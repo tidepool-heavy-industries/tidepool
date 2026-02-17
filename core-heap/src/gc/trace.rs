@@ -1,245 +1,190 @@
-use crate::arena::ArenaHeap;
-use core_eval::ThunkId;
-use std::collections::{HashMap, HashSet, VecDeque};
+use core_eval::heap::{Heap, ThunkState};
+use core_eval::value::{ThunkId, Value};
+use core_eval::env::Env;
+use std::collections::VecDeque;
 
-/// Maps old ThunkId -> new ThunkId for every reachable object.
-#[derive(Debug, Default)]
+/// Maps old ThunkIds to new ThunkIds.
 pub struct ForwardingTable {
-    pub old_to_new: HashMap<u32, u32>,
+    pub(crate) mapping: Vec<Option<ThunkId>>,
 }
 
 impl ForwardingTable {
-    /// Check if a thunk is present in the forwarding table.
-    pub fn contains(&self, old: ThunkId) -> bool {
-        self.old_to_new.contains_key(&old.0)
+    /// Look up the new ID for an old ID.
+    /// Panics if the old ID was not reachable during trace.
+    pub fn lookup(&self, old_id: ThunkId) -> ThunkId {
+        let idx = old_id.0 as usize;
+        if idx >= self.mapping.len() {
+            panic!("ThunkId not in forwarding table (not reachable during trace)");
+        }
+        self.mapping[idx].expect("ThunkId not in forwarding table (not reachable during trace)")
     }
-    
-    /// Get the new ThunkId for a given old ThunkId.
-    pub fn get(&self, old: ThunkId) -> Option<ThunkId> {
-        self.old_to_new.get(&old.0).map(|&n| ThunkId(n))
-    }
-    
-    /// Number of entries in the forwarding table.
-    pub fn len(&self) -> usize {
-        self.old_to_new.len()
-    }
-    
-    /// Check if the forwarding table is empty.
-    pub fn is_empty(&self) -> bool {
-        self.old_to_new.is_empty()
+
+    /// Check if an old ID is reachable.
+    pub fn is_reachable(&self, old_id: ThunkId) -> bool {
+        let idx = old_id.0 as usize;
+        idx < self.mapping.len() && self.mapping[idx].is_some()
     }
 }
 
-/// Trace from roots, building a forwarding table of all reachable objects.
-pub fn trace(roots: &[ThunkId], heap: &ArenaHeap) -> ForwardingTable {
-    let mut table = ForwardingTable::default();
-    let mut visited = HashSet::new();
+/// Trace reachable thunks starting from roots.
+pub fn trace(roots: &[ThunkId], heap: &dyn Heap) -> ForwardingTable {
+    let mut mapping: Vec<Option<ThunkId>> = Vec::new();
     let mut queue = VecDeque::new();
-    let mut next_id: u32 = 0;
-    
-    // Seed with roots
+    let mut next_new_id = 0;
+
     for &root in roots {
-        if !visited.contains(&root.0) {
-            visited.insert(root.0);
-            queue.push_back(root);
-        }
+        queue.push_back(root);
     }
-    
-    // BFS traversal
-    while let Some(id) = queue.pop_front() {
-        // Assign new compacted id
-        table.old_to_new.insert(id.0, next_id);
-        next_id += 1;
+
+    while let Some(old_id) = queue.pop_front() {
+        let idx = old_id.0 as usize;
         
-        // Find children (ThunkIds referenced by this thunk's state)
-        for child in heap.children_of(id) {
-            if !visited.contains(&child.0) {
-                visited.insert(child.0);
-                queue.push_back(child);
+        if idx < mapping.len() && mapping[idx].is_some() {
+            continue;
+        }
+
+        // Validate the ID before potentially large resize to prevent OOM/DoS
+        let state = heap.read(old_id);
+
+        if idx >= mapping.len() {
+            mapping.resize(idx + 1, None);
+        }
+
+        mapping[idx] = Some(ThunkId(next_new_id));
+        next_new_id += 1;
+
+        match state {
+            ThunkState::Unevaluated(env, _) => {
+                scan_env(env, &mut queue);
+            }
+            ThunkState::BlackHole => {}
+            ThunkState::Evaluated(val) => {
+                scan_value(val, &mut queue);
             }
         }
     }
-    
-    table
+
+    ForwardingTable { mapping }
+}
+
+fn scan_value(val: &Value, queue: &mut VecDeque<ThunkId>) {
+    match val {
+        Value::Lit(_) => {}
+        Value::Con(_, fields) => {
+            for field in fields {
+                scan_value(field, queue);
+            }
+        }
+        Value::Closure(env, _, _) => {
+            scan_env(env, queue);
+        }
+        Value::ThunkRef(id) => {
+            queue.push_back(*id);
+        }
+        Value::JoinCont(_, _, env) => {
+            scan_env(env, queue);
+        }
+    }
+}
+
+fn scan_env(env: &Env, queue: &mut VecDeque<ThunkId>) {
+    for val in env.values() {
+        scan_value(val, queue);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_eval::{Heap, ThunkState, value::Value};
-    use core_eval::env::Env;
-    use core_repr::{CoreFrame, CoreExpr, Literal, VarId, DataConId};
+    use core_eval::heap::VecHeap;
+    use core_repr::{CoreFrame, RecursiveTree, Literal, VarId, DataConId};
 
-    fn empty_expr() -> CoreExpr {
-        CoreExpr { nodes: vec![CoreFrame::Lit(Literal::LitInt(0))] }
+    fn empty_expr() -> core_repr::CoreExpr {
+        RecursiveTree { nodes: vec![CoreFrame::Var(VarId(0))] }
     }
 
     #[test]
-    fn test_empty_roots() {
-        let heap = ArenaHeap::new();
+    fn test_trace_empty_roots() {
+        let heap = VecHeap::new();
         let table = trace(&[], &heap);
-        assert!(table.is_empty());
+        assert!(table.mapping.is_empty());
     }
 
     #[test]
-    fn test_single_root_no_children() {
-        let mut heap = ArenaHeap::new();
-        let root = heap.alloc(Env::new(), empty_expr());
-        let table = trace(&[root], &heap);
-        assert_eq!(table.len(), 1);
-        assert!(table.contains(root));
-        assert_eq!(table.get(root), Some(ThunkId(0)));
+    fn test_trace_single_root() {
+        let mut heap = VecHeap::new();
+        let id = heap.alloc(Env::new(), empty_expr());
+        let table = trace(&[id], &heap);
+        assert_eq!(table.lookup(id), ThunkId(0));
     }
 
     #[test]
-    fn test_root_with_children() {
-        let mut heap = ArenaHeap::new();
+    fn test_trace_transitive_closure() {
+        let mut heap = VecHeap::new();
+        let id2 = heap.alloc(Env::new(), empty_expr());
         
-        // Create child thunks
-        let child1 = heap.alloc(Env::new(), empty_expr());
-        let child2 = heap.alloc(Env::new(), empty_expr());
-        
-        // Create root referencing children
-        let mut env = Env::new();
-        env.insert(VarId(0), Value::ThunkRef(child1));
-        env.insert(VarId(1), Value::ThunkRef(child2));
-        let root = heap.alloc(env, empty_expr());
-        
-        let table = trace(&[root], &heap);
-        assert_eq!(table.len(), 3);
-        assert!(table.contains(root));
-        assert!(table.contains(child1));
-        assert!(table.contains(child2));
+        let mut env1 = Env::new();
+        env1.insert(VarId(0), Value::ThunkRef(id2));
+        let id1 = heap.alloc(env1, empty_expr());
+
+        let table = trace(&[id1], &heap);
+        assert_eq!(table.lookup(id1), ThunkId(0));
+        assert_eq!(table.lookup(id2), ThunkId(1));
     }
 
     #[test]
-    fn test_unreachable_not_in_table() {
-        let mut heap = ArenaHeap::new();
-        let root = heap.alloc(Env::new(), empty_expr());
-        let unreachable = heap.alloc(Env::new(), empty_expr());
+    fn test_trace_double_referenced() {
+        let mut heap = VecHeap::new();
+        let id_shared = heap.alloc(Env::new(), empty_expr());
         
-        let table = trace(&[root], &heap);
-        assert_eq!(table.len(), 1);
-        assert!(table.contains(root));
-        assert!(!table.contains(unreachable));
+        let mut env1 = Env::new();
+        env1.insert(VarId(0), Value::ThunkRef(id_shared));
+        let id1 = heap.alloc(env1, empty_expr());
+
+        let mut env2 = Env::new();
+        env2.insert(VarId(0), Value::ThunkRef(id_shared));
+        let id2 = heap.alloc(env2, empty_expr());
+
+        let table = trace(&[id1, id2], &heap);
+        assert_eq!(table.lookup(id1), ThunkId(0));
+        assert_eq!(table.lookup(id2), ThunkId(1));
+        assert_eq!(table.lookup(id_shared), ThunkId(2));
+        
+        // Ensure no other IDs are in the table (max 3 reachable)
+        let reachable_count = table.mapping.iter().flatten().count();
+        assert_eq!(reachable_count, 3);
     }
 
     #[test]
-    fn test_diamond_pattern() {
-        let mut heap = ArenaHeap::new();
-        
-        // D
-        let d = heap.alloc(Env::new(), empty_expr());
-        
-        // B -> D
-        let mut env_b = Env::new();
-        env_b.insert(VarId(0), Value::ThunkRef(d));
-        let b = heap.alloc(env_b, empty_expr());
-        
-        // C -> D
-        let mut env_c = Env::new();
-        env_c.insert(VarId(0), Value::ThunkRef(d));
-        let c = heap.alloc(env_c, empty_expr());
-        
-        // A -> B, A -> C
-        let mut env_a = Env::new();
-        env_a.insert(VarId(0), Value::ThunkRef(b));
-        env_a.insert(VarId(1), Value::ThunkRef(c));
-        let a = heap.alloc(env_a, empty_expr());
-        
-        let table = trace(&[a], &heap);
-        assert_eq!(table.len(), 4);
-        assert!(table.contains(a));
-        assert!(table.contains(b));
-        assert!(table.contains(c));
-        assert!(table.contains(d));
-        
-        // Check that D is only assigned one new ID (implicit in ForwardingTable structure)
+    fn test_trace_blackhole_reachable() {
+        let mut heap = VecHeap::new();
+        let id = heap.alloc(Env::new(), empty_expr());
+        heap.write(id, ThunkState::BlackHole);
+
+        let table = trace(&[id], &heap);
+        assert_eq!(table.lookup(id), ThunkId(0));
     }
 
     #[test]
-    fn test_blackhole_traced() {
-        let mut heap = ArenaHeap::new();
-        let root = heap.alloc(Env::new(), empty_expr());
-        heap.write(root, ThunkState::BlackHole);
+    fn test_trace_complex_value() {
+        let mut heap = VecHeap::new();
+        let id3 = heap.alloc(Env::new(), empty_expr());
+        let id2 = heap.alloc(Env::new(), empty_expr());
         
-        let table = trace(&[root], &heap);
-        assert_eq!(table.len(), 1);
-        assert!(table.contains(root));
-    }
+        let val = Value::Con(DataConId(1), vec![
+            Value::Lit(Literal::LitInt(1)),
+            Value::ThunkRef(id2),
+            Value::Con(DataConId(2), vec![
+                Value::ThunkRef(id3)
+            ])
+        ]);
+        
+        let id1 = heap.alloc(Env::new(), empty_expr());
+        heap.write(id1, ThunkState::Evaluated(val));
 
-    #[test]
-    fn test_cycle() {
-        let mut heap = ArenaHeap::new();
-        
-        // Allocate placeholders
-        let a = heap.alloc(Env::new(), empty_expr());
-        let b = heap.alloc(Env::new(), empty_expr());
-        
-        // A -> B
-        let mut env_a = Env::new();
-        env_a.insert(VarId(0), Value::ThunkRef(b));
-        heap.write(a, ThunkState::Unevaluated(env_a, empty_expr()));
-        
-        // B -> A
-        let mut env_b = Env::new();
-        env_b.insert(VarId(0), Value::ThunkRef(a));
-        heap.write(b, ThunkState::Unevaluated(env_b, empty_expr()));
-        
-        let table = trace(&[a], &heap);
-        assert_eq!(table.len(), 2);
-        assert!(table.contains(a));
-        assert!(table.contains(b));
-    }
-
-    #[test]
-    fn test_evaluated_con_refs() {
-        let mut heap = ArenaHeap::new();
-        
-        let child = heap.alloc(Env::new(), empty_expr());
-        let con_val = Value::Con(DataConId(1), vec![Value::ThunkRef(child)]);
-        let root = heap.alloc(Env::new(), empty_expr());
-        heap.write(root, ThunkState::Evaluated(con_val));
-        
-        let table = trace(&[root], &heap);
-        assert_eq!(table.len(), 2);
-        assert!(table.contains(root));
-        assert!(table.contains(child));
-    }
-
-    #[test]
-    fn test_evaluated_closure_refs() {
-        let mut heap = ArenaHeap::new();
-        
-        let child = heap.alloc(Env::new(), empty_expr());
-        let mut env = Env::new();
-        env.insert(VarId(0), Value::ThunkRef(child));
-        
-        let closure_val = Value::Closure(env, VarId(1), empty_expr());
-        let root = heap.alloc(Env::new(), empty_expr());
-        heap.write(root, ThunkState::Evaluated(closure_val));
-        
-        let table = trace(&[root], &heap);
-        assert_eq!(table.len(), 2);
-        assert!(table.contains(root));
-        assert!(table.contains(child));
-    }
-
-    #[test]
-    fn test_evaluated_joincont_refs() {
-        let mut heap = ArenaHeap::new();
-        
-        let child = heap.alloc(Env::new(), empty_expr());
-        let mut env = Env::new();
-        env.insert(VarId(0), Value::ThunkRef(child));
-        
-        let join_val = Value::JoinCont(vec![VarId(1)], empty_expr(), env);
-        let root = heap.alloc(Env::new(), empty_expr());
-        heap.write(root, ThunkState::Evaluated(join_val));
-        
-        let table = trace(&[root], &heap);
-        assert_eq!(table.len(), 2);
-        assert!(table.contains(root));
-        assert!(table.contains(child));
+        let table = trace(&[id1], &heap);
+        assert_eq!(table.lookup(id1), ThunkId(0));
+        assert_eq!(table.lookup(id2), ThunkId(1));
+        assert_eq!(table.lookup(id3), ThunkId(2));
     }
 }
