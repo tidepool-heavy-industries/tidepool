@@ -6,7 +6,7 @@ use super::ReadError;
 
 /// Reads a CoreExpr from a CBOR-encoded byte slice.
 pub fn read_cbor(bytes: &[u8]) -> Result<RecursiveTree<CoreFrame<usize>>, ReadError> {
-    let tree_val: Value = ciborium::de::from_reader(bytes).map_err(ReadError::Cbor)?;
+    let tree_val: Value = ciborium::de::from_reader(bytes).map_err(|e| ReadError::Cbor(e.to_string()))?;
     
     let root_array = match tree_val {
         Value::Array(a) if a.len() == 2 => a,
@@ -18,12 +18,76 @@ pub fn read_cbor(bytes: &[u8]) -> Result<RecursiveTree<CoreFrame<usize>>, ReadEr
         _ => return Err(ReadError::InvalidStructure("First element must be array of nodes".to_string())),
     };
 
+    if nodes_array.is_empty() {
+        return Err(ReadError::InvalidStructure("CoreExpr must have at least one node".to_string()));
+    }
+
+    let root_idx = as_usize(&root_array[1])?;
+    if root_idx != nodes_array.len() - 1 {
+        return Err(ReadError::InvalidStructure(format!(
+            "Root index {} does not match expected last node index {}",
+            root_idx,
+            nodes_array.len() - 1
+        )));
+    }
+
     let mut nodes = Vec::with_capacity(nodes_array.len());
     for node_val in nodes_array {
         nodes.push(decode_frame(node_val)?);
     }
 
+    validate_indices(&nodes)?;
+
     Ok(RecursiveTree { nodes })
+}
+
+fn validate_indices(nodes: &[CoreFrame<usize>]) -> Result<(), ReadError> {
+    let len = nodes.len();
+    for node in nodes {
+        match node {
+            CoreFrame::App { fun, arg } => {
+                if *fun >= len || *arg >= len { return Err(ReadError::InvalidStructure("App index out of bounds".to_string())); }
+            }
+            CoreFrame::Lam { body, .. } => {
+                if *body >= len { return Err(ReadError::InvalidStructure("Lam index out of bounds".to_string())); }
+            }
+            CoreFrame::LetNonRec { rhs, body, .. } => {
+                if *rhs >= len || *body >= len { return Err(ReadError::InvalidStructure("LetNonRec index out of bounds".to_string())); }
+            }
+            CoreFrame::LetRec { bindings, body } => {
+                if *body >= len { return Err(ReadError::InvalidStructure("LetRec body index out of bounds".to_string())); }
+                for (_, rhs) in bindings {
+                    if *rhs >= len { return Err(ReadError::InvalidStructure("LetRec binding index out of bounds".to_string())); }
+                }
+            }
+            CoreFrame::Case { scrutinee, alts, .. } => {
+                if *scrutinee >= len { return Err(ReadError::InvalidStructure("Case scrutinee index out of bounds".to_string())); }
+                for alt in alts {
+                    if alt.body >= len { return Err(ReadError::InvalidStructure("Case alt body index out of bounds".to_string())); }
+                }
+            }
+            CoreFrame::Con { fields, .. } => {
+                for f in fields {
+                    if *f >= len { return Err(ReadError::InvalidStructure("Con field index out of bounds".to_string())); }
+                }
+            }
+            CoreFrame::Join { rhs, body, .. } => {
+                if *rhs >= len || *body >= len { return Err(ReadError::InvalidStructure("Join index out of bounds".to_string())); }
+            }
+            CoreFrame::Jump { args, .. } => {
+                for a in args {
+                    if *a >= len { return Err(ReadError::InvalidStructure("Jump argument index out of bounds".to_string())); }
+                }
+            }
+            CoreFrame::PrimOp { args, .. } => {
+                for a in args {
+                    if *a >= len { return Err(ReadError::InvalidStructure("PrimOp argument index out of bounds".to_string())); }
+                }
+            }
+            CoreFrame::Var(_) | CoreFrame::Lit(_) => {}
+        }
+    }
+    Ok(())
 }
 
 fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
@@ -53,23 +117,23 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
         "App" => {
             if arr.len() != 3 { return Err(ReadError::InvalidStructure("App expects 2 fields".to_string())); }
             Ok(CoreFrame::App {
-                fun: as_u64(&arr[1])? as usize,
-                arg: as_u64(&arr[2])? as usize,
+                fun: as_usize(&arr[1])?,
+                arg: as_usize(&arr[2])?,
             })
         }
         "Lam" => {
             if arr.len() != 3 { return Err(ReadError::InvalidStructure("Lam expects 2 fields".to_string())); }
             Ok(CoreFrame::Lam {
                 binder: VarId(as_u64(&arr[1])?),
-                body: as_u64(&arr[2])? as usize,
+                body: as_usize(&arr[2])?,
             })
         }
         "LetNonRec" => {
             if arr.len() != 4 { return Err(ReadError::InvalidStructure("LetNonRec expects 3 fields".to_string())); }
             Ok(CoreFrame::LetNonRec {
                 binder: VarId(as_u64(&arr[1])?),
-                rhs: as_u64(&arr[2])? as usize,
-                body: as_u64(&arr[3])? as usize,
+                rhs: as_usize(&arr[2])?,
+                body: as_usize(&arr[3])?,
             })
         }
         "LetRec" => {
@@ -84,11 +148,11 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
                     Value::Array(a) if a.len() == 2 => a,
                     _ => return Err(ReadError::InvalidStructure("LetRec binding must be array of 2".to_string())),
                 };
-                bindings.push((VarId(as_u64(&b_arr[0])?), as_u64(&b_arr[1])? as usize));
+                bindings.push((VarId(as_u64(&b_arr[0])?), as_usize(&b_arr[1])?));
             }
             Ok(CoreFrame::LetRec {
                 bindings,
-                body: as_u64(&arr[2])? as usize,
+                body: as_usize(&arr[2])?,
             })
         }
         "Case" => {
@@ -102,7 +166,7 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
                 alts.push(decode_alt(alt_val)?);
             }
             Ok(CoreFrame::Case {
-                scrutinee: as_u64(&arr[1])? as usize,
+                scrutinee: as_usize(&arr[1])?,
                 binder: VarId(as_u64(&arr[2])?),
                 alts,
             })
@@ -115,7 +179,7 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
             };
             let mut fields = Vec::with_capacity(fields_arr.len());
             for f_val in fields_arr {
-                fields.push(as_u64(f_val)? as usize);
+                fields.push(as_usize(f_val)?);
             }
             Ok(CoreFrame::Con {
                 tag: DataConId(as_u64(&arr[1])?),
@@ -135,8 +199,8 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
             Ok(CoreFrame::Join {
                 label: JoinId(as_u64(&arr[1])?),
                 params,
-                rhs: as_u64(&arr[3])? as usize,
-                body: as_u64(&arr[4])? as usize,
+                rhs: as_usize(&arr[3])?,
+                body: as_usize(&arr[4])?,
             })
         }
         "Jump" => {
@@ -147,7 +211,7 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
             };
             let mut args = Vec::with_capacity(args_arr.len());
             for a_val in args_arr {
-                args.push(as_u64(a_val)? as usize);
+                args.push(as_usize(a_val)?);
             }
             Ok(CoreFrame::Jump {
                 label: JoinId(as_u64(&arr[1])?),
@@ -167,7 +231,7 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
             };
             let mut args = Vec::with_capacity(args_arr.len());
             for a_val in args_arr {
-                args.push(as_u64(a_val)? as usize);
+                args.push(as_usize(a_val)?);
             }
             Ok(CoreFrame::PrimOp { op, args })
         }
@@ -217,7 +281,7 @@ fn decode_alt(val: &Value) -> Result<Alt<usize>, ReadError> {
     for b_val in binders_arr {
         binders.push(VarId(as_u64(b_val)?));
     }
-    let body = as_u64(&arr[2])? as usize;
+    let body = as_usize(&arr[2])?;
     Ok(Alt { con, binders, body })
 }
 
@@ -281,6 +345,16 @@ fn as_i64(val: &Value) -> Result<i64, ReadError> {
         Value::Integer(i) => {
             let i: i64 = (*i).try_into().map_err(|_| ReadError::InvalidStructure("Expected i64".to_string()))?;
             Ok(i)
+        }
+        _ => Err(ReadError::InvalidStructure("Expected integer".to_string())),
+    }
+}
+
+fn as_usize(val: &Value) -> Result<usize, ReadError> {
+    match val {
+        Value::Integer(i) => {
+            let u: u64 = (*i).try_into().map_err(|_| ReadError::InvalidStructure("Expected integer (u64)".to_string()))?;
+            usize::try_from(u).map_err(|_| ReadError::InvalidStructure("Integer too large for usize".to_string()))
         }
         _ => Err(ReadError::InvalidStructure("Expected integer".to_string())),
     }

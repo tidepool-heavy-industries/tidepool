@@ -1,21 +1,21 @@
 use ciborium::value::Value;
 use crate::frame::CoreFrame;
 use crate::tree::RecursiveTree;
-use crate::types::{Literal, AltCon, Alt};
+use crate::types::{Literal, AltCon, Alt, PrimOpKind};
 use super::WriteError;
 
 /// Writes a CoreExpr to a CBOR-encoded byte vector.
 pub fn write_cbor(expr: &RecursiveTree<CoreFrame<usize>>) -> Result<Vec<u8>, WriteError> {
+    if expr.nodes.is_empty() {
+        return Err(WriteError::Cbor("attempted to write an empty RecursiveTree as a CoreExpr".to_string()));
+    }
+
     let mut nodes_val = Vec::with_capacity(expr.nodes.len());
     for node in &expr.nodes {
         nodes_val.push(encode_frame(node));
     }
 
-    let root_idx = if expr.nodes.is_empty() {
-        0u64
-    } else {
-        (expr.nodes.len() - 1) as u64
-    };
+    let root_idx = (expr.nodes.len() - 1) as u64;
 
     let tree_val = Value::Array(vec![
         Value::Array(nodes_val),
@@ -23,7 +23,7 @@ pub fn write_cbor(expr: &RecursiveTree<CoreFrame<usize>>) -> Result<Vec<u8>, Wri
     ]);
 
     let mut bytes = Vec::new();
-    ciborium::ser::into_writer(&tree_val, &mut bytes).map_err(WriteError::Cbor)?;
+    ciborium::ser::into_writer(&tree_val, &mut bytes).map_err(|e| WriteError::Cbor(e.to_string()))?;
     Ok(bytes)
 }
 
@@ -139,10 +139,25 @@ fn encode_frame(frame: &CoreFrame<usize>) -> Value {
             );
             Value::Array(vec![
                 Value::Text("PrimOp".to_string()),
-                Value::Text(format!("{:?}", op)),
+                Value::Text(encode_primop(op).to_string()),
                 args_val,
             ])
         }
+    }
+}
+
+fn encode_primop(op: &PrimOpKind) -> &'static str {
+    use PrimOpKind::*;
+    match op {
+        IntAdd => "IntAdd", IntSub => "IntSub", IntMul => "IntMul",
+        IntNegate => "IntNegate",
+        IntEq => "IntEq", IntNe => "IntNe", IntLt => "IntLt", IntLe => "IntLe", IntGt => "IntGt", IntGe => "IntGe",
+        WordAdd => "WordAdd", WordSub => "WordSub", WordMul => "WordMul",
+        WordEq => "WordEq", WordNe => "WordNe", WordLt => "WordLt", WordLe => "WordLe", WordGt => "WordGt", WordGe => "WordGe",
+        DoubleAdd => "DoubleAdd", DoubleSub => "DoubleSub", DoubleMul => "DoubleMul", DoubleDiv => "DoubleDiv",
+        DoubleEq => "DoubleEq", DoubleNe => "DoubleNe", DoubleLt => "DoubleLt", DoubleLe => "DoubleLe", DoubleGt => "DoubleGt", DoubleGe => "DoubleGe",
+        CharEq => "CharEq", CharNe => "CharNe", CharLt => "CharLt", CharLe => "CharLe", CharGt => "CharGt", CharGe => "CharGe",
+        IndexArray => "IndexArray", SeqOp => "SeqOp", TagToEnum => "TagToEnum", DataToTag => "DataToTag",
     }
 }
 

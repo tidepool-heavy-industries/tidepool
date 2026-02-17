@@ -6,7 +6,7 @@ pub use write::write_cbor;
 
 #[derive(Debug)]
 pub enum ReadError {
-    Cbor(ciborium::de::Error<std::io::Error>),
+    Cbor(String),
     InvalidTag(String),
     InvalidLiteral(String),
     InvalidPrimOp(String),
@@ -27,18 +27,11 @@ impl std::fmt::Display for ReadError {
     }
 }
 
-impl std::error::Error for ReadError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ReadError::Cbor(e) => Some(e),
-            _ => None,
-        }
-    }
-}
+impl std::error::Error for ReadError {}
 
 #[derive(Debug)]
 pub enum WriteError {
-    Cbor(ciborium::ser::Error<std::io::Error>),
+    Cbor(String),
 }
 
 impl std::fmt::Display for WriteError {
@@ -49,13 +42,7 @@ impl std::fmt::Display for WriteError {
     }
 }
 
-impl std::error::Error for WriteError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            WriteError::Cbor(e) => Some(e),
-        }
-    }
-}
+impl std::error::Error for WriteError {}
 
 #[cfg(test)]
 mod tests {
