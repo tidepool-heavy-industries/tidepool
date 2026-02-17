@@ -1,5 +1,6 @@
 use bumpalo::Bump;
 use core_eval::{Heap, ThunkState, ThunkId};
+use core_eval::value::Value;
 use core_repr::CoreExpr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -54,7 +55,7 @@ impl ArenaHeap {
         let mut prev_used = self.used.load(Ordering::SeqCst);
         loop {
             if prev_used.checked_add(aligned_size)
-                .map_or(true, |new_used| new_used > self.nursery_limit)
+                .is_none_or(|new_used| new_used > self.nursery_limit)
             {
                 // v1 behavior: panic. Later we signal GC.
                 panic!("Nursery limit exceeded: GC not yet implemented");
@@ -86,6 +87,33 @@ impl ArenaHeap {
     /// Nursery capacity in bytes.
     pub fn nursery_limit(&self) -> usize {
         self.nursery_limit
+    }
+
+    /// Return all ThunkIds directly referenced by this thunk.
+    pub fn children_of(&self, id: ThunkId) -> Vec<ThunkId> {
+        match self.read(id) {
+            ThunkState::Unevaluated(env, _) => {
+                env.values()
+                    .flat_map(Self::collect_thunk_refs)
+                    .collect()
+            }
+            ThunkState::BlackHole => vec![],
+            ThunkState::Evaluated(val) => Self::collect_thunk_refs(val),
+        }
+    }
+
+    fn collect_thunk_refs(val: &Value) -> Vec<ThunkId> {
+        match val {
+            Value::ThunkRef(id) => vec![*id],
+            Value::Con(_, fields) => fields.iter().flat_map(Self::collect_thunk_refs).collect(),
+            Value::Closure(env, _, _) => {
+                env.values().flat_map(Self::collect_thunk_refs).collect()
+            }
+            Value::JoinCont(_, _, env) => {
+                env.values().flat_map(Self::collect_thunk_refs).collect()
+            }
+            Value::Lit(_) => vec![],
+        }
     }
 }
 
