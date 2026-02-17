@@ -23,9 +23,9 @@ impl Occ {
 /// Map from variable to occurrence count.
 pub type OccMap = HashMap<VarId, Occ>;
 
-/// Count occurrences of all free variables in the expression.
+/// Count occurrences of all variables in the expression.
 /// Binding sites (in Lam, Let, Case, Join) are NOT counted as occurrences.
-/// Only Var(v) nodes are counted.
+/// Only Var(v) nodes (variable use sites) are counted.
 pub fn occ_analysis(expr: &CoreExpr) -> OccMap {
     let mut map = OccMap::new();
     for node in &expr.nodes {
