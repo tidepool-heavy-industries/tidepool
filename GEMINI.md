@@ -33,11 +33,11 @@ Your spec has a DO NOT / ANTI-PATTERNS / CRITICAL RULES section at the top. Read
 
 You do not make architectural decisions. You do not choose dependencies. You do not decide module structure. You do not add features the spec didn't ask for. If the spec doesn't mention it, you don't do it.
 
-If something seems missing from the spec (e.g., a type isn't defined, a dependency seems needed), use the `question` tool to ask your TL. Do not guess.
+If something seems missing from the spec (e.g., a type isn't defined, a dependency seems needed), describe the gap in your PR body. Do not guess.
 
 ### No Escape Hatches
 
-Never write `todo!()`, `unimplemented!()`, `unreachable!()`, `panic!()` (except in tests), `Raw(String)` variants, `Other(Box<dyn Any>)`, or similar. If you can't implement something, ask via `question` rather than stubbing it out.
+Never write `todo!()`, `unimplemented!()`, `unreachable!()`, `panic!()` (except in tests), `Raw(String)` variants, `Other(Box<dyn Any>)`, or similar. If you can't implement something, describe the gap in your PR body rather than stubbing it out.
 
 ### No Unnecessary Dependencies
 

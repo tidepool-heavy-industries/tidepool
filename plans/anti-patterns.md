@@ -19,7 +19,7 @@ These rules apply to ALL workers in the tidepool project. TLs must include this 
 
 ## Architecture
 
-- **Do not make architectural decisions.** If something feels like it needs a design choice (new trait, different data structure, alternative algorithm), stop and ask via the `note` tool. The TL makes architectural decisions.
+- **Do not make architectural decisions.** If something feels like it needs a design choice (new trait, different data structure, alternative algorithm), describe the gap in your PR body. Do not guess. The TL makes architectural decisions.
 - **Do not refactor existing code.** Only modify files and functions listed in your spec. If you see something that "should" be cleaned up, leave it alone.
 - **Do not over-engineer.** If the spec says "3 files, ~200 lines," that's the scope. Don't build a framework.
 
