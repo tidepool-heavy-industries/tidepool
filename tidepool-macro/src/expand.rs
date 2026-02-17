@@ -10,11 +10,10 @@ pub fn expand(input: TokenStream) -> TokenStream {
         Ok(lit) => lit,
         Err(err) => return err.to_compile_error(),
     };
-    let path = path_lit.value();
 
     quote! {
         {
-            static __CBOR: &[u8] = include_bytes!(#path);
+            static __CBOR: &[u8] = include_bytes!(#path_lit);
             let __expr = core_repr::serial::read::read_cbor(__CBOR)
                 .expect("failed to deserialize CBOR — re-run extraction (cargo xtask extract)");
             let mut __heap = core_eval::heap::VecHeap::new();
