@@ -5,7 +5,6 @@ import Codec.CBOR.Write (toStrictByteString)
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import Data.Word
-import Data.Int
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Tidepool.Translate
@@ -91,10 +90,17 @@ encodeMetadata entries = toStrictByteString $
 
 encodeMetaEntry :: (Word64, Text, Int, Int, [Text]) -> Encoding
 encodeMetaEntry (dcid, name, tag, arity, bangs) =
+  let
+    tagWord :: Word
+    tagWord =
+      if tag < 0
+        then error "encodeMetaEntry: negative constructor tag"
+        else fromIntegral tag
+  in
   encodeListLen 5
   <> encodeWord64 dcid
   <> encodeString name
-  <> encodeInt tag
+  <> encodeWord tagWord
   <> encodeInt arity
   <> encodeListLen (fromIntegral (length bangs))
   <> foldMap encodeString bangs

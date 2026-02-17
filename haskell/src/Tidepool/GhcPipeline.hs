@@ -4,10 +4,8 @@ import GHC
 import GHC.Driver.Main (hscDesugar)
 import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Driver.Session (updOptLevel)
-import GHC.Driver.Backend (noBackend)
 import GHC.Unit.Module.ModGuts (ModGuts(..))
 import GHC.Core (CoreBind)
-import GHC.Core.TyCon (TyCon)
 import System.Process (readProcess)
 import Control.Monad.IO.Class (liftIO)
 
@@ -30,7 +28,9 @@ runPipeline path = do
     setTargets [target]
     _ <- depanal [] False
     modGraph <- getModuleGraph
-    let modSum = head (mgModSummaries modGraph)
+    modSum <- case mgModSummaries modGraph of
+      (ms:_) -> return ms
+      []     -> liftIO $ ioError (userError "runPipeline: empty module graph")
     parsed <- parseModule modSum
     typechecked <- typecheckModule parsed
     hscEnv <- getSession

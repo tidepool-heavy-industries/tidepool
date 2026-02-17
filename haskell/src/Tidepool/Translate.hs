@@ -12,15 +12,13 @@ import GHC.Core
 import GHC.Types.Id
 import GHC.Types.Var
 import GHC.Types.Unique (getKey)
-import GHC.Core.DataCon
+import GHC.Core.DataCon (DataCon, dataConRepArity, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
 import GHC.Builtin.PrimOps
 import GHC.Types.Literal
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Core.TyCon
 import GHC.Types.Basic (JoinPointHood(..))
-import GHC.Types.Demand (DmdSig)
-import GHC.Types.Var.Env ()
 import GHC.Utils.Outputable (showPprUnsafe)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
 import Data.Char (ord)
@@ -33,7 +31,6 @@ import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as Seq
 import Control.Monad.State
 import Control.Monad (foldM, forM)
-import Data.List (foldl')
 
 data FlatNode
   = NVar !Word64
@@ -184,7 +181,7 @@ collectValueBinders 0 e = ([], e)
 collectValueBinders n (Lam b e)
   | isTyVar b = collectValueBinders n e
   | otherwise = let (bs, body) = collectValueBinders (n-1) e in (b:bs, body)
-collectValueBinders _ e = ([], e)
+collectValueBinders n e = error $ "collectValueBinders: expected " ++ show n ++ " more value binder(s), but expression has no more lambdas: " ++ showPprUnsafe e
 
 isValueArg :: CoreExpr -> Bool
 isValueArg (Type _) = False

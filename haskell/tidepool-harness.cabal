@@ -11,8 +11,8 @@ executable tidepool-harness
     Tidepool.Translate
     Tidepool.CborEncode
   build-depends:
-    base         >= 4.19 && < 5,
-    ghc          >= 9.12 && < 9.14,
+    base         >= 4.20 && < 5,
+    ghc          >= 9.12 && < 9.13,
     bytestring,
     containers,
     filepath,
