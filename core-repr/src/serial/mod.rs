@@ -255,6 +255,51 @@ mod tests {
         assert!(matches!(tree.nodes[2], CoreFrame::Con { .. }));
     }
 
+    // End-to-end: .cbor → read_cbor → pretty_print
+    #[test]
+    fn test_e2e_identity_pretty() {
+        let bytes = std::fs::read("../haskell/test/Identity_cbor/identity.cbor")
+            .expect("identity.cbor not found");
+        let tree = read_cbor(&bytes).expect("read_cbor failed");
+        let output = crate::pretty::pretty_print(&tree);
+        assert!(!output.is_empty());
+        // identity = \x -> x, should contain a lambda
+        assert!(output.contains('\\'), "expected lambda in: {}", output);
+    }
+
+    #[test]
+    fn test_e2e_apply_pretty() {
+        let bytes = std::fs::read("../haskell/test/Identity_cbor/apply.cbor")
+            .expect("apply.cbor not found");
+        let tree = read_cbor(&bytes).expect("read_cbor failed");
+        let output = crate::pretty::pretty_print(&tree);
+        assert!(!output.is_empty());
+        // apply = \f x -> f x, should contain lambda and application
+        assert!(output.contains('\\'), "expected lambda in: {}", output);
+    }
+
+    #[test]
+    fn test_e2e_const_prime_pretty() {
+        let bytes = std::fs::read("../haskell/test/Identity_cbor/const'.cbor")
+            .expect("const'.cbor not found");
+        let tree = read_cbor(&bytes).expect("read_cbor failed");
+        let output = crate::pretty::pretty_print(&tree);
+        assert!(!output.is_empty());
+        // const' = \x _ -> x, two chained lambdas
+        assert!(output.contains('\\'), "expected lambda in: {}", output);
+    }
+
+    #[test]
+    fn test_e2e_trmodule_pretty() {
+        let bytes = std::fs::read("../haskell/test/Identity_cbor/$trModule.cbor")
+            .expect("$trModule.cbor not found");
+        let tree = read_cbor(&bytes).expect("read_cbor failed");
+        let output = crate::pretty::pretty_print(&tree);
+        assert!(!output.is_empty());
+        // Module metadata: Con node
+        assert!(output.contains("Con_"), "expected Con in: {}", output);
+    }
+
     #[test]
     fn test_complex_nested() {
         roundtrip(RecursiveTree {
