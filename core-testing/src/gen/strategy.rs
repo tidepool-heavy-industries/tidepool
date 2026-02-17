@@ -76,6 +76,8 @@ fn gen_expr(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuil
         return gen_leaf(ty, ctx);
     }
 
+    // Multiple clones of ty and ctx are needed to satisfy proptest move semantics
+    // in the prop_oneof! macro below.
     let ty2 = ty.clone();
     let ty3 = ty.clone();
     let ty4 = ty.clone();
@@ -117,6 +119,8 @@ fn gen_leaf(ty: SimpleType, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)>
         strategies.push(var_strat.boxed());
     }
 
+    // TODO: Support LitWord, LitString, LitDouble, LitFloat if needed.
+    // Currently restricted to LitInt and LitChar for simplicity.
     match ty {
         SimpleType::Int => {
             strategies.push(any::<i64>().prop_map(|i| {
@@ -159,7 +163,7 @@ fn gen_leaf(ty: SimpleType, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)>
                 return gen_con(SimpleType::Pair(a, b), 1, ctx);
             }
             _ => {
-                return Just((TreeBuilder::new(), 0)).boxed(); 
+                panic!("unreachable fallback in gen_leaf: all SimpleType variants should be handled");
             }
         }
     }

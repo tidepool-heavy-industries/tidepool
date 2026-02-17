@@ -1,5 +1,5 @@
 pub(crate) mod types;
-pub mod builder;
+pub(crate) mod builder;
 pub mod strategy;
 pub mod datacon_table;
 
