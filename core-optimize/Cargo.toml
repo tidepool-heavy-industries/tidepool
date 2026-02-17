@@ -6,3 +6,7 @@ edition = "2021"
 [dependencies]
 core-repr = { path = "../core-repr" }
 core-eval = { path = "../core-eval" }
+
+[dev-dependencies]
+core-testing = { path = "../core-testing" }
+proptest = "1"
