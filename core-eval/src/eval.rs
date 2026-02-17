@@ -1,21 +1,42 @@
-use core_repr::{AltCon, CoreExpr, CoreFrame, DataConId, Literal, PrimOpKind};
+use core_repr::{AltCon, CoreExpr, CoreFrame, DataConId, Literal, PrimOpKind, VarId};
 use crate::env::Env;
 use crate::value::Value;
 use crate::error::EvalError;
+use crate::heap::{Heap, ThunkState};
 
 /// Evaluate a CoreExpr to a Value.
-pub fn eval(expr: &CoreExpr, env: &Env) -> Result<Value, EvalError> {
+pub fn eval(expr: &CoreExpr, env: &Env, heap: &mut dyn Heap) -> Result<Value, EvalError> {
     if expr.nodes.is_empty() {
         return Err(EvalError::TypeMismatch {
             expected: "non-empty expression".into(),
             got: "empty expression".into(),
         });
     }
-    eval_at(expr, expr.nodes.len() - 1, env)
+    let res = eval_at(expr, expr.nodes.len() - 1, env, heap)?;
+    force(res, heap)
+}
+
+/// Force a thunk to a value.
+fn force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
+    match val {
+        Value::ThunkRef(id) => {
+            match heap.read(id).clone() {
+                ThunkState::Evaluated(v) => force(v, heap),
+                ThunkState::BlackHole => Err(EvalError::InfiniteLoop(id)),
+                ThunkState::Unevaluated(env, expr) => {
+                    heap.write(id, ThunkState::BlackHole);
+                    let result = eval(&expr, &env, heap)?;
+                    heap.write(id, ThunkState::Evaluated(result.clone()));
+                    Ok(result)
+                }
+            }
+        }
+        other => Ok(other),
+    }
 }
 
 /// Evaluate the node at `idx` in the expression tree.
-fn eval_at(expr: &CoreExpr, idx: usize, env: &Env) -> Result<Value, EvalError> {
+fn eval_at(expr: &CoreExpr, idx: usize, env: &Env, heap: &mut dyn Heap) -> Result<Value, EvalError> {
     match &expr.nodes[idx] {
         CoreFrame::Var(v) => env
             .get(v)
@@ -23,13 +44,13 @@ fn eval_at(expr: &CoreExpr, idx: usize, env: &Env) -> Result<Value, EvalError> {
             .ok_or(EvalError::UnboundVar(*v)),
         CoreFrame::Lit(lit) => Ok(Value::Lit(lit.clone())),
         CoreFrame::App { fun, arg } => {
-            let fun_val = eval_at(expr, *fun, env)?;
-            let arg_val = eval_at(expr, *arg, env)?;
+            let fun_val = force(eval_at(expr, *fun, env, heap)?, heap)?;
+            let arg_val = eval_at(expr, *arg, env, heap)?;
             match fun_val {
                 Value::Closure(clos_env, binder, body) => {
                     let mut new_env = clos_env;
                     new_env.insert(binder, arg_val);
-                    eval_at(&body, body.nodes.len() - 1, &new_env)
+                    eval(&body, &new_env, heap)
                 }
                 _ => Err(EvalError::NotAFunction),
             }
@@ -39,30 +60,51 @@ fn eval_at(expr: &CoreExpr, idx: usize, env: &Env) -> Result<Value, EvalError> {
             Ok(Value::Closure(env.clone(), *binder, body_expr))
         }
         CoreFrame::LetNonRec { binder, rhs, body } => {
-            let rhs_val = eval_at(expr, *rhs, env)?;
-            let mut new_env = env.clone();
-            new_env.insert(*binder, rhs_val);
-            eval_at(expr, *body, &new_env)
+            let rhs_val = if matches!(&expr.nodes[*rhs], CoreFrame::Lam { .. }) {
+                eval_at(expr, *rhs, env, heap)?  // Lambdas are values
+            } else {
+                let thunk_id = heap.alloc(env.clone(), extract_subtree(expr, *rhs));
+                Value::ThunkRef(thunk_id)
+            };
+            let new_env = env.update(*binder, rhs_val);
+            eval_at(expr, *body, &new_env, heap)
         }
         CoreFrame::LetRec { bindings, body } => {
             let mut new_env = env.clone();
-            for (binder, rhs) in bindings {
-                let rhs_val = eval_at(expr, *rhs, &new_env)?;
-                new_env.insert(*binder, rhs_val);
+            let mut thunks = Vec::new();
+            
+            // 1. Allocate thunks for all binders to allow full knot-tying.
+            // (Spec: non-lambdas -> ThunkRef, but for knot-tying lambdas also need to be accessible)
+            for (binder, rhs_idx) in bindings {
+                let tid = heap.alloc(Env::new(), CoreExpr { nodes: vec![] });
+                new_env = new_env.update(*binder, Value::ThunkRef(tid));
+                thunks.push((*binder, tid, *rhs_idx));
             }
-            eval_at(expr, *body, &new_env)
+
+            // 2. Evaluate lambda RHSes and back-patch thunks. Update env with Closures.
+            for (binder, tid, rhs_idx) in &thunks {
+                if matches!(&expr.nodes[*rhs_idx], CoreFrame::Lam { .. }) {
+                    let lam_val = eval_at(expr, *rhs_idx, &new_env, heap)?;
+                    heap.write(*tid, ThunkState::Evaluated(lam_val.clone()));
+                    new_env = new_env.update(*binder, lam_val);
+                } else {
+                    let rhs_subtree = extract_subtree(expr, *rhs_idx);
+                    heap.write(*tid, ThunkState::Unevaluated(new_env.clone(), rhs_subtree));
+                }
+            }
+
+            eval_at(expr, *body, &new_env, heap)
         }
         CoreFrame::Con { tag, fields } => {
             let mut field_vals = Vec::with_capacity(fields.len());
             for &f in fields {
-                field_vals.push(eval_at(expr, f, env)?);
+                field_vals.push(eval_at(expr, f, env, heap)?);
             }
             Ok(Value::Con(*tag, field_vals))
         }
         CoreFrame::Case { scrutinee, binder, alts } => {
-            let scrut_val = eval_at(expr, *scrutinee, env)?;
-            let mut case_env = env.clone();
-            case_env.insert(*binder, scrut_val.clone());
+            let scrut_val = force(eval_at(expr, *scrutinee, env, heap)?, heap)?;
+            let case_env = env.update(*binder, scrut_val.clone());
             
             for alt in alts {
                 match &alt.con {
@@ -77,21 +119,21 @@ fn eval_at(expr: &CoreExpr, idx: usize, env: &Env) -> Result<Value, EvalError> {
                                 }
                                 let mut alt_env = case_env;
                                 for (b, v) in alt.binders.iter().zip(fields.iter()) {
-                                    alt_env.insert(*b, v.clone());
+                                    alt_env = alt_env.update(*b, v.clone());
                                 }
-                                return eval_at(expr, alt.body, &alt_env);
+                                return eval_at(expr, alt.body, &alt_env, heap);
                             }
                         }
                     }
                     AltCon::LitAlt(lit) => {
                         if let Value::Lit(l) = &scrut_val {
                             if l == lit {
-                                return eval_at(expr, alt.body, &case_env);
+                                return eval_at(expr, alt.body, &case_env, heap);
                             }
                         }
                     }
                     AltCon::Default => {
-                        return eval_at(expr, alt.body, &case_env);
+                        return eval_at(expr, alt.body, &case_env, heap);
                     }
                 }
             }
@@ -100,18 +142,33 @@ fn eval_at(expr: &CoreExpr, idx: usize, env: &Env) -> Result<Value, EvalError> {
         CoreFrame::PrimOp { op, args } => {
             let mut arg_vals = Vec::with_capacity(args.len());
             for &arg in args {
-                arg_vals.push(eval_at(expr, arg, env)?);
+                let val = force(eval_at(expr, arg, env, heap)?, heap)?;
+                arg_vals.push(val);
             }
             dispatch_primop(*op, arg_vals)
         }
-        CoreFrame::Join { .. } => Err(EvalError::TypeMismatch {
-            expected: "supported node".into(),
-            got: "Join (not yet supported)".into(),
-        }),
-        CoreFrame::Jump { .. } => Err(EvalError::TypeMismatch {
-            expected: "supported node".into(),
-            got: "Jump (not yet supported)".into(),
-        }),
+        CoreFrame::Join { label, params, rhs, body } => {
+            let join_val = Value::JoinCont(params.clone(), extract_subtree(expr, *rhs), env.clone());
+            let join_var = VarId(label.0 | (1u64 << 63)); // high bit distinguishes join labels
+            let new_env = env.update(join_var, join_val);
+            eval_at(expr, *body, &new_env, heap)
+        }
+        CoreFrame::Jump { label, args } => {
+            let join_var = VarId(label.0 | (1u64 << 63));
+            match env.get(&join_var) {
+                Some(Value::JoinCont(params, rhs_expr, join_env)) => {
+                    let params = params.clone();
+                    let rhs_expr = rhs_expr.clone();
+                    let mut new_env = join_env.clone();
+                    for (param, arg_idx) in params.iter().zip(args.iter()) {
+                        let arg_val = eval_at(expr, *arg_idx, env, heap)?;
+                        new_env = new_env.update(*param, arg_val);
+                    }
+                    eval(&rhs_expr, &new_env, heap)
+                }
+                _ => Err(EvalError::UnboundJoin(*label)),
+            }
+        }
     }
 }
 
@@ -317,12 +374,13 @@ fn extract_subtree(expr: &CoreExpr, root_idx: usize) -> CoreExpr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_repr::{RecursiveTree, CoreFrame, Literal, VarId, DataConId, Alt, AltCon};
+    use core_repr::{RecursiveTree, CoreFrame, Literal, VarId, DataConId, Alt, AltCon, JoinId};
 
     #[test]
     fn test_eval_lit() {
         let expr = RecursiveTree { nodes: vec![CoreFrame::Lit(Literal::LitInt(42))] };
-        let res = eval(&expr, &Env::new()).unwrap();
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
         if let Value::Lit(Literal::LitInt(n)) = res {
             assert_eq!(n, 42);
         } else {
@@ -335,7 +393,8 @@ mod tests {
         let expr = RecursiveTree { nodes: vec![CoreFrame::Var(VarId(1))] };
         let mut env = Env::new();
         env.insert(VarId(1), Value::Lit(Literal::LitInt(42)));
-        let res = eval(&expr, &env).unwrap();
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &env, &mut heap).unwrap();
         if let Value::Lit(Literal::LitInt(n)) = res {
             assert_eq!(n, 42);
         } else {
@@ -346,7 +405,8 @@ mod tests {
     #[test]
     fn test_eval_unbound_var() {
         let expr = RecursiveTree { nodes: vec![CoreFrame::Var(VarId(1))] };
-        let res = eval(&expr, &Env::new());
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap);
         assert!(matches!(res, Err(EvalError::UnboundVar(VarId(1)))));
     }
 
@@ -359,7 +419,8 @@ mod tests {
             CoreFrame::App { fun: 1, arg: 2 }, 
         ];
         let expr = CoreExpr { nodes };
-        let res = eval(&expr, &Env::new()).unwrap();
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
         if let Value::Lit(Literal::LitInt(n)) = res {
             assert_eq!(n, 42);
         } else {
@@ -375,7 +436,8 @@ mod tests {
             CoreFrame::LetNonRec { binder: VarId(1), rhs: 0, body: 1 }, 
         ];
         let expr = CoreExpr { nodes };
-        let res = eval(&expr, &Env::new()).unwrap();
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
         if let Value::Lit(Literal::LitInt(n)) = res {
             assert_eq!(n, 1);
         } else {
@@ -390,7 +452,8 @@ mod tests {
             CoreFrame::Con { tag: DataConId(1), fields: vec![0] },
         ];
         let expr = CoreExpr { nodes };
-        let res = eval(&expr, &Env::new()).unwrap();
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
         if let Value::Con(tag, fields) = res {
             assert_eq!(tag.0, 1);
             assert_eq!(fields.len(), 1);
@@ -412,7 +475,8 @@ mod tests {
             CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![0, 1] },
         ];
         let expr = CoreExpr { nodes };
-        let res = eval(&expr, &Env::new()).unwrap();
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
         if let Value::Lit(Literal::LitInt(n)) = res {
             assert_eq!(n, 3);
         } else {
@@ -437,7 +501,8 @@ mod tests {
             }, 
         ];
         let expr = CoreExpr { nodes };
-        let res = eval(&expr, &Env::new()).unwrap();
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
         if let Value::Lit(Literal::LitInt(n)) = res {
             assert_eq!(n, 42);
         } else {
@@ -462,7 +527,8 @@ mod tests {
             }, 
         ];
         let expr = CoreExpr { nodes };
-        let res = eval(&expr, &Env::new()).unwrap();
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
         if let Value::Con(tag, _) = res {
             assert_eq!(tag.0, 1);
         } else {
@@ -488,7 +554,8 @@ mod tests {
             }, 
         ];
         let expr = CoreExpr { nodes };
-        let res = eval(&expr, &Env::new()).unwrap();
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
         if let Value::Lit(Literal::LitInt(n)) = res {
             assert_eq!(n, 30);
         } else {
@@ -503,7 +570,8 @@ mod tests {
             CoreFrame::PrimOp { op: PrimOpKind::DataToTag, args: vec![0] },
         ];
         let expr = CoreExpr { nodes };
-        let res = eval(&expr, &Env::new()).unwrap();
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
         if let Value::Lit(Literal::LitInt(n)) = res {
             assert_eq!(n, 5);
         } else {
@@ -524,7 +592,8 @@ mod tests {
             }, // 3
         ];
         let expr = CoreExpr { nodes };
-        let res = eval(&expr, &Env::new()).unwrap();
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
         if let Value::Lit(Literal::LitInt(n)) = res {
             assert_eq!(n, 1);
         } else {
@@ -533,23 +602,165 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_unsupported_join() {
+    fn test_eval_join_simple() {
+        // join j(x) = x in jump j(42)
         let nodes = vec![
-            CoreFrame::Lit(Literal::LitInt(1)),
-            CoreFrame::Join { label: core_repr::JoinId(1), params: vec![], rhs: 0, body: 0 },
+            CoreFrame::Var(VarId(10)), // 0: x
+            CoreFrame::Lit(Literal::LitInt(42)), // 1
+            CoreFrame::Jump { label: JoinId(1), args: vec![1] }, // 2
+            CoreFrame::Join { label: JoinId(1), params: vec![VarId(10)], rhs: 0, body: 2 }, // 3
         ];
         let expr = CoreExpr { nodes };
-        let res = eval(&expr, &Env::new());
-        assert!(res.is_err());
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
+        if let Value::Lit(Literal::LitInt(n)) = res {
+            assert_eq!(n, 42);
+        } else {
+            panic!("Expected LitInt(42)");
+        }
     }
 
     #[test]
-    fn test_eval_unsupported_jump() {
+    fn test_eval_join_multi_param() {
+        // join j(x, y) = x + y in jump j(1, 2)
         let nodes = vec![
-            CoreFrame::Jump { label: core_repr::JoinId(1), args: vec![] },
+            CoreFrame::Var(VarId(10)), // 0: x
+            CoreFrame::Var(VarId(11)), // 1: y
+            CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![0, 1] }, // 2: x + y
+            CoreFrame::Lit(Literal::LitInt(1)), // 3
+            CoreFrame::Lit(Literal::LitInt(2)), // 4
+            CoreFrame::Jump { label: JoinId(1), args: vec![3, 4] }, // 5
+            CoreFrame::Join { label: JoinId(1), params: vec![VarId(10), VarId(11)], rhs: 2, body: 5 }, // 6
         ];
         let expr = CoreExpr { nodes };
-        let res = eval(&expr, &Env::new());
-        assert!(res.is_err());
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
+        if let Value::Lit(Literal::LitInt(n)) = res {
+            assert_eq!(n, 3);
+        } else {
+            panic!("Expected LitInt(3)");
+        }
+    }
+
+    #[test]
+    fn test_eval_unbound_jump() {
+        let nodes = vec![
+            CoreFrame::Jump { label: JoinId(1), args: vec![] },
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap);
+        assert!(matches!(res, Err(EvalError::UnboundJoin(JoinId(1)))));
+    }
+
+    #[test]
+    fn test_thunk_lazy() {
+        // let x = <unbound> in 42
+        let nodes = vec![
+            CoreFrame::Var(VarId(999)), // 0: unbound
+            CoreFrame::Lit(Literal::LitInt(42)), // 1
+            CoreFrame::LetNonRec { binder: VarId(1), rhs: 0, body: 1 }, // 2
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
+        if let Value::Lit(Literal::LitInt(n)) = res {
+            assert_eq!(n, 42);
+        } else {
+            panic!("Expected LitInt(42)");
+        }
+    }
+
+    #[test]
+    fn test_thunk_caching() {
+        // let x = 1 + 1 in x + x
+        let nodes = vec![
+            CoreFrame::Lit(Literal::LitInt(1)), // 0
+            CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![0, 0] }, // 1: 1 + 1
+            CoreFrame::Var(VarId(1)), // 2: x
+            CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![2, 2] }, // 3: x + x
+            CoreFrame::LetNonRec { binder: VarId(1), rhs: 1, body: 3 }, // 4
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
+        if let Value::Lit(Literal::LitInt(n)) = res {
+            assert_eq!(n, 4);
+        } else {
+            panic!("Expected LitInt(4)");
+        }
+    }
+
+    #[test]
+    fn test_thunk_blackhole() {
+        // letrec x = x in x
+        let nodes = vec![
+            CoreFrame::Var(VarId(1)), // 0: x
+            CoreFrame::LetRec { bindings: vec![(VarId(1), 0)], body: 0 }, // 1
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap);
+        assert!(matches!(res, Err(EvalError::InfiniteLoop(_))));
+    }
+
+    #[test]
+    fn test_letrec_mutual_recursion() {
+        // letrec { f = \a -> g a; g = \b -> b } in f 42
+        let nodes = vec![
+            CoreFrame::Var(VarId(11)), // 0: a
+            CoreFrame::Var(VarId(2)), // 1: g
+            CoreFrame::App { fun: 1, arg: 0 }, // 2: g a
+            CoreFrame::Lam { binder: VarId(11), body: 2 }, // 3: \a -> g a (f)
+            
+            CoreFrame::Var(VarId(12)), // 4: b
+            CoreFrame::Lam { binder: VarId(12), body: 4 }, // 5: \b -> b (g)
+            
+            CoreFrame::Var(VarId(1)), // 6: f
+            CoreFrame::Lit(Literal::LitInt(42)), // 7
+            CoreFrame::App { fun: 6, arg: 7 }, // 8: f 42
+            
+            CoreFrame::LetRec {
+                bindings: vec![(VarId(1), 3), (VarId(2), 5)],
+                body: 8,
+            }, // 9
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
+        if let Value::Lit(Literal::LitInt(n)) = res {
+            assert_eq!(n, 42);
+        } else {
+            panic!("Expected LitInt(42)");
+        }
+    }
+
+    #[test]
+    fn test_eval_join_scoping() {
+        // let y = 100 in
+        // join j(x) = x + y in
+        // let y = 200 in
+        // jump j(1)
+        // Should be 101, not 201.
+        let nodes = vec![
+            CoreFrame::Lit(Literal::LitInt(100)), // 0
+            CoreFrame::Var(VarId(10)), // 1: x
+            CoreFrame::Var(VarId(20)), // 2: y (captured)
+            CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![1, 2] }, // 3: x + y
+            CoreFrame::Lit(Literal::LitInt(200)), // 4
+            CoreFrame::Lit(Literal::LitInt(1)), // 5
+            CoreFrame::Jump { label: JoinId(1), args: vec![5] }, // 6
+            CoreFrame::LetNonRec { binder: VarId(20), rhs: 4, body: 6 }, // 7: let y = 200 in jump j(1)
+            CoreFrame::Join { label: JoinId(1), params: vec![VarId(10)], rhs: 3, body: 7 }, // 8: join j(x) = x+y in ...
+            CoreFrame::LetNonRec { binder: VarId(20), rhs: 0, body: 8 }, // 9: let y = 100 in join ...
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
+        if let Value::Lit(Literal::LitInt(n)) = res {
+            assert_eq!(n, 101);
+        } else {
+            panic!("Expected LitInt(101)");
+        }
     }
 }
