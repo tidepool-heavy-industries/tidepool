@@ -206,4 +206,40 @@ mod tests {
         assert!(table.contains(root));
         assert!(table.contains(child));
     }
+
+    #[test]
+    fn test_evaluated_closure_refs() {
+        let mut heap = ArenaHeap::new();
+        
+        let child = heap.alloc(Env::new(), empty_expr());
+        let mut env = Env::new();
+        env.insert(VarId(0), Value::ThunkRef(child));
+        
+        let closure_val = Value::Closure(env, VarId(1), empty_expr());
+        let root = heap.alloc(Env::new(), empty_expr());
+        heap.write(root, ThunkState::Evaluated(closure_val));
+        
+        let table = trace(&[root], &heap);
+        assert_eq!(table.len(), 2);
+        assert!(table.contains(root));
+        assert!(table.contains(child));
+    }
+
+    #[test]
+    fn test_evaluated_joincont_refs() {
+        let mut heap = ArenaHeap::new();
+        
+        let child = heap.alloc(Env::new(), empty_expr());
+        let mut env = Env::new();
+        env.insert(VarId(0), Value::ThunkRef(child));
+        
+        let join_val = Value::JoinCont(vec![VarId(1)], empty_expr(), env);
+        let root = heap.alloc(Env::new(), empty_expr());
+        heap.write(root, ThunkState::Evaluated(join_val));
+        
+        let table = trace(&[root], &heap);
+        assert_eq!(table.len(), 2);
+        assert!(table.contains(root));
+        assert!(table.contains(child));
+    }
 }
