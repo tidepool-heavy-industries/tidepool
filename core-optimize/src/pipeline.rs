@@ -1,5 +1,10 @@
 use core_eval::pass::{Pass, Changed};
 use core_repr::CoreExpr;
+use crate::beta::BetaReduce;
+use crate::inline::Inline;
+use crate::case_reduce::CaseReduce;
+use crate::dce::Dce;
+use crate::partial::PartialEval;
 
 /// Maximum number of iterations for the pipeline to avoid infinite loops.
 pub const MAX_PIPELINE_ITERATIONS: usize = 1000;
@@ -54,6 +59,23 @@ pub fn run_pipeline(passes: &[Box<dyn Pass>], expr: &mut CoreExpr) -> PipelineSt
     }
 
     stats
+}
+
+/// Returns the default optimization pass sequence.
+/// Order: BetaReduce → Inline → CaseReduce → Dce → PartialEval.
+pub fn default_passes() -> Vec<Box<dyn Pass>> {
+    vec![
+        Box::new(BetaReduce),
+        Box::new(Inline),
+        Box::new(CaseReduce),
+        Box::new(Dce),
+        Box::new(PartialEval),
+    ]
+}
+
+/// Run the default optimization pipeline to fixed point.
+pub fn optimize(expr: &mut CoreExpr) -> PipelineStats {
+    run_pipeline(&default_passes(), expr)
 }
 
 /// Run a single pass to fixed point (convenience).
