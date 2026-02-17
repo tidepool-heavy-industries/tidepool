@@ -200,9 +200,9 @@ mod tests {
         ]);
         let pass = Inline;
         
-        // Pass 1: inline y = x
+        // Pass 1: inline x = 1 (outer let), producing: let y = 1 in y
         assert!(pass.run(&mut expr));
-        // Pass 2: inline x = 1
+        // Pass 2: inline y = 1 (inner let), producing: 1
         assert!(pass.run(&mut expr));
         // Result should be 1
         assert_eq!(expr.nodes.len(), 1);
