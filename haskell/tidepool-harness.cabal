@@ -1,0 +1,26 @@
+cabal-version: 2.4
+name:          tidepool-harness
+version:       0.1.0.0
+build-type:    Simple
+
+executable tidepool-harness
+  main-is:          Main.hs
+  hs-source-dirs:   app, src
+  other-modules:
+    Tidepool.GhcPipeline
+    Tidepool.Translate
+    Tidepool.CborEncode
+  build-depends:
+    base         >= 4.19 && < 5,
+    ghc          >= 9.12 && < 9.14,
+    bytestring,
+    containers,
+    filepath,
+    directory,
+    process,
+    text,
+    cborg,
+    mtl
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+  ghc-options:      -Wall
