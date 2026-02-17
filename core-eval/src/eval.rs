@@ -25,9 +25,18 @@ fn force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
                 ThunkState::BlackHole => Err(EvalError::InfiniteLoop(id)),
                 ThunkState::Unevaluated(env, expr) => {
                     heap.write(id, ThunkState::BlackHole);
-                    let result = eval(&expr, &env, heap)?;
-                    heap.write(id, ThunkState::Evaluated(result.clone()));
-                    Ok(result)
+                    match eval(&expr, &env, heap) {
+                        Ok(result) => {
+                            heap.write(id, ThunkState::Evaluated(result.clone()));
+                            Ok(result)
+                        }
+                        Err(err) => {
+                            // Restore state on error to avoid masking original failure
+                            // with InfiniteLoop on subsequent forces.
+                            heap.write(id, ThunkState::Unevaluated(env, expr));
+                            Err(err)
+                        }
+                    }
                 }
             }
         }
@@ -157,6 +166,12 @@ fn eval_at(expr: &CoreExpr, idx: usize, env: &Env, heap: &mut dyn Heap) -> Resul
             let join_var = VarId(label.0 | (1u64 << 63));
             match env.get(&join_var) {
                 Some(Value::JoinCont(params, rhs_expr, join_env)) => {
+                    if params.len() != args.len() {
+                        return Err(EvalError::TypeMismatch {
+                            expected: format!("{} arguments", params.len()),
+                            got: format!("{} arguments", args.len()),
+                        });
+                    }
                     let params = params.clone();
                     let rhs_expr = rhs_expr.clone();
                     let mut new_env = join_env.clone();
@@ -762,5 +777,40 @@ mod tests {
         } else {
             panic!("Expected LitInt(101)");
         }
+    }
+
+    #[test]
+    fn test_thunk_poison_restoration() {
+        // let x = <unbound> in x
+        let nodes = vec![
+            CoreFrame::Var(VarId(999)), // 0: unbound
+            CoreFrame::LetNonRec { binder: VarId(1), rhs: 0, body: 0 }, // 1: let x = unbound in x
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        
+        // First force fails with UnboundVar
+        let res1 = eval(&expr, &Env::new(), &mut heap);
+        assert!(matches!(res1, Err(EvalError::UnboundVar(_))));
+
+        // Second force should ALSO fail with UnboundVar, NOT InfiniteLoop (BlackHole)
+        let res2 = eval(&expr, &Env::new(), &mut heap);
+        assert!(matches!(res2, Err(EvalError::UnboundVar(_))));
+    }
+
+    #[test]
+    fn test_eval_jump_arity_mismatch() {
+        // join j(x) = x in jump j(1, 2)
+        let nodes = vec![
+            CoreFrame::Var(VarId(10)), // 0: x
+            CoreFrame::Lit(Literal::LitInt(1)), // 1
+            CoreFrame::Lit(Literal::LitInt(2)), // 2
+            CoreFrame::Jump { label: JoinId(1), args: vec![1, 2] }, // 3: jump j(1, 2)
+            CoreFrame::Join { label: JoinId(1), params: vec![VarId(10)], rhs: 0, body: 3 }, // 4: join j(x) ...
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap);
+        assert!(matches!(res, Err(EvalError::TypeMismatch { .. })));
     }
 }
