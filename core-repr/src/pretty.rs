@@ -366,16 +366,82 @@ mod tests {
         assert!(s.contains("42# -> v_2"));
     }
 
-    #[test]
-    fn test_primop() {
-        let nodes = vec![
-            lit_int(1),
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntAdd,
-                args: vec![0, 0],
-            },
-        ];
-        let expr = RecursiveTree { nodes };
-        assert_eq!(pretty_print(&expr), "intAdd#(1#, 1#)");
+        #[test]
+
+        fn test_primop() {
+
+            let nodes = vec![
+
+                lit_int(1),
+
+                CoreFrame::PrimOp {
+
+                    op: PrimOpKind::IntAdd,
+
+                    args: vec![0, 0],
+
+                },
+
+            ];
+
+            let expr = RecursiveTree { nodes };
+
+            assert_eq!(pretty_print(&expr), "intAdd#(1#, 1#)");
+
+        }
+
+    
+
+        #[test]
+
+        fn test_literals() {
+
+            let nodes = vec![
+
+                CoreFrame::Lit(Literal::LitWord(42)),
+
+                CoreFrame::Lit(Literal::LitChar('x')),
+
+                CoreFrame::Lit(Literal::LitString(b"hello".to_vec())),
+
+                CoreFrame::Lit(Literal::LitFloat(3.14f32.to_bits() as u64)),
+
+                CoreFrame::Lit(Literal::LitDouble(3.14f64.to_bits())),
+
+            ];
+
+    
+
+            let expr_word = RecursiveTree { nodes: vec![nodes[0].clone()] };
+
+            assert_eq!(pretty_print(&expr_word), "42##");
+
+    
+
+            let expr_char = RecursiveTree { nodes: vec![nodes[1].clone()] };
+
+            assert_eq!(pretty_print(&expr_char), "'x'#");
+
+    
+
+            let expr_string = RecursiveTree { nodes: vec![nodes[2].clone()] };
+
+            assert_eq!(pretty_print(&expr_string), "\"hello\"#");
+
+    
+
+            let expr_float = RecursiveTree { nodes: vec![nodes[3].clone()] };
+
+            assert_eq!(pretty_print(&expr_float), "3.14#");
+
+    
+
+            let expr_double = RecursiveTree { nodes: vec![nodes[4].clone()] };
+
+            assert_eq!(pretty_print(&expr_double), "3.14##");
+
+        }
+
     }
-}
+
+    
