@@ -6,4 +6,19 @@ edition = "2021"
 [dependencies]
 core-repr = { path = "../core-repr" }
 core-eval = { path = "../core-eval" }
+core-heap = { path = "../core-heap" }
+core-optimize = { path = "../core-optimize" }
 proptest = "1.10.0"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "eval"
+harness = false
+
+[[bench]]
+name = "optimize"
+harness = false
+
+[[bench]]
+name = "heap"
+harness = false

@@ -1,0 +1,17 @@
+[package]
+name = "tidepool-macro"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+[dev-dependencies]
+core-repr = { path = "../core-repr" }
+core-eval = { path = "../core-eval" }
+core-bridge = { path = "../core-bridge" }
