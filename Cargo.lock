@@ -45,6 +45,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bumpalo"
+version = "3.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5dd9dc738b7a8311c7ade152424974d8115f2cdad61e8dab8dac9f2362298510"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -78,11 +84,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-bridge"
+version = "0.1.0"
+dependencies = [
+ "core-eval",
+ "core-repr",
+]
+
+[[package]]
 name = "core-eval"
 version = "0.1.0"
 dependencies = [
  "core-repr",
  "im",
+]
+
+[[package]]
+name = "core-heap"
+version = "0.1.0"
+dependencies = [
+ "bumpalo",
+ "core-eval",
+ "core-repr",
+]
+
+[[package]]
+name = "core-optimize"
+version = "0.1.0"
+dependencies = [
+ "core-eval",
+ "core-repr",
 ]
 
 [[package]]
