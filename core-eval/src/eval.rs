@@ -65,14 +65,14 @@ fn eval_at(expr: &CoreExpr, idx: usize, env: &Env, heap: &mut dyn Heap) -> Resul
             }
         }
         CoreFrame::Lam { binder, body } => {
-            let body_expr = extract_subtree(expr, *body);
+            let body_expr = expr.extract_subtree(*body);
             Ok(Value::Closure(env.clone(), *binder, body_expr))
         }
         CoreFrame::LetNonRec { binder, rhs, body } => {
             let rhs_val = if matches!(&expr.nodes[*rhs], CoreFrame::Lam { .. }) {
                 eval_at(expr, *rhs, env, heap)?  // Lambdas are values
             } else {
-                let thunk_id = heap.alloc(env.clone(), extract_subtree(expr, *rhs));
+                let thunk_id = heap.alloc(env.clone(), expr.extract_subtree(*rhs));
                 Value::ThunkRef(thunk_id)
             };
             let new_env = env.update(*binder, rhs_val);
@@ -97,7 +97,7 @@ fn eval_at(expr: &CoreExpr, idx: usize, env: &Env, heap: &mut dyn Heap) -> Resul
                     heap.write(*tid, ThunkState::Evaluated(lam_val.clone()));
                     new_env = new_env.update(*binder, lam_val);
                 } else {
-                    let rhs_subtree = extract_subtree(expr, *rhs_idx);
+                    let rhs_subtree = expr.extract_subtree(*rhs_idx);
                     heap.write(*tid, ThunkState::Unevaluated(new_env.clone(), rhs_subtree));
                 }
             }
@@ -157,7 +157,7 @@ fn eval_at(expr: &CoreExpr, idx: usize, env: &Env, heap: &mut dyn Heap) -> Resul
             dispatch_primop(*op, arg_vals)
         }
         CoreFrame::Join { label, params, rhs, body } => {
-            let join_val = Value::JoinCont(params.clone(), extract_subtree(expr, *rhs), env.clone());
+            let join_val = Value::JoinCont(params.clone(), expr.extract_subtree(*rhs), env.clone());
             let join_var = VarId(label.0 | (1u64 << 63)); // high bit distinguishes join labels
             let new_env = env.update(join_var, join_val);
             eval_at(expr, *body, &new_env, heap)
@@ -359,31 +359,6 @@ fn cmp_char(_op: PrimOpKind, args: &[Value], f: impl Fn(char, char) -> bool) -> 
     let a = expect_char(&args[0])?;
     let b = expect_char(&args[1])?;
     Ok(Value::Lit(Literal::LitInt(if f(a, b) { 1 } else { 0 })))
-}
-
-fn extract_subtree(expr: &CoreExpr, root_idx: usize) -> CoreExpr {
-    let mut new_nodes = Vec::new();
-    let mut old_to_new = std::collections::HashMap::new();
-    
-    fn collect(idx: usize, expr: &CoreExpr, new_nodes: &mut Vec<CoreFrame<usize>>, old_to_new: &mut std::collections::HashMap<usize, usize>) -> usize {
-        if let Some(&new_idx) = old_to_new.get(&idx) {
-            return new_idx;
-        }
-        
-        use core_repr::MapLayer;
-        let frame = &expr.nodes[idx];
-        let mapped_frame = frame.clone().map_layer(|child_idx| {
-            collect(child_idx, expr, new_nodes, old_to_new)
-        });
-        
-        let new_idx = new_nodes.len();
-        new_nodes.push(mapped_frame);
-        old_to_new.insert(idx, new_idx);
-        new_idx
-    }
-    
-    collect(root_idx, expr, &mut new_nodes, &mut old_to_new);
-    CoreExpr { nodes: new_nodes }
 }
 
 #[cfg(test)]
@@ -631,7 +606,7 @@ mod tests {
         if let Value::Lit(Literal::LitInt(n)) = res {
             assert_eq!(n, 42);
         } else {
-            panic!("Expected LitInt(42)");
+            panic!("Expected LitInt(42), got {:?}", res);
         }
     }
 

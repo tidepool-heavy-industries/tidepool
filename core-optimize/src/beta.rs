@@ -36,8 +36,8 @@ fn try_beta_at(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
             // Check if fun is a Lam
             if let CoreFrame::Lam { binder, body } = &expr.nodes[*fun] {
                 // Found a manifest beta redex!
-                let body_tree = extract_subtree(expr, *body);
-                let arg_tree = extract_subtree(expr, *arg);
+                let body_tree = expr.extract_subtree(*body);
+                let arg_tree = expr.extract_subtree(*arg);
                 let substituted = core_repr::subst::subst(&body_tree, *binder, &arg_tree);
                 Some(replace_subtree(expr, idx, &substituted))
             } else {
@@ -53,8 +53,8 @@ fn try_beta_at(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
             // But it's easier to just match on the frame and visit children.
             match other {
                 CoreFrame::Var(_) | CoreFrame::Lit(_) => {}
-                CoreFrame::App { fun, arg } => {
-                    result = try_beta_at(expr, *fun).or_else(|| try_beta_at(expr, *arg));
+                CoreFrame::App { .. } => {
+                    unreachable!("App nodes are handled in the outer match")
                 }
                 CoreFrame::Lam { body, .. } => {
                     result = try_beta_at(expr, *body);
@@ -117,32 +117,6 @@ fn try_beta_at(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
             result
         }
     }
-}
-
-fn extract_subtree(expr: &CoreExpr, root_idx: usize) -> CoreExpr {
-    let mut new_nodes = Vec::new();
-    let mut old_to_new = HashMap::new();
-
-    fn collect(
-        idx: usize,
-        expr: &CoreExpr,
-        new_nodes: &mut Vec<CoreFrame<usize>>,
-        old_to_new: &mut HashMap<usize, usize>,
-    ) -> usize {
-        if let Some(&new_idx) = old_to_new.get(&idx) {
-            return new_idx;
-        }
-
-        let frame = &expr.nodes[idx];
-        let mapped = frame.clone().map_layer(|child| collect(child, expr, new_nodes, old_to_new));
-        let new_idx = new_nodes.len();
-        new_nodes.push(mapped);
-        old_to_new.insert(idx, new_idx);
-        new_idx
-    }
-
-    collect(root_idx, expr, &mut new_nodes, &mut old_to_new);
-    CoreExpr { nodes: new_nodes }
 }
 
 fn replace_subtree(expr: &CoreExpr, target_idx: usize, replacement: &CoreExpr) -> CoreExpr {
