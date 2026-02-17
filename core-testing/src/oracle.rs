@@ -1,6 +1,7 @@
 use core_repr::{CoreFrame, RecursiveTree};
 use core_eval::{eval::eval, env::Env, value::Value, heap::VecHeap, error::EvalError};
 use std::path::PathBuf;
+use std::error::Error;
 
 /// Helper function to evaluate a CoreExpr tree.
 pub fn eval_expr(nodes: Vec<CoreFrame<usize>>) -> Result<Value, EvalError> {
@@ -10,13 +11,13 @@ pub fn eval_expr(nodes: Vec<CoreFrame<usize>>) -> Result<Value, EvalError> {
 }
 
 /// Helper function to evaluate a CBOR file.
-pub fn eval_cbor(path: &str) -> Result<Value, EvalError> {
+pub fn eval_cbor(path: &str) -> Result<Value, Box<dyn Error>> {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push(path);
-    let bytes = std::fs::read(&p).expect(&format!("cbor file not found at {:?}", p));
-    let expr = core_repr::serial::read::read_cbor(&bytes).expect("parse error");
+    let bytes = std::fs::read(&p)?;
+    let expr = core_repr::serial::read::read_cbor(&bytes)?;
     let mut heap = VecHeap::new();
-    eval(&expr, &Env::new(), &mut heap)
+    eval(&expr, &Env::new(), &mut heap).map_err(|e| e.into())
 }
 
 #[cfg(test)]
@@ -580,7 +581,8 @@ mod tests {
 
     #[test]
     fn test_thunk_laziness() {
-        // let x = 1 / 0 in 42
+        // let x = <latent error> in 42
+        // We use an unbound variable (VarId(999)) to simulate an error that would occur if forced.
         let nodes = vec![
             CoreFrame::Var(VarId(999)), // 0: unbound
             CoreFrame::Lit(Literal::LitInt(42)), // 1
@@ -618,7 +620,24 @@ mod tests {
         assert!(matches!(res, Err(EvalError::InfiniteLoop(_))));
     }
 
-    // --- 9. CBOR roundtrip ---
+    // --- 9. CBOR roundtrip & Differential ---
+
+    #[test]
+    fn test_differential_identity() {
+        // Rust-constructed identity
+        let nodes = vec![
+            CoreFrame::Var(VarId(1)),
+            CoreFrame::Lam { binder: VarId(1), body: 0 },
+        ];
+        let rust_res = eval_expr(nodes).unwrap();
+
+        // Haskell-compiled identity from CBOR
+        let cbor_res = eval_cbor("../haskell/test/Identity_cbor/identity.cbor").unwrap();
+
+        // Both should be Closures
+        assert!(matches!(rust_res, Value::Closure(_, _, _)));
+        assert!(matches!(cbor_res, Value::Closure(_, _, _)));
+    }
 
     #[test]
     fn test_cbor_identity() {
