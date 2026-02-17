@@ -25,7 +25,7 @@ fn small_expr() -> CoreExpr {
     }
 }
 
-/// Builds a medium expression (~50 nodes): arithmetic chain via let-bindings
+/// Builds a medium expression (~75 nodes): arithmetic chain via let-bindings
 /// Baseline expectation: < 10us
 fn medium_expr() -> CoreExpr {
     let mut nodes = Vec::new();
@@ -57,7 +57,7 @@ fn medium_expr() -> CoreExpr {
     RecursiveTree { nodes }
 }
 
-/// Builds a large expression (~500 nodes): deeply nested arithmetic chain
+/// Builds a large expression (~375 nodes): deeply nested arithmetic chain
 /// Baseline expectation: < 100us
 fn large_expr() -> CoreExpr {
     let mut nodes = Vec::new();

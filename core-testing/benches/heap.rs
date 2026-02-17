@@ -1,9 +1,9 @@
 use core_eval::{env::Env, heap::Heap, heap::VecHeap};
 use core_heap::arena::ArenaHeap;
-use core_repr::{CoreFrame, RecursiveTree, VarId};
+use core_repr::{CoreExpr, CoreFrame, RecursiveTree, VarId};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
-fn dummy_expr() -> RecursiveTree<CoreFrame<usize>> {
+fn dummy_expr() -> CoreExpr {
     RecursiveTree {
         nodes: vec![CoreFrame::Var(VarId(0))],
     }
@@ -27,7 +27,7 @@ fn bench_heap(c: &mut Criterion) {
     }
     group.finish();
 
-    // 2. ArenaHeap raw allocation
+    // 2. ArenaHeap raw allocation (64-byte objects)
     let mut group = c.benchmark_group("arena_alloc_raw_64");
     for size in [100, 1000, 10000].iter() {
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {

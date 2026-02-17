@@ -9,7 +9,7 @@ use core_repr::{
 use core_eval::pass::Pass;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
-/// Builds a reducible expression (~100 nodes).
+/// Builds a reducible expression (~30 nodes).
 /// Contains:
 /// - Beta redexes
 /// - Dead let bindings
