@@ -512,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_let_rec_sequential() {
+    fn test_eval_let_rec_forward_refs() {
         // let { x = 1; y = x } in y
         let nodes = vec![
             CoreFrame::Lit(Literal::LitInt(1)), // 0
