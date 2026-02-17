@@ -1,0 +1,282 @@
+use core_eval::{Changed, Pass};
+use core_repr::{CoreExpr, CoreFrame, MapLayer};
+use crate::occ::{occ_analysis, get_occ, Occ};
+use std::collections::HashMap;
+
+/// Dead Code Elimination pass.
+/// Removes `LetNonRec` bindings where the binder is unused.
+/// Removes `LetRec` groups where all binders are unused.
+pub struct Dce;
+
+impl Pass for Dce {
+    fn run(&self, expr: &mut CoreExpr) -> Changed {
+        if expr.nodes.is_empty() {
+            return false;
+        }
+        let occ_map = occ_analysis(expr);
+        match try_dce(expr, &occ_map) {
+            Some(new_expr) => {
+                *expr = new_expr;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn name(&self) -> &str {
+        "Dce"
+    }
+}
+
+fn try_dce(expr: &CoreExpr, occ_map: &crate::occ::OccMap) -> Option<CoreExpr> {
+    try_dce_at(expr, expr.nodes.len() - 1, occ_map)
+}
+
+fn try_dce_at(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> Option<CoreExpr> {
+    match &expr.nodes[idx] {
+        CoreFrame::LetNonRec { binder, body, .. } => {
+            if get_occ(occ_map, *binder) == Occ::Dead {
+                // Drop the binding, keep just body
+                let body_tree = expr.extract_subtree(*body);
+                Some(replace_subtree(expr, idx, &body_tree))
+            } else {
+                try_children(expr, idx, occ_map)
+            }
+        }
+        CoreFrame::LetRec { bindings, body } => {
+            let all_dead = bindings.iter().all(|(binder, _)| get_occ(occ_map, *binder) == Occ::Dead);
+            if all_dead {
+                // Drop the entire group, keep just body
+                let body_tree = expr.extract_subtree(*body);
+                Some(replace_subtree(expr, idx, &body_tree))
+            } else {
+                try_children(expr, idx, occ_map)
+            }
+        }
+        _ => try_children(expr, idx, occ_map),
+    }
+}
+
+fn try_children(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> Option<CoreExpr> {
+    let children = get_children(&expr.nodes[idx]);
+    for child in children {
+        if let Some(result) = try_dce_at(expr, child, occ_map) {
+            return Some(result);
+        }
+    }
+    None
+}
+
+fn get_children(frame: &CoreFrame<usize>) -> Vec<usize> {
+    match frame {
+        CoreFrame::Var(_) | CoreFrame::Lit(_) => vec![],
+        CoreFrame::App { fun, arg } => vec![*fun, *arg],
+        CoreFrame::Lam { body, .. } => vec![*body],
+        CoreFrame::LetNonRec { rhs, body, .. } => vec![*rhs, *body],
+        CoreFrame::LetRec { bindings, body } => {
+            let mut c: Vec<usize> = bindings.iter().map(|(_, r)| *r).collect();
+            c.push(*body);
+            c
+        }
+        CoreFrame::Case {
+            scrutinee,
+            alts,
+            ..
+        } => {
+            let mut c = vec![*scrutinee];
+            for alt in alts {
+                c.push(alt.body);
+            }
+            c
+        }
+        CoreFrame::Con { fields, .. } => fields.clone(),
+        CoreFrame::Join { rhs, body, .. } => vec![*rhs, *body],
+        CoreFrame::Jump { args, .. } => args.clone(),
+        CoreFrame::PrimOp { args, .. } => args.clone(),
+    }
+}
+
+fn replace_subtree(expr: &CoreExpr, target_idx: usize, replacement: &CoreExpr) -> CoreExpr {
+    let mut new_nodes = Vec::new();
+    let mut old_to_new = HashMap::new();
+    rebuild(
+        expr,
+        expr.nodes.len() - 1,
+        target_idx,
+        replacement,
+        &mut new_nodes,
+        &mut old_to_new,
+    );
+    CoreExpr { nodes: new_nodes }
+}
+
+fn rebuild(
+    expr: &CoreExpr,
+    idx: usize,
+    target: usize,
+    replacement: &CoreExpr,
+    new_nodes: &mut Vec<CoreFrame<usize>>,
+    old_to_new: &mut HashMap<usize, usize>,
+) -> usize {
+    if let Some(&ni) = old_to_new.get(&idx) {
+        return ni;
+    }
+    if idx == target {
+        let offset = new_nodes.len();
+        for node in &replacement.nodes {
+            new_nodes.push(node.clone().map_layer(|i| i + offset));
+        }
+        let root = new_nodes.len() - 1;
+        old_to_new.insert(idx, root);
+        return root;
+    }
+    let mapped = expr.nodes[idx]
+        .clone()
+        .map_layer(|child| rebuild(expr, child, target, replacement, new_nodes, old_to_new));
+    let new_idx = new_nodes.len();
+    new_nodes.push(mapped);
+    old_to_new.insert(idx, new_idx);
+    new_idx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core_eval::{eval, Env, VecHeap};
+    use core_repr::{Literal, VarId};
+
+    // Helper to build a tree
+    fn tree(nodes: Vec<CoreFrame<usize>>) -> CoreExpr {
+        CoreExpr { nodes }
+    }
+
+    // 1. test_dce_dead_let: let x = 42 in 0 -> 0. Binder Dead, dropped.
+    #[test]
+    fn test_dce_dead_let() {
+        let x = VarId(1);
+        let expr = tree(vec![
+            CoreFrame::Lit(Literal::LitInt(42)), // 0: rhs
+            CoreFrame::Lit(Literal::LitInt(0)),  // 1: body
+            CoreFrame::LetNonRec { binder: x, rhs: 0, body: 1 }, // 2: root
+        ]);
+        let mut dce_expr = expr;
+        let changed = Dce.run(&mut dce_expr);
+        assert!(changed);
+        assert_eq!(dce_expr.nodes.len(), 1);
+        assert_eq!(dce_expr.nodes[0], CoreFrame::Lit(Literal::LitInt(0)));
+    }
+
+    // 2. test_dce_live_let_preserved: let x = 42 in x -> unchanged. Binder Once, kept.
+    #[test]
+    fn test_dce_live_let_preserved() {
+        let x = VarId(1);
+        let expr = tree(vec![
+            CoreFrame::Lit(Literal::LitInt(42)), // 0: rhs
+            CoreFrame::Var(x),                  // 1: body
+            CoreFrame::LetNonRec { binder: x, rhs: 0, body: 1 }, // 2: root
+        ]);
+        let mut dce_expr = expr.clone();
+        let changed = Dce.run(&mut dce_expr);
+        assert!(!changed);
+        assert_eq!(dce_expr, expr);
+    }
+
+    // 3. test_dce_letrec_all_dead: letrec { f = 1; g = 2 } in 0 -> 0. All Dead, drop entire group.
+    #[test]
+    fn test_dce_letrec_all_dead() {
+        let f = VarId(1);
+        let g = VarId(2);
+        let expr = tree(vec![
+            CoreFrame::Lit(Literal::LitInt(1)), // 0: f's rhs
+            CoreFrame::Lit(Literal::LitInt(2)), // 1: g's rhs
+            CoreFrame::Lit(Literal::LitInt(0)), // 2: body
+            CoreFrame::LetRec {
+                bindings: vec![(f, 0), (g, 1)],
+                body: 2,
+            }, // 3: root
+        ]);
+        let mut dce_expr = expr;
+        let changed = Dce.run(&mut dce_expr);
+        assert!(changed);
+        assert_eq!(dce_expr.nodes.len(), 1);
+        assert_eq!(dce_expr.nodes[0], CoreFrame::Lit(Literal::LitInt(0)));
+    }
+
+    // 4. test_dce_letrec_one_live: letrec { f = g; g = 1 } in f -> unchanged.
+    // f is Once (live), keep entire group even though g might be referenced only by f.
+    #[test]
+    fn test_dce_letrec_one_live() {
+        let f = VarId(1);
+        let g = VarId(2);
+        let expr = tree(vec![
+            CoreFrame::Var(g),                  // 0: f's rhs
+            CoreFrame::Lit(Literal::LitInt(1)), // 1: g's rhs
+            CoreFrame::Var(f),                  // 2: body
+            CoreFrame::LetRec {
+                bindings: vec![(f, 0), (g, 1)],
+                body: 2,
+            }, // 3: root
+        ]);
+        let mut dce_expr = expr.clone();
+        let changed = Dce.run(&mut dce_expr);
+        assert!(!changed);
+        assert_eq!(dce_expr, expr);
+    }
+
+    // 5. test_dce_nested: let x = 42 in let y = 0 in x -> after DCE drops y's let, result is let x = 42 in x.
+    #[test]
+    fn test_dce_nested() {
+        let x = VarId(1);
+        let y = VarId(2);
+        let expr = tree(vec![
+            CoreFrame::Lit(Literal::LitInt(42)), // 0: x's rhs
+            CoreFrame::Lit(Literal::LitInt(0)),  // 1: y's rhs
+            CoreFrame::Var(x),                  // 2: y's body
+            CoreFrame::LetNonRec { binder: y, rhs: 1, body: 2 }, // 3: x's body
+            CoreFrame::LetNonRec { binder: x, rhs: 0, body: 3 }, // 4: root
+        ]);
+        let mut dce_expr = expr;
+        let changed = Dce.run(&mut dce_expr);
+        assert!(changed);
+        // Should have dropped y
+        // let x = 42 in x
+        assert_eq!(dce_expr.nodes.len(), 3);
+        // The root should be a LetNonRec for x
+        let root_idx = dce_expr.nodes.len() - 1;
+        if let CoreFrame::LetNonRec { binder, .. } = &dce_expr.nodes[root_idx] {
+            assert_eq!(*binder, x);
+        } else {
+            panic!("Root should be LetNonRec for x, got {:?}", dce_expr.nodes[root_idx]);
+        }
+    }
+
+    // 6. test_dce_preserves_eval: let x = 42 in let y = 99 in x -> eval before/after, verify match.
+    #[test]
+    fn test_dce_preserves_eval() {
+        let x = VarId(1);
+        let y = VarId(2);
+        let expr = tree(vec![
+            CoreFrame::Lit(Literal::LitInt(42)), // 0: x's rhs
+            CoreFrame::Lit(Literal::LitInt(99)), // 1: y's rhs
+            CoreFrame::Var(x),                  // 2: y's body
+            CoreFrame::LetNonRec { binder: y, rhs: 1, body: 2 }, // 3: x's body
+            CoreFrame::LetNonRec { binder: x, rhs: 0, body: 3 }, // 4: root
+        ]);
+        let mut dce_expr = expr.clone();
+        
+        let mut heap = VecHeap::new();
+        let env = Env::new();
+        
+        let val_orig = eval(&expr, &env, &mut heap).expect("Original eval failed");
+        
+        let changed = Dce.run(&mut dce_expr);
+        assert!(changed);
+        
+        let val_dce = eval(&dce_expr, &env, &mut heap).expect("DCE eval failed");
+        
+        match (val_orig, val_dce) {
+            (core_eval::Value::Lit(l1), core_eval::Value::Lit(l2)) => assert_eq!(l1, l2),
+            _ => panic!("Expected literals"),
+        }
+    }
+}
