@@ -1,17 +1,66 @@
 use crate::parse::EnumInfo;
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::parse_quote;
+use syn::{parse_quote, Type};
+use std::collections::HashSet;
+
+fn collect_type_params(ty: &Type, params: &HashSet<syn::Ident>, used: &mut HashSet<syn::Ident>) {
+    match ty {
+        Type::Path(tp) => {
+            if tp.qself.is_none() {
+                // If it's PhantomData<T>, we DON'T consider T "used" for the purpose
+                // of adding FromCore/ToCore bounds, because our PhantomData impl
+                // doesn't require T to be FromCore/ToCore.
+                if tp.path.segments.last().map_or(false, |s| s.ident == "PhantomData") {
+                    return;
+                }
+                if let Some(ident) = tp.path.get_ident() {
+                    if params.contains(ident) {
+                        used.insert(ident.clone());
+                    }
+                }
+                for segment in &tp.path.segments {
+                    if let syn::PathArguments::AngleBracketed(ab) = &segment.arguments {
+                        for arg in &ab.args {
+                            if let syn::GenericArgument::Type(inner_ty) = arg {
+                                collect_type_params(inner_ty, params, used);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Type::Tuple(tt) => {
+            for elem in &tt.elems {
+                collect_type_params(elem, params, used);
+            }
+        }
+        Type::Array(ta) => {
+            collect_type_params(&ta.elem, params, used);
+        }
+        _ => {}
+    }
+}
 
 pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
     let name = &info.name;
     let trait_path: syn::Path = parse_quote!(core_bridge::FromCore);
     let mut generics = info.generics.clone();
 
-    // Add trait bounds
+    let all_params: HashSet<_> = info.generics.type_params().map(|p| p.ident.clone()).collect();
+    let mut used_params = HashSet::new();
+    for variant in &info.variants {
+        for field_ty in &variant.fields {
+            collect_type_params(field_ty, &all_params, &mut used_params);
+        }
+    }
+
+    // Add trait bounds only for used type parameters
     for param in &mut generics.params {
         if let syn::GenericParam::Type(type_param) = param {
-            type_param.bounds.push(parse_quote!(#trait_path));
+            if used_params.contains(&type_param.ident) {
+                type_param.bounds.push(parse_quote!(#trait_path));
+            }
         }
     }
 
@@ -63,7 +112,13 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
                     }
                     _ => Err(core_bridge::BridgeError::TypeMismatch {
                         expected: "Con".to_string(),
-                        got: format!("{:?}", value),
+                        got: match value {
+                            core_eval::Value::Lit(l) => format!("Lit({:?})", l),
+                            core_eval::Value::Con(id, _) => format!("Con({:?})", id),
+                            core_eval::Value::Closure(_, _, _) => "Closure".to_string(),
+                            core_eval::Value::ThunkRef(id) => format!("ThunkRef({:?})", id),
+                            core_eval::Value::JoinCont(_, _, _) => "JoinCont".to_string(),
+                        },
                     })
                 }
             }
@@ -76,10 +131,20 @@ pub fn generate_to_core(info: &EnumInfo) -> TokenStream {
     let trait_path: syn::Path = parse_quote!(core_bridge::ToCore);
     let mut generics = info.generics.clone();
 
-    // Add trait bounds
+    let all_params: HashSet<_> = info.generics.type_params().map(|p| p.ident.clone()).collect();
+    let mut used_params = HashSet::new();
+    for variant in &info.variants {
+        for field_ty in &variant.fields {
+            collect_type_params(field_ty, &all_params, &mut used_params);
+        }
+    }
+
+    // Add trait bounds only for used type parameters
     for param in &mut generics.params {
         if let syn::GenericParam::Type(type_param) = param {
-            type_param.bounds.push(parse_quote!(#trait_path));
+            if used_params.contains(&type_param.ident) {
+                type_param.bounds.push(parse_quote!(#trait_path));
+            }
         }
     }
 

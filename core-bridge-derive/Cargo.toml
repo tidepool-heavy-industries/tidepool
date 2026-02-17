@@ -15,3 +15,4 @@ proc-macro2 = "1"
 core-bridge = { path = "../core-bridge" }
 core-repr = { path = "../core-repr" }
 core-eval = { path = "../core-eval" }
+core-testing = { path = "../core-testing" }

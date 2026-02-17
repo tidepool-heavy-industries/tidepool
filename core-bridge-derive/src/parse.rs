@@ -18,7 +18,7 @@ pub fn parse_enum(input: &DeriveInput) -> Result<EnumInfo, syn::Error> {
         _ => {
             return Err(syn::Error::new_spanned(
                 input,
-                "Only enums are supported for #[derive(FromCore, ToCore)]",
+                "Only enums are supported",
             ))
         }
     };

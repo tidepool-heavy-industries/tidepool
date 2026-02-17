@@ -18,6 +18,35 @@ fn type_mismatch(expected: &str, got: &Value) -> BridgeError {
     }
 }
 
+impl<T> FromCore for std::marker::PhantomData<T> {
+    fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
+        match value {
+            Value::Con(_, fields) if fields.is_empty() => Ok(std::marker::PhantomData),
+            Value::Con(id, fields) => Err(BridgeError::ArityMismatch {
+                con: *id,
+                expected: 0,
+                got: fields.len(),
+            }),
+            _ => Err(type_mismatch("Con", value)),
+        }
+    }
+}
+
+impl<T> ToCore for std::marker::PhantomData<T> {
+    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+        // We use a dummy id since PhantomData has no representation in Core
+        // but we need some Con to represent it if it's a field.
+        // Actually, in Tidepool/Haskell, PhantomData fields shouldn't exist in Core.
+        // But for the bridge to work with derived enums, we need an impl.
+        // Let's use a unit tuple id if available, or just any unit-like.
+        let id = table
+            .get_by_name("()")
+            .or_else(|| table.iter().find(|dc| dc.rep_arity == 0).map(|dc| dc.id))
+            .ok_or_else(|| BridgeError::UnknownDataConName("()".into()))?;
+        Ok(Value::Con(id, vec![]))
+    }
+}
+
 // Primitives
 
 /// Bridges Rust `i64` to Haskell `Int#` literal.
