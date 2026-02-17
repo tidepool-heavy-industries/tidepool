@@ -1,18 +1,25 @@
 use core_eval::pass::{Pass, Changed};
 use core_repr::CoreExpr;
 
+/// Maximum number of iterations for the pipeline to avoid infinite loops.
+pub const MAX_PIPELINE_ITERATIONS: usize = 1000;
+
 /// Statistics from a pipeline run.
 #[derive(Debug, Clone, Default)]
 pub struct PipelineStats {
-    /// Total number of pipeline iterations (full passes over the list).
+    /// Total number of pipeline iterations.
+    /// Includes the final iteration where no changes were reported.
     pub iterations: usize,
     /// Total number of times each pass was invoked.
     pub pass_invocations: Vec<(String, usize)>,
 }
 
 /// Run a sequence of passes to fixed point.
-/// Keeps iterating until no pass reports a change.
+/// Keeps iterating until no pass reports a change or MAX_PIPELINE_ITERATIONS is reached.
 /// Returns stats about how many iterations and per-pass invocations.
+///
+/// # Panics
+/// Panics if the number of iterations exceeds MAX_PIPELINE_ITERATIONS.
 pub fn run_pipeline(passes: &[Box<dyn Pass>], expr: &mut CoreExpr) -> PipelineStats {
     let mut stats = PipelineStats {
         iterations: 0,
@@ -25,6 +32,14 @@ pub fn run_pipeline(passes: &[Box<dyn Pass>], expr: &mut CoreExpr) -> PipelineSt
 
     loop {
         stats.iterations += 1;
+        if stats.iterations > MAX_PIPELINE_ITERATIONS {
+            panic!(
+                "Optimization pipeline exceeded maximum iterations ({}). Potential infinite loop in passes: {:?}",
+                MAX_PIPELINE_ITERATIONS,
+                passes.iter().map(|p| p.name()).collect::<Vec<_>>()
+            );
+        }
+
         let mut changed: Changed = false;
         for (i, pass) in passes.iter().enumerate() {
             if pass.run(expr) {
@@ -44,14 +59,21 @@ pub fn run_pipeline(passes: &[Box<dyn Pass>], expr: &mut CoreExpr) -> PipelineSt
 /// Run a single pass to fixed point (convenience).
 /// Returns the number of times the pass reported a change.
 pub fn run_pass_to_fixpoint(pass: &dyn Pass, expr: &mut CoreExpr) -> usize {
-    let mut iterations = 0;
+    let mut changes = 0;
     loop {
         if !pass.run(expr) {
             break;
         }
-        iterations += 1;
+        changes += 1;
+        if changes >= MAX_PIPELINE_ITERATIONS {
+            panic!(
+                "Pass '{}' exceeded maximum iterations ({}) in run_pass_to_fixpoint.",
+                pass.name(),
+                MAX_PIPELINE_ITERATIONS
+            );
+        }
     }
-    iterations
+    changes
 }
 
 #[cfg(test)]
@@ -160,7 +182,19 @@ mod tests {
             name: "N-Times".to_string(),
             changes_remaining: Cell::new(n),
         };
-        let iterations = run_pass_to_fixpoint(&pass, &mut expr);
-        assert_eq!(iterations, n);
+        let changes = run_pass_to_fixpoint(&pass, &mut expr);
+        assert_eq!(changes, n);
+    }
+
+    #[test]
+    #[should_panic(expected = "Optimization pipeline exceeded maximum iterations")]
+    fn test_infinite_loop_panic() {
+        struct InfinitePass;
+        impl Pass for InfinitePass {
+            fn run(&self, _expr: &mut CoreExpr) -> Changed { true }
+            fn name(&self) -> &str { "Infinite" }
+        }
+        let mut expr = dummy_expr();
+        run_pipeline(&[Box::new(InfinitePass)], &mut expr);
     }
 }
