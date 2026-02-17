@@ -127,6 +127,7 @@ dependencies = [
 name = "core-testing"
 version = "0.1.0"
 dependencies = [
+ "core-eval",
  "core-repr",
  "proptest",
 ]

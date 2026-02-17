@@ -5,3 +5,4 @@
 //! and evaluation.
 
 pub mod gen;
+pub mod oracle;

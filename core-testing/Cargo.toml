@@ -5,4 +5,5 @@ edition = "2021"
 
 [dependencies]
 core-repr = { path = "../core-repr" }
+core-eval = { path = "../core-eval" }
 proptest = "1.10.0"
