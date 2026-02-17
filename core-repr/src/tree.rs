@@ -7,6 +7,43 @@ pub struct RecursiveTree<F> {
     pub nodes: Vec<F>,
 }
 
+impl<F> RecursiveTree<F>
+where
+    F: MapLayer<usize, usize, Output = F> + Clone,
+{
+    /// Extract a subtree rooted at `idx` into a new standalone tree.
+    pub fn extract_subtree(&self, idx: usize) -> Self {
+        let mut new_nodes = Vec::new();
+        let mut old_to_new = std::collections::HashMap::new();
+
+        fn collect<F>(
+            idx: usize,
+            tree: &RecursiveTree<F>,
+            new_nodes: &mut Vec<F>,
+            old_to_new: &mut std::collections::HashMap<usize, usize>,
+        ) -> usize
+        where
+            F: MapLayer<usize, usize, Output = F> + Clone,
+        {
+            if let Some(&new_idx) = old_to_new.get(&idx) {
+                return new_idx;
+            }
+
+            let frame = &tree.nodes[idx];
+            let mapped = frame
+                .clone()
+                .map_layer(|child| collect(child, tree, new_nodes, old_to_new));
+            let new_idx = new_nodes.len();
+            new_nodes.push(mapped);
+            old_to_new.insert(idx, new_idx);
+            new_idx
+        }
+
+        collect(idx, self, &mut new_nodes, &mut old_to_new);
+        RecursiveTree { nodes: new_nodes }
+    }
+}
+
 /// Functor map over the recursive positions of a frame.
 pub trait MapLayer<A, B> {
     type Output;
