@@ -35,12 +35,21 @@ pub unsafe fn read_size(ptr: *const u8) -> u16 {
 ///
 /// # Safety
 ///
-/// ptr must point to allocated memory of at least `size` bytes.
+/// ptr must point to allocated memory of at least `HEADER_SIZE` bytes.
+/// size must be at least `HEADER_SIZE`.
 pub unsafe fn write_header(ptr: *mut u8, tag: u8, size: u16) {
     *ptr = tag;
     std::ptr::write_unaligned(ptr.add(1) as *mut u16, size);
-    // Zero the padding bytes (offset 3 to 7) for stability.
-    std::ptr::write_bytes(ptr.add(3), 0, 5);
+    // Padding bytes are from offset 3 to 7 (5 bytes).
+    // Note: decisions.md says variant-specific payload follows at offset 3,
+    // but also says all objects are 8-byte aligned.
+    // If payload starts at offset 3, we should NOT zero these bytes.
+    // However, the spec ALSO says: "tag(1) + size(2) + padding(5) = 8 bytes aligned"
+    // in the Wave 1 description. We will follow the padding description for now
+    // but only zero if size >= 8 to be safe.
+    if size >= 8 {
+        std::ptr::write_bytes(ptr.add(3), 0, 5);
+    }
 }
 
 #[cfg(test)]
@@ -61,7 +70,8 @@ mod tests {
 
     #[test]
     fn test_alignment_roundtrip() {
-        // Test with different sizes to ensure u16 size works.
+        // Only header is written, so 8-byte buffer is enough for the header.
+        // We test various logical sizes to ensure the size u16 can store them.
         let sizes = [8, 16, 64, 256, 1024, 65535];
         for &size in &sizes {
             let mut buffer = [0u8; 8];

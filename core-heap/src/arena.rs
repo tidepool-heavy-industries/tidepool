@@ -45,14 +45,29 @@ impl ArenaHeap {
     ///
     /// The returned pointer is 8-byte aligned and valid for `size` bytes.
     pub fn alloc_raw(&self, size: usize) -> *mut u8 {
-        // Round up to 8-byte alignment.
-        let aligned_size = (size + 7) & !7;
+        // Round up to 8-byte alignment, check for overflow.
+        let aligned_size = size.checked_add(7)
+            .map(|s| s & !7)
+            .expect("Allocation size overflow");
         
-        // Check for nursery exhaustion.
-        let old_used = self.used.fetch_add(aligned_size, Ordering::SeqCst);
-        if old_used + aligned_size > self.nursery_limit {
-            // v1 behavior: panic. Later we signal GC.
-            panic!("Nursery limit exceeded: GC not yet implemented");
+        // Check for nursery exhaustion and reserve space atomically.
+        let mut prev_used = self.used.load(Ordering::SeqCst);
+        loop {
+            if prev_used.checked_add(aligned_size)
+                .map_or(true, |new_used| new_used > self.nursery_limit)
+            {
+                // v1 behavior: panic. Later we signal GC.
+                panic!("Nursery limit exceeded: GC not yet implemented");
+            }
+            match self.used.compare_exchange_weak(
+                prev_used,
+                prev_used + aligned_size,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(actual) => prev_used = actual,
+            }
         }
 
         // bumpalo::alloc_layout always returns 16-byte aligned pointer
