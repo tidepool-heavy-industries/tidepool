@@ -114,6 +114,8 @@ version = "0.1.0"
 dependencies = [
  "core-eval",
  "core-repr",
+ "core-testing",
+ "proptest",
 ]
 
 [[package]]

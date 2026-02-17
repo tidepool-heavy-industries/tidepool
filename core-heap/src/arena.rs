@@ -36,11 +36,20 @@ impl ArenaHeap {
         }
     }
 
+    /// Check whether `size` bytes can be allocated without triggering GC.
+    pub fn nursery_has_space(&self, size: usize) -> bool {
+        let aligned_size = (size + 7) & !7;
+        let used = self.used.load(Ordering::SeqCst);
+        used.checked_add(aligned_size)
+            .is_some_and(|total| total <= self.nursery_limit)
+    }
+
     /// Allocate raw bytes in the arena.
     ///
     /// # Panics
     ///
-    /// If the allocation exceeds the nursery limit.
+    /// If the allocation exceeds the nursery limit. Callers should check
+    /// `nursery_has_space` and call `collect_garbage` before retrying.
     ///
     /// # Safety
     ///
@@ -50,15 +59,14 @@ impl ArenaHeap {
         let aligned_size = size.checked_add(7)
             .map(|s| s & !7)
             .expect("Allocation size overflow");
-        
+
         // Check for nursery exhaustion and reserve space atomically.
         let mut prev_used = self.used.load(Ordering::SeqCst);
         loop {
             if prev_used.checked_add(aligned_size)
                 .is_none_or(|new_used| new_used > self.nursery_limit)
             {
-                // v1 behavior: panic. Later we signal GC.
-                panic!("Nursery limit exceeded: GC not yet implemented");
+                panic!("Nursery exhausted: call collect_garbage then retry");
             }
             match self.used.compare_exchange_weak(
                 prev_used,
@@ -87,6 +95,39 @@ impl ArenaHeap {
     /// Nursery capacity in bytes.
     pub fn nursery_limit(&self) -> usize {
         self.nursery_limit
+    }
+
+    /// Number of thunks currently allocated.
+    pub fn thunk_count(&self) -> usize {
+        self.thunks.len()
+    }
+
+    /// Run GC: trace from roots, compact live thunks, replace thunk store.
+    /// Returns the forwarding table so callers can update their root references.
+    pub fn collect_garbage(&mut self, roots: &[ThunkId]) -> crate::gc::trace::ForwardingTable {
+        let (new_heap, table) = crate::gc::collect(roots, self);
+
+        // Replace thunk store with compacted thunks via Heap trait
+        let reachable_count = table.mapping.iter().flatten().count();
+        self.thunks.clear();
+        for i in 0..reachable_count {
+            self.thunks.push(new_heap.read(ThunkId(i as u32)).clone());
+        }
+
+        // Reset raw arena (codegen path)
+        self.arena.reset();
+        self.used.store(0, Ordering::SeqCst);
+
+        // Nursery doubling: if live thunks > 75% of pre-GC count, grow capacity
+        if reachable_count > 0 {
+            let pre_gc_capacity = self.nursery_limit;
+            let live_bytes = self.thunks.len() * std::mem::size_of::<ThunkState>();
+            if live_bytes > pre_gc_capacity * 3 / 4 {
+                self.nursery_limit *= 2;
+            }
+        }
+
+        table
     }
 
     /// Return all ThunkIds directly referenced by this thunk.
@@ -212,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Nursery limit exceeded")]
+    #[should_panic(expected = "Nursery exhausted")]
     fn test_nursery_exhaustion() {
         let heap = ArenaHeap::with_capacity(128);
         // Fill up to the limit (note: bumpalo might have small internal overhead per alloc but usually zero for bump-pointer)
@@ -220,6 +261,83 @@ mod tests {
         heap.alloc_raw(128);
         // Next allocation should panic.
         heap.alloc_raw(8);
+    }
+
+    #[test]
+    fn test_nursery_has_space() {
+        let heap = ArenaHeap::with_capacity(128);
+        assert!(heap.nursery_has_space(64));
+        assert!(heap.nursery_has_space(128));
+        assert!(!heap.nursery_has_space(129));
+        heap.alloc_raw(64);
+        assert!(heap.nursery_has_space(64));
+        assert!(!heap.nursery_has_space(65));
+    }
+
+    #[test]
+    fn test_collect_garbage() {
+        let mut heap = ArenaHeap::new();
+        let env = Env::new();
+        let expr = RecursiveTree { nodes: vec![CoreFrame::Var(VarId(0))] };
+
+        // Allocate 3 thunks: id0, id1, id2
+        let id0 = heap.alloc(env.clone(), expr.clone());
+        let _id1 = heap.alloc(env.clone(), expr.clone()); // unreachable
+        let id2 = heap.alloc(env.clone(), expr.clone());
+
+        assert_eq!(heap.thunk_count(), 3);
+
+        // GC with only id0 and id2 as roots
+        let table = heap.collect_garbage(&[id0, id2]);
+
+        // Only 2 live thunks remain
+        assert_eq!(heap.thunk_count(), 2);
+
+        // Forwarding table maps old -> new
+        let new_id0 = table.lookup(id0);
+        let new_id2 = table.lookup(id2);
+        assert_eq!(new_id0, ThunkId(0));
+        assert_eq!(new_id2, ThunkId(1));
+
+        // Both are readable
+        match heap.read(new_id0) {
+            ThunkState::Unevaluated(_, _) => (),
+            _ => panic!("Expected Unevaluated"),
+        }
+        match heap.read(new_id2) {
+            ThunkState::Unevaluated(_, _) => (),
+            _ => panic!("Expected Unevaluated"),
+        }
+    }
+
+    #[test]
+    fn test_collect_garbage_rewrites_refs() {
+        let mut heap = ArenaHeap::new();
+        let env = Env::new();
+        let expr = RecursiveTree { nodes: vec![CoreFrame::Var(VarId(0))] };
+
+        // id0 is a leaf thunk
+        let id0 = heap.alloc(env.clone(), expr.clone());
+        // id1 references id0 in its env
+        let mut env_with_ref = Env::new();
+        env_with_ref.insert(VarId(42), Value::ThunkRef(id0));
+        let id1 = heap.alloc(env_with_ref, expr.clone());
+
+        let table = heap.collect_garbage(&[id1]);
+
+        assert_eq!(heap.thunk_count(), 2);
+        let new_id1 = table.lookup(id1);
+        match heap.read(new_id1) {
+            ThunkState::Unevaluated(env, _) => {
+                // The ThunkRef should point to the NEW id for id0
+                let new_id0 = table.lookup(id0);
+                match env.get(&VarId(42)).unwrap() {
+                    Value::ThunkRef(id) => assert_eq!(*id, new_id0),
+                    _ => panic!("Expected ThunkRef"),
+                }
+            }
+            _ => panic!("Expected Unevaluated"),
+        }
     }
 
     #[test]
