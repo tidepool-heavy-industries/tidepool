@@ -5,7 +5,5 @@ edition = "2021"
 
 [dependencies]
 core-repr = { path = "../core-repr" }
-proptest = "1"
-
-[dev-dependencies]
-proptest = "1"
+proptest = "1.4.0"
+proptest-derive = "0.4.0"

@@ -1,1 +1,1 @@
-// Placeholder for core-testing crate.
+pub mod gen;
