@@ -44,6 +44,14 @@ fn try_case_reduce_at(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
                         .or_else(|| alts.iter().find(|a| matches!(&a.con, AltCon::Default)));
 
                     if let Some(alt) = alt {
+                        // Arity check for DataAlt: binders must match fields.
+                        // If mismatch, skip this reduction (malformed IR).
+                        if let AltCon::DataAlt(_) = &alt.con {
+                            if alt.binders.len() != fields.len() {
+                                return try_children(expr, idx);
+                            }
+                        }
+
                         let mut body = extract_subtree(expr, alt.body);
                         // Bind fields to alt binders
                         if let AltCon::DataAlt(_) = &alt.con {
