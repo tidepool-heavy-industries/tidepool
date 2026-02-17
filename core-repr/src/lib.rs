@@ -1,4 +1,5 @@
 pub mod frame;
+pub mod pretty;
 pub mod tree;
 pub mod types;
 
