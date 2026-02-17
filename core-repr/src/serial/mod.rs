@@ -209,6 +209,29 @@ mod tests {
     }
 
     #[test]
+    fn test_read_harness_identity_cbor() {
+        let bytes = std::fs::read("../haskell/test/Identity_cbor/identity.cbor")
+            .expect("identity.cbor not found — run tidepool-harness first");
+        let tree = read_cbor(&bytes).expect("read_cbor failed on identity.cbor");
+        assert_eq!(tree.nodes.len(), 2);
+        // identity = \x -> x: [Var(x), Lam(x, 0)]
+        assert!(matches!(tree.nodes[0], CoreFrame::Var(_)));
+        assert!(matches!(tree.nodes[1], CoreFrame::Lam { .. }));
+    }
+
+    #[test]
+    fn test_read_harness_apply_cbor() {
+        let bytes = std::fs::read("../haskell/test/Identity_cbor/apply.cbor")
+            .expect("apply.cbor not found — run tidepool-harness first");
+        let tree = read_cbor(&bytes).expect("read_cbor failed on apply.cbor");
+        assert_eq!(tree.nodes.len(), 5);
+        // apply = \f -> \x -> f x: [Var(f), Var(x), App(0,1), Lam(x,2), Lam(f,3)]
+        assert!(matches!(tree.nodes[2], CoreFrame::App { .. }));
+        assert!(matches!(tree.nodes[3], CoreFrame::Lam { .. }));
+        assert!(matches!(tree.nodes[4], CoreFrame::Lam { .. }));
+    }
+
+    #[test]
     fn test_complex_nested() {
         roundtrip(RecursiveTree {
             nodes: vec![
