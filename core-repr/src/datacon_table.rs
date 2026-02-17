@@ -20,7 +20,17 @@ impl DataConTable {
     pub fn insert(&mut self, dc: DataCon) {
         let id = dc.id;
         let name = dc.name.clone();
-        self.by_id.insert(id, dc);
+
+        // If we're overwriting an existing entry for this id, remove its old name mapping.
+        if let Some(old_dc) = self.by_id.insert(id, dc) {
+            if let Some(mapped_id) = self.by_name.get(&old_dc.name).copied() {
+                if mapped_id == id {
+                    self.by_name.remove(&old_dc.name);
+                }
+            }
+        }
+
+        // Now insert/overwrite the mapping for the new name.
         self.by_name.insert(name, id);
     }
 
@@ -119,6 +129,36 @@ mod tests {
 
         assert_eq!(table.len(), 1);
         assert_eq!(table.get(DataConId(1)), Some(&dc2));
+    }
+
+    #[test]
+    fn test_overwrite_name_and_by_name_consistency() {
+        let mut table = DataConTable::new();
+
+        // Overwrite existing id with a different name; ensure by_name is updated and old name is removed.
+        let dc1 = make_datacon(1, "Just", 1, 1);
+        let dc2 = make_datacon(1, "Other", 1, 1);
+
+        table.insert(dc1);
+        table.insert(dc2.clone());
+
+        // Only one entry for id 1 and it should be dc2.
+        assert_eq!(table.len(), 1);
+        assert_eq!(table.get(DataConId(1)), Some(&dc2));
+
+        // by_name should now point "Other" to id 1 and no longer have "Just".
+        assert_eq!(table.get_by_name("Other"), Some(DataConId(1)));
+        assert_eq!(table.get_by_name("Just"), None);
+
+        // Now insert two different ids with the same name and ensure by_name tracks the latest.
+        let dc3 = make_datacon(2, "Same", 2, 0);
+        let dc4 = make_datacon(3, "Same", 3, 0);
+
+        table.insert(dc3.clone());
+        assert_eq!(table.get_by_name("Same"), Some(DataConId(2)));
+
+        table.insert(dc4.clone());
+        assert_eq!(table.get_by_name("Same"), Some(DataConId(3)));
     }
 
     #[test]
