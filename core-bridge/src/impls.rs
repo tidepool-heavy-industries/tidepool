@@ -6,7 +6,7 @@ use crate::traits::{FromCore, ToCore};
 // Helper for type mismatch errors
 fn type_mismatch(expected: &str, got: &Value) -> BridgeError {
     let got_str = match got {
-        Value::Lit(l) => format!("Lit({:?})", l),
+        Value::Lit(l) => format!("{:?}", l),
         Value::Con(id, _) => format!("Con({:?})", id),
         Value::Closure(_, _, _) => "Closure".to_string(),
         Value::ThunkRef(_) => "ThunkRef".to_string(),
@@ -20,6 +20,7 @@ fn type_mismatch(expected: &str, got: &Value) -> BridgeError {
 
 // Primitives
 
+/// Bridges Rust `i64` to Haskell `Int#` literal.
 impl FromCore for i64 {
     fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
         match value {
@@ -30,11 +31,12 @@ impl FromCore for i64 {
 }
 
 impl ToCore for i64 {
-    fn to_value(&self, _table: &DataConTable) -> Value {
-        Value::Lit(Literal::LitInt(*self))
+    fn to_value(&self, _table: &DataConTable) -> Result<Value, BridgeError> {
+        Ok(Value::Lit(Literal::LitInt(*self)))
     }
 }
 
+/// Bridges Rust `u64` to Haskell `Word#` literal.
 impl FromCore for u64 {
     fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
         match value {
@@ -45,11 +47,12 @@ impl FromCore for u64 {
 }
 
 impl ToCore for u64 {
-    fn to_value(&self, _table: &DataConTable) -> Value {
-        Value::Lit(Literal::LitWord(*self))
+    fn to_value(&self, _table: &DataConTable) -> Result<Value, BridgeError> {
+        Ok(Value::Lit(Literal::LitWord(*self)))
     }
 }
 
+/// Bridges Rust `f64` to Haskell `Double#` literal.
 impl FromCore for f64 {
     fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
         match value {
@@ -60,23 +63,33 @@ impl FromCore for f64 {
 }
 
 impl ToCore for f64 {
-    fn to_value(&self, _table: &DataConTable) -> Value {
-        Value::Lit(Literal::LitDouble(self.to_bits()))
+    fn to_value(&self, _table: &DataConTable) -> Result<Value, BridgeError> {
+        Ok(Value::Lit(Literal::LitDouble(self.to_bits())))
     }
 }
 
+/// Bridges Rust `i32` to Haskell `Int#` literal.
+/// Returns error on overflow/underflow.
 impl FromCore for i32 {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
-        i64::from_value(value, table).map(|n| n as i32)
+        let n = i64::from_value(value, table)?;
+        if n < i32::MIN as i64 || n > i32::MAX as i64 {
+            return Err(BridgeError::TypeMismatch {
+                expected: "i32 in range [-2147483648, 2147483647]".to_string(),
+                got: format!("LitInt({})", n),
+            });
+        }
+        Ok(n as i32)
     }
 }
 
 impl ToCore for i32 {
-    fn to_value(&self, table: &DataConTable) -> Value {
+    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         (*self as i64).to_value(table)
     }
 }
 
+/// Bridges Rust `bool` to Haskell `Bool` (True/False constructors).
 impl FromCore for bool {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         match value {
@@ -114,10 +127,10 @@ impl FromCore for bool {
 }
 
 impl ToCore for bool {
-    fn to_value(&self, table: &DataConTable) -> Value {
+    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let name = if *self { "True" } else { "False" };
-        let id = table.get_by_name(name).expect("Bool constructor not in table");
-        Value::Con(id, vec![])
+        let id = table.get_by_name(name).ok_or_else(|| BridgeError::UnknownDataConName(name.into()))?;
+        Ok(Value::Con(id, vec![]))
     }
 }
 
@@ -131,8 +144,8 @@ impl FromCore for char {
 }
 
 impl ToCore for char {
-    fn to_value(&self, _table: &DataConTable) -> Value {
-        Value::Lit(Literal::LitChar(*self))
+    fn to_value(&self, _table: &DataConTable) -> Result<Value, BridgeError> {
+        Ok(Value::Lit(Literal::LitChar(*self)))
     }
 }
 
@@ -151,8 +164,8 @@ impl FromCore for String {
 }
 
 impl ToCore for String {
-    fn to_value(&self, _table: &DataConTable) -> Value {
-        Value::Lit(Literal::LitString(self.as_bytes().to_vec()))
+    fn to_value(&self, _table: &DataConTable) -> Result<Value, BridgeError> {
+        Ok(Value::Lit(Literal::LitString(self.as_bytes().to_vec())))
     }
 }
 
@@ -195,15 +208,15 @@ impl<T: FromCore> FromCore for Option<T> {
 }
 
 impl<T: ToCore> ToCore for Option<T> {
-    fn to_value(&self, table: &DataConTable) -> Value {
+    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         match self {
             None => {
-                let id = table.get_by_name("Nothing").expect("Nothing constructor not in table");
-                Value::Con(id, vec![])
+                let id = table.get_by_name("Nothing").ok_or_else(|| BridgeError::UnknownDataConName("Nothing".into()))?;
+                Ok(Value::Con(id, vec![]))
             }
             Some(x) => {
-                let id = table.get_by_name("Just").expect("Just constructor not in table");
-                Value::Con(id, vec![x.to_value(table)])
+                let id = table.get_by_name("Just").ok_or_else(|| BridgeError::UnknownDataConName("Just".into()))?;
+                Ok(Value::Con(id, vec![x.to_value(table)?]))
             }
         }
     }
@@ -254,15 +267,15 @@ impl<T: FromCore> FromCore for Vec<T> {
 }
 
 impl<T: ToCore> ToCore for Vec<T> {
-    fn to_value(&self, table: &DataConTable) -> Value {
-        let nil_id = table.get_by_name("[]").expect("[] constructor not in table");
-        let cons_id = table.get_by_name(":").expect(": constructor not in table");
+    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+        let nil_id = table.get_by_name("[]").ok_or_else(|| BridgeError::UnknownDataConName("[]".into()))?;
+        let cons_id = table.get_by_name(":").ok_or_else(|| BridgeError::UnknownDataConName(":".into()))?;
 
         let mut res = Value::Con(nil_id, vec![]);
         for x in self.iter().rev() {
-            res = Value::Con(cons_id, vec![x.to_value(table), res]);
+            res = Value::Con(cons_id, vec![x.to_value(table)?, res]);
         }
-        res
+        Ok(res)
     }
 }
 
@@ -303,15 +316,15 @@ impl<T: FromCore, E: FromCore> FromCore for Result<T, E> {
 }
 
 impl<T: ToCore, E: ToCore> ToCore for Result<T, E> {
-    fn to_value(&self, table: &DataConTable) -> Value {
+    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         match self {
             Ok(x) => {
-                let id = table.get_by_name("Right").or_else(|| table.get_by_name("Ok")).expect("Right/Ok constructor not in table");
-                Value::Con(id, vec![x.to_value(table)])
+                let id = table.get_by_name("Right").or_else(|| table.get_by_name("Ok")).ok_or_else(|| BridgeError::UnknownDataConName("Right/Ok".into()))?;
+                Ok(Value::Con(id, vec![x.to_value(table)?]))
             }
             Err(e) => {
-                let id = table.get_by_name("Left").or_else(|| table.get_by_name("Err")).expect("Left/Err constructor not in table");
-                Value::Con(id, vec![e.to_value(table)])
+                let id = table.get_by_name("Left").or_else(|| table.get_by_name("Err")).ok_or_else(|| BridgeError::UnknownDataConName("Left/Err".into()))?;
+                Ok(Value::Con(id, vec![e.to_value(table)?]))
             }
         }
     }
@@ -344,9 +357,9 @@ impl<A: FromCore, B: FromCore> FromCore for (A, B) {
 }
 
 impl<A: ToCore, B: ToCore> ToCore for (A, B) {
-    fn to_value(&self, table: &DataConTable) -> Value {
-        let pair_id = table.get_by_name("(,)").expect("(,) constructor not in table");
-        Value::Con(pair_id, vec![self.0.to_value(table), self.1.to_value(table)])
+    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+        let pair_id = table.get_by_name("(,)").ok_or_else(|| BridgeError::UnknownDataConName("(,)".into()))?;
+        Ok(Value::Con(pair_id, vec![self.0.to_value(table)?, self.1.to_value(table)?]))
     }
 }
 
@@ -379,9 +392,13 @@ impl<A: FromCore, B: FromCore, C: FromCore> FromCore for (A, B, C) {
 }
 
 impl<A: ToCore, B: ToCore, C: ToCore> ToCore for (A, B, C) {
-    fn to_value(&self, table: &DataConTable) -> Value {
-        let triple_id = table.get_by_name("(,,)").expect("(,,) constructor not in table");
-        Value::Con(triple_id, vec![self.0.to_value(table), self.1.to_value(table), self.2.to_value(table)])
+    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+        let triple_id = table.get_by_name("(,,)").ok_or_else(|| BridgeError::UnknownDataConName("(,,)".into()))?;
+        Ok(Value::Con(triple_id, vec![
+            self.0.to_value(table)?,
+            self.1.to_value(table)?,
+            self.2.to_value(table)?,
+        ]))
     }
 }
 
@@ -407,8 +424,8 @@ mod tests {
     }
 
     fn roundtrip<T: FromCore + ToCore + PartialEq + std::fmt::Debug>(val: T, table: &DataConTable) {
-        let value = val.to_value(table);
-        let back = T::from_value(&value, table).expect("Roundtrip failed");
+        let value = val.to_value(table).expect("ToValue failed");
+        let back = T::from_value(&value, table).expect("FromValue failed");
         assert_eq!(val, back);
     }
 
@@ -417,6 +434,22 @@ mod tests {
         let table = test_table();
         roundtrip(42i64, &table);
         roundtrip(-7i64, &table);
+    }
+
+    #[test]
+    fn test_i32_roundtrip() {
+        let table = test_table();
+        roundtrip(42i32, &table);
+        roundtrip(-7i32, &table);
+    }
+
+    #[test]
+    fn test_i32_overflow() {
+        let table = test_table();
+        let val: i64 = i32::MAX as i64 + 1;
+        let value = val.to_value(&table).unwrap();
+        let res = i32::from_value(&value, &table);
+        assert!(matches!(res, Err(BridgeError::TypeMismatch { .. })));
     }
 
     #[test]
