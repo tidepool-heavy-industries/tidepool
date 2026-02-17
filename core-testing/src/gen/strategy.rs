@@ -3,6 +3,8 @@ use core_repr::*;
 use super::types::SimpleType;
 use super::builder::TreeBuilder;
 use std::collections::HashMap;
+use std::rc::Rc;
+use std::cell::Cell;
 
 /// Generate a random well-typed CoreExpr.
 pub fn arb_core_expr() -> impl Strategy<Value = RecursiveTree<CoreFrame<usize>>> {
@@ -28,40 +30,41 @@ fn arb_simple_type() -> impl Strategy<Value = SimpleType> {
 #[derive(Clone, Debug)]
 struct Context {
     vars: HashMap<VarId, SimpleType>,
-    joins: HashMap<JoinId, Vec<SimpleType>>,
-    next_var: u64,
-    next_join: u64,
+    next_var: Rc<Cell<u64>>,
+    next_join: Rc<Cell<u64>>,
 }
 
 impl Context {
     fn new() -> Self {
         Self {
             vars: HashMap::new(),
-            joins: HashMap::new(),
-            next_var: 0,
-            next_join: 0,
+            next_var: Rc::new(Cell::new(0)),
+            next_join: Rc::new(Cell::new(0)),
         }
     }
 
     fn add_var(&mut self, ty: SimpleType) -> VarId {
-        let id = VarId(self.next_var);
-        self.next_var += 1;
+        let val = self.next_var.get();
+        let id = VarId(val);
+        self.next_var.set(val + 1);
         self.vars.insert(id, ty);
         id
     }
 
-    fn add_join(&mut self, arg_tys: Vec<SimpleType>) -> JoinId {
-        let id = JoinId(self.next_join);
-        self.next_join += 1;
-        self.joins.insert(id, arg_tys);
+    fn add_join(&mut self) -> JoinId {
+        let val = self.next_join.get();
+        let id = JoinId(val);
+        self.next_join.set(val + 1);
         id
     }
 
     fn vars_of_type(&self, ty: &SimpleType) -> Vec<VarId> {
-        self.vars.iter()
+        let mut matching = self.vars.iter()
             .filter(|(_, v_ty)| *v_ty == ty)
             .map(|(id, _)| *id)
-            .collect()
+            .collect::<Vec<_>>();
+        matching.sort_by_key(|v| v.0); // Deterministic order for proptest
+        matching
     }
 }
 
@@ -121,7 +124,7 @@ fn gen_leaf(ty: SimpleType, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)>
 
     // TODO: Support LitWord, LitString, LitDouble, LitFloat if needed.
     // Currently restricted to LitInt and LitChar for simplicity.
-    match ty {
+    match &ty {
         SimpleType::Int => {
             strategies.push(any::<i64>().prop_map(|i| {
                 let mut builder = TreeBuilder::new();
@@ -224,12 +227,18 @@ fn gen_let_rec(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeB
             binders.push(ctx_body.add_var(rty.clone()));
         }
         
-        let mut rhs_strats = Vec::new();
+        let mut rhs_vec_strat: BoxedStrategy<Vec<(TreeBuilder, usize)>> = 
+            Just(Vec::new()).boxed();
+        
         for rty in rhs_tys {
-            rhs_strats.push(gen_expr(rty, depth, ctx_body.clone()));
+            let ctx_rhs = ctx_body.clone();
+            rhs_vec_strat = (rhs_vec_strat, gen_expr(rty.clone(), depth, ctx_rhs)).prop_map(|(mut acc, res)| {
+                acc.push(res);
+                acc
+            }).boxed();
         }
         
-        (rhs_strats, gen_expr(ty.clone(), depth, ctx_body), Just(binders))
+        (rhs_vec_strat, gen_expr(ty.clone(), depth, ctx_body), Just(binders))
     }).prop_map(|(rhss, (b_body, r_body), binders)| {
         let mut builder = TreeBuilder::new();
         let mut bindings = Vec::new();
@@ -357,7 +366,7 @@ fn gen_join_jump(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(Tre
         }
         
         let mut ctx_body = ctx_c.clone();
-        let label = ctx_body.add_join(arg_tys.clone());
+        let label = ctx_body.add_join();
         
         (
             gen_expr(ty_c.clone(), depth, ctx_rhs),
@@ -377,33 +386,35 @@ fn gen_join_jump(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(Tre
 }
 
 fn gen_jump(label: JoinId, arg_tys: Vec<SimpleType>, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)> {
-    let mut arg_strats = Vec::new();
+    let mut strat: BoxedStrategy<(TreeBuilder, Vec<usize>)> =
+        Just((TreeBuilder::new(), Vec::new())).boxed();
+
     for aty in arg_tys {
-        arg_strats.push(gen_expr(aty, depth, ctx.clone()));
+        let aty_cloned = aty.clone();
+        let ctx_cloned = ctx.clone();
+        strat = (strat, gen_expr(aty_cloned, depth, ctx_cloned)).prop_map(move |((mut acc_builder, mut acc_args), (b, r))| {
+            let off = acc_builder.push_tree(b);
+            acc_args.push(r + off);
+            (acc_builder, acc_args)
+        }).boxed();
     }
-    
-    arg_strats.prop_map(move |args_results| {
-        let mut builder = TreeBuilder::new();
-        let mut args = Vec::new();
-        for (b, r) in args_results {
-            let off = builder.push_tree(b);
-            args.push(r + off);
-        }
-        let root = builder.push(CoreFrame::Jump { label, args });
-        (builder, root)
-    }).boxed()
+
+    strat
+        .prop_map(move |(mut builder, args)| {
+            let root = builder.push(CoreFrame::Jump { label, args });
+            (builder, root)
+        })
+        .boxed()
 }
 
 fn gen_prim_op(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)> {
-    if ty != SimpleType::Int && ty != SimpleType::Bool {
+    // Only generate primitive operations for Int-typed expressions; for all other
+    // types (including Bool), fall back to leaf generation to preserve well-typedness.
+    if ty != SimpleType::Int {
         return gen_leaf(ty, ctx);
     }
     
-    let ops = if ty == SimpleType::Int {
-        vec![PrimOpKind::IntAdd, PrimOpKind::IntSub, PrimOpKind::IntMul]
-    } else {
-        vec![PrimOpKind::IntEq, PrimOpKind::IntNe, PrimOpKind::IntLt]
-    };
+    let ops = vec![PrimOpKind::IntAdd, PrimOpKind::IntSub, PrimOpKind::IntMul];
     
     prop::sample::select(ops).prop_flat_map(move |op| {
         (gen_expr(SimpleType::Int, depth, ctx.clone()), gen_expr(SimpleType::Int, depth, ctx.clone()), Just(op))
