@@ -1,5 +1,22 @@
 use crate::context::VMContext;
+use crate::gc::frame_walker::{self, StackRoot};
+use crate::stack_map::StackMapRegistry;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+type GcHook = fn(&[StackRoot]);
+
+thread_local! {
+    /// Registry of stack maps for JIT functions.
+    /// This is set before calling into JIT code so gc_trigger can access it.
+    static STACK_MAP_REGISTRY: RefCell<Option<*const StackMapRegistry>> = const { RefCell::new(None) };
+
+    /// Collected roots from the last gc_trigger call.
+    /// Used for test inspection.
+    static LAST_ROOTS: RefCell<Vec<StackRoot>> = const { RefCell::new(Vec::new()) };
+
+    static HOOK: RefCell<Option<GcHook>> = const { RefCell::new(None) };
+}
 
 /// GC trigger: called by JIT code when alloc_ptr exceeds alloc_limit.
 ///
@@ -8,17 +25,76 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 /// should have force-frame-pointers = true for the gc path).
 ///
 /// The frame walker in gc_trigger reads RBP to walk the JIT stack.
+#[inline(never)]
 pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
-    // Placeholder: in the full implementation, this will:
-    // 1. Walk the JIT stack via RBP chain
-    // 2. Collect GC roots from stack maps
-    // 3. Run the copying collector
-    // 4. Update forwarding pointers in stack slots
-    // 5. Update vmctx alloc_ptr/alloc_limit to new nursery
-    //
-    // For scaffold tests, just record that it was called.
+    // Force a frame to be created
+    let mut _dummy = [0u64; 2];
+    std::hint::black_box(&mut _dummy);
+
     GC_TRIGGER_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
     GC_TRIGGER_LAST_VMCTX.store(vmctx as usize, Ordering::SeqCst);
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        let rbp: usize;
+        let rsp: usize;
+        unsafe {
+            std::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack));
+            std::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack));
+        }
+
+        STACK_MAP_REGISTRY.with(|reg_cell| {
+            if let Some(registry_ptr) = *reg_cell.borrow() {
+                let registry = unsafe { &*registry_ptr };
+                // Walk frames starting from gc_trigger's own frame.
+                let roots = unsafe { frame_walker::walk_frames(rbp, registry, rsp) };
+                
+                // Call test hook if present
+                HOOK.with(|hook_cell| {
+                    if let Some(hook) = *hook_cell.borrow() {
+                        hook(&roots);
+                    }
+                });
+
+                LAST_ROOTS.with(|roots_cell| {
+                    *roots_cell.borrow_mut() = roots;
+                });
+            }
+        });
+    }
+}
+
+/// Set a hook to be called during gc_trigger with the collected roots.
+pub fn set_gc_test_hook(hook: GcHook) {
+    HOOK.with(|hook_cell| {
+        *hook_cell.borrow_mut() = Some(hook);
+    });
+}
+
+/// Clear the GC test hook.
+pub fn clear_gc_test_hook() {
+    HOOK.with(|hook_cell| {
+        *hook_cell.borrow_mut() = None;
+    });
+}
+
+/// Set the stack map registry for the current thread.
+pub fn set_stack_map_registry(registry: &StackMapRegistry) {
+    STACK_MAP_REGISTRY.with(|reg_cell| {
+        *reg_cell.borrow_mut() = Some(registry as *const _);
+    });
+}
+
+/// Clear the stack map registry for the current thread.
+pub fn clear_stack_map_registry() {
+    STACK_MAP_REGISTRY.with(|reg_cell| {
+        *reg_cell.borrow_mut() = None;
+    });
+}
+
+/// Get collected roots from the last gc_trigger call.
+pub fn last_gc_roots() -> Vec<StackRoot> {
+    LAST_ROOTS.with(|roots_cell| roots_cell.borrow().clone())
 }
 
 /// Heap allocation: called by JIT code for large or slow-path allocations.
@@ -40,6 +116,9 @@ static GC_TRIGGER_LAST_VMCTX: AtomicUsize = AtomicUsize::new(0);
 pub fn reset_test_counters() {
     GC_TRIGGER_CALL_COUNT.store(0, Ordering::SeqCst);
     GC_TRIGGER_LAST_VMCTX.store(0, Ordering::SeqCst);
+    LAST_ROOTS.with(|roots_cell| {
+        roots_cell.borrow_mut().clear();
+    });
 }
 
 /// Get gc_trigger call count. Only call from tests.
