@@ -30,8 +30,15 @@ resolveExternals binds =
   let localBinders = foldMap bindersOfSet binds
       allFreeVars  = foldMap freeVarsOfBind binds
       externals    = filter (isResolvable localBinders) (nonDetEltsUniqSet allFreeVars)
-      (resolved, _, unresolved) = go externals emptyVarSet localBinders [] []
-  in (resolved ++ binds, unresolved)
+      (resolvedBinds, _, unresolved) = go externals emptyVarSet localBinders [] []
+      -- Wrap all resolved externals in a single Rec group so they can
+      -- mutually reference each other. Individual NonRec bindings would
+      -- create nested lets where outer thunks can't see inner bindings.
+      resolvedPairs = concatMap toRecPairs resolvedBinds
+      augmented = case resolvedPairs of
+        []  -> binds
+        _   -> Rec resolvedPairs : binds
+  in (augmented, unresolved)
   where
     go :: [Var] -> VarSet -> VarSet -> [CoreBind] -> [UnresolvedVar]
        -> ([CoreBind], VarSet, [UnresolvedVar])
@@ -57,6 +64,10 @@ resolveExternals binds =
                      newExternals = filter (isResolvable localSet')
                                           (nonDetEltsUniqSet newFVs)
                  in go (newExternals ++ rest) visited' localSet' (newBind : acc) unres
+
+    toRecPairs :: CoreBind -> [(Var, CoreExpr)]
+    toRecPairs (NonRec b rhs) = [(b, rhs)]
+    toRecPairs (Rec pairs)    = pairs
 
     isResolvable :: VarSet -> Var -> Bool
     isResolvable localSet v =
