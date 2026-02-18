@@ -1,0 +1,10 @@
+[package]
+name = "core-effect"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core-repr = { path = "../core-repr" }
+core-eval = { path = "../core-eval" }
+core-bridge = { path = "../core-bridge" }
+frunk = "0.4"

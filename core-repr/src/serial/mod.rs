@@ -2,6 +2,7 @@ pub mod read;
 pub mod write;
 
 pub use read::read_cbor;
+pub use read::read_metadata;
 pub use write::write_cbor;
 
 #[derive(Debug)]

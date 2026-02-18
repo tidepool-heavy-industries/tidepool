@@ -118,6 +118,7 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
                             core_eval::Value::Closure(_, _, _) => "Closure".to_string(),
                             core_eval::Value::ThunkRef(id) => format!("ThunkRef({:?})", id),
                             core_eval::Value::JoinCont(_, _, _) => "JoinCont".to_string(),
+                            core_eval::Value::ConFun(id, arity, args) => format!("ConFun({:?}, {}/{})", id, args.len(), arity),
                         },
                     })
                 }

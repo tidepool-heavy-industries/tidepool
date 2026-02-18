@@ -14,6 +14,9 @@ pub enum Value {
     ThunkRef(ThunkId),
     /// Join point continuation (lives in Env only, never heap-allocated)
     JoinCont(Vec<VarId>, CoreExpr, Env),
+    /// Partially-applied data constructor: (tag, arity, accumulated args)
+    /// When all args are supplied, collapses to Con.
+    ConFun(DataConId, usize, Vec<Value>),
 }
 
 /// Thunk identifier — index into the thunk store.

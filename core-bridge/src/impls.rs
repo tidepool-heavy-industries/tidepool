@@ -11,6 +11,7 @@ fn type_mismatch(expected: &str, got: &Value) -> BridgeError {
         Value::Closure(_, _, _) => "Closure".to_string(),
         Value::ThunkRef(_) => "ThunkRef".to_string(),
         Value::JoinCont(_, _, _) => "JoinCont".to_string(),
+        Value::ConFun(id, arity, args) => format!("ConFun({:?}, {}/{})", id, args.len(), arity),
     };
     BridgeError::TypeMismatch {
         expected: expected.to_string(),

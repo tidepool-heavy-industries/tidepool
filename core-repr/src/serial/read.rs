@@ -52,6 +52,91 @@ pub fn read_cbor(bytes: &[u8]) -> Result<RecursiveTree<CoreFrame<usize>>, ReadEr
     Ok(RecursiveTree { nodes })
 }
 
+/// Reads a DataConTable from CBOR-encoded metadata bytes (meta.cbor format).
+///
+/// Format: CBOR array of entries, each entry is [dcid: u64, name: Text, tag: u64, arity: u64, bangs: [Text]]
+pub fn read_metadata(bytes: &[u8]) -> Result<crate::DataConTable, ReadError> {
+    use crate::datacon::{DataCon, SrcBang};
+    use crate::datacon_table::DataConTable;
+    use crate::types::DataConId;
+
+    let val: Value =
+        ciborium::de::from_reader(bytes).map_err(|e| ReadError::Cbor(e.to_string()))?;
+
+    let entries = match val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(ReadError::InvalidStructure(
+                "Metadata must be a CBOR array".to_string(),
+            ))
+        }
+    };
+
+    let mut table = DataConTable::new();
+    for entry in &entries {
+        let arr = match entry {
+            Value::Array(a) if a.len() == 5 => a,
+            _ => {
+                return Err(ReadError::InvalidStructure(
+                    "Metadata entry must be array of 5".to_string(),
+                ))
+            }
+        };
+
+        let dcid = as_u64(&arr[0])?;
+        let name = match &arr[1] {
+            Value::Text(t) => t.clone(),
+            _ => {
+                return Err(ReadError::InvalidStructure(
+                    "DataCon name must be text".to_string(),
+                ))
+            }
+        };
+        let tag = as_u64(&arr[2])? as u32;
+        let arity = as_u64(&arr[3])? as u32;
+        let bangs_arr = match &arr[4] {
+            Value::Array(a) => a,
+            _ => {
+                return Err(ReadError::InvalidStructure(
+                    "DataCon bangs must be array".to_string(),
+                ))
+            }
+        };
+        let mut bangs = Vec::with_capacity(bangs_arr.len());
+        for b in bangs_arr {
+            let bang_str = match b {
+                Value::Text(t) => t.as_str(),
+                _ => {
+                    return Err(ReadError::InvalidStructure(
+                        "Bang must be text".to_string(),
+                    ))
+                }
+            };
+            bangs.push(match bang_str {
+                "SrcBang" => SrcBang::SrcBang,
+                "SrcUnpack" => SrcBang::SrcUnpack,
+                "NoSrcBang" => SrcBang::NoSrcBang,
+                _ => {
+                    return Err(ReadError::InvalidStructure(format!(
+                        "Unknown bang: {}",
+                        bang_str
+                    )))
+                }
+            });
+        }
+
+        table.insert(DataCon {
+            id: DataConId(dcid),
+            name,
+            tag,
+            rep_arity: arity,
+            field_bangs: bangs,
+        });
+    }
+
+    Ok(table)
+}
+
 fn validate_indices(nodes: &[CoreFrame<usize>]) -> Result<(), ReadError> {
     let len = nodes.len();
     for node in nodes {

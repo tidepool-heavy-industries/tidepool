@@ -2,7 +2,25 @@ use crate::env::Env;
 use crate::error::EvalError;
 use crate::heap::{Heap, ThunkState};
 use crate::value::Value;
-use core_repr::{AltCon, CoreExpr, CoreFrame, DataConId, Literal, PrimOpKind, VarId};
+use core_repr::{AltCon, CoreExpr, CoreFrame, DataConId, DataConTable, Literal, PrimOpKind, VarId};
+
+/// Create an environment pre-populated with data constructor functions.
+/// Each constructor with arity N becomes a `ConFun(tag, N, [])` value
+/// bound to its worker VarId, so that `Var` references to constructors
+/// in the expression tree resolve correctly.
+pub fn env_from_datacon_table(table: &DataConTable) -> Env {
+    let mut env = Env::new();
+    for dc in table.iter() {
+        let var = VarId(dc.id.0);
+        if dc.rep_arity == 0 {
+            // Nullary constructor: just a Con value
+            env.insert(var, Value::Con(dc.id, vec![]));
+        } else {
+            env.insert(var, Value::ConFun(dc.id, dc.rep_arity as usize, vec![]));
+        }
+    }
+    env
+}
 
 /// Evaluate a CoreExpr to a Value.
 pub fn eval(expr: &CoreExpr, env: &Env, heap: &mut dyn Heap) -> Result<Value, EvalError> {
@@ -17,7 +35,7 @@ pub fn eval(expr: &CoreExpr, env: &Env, heap: &mut dyn Heap) -> Result<Value, Ev
 }
 
 /// Force a thunk to a value.
-fn force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
+pub fn force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
     match val {
         Value::ThunkRef(id) => {
             match heap.read(id).clone() {
@@ -62,6 +80,19 @@ fn eval_at(
                     let mut new_env = clos_env;
                     new_env.insert(binder, arg_val);
                     eval(&body, &new_env, heap)
+                }
+                Value::ConFun(tag, arity, mut args) => {
+                    args.push(arg_val);
+                    if args.len() == arity {
+                        // Force all fields when constructor is saturated
+                        let mut forced_args = Vec::with_capacity(args.len());
+                        for a in args {
+                            forced_args.push(force(a, heap)?);
+                        }
+                        Ok(Value::Con(tag, forced_args))
+                    } else {
+                        Ok(Value::ConFun(tag, arity, args))
+                    }
                 }
                 _ => Err(EvalError::NotAFunction),
             }

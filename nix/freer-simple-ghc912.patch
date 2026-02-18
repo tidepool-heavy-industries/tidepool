@@ -1,0 +1,11 @@
+--- a/src/Control/Monad/Freer/Internal.hs
++++ b/src/Control/Monad/Freer/Internal.hs
+@@ -153,7 +153,7 @@
+ instance (MonadBaseControl b m, LastMember m effs) => MonadBaseControl b (Eff effs) where
+   type StM (Eff effs) a = StM m a
+   liftBaseWith f = raise (liftBaseWith (\runInBase -> f (runInBase . runM)))
+   restoreM = raise . restoreM
+
+-instance (MonadBase b m, LastMember m effs) => MonadBase b (Eff effs) where
++instance (MonadBase b m, LastMember m effs, Applicative b, Monad b) => MonadBase b (Eff effs) where
+   liftBase = raise . liftBase

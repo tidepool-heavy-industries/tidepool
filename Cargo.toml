@@ -1,3 +1,3 @@
 [workspace]
-members = ["core-repr", "core-eval", "core-testing", "core-heap", "core-optimize", "core-bridge", "core-bridge-derive", "tidepool-macro"]
+members = ["core-repr", "core-eval", "core-testing", "core-heap", "core-optimize", "core-bridge", "core-bridge-derive", "tidepool-macro", "core-effect", "examples/guess"]
 resolver = "2"

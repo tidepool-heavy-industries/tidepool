@@ -33,6 +33,31 @@
             echo "  GHC:  $(ghc --version)"
           '';
         };
+
+        packages.tidepool-extract = let
+          # freer-simple 1.2.1.2 needs a patch for GHC 9.12: MonadBase instance
+          # requires explicit Applicative+Monad constraints due to superclass changes.
+          hsPkgs = pkgs.haskell.packages.ghc912.override {
+            overrides = self': super': {
+              freer-simple = (pkgs.haskell.lib.unmarkBroken (
+                pkgs.haskell.lib.doJailbreak super'.freer-simple
+              )).overrideAttrs (old: {
+                postPatch = (old.postPatch or "") + ''
+                  sed -i 's/instance (MonadBase b m, LastMember m effs) => MonadBase b (Eff effs)/instance (MonadBase b m, LastMember m effs, Applicative b, Monad b) => MonadBase b (Eff effs)/' src/Control/Monad/Freer/Internal.hs
+                '';
+              });
+            };
+          };
+          ghcEnv = hsPkgs.ghcWithPackages (ps: with ps; [
+            freer-simple
+          ]);
+          harness = hsPkgs.callCabal2nix "tidepool-harness" ./haskell {};
+        in pkgs.writeShellScriptBin "tidepool-extract" ''
+          export PATH="${ghcEnv}/bin:$PATH"
+          exec ${harness}/bin/tidepool-harness "$@"
+        '';
+
+        packages.default = self.packages.${system}.tidepool-extract;
       }
     );
 }

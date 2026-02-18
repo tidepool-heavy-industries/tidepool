@@ -1,6 +1,8 @@
 module Tidepool.Translate
   ( translateBinds
+  , translateModule
   , collectDataCons
+  , collectUsedDataCons
   , FlatNode(..)
   , FlatAlt(..)
   , FlatAltCon(..)
@@ -12,10 +14,10 @@ import GHC.Core
 import GHC.Types.Id
 import GHC.Types.Var
 import GHC.Types.Unique (getKey)
-import GHC.Core.DataCon (DataCon, dataConRepArity, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
+import GHC.Core.DataCon (DataCon, dataConSourceArity, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
 import GHC.Builtin.PrimOps
 import GHC.Types.Literal
-import GHC.Types.Name (nameOccName)
+import GHC.Types.Name (nameOccName, isExternalName, isSystemName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Core.TyCon
 import GHC.Types.Basic (JoinPointHood(..))
@@ -29,6 +31,7 @@ import qualified Data.Text as T
 import Data.ByteString (ByteString)
 import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as Seq
+import qualified Data.Map.Strict as Map
 import Control.Monad.State
 import Control.Monad (foldM, forM)
 
@@ -63,6 +66,7 @@ data LitEnc
 
 data TransState = TransState
   { tsNodes :: !(Seq FlatNode)
+  , tsUsedDCs :: !(Map.Map Word64 DataCon)
   }
 
 type TransM = State TransState
@@ -74,11 +78,15 @@ emitNode n = do
   put s { tsNodes = tsNodes s |> n }
   return idx
 
+recordDC :: DataCon -> TransM ()
+recordDC dc = modify' $ \s ->
+  s { tsUsedDCs = Map.insert (varId (dataConWorkId dc)) dc (tsUsedDCs s) }
+
 translateBinds :: [CoreBind] -> [(String, Seq FlatNode)]
 translateBinds binds = concatMap translateBind binds
   where
     translateBind (NonRec b rhs) =
-      let (idx, s) = runState (translate rhs) (TransState Seq.empty)
+      let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty)
           finalNodes = tsNodes s
           rootIdx = Seq.length finalNodes - 1
       in if idx == rootIdx
@@ -86,7 +94,7 @@ translateBinds binds = concatMap translateBind binds
          else error "Root index mismatch in NonRec"
     translateBind (Rec pairs) =
       map (\(b, rhs) ->
-        let (idx, s) = runState (translate rhs) (TransState Seq.empty)
+        let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty)
             finalNodes = tsNodes s
             rootIdx = Seq.length finalNodes - 1
         in if idx == rootIdx
@@ -94,13 +102,82 @@ translateBinds binds = concatMap translateBind binds
            else error "Root index mismatch in Rec"
       ) pairs
 
+-- | Translate an entire module's bindings into a single self-contained tree.
+-- All bindings become nested Let expressions wrapping a Var reference to the
+-- target binding. This eliminates cross-binding Var references since all
+-- definitions share one flat node array.
+translateModule :: [CoreBind] -> String -> (Seq FlatNode, Map.Map Word64 DataCon)
+translateModule allBinds targetName =
+  let targetId = findTargetId targetName allBinds
+      (_, finalState) = runState (wrapAllBinds allBinds targetId) (TransState Seq.empty Map.empty)
+  in (tsNodes finalState, tsUsedDCs finalState)
+  where
+    findTargetId name binds =
+      case filter isTarget (concatMap bindersOf binds) of
+        (b:_) -> b
+        []    -> error $ "translateModule: exported top-level binding '" ++ name ++ "' not found"
+      where
+        isTarget b =
+          occNameString (nameOccName (idName b)) == name
+          && isExportedId b
+          && isExternalName (idName b)
+          && not (isSystemName (idName b))
+
+    bindersOf (NonRec b _) = [b]
+    bindersOf (Rec pairs)  = map fst pairs
+
+    wrapAllBinds :: [CoreBind] -> Id -> TransM Int
+    wrapAllBinds [] target = emitNode (NVar (varId target))
+    wrapAllBinds (NonRec b rhs : rest) target
+      | isTyVar b = wrapAllBinds rest target  -- skip type bindings
+      | otherwise = do
+          rhsIdx <- translate rhs
+          bodyIdx <- wrapAllBinds rest target
+          emitNode (NLetNonRec (varId b) rhsIdx bodyIdx)
+    wrapAllBinds (Rec pairs : rest) target = do
+      let valPairs = filter (not . isTyVar . fst) pairs
+      if null valPairs
+        then wrapAllBinds rest target
+        else do
+          pairIdxs <- forM valPairs $ \(b, rhs) -> do
+            rhsIdx <- translate rhs
+            return (varId b, rhsIdx)
+          bodyIdx <- wrapAllBinds rest target
+          emitNode (NLetRec pairIdxs bodyIdx)
+
+-- | Collect all DataCons encountered during translation of Core bindings.
+-- This includes constructors from imported packages (e.g. freer-simple's
+-- Val, E, Leaf, Node, Union) that aren't in the module's mg_tcs.
+collectUsedDataCons :: [CoreBind] -> [(Word64, Text, Int, Int, [Text])]
+collectUsedDataCons binds =
+  let allDCs = foldMap collectFromBind binds
+  in map dcToMeta (Map.elems allDCs)
+  where
+    collectFromBind (NonRec _ rhs) =
+      let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty)
+      in tsUsedDCs s
+    collectFromBind (Rec pairs) =
+      foldMap (\(_, rhs) ->
+        let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty)
+        in tsUsedDCs s
+      ) pairs
+
+    dcToMeta dc =
+      ( varId (dataConWorkId dc)
+      , T.pack (occNameString (nameOccName (dataConName dc)))
+      , dataConTag dc
+      , dataConSourceArity dc
+      , map mapBang (dataConSrcBangs dc)
+      )
+
 translate :: CoreExpr -> TransM Int
 translate expr =
   let (hd, allArgs) = collectArgs expr
       args = filter isValueArg allArgs
   in case hd of
     Var v | Just dc <- isDataConWorkId_maybe v
-          , length args == dataConRepArity dc -> do
+          , length args == dataConSourceArity dc -> do
+        recordDC dc
         childIdxs <- mapM translate args
         emitNode $ NCon (varId v) childIdxs
     
@@ -164,14 +241,17 @@ translateHead = \case
 translateAlt :: CoreAlt -> TransM FlatAlt
 translateAlt (Alt con binders body) = do
   let vBinders = filter (not . isTyVar) binders
+  altCon <- mapAltCon con
   bodyIdx <- translate body
-  return $ FlatAlt (mapAltCon con) (map varId vBinders) bodyIdx
+  return $ FlatAlt altCon (map varId vBinders) bodyIdx
 
-mapAltCon :: AltCon -> FlatAltCon
+mapAltCon :: AltCon -> TransM FlatAltCon
 mapAltCon = \case
-  DataAlt dc -> FDataAlt (varId (dataConWorkId dc))
-  LitAlt l   -> FLitAlt (mapLit l)
-  DEFAULT    -> FDefault
+  DataAlt dc -> do
+    recordDC dc
+    return $ FDataAlt (varId (dataConWorkId dc))
+  LitAlt l   -> return $ FLitAlt (mapLit l)
+  DEFAULT    -> return FDefault
 
 varId :: Var -> Word64
 varId v = fromIntegral (getKey (varUnique v))
@@ -253,7 +333,7 @@ mapPrimOp = \case
 
 collectDataCons :: [TyCon] -> [(Word64, Text, Int, Int, [Text])]
 collectDataCons tycons =
-  [ (varId (dataConWorkId dc), T.pack (occNameString (nameOccName (dataConName dc))), dataConTag dc, dataConRepArity dc, map mapBang (dataConSrcBangs dc))
+  [ (varId (dataConWorkId dc), T.pack (occNameString (nameOccName (dataConName dc))), dataConTag dc, dataConSourceArity dc, map mapBang (dataConSrcBangs dc))
   | tc <- tycons
   , isAlgTyCon tc
   , dc <- tyConDataCons tc

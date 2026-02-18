@@ -4,48 +4,135 @@ import System.Environment (getArgs)
 import System.FilePath (takeBaseName, takeDirectory, (</>))
 import System.Directory (createDirectoryIfMissing)
 import qualified Data.ByteString as BS
+import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Control.Exception (try, SomeException)
 
-import Tidepool.GhcPipeline (runPipeline, PipelineResult(..))
-import Tidepool.Translate (translateBinds, collectDataCons)
+import GHC.Core.DataCon (DataCon, dataConSourceArity, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
+import GHC.Types.Name (nameOccName)
+import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.Unique (getKey)
+import GHC.Types.Var (varUnique)
+import Data.Word (Word64)
+import Data.Text (Text)
+import qualified Data.Text as T
+
+import Tidepool.GhcPipeline (runPipeline, PipelineResult(..), dumpCore)
+import Tidepool.Translate (translateBinds, translateModule, collectDataCons, collectUsedDataCons)
 import Tidepool.CborEncode (encodeTree, encodeMetadata)
 
 main :: IO ()
 main = do
-  args <- getArgs
-  case args of
-    [] -> putStrLn "Usage: tidepool-harness <file.hs> ..."
-    files -> mapM_ processFile files
+  rawArgs <- getArgs
+  let args = parseArgs rawArgs
+  case argFiles args of
+    [] -> putStrLn "Usage: tidepool-harness [--output-dir <dir>] [--target <name>] [--dump-core] <file.hs> ..."
+    files -> mapM_ (processFile args) files
 
-processFile :: FilePath -> IO ()
-processFile path = do
+data Args = Args
+  { argOutDir :: Maybe FilePath
+  , argTarget :: Maybe String
+  , argDumpCore :: Bool
+  , argFiles :: [String]
+  }
+
+parseArgs :: [String] -> Args
+parseArgs = go (Args Nothing Nothing False [])
+  where
+    go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
+    go a ("--target" : name : rest) = go a { argTarget = Just name } rest
+    go a ("--dump-core" : rest) = go a { argDumpCore = True } rest
+    go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
+    go a [] = a
+
+processFile :: Args -> FilePath -> IO ()
+processFile args path = do
+  let mOutDir = argOutDir args
+      mTarget = argTarget args
   putStrLn $ "Processing: " ++ path
   res <- try $ do
     result <- runPipeline path
     let binds = prBinds result
         tycons = prTyCons result
     putStrLn $ "  Top-level bindings: " ++ show (length binds)
-    
-    let outDir = takeDirectory path </> takeBaseName path ++ "_cbor"
+
+    if argDumpCore args
+      then putStrLn (dumpCore binds)
+      else return ()
+
+    let outDir = case mOutDir of
+          Just dir -> dir
+          Nothing  -> takeDirectory path </> takeBaseName path ++ "_cbor"
     createDirectoryIfMissing True outDir
-    
-    -- Translate and encode each binding
-    let translated = translateBinds binds
-    mapM_ (\(name, nodes) -> do
-      let cbor = encodeTree nodes
-      let outFile = outDir </> name ++ ".cbor"
-      BS.writeFile outFile cbor
-      putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
-      ) translated
-    
-    -- Write DataCon metadata
-    let meta = collectDataCons tycons
-    let metaCbor = encodeMetadata meta
-    let metaFile = outDir </> "meta.cbor"
-    BS.writeFile metaFile metaCbor
-    putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length meta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
-  
+
+    case mTarget of
+      Just targetName -> do
+        -- Whole-module mode: serialize all bindings as nested lets around the target
+        let (nodes, usedDCs) = translateModule binds targetName
+        let cbor = encodeTree nodes
+        let outFile = outDir </> targetName ++ ".cbor"
+        BS.writeFile outFile cbor
+        putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
+
+        -- Write metadata: merge TyCon-derived + module-translation-derived
+        let tyconMeta = collectDataCons tycons
+            usedMeta = map dcToMeta (Map.elems usedDCs)
+            mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- tyconMeta]
+                        `Map.union`
+                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- usedMeta]
+            allMeta = Map.elems mergedMap
+        let metaCbor = encodeMetadata allMeta
+        let metaFile = outDir </> "meta.cbor"
+        BS.writeFile metaFile metaCbor
+        putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
+
+      Nothing -> do
+        -- Per-binding mode (original behavior)
+        let translated = translateBinds binds
+            dedupd = dedup Map.empty translated
+        mapM_ (\(name, nodes) -> do
+          let cbor = encodeTree nodes
+          let outFile = outDir </> name ++ ".cbor"
+          BS.writeFile outFile cbor
+          putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
+          ) dedupd
+
+        -- Write DataCon metadata: merge TyCon-derived + usage-derived
+        let tyconMeta = collectDataCons tycons
+            usedMeta = collectUsedDataCons binds
+            mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- tyconMeta]
+                        `Map.union`
+                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- usedMeta]
+            allMeta = Map.elems mergedMap
+        let metaCbor = encodeMetadata allMeta
+        let metaFile = outDir </> "meta.cbor"
+        BS.writeFile metaFile metaCbor
+        putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
+
   case res of
     Left (e :: SomeException) -> putStrLn $ "  Error processing " ++ path ++ ": " ++ show e
     Right () -> return ()
+
+dcToMeta :: DataCon -> (Word64, Text, Int, Int, [Text])
+dcToMeta dc =
+  ( fromIntegral (getKey (varUnique (dataConWorkId dc)))
+  , T.pack (occNameString (nameOccName (dataConName dc)))
+  , dataConTag dc
+  , dataConSourceArity dc
+  , map mapBang (dataConSrcBangs dc)
+  )
+
+mapBang :: HsSrcBang -> Text
+mapBang (HsSrcBang _ (HsBang srcUnpack srcBang)) =
+  case (srcUnpack, srcBang) of
+    (_, SrcStrict) -> "SrcBang"
+    (SrcUnpack, _) -> "SrcUnpack"
+    _              -> "NoSrcBang"
+
+-- | Deduplicate binding names by appending _1, _2, etc. for collisions.
+dedup :: Map.Map String Int -> [(String, a)] -> [(String, a)]
+dedup _ [] = []
+dedup seen ((name, val) : rest) =
+  case Map.lookup name seen of
+    Nothing -> (name, val) : dedup (Map.insert name 1 seen) rest
+    Just n  -> (name ++ "_" ++ show n, val) : dedup (Map.insert name (n + 1) seen) rest

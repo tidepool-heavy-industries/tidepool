@@ -115,6 +115,18 @@ The `PrimOp` variant already handles `+#` etc., so unboxed *operations* are cove
 
 For v1, the likely answer is: `Literal` is always a raw value (i64, f64, etc.), boxing is explicit via `Con(I#, [Lit(42)])`, and the evaluator doesn't distinguish boxed from unboxed at the Value level. But this should be confirmed against actual `-O2` Core output from freer-simple programs.
 
+## D8: GHC Integration — `nix run` in Proc Macro
+
+`haskell_eval!("file.hs")` transparently compiles Haskell source to CBOR at proc-macro expansion time. The macro shells out to `nix run .#tidepool-extract -- <file> --output-dir <dir>`. No xtask, no build.rs, no requirement to be in `nix develop`.
+
+Key properties:
+- `flake.nix` exports `packages.tidepool-extract` via `callCabal2nix`
+- Proc macro uses `std::process::Command` to invoke nix (synchronous, at compile time)
+- Output dir is `$CARGO_MANIFEST_DIR/target/tidepool-cbor/<basename>/`
+- `include_bytes!` on the `.hs` source provides cargo dep tracking
+- Multi-binding modules use `::binding` syntax: `haskell_eval!("file.hs::identity")`
+- `.cbor` paths retain existing behavior unchanged
+
 ---
 
 ## GHC Pipeline
@@ -155,3 +167,15 @@ The Rust-side dispatcher extracts the tag as a machine integer — no heap alloc
 A ~30-line Rust `Iterator` wrapper: `step()` evaluates to WHNF, destructures `E (Union tag req) k`, returns `Yield::Request(tag, req)` or `Yield::Done(val)`. `resume(result)` applies the continuation tree to `result` and loops.
 
 Effect finalization via `run` (freer-simple's pure runner). No IO contamination.
+
+## D9: EffectMachine + HList Dispatch
+
+Effect handling uses an `EffectMachine` that drives freer-simple `Eff` expressions to completion. The machine recognizes `E (Union tag# req) k` yield points, dispatches to Rust handlers via an HList (frunk), and applies continuations (`Leaf`/`Node` tree).
+
+Key design:
+- **Handler registration:** HList via `frunk`, mirroring Haskell's effect type-level list
+- **Effect bridging:** `#[derive(FromCore, ToCore)]` on Rust enums mirroring Haskell effect ADTs
+- **Handler trait:** `EffectHandler` per-effect, dispatched by Union tag position in HList
+- **Crate:** `core-effect` depends on `core-eval`, `core-repr`, `core-bridge`, `frunk`
+- **Continuation:** `apply_cont(Leaf(f), val) = f(val)`, `apply_cont(Node(k1, k2), val)` = apply k1, compose with k2
+- **`haskell_expr!` macro:** Returns `(CoreExpr, DataConTable)` without evaluating, for effect-driven execution
