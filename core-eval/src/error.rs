@@ -1,13 +1,45 @@
 use crate::value::ThunkId;
 use core_repr::{JoinId, PrimOpKind, VarId};
 
+/// Describes the kind of a Value for error reporting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValueKind {
+    Literal(&'static str), // "Int#", "Word#", "Double#", "Char#", "String"
+    Constructor,
+    Closure,
+    Thunk,
+    /// Fallback for complex values — stores Debug output
+    Other(String),
+}
+
+impl std::fmt::Display for ValueKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValueKind::Literal(name) => write!(f, "{}", name),
+            ValueKind::Constructor => write!(f, "constructor"),
+            ValueKind::Closure => write!(f, "closure"),
+            ValueKind::Thunk => write!(f, "thunk"),
+            ValueKind::Other(s) => write!(f, "{}", s),
+        }
+    }
+}
+
 /// Evaluation error.
 #[derive(Debug, Clone)]
 pub enum EvalError {
     /// Variable not found in environment
     UnboundVar(VarId),
+    /// Arity mismatch (wrong number of arguments or fields)
+    ArityMismatch {
+        context: &'static str, // "arguments", "fields", "case binders"
+        expected: usize,
+        got: usize,
+    },
     /// Type mismatch during evaluation
-    TypeMismatch { expected: String, got: String },
+    TypeMismatch {
+        expected: &'static str,
+        got: ValueKind,
+    },
     /// No matching alternative in case expression
     NoMatchingAlt,
     /// Infinite loop detected (thunk forced itself)
@@ -26,6 +58,17 @@ impl std::fmt::Display for EvalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EvalError::UnboundVar(v) => write!(f, "unbound variable: v_{}", v.0),
+            EvalError::ArityMismatch {
+                context,
+                expected,
+                got,
+            } => {
+                write!(
+                    f,
+                    "arity mismatch: expected {} {}, got {}",
+                    expected, context, got
+                )
+            }
             EvalError::TypeMismatch { expected, got } => {
                 write!(f, "type mismatch: expected {}, got {}", expected, got)
             }
@@ -49,9 +92,14 @@ mod tests {
     fn test_error_display() {
         let errs = vec![
             EvalError::UnboundVar(VarId(42)),
+            EvalError::ArityMismatch {
+                context: "arguments",
+                expected: 2,
+                got: 1,
+            },
             EvalError::TypeMismatch {
-                expected: "Int".to_string(),
-                got: "Char".to_string(),
+                expected: "Int#",
+                got: ValueKind::Literal("Char#"),
             },
             EvalError::NoMatchingAlt,
             EvalError::InfiniteLoop(ThunkId(0)),

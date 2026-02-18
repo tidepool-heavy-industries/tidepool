@@ -5,9 +5,24 @@ use core_eval::error::EvalError;
 pub enum EffectError {
     Eval(EvalError),
     Bridge(BridgeError),
-    UnhandledEffect { tag: u64 },
-    BadContinuation(String),
-    BadUnion(String),
+    UnhandledEffect {
+        tag: u64,
+    },
+    /// A required constructor was not found in the DataConTable.
+    MissingConstructor {
+        name: &'static str,
+    },
+    /// A constructor had the wrong number of fields.
+    FieldCountMismatch {
+        constructor: &'static str,
+        expected: usize,
+        got: usize,
+    },
+    /// Encountered an unexpected value shape during dispatch.
+    UnexpectedValue {
+        context: &'static str,
+        got: String,
+    },
 }
 
 impl From<EvalError> for EffectError {
@@ -28,8 +43,19 @@ impl std::fmt::Display for EffectError {
             EffectError::Eval(e) => write!(f, "Eval error: {}", e),
             EffectError::Bridge(e) => write!(f, "Bridge error: {}", e),
             EffectError::UnhandledEffect { tag } => write!(f, "Unhandled effect at tag {}", tag),
-            EffectError::BadContinuation(s) => write!(f, "Bad continuation: {}", s),
-            EffectError::BadUnion(s) => write!(f, "Bad union: {}", s),
+            EffectError::MissingConstructor { name } => {
+                write!(f, "{} constructor not found in DataConTable", name)
+            }
+            EffectError::FieldCountMismatch {
+                constructor,
+                expected,
+                got,
+            } => {
+                write!(f, "{} expects {} fields, got {}", constructor, expected, got)
+            }
+            EffectError::UnexpectedValue { context, got } => {
+                write!(f, "expected {}, got {}", context, got)
+            }
         }
     }
 }
