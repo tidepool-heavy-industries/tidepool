@@ -55,6 +55,20 @@ impl<T> ToCore for std::marker::PhantomData<T> {
     }
 }
 
+// Box
+
+impl<T: FromCore> FromCore for Box<T> {
+    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+        T::from_value(value, table).map(Box::new)
+    }
+}
+
+impl<T: ToCore> ToCore for Box<T> {
+    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+        (**self).to_value(table)
+    }
+}
+
 // Unit
 
 impl ToCore for () {

@@ -184,6 +184,10 @@ fn encode_primop(op: &PrimOpKind) -> &'static str {
         SeqOp => "SeqOp",
         TagToEnum => "TagToEnum",
         DataToTag => "DataToTag",
+        IntQuot => "IntQuot",
+        IntRem => "IntRem",
+        Chr => "Chr",
+        Ord => "Ord",
     }
 }
 

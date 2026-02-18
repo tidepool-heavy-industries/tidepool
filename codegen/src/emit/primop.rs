@@ -122,6 +122,28 @@ pub fn emit_primop(
             let tag = builder.ins().load(types::I64, MemFlags::trusted(), obj, CON_TAG_OFFSET);
             Ok(SsaVal::Raw(tag, LIT_TAG_INT))
         }
+        PrimOpKind::IntQuot => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().sdiv(a, b), LIT_TAG_INT))
+        }
+        PrimOpKind::IntRem => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().srem(a, b), LIT_TAG_INT))
+        }
+        PrimOpKind::Chr => {
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(builder, args[0]);
+            Ok(SsaVal::Raw(v, LIT_TAG_CHAR))
+        }
+        PrimOpKind::Ord => {
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(builder, args[0]);
+            Ok(SsaVal::Raw(v, LIT_TAG_INT))
+        }
         PrimOpKind::TagToEnum | PrimOpKind::IndexArray | PrimOpKind::SeqOp => {
             Err(EmitError::NotYetImplemented(format!("{:?}", op)))
         }

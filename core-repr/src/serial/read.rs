@@ -612,6 +612,10 @@ fn decode_primop(s: &str) -> Result<PrimOpKind, ReadError> {
         "SeqOp" => Ok(SeqOp),
         "TagToEnum" => Ok(TagToEnum),
         "DataToTag" => Ok(DataToTag),
+        "IntQuot" => Ok(IntQuot),
+        "IntRem" => Ok(IntRem),
+        "Chr" => Ok(Chr),
+        "Ord" => Ok(PrimOpKind::Ord),
         _ => Err(ReadError::InvalidPrimOp(s.to_string())),
     }
 }

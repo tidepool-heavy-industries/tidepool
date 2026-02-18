@@ -207,7 +207,7 @@ mod tests {
             WordSub, WordMul, WordEq, WordNe, WordLt, WordLe, WordGt, WordGe, DoubleAdd, DoubleSub,
             DoubleMul, DoubleDiv, DoubleEq, DoubleNe, DoubleLt, DoubleLe, DoubleGt, DoubleGe,
             CharEq, CharNe, CharLt, CharLe, CharGt, CharGe, IndexArray, SeqOp, TagToEnum,
-            DataToTag,
+            DataToTag, IntQuot, IntRem, Chr, Ord,
         ];
         for op in ops {
             roundtrip(RecursiveTree {

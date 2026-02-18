@@ -371,6 +371,38 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 })
             }
         }
+        PrimOpKind::IntQuot => {
+            let (a, b) = bin_op_int(op, &args)?;
+            Ok(Value::Lit(Literal::LitInt(a.wrapping_div(b))))
+        }
+        PrimOpKind::IntRem => {
+            let (a, b) = bin_op_int(op, &args)?;
+            Ok(Value::Lit(Literal::LitInt(a.wrapping_rem(b))))
+        }
+        PrimOpKind::Chr => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let n = expect_int(&args[0])?;
+            Ok(Value::Lit(Literal::LitChar(
+                char::from_u32(n as u32).unwrap_or('\0'),
+            )))
+        }
+        PrimOpKind::Ord => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let c = expect_char(&args[0])?;
+            Ok(Value::Lit(Literal::LitInt(c as i64)))
+        }
         PrimOpKind::IndexArray | PrimOpKind::TagToEnum => Err(EvalError::UnsupportedPrimOp(op)),
     }
 }

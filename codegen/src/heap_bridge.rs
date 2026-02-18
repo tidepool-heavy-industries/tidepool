@@ -109,10 +109,18 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
                     *ptr.add(layout::LIT_TAG_OFFSET) = 4;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *bits as i64;
                 }
-                Literal::LitString(_) => {
-                    // LitString cannot be heap-allocated from host side (data section only)
-                    // For responses, strings are never sent back — only primitives and constructors
-                    return Err(BridgeError::UnexpectedLitTag(5));
+                Literal::LitString(bytes) => {
+                    // Allocate string data: [len: u64][bytes...]
+                    let data_size = 8 + bytes.len();
+                    let data_ptr = bump_alloc_from_vmctx(vmctx, data_size);
+                    *(data_ptr as *mut u64) = bytes.len() as u64;
+                    std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        data_ptr.add(8),
+                        bytes.len(),
+                    );
+                    *ptr.add(layout::LIT_TAG_OFFSET) = 5;
+                    *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = data_ptr as i64;
                 }
             }
             Ok(ptr)

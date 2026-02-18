@@ -63,6 +63,10 @@ pub enum PrimOpKind {
     SeqOp,
     TagToEnum,
     DataToTag,
+    IntQuot,
+    IntRem,
+    Chr,
+    Ord,
 }
 
 /// Case alternative constructor.
@@ -157,6 +161,10 @@ impl std::fmt::Display for PrimOpKind {
             PrimOpKind::SeqOp => "seq",
             PrimOpKind::TagToEnum => "tagToEnum#",
             PrimOpKind::DataToTag => "dataToTag#",
+            PrimOpKind::IntQuot => "quotInt#",
+            PrimOpKind::IntRem => "remInt#",
+            PrimOpKind::Chr => "chr#",
+            PrimOpKind::Ord => "ord#",
         };
         f.write_str(name)
     }

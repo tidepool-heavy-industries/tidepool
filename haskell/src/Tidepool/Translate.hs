@@ -403,6 +403,10 @@ mapPrimOp = \case
   TagToEnumOp -> "TagToEnum"
   DataToTagSmallOp -> "DataToTag"
   DataToTagLargeOp -> "DataToTag"
+  IntQuotOp -> "IntQuot"
+  IntRemOp  -> "IntRem"
+  ChrOp     -> "Chr"
+  OrdOp     -> "Ord"
   other       -> error $ "Unsupported primop: " ++ showPprUnsafe other
 
 collectDataCons :: [TyCon] -> [(Word64, Text, Int, Int, [Text])]
