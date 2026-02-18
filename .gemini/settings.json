@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "exomonad": {
-      "httpUrl": "http://localhost:7432/agents/dev/expr/mcp"
+      "httpUrl": "http://localhost:7432/agents/dev/yield/mcp"
     }
   },
   "hooks": {
