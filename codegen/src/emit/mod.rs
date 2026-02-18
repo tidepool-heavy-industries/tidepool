@@ -1,5 +1,6 @@
 pub mod expr;
 pub mod primop;
+pub mod case;
 pub mod join;
 
 use cranelift_codegen::ir::Value;

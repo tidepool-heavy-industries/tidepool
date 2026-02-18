@@ -339,7 +339,9 @@ impl EmitContext {
                 }
                 Ok(body_val)
             }
-            CoreFrame::Case { .. } => Err(EmitError::NotYetImplemented("Case".into())),
+            CoreFrame::Case { scrutinee, binder, alts } => {
+                crate::emit::case::emit_case(self, pipeline, builder, vmctx, gc_sig, tree, *scrutinee, binder, alts)
+            }
             CoreFrame::Join { label, params, rhs, body } => {
                 crate::emit::join::emit_join(self, pipeline, builder, vmctx, gc_sig, tree, label, params, *rhs, *body)
             }
