@@ -86,3 +86,36 @@ pub fn haskell_eval(input: TokenStream) -> TokenStream {
 pub fn haskell_expr(input: TokenStream) -> TokenStream {
     expand::expand_expr(input.into()).into()
 }
+
+/// Embeds inline Haskell source as a Core expression with its DataConTable.
+///
+/// Writes the Haskell source to a temporary file, compiles it via
+/// `nix run .#tidepool-extract`, and embeds the resulting CBOR.
+///
+/// Supports `include` paths for importing local Haskell modules.
+///
+/// # Returns
+///
+/// Returns `(core_repr::CoreExpr, core_repr::DataConTable)`.
+///
+/// # Examples
+///
+/// ```ignore
+/// let (expr, table) = haskell_inline! {
+///     target = "game",
+///     include = "haskell",
+///     r#"
+///         import Effects
+///
+///         game :: Eff '[Console, Rng] ()
+///         game = do
+///           target <- randInt 1 100
+///           emit "I'm thinking of a number between 1 and 100."
+///           guessLoop target
+///     "#
+/// };
+/// ```
+#[proc_macro]
+pub fn haskell_inline(input: TokenStream) -> TokenStream {
+    expand::expand_inline(input.into()).into()
+}

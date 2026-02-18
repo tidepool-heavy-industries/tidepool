@@ -9,7 +9,10 @@ import GHC.Unit.Module.ModGuts (ModGuts(..))
 import GHC.Core (CoreBind)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext)
 import System.Process (readProcess)
+import System.FilePath (takeBaseName)
 import Control.Monad.IO.Class (liftIO)
+import Control.Monad (forM, when)
+import Data.Char (toUpper)
 
 data PipelineResult = PipelineResult
   { prBinds  :: [CoreBind]
@@ -17,34 +20,51 @@ data PipelineResult = PipelineResult
   , prHscEnv :: HscEnv
   }
 
-runPipeline :: FilePath -> IO PipelineResult
-runPipeline path = do
+runPipeline :: FilePath -> [FilePath] -> IO PipelineResult
+runPipeline path includes = do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
     let dflags' = gopt_unset (updOptLevel 2 $ dflags
           { backend = noBackend
           , ghcLink = NoLink
+          , importPaths = importPaths dflags ++ includes
           }) Opt_FullLaziness
     setSessionDynFlags dflags'
     target <- guessTarget path Nothing Nothing
     setTargets [target]
-    _ <- depanal [] False
+    _ <- load LoadAllTargets
     modGraph <- getModuleGraph
-    modSum <- case mgModSummaries modGraph of
-      (ms:_) -> return ms
-      []     -> liftIO $ ioError (userError "runPipeline: empty module graph")
-    parsed <- parseModule modSum
-    typechecked <- typecheckModule parsed
+    let summaries = mgModSummaries modGraph
+    when (null summaries) $
+      liftIO $ ioError (userError "runPipeline: empty module graph")
+    -- Process all modules: parse, typecheck, desugar, optimize each
+    results <- forM summaries $ \modSum -> do
+      parsed <- parseModule modSum
+      typechecked <- typecheckModule parsed
+      hscEnv <- getSession
+      let tcGblEnv = fst (tm_internals_ typechecked)
+      desugared <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
+      simplified <- liftIO $ core2core hscEnv desugared
+      return simplified
+    -- Merge: dependency module bindings first, target module last
+    let targetModName = capitalize (takeBaseName path)
+        isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
+        (targetGuts, depGuts) = case filter isTargetMod results of
+          (tgt:_) -> (tgt, [g | g <- results, mg_module g /= mg_module tgt])
+          []       -> (head results, tail results)
+        allBinds = concatMap mg_binds depGuts ++ mg_binds targetGuts
+        allTyCons = concatMap mg_tcs depGuts ++ mg_tcs targetGuts
     hscEnv <- getSession
-    let tcGblEnv = fst (tm_internals_ typechecked)
-    desugared <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
-    simplified <- liftIO $ core2core hscEnv desugared
     return PipelineResult
-      { prBinds  = mg_binds simplified
-      , prTyCons = mg_tcs simplified
+      { prBinds  = allBinds
+      , prTyCons = allTyCons
       , prHscEnv = hscEnv
       }
+
+capitalize :: String -> String
+capitalize [] = []
+capitalize (c:cs) = toUpper c : cs
 
 dumpCore :: [CoreBind] -> String
 dumpCore binds = renderWithContext defaultSDocContext (pprCoreBindings binds)

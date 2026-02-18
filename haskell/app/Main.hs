@@ -26,22 +26,24 @@ main = do
   rawArgs <- getArgs
   let args = parseArgs rawArgs
   case argFiles args of
-    [] -> putStrLn "Usage: tidepool-harness [--output-dir <dir>] [--target <name>] [--dump-core] <file.hs> ..."
+    [] -> putStrLn "Usage: tidepool-harness [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] <file.hs> ..."
     files -> mapM_ (processFile args) files
 
 data Args = Args
   { argOutDir :: Maybe FilePath
   , argTarget :: Maybe String
   , argDumpCore :: Bool
+  , argIncludes :: [FilePath]
   , argFiles :: [String]
   }
 
 parseArgs :: [String] -> Args
-parseArgs = go (Args Nothing Nothing False [])
+parseArgs = go (Args Nothing Nothing False [] [])
   where
     go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
     go a ("--target" : name : rest) = go a { argTarget = Just name } rest
     go a ("--dump-core" : rest) = go a { argDumpCore = True } rest
+    go a ("--include" : dir : rest) = go a { argIncludes = argIncludes a ++ [dir] } rest
     go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
     go a [] = a
 
@@ -51,7 +53,7 @@ processFile args path = do
       mTarget = argTarget args
   putStrLn $ "Processing: " ++ path
   res <- try $ do
-    result <- runPipeline path
+    result <- runPipeline path (argIncludes args)
     let binds = prBinds result
         tycons = prTyCons result
     putStrLn $ "  Top-level bindings: " ++ show (length binds)
@@ -78,12 +80,15 @@ processFile args path = do
         BS.writeFile outFile cbor
         putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
 
-        -- Write metadata: merge TyCon-derived + module-translation-derived
+        -- Write metadata: merge TyCon-derived + translation-derived + raw-binding-scan
         let tyconMeta = collectDataCons tycons
             usedMeta = map dcToMeta (Map.elems usedDCs)
+            scanMeta = collectUsedDataCons binds
             mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- tyconMeta]
                         `Map.union`
                         Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- usedMeta]
+                        `Map.union`
+                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- scanMeta]
             allMeta = Map.elems mergedMap
         let metaCbor = encodeMetadata allMeta
         let metaFile = outDir </> "meta.cbor"

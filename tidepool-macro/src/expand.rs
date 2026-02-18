@@ -1,6 +1,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::LitStr;
+use syn::parse::{Parse, ParseStream};
+use syn::{LitStr, Token};
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -331,6 +332,272 @@ fn expand_expr_hs(path_lit: &LitStr, raw_path: &str) -> TokenStream {
                 .expect("failed to deserialize metadata");
             (__expr, __table)
         }
+    }
+}
+
+// ─── haskell_inline! support ───────────────────────────────────────────────
+
+/// Parsed input for `haskell_inline! { target = "name", include = "dir", r#"..."# }`
+struct InlineInput {
+    target: String,
+    includes: Vec<String>,
+    source: LitStr,
+}
+
+impl Parse for InlineInput {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        // Parse: target = "name"
+        let target_ident: syn::Ident = input.parse()?;
+        if target_ident != "target" {
+            return Err(syn::Error::new(target_ident.span(), "expected `target`"));
+        }
+        input.parse::<Token![=]>()?;
+        let target_lit: LitStr = input.parse()?;
+        let target = target_lit.value();
+        input.parse::<Token![,]>()?;
+
+        // Parse optional: include = "dir" or include = ["d1", "d2"]
+        let mut includes = Vec::new();
+        if input.peek(syn::Ident) {
+            let maybe_include = input.fork();
+            let ident: syn::Ident = maybe_include.parse()?;
+            if ident == "include" {
+                // Consume from real stream
+                let _: syn::Ident = input.parse()?;
+                input.parse::<Token![=]>()?;
+                if input.peek(syn::token::Bracket) {
+                    let content;
+                    syn::bracketed!(content in input);
+                    while !content.is_empty() {
+                        let lit: LitStr = content.parse()?;
+                        includes.push(lit.value());
+                        if !content.is_empty() {
+                            content.parse::<Token![,]>()?;
+                        }
+                    }
+                } else {
+                    let lit: LitStr = input.parse()?;
+                    includes.push(lit.value());
+                }
+                input.parse::<Token![,]>()?;
+            }
+        }
+
+        // Parse: r#"..."#
+        let source: LitStr = input.parse()?;
+
+        Ok(InlineInput {
+            target,
+            includes,
+            source,
+        })
+    }
+}
+
+/// Expands `haskell_inline!` — writes inline Haskell to a temp file, compiles,
+/// returns `(CoreExpr, DataConTable)`.
+pub fn expand_inline(input: TokenStream) -> TokenStream {
+    let parsed = match syn::parse2::<InlineInput>(input) {
+        Ok(p) => p,
+        Err(err) => return err.to_compile_error(),
+    };
+
+    let manifest_dir = match std::env::var("CARGO_MANIFEST_DIR") {
+        Ok(d) => d,
+        Err(_) => {
+            return syn::Error::new(parsed.source.span(), "CARGO_MANIFEST_DIR not set")
+                .to_compile_error();
+        }
+    };
+
+    // Capitalize target -> module name (e.g. "game" -> "Game")
+    let module_name = capitalize(&parsed.target);
+
+    // Resolve include dirs to absolute paths
+    let abs_includes: Vec<PathBuf> = parsed
+        .includes
+        .iter()
+        .map(|d| Path::new(&manifest_dir).join(d))
+        .collect();
+
+    // Read include files and strip their module headers/pragmas
+    let mut include_bodies = String::new();
+    for dir in &abs_includes {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().map_or(false, |ext| ext == "hs") {
+                    if let Ok(content) = std::fs::read_to_string(&p) {
+                        include_bodies.push_str(&strip_module_header(&content));
+                        include_bodies.push('\n');
+                    }
+                }
+            }
+        }
+    }
+
+    // Build single-module source: header + included definitions + user code
+    let source_text = parsed.source.value();
+    let full_source = format!(
+        "{{-# LANGUAGE GADTs, DataKinds, TypeOperators, FlexibleContexts #-}}\nmodule {} where\nimport Control.Monad.Freer\n{}\n{}",
+        module_name, include_bodies, source_text
+    );
+
+    // Write to target/tidepool-inline/<Module>.hs
+    let inline_dir = Path::new(&manifest_dir)
+        .join("target")
+        .join("tidepool-inline");
+    if let Err(e) = std::fs::create_dir_all(&inline_dir) {
+        return syn::Error::new(
+            parsed.source.span(),
+            format!("Failed to create {}: {}", inline_dir.display(), e),
+        )
+        .to_compile_error();
+    }
+    let hs_file = inline_dir.join(format!("{}.hs", module_name));
+    if let Err(e) = std::fs::write(&hs_file, &full_source) {
+        return syn::Error::new(
+            parsed.source.span(),
+            format!("Failed to write {}: {}", hs_file.display(), e),
+        )
+        .to_compile_error();
+    }
+
+    // Output dir for CBOR
+    let output_dir = Path::new(&manifest_dir)
+        .join("target")
+        .join("tidepool-cbor")
+        .join(&module_name);
+
+    // Find flake root
+    let flake_root = match find_flake_root(Path::new(&manifest_dir)) {
+        Some(r) => r,
+        None => {
+            return syn::Error::new(
+                parsed.source.span(),
+                "Could not find flake.nix in any parent directory",
+            )
+            .to_compile_error();
+        }
+    };
+
+    // Build command — no --include needed since we concatenated everything
+    let mut cmd = Command::new("nix");
+    cmd.args([
+        "run",
+        &format!("{}#tidepool-extract", flake_root.display()),
+        "--",
+    ]);
+    cmd.arg(hs_file.to_str().unwrap());
+    cmd.arg("--output-dir");
+    cmd.arg(output_dir.to_str().unwrap());
+    cmd.arg("--target");
+    cmd.arg(&parsed.target);
+    let result = cmd.output();
+
+    match result {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return syn::Error::new(
+                parsed.source.span(),
+                format!(
+                    "nix run tidepool-extract failed (exit {}):\n{}",
+                    output.status, stderr
+                ),
+            )
+            .to_compile_error();
+        }
+        Err(e) => {
+            return syn::Error::new(
+                parsed.source.span(),
+                format!("Failed to run nix: {}. Is nix installed?", e),
+            )
+            .to_compile_error();
+        }
+    }
+
+    // Find CBOR output
+    let cbor_path = output_dir.join(format!("{}.cbor", parsed.target));
+    if !cbor_path.exists() {
+        let available = list_bindings(&output_dir);
+        return syn::Error::new(
+            parsed.source.span(),
+            format!(
+                "Binding '{}' not found after compilation. Available: {:?}",
+                parsed.target, available
+            ),
+        )
+        .to_compile_error();
+    }
+
+    let cbor_path_str = cbor_path.to_str().unwrap();
+    let meta_path = output_dir.join("meta.cbor");
+    let meta_path_str = meta_path.to_str().unwrap();
+    let hs_path_str = hs_file.to_str().unwrap();
+
+    // Track include dir .hs files for recompilation
+    let include_tracks: Vec<TokenStream> = abs_includes
+        .iter()
+        .filter_map(|dir| {
+            std::fs::read_dir(dir).ok().map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().map_or(false, |ext| ext == "hs"))
+                    .map(|p| {
+                        let s = p.to_str().unwrap().to_string();
+                        quote! { const _: &[u8] = include_bytes!(#s); }
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .flatten()
+        .collect();
+
+    quote! {
+        {
+            const _: &[u8] = include_bytes!(#hs_path_str);
+            #(#include_tracks)*
+            static __CBOR: &[u8] = include_bytes!(#cbor_path_str);
+            static __META: &[u8] = include_bytes!(#meta_path_str);
+            let __expr = core_repr::serial::read::read_cbor(__CBOR)
+                .expect("failed to deserialize CBOR — re-run extraction");
+            let __table = core_repr::serial::read::read_metadata(__META)
+                .expect("failed to deserialize metadata");
+            (__expr, __table)
+        }
+    }
+}
+
+/// Strip module header, language pragmas, and import lines from a Haskell source file.
+/// Returns only the body (data declarations, function definitions, etc.).
+fn strip_module_header(source: &str) -> String {
+    let mut lines: Vec<&str> = Vec::new();
+    let mut past_header = false;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if !past_header {
+            // Skip language pragmas, module declarations, and imports
+            if trimmed.starts_with("{-#")
+                || trimmed.starts_with("module ")
+                || trimmed.starts_with("import ")
+                || trimmed.is_empty()
+            {
+                continue;
+            }
+            past_header = true;
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
     }
 }
 

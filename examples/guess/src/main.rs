@@ -1,9 +1,9 @@
 use core_bridge_derive::FromCore;
 use core_effect::{EffectError, EffectHandler, EffectMachine};
 use core_eval::value::Value;
-use core_repr::{CoreFrame, DataConTable, Literal};
+use core_repr::{DataConTable, Literal};
 use rand::Rng;
-use tidepool_macro::haskell_expr;
+use tidepool_macro::haskell_inline;
 
 #[derive(FromCore)]
 enum ConsoleReq {
@@ -16,12 +16,9 @@ enum ConsoleReq {
 struct ConsoleHandler;
 
 impl ConsoleHandler {
-    /// Construct a Haskell () value: Con("()", [])
     fn make_unit(table: &DataConTable) -> Value {
         match table.get_by_name("()") {
             Some(id) => Value::Con(id, vec![]),
-            // Fallback: GHC optimizes `case x of () -> body` away for ()
-            // so the continuation won't inspect this value
             None => Value::Lit(Literal::LitInt(0)),
         }
     }
@@ -40,12 +37,10 @@ impl EffectHandler for ConsoleHandler {
                 let mut input = String::new();
                 std::io::stdin().read_line(&mut input).unwrap();
                 let n: i64 = input.trim().parse().unwrap_or(0);
-                // Return boxed Int: I#(n) — the continuation expects Haskell's Int type
                 let result = match table.get_by_name("I#") {
                     Some(id) => Value::Con(id, vec![Value::Lit(Literal::LitInt(n))]),
                     None => Value::Lit(Literal::LitInt(n)),
                 };
-                eprintln!("[AwaitInt] input={:?} parsed={} returning={:?}", input.trim(), n, result);
                 Ok(result)
             }
         }
@@ -67,12 +62,10 @@ impl EffectHandler for RngHandler {
         match req {
             RngReq::RandInt(lo, hi) => {
                 let n: i64 = self.0.gen_range(lo..=hi);
-                // Return boxed Int: I#(n) — the continuation expects Haskell's Int type
                 let result = match table.get_by_name("I#") {
                     Some(id) => Value::Con(id, vec![Value::Lit(Literal::LitInt(n))]),
                     None => Value::Lit(Literal::LitInt(n)),
                 };
-                eprintln!("[RandInt] lo={} hi={} generated={} returning={:?}", lo, hi, n, result);
                 Ok(result)
             }
         }
@@ -80,152 +73,32 @@ impl EffectHandler for RngHandler {
 }
 
 fn main() {
-    let (expr, table) = haskell_expr!("Guess.hs::game");
+    let (expr, table) = haskell_inline! {
+        target = "game",
+        include = "haskell",
+        r#"
+game :: Eff '[Console, Rng] ()
+game = do
+  target <- randInt 1 100
+  emit "I'm thinking of a number between 1 and 100."
+  guessLoop target
 
-    // Debug: dump DataConTable
-    eprintln!("=== DataConTable ===");
-    for dc in table.iter() {
-        eprintln!("  {:?} -> {} (tag={}, arity={})", dc.id, dc.name, dc.tag, dc.rep_arity);
-    }
+guessLoop :: Int -> Eff '[Console, Rng] ()
+guessLoop target = do
+  emit "Your guess? "
+  guess <- awaitInt
+  if guess == target
+    then emit "Correct!"
+    else do
+      emit (if guess < target then "Too low!" else "Too high!")
+      guessLoop target
+        "#
+    };
 
-    // Debug: show tree structure
-    eprintln!("=== Tree: {} nodes, root = {} ===", expr.nodes.len(), expr.nodes.len() - 1);
-    // Show root node
-    eprintln!("Root node: {:?}", &expr.nodes[expr.nodes.len() - 1]);
-    // Pretty-print (may be large)
-    let pp = core_repr::pretty::pretty_print(&expr);
-    eprintln!("=== Pretty (first 2000 chars) ===");
-    eprintln!("{}", &pp[..pp.len().min(2000)]);
-
-    // Find ALL bindings and their names by looking at what the harness emitted
-    eprintln!("\n=== All LetNonRec binders ===");
-    for (i, node) in expr.nodes.iter().enumerate() {
-        if let CoreFrame::LetNonRec { binder, rhs, .. } = node {
-            let rhs_summary = match &expr.nodes[*rhs] {
-                CoreFrame::Con { tag, fields } => format!("Con({:?}, {} fields)", tag, fields.len()),
-                CoreFrame::Lam { .. } => "Lam(...)".to_string(),
-                CoreFrame::Lit(l) => format!("Lit({:?})", l),
-                CoreFrame::Var(v) => format!("Var(v_{})", v.0),
-                other => format!("{:?}", std::mem::discriminant(other)),
-            };
-            eprintln!("  [{}] v_{} = {}", i, binder.0, rhs_summary);
-        }
-    }
-
-    // Find all Var nodes referencing data constructors (not bound in tree)
-    let datacon_ids: std::collections::HashSet<u64> = table.iter().map(|dc| dc.id.0).collect();
-    eprintln!("\n=== Var nodes referencing DataCon IDs (potential unbound) ===");
-    for (i, node) in expr.nodes.iter().enumerate() {
-        if let CoreFrame::Var(v) = node {
-            if datacon_ids.contains(&v.0) {
-                let name = table.iter().find(|dc| dc.id.0 == v.0).map(|dc| dc.name.as_str()).unwrap_or("?");
-                eprintln!("  [{}] Var(v_{}) = DataCon '{}'", i, v.0, name);
-            }
-        }
-    }
-
-    // Search for the unbound variable — show context (parent nodes)
-    let unbound_var = 3458764513820540949u64;
-    eprintln!("\n=== Searching for v_{} in all nodes ===", unbound_var);
-    for (i, node) in expr.nodes.iter().enumerate() {
-        let found = match node {
-            CoreFrame::Var(v) if v.0 == unbound_var => true,
-            CoreFrame::Lam { binder, .. } if binder.0 == unbound_var => true,
-            CoreFrame::LetNonRec { binder, .. } if binder.0 == unbound_var => true,
-            CoreFrame::Case { binder, .. } if binder.0 == unbound_var => true,
-            CoreFrame::Join { label, .. } if label.0 == unbound_var => true,
-            _ => false,
-        };
-        if found {
-            eprintln!("  [{}] {:?}", i, node);
-            // Show parent App and its arg/grandparent context
-            for (j, parent) in expr.nodes.iter().enumerate() {
-                if let CoreFrame::App { fun, arg } = parent {
-                    if *fun == i {
-                        eprintln!("    parent [{}]: App {{ fun: {}, arg: {} }}", j, fun, arg);
-                        eprintln!("      arg node [{}]: {:?}", arg, &expr.nodes[*arg]);
-                        // grandparent
-                        for (k, gp) in expr.nodes.iter().enumerate() {
-                            let refs_j = match gp {
-                                CoreFrame::App { fun, arg } => *fun == j || *arg == j,
-                                CoreFrame::LetNonRec { rhs, body, .. } => *rhs == j || *body == j,
-                                CoreFrame::Case { alts, .. } => alts.iter().any(|a| a.body == j),
-                                _ => false,
-                            };
-                            if refs_j {
-                                eprintln!("      grandparent [{}]: {:?}", k, gp);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Find which binder matches the target VarId
-    let target_var = 8286623314361716746u64;
-    eprintln!("\n=== Looking for binder v_{} ===", target_var);
-    for (i, node) in expr.nodes.iter().enumerate() {
-        match node {
-            CoreFrame::LetNonRec { binder, rhs, .. } if binder.0 == target_var => {
-                eprintln!("  FOUND at [{}] LetNonRec binder=v_{} rhs=[{}]", i, binder.0, rhs);
-                eprintln!("    RHS node: {:?}", &expr.nodes[*rhs]);
-            }
-            CoreFrame::LetRec { bindings, .. } => {
-                for (b, rhs) in bindings {
-                    if b.0 == target_var {
-                        eprintln!("  FOUND in LetRec at [{}] binder=v_{} rhs=[{}]", i, b.0, rhs);
-                        eprintln!("    RHS node: {:?}", &expr.nodes[*rhs]);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Trace the body chain from root to find the innermost expression
-    eprintln!("\n=== Body chain from root ===");
-    let mut idx = expr.nodes.len() - 1;
-    let mut depth = 0;
-    loop {
-        match &expr.nodes[idx] {
-            CoreFrame::LetNonRec { body, binder, .. } => {
-                if depth < 5 || depth > 40 {
-                    eprintln!("  [{}] LetNonRec binder=v_{} body->{}", idx, binder.0, body);
-                } else if depth == 5 {
-                    eprintln!("  ... (skipping middle) ...");
-                }
-                idx = *body;
-                depth += 1;
-            }
-            CoreFrame::LetRec { body, .. } => {
-                eprintln!("  [{}] LetRec body->{}", idx, body);
-                idx = *body;
-                depth += 1;
-            }
-            other => {
-                eprintln!("  [{}] LEAF: {:?}", idx, other);
-                break;
-            }
-        }
-    }
-
-    // Debug: eval the expression and see what we get
     let mut heap = core_eval::heap::VecHeap::new();
-    let env = core_eval::eval::env_from_datacon_table(&table);
-    match core_eval::eval::eval(&expr, &env, &mut heap) {
-        Ok(val) => eprintln!("=== eval result ===\n  {:?}", val),
-        Err(e) => {
-            eprintln!("=== eval error ===\n  {:?}", e);
-            return;
-        }
-    }
-
-    // Now try the EffectMachine
-    let mut heap2 = core_eval::heap::VecHeap::new();
     let mut handlers = frunk::hlist![ConsoleHandler, RngHandler(rand::thread_rng())];
 
-    let result = EffectMachine::new(&table, &mut heap2)
+    let result = EffectMachine::new(&table, &mut heap)
         .and_then(|mut machine| machine.run(&expr, &mut handlers));
 
     match result {
