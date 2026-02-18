@@ -38,7 +38,7 @@ pub fn compile_expr(
     gc_sig.params.push(AbiParam::new(types::I64));
     let gc_sig_ref = builder.import_signature(gc_sig);
 
-    let mut emit_ctx = EmitContext::new();
+    let mut emit_ctx = EmitContext::new(name.to_string());
     let result = emit_ctx.emit_node(pipeline, &mut builder, vmctx, gc_sig_ref, tree, tree.nodes.len() - 1)?;
     let ret = ensure_heap_ptr(&mut builder, vmctx, gc_sig_ref, result);
 
@@ -162,7 +162,7 @@ impl EmitContext {
                 inner_gc_sig.params.push(AbiParam::new(types::I64));
                 let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
 
-                let mut inner_emit = EmitContext::new();
+                let mut inner_emit = EmitContext::new(self.prefix.clone());
                 inner_emit.lambda_counter = self.lambda_counter;
 
                 inner_emit.env.insert(*binder, SsaVal::HeapPtr(arg_param));
@@ -302,7 +302,7 @@ impl EmitContext {
                     inner_gc_sig.params.push(AbiParam::new(types::I64));
                     let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
 
-                    let mut inner_emit = EmitContext::new();
+                    let mut inner_emit = EmitContext::new(self.prefix.clone());
                     inner_emit.lambda_counter = self.lambda_counter;
                     inner_emit.env.insert(lam_binder, SsaVal::HeapPtr(inner_arg));
 
@@ -365,36 +365,43 @@ fn emit_lit(
             builder.ins().store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
             let val = builder.ins().iconst(types::I64, *n);
             builder.ins().store(MemFlags::trusted(), val, ptr, LIT_VALUE_OFFSET);
+            builder.declare_value_needs_stack_map(ptr);
+            Ok(SsaVal::HeapPtr(ptr))
         }
         Literal::LitWord(n) => {
             let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_WORD);
             builder.ins().store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
             let val = builder.ins().iconst(types::I64, *n as i64);
             builder.ins().store(MemFlags::trusted(), val, ptr, LIT_VALUE_OFFSET);
+            builder.declare_value_needs_stack_map(ptr);
+            Ok(SsaVal::HeapPtr(ptr))
         }
         Literal::LitChar(c) => {
             let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_CHAR);
             builder.ins().store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
             let val = builder.ins().iconst(types::I64, *c as i64);
             builder.ins().store(MemFlags::trusted(), val, ptr, LIT_VALUE_OFFSET);
+            builder.declare_value_needs_stack_map(ptr);
+            Ok(SsaVal::HeapPtr(ptr))
         }
         Literal::LitFloat(bits) => {
             let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_FLOAT);
             builder.ins().store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
             let val = builder.ins().iconst(types::I64, *bits as i64);
             builder.ins().store(MemFlags::trusted(), val, ptr, LIT_VALUE_OFFSET);
+            builder.declare_value_needs_stack_map(ptr);
+            Ok(SsaVal::HeapPtr(ptr))
         }
         Literal::LitDouble(bits) => {
             let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_DOUBLE);
             builder.ins().store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
             let val = builder.ins().iconst(types::I64, *bits as i64);
             builder.ins().store(MemFlags::trusted(), val, ptr, LIT_VALUE_OFFSET);
+            builder.declare_value_needs_stack_map(ptr);
+            Ok(SsaVal::HeapPtr(ptr))
         }
-        Literal::LitString(_) => return Err(EmitError::NotYetImplemented("LitString".into())),
+        Literal::LitString(_) => Err(EmitError::NotYetImplemented("LitString".into())),
     }
-
-    builder.declare_value_needs_stack_map(ptr);
-    Ok(SsaVal::HeapPtr(ptr))
 }
 
 fn ensure_heap_ptr(
@@ -405,15 +412,14 @@ fn ensure_heap_ptr(
 ) -> Value {
     match val {
         SsaVal::HeapPtr(v) => v,
-        SsaVal::Raw(v) => {
-            // Box as LitInt
+        SsaVal::Raw(v, lit_tag) => {
             let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig);
             let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);
             builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
             let size = builder.ins().iconst(types::I16, LIT_TOTAL_SIZE as i64);
             builder.ins().store(MemFlags::trusted(), size, ptr, 1);
-            let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_INT);
-            builder.ins().store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
+            let lit_tag_val = builder.ins().iconst(types::I8, lit_tag);
+            builder.ins().store(MemFlags::trusted(), lit_tag_val, ptr, LIT_TAG_OFFSET);
             builder.ins().store(MemFlags::trusted(), v, ptr, LIT_VALUE_OFFSET);
             builder.declare_value_needs_stack_map(ptr);
             ptr

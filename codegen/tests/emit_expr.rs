@@ -208,6 +208,23 @@ fn test_emit_primop_word_ops() {
 }
 
 #[test]
+fn test_emit_word_boxing() {
+    // PrimOp(WordAdd, [LitWord(1), LitWord(2)]) -> should be boxed as LitWord
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitWord(1)),
+        CoreFrame::Lit(Literal::LitWord(2)),
+        CoreFrame::PrimOp { op: PrimOpKind::WordAdd, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe {
+        assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
+        // Offset 8 is lit_tag
+        assert_eq!(*result.result_ptr.add(8), codegen::emit::LIT_TAG_WORD as u8);
+        assert_eq!(read_lit_int(result.result_ptr), 3);
+    }
+}
+
+#[test]
 fn test_emit_let_rec() {
     // let rec f = λn. if n == 0 then 1 else n * f (n-1) in f 5
     // Simplified: let rec f = λx. x in f 42
@@ -268,3 +285,33 @@ fn test_emit_let_rec_mutual() {
     let result = compile_and_run(&tree);
     unsafe { assert_eq!(read_lit_int(result.result_ptr), 42); }
 }
+
+#[test]
+fn test_emit_unique_lambda_names() {
+    // Compile two different expressions that both have lambdas using the same pipeline.
+    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    
+    let x = VarId(1);
+    // λx.x
+    let tree1 = RecursiveTree { nodes: vec![
+        CoreFrame::Var(x),
+        CoreFrame::Lam { binder: x, body: 0 },
+    ] };
+    
+    // λx. x + 1
+    let tree2 = RecursiveTree { nodes: vec![
+        CoreFrame::Var(x),
+        CoreFrame::Lit(Literal::LitInt(1)),
+        CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![0, 1] },
+        CoreFrame::Lam { binder: x, body: 2 },
+    ] };
+    
+        // This should NOT panic due to "duplicate function name"
+    
+        compile_expr(&mut pipeline, &tree1, "f1").expect("First compilation failed");
+    
+        compile_expr(&mut pipeline, &tree2, "f2").expect("Second compilation failed");
+    
+    }
+    
+    

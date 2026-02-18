@@ -2,7 +2,7 @@ pub mod expr;
 pub mod primop;
 
 use cranelift_codegen::ir::Value;
-use core_repr::{VarId, JoinId};
+use core_repr::{VarId, JoinId, PrimOpKind};
 use std::collections::HashMap;
 
 // HeapObject layout constants
@@ -25,8 +25,8 @@ pub const LIT_TAG_DOUBLE: i64 = 4;
 /// SSA value with boxed/unboxed tracking.
 #[derive(Debug, Clone, Copy)]
 pub enum SsaVal {
-    /// Unboxed raw value (i64 or f64 bits). NOT tracked by stack maps.
-    Raw(Value),
+    /// Unboxed raw value (i64 or f64 bits) with its literal tag.
+    Raw(Value, i64),
     /// Heap pointer. Already declared via `declare_value_needs_stack_map`.
     HeapPtr(Value),
 }
@@ -34,7 +34,7 @@ pub enum SsaVal {
 impl SsaVal {
     pub fn value(self) -> Value {
         match self {
-            SsaVal::Raw(v) | SsaVal::HeapPtr(v) => v,
+            SsaVal::Raw(v, _) | SsaVal::HeapPtr(v) => v,
         }
     }
 }
@@ -44,6 +44,7 @@ pub struct EmitContext {
     pub env: HashMap<VarId, SsaVal>,
     pub join_blocks: HashMap<JoinId, JoinInfo>,
     pub lambda_counter: u32,
+    pub prefix: String,
 }
 
 /// Placeholder for join point info (used by case/join leaf later).
@@ -58,6 +59,7 @@ pub enum EmitError {
     UnboundVariable(VarId),
     NotYetImplemented(String),
     CraneliftError(String),
+    InvalidArity(PrimOpKind, usize, usize),
 }
 
 impl std::fmt::Display for EmitError {
@@ -66,6 +68,9 @@ impl std::fmt::Display for EmitError {
             EmitError::UnboundVariable(v) => write!(f, "unbound variable: {:?}", v),
             EmitError::NotYetImplemented(s) => write!(f, "not yet implemented: {}", s),
             EmitError::CraneliftError(s) => write!(f, "cranelift error: {}", s),
+            EmitError::InvalidArity(op, expected, got) => {
+                write!(f, "invalid arity for {:?}: expected {}, got {}", op, expected, got)
+            }
         }
     }
 }
@@ -73,17 +78,18 @@ impl std::fmt::Display for EmitError {
 impl std::error::Error for EmitError {}
 
 impl EmitContext {
-    pub fn new() -> Self {
+    pub fn new(prefix: String) -> Self {
         Self {
             env: HashMap::new(),
             join_blocks: HashMap::new(),
             lambda_counter: 0,
+            prefix,
         }
     }
 
     pub fn next_lambda_name(&mut self) -> String {
         let n = self.lambda_counter;
         self.lambda_counter += 1;
-        format!("__lambda_{}", n)
+        format!("{}_lambda_{}", self.prefix, n)
     }
 }
