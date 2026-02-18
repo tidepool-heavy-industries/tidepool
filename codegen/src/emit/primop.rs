@@ -130,7 +130,7 @@ pub fn emit_primop(
 
 fn check_arity(op: &PrimOpKind, expected: usize, got: usize) -> Result<(), EmitError> {
     if expected != got {
-        Err(EmitError::InvalidArity(op.clone(), expected, got))
+        Err(EmitError::InvalidArity(*op, expected, got))
     } else {
         Ok(())
     }

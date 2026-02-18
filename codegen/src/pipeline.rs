@@ -7,7 +7,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Module, Linkage, FuncId};
 use std::sync::Arc;
 
-use crate::stack_map::StackMapRegistry;
+use crate::stack_map::{StackMapRegistry, RawStackMap};
 
 /// Cranelift JIT compilation pipeline.
 ///
@@ -28,7 +28,7 @@ pub struct CodegenPipeline {
     pub stack_maps: StackMapRegistry,
     /// Pending stack maps waiting for finalization to get base pointers.
     /// Stores (func_id, func_size, raw_maps).
-    pending_stack_maps: Vec<(FuncId, u32, Vec<(u32, u32, Vec<(cranelift_codegen::ir::types::Type, u32)>)>)>,
+    pending_stack_maps: Vec<(FuncId, u32, Vec<RawStackMap>)>,
 }
 
 impl CodegenPipeline {
@@ -101,12 +101,12 @@ impl CodegenPipeline {
         let func_size = compiled.buffer.data().len() as u32;
 
         // Extract stack map data before define_function recompiles
-        let raw_maps: Vec<(u32, u32, Vec<(cranelift_codegen::ir::types::Type, u32)>)> = compiled
+        let raw_maps: Vec<RawStackMap> = compiled
             .buffer
             .user_stack_maps()
             .iter()
             .map(|(offset, span, usm)| {
-                let entries: Vec<_> = usm.entries().map(|(ty, off)| (ty, off)).collect();
+                let entries: Vec<_> = usm.entries().collect();
                 (*offset, *span, entries)
             })
             .collect();
