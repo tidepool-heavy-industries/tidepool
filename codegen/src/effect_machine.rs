@@ -1,6 +1,21 @@
 use crate::context::VMContext;
 use crate::yield_type::{Yield, YieldError};
 
+/// Constructor tags for the freer-simple Eff type.
+///
+/// These identify which DataCon a heap-allocated constructor represents,
+/// allowing the effect machine to distinguish Val (pure result) from
+/// E (effect request) and destructure Union wrappers.
+#[derive(Debug, Clone, Copy)]
+pub struct ConTags {
+    /// Con_tag for the Val constructor (pure result).
+    pub val: u64,
+    /// Con_tag for the E constructor (effect request).
+    pub e: u64,
+    /// Con_tag for the Union constructor (effect type wrapper).
+    pub union: u64,
+}
+
 /// Compiled effect machine — drives JIT-compiled freer-simple effect stacks.
 ///
 /// The step/resume protocol:
@@ -18,7 +33,7 @@ pub struct CompiledEffectMachine {
     vmctx: VMContext,
     /// Con_tag value for Val constructor.
     val_con_tag: u64,
-    /// Con_tag value for E constructor.  
+    /// Con_tag value for E constructor.
     e_con_tag: u64,
     /// Con_tag value for Union constructor.
     #[allow(dead_code)]
@@ -33,16 +48,14 @@ impl CompiledEffectMachine {
     pub fn new(
         func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8,
         vmctx: VMContext,
-        val_con_tag: u64,
-        e_con_tag: u64,
-        union_con_tag: u64,
+        tags: ConTags,
     ) -> Self {
         Self {
             func_ptr,
             vmctx,
-            val_con_tag,
-            e_con_tag,
-            union_con_tag,
+            val_con_tag: tags.val,
+            e_con_tag: tags.e,
+            union_con_tag: tags.union,
         }
     }
 

@@ -189,7 +189,15 @@ fn test_yield_done_val() {
     let end = unsafe { start.add(4096) };
     let vmctx = VMContext::new(start, end, host_fns::gc_trigger);
 
-    let mut machine = CompiledEffectMachine::new(func, vmctx, VAL_CON_TAG, E_CON_TAG, UNION_CON_TAG);
+    let mut machine = CompiledEffectMachine::new(
+        func,
+        vmctx,
+        codegen::effect_machine::ConTags {
+            val: VAL_CON_TAG,
+            e: E_CON_TAG,
+            union: UNION_CON_TAG,
+        },
+    );
     let result = machine.step();
 
     match result {
@@ -224,7 +232,15 @@ fn test_yield_request_e() {
     let end = unsafe { start.add(4096) };
     let vmctx = VMContext::new(start, end, host_fns::gc_trigger);
 
-    let mut machine = CompiledEffectMachine::new(func, vmctx, VAL_CON_TAG, E_CON_TAG, UNION_CON_TAG);
+    let mut machine = CompiledEffectMachine::new(
+        func,
+        vmctx,
+        codegen::effect_machine::ConTags {
+            val: VAL_CON_TAG,
+            e: E_CON_TAG,
+            union: UNION_CON_TAG,
+        },
+    );
     let result = machine.step();
 
     match result {
@@ -264,7 +280,15 @@ fn test_unexpected_tag() {
     let end = unsafe { start.add(4096) };
     let vmctx = VMContext::new(start, end, host_fns::gc_trigger);
 
-    let mut machine = CompiledEffectMachine::new(func, vmctx, VAL_CON_TAG, E_CON_TAG, UNION_CON_TAG);
+    let mut machine = CompiledEffectMachine::new(
+        func,
+        vmctx,
+        codegen::effect_machine::ConTags {
+            val: VAL_CON_TAG,
+            e: E_CON_TAG,
+            union: UNION_CON_TAG,
+        },
+    );
     let result = machine.step();
 
     assert_eq!(result, Yield::Error(YieldError::UnexpectedTag(TAG_LIT)));
@@ -284,7 +308,15 @@ fn test_unexpected_con_tag() {
     let end = unsafe { start.add(4096) };
     let vmctx = VMContext::new(start, end, host_fns::gc_trigger);
 
-    let mut machine = CompiledEffectMachine::new(func, vmctx, VAL_CON_TAG, E_CON_TAG, UNION_CON_TAG);
+    let mut machine = CompiledEffectMachine::new(
+        func,
+        vmctx,
+        codegen::effect_machine::ConTags {
+            val: VAL_CON_TAG,
+            e: E_CON_TAG,
+            union: UNION_CON_TAG,
+        },
+    );
     let result = machine.step();
 
     assert_eq!(result, Yield::Error(YieldError::UnexpectedConTag(999)));

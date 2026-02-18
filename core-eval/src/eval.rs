@@ -26,8 +26,8 @@ pub fn env_from_datacon_table(table: &DataConTable) -> Env {
 pub fn eval(expr: &CoreExpr, env: &Env, heap: &mut dyn Heap) -> Result<Value, EvalError> {
     if expr.nodes.is_empty() {
         return Err(EvalError::TypeMismatch {
-            expected: "non-empty expression".into(),
-            got: "empty expression".into(),
+            expected: "non-empty expression",
+            got: crate::error::ValueKind::Other("empty tree".into()),
         });
     }
     let res = eval_at(expr, expr.nodes.len() - 1, env, heap)?;
@@ -187,9 +187,10 @@ fn eval_at(
                         if let Value::Con(con_tag, fields) = &scrut_val {
                             if con_tag == tag {
                                 if fields.len() != alt.binders.len() {
-                                    return Err(EvalError::TypeMismatch {
-                                        expected: format!("{} fields", alt.binders.len()),
-                                        got: format!("{} fields", fields.len()),
+                                    return Err(EvalError::ArityMismatch {
+                                        context: "case binders",
+                                        expected: alt.binders.len(),
+                                        got: fields.len(),
                                     });
                                 }
                                 let mut alt_env = case_env;
@@ -241,9 +242,10 @@ fn eval_at(
             match env.get(&join_var) {
                 Some(Value::JoinCont(params, rhs_expr, join_env)) => {
                     if params.len() != args.len() {
-                        return Err(EvalError::TypeMismatch {
-                            expected: format!("{} arguments", params.len()),
-                            got: format!("{} arguments", args.len()),
+                        return Err(EvalError::ArityMismatch {
+                            context: "arguments",
+                            expected: params.len(),
+                            got: args.len(),
                         });
                     }
                     let params = params.clone();
@@ -277,9 +279,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         }
         PrimOpKind::IntNegate => {
             if args.len() != 1 {
-                return Err(EvalError::TypeMismatch {
-                    expected: "1 argument".into(),
-                    got: format!("{} arguments", args.len()),
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
                 });
             }
             let a = expect_int(&args[0])?;
@@ -343,26 +346,28 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
 
         PrimOpKind::SeqOp => {
             if args.len() != 2 {
-                return Err(EvalError::TypeMismatch {
-                    expected: "2 arguments".into(),
-                    got: format!("{} arguments", args.len()),
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 2,
+                    got: args.len(),
                 });
             }
             Ok(args[1].clone())
         }
         PrimOpKind::DataToTag => {
             if args.len() != 1 {
-                return Err(EvalError::TypeMismatch {
-                    expected: "1 argument".into(),
-                    got: format!("{} arguments", args.len()),
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
                 });
             }
             if let Value::Con(DataConId(tag), _) = &args[0] {
                 Ok(Value::Lit(Literal::LitInt(*tag as i64)))
             } else {
                 Err(EvalError::TypeMismatch {
-                    expected: "Data constructor".into(),
-                    got: format!("{:?}", args[0]),
+                    expected: "Data constructor",
+                    got: crate::error::ValueKind::Other(format!("{:?}", args[0])),
                 })
             }
         }
@@ -375,8 +380,8 @@ fn expect_int(v: &Value) -> Result<i64, EvalError> {
         Ok(*n)
     } else {
         Err(EvalError::TypeMismatch {
-            expected: "Int#".into(),
-            got: format!("{:?}", v),
+            expected: "Int#",
+            got: crate::error::ValueKind::Other(format!("{:?}", v)),
         })
     }
 }
@@ -386,8 +391,8 @@ fn expect_word(v: &Value) -> Result<u64, EvalError> {
         Ok(*n)
     } else {
         Err(EvalError::TypeMismatch {
-            expected: "Word#".into(),
-            got: format!("{:?}", v),
+            expected: "Word#",
+            got: crate::error::ValueKind::Other(format!("{:?}", v)),
         })
     }
 }
@@ -397,8 +402,8 @@ fn expect_double(v: &Value) -> Result<f64, EvalError> {
         Ok(f64::from_bits(*bits))
     } else {
         Err(EvalError::TypeMismatch {
-            expected: "Double#".into(),
-            got: format!("{:?}", v),
+            expected: "Double#",
+            got: crate::error::ValueKind::Other(format!("{:?}", v)),
         })
     }
 }
@@ -408,17 +413,18 @@ fn expect_char(v: &Value) -> Result<char, EvalError> {
         Ok(*c)
     } else {
         Err(EvalError::TypeMismatch {
-            expected: "Char#".into(),
-            got: format!("{:?}", v),
+            expected: "Char#",
+            got: crate::error::ValueKind::Other(format!("{:?}", v)),
         })
     }
 }
 
 fn bin_op_int(_op: PrimOpKind, args: &[Value]) -> Result<(i64, i64), EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::TypeMismatch {
-            expected: "2 arguments".into(),
-            got: format!("{} arguments", args.len()),
+        return Err(EvalError::ArityMismatch {
+            context: "arguments",
+            expected: 2,
+            got: args.len(),
         });
     }
     Ok((expect_int(&args[0])?, expect_int(&args[1])?))
@@ -426,9 +432,10 @@ fn bin_op_int(_op: PrimOpKind, args: &[Value]) -> Result<(i64, i64), EvalError> 
 
 fn bin_op_word(_op: PrimOpKind, args: &[Value]) -> Result<(u64, u64), EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::TypeMismatch {
-            expected: "2 arguments".into(),
-            got: format!("{} arguments", args.len()),
+        return Err(EvalError::ArityMismatch {
+            context: "arguments",
+            expected: 2,
+            got: args.len(),
         });
     }
     Ok((expect_word(&args[0])?, expect_word(&args[1])?))
@@ -436,9 +443,10 @@ fn bin_op_word(_op: PrimOpKind, args: &[Value]) -> Result<(u64, u64), EvalError>
 
 fn bin_op_double(_op: PrimOpKind, args: &[Value]) -> Result<(f64, f64), EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::TypeMismatch {
-            expected: "2 arguments".into(),
-            got: format!("{} arguments", args.len()),
+        return Err(EvalError::ArityMismatch {
+            context: "arguments",
+            expected: 2,
+            got: args.len(),
         });
     }
     Ok((expect_double(&args[0])?, expect_double(&args[1])?))
@@ -477,9 +485,10 @@ fn cmp_char(
     f: impl Fn(char, char) -> bool,
 ) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::TypeMismatch {
-            expected: "2 arguments".into(),
-            got: format!("{} arguments", args.len()),
+        return Err(EvalError::ArityMismatch {
+            context: "arguments",
+            expected: 2,
+            got: args.len(),
         });
     }
     let a = expect_char(&args[0])?;
@@ -1026,6 +1035,6 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap);
-        assert!(matches!(res, Err(EvalError::TypeMismatch { .. })));
+        assert!(matches!(res, Err(EvalError::ArityMismatch { .. })));
     }
 }
