@@ -37,12 +37,12 @@ pub fn emit_primop(
         }
 
         // Int comparison → returns i64 (0=False, 1=True)
-        PrimOpKind::IntEq => emit_int_compare(builder, IntCC::Equal, args, LIT_TAG_INT),
-        PrimOpKind::IntNe => emit_int_compare(builder, IntCC::NotEqual, args, LIT_TAG_INT),
-        PrimOpKind::IntLt => emit_int_compare(builder, IntCC::SignedLessThan, args, LIT_TAG_INT),
-        PrimOpKind::IntLe => emit_int_compare(builder, IntCC::SignedLessThanOrEqual, args, LIT_TAG_INT),
-        PrimOpKind::IntGt => emit_int_compare(builder, IntCC::SignedGreaterThan, args, LIT_TAG_INT),
-        PrimOpKind::IntGe => emit_int_compare(builder, IntCC::SignedGreaterThanOrEqual, args, LIT_TAG_INT),
+        PrimOpKind::IntEq => emit_int_compare(builder, op, IntCC::Equal, args, LIT_TAG_INT),
+        PrimOpKind::IntNe => emit_int_compare(builder, op, IntCC::NotEqual, args, LIT_TAG_INT),
+        PrimOpKind::IntLt => emit_int_compare(builder, op, IntCC::SignedLessThan, args, LIT_TAG_INT),
+        PrimOpKind::IntLe => emit_int_compare(builder, op, IntCC::SignedLessThanOrEqual, args, LIT_TAG_INT),
+        PrimOpKind::IntGt => emit_int_compare(builder, op, IntCC::SignedGreaterThan, args, LIT_TAG_INT),
+        PrimOpKind::IntGe => emit_int_compare(builder, op, IntCC::SignedGreaterThanOrEqual, args, LIT_TAG_INT),
 
         // Word arithmetic
         PrimOpKind::WordAdd => {
@@ -65,12 +65,12 @@ pub fn emit_primop(
         }
 
         // Word comparison (unsigned)
-        PrimOpKind::WordEq => emit_int_compare(builder, IntCC::Equal, args, LIT_TAG_INT),
-        PrimOpKind::WordNe => emit_int_compare(builder, IntCC::NotEqual, args, LIT_TAG_INT),
-        PrimOpKind::WordLt => emit_int_compare(builder, IntCC::UnsignedLessThan, args, LIT_TAG_INT),
-        PrimOpKind::WordLe => emit_int_compare(builder, IntCC::UnsignedLessThanOrEqual, args, LIT_TAG_INT),
-        PrimOpKind::WordGt => emit_int_compare(builder, IntCC::UnsignedGreaterThan, args, LIT_TAG_INT),
-        PrimOpKind::WordGe => emit_int_compare(builder, IntCC::UnsignedGreaterThanOrEqual, args, LIT_TAG_INT),
+        PrimOpKind::WordEq => emit_int_compare(builder, op, IntCC::Equal, args, LIT_TAG_INT),
+        PrimOpKind::WordNe => emit_int_compare(builder, op, IntCC::NotEqual, args, LIT_TAG_INT),
+        PrimOpKind::WordLt => emit_int_compare(builder, op, IntCC::UnsignedLessThan, args, LIT_TAG_INT),
+        PrimOpKind::WordLe => emit_int_compare(builder, op, IntCC::UnsignedLessThanOrEqual, args, LIT_TAG_INT),
+        PrimOpKind::WordGt => emit_int_compare(builder, op, IntCC::UnsignedGreaterThan, args, LIT_TAG_INT),
+        PrimOpKind::WordGe => emit_int_compare(builder, op, IntCC::UnsignedGreaterThanOrEqual, args, LIT_TAG_INT),
 
         // Double arithmetic (unbox_double → f64, fadd/fsub/fmul/fdiv)
         PrimOpKind::DoubleAdd => {
@@ -99,20 +99,20 @@ pub fn emit_primop(
         }
 
         // Double comparison → returns i64 (0 or 1)
-        PrimOpKind::DoubleEq => emit_float_compare(builder, FloatCC::Equal, args, LIT_TAG_INT),
-        PrimOpKind::DoubleNe => emit_float_compare(builder, FloatCC::NotEqual, args, LIT_TAG_INT),
-        PrimOpKind::DoubleLt => emit_float_compare(builder, FloatCC::LessThan, args, LIT_TAG_INT),
-        PrimOpKind::DoubleLe => emit_float_compare(builder, FloatCC::LessThanOrEqual, args, LIT_TAG_INT),
-        PrimOpKind::DoubleGt => emit_float_compare(builder, FloatCC::GreaterThan, args, LIT_TAG_INT),
-        PrimOpKind::DoubleGe => emit_float_compare(builder, FloatCC::GreaterThanOrEqual, args, LIT_TAG_INT),
+        PrimOpKind::DoubleEq => emit_float_compare(builder, op, FloatCC::Equal, args, LIT_TAG_INT),
+        PrimOpKind::DoubleNe => emit_float_compare(builder, op, FloatCC::NotEqual, args, LIT_TAG_INT),
+        PrimOpKind::DoubleLt => emit_float_compare(builder, op, FloatCC::LessThan, args, LIT_TAG_INT),
+        PrimOpKind::DoubleLe => emit_float_compare(builder, op, FloatCC::LessThanOrEqual, args, LIT_TAG_INT),
+        PrimOpKind::DoubleGt => emit_float_compare(builder, op, FloatCC::GreaterThan, args, LIT_TAG_INT),
+        PrimOpKind::DoubleGe => emit_float_compare(builder, op, FloatCC::GreaterThanOrEqual, args, LIT_TAG_INT),
 
         // Char comparison → unbox_int (char stored as i64), use IntCC
-        PrimOpKind::CharEq => emit_int_compare(builder, IntCC::Equal, args, LIT_TAG_INT),
-        PrimOpKind::CharNe => emit_int_compare(builder, IntCC::NotEqual, args, LIT_TAG_INT),
-        PrimOpKind::CharLt => emit_int_compare(builder, IntCC::UnsignedLessThan, args, LIT_TAG_INT),
-        PrimOpKind::CharLe => emit_int_compare(builder, IntCC::UnsignedLessThanOrEqual, args, LIT_TAG_INT),
-        PrimOpKind::CharGt => emit_int_compare(builder, IntCC::UnsignedGreaterThan, args, LIT_TAG_INT),
-        PrimOpKind::CharGe => emit_int_compare(builder, IntCC::UnsignedGreaterThanOrEqual, args, LIT_TAG_INT),
+        PrimOpKind::CharEq => emit_int_compare(builder, op, IntCC::Equal, args, LIT_TAG_INT),
+        PrimOpKind::CharNe => emit_int_compare(builder, op, IntCC::NotEqual, args, LIT_TAG_INT),
+        PrimOpKind::CharLt => emit_int_compare(builder, op, IntCC::UnsignedLessThan, args, LIT_TAG_INT),
+        PrimOpKind::CharLe => emit_int_compare(builder, op, IntCC::UnsignedLessThanOrEqual, args, LIT_TAG_INT),
+        PrimOpKind::CharGt => emit_int_compare(builder, op, IntCC::UnsignedGreaterThan, args, LIT_TAG_INT),
+        PrimOpKind::CharGe => emit_int_compare(builder, op, IntCC::UnsignedGreaterThanOrEqual, args, LIT_TAG_INT),
 
         // Special ops
         PrimOpKind::DataToTag => {
@@ -138,11 +138,12 @@ fn check_arity(op: &PrimOpKind, expected: usize, got: usize) -> Result<(), EmitE
 
 fn emit_int_compare(
     builder: &mut FunctionBuilder,
+    op: &PrimOpKind,
     cc: IntCC,
     args: &[SsaVal],
     tag: i64,
 ) -> Result<SsaVal, EmitError> {
-    check_arity(&PrimOpKind::IntEq, 2, args.len())?; // Approximate op for error
+    check_arity(op, 2, args.len())?;
     let a = unbox_int(builder, args[0]);
     let b = unbox_int(builder, args[1]);
     let cmp = builder.ins().icmp(cc, a, b);
@@ -151,11 +152,12 @@ fn emit_int_compare(
 
 fn emit_float_compare(
     builder: &mut FunctionBuilder,
+    op: &PrimOpKind,
     cc: FloatCC,
     args: &[SsaVal],
     tag: i64,
 ) -> Result<SsaVal, EmitError> {
-    check_arity(&PrimOpKind::DoubleEq, 2, args.len())?; // Approximate op for error
+    check_arity(op, 2, args.len())?;
     let a = unbox_double(builder, args[0]);
     let b = unbox_double(builder, args[1]);
     let cmp = builder.ins().fcmp(cc, a, b);

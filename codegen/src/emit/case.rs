@@ -196,13 +196,13 @@ fn emit_lit_dispatch(
                     builder.ins().brif(eq, alt_block, &[], next_check_block, &[]);
                 }
                 Literal::LitFloat(bits) => {
-                    let scrut_f64 = builder.ins().bitcast(types::F64, MemFlags::trusted(), scrut_value);
+                    let scrut_f64 = builder.ins().bitcast(types::F64, MemFlags::new().with_endianness(ir::Endianness::Little), scrut_value);
                     let lit_val = builder.ins().f64const(f64::from_bits(*bits));
                     let eq = builder.ins().fcmp(ir::condcodes::FloatCC::Equal, scrut_f64, lit_val);
                     builder.ins().brif(eq, alt_block, &[], next_check_block, &[]);
                 }
                 Literal::LitDouble(bits) => {
-                    let scrut_f64 = builder.ins().bitcast(types::F64, MemFlags::trusted(), scrut_value);
+                    let scrut_f64 = builder.ins().bitcast(types::F64, MemFlags::new().with_endianness(ir::Endianness::Little), scrut_value);
                     let lit_val = builder.ins().f64const(f64::from_bits(*bits));
                     let eq = builder.ins().fcmp(ir::condcodes::FloatCC::Equal, scrut_f64, lit_val);
                     builder.ins().brif(eq, alt_block, &[], next_check_block, &[]);

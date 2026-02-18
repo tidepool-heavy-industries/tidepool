@@ -213,3 +213,54 @@ fn test_case_binder_used() {
         assert_eq!(read_con_tag(result.result_ptr), 0);
     }
 }
+
+#[test]
+fn test_case_lit_double() {
+    // case Lit(3.14) of { LitAlt(1.0) -> 10; LitAlt(3.14) -> 99; Default -> 0 }
+    let binder = VarId(99);
+    let pi_bits = 3.14f64.to_bits();
+    let one_bits = 1.0f64.to_bits();
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitDouble(pi_bits)),                // 0: scrutinee
+        CoreFrame::Lit(Literal::LitInt(10)),                         // 1: alt 1.0 body
+        CoreFrame::Lit(Literal::LitInt(99)),                         // 2: alt 3.14 body
+        CoreFrame::Lit(Literal::LitInt(0)),                          // 3: default body
+        CoreFrame::Case {
+            scrutinee: 0,
+            binder,
+            alts: vec![
+                Alt { con: AltCon::LitAlt(Literal::LitDouble(one_bits)), binders: vec![], body: 1 },
+                Alt { con: AltCon::LitAlt(Literal::LitDouble(pi_bits)), binders: vec![], body: 2 },
+                Alt { con: AltCon::Default, binders: vec![], body: 3 },
+            ],
+        },                                                            // 4: root
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 99); }
+}
+
+#[test]
+fn test_case_lit_float() {
+    // case Lit(2.5f) of { LitAlt(1.0f) -> 10; LitAlt(2.5f) -> 77; Default -> 0 }
+    let binder = VarId(99);
+    // LitFloat stores f64 bits (GHC represents Float# as Double internally)
+    let target_bits = 2.5f64.to_bits();
+    let one_bits = 1.0f64.to_bits();
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitFloat(target_bits)),              // 0: scrutinee
+        CoreFrame::Lit(Literal::LitInt(10)),                          // 1: alt 1.0 body
+        CoreFrame::Lit(Literal::LitInt(77)),                          // 2: alt 2.5 body
+        CoreFrame::Lit(Literal::LitInt(0)),                           // 3: default body
+        CoreFrame::Case {
+            scrutinee: 0,
+            binder,
+            alts: vec![
+                Alt { con: AltCon::LitAlt(Literal::LitFloat(one_bits)), binders: vec![], body: 1 },
+                Alt { con: AltCon::LitAlt(Literal::LitFloat(target_bits)), binders: vec![], body: 2 },
+                Alt { con: AltCon::Default, binders: vec![], body: 3 },
+            ],
+        },                                                             // 4: root
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 77); }
+}
