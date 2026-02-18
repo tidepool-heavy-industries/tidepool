@@ -66,9 +66,10 @@ impl CodegenPipeline {
 
     /// Create the standard function signature for compiled tidepool functions.
     ///
-    /// Tail calling convention, vmctx: i64 first param, returns i64.
+    /// Uses the target ISA's default C ABI calling convention, with vmctx: i64
+    /// as the first parameter and an i64 return value.
     pub fn make_func_signature(&self) -> ir::Signature {
-        let mut sig = ir::Signature::new(cranelift_codegen::isa::CallConv::Tail);
+        let mut sig = ir::Signature::new(self.isa.default_call_conv());
         sig.params.push(AbiParam::new(types::I64)); // vmctx pointer
         sig.returns.push(AbiParam::new(types::I64)); // result pointer
         sig
@@ -124,7 +125,8 @@ impl CodegenPipeline {
     /// Finalize all defined functions, making them callable.
     /// Also registers stack maps now that we have function base pointers.
     pub fn finalize(&mut self) {
-        self.module.finalize_definitions().unwrap();
+        self.module.finalize_definitions()
+            .expect("finalize_definitions failed");
 
         // Now register stack maps with actual base pointers
         let pending = std::mem::take(&mut self.pending_stack_maps);

@@ -7,7 +7,6 @@ use cranelift_codegen::ir::{self, types, AbiParam, InstBuilder, UserFuncName};
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::Module;
-use cranelift_codegen::isa::CallConv;
 
 /// Test 1: JIT boots, empty fn compiles and calls without crash.
 #[test]
@@ -63,7 +62,7 @@ fn test_stack_map_registry_populates() {
 
     // Declare a callee function (simulates a safepoint call target)
     let callee_sig = {
-        let mut sig = ir::Signature::new(CallConv::Tail);
+        let mut sig = ir::Signature::new(pipeline.isa.default_call_conv());
         sig.params.push(AbiParam::new(types::I64)); // vmctx
         sig.returns.push(AbiParam::new(types::I64));
         sig
@@ -107,16 +106,16 @@ fn test_stack_map_registry_populates() {
     assert!(pipeline.stack_maps.len() >= 1, "Should have at least one safepoint");
 }
 
-/// Test 4: RBP chain walkable from a host fn called by JIT code.
+/// Test 4: gc_trigger can be called from JIT code with the correct VMContext.
 #[test]
-fn test_rbp_chain_walkable() {
-    // We'll create a JIT function that calls gc_trigger, and gc_trigger
-    // will verify the RBP chain is walkable.
+fn test_gc_trigger_called_from_jit() {
+    // We'll create a JIT function that calls gc_trigger, and verify via
+    // host_fns counters that it was invoked with the expected VMContext.
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
 
     // Declare gc_trigger as importable
     let gc_sig = {
-        let mut sig = ir::Signature::new(CallConv::SystemV);
+        let mut sig = ir::Signature::new(pipeline.isa.default_call_conv());
         sig.params.push(AbiParam::new(types::I64)); // vmctx ptr
         sig
     };
@@ -183,7 +182,7 @@ fn test_alloc_fast_path() {
         let vmctx = builder.block_params(block)[0];
 
         // Declare gc_trigger signature for the alloc slow path
-        let mut gc_sig = ir::Signature::new(CallConv::SystemV);
+        let mut gc_sig = ir::Signature::new(pipeline.isa.default_call_conv());
         gc_sig.params.push(AbiParam::new(types::I64));
         let gc_sig_ref = builder.import_signature(gc_sig);
 
@@ -222,7 +221,7 @@ fn test_stack_map_end_to_end() {
 
     // Declare gc_trigger as import
     let gc_sig_ext = {
-        let mut sig = ir::Signature::new(CallConv::SystemV);
+        let mut sig = ir::Signature::new(pipeline.isa.default_call_conv());
         sig.params.push(AbiParam::new(types::I64));
         sig
     };
