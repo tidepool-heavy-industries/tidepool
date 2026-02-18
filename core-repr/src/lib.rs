@@ -1,4 +1,5 @@
 pub mod alpha;
+pub mod builder;
 pub mod datacon;
 pub mod datacon_table;
 pub mod frame;
@@ -9,6 +10,7 @@ pub mod subst;
 pub mod tree;
 pub mod types;
 
+pub use builder::TreeBuilder;
 pub use datacon::*;
 pub use datacon_table::*;
 pub use frame::*;

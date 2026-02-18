@@ -10,7 +10,7 @@ pub fn pretty_print(expr: &CoreExpr) -> String {
 
 fn pp_at(expr: &CoreExpr, idx: usize) -> String {
     match &expr.nodes[idx] {
-        CoreFrame::Var(VarId(id)) => format!("v_{}", id),
+        CoreFrame::Var(id) => format_var(id),
         CoreFrame::Lit(lit) => format_lit(lit),
         CoreFrame::App { fun, arg } => {
             let fun_frame = &expr.nodes[*fun];
@@ -41,7 +41,7 @@ fn pp_at(expr: &CoreExpr, idx: usize) -> String {
             }
             let binders_str = binders
                 .iter()
-                .map(|v| format!("v_{}", v.0))
+                .map(format_var)
                 .collect::<Vec<_>>()
                 .join(" ");
             format!("\\{} -> {}", binders_str, pp_at(expr, current_body))
@@ -49,12 +49,16 @@ fn pp_at(expr: &CoreExpr, idx: usize) -> String {
         CoreFrame::LetNonRec { binder, rhs, body } => {
             let rhs_str = pp_at(expr, *rhs);
             let body_str = pp_at(expr, *body);
-            format!("let v_{} = {}\nin {}", binder.0, rhs_str, body_str)
+            format!("let {} = {}\nin {}", format_var(binder), rhs_str, body_str)
         }
         CoreFrame::LetRec { bindings, body } => {
             let mut s = String::from("let rec\n");
             for (binder, rhs) in bindings {
-                s.push_str(&format!("  v_{} = {}\n", binder.0, pp_at(expr, *rhs)));
+                s.push_str(&format!(
+                    "  {} = {}\n",
+                    format_var(binder),
+                    pp_at(expr, *rhs)
+                ));
             }
             s.push_str(&format!("in {}", pp_at(expr, *body)));
             s
@@ -64,7 +68,11 @@ fn pp_at(expr: &CoreExpr, idx: usize) -> String {
             binder,
             alts,
         } => {
-            let mut s = format!("case {} of v_{} {{\n", pp_at(expr, *scrutinee), binder.0);
+            let mut s = format!(
+                "case {} of {} {{\n",
+                pp_at(expr, *scrutinee),
+                format_var(binder)
+            );
             for alt in alts {
                 s.push_str(&format!(
                     "  {} -> {}\n",
@@ -81,7 +89,7 @@ fn pp_at(expr: &CoreExpr, idx: usize) -> String {
                 .map(|&f| pp_at(expr, f))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("Con_{}({})", tag.0, fields_str)
+            format!("{}({})", tag, fields_str)
         }
         CoreFrame::Join {
             label,
@@ -91,12 +99,12 @@ fn pp_at(expr: &CoreExpr, idx: usize) -> String {
         } => {
             let params_str = params
                 .iter()
-                .map(|v| format!("v_{}", v.0))
+                .map(format_var)
                 .collect::<Vec<_>>()
                 .join(" ");
             format!(
-                "join j_{} ({}) = {}\nin {}",
-                label.0,
+                "join {} ({}) = {}\nin {}",
+                label,
                 params_str,
                 pp_at(expr, *rhs),
                 pp_at(expr, *body)
@@ -108,7 +116,7 @@ fn pp_at(expr: &CoreExpr, idx: usize) -> String {
                 .map(|&a| pp_at(expr, a))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("jump j_{}({})", label.0, args_str)
+            format!("jump {}({})", label, args_str)
         }
         CoreFrame::PrimOp { op, args } => {
             let args_str = args
@@ -116,85 +124,35 @@ fn pp_at(expr: &CoreExpr, idx: usize) -> String {
                 .map(|&a| pp_at(expr, a))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{}({})", primop_name(*op), args_str)
+            format!("{}({})", primop_name(op), args_str)
         }
     }
 }
 
+fn format_var(id: &VarId) -> String {
+    id.to_string()
+}
+
 fn format_lit(lit: &Literal) -> String {
-    match lit {
-        Literal::LitInt(n) => format!("{}#", n),
-        Literal::LitWord(n) => format!("{}##", n),
-        Literal::LitChar(c) => format!("'{}'#", c),
-        Literal::LitString(bytes) => {
-            let s = String::from_utf8_lossy(bytes);
-            format!("\"{}\"#", s)
-        }
-        Literal::LitFloat(bits) => format!("{}#", f32::from_bits(*bits as u32)),
-        Literal::LitDouble(bits) => format!("{}##", f64::from_bits(*bits)),
-    }
+    lit.to_string()
+}
+
+fn primop_name(op: &PrimOpKind) -> String {
+    op.to_string()
 }
 
 fn format_alt_con(con: &AltCon, binders: &[VarId]) -> String {
     let binders_str = binders
         .iter()
-        .map(|v| format!("v_{}", v.0))
+        .map(format_var)
         .collect::<Vec<_>>()
         .join(" ");
-    let mut s = match con {
-        AltCon::DataAlt(DataConId(id)) => format!("Con_{}", id),
-        AltCon::LitAlt(lit) => format_lit(lit),
-        AltCon::Default => "DEFAULT".to_string(),
-    };
+    let mut s = con.to_string();
     if !binders_str.is_empty() {
         s.push(' ');
         s.push_str(&binders_str);
     }
     s
-}
-
-fn primop_name(op: PrimOpKind) -> &'static str {
-    match op {
-        PrimOpKind::IntAdd => "intAdd#",
-        PrimOpKind::IntSub => "intSub#",
-        PrimOpKind::IntMul => "intMul#",
-        PrimOpKind::IntNegate => "intNegate#",
-        PrimOpKind::IntEq => "intEq#",
-        PrimOpKind::IntNe => "intNe#",
-        PrimOpKind::IntLt => "intLt#",
-        PrimOpKind::IntLe => "intLe#",
-        PrimOpKind::IntGt => "intGt#",
-        PrimOpKind::IntGe => "intGe#",
-        PrimOpKind::WordAdd => "wordAdd#",
-        PrimOpKind::WordSub => "wordSub#",
-        PrimOpKind::WordMul => "wordMul#",
-        PrimOpKind::WordEq => "wordEq#",
-        PrimOpKind::WordNe => "wordNe#",
-        PrimOpKind::WordLt => "wordLt#",
-        PrimOpKind::WordLe => "wordLe#",
-        PrimOpKind::WordGt => "wordGt#",
-        PrimOpKind::WordGe => "wordGe#",
-        PrimOpKind::DoubleAdd => "doubleAdd#",
-        PrimOpKind::DoubleSub => "doubleSub#",
-        PrimOpKind::DoubleMul => "doubleMul#",
-        PrimOpKind::DoubleDiv => "doubleDiv#",
-        PrimOpKind::DoubleEq => "doubleEq#",
-        PrimOpKind::DoubleNe => "doubleNe#",
-        PrimOpKind::DoubleLt => "doubleLt#",
-        PrimOpKind::DoubleLe => "doubleLe#",
-        PrimOpKind::DoubleGt => "doubleGt#",
-        PrimOpKind::DoubleGe => "doubleGe#",
-        PrimOpKind::CharEq => "charEq#",
-        PrimOpKind::CharNe => "charNe#",
-        PrimOpKind::CharLt => "charLt#",
-        PrimOpKind::CharLe => "charLe#",
-        PrimOpKind::CharGt => "charGt#",
-        PrimOpKind::CharGe => "charGe#",
-        PrimOpKind::IndexArray => "indexArray#",
-        PrimOpKind::SeqOp => "seq#",
-        PrimOpKind::TagToEnum => "tagToEnum#",
-        PrimOpKind::DataToTag => "dataToTag#",
-    }
 }
 
 fn needs_parens_in_app_fun(frame: &CoreFrame<usize>) -> bool {
@@ -270,7 +228,7 @@ mod tests {
                     binders: vec![],
                     body: 0,
                 }],
-            }, // 6: case 42# of v_5 { DEFAULT -> v_1 }
+            }, // 6: case 42# of v_5 { _ -> v_1 }
             CoreFrame::Con {
                 tag: DataConId(7),
                 fields: vec![1],
@@ -288,7 +246,7 @@ mod tests {
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![1, 1],
-            }, // 10: intAdd#(42#, 42#)
+            }, // 10: +#(42#, 42#)
         ];
 
         for i in 0..nodes.len() {
@@ -391,30 +349,27 @@ mod tests {
         ];
         let expr = RecursiveTree { nodes };
         let s = pretty_print(&expr);
-        assert!(s.contains("DEFAULT -> v_2"));
+        assert!(s.contains("_ -> v_2"));
         assert!(s.contains("Con_4 v_5 v_6 -> v_2"));
         assert!(s.contains("42# -> v_2"));
     }
 
     #[test]
-
     fn test_primop() {
         let nodes = vec![
             lit_int(1),
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
-
                 args: vec![0, 0],
             },
         ];
 
         let expr = RecursiveTree { nodes };
 
-        assert_eq!(pretty_print(&expr), "intAdd#(1#, 1#)");
+        assert_eq!(pretty_print(&expr), "+#(1#, 1#)");
     }
 
     #[test]
-
     fn test_literals() {
         let nodes = vec![
             CoreFrame::Lit(Literal::LitWord(42)),

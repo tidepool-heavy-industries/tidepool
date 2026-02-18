@@ -18,23 +18,19 @@ impl<'a> EffectMachine<'a> {
     pub fn new(table: &'a DataConTable, heap: &'a mut dyn Heap) -> Result<Self, EffectError> {
         let val_id = table
             .get_by_name("Val")
-            .ok_or_else(|| {
-                EffectError::BadUnion("Val constructor not found in DataConTable".into())
-            })?;
+            .ok_or_else(|| EffectError::MissingConstructor { name: "Val" })?;
         let e_id = table
             .get_by_name("E")
-            .ok_or_else(|| {
-                EffectError::BadUnion("E constructor not found in DataConTable".into())
-            })?;
+            .ok_or_else(|| EffectError::MissingConstructor { name: "E" })?;
         let leaf_id = table
             .get_by_name("Leaf")
-            .ok_or_else(|| EffectError::BadContinuation("Leaf constructor not found".into()))?;
+            .ok_or_else(|| EffectError::MissingConstructor { name: "Leaf" })?;
         let node_id = table
             .get_by_name("Node")
-            .ok_or_else(|| EffectError::BadContinuation("Node constructor not found".into()))?;
+            .ok_or_else(|| EffectError::MissingConstructor { name: "Node" })?;
         let union_id = table
             .get_by_name("Union")
-            .ok_or_else(|| EffectError::BadUnion("Union constructor not found".into()))?;
+            .ok_or_else(|| EffectError::MissingConstructor { name: "Union" })?;
         Ok(Self {
             table,
             heap,
@@ -69,10 +65,11 @@ impl<'a> EffectMachine<'a> {
                 Value::Con(id, ref fields) if id == self.e_id => {
                     // E (Union tag# req) k
                     if fields.len() != 2 {
-                        return Err(EffectError::BadUnion(format!(
-                            "E expects 2 fields, got {}",
-                            fields.len()
-                        )));
+                        return Err(EffectError::FieldCountMismatch {
+                            constructor: "E",
+                            expected: 2,
+                            got: fields.len(),
+                        });
                     }
                     let union_val = core_eval::eval::deep_force(fields[0].clone(), self.heap)?;
                     let k = core_eval::eval::force(fields[1].clone(), self.heap)?;
@@ -81,19 +78,20 @@ impl<'a> EffectMachine<'a> {
                     let (tag, request) = match union_val {
                         Value::Con(uid, ref ufields) if uid == self.union_id => {
                             if ufields.len() != 2 {
-                                return Err(EffectError::BadUnion(format!(
-                                    "Union expects 2 fields, got {}",
-                                    ufields.len()
-                                )));
+                                return Err(EffectError::FieldCountMismatch {
+                                    constructor: "Union",
+                                    expected: 2,
+                                    got: ufields.len(),
+                                });
                             }
                             let tag = match &ufields[0] {
                                 Value::Lit(core_repr::Literal::LitWord(w)) => *w,
                                 Value::Lit(core_repr::Literal::LitInt(i)) => *i as u64,
                                 other => {
-                                    return Err(EffectError::BadUnion(format!(
-                                        "Union tag must be Word#/Int#, got {:?}",
-                                        other
-                                    )))
+                                    return Err(EffectError::UnexpectedValue {
+                                        context: "Union tag (Word#/Int#)",
+                                        got: format!("{:?}", other),
+                                    })
                                 }
                             };
                             // deep_force the request so FromCore never sees ThunkRef
@@ -101,10 +99,10 @@ impl<'a> EffectMachine<'a> {
                             (tag, req)
                         }
                         other => {
-                            return Err(EffectError::BadUnion(format!(
-                                "Expected Union constructor, got {:?}",
-                                other
-                            )))
+                            return Err(EffectError::UnexpectedValue {
+                                context: "Union constructor",
+                                got: format!("{:?}", other),
+                            })
                         }
                     };
 
@@ -115,10 +113,10 @@ impl<'a> EffectMachine<'a> {
                     current = self.apply_cont(k, response)?;
                 }
                 other => {
-                    return Err(EffectError::BadUnion(format!(
-                        "Expected Val or E constructor, got {:?}",
-                        other
-                    )));
+                    return Err(EffectError::UnexpectedValue {
+                        context: "Val or E constructor",
+                        got: format!("{:?}", other),
+                    });
                 }
             }
         }
@@ -131,10 +129,11 @@ impl<'a> EffectMachine<'a> {
             Value::Con(id, ref fields) if id == self.leaf_id => {
                 // Leaf(f) — apply f to arg
                 if fields.len() != 1 {
-                    return Err(EffectError::BadContinuation(format!(
-                        "Leaf expects 1 field, got {}",
-                        fields.len()
-                    )));
+                    return Err(EffectError::FieldCountMismatch {
+                        constructor: "Leaf",
+                        expected: 1,
+                        got: fields.len(),
+                    });
                 }
                 let f = core_eval::eval::force(fields[0].clone(), self.heap)?;
                 Ok(self.apply_closure(f, arg)?)
@@ -142,10 +141,11 @@ impl<'a> EffectMachine<'a> {
             Value::Con(id, ref fields) if id == self.node_id => {
                 // Node(k1, k2) — apply k1, then compose with k2
                 if fields.len() != 2 {
-                    return Err(EffectError::BadContinuation(format!(
-                        "Node expects 2 fields, got {}",
-                        fields.len()
-                    )));
+                    return Err(EffectError::FieldCountMismatch {
+                        constructor: "Node",
+                        expected: 2,
+                        got: fields.len(),
+                    });
                 }
                 let k1 = fields[0].clone();
                 let k2 = fields[1].clone();
@@ -164,29 +164,31 @@ impl<'a> EffectMachine<'a> {
                     Value::Con(eid, ref efields) if eid == self.e_id => {
                         // k1 yielded E(union, k') — compose: E(union, Node(k', k2))
                         if efields.len() != 2 {
-                            return Err(EffectError::BadContinuation(
-                                "E in continuation expects 2 fields".into(),
-                            ));
+                            return Err(EffectError::FieldCountMismatch {
+                                constructor: "E (continuation)",
+                                expected: 2,
+                                got: efields.len(),
+                            });
                         }
                         let union_val = efields[0].clone();
                         let k_prime = efields[1].clone();
                         let new_k = Value::Con(self.node_id, vec![k_prime, k2]);
                         Ok(Value::Con(self.e_id, vec![union_val, new_k]))
                     }
-                    other => Err(EffectError::BadContinuation(format!(
-                        "Expected Val or E after applying k1, got {:?}",
-                        other
-                    ))),
+                    other => Err(EffectError::UnexpectedValue {
+                        context: "Val or E after applying k1",
+                        got: format!("{:?}", other),
+                    }),
                 }
             }
             Value::Closure(..) => {
                 // Raw closure (degenerate continuation)
                 Ok(self.apply_closure(k, arg)?)
             }
-            other => Err(EffectError::BadContinuation(format!(
-                "Expected Leaf or Node, got {:?}",
-                other
-            ))),
+            other => Err(EffectError::UnexpectedValue {
+                context: "Leaf or Node continuation",
+                got: format!("{:?}", other),
+            }),
         }
     }
 
@@ -205,10 +207,10 @@ impl<'a> EffectMachine<'a> {
                     Ok(Value::ConFun(tag, arity, args))
                 }
             }
-            other => Err(EffectError::BadContinuation(format!(
-                "Expected closure, got {:?}",
-                other
-            ))),
+            other => Err(EffectError::UnexpectedValue {
+                context: "closure",
+                got: format!("{:?}", other),
+            }),
         }
     }
 }
