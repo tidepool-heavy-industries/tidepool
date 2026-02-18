@@ -22,6 +22,7 @@ import GHC.Types.Literal
 import GHC.Types.Name (nameOccName, isExternalName, isSystemName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Core.TyCon
+import GHC.Core.Type (splitTyConApp_maybe)
 import GHC.Types.Basic (JoinPointHood(..))
 import GHC.Utils.Outputable (showPprUnsafe)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
@@ -34,6 +35,7 @@ import Data.ByteString (ByteString)
 import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as Seq
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Control.Monad.State
 import Control.Monad (foldM, forM)
 import Tidepool.Resolve (resolveExternals, UnresolvedVar(..))
@@ -70,6 +72,7 @@ data LitEnc
 data TransState = TransState
   { tsNodes :: !(Seq FlatNode)
   , tsUsedDCs :: !(Map.Map Word64 DataCon)
+  , tsRecJoinIds :: !(Set.Set Word64)  -- join IDs from Rec groups (translated as LetRec lambdas)
   }
 
 type TransM = State TransState
@@ -89,7 +92,7 @@ translateBinds :: [CoreBind] -> [(String, Seq FlatNode)]
 translateBinds binds = concatMap translateBind binds
   where
     translateBind (NonRec b rhs) =
-      let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty)
+      let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty)
           finalNodes = tsNodes s
           rootIdx = Seq.length finalNodes - 1
       in if idx == rootIdx
@@ -97,7 +100,7 @@ translateBinds binds = concatMap translateBind binds
          else error "Root index mismatch in NonRec"
     translateBind (Rec pairs) =
       map (\(b, rhs) ->
-        let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty)
+        let (idx, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty)
             finalNodes = tsNodes s
             rootIdx = Seq.length finalNodes - 1
         in if idx == rootIdx
@@ -112,7 +115,7 @@ translateBinds binds = concatMap translateBind binds
 translateModule :: [CoreBind] -> String -> (Seq FlatNode, Map.Map Word64 DataCon)
 translateModule allBinds targetName =
   let targetId = findTargetId targetName allBinds
-      (_, finalState) = runState (wrapAllBinds allBinds targetId) (TransState Seq.empty Map.empty)
+      (_, finalState) = runState (wrapAllBinds allBinds targetId) (TransState Seq.empty Map.empty Set.empty)
   in (tsNodes finalState, tsUsedDCs finalState)
   where
     findTargetId name binds =
@@ -142,9 +145,18 @@ translateModule allBinds targetName =
       if null valPairs
         then wrapAllBinds rest target
         else do
+          -- Register rec join IDs so call sites emit App instead of Jump
+          let recJoins = [varId b | (b, _) <- valPairs, isJoinId b]
+          modify' $ \s -> s { tsRecJoinIds = tsRecJoinIds s `Set.union` Set.fromList recJoins }
           pairIdxs <- forM valPairs $ \(b, rhs) -> do
-            rhsIdx <- translate rhs
-            return (varId b, rhsIdx)
+            rhs' <- case isJoinId_maybe b of
+              Just arity -> do
+                let (params, joinBody) = collectValueBinders arity rhs
+                joinBodyIdx <- translate joinBody
+                foldM (\inner p -> emitNode $ NLam (varId p) inner)
+                      joinBodyIdx (reverse params)
+              Nothing -> translate rhs
+            return (varId b, rhs')
           bodyIdx <- wrapAllBinds rest target
           emitNode (NLetRec pairIdxs bodyIdx)
 
@@ -167,11 +179,11 @@ collectUsedDataCons binds =
   in map dcToMeta (Map.elems allDCs)
   where
     collectFromBind (NonRec _ rhs) =
-      let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty)
+      let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty)
       in tsUsedDCs s
     collectFromBind (Rec pairs) =
       foldMap (\(_, rhs) ->
-        let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty)
+        let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty)
         in tsUsedDCs s
       ) pairs
 
@@ -210,6 +222,24 @@ translate expr =
         childIdxs <- mapM translate args
         emitNode $ NCon (varId (dataConWorkId dc)) childIdxs
 
+    -- tagToEnum# @T arg → case arg of { 0# → C0; 1# → C1; ... }
+    -- We desugar here because type information is erased downstream.
+    Var v | Just pop <- isPrimOpId_maybe v
+          , pop == TagToEnumOp
+          , length args == 1 -> do
+        let typeArgs = filter (not . isValueArg) allArgs
+        case typeArgs of
+          [Type ty] | Just (tc, _) <- splitTyConApp_maybe ty -> do
+            let dcs = tyConDataCons tc
+            argIdx <- translate (head args)
+            altData <- forM (zip [0..] dcs) $ \(i :: Int, dc) -> do
+              recordDC dc
+              conIdx <- emitNode $ NCon (varId (dataConWorkId dc)) []
+              return $ FlatAlt (FLitAlt (LEInt (fromIntegral i))) [] conIdx
+            -- Use VarId 0 as the case binder (unused in alternatives)
+            emitNode $ NCase argIdx 0 altData
+          _ -> error $ "tagToEnum# without resolvable type argument"
+
     Var v | Just pop <- isPrimOpId_maybe v
           , length args == primOpArity pop -> do
         childIdxs <- mapM translate args
@@ -217,8 +247,16 @@ translate expr =
 
     Var v | Just arity <- isJoinId_maybe v
           , length args == arity -> do
-        childIdxs <- mapM translate args
-        emitNode $ NJump (varId v) childIdxs
+        recJoins <- gets tsRecJoinIds
+        if Set.member (varId v) recJoins
+          then do
+            -- Rec join point: translated as LetRec lambda, emit App chain
+            hIdx <- emitNode $ NVar (varId v)
+            childIdxs <- mapM translate args
+            foldM (\fIdx aIdx -> emitNode $ NApp fIdx aIdx) hIdx childIdxs
+          else do
+            childIdxs <- mapM translate args
+            emitNode $ NJump (varId v) childIdxs
     
     _ -> do
       hIdx <- translateHead hd
@@ -246,16 +284,23 @@ translateHead = \case
         bodyIdx <- translate body
         emitNode $ NLetNonRec (varId b) rhsIdx bodyIdx
   Let (Rec pairs) body -> do
-    -- We need to be careful with LetRec if it contains join points.
-    -- The spec says: "If a Rec binding group contains join points (isJoinId_maybe), error with a clear message."
-    if any (isJoinId . fst) pairs
-      then error "LetRec contains join points, which is not supported in v1."
-      else do
-        pairIdxs <- forM pairs $ \(b, rhs) -> do
-          rhsIdx <- translate rhs
-          return (varId b, rhsIdx)
-        bodyIdx <- translate body
-        emitNode $ NLetRec pairIdxs bodyIdx
+    -- For join point binders in Rec groups (GHC's "joinrec"), strip the
+    -- join arity and translate as regular lambdas.  Register them so that
+    -- call sites emit NApp chains instead of NJump.
+    let recJoins = [varId b | (b, _) <- pairs, isJoinId b]
+    modify' $ \s -> s { tsRecJoinIds = tsRecJoinIds s `Set.union` Set.fromList recJoins }
+    pairIdxs <- forM pairs $ \(b, rhs) -> do
+      rhs' <- case isJoinId_maybe b of
+        Just arity -> do
+          let (params, joinBody) = collectValueBinders arity rhs
+          joinBodyIdx <- translate joinBody
+          -- Build nested NLam chain: \p1 -> \p2 -> ... -> joinBody
+          foldM (\inner p -> emitNode $ NLam (varId p) inner)
+                joinBodyIdx (reverse params)
+        Nothing -> translate rhs
+      return (varId b, rhs')
+    bodyIdx <- translate body
+    emitNode $ NLetRec pairIdxs bodyIdx
   Case scrut b _alts_ty alts -> do
     scrutIdx <- translate scrut
     altData <- mapM translateAlt alts

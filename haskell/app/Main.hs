@@ -7,9 +7,12 @@ import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Control.Exception (try, SomeException)
+import Control.Monad (foldM)
 
+import GHC.Core (CoreBind, Bind(..))
 import GHC.Core.DataCon (DataCon, dataConSourceArity, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
-import GHC.Types.Name (nameOccName)
+import GHC.Types.Name (nameOccName, isExternalName)
+import GHC.Types.Id (idName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Var (varUnique)
@@ -33,16 +36,18 @@ data Args = Args
   { argOutDir :: Maybe FilePath
   , argTarget :: Maybe String
   , argDumpCore :: Bool
+  , argAllClosed :: Bool
   , argIncludes :: [FilePath]
   , argFiles :: [String]
   }
 
 parseArgs :: [String] -> Args
-parseArgs = go (Args Nothing Nothing False [] [])
+parseArgs = go (Args Nothing Nothing False False [] [])
   where
     go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
     go a ("--target" : name : rest) = go a { argTarget = Just name } rest
     go a ("--dump-core" : rest) = go a { argDumpCore = True } rest
+    go a ("--all-closed" : rest) = go a { argAllClosed = True } rest
     go a ("--include" : dir : rest) = go a { argIncludes = argIncludes a ++ [dir] } rest
     go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
     go a [] = a
@@ -67,8 +72,48 @@ processFile args path = do
           Nothing  -> takeDirectory path </> takeBaseName path ++ "_cbor"
     createDirectoryIfMissing True outDir
 
-    case mTarget of
-      Just targetName -> do
+    case (mTarget, argAllClosed args) of
+      (_, True) -> do
+        -- All-closed mode: translate each binding independently via translateModuleClosed
+        -- Use original names (not deduped) since translateModuleClosed looks up by name.
+        -- Skip duplicates (GHC may produce multiple bindings with the same name).
+        -- Only export bindings with External names (user-defined top-level).
+        -- GHC-floated locals (isEven, go, etc.) have Internal/System names.
+        let externalBinders = [ b | bind <- binds
+                              , b <- case bind of
+                                       NonRec b _ -> [b]
+                                       Rec pairs  -> map fst pairs
+                              , isExternalName (idName b) ]
+            uniqueNames = Map.keys $ Map.fromList
+              [(n, ()) | b <- externalBinders
+              , let n = occNameString (nameOccName (idName b))
+              , not (null n), head n /= '$']
+        allMetaMap <- foldM (\acc name -> do
+          let (nodes, usedDCs, unresolved) = translateModuleClosed binds name
+          if not (null unresolved) then
+            putStrLn $ "  WARNING (" ++ name ++ "): " ++ show (length unresolved) ++ " unresolved external(s)"
+          else return ()
+          let cbor = encodeTree nodes
+          let outFile = outDir </> name ++ ".cbor"
+          BS.writeFile outFile cbor
+          putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
+          let usedMeta = map dcToMeta (Map.elems usedDCs)
+          return $ acc `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- usedMeta]
+          ) Map.empty uniqueNames
+
+        -- Write merged metadata
+        let tyconMeta = collectDataCons tycons
+            scanMeta = collectUsedDataCons binds
+            mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- tyconMeta]
+                        `Map.union` allMetaMap
+                        `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- scanMeta]
+            allMeta = Map.elems mergedMap
+        let metaCbor = encodeMetadata allMeta
+        let metaFile = outDir </> "meta.cbor"
+        BS.writeFile metaFile metaCbor
+        putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
+
+      (Just targetName, False) -> do
         -- Whole-module mode: serialize all bindings as nested lets around the target
         let (nodes, usedDCs, unresolved) = translateModuleClosed binds targetName
         if not (null unresolved) then do
@@ -95,7 +140,7 @@ processFile args path = do
         BS.writeFile metaFile metaCbor
         putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
 
-      Nothing -> do
+      (Nothing, False) -> do
         -- Per-binding mode (original behavior)
         let translated = translateBinds binds
             dedupd = dedup Map.empty translated

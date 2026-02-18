@@ -54,6 +54,11 @@ impl DataConTable {
         self.by_id.is_empty()
     }
 
+    /// Look up constructor name by DataConId.
+    pub fn name_of(&self, id: DataConId) -> Option<&str> {
+        self.by_id.get(&id).map(|dc| dc.name.as_str())
+    }
+
     /// Iterate over all data constructors.
     pub fn iter(&self) -> impl Iterator<Item = &DataCon> {
         self.by_id.values()
