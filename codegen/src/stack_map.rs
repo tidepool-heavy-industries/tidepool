@@ -17,6 +17,8 @@ pub struct StackMapInfo {
 #[derive(Debug, Default)]
 pub struct StackMapRegistry {
     entries: BTreeMap<usize, StackMapInfo>,
+    /// Known JIT function address ranges (start, end).
+    ranges: Vec<(usize, usize)>,
 }
 
 impl StackMapRegistry {
@@ -27,14 +29,12 @@ impl StackMapRegistry {
     /// Register stack map entries from a compiled function.
     ///
     /// `base_ptr` is the start address of the compiled function in memory.
+    /// `size` is the total size of the function in bytes.
     /// `raw_entries` come from `CompiledCode.buffer.user_stack_maps()`:
     ///   each tuple is (code_offset, frame_size, UserStackMap).
-    ///
-    /// We key by `base_ptr + code_offset` as an approximation of the return address.
-    /// The exact return address depends on the call instruction encoding size,
-    /// but Cranelift's code_offset for user stack maps points to the instruction
-    /// AFTER the call (the return point), so base_ptr + code_offset IS the return address.
-    pub fn register(&mut self, base_ptr: usize, raw_entries: &[(u32, u32, Vec<(cranelift_codegen::ir::types::Type, u32)>)]) {
+    pub fn register(&mut self, base_ptr: usize, size: u32, raw_entries: &[(u32, u32, Vec<(cranelift_codegen::ir::types::Type, u32)>)]) {
+        self.ranges.push((base_ptr, base_ptr + size as usize));
+        
         for (code_offset, frame_size, slot_entries) in raw_entries {
             let return_addr = base_ptr + *code_offset as usize;
             let offsets: Vec<u32> = slot_entries.iter().map(|(_, offset)| *offset).collect();
@@ -63,14 +63,6 @@ impl StackMapRegistry {
     /// Check if an address falls within the known JIT code region.
     /// Used by the frame walker to determine when to stop walking.
     pub fn contains_address(&self, addr: usize) -> bool {
-        // If we have any entries, check if addr is in the range
-        // of known return addresses. This is a rough heuristic;
-        // a more precise approach would track function start/end ranges.
-        if let (Some((&min, _)), Some((&max, _))) = (self.entries.iter().next(), self.entries.iter().next_back()) {
-            // Give some slack for the function boundaries
-            addr >= min.saturating_sub(4096) && addr <= max.saturating_add(4096)
-        } else {
-            false
-        }
+        self.ranges.iter().any(|(start, end)| addr >= *start && addr < *end)
     }
 }

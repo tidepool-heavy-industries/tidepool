@@ -16,13 +16,19 @@ use crate::stack_map::StackMapRegistry;
 /// 2. `module.define_function()` for executable code (recompiles from IR)
 pub struct CodegenPipeline {
     /// The JIT module that manages executable memory.
+    ///
+    /// This field is public as an **escape hatch** for advanced use cases and tests
+    /// that need direct access to Cranelift's `JITModule`. Most users should prefer
+    /// the safe wrapper methods on `CodegenPipeline` (e.g., `declare_function`)
+    /// instead of calling into `module` directly.
     pub module: JITModule,
     /// Target ISA (needed for Context::compile).
     pub isa: Arc<dyn TargetIsa>,
     /// Stack map registry populated during compilation.
     pub stack_maps: StackMapRegistry,
     /// Pending stack maps waiting for finalization to get base pointers.
-    pending_stack_maps: Vec<(FuncId, Vec<(u32, u32, Vec<(cranelift_codegen::ir::types::Type, u32)>)>)>,
+    /// Stores (func_id, func_size, raw_maps).
+    pending_stack_maps: Vec<(FuncId, u32, Vec<(u32, u32, Vec<(cranelift_codegen::ir::types::Type, u32)>)>)>,
 }
 
 impl CodegenPipeline {
@@ -73,7 +79,7 @@ impl CodegenPipeline {
         let sig = self.make_func_signature();
         self.module
             .declare_function(name, Linkage::Export, &sig)
-            .expect("failed to declare function")
+            .unwrap_or_else(|e| panic!("failed to declare function `{}`: {}", name, e))
     }
 
     /// Compile a function using the double-compile strategy.
@@ -87,7 +93,11 @@ impl CodegenPipeline {
         // First compile: extract stack maps
         let mut ctrl_plane = ControlPlane::default();
         let compiled = ctx.compile(self.isa.as_ref(), &mut ctrl_plane)
-            .expect("first compilation failed");
+            .unwrap_or_else(|e| {
+                panic!("first compilation failed for function ID {:?}: {:?}", func_id, e);
+            });
+
+        let func_size = compiled.buffer.data().len() as u32;
 
         // Extract stack map data before define_function recompiles
         let raw_maps: Vec<(u32, u32, Vec<(cranelift_codegen::ir::types::Type, u32)>)> = compiled
@@ -103,10 +113,12 @@ impl CodegenPipeline {
         // Second compile: define in module for execution
         self.module
             .define_function(func_id, ctx)
-            .expect("define_function failed");
+            .unwrap_or_else(|e| {
+                panic!("define_function failed for FuncId {:?}: {:?}", func_id, e);
+            });
 
         // Store raw maps and register after finalize.
-        self.pending_stack_maps.push((func_id, raw_maps));
+        self.pending_stack_maps.push((func_id, func_size, raw_maps));
     }
 
     /// Finalize all defined functions, making them callable.
@@ -116,9 +128,9 @@ impl CodegenPipeline {
 
         // Now register stack maps with actual base pointers
         let pending = std::mem::take(&mut self.pending_stack_maps);
-        for (func_id, raw_maps) in pending {
+        for (func_id, func_size, raw_maps) in pending {
             let base_ptr = self.module.get_finalized_function(func_id) as usize;
-            self.stack_maps.register(base_ptr, &raw_maps);
+            self.stack_maps.register(base_ptr, func_size, &raw_maps);
         }
     }
 
