@@ -340,8 +340,12 @@ impl EmitContext {
                 Ok(body_val)
             }
             CoreFrame::Case { .. } => Err(EmitError::NotYetImplemented("Case".into())),
-            CoreFrame::Join { .. } => Err(EmitError::NotYetImplemented("Join".into())),
-            CoreFrame::Jump { .. } => Err(EmitError::NotYetImplemented("Jump".into())),
+            CoreFrame::Join { label, params, rhs, body } => {
+                crate::emit::join::emit_join(self, pipeline, builder, vmctx, gc_sig, tree, label, params, *rhs, *body)
+            }
+            CoreFrame::Jump { label, args } => {
+                crate::emit::join::emit_jump(self, pipeline, builder, vmctx, gc_sig, tree, label, args)
+            }
         }
     }
 }
@@ -404,7 +408,7 @@ fn emit_lit(
     }
 }
 
-fn ensure_heap_ptr(
+pub(crate) fn ensure_heap_ptr(
     builder: &mut FunctionBuilder,
     vmctx: Value,
     gc_sig: ir::SigRef,

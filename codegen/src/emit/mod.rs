@@ -1,5 +1,6 @@
 pub mod expr;
 pub mod primop;
+pub mod join;
 
 use cranelift_codegen::ir::Value;
 use core_repr::{VarId, JoinId, PrimOpKind};
