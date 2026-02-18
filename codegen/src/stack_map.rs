@@ -12,8 +12,10 @@ pub struct StackMapInfo {
 
 /// Maps absolute return addresses to stack map info.
 ///
-/// Key = function_base_ptr + code_offset + call_instruction_size
+/// Key = function_base_ptr + code_offset
 /// (i.e., the return address, which is what the frame walker sees as caller_pc).
+/// Cranelift's `code_offset` for user stack maps already points to the
+/// instruction AFTER the call (the return point).
 #[derive(Debug, Default)]
 pub struct StackMapRegistry {
     entries: BTreeMap<usize, StackMapInfo>,
@@ -32,6 +34,10 @@ impl StackMapRegistry {
     /// `size` is the total size of the function in bytes.
     /// `raw_entries` come from `CompiledCode.buffer.user_stack_maps()`:
     ///   each tuple is (code_offset, frame_size, UserStackMap).
+    ///
+    /// We key by `base_ptr + code_offset` as the return address. Cranelift's
+    /// `code_offset` for user stack maps points to the instruction AFTER the call
+    /// (the return point), so `base_ptr + code_offset` IS the absolute return address.
     pub fn register(&mut self, base_ptr: usize, size: u32, raw_entries: &[(u32, u32, Vec<(cranelift_codegen::ir::types::Type, u32)>)]) {
         self.ranges.push((base_ptr, base_ptr + size as usize));
         
