@@ -79,6 +79,10 @@ pub fn clear_gc_test_hook() {
 }
 
 /// Set the stack map registry for the current thread.
+///
+/// # Safety
+/// The registry must outlive any JIT code execution that might trigger GC, and should
+/// be cleared (via `clear_stack_map_registry`) before the registry is dropped.
 pub fn set_stack_map_registry(registry: &StackMapRegistry) {
     STACK_MAP_REGISTRY.with(|reg_cell| {
         *reg_cell.borrow_mut() = Some(registry as *const _);

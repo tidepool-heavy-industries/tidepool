@@ -77,8 +77,10 @@ pub unsafe fn walk_frames(
             // The SP just before that 'call' was (addr_of_return_addr + 8).
             
             // We need to find where this return_addr was on the stack.
-            // If it's the first frame, it's at search_ptr.
-            // If it's a subsequent frame, it's at rbp + 8.
+            //
+            // If this is the first frame we found, and it was found via the initial RSP search
+            // (proxied by `search_ptr < start_rbp + 16`), we use that search address.
+            // Otherwise, for any subsequent JIT frames, the return address is at [rbp + 8].
             let addr_of_return_addr = if roots.is_empty() && search_ptr < start_rbp + 16 {
                 search_ptr
             } else {
