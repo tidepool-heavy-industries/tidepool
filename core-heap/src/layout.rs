@@ -27,6 +27,13 @@ impl HeapTag {
     }
 }
 
+impl TryFrom<u8> for HeapTag {
+    type Error = u8;
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::from_byte(value).ok_or(value)
+    }
+}
+
 impl std::fmt::Display for HeapTag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -65,6 +72,13 @@ impl ThunkStateTag {
 
     pub fn as_byte(self) -> u8 {
         self as u8
+    }
+}
+
+impl TryFrom<u8> for ThunkStateTag {
+    type Error = u8;
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::from_byte(value).ok_or(value)
     }
 }
 
@@ -108,6 +122,13 @@ impl LitTag {
 
     pub fn as_byte(self) -> u8 {
         self as u8
+    }
+}
+
+impl TryFrom<u8> for LitTag {
+    type Error = u8;
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::from_byte(value).ok_or(value)
     }
 }
 
@@ -178,7 +199,7 @@ pub const HEADER_SIZE: usize = 8;
 ///
 /// ptr must point to a valid HeapObject.
 pub unsafe fn read_tag(ptr: *const u8) -> u8 {
-    *ptr
+    *ptr.add(OFFSET_TAG)
 }
 
 /// Read the tag byte and convert to HeapTag enum.
@@ -187,7 +208,7 @@ pub unsafe fn read_tag(ptr: *const u8) -> u8 {
 ///
 /// ptr must point to a valid HeapObject.
 pub unsafe fn read_heap_tag(ptr: *const u8) -> Option<HeapTag> {
-    HeapTag::from_byte(*ptr)
+    HeapTag::from_byte(*ptr.add(OFFSET_TAG))
 }
 
 /// Read the total size from a heap object pointer.
@@ -199,7 +220,7 @@ pub unsafe fn read_size(ptr: *const u8) -> u16 {
     // Size is stored at offset 1 as u16.
     // Use read_unaligned in case the pointer itself is not perfectly aligned
     // (though our objects should be 8-byte aligned).
-    std::ptr::read_unaligned(ptr.add(1) as *const u16)
+    std::ptr::read_unaligned(ptr.add(OFFSET_SIZE) as *const u16)
 }
 
 /// Write tag + size header.
@@ -209,16 +230,16 @@ pub unsafe fn read_size(ptr: *const u8) -> u16 {
 /// ptr must point to allocated memory of at least `HEADER_SIZE` bytes.
 /// size must be at least `HEADER_SIZE`.
 pub unsafe fn write_header(ptr: *mut u8, tag: u8, size: u16) {
-    *ptr = tag;
-    std::ptr::write_unaligned(ptr.add(1) as *mut u16, size);
+    *ptr.add(OFFSET_TAG) = tag;
+    std::ptr::write_unaligned(ptr.add(OFFSET_SIZE) as *mut u16, size);
     // Padding bytes are from offset 3 to 7 (5 bytes).
     // Note: decisions.md says variant-specific payload follows at offset 3,
     // but also says all objects are 8-byte aligned.
     // If payload starts at offset 3, we should NOT zero these bytes.
     // However, the spec ALSO says: "tag(1) + size(2) + padding(5) = 8 bytes aligned"
     // in the Wave 1 description. We will follow the padding description for now
-    // but only zero if size >= 8 to be safe.
-    if size >= 8 {
+    // but only zero if size as usize >= HEADER_SIZE to be safe.
+    if size as usize >= HEADER_SIZE {
         std::ptr::write_bytes(ptr.add(3), 0, 5);
     }
 }
@@ -265,8 +286,10 @@ mod tests {
     fn test_heap_tag_roundtrip() {
         for tag in [HeapTag::Closure, HeapTag::Thunk, HeapTag::Con, HeapTag::Lit] {
             assert_eq!(HeapTag::from_byte(tag.as_byte()), Some(tag));
+            assert_eq!(HeapTag::try_from(tag.as_byte()), Ok(tag));
         }
         assert_eq!(HeapTag::from_byte(255), None);
+        assert_eq!(HeapTag::try_from(255), Err(255));
     }
 
     #[test]
@@ -285,8 +308,10 @@ mod tests {
             ThunkStateTag::Evaluated,
         ] {
             assert_eq!(ThunkStateTag::from_byte(tag.as_byte()), Some(tag));
+            assert_eq!(ThunkStateTag::try_from(tag.as_byte()), Ok(tag));
         }
         assert_eq!(ThunkStateTag::from_byte(255), None);
+        assert_eq!(ThunkStateTag::try_from(255), Err(255));
     }
 
     #[test]
@@ -306,8 +331,10 @@ mod tests {
             LitTag::Double,
         ] {
             assert_eq!(LitTag::from_byte(tag.as_byte()), Some(tag));
+            assert_eq!(LitTag::try_from(tag.as_byte()), Ok(tag));
         }
         assert_eq!(LitTag::from_byte(255), None);
+        assert_eq!(LitTag::try_from(255), Err(255));
     }
 
     #[test]
