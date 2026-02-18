@@ -10,6 +10,9 @@ pub struct StackMapInfo {
     pub offsets: Vec<u32>,
 }
 
+pub type RawStackMapEntry = (cranelift_codegen::ir::types::Type, u32);
+pub type RawStackMap = (u32, u32, Vec<RawStackMapEntry>);
+
 /// Maps absolute return addresses to stack map info.
 ///
 /// Key = function_base_ptr + code_offset
@@ -38,7 +41,7 @@ impl StackMapRegistry {
     /// We key by `base_ptr + code_offset` as the return address. Cranelift's
     /// `code_offset` for user stack maps points to the instruction AFTER the call
     /// (the return point), so `base_ptr + code_offset` IS the absolute return address.
-    pub fn register(&mut self, base_ptr: usize, size: u32, raw_entries: &[(u32, u32, Vec<(cranelift_codegen::ir::types::Type, u32)>)]) {
+    pub fn register(&mut self, base_ptr: usize, size: u32, raw_entries: &[RawStackMap]) {
         self.ranges.push((base_ptr, base_ptr + size as usize));
         
         for (code_offset, frame_size, slot_entries) in raw_entries {
