@@ -83,7 +83,7 @@ impl CompiledEffectMachine {
             // Val(value) — extract value from fields[0]
             let num_fields = unsafe { *(result.add(16) as *const u16) };
             if num_fields < 1 {
-                return Yield::Error(YieldError::BadEFields(num_fields));
+                return Yield::Error(YieldError::BadValFields(num_fields));
             }
             let value = unsafe { *(result.add(24) as *const *mut u8) };
             Yield::Done(value)

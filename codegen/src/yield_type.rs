@@ -20,6 +20,8 @@ pub enum YieldError {
     UnexpectedTag(u8),
     /// Result was Con but con_tag was neither Val nor E.
     UnexpectedConTag(u64),
+    /// Val constructor had wrong number of fields.
+    BadValFields(u16),
     /// E constructor had wrong number of fields.
     BadEFields(u16),
     /// Union constructor had wrong number of fields.  
