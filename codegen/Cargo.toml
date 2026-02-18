@@ -10,3 +10,5 @@ cranelift-jit = "=0.116.1"
 cranelift-module = "=0.116.1"
 cranelift-native = "=0.116.1"
 target-lexicon = "0.13"
+core-repr = { path = "../core-repr" }
+core-heap = { path = "../core-heap" }
