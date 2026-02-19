@@ -301,12 +301,21 @@ impl Parse for InlineInput {
                     let lit: LitStr = input.parse()?;
                     includes.push(lit.value());
                 }
-                input.parse::<Token![,]>()?;
+                let _ = input.parse::<Token![,]>();
             }
         }
 
-        // Parse: r#"..."#
-        let source: LitStr = input.parse()?;
+        // Parse optional Haskell source body
+        let source = if input.is_empty() {
+            LitStr::new("", proc_macro2::Span::call_site())
+        } else {
+            let _ = input.parse::<Token![,]>();
+            if input.is_empty() {
+                LitStr::new("", proc_macro2::Span::call_site())
+            } else {
+                input.parse()?
+            }
+        };
 
         Ok(InlineInput {
             target,

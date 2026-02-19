@@ -13,3 +13,4 @@ target-lexicon = "0.13"
 core-repr = { path = "../core-repr" }
 core-heap = { path = "../core-heap" }
 core-eval = { path = "../core-eval" }
+core-effect = { path = "../core-effect" }

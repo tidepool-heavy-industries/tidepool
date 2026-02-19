@@ -7,6 +7,7 @@ pub mod emit;
 pub mod gc;
 pub mod heap_bridge;
 pub mod host_fns;
+pub mod jit_machine;
 pub mod nursery;
 pub mod pipeline;
 pub mod stack_map;
