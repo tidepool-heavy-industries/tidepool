@@ -57,6 +57,19 @@ impl<T> ToCore for std::marker::PhantomData<T> {
 
 // Box
 
+// Value identity — pass through without conversion.
+impl ToCore for Value {
+    fn to_value(&self, _table: &DataConTable) -> Result<Value, BridgeError> {
+        Ok(self.clone())
+    }
+}
+
+impl FromCore for Value {
+    fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
+        Ok(value.clone())
+    }
+}
+
 impl<T: FromCore> FromCore for Box<T> {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         T::from_value(value, table).map(Box::new)

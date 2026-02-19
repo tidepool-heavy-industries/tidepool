@@ -1,7 +1,6 @@
 {-# LANGUAGE DataKinds, TypeOperators #-}
 module Eval (eval, repl, showVal, showInt) where
 
-import Data.Char (chr)
 import Types
 import Effects
 
@@ -18,7 +17,21 @@ showInt n
 showPos :: Int -> String
 showPos n
   | n == (0 :: Int) = ""
-  | otherwise       = showPos (quot n (10 :: Int)) ++ [chr ((48 :: Int) + rem n (10 :: Int))]
+  | otherwise       = showPos (quot n (10 :: Int)) ++ [digitToChar (rem n (10 :: Int))]
+
+digitToChar :: Int -> Char
+digitToChar d = case d of
+  0 -> '0'
+  1 -> '1'
+  2 -> '2'
+  3 -> '3'
+  4 -> '4'
+  5 -> '5'
+  6 -> '6'
+  7 -> '7'
+  8 -> '8'
+  9 -> '9'
+  _ -> '?'
 
 -- | Convert TVal to display string.
 showVal :: TVal -> String

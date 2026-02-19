@@ -23,6 +23,8 @@ pub enum EffectError {
         context: &'static str,
         got: String,
     },
+    /// An effect handler encountered a runtime error.
+    Handler(String),
 }
 
 impl From<EvalError> for EffectError {
@@ -56,6 +58,7 @@ impl std::fmt::Display for EffectError {
             EffectError::UnexpectedValue { context, got } => {
                 write!(f, "expected {}, got {}", context, got)
             }
+            EffectError::Handler(msg) => write!(f, "handler error: {}", msg),
         }
     }
 }

@@ -245,50 +245,93 @@ impl EmitContext {
             }
             CoreFrame::LetRec { bindings, body } => {
                 for (_, rhs_idx) in bindings {
-                    if !matches!(tree.nodes[*rhs_idx], CoreFrame::Lam { .. }) {
-                        return Err(EmitError::NotYetImplemented("LetRec with non-lambda RHS".into()));
+                    match &tree.nodes[*rhs_idx] {
+                        CoreFrame::Lam { .. } | CoreFrame::Con { .. } => {}
+                        _ => return Err(EmitError::NotYetImplemented(
+                            format!("LetRec with {:?} RHS", std::mem::discriminant(&tree.nodes[*rhs_idx]))
+                        )),
                     }
                 }
 
+                // Phase 1: Pre-allocate all bindings (both Lam and Con)
+                enum PreAlloc {
+                    Lam { binder: VarId, ptr: cranelift_codegen::ir::Value, fvs: Vec<VarId>, rhs_idx: usize },
+                    Con { binder: VarId, ptr: cranelift_codegen::ir::Value, field_indices: Vec<usize> },
+                }
                 let mut pre_allocs = Vec::new();
+
                 for (binder, rhs_idx) in bindings {
-                    // This is Lam, we need the body subtree but let's just use it to find captures
-                    let (lam_binder, lam_body) = match &tree.nodes[*rhs_idx] {
-                        CoreFrame::Lam { binder, body } => (*binder, *body),
+                    match &tree.nodes[*rhs_idx] {
+                        CoreFrame::Lam { binder: lam_binder, body: lam_body } => {
+                            let lam_body_tree = tree.extract_subtree(*lam_body);
+                            let mut fvs = core_repr::free_vars::free_vars(&lam_body_tree);
+                            fvs.remove(lam_binder);
+                            let mut sorted_fvs: Vec<VarId> = fvs.into_iter().filter(|v| {
+                                self.env.contains_key(v) || bindings.iter().any(|(b, _)| b == v)
+                            }).collect();
+                            sorted_fvs.sort_by_key(|v| v.0);
+
+                            let num_captures = sorted_fvs.len();
+                            let closure_size = 24 + 8 * num_captures as u64;
+                            let closure_ptr = emit_alloc_fast_path(builder, vmctx, closure_size, gc_sig);
+
+                            let tag_val = builder.ins().iconst(types::I8, layout::TAG_CLOSURE as i64);
+                            builder.ins().store(MemFlags::trusted(), tag_val, closure_ptr, 0);
+                            let size_val = builder.ins().iconst(types::I16, closure_size as i64);
+                            builder.ins().store(MemFlags::trusted(), size_val, closure_ptr, 1);
+                            let num_cap_val = builder.ins().iconst(types::I16, num_captures as i64);
+                            builder.ins().store(MemFlags::trusted(), num_cap_val, closure_ptr, CLOSURE_NUM_CAPTURED_OFFSET);
+
+                            builder.declare_value_needs_stack_map(closure_ptr);
+                            pre_allocs.push(PreAlloc::Lam { binder: *binder, ptr: closure_ptr, fvs: sorted_fvs, rhs_idx: *rhs_idx });
+                        }
+                        CoreFrame::Con { tag, fields } => {
+                            let num_fields = fields.len();
+                            let size = 24 + 8 * num_fields as u64;
+                            let ptr = emit_alloc_fast_path(builder, vmctx, size, gc_sig);
+
+                            let tag_val = builder.ins().iconst(types::I8, layout::TAG_CON as i64);
+                            builder.ins().store(MemFlags::trusted(), tag_val, ptr, 0);
+                            let size_val = builder.ins().iconst(types::I16, size as i64);
+                            builder.ins().store(MemFlags::trusted(), size_val, ptr, 1);
+                            let con_tag_val = builder.ins().iconst(types::I64, tag.0 as i64);
+                            builder.ins().store(MemFlags::trusted(), con_tag_val, ptr, CON_TAG_OFFSET);
+                            let num_fields_val = builder.ins().iconst(types::I16, num_fields as i64);
+                            builder.ins().store(MemFlags::trusted(), num_fields_val, ptr, CON_NUM_FIELDS_OFFSET);
+
+                            builder.declare_value_needs_stack_map(ptr);
+                            pre_allocs.push(PreAlloc::Con { binder: *binder, ptr, field_indices: fields.clone() });
+                        }
                         _ => unreachable!(),
+                    }
+                }
+
+                // Phase 2: Bind all to their pre-allocated pointers
+                for pa in &pre_allocs {
+                    let (binder, ptr) = match pa {
+                        PreAlloc::Lam { binder, ptr, .. } => (*binder, *ptr),
+                        PreAlloc::Con { binder, ptr, .. } => (*binder, *ptr),
                     };
-                    let lam_body_tree = tree.extract_subtree(lam_body);
-                    let mut fvs = core_repr::free_vars::free_vars(&lam_body_tree);
-                    fvs.remove(&lam_binder);
-                    
-                    // Captures include other letrec binders + outer env
-                    let mut sorted_fvs: Vec<VarId> = fvs.into_iter().filter(|v| {
-                        self.env.contains_key(v) || bindings.iter().any(|(b, _)| b == v)
-                    }).collect();
-                    sorted_fvs.sort_by_key(|v| v.0);
-                    
-                    let num_captures = sorted_fvs.len();
-                    let closure_size = 24 + 8 * num_captures as u64;
-                    let closure_ptr = emit_alloc_fast_path(builder, vmctx, closure_size, gc_sig);
-                    
-                    let tag_val = builder.ins().iconst(types::I8, layout::TAG_CLOSURE as i64);
-                    builder.ins().store(MemFlags::trusted(), tag_val, closure_ptr, 0);
-                    let size_val = builder.ins().iconst(types::I16, closure_size as i64);
-                    builder.ins().store(MemFlags::trusted(), size_val, closure_ptr, 1);
-                    let num_cap_val = builder.ins().iconst(types::I16, num_captures as i64);
-                    builder.ins().store(MemFlags::trusted(), num_cap_val, closure_ptr, CLOSURE_NUM_CAPTURED_OFFSET);
-                    
-                    builder.declare_value_needs_stack_map(closure_ptr);
-                    pre_allocs.push((*binder, closure_ptr, sorted_fvs, *rhs_idx));
+                    self.env.insert(binder, SsaVal::HeapPtr(ptr));
                 }
 
-                // Bind all to their pre-allocated pointers
-                for (binder, ptr, _, _) in &pre_allocs {
-                    self.env.insert(*binder, SsaVal::HeapPtr(*ptr));
+                // Phase 3a: Fill Con fields (now that all bindings are in env)
+                for pa in &pre_allocs {
+                    if let PreAlloc::Con { ptr, field_indices, .. } = pa {
+                        for (i, &f_idx) in field_indices.iter().enumerate() {
+                            let val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, f_idx)?;
+                            let field_val = ensure_heap_ptr(builder, vmctx, gc_sig, val);
+                            builder.ins().store(MemFlags::trusted(), field_val, *ptr, CON_FIELDS_START + 8 * i as i32);
+                        }
+                    }
                 }
 
-                // Compile bodies and fill closures
-                for (_, closure_ptr, sorted_fvs, rhs_idx) in pre_allocs {
+                // Phase 3b: Compile Lam bodies and fill closures
+                for pa in pre_allocs {
+                    let (closure_ptr, sorted_fvs, rhs_idx) = match pa {
+                        PreAlloc::Lam { ptr, fvs, rhs_idx, .. } => (ptr, fvs, rhs_idx),
+                        PreAlloc::Con { .. } => continue,
+                    };
                     let (lam_binder, lam_body) = match &tree.nodes[rhs_idx] {
                         CoreFrame::Lam { binder, body } => (*binder, *body),
                         _ => unreachable!(),
