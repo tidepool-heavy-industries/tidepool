@@ -6,6 +6,22 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 type GcHook = fn(&[StackRoot]);
 
+/// Runtime errors raised by JIT code via host functions.
+#[derive(Debug, Clone)]
+pub enum RuntimeError {
+    DivisionByZero,
+    Overflow,
+}
+
+impl std::fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RuntimeError::DivisionByZero => write!(f, "division by zero"),
+            RuntimeError::Overflow => write!(f, "arithmetic overflow"),
+        }
+    }
+}
+
 thread_local! {
     /// Registry of stack maps for JIT functions.
     /// This is set before calling into JIT code so gc_trigger can access it.
@@ -16,6 +32,9 @@ thread_local! {
     static LAST_ROOTS: RefCell<Vec<StackRoot>> = const { RefCell::new(Vec::new()) };
 
     static HOOK: RefCell<Option<GcHook>> = const { RefCell::new(None) };
+
+    /// Runtime error from JIT code. Checked after JIT returns.
+    static RUNTIME_ERROR: RefCell<Option<RuntimeError>> = const { RefCell::new(None) };
 }
 
 /// GC trigger: called by JIT code when alloc_ptr exceeds alloc_limit.
@@ -149,6 +168,27 @@ pub extern "C" fn unresolved_var_trap(var_id: u64) -> *mut u8 {
     std::ptr::null_mut()
 }
 
+/// Called by JIT code for runtime errors (divZeroError, overflowError).
+/// Sets a thread-local error flag and returns null. The effect machine
+/// checks this after JIT returns and converts to Yield::Error.
+/// kind: 0 = divZeroError, 1 = overflowError
+pub extern "C" fn runtime_error(kind: u64) -> *mut u8 {
+    let err = match kind {
+        0 => RuntimeError::DivisionByZero,
+        1 => RuntimeError::Overflow,
+        _ => RuntimeError::Overflow,
+    };
+    RUNTIME_ERROR.with(|cell| {
+        *cell.borrow_mut() = Some(err);
+    });
+    std::ptr::null_mut()
+}
+
+/// Check and take any pending runtime error from JIT code.
+pub fn take_runtime_error() -> Option<RuntimeError> {
+    RUNTIME_ERROR.with(|cell| cell.borrow_mut().take())
+}
+
 /// Return the list of host function symbols for JIT registration.
 ///
 /// Usage: `CodegenPipeline::new(&host_fn_symbols())`
@@ -158,5 +198,6 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
         ("heap_alloc", heap_alloc as *const u8),
         ("heap_force", heap_force as *const u8),
         ("unresolved_var_trap", unresolved_var_trap as *const u8),
+        ("runtime_error", runtime_error as *const u8),
     ]
 }

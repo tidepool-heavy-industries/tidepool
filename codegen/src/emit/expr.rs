@@ -71,8 +71,29 @@ impl EmitContext {
                 match self.env.get(vid).copied() {
                     Some(v) => Ok(v),
                     None => {
+                        // Check for well-known runtime error VarIds (tag 'E' = 0x45)
+                        let tag = (vid.0 >> 56) as u8;
+                        if tag == 0x45 {
+                            // Runtime error: kind = low bits (0=divZero, 1=overflow)
+                            let kind = vid.0 & 0xFF;
+                            let err_fn = pipeline.module.declare_function(
+                                "runtime_error",
+                                Linkage::Import,
+                                &{
+                                    let mut sig = Signature::new(pipeline.isa.default_call_conv());
+                                    sig.params.push(AbiParam::new(types::I64)); // kind
+                                    sig.returns.push(AbiParam::new(types::I64));
+                                    sig
+                                },
+                            ).map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+                            let err_ref = pipeline.module.declare_func_in_func(err_fn, builder.func);
+                            let kind_val = builder.ins().iconst(types::I64, kind as i64);
+                            let inst = builder.ins().call(err_ref, &[kind_val]);
+                            let result = builder.inst_results(inst)[0];
+                            return Ok(SsaVal::HeapPtr(result));
+                        }
+
                         // Unresolved external — emit a call to unresolved_var_trap
-                        // which panics with the VarId for diagnostics.
                         eprintln!("[codegen] WARNING: unresolved var {:?} in {} (lambda_counter={})", vid, self.prefix, self.lambda_counter);
                         let trap_fn = pipeline.module.declare_function(
                             "unresolved_var_trap",
@@ -80,7 +101,7 @@ impl EmitContext {
                             &{
                                 let mut sig = Signature::new(pipeline.isa.default_call_conv());
                                 sig.params.push(AbiParam::new(types::I64)); // var_id
-                                sig.returns.push(AbiParam::new(types::I64)); // never returns, but need a value for SSA
+                                sig.returns.push(AbiParam::new(types::I64));
                                 sig
                             },
                         ).map_err(|e| EmitError::CraneliftError(e.to_string()))?;

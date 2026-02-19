@@ -48,6 +48,10 @@ pub enum YieldError {
     BadUnionFields(u16),
     /// Null pointer encountered.
     NullPointer,
+    /// Division by zero in JIT code.
+    DivisionByZero,
+    /// Arithmetic overflow in JIT code.
+    Overflow,
 }
 
 impl std::fmt::Display for YieldError {
@@ -63,6 +67,8 @@ impl std::fmt::Display for YieldError {
                 write!(f, "Union constructor has {} fields, expected 2", n)
             }
             YieldError::NullPointer => write!(f, "null pointer in effect result"),
+            YieldError::DivisionByZero => write!(f, "division by zero"),
+            YieldError::Overflow => write!(f, "arithmetic overflow"),
         }
     }
 }

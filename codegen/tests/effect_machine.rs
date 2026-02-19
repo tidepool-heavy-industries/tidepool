@@ -302,7 +302,111 @@ fn test_unexpected_tag() {
     assert_eq!(result, Yield::Error(YieldError::UnexpectedTag(TAG_LIT)));
 }
 
-/// Test 5: Unknown con_tag → YieldError.
+/// Test 5: runtime_error(0) → YieldError::DivisionByZero.
+#[test]
+fn test_runtime_error_div_zero() {
+    let (_pipeline, func) = build_test_fn("test_div_zero", |builder, vmctx, gc_sig| {
+        // Call runtime_error(0) which sets thread-local and returns null
+        let mut err_sig = ir::Signature::new(builder.func.signature.call_conv);
+        err_sig.params.push(AbiParam::new(types::I64));
+        err_sig.returns.push(AbiParam::new(types::I64));
+        let err_sig_ref = builder.import_signature(err_sig);
+
+        let err_ptr = builder.ins().iconst(types::I64, host_fns::runtime_error as *const u8 as i64);
+        let kind = builder.ins().iconst(types::I64, 0); // divZero
+        let inst = builder.ins().call_indirect(err_sig_ref, err_ptr, &[kind]);
+        let result = builder.inst_results(inst)[0];
+        builder.ins().return_(&[result]);
+    });
+
+    let mut nursery = vec![0u8; 4096];
+    let start = nursery.as_mut_ptr();
+    let end = unsafe { start.add(4096) };
+    let vmctx = VMContext::new(start, end, host_fns::gc_trigger);
+    host_fns::reset_test_counters();
+
+    let mut machine = CompiledEffectMachine::new(
+        func,
+        vmctx,
+        codegen::effect_machine::ConTags {
+            val: VAL_CON_TAG,
+            e: E_CON_TAG,
+            union: UNION_CON_TAG,
+            leaf: LEAF_CON_TAG,
+            node: NODE_CON_TAG,
+        },
+    );
+    let result = machine.step();
+    assert_eq!(result, Yield::Error(YieldError::DivisionByZero));
+}
+
+/// Test 6: runtime_error(1) → YieldError::Overflow.
+#[test]
+fn test_runtime_error_overflow() {
+    let (_pipeline, func) = build_test_fn("test_overflow", |builder, vmctx, gc_sig| {
+        let mut err_sig = ir::Signature::new(builder.func.signature.call_conv);
+        err_sig.params.push(AbiParam::new(types::I64));
+        err_sig.returns.push(AbiParam::new(types::I64));
+        let err_sig_ref = builder.import_signature(err_sig);
+
+        let err_ptr = builder.ins().iconst(types::I64, host_fns::runtime_error as *const u8 as i64);
+        let kind = builder.ins().iconst(types::I64, 1); // overflow
+        let inst = builder.ins().call_indirect(err_sig_ref, err_ptr, &[kind]);
+        let result = builder.inst_results(inst)[0];
+        builder.ins().return_(&[result]);
+    });
+
+    let mut nursery = vec![0u8; 4096];
+    let start = nursery.as_mut_ptr();
+    let end = unsafe { start.add(4096) };
+    let vmctx = VMContext::new(start, end, host_fns::gc_trigger);
+    host_fns::reset_test_counters();
+
+    let mut machine = CompiledEffectMachine::new(
+        func,
+        vmctx,
+        codegen::effect_machine::ConTags {
+            val: VAL_CON_TAG,
+            e: E_CON_TAG,
+            union: UNION_CON_TAG,
+            leaf: LEAF_CON_TAG,
+            node: NODE_CON_TAG,
+        },
+    );
+    let result = machine.step();
+    assert_eq!(result, Yield::Error(YieldError::Overflow));
+}
+
+/// Test 7: null without runtime_error → YieldError::NullPointer (not a false positive).
+#[test]
+fn test_null_without_runtime_error() {
+    let (_pipeline, func) = build_test_fn("test_null", |builder, vmctx, gc_sig| {
+        let null = builder.ins().iconst(types::I64, 0);
+        builder.ins().return_(&[null]);
+    });
+
+    let mut nursery = vec![0u8; 4096];
+    let start = nursery.as_mut_ptr();
+    let end = unsafe { start.add(4096) };
+    let vmctx = VMContext::new(start, end, host_fns::gc_trigger);
+    host_fns::reset_test_counters();
+
+    let mut machine = CompiledEffectMachine::new(
+        func,
+        vmctx,
+        codegen::effect_machine::ConTags {
+            val: VAL_CON_TAG,
+            e: E_CON_TAG,
+            union: UNION_CON_TAG,
+            leaf: LEAF_CON_TAG,
+            node: NODE_CON_TAG,
+        },
+    );
+    let result = machine.step();
+    assert_eq!(result, Yield::Error(YieldError::NullPointer));
+}
+
+/// Test 8: Unknown con_tag → YieldError.
 #[test]
 fn test_unexpected_con_tag() {
     let (_pipeline, func) = build_test_fn("test_unknown_con", |builder, vmctx, gc_sig| {

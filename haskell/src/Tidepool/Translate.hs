@@ -330,8 +330,12 @@ translate expr =
 
 translateHead :: CoreExpr -> TransM Int
 translateHead = \case
-  Var v -> do
-    emitNode $ NVar (varId v)
+  Var v
+    | isRuntimeErrorVar v -> do
+        let kind = if occNameString (nameOccName (idName v)) == "divZeroError" then 0 else 1
+        emitNode $ NVar (0x4500000000000000 .|. kind)  -- tag 'E' for error
+    | otherwise -> do
+        emitNode $ NVar (varId v)
   Lit l -> emitNode $ NLit (mapLit l)
   Lam b body
     | isTyVar b -> translate body
@@ -496,6 +500,11 @@ mapBang (HsSrcBang _ (HsBang srcUnpack srcBang)) =
 -- | Recognize GHC.Internal.Base.++ (list append).
 isAppendVar :: Id -> Bool
 isAppendVar v = occNameString (nameOccName (idName v)) == "++"
+
+isRuntimeErrorVar :: Id -> Bool
+isRuntimeErrorVar v =
+  let name = occNameString (nameOccName (idName v))
+  in name == "divZeroError" || name == "overflowError"
 
 isUnpackCStringVar :: Id -> Bool
 isUnpackCStringVar v =

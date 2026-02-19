@@ -311,7 +311,53 @@ fn test_emit_unique_lambda_names() {
         compile_expr(&mut pipeline, &tree1, "f1").expect("First compilation failed");
     
         compile_expr(&mut pipeline, &tree2, "f2").expect("Second compilation failed");
-    
+
     }
-    
+
+#[test]
+fn test_emit_runtime_error_div_zero() {
+    // A Var with tag 'E' (0x45) and kind 0 should call runtime_error(0) and return null
+    let div_zero_var = VarId(0x4500000000000000); // tag 'E', kind 0 = divZero
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Var(div_zero_var), // 0 (root)
+    ] };
+    let result = compile_and_run(&tree);
+    assert!(result.result_ptr.is_null());
+    let err = host_fns::take_runtime_error();
+    assert!(matches!(err, Some(host_fns::RuntimeError::DivisionByZero)));
+}
+
+#[test]
+fn test_emit_runtime_error_overflow() {
+    let overflow_var = VarId(0x4500000000000001); // tag 'E', kind 1 = overflow
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Var(overflow_var), // 0 (root)
+    ] };
+    let result = compile_and_run(&tree);
+    assert!(result.result_ptr.is_null());
+    let err = host_fns::take_runtime_error();
+    assert!(matches!(err, Some(host_fns::RuntimeError::Overflow)));
+}
+
+#[test]
+fn test_emit_int_quot() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(42)),
+        CoreFrame::Lit(Literal::LitInt(6)),
+        CoreFrame::PrimOp { op: PrimOpKind::IntQuot, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 7); }
+}
+
+#[test]
+fn test_emit_int_rem() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(42)),
+        CoreFrame::Lit(Literal::LitInt(5)),
+        CoreFrame::PrimOp { op: PrimOpKind::IntRem, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 2); }
+}
     
