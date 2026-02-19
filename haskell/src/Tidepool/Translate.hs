@@ -17,6 +17,7 @@ import GHC.Types.Id
 import GHC.Types.Var
 import GHC.Types.Unique (getKey)
 import GHC.Core.DataCon (DataCon, dataConSourceArity, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
+import GHC.Builtin.Types (consDataCon)
 import GHC.Builtin.PrimOps
 import GHC.Types.Literal
 import GHC.Types.Name (nameOccName, isExternalName, isSystemName)
@@ -32,12 +33,14 @@ import Data.Int
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as Seq
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Control.Monad.State
-import Control.Monad (foldM, forM)
+import Control.Monad (foldM, forM, when)
+import Debug.Trace (trace)
 import Tidepool.Resolve (resolveExternals, UnresolvedVar(..))
 
 data FlatNode
@@ -167,8 +170,12 @@ translateModule allBinds targetName =
 translateModuleClosed :: [CoreBind] -> String -> (Seq FlatNode, Map.Map Word64 DataCon, [UnresolvedVar])
 translateModuleClosed allBinds targetName =
   let (closedBinds, unresolved) = resolveExternals allBinds
+      originalCount = length allBinds
+      closedCount = length closedBinds
+      resolvedCount = closedCount - originalCount
       (nodes, usedDCs) = translateModule closedBinds targetName
-  in (nodes, usedDCs, unresolved)
+  in trace ("  resolveExternals: " ++ show originalCount ++ " original + " ++ show resolvedCount ++ " resolved = " ++ show closedCount ++ " total")
+     (nodes, usedDCs, unresolved)
 
 -- | Collect all DataCons encountered during translation of Core bindings.
 -- This includes constructors from imported packages (e.g. freer-simple's
@@ -206,6 +213,20 @@ translate expr =
     Var v | isUnpackCStringVar v
           , [arg] <- args
           , Lit l <- arg -> emitNode $ NLit (mapLit l)
+
+    -- Desugar unpackAppendCString# "prefix"# suffix to cons chain:
+    -- (:) 'p' ((:) 'r' (... ((:) 'x' suffix)))
+    Var v | isUnpackAppendCStringVar v
+          , [litArg, suffixArg] <- args
+          , Lit l <- litArg -> do
+        suffixIdx <- translate suffixArg
+        let bytes = litStringBytes l
+            consId = varId (dataConWorkId consDataCon)
+        foldM (\acc byte -> do
+            recordDC consDataCon
+            charIdx <- emitNode $ NLit (LEChar (fromIntegral byte))
+            emitNode $ NCon consId [charIdx, acc]
+          ) suffixIdx (reverse bytes)
 
     Var v | Just dc <- isDataConWorkId_maybe v
           , length args == dataConSourceArity dc -> do
@@ -266,7 +287,8 @@ translate expr =
 
 translateHead :: CoreExpr -> TransM Int
 translateHead = \case
-  Var v -> emitNode $ NVar (varId v)
+  Var v -> do
+    emitNode $ NVar (varId v)
   Lit l -> emitNode $ NLit (mapLit l)
   Lam b body
     | isTyVar b -> translate body
@@ -432,6 +454,19 @@ isUnpackCStringVar :: Id -> Bool
 isUnpackCStringVar v =
   let name = occNameString (nameOccName (idName v))
   in name == "unpackCString#" || name == "unpackCStringUtf8#"
+
+-- | Recognize GHC's unpackAppendCString# builtin.
+-- unpackAppendCString# :: Addr# -> [Char] -> [Char]
+-- Prepends a C string literal to a suffix list.
+isUnpackAppendCStringVar :: Id -> Bool
+isUnpackAppendCStringVar v =
+  let name = occNameString (nameOccName (idName v))
+  in name == "unpackAppendCString#"
+
+-- | Extract raw bytes from a GHC string literal.
+litStringBytes :: Literal -> [Word8]
+litStringBytes (LitString bs) = BS.unpack bs
+litStringBytes _ = []
 
 primOpArity :: PrimOp -> Int
 primOpArity op = let (_, _, _, a, _) = primOpSig op in a

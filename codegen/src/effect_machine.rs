@@ -228,9 +228,55 @@ impl CompiledEffectMachine {
     /// `closure` must point to a valid Closure HeapObject.
     unsafe fn call_closure(&mut self, closure: *mut u8, arg: *mut u8) -> *mut u8 {
         let code_ptr = *(closure.add(layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
+
+        let trace = crate::debug::trace_level();
+        if trace >= crate::debug::TraceLevel::Calls {
+            let name = crate::debug::lookup_lambda(code_ptr)
+                .unwrap_or_else(|| format!("0x{:x}", code_ptr));
+            eprintln!(
+                "[trace] call_closure {} closure={:?} arg={}",
+                name,
+                closure,
+                crate::debug::heap_describe(arg),
+            );
+        }
+        if trace >= crate::debug::TraceLevel::Heap {
+            if let Err(e) = crate::debug::heap_validate_deep(closure) {
+                eprintln!("[trace] INVALID closure: {}", e);
+                eprintln!("[trace]   {}", crate::debug::heap_describe(closure));
+                return std::ptr::null_mut();
+            }
+            if let Err(e) = crate::debug::heap_validate(arg) {
+                eprintln!("[trace] INVALID arg: {}", e);
+                return std::ptr::null_mut();
+            }
+            // Dump captures
+            let num_captured = *(closure.add(layout::CLOSURE_NUM_CAPTURED_OFFSET) as *const u16);
+            for i in 0..num_captured as usize {
+                let cap = *(closure.add(layout::CLOSURE_CAPTURED_OFFSET + 8 * i) as *const *const u8);
+                if cap.is_null() {
+                    eprintln!("[trace]   capture[{}] = NULL", i);
+                } else {
+                    eprintln!("[trace]   capture[{}] = {}", i, crate::debug::heap_describe(cap));
+                }
+            }
+        }
+
         let func: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
             std::mem::transmute(code_ptr);
-        func(&mut self.vmctx, closure, arg)
+        let result = func(&mut self.vmctx, closure, arg);
+
+        if trace >= crate::debug::TraceLevel::Calls {
+            let name = crate::debug::lookup_lambda(code_ptr)
+                .unwrap_or_else(|| format!("0x{:x}", code_ptr));
+            if result.is_null() {
+                eprintln!("[trace] {} returned NULL", name);
+            } else {
+                eprintln!("[trace] {} returned {}", name, crate::debug::heap_describe(result));
+            }
+        }
+
+        result
     }
 
     /// Allocate a Con HeapObject on the nursery with the given tag and fields.

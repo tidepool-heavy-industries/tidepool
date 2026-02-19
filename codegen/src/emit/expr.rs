@@ -71,14 +71,24 @@ impl EmitContext {
                 match self.env.get(vid).copied() {
                     Some(v) => Ok(v),
                     None => {
-                        // Unresolved external — emit a null sentinel. In a lazy
-                        // language these are thunks that error if forced. Since the
-                        // JIT is strict, we can't trap here (it would terminate the
-                        // basic block and make subsequent code unreachable). Instead,
-                        // emit null — if the value is never used (dead binding), no
-                        // crash. If dereferenced, it produces a segfault.
-                        let null = builder.ins().iconst(types::I64, 0);
-                        Ok(SsaVal::HeapPtr(null))
+                        // Unresolved external — emit a call to unresolved_var_trap
+                        // which panics with the VarId for diagnostics.
+                        eprintln!("[codegen] WARNING: unresolved var {:?} in {} (lambda_counter={})", vid, self.prefix, self.lambda_counter);
+                        let trap_fn = pipeline.module.declare_function(
+                            "unresolved_var_trap",
+                            Linkage::Import,
+                            &{
+                                let mut sig = Signature::new(pipeline.isa.default_call_conv());
+                                sig.params.push(AbiParam::new(types::I64)); // var_id
+                                sig.returns.push(AbiParam::new(types::I64)); // never returns, but need a value for SSA
+                                sig
+                            },
+                        ).map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+                        let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
+                        let var_id_val = builder.ins().iconst(types::I64, vid.0 as i64);
+                        let inst = builder.ins().call(trap_ref, &[var_id_val]);
+                        let result = builder.inst_results(inst)[0];
+                        Ok(SsaVal::HeapPtr(result))
                     }
                 }
             }
@@ -156,6 +166,7 @@ impl EmitContext {
 
                 let lambda_func_id = pipeline.module.declare_function(&lambda_name, Linkage::Local, &closure_sig)
                     .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+                pipeline.register_lambda(lambda_func_id, lambda_name.clone());
 
                 let mut inner_ctx = Context::new();
                 inner_ctx.func.signature = closure_sig;
@@ -228,10 +239,12 @@ impl EmitContext {
             }
             CoreFrame::LetNonRec { binder, rhs, body } => {
                 // Dead code elimination: skip RHS if binder is unused in body.
-                // This is necessary because the interpreter is lazy (thunks non-lambda RHS),
-                // but the codegen is strict. Dead bindings from GHC metadata ($trModule, etc.)
-                // may reference unresolved externals that would trap if evaluated.
                 let body_fvs = core_repr::free_vars::free_vars(&tree.extract_subtree(*body));
+                // Debug: log DCE decisions for known problematic vars
+                let known_bad = [8214565720323787988u64, 8214565720323787989, 8214565720323787990, 8214565720323784990, 3458764513820540932];
+                if known_bad.contains(&binder.0) {
+                    eprintln!("[dce] {:?} in_fvs={}", binder, body_fvs.contains(binder));
+                }
                 if body_fvs.contains(binder) {
                     let rhs_val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *rhs)?;
                     self.env.insert(*binder, rhs_val);
@@ -244,30 +257,42 @@ impl EmitContext {
                 }
             }
             CoreFrame::LetRec { bindings, body } => {
-                for (_, rhs_idx) in bindings {
-                    match &tree.nodes[*rhs_idx] {
-                        CoreFrame::Lam { .. } | CoreFrame::Con { .. } => {}
-                        _ => return Err(EmitError::NotYetImplemented(
-                            format!("LetRec with {:?} RHS", std::mem::discriminant(&tree.nodes[*rhs_idx]))
-                        )),
-                    }
+                // Split bindings: Lam/Con need 3-phase pre-allocation (recursive),
+                // everything else is evaluated eagerly as simple bindings first.
+                let (rec_bindings, simple_bindings): (Vec<_>, Vec<_>) = bindings.iter().partition(|(_, rhs_idx)| {
+                    matches!(&tree.nodes[*rhs_idx], CoreFrame::Lam { .. } | CoreFrame::Con { .. })
+                });
+
+                // Evaluate simple (non-recursive) bindings first
+                for (binder, rhs_idx) in &simple_bindings {
+                    let rhs_val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *rhs_idx)?;
+                    self.env.insert(*binder, rhs_val);
                 }
 
-                // Phase 1: Pre-allocate all bindings (both Lam and Con)
+                // If no recursive bindings remain, just emit body
+                if rec_bindings.is_empty() {
+                    let body_val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *body)?;
+                    for (binder, _) in bindings {
+                        self.env.remove(binder);
+                    }
+                    return Ok(body_val);
+                }
+
+                // Phase 1: Pre-allocate all recursive bindings (Lam and Con)
                 enum PreAlloc {
                     Lam { binder: VarId, ptr: cranelift_codegen::ir::Value, fvs: Vec<VarId>, rhs_idx: usize },
                     Con { binder: VarId, ptr: cranelift_codegen::ir::Value, field_indices: Vec<usize> },
                 }
                 let mut pre_allocs = Vec::new();
 
-                for (binder, rhs_idx) in bindings {
+                for (binder, rhs_idx) in &rec_bindings {
                     match &tree.nodes[*rhs_idx] {
                         CoreFrame::Lam { binder: lam_binder, body: lam_body } => {
                             let lam_body_tree = tree.extract_subtree(*lam_body);
                             let mut fvs = core_repr::free_vars::free_vars(&lam_body_tree);
                             fvs.remove(lam_binder);
                             let mut sorted_fvs: Vec<VarId> = fvs.into_iter().filter(|v| {
-                                self.env.contains_key(v) || bindings.iter().any(|(b, _)| b == v)
+                                self.env.contains_key(v) || rec_bindings.iter().any(|(b, _)| b == v)
                             }).collect();
                             sorted_fvs.sort_by_key(|v| v.0);
 
@@ -349,6 +374,7 @@ impl EmitContext {
 
                     let lambda_func_id = pipeline.module.declare_function(&lambda_name, Linkage::Local, &closure_sig)
                         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+                    pipeline.register_lambda(lambda_func_id, lambda_name.clone());
 
                     let mut inner_ctx = Context::new();
                     inner_ctx.func.signature = closure_sig;

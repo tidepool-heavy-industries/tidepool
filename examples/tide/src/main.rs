@@ -28,6 +28,9 @@ fn main() {
     let func_id = compile_expr(&mut pipeline, &expr, "repl").unwrap();
     pipeline.finalize();
 
+    // Install lambda registry for debug tracing (TIDEPOOL_TRACE=calls|heap)
+    codegen::debug::set_lambda_registry(pipeline.build_lambda_registry());
+
     let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
         unsafe { std::mem::transmute(pipeline.get_function_ptr(func_id)) };
 
@@ -72,4 +75,5 @@ fn main() {
     }
 
     host_fns::clear_stack_map_registry();
+    codegen::debug::clear_lambda_registry();
 }

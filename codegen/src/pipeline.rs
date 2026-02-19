@@ -7,6 +7,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Module, Linkage, FuncId};
 use std::sync::Arc;
 
+use crate::debug::LambdaRegistry;
 use crate::stack_map::{StackMapRegistry, RawStackMap};
 
 /// Cranelift JIT compilation pipeline.
@@ -29,6 +30,8 @@ pub struct CodegenPipeline {
     /// Pending stack maps waiting for finalization to get base pointers.
     /// Stores (func_id, func_size, raw_maps).
     pending_stack_maps: Vec<(FuncId, u32, Vec<RawStackMap>)>,
+    /// Lambda name registry: (func_id, name). Populated during define_function.
+    lambda_names: Vec<(FuncId, String)>,
 }
 
 impl CodegenPipeline {
@@ -61,6 +64,7 @@ impl CodegenPipeline {
             isa,
             stack_maps: StackMapRegistry::new(),
             pending_stack_maps: Vec::new(),
+            lambda_names: Vec::new(),
         }
     }
 
@@ -139,5 +143,21 @@ impl CodegenPipeline {
     /// Get the callable function pointer after finalization.
     pub fn get_function_ptr(&self, func_id: FuncId) -> *const u8 {
         self.module.get_finalized_function(func_id)
+    }
+
+    /// Register a lambda name for a function ID (call before finalize).
+    pub fn register_lambda(&mut self, func_id: FuncId, name: String) {
+        self.lambda_names.push((func_id, name));
+    }
+
+    /// Build a LambdaRegistry from all registered lambdas.
+    /// Must be called after `finalize()` so code pointers are available.
+    pub fn build_lambda_registry(&self) -> LambdaRegistry {
+        let mut registry = LambdaRegistry::new();
+        for (func_id, name) in &self.lambda_names {
+            let ptr = self.module.get_finalized_function(*func_id) as usize;
+            registry.register(ptr, name.clone());
+        }
+        registry
     }
 }

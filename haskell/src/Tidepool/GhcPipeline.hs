@@ -4,7 +4,7 @@ import GHC
 import GHC.Driver.Main (hscDesugar)
 import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Core.Ppr (pprCoreBindings)
-import GHC.Driver.Session (updOptLevel, gopt_unset, GeneralFlag(..))
+import GHC.Driver.Session (updOptLevel, gopt_set, gopt_unset, GeneralFlag(..))
 import GHC.Unit.Module.ModGuts (ModGuts(..))
 import GHC.Core (CoreBind)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext)
@@ -25,11 +25,11 @@ runPipeline path includes = do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
-    let dflags' = gopt_unset (updOptLevel 2 $ dflags
+    let dflags' = gopt_set (gopt_unset (updOptLevel 2 $ dflags
           { backend = noBackend
           , ghcLink = NoLink
           , importPaths = importPaths dflags ++ includes
-          }) Opt_FullLaziness
+          }) Opt_FullLaziness) Opt_ExposeAllUnfoldings
     setSessionDynFlags dflags'
     target <- guessTarget path Nothing Nothing
     setTargets [target]

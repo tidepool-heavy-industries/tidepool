@@ -135,6 +135,20 @@ pub fn gc_trigger_last_vmctx() -> usize {
     GC_TRIGGER_LAST_VMCTX.load(Ordering::SeqCst)
 }
 
+/// Called by JIT code when an unresolved external variable is forced.
+/// Returns null to allow execution to continue (will likely segfault later).
+/// In debug mode (TIDEPOOL_TRACE), logs and returns null.
+pub extern "C" fn unresolved_var_trap(var_id: u64) -> *mut u8 {
+    let tag_char = (var_id >> 56) as u8 as char;
+    let key = var_id & ((1u64 << 56) - 1);
+    eprintln!(
+        "[FATAL] Forced unresolved external variable: VarId({}) [tag='{}', key={}]",
+        var_id, tag_char, key
+    );
+    eprintln!("  Backtrace: set RUST_BACKTRACE=1 for details");
+    std::ptr::null_mut()
+}
+
 /// Return the list of host function symbols for JIT registration.
 ///
 /// Usage: `CodegenPipeline::new(&host_fn_symbols())`
@@ -143,5 +157,6 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
         ("gc_trigger", gc_trigger as *const u8),
         ("heap_alloc", heap_alloc as *const u8),
         ("heap_force", heap_force as *const u8),
+        ("unresolved_var_trap", unresolved_var_trap as *const u8),
     ]
 }

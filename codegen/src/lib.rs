@@ -1,4 +1,5 @@
 pub mod alloc;
+pub mod debug;
 pub mod context;
 pub mod datacon_env;
 pub mod effect_machine;
