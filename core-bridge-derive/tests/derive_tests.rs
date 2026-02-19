@@ -42,6 +42,27 @@ fn test_table() -> DataConTable {
         rep_arity: 3,
         field_bangs: vec![],
     });
+    t.insert(DataCon {
+        id: DataConId(20),
+        name: "GetBranch".into(),
+        tag: 1,
+        rep_arity: 1,
+        field_bangs: vec![],
+    });
+    t.insert(DataCon {
+        id: DataConId(21),
+        name: "UnitStruct".into(),
+        tag: 1,
+        rep_arity: 0,
+        field_bangs: vec![],
+    });
+    t.insert(DataCon {
+        id: DataConId(22),
+        name: "Pair".into(),
+        tag: 1,
+        rep_arity: 2,
+        field_bangs: vec![],
+    });
     t
 }
 
@@ -148,7 +169,80 @@ fn test_arity_mismatch() {
     let res = MyBool::from_value(&value, &table);
 
     assert!(matches!(res, Err(BridgeError::ArityMismatch { .. })));
-
 }
 
+// --- Struct derive tests ---
 
+#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+#[core(name = "GetBranch")]
+struct GetBranchRequest {
+    working_dir: String,
+}
+
+#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+struct UnitStruct;
+
+#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+#[core(name = "Pair")]
+struct GenericStruct<A, B> {
+    first: A,
+    second: B,
+}
+
+#[test]
+fn test_struct_single_field() {
+    let table = test_table();
+    let val = GetBranchRequest {
+        working_dir: "/tmp".into(),
+    };
+    let value = val.to_value(&table).unwrap();
+    let back = GetBranchRequest::from_value(&value, &table).unwrap();
+    assert_eq!(val, back);
+}
+
+#[test]
+fn test_struct_unit() {
+    let table = test_table();
+    let val = UnitStruct;
+    let value = val.to_value(&table).unwrap();
+    let back = UnitStruct::from_value(&value, &table).unwrap();
+    assert_eq!(val, back);
+}
+
+#[test]
+fn test_struct_generic() {
+    let table = test_table();
+    let val = GenericStruct {
+        first: 42i64,
+        second: true,
+    };
+    let value = val.to_value(&table).unwrap();
+    let back = GenericStruct::<i64, bool>::from_value(&value, &table).unwrap();
+    assert_eq!(val, back);
+}
+
+#[test]
+fn test_struct_wrong_con() {
+    let table = test_table();
+    // Use Pair's constructor id with GetBranch's expected type
+    let pair_id = table.get_by_name("Pair").unwrap();
+    let value = Value::Con(pair_id, vec![Value::Lit(core_repr::Literal::LitInt(1))]);
+    let res = GetBranchRequest::from_value(&value, &table);
+    assert!(matches!(res, Err(BridgeError::UnknownDataCon(_))));
+}
+
+#[test]
+fn test_struct_arity_mismatch() {
+    let table = test_table();
+    let get_branch_id = table.get_by_name("GetBranch").unwrap();
+    // GetBranch expects 1 field, give it 2
+    let value = Value::Con(
+        get_branch_id,
+        vec![
+            Value::Lit(core_repr::Literal::LitInt(1)),
+            Value::Lit(core_repr::Literal::LitInt(2)),
+        ],
+    );
+    let res = GetBranchRequest::from_value(&value, &table);
+    assert!(matches!(res, Err(BridgeError::ArityMismatch { .. })));
+}

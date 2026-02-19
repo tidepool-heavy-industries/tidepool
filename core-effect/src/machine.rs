@@ -1,4 +1,4 @@
-use crate::dispatch::DispatchEffect;
+use crate::dispatch::{DispatchEffect, EffectContext};
 use crate::error::EffectError;
 use core_eval::heap::Heap;
 use core_eval::value::Value;
@@ -43,10 +43,21 @@ impl<'a> EffectMachine<'a> {
     }
 
     /// Run an Eff expression to completion with the given handler HList.
+    /// Backward-compatible: uses U=() (no user data).
     pub fn run<H: DispatchEffect>(
         &mut self,
         expr: &CoreExpr,
         handlers: &mut H,
+    ) -> Result<Value, EffectError> {
+        self.run_with_user(expr, handlers, &())
+    }
+
+    /// Run an Eff expression with user data threaded through to handlers.
+    pub fn run_with_user<U, H: DispatchEffect<U>>(
+        &mut self,
+        expr: &CoreExpr,
+        handlers: &mut H,
+        user: &U,
     ) -> Result<Value, EffectError> {
         let env = core_eval::eval::env_from_datacon_table(self.table);
         let mut current = core_eval::eval::eval(expr, &env, self.heap)?;
@@ -107,9 +118,88 @@ impl<'a> EffectMachine<'a> {
                     };
 
                     // Dispatch to handler
-                    let response = handlers.dispatch(tag, &request, self.table)?;
+                    let cx = EffectContext::with_user(self.table, user);
+                    let response = handlers.dispatch(tag, &request, &cx)?;
 
                     // Apply continuation
+                    current = self.apply_cont(k, response)?;
+                }
+                other => {
+                    return Err(EffectError::UnexpectedValue {
+                        context: "Val or E constructor",
+                        got: format!("{:?}", other),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Async version of run_with_user. Same interpreter loop, but awaits handler dispatch.
+    /// Not Send (because &mut dyn Heap is not Send). Consumer wraps in a task that owns the machine.
+    #[cfg(feature = "async")]
+    pub async fn run_async<U: Sync, H: crate::dispatch::AsyncDispatchEffect<U>>(
+        &mut self,
+        expr: &CoreExpr,
+        handlers: &mut H,
+        user: &U,
+    ) -> Result<Value, EffectError> {
+        let env = core_eval::eval::env_from_datacon_table(self.table);
+        let mut current = core_eval::eval::eval(expr, &env, self.heap)?;
+
+        loop {
+            let forced = core_eval::eval::force(current, self.heap)?;
+            match forced {
+                Value::Con(id, ref fields) if id == self.val_id => {
+                    let result = fields
+                        .first()
+                        .cloned()
+                        .unwrap_or(Value::Lit(core_repr::Literal::LitInt(0)));
+                    return Ok(core_eval::eval::deep_force(result, self.heap)?);
+                }
+                Value::Con(id, ref fields) if id == self.e_id => {
+                    if fields.len() != 2 {
+                        return Err(EffectError::FieldCountMismatch {
+                            constructor: "E",
+                            expected: 2,
+                            got: fields.len(),
+                        });
+                    }
+                    let union_val = core_eval::eval::deep_force(fields[0].clone(), self.heap)?;
+                    let k = core_eval::eval::force(fields[1].clone(), self.heap)?;
+
+                    let (tag, request) = match union_val {
+                        Value::Con(uid, ref ufields) if uid == self.union_id => {
+                            if ufields.len() != 2 {
+                                return Err(EffectError::FieldCountMismatch {
+                                    constructor: "Union",
+                                    expected: 2,
+                                    got: ufields.len(),
+                                });
+                            }
+                            let tag = match &ufields[0] {
+                                Value::Lit(core_repr::Literal::LitWord(w)) => *w,
+                                Value::Lit(core_repr::Literal::LitInt(i)) => *i as u64,
+                                other => {
+                                    return Err(EffectError::UnexpectedValue {
+                                        context: "Union tag (Word#/Int#)",
+                                        got: format!("{:?}", other),
+                                    })
+                                }
+                            };
+                            let req = ufields[1].clone();
+                            (tag, req)
+                        }
+                        other => {
+                            return Err(EffectError::UnexpectedValue {
+                                context: "Union constructor",
+                                got: format!("{:?}", other),
+                            })
+                        }
+                    };
+
+                    let cx = EffectContext::with_user(self.table, user);
+                    let response = handlers.dispatch(tag, &request, &cx).await?;
+
                     current = self.apply_cont(k, response)?;
                 }
                 other => {
@@ -298,9 +388,6 @@ mod tests {
         let table = make_test_table();
         let mut heap = VecHeap::new();
 
-        // Build the continuation: Leaf(\x -> Val(x))
-        // \x -> Val(x) is: Lam(x, Con(Val, [Var(x)]))
-        // Leaf(f) is: Con(Leaf, [f])
         let expr: CoreExpr = RecursiveTree {
             nodes: vec![
                 // 0: Var(x) -- will be the Val payload
@@ -377,6 +464,301 @@ mod tests {
         match result {
             Value::Lit(Literal::LitInt(n)) => assert_eq!(n, 100),
             other => panic!("Expected Lit(100), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_run_with_user_data() {
+        // Same as single_effect but handler reads user data to compute response
+        let table = make_test_table();
+        let mut heap = VecHeap::new();
+
+        let expr: CoreExpr = RecursiveTree {
+            nodes: vec![
+                CoreFrame::Var(VarId(100)),
+                CoreFrame::Con {
+                    tag: DataConId(1),
+                    fields: vec![0],
+                },
+                CoreFrame::Lam {
+                    binder: VarId(100),
+                    body: 1,
+                },
+                CoreFrame::Con {
+                    tag: DataConId(3),
+                    fields: vec![2],
+                },
+                CoreFrame::Lit(Literal::LitInt(10)),
+                CoreFrame::Lit(Literal::LitWord(0)),
+                CoreFrame::Con {
+                    tag: DataConId(5),
+                    fields: vec![5, 4],
+                },
+                CoreFrame::Con {
+                    tag: DataConId(2),
+                    fields: vec![6, 3],
+                },
+            ],
+        };
+
+        use crate::dispatch::{EffectContext, EffectHandler};
+        use core_bridge::FromCore;
+
+        struct TestReq(i64);
+        impl FromCore for TestReq {
+            fn from_value(
+                value: &Value,
+                _table: &DataConTable,
+            ) -> Result<Self, core_bridge::BridgeError> {
+                match value {
+                    Value::Lit(Literal::LitInt(n)) => Ok(TestReq(*n)),
+                    _ => Err(core_bridge::BridgeError::TypeMismatch {
+                        expected: "LitInt".into(),
+                        got: format!("{:?}", value),
+                    }),
+                }
+            }
+        }
+
+        struct UserData {
+            multiplier: i64,
+        }
+
+        struct UserHandler;
+        impl EffectHandler<UserData> for UserHandler {
+            type Request = TestReq;
+            fn handle(
+                &mut self,
+                req: TestReq,
+                cx: &EffectContext<'_, UserData>,
+            ) -> Result<Value, EffectError> {
+                Ok(Value::Lit(Literal::LitInt(req.0 * cx.user().multiplier)))
+            }
+        }
+
+        let user = UserData { multiplier: 5 };
+        let mut handlers = frunk::hlist![UserHandler];
+        let mut machine = EffectMachine::new(&table, &mut heap).unwrap();
+        let result = machine.run_with_user(&expr, &mut handlers, &user).unwrap();
+
+        match result {
+            Value::Lit(Literal::LitInt(n)) => assert_eq!(n, 50), // 10 * 5
+            other => panic!("Expected Lit(50), got {:?}", other),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "async"))]
+mod async_tests {
+    use super::*;
+    use crate::dispatch::{AsyncEffectHandler, EffectContext};
+    use core_bridge::FromCore;
+    use core_eval::heap::VecHeap;
+    use core_eval::value::Value;
+    use core_repr::datacon::DataCon;
+    use core_repr::datacon_table::DataConTable;
+    use core_repr::types::{DataConId, Literal, VarId};
+    use core_repr::{CoreExpr, CoreFrame, RecursiveTree};
+
+    fn make_test_table() -> DataConTable {
+        let mut table = DataConTable::new();
+        table.insert(DataCon {
+            id: DataConId(1),
+            name: "Val".to_string(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![],
+        });
+        table.insert(DataCon {
+            id: DataConId(2),
+            name: "E".to_string(),
+            tag: 2,
+            rep_arity: 2,
+            field_bangs: vec![],
+        });
+        table.insert(DataCon {
+            id: DataConId(3),
+            name: "Leaf".to_string(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![],
+        });
+        table.insert(DataCon {
+            id: DataConId(4),
+            name: "Node".to_string(),
+            tag: 2,
+            rep_arity: 2,
+            field_bangs: vec![],
+        });
+        table.insert(DataCon {
+            id: DataConId(5),
+            name: "Union".to_string(),
+            tag: 1,
+            rep_arity: 2,
+            field_bangs: vec![],
+        });
+        table
+    }
+
+    fn make_single_effect_expr() -> CoreExpr {
+        // E(Union(0, Lit(99)), Leaf(\x -> Val(x)))
+        RecursiveTree {
+            nodes: vec![
+                CoreFrame::Var(VarId(100)),
+                CoreFrame::Con {
+                    tag: DataConId(1),
+                    fields: vec![0],
+                },
+                CoreFrame::Lam {
+                    binder: VarId(100),
+                    body: 1,
+                },
+                CoreFrame::Con {
+                    tag: DataConId(3),
+                    fields: vec![2],
+                },
+                CoreFrame::Lit(Literal::LitInt(99)),
+                CoreFrame::Lit(Literal::LitWord(0)),
+                CoreFrame::Con {
+                    tag: DataConId(5),
+                    fields: vec![5, 4],
+                },
+                CoreFrame::Con {
+                    tag: DataConId(2),
+                    fields: vec![6, 3],
+                },
+            ],
+        }
+    }
+
+    struct TestReq(i64);
+    impl FromCore for TestReq {
+        fn from_value(
+            value: &Value,
+            _table: &DataConTable,
+        ) -> Result<Self, core_bridge::BridgeError> {
+            match value {
+                Value::Lit(Literal::LitInt(n)) => Ok(TestReq(*n)),
+                _ => Err(core_bridge::BridgeError::TypeMismatch {
+                    expected: "LitInt".into(),
+                    got: format!("{:?}", value),
+                }),
+            }
+        }
+    }
+
+    struct AsyncTestHandler;
+    impl AsyncEffectHandler for AsyncTestHandler {
+        type Request = TestReq;
+        fn handle(
+            &mut self,
+            req: TestReq,
+            _cx: &EffectContext<'_, ()>,
+        ) -> impl std::future::Future<Output = Result<Value, EffectError>> + Send + '_ {
+            async move { Ok(Value::Lit(Literal::LitInt(req.0 + 1))) }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_async_single_effect() {
+        let table = make_test_table();
+        let mut heap = VecHeap::new();
+        let expr = make_single_effect_expr();
+
+        let mut handlers = frunk::hlist![AsyncTestHandler];
+        let mut machine = EffectMachine::new(&table, &mut heap).unwrap();
+        let result = machine.run_async(&expr, &mut handlers, &()).await.unwrap();
+
+        match result {
+            Value::Lit(Literal::LitInt(n)) => assert_eq!(n, 100),
+            other => panic!("Expected Lit(100), got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_async_with_user_data() {
+        let table = make_test_table();
+        let mut heap = VecHeap::new();
+        let expr: CoreExpr = RecursiveTree {
+            nodes: vec![
+                CoreFrame::Var(VarId(100)),
+                CoreFrame::Con {
+                    tag: DataConId(1),
+                    fields: vec![0],
+                },
+                CoreFrame::Lam {
+                    binder: VarId(100),
+                    body: 1,
+                },
+                CoreFrame::Con {
+                    tag: DataConId(3),
+                    fields: vec![2],
+                },
+                CoreFrame::Lit(Literal::LitInt(10)),
+                CoreFrame::Lit(Literal::LitWord(0)),
+                CoreFrame::Con {
+                    tag: DataConId(5),
+                    fields: vec![5, 4],
+                },
+                CoreFrame::Con {
+                    tag: DataConId(2),
+                    fields: vec![6, 3],
+                },
+            ],
+        };
+
+        struct UserData {
+            multiplier: i64,
+        }
+
+        struct AsyncUserHandler;
+        impl AsyncEffectHandler<UserData> for AsyncUserHandler {
+            type Request = TestReq;
+            fn handle(
+                &mut self,
+                req: TestReq,
+                cx: &EffectContext<'_, UserData>,
+            ) -> impl std::future::Future<Output = Result<Value, EffectError>> + Send + '_ {
+                let result = req.0 * cx.user().multiplier;
+                async move { Ok(Value::Lit(Literal::LitInt(result))) }
+            }
+        }
+
+        let user = UserData { multiplier: 7 };
+        let mut handlers = frunk::hlist![AsyncUserHandler];
+        let mut machine = EffectMachine::new(&table, &mut heap).unwrap();
+        let result = machine
+            .run_async(&expr, &mut handlers, &user)
+            .await
+            .unwrap();
+
+        match result {
+            Value::Lit(Literal::LitInt(n)) => assert_eq!(n, 70), // 10 * 7
+            other => panic!("Expected Lit(70), got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_async_pure_val() {
+        let table = make_test_table();
+        let mut heap = VecHeap::new();
+        let expr: CoreExpr = RecursiveTree {
+            nodes: vec![
+                CoreFrame::Lit(Literal::LitInt(42)),
+                CoreFrame::Con {
+                    tag: DataConId(1),
+                    fields: vec![0],
+                },
+            ],
+        };
+
+        let mut handlers = frunk::HNil;
+        let mut machine = EffectMachine::new(&table, &mut heap).unwrap();
+        let result = machine.run_async(&expr, &mut handlers, &()).await.unwrap();
+
+        match result {
+            Value::Lit(Literal::LitInt(n)) => assert_eq!(n, 42),
+            other => panic!("Expected Lit(42), got {:?}", other),
         }
     }
 }

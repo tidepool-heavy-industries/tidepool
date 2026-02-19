@@ -1,8 +1,8 @@
-use crate::parse::EnumInfo;
+use crate::parse::{EnumInfo, StructInfo};
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{parse_quote, Type};
 use std::collections::HashSet;
+use syn::{parse_quote, Type};
 
 fn collect_type_params(ty: &Type, params: &HashSet<syn::Ident>, used: &mut HashSet<syn::Ident>) {
     match ty {
@@ -42,20 +42,16 @@ fn collect_type_params(ty: &Type, params: &HashSet<syn::Ident>, used: &mut HashS
     }
 }
 
-pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
-    let name = &info.name;
-    let trait_path: syn::Path = parse_quote!(core_bridge::FromCore);
-    let mut generics = info.generics.clone();
-
-    let all_params: HashSet<_> = info.generics.type_params().map(|p| p.ident.clone()).collect();
+fn add_trait_bounds(
+    generics: &mut syn::Generics,
+    trait_path: &syn::Path,
+    field_types: impl Iterator<Item = Type>,
+) {
+    let all_params: HashSet<_> = generics.type_params().map(|p| p.ident.clone()).collect();
     let mut used_params = HashSet::new();
-    for variant in &info.variants {
-        for field_ty in &variant.fields {
-            collect_type_params(field_ty, &all_params, &mut used_params);
-        }
+    for field_ty in field_types {
+        collect_type_params(&field_ty, &all_params, &mut used_params);
     }
-
-    // Add trait bounds only for used type parameters
     for param in &mut generics.params {
         if let syn::GenericParam::Type(type_param) = param {
             if used_params.contains(&type_param.ident) {
@@ -63,6 +59,18 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
             }
         }
     }
+}
+
+pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
+    let name = &info.name;
+    let trait_path: syn::Path = parse_quote!(core_bridge::FromCore);
+    let mut generics = info.generics.clone();
+
+    add_trait_bounds(
+        &mut generics,
+        &trait_path,
+        info.variants.iter().flat_map(|v| v.fields.iter().cloned()),
+    );
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
@@ -132,22 +140,11 @@ pub fn generate_to_core(info: &EnumInfo) -> TokenStream {
     let trait_path: syn::Path = parse_quote!(core_bridge::ToCore);
     let mut generics = info.generics.clone();
 
-    let all_params: HashSet<_> = info.generics.type_params().map(|p| p.ident.clone()).collect();
-    let mut used_params = HashSet::new();
-    for variant in &info.variants {
-        for field_ty in &variant.fields {
-            collect_type_params(field_ty, &all_params, &mut used_params);
-        }
-    }
-
-    // Add trait bounds only for used type parameters
-    for param in &mut generics.params {
-        if let syn::GenericParam::Type(type_param) = param {
-            if used_params.contains(&type_param.ident) {
-                type_param.bounds.push(parse_quote!(#trait_path));
-            }
-        }
-    }
+    add_trait_bounds(
+        &mut generics,
+        &trait_path,
+        info.variants.iter().flat_map(|v| v.fields.iter().cloned()),
+    );
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
@@ -184,6 +181,114 @@ pub fn generate_to_core(info: &EnumInfo) -> TokenStream {
                 match self {
                     #(#match_arms)*
                 }
+            }
+        }
+    }
+}
+
+pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
+    let name = &info.name;
+    let core_name = &info.core_name;
+    let trait_path: syn::Path = parse_quote!(core_bridge::FromCore);
+    let mut generics = info.generics.clone();
+
+    add_trait_bounds(
+        &mut generics,
+        &trait_path,
+        info.fields.iter().map(|(_, ty)| ty.clone()),
+    );
+
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let arity = info.fields.len();
+
+    let field_constructions: Vec<_> = info
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(i, (field_name, field_ty))| {
+            quote! {
+                #field_name: <#field_ty as core_bridge::FromCore>::from_value(&fields[#i], table)?
+            }
+        })
+        .collect();
+
+    let construction = if info.fields.is_empty() {
+        quote! { #name }
+    } else {
+        quote! { #name { #(#field_constructions),* } }
+    };
+
+    quote! {
+        impl #impl_generics core_bridge::FromCore for #name #ty_generics #where_clause {
+            fn from_value(value: &core_eval::Value, table: &core_repr::DataConTable) -> Result<Self, core_bridge::BridgeError> {
+                match value {
+                    core_eval::Value::Con(id, fields) => {
+                        let con_id = table.get_by_name(#core_name)
+                            .ok_or_else(|| core_bridge::BridgeError::UnknownDataConName(#core_name.to_string()))?;
+                        if *id != con_id {
+                            return Err(core_bridge::BridgeError::UnknownDataCon(*id));
+                        }
+                        if fields.len() != #arity {
+                            return Err(core_bridge::BridgeError::ArityMismatch {
+                                con: *id,
+                                expected: #arity,
+                                got: fields.len(),
+                            });
+                        }
+                        Ok(#construction)
+                    }
+                    _ => Err(core_bridge::BridgeError::TypeMismatch {
+                        expected: "Con".to_string(),
+                        got: match value {
+                            core_eval::Value::Lit(l) => format!("Lit({:?})", l),
+                            core_eval::Value::Con(id, _) => format!("Con({:?})", id),
+                            core_eval::Value::Closure(_, _, _) => "Closure".to_string(),
+                            core_eval::Value::ThunkRef(id) => format!("ThunkRef({:?})", id),
+                            core_eval::Value::JoinCont(_, _, _) => "JoinCont".to_string(),
+                            core_eval::Value::ConFun(id, arity, args) => format!("ConFun({:?}, {}/{})", id, args.len(), arity),
+                        },
+                    })
+                }
+            }
+        }
+    }
+}
+
+pub fn generate_struct_to_core(info: &StructInfo) -> TokenStream {
+    let name = &info.name;
+    let core_name = &info.core_name;
+    let trait_path: syn::Path = parse_quote!(core_bridge::ToCore);
+    let mut generics = info.generics.clone();
+
+    add_trait_bounds(
+        &mut generics,
+        &trait_path,
+        info.fields.iter().map(|(_, ty)| ty.clone()),
+    );
+
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    let field_names: Vec<_> = info.fields.iter().map(|(name, _)| name).collect();
+    let field_to_values: Vec<_> = field_names
+        .iter()
+        .map(|f| {
+            quote! { core_bridge::ToCore::to_value(#f, table)? }
+        })
+        .collect();
+
+    let destructure = if info.fields.is_empty() {
+        quote! { #name }
+    } else {
+        quote! { #name { #(#field_names),* } }
+    };
+
+    quote! {
+        impl #impl_generics core_bridge::ToCore for #name #ty_generics #where_clause {
+            fn to_value(&self, table: &core_repr::DataConTable) -> Result<core_eval::Value, core_bridge::BridgeError> {
+                let #destructure = self;
+                let id = table.get_by_name(#core_name)
+                    .ok_or_else(|| core_bridge::BridgeError::UnknownDataConName(#core_name.to_string()))?;
+                Ok(core_eval::Value::Con(id, vec![#(#field_to_values),*]))
             }
         }
     }

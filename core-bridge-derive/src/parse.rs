@@ -12,6 +12,49 @@ pub struct VariantInfo {
     pub fields: Vec<Type>,
 }
 
+pub struct StructInfo {
+    pub name: Ident,
+    pub generics: Generics,
+    pub core_name: String,
+    pub fields: Vec<(Ident, Type)>,
+}
+
+pub enum DataInfo {
+    Enum(EnumInfo),
+    Struct(StructInfo),
+}
+
+pub fn parse_input(input: &DeriveInput) -> Result<DataInfo, syn::Error> {
+    match &input.data {
+        Data::Enum(_) => parse_enum(input).map(DataInfo::Enum),
+        Data::Struct(s) => {
+            let core_name = get_core_name(&input.attrs)?
+                .unwrap_or_else(|| input.ident.to_string());
+            let fields = match &s.fields {
+                Fields::Named(f) => f
+                    .named
+                    .iter()
+                    .map(|field| (field.ident.clone().unwrap(), field.ty.clone()))
+                    .collect(),
+                Fields::Unit => Vec::new(),
+                Fields::Unnamed(_) => {
+                    return Err(syn::Error::new_spanned(
+                        input,
+                        "Tuple structs are not supported, use named fields",
+                    ))
+                }
+            };
+            Ok(DataInfo::Struct(StructInfo {
+                name: input.ident.clone(),
+                generics: input.generics.clone(),
+                core_name,
+                fields,
+            }))
+        }
+        Data::Union(_) => Err(syn::Error::new_spanned(input, "Unions are not supported")),
+    }
+}
+
 pub fn parse_enum(input: &DeriveInput) -> Result<EnumInfo, syn::Error> {
     let data_enum = match &input.data {
         Data::Enum(e) => e,

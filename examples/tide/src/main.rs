@@ -62,7 +62,8 @@ fn main() {
                 continuation,
             } => {
                 let req_val = unsafe { heap_to_value(request) }.unwrap();
-                let resp_val = handlers.dispatch(tag, &req_val, &table).unwrap();
+                let cx = core_effect::EffectContext::with_user(&table, &());
+                let resp_val = handlers.dispatch(tag, &req_val, &cx).unwrap();
                 let resp_ptr =
                     unsafe { value_to_heap(&resp_val, machine.vmctx_mut()) }.unwrap();
                 yield_result = unsafe { machine.resume(continuation, resp_ptr) };
