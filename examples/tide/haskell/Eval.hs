@@ -86,9 +86,14 @@ eval expr = case expr of
     vs <- evalList args
     evalBuiltin bId vs
   TLet name e body -> do
+    old <- envLookup name
     v <- eval e
     envExtend name v
-    eval body
+    result <- eval body
+    case old of
+      Just prev -> envExtend name prev
+      Nothing   -> pure ()
+    pure result
   TLam params body ->
     pure (VFun params body)
   TApp f args -> do
