@@ -4,6 +4,7 @@ module Tidepool.Translate
   , translateModuleClosed
   , collectDataCons
   , collectUsedDataCons
+  , collectTransitiveDCons
   , FlatNode(..)
   , FlatAlt(..)
   , FlatAltCon(..)
@@ -16,7 +17,7 @@ import GHC.Core
 import GHC.Types.Id
 import GHC.Types.Var
 import GHC.Types.Unique (getKey)
-import GHC.Core.DataCon (DataCon, dataConSourceArity, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
+import GHC.Core.DataCon (DataCon, dataConSourceArity, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, dataConOrigArgTys, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
 import GHC.Builtin.Types (consDataCon, nilDataCon)
 import GHC.Builtin.PrimOps
 import GHC.Types.Literal
@@ -24,6 +25,9 @@ import GHC.Types.Name (nameOccName, isExternalName, isSystemName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Core.TyCon
 import GHC.Core.Type (splitTyConApp_maybe)
+import GHC.Core.TyCo.Rep (Scaled(..))
+import GHC.Core.TyCo.FVs (tyConsOfType)
+import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet, nonDetEltsUniqSet)
 import GHC.Types.Basic (JoinPointHood(..))
 import GHC.Utils.Outputable (showPprUnsafe)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
@@ -212,6 +216,46 @@ collectUsedDataCons binds =
       , dataConSourceArity dc
       , map mapBang (dataConSrcBangs dc)
       )
+
+-- | Compute transitive closure of TyCons reachable from all binder types,
+-- expanding through newtypes, then return metadata for all their DataCons.
+collectTransitiveDCons :: [CoreBind] -> [(Word64, Text, Int, Int, [Text])]
+collectTransitiveDCons binds =
+  let binderTypes = [ idType b | b <- concatMap bindersOfBind binds ]
+      seedTyCons  = foldMap (nonDetEltsUniqSet . tyConsOfType) binderTypes
+      allTyCons   = closeTyCons emptyUniqSet seedTyCons
+  in  concatMap tyConToDCMeta (nonDetEltsUniqSet allTyCons)
+  where
+    bindersOfBind (NonRec b _) = [b]
+    bindersOfBind (Rec pairs)  = map fst pairs
+
+closeTyCons :: UniqSet TyCon -> [TyCon] -> UniqSet TyCon
+closeTyCons visited []     = visited
+closeTyCons visited (tc:rest)
+  | tc `elementOfUniqSet` visited = closeTyCons visited rest
+  | otherwise =
+      let visited' = addOneToUniqSet visited tc
+          newtypeChildren = case unwrapNewTyCon_maybe tc of
+            Just (_tvs, reprTy, _coax) -> nonDetEltsUniqSet (tyConsOfType reprTy)
+            Nothing                    -> []
+          fieldChildren = case tyConDataCons_maybe tc of
+            Just dcs -> [ ftc
+                        | dc <- dcs
+                        , Scaled _ ft <- dataConOrigArgTys dc
+                        , ftc <- nonDetEltsUniqSet (tyConsOfType ft) ]
+            Nothing  -> []
+      in closeTyCons visited' (newtypeChildren ++ fieldChildren ++ rest)
+
+tyConToDCMeta :: TyCon -> [(Word64, Text, Int, Int, [Text])]
+tyConToDCMeta tc = case tyConDataCons_maybe tc of
+  Just dcs -> map (\dc ->
+    ( varId (dataConWorkId dc)
+    , T.pack (occNameString (nameOccName (dataConName dc)))
+    , dataConTag dc
+    , dataConSourceArity dc
+    , map mapBang (dataConSrcBangs dc)
+    )) dcs
+  Nothing  -> []
 
 translate :: CoreExpr -> TransM Int
 translate expr =

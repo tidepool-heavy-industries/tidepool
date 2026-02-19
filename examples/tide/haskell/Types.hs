@@ -12,6 +12,7 @@ data TExpr
   | TLam [String] TExpr
   | TIf TExpr TExpr TExpr
   | TBinOp Int TExpr TExpr
+  | TBind String TExpr
 
 data EvalError
   = TypeError String

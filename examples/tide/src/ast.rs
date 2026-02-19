@@ -15,4 +15,5 @@ pub enum TExpr {
     #[core(name = "TLam")]     TLam(Vec<String>, Box<TExpr>),
     #[core(name = "TIf")]      TIf(Box<TExpr>, Box<TExpr>, Box<TExpr>),
     #[core(name = "TBinOp")]   TBinOp(i64, Box<TExpr>, Box<TExpr>),
+    #[core(name = "TBind")]    TBind(String, Box<TExpr>),
 }

@@ -30,13 +30,13 @@ fn parse_let(pair: Pair<Rule>) -> Result<TExpr, String> {
     let mut inner = pair.into_inner();
     let ident = inner.next().unwrap().as_str().to_string();
     let val = parse_expr(inner.next().unwrap())?;
-    let body = if let Some(body_pair) = inner.next() {
-        parse_expr(body_pair)?
+    if let Some(body_pair) = inner.next() {
+        let body = parse_expr(body_pair)?;
+        Ok(TExpr::TLet(ident, Box::new(val), Box::new(body)))
     } else {
-        // REPL shorthand: `let x = 5` → `let x = 5; x`
-        TExpr::TVar(ident.clone())
-    };
-    Ok(TExpr::TLet(ident, Box::new(val), Box::new(body)))
+        // REPL shorthand: `let x = 5` → persistent binding (no restore)
+        Ok(TExpr::TBind(ident, Box::new(val)))
+    }
 }
 
 fn parse_if(pair: Pair<Rule>) -> Result<TExpr, String> {

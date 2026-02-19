@@ -21,7 +21,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 
 import Tidepool.GhcPipeline (runPipeline, PipelineResult(..), dumpCore)
-import Tidepool.Translate (translateBinds, translateModuleClosed, collectDataCons, collectUsedDataCons, UnresolvedVar(..))
+import Tidepool.Translate (translateBinds, translateModuleClosed, collectDataCons, collectUsedDataCons, collectTransitiveDCons, UnresolvedVar(..))
 import Tidepool.CborEncode (encodeTree, encodeMetadata)
 
 main :: IO ()
@@ -104,9 +104,11 @@ processFile args path = do
         -- Write merged metadata
         let tyconMeta = collectDataCons tycons
             scanMeta = collectUsedDataCons binds
+            transitiveMeta = collectTransitiveDCons binds
             mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- tyconMeta]
                         `Map.union` allMetaMap
                         `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- scanMeta]
+                        `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- transitiveMeta]
             allMeta = Map.elems mergedMap
         let metaCbor = encodeMetadata allMeta
         let metaFile = outDir </> "meta.cbor"
@@ -125,15 +127,18 @@ processFile args path = do
         BS.writeFile outFile cbor
         putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
 
-        -- Write metadata: merge TyCon-derived + translation-derived + raw-binding-scan
+        -- Write metadata: merge TyCon-derived + translation-derived + raw-binding-scan + transitive
         let tyconMeta = collectDataCons tycons
             usedMeta = map dcToMeta (Map.elems usedDCs)
             scanMeta = collectUsedDataCons binds
+            transitiveMeta = collectTransitiveDCons binds
             mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- tyconMeta]
                         `Map.union`
                         Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- usedMeta]
                         `Map.union`
                         Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- scanMeta]
+                        `Map.union`
+                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- transitiveMeta]
             allMeta = Map.elems mergedMap
         let metaCbor = encodeMetadata allMeta
         let metaFile = outDir </> "meta.cbor"
@@ -151,12 +156,15 @@ processFile args path = do
           putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
           ) dedupd
 
-        -- Write DataCon metadata: merge TyCon-derived + usage-derived
+        -- Write DataCon metadata: merge TyCon-derived + usage-derived + transitive
         let tyconMeta = collectDataCons tycons
             usedMeta = collectUsedDataCons binds
+            transitiveMeta = collectTransitiveDCons binds
             mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- tyconMeta]
                         `Map.union`
                         Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- usedMeta]
+                        `Map.union`
+                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- transitiveMeta]
             allMeta = Map.elems mergedMap
         let metaCbor = encodeMetadata allMeta
         let metaFile = outDir </> "meta.cbor"

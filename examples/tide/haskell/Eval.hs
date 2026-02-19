@@ -94,6 +94,10 @@ eval expr = case expr of
       Just prev -> envExtend name prev
       Nothing   -> pure ()
     pure result
+  TBind name e -> do
+    v <- eval e
+    envExtend name v
+    pure v
   TLam params body ->
     pure (VFun params body)
   TApp f args -> do
@@ -163,9 +167,33 @@ strEq xs ys = case xs of
 applyFun :: TVal -> [TVal] -> Eff TideEffs TVal
 applyFun fv args = case fv of
   VFun params body -> do
+    -- Save old bindings for params, bind new values, eval, restore
+    olds <- saveParams params
     bindParams params args
-    eval body
+    result <- eval body
+    restoreParams params olds
+    pure result
   _ -> pure (VError NotAFunction)
+
+-- | Save current bindings for parameter names.
+saveParams :: [String] -> Eff TideEffs [Maybe TVal]
+saveParams ps = case ps of
+  []     -> pure []
+  (p:rest) -> do
+    old <- envLookup p
+    olds <- saveParams rest
+    pure (old : olds)
+
+-- | Restore saved bindings for parameter names.
+restoreParams :: [String] -> [Maybe TVal] -> Eff TideEffs ()
+restoreParams ps olds = case (ps, olds) of
+  ([], _) -> pure ()
+  (_, []) -> pure ()
+  (p:prest, o:orest) -> do
+    case o of
+      Just prev -> envExtend p prev
+      Nothing   -> pure ()
+    restoreParams prest orest
 
 -- | Bind parameters in environment.
 bindParams :: [String] -> [TVal] -> Eff TideEffs ()
