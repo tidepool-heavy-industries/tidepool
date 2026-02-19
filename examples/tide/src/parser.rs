@@ -484,6 +484,32 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_parse_let_lambda_value() {
+        // let inc = \x -> x + 1
+        assert_eq!(parse(r#"let inc = \x -> x + 1"#).unwrap(), TExpr::TLet(
+            "inc".into(),
+            Box::new(TExpr::TLam(
+                vec!["x".into()],
+                Box::new(TExpr::TBinOp(0,
+                    Box::new(TExpr::TVar("x".into())),
+                    Box::new(TExpr::TInt(1)))))),
+            Box::new(TExpr::TVar("inc".into())),
+        ));
+    }
+
+    #[test]
+    fn test_parse_let_if_value() {
+        assert_eq!(parse("let x = if true then 1 else 2").unwrap(), TExpr::TLet(
+            "x".into(),
+            Box::new(TExpr::TIf(
+                Box::new(TExpr::TBool(true)),
+                Box::new(TExpr::TInt(1)),
+                Box::new(TExpr::TInt(2)))),
+            Box::new(TExpr::TVar("x".into())),
+        ));
+    }
+
     // === If expressions ===
 
     #[test]

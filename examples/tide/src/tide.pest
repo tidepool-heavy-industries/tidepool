@@ -8,7 +8,7 @@ program = { SOI ~ expr ~ EOI }
 // Expressions by precedence (lowest first)
 expr = { let_expr | if_expr | lambda_expr | comparison }
 
-let_expr = { "let" ~ ident ~ "=" ~ comparison ~ (";" ~ expr)? }
+let_expr = { "let" ~ ident ~ "=" ~ expr ~ (";" ~ expr)? }
 if_expr = { "if" ~ expr ~ "then" ~ expr ~ "else" ~ expr }
 lambda_expr = { "\\" ~ ident+ ~ "->" ~ expr }
 
