@@ -65,6 +65,36 @@ impl EffectHandler for ReplHandler {
                                     if t.is_empty() {
                                         continue;
                                     }
+                                    if t.starts_with('/') {
+                                        match t.as_str() {
+                                            "/help" => {
+                                                println!("\
+Tide expression language
+
+  Literals:     42  \"hello\"  true  false  [1, 2, 3]
+  Arithmetic:   +  -  *  /  (unary -)
+  Comparison:   ==  !=  <  >  <=  >=
+  Concatenation: \"a\" ++ \"b\"
+  Variables:    let x = 5        (bind and echo)
+                let x = 5; x+1  (bind with body)
+  Conditionals: if x > 0 then x else -x
+  Lambdas:      \\x y -> x + y
+  Function call: f(1, 2)
+  Builtins:     print(v)  len(xs)  str(v)  int(v)
+                concat(a, b)  fetch(url)
+                read_file(path)  write_file(path, s)
+
+  /help   Show this message
+  /exit   Quit the REPL");
+                                                continue;
+                                            }
+                                            "/exit" => break cx.respond(None::<Value>),
+                                            _ => {
+                                                eprintln!("Unknown command: {}. Try /help", t);
+                                                continue;
+                                            }
+                                        }
+                                    }
                                     editor.add_history_entry(&t).ok();
                                     match crate::parser::parse(&t) {
                                         Ok(expr) => {
