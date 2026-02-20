@@ -103,7 +103,11 @@ impl ServerHandler for TidepoolMcpServerImpl {
                 .map_err(|e| McpError::invalid_params(format!("invalid params: {}", e), None))?;
             self.run_haskell(req).await
         } else {
-            Err(McpError::internal_error(format!("Tool not found: {}", request.name), None))
+            Err(McpError {
+                code: ErrorCode::METHOD_NOT_FOUND,
+                message: format!("Tool not found: {}", request.name).into(),
+                data: None,
+            })
         }
     }
 
@@ -164,6 +168,24 @@ where
     }
 
     /// Start the MCP server on stdio transport.
+    ///
+    /// This starts an MCP server that communicates over the process's standard
+    /// input and output streams. It will run until the underlying server shuts
+    /// down or an error occurs.
+    ///
+    /// # Errors
+    ///
+    /// This function returns an error if:
+    ///
+    /// - Reading from `stdin` or writing to `stdout` fails (for example, due to
+    ///   I/O errors on the standard streams).
+    /// - The underlying MCP server fails to start or encounters an error while
+    ///   serving requests over stdio.
+    /// - There are protocol- or serialization-level errors reported by the
+    ///   `rmcp` server implementation while handling MCP messages.
+    ///
+    /// All such errors are returned as a boxed [`std::error::Error`], and may
+    /// originate from `std::io` or from the underlying MCP/transport layer.
     pub async fn serve_stdio(self) -> Result<(), Box<dyn std::error::Error>> {
         self.inner
             .serve((stdin(), stdout()))
@@ -171,5 +193,34 @@ where
             .waiting()
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frunk::HNil;
+
+    #[test]
+    fn test_run_haskell_request_serialization() {
+        let req = RunHaskellRequest {
+            source: "main = 42".to_string(),
+            target: "main".to_string(),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["source"], "main = 42");
+        assert_eq!(json["target"], "main");
+
+        let de: RunHaskellRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(de.source, "main = 42");
+        assert_eq!(de.target, "main");
+    }
+
+    #[test]
+    fn test_with_include() {
+        let server = TidepoolMcpServer::new(HNil);
+        let path = PathBuf::from("/tmp/haskell");
+        let server = server.with_include(vec![path.clone()]);
+        assert_eq!(server.inner.include, vec![path]);
     }
 }
