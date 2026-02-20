@@ -217,6 +217,7 @@ impl<'a> DispatchEffect<()> for HandlerWrapper<'a> {
 
 impl TidepoolMcpServerImpl {
     async fn eval(&self, req: EvalRequest) -> Result<CallToolResult, McpError> {
+        tracing::info!(lines = req.source.len(), "eval request");
         let source = template_haskell(
             &self.haskell_preamble,
             &self.effect_stack_type,
@@ -227,29 +228,56 @@ impl TidepoolMcpServerImpl {
 
         let mut handlers = dyn_clone::clone_box(&*self.handler_factory);
         let include_refs: Vec<PathBuf> = self.include.clone();
+        let source_for_blocking = source.clone();
 
         let result = tokio::task::spawn_blocking(move || {
             let include_paths: Vec<&Path> = include_refs.iter().map(|p| p.as_path()).collect();
             let mut wrapper = HandlerWrapper(handlers.as_mut());
-            tidepool_runtime::compile_and_run(
-                &source,
-                "result",
-                &include_paths,
-                &mut wrapper,
-                &(),
-            )
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tidepool_runtime::compile_and_run(
+                    &source_for_blocking,
+                    "result",
+                    &include_paths,
+                    &mut wrapper,
+                    &(),
+                )
+            }))
         })
         .await
         .map_err(|e| McpError::internal_error(format!("task join error: {}", e), None))?;
 
         match result {
-            Ok(eval_result) => Ok(CallToolResult::success(vec![Content::text(
-                eval_result.to_string_pretty(),
-            )])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("{}", e))])),
+            Ok(Ok(eval_result)) => {
+                tracing::info!("eval succeeded");
+                Ok(CallToolResult::success(vec![Content::text(
+                    eval_result.to_string_pretty(),
+                )]))
+            }
+            Ok(Err(e)) => {
+                let error_msg = format!(
+                    "## Error\n{}\n\n## Compiled Source\n```haskell\n{}\n```",
+                    e, source
+                );
+                tracing::error!("eval failed: {}", e);
+                Ok(CallToolResult::error(vec![Content::text(error_msg)]))
+            }
+            Err(panic_payload) => {
+                let panic_msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else {
+                    "unknown panic".to_string()
+                };
+                let error_msg = format!(
+                    "## Error\nInternal panic: {}\n\n## Compiled Source\n```haskell\n{}\n```",
+                    panic_msg, source
+                );
+                tracing::error!("eval panicked: {}", panic_msg);
+                Ok(CallToolResult::error(vec![Content::text(error_msg)]))
+            }
         }
     }
-
 }
 
 impl ServerHandler for TidepoolMcpServerImpl {

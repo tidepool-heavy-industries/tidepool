@@ -13,6 +13,7 @@ tidepool-effect = { version = "0.0.1", path = "../tidepool-effect" }
 rmcp = { version = "0.16", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util"] }
 serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
 dyn-clone = "1.0"
 frunk = "0.4"
 schemars = "=1.2.1"
