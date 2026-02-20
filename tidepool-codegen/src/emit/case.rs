@@ -67,6 +67,7 @@ pub fn emit_case(
     builder.switch_to_block(merge_block);
     let result = builder.block_params(merge_block)[0];
     builder.declare_value_needs_stack_map(result);
+    ctx.declare_env(builder);
 
     // 6. Clean up case binder
     ctx.env.remove(binder);
@@ -103,6 +104,7 @@ fn emit_data_dispatch(
             // Emit alt body
             builder.switch_to_block(alt_block);
             builder.seal_block(alt_block);
+            ctx.declare_env(builder);
 
             // Bind pattern variables
             let mut bound_vars = Vec::new();
@@ -131,6 +133,7 @@ fn emit_data_dispatch(
 
     // Default or trap
     if let Some(alt) = default_alt {
+        ctx.declare_env(builder);
         let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, tree, alt.body)?;
         let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, result);
         builder.ins().jump(merge_block, &[result_ptr]);
@@ -199,6 +202,7 @@ fn emit_lit_dispatch(
         // Emit alt body
         builder.switch_to_block(alt_block);
         builder.seal_block(alt_block);
+        ctx.declare_env(builder);
         let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, tree, alt.body)?;
         let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, result);
         builder.ins().jump(merge_block, &[result_ptr]);
@@ -210,6 +214,7 @@ fn emit_lit_dispatch(
 
     // Default or trap
     if let Some(alt) = default_alt {
+        ctx.declare_env(builder);
         let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, tree, alt.body)?;
         let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, result);
         builder.ins().jump(merge_block, &[result_ptr]);
