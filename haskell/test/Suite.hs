@@ -451,3 +451,50 @@ edge_mutual_data =
   let wrap x = Just x
       unwrap mb = case mb of { Nothing -> 0; Just x -> x }
   in unwrap (wrap (42 :: Int))
+
+-- ============================================================
+-- Prelude functions (closure resolution) (10)
+-- ============================================================
+
+prelude_null_empty :: Bool
+prelude_null_empty = null ([] :: [Int])
+
+prelude_null_nonempty :: Bool
+prelude_null_nonempty = null [1 :: Int, 2, 3]
+
+prelude_length :: Int
+prelude_length = length [1 :: Int, 2, 3, 4, 5]
+
+prelude_take :: Int
+prelude_take =
+  let mylen acc [] = acc
+      mylen acc (_:xs) = mylen (acc + 1) xs
+  in mylen 0 (take 3 [1 :: Int, 2, 3, 4, 5])
+
+prelude_map :: Int
+prelude_map =
+  let mylen acc [] = acc
+      mylen acc (_:xs) = mylen (acc + 1) xs
+  in mylen 0 (map (+ (1 :: Int)) [1 :: Int, 2, 3])
+
+prelude_filter :: Int
+prelude_filter =
+  let mylen acc [] = acc
+      mylen acc (_:xs) = mylen (acc + 1) xs
+      isEven n = let go k = if k >= n then k == n else go (k + 2) in go (0 :: Int)
+  in mylen 0 (filter isEven [1 :: Int, 2, 3, 4, 5, 6])
+
+prelude_or :: Bool
+prelude_or = False || True
+
+prelude_and :: Bool
+prelude_and = True && False
+
+prelude_eq_int :: Bool
+prelude_eq_int = (42 :: Int) == 42
+
+prelude_string_append :: Int
+prelude_string_append =
+  let mylen acc [] = acc
+      mylen acc (_:xs) = mylen (acc + 1) xs
+  in mylen 0 ("hello" ++ " world")

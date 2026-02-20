@@ -422,3 +422,18 @@ suite_int!(edge_const_chain, 42);
 suite_int!(edge_case_of_case, 1);
 suite_int!(edge_deep_nesting, 6);
 suite_int!(edge_mutual_data, 42);
+
+// =============================================================================
+// Prelude functions (closure resolution) (10)
+// =============================================================================
+
+suite_bool!(prelude_null_empty, true);
+suite_bool!(prelude_null_nonempty, false);
+suite_int!(prelude_length, 5);
+suite_int!(prelude_take, 3);
+suite_int!(prelude_map, 3);
+suite_int!(prelude_filter, 3);
+suite_bool!(prelude_or, true);
+suite_bool!(prelude_and, false);
+suite_bool!(prelude_eq_int, true);
+suite_int!(prelude_string_append, 11);

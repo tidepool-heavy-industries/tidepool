@@ -2,11 +2,11 @@ module Tidepool.Resolve (resolveExternals, UnresolvedVar(..)) where
 
 import GHC.Core (CoreBind, CoreExpr, Bind(..), maybeUnfoldingTemplate)
 import GHC.Core.FVs (exprSomeFreeVars)
-import GHC.Types.Id (Id, idUnfolding, isGlobalId, isPrimOpId_maybe, isDataConWorkId_maybe, isDataConWrapId_maybe)
+import GHC.Types.Id (Id, idUnfolding, realIdUnfolding, isGlobalId, isPrimOpId_maybe, isDataConWorkId_maybe, isDataConWrapId_maybe)
 import GHC.Utils.Outputable (showPprUnsafe)
 import Debug.Trace (trace)
 import GHC.Types.Var (Var, varName, varUnique)
-import GHC.Types.Var.Set (VarSet, emptyVarSet, unitVarSet, unionVarSet, elemVarSet, extendVarSet)
+import GHC.Types.Var.Set (VarSet, emptyVarSet, unitVarSet, elemVarSet, extendVarSet)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Types.Name (nameOccName, nameModule_maybe)
@@ -48,26 +48,29 @@ resolveExternals binds =
       | otherwise =
           let visited' = extendVarSet visited v
               vName = occNameString (nameOccName (varName v))
+              handleUnfolding unfoldingExpr =
+                let newBind = NonRec v unfoldingExpr
+                    -- Use exprSomeFreeVars (const True) here too, so we
+                    -- discover globals in the inlined unfolding bodies.
+                    newFVs = exprSomeFreeVars (const True) unfoldingExpr
+                    localSet' = extendVarSet localSet v
+                    newExternals = filter (isResolvable localSet')
+                                         (nonDetEltsUniqSet newFVs)
+                in go (newExternals ++ rest) visited' localSet' (newBind : acc) unres
           in case maybeUnfoldingTemplate (idUnfolding v) of
-               Nothing ->
-                 trace ("  [resolve] FAIL " ++ vName ++ ": " ++ showPprUnsafe (idUnfolding v)) $
-                 let uv = UnresolvedVar
-                       { uvKey    = fromIntegral (getKey (varUnique v))
-                       , uvName   = occNameString (nameOccName (varName v))
-                       , uvModule = case nameModule_maybe (varName v) of
-                                      Just m  -> moduleNameString (moduleName m)
-                                      Nothing -> "<no module>"
-                       }
-                 in go rest visited' localSet acc (uv : unres)
-               Just unfoldingExpr ->
-                 let newBind = NonRec v unfoldingExpr
-                     -- Use exprSomeFreeVars (const True) here too, so we
-                     -- discover globals in the inlined unfolding bodies.
-                     newFVs = exprSomeFreeVars (const True) unfoldingExpr
-                     localSet' = extendVarSet localSet v
-                     newExternals = filter (isResolvable localSet')
-                                          (nonDetEltsUniqSet newFVs)
-                 in go (newExternals ++ rest) visited' localSet' (newBind : acc) unres
+               Just unfoldingExpr -> handleUnfolding unfoldingExpr
+               Nothing -> case maybeUnfoldingTemplate (realIdUnfolding v) of
+                 Just unfoldingExpr -> handleUnfolding unfoldingExpr
+                 Nothing ->
+                   trace ("  [resolve] FAIL " ++ vName ++ ": " ++ showPprUnsafe (idUnfolding v)) $
+                   let uv = UnresolvedVar
+                         { uvKey    = fromIntegral (getKey (varUnique v))
+                         , uvName   = occNameString (nameOccName (varName v))
+                         , uvModule = case nameModule_maybe (varName v) of
+                                        Just m  -> moduleNameString (moduleName m)
+                                        Nothing -> "<no module>"
+                         }
+                   in go rest visited' localSet acc (uv : unres)
 
     toRecPairs :: CoreBind -> [(Var, CoreExpr)]
     toRecPairs (NonRec b rhs) = [(b, rhs)]
