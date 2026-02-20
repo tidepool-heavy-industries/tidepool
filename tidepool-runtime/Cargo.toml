@@ -1,0 +1,8 @@
+[package]
+name = "tidepool-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core-repr = { path = "../core-repr" }
+tempfile = "3"
