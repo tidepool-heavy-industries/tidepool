@@ -68,24 +68,6 @@ where
 // Request types
 // ---------------------------------------------------------------------------
 
-/// Request parameters for the `run_haskell` tool.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct RunHaskellRequest {
-    /// Haskell source code to compile and execute.
-    pub source: String,
-    /// Name of the top-level binding to evaluate.
-    pub target: String,
-}
-
-/// Request parameters for the `compile_haskell` tool.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct CompileHaskellRequest {
-    /// Haskell source code to compile (without executing).
-    pub source: String,
-    /// Name of the top-level binding to target.
-    pub target: String,
-}
-
 /// Request parameters for the structured `eval` tool.
 ///
 /// Provide do-notation lines; the server wraps them in a full Haskell module
@@ -137,24 +119,26 @@ fn build_effect_stack_type(effects: &[EffectDecl]) -> String {
 }
 
 fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
-    let mut desc = String::from(
-        "Compile and run Haskell source code via GHC + Cranelift JIT. \
-         Input: Haskell source with 'module X where' header and a target binding name. \
-         Output: the evaluated result as structured JSON. \
-         Examples: Int->number, Bool->boolean, String->string, [a]->array, Maybe->null/value, \
-         custom ADTs->{constructor,fields}. \
-         First compilation is slow (~2s, GHC). Subsequent calls are cached.",
-    );
+    let mut desc = String::from(concat!(
+        "Compile and run Haskell source code via GHC + Cranelift JIT. ",
+        "Input: Haskell source with 'module X where' header and a target binding name. ",
+        "Output: the evaluated result as structured JSON. ",
+        "Examples: Int->number, Bool->boolean, String->string, [a]->array, Maybe->null/value, ",
+        "custom ADTs->{constructor,fields}. ",
+        "First compilation is slow (~2s, GHC). Subsequent calls are cached.\n",
+        "\n",
+        "Provide do-notation lines; the server wraps them in a full Haskell module ",
+        "with the correct effect stack type, LANGUAGE pragmas, and imports. ",
+        "Use `pure x` as the last line to return a value. ",
+        "Use `send (Constructor args)` to invoke effects.\n",
+    ));
 
     if !effects.is_empty() {
-        desc.push_str("\n\nAvailable effects (use `send` to invoke):");
+        desc.push_str("\nAvailable effects (use `send` to invoke):\n");
         for eff in effects {
-            desc.push_str(&format!("\n\n{}:", eff.type_name));
-            if !eff.description.is_empty() {
-                desc.push_str(&format!(" {}", eff.description));
-            }
+            desc.push_str(&format!("\n{}: {}\n", eff.type_name, eff.description));
             for ctor in eff.constructors {
-                desc.push_str(&format!("\n  {}", ctor));
+                desc.push_str(&format!("  {}\n", ctor));
             }
         }
     }
@@ -238,32 +222,6 @@ impl<'a> DispatchEffect<()> for HandlerWrapper<'a> {
 }
 
 impl TidepoolMcpServerImpl {
-    async fn run_haskell(&self, req: RunHaskellRequest) -> Result<CallToolResult, McpError> {
-        let mut handlers = dyn_clone::clone_box(&*self.handler_factory);
-        let include_refs: Vec<PathBuf> = self.include.clone();
-
-        let result = tokio::task::spawn_blocking(move || {
-            let include_paths: Vec<&Path> = include_refs.iter().map(|p| p.as_path()).collect();
-            let mut wrapper = HandlerWrapper(handlers.as_mut());
-            tidepool_runtime::compile_and_run(
-                &req.source,
-                &req.target,
-                &include_paths,
-                &mut wrapper,
-                &(),
-            )
-        })
-        .await
-        .map_err(|e| McpError::internal_error(format!("task join error: {}", e), None))?;
-
-        match result {
-            Ok(eval_result) => Ok(CallToolResult::success(vec![Content::text(
-                eval_result.to_string_pretty(),
-            )])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("{}", e))])),
-        }
-    }
-
     async fn eval(&self, req: EvalRequest) -> Result<CallToolResult, McpError> {
         let source = template_haskell(
             &self.haskell_preamble,
@@ -298,36 +256,6 @@ impl TidepoolMcpServerImpl {
         }
     }
 
-    async fn compile_haskell_tool(
-        &self,
-        req: CompileHaskellRequest,
-    ) -> Result<CallToolResult, McpError> {
-        let include_refs: Vec<PathBuf> = self.include.clone();
-        let source = req.source.clone();
-        let target = req.target.clone();
-
-        let result = tokio::task::spawn_blocking(move || {
-            let include_paths: Vec<&Path> = include_refs.iter().map(|p| p.as_path()).collect();
-            tidepool_runtime::compile_haskell(&source, &target, &include_paths)
-        })
-        .await
-        .map_err(|e| McpError::internal_error(format!("task join error: {}", e), None))?;
-
-        match result {
-            Ok((expr, table)) => {
-                let constructors: Vec<String> = table.iter().map(|dc| dc.name.clone()).collect();
-                let info = serde_json::json!({
-                    "target": req.target,
-                    "expr_nodes": expr.nodes.len(),
-                    "constructors": constructors,
-                });
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&info).unwrap_or_else(|_| info.to_string()),
-                )]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("{}", e))])),
-        }
-    }
 }
 
 impl ServerHandler for TidepoolMcpServerImpl {
@@ -346,20 +274,6 @@ impl ServerHandler for TidepoolMcpServerImpl {
     ) -> Result<CallToolResult, McpError> {
         let args = request.arguments.unwrap_or_default();
         match request.name.as_ref() {
-            "run_haskell" => {
-                let req: RunHaskellRequest =
-                    serde_json::from_value(serde_json::Value::Object(args)).map_err(|e| {
-                        McpError::invalid_params(format!("invalid params: {}", e), None)
-                    })?;
-                self.run_haskell(req).await
-            }
-            "compile_haskell" => {
-                let req: CompileHaskellRequest =
-                    serde_json::from_value(serde_json::Value::Object(args)).map_err(|e| {
-                        McpError::invalid_params(format!("invalid params: {}", e), None)
-                    })?;
-                self.compile_haskell_tool(req).await
-            }
             "eval" => {
                 let req: EvalRequest =
                     serde_json::from_value(serde_json::Value::Object(args)).map_err(|e| {
@@ -393,41 +307,6 @@ impl ServerHandler for TidepoolMcpServerImpl {
         }
 
         let tools = vec![
-            Tool {
-                name: "run_haskell".into(),
-                title: None,
-                description: Some(
-                    concat!(
-                        "Compile and run Haskell source code via GHC + Cranelift JIT. ",
-                        "Input: Haskell source with 'module X where' header and a target binding name. ",
-                        "Output: the evaluated result as structured JSON. ",
-                        "Examples: Int->number, Bool->boolean, String->string, [a]->array, Maybe->null/value, ",
-                        "custom ADTs->{constructor,fields}. ",
-                        "First compilation is slow (~2s, GHC). Subsequent calls are cached.",
-                    )
-                    .into(),
-                ),
-                input_schema: schema_to_map(schemars::schema_for!(RunHaskellRequest))?,
-                output_schema: None,
-                annotations: None,
-                icons: None,
-                meta: None,
-                execution: None,
-            },
-            Tool {
-                name: "compile_haskell".into(),
-                title: None,
-                description: Some(
-                    "Compile Haskell source code without executing. Returns metadata: expression node count and available constructors."
-                        .into(),
-                ),
-                input_schema: schema_to_map(schemars::schema_for!(CompileHaskellRequest))?,
-                output_schema: None,
-                annotations: None,
-                icons: None,
-                meta: None,
-                execution: None,
-            },
             Tool {
                 name: "eval".into(),
                 title: None,
@@ -499,28 +378,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_run_haskell_request_serialization() {
-        let req = RunHaskellRequest {
-            source: "main = 42".to_string(),
-            target: "main".to_string(),
-        };
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["source"], "main = 42");
-        assert_eq!(json["target"], "main");
-    }
-
-    #[test]
-    fn test_compile_haskell_request_serialization() {
-        let req = CompileHaskellRequest {
-            source: "module Test where\nfoo = 42".to_string(),
-            target: "foo".to_string(),
-        };
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["source"], "module Test where\nfoo = 42");
-        assert_eq!(json["target"], "foo");
-    }
 
     #[test]
     fn test_eval_request_defaults() {
