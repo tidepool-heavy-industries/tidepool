@@ -207,7 +207,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cwd = std::env::current_dir()?;
-    let handlers = frunk::hlist![ConsoleHandler, KvHandler::new(), FsHandler::new(cwd)];
-    let server = TidepoolMcpServer::new(handlers);
+    let handlers = frunk::hlist![ConsoleHandler, KvHandler::new(), FsHandler::new(cwd.clone())];
+
+    // Prelude lives at haskell/lib/ relative to repo root, or via TIDEPOOL_PRELUDE_DIR
+    let prelude_fallback = cwd.join("haskell").join("lib");
+    let server = TidepoolMcpServer::new(handlers).with_prelude(prelude_fallback);
     server.serve_stdio().await
 }

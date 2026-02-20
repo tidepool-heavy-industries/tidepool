@@ -95,7 +95,9 @@ fn build_preamble(effects: &[EffectDecl]) -> String {
     let mut out = String::new();
     out.push_str("{-# LANGUAGE DataKinds, TypeOperators, FlexibleContexts, GADTs, PartialTypeSignatures, ScopedTypeVariables #-}\n");
     out.push_str("module Expr where\n");
+    out.push_str("import Prelude hiding (reverse, splitAt, span, break, init, words, lines, unlines, unwords, concatMap, dropWhile)\n");
     out.push_str("import Control.Monad.Freer\n");
+    out.push_str("import Tidepool.Prelude\n");
     out.push('\n');
 
     for eff in effects {
@@ -434,6 +436,23 @@ where
     /// Add include paths for Haskell module resolution.
     pub fn with_include(mut self, paths: Vec<PathBuf>) -> Self {
         self.inner.include = paths;
+        self
+    }
+
+    /// Add the bundled Tidepool prelude to the include paths.
+    ///
+    /// Looks for the prelude in this order:
+    /// 1. `TIDEPOOL_PRELUDE_DIR` environment variable
+    /// 2. The provided fallback path
+    ///
+    /// The prelude provides source definitions for common Prelude functions
+    /// (reverse, splitAt, sort, etc.) whose GHC base library workers lack
+    /// unfoldings in .hi files.
+    pub fn with_prelude(mut self, fallback: PathBuf) -> Self {
+        let prelude_dir = std::env::var_os("TIDEPOOL_PRELUDE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or(fallback);
+        self.inner.include.push(prelude_dir);
         self
     }
 

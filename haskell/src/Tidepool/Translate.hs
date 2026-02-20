@@ -27,6 +27,9 @@ import GHC.Core.TyCon
 import GHC.Core.Type (splitTyConApp_maybe)
 import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Core.TyCo.FVs (tyConsOfType)
+import GHC.Core.FVs (exprSomeFreeVars)
+import GHC.Types.Var.Set (VarSet, emptyVarSet, extendVarSet, elemVarSet)
+import GHC.Types.Unique.Set as USet (nonDetEltsUniqSet)
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet, nonDetEltsUniqSet)
 import GHC.Types.Basic (JoinPointHood(..))
 import GHC.Utils.Outputable (showPprUnsafe)
@@ -37,6 +40,7 @@ import Data.Bits ((.&.), (.|.), shiftL)
 import Data.Word
 import Data.Int
 import Data.Text (Text)
+import qualified Data.Set as Set
 import qualified Data.Text as T
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -197,11 +201,14 @@ translateModuleClosed :: [CoreBind] -> String -> (Seq FlatNode, Map.Map Word64 D
 translateModuleClosed allBinds targetName =
   let (closedBinds, unresolved) = resolveExternals allBinds
       -- Filter out vars the translator knows how to desugar
-      trulyUnresolved = filter (not . isDesugaredVar . uvName) unresolved
+      filtered = filter (not . isDesugaredVar . uvName) unresolved
       originalCount = length allBinds
       closedCount = length closedBinds
       resolvedCount = closedCount - originalCount
       (nodes, usedDCs) = translateModule closedBinds targetName
+      -- Only report unresolved vars that actually appear in the emitted tree
+      referencedIds = collectVarIds nodes
+      trulyUnresolved = filter (\uv -> uvKey uv `Set.member` referencedIds) filtered
   in trace ("  resolveExternals: " ++ show originalCount ++ " original + " ++ show resolvedCount ++ " resolved = " ++ show closedCount ++ " total")
      (nodes, usedDCs, trulyUnresolved)
   where
@@ -211,6 +218,12 @@ translateModuleClosed allBinds targetName =
       , "eqString", "$wunsafeTake", "unsafeTake"
       , "divZeroError", "overflowError"
       ]
+    -- Collect all VarIds referenced in the emitted nodes
+    collectVarIds :: Seq FlatNode -> Set.Set Word64
+    collectVarIds = foldl' (\acc node -> acc `Set.union` nodeVarIds node) Set.empty
+    nodeVarIds :: FlatNode -> Set.Set Word64
+    nodeVarIds (NVar v) = Set.singleton v
+    nodeVarIds _ = Set.empty
 
 -- | Collect all DataCons encountered during translation of Core bindings.
 -- This includes constructors from imported packages (e.g. freer-simple's
