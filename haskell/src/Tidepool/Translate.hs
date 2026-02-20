@@ -386,8 +386,7 @@ translate expr =
         charEqCaseFinal <- emitNode $ NCase xRef xId [xUnboxAlt]
         -- Build: case b of { [] -> False; (:) y yrest -> case x of ... }
         bRef2 <- emitNode $ NVar bId
-        falseIdx2 <- emitNode $ NCon falseId []
-        let bNilAlt2  = FlatAlt (FDataAlt nilId) [] falseIdx2
+        let bNilAlt2  = FlatAlt (FDataAlt nilId) [] falseIdx
             bConsAlt2 = FlatAlt (FDataAlt consId) [yId, yrestId] charEqCaseFinal
         bCaseWhenACons <- emitNode $ NCase bRef2 bId [bNilAlt2, bConsAlt2]
         -- Build: case a of { [] -> <bCaseWhenANil>; (:) x xrest -> <bCaseWhenACons> }
@@ -440,9 +439,8 @@ translate expr =
         iRef2 <- emitNode $ NVar iId
         lit0 <- emitNode $ NLit (LEInt 0)
         leResult <- emitNode $ NPrimOp (T.pack "IntLe") [iRef2, lit0]
-        nilIdx2 <- emitNode $ NCon nilId []
         let leDefaultAlt = FlatAlt FDefault [] aCaseIdx
-            leTrueAlt    = FlatAlt (FLitAlt (LEInt 1)) [] nilIdx2
+            leTrueAlt    = FlatAlt (FLitAlt (LEInt 1)) [] nilIdx
         leCaseIdx <- emitNode $ NCase leResult 0 [leDefaultAlt, leTrueAlt]
         -- Build: \i -> \a -> case (IntLe i 0) of ...
         lamA <- emitNode $ NLam aId leCaseIdx
