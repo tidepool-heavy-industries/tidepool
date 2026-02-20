@@ -1381,6 +1381,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcp-server-example"
+version = "0.1.0"
+dependencies = [
+ "core-effect",
+ "core-eval",
+ "core-repr",
+ "frunk",
+ "tidepool-mcp",
+ "tidepool-runtime",
+ "tokio",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
