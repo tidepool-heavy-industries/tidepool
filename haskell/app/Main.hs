@@ -8,6 +8,8 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Control.Exception (try, SomeException)
 import Control.Monad (foldM)
+import System.Exit (exitFailure)
+import System.IO (hPutStrLn, stderr)
 
 import GHC.Core (CoreBind, Bind(..))
 import GHC.Core.DataCon (DataCon, dataConSourceArity, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
@@ -90,15 +92,17 @@ processFile args path = do
               , not (null n), head n /= '$']
         allMetaMap <- foldM (\acc name -> do
           let (nodes, usedDCs, unresolved) = translateModuleClosed binds name
-          if not (null unresolved) then
-            putStrLn $ "  WARNING (" ++ name ++ "): " ++ show (length unresolved) ++ " unresolved external(s)"
-          else return ()
-          let cbor = encodeTree nodes
-          let outFile = outDir </> name ++ ".cbor"
-          BS.writeFile outFile cbor
-          putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
-          let usedMeta = map dcToMeta (Map.elems usedDCs)
-          return $ acc `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- usedMeta]
+          if not (null unresolved) then do
+            let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
+            putStrLn $ "  SKIPPED (" ++ name ++ "): unresolved external(s): " ++ unwords names
+            return acc
+          else do
+            let cbor = encodeTree nodes
+            let outFile = outDir </> name ++ ".cbor"
+            BS.writeFile outFile cbor
+            putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
+            let usedMeta = map dcToMeta (Map.elems usedDCs)
+            return $ acc `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- usedMeta]
           ) Map.empty uniqueNames
 
         -- Write merged metadata
@@ -119,8 +123,10 @@ processFile args path = do
         -- Whole-module mode: serialize all bindings as nested lets around the target
         let (nodes, usedDCs, unresolved) = translateModuleClosed binds targetName
         if not (null unresolved) then do
-          putStrLn $ "  WARNING: " ++ show (length unresolved) ++ " unresolved external(s):"
-          mapM_ (\uv -> putStrLn $ "    " ++ uvModule uv ++ "." ++ uvName uv ++ " (v_" ++ show (uvKey uv) ++ ")") unresolved
+          let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
+          error $ "Unresolved external(s): " ++ unwords names
+            ++ "\nThese functions don't expose their implementation to the GHC API."
+            ++ "\nDefine them in your source or use equivalent inline definitions."
         else return ()
         let cbor = encodeTree nodes
         let outFile = outDir </> targetName ++ ".cbor"
@@ -172,7 +178,9 @@ processFile args path = do
         putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
 
   case res of
-    Left (e :: SomeException) -> putStrLn $ "  Error processing " ++ path ++ ": " ++ show e
+    Left (e :: SomeException) -> do
+      hPutStrLn stderr $ "Error: " ++ show e
+      exitFailure
     Right () -> return ()
 
 dcToMeta :: DataCon -> (Word64, Text, Int, Int, [Text])

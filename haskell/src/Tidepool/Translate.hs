@@ -196,12 +196,21 @@ translateModule allBinds targetName =
 translateModuleClosed :: [CoreBind] -> String -> (Seq FlatNode, Map.Map Word64 DataCon, [UnresolvedVar])
 translateModuleClosed allBinds targetName =
   let (closedBinds, unresolved) = resolveExternals allBinds
+      -- Filter out vars the translator knows how to desugar
+      trulyUnresolved = filter (not . isDesugaredVar . uvName) unresolved
       originalCount = length allBinds
       closedCount = length closedBinds
       resolvedCount = closedCount - originalCount
       (nodes, usedDCs) = translateModule closedBinds targetName
   in trace ("  resolveExternals: " ++ show originalCount ++ " original + " ++ show resolvedCount ++ " resolved = " ++ show closedCount ++ " total")
-     (nodes, usedDCs, unresolved)
+     (nodes, usedDCs, trulyUnresolved)
+  where
+    -- Names that resolveExternals can't inline but translate desugars directly
+    isDesugaredVar name = name `elem`
+      [ "unpackCString#", "unpackCStringUtf8#", "unpackAppendCString#"
+      , "eqString", "$wunsafeTake", "unsafeTake"
+      , "divZeroError", "overflowError"
+      ]
 
 -- | Collect all DataCons encountered during translation of Core bindings.
 -- This includes constructors from imported packages (e.g. freer-simple's
