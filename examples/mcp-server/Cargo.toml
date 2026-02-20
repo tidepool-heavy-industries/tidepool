@@ -12,5 +12,8 @@ path = "src/main.rs"
 tidepool-mcp = { path = "../../tidepool-mcp" }
 tidepool-effect = { path = "../../tidepool-effect" }
 tidepool-eval = { path = "../../tidepool-eval" }
+tidepool-bridge = { path = "../../tidepool-bridge" }
+tidepool-bridge-derive = { path = "../../tidepool-bridge-derive" }
+tidepool-repr = { path = "../../tidepool-repr" }
 frunk = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
