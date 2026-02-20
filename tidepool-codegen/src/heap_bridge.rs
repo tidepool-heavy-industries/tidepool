@@ -9,6 +9,7 @@ pub enum BridgeError {
     UnexpectedHeapTag(u8),
     UnexpectedLitTag(u8),
     NullPointer,
+    NurseryExhausted,
 }
 
 impl fmt::Display for BridgeError {
@@ -17,6 +18,7 @@ impl fmt::Display for BridgeError {
             BridgeError::UnexpectedHeapTag(t) => write!(f, "unexpected heap tag: {}", t),
             BridgeError::UnexpectedLitTag(t) => write!(f, "unexpected lit tag: {}", t),
             BridgeError::NullPointer => write!(f, "null pointer"),
+            BridgeError::NurseryExhausted => write!(f, "nursery exhausted"),
         }
     }
 }
@@ -86,26 +88,33 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
     match val {
         Value::Lit(lit) => {
             let ptr = bump_alloc_from_vmctx(vmctx, layout::LIT_SIZE);
-            layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
+            if ptr.is_null() {
+                return Err(BridgeError::NurseryExhausted);
+            }
 
             match lit {
                 Literal::LitInt(n) => {
+                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
                     *ptr.add(layout::LIT_TAG_OFFSET) = 0;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *n;
                 }
                 Literal::LitWord(n) => {
+                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
                     *ptr.add(layout::LIT_TAG_OFFSET) = 1;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *n as i64;
                 }
                 Literal::LitChar(c) => {
+                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
                     *ptr.add(layout::LIT_TAG_OFFSET) = 2;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *c as i64;
                 }
                 Literal::LitFloat(bits) => {
+                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
                     *ptr.add(layout::LIT_TAG_OFFSET) = 3;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *bits as i64;
                 }
                 Literal::LitDouble(bits) => {
+                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
                     *ptr.add(layout::LIT_TAG_OFFSET) = 4;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *bits as i64;
                 }
@@ -113,12 +122,20 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
                     // Allocate string data: [len: u64][bytes...]
                     let data_size = 8 + bytes.len();
                     let data_ptr = bump_alloc_from_vmctx(vmctx, data_size);
+                    if data_ptr.is_null() {
+                        // Roll back the Lit object allocation to avoid dead space in nursery
+                        vmctx.alloc_ptr = ptr;
+                        return Err(BridgeError::NurseryExhausted);
+                    }
                     *(data_ptr as *mut u64) = bytes.len() as u64;
                     std::ptr::copy_nonoverlapping(
                         bytes.as_ptr(),
                         data_ptr.add(8),
                         bytes.len(),
                     );
+                    
+                    // Only write the header once we're sure all allocations succeeded
+                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
                     *ptr.add(layout::LIT_TAG_OFFSET) = 5;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = data_ptr as i64;
                 }
@@ -134,6 +151,9 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
 
             let size = 24 + 8 * fields.len();
             let ptr = bump_alloc_from_vmctx(vmctx, size);
+            if ptr.is_null() {
+                return Err(BridgeError::NurseryExhausted);
+            }
             layout::write_header(ptr, layout::TAG_CON, size as u16);
 
             *(ptr.add(layout::CON_TAG_OFFSET) as *mut u64) = id.0;
@@ -148,7 +168,7 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
     }
 }
 
-/// Bump-allocate from VMContext. Panics if nursery is exhausted.
+/// Bump-allocate from VMContext. Returns null if nursery is exhausted.
 ///
 /// # Safety
 ///
@@ -159,11 +179,7 @@ pub unsafe fn bump_alloc_from_vmctx(vmctx: &mut VMContext, size: usize) -> *mut 
     let ptr = vmctx.alloc_ptr;
     let new_ptr = ptr.add(aligned_size);
     if new_ptr as *const u8 > vmctx.alloc_limit {
-        panic!(
-            "nursery exhausted: tried to allocate {} bytes, {} remaining",
-            aligned_size,
-            vmctx.alloc_limit as usize - ptr as usize
-        );
+        return std::ptr::null_mut();
     }
     vmctx.alloc_ptr = new_ptr;
     ptr

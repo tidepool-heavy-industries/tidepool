@@ -24,7 +24,7 @@ where
     F: FnOnce(&mut FunctionBuilder, ir::Value, ir::SigRef),
 {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
-    let func_id = pipeline.declare_function(name);
+    let func_id = pipeline.declare_function(name).expect("failed to declare");
 
     let mut ctx = Context::new();
     ctx.func = ir::Function::with_name_signature(UserFuncName::default(), pipeline.make_func_signature());
@@ -48,8 +48,8 @@ where
         builder.finalize();
     }
 
-    pipeline.define_function(func_id, &mut ctx);
-    pipeline.finalize();
+    pipeline.define_function(func_id, &mut ctx).expect("failed to define");
+    pipeline.finalize().expect("failed to finalize");
 
     let ptr = pipeline.get_function_ptr(func_id);
     let func = unsafe { std::mem::transmute(ptr) };

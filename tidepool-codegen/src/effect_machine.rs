@@ -290,6 +290,9 @@ impl CompiledEffectMachine {
     unsafe fn alloc_con(&mut self, con_tag: u64, fields: &[*mut u8]) -> *mut u8 {
         let size = 24 + 8 * fields.len();
         let ptr = heap_bridge::bump_alloc_from_vmctx(&mut self.vmctx, size);
+        if ptr.is_null() {
+            return std::ptr::null_mut();
+        }
         layout::write_header(ptr, layout::TAG_CON, size as u16);
         *(ptr.add(layout::CON_TAG_OFFSET) as *mut u64) = con_tag;
         *(ptr.add(layout::CON_NUM_FIELDS_OFFSET) as *mut u16) = fields.len() as u16;

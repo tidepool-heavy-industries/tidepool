@@ -14,6 +14,7 @@ use crate::yield_type::Yield;
 #[derive(Debug)]
 pub enum JitError {
     Compilation(crate::emit::EmitError),
+    Pipeline(crate::pipeline::PipelineError),
     MissingConTags,
     Effect(EffectError),
     Yield(crate::yield_type::YieldError),
@@ -24,6 +25,7 @@ impl std::fmt::Display for JitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             JitError::Compilation(e) => write!(f, "JIT compilation error: {}", e),
+            JitError::Pipeline(e) => write!(f, "pipeline error: {}", e),
             JitError::MissingConTags => write!(f, "missing freer-simple constructors in DataConTable"),
             JitError::Effect(e) => write!(f, "effect dispatch error: {}", e),
             JitError::Yield(e) => write!(f, "yield error: {}", e),
@@ -37,6 +39,12 @@ impl std::error::Error for JitError {}
 impl From<EffectError> for JitError {
     fn from(e: EffectError) -> Self {
         JitError::Effect(e)
+    }
+}
+
+impl From<crate::pipeline::PipelineError> for JitError {
+    fn from(e: crate::pipeline::PipelineError) -> Self {
+        JitError::Pipeline(e)
     }
 }
 
@@ -60,7 +68,7 @@ impl JitEffectMachine {
         let mut pipeline = CodegenPipeline::new(&crate::host_fns::host_fn_symbols());
         let func_id = crate::emit::expr::compile_expr(&mut pipeline, &expr, "main")
             .map_err(JitError::Compilation)?;
-        pipeline.finalize();
+        pipeline.finalize()?;
 
         let tags = ConTags::from_table(table).ok_or(JitError::MissingConTags)?;
         let nursery = Nursery::new(nursery_size);

@@ -43,7 +43,7 @@ fn test_stack_map_app_safepoints() {
     let tree = CoreExpr { nodes };
     
     let _ = compile_expr(&mut pipeline, &tree, "test_app").unwrap();
-    pipeline.finalize();
+    pipeline.finalize().expect("failed to finalize");
     
     // The App(0, 1) is a safepoint.
     assert!(!pipeline.stack_maps.is_empty(), "Stack maps should be generated for App");
@@ -77,7 +77,7 @@ fn test_stack_map_case_safepoints() {
     
     let tree = CoreExpr { nodes };
     let _ = compile_expr(&mut pipeline, &tree, "test_case_safepoint").unwrap();
-    pipeline.finalize();
+    pipeline.finalize().expect("failed to finalize");
     
     // App(0, 1) inside Case alt is a safepoint.
     assert!(!pipeline.stack_maps.is_empty(), "Stack maps should be generated for App in Case alt");
@@ -112,7 +112,7 @@ fn test_stack_map_join_safepoints() {
     let tree = CoreExpr { nodes };
     
     let _ = compile_expr(&mut pipeline, &tree, "test_join_safepoint").unwrap();
-    pipeline.finalize();
+    pipeline.finalize().expect("failed to finalize");
     
     // App(0, 1) in RHS is a safepoint.
     assert!(!pipeline.stack_maps.is_empty(), "Stack maps should be generated for App in Join RHS");

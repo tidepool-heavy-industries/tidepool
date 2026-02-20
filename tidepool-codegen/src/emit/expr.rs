@@ -17,8 +17,7 @@ pub fn compile_expr(
     name: &str,
 ) -> Result<FuncId, EmitError> {
     let sig = pipeline.make_func_signature();
-    let func_id = pipeline.module.declare_function(name, Linkage::Export, &sig)
-        .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+    let func_id = pipeline.declare_function(name)?;
 
     let mut ctx = Context::new();
     ctx.func.signature = sig;
@@ -46,7 +45,7 @@ pub fn compile_expr(
     builder.ins().return_(&[ret]);
     builder.finalize();
 
-    pipeline.define_function(func_id, &mut ctx);
+    pipeline.define_function(func_id, &mut ctx)?;
 
     Ok(func_id)
 }
@@ -238,7 +237,7 @@ impl EmitContext {
                 inner_builder.finalize();
 
                 self.lambda_counter = inner_emit.lambda_counter;
-                pipeline.define_function(lambda_func_id, &mut inner_ctx);
+                pipeline.define_function(lambda_func_id, &mut inner_ctx)?;
 
                 let func_ref = pipeline.module.declare_func_in_func(lambda_func_id, builder.func);
                 let code_ptr = builder.ins().func_addr(types::I64, func_ref);
@@ -441,7 +440,7 @@ impl EmitContext {
                     inner_builder.ins().return_(&[ret_val]);
                     inner_builder.finalize();
                     self.lambda_counter = inner_emit.lambda_counter;
-                    pipeline.define_function(lambda_func_id, &mut inner_ctx);
+                    pipeline.define_function(lambda_func_id, &mut inner_ctx)?;
 
                     let func_ref = pipeline.module.declare_func_in_func(lambda_func_id, builder.func);
                     let code_ptr = builder.ins().func_addr(types::I64, func_ref);

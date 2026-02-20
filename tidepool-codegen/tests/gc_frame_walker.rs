@@ -20,7 +20,7 @@ fn test_frame_walker_finds_roots() {
     };
     let gc_id = pipeline.module.declare_function("gc_trigger", cranelift_module::Linkage::Import, &gc_sig_ext).unwrap();
 
-    let func_id = pipeline.declare_function("test_find_roots");
+    let func_id = pipeline.declare_function("test_find_roots").expect("failed to declare");
     let mut ctx = Context::new();
     ctx.func = ir::Function::with_name_signature(UserFuncName::default(), pipeline.make_func_signature());
     let mut fb_ctx = FunctionBuilderContext::new();
@@ -52,8 +52,8 @@ fn test_frame_walker_finds_roots() {
         builder.finalize();
     }
 
-    pipeline.define_function(func_id, &mut ctx);
-    pipeline.finalize();
+    pipeline.define_function(func_id, &mut ctx).expect("failed to define");
+    pipeline.finalize().expect("failed to finalize");
 
     host_fns::reset_test_counters();
     host_fns::set_stack_map_registry(&pipeline.stack_maps);
@@ -91,7 +91,7 @@ fn test_frame_walker_rewrite_roots() {
     };
     let gc_id = pipeline.module.declare_function("gc_trigger", cranelift_module::Linkage::Import, &gc_sig_ext).unwrap();
 
-    let func_id = pipeline.declare_function("test_rewrite_roots");
+    let func_id = pipeline.declare_function("test_rewrite_roots").expect("failed to declare");
     let mut ctx = Context::new();
     ctx.func = ir::Function::with_name_signature(UserFuncName::default(), pipeline.make_func_signature());
     let mut fb_ctx = FunctionBuilderContext::new();
@@ -118,8 +118,8 @@ fn test_frame_walker_rewrite_roots() {
         builder.finalize();
     }
 
-    pipeline.define_function(func_id, &mut ctx);
-    pipeline.finalize();
+    pipeline.define_function(func_id, &mut ctx).expect("failed to define");
+    pipeline.finalize().expect("failed to finalize");
 
     host_fns::reset_test_counters();
     host_fns::set_stack_map_registry(&pipeline.stack_maps);
@@ -152,7 +152,7 @@ fn test_frame_walker_rewrite_roots() {
 #[test]
 fn test_frame_walker_terminates_at_jit_boundary() {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
-    let func_id = pipeline.declare_function("test_boundary");
+    let func_id = pipeline.declare_function("test_boundary").expect("failed to declare");
 
     let mut ctx = Context::new();
     ctx.func = ir::Function::with_name_signature(UserFuncName::default(), pipeline.make_func_signature());
@@ -179,8 +179,8 @@ fn test_frame_walker_terminates_at_jit_boundary() {
         builder.finalize();
     }
 
-    pipeline.define_function(func_id, &mut ctx);
-    pipeline.finalize();
+    pipeline.define_function(func_id, &mut ctx).expect("failed to define");
+    pipeline.finalize().expect("failed to finalize");
 
     host_fns::reset_test_counters();
     host_fns::set_stack_map_registry(&pipeline.stack_maps);
