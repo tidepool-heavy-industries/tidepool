@@ -5,9 +5,10 @@ use tidepool_bridge_derive::FromCore;
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
 use tidepool_eval::value::Value;
-use tidepool_mcp::TidepoolMcpServer;
+use tidepool_mcp::{DescribeEffect, EffectDecl, TidepoolMcpServer};
 
 // === Tag 0: Console ===
+
 #[derive(FromCore)]
 enum ConsoleReq {
     #[core(name = "Print")]
@@ -16,6 +17,16 @@ enum ConsoleReq {
 
 #[derive(Clone)]
 struct ConsoleHandler;
+
+impl DescribeEffect for ConsoleHandler {
+    fn effect_decl() -> EffectDecl {
+        EffectDecl {
+            type_name: "Console",
+            description: "Print text output.",
+            constructors: &["Print :: String -> Console ()"],
+        }
+    }
+}
 
 impl EffectHandler<()> for ConsoleHandler {
     type Request = ConsoleReq;
@@ -30,6 +41,7 @@ impl EffectHandler<()> for ConsoleHandler {
 }
 
 // === Tag 1: KV Store ===
+
 #[derive(FromCore)]
 enum KvReq {
     #[core(name = "KvGet")]
@@ -51,6 +63,21 @@ impl KvHandler {
     fn new() -> Self {
         Self {
             store: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl DescribeEffect for KvHandler {
+    fn effect_decl() -> EffectDecl {
+        EffectDecl {
+            type_name: "KV",
+            description: "Persistent key-value store. State survives across calls within one server session.",
+            constructors: &[
+                "KvGet :: String -> KV (Maybe String)",
+                "KvSet :: String -> String -> KV ()",
+                "KvDelete :: String -> KV ()",
+                "KvKeys :: KV [String]",
+            ],
         }
     }
 }
@@ -84,6 +111,7 @@ impl EffectHandler<()> for KvHandler {
 }
 
 // === Tag 2: File I/O (sandboxed to working directory) ===
+
 #[derive(FromCore)]
 enum FsReq {
     #[core(name = "FsRead")]
@@ -104,12 +132,10 @@ impl FsHandler {
 
     fn resolve(&self, path: &str) -> Result<PathBuf, EffectError> {
         let resolved = self.root.join(path);
-        // Sandbox: ensure resolved path is under root
         let canonical_root = self
             .root
             .canonicalize()
             .map_err(|e| EffectError::Handler(e.to_string()))?;
-        // For new files that don't exist yet, check parent
         let check_path = if resolved.exists() {
             resolved
                 .canonicalize()
@@ -134,6 +160,19 @@ impl FsHandler {
             )));
         }
         Ok(check_path)
+    }
+}
+
+impl DescribeEffect for FsHandler {
+    fn effect_decl() -> EffectDecl {
+        EffectDecl {
+            type_name: "Fs",
+            description: "Read and write files (sandboxed to server working directory).",
+            constructors: &[
+                "FsRead :: String -> Fs String",
+                "FsWrite :: String -> String -> Fs ()",
+            ],
+        }
     }
 }
 

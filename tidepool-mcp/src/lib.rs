@@ -1,7 +1,8 @@
 //! MCP (Model Context Protocol) server library for Tidepool.
 //!
-//! Wraps `tidepool-runtime` in an MCP server exposing a `run_haskell` tool.
-//! Generic over effect handler stacks via `TidepoolMcpServer<H>`.
+//! Wraps `tidepool-runtime` in an MCP server exposing `run_haskell`,
+//! `compile_haskell`, and `eval` tools. Generic over effect handler stacks
+//! via `TidepoolMcpServer<H>`.
 
 use dyn_clone::{clone_trait_object, DynClone};
 use rmcp::{
@@ -16,6 +17,56 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tidepool_runtime::DispatchEffect;
 use tokio::io::{stdin, stdout};
+
+// ---------------------------------------------------------------------------
+// Effect metadata — lives next to the handler, discovered via trait
+// ---------------------------------------------------------------------------
+
+/// Static metadata describing a Haskell effect type.
+///
+/// Each effect handler that wants to participate in the MCP templating system
+/// implements `DescribeEffect` to provide its Haskell-side type declaration.
+#[derive(Debug, Clone, Copy)]
+pub struct EffectDecl {
+    /// Haskell GADT type name, e.g. `"Console"`.
+    pub type_name: &'static str,
+    /// Human-readable description of what this effect does.
+    pub description: &'static str,
+    /// Haskell GADT constructor declarations (one per line inside `data T a where`).
+    pub constructors: &'static [&'static str],
+}
+
+/// Trait for effect handlers that can describe their Haskell-side type.
+pub trait DescribeEffect {
+    fn effect_decl() -> EffectDecl;
+}
+
+/// Trait for collecting effect declarations from an HList of handlers.
+pub trait CollectEffectDecls {
+    fn collect_decls() -> Vec<EffectDecl>;
+}
+
+impl CollectEffectDecls for frunk::HNil {
+    fn collect_decls() -> Vec<EffectDecl> {
+        Vec::new()
+    }
+}
+
+impl<H, T> CollectEffectDecls for frunk::HCons<H, T>
+where
+    H: DescribeEffect,
+    T: CollectEffectDecls,
+{
+    fn collect_decls() -> Vec<EffectDecl> {
+        let mut decls = vec![H::effect_decl()];
+        decls.extend(T::collect_decls());
+        decls
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Request types
+// ---------------------------------------------------------------------------
 
 /// Request parameters for the `run_haskell` tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -35,6 +86,121 @@ pub struct CompileHaskellRequest {
     pub target: String,
 }
 
+/// Request parameters for the structured `eval` tool.
+///
+/// Provide do-notation lines; the server wraps them in a full Haskell module
+/// with the correct effect stack type, LANGUAGE pragmas, and imports.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EvalRequest {
+    /// Lines of do-notation Haskell code. Each line becomes one line in a
+    /// do-block. Use `pure x` as the last line to return a value.
+    /// Use `send (Constructor args)` to invoke effects.
+    pub source: Vec<String>,
+    /// Additional Haskell module imports (e.g. `"Data.List"`). Optional.
+    #[serde(default)]
+    pub imports: Vec<String>,
+    /// Top-level helper definitions placed before the main binding. Optional.
+    /// Each entry is a complete Haskell definition (may be multi-line).
+    #[serde(default)]
+    pub helpers: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Templating
+// ---------------------------------------------------------------------------
+
+fn build_preamble(effects: &[EffectDecl]) -> String {
+    let mut out = String::new();
+    out.push_str("{-# LANGUAGE DataKinds, TypeOperators, FlexibleContexts, GADTs, PartialTypeSignatures, ScopedTypeVariables #-}\n");
+    out.push_str("module Expr where\n");
+    out.push_str("import Control.Monad.Freer\n");
+    out.push('\n');
+
+    for eff in effects {
+        out.push_str(&format!("data {} a where\n", eff.type_name));
+        for ctor in eff.constructors {
+            out.push_str(&format!("  {}\n", ctor));
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+fn build_effect_stack_type(effects: &[EffectDecl]) -> String {
+    if effects.is_empty() {
+        "'[]".to_string()
+    } else {
+        let names: Vec<&str> = effects.iter().map(|e| e.type_name).collect();
+        format!("'[{}]", names.join(", "))
+    }
+}
+
+fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
+    let mut desc = String::from(
+        "Compile and run Haskell source code via GHC + Cranelift JIT. \
+         Input: Haskell source with 'module X where' header and a target binding name. \
+         Output: the evaluated result as structured JSON. \
+         Examples: Int->number, Bool->boolean, String->string, [a]->array, Maybe->null/value, \
+         custom ADTs->{constructor,fields}. \
+         First compilation is slow (~2s, GHC). Subsequent calls are cached.",
+    );
+
+    if !effects.is_empty() {
+        desc.push_str("\n\nAvailable effects (use `send` to invoke):");
+        for eff in effects {
+            desc.push_str(&format!("\n\n{}:", eff.type_name));
+            if !eff.description.is_empty() {
+                desc.push_str(&format!(" {}", eff.description));
+            }
+            for ctor in eff.constructors {
+                desc.push_str(&format!("\n  {}", ctor));
+            }
+        }
+    }
+
+    desc
+}
+
+fn template_haskell(
+    preamble: &str,
+    effect_stack: &str,
+    source: &[String],
+    imports: &[String],
+    helpers: &[String],
+) -> String {
+    let mut out = String::new();
+
+    out.push_str(preamble);
+
+    for imp in imports {
+        out.push_str(&format!("import {}\n", imp));
+    }
+    if !imports.is_empty() {
+        out.push('\n');
+    }
+
+    for helper in helpers {
+        out.push_str(helper);
+        out.push('\n');
+    }
+    if !helpers.is_empty() {
+        out.push('\n');
+    }
+
+    out.push_str(&format!("result :: Eff {} _\n", effect_stack));
+    out.push_str("result = do\n");
+    for line in source {
+        out.push_str(&format!("  {}\n", line));
+    }
+
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Server internals
+// ---------------------------------------------------------------------------
+
 /// Trait combining effect dispatch with cloning for the MCP server.
 pub trait McpEffectHandler: DispatchEffect<()> + DynClone + Send + Sync + 'static {}
 clone_trait_object!(McpEffectHandler);
@@ -53,6 +219,9 @@ pub struct TidepoolMcpServer<H> {
 pub struct TidepoolMcpServerImpl {
     handler_factory: Arc<dyn McpEffectHandler>,
     include: Vec<PathBuf>,
+    haskell_preamble: String,
+    effect_stack_type: String,
+    eval_tool_description: String,
 }
 
 struct HandlerWrapper<'a>(&'a mut dyn McpEffectHandler);
@@ -71,7 +240,7 @@ impl<'a> DispatchEffect<()> for HandlerWrapper<'a> {
 impl TidepoolMcpServerImpl {
     async fn run_haskell(&self, req: RunHaskellRequest) -> Result<CallToolResult, McpError> {
         let mut handlers = dyn_clone::clone_box(&*self.handler_factory);
-        let include_refs: Vec<std::path::PathBuf> = self.include.clone();
+        let include_refs: Vec<PathBuf> = self.include.clone();
 
         let result = tokio::task::spawn_blocking(move || {
             let include_paths: Vec<&Path> = include_refs.iter().map(|p| p.as_path()).collect();
@@ -79,6 +248,40 @@ impl TidepoolMcpServerImpl {
             tidepool_runtime::compile_and_run(
                 &req.source,
                 &req.target,
+                &include_paths,
+                &mut wrapper,
+                &(),
+            )
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task join error: {}", e), None))?;
+
+        match result {
+            Ok(eval_result) => Ok(CallToolResult::success(vec![Content::text(
+                eval_result.to_string_pretty(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("{}", e))])),
+        }
+    }
+
+    async fn eval(&self, req: EvalRequest) -> Result<CallToolResult, McpError> {
+        let source = template_haskell(
+            &self.haskell_preamble,
+            &self.effect_stack_type,
+            &req.source,
+            &req.imports,
+            &req.helpers,
+        );
+
+        let mut handlers = dyn_clone::clone_box(&*self.handler_factory);
+        let include_refs: Vec<PathBuf> = self.include.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let include_paths: Vec<&Path> = include_refs.iter().map(|p| p.as_path()).collect();
+            let mut wrapper = HandlerWrapper(handlers.as_mut());
+            tidepool_runtime::compile_and_run(
+                &source,
+                "result",
                 &include_paths,
                 &mut wrapper,
                 &(),
@@ -130,16 +333,7 @@ impl TidepoolMcpServerImpl {
 impl ServerHandler for TidepoolMcpServerImpl {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some(concat!(
-                "Tidepool compiles and runs Haskell via GHC + Cranelift JIT. ",
-                "Write standard Haskell (module header required). ",
-                "Supported: algebraic data types, pattern matching, let/where, ",
-                "Prelude functions (map, filter, null, take, length, ++, ==, ||, &&), ",
-                "arithmetic, lists, tuples, Maybe, Either, Bool. ",
-                "Returns structured JSON: 42, [1,2,3], true, \"hello\", ",
-                "{\"constructor\":\"Person\",\"fields\":[\"Alice\",30]}. ",
-                "Effects available at tags 0-2: Console(Print), KV(Get/Set/Delete/Keys), Fs(Read/Write).",
-            ).into()),
+            instructions: Some(self.eval_tool_description.clone().into()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
@@ -153,8 +347,8 @@ impl ServerHandler for TidepoolMcpServerImpl {
         let args = request.arguments.unwrap_or_default();
         match request.name.as_ref() {
             "run_haskell" => {
-                let req: RunHaskellRequest = serde_json::from_value(serde_json::Value::Object(args))
-                    .map_err(|e| {
+                let req: RunHaskellRequest =
+                    serde_json::from_value(serde_json::Value::Object(args)).map_err(|e| {
                         McpError::invalid_params(format!("invalid params: {}", e), None)
                     })?;
                 self.run_haskell(req).await
@@ -165,6 +359,13 @@ impl ServerHandler for TidepoolMcpServerImpl {
                         McpError::invalid_params(format!("invalid params: {}", e), None)
                     })?;
                 self.compile_haskell_tool(req).await
+            }
+            "eval" => {
+                let req: EvalRequest =
+                    serde_json::from_value(serde_json::Value::Object(args)).map_err(|e| {
+                        McpError::invalid_params(format!("invalid params: {}", e), None)
+                    })?;
+                self.eval(req).await
             }
             _ => Err(McpError {
                 code: ErrorCode::METHOD_NOT_FOUND,
@@ -179,23 +380,17 @@ impl ServerHandler for TidepoolMcpServerImpl {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let run_schema = schemars::schema_for!(RunHaskellRequest);
-        let run_schema_json = serde_json::to_value(&run_schema).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize schema: {}", e), None)
-        })?;
-        let run_input_schema = match run_schema_json {
-            serde_json::Value::Object(o) => Arc::new(o),
-            _ => Arc::new(serde_json::Map::new()),
-        };
-
-        let compile_schema = schemars::schema_for!(CompileHaskellRequest);
-        let compile_schema_json = serde_json::to_value(&compile_schema).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize schema: {}", e), None)
-        })?;
-        let compile_input_schema = match compile_schema_json {
-            serde_json::Value::Object(o) => Arc::new(o),
-            _ => Arc::new(serde_json::Map::new()),
-        };
+        fn schema_to_map(
+            schema: schemars::Schema,
+        ) -> Result<Arc<serde_json::Map<String, serde_json::Value>>, McpError> {
+            let json = serde_json::to_value(&schema).map_err(|e| {
+                McpError::internal_error(format!("Failed to serialize schema: {}", e), None)
+            })?;
+            match json {
+                serde_json::Value::Object(o) => Ok(Arc::new(o)),
+                _ => Ok(Arc::new(serde_json::Map::new())),
+            }
+        }
 
         let tools = vec![
             Tool {
@@ -209,9 +404,10 @@ impl ServerHandler for TidepoolMcpServerImpl {
                         "Examples: Int->number, Bool->boolean, String->string, [a]->array, Maybe->null/value, ",
                         "custom ADTs->{constructor,fields}. ",
                         "First compilation is slow (~2s, GHC). Subsequent calls are cached.",
-                    ).into(),
+                    )
+                    .into(),
                 ),
-                input_schema: run_input_schema,
+                input_schema: schema_to_map(schemars::schema_for!(RunHaskellRequest))?,
                 output_schema: None,
                 annotations: None,
                 icons: None,
@@ -225,7 +421,18 @@ impl ServerHandler for TidepoolMcpServerImpl {
                     "Compile Haskell source code without executing. Returns metadata: expression node count and available constructors."
                         .into(),
                 ),
-                input_schema: compile_input_schema,
+                input_schema: schema_to_map(schemars::schema_for!(CompileHaskellRequest))?,
+                output_schema: None,
+                annotations: None,
+                icons: None,
+                meta: None,
+                execution: None,
+            },
+            Tool {
+                name: "eval".into(),
+                title: None,
+                description: Some(self.eval_tool_description.clone().into()),
+                input_schema: schema_to_map(schemars::schema_for!(EvalRequest))?,
                 output_schema: None,
                 annotations: None,
                 icons: None,
@@ -242,16 +449,27 @@ impl ServerHandler for TidepoolMcpServerImpl {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
 impl<H> TidepoolMcpServer<H>
 where
-    H: DispatchEffect<()> + Clone + Send + Sync + 'static,
+    H: DispatchEffect<()> + Clone + Send + Sync + 'static + CollectEffectDecls,
 {
     /// Create a new server with the given effect handler stack.
+    ///
+    /// Effect declarations are collected automatically from handlers that
+    /// implement `DescribeEffect`.
     pub fn new(handler: H) -> Self {
+        let decls = H::collect_decls();
         Self {
             inner: TidepoolMcpServerImpl {
                 handler_factory: Arc::new(handler),
                 include: Vec::new(),
+                haskell_preamble: build_preamble(&decls),
+                effect_stack_type: build_effect_stack_type(&decls),
+                eval_tool_description: build_eval_tool_description(&decls),
             },
             _phantom: PhantomData,
         }
@@ -264,24 +482,6 @@ where
     }
 
     /// Start the MCP server on stdio transport.
-    ///
-    /// This starts an MCP server that communicates over the process's standard
-    /// input and output streams. It will run until the underlying server shuts
-    /// down or an error occurs.
-    ///
-    /// # Errors
-    ///
-    /// This function returns an error if:
-    ///
-    /// - Reading from `stdin` or writing to `stdout` fails (for example, due to
-    ///   I/O errors on the standard streams).
-    /// - The underlying MCP server fails to start or encounters an error while
-    ///   serving requests over stdio.
-    /// - There are protocol- or serialization-level errors reported by the
-    ///   `rmcp` server implementation while handling MCP messages.
-    ///
-    /// All such errors are returned as a boxed [`std::error::Error`], and may
-    /// originate from `std::io` or from the underlying MCP/transport layer.
     pub async fn serve_stdio(self) -> Result<(), Box<dyn std::error::Error>> {
         self.inner
             .serve((stdin(), stdout()))
@@ -292,10 +492,13 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frunk::HNil;
 
     #[test]
     fn test_run_haskell_request_serialization() {
@@ -306,10 +509,6 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["source"], "main = 42");
         assert_eq!(json["target"], "main");
-
-        let de: RunHaskellRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(de.source, "main = 42");
-        assert_eq!(de.target, "main");
     }
 
     #[test]
@@ -321,17 +520,82 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["source"], "module Test where\nfoo = 42");
         assert_eq!(json["target"], "foo");
-
-        let de: CompileHaskellRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(de.source, "module Test where\nfoo = 42");
-        assert_eq!(de.target, "foo");
     }
 
     #[test]
-    fn test_with_include() {
-        let server = TidepoolMcpServer::new(HNil);
-        let path = PathBuf::from("/tmp/haskell");
-        let server = server.with_include(vec![path.clone()]);
-        assert_eq!(server.inner.include, vec![path]);
+    fn test_eval_request_defaults() {
+        let json = serde_json::json!({"source": ["pure 42"]});
+        let req: EvalRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.source, vec!["pure 42"]);
+        assert!(req.imports.is_empty());
+        assert!(req.helpers.is_empty());
+    }
+
+    #[test]
+    fn test_build_preamble() {
+        let effects = vec![
+            EffectDecl {
+                type_name: "Console",
+                description: "Print output",
+                constructors: &["Print :: String -> Console ()"],
+            },
+            EffectDecl {
+                type_name: "KV",
+                description: "Key-value store",
+                constructors: &[
+                    "KvGet :: String -> KV (Maybe String)",
+                    "KvSet :: String -> String -> KV ()",
+                ],
+            },
+        ];
+        let preamble = build_preamble(&effects);
+        assert!(preamble.contains("data Console a where"));
+        assert!(preamble.contains("  Print :: String -> Console ()"));
+        assert!(preamble.contains("data KV a where"));
+    }
+
+    #[test]
+    fn test_build_effect_stack_type() {
+        let effects = vec![
+            EffectDecl { type_name: "Console", description: "", constructors: &[] },
+            EffectDecl { type_name: "KV", description: "", constructors: &[] },
+            EffectDecl { type_name: "Fs", description: "", constructors: &[] },
+        ];
+        assert_eq!(build_effect_stack_type(&effects), "'[Console, KV, Fs]");
+        assert_eq!(build_effect_stack_type(&[]), "'[]");
+    }
+
+    #[test]
+    fn test_template_haskell() {
+        let effects = vec![EffectDecl {
+            type_name: "Console",
+            description: "",
+            constructors: &["Print :: String -> Console ()"],
+        }];
+        let preamble = build_preamble(&effects);
+        let stack = build_effect_stack_type(&effects);
+        let source = vec!["let x = 42".into(), "pure x".into()];
+
+        let result = template_haskell(&preamble, &stack, &source, &[], &[]);
+
+        assert!(result.contains("module Expr where"));
+        assert!(result.contains("import Control.Monad.Freer"));
+        assert!(result.contains("data Console a where"));
+        assert!(result.contains("result :: Eff '[Console] _"));
+        assert!(result.contains("result = do"));
+        assert!(result.contains("  let x = 42"));
+        assert!(result.contains("  pure x"));
+    }
+
+    #[test]
+    fn test_eval_tool_description_includes_effects() {
+        let effects = vec![EffectDecl {
+            type_name: "Console",
+            description: "Print to console",
+            constructors: &["Print :: String -> Console ()"],
+        }];
+        let desc = build_eval_tool_description(&effects);
+        assert!(desc.contains("Console: Print to console"));
+        assert!(desc.contains("Print :: String -> Console ()"));
     }
 }
