@@ -145,7 +145,7 @@ fn literal_to_json(lit: &Literal) -> serde_json::Value {
         Literal::LitWord(n) => json!(n),
         Literal::LitChar(c) => json!(c.to_string()),
         Literal::LitString(bytes) => {
-            match String::from_utf8(bytes.clone()) {
+            match std::str::from_utf8(bytes) {
                 Ok(s) => json!(s),
                 Err(_) => json!(format!("<binary:{} bytes>", bytes.len())),
             }
