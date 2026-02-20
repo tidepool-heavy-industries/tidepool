@@ -16,6 +16,9 @@ use std::process::Command;
 use tempfile::TempDir;
 
 mod cache;
+mod render;
+
+pub use render::EvalResult;
 
 /// Result of successful Haskell compilation: a Core expression and its associated DataCon metadata.
 pub type CompileResult = (CoreExpr, DataConTable);
@@ -206,7 +209,7 @@ const DEFAULT_NURSERY_SIZE: usize = 1 << 20; // 1 MiB
 /// * `nursery_size` - Size of the allocation nursery in bytes.
 ///
 /// # Returns
-/// * `Ok(Value)` on successful execution.
+/// * `Ok(EvalResult)` on successful execution.
 /// * `Err(RuntimeError)` for compilation or JIT execution errors.
 pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
     source: &str,
@@ -215,11 +218,11 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
     handlers: &mut H,
     user: &U,
     nursery_size: usize,
-) -> Result<Value, RuntimeError> {
+) -> Result<EvalResult, RuntimeError> {
     let (expr, table) = compile_haskell(source, target, include)?;
     let mut machine = JitEffectMachine::compile(&expr, &table, nursery_size)?;
     let value = machine.run(&table, handlers, user)?;
-    Ok(value)
+    Ok(EvalResult::new(value, table))
 }
 
 /// Compile Haskell source and run it with the given effect handlers,
@@ -233,7 +236,7 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
 /// * `user` - User context for effect handlers.
 ///
 /// # Returns
-/// * `Ok(Value)` on successful execution.
+/// * `Ok(EvalResult)` on successful execution.
 /// * `Err(RuntimeError)` for compilation or JIT execution errors.
 pub fn compile_and_run<U, H: DispatchEffect<U>>(
     source: &str,
@@ -241,7 +244,7 @@ pub fn compile_and_run<U, H: DispatchEffect<U>>(
     include: &[&Path],
     handlers: &mut H,
     user: &U,
-) -> Result<Value, RuntimeError> {
+) -> Result<EvalResult, RuntimeError> {
     compile_and_run_with_nursery_size(source, target, include, handlers, user, DEFAULT_NURSERY_SIZE)
 }
 
