@@ -1,17 +1,41 @@
 use std::fs;
 use std::env;
+use std::path::PathBuf;
 use tempfile::TempDir;
 use tidepool_runtime::compile_haskell;
+
+/// Helper to restore an environment variable after a test.
+struct EnvGuard {
+    key: &'static str,
+    old_value: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: PathBuf) -> Self {
+        let old_value = env::var(key).ok();
+        env::set_var(key, value);
+        Self { key, old_value }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        if let Some(ref val) = self.old_value {
+            env::set_var(self.key, val);
+        } else {
+            env::remove_var(self.key);
+        }
+    }
+}
 
 #[test]
 #[ignore] // Requires tidepool-extract on PATH
 fn test_cache_hit_same_source() {
     let cache_root = TempDir::new().unwrap();
-    env::set_var("XDG_CACHE_HOME", cache_root.path());
+    let _guard = EnvGuard::set("XDG_CACHE_HOME", cache_root.path().to_path_buf());
     let tidepool_cache = cache_root.path().join("tidepool");
 
-    let src = "module Test where
-val = 42";
+    let src = "module Test where\nval = 42";
     let target = "val";
 
     // First compile
@@ -35,13 +59,11 @@ val = 42";
 #[ignore] // Requires tidepool-extract on PATH
 fn test_cache_miss_different_source() {
     let cache_root = TempDir::new().unwrap();
-    env::set_var("XDG_CACHE_HOME", cache_root.path());
+    let _guard = EnvGuard::set("XDG_CACHE_HOME", cache_root.path().to_path_buf());
     let tidepool_cache = cache_root.path().join("tidepool");
 
-    let src1 = "module Test where
-val = 1";
-    let src2 = "module Test where
-val = 2";
+    let src1 = "module Test where\nval = 1";
+    let src2 = "module Test where\nval = 2";
     let target = "val";
 
     // Compile first version
@@ -59,17 +81,14 @@ val = 2";
 #[ignore] // Requires tidepool-extract on PATH
 fn test_cache_miss_modified_include() {
     let cache_root = TempDir::new().unwrap();
-    env::set_var("XDG_CACHE_HOME", cache_root.path());
+    let _guard = EnvGuard::set("XDG_CACHE_HOME", cache_root.path().to_path_buf());
     let tidepool_cache = cache_root.path().join("tidepool");
 
     let include_dir = TempDir::new().unwrap();
     let hs_file = include_dir.path().join("Lib.hs");
-    fs::write(&hs_file, "module Lib where
-foo = 1").unwrap();
+    fs::write(&hs_file, "module Lib where\nfoo = 1").unwrap();
 
-    let src = "module Test where
-import Lib
-main = foo";
+    let src = "module Test where\nimport Lib\nmain = foo";
     let target = "main";
     let includes = [include_dir.path()];
 
@@ -78,8 +97,7 @@ main = foo";
     let count1 = fs::read_dir(&tidepool_cache).unwrap().count();
 
     // Modify include file content to trigger fingerprint change
-    fs::write(&hs_file, "module Lib where
-foo = 2").unwrap();
+    fs::write(&hs_file, "module Lib where\nfoo = 2").unwrap();
     
     // Second compile
     compile_haskell(src, target, &includes).expect("Second compile failed");
@@ -92,11 +110,10 @@ foo = 2").unwrap();
 #[ignore] // Requires tidepool-extract on PATH
 fn test_corrupted_cache_recovery() {
     let cache_root = TempDir::new().unwrap();
-    env::set_var("XDG_CACHE_HOME", cache_root.path());
+    let _guard = EnvGuard::set("XDG_CACHE_HOME", cache_root.path().to_path_buf());
     let tidepool_cache = cache_root.path().join("tidepool");
 
-    let src = "module Test where
-val = 100";
+    let src = "module Test where\nval = 100";
     let target = "val";
 
     // Initial compile to populate cache
