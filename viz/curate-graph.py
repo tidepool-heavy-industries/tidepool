@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build curated graph-data.json from GitHub PR data with synthetic phase groupings."""
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -129,6 +130,95 @@ for syn_id in synthetics:
             'mergedAt': latest,
             'closedAt': latest,
         }]
+
+# === Fetch ALL first-parent commits on main and route to ideal parent ===
+print("Fetching commits on main...")
+git_log = subprocess.check_output(
+    ['git', 'log', '--first-parent', '--format=%H %aI %s', 'main'],
+    text=True, cwd='..'
+)
+
+# PR number → headRefName for routing merges to ideal parent
+pr_branch = {}
+for p in prs:
+    pr_branch[p['number']] = p['headRefName']
+
+known_pr_nums = set(pr_branch.keys())
+
+# Find ideal parent for a branch (reparent map, then dot-parent)
+def ideal_parent(branch):
+    if branch in reparent:
+        return reparent[branch]
+    parts = branch.split('.')
+    return '.'.join(parts[:-1]) if len(parts) > 1 else None
+
+# Find the latest PR merge timestamp to exclude viz/post-project commits
+latest_pr_merge = None
+for p in prs:
+    if p['mergedAt']:
+        if latest_pr_merge is None or p['mergedAt'] > latest_pr_merge:
+            latest_pr_merge = p['mergedAt']
+
+# Route each commit to the right node's directCommits
+parent_commits = {}  # node_id → [commit]
+for line in git_log.strip().split('\n'):
+    if not line.strip():
+        continue
+    parts = line.split(' ', 2)
+    sha, timestamp, message = parts[0], parts[1], parts[2]
+
+    # Skip commits after latest PR merge (viz commit etc.)
+    if latest_pr_merge and timestamp > latest_pr_merge:
+        continue
+
+    # Extract PR number from squash merge "(#N)" or merge commit "Merge pull request #N"
+    pr_num = None
+    m = re.search(r'\(#(\d+)\)', message)
+    if m and int(m.group(1)) in known_pr_nums:
+        pr_num = int(m.group(1))
+    if pr_num is None:
+        m = re.search(r'Merge pull request #(\d+)', message)
+        if m and int(m.group(1)) in known_pr_nums:
+            pr_num = int(m.group(1))
+
+    if pr_num is not None:
+        # PR merge/squash → route to the ideal parent of the PR's branch
+        branch = pr_branch[pr_num]
+        target = ideal_parent(branch)
+        kind = 'merge'
+    else:
+        # Direct TL work → stays on main
+        target = 'main'
+        kind = 'direct'
+
+    # Only route to nodes that exist
+    if target not in nodes:
+        target = 'main'
+
+    if target not in parent_commits:
+        parent_commits[target] = []
+    parent_commits[target].append({
+        'sha': sha[:7],
+        'message': message,
+        'timestamp': timestamp,
+        'kind': kind,
+    })
+
+# Attach sorted directCommits to each node
+for node_id, commits in parent_commits.items():
+    commits.sort(key=lambda c: c['timestamp'])
+    nodes[node_id]['directCommits'] = commits
+
+total_dc = sum(len(c) for c in parent_commits.values())
+print(f"  {total_dc} commits routed to {len(parent_commits)} nodes:")
+for nid in sorted(parent_commits.keys()):
+    dc = parent_commits[nid]
+    n_direct = sum(1 for c in dc if c['kind'] == 'direct')
+    n_merge = sum(1 for c in dc if c['kind'] == 'merge')
+    parts = []
+    if n_direct: parts.append(f"{n_direct} direct")
+    if n_merge: parts.append(f"{n_merge} merge")
+    print(f"    {nid}: {', '.join(parts)}")
 
 # === Compute depths from parent chain ===
 def compute_depth(node_id):

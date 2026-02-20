@@ -62,6 +62,7 @@
   .cell rect.selected { stroke: #e2e2e8; stroke-width: 2.5px; }
   .cell text { pointer-events: none; fill: #e2e2e8; }
   .cell .sub { fill: #ffffff70; }
+  .tick-rect { pointer-events: none; }
 </style>
 <script>window.__GRAPH_DATA__ = %%GRAPH_DATA%%;</script>
 </head>
@@ -175,6 +176,117 @@ root.each(d => {
     d.y1 = rootW + (d.y1 - origDepth) * scale;
   }
 });
+
+// === Insert gaps for direct commits between wave groups ===
+const TICK_H = 4;
+const TICK_INSET = 2;
+const MAX_GAP_RATIO = 0.4;
+const allGapTicks = []; // collected during gap insertion for rendering
+
+function insertGaps(node) {
+  // Recurse first (bottom-up) so children are finalized before we shift them
+  if (node.children) node.children.forEach(insertGaps);
+
+  // Only insert visual gaps on root — synthetic parents keep data for sidebar
+  if (node.depth !== 0) return;
+  if (!node.children || !node.data.nodeData.directCommits) return;
+  const commits = node.data.nodeData.directCommits;
+  if (!commits.length) return;
+
+  // Identify wave groups among direct children (sorted by wave already)
+  const groups = []; // { children: [...], mergeTime }
+  let gStart = 0;
+  for (let i = 1; i <= node.children.length; i++) {
+    if (i === node.children.length || node.children[i]._wave !== node.children[i-1]._wave) {
+      const members = node.children.slice(gStart, i);
+      groups.push({
+        startIdx: gStart, endIdx: i - 1,
+        children: members,
+        mergeTime: Math.max(...members.map(c => {
+          const pr = c.data.nodeData.prs && c.data.nodeData.prs.find(p => p.mergedAt);
+          return pr ? +new Date(pr.mergedAt) : 0;
+        }))
+      });
+      gStart = i;
+    }
+  }
+
+  // Assign each commit to a gap position
+  // Gap 0 = before first group, Gap k = between group k-1 and k, Gap N = after last group
+  const gapCommits = {};
+  commits.forEach(commit => {
+    const ct = +new Date(commit.timestamp);
+    let pos = groups.length; // default: after last group
+    for (let i = 0; i < groups.length; i++) {
+      if (ct < groups[i].mergeTime) { pos = i; break; }
+    }
+    if (!gapCommits[pos]) gapCommits[pos] = [];
+    gapCommits[pos].push(commit);
+  });
+
+  // Total gap pixels
+  let totalGapPx = 0;
+  for (const pos in gapCommits) totalGapPx += gapCommits[pos].length * TICK_H;
+
+  const range = node.x1 - node.x0;
+  if (totalGapPx > range * MAX_GAP_RATIO || range < 10) return;
+
+  // Scale factor to compress children
+  const sf = (range - totalGapPx) / range;
+
+  // Build a map: for each child index, the cumulative gap pixels BEFORE that child's group
+  // Walk groups in order, accumulate gap before each
+  let cumGap = 0;
+  const childGapBefore = new Array(node.children.length).fill(0);
+  for (let gi = 0; gi < groups.length; gi++) {
+    // Gap before this group
+    if (gapCommits[gi]) cumGap += gapCommits[gi].length * TICK_H;
+    for (let ci = groups[gi].startIdx; ci <= groups[gi].endIdx; ci++) {
+      childGapBefore[ci] = cumGap;
+    }
+  }
+  // Gap after last group (for tick collection only)
+  const totalCumGap = cumGap + (gapCommits[groups.length] ? gapCommits[groups.length].length * TICK_H : 0);
+
+  // Transform all descendants: new_x = node.x0 + (old_x - node.x0) * sf + gapOffset
+  // The gapOffset for a descendant is determined by which direct child subtree it belongs to
+  node.children.forEach((child, ci) => {
+    const gap = childGapBefore[ci];
+    child.each(desc => {
+      desc.x0 = node.x0 + (desc.x0 - node.x0) * sf + gap;
+      desc.x1 = node.x0 + (desc.x1 - node.x0) * sf + gap;
+    });
+  });
+
+  // Collect tick rects for rendering
+  node._gapTicks = [];
+  let gapCum = 0;
+  for (let gi = 0; gi <= groups.length; gi++) {
+    if (!gapCommits[gi]) continue;
+    // Position: just before the first child of group gi (or after last child for final gap)
+    let gapStartX;
+    if (gi < groups.length) {
+      gapStartX = node.children[groups[gi].startIdx].x0 - gapCommits[gi].length * TICK_H;
+    } else {
+      // After last group: position after last child
+      const lastChild = node.children[node.children.length - 1];
+      gapStartX = lastChild.x1;
+    }
+
+    gapCommits[gi].forEach((commit, ti) => {
+      const tick = {
+        parentY0: node.y0,
+        parentY1: node.y1,
+        tickX: gapStartX + ti * TICK_H,
+        parentNode: node,
+        commit: commit,
+      };
+      allGapTicks.push(tick);
+      node._gapTicks.push(tick);
+    });
+  }
+}
+insertGaps(root);
 
 // === Color ===
 const waveColor = d3.scaleLinear()
@@ -292,6 +404,31 @@ const sub = cell.append('text')
   })
   .style('opacity', d => (d.x1 - d.x0) > 26 && (d.y1 - d.y0) > 40 ? 1 : 0);
 
+// === Render commit ticks in gaps ===
+function desaturate(color, opacity) {
+  const c = d3.color(color);
+  if (!c) return `rgba(139,148,158,${opacity})`;
+  c.opacity = opacity;
+  return c.toString();
+}
+
+const tickG = g.append('g').attr('class', 'commit-ticks');
+const tickRects = tickG.selectAll('.tick-rect')
+  .data(allGapTicks)
+  .join('rect')
+  .attr('class', 'tick-rect')
+  .attr('x', d => d.parentY0 + TICK_INSET)
+  .attr('y', d => d.tickX)
+  .attr('width', d => Math.max(0, d.parentY1 - d.parentY0 - TICK_INSET * 2))
+  .attr('height', TICK_H - 1)
+  .attr('fill', d => {
+    const baseColor = d.parentNode.depth === 0 ? '#8b949e' : waveColor(getWave(d.parentNode));
+    const opacity = d.commit.kind === 'merge' ? 0.6 : 0.35;
+    return desaturate(baseColor, opacity);
+  })
+  .attr('rx', 1)
+  .attr('pointer-events', 'none');
+
 // === Zoom (click to drill in/out) ===
 let focus = root;
 
@@ -299,13 +436,22 @@ function doZoom(p) {
   if (!p) return;
   focus = focus === p ? (p.parent || root) : p;
 
+  const focusRange = focus.x1 - focus.x0;
   root.each(d => {
     d.target = {
-      x0: (d.x0 - focus.x0) / (focus.x1 - focus.x0) * H,
-      x1: (d.x1 - focus.x0) / (focus.x1 - focus.x0) * H,
+      x0: (d.x0 - focus.x0) / focusRange * H,
+      x1: (d.x1 - focus.x0) / focusRange * H,
       y0: d.y0 - focus.y0,
       y1: d.y1 - focus.y0
     };
+    // Compute tick targets for this node's gap ticks
+    if (d._gapTicks) {
+      d._gapTicks.forEach(tick => {
+        tick.targetX = d.target.y0 + TICK_INSET;
+        tick.targetY = (tick.tickX - focus.x0) / focusRange * H;
+        tick.targetW = Math.max(0, d.target.y1 - d.target.y0 - TICK_INSET * 2);
+      });
+    }
   });
 
   const t = g.transition().duration(500);
@@ -343,6 +489,13 @@ function doZoom(p) {
     .attr('x2', d => d.child.target.y1)
     .attr('y2', d => d.child.target.x0 - 0.75)
     .style('opacity', d => d.child.target.x0 >= 0 && d.child.target.x1 - d.child.target.x0 > 2 ? 1 : 0);
+
+  // Animate commit ticks
+  tickRects.transition(t)
+    .attr('x', d => d.targetX)
+    .attr('y', d => d.targetY)
+    .attr('width', d => d.targetW)
+    .style('opacity', d => d.targetY >= -TICK_H && d.targetY <= H ? 1 : 0);
 
   updateBreadcrumb(focus);
 }

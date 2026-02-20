@@ -1,16 +1,16 @@
 {
   "meta": {
     "repo": "tidepool-heavy-industries/tidepool",
-    "generated": "2026-02-20T01:59:59Z",
-    "node_count": 49,
-    "pr_count": 42
+    "generated": "2026-02-20T03:41:08Z",
+    "node_count": 52,
+    "pr_count": 45
   },
   "stats": {
-    "merged": 42,
+    "merged": 45,
     "closed": 2,
-    "open": 0,
-    "total_additions": 27285,
-    "total_deletions": 896
+    "open": 2,
+    "total_additions": 28306,
+    "total_deletions": 900
   },
   "nodes": [
     {
@@ -21,7 +21,189 @@
       "prs": [],
       "additions": 0,
       "deletions": 0,
-      "status": "root"
+      "status": "root",
+      "directCommits": [
+        {
+          "sha": "8ad9a76",
+          "message": "Initial commit: plans, research, flake, agent instructions",
+          "timestamp": "2026-02-16T17:36:51-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "11bf8a7",
+          "message": "exo config",
+          "timestamp": "2026-02-16T17:38:36-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "a620de8",
+          "message": "fix: remove references to removed messaging tools (question, note)",
+          "timestamp": "2026-02-16T20:05:00-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "4bae490",
+          "message": "gitignore",
+          "timestamp": "2026-02-16T20:06:48-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "0f0ee4a",
+          "message": "gitignore+config",
+          "timestamp": "2026-02-16T21:28:51-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "f9c0e72",
+          "message": "update prompts",
+          "timestamp": "2026-02-16T21:29:22-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "e3a03aa",
+          "message": "scaffold core-repr: CoreFrame, MapLayer, RecursiveTree",
+          "timestamp": "2026-02-16T21:53:17-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "437c020",
+          "message": "update project docs and add Cargo.lock",
+          "timestamp": "2026-02-16T22:18:16-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "183f9a7",
+          "message": "add end-to-end integration tests: .cbor → CoreExpr → pretty_print",
+          "timestamp": "2026-02-17T01:01:27-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "d0a3ba2",
+          "message": "scaffold core-eval: Value, Env, Heap trait, VecHeap, Pass trait",
+          "timestamp": "2026-02-17T08:44:51-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "f70602c",
+          "message": "fix(core-testing): run proptest generators with 8MB stack",
+          "timestamp": "2026-02-17T09:46:06-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "0e939de",
+          "message": "scaffold workspace: add core-heap, core-optimize, core-bridge crates",
+          "timestamp": "2026-02-17T10:24:08-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "1cfaefe",
+          "message": "feat(core-optimize): complete optimization pass pipeline (#25)",
+          "timestamp": "2026-02-17T11:41:35-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "e505c6f",
+          "message": "fix(core-heap): wire unified GC and add nursery management",
+          "timestamp": "2026-02-17T11:49:18-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "a4451b5",
+          "message": "style: cargo fmt --all",
+          "timestamp": "2026-02-17T11:49:41-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "19ff696",
+          "message": "scaffold: add core-bridge-derive, tidepool-macro crates and criterion benchmarks",
+          "timestamp": "2026-02-17T11:55:09-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "815779b",
+          "message": "WIP: findTargetId fix, ConFun, env_from_datacon_table, core-effect, haskell_expr! macro",
+          "timestamp": "2026-02-17T17:58:01-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "314cfe1",
+          "message": "feat: transitive closure for cross-module bindings + deep_force",
+          "timestamp": "2026-02-17T18:06:07-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "c2a7ff7",
+          "message": "fix(core-bridge): unwrap boxing constructors (I#, W#, D#, C#) in FromCore",
+          "timestamp": "2026-02-17T18:08:38-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "94c5c9d",
+          "message": "refactor(resolve): return unresolved vars as structured data",
+          "timestamp": "2026-02-17T18:13:32-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "f68dc4b",
+          "message": "fix(resolve): wrap resolved externals in Rec group for mutual visibility",
+          "timestamp": "2026-02-17T18:17:30-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "4317ba3",
+          "message": "fix(translate): erase unpackCString#/unpackCStringUtf8# applications",
+          "timestamp": "2026-02-17T18:21:10-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "e36fb49",
+          "message": "fix: three bugs blocking end-to-end guess example",
+          "timestamp": "2026-02-17T21:07:11-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "8538690",
+          "message": "feat: add haskell_inline! proc macro with include paths",
+          "timestamp": "2026-02-17T21:56:28-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "9446c23",
+          "message": "feat(bridge): add EffectContext to hide DataConTable from handlers",
+          "timestamp": "2026-02-17T22:35:25-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "993e553",
+          "message": "chore: update .gitignore for nested targets, .exo, and nix result",
+          "timestamp": "2026-02-17T22:53:17-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "0b50b9a",
+          "message": "Merge pull request #40 from tidepool-heavy-industries/main.codegen",
+          "timestamp": "2026-02-18T10:37:33-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "01bc12b",
+          "message": "feat: add 100 end-to-end Haskell pipeline tests",
+          "timestamp": "2026-02-18T12:34:59-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "f008f76",
+          "message": "working!",
+          "timestamp": "2026-02-18T14:03:06-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "d615a3e",
+          "message": "feat(viz): add build story treemap visualization",
+          "timestamp": "2026-02-19T18:04:39-08:00",
+          "kind": "direct"
+        }
+      ]
     },
     {
       "id": "main.codegen",
@@ -43,7 +225,21 @@
       ],
       "additions": 4061,
       "deletions": 255,
-      "status": "merged"
+      "status": "merged",
+      "directCommits": [
+        {
+          "sha": "c30c2ba",
+          "message": "feat(codegen): add Cranelift JIT infrastructure scaffold (#29)",
+          "timestamp": "2026-02-18T00:22:03-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "cf0fe37",
+          "message": "Merge pull request #46 from tidepool-heavy-industries/main.codegen-primops",
+          "timestamp": "2026-02-18T15:47:29-08:00",
+          "kind": "merge"
+        }
+      ]
     },
     {
       "id": "main.core-bridge",
@@ -65,7 +261,27 @@
       ],
       "additions": 0,
       "deletions": 0,
-      "status": "merged"
+      "status": "merged",
+      "directCommits": [
+        {
+          "sha": "7aa47a3",
+          "message": "feat(core-bridge): implement FromCore/ToCore traits and primitive impls (#13)",
+          "timestamp": "2026-02-17T10:56:11-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "058cc6e",
+          "message": "feat(tidepool-macro): implement haskell_eval! proc-macro (#27)",
+          "timestamp": "2026-02-17T13:52:22-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "bfaef56",
+          "message": "feat(core-bridge-derive): implement #[derive(FromCore, ToCore)] for enums (#26)",
+          "timestamp": "2026-02-17T13:52:46-08:00",
+          "kind": "merge"
+        }
+      ]
     },
     {
       "id": "main.core-eval",
@@ -87,7 +303,21 @@
       ],
       "additions": 0,
       "deletions": 0,
-      "status": "merged"
+      "status": "merged",
+      "directCommits": [
+        {
+          "sha": "3a434f7",
+          "message": "implement tree-walking evaluator for CoreExpr (#8)",
+          "timestamp": "2026-02-17T09:32:29-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "11af9af",
+          "message": "feat(core-eval): implement lazy evaluation (thunks) and join points (#10)",
+          "timestamp": "2026-02-17T10:22:43-08:00",
+          "kind": "merge"
+        }
+      ]
     },
     {
       "id": "main.core-heap",
@@ -109,7 +339,27 @@
       ],
       "additions": 0,
       "deletions": 0,
-      "status": "merged"
+      "status": "merged",
+      "directCommits": [
+        {
+          "sha": "ff67aca",
+          "message": "feat(core-heap): ArenaHeap and HeapObject manual memory layout (#15)",
+          "timestamp": "2026-02-17T10:54:47-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "b1bda23",
+          "message": "feat(core-heap): implement root enumeration and transitive marking for copying GC (#20)",
+          "timestamp": "2026-02-17T11:35:45-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "1edb109",
+          "message": "Implement copying GC: trace and compact phases (#21)",
+          "timestamp": "2026-02-17T11:40:38-08:00",
+          "kind": "merge"
+        }
+      ]
     },
     {
       "id": "main.core-optimize",
@@ -131,7 +381,21 @@
       ],
       "additions": 1628,
       "deletions": 0,
-      "status": "merged"
+      "status": "merged",
+      "directCommits": [
+        {
+          "sha": "e1b6947",
+          "message": "feat(core-optimize): implement beta reduction pass (#16)",
+          "timestamp": "2026-02-17T10:54:05-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "168446c",
+          "message": "main.core optimize.case reduce (#14)",
+          "timestamp": "2026-02-17T10:54:27-08:00",
+          "kind": "merge"
+        }
+      ]
     },
     {
       "id": "main.core-repr",
@@ -153,7 +417,45 @@
       ],
       "additions": 0,
       "deletions": 0,
-      "status": "merged"
+      "status": "merged",
+      "directCommits": [
+        {
+          "sha": "b00a0ff",
+          "message": "Merge pull request #2 from tidepool-heavy-industries/main.types-and-datacon",
+          "timestamp": "2026-02-16T22:14:12-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "0786088",
+          "message": "Implement CBOR serialization for CoreExpr (#4)",
+          "timestamp": "2026-02-16T22:15:03-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "c792f6b",
+          "message": "pretty: implement pretty printer for CoreExpr (#3)",
+          "timestamp": "2026-02-16T22:15:30-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "0abafa1",
+          "message": "Merge pull request #5 from tidepool-heavy-industries/main.frame-and-utils",
+          "timestamp": "2026-02-16T22:16:20-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "0970e60",
+          "message": "feat(haskell): implement GHC 9.12 harness with CBOR serialization (#6)",
+          "timestamp": "2026-02-17T00:29:20-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "8296e6a",
+          "message": "test(core-repr): integration tests for harness CBOR output (#7)",
+          "timestamp": "2026-02-17T00:57:19-08:00",
+          "kind": "merge"
+        }
+      ]
     },
     {
       "id": "main.core-testing",
@@ -175,6 +477,70 @@
       ],
       "additions": 0,
       "deletions": 0,
+      "status": "merged",
+      "directCommits": [
+        {
+          "sha": "8cb0c77",
+          "message": "feat(core-testing): scaffold crate and implement proptest generators (#9)",
+          "timestamp": "2026-02-17T09:44:34-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "755a712",
+          "message": "feat(core-testing): implement differential testing oracle with 36 tests (#22)",
+          "timestamp": "2026-02-17T11:36:48-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "3a889d5",
+          "message": "Implement criterion benchmarks (#28)",
+          "timestamp": "2026-02-17T13:52:07-08:00",
+          "kind": "merge"
+        }
+      ]
+    },
+    {
+      "id": "main.runtime-engine",
+      "parent": "main",
+      "depth": 1,
+      "label": "runtime-engine",
+      "prs": [
+        {
+          "number": 48,
+          "title": "feat(runtime): implement compile_and_run, caching, and RuntimeError",
+          "body": "## Summary\n- Implemented `compile_and_run` in `tidepool-runtime` for unified Haskell compilation and JIT execution.\n- Added a caching mechanism in `src/cache.rs` using `blake3` hashes to store CBOR output and metadata, significantly speeding up repeated runs.\n- Introduced `RuntimeError` to unify `CompileError` and `JitError`.\n- Re-exported `Value`, `JitError`, and `DispatchEffect` from the crate root.\n- Updated dependencies to include `core-eval`, `core-effect`, `codegen`, and `blake3`.\n\n## Verification\n- `cargo check -p tidepool-runtime` passes.\n- Caching logic follows XDG conventions for directory locations.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/48",
+          "additions": 296,
+          "deletions": 0,
+          "mergedAt": "2026-02-20T02:27:53Z",
+          "closedAt": "2026-02-20T02:27:53Z"
+        }
+      ],
+      "additions": 296,
+      "deletions": 0,
+      "status": "merged"
+    },
+    {
+      "id": "main.runtime-tests",
+      "parent": "main",
+      "depth": 1,
+      "label": "runtime-tests",
+      "prs": [
+        {
+          "number": 49,
+          "title": "test(runtime): add integration tests for compile and run pipeline",
+          "body": "Adds integration tests in `tidepool-runtime/tests/integration.rs` (all `#[ignore]`) covering:\n- `compile_haskell` identity function\n- `compile_and_run` with literals (boxed vs unboxed)\n- `compile_and_run` with arithmetic\n- `compile_haskell` error reporting\n- Caching consistency check",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/49",
+          "additions": 69,
+          "deletions": 1,
+          "mergedAt": "2026-02-20T02:48:16Z",
+          "closedAt": "2026-02-20T02:48:16Z"
+        }
+      ],
+      "additions": 69,
+      "deletions": 1,
       "status": "merged"
     },
     {
@@ -197,6 +563,42 @@
       ],
       "additions": 0,
       "deletions": 0,
+      "status": "merged",
+      "directCommits": [
+        {
+          "sha": "23adc1b",
+          "message": "Merge pull request #45 from tidepool-heavy-industries/main.tide-parser",
+          "timestamp": "2026-02-18T15:47:31-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "d03dd10",
+          "message": "Merge pull request #44 from tidepool-heavy-industries/main.tide-haskell",
+          "timestamp": "2026-02-18T15:47:34-08:00",
+          "kind": "merge"
+        }
+      ]
+    },
+    {
+      "id": "main.tidepool-mcp",
+      "parent": "main",
+      "depth": 1,
+      "label": "tidepool-mcp",
+      "prs": [
+        {
+          "number": 50,
+          "title": "feat: implement tidepool-mcp library crate",
+          "body": "This PR adds the tidepool-mcp library crate, which provides an MCP server for compiling and running Haskell code via Tidepool. It is generic over effect handlers and uses the stdio transport.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/50",
+          "additions": 656,
+          "deletions": 3,
+          "mergedAt": "2026-02-20T03:07:45Z",
+          "closedAt": "2026-02-20T03:07:45Z"
+        }
+      ],
+      "additions": 656,
+      "deletions": 3,
       "status": "merged"
     },
     {
