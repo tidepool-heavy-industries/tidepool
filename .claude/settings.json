@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "tidepool": {
+      "command": "/home/inanna/dev/tidepool/target/debug/mcp-server-example"
+    }
+  }
+}

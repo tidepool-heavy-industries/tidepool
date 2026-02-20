@@ -130,7 +130,16 @@ impl TidepoolMcpServerImpl {
 impl ServerHandler for TidepoolMcpServerImpl {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("Tidepool: compile and run Haskell with effect handlers".into()),
+            instructions: Some(concat!(
+                "Tidepool compiles and runs Haskell via GHC + Cranelift JIT. ",
+                "Write standard Haskell (module header required). ",
+                "Supported: algebraic data types, pattern matching, let/where, ",
+                "Prelude functions (map, filter, null, take, length, ++, ==, ||, &&), ",
+                "arithmetic, lists, tuples, Maybe, Either, Bool. ",
+                "Returns structured JSON: 42, [1,2,3], true, \"hello\", ",
+                "{\"constructor\":\"Person\",\"fields\":[\"Alice\",30]}. ",
+                "Effects available at tags 0-2: Console(Print), KV(Get/Set/Delete/Keys), Fs(Read/Write).",
+            ).into()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
@@ -193,8 +202,14 @@ impl ServerHandler for TidepoolMcpServerImpl {
                 name: "run_haskell".into(),
                 title: None,
                 description: Some(
-                    "Compile and run Haskell source code. Returns the evaluated result as structured JSON."
-                        .into(),
+                    concat!(
+                        "Compile and run Haskell source code via GHC + Cranelift JIT. ",
+                        "Input: Haskell source with 'module X where' header and a target binding name. ",
+                        "Output: the evaluated result as structured JSON. ",
+                        "Examples: Int->number, Bool->boolean, String->string, [a]->array, Maybe->null/value, ",
+                        "custom ADTs->{constructor,fields}. ",
+                        "First compilation is slow (~2s, GHC). Subsequent calls are cached.",
+                    ).into(),
                 ),
                 input_schema: run_input_schema,
                 output_schema: None,
