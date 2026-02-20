@@ -10,6 +10,32 @@ use std::sync::Arc;
 use crate::debug::LambdaRegistry;
 use crate::stack_map::{StackMapRegistry, RawStackMap};
 
+/// Errors from the Cranelift compilation pipeline.
+#[derive(Debug)]
+pub enum PipelineError {
+    /// Function declaration failed.
+    Declaration(String),
+    /// First-pass compilation failed (stack map extraction).
+    Compilation(String),
+    /// Module define_function failed.
+    Definition(String),
+    /// Module finalize_definitions failed.
+    Finalization(String),
+}
+
+impl std::fmt::Display for PipelineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PipelineError::Declaration(e) => write!(f, "function declaration failed: {}", e),
+            PipelineError::Compilation(e) => write!(f, "compilation failed: {}", e),
+            PipelineError::Definition(e) => write!(f, "define_function failed: {}", e),
+            PipelineError::Finalization(e) => write!(f, "finalize_definitions failed: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for PipelineError {}
+
 /// Cranelift JIT compilation pipeline.
 ///
 /// Implements the double-compile strategy:
@@ -80,11 +106,11 @@ impl CodegenPipeline {
     }
 
     /// Declare a function in the JIT module.
-    pub fn declare_function(&mut self, name: &str) -> FuncId {
+    pub fn declare_function(&mut self, name: &str) -> Result<FuncId, PipelineError> {
         let sig = self.make_func_signature();
         self.module
             .declare_function(name, Linkage::Export, &sig)
-            .unwrap_or_else(|e| panic!("failed to declare function `{}`: {}", name, e))
+            .map_err(|e| PipelineError::Declaration(format!("failed to declare `{}`: {}", name, e)))
     }
 
     /// Compile a function using the double-compile strategy.
@@ -94,13 +120,11 @@ impl CodegenPipeline {
     /// 3. Calls `module.define_function()` which recompiles for execution
     ///
     /// After calling this for all functions, call `finalize()` to make them callable.
-    pub fn define_function(&mut self, func_id: FuncId, ctx: &mut Context) {
+    pub fn define_function(&mut self, func_id: FuncId, ctx: &mut Context) -> Result<(), PipelineError> {
         // First compile: extract stack maps
         let mut ctrl_plane = ControlPlane::default();
         let compiled = ctx.compile(self.isa.as_ref(), &mut ctrl_plane)
-            .unwrap_or_else(|e| {
-                panic!("first compilation failed for function ID {:?}: {:?}", func_id, e);
-            });
+            .map_err(|e| PipelineError::Compilation(format!("{:?}", e)))?;
 
         let func_size = compiled.buffer.data().len() as u32;
 
@@ -118,19 +142,18 @@ impl CodegenPipeline {
         // Second compile: define in module for execution
         self.module
             .define_function(func_id, ctx)
-            .unwrap_or_else(|e| {
-                panic!("define_function failed for FuncId {:?}: {:?}", func_id, e);
-            });
+            .map_err(|e| PipelineError::Definition(format!("{:?}", e)))?;
 
         // Store raw maps and register after finalize.
         self.pending_stack_maps.push((func_id, func_size, raw_maps));
+        Ok(())
     }
 
     /// Finalize all defined functions, making them callable.
     /// Also registers stack maps now that we have function base pointers.
-    pub fn finalize(&mut self) {
+    pub fn finalize(&mut self) -> Result<(), PipelineError> {
         self.module.finalize_definitions()
-            .expect("finalize_definitions failed");
+            .map_err(|e| PipelineError::Finalization(format!("{}", e)))?;
 
         // Now register stack maps with actual base pointers
         let pending = std::mem::take(&mut self.pending_stack_maps);
@@ -138,6 +161,7 @@ impl CodegenPipeline {
             let base_ptr = self.module.get_finalized_function(func_id) as usize;
             self.stack_maps.register(base_ptr, func_size, &raw_maps);
         }
+        Ok(())
     }
 
     /// Get the callable function pointer after finalization.

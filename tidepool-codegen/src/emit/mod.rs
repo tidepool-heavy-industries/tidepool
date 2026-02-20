@@ -62,6 +62,7 @@ pub enum EmitError {
     UnboundVariable(VarId),
     NotYetImplemented(String),
     CraneliftError(String),
+    Pipeline(crate::pipeline::PipelineError),
     InvalidArity(PrimOpKind, usize, usize),
 }
 
@@ -71,6 +72,7 @@ impl std::fmt::Display for EmitError {
             EmitError::UnboundVariable(v) => write!(f, "unbound variable: {:?}", v),
             EmitError::NotYetImplemented(s) => write!(f, "not yet implemented: {}", s),
             EmitError::CraneliftError(s) => write!(f, "cranelift error: {}", s),
+            EmitError::Pipeline(e) => write!(f, "pipeline error: {}", e),
             EmitError::InvalidArity(op, expected, got) => {
                 write!(f, "invalid arity for {:?}: expected {}, got {}", op, expected, got)
             }
@@ -79,6 +81,12 @@ impl std::fmt::Display for EmitError {
 }
 
 impl std::error::Error for EmitError {}
+
+impl From<crate::pipeline::PipelineError> for EmitError {
+    fn from(e: crate::pipeline::PipelineError) -> Self {
+        EmitError::Pipeline(e)
+    }
+}
 
 impl EmitContext {
     pub fn new(prefix: String) -> Self {

@@ -12,7 +12,7 @@ use cranelift_module::Module;
 #[test]
 fn test_jit_boot_empty_fn() {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
-    let func_id = pipeline.declare_function("test_empty");
+    let func_id = pipeline.declare_function("test_empty").expect("failed to declare");
 
     let mut ctx = Context::new();
     ctx.func = ir::Function::with_name_signature(UserFuncName::default(), pipeline.make_func_signature());
@@ -30,8 +30,8 @@ fn test_jit_boot_empty_fn() {
         builder.finalize();
     }
 
-    pipeline.define_function(func_id, &mut ctx);
-    pipeline.finalize();
+    pipeline.define_function(func_id, &mut ctx).expect("failed to define");
+    pipeline.finalize().expect("failed to finalize");
 
     let ptr = pipeline.get_function_ptr(func_id);
     let func: unsafe extern "C" fn(*mut VMContext) -> i64 = unsafe { std::mem::transmute(ptr) };
@@ -69,7 +69,7 @@ fn test_stack_map_registry_populates() {
     };
     let callee_id = pipeline.module.declare_function("callee", cranelift_module::Linkage::Import, &callee_sig).unwrap();
 
-    let func_id = pipeline.declare_function("test_stack_maps");
+    let func_id = pipeline.declare_function("test_stack_maps").expect("failed to declare");
     let mut ctx = Context::new();
     ctx.func = ir::Function::with_name_signature(UserFuncName::default(), pipeline.make_func_signature());
     let mut fb_ctx = FunctionBuilderContext::new();
@@ -98,8 +98,8 @@ fn test_stack_map_registry_populates() {
         builder.finalize();
     }
 
-    pipeline.define_function(func_id, &mut ctx);
-    pipeline.finalize();
+    pipeline.define_function(func_id, &mut ctx).expect("failed to define");
+    pipeline.finalize().expect("failed to finalize");
 
     // Stack maps should have been populated
     assert!(!pipeline.stack_maps.is_empty(), "Stack map registry should have entries");
@@ -121,7 +121,7 @@ fn test_gc_trigger_called_from_jit() {
     };
     let gc_id = pipeline.module.declare_function("gc_trigger", cranelift_module::Linkage::Import, &gc_sig).unwrap();
 
-    let func_id = pipeline.declare_function("test_rbp");
+    let func_id = pipeline.declare_function("test_rbp").expect("failed to declare");
     let mut ctx = Context::new();
     ctx.func = ir::Function::with_name_signature(UserFuncName::default(), pipeline.make_func_signature());
     let mut fb_ctx = FunctionBuilderContext::new();
@@ -143,8 +143,8 @@ fn test_gc_trigger_called_from_jit() {
         builder.finalize();
     }
 
-    pipeline.define_function(func_id, &mut ctx);
-    pipeline.finalize();
+    pipeline.define_function(func_id, &mut ctx).expect("failed to define");
+    pipeline.finalize().expect("failed to finalize");
 
     host_fns::reset_test_counters();
 
@@ -167,7 +167,7 @@ fn test_gc_trigger_called_from_jit() {
 #[test]
 fn test_alloc_fast_path() {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
-    let func_id = pipeline.declare_function("test_alloc");
+    let func_id = pipeline.declare_function("test_alloc").expect("failed to declare");
 
     let mut ctx = Context::new();
     ctx.func = ir::Function::with_name_signature(UserFuncName::default(), pipeline.make_func_signature());
@@ -193,8 +193,8 @@ fn test_alloc_fast_path() {
         builder.finalize();
     }
 
-    pipeline.define_function(func_id, &mut ctx);
-    pipeline.finalize();
+    pipeline.define_function(func_id, &mut ctx).expect("failed to define");
+    pipeline.finalize().expect("failed to finalize");
 
     // Set up VMContext with nursery
     let mut nursery = vec![0u8; 4096];
@@ -227,7 +227,7 @@ fn test_stack_map_end_to_end() {
     };
     let gc_id = pipeline.module.declare_function("gc_trigger", cranelift_module::Linkage::Import, &gc_sig_ext).unwrap();
 
-    let func_id = pipeline.declare_function("test_e2e");
+    let func_id = pipeline.declare_function("test_e2e").expect("failed to declare");
     let mut ctx = Context::new();
     ctx.func = ir::Function::with_name_signature(UserFuncName::default(), pipeline.make_func_signature());
     let mut fb_ctx = FunctionBuilderContext::new();
@@ -256,8 +256,8 @@ fn test_stack_map_end_to_end() {
         builder.finalize();
     }
 
-    pipeline.define_function(func_id, &mut ctx);
-    pipeline.finalize();
+    pipeline.define_function(func_id, &mut ctx).expect("failed to define");
+    pipeline.finalize().expect("failed to finalize");
 
     // Verify stack maps have entries with 2 offsets at the safepoint
     assert!(!pipeline.stack_maps.is_empty());

@@ -9,6 +9,7 @@ pub enum BridgeError {
     UnexpectedHeapTag(u8),
     UnexpectedLitTag(u8),
     NullPointer,
+    NurseryExhausted,
 }
 
 impl fmt::Display for BridgeError {
@@ -17,6 +18,7 @@ impl fmt::Display for BridgeError {
             BridgeError::UnexpectedHeapTag(t) => write!(f, "unexpected heap tag: {}", t),
             BridgeError::UnexpectedLitTag(t) => write!(f, "unexpected lit tag: {}", t),
             BridgeError::NullPointer => write!(f, "null pointer"),
+            BridgeError::NurseryExhausted => write!(f, "nursery exhausted"),
         }
     }
 }
@@ -86,6 +88,9 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
     match val {
         Value::Lit(lit) => {
             let ptr = bump_alloc_from_vmctx(vmctx, layout::LIT_SIZE);
+            if ptr.is_null() {
+                return Err(BridgeError::NurseryExhausted);
+            }
             layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
 
             match lit {
@@ -113,6 +118,9 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
                     // Allocate string data: [len: u64][bytes...]
                     let data_size = 8 + bytes.len();
                     let data_ptr = bump_alloc_from_vmctx(vmctx, data_size);
+                    if data_ptr.is_null() {
+                        return Err(BridgeError::NurseryExhausted);
+                    }
                     *(data_ptr as *mut u64) = bytes.len() as u64;
                     std::ptr::copy_nonoverlapping(
                         bytes.as_ptr(),
@@ -134,6 +142,9 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
 
             let size = 24 + 8 * fields.len();
             let ptr = bump_alloc_from_vmctx(vmctx, size);
+            if ptr.is_null() {
+                return Err(BridgeError::NurseryExhausted);
+            }
             layout::write_header(ptr, layout::TAG_CON, size as u16);
 
             *(ptr.add(layout::CON_TAG_OFFSET) as *mut u64) = id.0;
@@ -148,7 +159,7 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
     }
 }
 
-/// Bump-allocate from VMContext. Panics if nursery is exhausted.
+/// Bump-allocate from VMContext. Returns null if nursery is exhausted.
 ///
 /// # Safety
 ///
@@ -159,11 +170,7 @@ pub unsafe fn bump_alloc_from_vmctx(vmctx: &mut VMContext, size: usize) -> *mut 
     let ptr = vmctx.alloc_ptr;
     let new_ptr = ptr.add(aligned_size);
     if new_ptr as *const u8 > vmctx.alloc_limit {
-        panic!(
-            "nursery exhausted: tried to allocate {} bytes, {} remaining",
-            aligned_size,
-            vmctx.alloc_limit as usize - ptr as usize
-        );
+        return std::ptr::null_mut();
     }
     vmctx.alloc_ptr = new_ptr;
     ptr

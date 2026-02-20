@@ -21,7 +21,7 @@ struct TestResult {
 fn compile_and_run(tree: &CoreExpr) -> TestResult {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
     let func_id = compile_expr(&mut pipeline, tree, "test_fn").expect("compile_expr failed");
-    pipeline.finalize();
+    pipeline.finalize().expect("failed to finalize");
 
     let mut nursery = vec![0u8; 65536];
     let start = nursery.as_mut_ptr();
@@ -419,5 +419,5 @@ fn compile_repl_cbor_inner() {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
     let result = compile_expr(&mut pipeline, &expr, "repl");
     assert!(result.is_ok(), "compile_expr failed: {:?}", result.err());
-    pipeline.finalize();
+    pipeline.finalize().expect("failed to finalize");
 }
