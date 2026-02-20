@@ -1,5 +1,5 @@
 use frunk::HNil;
-use tidepool_runtime::{compile_haskell, compile_and_run, Value};
+use tidepool_runtime::{compile_haskell, compile_and_run, Value, EvalResult};
 use tidepool_repr::Literal;
 
 #[test]
@@ -15,7 +15,7 @@ fn test_compile_haskell_identity() {
 #[ignore] // Manual test: requires tidepool-extract on PATH
 fn test_compile_and_run_literal() {
     let src = "module Test where\nfortyTwo :: Int\nfortyTwo = 42";
-    let val = compile_and_run(src, "fortyTwo", &[], &mut HNil, &()).unwrap();
+    let val = compile_and_run(src, "fortyTwo", &[], &mut HNil, &()).unwrap().into_value();
     match val {
         Value::Lit(Literal::LitInt(n)) => assert_eq!(n, 42),
         Value::Con(_, ref fields) => {
@@ -33,7 +33,7 @@ fn test_compile_and_run_literal() {
 #[ignore] // Manual test: requires tidepool-extract on PATH
 fn test_compile_and_run_arithmetic() {
     let src = "module Test where\nresult :: Int\nresult = 2 + 3";
-    let val = compile_and_run(src, "result", &[], &mut HNil, &()).unwrap();
+    let val = compile_and_run(src, "result", &[], &mut HNil, &()).unwrap().into_value();
     // Result may be boxed I# 5 or literal 5
     match val {
         Value::Lit(Literal::LitInt(n)) => assert_eq!(n, 5),
@@ -57,8 +57,18 @@ fn test_compile_error() {
 #[ignore] // Manual test: requires tidepool-extract on PATH
 fn test_caching_produces_same_result() {
     let src = "module Test where\nval :: Int\nval = 10";
-    let v1 = compile_and_run(src, "val", &[], &mut HNil, &()).unwrap();
-    let v2 = compile_and_run(src, "val", &[], &mut HNil, &()).unwrap();
+    let r1 = compile_and_run(src, "val", &[], &mut HNil, &()).unwrap();
+    let r2 = compile_and_run(src, "val", &[], &mut HNil, &()).unwrap();
     // Both should produce the same value (second from cache)
-    assert_eq!(format!("{:?}", v1), format!("{:?}", v2));
+    assert_eq!(r1.to_string_pretty(), r2.to_string_pretty());
+}
+
+#[test]
+#[ignore]
+fn test_eval_result_to_json() {
+    let src = "module Test where\nfortyTwo :: Int\nfortyTwo = 42";
+    let result = compile_and_run(src, "fortyTwo", &[], &mut HNil, &()).unwrap();
+    let json = result.to_json();
+    // Should be 42 (either directly or after unwrapping I#)
+    assert_eq!(json, serde_json::json!(42));
 }

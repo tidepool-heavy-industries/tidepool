@@ -83,7 +83,7 @@ pub(crate) fn cache_store(key: &str, expr_bytes: &[u8], meta_bytes: &[u8]) {
 /// Writes data to a temporary file then renames it to the target path
 /// to ensure that readers never see partially written or corrupted files.
 fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let dir = path.parent().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "no parent dir"))?;
+    let dir = path.parent().ok_or_else(|| std::io::Error::other("no parent dir"))?;
     let mut temp = tempfile::NamedTempFile::new_in(dir)?;
     use std::io::Write;
     temp.write_all(data)?;

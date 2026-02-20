@@ -11,6 +11,7 @@ tidepool-repr = { version = "0.0.1", path = "../tidepool-repr" }
 tidepool-eval = { version = "0.0.1", path = "../tidepool-eval" }
 tidepool-effect = { version = "0.0.1", path = "../tidepool-effect" }
 tidepool-codegen = { version = "0.0.1", path = "../tidepool-codegen" }
+serde_json = "1"
 tempfile = "3"
 blake3 = "1"
 
