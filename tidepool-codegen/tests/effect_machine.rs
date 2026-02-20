@@ -305,7 +305,7 @@ fn test_unexpected_tag() {
 /// Test 5: runtime_error(0) → YieldError::DivisionByZero.
 #[test]
 fn test_runtime_error_div_zero() {
-    let (_pipeline, func) = build_test_fn("test_div_zero", |builder, vmctx, gc_sig| {
+    let (_pipeline, func) = build_test_fn("test_div_zero", |builder, _vmctx, _gc_sig| {
         // Call runtime_error(0) which sets thread-local and returns null
         let mut err_sig = ir::Signature::new(builder.func.signature.call_conv);
         err_sig.params.push(AbiParam::new(types::I64));
@@ -343,7 +343,7 @@ fn test_runtime_error_div_zero() {
 /// Test 6: runtime_error(1) → YieldError::Overflow.
 #[test]
 fn test_runtime_error_overflow() {
-    let (_pipeline, func) = build_test_fn("test_overflow", |builder, vmctx, gc_sig| {
+    let (_pipeline, func) = build_test_fn("test_overflow", |builder, _vmctx, _gc_sig| {
         let mut err_sig = ir::Signature::new(builder.func.signature.call_conv);
         err_sig.params.push(AbiParam::new(types::I64));
         err_sig.returns.push(AbiParam::new(types::I64));
@@ -380,7 +380,7 @@ fn test_runtime_error_overflow() {
 /// Test 7: null without runtime_error → YieldError::NullPointer (not a false positive).
 #[test]
 fn test_null_without_runtime_error() {
-    let (_pipeline, func) = build_test_fn("test_null", |builder, vmctx, gc_sig| {
+    let (_pipeline, func) = build_test_fn("test_null", |builder, _vmctx, _gc_sig| {
         let null = builder.ins().iconst(types::I64, 0);
         builder.ins().return_(&[null]);
     });

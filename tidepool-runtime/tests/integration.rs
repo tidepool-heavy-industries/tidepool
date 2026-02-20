@@ -1,5 +1,5 @@
 use frunk::HNil;
-use tidepool_runtime::{compile_haskell, compile_and_run, Value, EvalResult};
+use tidepool_runtime::{compile_haskell, compile_and_run, Value};
 use tidepool_repr::Literal;
 
 #[test]
