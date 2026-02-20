@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::fs;
 
+/// Returns the platform-specific cache directory for Tidepool.
+/// Following XDG conventions: `$XDG_CACHE_HOME/tidepool` or `~/.cache/tidepool`.
 fn cache_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
@@ -8,6 +10,9 @@ fn cache_dir() -> Option<PathBuf> {
         .map(|d| d.join("tidepool"))
 }
 
+/// Computes a unique cache key for a compilation request.
+/// The key includes the source code, the target binder, and a fingerprint of
+/// all include directories to ensure cache invalidation when dependencies change.
 pub(crate) fn cache_key(source: &str, target: &str, include: &[&Path]) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(source.as_bytes());
@@ -27,6 +32,8 @@ pub(crate) fn cache_key(source: &str, target: &str, include: &[&Path]) -> String
     hasher.finalize().to_hex().to_string()
 }
 
+/// Recursively walks a directory to fingerprint its contents.
+/// Considers file paths, sizes, and modification times of `.hs` and `.hs-boot` files.
 fn fingerprint_dir(dir: &Path, hasher: &mut blake3::Hasher) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     let mut paths: Vec<_> = entries.filter_map(|e| e.ok()).collect();
@@ -52,6 +59,8 @@ fn fingerprint_dir(dir: &Path, hasher: &mut blake3::Hasher) {
     }
 }
 
+/// Attempts to load the Core expression and metadata from the cache.
+/// Returns `Some((expr_bytes, meta_bytes))` on success.
 pub(crate) fn cache_load(key: &str) -> Option<(Vec<u8>, Vec<u8>)> {
     let dir = cache_dir()?;
     let expr_bytes = fs::read(dir.join(format!("{}.cbor", key))).ok()?;
@@ -59,6 +68,7 @@ pub(crate) fn cache_load(key: &str) -> Option<(Vec<u8>, Vec<u8>)> {
     Some((expr_bytes, meta_bytes))
 }
 
+/// Stores the compilation results in the cache atomically.
 pub(crate) fn cache_store(key: &str, expr_bytes: &[u8], meta_bytes: &[u8]) {
     let Some(dir) = cache_dir() else { return };
     if fs::create_dir_all(&dir).is_err() { return; }
@@ -70,6 +80,8 @@ pub(crate) fn cache_store(key: &str, expr_bytes: &[u8], meta_bytes: &[u8]) {
     let _ = atomic_write(&meta_path, meta_bytes);
 }
 
+/// Writes data to a temporary file then renames it to the target path
+/// to ensure that readers never see partially written or corrupted files.
 fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "no parent dir"))?;
     let mut temp = tempfile::NamedTempFile::new_in(dir)?;

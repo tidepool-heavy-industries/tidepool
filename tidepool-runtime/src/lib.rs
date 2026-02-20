@@ -106,6 +106,10 @@ impl From<JitError> for RuntimeError {
 /// to perform GHC parsing, type-checking, and Core translation. It writes the source to a 
 /// temporary file, executes the extractor, and reads back the resulting CBOR and metadata.
 ///
+/// Compiled results are cached in the XDG cache directory (typically `~/.cache/tidepool`)
+/// to speed up repeated compilations. The cache key is derived from the source code,
+/// the target binder, and a fingerprint of any included dependency directories.
+///
 /// # Arguments
 /// * `source` - The Haskell source code to compile.
 /// * `target` - The name of the top-level binder to use as the entry point (e.g., "main").
@@ -187,6 +191,18 @@ const DEFAULT_NURSERY_SIZE: usize = 1 << 20; // 1 MiB
 
 /// Compile Haskell source and run it with the given effect handlers,
 /// using the specified nursery size.
+///
+/// # Arguments
+/// * `source` - The Haskell source code to compile.
+/// * `target` - The name of the entry point binder.
+/// * `include` - Search paths for Haskell modules.
+/// * `handlers` - Effect dispatchers for the JIT machine.
+/// * `user` - User context for effect handlers.
+/// * `nursery_size` - Size of the allocation nursery in bytes.
+///
+/// # Returns
+/// * `Ok(Value)` on successful execution.
+/// * `Err(RuntimeError)` for compilation or JIT execution errors.
 pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
     source: &str,
     target: &str,
@@ -201,7 +217,19 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
     Ok(value)
 }
 
-/// Compile Haskell source and run it with the given effect handlers.
+/// Compile Haskell source and run it with the given effect handlers,
+/// using the default nursery size (1 MiB).
+///
+/// # Arguments
+/// * `source` - The Haskell source code to compile.
+/// * `target` - The name of the entry point binder.
+/// * `include` - Search paths for Haskell modules.
+/// * `handlers` - Effect dispatchers for the JIT machine.
+/// * `user` - User context for effect handlers.
+///
+/// # Returns
+/// * `Ok(Value)` on successful execution.
+/// * `Err(RuntimeError)` for compilation or JIT execution errors.
 pub fn compile_and_run<U, H: DispatchEffect<U>>(
     source: &str,
     target: &str,
