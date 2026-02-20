@@ -13,21 +13,21 @@ use crate::yield_type::Yield;
 /// Error type for JIT compilation/execution failures.
 #[derive(Debug)]
 pub enum JitError {
-    Compilation(String),
+    Compilation(crate::emit::EmitError),
     MissingConTags,
     Effect(EffectError),
     Yield(crate::yield_type::YieldError),
-    HeapBridge(String),
+    HeapBridge(crate::heap_bridge::BridgeError),
 }
 
 impl std::fmt::Display for JitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            JitError::Compilation(s) => write!(f, "JIT compilation error: {}", s),
+            JitError::Compilation(e) => write!(f, "JIT compilation error: {}", e),
             JitError::MissingConTags => write!(f, "missing freer-simple constructors in DataConTable"),
             JitError::Effect(e) => write!(f, "effect dispatch error: {}", e),
             JitError::Yield(e) => write!(f, "yield error: {}", e),
-            JitError::HeapBridge(s) => write!(f, "heap bridge error: {}", s),
+            JitError::HeapBridge(e) => write!(f, "heap bridge error: {}", e),
         }
     }
 }
@@ -59,7 +59,7 @@ impl JitEffectMachine {
         let expr = crate::datacon_env::wrap_with_datacon_env(expr, table);
         let mut pipeline = CodegenPipeline::new(&crate::host_fns::host_fn_symbols());
         let func_id = crate::emit::expr::compile_expr(&mut pipeline, &expr, "main")
-            .map_err(|e| JitError::Compilation(format!("{:?}", e)))?;
+            .map_err(JitError::Compilation)?;
         pipeline.finalize();
 
         let tags = ConTags::from_table(table).ok_or(JitError::MissingConTags)?;
@@ -95,7 +95,7 @@ impl JitEffectMachine {
             match yield_result {
                 Yield::Done(ptr) => {
                     let val = unsafe { heap_bridge::heap_to_value(ptr) }
-                        .map_err(|e| JitError::HeapBridge(format!("{:?}", e)))?;
+                        .map_err(JitError::HeapBridge)?;
                     break Ok(val);
                 }
                 Yield::Request {
@@ -104,12 +104,12 @@ impl JitEffectMachine {
                     continuation,
                 } => {
                     let req_val = unsafe { heap_bridge::heap_to_value(request) }
-                        .map_err(|e| JitError::HeapBridge(format!("{:?}", e)))?;
+                        .map_err(JitError::HeapBridge)?;
                     let cx = EffectContext::with_user(table, user);
                     let resp_val = handlers.dispatch(tag, &req_val, &cx)?;
                     let resp_ptr =
                         unsafe { heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut()) }
-                            .map_err(|e| JitError::HeapBridge(format!("{:?}", e)))?;
+                            .map_err(JitError::HeapBridge)?;
                     yield_result = unsafe { machine.resume(continuation, resp_ptr) };
                 }
                 Yield::Error(e) => break Err(JitError::Yield(e)),
