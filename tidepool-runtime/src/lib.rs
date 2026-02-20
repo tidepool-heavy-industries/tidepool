@@ -121,9 +121,11 @@ pub fn compile_haskell(
 ) -> Result<CompileResult, CompileError> {
     let key = cache::cache_key(source, target, include);
     if let Some((expr_bytes, meta_bytes)) = cache::cache_load(&key) {
-        let expr = read_cbor(&expr_bytes)?;
-        let table = read_metadata(&meta_bytes)?;
-        return Ok((expr, table));
+        // Attempt to deserialize cached data. If this fails, treat it as a cache
+        // miss and fall through to recompilation instead of propagating the error.
+        if let (Ok(expr), Ok(table)) = (read_cbor(&expr_bytes), read_metadata(&meta_bytes)) {
+            return Ok((expr, table));
+        }
     }
 
     // 1. Setup temporary workspace
@@ -172,15 +174,32 @@ pub fn compile_haskell(
     let expr_bytes = std::fs::read(&expr_path)?;
     let meta_bytes = std::fs::read(&meta_path)?;
 
-    cache::cache_store(&key, &expr_bytes, &meta_bytes);
-
     let expr = read_cbor(&expr_bytes)?;
     let table = read_metadata(&meta_bytes)?;
+
+    // Only store in cache if deserialization succeeded
+    cache::cache_store(&key, &expr_bytes, &meta_bytes);
 
     Ok((expr, table))
 }
 
 const DEFAULT_NURSERY_SIZE: usize = 1 << 20; // 1 MiB
+
+/// Compile Haskell source and run it with the given effect handlers,
+/// using the specified nursery size.
+pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
+    source: &str,
+    target: &str,
+    include: &[&Path],
+    handlers: &mut H,
+    user: &U,
+    nursery_size: usize,
+) -> Result<Value, RuntimeError> {
+    let (expr, table) = compile_haskell(source, target, include)?;
+    let mut machine = JitEffectMachine::compile(&expr, &table, nursery_size)?;
+    let value = machine.run(&table, handlers, user)?;
+    Ok(value)
+}
 
 /// Compile Haskell source and run it with the given effect handlers.
 pub fn compile_and_run<U, H: DispatchEffect<U>>(
@@ -190,10 +209,7 @@ pub fn compile_and_run<U, H: DispatchEffect<U>>(
     handlers: &mut H,
     user: &U,
 ) -> Result<Value, RuntimeError> {
-    let (expr, table) = compile_haskell(source, target, include)?;
-    let mut machine = JitEffectMachine::compile(&expr, &table, DEFAULT_NURSERY_SIZE)?;
-    let value = machine.run(&table, handlers, user)?;
-    Ok(value)
+    compile_and_run_with_nursery_size(source, target, include, handlers, user, DEFAULT_NURSERY_SIZE)
 }
 
 #[cfg(test)]
