@@ -35,12 +35,17 @@ impl std::fmt::Display for Value {
             Value::Lit(lit) => match lit {
                 Literal::LitInt(n) => write!(f, "{}", n),
                 Literal::LitWord(n) => write!(f, "{}", n),
-                Literal::LitChar(c) => write!(f, "'{}'", c),
+                Literal::LitChar(c) => write!(f, "'{}'", c.escape_default()),
                 Literal::LitString(bs) => match std::str::from_utf8(bs) {
-                    Ok(s) => write!(f, "\"{}\"", s),
+                    Ok(s) => write!(f, "{:?}", s),
                     Err(_) => write!(f, "<bytes len={}>", bs.len()),
                 },
-                Literal::LitFloat(bits) => write!(f, "{}", f32::from_bits(*bits as u32)),
+                Literal::LitFloat(bits) => {
+                    match u32::try_from(*bits) {
+                        Ok(bits32) => write!(f, "{}", f32::from_bits(bits32)),
+                        Err(_) => write!(f, "<invalid f32 bits=0x{:016x}>", *bits),
+                    }
+                }
                 Literal::LitDouble(bits) => write!(f, "{}", f64::from_bits(*bits)),
             },
             Value::Con(id, fields) => {
@@ -74,11 +79,20 @@ mod tests {
 
         assert_eq!(Value::Lit(Literal::LitInt(42)).to_string(), "42");
         assert_eq!(Value::Lit(Literal::LitChar('x')).to_string(), "'x'");
+        assert_eq!(Value::Lit(Literal::LitChar('\n')).to_string(), r"'\n'");
         assert_eq!(
             Value::Lit(Literal::LitString(b"hello".to_vec())).to_string(),
             "\"hello\""
         );
+        assert_eq!(
+            Value::Lit(Literal::LitString(b"with \"quotes\"".to_vec())).to_string(),
+            "\"with \\\"quotes\\\"\""
+        );
         assert_eq!(Value::Lit(Literal::from(3.14f64)).to_string(), "3.14");
+        assert_eq!(
+            Value::Lit(Literal::LitFloat(0xFFFF_FFFF_FFFF_FFFF)).to_string(),
+            "<invalid f32 bits=0xffffffffffffffff>"
+        );
 
         assert_eq!(Value::Con(DataConId(1), vec![]).to_string(), "<Con#1>");
         assert_eq!(
