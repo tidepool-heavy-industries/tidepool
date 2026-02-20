@@ -48,24 +48,19 @@ resolveExternals binds =
       | otherwise =
           let visited' = extendVarSet visited v
               vName = occNameString (nameOccName (varName v))
+              handleUnfolding unfoldingExpr =
+                let newBind = NonRec v unfoldingExpr
+                    -- Use exprSomeFreeVars (const True) here too, so we
+                    -- discover globals in the inlined unfolding bodies.
+                    newFVs = exprSomeFreeVars (const True) unfoldingExpr
+                    localSet' = extendVarSet localSet v
+                    newExternals = filter (isResolvable localSet')
+                                         (nonDetEltsUniqSet newFVs)
+                in go (newExternals ++ rest) visited' localSet' (newBind : acc) unres
           in case maybeUnfoldingTemplate (idUnfolding v) of
-               Just unfoldingExpr ->
-                 let newBind = NonRec v unfoldingExpr
-                     -- Use exprSomeFreeVars (const True) here too, so we
-                     -- discover globals in the inlined unfolding bodies.
-                     newFVs = exprSomeFreeVars (const True) unfoldingExpr
-                     localSet' = extendVarSet localSet v
-                     newExternals = filter (isResolvable localSet')
-                                          (nonDetEltsUniqSet newFVs)
-                 in go (newExternals ++ rest) visited' localSet' (newBind : acc) unres
+               Just unfoldingExpr -> handleUnfolding unfoldingExpr
                Nothing -> case maybeUnfoldingTemplate (realIdUnfolding v) of
-                 Just unfoldingExpr ->
-                   let newBind = NonRec v unfoldingExpr
-                       newFVs = exprSomeFreeVars (const True) unfoldingExpr
-                       localSet' = extendVarSet localSet v
-                       newExternals = filter (isResolvable localSet')
-                                            (nonDetEltsUniqSet newFVs)
-                   in go (newExternals ++ rest) visited' localSet' (newBind : acc) unres
+                 Just unfoldingExpr -> handleUnfolding unfoldingExpr
                  Nothing ->
                    trace ("  [resolve] FAIL " ++ vName ++ ": " ++ showPprUnsafe (idUnfolding v)) $
                    let uv = UnresolvedVar
