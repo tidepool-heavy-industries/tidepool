@@ -10,3 +10,6 @@ core-effect = { path = "../core-effect" }
 codegen = { path = "../codegen" }
 tempfile = "3"
 blake3 = "1"
+
+[dev-dependencies]
+frunk = "0.4"
