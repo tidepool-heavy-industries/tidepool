@@ -12,7 +12,7 @@ import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
 
 import GHC.Core (CoreBind, Bind(..))
-import GHC.Core.DataCon (DataCon, dataConSourceArity, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
+import GHC.Core.DataCon (DataCon, dataConRepArity, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
 import GHC.Types.Name (nameOccName, isExternalName)
 import GHC.Types.Id (idName)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -188,7 +188,7 @@ dcToMeta dc =
   ( fromIntegral (getKey (varUnique (dataConWorkId dc)))
   , T.pack (occNameString (nameOccName (dataConName dc)))
   , dataConTag dc
-  , dataConSourceArity dc
+  , dataConRepArity dc
   , map mapBang (dataConSrcBangs dc)
   )
 

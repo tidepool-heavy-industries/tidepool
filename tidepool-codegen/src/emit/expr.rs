@@ -564,28 +564,12 @@ impl EmitContext {
                     self.env.insert(binder, SsaVal::HeapPtr(ptr));
                 }
 
-                // Evaluate simple (non-recursive) bindings now that rec bindings are in env
-                for (binder, rhs_idx) in &simple_bindings {
-                    let rhs_val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *rhs_idx)?;
-                    self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
-                    self.env.insert(*binder, rhs_val);
-                }
-
-                // Phase 3a: Fill Con fields (now that all bindings are in env)
+                // Phase 3a: Compile Lam bodies and fill closures FIRST
+                // (must happen before Con field filling, because Con fields may
+                // contain App nodes that call closures from this same LetRec group)
                 for pa in &pre_allocs {
-                    if let PreAlloc::Con { ptr, field_indices, .. } = pa {
-                        for (i, &f_idx) in field_indices.iter().enumerate() {
-                            let val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, f_idx)?;
-                            let field_val = ensure_heap_ptr(builder, vmctx, gc_sig, val);
-                            builder.ins().store(MemFlags::trusted(), field_val, *ptr, CON_FIELDS_START + 8 * i as i32);
-                        }
-                    }
-                }
-
-                // Phase 3b: Compile Lam bodies and fill closures
-                for pa in pre_allocs {
                     let (closure_ptr, sorted_fvs, rhs_idx) = match pa {
-                        PreAlloc::Lam { ptr, fvs, rhs_idx, .. } => (ptr, fvs, rhs_idx),
+                        PreAlloc::Lam { ptr, fvs, rhs_idx, .. } => (*ptr, fvs, *rhs_idx),
                         PreAlloc::Con { .. } => continue,
                     };
                     let (lam_binder, lam_body) = match &tree.nodes[rhs_idx] {
@@ -658,6 +642,24 @@ impl EmitContext {
                         let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
                         builder.ins().store(MemFlags::trusted(), cap_val, closure_ptr, offset);
                     }
+                }
+
+                // Phase 3b: Fill Con fields (now safe because all Lam code pointers are initialized)
+                for pa in &pre_allocs {
+                    if let PreAlloc::Con { ptr, field_indices, .. } = pa {
+                        for (i, &f_idx) in field_indices.iter().enumerate() {
+                            let val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, f_idx)?;
+                            let field_val = ensure_heap_ptr(builder, vmctx, gc_sig, val);
+                            builder.ins().store(MemFlags::trusted(), field_val, *ptr, CON_FIELDS_START + 8 * i as i32);
+                        }
+                    }
+                }
+
+                // Phase 3c: Evaluate simple (non-recursive) bindings now that all closures are fully initialized
+                for (binder, rhs_idx) in &simple_bindings {
+                    let rhs_val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *rhs_idx)?;
+                    self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
+                    self.env.insert(*binder, rhs_val);
                 }
 
                 let_cleanup.push(LetCleanup::Rec(bindings.iter().map(|(b, _)| *b).collect()));

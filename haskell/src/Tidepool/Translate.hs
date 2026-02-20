@@ -17,7 +17,7 @@ import GHC.Core
 import GHC.Types.Id
 import GHC.Types.Var
 import GHC.Types.Unique (getKey)
-import GHC.Core.DataCon (DataCon, dataConSourceArity, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, dataConOrigArgTys, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
+import GHC.Core.DataCon (DataCon, dataConRepArity, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, dataConOrigArgTys, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
 import GHC.Builtin.Types (consDataCon, nilDataCon, trueDataCon, falseDataCon, charDataCon)
 import GHC.Builtin.PrimOps
 import GHC.Types.Literal
@@ -281,7 +281,7 @@ collectUsedDataCons binds =
       ( varId (dataConWorkId dc)
       , T.pack (occNameString (nameOccName (dataConName dc)))
       , dataConTag dc
-      , dataConSourceArity dc
+      , dataConRepArity dc
       , map mapBang (dataConSrcBangs dc)
       )
 
@@ -320,7 +320,7 @@ tyConToDCMeta tc = case tyConDataCons_maybe tc of
     ( varId (dataConWorkId dc)
     , T.pack (occNameString (nameOccName (dataConName dc)))
     , dataConTag dc
-    , dataConSourceArity dc
+    , dataConRepArity dc
     , map mapBang (dataConSrcBangs dc)
     )) dcs
   Nothing  -> []
@@ -519,7 +519,7 @@ translate expr =
         emitNode $ NLetRec [(goId, lamI)] goNXs
 
     Var v | Just dc <- isDataConWorkId_maybe v
-          , length args == dataConSourceArity dc -> do
+          , length args == dataConRepArity dc -> do
         recordDC dc
         childIdxs <- mapM translate args
         emitNode $ NCon (varId v) childIdxs
@@ -528,7 +528,7 @@ translate expr =
     -- isDataConWorkId_maybe returns Nothing for wrappers, so we check separately.
     -- We emit NCon using the *worker* Id since that's what DataConTable indexes.
     Var v | Just dc <- isDataConWrapId_maybe v
-          , length args == dataConSourceArity dc -> do
+          , length args == dataConRepArity dc -> do
         recordDC dc
         childIdxs <- mapM translate args
         emitNode $ NCon (varId (dataConWorkId dc)) childIdxs
@@ -778,7 +778,7 @@ mapPrimOp = \case
 
 collectDataCons :: [TyCon] -> [(Word64, Text, Int, Int, [Text])]
 collectDataCons tycons =
-  [ (varId (dataConWorkId dc), T.pack (occNameString (nameOccName (dataConName dc))), dataConTag dc, dataConSourceArity dc, map mapBang (dataConSrcBangs dc))
+  [ (varId (dataConWorkId dc), T.pack (occNameString (nameOccName (dataConName dc))), dataConTag dc, dataConRepArity dc, map mapBang (dataConSrcBangs dc))
   | tc <- tycons
   , isAlgTyCon tc
   , dc <- tyConDataCons tc
