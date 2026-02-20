@@ -2015,6 +2015,7 @@ dependencies = [
  "core-effect",
  "core-eval",
  "core-repr",
+ "frunk",
  "tempfile",
 ]
 
