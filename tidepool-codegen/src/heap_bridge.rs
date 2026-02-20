@@ -91,26 +91,30 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
             if ptr.is_null() {
                 return Err(BridgeError::NurseryExhausted);
             }
-            layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
 
             match lit {
                 Literal::LitInt(n) => {
+                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
                     *ptr.add(layout::LIT_TAG_OFFSET) = 0;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *n;
                 }
                 Literal::LitWord(n) => {
+                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
                     *ptr.add(layout::LIT_TAG_OFFSET) = 1;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *n as i64;
                 }
                 Literal::LitChar(c) => {
+                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
                     *ptr.add(layout::LIT_TAG_OFFSET) = 2;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *c as i64;
                 }
                 Literal::LitFloat(bits) => {
+                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
                     *ptr.add(layout::LIT_TAG_OFFSET) = 3;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *bits as i64;
                 }
                 Literal::LitDouble(bits) => {
+                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
                     *ptr.add(layout::LIT_TAG_OFFSET) = 4;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *bits as i64;
                 }
@@ -119,6 +123,8 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
                     let data_size = 8 + bytes.len();
                     let data_ptr = bump_alloc_from_vmctx(vmctx, data_size);
                     if data_ptr.is_null() {
+                        // Roll back the Lit object allocation to avoid dead space in nursery
+                        vmctx.alloc_ptr = ptr;
                         return Err(BridgeError::NurseryExhausted);
                     }
                     *(data_ptr as *mut u64) = bytes.len() as u64;
@@ -127,6 +133,9 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
                         data_ptr.add(8),
                         bytes.len(),
                     );
+                    
+                    // Only write the header once we're sure all allocations succeeded
+                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
                     *ptr.add(layout::LIT_TAG_OFFSET) = 5;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = data_ptr as i64;
                 }
