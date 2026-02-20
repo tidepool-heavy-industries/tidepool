@@ -78,13 +78,13 @@ eval expr = case expr of
   TList es -> do
     vs <- evalList es
     pure (VList vs)
-  TBinOp opId l r -> do
+  TBinOp op l r -> do
     lv <- eval l
     rv <- eval r
-    evalBinOp opId lv rv
-  TBuiltin bId args -> do
+    evalBinOp op lv rv
+  TBuiltin bid args -> do
     vs <- evalList args
-    evalBuiltin bId vs
+    evalBuiltin bid vs
   TLet name e body -> do
     old <- envLookup name
     v <- eval e
@@ -121,24 +121,23 @@ evalList xs = case xs of
     pure (v : vs)
 
 -- | Evaluate binary operator.
-evalBinOp :: Int -> TVal -> TVal -> Eff TideEffs TVal
-evalBinOp opId lv rv = case opId of
-  0 -> intOp lv rv (\a b -> VInt (a + b))
-  1 -> intOp lv rv (\a b -> VInt (a - b))
-  2 -> intOp lv rv (\a b -> VInt (a * b))
-  3 -> intOp lv rv (\a b -> VInt (quot a b))
-  4 -> pure (VBool (valEq lv rv))
-  5 -> pure (VBool (not (valEq lv rv)))
-  6 -> intOp lv rv (\a b -> VBool (a < b))
-  7 -> intOp lv rv (\a b -> VBool (a > b))
-  8 -> intOp lv rv (\a b -> VBool (a <= b))
-  9 -> intOp lv rv (\a b -> VBool (a >= b))
-  10 -> case lv of
+evalBinOp :: BinOp -> TVal -> TVal -> Eff TideEffs TVal
+evalBinOp op lv rv = case op of
+  OpAdd    -> intOp lv rv (\a b -> VInt (a + b))
+  OpSub    -> intOp lv rv (\a b -> VInt (a - b))
+  OpMul    -> intOp lv rv (\a b -> VInt (a * b))
+  OpDiv    -> intOp lv rv (\a b -> VInt (quot a b))
+  OpEq     -> pure (VBool (valEq lv rv))
+  OpNe     -> pure (VBool (not (valEq lv rv)))
+  OpLt     -> intOp lv rv (\a b -> VBool (a < b))
+  OpGt     -> intOp lv rv (\a b -> VBool (a > b))
+  OpLe     -> intOp lv rv (\a b -> VBool (a <= b))
+  OpGe     -> intOp lv rv (\a b -> VBool (a >= b))
+  OpConcat -> case lv of
     VStr a -> case rv of
       VStr b -> pure (VStr (a ++ b))
       _      -> pure (VError (TypeError "++ expects strings"))
     _      -> pure (VError (TypeError "++ expects strings"))
-  _ -> pure (VError (TypeError ("unknown operator: " ++ showInt opId)))
 
 -- | Apply integer binary operation.
 intOp :: TVal -> TVal -> (Int -> Int -> TVal) -> Eff TideEffs TVal
@@ -206,42 +205,41 @@ bindParams ps as' = case ps of
       bindParams rest restA
 
 -- | Dispatch builtin by ID.
-evalBuiltin :: Int -> [TVal] -> Eff TideEffs TVal
-evalBuiltin bId args = case bId of
-  0 -> case args of
+evalBuiltin :: BuiltinId -> [TVal] -> Eff TideEffs TVal
+evalBuiltin bid args = case bid of
+  BPrint -> case args of
     (v:[]) -> do
       printLine (showVal v)
       pure VUnit
     _ -> pure (VError (ArityError "print: 1 arg expected"))
-  1 -> case args of
+  BFetch -> case args of
     (VStr url : []) -> do
       s <- httpGet url
       pure (VStr s)
     _ -> pure (VError (ArityError "fetch: string arg expected"))
-  2 -> case args of
+  BReadFile -> case args of
     (VStr path : []) -> do
       s <- fsRead path
       pure (VStr s)
     _ -> pure (VError (ArityError "read_file: string arg expected"))
-  3 -> case args of
+  BWriteFile -> case args of
     (VStr path : VStr contents : []) -> do
       fsWrite path contents
       pure VUnit
     _ -> pure (VError (ArityError "write_file: 2 string args expected"))
-  4 -> case args of
+  BLen -> case args of
     (VList vs : []) -> pure (VInt (listLength vs))
     (VStr s : [])   -> pure (VInt (listLength s))
     _ -> pure (VError (ArityError "len: list or string expected"))
-  5 -> case args of
+  BStr -> case args of
     (v:[]) -> pure (VStr (showVal v))
     _ -> pure (VError (ArityError "str: 1 arg expected"))
-  6 -> case args of
+  BInt -> case args of
     (VInt n : []) -> pure (VInt n)
     _ -> pure (VError (ArityError "int: numeric arg expected"))
-  7 -> case args of
+  BConcat -> case args of
     (VStr a : VStr b : []) -> pure (VStr (a ++ b))
     _ -> pure (VError (ArityError "concat: 2 string args expected"))
-  _ -> pure (VError (TypeError ("unknown builtin: " ++ showInt bId)))
 
 -- | Main REPL loop.
 repl :: Eff TideEffs ()

@@ -16,6 +16,12 @@ codegen = { path = "../../codegen" }
 frunk = "0.4"
 ureq = "2"
 rustyline = "15"
+anyhow = "1.0"
+thiserror = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+miette = { version = "7", features = ["fancy"] }
 
 [package.metadata.tidepool]
 haskell-deps = ["freer-simple"]

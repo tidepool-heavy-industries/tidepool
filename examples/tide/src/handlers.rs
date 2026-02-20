@@ -1,9 +1,30 @@
 use std::collections::HashMap;
+use thiserror::Error;
+use tracing::{debug, error, info, warn};
 
 use core_bridge::ToCore;
 use core_bridge_derive::FromCore;
 use core_effect::{EffectContext, EffectError, EffectHandler};
 use core_eval::value::Value;
+
+/// Structured errors for Tide effect handlers.
+#[derive(Error, Debug)]
+pub enum TideError {
+    #[error("Parse error: {0}")]
+    Parse(String),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("HTTP error: {0}")]
+    Http(String),
+    #[error("Internal error: {0}")]
+    Internal(String),
+}
+
+impl From<TideError> for EffectError {
+    fn from(e: TideError) -> Self {
+        EffectError::Handler(e.to_string())
+    }
+}
 
 // === Tag 0: Repl ===
 
@@ -25,46 +46,47 @@ pub struct ReplHandler {
 }
 
 impl ReplHandler {
-    pub fn new() -> Self {
-        ReplHandler {
-            source: InputSource::Interactive(rustyline::DefaultEditor::new().unwrap()),
-        }
+    pub fn new() -> anyhow::Result<Self> {
+        Ok(ReplHandler {
+            source: InputSource::Interactive(rustyline::DefaultEditor::new()?),
+        })
     }
 
-    pub fn from_file(path: &str) -> Self {
-        let contents = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("cannot read {}: {}", path, e));
+    pub fn from_file(path: &str) -> anyhow::Result<Self> {
+        let contents = std::fs::read_to_string(path)?;
         let lines: Vec<String> = contents
             .lines()
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
             .collect();
-        ReplHandler {
+        Ok(ReplHandler {
             source: InputSource::File { lines, pos: 0 },
-        }
+        })
     }
 }
 
-impl EffectHandler for ReplHandler {
-    type Request = ReplReq;
+fn parse_and_serialize(input: &str, cx: &EffectContext) -> Result<Value, TideError> {
+    let expr = crate::parser::parse(input)
+        .map_err(|e| TideError::Parse(format!("{:?}", e)))?;
+    expr.to_value(cx.table())
+        .map_err(|e| TideError::Internal(format!("ToCore failed: {:?}", e)))
+}
 
-    fn handle(&mut self, req: ReplReq, cx: &EffectContext) -> Result<Value, EffectError> {
-        match req {
-            ReplReq::ReadLine => {
-                match &mut self.source {
-                    InputSource::Interactive(editor) => {
-                        // Loop on parse errors so the user can retry
-                        loop {
-                            match editor.readline("tide> ") {
-                                Ok(line) => {
-                                    let t = line.trim().to_string();
-                                    if t.is_empty() {
-                                        continue;
-                                    }
-                                    if t.starts_with('/') {
-                                        match t.as_str() {
-                                            "/help" => {
-                                                println!("\
+fn read_interactive(
+    editor: &mut rustyline::DefaultEditor,
+    cx: &EffectContext,
+) -> Result<Option<Value>, TideError> {
+    loop {
+        match editor.readline("tide> ") {
+            Ok(line) => {
+                let t = line.trim().to_string();
+                if t.is_empty() {
+                    continue;
+                }
+                if t.starts_with('/') {
+                    match t.as_str() {
+                        "/help" => {
+                            println!("\
 Tide expression language
 
   Literals:     42  \"hello\"  true  false  [1, 2, 3]
@@ -82,56 +104,77 @@ Tide expression language
 
   /help   Show this message
   /exit   Quit the REPL");
-                                                continue;
-                                            }
-                                            "/exit" => break cx.respond(None::<Value>),
-                                            _ => {
-                                                eprintln!("Unknown command: {}. Try /help", t);
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                    editor.add_history_entry(&t).ok();
-                                    match crate::parser::parse(&t) {
-                                        Ok(expr) => {
-                                            let val = expr.to_value(cx.table()).map_err(|e| {
-                                                EffectError::Handler(format!("ToCore failed: {:?}", e))
-                                            })?;
-                                            break cx.respond(Some(val));
-                                        }
-                                        Err(e) => {
-                                            eprintln!("Parse error: {}", e);
-                                            // loop: re-prompt
-                                        }
-                                    }
-                                }
-                                Err(_) => break cx.respond(None::<Value>),
-                            }
+                            continue;
                         }
-                    }
-                    InputSource::File { lines, pos } => {
-                        if *pos < lines.len() {
-                            let text = lines[*pos].clone();
-                            *pos += 1;
-                            match crate::parser::parse(&text) {
-                                Ok(expr) => {
-                                    let val = expr.to_value(cx.table()).map_err(|e| {
-                                        EffectError::Handler(format!("ToCore failed: {:?}", e))
-                                    })?;
-                                    cx.respond(Some(val))
-                                }
-                                Err(e) => {
-                                    eprintln!("Parse error: {}", e);
-                                    cx.respond(None::<Value>)
-                                }
-                            }
-                        } else {
-                            cx.respond(None::<Value>)
+                        "/exit" => return Ok(None),
+                        _ => {
+                            warn!("Unknown command: {}", t);
+                            continue;
                         }
                     }
                 }
+                editor.add_history_entry(&t).ok();
+                
+                // Try parsing with miette for fancy errors
+                match crate::parser::parse(&t) {
+                    Ok(expr) => {
+                        match expr.to_value(cx.table()) {
+                            Ok(val) => return Ok(Some(val)),
+                            Err(e) => return Err(TideError::Internal(format!("ToCore failed: {:?}", e))),
+                        }
+                    }
+                    Err(e) => {
+                        // Display fancy miette error
+                        eprintln!("{:?}", e);
+                        // loop: re-prompt
+                    }
+                }
+            }
+            Err(_) => return Ok(None),
+        }
+    }
+}
+
+fn read_file_line(
+    lines: &[String],
+    pos: &mut usize,
+    cx: &EffectContext,
+) -> Result<Option<Value>, TideError> {
+    if *pos < lines.len() {
+        let text = lines[*pos].clone();
+        *pos += 1;
+        debug!("Processing file line {}: {}", pos, text);
+        match crate::parser::parse(&text) {
+            Ok(expr) => {
+                match expr.to_value(cx.table()) {
+                    Ok(val) => Ok(Some(val)),
+                    Err(e) => Err(TideError::Internal(format!("ToCore failed: {:?}", e))),
+                }
+            }
+            Err(e) => {
+                error!("{:?}", e);
+                Ok(None)
+            }
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+impl EffectHandler for ReplHandler {
+    type Request = ReplReq;
+
+    fn handle(&mut self, req: ReplReq, cx: &EffectContext) -> Result<Value, EffectError> {
+        match req {
+            ReplReq::ReadLine => {
+                let result = match &mut self.source {
+                    InputSource::Interactive(editor) => read_interactive(editor, cx)?,
+                    InputSource::File { lines, pos } => read_file_line(lines, pos, cx)?,
+                };
+                cx.respond(result)
             }
             ReplReq::Display(s) => {
+                info!("Tide: {}", s);
                 println!("{}", s);
                 cx.respond(())
             }
@@ -155,6 +198,7 @@ impl EffectHandler for ConsoleHandler {
     fn handle(&mut self, req: ConsoleReq, cx: &EffectContext) -> Result<Value, EffectError> {
         match req {
             ConsoleReq::Print(s) => {
+                info!("Console: {}", s);
                 println!("{}", s);
                 cx.respond(())
             }
@@ -163,8 +207,6 @@ impl EffectHandler for ConsoleHandler {
 }
 
 // === Tag 2: Env ===
-// Env stores TVal values, but TVal is recursive and hard to deserialize.
-// We keep Values opaque — just clone them through.
 
 #[derive(FromCore)]
 pub enum EnvReq {
@@ -192,10 +234,12 @@ impl EffectHandler for EnvHandler {
     fn handle(&mut self, req: EnvReq, cx: &EffectContext) -> Result<Value, EffectError> {
         match req {
             EnvReq::EnvLookup(key) => {
+                debug!("Lookup: {}", key);
                 let result = self.env.get(&key).cloned();
                 cx.respond(result)
             }
             EnvReq::EnvExtend(key, val) => {
+                debug!("Extend: {}", key);
                 self.env.insert(key, val);
                 cx.respond(())
             }
@@ -219,11 +263,12 @@ impl EffectHandler for NetHandler {
     fn handle(&mut self, req: NetReq, cx: &EffectContext) -> Result<Value, EffectError> {
         match req {
             NetReq::HttpGet(url) => {
+                info!("GET {}", url);
                 let body = ureq::get(&url)
                     .call()
-                    .map_err(|e| EffectError::Handler(format!("HTTP error: {}", e)))?
+                    .map_err(|e| TideError::Http(format!("HTTP error: {}", e)))?
                     .into_string()
-                    .map_err(|e| EffectError::Handler(format!("Read error: {}", e)))?;
+                    .map_err(|e| TideError::Http(format!("Read error: {}", e)))?;
                 cx.respond(body)
             }
         }
@@ -248,13 +293,13 @@ impl EffectHandler for FsHandler {
     fn handle(&mut self, req: FsReq, cx: &EffectContext) -> Result<Value, EffectError> {
         match req {
             FsReq::FsRead(path) => {
-                let contents = std::fs::read_to_string(&path)
-                    .map_err(|e| EffectError::Handler(format!("fs read error: {}", e)))?;
+                info!("Reading file: {}", path);
+                let contents = std::fs::read_to_string(&path).map_err(TideError::from)?;
                 cx.respond(contents)
             }
             FsReq::FsWrite(path, contents) => {
-                std::fs::write(&path, &contents)
-                    .map_err(|e| EffectError::Handler(format!("fs write error: {}", e)))?;
+                info!("Writing file: {}", path);
+                std::fs::write(&path, &contents).map_err(TideError::from)?;
                 cx.respond(())
             }
         }

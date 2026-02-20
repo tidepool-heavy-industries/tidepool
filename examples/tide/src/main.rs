@@ -1,12 +1,45 @@
+use anyhow::{Context, Result};
+use clap::Parser;
 use codegen::jit_machine::JitEffectMachine;
 use tidepool_macro::haskell_inline;
 use tidepool_tide::handlers::{ConsoleHandler, EnvHandler, FsHandler, NetHandler, ReplHandler};
 
-fn main() {
+#[derive(Parser, Debug)]
+#[command(author, version, about = "The Tide language interpreter")]
+struct Args {
+    /// Path to a file of expressions to run
+    #[arg(short, long)]
+    file: Option<String>,
+}
+
+fn main() -> Result<()> {
+    // Initialize tracing for observability. Try `RUST_LOG=debug cargo run`.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("tidepool_tide=info,codegen=info,warn")),
+        )
+        .init();
+
+    // emit_node uses ~22KB stack per recursive call in debug builds.
+    // With ~420 tree depth (302 Core + 117 datacon bindings), that's ~9MB.
+    let builder = std::thread::Builder::new()
+        .name("tide-runtime".into())
+        .stack_size(16 * 1024 * 1024);
+
+    let handler = builder.spawn(|| {
+        let args = Args::parse();
+        run(args)
+    }).context("Failed to spawn runtime thread")?;
+
+    handler.join().expect("Runtime thread panicked")
+}
+
+fn run(args: Args) -> Result<()> {
     // Choose input source: file of expressions, or interactive REPL.
-    let repl_handler = match std::env::args().nth(1) {
-        Some(path) => ReplHandler::from_file(&path),
-        None => ReplHandler::new(),
+    let repl_handler = match args.file {
+        Some(path) => ReplHandler::from_file(&path)?,
+        None => ReplHandler::new()?,
     };
 
     // Compile the Haskell effect stack (haskell/ directory) into a CoreExpr.
@@ -16,8 +49,8 @@ fn main() {
     };
 
     // JIT-compile the CoreExpr to native code.
-    let mut vm =
-        JitEffectMachine::compile(&expr, &table, 4 << 20).expect("JIT compilation failed");
+    let mut vm = JitEffectMachine::compile(&expr, &table, 4 << 20)
+        .context("JIT compilation failed")?;
 
     // Each handler in the HList corresponds to one effect in the Haskell stack:
     //   '[Repl, Console, Env, Net, Fs]
@@ -30,7 +63,8 @@ fn main() {
     ];
 
     // Run: the JIT executes Haskell, yielding effect requests back to Rust.
-    if let Err(e) = vm.run(&table, &mut handlers, &()) {
-        eprintln!("Error: {}", e);
-    }
+    vm.run(&table, &mut handlers, &())
+        .map_err(|e| anyhow::anyhow!("Runtime error: {}", e))?;
+
+    Ok(())
 }
