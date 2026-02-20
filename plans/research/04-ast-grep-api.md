@@ -86,8 +86,8 @@ data Range = Range
   } deriving (Show, Eq, Generic, ToCore, FromCore)
 
 data SyntaxNode = SyntaxNode
-  { nodeKind     :: Text
-  , nodeText     :: Text
+  { nodeKind     :: String
+  , nodeText     :: String
   , nodeRange    :: Range
   , nodeChildren :: [SyntaxNode]
   } deriving (Show, Eq, Generic, ToCore, FromCore)
@@ -98,10 +98,10 @@ A structural representation of code patterns, avoiding raw strings where possibl
 
 ```haskell
 data Pattern
-  = PNode Text [Pattern]  -- Match node of kind with specific children
-  | PLeaf Text            -- Match exact text
-  | PCapture Text         -- $VAR (matches single node)
-  | PListCapture Text     -- $$$VAR (matches multiple nodes)
+  = PNode String [Pattern]  -- Match node of kind with specific children
+  | PLeaf String            -- Match exact text
+  | PCapture String         -- $VAR (matches single node)
+  | PListCapture String     -- $$$VAR (matches multiple nodes)
   | PWildcard             -- _ (matches anything)
   deriving (Show, Eq, Generic, ToCore, FromCore)
 ```
@@ -112,8 +112,8 @@ The high-level logic for combining patterns and constraints.
 ```haskell
 data Rule
   = RPattern Pattern
-  | RKind Text
-  | RRegex Text
+  | RKind String
+  | RRegex String
   | RAll [Rule]
   | RAny [Rule]
   | RNot Rule
@@ -126,7 +126,7 @@ data Rule
 data RelationalRule = RelationalRule
   { relRule   :: Rule
   , relStopBy :: Maybe StopBy
-  , relField  :: Maybe Text
+  , relField  :: Maybe String
   } deriving (Show, Eq, Generic, ToCore, FromCore)
 
 data StopBy = StopByEnd | StopByNeighbor | StopByRule Rule
@@ -147,17 +147,17 @@ data Language
 The `AstGrep` effect allows Haskell to interact with the search engine.
 
 ```haskell
-newtype Capture = Capture Text deriving (Show, Eq, Ord, Generic, ToCore, FromCore)
+newtype Capture = Capture String deriving (Show, Eq, Ord, Generic, ToCore, FromCore)
 
 data Match = Match
   { matchedNode :: SyntaxNode
-  , captures    :: Map Capture SyntaxNode
+  , captures    :: [(Capture, SyntaxNode)]
   } deriving (Show, Eq, Generic, ToCore, FromCore)
 
 data AstGrepEffect a where
   ParseFile :: FilePath -> Language -> AstGrepEffect SyntaxNode
   FindAll   :: Rule -> SyntaxNode -> AstGrepEffect [Match]
-  Replace   :: Rule -> Text -> SyntaxNode -> AstGrepEffect Text
+  Replace   :: Rule -> String -> SyntaxNode -> AstGrepEffect String
 ```
 
 ## Rust Handler Sketch
@@ -182,7 +182,8 @@ impl EffectHandler for AstGrepHandler {
         match req {
             AstGrepReq::ParseFile(path, lang) => {
                 let sg_lang = to_sg_lang(lang);
-                let content = std::fs::read_to_string(path)?;
+                let content = std::fs::read_to_string(path)
+                    .map_err(|e| EffectError::Handler(e.to_string()))?;
                 let doc = sg_lang.parse_doc(&content);
                 cx.respond(to_syntax_node(doc.root()))
             }
@@ -206,5 +207,5 @@ impl EffectHandler for AstGrepHandler {
 
 1. **Pattern Serialization:** Should we serialize the Haskell `Pattern` ADT to a string for `ast-grep` to parse, or try to build the `PatternNode` tree manually? Serialization is easier but might introduce parsing overhead.
 2. **Performance:** `ast-grep` is highly optimized. Converting between Haskell `SyntaxNode` and Rust `SgNode` repeatedly might be expensive. We should consider keeping a handle to the Rust `SgNode` in the Haskell side if possible (e.g., via an opaque `StablePtr` or ID).
-3. **Template representation:** The `Replace` effect currently takes a `Text` template. Should this also be an ADT to ensure type safety for captures?
+3. **Template representation:** The `Replace` effect currently takes a `String` template. Should this also be an ADT to ensure type safety for captures?
 4. **Field support:** `ast-grep` supports matching specific fields (e.g., the `name` field of a `function_item`). Our `RelationalRule` includes `relField`, but we need to ensure this is correctly mapped to tree-sitter fields.
