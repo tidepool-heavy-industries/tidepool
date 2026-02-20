@@ -1,0 +1,16 @@
+[package]
+name = "tidepool-mcp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tidepool-runtime = { path = "../tidepool-runtime" }
+core-eval = { path = "../core-eval" }
+core-effect = { path = "../core-effect" }
+rmcp = { version = "0.16", features = ["server", "transport-io"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+dyn-clone = "1.0"
+frunk = "0.4"
+schemars = "=1.2.1"
+serde_json = "1"
