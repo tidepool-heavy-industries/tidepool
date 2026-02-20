@@ -88,12 +88,9 @@ impl TidepoolMcpServerImpl {
         .map_err(|e| McpError::internal_error(format!("task join error: {}", e), None))?;
 
         match result {
-            Ok(eval_result) => {
-                let json = eval_result.to_json();
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&json).unwrap_or_else(|_| json.to_string()),
-                )]))
-            }
+            Ok(eval_result) => Ok(CallToolResult::success(vec![Content::text(
+                eval_result.to_string_pretty(),
+            )])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("{}", e))])),
         }
     }
