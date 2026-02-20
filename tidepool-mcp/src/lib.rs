@@ -120,17 +120,11 @@ fn build_effect_stack_type(effects: &[EffectDecl]) -> String {
 
 fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
     let mut desc = String::from(concat!(
-        "Compile and run Haskell source code via GHC + Cranelift JIT. ",
-        "Input: Haskell source with 'module X where' header and a target binding name. ",
-        "Output: the evaluated result as structured JSON. ",
-        "Examples: Int->number, Bool->boolean, String->string, [a]->array, Maybe->null/value, ",
-        "custom ADTs->{constructor,fields}. ",
-        "First compilation is slow (~2s, GHC). Subsequent calls are cached.\n",
-        "\n",
-        "Provide do-notation lines; the server wraps them in a full Haskell module ",
-        "with the correct effect stack type, LANGUAGE pragmas, and imports. ",
+        "Provide do-notation lines in `source`; the server wraps them in a Haskell ",
+        "module with the effect stack, pragmas, and imports. ",
         "Use `pure x` as the last line to return a value. ",
-        "Use `send (Constructor args)` to invoke effects.\n",
+        "Use `send (Constructor args)` to invoke effects. ",
+        "First call is slow (~2s). Subsequent calls are cached.",
     ));
 
     if !effects.is_empty() {
