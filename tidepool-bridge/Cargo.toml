@@ -7,5 +7,13 @@ repository = "https://github.com/tidepool-heavy-industries/tidepool"
 description = "Bridge between Rust types and Tidepool Core values"
 
 [dependencies]
+
 tidepool-repr = { version = "0.0.1", path = "../tidepool-repr" }
+
 tidepool-eval = { version = "0.0.1", path = "../tidepool-eval" }
+
+
+
+[dev-dependencies]
+
+proptest = "1"

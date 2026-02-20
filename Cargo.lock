@@ -2231,6 +2231,7 @@ dependencies = [
 name = "tidepool-bridge"
 version = "0.0.1"
 dependencies = [
+ "proptest",
  "tidepool-eval",
  "tidepool-repr",
 ]
