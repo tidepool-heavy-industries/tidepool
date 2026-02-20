@@ -498,3 +498,24 @@ prelude_string_append =
   let mylen acc [] = acc
       mylen acc (_:xs) = mylen (acc + 1) xs
   in mylen 0 ("hello" ++ " world")
+
+-- Test take on cons-chain (not string literal to avoid indexCharOffAddr# fusion)
+prelude_take_cons :: Int
+prelude_take_cons =
+  let mylen acc [] = acc
+      mylen acc (_:xs) = mylen (acc + 1) xs
+      s = 'h' : 'e' : 'l' : 'l' : 'o' : []
+  in mylen 0 (take 3 s)
+
+-- Test == on cons-chain strings (not literals to avoid indexCharOffAddr# fusion)
+prelude_eq_string_true :: Bool
+prelude_eq_string_true =
+  let s1 = 'h' : 'e' : 'l' : 'l' : 'o' : []
+      s2 = 'h' : 'e' : 'l' : 'l' : 'o' : []
+  in s1 == s2
+
+prelude_eq_string_false :: Bool
+prelude_eq_string_false =
+  let s1 = 'h' : 'e' : 'l' : 'l' : 'o' : []
+      s2 = 'w' : 'o' : 'r' : 'l' : 'd' : []
+  in s1 == s2

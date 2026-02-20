@@ -18,7 +18,7 @@ import GHC.Types.Id
 import GHC.Types.Var
 import GHC.Types.Unique (getKey)
 import GHC.Core.DataCon (DataCon, dataConSourceArity, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, dataConOrigArgTys, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
-import GHC.Builtin.Types (consDataCon, nilDataCon)
+import GHC.Builtin.Types (consDataCon, nilDataCon, trueDataCon, falseDataCon, charDataCon)
 import GHC.Builtin.PrimOps
 import GHC.Types.Literal
 import GHC.Types.Name (nameOccName, isExternalName, isSystemName)
@@ -272,11 +272,14 @@ translate expr =
         let bytes = litStringBytes l
             consId = varId (dataConWorkId consDataCon)
             nilId  = varId (dataConWorkId nilDataCon)
+            charId = varId (dataConWorkId charDataCon)
         recordDC consDataCon
         recordDC nilDataCon
+        recordDC charDataCon
         nilIdx <- emitNode $ NCon nilId []
         foldM (\acc byte -> do
-            charIdx <- emitNode $ NLit (LEChar (fromIntegral byte))
+            unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral byte))
+            charIdx <- emitNode $ NCon charId [unboxedCharIdx]
             emitNode $ NCon consId [charIdx, acc]
           ) nilIdx (reverse bytes)
 
@@ -288,9 +291,12 @@ translate expr =
         suffixIdx <- translate suffixArg
         let bytes = litStringBytes l
             consId = varId (dataConWorkId consDataCon)
+            charId = varId (dataConWorkId charDataCon)
+        recordDC consDataCon
+        recordDC charDataCon
         foldM (\acc byte -> do
-            recordDC consDataCon
-            charIdx <- emitNode $ NLit (LEChar (fromIntegral byte))
+            unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral byte))
+            charIdx <- emitNode $ NCon charId [unboxedCharIdx]
             emitNode $ NCon consId [charIdx, acc]
           ) suffixIdx (reverse bytes)
 
@@ -325,6 +331,128 @@ translate expr =
         appIdx <- emitNode $ NApp goRef2 xsIdx
         -- Build: letrec go = \a -> ... in go xs
         emitNode $ NLetRec [(goId, lamIdx)] appIdx
+
+    -- Desugar eqString xs ys → recursive char-by-char comparison.
+    -- GHC rewrites (== @[Char]) to eqString via a built-in RULE at -O2.
+    -- eqString has no unfolding in the .hi file, so we desugar manually.
+    Var v | isEqStringVar v, [xsArg, ysArg] <- args -> do
+        xsIdx <- translate xsArg
+        ysIdx <- translate ysArg
+        goId <- freshSynthVarId
+        aId <- freshSynthVarId
+        bId <- freshSynthVarId
+        xId <- freshSynthVarId
+        xrestId <- freshSynthVarId
+        yId <- freshSynthVarId
+        yrestId <- freshSynthVarId
+        let consId = varId (dataConWorkId consDataCon)
+            nilId  = varId (dataConWorkId nilDataCon)
+            trueId = varId (dataConWorkId trueDataCon)
+            falseId = varId (dataConWorkId falseDataCon)
+        recordDC consDataCon
+        recordDC nilDataCon
+        recordDC trueDataCon
+        recordDC falseDataCon
+        -- Build False and True results
+        falseIdx <- emitNode $ NCon falseId []
+        trueIdx  <- emitNode $ NCon trueId []
+        -- Build: case b of { [] -> True; (:) _ _ -> False }  (both lists empty = equal)
+        bRefInner <- emitNode $ NVar bId
+        let bNilAlt  = FlatAlt (FDataAlt nilId) [] trueIdx
+            bConsAlt = FlatAlt (FDataAlt consId) [yId, yrestId] falseIdx
+        bCaseWhenANil <- emitNode $ NCase bRefInner bId [bNilAlt, bConsAlt]
+        -- Build: go xrest yrest
+        goRef1 <- emitNode $ NVar goId
+        xrestRef <- emitNode $ NVar xrestId
+        goXrest <- emitNode $ NApp goRef1 xrestRef
+        yrestRef <- emitNode $ NVar yrestId
+        goXrestYrest <- emitNode $ NApp goXrest yrestRef
+        -- Build: case x of { C# x# -> case y of { C# y# -> case (CharEq x# y#) of ... } }
+        xRawId <- freshSynthVarId
+        yRawId <- freshSynthVarId
+        let charId = varId (dataConWorkId charDataCon)
+        recordDC charDataCon
+        xRawRef <- emitNode $ NVar xRawId
+        yRawRef <- emitNode $ NVar yRawId
+        charEqIdx <- emitNode $ NPrimOp (T.pack "CharEq") [xRawRef, yRawRef]
+        let eqFalseAlt = FlatAlt (FLitAlt (LEInt 0)) [] falseIdx
+            eqDefaultAlt = FlatAlt FDefault [] goXrestYrest
+        charEqCase <- emitNode $ NCase charEqIdx 0 [eqFalseAlt, eqDefaultAlt]
+        yRef <- emitNode $ NVar yId
+        let yUnboxAlt = FlatAlt (FDataAlt charId) [yRawId] charEqCase
+        yCase <- emitNode $ NCase yRef yId [yUnboxAlt]
+        xRef <- emitNode $ NVar xId
+        let xUnboxAlt = FlatAlt (FDataAlt charId) [xRawId] yCase
+        charEqCaseFinal <- emitNode $ NCase xRef xId [xUnboxAlt]
+        -- Build: case b of { [] -> False; (:) y yrest -> case x of ... }
+        bRef2 <- emitNode $ NVar bId
+        falseIdx2 <- emitNode $ NCon falseId []
+        let bNilAlt2  = FlatAlt (FDataAlt nilId) [] falseIdx2
+            bConsAlt2 = FlatAlt (FDataAlt consId) [yId, yrestId] charEqCaseFinal
+        bCaseWhenACons <- emitNode $ NCase bRef2 bId [bNilAlt2, bConsAlt2]
+        -- Build: case a of { [] -> <bCaseWhenANil>; (:) x xrest -> <bCaseWhenACons> }
+        aRef <- emitNode $ NVar aId
+        let aNilAlt  = FlatAlt (FDataAlt nilId) [] bCaseWhenANil
+            aConsAlt = FlatAlt (FDataAlt consId) [xId, xrestId] bCaseWhenACons
+        aCaseIdx <- emitNode $ NCase aRef aId [aNilAlt, aConsAlt]
+        -- Build: \b -> case a of ...
+        lamB <- emitNode $ NLam bId aCaseIdx
+        -- Build: \a -> \b -> ...
+        lamA <- emitNode $ NLam aId lamB
+        -- Build: go xs ys
+        goRef2 <- emitNode $ NVar goId
+        goXs <- emitNode $ NApp goRef2 xsIdx
+        goXsYs <- emitNode $ NApp goXs ysIdx
+        -- Build: letrec go = \a -> \b -> ... in go xs ys
+        emitNode $ NLetRec [(goId, lamA)] goXsYs
+
+    -- Desugar $wunsafeTake n# xs → recursive list take with unboxed counter.
+    -- GHC worker-wrappers `take` at -O2; the worker $wunsafeTake has no unfolding.
+    Var v | isUnsafeTakeVar v, [nArg, xsArg] <- args -> do
+        nIdx <- translate nArg
+        xsIdx <- translate xsArg
+        goId <- freshSynthVarId
+        iId <- freshSynthVarId
+        aId <- freshSynthVarId
+        xId <- freshSynthVarId
+        restId <- freshSynthVarId
+        let consId = varId (dataConWorkId consDataCon)
+            nilId  = varId (dataConWorkId nilDataCon)
+        recordDC consDataCon
+        recordDC nilDataCon
+        -- Build: (:) x (go (IntSub i 1) rest)
+        goRef1 <- emitNode $ NVar goId
+        iRef1 <- emitNode $ NVar iId
+        lit1 <- emitNode $ NLit (LEInt 1)
+        iSub1 <- emitNode $ NPrimOp (T.pack "IntSub") [iRef1, lit1]
+        goISub1 <- emitNode $ NApp goRef1 iSub1
+        restRef <- emitNode $ NVar restId
+        goISub1Rest <- emitNode $ NApp goISub1 restRef
+        xRef <- emitNode $ NVar xId
+        consResult <- emitNode $ NCon consId [xRef, goISub1Rest]
+        -- Build: case a of { [] -> []; (:) x rest -> (:) x (go (i-1) rest) }
+        nilIdx <- emitNode $ NCon nilId []
+        aRef <- emitNode $ NVar aId
+        let aNilAlt  = FlatAlt (FDataAlt nilId) [] nilIdx
+            aConsAlt = FlatAlt (FDataAlt consId) [xId, restId] consResult
+        aCaseIdx <- emitNode $ NCase aRef aId [aNilAlt, aConsAlt]
+        -- Build: case (IntLe i 0) of { DEFAULT -> <aCaseIdx>; 1# -> [] }
+        iRef2 <- emitNode $ NVar iId
+        lit0 <- emitNode $ NLit (LEInt 0)
+        leResult <- emitNode $ NPrimOp (T.pack "IntLe") [iRef2, lit0]
+        nilIdx2 <- emitNode $ NCon nilId []
+        let leDefaultAlt = FlatAlt FDefault [] aCaseIdx
+            leTrueAlt    = FlatAlt (FLitAlt (LEInt 1)) [] nilIdx2
+        leCaseIdx <- emitNode $ NCase leResult 0 [leDefaultAlt, leTrueAlt]
+        -- Build: \i -> \a -> case (IntLe i 0) of ...
+        lamA <- emitNode $ NLam aId leCaseIdx
+        lamI <- emitNode $ NLam iId lamA
+        -- Build: go n xs
+        goRef2 <- emitNode $ NVar goId
+        goN <- emitNode $ NApp goRef2 nIdx
+        goNXs <- emitNode $ NApp goN xsIdx
+        -- Build: letrec go = \i -> \a -> ... in go n xs
+        emitNode $ NLetRec [(goId, lamI)] goNXs
 
     Var v | Just dc <- isDataConWorkId_maybe v
           , length args == dataConSourceArity dc -> do
@@ -556,6 +684,14 @@ mapBang (HsSrcBang _ (HsBang srcUnpack srcBang)) =
 -- | Recognize GHC.Internal.Base.++ (list append).
 isAppendVar :: Id -> Bool
 isAppendVar v = occNameString (nameOccName (idName v)) == "++"
+
+isEqStringVar :: Id -> Bool
+isEqStringVar v = occNameString (nameOccName (idName v)) == "eqString"
+
+isUnsafeTakeVar :: Id -> Bool
+isUnsafeTakeVar v =
+  let name = occNameString (nameOccName (idName v))
+  in name == "$wunsafeTake" || name == "unsafeTake"
 
 isRuntimeErrorVar :: Id -> Bool
 isRuntimeErrorVar v =

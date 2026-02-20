@@ -437,3 +437,7 @@ suite_bool!(prelude_or, true);
 suite_bool!(prelude_and, false);
 suite_bool!(prelude_eq_int, true);
 suite_int!(prelude_string_append, 11);
+
+suite_int!(prelude_take_cons, 3);
+suite_bool!(prelude_eq_string_true, true);
+suite_bool!(prelude_eq_string_false, false);
