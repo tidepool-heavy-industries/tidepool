@@ -94,6 +94,7 @@ impl EmitContext {
                             let kind_val = builder.ins().iconst(types::I64, kind as i64);
                             let inst = builder.ins().call(err_ref, &[kind_val]);
                             let result = builder.inst_results(inst)[0];
+                            builder.declare_value_needs_stack_map(result);
                             return Ok(SsaVal::HeapPtr(result));
                         }
 
@@ -113,6 +114,7 @@ impl EmitContext {
                         let var_id_val = builder.ins().iconst(types::I64, vid.0 as i64);
                         let inst = builder.ins().call(trap_ref, &[var_id_val]);
                         let result = builder.inst_results(inst)[0];
+                        builder.declare_value_needs_stack_map(result);
                         Ok(SsaVal::HeapPtr(result))
                     }
                 };
@@ -153,6 +155,7 @@ impl EmitContext {
                 break primop::emit_primop(builder, op, &arg_vals);
             }
             CoreFrame::App { fun, arg } => {
+                self.declare_env(builder);
                 let fun_val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *fun)?;
                 let arg_val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *arg)?;
                 let fun_ptr = fun_val.value();
