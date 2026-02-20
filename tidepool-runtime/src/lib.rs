@@ -1,9 +1,9 @@
-use codegen::jit_machine::JitEffectMachine;
-pub use codegen::jit_machine::JitError;
-pub use core_effect::dispatch::DispatchEffect;
-pub use core_eval::value::Value;
-use core_repr::serial::{read_cbor, read_metadata, ReadError};
-use core_repr::{CoreExpr, DataConTable};
+use tidepool_codegen::jit_machine::JitEffectMachine;
+pub use tidepool_codegen::jit_machine::JitError;
+pub use tidepool_effect::dispatch::DispatchEffect;
+pub use tidepool_eval::value::Value;
+use tidepool_repr::serial::{read_cbor, read_metadata, ReadError};
+use tidepool_repr::{CoreExpr, DataConTable};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};

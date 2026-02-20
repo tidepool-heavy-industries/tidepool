@@ -1,0 +1,20 @@
+[package]
+name = "tidepool-effect"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tidepool-heavy-industries/tidepool"
+description = "Effect system and handlers for Tidepool Core"
+
+[features]
+default = []
+async = []
+
+[dependencies]
+tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
+tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
+tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
+frunk = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

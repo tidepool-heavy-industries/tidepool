@@ -1,6 +1,6 @@
-use core_bridge_derive::FromCore;
-use core_effect::{EffectContext, EffectError, EffectHandler, EffectMachine};
-use core_eval::value::Value;
+use tidepool_bridge_derive::FromCore;
+use tidepool_effect::{EffectContext, EffectError, EffectHandler, EffectMachine};
+use tidepool_eval::value::Value;
 use rand::Rng;
 use tidepool_macro::haskell_inline;
 
@@ -77,7 +77,7 @@ guessLoop target = do
         "#
     };
 
-    let mut heap = core_eval::heap::VecHeap::new();
+    let mut heap = tidepool_eval::heap::VecHeap::new();
     let mut handlers = frunk::hlist![ConsoleHandler, RngHandler(rand::thread_rng())];
 
     let result = EffectMachine::new(&table, &mut heap)

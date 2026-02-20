@@ -1,0 +1,28 @@
+[package]
+name = "tidepool-testing"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tidepool-heavy-industries/tidepool"
+description = "Testing utilities and benchmarks for Tidepool"
+publish = false
+
+[dependencies]
+tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
+tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
+tidepool-heap = { version = "0.1.0", path = "../tidepool-heap" }
+tidepool-optimize = { version = "0.1.0", path = "../tidepool-optimize" }
+proptest = "1.10.0"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "eval"
+harness = false
+
+[[bench]]
+name = "optimize"
+harness = false
+
+[[bench]]
+name = "heap"
+harness = false

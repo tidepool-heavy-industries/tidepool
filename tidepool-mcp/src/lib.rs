@@ -47,9 +47,9 @@ impl<'a> DispatchEffect<()> for HandlerWrapper<'a> {
     fn dispatch(
         &mut self,
         tag: u64,
-        request: &core_eval::value::Value,
-        cx: &core_effect::dispatch::EffectContext<'_, ()>,
-    ) -> Result<core_eval::value::Value, core_effect::error::EffectError> {
+        request: &tidepool_eval::value::Value,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, ()>,
+    ) -> Result<tidepool_eval::value::Value, tidepool_effect::error::EffectError> {
         self.0.dispatch(tag, request, cx)
     }
 }

@@ -32,11 +32,11 @@ fn expand_cbor(path_lit: &LitStr) -> TokenStream {
     quote! {
         {
             static __CBOR: &[u8] = include_bytes!(#path_lit);
-            let __expr = core_repr::serial::read::read_cbor(__CBOR)
+            let __expr = tidepool_repr::serial::read::read_cbor(__CBOR)
                 .expect("failed to deserialize CBOR — re-run extraction (cargo xtask extract)");
-            let mut __heap = core_eval::heap::VecHeap::new();
-            let __env = core_eval::env::Env::new();
-            core_eval::eval::eval(&__expr, &__env, &mut __heap)
+            let mut __heap = tidepool_eval::heap::VecHeap::new();
+            let __env = tidepool_eval::env::Env::new();
+            tidepool_eval::eval::eval(&__expr, &__env, &mut __heap)
         }
     }
 }
@@ -116,11 +116,11 @@ fn expand_hs(path_lit: &LitStr, raw_path: &str) -> TokenStream {
         {
             const _: &[u8] = include_bytes!(#hs_abs_str);
             static __CBOR: &[u8] = include_bytes!(#cbor_path_str);
-            let __expr = core_repr::serial::read::read_cbor(__CBOR)
+            let __expr = tidepool_repr::serial::read::read_cbor(__CBOR)
                 .expect("failed to deserialize CBOR — re-run extraction");
-            let mut __heap = core_eval::heap::VecHeap::new();
-            let __env = core_eval::env::Env::new();
-            core_eval::eval::eval(&__expr, &__env, &mut __heap)
+            let mut __heap = tidepool_eval::heap::VecHeap::new();
+            let __env = tidepool_eval::env::Env::new();
+            tidepool_eval::eval::eval(&__expr, &__env, &mut __heap)
         }
     }
 }
@@ -161,9 +161,9 @@ fn expand_expr_cbor(path_lit: &LitStr) -> TokenStream {
         {
             static __CBOR: &[u8] = include_bytes!(#path_lit);
             static __META: &[u8] = include_bytes!(#meta_path_str);
-            let __expr = core_repr::serial::read::read_cbor(__CBOR)
+            let __expr = tidepool_repr::serial::read::read_cbor(__CBOR)
                 .expect("failed to deserialize CBOR");
-            let __table = core_repr::serial::read::read_metadata(__META)
+            let __table = tidepool_repr::serial::read::read_metadata(__META)
                 .expect("failed to deserialize metadata");
             (__expr, __table)
         }
@@ -248,9 +248,9 @@ fn expand_expr_hs(path_lit: &LitStr, raw_path: &str) -> TokenStream {
             const _: &[u8] = include_bytes!(#hs_abs_str);
             static __CBOR: &[u8] = include_bytes!(#cbor_path_str);
             static __META: &[u8] = include_bytes!(#meta_path_str);
-            let __expr = core_repr::serial::read::read_cbor(__CBOR)
+            let __expr = tidepool_repr::serial::read::read_cbor(__CBOR)
                 .expect("failed to deserialize CBOR — re-run extraction");
-            let __table = core_repr::serial::read::read_metadata(__META)
+            let __table = tidepool_repr::serial::read::read_metadata(__META)
                 .expect("failed to deserialize metadata");
             (__expr, __table)
         }
@@ -453,9 +453,9 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
             #(#include_tracks)*
             static __CBOR: &[u8] = include_bytes!(#cbor_path_str);
             static __META: &[u8] = include_bytes!(#meta_path_str);
-            let __expr = core_repr::serial::read::read_cbor(__CBOR)
+            let __expr = tidepool_repr::serial::read::read_cbor(__CBOR)
                 .expect("failed to deserialize CBOR — re-run extraction");
-            let __table = core_repr::serial::read::read_metadata(__META)
+            let __table = tidepool_repr::serial::read::read_metadata(__META)
                 .expect("failed to deserialize metadata");
             (__expr, __table)
         }

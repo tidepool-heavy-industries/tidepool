@@ -1,3 +1,20 @@
 [workspace]
-members = ["core-repr", "core-eval", "core-testing", "core-heap", "core-optimize", "core-bridge", "core-bridge-derive", "tidepool-macro", "core-effect", "codegen", "examples/guess", "examples/guess-interpreted", "examples/tide", "tidepool-runtime", "tidepool-mcp"]
+members = [
+    "tidepool-repr",
+    "tidepool-eval",
+    "tidepool-testing",
+    "tidepool-heap",
+    "tidepool-optimize",
+    "tidepool-bridge",
+    "tidepool-bridge-derive",
+    "tidepool-macro",
+    "tidepool-effect",
+    "tidepool-codegen",
+    "tidepool-runtime",
+    "tidepool-mcp",
+    "tidepool",
+    "examples/guess",
+    "examples/guess-interpreted",
+    "examples/tide",
+]
 resolver = "2"

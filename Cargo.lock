@@ -361,22 +361,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codegen"
-version = "0.1.0"
-dependencies = [
- "core-effect",
- "core-eval",
- "core-heap",
- "core-repr",
- "cranelift-codegen",
- "cranelift-frontend",
- "cranelift-jit",
- "cranelift-module",
- "cranelift-native",
- "target-lexicon",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -389,88 +373,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
-name = "core-bridge"
-version = "0.1.0"
-dependencies = [
- "core-eval",
- "core-repr",
-]
-
-[[package]]
-name = "core-bridge-derive"
-version = "0.1.0"
-dependencies = [
- "core-bridge",
- "core-eval",
- "core-repr",
- "core-testing",
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "core-effect"
-version = "0.1.0"
-dependencies = [
- "core-bridge",
- "core-eval",
- "core-repr",
- "frunk",
- "tokio",
-]
-
-[[package]]
-name = "core-eval"
-version = "0.1.0"
-dependencies = [
- "core-repr",
- "im",
-]
-
-[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
-
-[[package]]
-name = "core-heap"
-version = "0.1.0"
-dependencies = [
- "bumpalo",
- "core-eval",
- "core-repr",
-]
-
-[[package]]
-name = "core-optimize"
-version = "0.1.0"
-dependencies = [
- "core-eval",
- "core-repr",
- "core-testing",
- "proptest",
-]
-
-[[package]]
-name = "core-repr"
-version = "0.1.0"
-dependencies = [
- "ciborium",
-]
-
-[[package]]
-name = "core-testing"
-version = "0.1.0"
-dependencies = [
- "core-eval",
- "core-heap",
- "core-optimize",
- "core-repr",
- "criterion",
- "proptest",
-]
 
 [[package]]
 name = "cpufeatures"
@@ -2294,60 +2200,159 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidepool"
+version = "0.1.0"
+dependencies = [
+ "tidepool-bridge",
+ "tidepool-bridge-derive",
+ "tidepool-codegen",
+ "tidepool-effect",
+ "tidepool-eval",
+ "tidepool-heap",
+ "tidepool-macro",
+ "tidepool-mcp",
+ "tidepool-optimize",
+ "tidepool-repr",
+ "tidepool-runtime",
+]
+
+[[package]]
+name = "tidepool-bridge"
+version = "0.1.0"
+dependencies = [
+ "tidepool-eval",
+ "tidepool-repr",
+]
+
+[[package]]
+name = "tidepool-bridge-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+ "tidepool-bridge",
+ "tidepool-eval",
+ "tidepool-repr",
+ "tidepool-testing",
+]
+
+[[package]]
+name = "tidepool-codegen"
+version = "0.1.0"
+dependencies = [
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native",
+ "target-lexicon",
+ "tidepool-effect",
+ "tidepool-eval",
+ "tidepool-heap",
+ "tidepool-repr",
+]
+
+[[package]]
+name = "tidepool-effect"
+version = "0.1.0"
+dependencies = [
+ "frunk",
+ "tidepool-bridge",
+ "tidepool-eval",
+ "tidepool-repr",
+ "tokio",
+]
+
+[[package]]
+name = "tidepool-eval"
+version = "0.1.0"
+dependencies = [
+ "im",
+ "tidepool-repr",
+]
+
+[[package]]
 name = "tidepool-guess"
 version = "0.1.0"
 dependencies = [
- "codegen",
- "core-bridge",
- "core-bridge-derive",
- "core-effect",
- "core-eval",
- "core-repr",
  "frunk",
  "rand 0.8.5",
+ "tidepool-bridge",
+ "tidepool-bridge-derive",
+ "tidepool-codegen",
+ "tidepool-effect",
+ "tidepool-eval",
  "tidepool-macro",
+ "tidepool-repr",
 ]
 
 [[package]]
 name = "tidepool-guess-interpreted"
 version = "0.1.0"
 dependencies = [
- "core-bridge",
- "core-bridge-derive",
- "core-effect",
- "core-eval",
- "core-repr",
  "frunk",
  "rand 0.8.5",
+ "tidepool-bridge",
+ "tidepool-bridge-derive",
+ "tidepool-effect",
+ "tidepool-eval",
  "tidepool-macro",
+ "tidepool-repr",
+]
+
+[[package]]
+name = "tidepool-heap"
+version = "0.1.0"
+dependencies = [
+ "bumpalo",
+ "tidepool-eval",
+ "tidepool-repr",
 ]
 
 [[package]]
 name = "tidepool-macro"
 version = "0.1.0"
 dependencies = [
- "core-bridge",
- "core-eval",
- "core-repr",
  "proc-macro2",
  "quote",
  "syn",
+ "tidepool-bridge",
+ "tidepool-eval",
+ "tidepool-repr",
 ]
 
 [[package]]
 name = "tidepool-mcp"
 version = "0.1.0"
 dependencies = [
- "core-effect",
- "core-eval",
  "dyn-clone",
  "frunk",
  "rmcp",
  "schemars",
  "serde",
  "serde_json",
+ "tidepool-effect",
+ "tidepool-eval",
  "tidepool-runtime",
  "tokio",
+]
+
+[[package]]
+name = "tidepool-optimize"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "tidepool-eval",
+ "tidepool-repr",
+ "tidepool-testing",
+]
+
+[[package]]
+name = "tidepool-repr"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
 ]
 
 [[package]]
@@ -2355,12 +2360,24 @@ name = "tidepool-runtime"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "codegen",
- "core-effect",
- "core-eval",
- "core-repr",
  "frunk",
  "tempfile",
+ "tidepool-codegen",
+ "tidepool-effect",
+ "tidepool-eval",
+ "tidepool-repr",
+]
+
+[[package]]
+name = "tidepool-testing"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "proptest",
+ "tidepool-eval",
+ "tidepool-heap",
+ "tidepool-optimize",
+ "tidepool-repr",
 ]
 
 [[package]]
@@ -2369,19 +2386,19 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "codegen",
- "core-bridge",
- "core-bridge-derive",
- "core-effect",
- "core-eval",
- "core-repr",
  "frunk",
  "miette",
  "pest",
  "pest_derive",
  "rustyline",
  "thiserror 1.0.69",
+ "tidepool-bridge",
+ "tidepool-bridge-derive",
+ "tidepool-codegen",
+ "tidepool-effect",
+ "tidepool-eval",
  "tidepool-macro",
+ "tidepool-repr",
  "tracing",
  "tracing-subscriber",
  "ureq",

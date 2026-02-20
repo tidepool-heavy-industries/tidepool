@@ -2,12 +2,15 @@
 name = "tidepool-runtime"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tidepool-heavy-industries/tidepool"
+description = "Runtime support for Tidepool applications"
 
 [dependencies]
-core-repr = { path = "../core-repr" }
-core-eval = { path = "../core-eval" }
-core-effect = { path = "../core-effect" }
-codegen = { path = "../codegen" }
+tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
+tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
+tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
+tidepool-codegen = { version = "0.1.0", path = "../tidepool-codegen" }
 tempfile = "3"
 blake3 = "1"
 

@@ -1,0 +1,20 @@
+[package]
+name = "tidepool"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tidepool-heavy-industries/tidepool"
+description = "Haskell Core to Rust compiler and runtime — facade crate"
+
+[dependencies]
+tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
+tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
+tidepool-heap = { version = "0.1.0", path = "../tidepool-heap" }
+tidepool-optimize = { version = "0.1.0", path = "../tidepool-optimize" }
+tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
+tidepool-bridge-derive = { version = "0.1.0", path = "../tidepool-bridge-derive" }
+tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
+tidepool-codegen = { version = "0.1.0", path = "../tidepool-codegen" }
+tidepool-macro = { version = "0.1.0", path = "../tidepool-macro" }
+tidepool-runtime = { version = "0.1.0", path = "../tidepool-runtime" }
+tidepool-mcp = { version = "0.1.0", path = "../tidepool-mcp" }

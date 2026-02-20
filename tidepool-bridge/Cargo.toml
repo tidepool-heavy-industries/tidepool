@@ -1,0 +1,11 @@
+[package]
+name = "tidepool-bridge"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tidepool-heavy-industries/tidepool"
+description = "Bridge between Rust types and Tidepool Core values"
+
+[dependencies]
+tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
+tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }

@@ -1,7 +1,7 @@
-use codegen::jit_machine::JitEffectMachine;
-use core_bridge_derive::FromCore;
-use core_effect::{EffectContext, EffectError, EffectHandler};
-use core_eval::value::Value;
+use tidepool_codegen::jit_machine::JitEffectMachine;
+use tidepool_bridge_derive::FromCore;
+use tidepool_effect::{EffectContext, EffectError, EffectHandler};
+use tidepool_eval::value::Value;
 use rand::Rng;
 use tidepool_macro::haskell_inline;
 

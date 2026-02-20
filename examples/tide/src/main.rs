@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use codegen::jit_machine::JitEffectMachine;
+use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_macro::haskell_inline;
 use tidepool_tide::handlers::{ConsoleHandler, EnvHandler, FsHandler, NetHandler, ReplHandler};
 

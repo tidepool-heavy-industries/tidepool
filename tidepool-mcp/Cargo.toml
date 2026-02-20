@@ -2,11 +2,14 @@
 name = "tidepool-mcp"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tidepool-heavy-industries/tidepool"
+description = "Model Context Protocol (MCP) server for Tidepool"
 
 [dependencies]
-tidepool-runtime = { path = "../tidepool-runtime" }
-core-eval = { path = "../core-eval" }
-core-effect = { path = "../core-effect" }
+tidepool-runtime = { version = "0.1.0", path = "../tidepool-runtime" }
+tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
+tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
 rmcp = { version = "0.16", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util"] }
 serde = { version = "1", features = ["derive"] }

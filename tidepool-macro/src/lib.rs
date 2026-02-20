@@ -36,12 +36,12 @@ mod expand;
 /// The expansion of this macro expects the following crates to be available in the
 /// caller's scope:
 ///
-/// - `core_repr`
-/// - `core_eval`
+/// - `tidepool_repr`
+/// - `tidepool_eval`
 ///
 /// # Returns
 ///
-/// Returns a `Result<core_eval::Value, core_eval::error::EvalError>`.
+/// Returns a `Result<tidepool_eval::Value, tidepool_eval::error::EvalError>`.
 ///
 /// # Examples
 ///
@@ -73,14 +73,14 @@ pub fn haskell_eval(input: TokenStream) -> TokenStream {
 ///
 /// # Returns
 ///
-/// Returns `(core_repr::CoreExpr, core_repr::DataConTable)`.
+/// Returns `(tidepool_repr::CoreExpr, tidepool_repr::DataConTable)`.
 ///
 /// # Examples
 ///
 /// ```ignore
 /// let (expr, table) = haskell_expr!("../Guess.hs::game");
-/// let mut heap = core_eval::heap::VecHeap::new();
-/// let mut machine = core_effect::EffectMachine::new(&table, &mut heap).unwrap();
+/// let mut heap = tidepool_eval::heap::VecHeap::new();
+/// let mut machine = tidepool_effect::EffectMachine::new(&table, &mut heap).unwrap();
 /// ```
 #[proc_macro]
 pub fn haskell_expr(input: TokenStream) -> TokenStream {
@@ -96,7 +96,7 @@ pub fn haskell_expr(input: TokenStream) -> TokenStream {
 ///
 /// # Returns
 ///
-/// Returns `(core_repr::CoreExpr, core_repr::DataConTable)`.
+/// Returns `(tidepool_repr::CoreExpr, tidepool_repr::DataConTable)`.
 ///
 /// # Examples
 ///

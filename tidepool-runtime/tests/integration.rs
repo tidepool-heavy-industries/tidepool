@@ -1,6 +1,6 @@
 use frunk::HNil;
 use tidepool_runtime::{compile_haskell, compile_and_run, Value};
-use core_repr::Literal;
+use tidepool_repr::Literal;
 
 #[test]
 #[ignore] // Manual test: requires tidepool-extract on PATH

@@ -1,4 +1,4 @@
-use core_bridge_derive::ToCore;
+use tidepool_bridge_derive::ToCore;
 
 /// Binary operator tag — mirrors `BinOp` in `haskell/Types.hs`.
 #[derive(Debug, Clone, PartialEq, ToCore)]

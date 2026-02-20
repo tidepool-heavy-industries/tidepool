@@ -1,0 +1,10 @@
+[package]
+name = "tidepool-repr"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tidepool-heavy-industries/tidepool"
+description = "Intermediate representation for the Tidepool compiler"
+
+[dependencies]
+ciborium = "0.2"

@@ -2,6 +2,9 @@
 name = "tidepool-macro"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tidepool-heavy-industries/tidepool"
+description = "Procedural macros for the Tidepool language"
 
 [lib]
 proc-macro = true
@@ -12,6 +15,6 @@ quote = "1"
 proc-macro2 = "1"
 
 [dev-dependencies]
-core-repr = { path = "../core-repr" }
-core-eval = { path = "../core-eval" }
-core-bridge = { path = "../core-bridge" }
+tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
+tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
+tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }

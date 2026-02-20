@@ -1,0 +1,19 @@
+[package]
+name = "tidepool-codegen"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tidepool-heavy-industries/tidepool"
+description = "Cranelift-based JIT compiler for Tidepool Core"
+
+[dependencies]
+cranelift-codegen = "=0.116.1"
+cranelift-frontend = "=0.116.1"
+cranelift-jit = "=0.116.1"
+cranelift-module = "=0.116.1"
+cranelift-native = "=0.116.1"
+target-lexicon = "0.13"
+tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
+tidepool-heap = { version = "0.1.0", path = "../tidepool-heap" }
+tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
+tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }

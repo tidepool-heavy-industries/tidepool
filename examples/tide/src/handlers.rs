@@ -4,10 +4,10 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 use url::Url;
 
-use core_bridge::ToCore;
-use core_bridge_derive::FromCore;
-use core_effect::{EffectContext, EffectError, EffectHandler};
-use core_eval::value::Value;
+use tidepool_bridge::ToCore;
+use tidepool_bridge_derive::FromCore;
+use tidepool_effect::{EffectContext, EffectError, EffectHandler};
+use tidepool_eval::value::Value;
 
 /// Structured errors for Tide effect handlers.
 #[derive(Error, Debug)]

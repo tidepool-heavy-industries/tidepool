@@ -2,17 +2,21 @@
 name = "tidepool-tide"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tidepool-heavy-industries/tidepool"
+description = "Tidepool interactive shell and compiler"
+publish = false
 
 [dependencies]
 pest = "2.7"
 pest_derive = "2.7"
-core-repr = { path = "../../core-repr" }
-core-bridge = { path = "../../core-bridge" }
-core-bridge-derive = { path = "../../core-bridge-derive" }
-core-eval = { path = "../../core-eval" }
-core-effect = { path = "../../core-effect" }
-tidepool-macro = { path = "../../tidepool-macro" }
-codegen = { path = "../../codegen" }
+tidepool-repr = { version = "0.1.0", path = "../../tidepool-repr" }
+tidepool-bridge = { version = "0.1.0", path = "../../tidepool-bridge" }
+tidepool-bridge-derive = { version = "0.1.0", path = "../../tidepool-bridge-derive" }
+tidepool-eval = { version = "0.1.0", path = "../../tidepool-eval" }
+tidepool-effect = { version = "0.1.0", path = "../../tidepool-effect" }
+tidepool-macro = { version = "0.1.0", path = "../../tidepool-macro" }
+tidepool-codegen = { version = "0.1.0", path = "../../tidepool-codegen" }
 frunk = "0.4"
 ureq = "2"
 url = "2"
