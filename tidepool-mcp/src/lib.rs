@@ -26,6 +26,15 @@ pub struct RunHaskellRequest {
     pub target: String,
 }
 
+/// Request parameters for the `compile_haskell` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CompileHaskellRequest {
+    /// Haskell source code to compile (without executing).
+    pub source: String,
+    /// Name of the top-level binding to target.
+    pub target: String,
+}
+
 /// Trait combining effect dispatch with cloning for the MCP server.
 pub trait McpEffectHandler: DispatchEffect<()> + DynClone + Send + Sync + 'static {}
 clone_trait_object!(McpEffectHandler);
@@ -79,10 +88,43 @@ impl TidepoolMcpServerImpl {
         .map_err(|e| McpError::internal_error(format!("task join error: {}", e), None))?;
 
         match result {
-            Ok(value) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "{:?}",
-                value
-            ))])),
+            Ok(eval_result) => {
+                let json = eval_result.to_json();
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json).unwrap_or_else(|_| json.to_string()),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("{}", e))])),
+        }
+    }
+
+    async fn compile_haskell_tool(
+        &self,
+        req: CompileHaskellRequest,
+    ) -> Result<CallToolResult, McpError> {
+        let include_refs: Vec<PathBuf> = self.include.clone();
+        let source = req.source.clone();
+        let target = req.target.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let include_paths: Vec<&Path> = include_refs.iter().map(|p| p.as_path()).collect();
+            tidepool_runtime::compile_haskell(&source, &target, &include_paths)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task join error: {}", e), None))?;
+
+        match result {
+            Ok((expr, table)) => {
+                let constructors: Vec<String> = table.iter().map(|dc| dc.name.clone()).collect();
+                let info = serde_json::json!({
+                    "target": req.target,
+                    "expr_nodes": expr.nodes.len(),
+                    "constructors": constructors,
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&info).unwrap_or_else(|_| info.to_string()),
+                )]))
+            }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("{}", e))])),
         }
     }
@@ -102,17 +144,27 @@ impl ServerHandler for TidepoolMcpServerImpl {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        if request.name == "run_haskell" {
-            let args = request.arguments.unwrap_or_default();
-            let req: RunHaskellRequest = serde_json::from_value(serde_json::Value::Object(args))
-                .map_err(|e| McpError::invalid_params(format!("invalid params: {}", e), None))?;
-            self.run_haskell(req).await
-        } else {
-            Err(McpError {
+        let args = request.arguments.unwrap_or_default();
+        match request.name.as_ref() {
+            "run_haskell" => {
+                let req: RunHaskellRequest = serde_json::from_value(serde_json::Value::Object(args))
+                    .map_err(|e| {
+                        McpError::invalid_params(format!("invalid params: {}", e), None)
+                    })?;
+                self.run_haskell(req).await
+            }
+            "compile_haskell" => {
+                let req: CompileHaskellRequest =
+                    serde_json::from_value(serde_json::Value::Object(args)).map_err(|e| {
+                        McpError::invalid_params(format!("invalid params: {}", e), None)
+                    })?;
+                self.compile_haskell_tool(req).await
+            }
+            _ => Err(McpError {
                 code: ErrorCode::METHOD_NOT_FOUND,
                 message: format!("Tool not found: {}", request.name).into(),
                 data: None,
-            })
+            }),
         }
     }
 
@@ -121,30 +173,57 @@ impl ServerHandler for TidepoolMcpServerImpl {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let schema = schemars::schema_for!(RunHaskellRequest);
-        let schema_json = serde_json::to_value(&schema).map_err(|e| {
+        let run_schema = schemars::schema_for!(RunHaskellRequest);
+        let run_schema_json = serde_json::to_value(&run_schema).map_err(|e| {
             McpError::internal_error(format!("Failed to serialize schema: {}", e), None)
         })?;
-        
-        let input_schema = match schema_json {
+        let run_input_schema = match run_schema_json {
             serde_json::Value::Object(o) => Arc::new(o),
             _ => Arc::new(serde_json::Map::new()),
         };
 
-        let tool = Tool {
-            name: "run_haskell".into(),
-            title: None,
-            description: Some("Compile and run Haskell source code. Returns the evaluated result.".into()),
-            input_schema,
-            output_schema: None,
-            annotations: None,
-            icons: None,
-            meta: None,
-            execution: None,
+        let compile_schema = schemars::schema_for!(CompileHaskellRequest);
+        let compile_schema_json = serde_json::to_value(&compile_schema).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize schema: {}", e), None)
+        })?;
+        let compile_input_schema = match compile_schema_json {
+            serde_json::Value::Object(o) => Arc::new(o),
+            _ => Arc::new(serde_json::Map::new()),
         };
 
+        let tools = vec![
+            Tool {
+                name: "run_haskell".into(),
+                title: None,
+                description: Some(
+                    "Compile and run Haskell source code. Returns the evaluated result as structured JSON."
+                        .into(),
+                ),
+                input_schema: run_input_schema,
+                output_schema: None,
+                annotations: None,
+                icons: None,
+                meta: None,
+                execution: None,
+            },
+            Tool {
+                name: "compile_haskell".into(),
+                title: None,
+                description: Some(
+                    "Compile Haskell source code without executing. Returns metadata: expression node count and available constructors."
+                        .into(),
+                ),
+                input_schema: compile_input_schema,
+                output_schema: None,
+                annotations: None,
+                icons: None,
+                meta: None,
+                execution: None,
+            },
+        ];
+
         Ok(ListToolsResult {
-            tools: vec![tool],
+            tools,
             next_cursor: None,
             meta: None,
         })
@@ -219,6 +298,21 @@ mod tests {
         let de: RunHaskellRequest = serde_json::from_value(json).unwrap();
         assert_eq!(de.source, "main = 42");
         assert_eq!(de.target, "main");
+    }
+
+    #[test]
+    fn test_compile_haskell_request_serialization() {
+        let req = CompileHaskellRequest {
+            source: "module Test where\nfoo = 42".to_string(),
+            target: "foo".to_string(),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["source"], "module Test where\nfoo = 42");
+        assert_eq!(json["target"], "foo");
+
+        let de: CompileHaskellRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(de.source, "module Test where\nfoo = 42");
+        assert_eq!(de.target, "foo");
     }
 
     #[test]
