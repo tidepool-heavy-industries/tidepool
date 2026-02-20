@@ -58,7 +58,10 @@ impl KvHandler {
 impl EffectHandler<()> for KvHandler {
     type Request = KvReq;
     fn handle(&mut self, req: KvReq, cx: &EffectContext<'_, ()>) -> Result<Value, EffectError> {
-        let mut store = self.store.lock().unwrap();
+        let mut store = self
+            .store
+            .lock()
+            .map_err(|e| EffectError::Handler(format!("Mutex poisoned: {}", e)))?;
         match req {
             KvReq::Get(key) => {
                 let val = store.get(&key).cloned();
@@ -130,7 +133,7 @@ impl FsHandler {
                 path
             )));
         }
-        Ok(resolved)
+        Ok(check_path)
     }
 }
 
