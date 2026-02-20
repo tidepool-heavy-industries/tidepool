@@ -277,10 +277,9 @@ mod tests {
     #[test]
     fn test_parse_let_no_body() {
         let expr = parse("let x = 5").unwrap();
-        assert_eq!(expr, TExpr::TLet(
+        assert_eq!(expr, TExpr::TBind(
             "x".into(),
-            Box::new(TExpr::TInt(5)),
-            Box::new(TExpr::TVar("x".into()))
+            Box::new(TExpr::TInt(5))
         ));
     }
 
@@ -486,10 +485,9 @@ mod tests {
 
     #[test]
     fn test_parse_let_with_binop_value() {
-        assert_eq!(parse("let x = 1 + 2").unwrap(), TExpr::TLet(
+        assert_eq!(parse("let x = 1 + 2").unwrap(), TExpr::TBind(
             "x".into(),
-            Box::new(TExpr::TBinOp(BinOp::Add, Box::new(TExpr::TInt(1)), Box::new(TExpr::TInt(2)))),
-            Box::new(TExpr::TVar("x".into())),
+            Box::new(TExpr::TBinOp(BinOp::Add, Box::new(TExpr::TInt(1)), Box::new(TExpr::TInt(2))))
         ));
     }
 
@@ -510,26 +508,24 @@ mod tests {
 
     #[test]
     fn test_parse_let_lambda_value() {
-        assert_eq!(parse(r#"let inc = \x -> x + 1"#).unwrap(), TExpr::TLet(
+        assert_eq!(parse(r#"let inc = \x -> x + 1"#).unwrap(), TExpr::TBind(
             "inc".into(),
             Box::new(TExpr::TLam(
                 vec!["x".into()],
                 Box::new(TExpr::TBinOp(BinOp::Add,
                     Box::new(TExpr::TVar("x".into())),
                     Box::new(TExpr::TInt(1)))))),
-            Box::new(TExpr::TVar("inc".into())),
         ));
     }
 
     #[test]
     fn test_parse_let_if_value() {
-        assert_eq!(parse("let x = if true then 1 else 2").unwrap(), TExpr::TLet(
+        assert_eq!(parse("let x = if true then 1 else 2").unwrap(), TExpr::TBind(
             "x".into(),
             Box::new(TExpr::TIf(
                 Box::new(TExpr::TBool(true)),
                 Box::new(TExpr::TInt(1)),
                 Box::new(TExpr::TInt(2)))),
-            Box::new(TExpr::TVar("x".into())),
         ));
     }
 
