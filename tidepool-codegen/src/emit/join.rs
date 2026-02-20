@@ -8,6 +8,7 @@ use cranelift_frontend::FunctionBuilder;
 /// Emits a Join expression.
 /// Join { label, params, rhs, body } creates a join point (a parameterized block)
 /// that can be jumped to from within the body.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_join(
     ctx: &mut EmitContext,
     pipeline: &mut CodegenPipeline,
@@ -91,6 +92,7 @@ pub fn emit_join(
 
 /// Emits a Jump expression.
 /// Jump { label, args } transfers control to the join point block.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_jump(
     ctx: &mut EmitContext,
     pipeline: &mut CodegenPipeline,

@@ -1,3 +1,4 @@
+#![allow(unused, clippy::all)]
 use crate::ast::{BinOp, BuiltinId, TExpr};
 use miette::{Diagnostic, SourceSpan};
 use pest::iterators::Pair;

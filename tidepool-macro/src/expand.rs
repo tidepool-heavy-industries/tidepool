@@ -357,7 +357,7 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
-                if p.extension().map_or(false, |ext| ext == "hs") {
+                if p.extension().is_some_and(|ext| ext == "hs") {
                     if let Ok(content) = std::fs::read_to_string(&p) {
                         include_bodies.push_str(&strip_module_header(&content));
                         include_bodies.push('\n');
@@ -436,7 +436,7 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
                 entries
                     .filter_map(|e| e.ok())
                     .map(|e| e.path())
-                    .filter(|p| p.extension().map_or(false, |ext| ext == "hs"))
+                    .filter(|p| p.extension().is_some_and(|ext| ext == "hs"))
                     .map(|p| {
                         let s = p.to_str().unwrap().to_string();
                         quote! { const _: &[u8] = include_bytes!(#s); }
@@ -573,8 +573,8 @@ fn list_bindings(output_dir: &Path) -> Vec<String> {
         .flatten()
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().map_or(false, |ext| ext == "cbor"))
-        .filter(|p| p.file_stem().map_or(false, |s| s != "meta"))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "cbor"))
+        .filter(|p| p.file_stem().is_some_and(|s| s != "meta"))
         .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
         .collect()
 }
@@ -584,8 +584,8 @@ fn find_single_binding(output_dir: &Path) -> Result<PathBuf, String> {
         .map(|rd| {
             rd.filter_map(|e| e.ok())
                 .map(|e| e.path())
-                .filter(|p| p.extension().map_or(false, |ext| ext == "cbor"))
-                .filter(|p| p.file_stem().map_or(false, |s| s != "meta"))
+                .filter(|p| p.extension().is_some_and(|ext| ext == "cbor"))
+                .filter(|p| p.file_stem().is_some_and(|s| s != "meta"))
                 .collect()
         })
         .unwrap_or_default();

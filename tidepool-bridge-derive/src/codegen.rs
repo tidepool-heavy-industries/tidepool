@@ -11,7 +11,7 @@ fn collect_type_params(ty: &Type, params: &HashSet<syn::Ident>, used: &mut HashS
                 // If it's PhantomData<T>, we DON'T consider T "used" for the purpose
                 // of adding FromCore/ToCore bounds, because our PhantomData impl
                 // doesn't require T to be FromCore/ToCore.
-                if tp.path.segments.last().map_or(false, |s| s.ident == "PhantomData") {
+                if tp.path.segments.last().is_some_and(|s| s.ident == "PhantomData") {
                     return;
                 }
                 if let Some(ident) = tp.path.get_ident() {

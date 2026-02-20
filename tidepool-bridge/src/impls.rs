@@ -5,9 +5,7 @@ use tidepool_repr::{DataConId, DataConTable, Literal};
 
 /// Check if a DataConId matches a known boxing constructor name (I#, W#, D#, C#).
 fn is_boxing_con(name: &str, id: DataConId, table: &DataConTable) -> bool {
-    table
-        .get_by_name(name)
-        .map_or(false, |expected| expected == id)
+    table.get_by_name(name) == Some(id)
 }
 
 // Helper for type mismatch errors
@@ -299,14 +297,14 @@ impl FromCore for String {
                 let mut cur = value;
                 loop {
                     match cur {
-                        Value::Con(tag, fields) if table.get_by_name("[]").map_or(false, |nil| nil == *tag) && fields.is_empty() => {
+                        Value::Con(tag, fields) if table.get_by_name("[]") == Some(*tag) && fields.is_empty() => {
                             break;
                         }
-                        Value::Con(tag, fields) if table.get_by_name(":").map_or(false, |cons| cons == *tag) && fields.len() == 2 => {
+                        Value::Con(tag, fields) if table.get_by_name(":") == Some(*tag) && fields.len() == 2 => {
                             match &fields[0] {
                                 Value::Lit(Literal::LitChar(c)) => chars.push(*c),
                                 // Boxing: C# wraps a Char
-                                Value::Con(box_tag, box_fields) if table.get_by_name("C#").map_or(false, |c_id| c_id == *box_tag) && box_fields.len() == 1 => {
+                                Value::Con(box_tag, box_fields) if table.get_by_name("C#") == Some(*box_tag) && box_fields.len() == 1 => {
                                     match &box_fields[0] {
                                         Value::Lit(Literal::LitChar(c)) => chars.push(*c),
                                         other => return Err(type_mismatch("Char in C#", other)),

@@ -18,19 +18,19 @@ impl<'a> EffectMachine<'a> {
     pub fn new(table: &'a DataConTable, heap: &'a mut dyn Heap) -> Result<Self, EffectError> {
         let val_id = table
             .get_by_name("Val")
-            .ok_or_else(|| EffectError::MissingConstructor { name: "Val" })?;
+            .ok_or(EffectError::MissingConstructor { name: "Val" })?;
         let e_id = table
             .get_by_name("E")
-            .ok_or_else(|| EffectError::MissingConstructor { name: "E" })?;
+            .ok_or(EffectError::MissingConstructor { name: "E" })?;
         let leaf_id = table
             .get_by_name("Leaf")
-            .ok_or_else(|| EffectError::MissingConstructor { name: "Leaf" })?;
+            .ok_or(EffectError::MissingConstructor { name: "Leaf" })?;
         let node_id = table
             .get_by_name("Node")
-            .ok_or_else(|| EffectError::MissingConstructor { name: "Node" })?;
+            .ok_or(EffectError::MissingConstructor { name: "Node" })?;
         let union_id = table
             .get_by_name("Union")
-            .ok_or_else(|| EffectError::MissingConstructor { name: "Union" })?;
+            .ok_or(EffectError::MissingConstructor { name: "Union" })?;
         Ok(Self {
             table,
             heap,

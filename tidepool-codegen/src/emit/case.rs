@@ -6,6 +6,7 @@ use cranelift_codegen::ir::{self, types, InstBuilder, MemFlags, Value, condcodes
 use cranelift_frontend::FunctionBuilder;
 
 /// Emit Case dispatch.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_case(
     ctx: &mut EmitContext,
     pipeline: &mut CodegenPipeline,
@@ -75,6 +76,7 @@ pub fn emit_case(
     Ok(SsaVal::HeapPtr(result))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_data_dispatch(
     ctx: &mut EmitContext,
     pipeline: &mut CodegenPipeline,
@@ -144,6 +146,7 @@ fn emit_data_dispatch(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_lit_dispatch(
     ctx: &mut EmitContext,
     pipeline: &mut CodegenPipeline,
