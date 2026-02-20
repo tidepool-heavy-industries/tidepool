@@ -197,14 +197,43 @@ fn format_error_with_source(title: &str, error: &str, source: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Output capture
+// ---------------------------------------------------------------------------
+
+/// Captured output from effect handlers (e.g., Console Print).
+///
+/// Clone is cheap (Arc-backed). Thread-safe for use across spawn_blocking.
+#[derive(Clone, Default)]
+pub struct CapturedOutput {
+    lines: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl CapturedOutput {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Push a line of output.
+    pub fn push(&self, line: String) {
+        self.lines.lock().unwrap().push(line);
+    }
+
+    /// Drain all captured lines, returning them and clearing the buffer.
+    pub fn drain(&self) -> Vec<String> {
+        let mut lines = self.lines.lock().unwrap();
+        std::mem::take(&mut *lines)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Server internals
 // ---------------------------------------------------------------------------
 
 /// Trait combining effect dispatch with cloning for the MCP server.
-pub trait McpEffectHandler: DispatchEffect<()> + DynClone + Send + Sync + 'static {}
+pub trait McpEffectHandler: DispatchEffect<CapturedOutput> + DynClone + Send + Sync + 'static {}
 clone_trait_object!(McpEffectHandler);
 
-impl<T> McpEffectHandler for T where T: DispatchEffect<()> + Clone + Send + Sync + 'static {}
+impl<T> McpEffectHandler for T where T: DispatchEffect<CapturedOutput> + Clone + Send + Sync + 'static {}
 
 /// Generic MCP server wrapper that compiles and runs Haskell via Tidepool.
 #[derive(Clone)]
@@ -225,12 +254,12 @@ pub struct TidepoolMcpServerImpl {
 
 struct HandlerWrapper<'a>(&'a mut dyn McpEffectHandler);
 
-impl<'a> DispatchEffect<()> for HandlerWrapper<'a> {
+impl<'a> DispatchEffect<CapturedOutput> for HandlerWrapper<'a> {
     fn dispatch(
         &mut self,
         tag: u64,
         request: &tidepool_eval::value::Value,
-        cx: &tidepool_effect::dispatch::EffectContext<'_, ()>,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_eval::value::Value, tidepool_effect::error::EffectError> {
         self.0.dispatch(tag, request, cx)
     }
@@ -251,6 +280,8 @@ impl TidepoolMcpServerImpl {
         let mut handlers = dyn_clone::clone_box(&*self.handler_factory);
         let include_refs: Vec<PathBuf> = self.include.clone();
         let source_for_blocking = Arc::clone(&source);
+        let captured = CapturedOutput::new();
+        let captured_for_blocking = captured.clone();
 
         let result = tokio::task::spawn_blocking(move || {
             let include_paths: Vec<&Path> = include_refs.iter().map(|p| p.as_path()).collect();
@@ -261,19 +292,29 @@ impl TidepoolMcpServerImpl {
                     "result",
                     &include_paths,
                     &mut wrapper,
-                    &(),
+                    &captured_for_blocking,
                 )
             }))
         })
         .await
         .map_err(|e| McpError::internal_error(format!("task join error: {}", e), None))?;
 
+        let output_lines = captured.drain();
+
         match result {
             Ok(Ok(eval_result)) => {
                 tracing::info!("eval succeeded");
-                Ok(CallToolResult::success(vec![Content::text(
-                    eval_result.to_string_pretty(),
-                )]))
+                let mut response = String::new();
+                if !output_lines.is_empty() {
+                    response.push_str("## Output\n");
+                    for line in &output_lines {
+                        response.push_str(line);
+                        response.push('\n');
+                    }
+                    response.push_str("\n## Result\n");
+                }
+                response.push_str(&eval_result.to_string_pretty());
+                Ok(CallToolResult::success(vec![Content::text(response)]))
             }
             Ok(Err(e)) => {
                 let error_msg = format_error_with_source("Error", &e.to_string(), &source);
@@ -370,7 +411,7 @@ impl ServerHandler for TidepoolMcpServerImpl {
 
 impl<H> TidepoolMcpServer<H>
 where
-    H: DispatchEffect<()> + Clone + Send + Sync + 'static + CollectEffectDecls,
+    H: DispatchEffect<CapturedOutput> + Clone + Send + Sync + 'static + CollectEffectDecls,
 {
     /// Create a new server with the given effect handler stack.
     ///

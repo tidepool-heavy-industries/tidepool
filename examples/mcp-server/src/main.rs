@@ -5,7 +5,7 @@ use tidepool_bridge_derive::FromCore;
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
 use tidepool_eval::value::Value;
-use tidepool_mcp::{DescribeEffect, EffectDecl, TidepoolMcpServer};
+use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl, TidepoolMcpServer};
 
 // === Tag 0: Console ===
 
@@ -28,12 +28,12 @@ impl DescribeEffect for ConsoleHandler {
     }
 }
 
-impl EffectHandler<()> for ConsoleHandler {
+impl EffectHandler<CapturedOutput> for ConsoleHandler {
     type Request = ConsoleReq;
-    fn handle(&mut self, req: ConsoleReq, cx: &EffectContext<'_, ()>) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: ConsoleReq, cx: &EffectContext<'_, CapturedOutput>) -> Result<Value, EffectError> {
         match req {
             ConsoleReq::Print(s) => {
-                eprintln!("[console] {}", s);
+                cx.user().push(s);
                 cx.respond(())
             }
         }
@@ -82,9 +82,9 @@ impl DescribeEffect for KvHandler {
     }
 }
 
-impl EffectHandler<()> for KvHandler {
+impl EffectHandler<CapturedOutput> for KvHandler {
     type Request = KvReq;
-    fn handle(&mut self, req: KvReq, cx: &EffectContext<'_, ()>) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: KvReq, cx: &EffectContext<'_, CapturedOutput>) -> Result<Value, EffectError> {
         let mut store = self
             .store
             .lock()
@@ -176,9 +176,9 @@ impl DescribeEffect for FsHandler {
     }
 }
 
-impl EffectHandler<()> for FsHandler {
+impl EffectHandler<CapturedOutput> for FsHandler {
     type Request = FsReq;
-    fn handle(&mut self, req: FsReq, cx: &EffectContext<'_, ()>) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: FsReq, cx: &EffectContext<'_, CapturedOutput>) -> Result<Value, EffectError> {
         match req {
             FsReq::Read(path) => {
                 let resolved = self.resolve(&path)?;
