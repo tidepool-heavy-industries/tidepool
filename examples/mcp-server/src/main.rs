@@ -15,10 +15,10 @@ impl EffectHandler<()> for ConsoleHandler {
     fn handle(
         &mut self,
         req: Self::Request,
-        _cx: &EffectContext<'_, ()>,
+        cx: &EffectContext<'_, ()>,
     ) -> Result<Value, EffectError> {
         eprintln!("[console] {:?}", req);
-        Ok(Value::Lit(core_repr::Literal::LitInt(0)))
+        cx.respond(())
     }
 }
 
@@ -32,10 +32,10 @@ impl EffectHandler<()> for EnvHandler {
     fn handle(
         &mut self,
         req: Self::Request,
-        _cx: &EffectContext<'_, ()>,
+        cx: &EffectContext<'_, ()>,
     ) -> Result<Value, EffectError> {
         eprintln!("[env] lookup {:?}", req);
-        Ok(Value::Lit(core_repr::Literal::LitString("example_value".into())))
+        cx.respond("example_value".to_string())
     }
 }
 

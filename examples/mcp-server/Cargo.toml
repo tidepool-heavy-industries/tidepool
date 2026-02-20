@@ -10,7 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 tidepool-mcp = { path = "../../tidepool-mcp" }
-tidepool-runtime = { path = "../../tidepool-runtime" }
 core-effect = { path = "../../core-effect" }
 core-eval = { path = "../../core-eval" }
 core-repr = { path = "../../core-repr" }
