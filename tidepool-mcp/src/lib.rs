@@ -285,21 +285,25 @@ impl TidepoolMcpServerImpl {
         let captured = CapturedOutput::new();
         let captured_for_blocking = captured.clone();
 
-        let result = tokio::task::spawn_blocking(move || {
-            let include_paths: Vec<&Path> = include_refs.iter().map(|p| p.as_path()).collect();
-            let mut wrapper = HandlerWrapper(handlers.as_mut());
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                tidepool_runtime::compile_and_run(
-                    &source_for_blocking,
-                    "result",
-                    &include_paths,
-                    &mut wrapper,
-                    &captured_for_blocking,
-                )
-            }))
-        })
-        .await
-        .map_err(|e| McpError::internal_error(format!("task join error: {}", e), None))?;
+        let result = std::thread::Builder::new()
+            .name("tidepool-eval".into())
+            .stack_size(8 * 1024 * 1024) // 8 MiB — JIT compilation + execution needs headroom
+            .spawn(move || {
+                let include_paths: Vec<&Path> = include_refs.iter().map(|p| p.as_path()).collect();
+                let mut wrapper = HandlerWrapper(handlers.as_mut());
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    tidepool_runtime::compile_and_run(
+                        &source_for_blocking,
+                        "result",
+                        &include_paths,
+                        &mut wrapper,
+                        &captured_for_blocking,
+                    )
+                }))
+            })
+            .map_err(|e| McpError::internal_error(format!("thread spawn error: {}", e), None))?
+            .join()
+            .map_err(|_| McpError::internal_error("eval thread panicked", None))?;
 
         let output_lines = captured.drain();
 

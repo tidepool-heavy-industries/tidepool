@@ -5,7 +5,7 @@ use tidepool_repr::{VarId, Alt, AltCon, Literal, CoreExpr};
 use cranelift_codegen::ir::{self, types, InstBuilder, MemFlags, Value, condcodes::IntCC, TrapCode};
 use cranelift_frontend::FunctionBuilder;
 
-/// Emit Case dispatch.
+/// Emit Case dispatch. The scrutinee has already been evaluated (stack-safe).
 #[allow(clippy::too_many_arguments)]
 pub fn emit_case(
     ctx: &mut EmitContext,
@@ -14,12 +14,11 @@ pub fn emit_case(
     vmctx: Value,
     gc_sig: ir::SigRef,
     tree: &CoreExpr,
-    scrutinee_idx: usize,
+    scrut: SsaVal,
     binder: &VarId,
     alts: &[Alt<usize>],
 ) -> Result<SsaVal, EmitError> {
-    // 1. Emit scrutinee
-    let scrut = ctx.emit_node(pipeline, builder, vmctx, gc_sig, tree, scrutinee_idx)?;
+    // 1. Scrutinee already evaluated
     let scrut_ptr = scrut.value();
 
     // 2. Bind case binder

@@ -17,3 +17,4 @@ tidepool-repr = { version = "0.0.1", path = "../tidepool-repr" }
 tidepool-heap = { version = "0.0.1", path = "../tidepool-heap" }
 tidepool-eval = { version = "0.0.1", path = "../tidepool-eval" }
 tidepool-effect = { version = "0.0.1", path = "../tidepool-effect" }
+recursion = "0.5.4"
