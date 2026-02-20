@@ -147,6 +147,7 @@ pub fn emit_primop(
         PrimOpKind::TagToEnum | PrimOpKind::IndexArray | PrimOpKind::SeqOp => {
             Err(EmitError::NotYetImplemented(format!("{:?}", op)))
         }
+        _ => Err(EmitError::NotYetImplemented(format!("{:?}", op))),
     }
 }
 

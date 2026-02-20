@@ -532,6 +532,56 @@ mapPrimOp = \case
   IntRemOp  -> "IntRem"
   ChrOp     -> "Chr"
   OrdOp     -> "Ord"
+  -- Int bitwise
+  IntAndOp  -> "IntAnd"
+  IntOrOp   -> "IntOr"
+  IntXorOp  -> "IntXor"
+  IntNotOp  -> "IntNot"
+  IntSllOp  -> "IntShl"
+  IntSraOp  -> "IntShra"
+  IntSrlOp  -> "IntShrl"
+  -- Word arithmetic + bitwise
+  WordQuotOp -> "WordQuot"
+  WordRemOp  -> "WordRem"
+  WordAndOp  -> "WordAnd"
+  WordOrOp   -> "WordOr"
+  WordXorOp  -> "WordXor"
+  WordNotOp  -> "WordNot"
+  WordSllOp  -> "WordShl"
+  WordSrlOp  -> "WordShrl"
+  -- Int↔Word conversions
+  IntToWordOp -> "Int2Word"
+  WordToIntOp -> "Word2Int"
+  -- Narrowing
+  Narrow8IntOp   -> "Narrow8Int"
+  Narrow16IntOp  -> "Narrow16Int"
+  Narrow32IntOp  -> "Narrow32Int"
+  Narrow8WordOp  -> "Narrow8Word"
+  Narrow16WordOp -> "Narrow16Word"
+  Narrow32WordOp -> "Narrow32Word"
+  -- Float arithmetic + comparison
+  FloatAddOp    -> "FloatAdd"
+  FloatSubOp    -> "FloatSub"
+  FloatMulOp    -> "FloatMul"
+  FloatDivOp    -> "FloatDiv"
+  FloatNegOp    -> "FloatNegate"
+  FloatEqOp     -> "FloatEq"
+  FloatNeOp     -> "FloatNe"
+  FloatLtOp     -> "FloatLt"
+  FloatLeOp     -> "FloatLe"
+  FloatGtOp     -> "FloatGt"
+  FloatGeOp     -> "FloatGe"
+  -- Double extras
+  DoubleNegOp   -> "DoubleNegate"
+  -- Type conversions
+  IntToDoubleOp   -> "Int2Double"
+  DoubleToIntOp   -> "Double2Int"
+  IntToFloatOp    -> "Int2Float"
+  FloatToIntOp    -> "Float2Int"
+  DoubleToFloatOp -> "Double2Float"
+  FloatToDoubleOp -> "Float2Double"
+  -- Addr#
+  IndexOffAddrOp_Char -> "IndexCharOffAddr"
   other       -> error $ "Unsupported primop: " ++ showPprUnsafe other
 
 collectDataCons :: [TyCon] -> [(Word64, Text, Int, Int, [Text])]

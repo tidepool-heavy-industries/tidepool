@@ -67,6 +67,56 @@ pub enum PrimOpKind {
     IntRem,
     Chr,
     Ord,
+    // --- Tier 2: Int bitwise ---
+    IntAnd,
+    IntOr,
+    IntXor,
+    IntNot,      // unary
+    IntShl,      // uncheckedIShiftL#
+    IntShra,     // uncheckedIShiftRA# (arithmetic right shift)
+    IntShrl,     // uncheckedIShiftRL# (logical right shift)
+    // --- Tier 2: Word arithmetic + bitwise ---
+    WordQuot,
+    WordRem,
+    WordAnd,
+    WordOr,
+    WordXor,
+    WordNot,     // unary
+    WordShl,     // uncheckedShiftL#
+    WordShrl,    // uncheckedShiftRL#
+    // --- Tier 2: Int↔Word conversions ---
+    Int2Word,
+    Word2Int,
+    // --- Tier 2: Narrowing ---
+    Narrow8Int,
+    Narrow16Int,
+    Narrow32Int,
+    Narrow8Word,
+    Narrow16Word,
+    Narrow32Word,
+    // --- Tier 2: Float arithmetic + comparison ---
+    FloatAdd,
+    FloatSub,
+    FloatMul,
+    FloatDiv,
+    FloatNegate,  // unary
+    FloatEq,
+    FloatNe,
+    FloatLt,
+    FloatLe,
+    FloatGt,
+    FloatGe,
+    // --- Tier 2: Double extras ---
+    DoubleNegate, // unary
+    // --- Tier 2: Type conversions ---
+    Int2Double,
+    Double2Int,
+    Int2Float,
+    Float2Int,
+    Double2Float,
+    Float2Double,
+    // --- Tier 3: Addr# ---
+    IndexCharOffAddr,
 }
 
 /// Case alternative constructor.
@@ -165,6 +215,48 @@ impl std::fmt::Display for PrimOpKind {
             PrimOpKind::IntRem => "remInt#",
             PrimOpKind::Chr => "chr#",
             PrimOpKind::Ord => "ord#",
+            PrimOpKind::IntAnd => "andI#",
+            PrimOpKind::IntOr => "orI#",
+            PrimOpKind::IntXor => "xorI#",
+            PrimOpKind::IntNot => "notI#",
+            PrimOpKind::IntShl => "uncheckedIShiftL#",
+            PrimOpKind::IntShra => "uncheckedIShiftRA#",
+            PrimOpKind::IntShrl => "uncheckedIShiftRL#",
+            PrimOpKind::WordQuot => "quotWord#",
+            PrimOpKind::WordRem => "remWord#",
+            PrimOpKind::WordAnd => "and#",
+            PrimOpKind::WordOr => "or#",
+            PrimOpKind::WordXor => "xor#",
+            PrimOpKind::WordNot => "not#",
+            PrimOpKind::WordShl => "uncheckedShiftL#",
+            PrimOpKind::WordShrl => "uncheckedShiftRL#",
+            PrimOpKind::Int2Word => "int2Word#",
+            PrimOpKind::Word2Int => "word2Int#",
+            PrimOpKind::Narrow8Int => "narrow8Int#",
+            PrimOpKind::Narrow16Int => "narrow16Int#",
+            PrimOpKind::Narrow32Int => "narrow32Int#",
+            PrimOpKind::Narrow8Word => "narrow8Word#",
+            PrimOpKind::Narrow16Word => "narrow16Word#",
+            PrimOpKind::Narrow32Word => "narrow32Word#",
+            PrimOpKind::FloatAdd => "plusFloat#",
+            PrimOpKind::FloatSub => "minusFloat#",
+            PrimOpKind::FloatMul => "timesFloat#",
+            PrimOpKind::FloatDiv => "divideFloat#",
+            PrimOpKind::FloatNegate => "negateFloat#",
+            PrimOpKind::FloatEq => "eqFloat#",
+            PrimOpKind::FloatNe => "neFloat#",
+            PrimOpKind::FloatLt => "ltFloat#",
+            PrimOpKind::FloatLe => "leFloat#",
+            PrimOpKind::FloatGt => "gtFloat#",
+            PrimOpKind::FloatGe => "geFloat#",
+            PrimOpKind::DoubleNegate => "negateDouble#",
+            PrimOpKind::Int2Double => "int2Double#",
+            PrimOpKind::Double2Int => "double2Int#",
+            PrimOpKind::Int2Float => "int2Float#",
+            PrimOpKind::Float2Int => "float2Int#",
+            PrimOpKind::Double2Float => "double2Float#",
+            PrimOpKind::Float2Double => "float2Double#",
+            PrimOpKind::IndexCharOffAddr => "indexCharOffAddr#",
         };
         f.write_str(name)
     }

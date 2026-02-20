@@ -294,6 +294,43 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::IntLe => cmp_int(op, &args, |a, b| a <= b),
         PrimOpKind::IntGt => cmp_int(op, &args, |a, b| a > b),
         PrimOpKind::IntGe => cmp_int(op, &args, |a, b| a >= b),
+        PrimOpKind::IntAnd => {
+            let (a, b) = bin_op_int(op, &args)?;
+            Ok(Value::Lit(Literal::LitInt(a & b)))
+        }
+        PrimOpKind::IntOr => {
+            let (a, b) = bin_op_int(op, &args)?;
+            Ok(Value::Lit(Literal::LitInt(a | b)))
+        }
+        PrimOpKind::IntXor => {
+            let (a, b) = bin_op_int(op, &args)?;
+            Ok(Value::Lit(Literal::LitInt(a ^ b)))
+        }
+        PrimOpKind::IntNot => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_int(&args[0])?;
+            Ok(Value::Lit(Literal::LitInt(!a)))
+        }
+        PrimOpKind::IntShl => {
+            let (a, b) = bin_op_int(op, &args)?;
+            Ok(Value::Lit(Literal::LitInt(a.wrapping_shl(b as u32))))
+        }
+        PrimOpKind::IntShra => {
+            let (a, b) = bin_op_int(op, &args)?;
+            Ok(Value::Lit(Literal::LitInt(a.wrapping_shr(b as u32))))
+        }
+        PrimOpKind::IntShrl => {
+            let (a, b) = bin_op_int(op, &args)?;
+            Ok(Value::Lit(Literal::LitInt(
+                (a as u64).wrapping_shr(b as u32) as i64,
+            )))
+        }
 
         PrimOpKind::WordAdd => {
             let (a, b) = bin_op_word(op, &args)?;
@@ -313,6 +350,61 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::WordLe => cmp_word(op, &args, |a, b| a <= b),
         PrimOpKind::WordGt => cmp_word(op, &args, |a, b| a > b),
         PrimOpKind::WordGe => cmp_word(op, &args, |a, b| a >= b),
+        PrimOpKind::WordQuot => {
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitWord(a.wrapping_div(b))))
+        }
+        PrimOpKind::WordRem => {
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitWord(a.wrapping_rem(b))))
+        }
+        PrimOpKind::WordAnd => {
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitWord(a & b)))
+        }
+        PrimOpKind::WordOr => {
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitWord(a | b)))
+        }
+        PrimOpKind::WordXor => {
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitWord(a ^ b)))
+        }
+        PrimOpKind::WordNot => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_word(&args[0])?;
+            Ok(Value::Lit(Literal::LitWord(!a)))
+        }
+        PrimOpKind::WordShl => {
+            if args.len() != 2 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 2,
+                    got: args.len(),
+                });
+            }
+            let a = expect_word(&args[0])?;
+            let b = expect_int(&args[1])?;
+            Ok(Value::Lit(Literal::LitWord(a.wrapping_shl(b as u32))))
+        }
+        PrimOpKind::WordShrl => {
+            if args.len() != 2 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 2,
+                    got: args.len(),
+                });
+            }
+            let a = expect_word(&args[0])?;
+            let b = expect_int(&args[1])?;
+            Ok(Value::Lit(Literal::LitWord(a.wrapping_shr(b as u32))))
+        }
 
         PrimOpKind::DoubleAdd => {
             let (a, b) = bin_op_double(op, &args)?;
@@ -336,6 +428,50 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleLe => cmp_double(op, &args, |a, b| a <= b),
         PrimOpKind::DoubleGt => cmp_double(op, &args, |a, b| a > b),
         PrimOpKind::DoubleGe => cmp_double(op, &args, |a, b| a >= b),
+        PrimOpKind::DoubleNegate => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble((-a).to_bits())))
+        }
+        PrimOpKind::FloatAdd => {
+            let (a, b) = bin_op_float(op, &args)?;
+            Ok(Value::Lit(Literal::LitFloat((a + b).to_bits() as u64)))
+        }
+        PrimOpKind::FloatSub => {
+            let (a, b) = bin_op_float(op, &args)?;
+            Ok(Value::Lit(Literal::LitFloat((a - b).to_bits() as u64)))
+        }
+        PrimOpKind::FloatMul => {
+            let (a, b) = bin_op_float(op, &args)?;
+            Ok(Value::Lit(Literal::LitFloat((a * b).to_bits() as u64)))
+        }
+        PrimOpKind::FloatDiv => {
+            let (a, b) = bin_op_float(op, &args)?;
+            Ok(Value::Lit(Literal::LitFloat((a / b).to_bits() as u64)))
+        }
+        PrimOpKind::FloatNegate => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_float(&args[0])?;
+            Ok(Value::Lit(Literal::LitFloat((-a).to_bits() as u64)))
+        }
+        PrimOpKind::FloatEq => cmp_float(op, &args, |a, b| a == b),
+        PrimOpKind::FloatNe => cmp_float(op, &args, |a, b| a != b),
+        PrimOpKind::FloatLt => cmp_float(op, &args, |a, b| a < b),
+        PrimOpKind::FloatLe => cmp_float(op, &args, |a, b| a <= b),
+        PrimOpKind::FloatGt => cmp_float(op, &args, |a, b| a > b),
+        PrimOpKind::FloatGe => cmp_float(op, &args, |a, b| a >= b),
 
         PrimOpKind::CharEq => cmp_char(op, &args, |a, b| a == b),
         PrimOpKind::CharNe => cmp_char(op, &args, |a, b| a != b),
@@ -343,6 +479,160 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::CharLe => cmp_char(op, &args, |a, b| a <= b),
         PrimOpKind::CharGt => cmp_char(op, &args, |a, b| a > b),
         PrimOpKind::CharGe => cmp_char(op, &args, |a, b| a >= b),
+        PrimOpKind::Int2Word => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_int(&args[0])?;
+            Ok(Value::Lit(Literal::LitWord(a as u64)))
+        }
+        PrimOpKind::Word2Int => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_word(&args[0])?;
+            Ok(Value::Lit(Literal::LitInt(a as i64)))
+        }
+        PrimOpKind::Narrow8Int => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_int(&args[0])?;
+            Ok(Value::Lit(Literal::LitInt(a as i8 as i64)))
+        }
+        PrimOpKind::Narrow16Int => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_int(&args[0])?;
+            Ok(Value::Lit(Literal::LitInt(a as i16 as i64)))
+        }
+        PrimOpKind::Narrow32Int => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_int(&args[0])?;
+            Ok(Value::Lit(Literal::LitInt(a as i32 as i64)))
+        }
+        PrimOpKind::Narrow8Word => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_word(&args[0])?;
+            Ok(Value::Lit(Literal::LitWord(a as u8 as u64)))
+        }
+        PrimOpKind::Narrow16Word => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_word(&args[0])?;
+            Ok(Value::Lit(Literal::LitWord(a as u16 as u64)))
+        }
+        PrimOpKind::Narrow32Word => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_word(&args[0])?;
+            Ok(Value::Lit(Literal::LitWord(a as u32 as u64)))
+        }
+        PrimOpKind::Int2Double => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_int(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble((a as f64).to_bits())))
+        }
+        PrimOpKind::Double2Int => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitInt(a as i64)))
+        }
+        PrimOpKind::Int2Float => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_int(&args[0])?;
+            Ok(Value::Lit(Literal::LitFloat((a as f32).to_bits() as u64)))
+        }
+        PrimOpKind::Float2Int => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_float(&args[0])?;
+            Ok(Value::Lit(Literal::LitInt(a as i64)))
+        }
+        PrimOpKind::Double2Float => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitFloat((a as f32).to_bits() as u64)))
+        }
+        PrimOpKind::Float2Double => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_float(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble((a as f64).to_bits())))
+        }
 
         PrimOpKind::SeqOp => {
             if args.len() != 2 {
@@ -403,6 +693,27 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let c = expect_char(&args[0])?;
             Ok(Value::Lit(Literal::LitInt(c as i64)))
         }
+        PrimOpKind::IndexCharOffAddr => {
+            if args.len() != 2 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 2,
+                    got: args.len(),
+                });
+            }
+            let bytes = match &args[0] {
+                Value::Lit(Literal::LitString(bs)) => bs,
+                other => {
+                    return Err(EvalError::TypeMismatch {
+                        expected: "Addr# (LitString)",
+                        got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                    })
+                }
+            };
+            let offset = expect_int(&args[1])? as usize;
+            let ch = bytes.get(offset).copied().unwrap_or(0);
+            Ok(Value::Lit(Literal::LitChar(ch as char)))
+        }
         PrimOpKind::IndexArray | PrimOpKind::TagToEnum => Err(EvalError::UnsupportedPrimOp(op)),
     }
 }
@@ -435,6 +746,17 @@ fn expect_double(v: &Value) -> Result<f64, EvalError> {
     } else {
         Err(EvalError::TypeMismatch {
             expected: "Double#",
+            got: crate::error::ValueKind::Other(format!("{:?}", v)),
+        })
+    }
+}
+
+fn expect_float(v: &Value) -> Result<f32, EvalError> {
+    if let Value::Lit(Literal::LitFloat(bits)) = v {
+        Ok(f32::from_bits(*bits as u32))
+    } else {
+        Err(EvalError::TypeMismatch {
+            expected: "Float#",
             got: crate::error::ValueKind::Other(format!("{:?}", v)),
         })
     }
@@ -484,6 +806,17 @@ fn bin_op_double(_op: PrimOpKind, args: &[Value]) -> Result<(f64, f64), EvalErro
     Ok((expect_double(&args[0])?, expect_double(&args[1])?))
 }
 
+fn bin_op_float(_op: PrimOpKind, args: &[Value]) -> Result<(f32, f32), EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::ArityMismatch {
+            context: "arguments",
+            expected: 2,
+            got: args.len(),
+        });
+    }
+    Ok((expect_float(&args[0])?, expect_float(&args[1])?))
+}
+
 fn cmp_int(
     op: PrimOpKind,
     args: &[Value],
@@ -508,6 +841,15 @@ fn cmp_double(
     f: impl Fn(f64, f64) -> bool,
 ) -> Result<Value, EvalError> {
     let (a, b) = bin_op_double(op, args)?;
+    Ok(Value::Lit(Literal::LitInt(if f(a, b) { 1 } else { 0 })))
+}
+
+fn cmp_float(
+    op: PrimOpKind,
+    args: &[Value],
+    f: impl Fn(f32, f32) -> bool,
+) -> Result<Value, EvalError> {
+    let (a, b) = bin_op_float(op, args)?;
     Ok(Value::Lit(Literal::LitInt(if f(a, b) { 1 } else { 0 })))
 }
 
