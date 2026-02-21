@@ -22,12 +22,17 @@ module Tidepool.Prelude
   , concatMap
   , append
   , dropWhile
+    -- * Numeric
+  , showInt
+  , length
+    -- * String comparison
+  , compareString
   ) where
 
 import Prelude hiding
   ( reverse, splitAt, span, break, init
   , words, lines, unlines, unwords
-  , concatMap, dropWhile, (++) )
+  , concatMap, dropWhile, length, (++) )
 
 -- | Marker typeclass for types whose runtime values can be rendered to JSON
 -- by the Rust-side value_to_json renderer. Use @pure x@ to return values
@@ -177,4 +182,44 @@ concatMap :: (a -> [b]) -> [a] -> [b]
 concatMap _ []     = []
 concatMap f (x:xs) = f x `append` concatMap f xs
 {-# INLINE concatMap #-}
+
+-- | Length of a list. Self-contained replacement for Prelude's length.
+length :: [a] -> Int
+length = go 0
+  where
+    go :: Int -> [a] -> Int
+    go !acc []     = acc
+    go !acc (_:xs) = go (acc + 1) xs
+{-# INLINE length #-}
+
+-- | Convert an Int to its decimal String representation.
+-- Uses quot/rem separately to avoid quotRemInt# (unboxed tuple primop).
+showInt :: Int -> String
+showInt n
+  | n < (0 :: Int)  = '-' : showPos (negate n)
+  | n == (0 :: Int) = "0"
+  | otherwise       = showPos n
+  where
+    showPos :: Int -> String
+    showPos m
+      | m == (0 :: Int) = ""
+      | otherwise       = showPos (quot m (10 :: Int)) `append` [digitToChar (rem m (10 :: Int))]
+    digitToChar :: Int -> Char
+    digitToChar d = case d of
+      0 -> '0'; 1 -> '1'; 2 -> '2'; 3 -> '3'; 4 -> '4'
+      5 -> '5'; 6 -> '6'; 7 -> '7'; 8 -> '8'; 9 -> '9'
+      _ -> '?'
+{-# INLINE showInt #-}
+
+-- | Lexicographic comparison of Strings. Self-contained replacement for
+-- compare on [Char] that avoids GHC's $fOrdList specialization.
+compareString :: String -> String -> Ordering
+compareString []     []     = EQ
+compareString []     (_:_)  = LT
+compareString (_:_)  []     = GT
+compareString (x:xs) (y:ys)
+  | x < y    = LT
+  | x > y    = GT
+  | otherwise = compareString xs ys
+{-# INLINE compareString #-}
 
