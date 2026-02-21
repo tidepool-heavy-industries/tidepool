@@ -172,7 +172,7 @@ fn template_haskell(
         out.push('\n');
     }
 
-    out.push_str(&format!("result :: Renderable _ => Eff {} _\n", effect_stack));
+    out.push_str(&format!("result :: Eff {} _\n", effect_stack));
     out.push_str("result = do\n");
     for line in source {
         out.push_str(&format!("  {}\n", line));
@@ -542,7 +542,7 @@ mod tests {
         assert!(result.contains("module Expr where"));
         assert!(result.contains("import Control.Monad.Freer"));
         assert!(result.contains("data Console a where"));
-        assert!(result.contains("result :: Renderable _ => Eff '[Console] _"));
+        assert!(result.contains("result :: Eff '[Console] _"));
         assert!(result.contains("result = do"));
         assert!(result.contains("  let x = 42"));
         assert!(result.contains("  pure x"));
