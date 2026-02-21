@@ -93,11 +93,10 @@ pub struct EvalRequest {
 
 fn build_preamble(effects: &[EffectDecl]) -> String {
     let mut out = String::new();
-    out.push_str("{-# LANGUAGE DataKinds, TypeOperators, FlexibleContexts, GADTs, PartialTypeSignatures, ScopedTypeVariables #-}\n");
+    out.push_str("{-# LANGUAGE NoImplicitPrelude, DataKinds, TypeOperators, FlexibleContexts, GADTs, PartialTypeSignatures, ScopedTypeVariables #-}\n");
     out.push_str("module Expr where\n");
-    out.push_str("import Prelude hiding (reverse, splitAt, span, break, init, words, lines, unlines, unwords, concatMap, dropWhile, length)\n");
-    out.push_str("import Control.Monad.Freer\n");
     out.push_str("import Tidepool.Prelude\n");
+    out.push_str("import Control.Monad.Freer\n");
     out.push('\n');
 
     for eff in effects {

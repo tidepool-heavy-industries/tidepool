@@ -1,13 +1,35 @@
-{-# LANGUAGE BangPatterns #-}
--- | Bundled prelude providing source definitions for common functions
--- whose GHC base library workers lack unfoldings in .hi files.
+{-# LANGUAGE BangPatterns, NoImplicitPrelude #-}
+-- | Self-contained prelude for Tidepool user code.
 --
--- All definitions are self-contained — no base library functions are
--- used that lack unfoldings. This ensures a fully closed Core IR.
+-- With NoImplicitPrelude in the MCP template, this is the single import.
+-- Nothing from base Prelude is re-exported — every function is either
+-- defined here or explicitly re-exported from a known-safe base module.
 module Tidepool.Prelude
   ( -- * Renderable marker
     Renderable
+    -- * Types (re-exported from base)
+  , Int, Word, Char, Bool(..), Double, Float
+  , String, Ordering(..), Maybe(..), Either(..)
+  , IO
+    -- * Typeclasses (re-exported from base)
+  , Eq(..), Ord(..), Num(..), Integral(..), Show(..)
+  , Functor(..), Applicative(..), Monad(..)
+    -- * Basic functions (re-exported from base)
+  , id, const, flip, (.), ($), ($!)
+  , not, (&&), (||), otherwise, seq
+  , fst, snd, curry, uncurry
+  , error, undefined
+  , show
     -- * List operations
+  , map, filter, foldl, foldl', foldr
+  , null
+  , take, drop, zip, zipWith, unzip
+  , lookup, elem, notElem
+  , any, all, and, or
+  , sum, product, minimum, maximum
+  , concat, iterate, repeat, cycle
+  , scanl, scanr
+    -- * Self-contained list operations
   , reverse
   , splitAt
   , span
@@ -18,21 +40,49 @@ module Tidepool.Prelude
   , unlines
   , unwords
   , nub
+  , nubBy
   , sort
+  , sortBy
   , concatMap
   , append
+  , (++)
   , dropWhile
+  , length
+  , replicate
+  , intercalate
+  , isPrefixOf
+  , intersperse
     -- * Numeric
   , showInt
-  , length
     -- * String comparison
   , compareString
+  , eqString
+  , eqChar
   ) where
 
-import Prelude hiding
-  ( reverse, splitAt, span, break, init
-  , words, lines, unlines, unwords
-  , concatMap, dropWhile, length, (++) )
+import Prelude
+  ( Int, Word, Char, Bool(..), Double, Float
+  , String, Ordering(..), Maybe(..), Either(..)
+  , IO
+  , Eq(..), Ord(..), Num(..), Integral(..), Show(..)
+  , Functor(..), Applicative(..), Monad(..)
+  , id, const, flip, (.), ($), ($!)
+  , not, (&&), (||), otherwise, seq
+  , fst, snd, curry, uncurry
+  , error, undefined
+  , show
+  , map, filter, foldl, foldr
+  , take, drop, zip, zipWith, unzip
+  , lookup, elem, notElem
+  , any, all, and, or
+  , sum, product, minimum, maximum
+  , concat, iterate, repeat, cycle
+  , scanl, scanr
+  , negate, quot, rem
+  , compare
+  , fromEnum
+  )
+import Data.List (foldl')
 
 -- | Marker typeclass for types whose runtime values can be rendered to JSON
 -- by the Rust-side value_to_json renderer. Use @pure x@ to return values
@@ -51,11 +101,22 @@ instance (Renderable a, Renderable b) => Renderable (a, b)
 instance (Renderable a, Renderable b, Renderable c) => Renderable (a, b, c)
 instance (Renderable a, Renderable b, Renderable c, Renderable d) => Renderable (a, b, c, d)
 
--- | Append two lists. Self-contained replacement for (++).
+-- | Append two lists.
 append :: [a] -> [a] -> [a]
 append []     ys = ys
 append (x:xs) ys = x : append xs ys
 {-# INLINE append #-}
+
+(++) :: [a] -> [a] -> [a]
+(++) = append
+{-# INLINE (++) #-}
+infixr 5 ++
+
+-- | Check if a list is empty.
+null :: [a] -> Bool
+null [] = True
+null _  = False
+{-# INLINE null #-}
 
 -- | Reverse a list.
 reverse :: [a] -> [a]
@@ -156,6 +217,18 @@ nub = go []
     elemOf y (z:zs) = y == z || elemOf y zs
 {-# INLINABLE nub #-}
 
+-- | Remove duplicates using a custom equality function.
+nubBy :: (a -> a -> Bool) -> [a] -> [a]
+nubBy eq = go []
+  where
+    go _ []     = []
+    go seen (x:xs)
+      | elemOf x seen = go seen xs
+      | otherwise      = x : go (x:seen) xs
+    elemOf _ []     = False
+    elemOf y (z:zs) = eq y z || elemOf y zs
+{-# INLINABLE nubBy #-}
+
 -- | Sort a list using merge sort.
 sort :: Ord a => [a] -> [a]
 sort = mergeSort
@@ -177,13 +250,31 @@ sort = mergeSort
       | otherwise  = y : merge (x:xs) ys
 {-# INLINABLE sort #-}
 
+-- | Sort using a custom comparison function.
+sortBy :: (a -> a -> Ordering) -> [a] -> [a]
+sortBy cmp = mergeSort
+  where
+    mergeSort []  = []
+    mergeSort [x] = [x]
+    mergeSort xs  = let (as, bs) = halve xs
+                    in merge (mergeSort as) (mergeSort bs)
+    halve []       = ([], [])
+    halve [x]      = ([x], [])
+    halve (x:y:zs) = let (as, bs) = halve zs in (x:as, y:bs)
+    merge [] ys = ys
+    merge xs [] = xs
+    merge (x:xs) (y:ys)
+      | cmp x y /= GT = x : merge xs (y:ys)
+      | otherwise      = y : merge (x:xs) ys
+{-# INLINABLE sortBy #-}
+
 -- | Map a function over a list and concatenate results.
 concatMap :: (a -> [b]) -> [a] -> [b]
 concatMap _ []     = []
 concatMap f (x:xs) = f x `append` concatMap f xs
 {-# INLINE concatMap #-}
 
--- | Length of a list. Self-contained replacement for Prelude's length.
+-- | Length of a list.
 length :: [a] -> Int
 length = go 0
   where
@@ -191,6 +282,35 @@ length = go 0
     go !acc []     = acc
     go !acc (_:xs) = go (acc + 1) xs
 {-# INLINE length #-}
+
+-- | Build a list of n copies of a value.
+replicate :: Int -> a -> [a]
+replicate n x = go n
+  where
+    go 0 = []
+    go !m = x : go (m - 1)
+{-# INLINE replicate #-}
+
+-- | Insert a list between every element of a list of lists.
+intercalate :: [a] -> [[a]] -> [a]
+intercalate _   []     = []
+intercalate _   [x]    = x
+intercalate sep (x:xs) = x `append` (sep `append` intercalate sep xs)
+{-# INLINE intercalate #-}
+
+-- | Is the first list a prefix of the second?
+isPrefixOf :: Eq a => [a] -> [a] -> Bool
+isPrefixOf []     _      = True
+isPrefixOf _      []     = False
+isPrefixOf (x:xs) (y:ys) = x == y && isPrefixOf xs ys
+{-# INLINABLE isPrefixOf #-}
+
+-- | Insert an element between every pair of elements.
+intersperse :: a -> [a] -> [a]
+intersperse _   []     = []
+intersperse _   [x]    = [x]
+intersperse sep (x:xs) = x : sep : intersperse sep xs
+{-# INLINE intersperse #-}
 
 -- | Convert an Int to its decimal String representation.
 -- Uses quot/rem separately to avoid quotRemInt# (unboxed tuple primop).
@@ -211,8 +331,7 @@ showInt n
       _ -> '?'
 {-# INLINE showInt #-}
 
--- | Lexicographic comparison of Strings. Self-contained replacement for
--- compare on [Char] that avoids GHC's $fOrdList specialization.
+-- | Lexicographic comparison of Strings.
 compareString :: String -> String -> Ordering
 compareString []     []     = EQ
 compareString []     (_:_)  = LT
@@ -222,4 +341,16 @@ compareString (x:xs) (y:ys)
   | x > y    = GT
   | otherwise = compareString xs ys
 {-# INLINE compareString #-}
+
+-- | String equality without GHC's $fEqList specialization.
+eqString :: String -> String -> Bool
+eqString [] [] = True
+eqString (x:xs) (y:ys) = eqChar x y && eqString xs ys
+eqString _ _ = False
+{-# INLINE eqString #-}
+
+-- | Character equality avoiding Eq class dictionary if possible.
+eqChar :: Char -> Char -> Bool
+eqChar c1 c2 = fromEnum c1 == fromEnum c2
+{-# INLINE eqChar #-}
 
