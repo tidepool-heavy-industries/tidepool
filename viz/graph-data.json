@@ -1,16 +1,16 @@
 {
   "meta": {
     "repo": "tidepool-heavy-industries/tidepool",
-    "generated": "2026-02-20T03:41:08Z",
-    "node_count": 52,
-    "pr_count": 45
+    "generated": "2026-02-21T01:41:18Z",
+    "node_count": 72,
+    "pr_count": 62
   },
   "stats": {
-    "merged": 45,
-    "closed": 2,
-    "open": 2,
-    "total_additions": 28306,
-    "total_deletions": 900
+    "merged": 62,
+    "closed": 3,
+    "open": 0,
+    "total_additions": 32379,
+    "total_deletions": 1914
   },
   "nodes": [
     {
@@ -198,12 +198,244 @@
           "kind": "direct"
         },
         {
-          "sha": "d615a3e",
+          "sha": "6990b4c",
+          "message": "feat(tide): wire Haskell evaluator to Cranelift JIT",
+          "timestamp": "2026-02-18T16:26:58-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "570c514",
+          "message": "test(codegen): add 7 unit tests for LetRec with Con RHS",
+          "timestamp": "2026-02-18T16:40:49-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "c925fc0",
+          "message": "fix(resolve): use exprSomeFreeVars to collect global free vars",
+          "timestamp": "2026-02-18T18:13:36-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "f691e5e",
+          "message": "feat(translate): desugar ++ to recursive cons-cell append",
+          "timestamp": "2026-02-18T18:24:20-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "fbf1088",
+          "message": "feat(codegen): catchable runtime errors for divZeroError/overflowError",
+          "timestamp": "2026-02-18T23:06:10-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "6276e2c",
+          "message": "feat: EffectContext<U>, struct derive, async handlers (#43, #42, #41)",
+          "timestamp": "2026-02-18T23:16:22-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "9046169",
+          "message": "fix(translate): handle polymorphic join points and uniform string repr",
+          "timestamp": "2026-02-19T11:54:14-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "0c93cf4",
+          "message": "fix(bridge): ToCore for String emits cons-cell [Char] instead of LitString",
+          "timestamp": "2026-02-19T11:56:08-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "ddba308",
+          "message": "feat(tide): structured eval errors, interactive REPL, macro refactor",
+          "timestamp": "2026-02-19T11:59:11-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "60aa002",
+          "message": "feat: JitEffectMachine, optional macro source body, example cleanup",
+          "timestamp": "2026-02-19T12:25:24-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "c68ca88",
+          "message": "fix(tide): REPL prompt on init, optional let-body, exhaustive parser tests",
+          "timestamp": "2026-02-19T12:31:39-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "d20a3a1",
+          "message": "feat(tide): /help and /exit REPL slash commands",
+          "timestamp": "2026-02-19T12:34:04-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "9050217",
+          "message": "fix(tide): let-expr accepts full expressions as values",
+          "timestamp": "2026-02-19T12:35:24-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "37a901e",
+          "message": "fix(tide): remove eager prompt hack that broke rustyline cursor",
+          "timestamp": "2026-02-19T12:41:20-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "47db9ef",
+          "message": "fix(tide): lexical scoping for let-bindings",
+          "timestamp": "2026-02-19T14:11:30-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "9203768",
+          "message": "feat: transitive type closure for DataConTable + fix REPL let-binding and function scoping",
+          "timestamp": "2026-02-19T15:27:03-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "8ab7734",
+          "message": "fix(codegen): iterative tail-position emit_node to prevent stack overflow on deep let-chains",
+          "timestamp": "2026-02-19T16:14:40-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "a05b1a0",
+          "message": "feat(tide): REPL improvements, clap args, tracing filter, parser/handler refactors",
+          "timestamp": "2026-02-19T16:15:33-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "a282cc6",
+          "message": "fix(tide): lexical closure scoping + QOL improvements",
+          "timestamp": "2026-02-19T16:57:40-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "811480c",
           "message": "feat(viz): add build story treemap visualization",
           "timestamp": "2026-02-19T18:04:39-08:00",
           "kind": "direct"
+        },
+        {
+          "sha": "07a33da",
+          "message": "docs: update pre-publish plan with cargo-workspaces + GH release",
+          "timestamp": "2026-02-19T19:15:38-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "4dbf35f",
+          "message": "feat: add MCP server example + crate docs + update CLAUDE.md",
+          "timestamp": "2026-02-19T19:55:23-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "04c9a14",
+          "message": "feat(viz): add commit tick marks and ideal merge routing",
+          "timestamp": "2026-02-19T20:04:48-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "785085d",
+          "message": "chore: bump all crate versions to 0.0.1",
+          "timestamp": "2026-02-19T20:08:19-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "979beb1",
+          "message": "ci: add CI workflow + release workflow with tidepool-extract binary",
+          "timestamp": "2026-02-19T21:21:58-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "f5df7e2",
+          "message": "fix: re-export EvalResult from facade crate",
+          "timestamp": "2026-02-19T23:35:39-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "f49e3e1",
+          "message": "Research: ast-grep-core Rust API and Haskell ADT Design (#63)",
+          "timestamp": "2026-02-20T02:29:12-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "3c08c11",
+          "message": "chore: improve MCP tool descriptions and add server to project config",
+          "timestamp": "2026-02-20T02:49:23-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "1dd02cf",
+          "message": "feat(mcp): add eval tool with DescribeEffect trait and auto-templating",
+          "timestamp": "2026-02-20T03:12:35-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "b7b6bcb",
+          "message": "refactor(mcp): single eval tool with DescribeEffect auto-discovery",
+          "timestamp": "2026-02-20T03:18:59-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "881dc78",
+          "message": "chore(mcp): focus tool description on usage, not implementation",
+          "timestamp": "2026-02-20T03:20:37-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "2e1eb0f",
+          "message": "feat(mcp): add tracing subscriber to MCP server example",
+          "timestamp": "2026-02-20T03:51:49-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "9af921c",
+          "message": "fix: filter metadata bindings and handle let-floated Addr# in unpackCString#",
+          "timestamp": "2026-02-20T07:11:21-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "bb81803",
+          "message": "fix: fail early on unresolved externals instead of emitting broken CBOR",
+          "timestamp": "2026-02-20T10:35:29-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "42e3b6c",
+          "message": "feat: bundled prelude for closed Core IR extraction",
+          "timestamp": "2026-02-20T11:29:32-08:00",
+          "kind": "direct"
+        },
+        {
+          "sha": "c30ed66",
+          "message": "feat: dead binding elimination via reachability analysis in translateModule",
+          "timestamp": "2026-02-20T11:38:59-08:00",
+          "kind": "direct"
         }
       ]
+    },
+    {
+      "id": "main.ast-grep-research",
+      "parent": "main",
+      "depth": 1,
+      "label": "ast-grep-research",
+      "prs": [
+        {
+          "number": 63,
+          "title": "Research: ast-grep-core Rust API and Haskell ADT Design",
+          "body": "Drafted a research document designing a Haskell ADT and effect interface that mirrors the ast-grep-core Rust API. See plans/research/04-ast-grep-api.md for details.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/63",
+          "additions": 211,
+          "deletions": 0,
+          "mergedAt": "2026-02-20T10:29:12Z",
+          "closedAt": "2026-02-20T10:29:12Z"
+        }
+      ],
+      "additions": 211,
+      "deletions": 0,
+      "status": "merged"
     },
     {
       "id": "main.codegen",
@@ -500,48 +732,214 @@
       ]
     },
     {
-      "id": "main.runtime-engine",
+      "id": "main.issue-64",
       "parent": "main",
       "depth": 1,
-      "label": "runtime-engine",
+      "label": "issue-64",
       "prs": [
         {
-          "number": 48,
-          "title": "feat(runtime): implement compile_and_run, caching, and RuntimeError",
-          "body": "## Summary\n- Implemented `compile_and_run` in `tidepool-runtime` for unified Haskell compilation and JIT execution.\n- Added a caching mechanism in `src/cache.rs` using `blake3` hashes to store CBOR output and metadata, significantly speeding up repeated runs.\n- Introduced `RuntimeError` to unify `CompileError` and `JitError`.\n- Re-exported `Value`, `JitError`, and `DispatchEffect` from the crate root.\n- Updated dependencies to include `core-eval`, `core-effect`, `codegen`, and `blake3`.\n\n## Verification\n- `cargo check -p tidepool-runtime` passes.\n- Caching logic follows XDG conventions for directory locations.",
+          "number": 70,
+          "title": "feat: expand PrimOp coverage + desugar eqString/take (fixes #64)",
+          "body": "## Summary\n\nFixes #64: `==` on String and `take` fail with `UnboundVar` at runtime.\n\n**Root cause:** GHC at `-O2` rewrites `== @[Char]` → `eqString` and `take` → `$wunsafeTake` via RULES and worker-wrapper transformation. Neither function has an unfolding in `.hi` files, so `Tidepool.Resolve` can't inline them → `UnboundVar` at eval time.\n\n**Fix (two merged sub-PRs):**\n\n1. **Hardcoded desugarings** (PR #68, already on main): Added `eqString` and `$wunsafeTake` desugarings in `Translate.hs`, plus fixed `Char` boxing in `unpackCString#`/`unpackAppendCString#` desugarings. Added 3 new test cases (`prelude_take_cons`, `prelude_eq_string_true`, `prelude_eq_string_false`).\n\n2. **Expanded PrimOp coverage** (PR #69, this branch): Added ~41 new primop variants across Tiers 2-3 — Int bitwise, Word arithmetic+bitwise, Float ops, narrowing, type conversions, and `IndexOffAddrOp_Char`. This prevents future `Unsupported primop` crashes when GHC fuses string operations.\n\n## Test plan\n- [x] `prelude_eq_string_true` passes (string equality)\n- [x] `prelude_eq_string_false` passes (string inequality)  \n- [x] `prelude_take_cons` passes (take on cons-chain list)\n- [x] All existing suite tests continue to pass\n- [x] `cargo check --workspace` passes\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
           "state": "merged",
-          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/48",
-          "additions": 296,
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/70",
+          "additions": 569,
           "deletions": 0,
-          "mergedAt": "2026-02-20T02:27:53Z",
-          "closedAt": "2026-02-20T02:27:53Z"
+          "mergedAt": "2026-02-20T12:14:00Z",
+          "closedAt": "2026-02-20T12:14:00Z"
         }
       ],
-      "additions": 296,
+      "additions": 569,
       "deletions": 0,
-      "status": "merged"
+      "status": "merged",
+      "directCommits": [
+        {
+          "sha": "9ff2553",
+          "message": "feat: desugar eqString and $wunsafeTake (#68)",
+          "timestamp": "2026-02-20T04:10:27-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "53d7aa5",
+          "message": "feat: expand PrimOp coverage for Tier 2-3 operations (#69) (#70)",
+          "timestamp": "2026-02-20T04:14:00-08:00",
+          "kind": "merge"
+        }
+      ]
     },
     {
-      "id": "main.runtime-tests",
+      "id": "main.mcp",
       "parent": "main",
       "depth": 1,
-      "label": "runtime-tests",
+      "label": "mcp",
       "prs": [
         {
-          "number": 49,
-          "title": "test(runtime): add integration tests for compile and run pipeline",
-          "body": "Adds integration tests in `tidepool-runtime/tests/integration.rs` (all `#[ignore]`) covering:\n- `compile_haskell` identity function\n- `compile_and_run` with literals (boxed vs unboxed)\n- `compile_and_run` with arithmetic\n- `compile_haskell` error reporting\n- Caching consistency check",
+          "number": 0,
+          "title": "mcp (phase grouping)",
+          "body": "",
           "state": "merged",
-          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/49",
-          "additions": 69,
-          "deletions": 1,
-          "mergedAt": "2026-02-20T02:48:16Z",
-          "closedAt": "2026-02-20T02:48:16Z"
+          "url": "",
+          "additions": 0,
+          "deletions": 0,
+          "mergedAt": "2026-02-20T12:07:22Z",
+          "closedAt": "2026-02-20T12:07:22Z"
         }
       ],
-      "additions": 69,
-      "deletions": 1,
-      "status": "merged"
+      "additions": 0,
+      "deletions": 0,
+      "status": "merged",
+      "directCommits": [
+        {
+          "sha": "1c7c675",
+          "message": "feat: implement tidepool-mcp library crate (#50)",
+          "timestamp": "2026-02-19T19:07:45-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "7fd1ea9",
+          "message": "feat(mcp): structured JSON output and compile_haskell tool (#60)",
+          "timestamp": "2026-02-19T23:16:36-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "0abd8a4",
+          "message": "feat(mcp): wire dogfood effect handlers into mcp-server example (#62)",
+          "timestamp": "2026-02-20T02:29:09-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "b9bc3ba",
+          "message": "feat(mcp): catch panics and show source in eval errors (#65)",
+          "timestamp": "2026-02-20T03:50:50-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "a277f8d",
+          "message": "feat(mcp): capture Console output in eval responses (#67)",
+          "timestamp": "2026-02-20T04:07:22-08:00",
+          "kind": "merge"
+        }
+      ]
+    },
+    {
+      "id": "main.polish",
+      "parent": "main",
+      "depth": 1,
+      "label": "polish",
+      "prs": [
+        {
+          "number": 0,
+          "title": "polish (phase grouping)",
+          "body": "",
+          "state": "merged",
+          "url": "",
+          "additions": 0,
+          "deletions": 0,
+          "mergedAt": "2026-02-20T11:51:04Z",
+          "closedAt": "2026-02-20T11:51:04Z"
+        }
+      ],
+      "additions": 0,
+      "deletions": 0,
+      "status": "merged",
+      "directCommits": [
+        {
+          "sha": "60e7d86",
+          "message": "Pre-publish workspace migration: rename core-* to tidepool-* (#52)",
+          "timestamp": "2026-02-19T19:51:25-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "e0565b4",
+          "message": "feat: implement Display for Value (#53)",
+          "timestamp": "2026-02-19T21:06:56-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "5240afb",
+          "message": "codegen: replace opaque String payloads in JitError with structured errors (#55)",
+          "timestamp": "2026-02-19T21:07:00-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "f2a2baf",
+          "message": "feat: add property-based roundtrip tests for tidepool-bridge (#56)",
+          "timestamp": "2026-02-19T21:07:02-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "0eb0076",
+          "message": "fix: propagate stack map declarations across block boundaries (#57)",
+          "timestamp": "2026-02-19T21:07:04-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "bd85dc2",
+          "message": "refactor(codegen): convert pipeline panics to Results (#66)",
+          "timestamp": "2026-02-20T03:51:04-08:00",
+          "kind": "merge"
+        }
+      ]
+    },
+    {
+      "id": "main.runtime",
+      "parent": "main",
+      "depth": 1,
+      "label": "runtime",
+      "prs": [
+        {
+          "number": 0,
+          "title": "runtime (phase grouping)",
+          "body": "",
+          "state": "merged",
+          "url": "",
+          "additions": 0,
+          "deletions": 0,
+          "mergedAt": "2026-02-20T10:16:57Z",
+          "closedAt": "2026-02-20T10:16:57Z"
+        }
+      ],
+      "additions": 0,
+      "deletions": 0,
+      "status": "merged",
+      "directCommits": [
+        {
+          "sha": "5fae697",
+          "message": "feat(runtime): implement tidepool-runtime with compile_haskell (#47)",
+          "timestamp": "2026-02-19T17:32:34-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "65c3f06",
+          "message": "feat(runtime): implement compile_and_run, caching, and RuntimeError (#48)",
+          "timestamp": "2026-02-19T18:27:53-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "52dd9e4",
+          "message": "test(runtime): add integration tests for compile and run pipeline (#49)",
+          "timestamp": "2026-02-19T18:48:16-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "d853e51",
+          "message": "feat(runtime): add cache invalidation integration tests (#54)",
+          "timestamp": "2026-02-19T21:06:58-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "8ac3d54",
+          "message": "feat: add EvalResult with JSON rendering to tidepool-runtime (#58)",
+          "timestamp": "2026-02-19T22:55:34-08:00",
+          "kind": "merge"
+        },
+        {
+          "sha": "795bee8",
+          "message": "Improve external reference resolution for Prelude functions (#61)",
+          "timestamp": "2026-02-20T02:16:57-08:00",
+          "kind": "merge"
+        }
+      ]
     },
     {
       "id": "main.tide",
@@ -557,8 +955,8 @@
           "url": "",
           "additions": 0,
           "deletions": 0,
-          "mergedAt": "2026-02-20T01:32:34Z",
-          "closedAt": "2026-02-20T01:32:34Z"
+          "mergedAt": "2026-02-18T23:47:34Z",
+          "closedAt": "2026-02-18T23:47:34Z"
         }
       ],
       "additions": 0,
@@ -578,28 +976,6 @@
           "kind": "merge"
         }
       ]
-    },
-    {
-      "id": "main.tidepool-mcp",
-      "parent": "main",
-      "depth": 1,
-      "label": "tidepool-mcp",
-      "prs": [
-        {
-          "number": 50,
-          "title": "feat: implement tidepool-mcp library crate",
-          "body": "This PR adds the tidepool-mcp library crate, which provides an MCP server for compiling and running Haskell code via Tidepool. It is generic over effect handlers and uses the stdio transport.",
-          "state": "merged",
-          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/50",
-          "additions": 656,
-          "deletions": 3,
-          "mergedAt": "2026-02-20T03:07:45Z",
-          "closedAt": "2026-02-20T03:07:45Z"
-        }
-      ],
-      "additions": 656,
-      "deletions": 3,
-      "status": "merged"
     },
     {
       "id": "main.bridge-derive",
@@ -624,6 +1000,28 @@
       "status": "merged"
     },
     {
+      "id": "main.bridge-roundtrip",
+      "parent": "main.polish",
+      "depth": 2,
+      "label": "bridge-roundtrip",
+      "prs": [
+        {
+          "number": 56,
+          "title": "feat: add property-based roundtrip tests for tidepool-bridge",
+          "body": "This PR adds property-based roundtrip tests for the  crate using . It covers all major types including primitives, options, vectors, results, and tuples, ensuring bit-perfect roundtrips between Rust types and Core Values.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/56",
+          "additions": 197,
+          "deletions": 1,
+          "mergedAt": "2026-02-20T05:07:02Z",
+          "closedAt": "2026-02-20T05:07:03Z"
+        }
+      ],
+      "additions": 197,
+      "deletions": 1,
+      "status": "merged"
+    },
+    {
       "id": "main.bridge-scaffold",
       "parent": "main.core-bridge",
       "depth": 2,
@@ -643,6 +1041,28 @@
       ],
       "additions": 639,
       "deletions": 31,
+      "status": "merged"
+    },
+    {
+      "id": "main.cache-tests",
+      "parent": "main.runtime",
+      "depth": 2,
+      "label": "cache-tests",
+      "prs": [
+        {
+          "number": 54,
+          "title": "feat(runtime): add cache invalidation integration tests",
+          "body": "Adds integration tests for the tidepool-runtime compilation cache.\n\nTests cover:\n- Cache hits for identical sources\n- Cache misses for different sources\n- Cache misses for modified include directories (via fingerprinting)\n- Graceful recovery from corrupted cache files\n\nAll tests are marked with `#[ignore]` as they require `tidepool-extract` on the PATH.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/54",
+          "additions": 132,
+          "deletions": 0,
+          "mergedAt": "2026-02-20T05:06:58Z",
+          "closedAt": "2026-02-20T05:06:58Z"
+        }
+      ],
+      "additions": 132,
+      "deletions": 0,
       "status": "merged"
     },
     {
@@ -797,6 +1217,28 @@
       ],
       "additions": 837,
       "deletions": 11,
+      "status": "merged"
+    },
+    {
+      "id": "main.console-capture",
+      "parent": "main.mcp",
+      "depth": 2,
+      "label": "console-capture",
+      "prs": [
+        {
+          "number": 67,
+          "title": "feat(mcp): capture Console output in eval responses",
+          "body": "This PR adds output capture for Console effects in the Tidepool MCP server.\n\n- Added 'CapturedOutput' to 'tidepool-mcp' to store output lines.\n- Updated 'McpEffectHandler' to use 'CapturedOutput' as user context.\n- Modified 'eval' tool to drain and prepend captured output to the response.\n- Updated 'ConsoleHandler' in 'mcp-server-example' to use 'CapturedOutput' instead of 'eprintln!'.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/67",
+          "additions": 60,
+          "deletions": 17,
+          "mergedAt": "2026-02-20T12:07:22Z",
+          "closedAt": "2026-02-20T12:07:22Z"
+        }
+      ],
+      "additions": 60,
+      "deletions": 17,
       "status": "merged"
     },
     {
@@ -976,6 +1418,72 @@
       "status": "merged"
     },
     {
+      "id": "main.dogfood-handlers",
+      "parent": "main.mcp",
+      "depth": 2,
+      "label": "dogfood-handlers",
+      "prs": [
+        {
+          "number": 62,
+          "title": "feat(mcp): wire dogfood effect handlers into mcp-server example",
+          "body": "Implement real effect handlers for Console, KV store, and sandboxed File I/O in the mcp-server example. This provides a functional reference for integrating concrete handlers with the TidepoolMcpServer.\n\n- Console: Print to stderr\n- KV Store: Arc<Mutex<HashMap>> for persistence\n- File I/O: Path-sandboxed read/write",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/62",
+          "additions": 156,
+          "deletions": 31,
+          "mergedAt": "2026-02-20T10:29:09Z",
+          "closedAt": "2026-02-20T10:29:10Z"
+        }
+      ],
+      "additions": 156,
+      "deletions": 31,
+      "status": "merged"
+    },
+    {
+      "id": "main.eval-resilience",
+      "parent": "main.mcp",
+      "depth": 2,
+      "label": "eval-resilience",
+      "prs": [
+        {
+          "number": 65,
+          "title": "feat(mcp): catch panics and show source in eval errors",
+          "body": "This PR improves the resilience and observability of the MCP server's eval tool:\n- Internal panics are now caught and returned as structured error responses instead of task join errors.\n- Error messages (both runtime and panic) now include the compiled Haskell source to aid debugging.\n- Added tracing instrumentation to log request metadata and results.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/65",
+          "additions": 87,
+          "deletions": 14,
+          "mergedAt": "2026-02-20T11:50:50Z",
+          "closedAt": "2026-02-20T11:50:50Z"
+        }
+      ],
+      "additions": 87,
+      "deletions": 14,
+      "status": "merged"
+    },
+    {
+      "id": "main.eval-result",
+      "parent": "main.runtime",
+      "depth": 2,
+      "label": "eval-result",
+      "prs": [
+        {
+          "number": 58,
+          "title": "feat: add EvalResult with JSON rendering to tidepool-runtime",
+          "body": "Adds an opaque EvalResult type that bundles Value + DataConTable, exposes to_json() for structured JSON rendering, and updates compile_and_run to return EvalResult.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/58",
+          "additions": 358,
+          "deletions": 12,
+          "mergedAt": "2026-02-20T06:55:34Z",
+          "closedAt": "2026-02-20T06:55:34Z"
+        }
+      ],
+      "additions": 358,
+      "deletions": 12,
+      "status": "merged"
+    },
+    {
       "id": "main.eval-strict-case",
       "parent": "main.core-eval",
       "depth": 2,
@@ -1017,6 +1525,28 @@
       ],
       "additions": 315,
       "deletions": 54,
+      "status": "merged"
+    },
+    {
+      "id": "main.fix-gc-audit",
+      "parent": "main.polish",
+      "depth": 2,
+      "label": "fix-gc-audit",
+      "prs": [
+        {
+          "number": 57,
+          "title": "Fix GC audit test failures for Case/Join safepoints",
+          "body": "This PR fixes the `gc_audit` test failures by ensuring that stack map declarations for heap pointers are correctly propagated across block boundaries and into nested contexts.\n\n### Changes:\n- **`tidepool-codegen/src/emit/mod.rs`**: Added `declare_env` to re-declare environment heap pointers at block boundaries.\n- **`tidepool-codegen/src/emit/case.rs`**: Integrated `declare_env` into case alternatives and merge blocks.\n- **`tidepool-codegen/src/emit/join.rs`**: Integrated `declare_env` into join RHS and merge blocks.\n- **`tidepool-codegen/src/emit/expr.rs`**: Integrated `declare_env` into `App` emission and added missing stack map declarations for runtime error results.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/57",
+          "additions": 25,
+          "deletions": 0,
+          "mergedAt": "2026-02-20T05:07:04Z",
+          "closedAt": "2026-02-20T05:07:04Z"
+        }
+      ],
+      "additions": 25,
+      "deletions": 0,
       "status": "merged"
     },
     {
@@ -1174,6 +1704,116 @@
       "status": "merged"
     },
     {
+      "id": "main.issue-64.desugar-eqstring-take",
+      "parent": "main.issue-64",
+      "depth": 2,
+      "label": "desugar-eqstring-take",
+      "prs": [
+        {
+          "number": 68,
+          "title": "feat: desugar eqString and $wunsafeTake",
+          "body": "Fixes #64. Implements hardcoded desugarings for eqString and $wunsafeTake in Translate.hs, adds test cases, and regenerates CBOR fixtures.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/68",
+          "additions": 163,
+          "deletions": 4,
+          "mergedAt": "2026-02-20T12:10:27Z",
+          "closedAt": "2026-02-20T12:10:28Z"
+        }
+      ],
+      "additions": 163,
+      "deletions": 4,
+      "status": "merged"
+    },
+    {
+      "id": "main.issue-64.expand-primops",
+      "parent": "main.issue-64",
+      "depth": 2,
+      "label": "expand-primops",
+      "prs": [
+        {
+          "number": 69,
+          "title": "feat: expand PrimOp coverage for Tier 2-3 operations",
+          "body": "Expands PrimOp coverage from ~35 to ~76 operations across Tiers 2-3. Fixes the indexCharOffAddr# crash that blocks string literal operations. Corrected GHC 9.12 constructor names in Translate.hs.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/69",
+          "additions": 569,
+          "deletions": 0,
+          "mergedAt": "2026-02-20T12:10:38Z",
+          "closedAt": "2026-02-20T12:10:38Z"
+        }
+      ],
+      "additions": 569,
+      "deletions": 0,
+      "status": "merged"
+    },
+    {
+      "id": "main.mcp-mature",
+      "parent": "main.mcp",
+      "depth": 2,
+      "label": "mcp-mature",
+      "prs": [
+        {
+          "number": 60,
+          "title": "feat(mcp): structured JSON output and compile_haskell tool",
+          "body": "This PR updates the MCP server to use structured JSON output via EvalResult::to_json() and adds a compile_haskell tool that returns metadata without execution.\n\n- Updated run_haskell to use structured output.\n- Added compile_haskell tool for metadata-only compilation.\n- Added serialization tests for CompileHaskellRequest.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/60",
+          "additions": 141,
+          "deletions": 45,
+          "mergedAt": "2026-02-20T07:16:36Z",
+          "closedAt": "2026-02-20T07:16:36Z"
+        }
+      ],
+      "additions": 141,
+      "deletions": 45,
+      "status": "merged"
+    },
+    {
+      "id": "main.pipeline-errors",
+      "parent": "main.polish",
+      "depth": 2,
+      "label": "pipeline-errors",
+      "prs": [
+        {
+          "number": 66,
+          "title": "refactor(codegen): convert pipeline panics to Results",
+          "body": "This PR converts various panics in the `tidepool-codegen` pipeline and heap bridge to `Result` types.\n\nKey changes:\n- Introduced `PipelineError` for `CodegenPipeline` methods.\n- Propagated `PipelineError` through `JitError` and `EmitError`.\n- Updated `bump_alloc_from_vmctx` to return null on nursery exhaustion instead of panicking.\n- Updated `value_to_heap` and the effect machine's `alloc_con` to handle allocation failure.\n- Updated all integration tests in `tidepool-codegen` to handle the new `Result` return types.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/66",
+          "additions": 117,
+          "deletions": 59,
+          "mergedAt": "2026-02-20T11:51:04Z",
+          "closedAt": "2026-02-20T11:51:04Z"
+        }
+      ],
+      "additions": 117,
+      "deletions": 59,
+      "status": "merged"
+    },
+    {
+      "id": "main.pre-publish",
+      "parent": "main.polish",
+      "depth": 2,
+      "label": "pre-publish",
+      "prs": [
+        {
+          "number": 52,
+          "title": "Pre-publish workspace migration: rename core-* to tidepool-*",
+          "body": "This PR implements steps 1-7 of `PRE_PUBLISH_PLAN.md`, preparing the workspace for publication on crates.io.\n\n### Changes:\n- Renamed all `core-*` crates to `tidepool-*` (repr, eval, heap, optimize, bridge, bridge-derive, effect) and `codegen` to `tidepool-codegen`.\n- Renamed all crate directories using `git mv`.\n- Updated all import paths and internal references from `core_*` to `tidepool_*` across the codebase.\n- Updated all `Cargo.toml` files with new names, path dependencies, versions, and metadata (license, repository, description).\n- Created a `tidepool` facade crate that re-exports public APIs.\n- Added MIT and Apache-2.0 license files at the repo root.\n- Marked testing and example crates as non-publishable (`publish = false`).\n- Fixed minor test regressions in `tidepool-codegen` (GC audits) and `tidepool-tide` (parser expectations) caused by the migration and desugaring changes.\n\nVerified with `cargo check --workspace` and `cargo test --workspace`. All tests passed.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/52",
+          "additions": 1095,
+          "deletions": 802,
+          "mergedAt": "2026-02-20T03:51:25Z",
+          "closedAt": "2026-02-20T03:51:25Z"
+        }
+      ],
+      "additions": 1095,
+      "deletions": 802,
+      "status": "merged"
+    },
+    {
       "id": "main.pretty",
       "parent": "main.core-repr",
       "depth": 2,
@@ -1196,6 +1836,50 @@
       "status": "merged"
     },
     {
+      "id": "main.runtime-engine",
+      "parent": "main.runtime",
+      "depth": 2,
+      "label": "runtime-engine",
+      "prs": [
+        {
+          "number": 48,
+          "title": "feat(runtime): implement compile_and_run, caching, and RuntimeError",
+          "body": "## Summary\n- Implemented `compile_and_run` in `tidepool-runtime` for unified Haskell compilation and JIT execution.\n- Added a caching mechanism in `src/cache.rs` using `blake3` hashes to store CBOR output and metadata, significantly speeding up repeated runs.\n- Introduced `RuntimeError` to unify `CompileError` and `JitError`.\n- Re-exported `Value`, `JitError`, and `DispatchEffect` from the crate root.\n- Updated dependencies to include `core-eval`, `core-effect`, `codegen`, and `blake3`.\n\n## Verification\n- `cargo check -p tidepool-runtime` passes.\n- Caching logic follows XDG conventions for directory locations.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/48",
+          "additions": 296,
+          "deletions": 0,
+          "mergedAt": "2026-02-20T02:27:53Z",
+          "closedAt": "2026-02-20T02:27:53Z"
+        }
+      ],
+      "additions": 296,
+      "deletions": 0,
+      "status": "merged"
+    },
+    {
+      "id": "main.runtime-tests",
+      "parent": "main.runtime",
+      "depth": 2,
+      "label": "runtime-tests",
+      "prs": [
+        {
+          "number": 49,
+          "title": "test(runtime): add integration tests for compile and run pipeline",
+          "body": "Adds integration tests in `tidepool-runtime/tests/integration.rs` (all `#[ignore]`) covering:\n- `compile_haskell` identity function\n- `compile_and_run` with literals (boxed vs unboxed)\n- `compile_and_run` with arithmetic\n- `compile_haskell` error reporting\n- Caching consistency check",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/49",
+          "additions": 69,
+          "deletions": 1,
+          "mergedAt": "2026-02-20T02:48:16Z",
+          "closedAt": "2026-02-20T02:48:16Z"
+        }
+      ],
+      "additions": 69,
+      "deletions": 1,
+      "status": "merged"
+    },
+    {
       "id": "main.serial",
       "parent": "main.core-repr",
       "depth": 2,
@@ -1215,6 +1899,28 @@
       ],
       "additions": 804,
       "deletions": 0,
+      "status": "merged"
+    },
+    {
+      "id": "main.structured-errors",
+      "parent": "main.polish",
+      "depth": 2,
+      "label": "structured-errors",
+      "prs": [
+        {
+          "number": 55,
+          "title": "codegen: structured JitError variants",
+          "body": "This PR replaces the opaque `String` payloads in `JitError::Compilation` and `JitError::HeapBridge` with structured `EmitError` and `BridgeError` variants. This preserves error information for callers and improves the `Display` implementation.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/55",
+          "additions": 8,
+          "deletions": 8,
+          "mergedAt": "2026-02-20T05:07:00Z",
+          "closedAt": "2026-02-20T05:07:00Z"
+        }
+      ],
+      "additions": 8,
+      "deletions": 8,
       "status": "merged"
     },
     {
@@ -1328,8 +2034,30 @@
       "status": "merged"
     },
     {
+      "id": "main.tidepool-mcp",
+      "parent": "main.mcp",
+      "depth": 2,
+      "label": "tidepool-mcp",
+      "prs": [
+        {
+          "number": 50,
+          "title": "feat: implement tidepool-mcp library crate",
+          "body": "This PR adds the tidepool-mcp library crate, which provides an MCP server for compiling and running Haskell code via Tidepool. It is generic over effect handlers and uses the stdio transport.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/50",
+          "additions": 656,
+          "deletions": 3,
+          "mergedAt": "2026-02-20T03:07:45Z",
+          "closedAt": "2026-02-20T03:07:45Z"
+        }
+      ],
+      "additions": 656,
+      "deletions": 3,
+      "status": "merged"
+    },
+    {
       "id": "main.tidepool-runtime",
-      "parent": "main.tide",
+      "parent": "main.runtime",
       "depth": 2,
       "label": "tidepool-runtime",
       "prs": [
@@ -1369,6 +2097,50 @@
       ],
       "additions": 202,
       "deletions": 0,
+      "status": "merged"
+    },
+    {
+      "id": "main.value-display",
+      "parent": "main.polish",
+      "depth": 2,
+      "label": "value-display",
+      "prs": [
+        {
+          "number": 53,
+          "title": "feat: implement Display for Value",
+          "body": "This PR adds a human-readable `Display` implementation for the `Value` enum and `ThunkId` in `tidepool-eval`. This improves the output in the REPL and MCP server by replacing the verbose `Debug` output with cleaner, Haskell-like representations.\\n\\nChanges:\\n- `Lit(LitInt(42))` -> `42`\\n- `Con(id, fields)` -> `<Con#id> field1 field2`\\n- `Closure` -> `<closure>`\\n- `ThunkRef(id)` -> `<thunk#id>`\\n- `JoinCont` -> `<join>`\\n- `ConFun` -> `<partial Con#id n/arity>`\\n\\nVerified with existing and new tests.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/53",
+          "additions": 99,
+          "deletions": 0,
+          "mergedAt": "2026-02-20T05:06:56Z",
+          "closedAt": "2026-02-20T05:06:56Z"
+        }
+      ],
+      "additions": 99,
+      "deletions": 0,
+      "status": "merged"
+    },
+    {
+      "id": "prelude-closure",
+      "parent": "main.runtime",
+      "depth": 2,
+      "label": "prelude-closure",
+      "prs": [
+        {
+          "number": 61,
+          "title": "Improve external reference resolution for Prelude functions",
+          "body": "This PR improves the Haskell extractor's external reference resolver by adding a fallback to  when  returns . This ensures that definitions for external Prelude functions (like , , etc.) are correctly captured and included in the serialized CBOR, fixing  errors in the evaluator. Added 10 new test bindings to  and corresponding Rust tests in  to verify the fix.",
+          "state": "merged",
+          "url": "https://github.com/tidepool-heavy-industries/tidepool/pull/61",
+          "additions": 86,
+          "deletions": 21,
+          "mergedAt": "2026-02-20T10:16:57Z",
+          "closedAt": "2026-02-20T10:16:57Z"
+        }
+      ],
+      "additions": 86,
+      "deletions": 21,
       "status": "merged"
     },
     {

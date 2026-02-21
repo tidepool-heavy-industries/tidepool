@@ -14,8 +14,8 @@ raw = subprocess.check_output([
 ], text=True)
 all_prs = json.loads(raw)
 
-# Only merged PRs with main.* branches
-prs = [p for p in all_prs if p['state'] == 'MERGED' and p['headRefName'].startswith('main.')]
+# Only merged PRs with main.* branches (plus special cases)
+prs = [p for p in all_prs if p['state'] == 'MERGED' and (p['headRefName'].startswith('main.') or p['headRefName'] in ('prelude-closure',))]
 prs.sort(key=lambda p: p['mergedAt'] or '')
 
 print(f"  {len(prs)} merged PRs")
@@ -49,12 +49,30 @@ reparent = {
     # Extras: tide
     'main.tide-haskell':         'main.tide',
     'main.tide-parser':          'main.tide',
-    # Runtime
-    'main.tidepool-runtime':     'main.tide',
     # PRs that actually targeted main but should target their dot-parent
     'main.codegen.scaffold':     'main.codegen',
     'main.core-optimize.case-reduce': 'main.core-optimize',
     'main.core-optimize.beta-reduce': 'main.core-optimize',
+    # Long tail: runtime
+    'main.tidepool-runtime':     'main.runtime',
+    'main.runtime-engine':       'main.runtime',
+    'main.runtime-tests':        'main.runtime',
+    'main.cache-tests':          'main.runtime',
+    'main.eval-result':          'main.runtime',
+    'prelude-closure':           'main.runtime',
+    # Long tail: mcp
+    'main.tidepool-mcp':         'main.mcp',
+    'main.mcp-mature':           'main.mcp',
+    'main.dogfood-handlers':     'main.mcp',
+    'main.eval-resilience':      'main.mcp',
+    'main.console-capture':      'main.mcp',
+    # Long tail: polish
+    'main.pre-publish':          'main.polish',
+    'main.value-display':        'main.polish',
+    'main.structured-errors':    'main.polish',
+    'main.bridge-roundtrip':     'main.polish',
+    'main.fix-gc-audit':         'main.polish',
+    'main.pipeline-errors':      'main.polish',
 }
 
 # === Build nodes from PRs ===
@@ -85,7 +103,8 @@ ensure_node('main')
 
 # Synthetic grouping nodes (these never had their own PRs)
 synthetics = ['main.core-repr', 'main.core-eval', 'main.core-heap',
-              'main.core-bridge', 'main.core-testing', 'main.tide']
+              'main.core-bridge', 'main.core-testing', 'main.tide',
+              'main.runtime', 'main.mcp', 'main.polish']
 for s in synthetics:
     ensure_node(s)
 

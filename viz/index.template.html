@@ -187,7 +187,6 @@ function insertGaps(node) {
   // Recurse first (bottom-up) so children are finalized before we shift them
   if (node.children) node.children.forEach(insertGaps);
 
-  // Only insert visual gaps on root — synthetic parents keep data for sidebar
   if (node.depth !== 0) return;
   if (!node.children || !node.data.nodeData.directCommits) return;
   const commits = node.data.nodeData.directCommits;
@@ -288,6 +287,26 @@ function insertGaps(node) {
 }
 insertGaps(root);
 
+// For non-root parents with children: split depth strip 70% rect / 30% child chart
+const CHART_RATIO = 0.3;
+const allChildTicks = [];
+root.each(d => {
+  if (d.depth > 0 && d.children) {
+    d.chartSplit = d.y0 + (d.y1 - d.y0) * (1 - CHART_RATIO);
+    d._childTicks = [];
+    d.children.forEach(child => {
+      const tick = {
+        parentNode: d,
+        childNode: child,
+        tickX: child.x0,
+        tickH: child.x1 - child.x0,
+      };
+      allChildTicks.push(tick);
+      d._childTicks.push(tick);
+    });
+  }
+});
+
 // Snapshot rest-state positions for accordion remap
 root.each(d => {
   d.orig = { x0: d.x0, x1: d.x1, y0: d.y0, y1: d.y1 };
@@ -296,6 +315,10 @@ allGapTicks.forEach(t => {
   t.origTickX = t.tickX;
   t.origParentY0 = t.parentY0;
   t.origParentY1 = t.parentY1;
+});
+allChildTicks.forEach(t => {
+  t.origTickX = t.tickX;
+  t.origTickH = t.tickH;
 });
 
 // === Color ===
@@ -372,16 +395,16 @@ const cell = g.selectAll('.cell')
   .attr('transform', d => `translate(${d.y0},${d.x0})`);
 
 const rect = cell.append('rect')
-  .attr('width', d => Math.max(0, d.y1 - d.y0))
+  .attr('width', d => Math.max(0, (d.chartSplit || d.y1) - d.y0))
   .attr('height', d => Math.max(0, d.x1 - d.x0))
   .attr('fill', cellFill)
   .attr('rx', 2);
 
 // Clip paths so text doesn't bleed
-cell.append('clipPath')
+const clipRect = cell.append('clipPath')
   .attr('id', (d, i) => `cp${i}`)
   .append('rect')
-  .attr('width', d => Math.max(0, d.y1 - d.y0 - 4))
+  .attr('width', d => Math.max(0, (d.chartSplit || d.y1) - d.y0 - 4))
   .attr('height', d => Math.max(0, d.x1 - d.x0));
 
 // Primary label
@@ -422,6 +445,7 @@ function desaturate(color, opacity) {
   return c.toString();
 }
 
+// Root gap ticks (spine)
 const tickG = g.append('g').attr('class', 'commit-ticks');
 const tickRects = tickG.selectAll('.tick-rect')
   .data(allGapTicks)
@@ -432,10 +456,23 @@ const tickRects = tickG.selectAll('.tick-rect')
   .attr('width', d => Math.max(0, d.parentY1 - d.parentY0 - TICK_INSET * 2))
   .attr('height', TICK_H - 1)
   .attr('fill', d => {
-    const baseColor = d.parentNode.depth === 0 ? '#8b949e' : waveColor(getWave(d.parentNode));
     const opacity = d.commit.kind === 'merge' ? 0.6 : 0.35;
-    return desaturate(baseColor, opacity);
+    return desaturate('#8b949e', opacity);
   })
+  .attr('rx', 1)
+  .attr('pointer-events', 'none');
+
+// Child-aligned bars in parent chart strips
+const childTickG = g.append('g').attr('class', 'child-ticks');
+const childTickRects = childTickG.selectAll('.child-tick')
+  .data(allChildTicks)
+  .join('rect')
+  .attr('class', 'child-tick tick-rect')
+  .attr('x', d => d.parentNode.chartSplit + TICK_INSET)
+  .attr('y', d => d.tickX)
+  .attr('width', d => Math.max(0, d.parentNode.y1 - d.parentNode.chartSplit - TICK_INSET * 2))
+  .attr('height', d => Math.max(0, d.tickH))
+  .attr('fill', d => desaturate(waveColor(getWave(d.childNode)), d.childNode.children ? 0.4 : 0.6))
   .attr('rx', 1)
   .attr('pointer-events', 'none');
 
@@ -523,6 +560,12 @@ function doAccordion(clickedD1) {
         tick.targetW = Math.max(0, d.target.y1 - d.target.y0 - TICK_INSET * 2);
       });
     }
+    if (d._childTicks) {
+      d._childTicks.forEach(tick => {
+        tick.targetY = tick.childNode.target.x0;
+        tick.targetH = tick.childNode.target.x1 - tick.childNode.target.x0;
+      });
+    }
   });
 
   const t = g.transition().duration(500);
@@ -531,7 +574,11 @@ function doAccordion(clickedD1) {
     .attr('transform', d => `translate(${d.target.y0},${d.target.x0})`);
 
   rect.transition(t)
-    .attr('width', d => Math.max(0, d.target.y1 - d.target.y0 - 1))
+    .attr('width', d => Math.max(0, (d.chartSplit || d.target.y1) - d.target.y0 - 1))
+    .attr('height', d => Math.max(0, d.target.x1 - d.target.x0));
+
+  clipRect.transition(t)
+    .attr('width', d => Math.max(0, (d.chartSplit || d.target.y1) - d.target.y0 - 4))
     .attr('height', d => Math.max(0, d.target.x1 - d.target.x0));
 
   label.transition(t)
@@ -563,6 +610,11 @@ function doAccordion(clickedD1) {
     .attr('y', d => d.targetY)
     .attr('width', d => d.targetW)
     .style('opacity', d => d.targetY >= -TICK_H && d.targetY <= H ? 1 : 0);
+
+  childTickRects.transition(t)
+    .attr('y', d => d.targetY)
+    .attr('height', d => Math.max(0, d.targetH))
+    .style('opacity', d => d.targetH > 2 ? 1 : 0);
 
   spineLabels.selectAll('text').transition(t)
     .attr('y', d => (d.target.x0 + d.target.x1) / 2)
