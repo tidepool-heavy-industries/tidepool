@@ -84,10 +84,9 @@ impl<T: ToCore> ToCore for Box<T> {
 
 impl ToCore for () {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        match table.get_by_name("()") {
-            Some(id) => Ok(Value::Con(id, vec![])),
-            None => Ok(Value::Lit(Literal::LitInt(0))),
-        }
+        let id = table.get_by_name("()")
+            .ok_or_else(|| BridgeError::UnknownDataConName("()".into()))?;
+        Ok(Value::Con(id, vec![]))
     }
 }
 
@@ -95,7 +94,6 @@ impl FromCore for () {
     fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
         match value {
             Value::Con(_, fields) if fields.is_empty() => Ok(()),
-            Value::Lit(Literal::LitInt(0)) => Ok(()),
             _ => Err(type_mismatch("()", value)),
         }
     }
@@ -123,10 +121,9 @@ impl FromCore for i64 {
 
 impl ToCore for i64 {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        match table.get_by_name("I#") {
-            Some(id) => Ok(Value::Con(id, vec![Value::Lit(Literal::LitInt(*self))])),
-            None => Ok(Value::Lit(Literal::LitInt(*self))),
-        }
+        let id = table.get_by_name("I#")
+            .ok_or_else(|| BridgeError::UnknownDataConName("I#".into()))?;
+        Ok(Value::Con(id, vec![Value::Lit(Literal::LitInt(*self))]))
     }
 }
 
@@ -150,10 +147,9 @@ impl FromCore for u64 {
 
 impl ToCore for u64 {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        match table.get_by_name("W#") {
-            Some(id) => Ok(Value::Con(id, vec![Value::Lit(Literal::LitWord(*self))])),
-            None => Ok(Value::Lit(Literal::LitWord(*self))),
-        }
+        let id = table.get_by_name("W#")
+            .ok_or_else(|| BridgeError::UnknownDataConName("W#".into()))?;
+        Ok(Value::Con(id, vec![Value::Lit(Literal::LitWord(*self))]))
     }
 }
 
@@ -177,10 +173,9 @@ impl FromCore for f64 {
 
 impl ToCore for f64 {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        match table.get_by_name("D#") {
-            Some(id) => Ok(Value::Con(id, vec![Value::Lit(Literal::LitDouble(self.to_bits()))])),
-            None => Ok(Value::Lit(Literal::LitDouble(self.to_bits()))),
-        }
+        let id = table.get_by_name("D#")
+            .ok_or_else(|| BridgeError::UnknownDataConName("D#".into()))?;
+        Ok(Value::Con(id, vec![Value::Lit(Literal::LitDouble(self.to_bits()))]))
     }
 }
 
@@ -275,10 +270,9 @@ impl FromCore for char {
 
 impl ToCore for char {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        match table.get_by_name("C#") {
-            Some(id) => Ok(Value::Con(id, vec![Value::Lit(Literal::LitChar(*self))])),
-            None => Ok(Value::Lit(Literal::LitChar(*self))),
-        }
+        let id = table.get_by_name("C#")
+            .ok_or_else(|| BridgeError::UnknownDataConName("C#".into()))?;
+        Ok(Value::Con(id, vec![Value::Lit(Literal::LitChar(*self))]))
     }
 }
 
@@ -623,6 +617,7 @@ mod tests {
     fn test_table() -> DataConTable {
         let mut t = DataConTable::new();
         // Nothing=0, Just=1, False=2, True=3, ()=4, Nil=5, Cons=6, (,,)=7, Right=8, Left=9
+        // I#=10, W#=11, D#=12, C#=13
         t.insert(DataCon {
             id: DataConId(0),
             name: "Nothing".into(),
@@ -691,6 +686,41 @@ mod tests {
             name: "Left".into(),
             tag: 1,
             rep_arity: 1,
+            field_bangs: vec![],
+        });
+        t.insert(DataCon {
+            id: DataConId(10),
+            name: "I#".into(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![],
+        });
+        t.insert(DataCon {
+            id: DataConId(11),
+            name: "W#".into(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![],
+        });
+        t.insert(DataCon {
+            id: DataConId(12),
+            name: "D#".into(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![],
+        });
+        t.insert(DataCon {
+            id: DataConId(13),
+            name: "C#".into(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![],
+        });
+        t.insert(DataCon {
+            id: DataConId(14),
+            name: "()".into(),
+            tag: 1,
+            rep_arity: 0,
             field_bangs: vec![],
         });
         t

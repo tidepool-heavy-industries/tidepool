@@ -5,6 +5,7 @@ module Tidepool.Translate
   , collectDataCons
   , collectUsedDataCons
   , collectTransitiveDCons
+  , wiredInDataCons
   , FlatNode(..)
   , FlatAlt(..)
   , FlatAltCon(..)
@@ -18,7 +19,8 @@ import GHC.Types.Id
 import GHC.Types.Var
 import GHC.Types.Unique (getKey)
 import GHC.Core.DataCon (DataCon, dataConRepArity, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, dataConOrigArgTys, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
-import GHC.Builtin.Types (consDataCon, nilDataCon, trueDataCon, falseDataCon, charDataCon)
+import Language.Haskell.Syntax.Basic (Boxity(..))
+import GHC.Builtin.Types (consDataCon, nilDataCon, trueDataCon, falseDataCon, charDataCon, unitDataCon, tupleDataCon, ordLTDataCon, ordEQDataCon, ordGTDataCon, intDataCon, wordDataCon, doubleDataCon, floatDataCon)
 import GHC.Builtin.PrimOps
 import GHC.Types.Literal
 import GHC.Types.Name (nameOccName, isExternalName, isSystemName)
@@ -790,6 +792,30 @@ mapBang (HsSrcBang _ (HsBang srcUnpack srcBang)) =
     (_, SrcStrict) -> "SrcBang"
     (SrcUnpack, _) -> "SrcUnpack"
     _              -> "NoSrcBang"
+
+-- | Wired-in constructors that GHC always knows about but may not appear in
+-- mg_tcs or binder types. We include these unconditionally in metadata so
+-- that ToCore impls ((), Bool, Char, Int, Word, Double, Float, tuples,
+-- Ordering, lists) always find their constructors in the DataConTable.
+wiredInDataCons :: [(Word64, Text, Int, Int, [Text])]
+wiredInDataCons = concatMap (\dc ->
+    [( varId (dataConWorkId dc)
+     , T.pack (occNameString (nameOccName (dataConName dc)))
+     , dataConTag dc
+     , dataConRepArity dc
+     , map mapBang (dataConSrcBangs dc)
+     )]
+  ) wiredInList
+  where
+    wiredInList =
+      [ consDataCon, nilDataCon
+      , trueDataCon, falseDataCon
+      , charDataCon, unitDataCon
+      , intDataCon, wordDataCon, doubleDataCon, floatDataCon
+      , tupleDataCon Boxed 2  -- (,)
+      , tupleDataCon Boxed 3  -- (,,)
+      , ordLTDataCon, ordEQDataCon, ordGTDataCon
+      ]
 
 -- | Recognize GHC's unpackCString# and unpackCStringUtf8# builtins.
 -- These convert Addr# (C string pointers) to [Char]. Since our

@@ -210,6 +210,9 @@ impl CompiledEffectMachine {
 
                         // Allocate Node(k', k2)
                         let new_node = self.alloc_con(self.tags.node, &[k_prime, k2]);
+                        if new_node.is_null() {
+                            return std::ptr::null_mut();
+                        }
                         // Allocate E(union, new_node)
                         self.alloc_con(self.tags.e, &[union_val, new_node])
                     } else {
