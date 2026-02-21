@@ -344,7 +344,7 @@ impl TidepoolMcpServerImpl {
 impl ServerHandler for TidepoolMcpServerImpl {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some(self.eval_tool_description.clone().into()),
+            instructions: Some(self.eval_tool_description.clone()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }

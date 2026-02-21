@@ -230,8 +230,8 @@ suite_int!(arith_mul_one, 42);
 suite_double!(arith_double_add, 4.0);
 suite_double!(arith_double_mul, 6.0);
 suite_double!(arith_double_sub, 6.5);
-suite_int!(prim_quotRemInt, 31);
-suite_int!(prim_quotRemWord, 31);
+suite_int!(prim_quot_rem_int, 31);
+suite_int!(prim_quot_rem_word, 31);
 
 // =============================================================================
 // Comparisons (8)

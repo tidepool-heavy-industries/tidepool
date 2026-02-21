@@ -524,12 +524,12 @@ prelude_eq_string_false =
 -- Multi-return primops (2)
 -- ============================================================
 
-prim_quotRemInt :: Int
-prim_quotRemInt =
+prim_quot_rem_int :: Int
+prim_quot_rem_int =
   let (q, r) = quotRem (10 :: Int) (3 :: Int)
   in q * 10 + r -- should be 3 * 10 + 1 = 31
 
-prim_quotRemWord :: Int
-prim_quotRemWord =
+prim_quot_rem_word :: Int
+prim_quot_rem_word =
   let (q, r) = quotRem (10 :: Word) (3 :: Word)
   in fromIntegral (q * 10 + r) -- should be 3 * 10 + 1 = 31
