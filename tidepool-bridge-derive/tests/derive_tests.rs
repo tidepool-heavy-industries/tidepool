@@ -29,35 +29,35 @@ enum MultiField {
 fn test_table() -> DataConTable {
     let mut t = standard_datacon_table();
     t.insert(DataCon {
-        id: DataConId(4),
+        id: DataConId(20),
         name: "()".into(),
         tag: 1,
         rep_arity: 0,
         field_bangs: vec![],
     });
     t.insert(DataCon {
-        id: DataConId(10),
+        id: DataConId(21),
         name: "Triple".into(),
         tag: 1,
         rep_arity: 3,
         field_bangs: vec![],
     });
     t.insert(DataCon {
-        id: DataConId(20),
+        id: DataConId(22),
         name: "GetBranch".into(),
         tag: 1,
         rep_arity: 1,
         field_bangs: vec![],
     });
     t.insert(DataCon {
-        id: DataConId(21),
+        id: DataConId(23),
         name: "UnitStruct".into(),
         tag: 1,
         rep_arity: 0,
         field_bangs: vec![],
     });
     t.insert(DataCon {
-        id: DataConId(22),
+        id: DataConId(24),
         name: "Pair".into(),
         tag: 1,
         rep_arity: 2,

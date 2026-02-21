@@ -57,5 +57,34 @@ pub fn standard_datacon_table() -> DataConTable {
         rep_arity: 2,
         field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang],
     });
+    // Boxing
+    table.insert(DataCon {
+        id: DataConId(7),
+        name: "I#".to_string(),
+        tag: 1,
+        rep_arity: 1,
+        field_bangs: vec![SrcBang::NoSrcBang],
+    });
+    table.insert(DataCon {
+        id: DataConId(8),
+        name: "W#".to_string(),
+        tag: 1,
+        rep_arity: 1,
+        field_bangs: vec![SrcBang::NoSrcBang],
+    });
+    table.insert(DataCon {
+        id: DataConId(9),
+        name: "D#".to_string(),
+        tag: 1,
+        rep_arity: 1,
+        field_bangs: vec![SrcBang::NoSrcBang],
+    });
+    table.insert(DataCon {
+        id: DataConId(10),
+        name: "C#".to_string(),
+        tag: 1,
+        rep_arity: 1,
+        field_bangs: vec![SrcBang::NoSrcBang],
+    });
     table
 }
