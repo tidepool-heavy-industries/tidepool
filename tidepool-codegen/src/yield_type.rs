@@ -56,6 +56,8 @@ pub enum YieldError {
     UserError,
     /// Haskell `undefined` forced in JIT code.
     Undefined,
+    /// GHC type metadata forced (should be dead code).
+    TypeMetadata,
 }
 
 impl std::fmt::Display for YieldError {
@@ -75,6 +77,7 @@ impl std::fmt::Display for YieldError {
             YieldError::Overflow => write!(f, "arithmetic overflow"),
             YieldError::UserError => write!(f, "Haskell error called"),
             YieldError::Undefined => write!(f, "Haskell undefined forced"),
+            YieldError::TypeMetadata => write!(f, "forced type metadata (should be dead code)"),
         }
     }
 }

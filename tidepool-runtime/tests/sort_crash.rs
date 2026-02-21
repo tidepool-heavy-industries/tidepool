@@ -356,6 +356,14 @@ fn test_sort_by_compare_string() {
 
 #[test]
 #[ignore]
+fn test_nub_string() {
+    // Test list equality via the Eq [Char] specialization substitute
+    let json = run_plain("nub [\"a\", \"a\"]");
+    assert_eq!(json, serde_json::json!(["a"]));
+}
+
+#[test]
+#[ignore]
 fn test_intercalate() {
     let json = run_plain("intercalate \", \" [\"a\", \"b\", \"c\"]");
     assert_eq!(json, serde_json::json!("a, b, c"));

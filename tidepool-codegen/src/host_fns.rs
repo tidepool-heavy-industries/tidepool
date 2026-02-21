@@ -13,6 +13,7 @@ pub enum RuntimeError {
     Overflow,
     UserError,
     Undefined,
+    TypeMetadata,
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -22,6 +23,7 @@ impl std::fmt::Display for RuntimeError {
             RuntimeError::Overflow => write!(f, "arithmetic overflow"),
             RuntimeError::UserError => write!(f, "Haskell error called"),
             RuntimeError::Undefined => write!(f, "Haskell undefined forced"),
+            RuntimeError::TypeMetadata => write!(f, "forced type metadata (should be dead code)"),
         }
     }
 }
@@ -182,6 +184,7 @@ pub extern "C" fn runtime_error(kind: u64) -> *mut u8 {
         1 => RuntimeError::Overflow,
         2 => RuntimeError::UserError,
         3 => RuntimeError::Undefined,
+        4 => RuntimeError::TypeMetadata,
         _ => RuntimeError::UserError,
     };
     RUNTIME_ERROR.with(|cell| {

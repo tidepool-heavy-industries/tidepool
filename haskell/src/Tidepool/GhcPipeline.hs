@@ -25,12 +25,13 @@ runPipeline path includes = do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
-    let dflags' = gopt_set (gopt_set (gopt_set (gopt_unset (gopt_unset (updOptLevel 2 $ dflags
+    let dflags' = gopt_set (gopt_set (gopt_unset (gopt_unset (gopt_unset (gopt_unset (gopt_unset (updOptLevel 2 $ dflags
           { backend = noBackend
           , ghcLink = NoLink
           , importPaths = importPaths dflags ++ includes
-          }) Opt_FullLaziness) Opt_CprAnal) Opt_ExposeAllUnfoldings)
-          Opt_ExposeOverloadedUnfoldings) Opt_CrossModuleSpecialise
+          }) Opt_FullLaziness) Opt_CprAnal) Opt_Specialise)
+          Opt_SpecialiseAggressively) Opt_CrossModuleSpecialise)
+          Opt_ExposeAllUnfoldings) Opt_ExposeOverloadedUnfoldings
     setSessionDynFlags dflags'
     target <- guessTarget path Nothing Nothing
     setTargets [target]

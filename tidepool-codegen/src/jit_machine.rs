@@ -164,6 +164,9 @@ impl JitEffectMachine {
                     crate::host_fns::RuntimeError::Undefined => {
                         crate::yield_type::YieldError::Undefined
                     }
+                    crate::host_fns::RuntimeError::TypeMetadata => {
+                        crate::yield_type::YieldError::TypeMetadata
+                    }
                 }))
             } else {
                 Err(JitError::Yield(crate::yield_type::YieldError::NullPointer))

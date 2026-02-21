@@ -25,3 +25,6 @@ executable tidepool-harness
   default-language: GHC2024
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
+-- nix cache bust 1771703477
+-- nix cache bust 1771703850
+-- nix cache bust metadata-fix

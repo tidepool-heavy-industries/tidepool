@@ -96,6 +96,7 @@ impl CompiledEffectMachine {
                     crate::host_fns::RuntimeError::Overflow => YieldError::Overflow,
                     crate::host_fns::RuntimeError::UserError => YieldError::UserError,
                     crate::host_fns::RuntimeError::Undefined => YieldError::Undefined,
+                    crate::host_fns::RuntimeError::TypeMetadata => YieldError::TypeMetadata,
                 });
             }
             return Yield::Error(YieldError::NullPointer);

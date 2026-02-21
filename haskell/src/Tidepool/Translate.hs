@@ -52,6 +52,7 @@ import qualified Data.Map.Strict as Map
 import Control.Monad.State
 import Control.Monad (foldM, forM, when)
 
+import GHC.Driver.Env (HscEnv)
 import Tidepool.Resolve (resolveExternals, UnresolvedVar(..))
 
 data FlatNode
@@ -213,13 +214,12 @@ translateModule allBinds targetName =
     wrapAllBinds [] target = emitNode (NVar (varId target))
     wrapAllBinds (NonRec b rhs : rest) target
       | isTyVar b = wrapAllBinds rest target  -- skip type bindings
-      | isMetadataBinder b = wrapAllBinds rest target  -- skip $trModule etc.
       | otherwise = do
           rhsIdx <- translate rhs
           bodyIdx <- wrapAllBinds rest target
           emitNode (NLetNonRec (varId b) rhsIdx bodyIdx)
     wrapAllBinds (Rec pairs : rest) target = do
-      let valPairs = filter (\(b, _) -> not (isTyVar b) && not (isMetadataBinder b)) pairs
+      let valPairs = filter (\(b, _) -> not (isTyVar b)) pairs
       if null valPairs
         then wrapAllBinds rest target
         else do
@@ -242,14 +242,28 @@ translateModule allBinds targetName =
 -- by inlining unfoldings from the GHC environment. Returns the
 -- translated tree, used DataCons, and any variables that could not
 -- be resolved (no unfolding available).
-translateModuleClosed :: [CoreBind] -> String -> (Seq FlatNode, Map.Map Word64 DataCon, [UnresolvedVar], [CoreBind])
-translateModuleClosed allBinds targetName =
-  let (closedBinds, unresolved) = resolveExternals allBinds
-      filtered = filter (not . isDesugaredVar . uvName) unresolved
+translateModuleClosed :: HscEnv -> [CoreBind] -> String -> IO (Seq FlatNode, Map.Map Word64 DataCon, [UnresolvedVar], [CoreBind])
+translateModuleClosed hscEnv allBinds targetName = do
+  (closedBinds, unresolved) <- resolveExternals hscEnv allBinds
+  let filtered = filter (not . isDesugaredVar . uvName) unresolved
       (nodes, usedDCs) = translateModule closedBinds targetName
       referencedIds = collectVarIds nodes
+      -- Collect all binder VarIds (Let-bound vars in the CBOR tree)
+      definedIds = collectDefinedIds nodes
+      -- Find NVar IDs that are not defined by any Let binding
+      orphanIds = Set.difference referencedIds definedIds
       trulyUnresolved = filter (\uv -> uvKey uv `Set.member` referencedIds) filtered
-  in (nodes, usedDCs, trulyUnresolved, closedBinds)
+  -- Debug: print orphan IDs that might cause SIGSEGV
+  when (not (Set.null orphanIds) && targetName == "result") $ do
+    putStrLn $ "  [translate] ORPHAN NVar IDs for " ++ targetName ++ ": " ++
+           show (Set.toList orphanIds)
+    -- Try to find these IDs in the binder list
+    let allBinders = [(varId b, occNameString (nameOccName (idName b))) | bind <- closedBinds, b <- case bind of { NonRec b _ -> [b]; Rec ps -> map fst ps }]
+    mapM_ (\oid -> case lookup oid allBinders of
+      Just name -> putStrLn $ "    " ++ show oid ++ " = " ++ name ++ " (defined but not in CBOR tree)"
+      Nothing   -> putStrLn $ "    " ++ show oid ++ " = <not found in any binding>"
+      ) (Set.toList orphanIds)
+  return (nodes, usedDCs, trulyUnresolved, closedBinds)
   where
     isDesugaredVar name = name `elem`
       [ "unpackCString#", "unpackCStringUtf8#", "unpackAppendCString#"
@@ -264,6 +278,14 @@ translateModuleClosed allBinds targetName =
     nodeVarIds :: FlatNode -> Set.Set Word64
     nodeVarIds (NVar v) = Set.singleton v
     nodeVarIds _ = Set.empty
+    collectDefinedIds :: Seq FlatNode -> Set.Set Word64
+    collectDefinedIds = foldl' (\acc node -> acc `Set.union` nodeDefIds node) Set.empty
+    nodeDefIds :: FlatNode -> Set.Set Word64
+    nodeDefIds (NLetNonRec v _ _) = Set.singleton v
+    nodeDefIds (NLetRec pairs _) = Set.fromList (map fst pairs)
+    nodeDefIds (NLam v _) = Set.singleton v
+    nodeDefIds (NCase _ _ alts) = Set.fromList [v | FlatAlt _ bs _ <- alts, v <- bs]
+    nodeDefIds _ = Set.empty
 
 -- | Collect all DataCons encountered during translation of Core bindings.
 -- This includes constructors from imported packages (e.g. freer-simple's
@@ -522,6 +544,7 @@ translateHead = \case
         emitNode $ NVar (0x4500000000000000 .|. kind)  -- tag 'E' for error
     | isErrorVar v -> emitNode $ NVar 0x4500000000000002  -- tag 'E', kind 2 (error)
     | isUndefinedVar v -> emitNode $ NVar 0x4500000000000003  -- tag 'E', kind 3 (undefined)
+    | isTypeMetadataVar v -> emitNode $ NVar 0x4500000000000004  -- tag 'E', kind 4 (type metadata)
     | otherwise -> do
         emitNode $ NVar (varId v)
   Lit l -> emitNode $ NLit (mapLit l)
@@ -818,6 +841,13 @@ isRuntimeErrorVar v =
 isUnsafeEqualityProofVar :: Id -> Bool
 isUnsafeEqualityProofVar v =
   occNameString (nameOccName (idName v)) == "unsafeEqualityProof"
+
+-- | Recognize GHC type-representation metadata vars ($tc*, $trModule*, krep$*, $krep*).
+-- These have no runtime semantics and no unfoldings; emit as error VarId.
+isTypeMetadataVar :: Id -> Bool
+isTypeMetadataVar v =
+  let name = occNameString (nameOccName (idName v))
+  in any (`isPrefixOf` name) ["$trModule", "$krep", "$tc", "krep$"]
 
 isUnpackCStringVar :: Id -> Bool
 isUnpackCStringVar v =

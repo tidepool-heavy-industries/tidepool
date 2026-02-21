@@ -63,6 +63,7 @@ processFile args path = do
     result <- runPipeline path (argIncludes args)
     let binds = prBinds result
         tycons = prTyCons result
+        hscEnv = prHscEnv result
     putStrLn $ "  Top-level bindings: " ++ show (length binds)
 
     if argDumpCore args
@@ -91,7 +92,7 @@ processFile args path = do
               , let n = occNameString (nameOccName (idName b))
               , not (null n), head n /= '$']
         (allMetaMap, allClosedBinds) <- foldM (\(acc, closedAcc) name -> do
-          let (nodes, usedDCs, unresolved, closedBinds) = translateModuleClosed binds name
+          (nodes, usedDCs, unresolved, closedBinds) <- translateModuleClosed hscEnv binds name
           if not (null unresolved) then do
             let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
             putStrLn $ "  SKIPPED (" ++ name ++ "): unresolved external(s): " ++ unwords names
@@ -123,7 +124,7 @@ processFile args path = do
 
       (Just targetName, False) -> do
         -- Whole-module mode: serialize all bindings as nested lets around the target
-        let (nodes, usedDCs, unresolved, closedBinds) = translateModuleClosed binds targetName
+        (nodes, usedDCs, unresolved, closedBinds) <- translateModuleClosed hscEnv binds targetName
         if not (null unresolved) then do
           let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
           error $ "Unresolved external(s): " ++ unwords names
