@@ -230,6 +230,21 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
     Ok(EvalResult::new(value, table))
 }
 
+/// Compile Haskell source and run it as a pure (non-effectful) program.
+///
+/// Skips freer-simple effect dispatch — the result is converted directly
+/// from the heap. Use this for programs that don't use an `Eff` wrapper.
+pub fn compile_and_run_pure(
+    source: &str,
+    target: &str,
+    include: &[&Path],
+) -> Result<EvalResult, RuntimeError> {
+    let (expr, table) = compile_haskell(source, target, include)?;
+    let mut machine = JitEffectMachine::compile(&expr, &table, DEFAULT_NURSERY_SIZE)?;
+    let value = machine.run_pure()?;
+    Ok(EvalResult::new(value, table))
+}
+
 /// Compile Haskell source and run it with the given effect handlers,
 /// using the default nursery size (1 MiB).
 ///

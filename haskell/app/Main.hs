@@ -90,25 +90,25 @@ processFile args path = do
               [(n, ()) | b <- externalBinders
               , let n = occNameString (nameOccName (idName b))
               , not (null n), head n /= '$']
-        allMetaMap <- foldM (\acc name -> do
-          let (nodes, usedDCs, unresolved) = translateModuleClosed binds name
+        (allMetaMap, allClosedBinds) <- foldM (\(acc, closedAcc) name -> do
+          let (nodes, usedDCs, unresolved, closedBinds) = translateModuleClosed binds name
           if not (null unresolved) then do
             let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
             putStrLn $ "  SKIPPED (" ++ name ++ "): unresolved external(s): " ++ unwords names
-            return acc
+            return (acc, closedAcc)
           else do
             let cbor = encodeTree nodes
             let outFile = outDir </> name ++ ".cbor"
             BS.writeFile outFile cbor
             putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
             let usedMeta = map dcToMeta (Map.elems usedDCs)
-            return $ acc `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- usedMeta]
-          ) Map.empty uniqueNames
+            return (acc `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- usedMeta], closedAcc ++ closedBinds)
+          ) (Map.empty, []) uniqueNames
 
         -- Write merged metadata
         let tyconMeta = collectDataCons tycons
-            scanMeta = collectUsedDataCons binds
-            transitiveMeta = collectTransitiveDCons binds
+            scanMeta = collectUsedDataCons allClosedBinds
+            transitiveMeta = collectTransitiveDCons allClosedBinds
             mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- tyconMeta]
                         `Map.union` allMetaMap
                         `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- scanMeta]
@@ -121,7 +121,7 @@ processFile args path = do
 
       (Just targetName, False) -> do
         -- Whole-module mode: serialize all bindings as nested lets around the target
-        let (nodes, usedDCs, unresolved) = translateModuleClosed binds targetName
+        let (nodes, usedDCs, unresolved, closedBinds) = translateModuleClosed binds targetName
         if not (null unresolved) then do
           let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
           error $ "Unresolved external(s): " ++ unwords names
@@ -136,8 +136,8 @@ processFile args path = do
         -- Write metadata: merge TyCon-derived + translation-derived + raw-binding-scan + transitive
         let tyconMeta = collectDataCons tycons
             usedMeta = map dcToMeta (Map.elems usedDCs)
-            scanMeta = collectUsedDataCons binds
-            transitiveMeta = collectTransitiveDCons binds
+            scanMeta = collectUsedDataCons closedBinds
+            transitiveMeta = collectTransitiveDCons closedBinds
             mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- tyconMeta]
                         `Map.union`
                         Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- usedMeta]

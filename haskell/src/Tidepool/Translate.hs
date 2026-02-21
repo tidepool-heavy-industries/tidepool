@@ -240,14 +240,14 @@ translateModule allBinds targetName =
 -- by inlining unfoldings from the GHC environment. Returns the
 -- translated tree, used DataCons, and any variables that could not
 -- be resolved (no unfolding available).
-translateModuleClosed :: [CoreBind] -> String -> (Seq FlatNode, Map.Map Word64 DataCon, [UnresolvedVar])
+translateModuleClosed :: [CoreBind] -> String -> (Seq FlatNode, Map.Map Word64 DataCon, [UnresolvedVar], [CoreBind])
 translateModuleClosed allBinds targetName =
   let (closedBinds, unresolved) = resolveExternals allBinds
       filtered = filter (not . isDesugaredVar . uvName) unresolved
       (nodes, usedDCs) = translateModule closedBinds targetName
       referencedIds = collectVarIds nodes
       trulyUnresolved = filter (\uv -> uvKey uv `Set.member` referencedIds) filtered
-  in (nodes, usedDCs, trulyUnresolved)
+  in (nodes, usedDCs, trulyUnresolved, closedBinds)
   where
     isDesugaredVar name = name `elem`
       [ "unpackCString#", "unpackCStringUtf8#", "unpackAppendCString#"

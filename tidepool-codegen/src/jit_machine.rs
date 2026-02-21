@@ -53,7 +53,7 @@ impl From<crate::pipeline::PipelineError> for JitError {
 pub struct JitEffectMachine {
     pipeline: CodegenPipeline,
     nursery: Nursery,
-    tags: ConTags,
+    tags: Option<ConTags>,
     func_id: FuncId,
 }
 
@@ -70,7 +70,7 @@ impl JitEffectMachine {
             .map_err(JitError::Compilation)?;
         pipeline.finalize()?;
 
-        let tags = ConTags::from_table(table).ok_or(JitError::MissingConTags)?;
+        let tags = ConTags::from_table(table);
         let nursery = Nursery::new(nursery_size);
 
         Ok(Self {
@@ -88,6 +88,8 @@ impl JitEffectMachine {
         handlers: &mut H,
         user: &U,
     ) -> Result<Value, JitError> {
+        let tags = self.tags.ok_or(JitError::MissingConTags)?;
+
         // Install registries
         crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
         crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
@@ -96,7 +98,7 @@ impl JitEffectMachine {
             unsafe { std::mem::transmute(self.pipeline.get_function_ptr(self.func_id)) };
         let vmctx = self.nursery.make_vmctx(crate::host_fns::gc_trigger);
 
-        let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, self.tags);
+        let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
         let mut yield_result = machine.step();
 
         let result = loop {
@@ -122,6 +124,46 @@ impl JitEffectMachine {
                 }
                 Yield::Error(e) => break Err(JitError::Yield(e)),
             }
+        };
+
+        // Cleanup registries
+        crate::host_fns::clear_stack_map_registry();
+        crate::debug::clear_lambda_registry();
+
+        result
+    }
+
+    /// Run a pure (non-effectful) program to completion.
+    ///
+    /// Skips freer-simple effect dispatch entirely — calls the compiled function
+    /// and converts the raw heap result directly to a Value. Use this for programs
+    /// that don't use an `Eff` wrapper.
+    pub fn run_pure(&mut self) -> Result<Value, JitError> {
+        // Install registries
+        crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
+        crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
+
+        let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
+            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(self.func_id)) };
+        let mut vmctx = self.nursery.make_vmctx(crate::host_fns::gc_trigger);
+
+        let result_ptr: *mut u8 = unsafe { func_ptr(&mut vmctx) };
+
+        let result = if result_ptr.is_null() {
+            if let Some(err) = crate::host_fns::take_runtime_error() {
+                Err(JitError::Yield(match err {
+                    crate::host_fns::RuntimeError::DivisionByZero => {
+                        crate::yield_type::YieldError::DivisionByZero
+                    }
+                    crate::host_fns::RuntimeError::Overflow => {
+                        crate::yield_type::YieldError::Overflow
+                    }
+                }))
+            } else {
+                Err(JitError::Yield(crate::yield_type::YieldError::NullPointer))
+            }
+        } else {
+            unsafe { heap_bridge::heap_to_value(result_ptr) }.map_err(JitError::HeapBridge)
         };
 
         // Cleanup registries

@@ -3,7 +3,7 @@
 /// the MCP server generates.
 use std::path::Path;
 use frunk::HNil;
-use tidepool_runtime::{compile_and_run, compile_haskell};
+use tidepool_runtime::{compile_and_run, compile_and_run_pure, compile_haskell};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -103,8 +103,8 @@ fn run_plain(body: &str) -> serde_json::Value {
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
             let include = [pp.as_path()];
-            let val = compile_and_run(&src, "result", &include, &mut HNil, &())
-                .expect("compile_and_run failed");
+            let val = compile_and_run_pure(&src, "result", &include)
+                .expect("compile_and_run_pure failed");
             val.to_json()
         })
         .unwrap()
@@ -114,16 +114,11 @@ fn run_plain(body: &str) -> serde_json::Value {
 
 // ===========================================================================
 // Plain (non-effect) prelude tests
-// NOTE: Plain modules without the Eff wrapper hit MissingConTags because
-// --all-closed extraction lacks sufficient type context. These are known
-// failures documenting the limitation, not codegen bugs.
 // ===========================================================================
 
 #[test]
 #[ignore]
 fn test_plain_sort() {
-    // Plain module sort also hits MissingConTags from Ord dictionaries.
-    // This test will pass once the extraction bug is fixed.
     let json = run_plain("sort [3, 1, 2 :: Int]");
     assert_eq!(json, serde_json::json!([1, 2, 3]));
 }
