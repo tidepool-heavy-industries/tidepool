@@ -519,3 +519,17 @@ prelude_eq_string_false =
   let s1 = 'h' : 'e' : 'l' : 'l' : 'o' : []
       s2 = 'w' : 'o' : 'r' : 'l' : 'd' : []
   in s1 == s2
+
+-- ============================================================
+-- Multi-return primops (2)
+-- ============================================================
+
+prim_quotRemInt :: Int
+prim_quotRemInt =
+  let (q, r) = quotRem (10 :: Int) (3 :: Int)
+  in q * 10 + r -- should be 3 * 10 + 1 = 31
+
+prim_quotRemWord :: Int
+prim_quotRemWord =
+  let (q, r) = quotRem (10 :: Word) (3 :: Word)
+  in fromIntegral (q * 10 + r) -- should be 3 * 10 + 1 = 31

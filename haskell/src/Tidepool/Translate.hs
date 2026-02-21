@@ -628,7 +628,11 @@ translateHead = \case
     bodyIdx <- translate body
     emitNode $ NLetRec pairIdxs bodyIdx
   -- Desugar multi-return primops: case quotRemInt# a b of (# q, r #) -> body
-  -- Split into: let q = quotInt# a b; r = remInt# a b in body
+  -- Split into:
+  --   case quotInt# a b of q { DEFAULT ->
+  --   case remInt# a b of r { DEFAULT ->
+  --   body }}
+  -- This ensures both components are forced and a/b are shared.
   Case scrut _caseBinder _ty [Alt (DataAlt _dc) binders body]
     | (Var v, allArgs) <- collectArgs scrut
     , Just pop <- isPrimOpId_maybe v
@@ -639,13 +643,14 @@ translateHead = \case
     , [qBinder, rBinder] <- vBinders -> do
         aIdx <- translate a
         bIdx <- translate b
-        qIdx <- emitNode $ NPrimOp op1Name [aIdx, bIdx]
-        rIdx <- emitNode $ NPrimOp op2Name [aIdx, bIdx]
-        -- Bind q and r, then translate body
+        qValIdx <- emitNode $ NPrimOp op1Name [aIdx, bIdx]
+        rValIdx <- emitNode $ NPrimOp op2Name [aIdx, bIdx]
+        -- Bind q and r using Case to force them, then translate body
         bodyIdx <- translate body
-        -- Use nested LetNonRec: let q = quot in let r = rem in body
-        innerLet <- emitNode $ NLetNonRec (varId rBinder) rIdx bodyIdx
-        emitNode $ NLetNonRec (varId qBinder) qIdx innerLet
+        -- case rVal of rBinder { DEFAULT -> body }
+        rCaseIdx <- emitNode $ NCase rValIdx (varId rBinder) [FlatAlt FDefault [] bodyIdx]
+        -- case qVal of qBinder { DEFAULT -> rCaseIdx }
+        emitNode $ NCase qValIdx (varId qBinder) [FlatAlt FDefault [] rCaseIdx]
   Case scrut b _alts_ty alts -> do
     scrutIdx <- translate scrut
     altData <- mapM translateAlt alts

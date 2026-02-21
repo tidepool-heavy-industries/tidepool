@@ -134,6 +134,18 @@ pub fn emit_primop(
             let b = unbox_int(builder, args[1]);
             Ok(SsaVal::Raw(builder.ins().srem(a, b), LIT_TAG_INT))
         }
+        PrimOpKind::WordQuot => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().udiv(a, b), LIT_TAG_WORD))
+        }
+        PrimOpKind::WordRem => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().urem(a, b), LIT_TAG_WORD))
+        }
         PrimOpKind::Chr => {
             check_arity(op, 1, args.len())?;
             let v = unbox_int(builder, args[0]);
