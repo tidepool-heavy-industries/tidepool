@@ -322,9 +322,10 @@ impl ToCore for String {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let cons_id = table.get_by_name(":").ok_or_else(|| BridgeError::UnknownDataConName("(:)".into()))?;
         let nil_id = table.get_by_name("[]").ok_or_else(|| BridgeError::UnknownDataConName("[]".into()))?;
+        let char_con_id = table.get_by_name("C#").ok_or_else(|| BridgeError::UnknownDataConName("C#".into()))?;
         let mut result = Value::Con(nil_id, vec![]);
         for ch in self.chars().rev() {
-            let char_val = Value::Lit(Literal::LitChar(ch));
+            let char_val = Value::Con(char_con_id, vec![Value::Lit(Literal::LitChar(ch))]);
             result = Value::Con(cons_id, vec![char_val, result]);
         }
         Ok(result)

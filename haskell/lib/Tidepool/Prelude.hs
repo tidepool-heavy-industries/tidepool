@@ -5,8 +5,10 @@
 -- All definitions are self-contained — no base library functions are
 -- used that lack unfoldings. This ensures a fully closed Core IR.
 module Tidepool.Prelude
-  ( -- * List operations
-    reverse
+  ( -- * Renderable marker
+    Renderable
+    -- * List operations
+  , reverse
   , splitAt
   , span
   , break
@@ -26,6 +28,23 @@ import Prelude hiding
   ( reverse, splitAt, span, break, init
   , words, lines, unlines, unwords
   , concatMap, dropWhile, (++) )
+
+-- | Marker typeclass for types whose runtime values can be rendered to JSON
+-- by the Rust-side value_to_json renderer. Use @pure x@ to return values
+-- instead of @send (Print (show x))@.
+class Renderable a
+instance Renderable Int
+instance Renderable Word
+instance Renderable Char
+instance Renderable Double
+instance Renderable Float
+instance Renderable Bool
+instance Renderable ()
+instance Renderable a => Renderable [a]
+instance Renderable a => Renderable (Maybe a)
+instance (Renderable a, Renderable b) => Renderable (a, b)
+instance (Renderable a, Renderable b, Renderable c) => Renderable (a, b, c)
+instance (Renderable a, Renderable b, Renderable c, Renderable d) => Renderable (a, b, c, d)
 
 -- | Append two lists. Self-contained replacement for (++).
 append :: [a] -> [a] -> [a]

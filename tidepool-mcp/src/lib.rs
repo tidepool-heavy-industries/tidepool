@@ -126,7 +126,11 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         "module with the effect stack, pragmas, and imports. ",
         "Use `pure x` as the last line to return a value. ",
         "Use `send (Constructor args)` to invoke effects. ",
-        "First call is slow (~2s). Subsequent calls are cached.",
+        "First call is slow (~2s). Subsequent calls are cached.\n",
+        "Return values are automatically rendered to JSON by the Rust runtime — ",
+        "Int becomes a number, [Char] becomes a string, Bool becomes true/false, ",
+        "lists become arrays, etc. Prefer `pure x` over `send (Print (show x))` ",
+        "for returning results.",
     ));
 
     if !effects.is_empty() {
@@ -168,7 +172,7 @@ fn template_haskell(
         out.push('\n');
     }
 
-    out.push_str(&format!("result :: Eff {} _\n", effect_stack));
+    out.push_str(&format!("result :: Renderable _ => Eff {} _\n", effect_stack));
     out.push_str("result = do\n");
     for line in source {
         out.push_str(&format!("  {}\n", line));
@@ -538,7 +542,7 @@ mod tests {
         assert!(result.contains("module Expr where"));
         assert!(result.contains("import Control.Monad.Freer"));
         assert!(result.contains("data Console a where"));
-        assert!(result.contains("result :: Eff '[Console] _"));
+        assert!(result.contains("result :: Renderable _ => Eff '[Console] _"));
         assert!(result.contains("result = do"));
         assert!(result.contains("  let x = 42"));
         assert!(result.contains("  pure x"));
