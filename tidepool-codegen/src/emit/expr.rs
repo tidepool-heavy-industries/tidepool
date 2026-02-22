@@ -486,7 +486,6 @@ impl EmitContext {
                 let (rec_bindings, simple_bindings): (Vec<_>, Vec<_>) = bindings.iter().partition(|(_, rhs_idx)| {
                     matches!(&tree.nodes[*rhs_idx], CoreFrame::Lam { .. } | CoreFrame::Con { .. })
                 });
-
                 // If no recursive bindings, evaluate all as simple
                 if rec_bindings.is_empty() {
                     for (binder, rhs_idx) in &simple_bindings {
@@ -512,6 +511,14 @@ impl EmitContext {
                             let lam_body_tree = tree.extract_subtree(*lam_body);
                             let mut fvs = tidepool_repr::free_vars::free_vars(&lam_body_tree);
                             fvs.remove(lam_binder);
+                            let dropped_fvs: Vec<VarId> = fvs.iter().filter(|v| {
+                                !self.env.contains_key(v)
+                                    && !rec_bindings.iter().any(|(b, _)| b == *v)
+                                    && !simple_bindings.iter().any(|(b, _)| b == *v)
+                            }).copied().collect();
+                            if !dropped_fvs.is_empty() {
+                                self.trace_scope(&format!("LetRec lam {:?}: dropped FVs {:?}", binder, dropped_fvs));
+                            }
                             let mut sorted_fvs: Vec<VarId> = fvs.into_iter().filter(|v| {
                                 self.env.contains_key(v)
                                     || rec_bindings.iter().any(|(b, _)| b == v)
@@ -659,23 +666,46 @@ impl EmitContext {
                     }
                 }
 
-                // Phase 3b: Fill Con fields (now safe because all Lam code pointers are initialized)
+                // Phase 3b: Fill Con fields that DON'T reference deferred simple
+                // bindings. These are safe to fill now — at runtime, function calls
+                // in simple bindings may pattern-match on these Cons, so their fields
+                // must be populated before any simple binding evaluation.
+                let simple_binder_set: std::collections::HashSet<VarId> =
+                    deferred_simple.iter().map(|(b, _)| *b).collect();
+                let mut deferred_cons: Vec<(cranelift_codegen::ir::Value, Vec<usize>)> = Vec::new();
                 for pa in &pre_allocs {
                     if let PreAlloc::Con { ptr, field_indices, .. } = pa {
-                        for (i, &f_idx) in field_indices.iter().enumerate() {
-                            let val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, f_idx)?;
-                            let field_val = ensure_heap_ptr(builder, vmctx, gc_sig, val);
-                            builder.ins().store(MemFlags::trusted(), field_val, *ptr, CON_FIELDS_START + 8 * i as i32);
+                        let needs_simple = field_indices.iter().any(|&f_idx| {
+                            matches!(&tree.nodes[f_idx], CoreFrame::Var(v) if simple_binder_set.contains(v))
+                        });
+                        if needs_simple {
+                            deferred_cons.push((*ptr, field_indices.clone()));
+                        } else {
+                            for (i, &f_idx) in field_indices.iter().enumerate() {
+                                let val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, f_idx)?;
+                                let field_val = ensure_heap_ptr(builder, vmctx, gc_sig, val);
+                                builder.ins().store(MemFlags::trusted(), field_val, *ptr, CON_FIELDS_START + 8 * i as i32);
+                            }
                         }
                     }
                 }
 
-                // Phase 3c: Evaluate deferred simple bindings (non-Var, non-recursive)
-                // now that all closures are fully initialized
+                // Phase 3c: Evaluate deferred simple bindings (now that Con fields
+                // they may access at runtime are populated).
                 for (binder, rhs_idx) in &deferred_simple {
                     let rhs_val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *rhs_idx)?;
                     self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
                     self.env.insert(*binder, rhs_val);
+                }
+
+                // Phase 3d: Fill deferred Con fields (those that reference simple
+                // binding results, e.g. Con_Return(result)).
+                for (ptr, field_indices) in &deferred_cons {
+                    for (i, &f_idx) in field_indices.iter().enumerate() {
+                        let val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, f_idx)?;
+                        let field_val = ensure_heap_ptr(builder, vmctx, gc_sig, val);
+                        builder.ins().store(MemFlags::trusted(), field_val, *ptr, CON_FIELDS_START + 8 * i as i32);
+                    }
                 }
 
                 let_cleanup.push(LetCleanup::Rec(bindings.iter().map(|(b, _)| *b).collect()));
