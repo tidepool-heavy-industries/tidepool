@@ -14,6 +14,8 @@ import Data.Word (Word64)
 import Data.Char (isDigit)
 import Data.List (isPrefixOf, isInfixOf)
 import qualified Data.Map.Strict as Map
+import System.IO (hPutStrLn, stderr)
+import Control.Monad (when)
 
 -- For specialization fallback
 import GHC.Driver.Env (HscEnv(..), hscEPS)
@@ -53,6 +55,22 @@ resolveExternals hscEnv binds = do
       -- Build name→Var lookup for Prelude substitution fallback
       localNameMap = buildLocalNameMap binds
   (resolvedBinds, substituteBinds, _, unresolved) <- go localNameMap externals emptyVarSet localBinders [] [] []
+  -- DEBUG: dump all pairs' binder keys
+  hPutStrLn stderr $ "[resolve] unresolved count: " ++ show (length unresolved)
+  mapM_ (\uv -> hPutStrLn stderr $ "  UNRESOLVED: " ++ uvModule uv ++ "." ++ uvName uv ++ " key=" ++ show (uvKey uv)) unresolved
+  hPutStrLn stderr $ "[resolve] resolved binds: " ++ show (length resolvedBinds) ++ ", substitute binds: " ++ show (length substituteBinds)
+  mapM_ (\sb -> case sb of
+    NonRec b _ -> hPutStrLn stderr $ "  SUBSTITUTE: " ++ occNameString (nameOccName (varName b)) ++ " key=" ++ show (fromIntegral (getKey (varUnique b)) :: Word64)
+    Rec _ -> return ()) substituteBinds
+  -- Dump all binder keys to find key 8766
+  let allOrigPairs = concatMap toRecPairs binds
+  mapM_ (\(b, _) -> do
+    let k = fromIntegral (getKey (varUnique b)) :: Word64
+        tag = k `div` (2^(56 :: Int))
+        baseKey = k `mod` (2^(56 :: Int))
+    when (tag == 0x73) $  -- 's' = system generated
+      hPutStrLn stderr $ "  ORIG-SYS: " ++ occNameString (nameOccName (varName b)) ++ " key=" ++ show k ++ " baseKey=" ++ show baseKey
+    ) allOrigPairs
   let resolvedPairs = concatMap toRecPairs resolvedBinds
       substitutePairs = concatMap toRecPairs substituteBinds
       -- All three groups (resolved, originals, substitutes) form a 3-way cycle:
