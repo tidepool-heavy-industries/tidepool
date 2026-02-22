@@ -13,7 +13,37 @@
   outputs = { self, nixpkgs, flake-utils, rust-overlay }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        overlays = [ (import rust-overlay) ];
+        # Overlay: rebuild GHC 9.12 with ghc-internal exposing all unfoldings.
+        # This lets our JIT resolver extract Core for deep library functions
+        # (showList__, showLitChar, etc.) that normally exceed .hi size thresholds.
+        ghcInternalOverlay = final: prev: {
+          haskell = prev.haskell // {
+            compiler = prev.haskell.compiler // {
+              ghc912 = prev.haskell.compiler.ghc912.overrideAttrs (old: {
+                postPatch = (old.postPatch or "") + ''
+                  # Inject flags into ghc-internal boot library so all unfoldings
+                  # are serialized into .hi files, even large ones like showList__
+                  # The .cabal file is generated from .cabal.in by configure,
+                  # so we must patch the template at patchPhase time.
+                  for f in libraries/ghc-internal/ghc-internal.cabal.in libraries/ghc-internal/ghc-internal.cabal; do
+                    if [ -f "$f" ]; then
+                      sed -i -e '/^library/a \    ghc-options: -fexpose-all-unfoldings -funfolding-creation-threshold=1000' "$f"
+                      echo "tidepool: patched $f with -fexpose-all-unfoldings"
+                    fi
+                  done
+                '';
+              });
+            };
+            # Rebuild the package set against the patched compiler
+            packages = prev.haskell.packages // {
+              ghc912 = prev.haskell.packages.ghc912.override {
+                ghc = final.haskell.compiler.ghc912;
+              };
+            };
+          };
+        };
+
+        overlays = [ (import rust-overlay) ghcInternalOverlay ];
         pkgs = import nixpkgs { inherit system overlays; };
         rust = pkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "rust-analyzer" ];

@@ -340,6 +340,11 @@ fn test_show_int_neg() {
     assert_eq!(json, serde_json::json!("-456"));
 }
 
+// TODO: show (Just "hello") — unfoldings now resolve cleanly with patched GHC,
+// but SIGSEGV at runtime due to deep Show machinery hitting unknown edge case.
+// The `error` sentinel (tag 0x45) is the only free var — likely from partial
+// patterns in showLitChar/protectEsc. Need to investigate the runtime crash.
+
 #[test]
 #[ignore]
 fn test_nub_by_eq_string() {
