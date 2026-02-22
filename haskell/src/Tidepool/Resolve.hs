@@ -91,12 +91,13 @@ resolveExternals hscEnv binds = do
                    mbFallback <- attemptSpecFallback hscEnv v
                    case mbFallback of
                      Just (genId, unfoldingExpr) ->
-                       let newBind = NonRec genId unfoldingExpr
+                       let genBind = NonRec genId unfoldingExpr
+                           aliasBind = NonRec v (Var genId)  -- alias $s var → generic parent
                            newFVs = exprSomeFreeVars (const True) unfoldingExpr
                            localSet' = extendVarSet (extendVarSet localSet v) genId
                            newExternals = filter (isResolvable localSet')
                                                  (nonDetEltsUniqSet newFVs)
-                       in go nameMap (newExternals ++ rest) visited' localSet' (newBind : acc) subAcc unres
+                       in go nameMap (newExternals ++ rest) visited' localSet' (genBind : acc) (aliasBind : subAcc) unres
                      Nothing ->
                        -- Despec failed too. Try Prelude substitution.
                        case preludeSubstitute nameMap vName v of
