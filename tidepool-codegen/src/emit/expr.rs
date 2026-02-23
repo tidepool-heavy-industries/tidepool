@@ -222,6 +222,19 @@ fn collapse_frame(
             let fun_ptr = fun.value();
             let arg_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, arg);
 
+            // Debug: call host fn to validate fun_ptr tag before call_indirect
+            let check_fn = pipeline.module.declare_function(
+                "debug_app_check",
+                Linkage::Import,
+                &{
+                    let mut sig = Signature::new(pipeline.isa.default_call_conv());
+                    sig.params.push(AbiParam::new(types::I64)); // fun_ptr
+                    sig
+                },
+            ).map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+            let check_ref = pipeline.module.declare_func_in_func(check_fn, builder.func);
+            builder.ins().call(check_ref, &[fun_ptr]);
+
             let code_ptr = builder.ins().load(types::I64, MemFlags::trusted(), fun_ptr, CLOSURE_CODE_PTR_OFFSET);
 
             let mut sig = Signature::new(pipeline.isa.default_call_conv());

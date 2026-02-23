@@ -19,41 +19,53 @@
         # -fexpose-all-unfoldings + high threshold retained as secondary defense.
         # Targets: ghc-internal (stdlib impl) + ghc-bignum (Integer/Natural).
         # base is just re-exports; ghc-prim has no Haskell Core.
-        ghcInternalOverlay = final: prev: {
-          haskell = prev.haskell // {
-            compiler = prev.haskell.compiler // {
-              ghc912 = prev.haskell.compiler.ghc912.overrideAttrs (old: {
-                postPatch = (old.postPatch or "") + ''
-                  TIDEPOOL_GHC_OPTS="-fexpose-all-unfoldings -funfolding-creation-threshold=100000 -fwrite-if-simplified-core"
+        ghcInternalOverlay = final: prev:
+          let
+            patchedGhc = prev.haskell.compiler.ghc912.overrideAttrs (old: {
+              postPatch = (old.postPatch or "") + ''
+                TIDEPOOL_GHC_OPTS="-fexpose-all-unfoldings -funfolding-creation-threshold=100000 -fwrite-if-simplified-core"
 
-                  # Patch ghc-internal and ghc-bignum .cabal/.cabal.in files
-                  for f in libraries/ghc-internal/ghc-internal.cabal.in libraries/ghc-internal/ghc-internal.cabal \
-                           libraries/ghc-bignum/ghc-bignum.cabal.in libraries/ghc-bignum/ghc-bignum.cabal; do
-                    if [ -f "$f" ]; then
-                      sed -i -e "/^library/a \\    ghc-options: $TIDEPOOL_GHC_OPTS" "$f"
-                      echo "tidepool: patched $f with fat interface flags"
-                    fi
-                  done
+                # Patch ghc-internal, ghc-bignum, and ghc-prim .cabal/.cabal.in files.
+                # ghc-prim has GHC.Types, GHC.CString etc. — tcTopIfaceBindings needs
+                # mi_extra_decls from these when deserializing ghc-internal's fat Core.
+                for f in libraries/ghc-internal/ghc-internal.cabal.in libraries/ghc-internal/ghc-internal.cabal \
+                         libraries/ghc-bignum/ghc-bignum.cabal.in libraries/ghc-bignum/ghc-bignum.cabal \
+                         libraries/ghc-prim/ghc-prim.cabal.in libraries/ghc-prim/ghc-prim.cabal; do
+                  if [ -f "$f" ]; then
+                    sed -i -e "/^library/a \\    ghc-options: $TIDEPOOL_GHC_OPTS" "$f"
+                    echo "tidepool: patched $f with fat interface flags"
+                  fi
+                done
 
-                  # Also inject OPTIONS_GHC pragmas into every .hs source file in case
-                  # Hadrian ignores .cabal ghc-options for boot libraries
-                  for dir in libraries/ghc-internal/src libraries/ghc-bignum/src; do
-                    if [ -d "$dir" ]; then
-                      find "$dir" -name '*.hs' -exec sed -i "1s/^/{-# OPTIONS_GHC $TIDEPOOL_GHC_OPTS #-}\n/" {} +
-                      echo "tidepool: injected OPTIONS_GHC into all .hs files in $dir"
-                    fi
-                  done
-                '';
-              });
-            };
-            # Rebuild the package set against the patched compiler
-            packages = prev.haskell.packages // {
-              ghc912 = prev.haskell.packages.ghc912.override {
-                ghc = final.haskell.compiler.ghc912;
+                # Also inject OPTIONS_GHC pragmas into every .hs source file in case
+                # Hadrian ignores .cabal ghc-options for boot libraries
+                for dir in libraries/ghc-internal/src libraries/ghc-bignum/src libraries/ghc-prim; do
+                  if [ -d "$dir" ]; then
+                    find "$dir" -name '*.hs' -exec sed -i "1s/^/{-# OPTIONS_GHC $TIDEPOOL_GHC_OPTS #-}\n/" {} +
+                    echo "tidepool: injected OPTIONS_GHC into all .hs files in $dir"
+                  fi
+                done
+              '';
+            });
+          in {
+            haskell = prev.haskell // {
+              compiler = prev.haskell.compiler // {
+                ghc912 = patchedGhc;
+              };
+              # Wire patched GHC into the package set so ALL Haskell deps
+              # (freer-simple, etc.) are rebuilt from source against the new boot lib ABIs.
+              # Both `ghc` and `buildHaskellPackages` must point to patchedGhc to avoid
+              # mixing artifacts from the old ABI universe (causes "dependency doesn't exist").
+              packages = prev.haskell.packages // {
+                ghc912 = prev.haskell.packages.ghc912.override (old: {
+                  ghc = patchedGhc;
+                  buildHaskellPackages = old.buildHaskellPackages.override (_: {
+                    ghc = patchedGhc;
+                  });
+                });
               };
             };
           };
-        };
 
         overlays = [ (import rust-overlay) ghcInternalOverlay ];
         pkgs = import nixpkgs { inherit system overlays; };
@@ -77,6 +89,9 @@
         };
 
         packages.tidepool-extract = let
+          # The overlay already wires patchedGhc into pkgs.haskell.packages.ghc912,
+          # so this package set has fat interfaces AND rebuilds all deps from source.
+          #
           # freer-simple 1.2.1.2 needs a patch for GHC 9.12: MonadBase instance
           # requires explicit Applicative+Monad constraints due to superclass changes.
           hsPkgs = pkgs.haskell.packages.ghc912.override {

@@ -147,7 +147,9 @@ pub fn compile_haskell(
 
     // 2. Execute tidepool-extract
     // Arguments: <file.hs> --output-dir <dir> --target <name> [--include <dir> ...]
-    let mut cmd = Command::new("tidepool-extract");
+    let extract_bin = std::env::var("TIDEPOOL_EXTRACT")
+        .unwrap_or_else(|_| "tidepool-extract".to_string());
+    let mut cmd = Command::new(&extract_bin);
     cmd.arg(&input_path);
     cmd.arg("--output-dir").arg(temp_dir.path());
     cmd.arg("--target").arg(target);

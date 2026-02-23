@@ -252,42 +252,42 @@ fn run_mcp_effectful(lines: &[&str]) -> (serde_json::Value, Vec<String>) {
 // ===========================================================================
 
 #[test]
-#[ignore]
+
 fn test_plain_sort() {
     let json = run_plain("sort [3, 1, 2 :: Int]");
     assert_eq!(json, serde_json::json!([1, 2, 3]));
 }
 
 #[test]
-#[ignore]
+
 fn test_eq_char() {
     let json = run_plain("'a' == 'a'");
     assert_eq!(json, serde_json::json!(true));
 }
 
 #[test]
-#[ignore]
+
 fn test_eq_string_empty() {
     let json = run_plain("eqString \"\" \"\"");
     assert_eq!(json, serde_json::json!(true));
 }
 
 #[test]
-#[ignore]
+
 fn test_and() {
     let json = run_plain("True && True");
     assert_eq!(json, serde_json::json!(true));
 }
 
 #[test]
-#[ignore]
+
 fn test_case_eq_char() {
     let json = run_plain("case \"a\" of { (x:_) -> x == 'a'; [] -> False }");
     assert_eq!(json, serde_json::json!(true));
 }
 
 #[test]
-#[ignore]
+
 fn test_eq_string_local() {
     let json = run_mcp(&[
         "let { myEq [] [] = True; myEq (x:xs) (y:ys) = x == y && myEq xs ys; myEq _ _ = False }",
@@ -297,49 +297,49 @@ fn test_eq_string_local() {
 }
 
 #[test]
-#[ignore]
+
 fn test_eq_string_simple() {
     let json = run_plain("eqString \"a\" \"a\"");
     assert_eq!(json, serde_json::json!(true));
 }
 
 #[test]
-#[ignore]
+
 fn test_eq_string_multi_char() {
     let json = run_plain("eqString \"hello\" \"hello\"");
     assert_eq!(json, serde_json::json!(true));
 }
 
 #[test]
-#[ignore]
+
 fn test_eq_string_diff_content() {
     let json = run_plain("eqString \"abc\" \"abd\"");
     assert_eq!(json, serde_json::json!(false));
 }
 
 #[test]
-#[ignore]
+
 fn test_eq_string_diff_length() {
     let json = run_plain("eqString \"ab\" \"abc\"");
     assert_eq!(json, serde_json::json!(false));
 }
 
 #[test]
-#[ignore]
+
 fn test_eq_string_diff() {
     let json = run_plain("eqString \"a\" \"b\"");
     assert_eq!(json, serde_json::json!(false));
 }
 
 #[test]
-#[ignore]
+
 fn test_show_int() {
     let json = run_plain("showInt (123 :: Int)");
     assert_eq!(json, serde_json::json!("123"));
 }
 
 #[test]
-#[ignore]
+
 fn test_show_int_neg() {
     let json = run_plain("showInt (-456 :: Int)");
     assert_eq!(json, serde_json::json!("-456"));
@@ -347,14 +347,14 @@ fn test_show_int_neg() {
 
 // Bisect: show machinery frontier tests
 #[test]
-#[ignore]
+
 fn test_show_generic_int() {
     let json = run_plain("show (42 :: Int)");
     assert_eq!(json, serde_json::json!("42"));
 }
 
 #[test]
-#[ignore]
+
 fn test_compile_show_char() {
     let src = plain_source("show 'a'");
     let count = compile_only(&src).expect("compile_only failed");
@@ -362,49 +362,49 @@ fn test_compile_show_char() {
 }
 
 #[test]
-#[ignore]
+
 fn test_show_char() {
     let json = run_plain("show 'a'");
     assert_eq!(json, serde_json::json!("'a'"));
 }
 
 #[test]
-#[ignore]
+
 fn test_show_string() {
     let json = run_plain("show \"hello\"");
     assert_eq!(json, serde_json::json!("\"hello\""));
 }
 
 #[test]
-#[ignore]
+
 fn test_show_maybe_int() {
     let json = run_plain("show (Just 42 :: Maybe Int)");
     assert_eq!(json, serde_json::json!("Just 42"));
 }
 
 #[test]
-#[ignore]
+
 fn test_show_maybe_string() {
     let json = run_plain("show (Just \"hello\" :: Maybe String)");
     assert_eq!(json, serde_json::json!("Just \"hello\""));
 }
 
 #[test]
-#[ignore]
+
 fn test_nub_by_eq_string() {
     let json = run_plain("nubBy eqString [\"a\", \"b\", \"a\", \"c\"]");
     assert_eq!(json, serde_json::json!(["a", "b", "c"]));
 }
 
 #[test]
-#[ignore]
+
 fn test_sort_by_compare_string() {
     let json = run_plain("sortBy compareString [\"c\", \"a\", \"b\"]");
     assert_eq!(json, serde_json::json!(["a", "b", "c"]));
 }
 
 #[test]
-#[ignore]
+
 fn test_nub_string() {
     // Test list equality via the Eq [Char] specialization substitute
     let json = run_plain("nub [\"a\", \"a\"]");
@@ -412,21 +412,21 @@ fn test_nub_string() {
 }
 
 #[test]
-#[ignore]
+
 fn test_intercalate() {
     let json = run_plain("intercalate \", \" [\"a\", \"b\", \"c\"]");
     assert_eq!(json, serde_json::json!("a, b, c"));
 }
 
 #[test]
-#[ignore]
+
 fn test_is_prefix_of() {
     let json = run_plain("isPrefixOf \"abc\" \"abcdef\"");
     assert_eq!(json, serde_json::json!(true));
 }
 
 #[test]
-#[ignore]
+
 fn test_replicate() {
     let json = run_plain("replicate 3 \"a\"");
     assert_eq!(json, serde_json::json!(["a", "a", "a"]));
@@ -437,35 +437,35 @@ fn test_replicate() {
 // ===========================================================================
 
 #[test]
-#[ignore]
+
 fn test_mcp_pure_lit() {
     let json = run_mcp(&["pure (42 :: Int)"]);
     assert_eq!(json, serde_json::json!(42));
 }
 
 #[test]
-#[ignore]
+
 fn test_mcp_pure_list() {
     let json = run_mcp(&["pure [1,2,3 :: Int]"]);
     assert_eq!(json, serde_json::json!([1, 2, 3]));
 }
 
 #[test]
-#[ignore]
+
 fn test_mcp_pure_string() {
     let json = run_mcp(&["pure \"hello\""]);
     assert_eq!(json, serde_json::json!("hello"));
 }
 
 #[test]
-#[ignore]
+
 fn test_mcp_pure_bool() {
     let json = run_mcp(&["pure True"]);
     assert_eq!(json, serde_json::json!(true));
 }
 
 #[test]
-#[ignore]
+
 fn test_mcp_pure_pair() {
     let json = run_mcp(&["pure (1 :: Int, True)"]);
     // Pair rendered as 2-element array
@@ -476,7 +476,7 @@ fn test_mcp_pure_pair() {
 }
 
 #[test]
-#[ignore]
+
 fn test_mcp_let_binding() {
     let json = run_mcp(&[
         "let x = 10 :: Int",
@@ -486,56 +486,56 @@ fn test_mcp_let_binding() {
 }
 
 #[test]
-#[ignore]
+
 fn test_mcp_reverse() {
     let json = run_mcp(&["pure (reverse [1,2,3 :: Int])"]);
     assert_eq!(json, serde_json::json!([3, 2, 1]));
 }
 
 #[test]
-#[ignore]
+
 fn test_mcp_map() {
     let json = run_mcp(&["pure (map (+1) [1,2,3 :: Int])"]);
     assert_eq!(json, serde_json::json!([2, 3, 4]));
 }
 
 #[test]
-#[ignore]
+
 fn test_mcp_filter() {
     let json = run_mcp(&["pure (filter (> 2) [1,2,3,4,5 :: Int])"]);
     assert_eq!(json, serde_json::json!([3, 4, 5]));
 }
 
 #[test]
-#[ignore]
+
 fn test_mcp_words() {
     let json = run_mcp(&["pure (words \"hello world\")"]);
     assert_eq!(json, serde_json::json!(["hello", "world"]));
 }
 
 #[test]
-#[ignore]
+
 fn test_mcp_length() {
     let json = run_mcp(&["pure (length [10,20,30 :: Int])"]);
     assert_eq!(json, serde_json::json!(3));
 }
 
 #[test]
-#[ignore]
+
 fn test_mcp_take() {
     let json = run_mcp(&["pure (take 2 [1,2,3,4 :: Int])"]);
     assert_eq!(json, serde_json::json!([1, 2]));
 }
 
 #[test]
-#[ignore]
+
 fn test_mcp_string_append() {
     let json = run_mcp(&["pure (\"hello\" ++ \" world\")"]);
     assert_eq!(json, serde_json::json!("hello world"));
 }
 
 #[test]
-#[ignore]
+
 fn test_mcp_multi_line_do() {
     let json = run_mcp(&[
         "let xs = [1,2,3 :: Int]",
@@ -546,7 +546,7 @@ fn test_mcp_multi_line_do() {
 }
 
 #[test]
-#[ignore]
+
 fn test_mcp_sort() {
     // Prelude sort pulls in Ord typeclass dictionaries that --all-closed
     // extraction doesn't fully resolve → Jit(MissingConTags).
@@ -556,7 +556,7 @@ fn test_mcp_sort() {
 }
 
 #[test]
-#[ignore]
+
 fn test_mcp_inline_sort() {
     // Inline sort (no Ord dictionary from prelude) — this worked in MCP.
     let json = run_mcp(&[
@@ -571,7 +571,7 @@ fn test_mcp_inline_sort() {
 // ===========================================================================
 
 #[test]
-#[ignore]
+
 fn test_effect_kv_set_get() {
     // The original bug: () return from KvSet must be TAG_CON
     let (json, _) = run_mcp_effectful(&[
@@ -582,7 +582,7 @@ fn test_effect_kv_set_get() {
 }
 
 #[test]
-#[ignore]
+
 fn test_effect_kv_get_missing() {
     let (json, _) = run_mcp_effectful(&[
         "send (KvGet \"nope\")",
@@ -591,7 +591,7 @@ fn test_effect_kv_get_missing() {
 }
 
 #[test]
-#[ignore]
+
 fn test_effect_kv_delete_then_get() {
     let (json, _) = run_mcp_effectful(&[
         "send (KvSet \"k\" \"v\")",
@@ -602,7 +602,7 @@ fn test_effect_kv_delete_then_get() {
 }
 
 #[test]
-#[ignore]
+
 fn test_effect_kv_keys() {
     let (json, _) = run_mcp_effectful(&[
         "send (KvSet \"a\" \"1\")",
@@ -619,7 +619,7 @@ fn test_effect_kv_keys() {
 }
 
 #[test]
-#[ignore]
+
 fn test_effect_console_print() {
     let (json, lines) = run_mcp_effectful(&[
         "send (Print \"hello\")",
@@ -630,7 +630,7 @@ fn test_effect_console_print() {
 }
 
 #[test]
-#[ignore]
+
 fn test_effect_console_multi_print() {
     let (json, lines) = run_mcp_effectful(&[
         "send (Print \"a\")",
@@ -643,7 +643,7 @@ fn test_effect_console_multi_print() {
 }
 
 #[test]
-#[ignore]
+
 fn test_effect_mixed_console_kv() {
     let (json, lines) = run_mcp_effectful(&[
         "send (Print \"storing\")",
@@ -657,7 +657,7 @@ fn test_effect_mixed_console_kv() {
 }
 
 #[test]
-#[ignore]
+
 fn test_effect_kv_conditional() {
     let (json, _) = run_mcp_effectful(&[
         "send (KvSet \"flag\" \"yes\")",
@@ -669,7 +669,7 @@ fn test_effect_kv_conditional() {
 }
 
 #[test]
-#[ignore]
+
 fn test_effect_kv_overwrite() {
     let (json, _) = run_mcp_effectful(&[
         "send (KvSet \"k\" \"old\")",
@@ -680,7 +680,7 @@ fn test_effect_kv_overwrite() {
 }
 
 #[test]
-#[ignore]
+
 fn test_effect_words() {
     // FsRead returns "stub" by default in our mock
     let (json, _) = run_mcp_effectful(&[
@@ -691,7 +691,7 @@ fn test_effect_words() {
 }
 
 #[test]
-#[ignore]
+
 fn test_effect_words_custom() {
     let (json, _) = run_mcp_effectful(&[
         "pure (words \"  hello   world  \")",

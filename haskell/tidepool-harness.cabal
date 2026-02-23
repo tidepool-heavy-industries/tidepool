@@ -10,6 +10,7 @@ executable tidepool-harness
     Tidepool.GhcPipeline
     Tidepool.Translate
     Tidepool.Resolve
+    Tidepool.FatIface
     Tidepool.CborEncode
   build-depends:
     base         >= 4.20 && < 5,

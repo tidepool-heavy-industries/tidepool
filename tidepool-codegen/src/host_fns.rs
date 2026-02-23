@@ -167,11 +167,13 @@ pub extern "C" fn unresolved_var_trap(var_id: u64) -> *mut u8 {
     let tag_char = (var_id >> 56) as u8 as char;
     let key = var_id & ((1u64 << 56) - 1);
     eprintln!(
-        "[FATAL] Forced unresolved external variable: VarId({}) [tag='{}', key={}]",
+        "[FATAL] Forced unresolved external variable: VarId({:#x}) [tag='{}', key={}]",
         var_id, tag_char, key
     );
-    eprintln!("  Backtrace: set RUST_BACKTRACE=1 for details");
-    std::ptr::null_mut()
+    eprintln!("  Backtrace:");
+    let bt = std::backtrace::Backtrace::force_capture();
+    eprintln!("{}", bt);
+    std::process::abort();
 }
 
 /// Called by JIT code for runtime errors (divZeroError, overflowError).
@@ -179,6 +181,15 @@ pub extern "C" fn unresolved_var_trap(var_id: u64) -> *mut u8 {
 /// checks this after JIT returns and converts to Yield::Error.
 /// kind: 0 = divZeroError, 1 = overflowError
 pub extern "C" fn runtime_error(kind: u64) -> *mut u8 {
+    let err_name = match kind {
+        0 => "DivisionByZero",
+        1 => "Overflow",
+        2 => "UserError",
+        3 => "Undefined",
+        4 => "TypeMetadata",
+        _ => "Unknown",
+    };
+    eprintln!("[JIT] runtime_error called: kind={} ({})", kind, err_name);
     let err = match kind {
         0 => RuntimeError::DivisionByZero,
         1 => RuntimeError::Overflow,
@@ -201,6 +212,36 @@ pub fn take_runtime_error() -> Option<RuntimeError> {
 /// Return the list of host function symbols for JIT registration.
 ///
 /// Usage: `CodegenPipeline::new(&host_fn_symbols())`
+/// Debug: called before every App call_indirect to validate the function pointer.
+/// Prints the heap tag and code_ptr. Aborts on non-closure.
+pub extern "C" fn debug_app_check(fun_ptr: *const u8) {
+    if fun_ptr.is_null() {
+        eprintln!("[JIT] App: fun_ptr is NULL");
+        std::process::abort();
+    }
+    let tag = unsafe { *fun_ptr };
+    if tag != tidepool_heap::layout::TAG_CLOSURE {
+        let tag_name = match tag {
+            0 => "Closure",
+            1 => "Thunk",
+            2 => "Con",
+            3 => "Lit",
+            _ => "UNKNOWN",
+        };
+        eprintln!(
+            "[JIT] App: fun_ptr={:p} has tag {} ({}) — expected Closure!",
+            fun_ptr, tag, tag_name
+        );
+        // Read more context for debugging
+        if tag == tidepool_heap::layout::TAG_CON {
+            let con_tag = unsafe { *(fun_ptr.add(8) as *const u64) };
+            let num_fields = unsafe { *(fun_ptr.add(16) as *const u16) };
+            eprintln!("[JIT]   Con tag={}, num_fields={}", con_tag, num_fields);
+        }
+        std::process::abort();
+    }
+}
+
 pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
     vec![
         ("gc_trigger", gc_trigger as *const u8),
@@ -208,5 +249,6 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
         ("heap_force", heap_force as *const u8),
         ("unresolved_var_trap", unresolved_var_trap as *const u8),
         ("runtime_error", runtime_error as *const u8),
+        ("debug_app_check", debug_app_check as *const u8),
     ]
 }

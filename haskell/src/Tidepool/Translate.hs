@@ -170,7 +170,7 @@ translateModule allBinds targetName unresolvedIds =
     isMetadataBinder :: Id -> Bool
     isMetadataBinder b =
       let name = occNameString (nameOccName (idName b))
-      in any (`isPrefixOf` name) ["$trModule", "$krep", "$tc", "$cShow"]
+      in any (`isPrefixOf` name) ["$trModule", "$krep", "$tc"]
 
     -- | Filter bindings to only those transitively reachable from the target.
     -- Flattens Rec groups into individual (binder, rhs) pairs for fine-grained

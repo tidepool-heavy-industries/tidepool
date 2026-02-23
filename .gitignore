@@ -47,6 +47,5 @@ haskell/test/suite_cbor/con_nested_just_1.cbor
 # Duplicate extraction output (Suite_cbor/ vs suite_cbor/)
 haskell/test/Suite_cbor/
 
-# Experimental Haskell modules
-haskell/src/Tidepool/FatIface.hs
+# Experimental Haskell modules (none currently)
 haskell/test-prelude.hs

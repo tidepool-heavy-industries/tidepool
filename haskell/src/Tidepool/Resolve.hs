@@ -23,9 +23,9 @@ import GHC.Types.Name.Env (lookupNameEnv)
 import GHC.Types.TyThing (TyThing(..))
 import Control.Concurrent.MVar (readMVar)
 
--- Fat interface fallback (mi_extra_decls) — disabled for now, threshold bump
--- may be sufficient. Re-enable if workers still return NoUnfolding.
--- import Tidepool.FatIface (FatIfaceCache, newFatIfaceCache, lookupFatIface)
+-- Fat interface fallback (mi_extra_decls) — for loop-breakers whose
+-- unfoldings are not exposed via realIdUnfolding even with threshold bumps.
+import Tidepool.FatIface (FatIfaceCache, newFatIfaceCache, lookupFatIface)
 
 data UnresolvedVar = UnresolvedVar
   { uvKey    :: !Word64
@@ -56,7 +56,8 @@ resolveExternals hscEnv binds = do
       externals    = filter (isResolvable localBinders) (nonDetEltsUniqSet allFreeVars)
       -- Build name→Var lookup for Prelude substitution fallback
       localNameMap = buildLocalNameMap binds
-  (resolvedBinds, substituteBinds, _, unresolved) <- go localNameMap externals emptyVarSet localBinders [] [] []
+  fatCache <- newFatIfaceCache
+  (resolvedBinds, substituteBinds, _, unresolved) <- go fatCache localNameMap externals emptyVarSet localBinders [] [] []
   let resolvedPairs = concatMap toRecPairs resolvedBinds
       substitutePairs = concatMap toRecPairs substituteBinds
       -- All three groups (resolved, originals, substitutes) form a 3-way cycle:
@@ -70,12 +71,12 @@ resolveExternals hscEnv binds = do
       augmented = if null allPairs then [] else [Rec allPairs]
   return (augmented, unresolved)
   where
-    go :: Map.Map String (Var, CoreExpr) -> [Var] -> VarSet -> VarSet
+    go :: FatIfaceCache -> Map.Map String (Var, CoreExpr) -> [Var] -> VarSet -> VarSet
        -> [CoreBind] -> [CoreBind] -> [UnresolvedVar]
        -> IO ([CoreBind], [CoreBind], VarSet, [UnresolvedVar])
-    go _ [] visited _ acc subAcc unres = return (reverse acc, reverse subAcc, visited, reverse unres)
-    go nameMap (v:rest) visited localSet acc subAcc unres
-      | elemVarSet v visited = go nameMap rest visited localSet acc subAcc unres
+    go _ _ [] visited _ acc subAcc unres = return (reverse acc, reverse subAcc, visited, reverse unres)
+    go fatCache nameMap (v:rest) visited localSet acc subAcc unres
+      | elemVarSet v visited = go fatCache nameMap rest visited localSet acc subAcc unres
       | otherwise = do
           let visited' = extendVarSet visited v
               vName = occNameString (nameOccName (varName v))
@@ -85,7 +86,7 @@ resolveExternals hscEnv binds = do
                     localSet' = extendVarSet localSet v
                     newExternals = filter (isResolvable localSet')
                                          (nonDetEltsUniqSet newFVs)
-                in go nameMap (newExternals ++ rest) visited' localSet' (newBind : acc) subAcc unres
+                in go fatCache nameMap (newExternals ++ rest) visited' localSet' (newBind : acc) subAcc unres
           case maybeUnfoldingTemplate (idUnfolding v) of
                Just unfoldingExpr -> handleUnfolding unfoldingExpr
                Nothing -> case maybeUnfoldingTemplate (realIdUnfolding v) of
@@ -101,22 +102,29 @@ resolveExternals hscEnv binds = do
                            localSet' = extendVarSet (extendVarSet localSet v) genId
                            newExternals = filter (isResolvable localSet')
                                                  (nonDetEltsUniqSet newFVs)
-                       in go nameMap (newExternals ++ rest) visited' localSet' (genBind : acc) (aliasBind : subAcc) unres
+                       in go fatCache nameMap (newExternals ++ rest) visited' localSet' (genBind : acc) (aliasBind : subAcc) unres
                      Nothing ->
                        -- Despec failed too. Try Prelude substitution.
                        case preludeSubstitute nameMap vName v of
                          Just subBind ->
                            let localSet' = extendVarSet localSet v
-                           in go nameMap rest visited' localSet' acc (subBind : subAcc) unres
-                         Nothing ->
-                           let uv = UnresolvedVar
-                                 { uvKey    = fromIntegral (getKey (varUnique v))
-                                 , uvName   = occNameString (nameOccName (varName v))
-                                 , uvModule = case nameModule_maybe (varName v) of
-                                                Just m  -> moduleNameString (moduleName m)
-                                                Nothing -> "<no module>"
-                                 }
-                           in go nameMap rest visited' localSet acc subAcc (uv : unres)
+                           in go fatCache nameMap rest visited' localSet' acc (subBind : subAcc) unres
+                         Nothing -> do
+                           -- Last resort: fat interface fallback (mi_extra_decls).
+                           -- Handles loop-breakers like itos' whose unfoldings are
+                           -- not exposed via realIdUnfolding.
+                           mbFat <- lookupFatIface hscEnv fatCache (varName v)
+                           case mbFat of
+                             Just fatExpr -> handleUnfolding fatExpr
+                             Nothing ->
+                               let uv = UnresolvedVar
+                                     { uvKey    = fromIntegral (getKey (varUnique v))
+                                     , uvName   = occNameString (nameOccName (varName v))
+                                     , uvModule = case nameModule_maybe (varName v) of
+                                                    Just m  -> moduleNameString (moduleName m)
+                                                    Nothing -> "<no module>"
+                                     }
+                               in go fatCache nameMap rest visited' localSet acc subAcc (uv : unres)
 
     toRecPairs :: CoreBind -> [(Var, CoreExpr)]
     toRecPairs (NonRec b rhs) = [(b, rhs)]
