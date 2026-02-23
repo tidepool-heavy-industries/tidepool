@@ -346,7 +346,13 @@ fn emit_lam(
     let mut sorted_fvs: Vec<VarId> = fvs.into_iter().filter(|v| ctx.env.contains_key(v)).collect();
     sorted_fvs.sort_by_key(|v| v.0);
 
-    let captures: Vec<(VarId, SsaVal)> = sorted_fvs.iter().map(|v| (*v, ctx.env[v])).collect();
+    let captures: Vec<(VarId, SsaVal)> = sorted_fvs.iter().map(|v| {
+        let val = ctx.env.get(v).unwrap_or_else(|| {
+            panic!("Lam capture: VarId({:#x}) not in env. env keys: {:?}",
+                   v.0, ctx.env.keys().map(|k| format!("{:#x}", k.0)).collect::<Vec<_>>())
+        });
+        (*v, *val)
+    }).collect();
 
     let lambda_name = ctx.next_lambda_name();
     let mut closure_sig = Signature::new(pipeline.isa.default_call_conv());
@@ -635,7 +641,13 @@ impl EmitContext {
                     };
                     let lam_body_tree = tree.extract_subtree(lam_body);
 
-                    let captures: Vec<(VarId, SsaVal)> = sorted_fvs.iter().map(|v| (*v, self.env[v])).collect();
+                    let captures: Vec<(VarId, SsaVal)> = sorted_fvs.iter().map(|v| {
+                        let val = self.env.get(v).unwrap_or_else(|| {
+                            panic!("LetRec Lam capture: VarId({:#x}) not in env. env keys: {:?}",
+                                   v.0, self.env.keys().map(|k| format!("{:#x}", k.0)).collect::<Vec<_>>())
+                        });
+                        (*v, *val)
+                    }).collect();
 
                     let lambda_name = self.next_lambda_name();
                     let mut closure_sig = Signature::new(pipeline.isa.default_call_conv());

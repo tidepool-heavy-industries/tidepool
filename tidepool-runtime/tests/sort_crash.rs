@@ -23,6 +23,10 @@ fn prelude_path() -> std::path::PathBuf {
 /// Build the exact Haskell source the MCP server generates for a given
 /// set of do-notation lines with Console/KV/Fs effects.
 fn mcp_source(lines: &[&str]) -> String {
+    mcp_source_with_helpers(lines, &[])
+}
+
+fn mcp_source_with_helpers(lines: &[&str], helpers: &[&str]) -> String {
     let mut s = String::from(
 r#"{-# LANGUAGE NoImplicitPrelude, DataKinds, TypeOperators, FlexibleContexts, GADTs, PartialTypeSignatures, ScopedTypeVariables #-}
 module Expr where
@@ -42,9 +46,13 @@ data Fs a where
   FsRead :: String -> Fs String
   FsWrite :: String -> String -> Fs ()
 
-result :: Eff '[Console, KV, Fs] _
-result = do
 "#);
+    for helper in helpers {
+        s.push_str(helper);
+        s.push('\n');
+        s.push('\n');
+    }
+    s.push_str("result :: Eff '[Console, KV, Fs] _\nresult = do\n");
     for line in lines {
         s.push_str("  ");
         s.push_str(line);
@@ -227,7 +235,11 @@ impl EffectHandler for TestFs {
 /// Run an effectful MCP test with real Console/KV/Fs handlers.
 /// Returns (json_result, console_lines).
 fn run_mcp_effectful(lines: &[&str]) -> (serde_json::Value, Vec<String>) {
-    let src = mcp_source(lines);
+    run_mcp_effectful_with_helpers(lines, &[])
+}
+
+fn run_mcp_effectful_with_helpers(lines: &[&str], helpers: &[&str]) -> (serde_json::Value, Vec<String>) {
+    let src = mcp_source_with_helpers(lines, helpers);
     let pp = prelude_path();
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
@@ -697,4 +709,30 @@ fn test_effect_words_custom() {
         "pure (words \"  hello   world  \")",
     ]);
     assert_eq!(json, serde_json::json!(["hello", "world"]));
+}
+
+// ===========================================================================
+// Helper function tests (multi-arg lambdas calling effects)
+// ===========================================================================
+
+#[test]
+fn test_effect_helper_two_args() {
+    // Reproducer: two-arg helper function that calls KvGet + case + KvSet/FsWrite.
+    // Panicked with "no entry found for key" (HashMap Index on missing VarId).
+    let (json, console) = run_mcp_effectful_with_helpers(
+        &[
+            "send (KvSet \"a\" \"data\")",
+            "persist \"a\" \"out.txt\"",
+            "pure \"done\"",
+        ],
+        &[
+r#"persist :: String -> String -> Eff '[Console, KV, Fs] ()
+persist key filename = do
+  val <- send (KvGet key)
+  case val of
+    Nothing -> send (Print "nothing")
+    Just content -> send (FsWrite filename content)"#,
+        ],
+    );
+    assert_eq!(json, serde_json::json!("done"));
 }
