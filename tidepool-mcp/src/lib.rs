@@ -108,6 +108,12 @@ fn build_preamble(effects: &[EffectDecl]) -> String {
         out.push('\n');
     }
 
+    // Type alias so helpers can write `M a` instead of `Eff '[Console, KV, Fs] a`
+    if !effects.is_empty() {
+        let names: Vec<&str> = effects.iter().map(|e| e.type_name).collect();
+        out.push_str(&format!("type M = Eff '[{}]\n\n", names.join(", ")));
+    }
+
     out
 }
 
@@ -155,13 +161,18 @@ fn template_haskell(
 ) -> String {
     let mut out = String::new();
 
-    out.push_str(preamble);
-
-    for imp in imports {
-        out.push_str(&format!("import {}\n", imp));
-    }
+    // Preamble contains: pragmas, module header, standard imports, default decl,
+    // data declarations, type alias. User imports must go after standard imports
+    // (after "import Control.Monad.Freer\n") and before "default".
     if !imports.is_empty() {
-        out.push('\n');
+        let insert_point = preamble.find("default (Int)").unwrap_or(preamble.len());
+        out.push_str(&preamble[..insert_point]);
+        for imp in imports {
+            out.push_str(&format!("import {}\n", imp));
+        }
+        out.push_str(&preamble[insert_point..]);
+    } else {
+        out.push_str(preamble);
     }
 
     for helper in helpers {

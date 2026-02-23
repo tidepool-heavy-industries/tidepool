@@ -759,6 +759,8 @@ mapPrimOp = \case
   FloatToIntOp    -> "Float2Int"
   DoubleToFloatOp -> "Double2Float"
   FloatToDoubleOp -> "Float2Double"
+  -- Pointer equality (polyfill: always 0# = not equal)
+  ReallyUnsafePtrEqualityOp -> "ReallyUnsafePtrEquality"
   -- Addr#
   IndexOffAddrOp_Char -> "IndexCharOffAddr"
   -- Exception

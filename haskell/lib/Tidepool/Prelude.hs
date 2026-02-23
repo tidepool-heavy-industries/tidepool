@@ -51,12 +51,23 @@ module Tidepool.Prelude
   , intercalate
   , isPrefixOf
   , intersperse
+    -- * Monadic combinators
+  , mapM, mapM_, sequence, sequence_
+  , when, unless, void, join, guard
+  , forM, forM_
+  , (=<<), (>=>), (<=<)
+  , foldM, foldM_
+    -- * Maybe/Either utilities
+  , maybe, fromMaybe, isJust, isNothing, catMaybes, mapMaybe
+  , either
     -- * Partial functions (use with care)
   , head
   , tail
   , last
+    -- * Char/Enum
+  , ord, chr, fromEnum
     -- * Numeric
-  , showInt
+  , showInt, readInt
     -- * String comparison
   , compareString
   , eqString
@@ -73,6 +84,7 @@ import Prelude
   , not, (&&), (||), otherwise, seq
   , fst, snd, curry, uncurry
   , error, undefined
+  , maybe, either
   , show
   , map, filter, foldl, foldr
   , take, drop, zip, zipWith, unzip
@@ -84,8 +96,17 @@ import Prelude
   , negate, quot, rem
   , compare
   , fromEnum
+  , mapM, mapM_, sequence, sequence_
   )
+import Data.Char (ord, chr)
+import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe)
 import Data.List (foldl')
+import Control.Monad
+  ( when, unless, void, join, guard
+  , forM, forM_
+  , (=<<), (>=>), (<=<)
+  , foldM, foldM_
+  )
 
 -- | Marker typeclass for types whose runtime values can be rendered to JSON
 -- by the Rust-side value_to_json renderer. Use @pure x@ to return values
@@ -352,6 +373,20 @@ showInt n
       5 -> '5'; 6 -> '6'; 7 -> '7'; 8 -> '8'; 9 -> '9'
       _ -> '?'
 {-# INLINE showInt #-}
+
+-- | Parse a decimal string to an Int. No error handling — returns 0 for empty.
+readInt :: String -> Int
+readInt [] = 0
+readInt ('-':cs) = negate (readPos cs)
+readInt cs = readPos cs
+
+readPos :: String -> Int
+readPos = go 0
+  where
+    go :: Int -> String -> Int
+    go !acc [] = acc
+    go !acc (c:rest) = go (acc * 10 + (ord c - ord '0')) rest
+{-# INLINE readInt #-}
 
 -- | Lexicographic comparison of Strings.
 compareString :: String -> String -> Ordering

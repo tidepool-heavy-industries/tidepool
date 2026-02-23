@@ -35,6 +35,63 @@ pub fn emit_primop(
             let a = unbox_int(builder, args[0]);
             Ok(SsaVal::Raw(builder.ins().ineg(a), LIT_TAG_INT))
         }
+        PrimOpKind::IntQuot => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().sdiv(a, b), LIT_TAG_INT))
+        }
+        PrimOpKind::IntRem => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().srem(a, b), LIT_TAG_INT))
+        }
+
+        // Int bitwise
+        PrimOpKind::IntAnd => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().band(a, b), LIT_TAG_INT))
+        }
+        PrimOpKind::IntOr => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().bor(a, b), LIT_TAG_INT))
+        }
+        PrimOpKind::IntXor => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().bxor(a, b), LIT_TAG_INT))
+        }
+        PrimOpKind::IntNot => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            Ok(SsaVal::Raw(builder.ins().bnot(a), LIT_TAG_INT))
+        }
+
+        // Int shifts
+        PrimOpKind::IntShl => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().ishl(a, b), LIT_TAG_INT))
+        }
+        PrimOpKind::IntShra => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().sshr(a, b), LIT_TAG_INT))
+        }
+        PrimOpKind::IntShrl => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().ushr(a, b), LIT_TAG_INT))
+        }
 
         // Int comparison → returns i64 (0=False, 1=True)
         PrimOpKind::IntEq => emit_int_compare(builder, op, IntCC::Equal, args, LIT_TAG_INT),
@@ -62,6 +119,58 @@ pub fn emit_primop(
             let a = unbox_int(builder, args[0]);
             let b = unbox_int(builder, args[1]);
             Ok(SsaVal::Raw(builder.ins().imul(a, b), LIT_TAG_WORD))
+        }
+
+        PrimOpKind::WordQuot => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().udiv(a, b), LIT_TAG_WORD))
+        }
+        PrimOpKind::WordRem => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().urem(a, b), LIT_TAG_WORD))
+        }
+
+        // Word bitwise
+        PrimOpKind::WordAnd => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().band(a, b), LIT_TAG_WORD))
+        }
+        PrimOpKind::WordOr => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().bor(a, b), LIT_TAG_WORD))
+        }
+        PrimOpKind::WordXor => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().bxor(a, b), LIT_TAG_WORD))
+        }
+        PrimOpKind::WordNot => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            Ok(SsaVal::Raw(builder.ins().bnot(a), LIT_TAG_WORD))
+        }
+
+        // Word shifts
+        PrimOpKind::WordShl => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().ishl(a, b), LIT_TAG_WORD))
+        }
+        PrimOpKind::WordShrl => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().ushr(a, b), LIT_TAG_WORD))
         }
 
         // Word comparison (unsigned)
@@ -114,38 +223,7 @@ pub fn emit_primop(
         PrimOpKind::CharGt => emit_int_compare(builder, op, IntCC::UnsignedGreaterThan, args, LIT_TAG_INT),
         PrimOpKind::CharGe => emit_int_compare(builder, op, IntCC::UnsignedGreaterThanOrEqual, args, LIT_TAG_INT),
 
-        // Special ops
-        PrimOpKind::DataToTag => {
-            check_arity(op, 1, args.len())?;
-            // Load con_tag from HeapObject at CON_TAG_OFFSET
-            let obj = args[0].value(); // HeapPtr
-            let tag = builder.ins().load(types::I64, MemFlags::trusted(), obj, CON_TAG_OFFSET);
-            Ok(SsaVal::Raw(tag, LIT_TAG_INT))
-        }
-        PrimOpKind::IntQuot => {
-            check_arity(op, 2, args.len())?;
-            let a = unbox_int(builder, args[0]);
-            let b = unbox_int(builder, args[1]);
-            Ok(SsaVal::Raw(builder.ins().sdiv(a, b), LIT_TAG_INT))
-        }
-        PrimOpKind::IntRem => {
-            check_arity(op, 2, args.len())?;
-            let a = unbox_int(builder, args[0]);
-            let b = unbox_int(builder, args[1]);
-            Ok(SsaVal::Raw(builder.ins().srem(a, b), LIT_TAG_INT))
-        }
-        PrimOpKind::WordQuot => {
-            check_arity(op, 2, args.len())?;
-            let a = unbox_int(builder, args[0]);
-            let b = unbox_int(builder, args[1]);
-            Ok(SsaVal::Raw(builder.ins().udiv(a, b), LIT_TAG_WORD))
-        }
-        PrimOpKind::WordRem => {
-            check_arity(op, 2, args.len())?;
-            let a = unbox_int(builder, args[0]);
-            let b = unbox_int(builder, args[1]);
-            Ok(SsaVal::Raw(builder.ins().urem(a, b), LIT_TAG_WORD))
-        }
+        // Conversions
         PrimOpKind::Chr => {
             check_arity(op, 1, args.len())?;
             let v = unbox_int(builder, args[0]);
@@ -156,6 +234,106 @@ pub fn emit_primop(
             let v = unbox_int(builder, args[0]);
             Ok(SsaVal::Raw(v, LIT_TAG_INT))
         }
+        PrimOpKind::Int2Word | PrimOpKind::Word2Int => {
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(builder, args[0]);
+            let tag = if matches!(op, PrimOpKind::Int2Word) { LIT_TAG_WORD } else { LIT_TAG_INT };
+            Ok(SsaVal::Raw(v, tag))
+        }
+        PrimOpKind::Int2Double => {
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(builder, args[0]);
+            Ok(SsaVal::Raw(builder.ins().fcvt_from_sint(types::F64, v), LIT_TAG_DOUBLE))
+        }
+        PrimOpKind::Double2Int => {
+            check_arity(op, 1, args.len())?;
+            let v = unbox_double(builder, args[0]);
+            Ok(SsaVal::Raw(builder.ins().fcvt_to_sint_sat(types::I64, v), LIT_TAG_INT))
+        }
+        PrimOpKind::Int2Float => {
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(builder, args[0]);
+            Ok(SsaVal::Raw(builder.ins().fcvt_from_sint(types::F32, v), LIT_TAG_FLOAT))
+        }
+        PrimOpKind::Float2Int => {
+            check_arity(op, 1, args.len())?;
+            let v = unbox_float(builder, args[0]);
+            Ok(SsaVal::Raw(builder.ins().fcvt_to_sint_sat(types::I64, v), LIT_TAG_INT))
+        }
+        PrimOpKind::Double2Float => {
+            check_arity(op, 1, args.len())?;
+            let v = unbox_double(builder, args[0]);
+            Ok(SsaVal::Raw(builder.ins().fdemote(types::F32, v), LIT_TAG_FLOAT))
+        }
+        PrimOpKind::Float2Double => {
+            check_arity(op, 1, args.len())?;
+            let v = unbox_float(builder, args[0]);
+            Ok(SsaVal::Raw(builder.ins().fpromote(types::F64, v), LIT_TAG_DOUBLE))
+        }
+
+        // Narrowing (truncate then sign/zero-extend back to i64)
+        PrimOpKind::Narrow8Int => {
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(builder, args[0]);
+            let narrow = builder.ins().ireduce(types::I8, v);
+            Ok(SsaVal::Raw(builder.ins().sextend(types::I64, narrow), LIT_TAG_INT))
+        }
+        PrimOpKind::Narrow16Int => {
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(builder, args[0]);
+            let narrow = builder.ins().ireduce(types::I16, v);
+            Ok(SsaVal::Raw(builder.ins().sextend(types::I64, narrow), LIT_TAG_INT))
+        }
+        PrimOpKind::Narrow32Int => {
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(builder, args[0]);
+            let narrow = builder.ins().ireduce(types::I32, v);
+            Ok(SsaVal::Raw(builder.ins().sextend(types::I64, narrow), LIT_TAG_INT))
+        }
+        PrimOpKind::Narrow8Word => {
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(builder, args[0]);
+            let narrow = builder.ins().ireduce(types::I8, v);
+            Ok(SsaVal::Raw(builder.ins().uextend(types::I64, narrow), LIT_TAG_WORD))
+        }
+        PrimOpKind::Narrow16Word => {
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(builder, args[0]);
+            let narrow = builder.ins().ireduce(types::I16, v);
+            Ok(SsaVal::Raw(builder.ins().uextend(types::I64, narrow), LIT_TAG_WORD))
+        }
+        PrimOpKind::Narrow32Word => {
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(builder, args[0]);
+            let narrow = builder.ins().ireduce(types::I32, v);
+            Ok(SsaVal::Raw(builder.ins().uextend(types::I64, narrow), LIT_TAG_WORD))
+        }
+
+        // Special ops
+        PrimOpKind::DataToTag => {
+            check_arity(op, 1, args.len())?;
+            let obj = args[0].value();
+            let tag = builder.ins().load(types::I64, MemFlags::trusted(), obj, CON_TAG_OFFSET);
+            Ok(SsaVal::Raw(tag, LIT_TAG_INT))
+        }
+        PrimOpKind::DoubleNegate => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_double(builder, args[0]);
+            Ok(SsaVal::Raw(builder.ins().fneg(a), LIT_TAG_DOUBLE))
+        }
+        PrimOpKind::FloatNegate => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_float(builder, args[0]);
+            Ok(SsaVal::Raw(builder.ins().fneg(a), LIT_TAG_FLOAT))
+        }
+
+        // Pointer equality polyfill: always return 0 (not equal).
+        // Safe — just disables GHC's structural sharing optimization.
+        PrimOpKind::ReallyUnsafePtrEquality => {
+            check_arity(op, 2, args.len())?;
+            Ok(SsaVal::Raw(builder.ins().iconst(types::I64, 0), LIT_TAG_INT))
+        }
+
         PrimOpKind::TagToEnum | PrimOpKind::IndexArray | PrimOpKind::SeqOp => {
             Err(EmitError::NotYetImplemented(format!("{:?}", op)))
         }
@@ -210,5 +388,12 @@ pub fn unbox_double(builder: &mut FunctionBuilder, val: SsaVal) -> Value {
     match val {
         SsaVal::Raw(v, _) => v,
         SsaVal::HeapPtr(v) => builder.ins().load(types::F64, MemFlags::trusted(), v, LIT_VALUE_OFFSET),
+    }
+}
+
+pub fn unbox_float(builder: &mut FunctionBuilder, val: SsaVal) -> Value {
+    match val {
+        SsaVal::Raw(v, _) => v,
+        SsaVal::HeapPtr(v) => builder.ins().load(types::F32, MemFlags::trusted(), v, LIT_VALUE_OFFSET),
     }
 }

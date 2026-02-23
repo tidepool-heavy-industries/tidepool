@@ -115,6 +115,8 @@ pub enum PrimOpKind {
     Float2Int,
     Double2Float,
     Float2Double,
+    // --- Tier 3: Pointer equality (polyfill: always 0 = not equal) ---
+    ReallyUnsafePtrEquality,
     // --- Tier 3: Addr# ---
     IndexCharOffAddr,
     // --- Tier 3: Exception ---
@@ -258,6 +260,7 @@ impl std::fmt::Display for PrimOpKind {
             PrimOpKind::Float2Int => "float2Int#",
             PrimOpKind::Double2Float => "double2Float#",
             PrimOpKind::Float2Double => "float2Double#",
+            PrimOpKind::ReallyUnsafePtrEquality => "reallyUnsafePtrEquality#",
             PrimOpKind::IndexCharOffAddr => "indexCharOffAddr#",
             PrimOpKind::Raise => "raise#",
         };

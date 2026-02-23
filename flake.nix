@@ -25,24 +25,28 @@
               postPatch = (old.postPatch or "") + ''
                 TIDEPOOL_GHC_OPTS="-fexpose-all-unfoldings -funfolding-creation-threshold=100000 -fwrite-if-simplified-core"
 
-                # Patch ghc-internal, ghc-bignum, and ghc-prim .cabal/.cabal.in files.
-                # ghc-prim has GHC.Types, GHC.CString etc. — tcTopIfaceBindings needs
-                # mi_extra_decls from these when deserializing ghc-internal's fat Core.
-                for f in libraries/ghc-internal/ghc-internal.cabal.in libraries/ghc-internal/ghc-internal.cabal \
-                         libraries/ghc-bignum/ghc-bignum.cabal.in libraries/ghc-bignum/ghc-bignum.cabal \
-                         libraries/ghc-prim/ghc-prim.cabal.in libraries/ghc-prim/ghc-prim.cabal; do
-                  if [ -f "$f" ]; then
-                    sed -i -e "/^library/a \\    ghc-options: $TIDEPOOL_GHC_OPTS" "$f"
-                    echo "tidepool: patched $f with fat interface flags"
-                  fi
-                done
-
-                # Also inject OPTIONS_GHC pragmas into every .hs source file in case
-                # Hadrian ignores .cabal ghc-options for boot libraries
+                # Inject fat interface flags via OPTIONS_GHC into boot libraries.
+                # ghc-internal, ghc-bignum, ghc-prim: safe to prepend (no exotic extensions).
                 for dir in libraries/ghc-internal/src libraries/ghc-bignum/src libraries/ghc-prim; do
                   if [ -d "$dir" ]; then
                     find "$dir" -name '*.hs' -exec sed -i "1s/^/{-# OPTIONS_GHC $TIDEPOOL_GHC_OPTS #-}\n/" {} +
-                    echo "tidepool: injected OPTIONS_GHC into all .hs files in $dir"
+                    echo "tidepool: injected OPTIONS_GHC into $dir"
+                  fi
+                done
+
+                # For ALL other boot libraries (containers, bytestring, array, text, etc.),
+                # inject OPTIONS_GHC AFTER existing pragmas by appending before the module line.
+                # This avoids breaking files that start with {-# LANGUAGE MagicHash #-} etc.
+                for lib in libraries/containers libraries/bytestring libraries/array \
+                           libraries/deepseq libraries/directory libraries/filepath \
+                           libraries/process libraries/unix libraries/parsec \
+                           libraries/mtl libraries/transformers libraries/stm \
+                           libraries/template-haskell libraries/binary \
+                           libraries/exceptions libraries/time libraries/hpc \
+                           libraries/Cabal libraries/Cabal-syntax libraries/text; do
+                  if [ -d "$lib" ]; then
+                    find "$lib" -name '*.hs' -exec sed -i '/^module /i {-# OPTIONS_GHC '"$TIDEPOOL_GHC_OPTS"' #-}' {} +
+                    echo "tidepool: injected OPTIONS_GHC before module decl in $lib"
                   fi
                 done
               '';
@@ -94,8 +98,18 @@
           #
           # freer-simple 1.2.1.2 needs a patch for GHC 9.12: MonadBase instance
           # requires explicit Applicative+Monad constraints due to superclass changes.
+          # Every library package must be built with fat interface flags so that
+          # mi_extra_decls is populated. Without this, the fat interface fallback
+          # hits the PIT panic for non-boot-library packages (containers, aeson, etc.).
+          # Override mkDerivation to inject flags globally into ALL packages.
           hsPkgs = pkgs.haskell.packages.ghc912.override {
             overrides = self': super': {
+              mkDerivation = args: super'.mkDerivation (args // {
+                configureFlags = (args.configureFlags or []) ++ [
+                  "--ghc-options=-fwrite-if-simplified-core"
+                  "--ghc-options=-fexpose-all-unfoldings"
+                ];
+              });
               freer-simple = (pkgs.haskell.lib.unmarkBroken (
                 pkgs.haskell.lib.doJailbreak super'.freer-simple
               )).overrideAttrs (old: {
@@ -107,6 +121,8 @@
           };
           ghcEnv = hsPkgs.ghcWithPackages (ps: with ps; [
             freer-simple
+            aeson
+            lens
           ]);
           harness = hsPkgs.callCabal2nix "tidepool-harness" ./haskell {};
         in pkgs.writeShellScriptBin "tidepool-extract" ''

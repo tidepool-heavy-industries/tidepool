@@ -3,23 +3,25 @@
 -- post-optimization Core for ALL bindings including workers, loop-breakers,
 -- and internal helpers that don't get normal unfoldings.
 --
--- Used as a fallback when realIdUnfolding returns NoUnfolding.
+-- Uses findAndReadIface to read .hi files directly from disk, bypassing the
+-- PIT (Package Interface Table) cache. The PIT replaces mi_extra_decls with
+-- a panic thunk to save memory, so loadSysInterface can't be used here.
 module Tidepool.FatIface (FatIfaceCache, newFatIfaceCache, lookupFatIface) where
 
 import GHC.Core (CoreBind, CoreExpr, Bind(..))
 import GHC.Driver.Env (HscEnv)
 import GHC.Types.Name (Name, nameModule_maybe)
 import GHC.Types.Var (varName)
-import GHC.Unit.Types (Module)
-import GHC.Utils.Outputable (showSDocUnsafe, ppr)
+import GHC.Unit.Types (Module, moduleUnit, moduleName, mkModule, toUnitId)
 import GHC.Unit.Module.ModIface (mi_extra_decls)
+import GHC.Utils.Outputable (showSDocUnsafe, ppr, text)
 
-import GHC.Iface.Load (loadSysInterface)
+import GHC.Iface.Load (findAndReadIface)
 import GHC.IfaceToCore (tcTopIfaceBindings)
 import GHC.Tc.Utils.Monad (initIfaceCheck, initIfaceLcl)
 import GHC.Types.TypeEnv (emptyTypeEnv)
+import GHC.Data.Maybe (MaybeErr(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
-import GHC.Utils.Outputable (text)
 
 import Control.Exception (SomeException, try)
 import Control.Monad.IO.Class (liftIO)
@@ -56,9 +58,7 @@ lookupFatIface hscEnv (FatIfaceCache cacheRef) name = do
       return (Map.lookup name nameMap)
 
 -- | Load and deserialize mi_extra_decls for a single module.
--- Returns an empty map if the module has no fat interface or if deserialization
--- fails (e.g., GHC panics with "No mi_extra_decls in PIT" when a transitive
--- dependency wasn't compiled with -fwrite-if-simplified-core).
+-- Uses findAndReadIface to bypass the PIT cache (which strips mi_extra_decls).
 loadModuleExtraDecls :: HscEnv -> Module -> IO (Map.Map Name CoreExpr)
 loadModuleExtraDecls hscEnv modl = do
   result <- try $ loadModuleExtraDeclsUnsafe hscEnv modl
@@ -66,27 +66,35 @@ loadModuleExtraDecls hscEnv modl = do
     Right m -> return m
     Left (e :: SomeException) -> do
       hPutStrLn stderr $
-        "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": exception during tcTopIfaceBindings: " ++ show e
+        "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": exception: " ++ show e
       return Map.empty
 
 loadModuleExtraDeclsUnsafe :: HscEnv -> Module -> IO (Map.Map Name CoreExpr)
 loadModuleExtraDeclsUnsafe hscEnv modl = do
   let doc = text "tidepool fat-iface lookup"
-  coreBinds <- initIfaceCheck doc hscEnv $ do
-    iface <- loadSysInterface doc modl
-    case mi_extra_decls iface of
-      Nothing -> do
-        liftIO $ hPutStrLn stderr $
-          "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": no mi_extra_decls (missing -fwrite-if-simplified-core?)"
-        return []
-      Just ifaceBinds -> do
-        typeEnvRef <- liftIO $ newIORef emptyTypeEnv
-        binds <- initIfaceLcl modl doc NotBoot $
-          tcTopIfaceBindings typeEnvRef ifaceBinds
-        liftIO $ hPutStrLn stderr $
-          "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": loaded " ++ show (length binds) ++ " bindings"
-        return binds
-  return (bindingsToMap coreBinds)
+      -- findAndReadIface wants InstalledModule (GenModule UnitId)
+      installedMod = mkModule (toUnitId (moduleUnit modl)) (moduleName modl)
+  -- Read .hi directly from disk — bypasses PIT, mi_extra_decls intact
+  readResult <- findAndReadIface hscEnv doc installedMod modl NotBoot
+  case readResult of
+    Failed _err -> do
+      hPutStrLn stderr $
+        "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": could not read .hi file"
+      return Map.empty
+    Succeeded (iface, _loc) ->
+      case mi_extra_decls iface of
+        Nothing -> do
+          hPutStrLn stderr $
+            "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": no mi_extra_decls"
+          return Map.empty
+        Just ifaceBinds -> do
+          coreBinds <- initIfaceCheck doc hscEnv $ do
+            typeEnvRef <- liftIO $ newIORef emptyTypeEnv
+            initIfaceLcl modl doc NotBoot $
+              tcTopIfaceBindings typeEnvRef ifaceBinds
+          hPutStrLn stderr $
+            "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": loaded " ++ show (length coreBinds) ++ " bindings"
+          return (bindingsToMap coreBinds)
 
 -- | Flatten CoreBinds into a Name→CoreExpr map.
 bindingsToMap :: [CoreBind] -> Map.Map Name CoreExpr

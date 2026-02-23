@@ -728,6 +728,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let ch = bytes.get(offset).copied().unwrap_or(0);
             Ok(Value::Lit(Literal::LitChar(ch as char)))
         }
+        PrimOpKind::ReallyUnsafePtrEquality => Ok(Value::Lit(Literal::LitInt(0))),
         PrimOpKind::Raise => Err(EvalError::UserError),
         PrimOpKind::IndexArray | PrimOpKind::TagToEnum => Err(EvalError::UnsupportedPrimOp(op)),
     }
