@@ -83,6 +83,8 @@ fn run_mcp(lines: &[&str]) -> serde_json::Value {
         .expect("thread panicked")
 }
 
+use tidepool_codegen::jit_machine::JitEffectMachine;
+
 /// Compile-only (no execution). Returns Ok(node_count) or Err(message).
 fn compile_only(src: &str) -> Result<usize, String> {
     let pp = prelude_path();
@@ -91,7 +93,10 @@ fn compile_only(src: &str) -> Result<usize, String> {
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
             let include = [pp.as_path()];
-            let (expr, _table) = compile_haskell(&src, "result", &include)
+            let (expr, table) = compile_haskell(&src, "result", &include)
+                .map_err(|e| format!("{:?}", e))?;
+            // Also test JIT compilation
+            let _machine = JitEffectMachine::compile(&expr, &table, 1 << 20)
                 .map_err(|e| format!("{:?}", e))?;
             Ok(expr.nodes.len())
         })
@@ -340,10 +345,49 @@ fn test_show_int_neg() {
     assert_eq!(json, serde_json::json!("-456"));
 }
 
-// TODO: show (Just "hello") — unfoldings now resolve cleanly with patched GHC,
-// but SIGSEGV at runtime due to deep Show machinery hitting unknown edge case.
-// The `error` sentinel (tag 0x45) is the only free var — likely from partial
-// patterns in showLitChar/protectEsc. Need to investigate the runtime crash.
+// Bisect: show machinery frontier tests
+#[test]
+#[ignore]
+fn test_show_generic_int() {
+    let json = run_plain("show (42 :: Int)");
+    assert_eq!(json, serde_json::json!("42"));
+}
+
+#[test]
+#[ignore]
+fn test_compile_show_char() {
+    let src = plain_source("show 'a'");
+    let count = compile_only(&src).expect("compile_only failed");
+    println!("Compiled show 'a' to {} nodes", count);
+}
+
+#[test]
+#[ignore]
+fn test_show_char() {
+    let json = run_plain("show 'a'");
+    assert_eq!(json, serde_json::json!("'a'"));
+}
+
+#[test]
+#[ignore]
+fn test_show_string() {
+    let json = run_plain("show \"hello\"");
+    assert_eq!(json, serde_json::json!("\"hello\""));
+}
+
+#[test]
+#[ignore]
+fn test_show_maybe_int() {
+    let json = run_plain("show (Just 42 :: Maybe Int)");
+    assert_eq!(json, serde_json::json!("Just 42"));
+}
+
+#[test]
+#[ignore]
+fn test_show_maybe_string() {
+    let json = run_plain("show (Just \"hello\" :: Maybe String)");
+    assert_eq!(json, serde_json::json!("Just \"hello\""));
+}
 
 #[test]
 #[ignore]
