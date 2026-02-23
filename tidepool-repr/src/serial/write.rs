@@ -230,6 +230,7 @@ fn encode_primop(op: &PrimOpKind) -> &'static str {
         Double2Float => "Double2Float",
         Float2Double => "Float2Double",
         IndexCharOffAddr => "IndexCharOffAddr",
+        Raise => "Raise",
     }
 }
 

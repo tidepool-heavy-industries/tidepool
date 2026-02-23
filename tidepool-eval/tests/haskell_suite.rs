@@ -495,25 +495,23 @@ fn show_int_neg() {
     assert_eq!(s, "-7", "expected \"-7\", got \"{s}\"");
 }
 
-// SKIP: showChar - failed extraction with "Unsupported primop: plusAddr#"
-// #[test]
-// fn show_char() {
-//     static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showChar.cbor");
-//     let val = eval_fixture(CBOR);
-//     let table = table();
-//     let s = collect_string(&val, &table);
-//     assert_eq!(s, "'a'", "expected \"'a'\", got \"{s}\"");
-// }
+#[test]
+fn show_char_a() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showCharA.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let s = collect_string(&val, &table);
+    assert_eq!(s, "'a'", "expected \"'a'\", got \"{s}\"");
+}
 
-// SKIP: showString - failed extraction with "Unsupported primop: plusAddr#"
-// #[test]
-// fn show_string() {
-//     static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showString.cbor");
-//     let val = eval_fixture(CBOR);
-//     let table = table();
-//     let s = collect_string(&val, &table);
-//     assert_eq!(s, "\"hello\"", "expected \"\\\"hello\\\"\", got \"{s}\"");
-// }
+#[test]
+fn show_hello() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showHello.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let s = collect_string(&val, &table);
+    assert_eq!(s, "\"hello\"", "expected \"\\\"hello\\\"\", got \"{s}\"");
+}
 
 #[test]
 fn show_maybe_int() {

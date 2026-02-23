@@ -16,6 +16,7 @@ module Tidepool.Translate
   , UnresolvedVar(..)
   ) where
 
+import Debug.Trace (trace)
 import GHC
 import GHC.Core
 import GHC.Types.Id
@@ -367,6 +368,24 @@ translate expr =
             emitNode $ NCon consId [charIdx, acc]
           ) suffixIdx (reverse bytes)
 
+    -- Desugar unpackFoldrCString# "lit"# f z → f (C# c1) (f (C# c2) (... (f (C# cn) z)))
+    -- GHC's build/foldr fusion rewrites foldr/build pairs into unpackFoldrCString#,
+    -- whose unfolding uses plusAddr#/indexCharOffAddr# (Addr# pointer arithmetic).
+    -- We intercept and expand statically to avoid needing Addr# primops.
+    Var v | isUnpackFoldrCStringVar v
+          , [litArg, fArg, zArg] <- args
+          , Just bytes <- extractAddrLitBytes litArg -> do
+        zIdx <- translate zArg
+        fIdx <- translate fArg
+        let charId = varId (dataConWorkId charDataCon)
+        recordDC charDataCon
+        foldM (\acc byte -> do
+            unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral byte))
+            charIdx <- emitNode $ NCon charId [unboxedCharIdx]
+            fCharIdx <- emitNode $ NApp fIdx charIdx
+            emitNode $ NApp fCharIdx acc
+          ) zIdx (reverse bytes)
+
     -- Desugar (++) xs ys → letrec go = \a -> case a of { [] -> ys; (:) x rest -> (:) x (go rest) } in go xs
     -- GHC.Internal.Base.++ has no unfolding available from the .hi file.
     Var v | isAppendVar v, [xsArg, ysArg] <- args -> do
@@ -642,6 +661,9 @@ mapLit = \case
   LitString bs           -> LEString bs
   LitFloat r             -> LEFloat (fromIntegral (castFloatToWord32 (fromRational r)))
   LitDouble r            -> LEDouble (castDoubleToWord64 (fromRational r))
+  LitNullAddr            -> LEInt 0  -- Addr# null → dummy value (dead code path)
+  LitLabel{}             -> LEInt 0  -- Function label → dummy value (dead code path)
+  LitRubbish{}           -> LEInt 0  -- Rubbish literal → dummy value
   other                  -> error $ "Unsupported literal: " ++ showPprUnsafe other
 
 mapPrimOp :: PrimOp -> Text
@@ -739,7 +761,9 @@ mapPrimOp = \case
   FloatToDoubleOp -> "Float2Double"
   -- Addr#
   IndexOffAddrOp_Char -> "IndexCharOffAddr"
-  other       -> error $ "Unsupported primop: " ++ showPprUnsafe other
+  -- Exception
+  RaiseOp     -> "Raise"
+  other       -> trace ("WARNING: unsupported primop: " ++ showPprUnsafe other ++ " (emitting Raise)") "Raise"
 
 collectDataCons :: [TyCon] -> [(Word64, Text, Int, Int, [Text])]
 collectDataCons tycons =
@@ -840,6 +864,14 @@ isUnpackAppendCStringVar :: Id -> Bool
 isUnpackAppendCStringVar v =
   let name = occNameString (nameOccName (idName v))
   in name == "unpackAppendCString#"
+
+-- | Recognize GHC's unpackFoldrCString# builtin.
+-- unpackFoldrCString# :: Addr# -> (Char -> a -> a) -> a -> a
+-- GHC's build/foldr fusion rewrites to this; its unfolding uses plusAddr#.
+isUnpackFoldrCStringVar :: Id -> Bool
+isUnpackFoldrCStringVar v =
+  let name = occNameString (nameOccName (idName v))
+  in name == "unpackFoldrCString#" || name == "unpackFoldrCStringUtf8#"
 
 -- | Recognize primops that return unboxed tuples and can be split into
 -- two individual primops. Returns (primop1, primop2) text names.

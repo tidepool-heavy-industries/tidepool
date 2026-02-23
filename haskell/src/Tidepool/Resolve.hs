@@ -128,6 +128,7 @@ resolveExternals hscEnv binds = do
       && not (elemVarSet v localSet)
       && not (isPrimOp v)
       && not (isDataCon v)
+      && not (isMagicUnpackVar v)
 
     bindersOfSet :: CoreBind -> VarSet
     bindersOfSet (NonRec b _) = unitVarSet b
@@ -148,6 +149,16 @@ resolveExternals hscEnv binds = do
       Nothing -> case isDataConWrapId_maybe v of
         Just _  -> True
         Nothing -> False
+
+    -- | Skip magic unpack/string functions that Translate.hs handles specially.
+    -- Their unfoldings use Addr# primops (plusAddr#, indexCharOffAddr#) that we
+    -- don't support; instead, Translate desugars them to cons-cell chains.
+    isMagicUnpackVar :: Var -> Bool
+    isMagicUnpackVar v =
+      let name = occNameString (nameOccName (varName v))
+      in name `elem` [ "unpackCString#", "unpackCStringUtf8#"
+                      , "unpackAppendCString#"
+                      , "unpackFoldrCString#", "unpackFoldrCStringUtf8#" ]
 
 -- | Build a map from OccName string to (Var, CoreExpr) for all local binders.
 -- Used for Prelude substitution: when a specialized method can't be resolved,

@@ -117,6 +117,8 @@ pub enum PrimOpKind {
     Float2Double,
     // --- Tier 3: Addr# ---
     IndexCharOffAddr,
+    // --- Tier 3: Exception ---
+    Raise,
 }
 
 /// Case alternative constructor.
@@ -257,6 +259,7 @@ impl std::fmt::Display for PrimOpKind {
             PrimOpKind::Double2Float => "double2Float#",
             PrimOpKind::Float2Double => "float2Double#",
             PrimOpKind::IndexCharOffAddr => "indexCharOffAddr#",
+            PrimOpKind::Raise => "raise#",
         };
         f.write_str(name)
     }

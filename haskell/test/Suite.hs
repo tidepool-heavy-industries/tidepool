@@ -544,13 +544,11 @@ showInt = show (42 :: Int)
 showIntNeg :: String
 showIntNeg = show (-7 :: Int)
 
-{-
-showChar :: String
-showChar = show ('a' :: Char)
+showCharA :: String
+showCharA = show ('a' :: Char)
 
-showString :: String
-showString = show ("hello" :: String)
--}
+showHello :: String
+showHello = show ("hello" :: String)
 
 showMaybeInt :: String
 showMaybeInt = show (Just 42 :: Maybe Int)
