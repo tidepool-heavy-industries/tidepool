@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [[bin]]
-name = "mcp-server-example"
+name = "tidepool"
 path = "src/main.rs"
 
 [dependencies]

@@ -32,6 +32,7 @@ r#"{-# LANGUAGE NoImplicitPrelude, DataKinds, TypeOperators, FlexibleContexts, G
 module Expr where
 import Tidepool.Prelude
 import Control.Monad.Freer
+default (Int)
 
 data Console a where
   Print :: String -> Console ()
