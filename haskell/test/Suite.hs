@@ -533,3 +533,10 @@ prim_quot_rem_word :: Int
 prim_quot_rem_word =
   let (q, r) = quotRem (10 :: Word) (3 :: Word)
   in fromIntegral (q * 10 + r) -- should be 3 * 10 + 1 = 31
+
+-- ============================================================
+-- Show (1)
+-- ============================================================
+
+showInt :: String
+showInt = show (42 :: Int)

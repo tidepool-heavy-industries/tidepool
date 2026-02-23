@@ -126,6 +126,35 @@ fn unwrap_tuple(val: &Value) -> &[Value] {
     panic!("expected tuple, got {val:?}");
 }
 
+/// Collect a Haskell String (list of Char) into a Rust String.
+fn collect_string(val: &Value, table: &DataConTable) -> String {
+    let mut result = String::new();
+    let mut cur = val;
+    loop {
+        match cur {
+            Value::Con(id, fields) => {
+                let name = table.name_of(*id).unwrap();
+                if name == "[]" {
+                    break;
+                } else if name == ":" {
+                    assert_eq!(fields.len(), 2, "(:) should have 2 fields");
+                    let ch = unbox(&fields[0], table);
+                    if let Value::Lit(Literal::LitChar(c)) = ch {
+                        result.push(c);
+                    } else {
+                        panic!("expected Char in string cons, got {ch:?}");
+                    }
+                    cur = &fields[1];
+                } else {
+                    panic!("expected [] or (:), got {name}");
+                }
+            }
+            other => panic!("expected string cons cell, got {other:?}"),
+        }
+    }
+    result
+}
+
 // =============================================================================
 // Macros
 // =============================================================================
@@ -443,3 +472,16 @@ suite_int!(prelude_string_append, 11);
 suite_int!(prelude_take_cons, 3);
 suite_bool!(prelude_eq_string_true, true);
 suite_bool!(prelude_eq_string_false, false);
+
+// =============================================================================
+// Show (1)
+// =============================================================================
+
+#[test]
+fn show_int() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showInt.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let s = collect_string(&val, &table);
+    assert_eq!(s, "42", "expected \"42\", got \"{s}\"");
+}

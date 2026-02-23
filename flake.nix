@@ -13,22 +13,34 @@
   outputs = { self, nixpkgs, flake-utils, rust-overlay }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        # Overlay: rebuild GHC 9.12 with ghc-internal exposing all unfoldings.
-        # This lets our JIT resolver extract Core for deep library functions
-        # (showList__, showLitChar, etc.) that normally exceed .hi size thresholds.
+        # Overlay: rebuild GHC 9.12 with fat interface files for boot libraries.
+        # -fwrite-if-simplified-core writes ALL Core (including workers, loop-breakers)
+        # into mi_extra_decls in .hi files, bypassing unfolding heuristics entirely.
+        # -fexpose-all-unfoldings + high threshold retained as secondary defense.
+        # Targets: ghc-internal (stdlib impl) + ghc-bignum (Integer/Natural).
+        # base is just re-exports; ghc-prim has no Haskell Core.
         ghcInternalOverlay = final: prev: {
           haskell = prev.haskell // {
             compiler = prev.haskell.compiler // {
               ghc912 = prev.haskell.compiler.ghc912.overrideAttrs (old: {
                 postPatch = (old.postPatch or "") + ''
-                  # Inject flags into ghc-internal boot library so all unfoldings
-                  # are serialized into .hi files, even large ones like showList__
-                  # The .cabal file is generated from .cabal.in by configure,
-                  # so we must patch the template at patchPhase time.
-                  for f in libraries/ghc-internal/ghc-internal.cabal.in libraries/ghc-internal/ghc-internal.cabal; do
+                  TIDEPOOL_GHC_OPTS="-fexpose-all-unfoldings -funfolding-creation-threshold=100000 -fwrite-if-simplified-core"
+
+                  # Patch ghc-internal and ghc-bignum .cabal/.cabal.in files
+                  for f in libraries/ghc-internal/ghc-internal.cabal.in libraries/ghc-internal/ghc-internal.cabal \
+                           libraries/ghc-bignum/ghc-bignum.cabal.in libraries/ghc-bignum/ghc-bignum.cabal; do
                     if [ -f "$f" ]; then
-                      sed -i -e '/^library/a \    ghc-options: -fexpose-all-unfoldings -funfolding-creation-threshold=1000' "$f"
-                      echo "tidepool: patched $f with -fexpose-all-unfoldings"
+                      sed -i -e "/^library/a \\    ghc-options: $TIDEPOOL_GHC_OPTS" "$f"
+                      echo "tidepool: patched $f with fat interface flags"
+                    fi
+                  done
+
+                  # Also inject OPTIONS_GHC pragmas into every .hs source file in case
+                  # Hadrian ignores .cabal ghc-options for boot libraries
+                  for dir in libraries/ghc-internal/src libraries/ghc-bignum/src; do
+                    if [ -d "$dir" ]; then
+                      find "$dir" -name '*.hs' -exec sed -i "1s/^/{-# OPTIONS_GHC $TIDEPOOL_GHC_OPTS #-}\n/" {} +
+                      echo "tidepool: injected OPTIONS_GHC into all .hs files in $dir"
                     fi
                   done
                 '';
