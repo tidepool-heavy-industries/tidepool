@@ -817,3 +817,40 @@ fn test_map_intersection_with() {
     );
     assert_eq!(json, serde_json::json!([[2, 120], [3, 230]]));
 }
+
+// BUG: Map.findWithDefault triggers "Jump to unknown label JoinId(...)"
+// in the JIT. Fat interface join point with tag-'a' unique not resolved.
+// Map.lookup works; findWithDefault does not.
+#[test]
+#[ignore]
+fn test_map_find_with_default() {
+    let json = run_mcp_with_imports(
+        &[
+            "let m = Map.fromList [(1::Int,10::Int),(3,30),(5,50)]",
+            "pure (Map.findWithDefault 0 3 m)",
+        ],
+        &[],
+        &["qualified Data.Map.Strict as Map"],
+    );
+    assert_eq!(json, serde_json::json!(30));
+}
+
+#[test]
+fn test_map_over_string_literal() {
+    let json = run_mcp(&[
+        "pure (map (\\c -> chr (ord c + 1)) \"Hello\")",
+    ]);
+    assert_eq!(json, serde_json::json!("Ifmmp"));
+}
+
+#[test]
+fn test_filter_string_literal() {
+    let json = run_plain("filter (\\c -> c /= 'l') \"Hello World\"");
+    assert_eq!(json, serde_json::json!("Heo Word"));
+}
+
+#[test]
+fn test_show_4_tuple() {
+    let json = run_plain("show (1::Int, True, 'x', \"hi\")");
+    assert_eq!(json, serde_json::json!("(1,True,'x',\"hi\")"));
+}

@@ -119,6 +119,7 @@ pub enum PrimOpKind {
     ReallyUnsafePtrEquality,
     // --- Tier 3: Addr# ---
     IndexCharOffAddr,
+    PlusAddr,
     // --- Tier 3: Exception ---
     Raise,
 }
@@ -262,6 +263,7 @@ impl std::fmt::Display for PrimOpKind {
             PrimOpKind::Float2Double => "float2Double#",
             PrimOpKind::ReallyUnsafePtrEquality => "reallyUnsafePtrEquality#",
             PrimOpKind::IndexCharOffAddr => "indexCharOffAddr#",
+            PrimOpKind::PlusAddr => "plusAddr#",
             PrimOpKind::Raise => "raise#",
         };
         f.write_str(name)

@@ -334,6 +334,27 @@ pub fn emit_primop(
             Ok(SsaVal::Raw(builder.ins().iconst(types::I64, 0), LIT_TAG_INT))
         }
 
+        PrimOpKind::IndexCharOffAddr => {
+            // indexCharOffAddr# :: Addr# -> Int# -> Char#
+            // addr is raw pointer to bytes, i is offset
+            check_arity(op, 2, args.len())?;
+            let addr = unbox_addr(builder, args[0]);
+            let idx = unbox_int(builder, args[1]);
+            let effective = builder.ins().iadd(addr, idx);
+            // Load single byte, zero-extend to i64
+            let byte_val = builder.ins().load(types::I8, MemFlags::new(), effective, 0);
+            let char_val = builder.ins().uextend(types::I64, byte_val);
+            Ok(SsaVal::Raw(char_val, LIT_TAG_CHAR))
+        }
+
+        PrimOpKind::PlusAddr => {
+            // plusAddr# :: Addr# -> Int# -> Addr#
+            check_arity(op, 2, args.len())?;
+            let addr = unbox_addr(builder, args[0]);
+            let offset = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().iadd(addr, offset), LIT_TAG_ADDR))
+        }
+
         PrimOpKind::TagToEnum | PrimOpKind::IndexArray | PrimOpKind::SeqOp => {
             Err(EmitError::NotYetImplemented(format!("{:?}", op)))
         }
@@ -375,6 +396,25 @@ fn emit_float_compare(
     let b = unbox_double(builder, args[1]);
     let cmp = builder.ins().fcmp(cc, a, b);
     Ok(SsaVal::Raw(builder.ins().uextend(types::I64, cmp), tag))
+}
+
+/// Unbox an Addr# value. If it's a Raw (from a previous plusAddr#), use directly.
+/// If it's a HeapPtr, check the lit_tag:
+///   - LIT_TAG_STRING (5): data_ptr points to [len: u64][bytes...], skip 8
+///   - LIT_TAG_ADDR (6): raw pointer already points to bytes, no skip
+fn unbox_addr(builder: &mut FunctionBuilder, val: SsaVal) -> Value {
+    match val {
+        SsaVal::Raw(v, _) => v, // Already an Addr# (from previous plusAddr#)
+        SsaVal::HeapPtr(v) => {
+            let raw_val = builder.ins().load(types::I64, MemFlags::trusted(), v, LIT_VALUE_OFFSET);
+            let lit_tag = builder.ins().load(types::I8, MemFlags::trusted(), v, LIT_TAG_OFFSET);
+            let lit_tag_ext = builder.ins().uextend(types::I64, lit_tag);
+            let is_string = builder.ins().icmp_imm(IntCC::Equal, lit_tag_ext, LIT_TAG_STRING);
+            // If LitString, skip the 8-byte length prefix; if Addr#, use as-is
+            let adjusted = builder.ins().iadd_imm(raw_val, 8);
+            builder.ins().select(is_string, adjusted, raw_val)
+        }
+    }
 }
 
 pub fn unbox_int(builder: &mut FunctionBuilder, val: SsaVal) -> Value {

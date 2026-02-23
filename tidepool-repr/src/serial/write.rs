@@ -231,6 +231,7 @@ fn encode_primop(op: &PrimOpKind) -> &'static str {
         Float2Double => "Float2Double",
         ReallyUnsafePtrEquality => "ReallyUnsafePtrEquality",
         IndexCharOffAddr => "IndexCharOffAddr",
+        PlusAddr => "PlusAddr",
         Raise => "Raise",
     }
 }

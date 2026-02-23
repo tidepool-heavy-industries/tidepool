@@ -659,6 +659,7 @@ fn decode_primop(s: &str) -> Result<PrimOpKind, ReadError> {
         "Float2Double" => Ok(Float2Double),
         "ReallyUnsafePtrEquality" => Ok(ReallyUnsafePtrEquality),
         "IndexCharOffAddr" => Ok(IndexCharOffAddr),
+        "PlusAddr" => Ok(PlusAddr),
         "Raise" => Ok(Raise),
         _ => Err(ReadError::InvalidPrimOp(s.to_string())),
     }

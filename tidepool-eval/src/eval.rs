@@ -728,6 +728,28 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let ch = bytes.get(offset).copied().unwrap_or(0);
             Ok(Value::Lit(Literal::LitChar(ch as char)))
         }
+        PrimOpKind::PlusAddr => {
+            // plusAddr# :: Addr# -> Int# -> Addr#
+            // In interpreter, Addr# is LitString. plusAddr# slices the byte vec.
+            if args.len() != 2 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 2,
+                    got: args.len(),
+                });
+            }
+            let bytes = match &args[0] {
+                Value::Lit(Literal::LitString(bs)) => bs,
+                other => {
+                    return Err(EvalError::TypeMismatch {
+                        expected: "Addr# (LitString)",
+                        got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                    })
+                }
+            };
+            let offset = expect_int(&args[1])? as usize;
+            Ok(Value::Lit(Literal::LitString(bytes[offset..].to_vec())))
+        }
         PrimOpKind::ReallyUnsafePtrEquality => Ok(Value::Lit(Literal::LitInt(0))),
         PrimOpKind::Raise => Err(EvalError::UserError),
         PrimOpKind::IndexArray | PrimOpKind::TagToEnum => Err(EvalError::UnsupportedPrimOp(op)),

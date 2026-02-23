@@ -763,6 +763,7 @@ mapPrimOp = \case
   ReallyUnsafePtrEqualityOp -> "ReallyUnsafePtrEquality"
   -- Addr#
   IndexOffAddrOp_Char -> "IndexCharOffAddr"
+  AddrAddOp           -> "PlusAddr"
   -- Exception
   RaiseOp     -> "Raise"
   other       -> trace ("WARNING: unsupported primop: " ++ showPprUnsafe other ++ " (emitting Raise)") "Raise"

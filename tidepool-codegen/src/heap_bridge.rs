@@ -61,6 +61,11 @@ pub unsafe fn heap_to_value(ptr: *const u8) -> Result<Value, BridgeError> {
                     let bytes = std::slice::from_raw_parts(bytes_ptr, len).to_vec();
                     Ok(Value::Lit(Literal::LitString(bytes)))
                 }
+                6 => {
+                    // Addr# — intermediate value, shouldn't normally be a final result.
+                    // Wrap as empty LitString as graceful fallback.
+                    Ok(Value::Lit(Literal::LitString(vec![])))
+                }
                 other => Err(BridgeError::UnexpectedLitTag(other as u8)),
             }
         }

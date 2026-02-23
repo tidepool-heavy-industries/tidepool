@@ -900,9 +900,10 @@ fn emit_lit_string(
 
     let mut data_desc = DataDescription::new();
     data_desc.set_align(8); // Ensure 8-byte alignment for u64 length prefix
-    let mut contents = Vec::with_capacity(8 + bytes.len());
+    let mut contents = Vec::with_capacity(8 + bytes.len() + 1);
     contents.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
     contents.extend_from_slice(bytes);
+    contents.push(0); // Null terminator for GHC's Addr# string iteration
     data_desc.define(contents.into_boxed_slice());
 
     pipeline.module
