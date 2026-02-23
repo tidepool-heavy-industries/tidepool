@@ -474,7 +474,7 @@ suite_bool!(prelude_eq_string_true, true);
 suite_bool!(prelude_eq_string_false, false);
 
 // =============================================================================
-// Show (1)
+// Show (7)
 // =============================================================================
 
 #[test]
@@ -484,4 +484,60 @@ fn show_int() {
     let table = table();
     let s = collect_string(&val, &table);
     assert_eq!(s, "42", "expected \"42\", got \"{s}\"");
+}
+
+#[test]
+fn show_int_neg() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showIntNeg.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let s = collect_string(&val, &table);
+    assert_eq!(s, "-7", "expected \"-7\", got \"{s}\"");
+}
+
+// SKIP: showChar - failed extraction with "Unsupported primop: plusAddr#"
+// #[test]
+// fn show_char() {
+//     static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showChar.cbor");
+//     let val = eval_fixture(CBOR);
+//     let table = table();
+//     let s = collect_string(&val, &table);
+//     assert_eq!(s, "'a'", "expected \"'a'\", got \"{s}\"");
+// }
+
+// SKIP: showString - failed extraction with "Unsupported primop: plusAddr#"
+// #[test]
+// fn show_string() {
+//     static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showString.cbor");
+//     let val = eval_fixture(CBOR);
+//     let table = table();
+//     let s = collect_string(&val, &table);
+//     assert_eq!(s, "\"hello\"", "expected \"\\\"hello\\\"\", got \"{s}\"");
+// }
+
+#[test]
+fn show_maybe_int() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showMaybeInt.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let s = collect_string(&val, &table);
+    assert_eq!(s, "Just 42", "expected \"Just 42\", got \"{s}\"");
+}
+
+#[test]
+fn show_maybe_nothing() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showMaybeNothing.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let s = collect_string(&val, &table);
+    assert_eq!(s, "Nothing", "expected \"Nothing\", got \"{s}\"");
+}
+
+#[test]
+fn show_bool() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showBool.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let s = collect_string(&val, &table);
+    assert_eq!(s, "True", "expected \"True\", got \"{s}\"");
 }

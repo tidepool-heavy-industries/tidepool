@@ -535,8 +535,28 @@ prim_quot_rem_word =
   in fromIntegral (q * 10 + r) -- should be 3 * 10 + 1 = 31
 
 -- ============================================================
--- Show (1)
+-- Show (7)
 -- ============================================================
 
 showInt :: String
 showInt = show (42 :: Int)
+
+showIntNeg :: String
+showIntNeg = show (-7 :: Int)
+
+{-
+showChar :: String
+showChar = show ('a' :: Char)
+
+showString :: String
+showString = show ("hello" :: String)
+-}
+
+showMaybeInt :: String
+showMaybeInt = show (Just 42 :: Maybe Int)
+
+showMaybeNothing :: String
+showMaybeNothing = show (Nothing :: Maybe Int)
+
+showBool :: String
+showBool = show True
