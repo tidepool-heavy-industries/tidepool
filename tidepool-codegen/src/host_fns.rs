@@ -482,3 +482,223 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
         ("runtime_text_reverse", runtime_text_reverse as *const u8),
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::alloc::{dealloc, Layout};
+
+    unsafe fn free_byte_array(ptr: i64) {
+        let old_ptr = ptr as *mut u8;
+        let size = *(old_ptr as *const u64) as usize;
+        let layout = Layout::from_size_align(8 + size, 8).unwrap();
+        dealloc(old_ptr, layout);
+    }
+
+    #[test]
+    fn test_runtime_new_byte_array() {
+        unsafe {
+            let ba = runtime_new_byte_array(10);
+            assert_ne!(ba, 0);
+            assert_eq!(*(ba as *const u64), 10);
+            let bytes = std::slice::from_raw_parts((ba as *const u8).add(8), 10);
+            assert!(bytes.iter().all(|&b| b == 0));
+            free_byte_array(ba);
+        }
+    }
+
+    #[test]
+    fn test_runtime_copy_addr_to_byte_array() {
+        unsafe {
+            let ba = runtime_new_byte_array(10);
+            let src = b"hello";
+            runtime_copy_addr_to_byte_array(src.as_ptr() as i64, ba, 2, 5);
+            let bytes = std::slice::from_raw_parts((ba as *const u8).add(8), 10);
+            assert_eq!(&bytes[2..7], b"hello");
+            assert_eq!(bytes[0], 0);
+            assert_eq!(bytes[1], 0);
+            assert_eq!(bytes[7], 0);
+            free_byte_array(ba);
+        }
+    }
+
+    #[test]
+    fn test_runtime_set_byte_array() {
+        unsafe {
+            let ba = runtime_new_byte_array(10);
+            runtime_set_byte_array(ba, 3, 4, 0xFF);
+            let bytes = std::slice::from_raw_parts((ba as *const u8).add(8), 10);
+            assert_eq!(bytes[2], 0);
+            assert_eq!(bytes[3], 0xFF);
+            assert_eq!(bytes[4], 0xFF);
+            assert_eq!(bytes[5], 0xFF);
+            assert_eq!(bytes[6], 0xFF);
+            assert_eq!(bytes[7], 0);
+            free_byte_array(ba);
+        }
+    }
+
+    #[test]
+    fn test_runtime_shrink_byte_array() {
+        unsafe {
+            let ba = runtime_new_byte_array(10);
+            runtime_shrink_byte_array(ba, 5);
+            assert_eq!(*(ba as *const u64), 5);
+            // Memory is still there, we just update the logical length prefix.
+            // Note: we still need to free the original 10-byte allocation.
+            let layout = Layout::from_size_align(8 + 10, 8).unwrap();
+            dealloc(ba as *mut u8, layout);
+        }
+    }
+
+    #[test]
+    fn test_runtime_resize_byte_array_grow() {
+        unsafe {
+            let ba = runtime_new_byte_array(5);
+            let bytes = std::slice::from_raw_parts_mut((ba as *mut u8).add(8), 5);
+            bytes.copy_from_slice(b"abcde");
+            
+            let new_ba = runtime_resize_byte_array(ba, 10);
+            assert_eq!(*(new_ba as *const u64), 10);
+            let new_bytes = std::slice::from_raw_parts((new_ba as *const u8).add(8), 10);
+            assert_eq!(&new_bytes[0..5], b"abcde");
+            assert_eq!(&new_bytes[5..10], &[0, 0, 0, 0, 0]);
+            
+            free_byte_array(new_ba);
+        }
+    }
+
+    #[test]
+    fn test_runtime_resize_byte_array_shrink() {
+        unsafe {
+            let ba = runtime_new_byte_array(10);
+            let bytes = std::slice::from_raw_parts_mut((ba as *mut u8).add(8), 10);
+            bytes.copy_from_slice(b"0123456789");
+            
+            let new_ba = runtime_resize_byte_array(ba, 5);
+            assert_eq!(*(new_ba as *const u64), 5);
+            let new_bytes = std::slice::from_raw_parts((new_ba as *const u8).add(8), 5);
+            assert_eq!(new_bytes, b"01234");
+            
+            free_byte_array(new_ba);
+        }
+    }
+
+    #[test]
+    fn test_runtime_copy_byte_array() {
+        unsafe {
+            let ba1 = runtime_new_byte_array(10);
+            let ba2 = runtime_new_byte_array(10);
+            
+            let bytes1 = std::slice::from_raw_parts_mut((ba1 as *mut u8).add(8), 10);
+            bytes1.copy_from_slice(b"abcdefghij");
+            
+            runtime_copy_byte_array(ba1, 2, ba2, 4, 3);
+            
+            let bytes2 = std::slice::from_raw_parts((ba2 as *const u8).add(8), 10);
+            assert_eq!(&bytes2[4..7], b"cde");
+            
+            free_byte_array(ba1);
+            free_byte_array(ba2);
+        }
+    }
+
+    #[test]
+    fn test_runtime_copy_byte_array_overlap() {
+        unsafe {
+            let ba = runtime_new_byte_array(10);
+            let bytes = std::slice::from_raw_parts_mut((ba as *mut u8).add(8), 10);
+            bytes.copy_from_slice(b"0123456789");
+            
+            // Overlapping copy: 01234 -> 23456
+            runtime_copy_byte_array(ba, 0, ba, 2, 5);
+            
+            assert_eq!(bytes, b"0101234789");
+            
+            free_byte_array(ba);
+        }
+    }
+
+    #[test]
+    fn test_runtime_compare_byte_arrays() {
+        unsafe {
+            let ba1 = runtime_new_byte_array(5);
+            let ba2 = runtime_new_byte_array(5);
+            
+            std::ptr::copy_nonoverlapping(b"apple".as_ptr(), (ba1 as *mut u8).add(8), 5);
+            std::ptr::copy_nonoverlapping(b"apply".as_ptr(), (ba2 as *mut u8).add(8), 5);
+            
+            assert_eq!(runtime_compare_byte_arrays(ba1, 0, ba2, 0, 4), 0); // "appl" == "appl"
+            assert_eq!(runtime_compare_byte_arrays(ba1, 0, ba2, 0, 5), -1); // "apple" < "apply"
+            assert_eq!(runtime_compare_byte_arrays(ba2, 0, ba1, 0, 5), 1); // "apply" > "apple"
+            
+            free_byte_array(ba1);
+            free_byte_array(ba2);
+        }
+    }
+
+    #[test]
+    fn test_runtime_strlen() {
+        let s = b"hello\0world\0";
+        unsafe {
+            assert_eq!(runtime_strlen(s.as_ptr() as i64), 5);
+            assert_eq!(runtime_strlen(s.as_ptr().add(6) as i64), 5);
+        }
+    }
+
+    #[test]
+    fn test_runtime_text_measure_off_ascii() {
+        let s = b"hello";
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 5), 5);
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 1, 3), 3);
+    }
+
+    #[test]
+    fn test_runtime_text_measure_off_multi_byte() {
+        // "λ" is 2 bytes: CF BB
+        // "😀" is 4 bytes: F0 9F 98 80
+        let s = "λ😀x".as_bytes();
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 1), 2); // λ
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 2), 6); // λ😀
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 2, 1), 4); // 😀
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 6, 1), 1); // x
+    }
+
+    #[test]
+    fn test_runtime_text_memchr() {
+        let s = b"abacaba";
+        assert_eq!(runtime_text_memchr(s.as_ptr() as i64, 0, 7, b'a' as i64), 0);
+        assert_eq!(runtime_text_memchr(s.as_ptr() as i64, 1, 6, b'a' as i64), 1); // 'a' at index 2 of original, which is offset 1 from s+1
+        assert_eq!(runtime_text_memchr(s.as_ptr() as i64, 0, 7, b'z' as i64), -1);
+    }
+
+    #[test]
+    fn test_runtime_text_reverse_ascii() {
+        let src = b"hello";
+        let mut dest = [0u8; 5];
+        runtime_text_reverse(dest.as_mut_ptr() as i64, 5, src.as_ptr() as i64);
+        assert_eq!(&dest, b"olleh");
+    }
+
+    #[test]
+    fn test_runtime_text_reverse_utf8() {
+        // "λ😀" -> CF BB | F0 9F 98 80
+        // Reversed should be "😀λ" -> F0 9F 98 80 | CF BB
+        let src = "λ😀".as_bytes();
+        let mut dest = [0u8; 6];
+        runtime_text_reverse(dest.as_mut_ptr() as i64, 6, src.as_ptr() as i64);
+        assert_eq!(std::str::from_utf8(&dest).unwrap(), "😀λ");
+    }
+
+    #[test]
+    fn test_runtime_text_measure_complex() {
+        // "Aλ文😀" 
+        // A: 1 byte
+        // λ: 2 bytes
+        // 文: 3 bytes (E6 96 87)
+        // 😀: 4 bytes
+        let s = "Aλ文😀".as_bytes();
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 4), 1 + 2 + 3 + 4);
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 1, 2), 2 + 3);
+    }
+}
