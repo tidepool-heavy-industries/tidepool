@@ -267,7 +267,11 @@ pub fn take_runtime_error() -> Option<RuntimeError> {
 /// Usage: `CodegenPipeline::new(&host_fn_symbols())`
 /// Debug: called before every App call_indirect to validate the function pointer.
 /// Prints the heap tag and code_ptr. Aborts on non-closure.
-pub extern "C" fn debug_app_check(fun_ptr: *const u8) {
+///
+/// # Safety
+///
+/// `fun_ptr` must point to a valid HeapObject if not null.
+pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) {
     use std::io::Write;
     // If a runtime error is already pending, don't abort on tag mismatches —
     // we're in error-propagation mode and the effect machine will handle it.

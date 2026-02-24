@@ -284,12 +284,12 @@ mod tests {
     #[test]
     fn test_lit_double_roundtrip() {
         let (_nursery, mut vmctx) = setup_vmctx(1024);
-        let val = Value::Lit(Literal::LitDouble(f64::to_bits(3.14159)));
+        let val = Value::Lit(Literal::LitDouble(f64::to_bits(1.2345678)));
         unsafe {
             let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
             let back = heap_to_value(ptr).expect("heap_to_value failed");
             if let Value::Lit(Literal::LitDouble(bits)) = back {
-                assert_eq!(f64::from_bits(bits), 3.14159);
+                assert_eq!(f64::from_bits(bits), 1.2345678);
             } else {
                 panic!("Expected LitDouble, got {:?}", back);
             }
@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn test_lit_float_roundtrip() {
         let (_nursery, mut vmctx) = setup_vmctx(1024);
-        let bits = f32::to_bits(3.14f32) as u64;
+        let bits = f32::to_bits(1.23f32) as u64;
         let val = Value::Lit(Literal::LitFloat(bits));
         unsafe {
             let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");

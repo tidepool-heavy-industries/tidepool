@@ -218,19 +218,19 @@ fn test_case_binder_used() {
 fn test_case_lit_double() {
     // case Lit(3.14) of { LitAlt(1.0) -> 10; LitAlt(3.14) -> 99; Default -> 0 }
     let binder = VarId(99);
-    let pi_bits = 3.14f64.to_bits();
+    let val_bits = 1.23f64.to_bits();
     let one_bits = 1.0f64.to_bits();
     let tree = RecursiveTree { nodes: vec![
-        CoreFrame::Lit(Literal::LitDouble(pi_bits)),                // 0: scrutinee
+        CoreFrame::Lit(Literal::LitDouble(val_bits)),                // 0: scrutinee
         CoreFrame::Lit(Literal::LitInt(10)),                         // 1: alt 1.0 body
-        CoreFrame::Lit(Literal::LitInt(99)),                         // 2: alt 3.14 body
+        CoreFrame::Lit(Literal::LitInt(99)),                         // 2: alt 1.23 body
         CoreFrame::Lit(Literal::LitInt(0)),                          // 3: default body
         CoreFrame::Case {
             scrutinee: 0,
             binder,
             alts: vec![
                 Alt { con: AltCon::LitAlt(Literal::LitDouble(one_bits)), binders: vec![], body: 1 },
-                Alt { con: AltCon::LitAlt(Literal::LitDouble(pi_bits)), binders: vec![], body: 2 },
+                Alt { con: AltCon::LitAlt(Literal::LitDouble(val_bits)), binders: vec![], body: 2 },
                 Alt { con: AltCon::Default, binders: vec![], body: 3 },
             ],
         },                                                            // 4: root
