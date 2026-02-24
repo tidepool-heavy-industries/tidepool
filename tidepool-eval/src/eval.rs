@@ -1928,4 +1928,187 @@ mod tests {
         let res = eval(&expr, &Env::new(), &mut heap);
         assert!(matches!(res, Err(EvalError::ArityMismatch { .. })));
     }
+
+    #[test]
+    fn test_eval_case_no_match() {
+        let nodes = vec![
+            CoreFrame::Lit(Literal::LitInt(42)), // 0
+            CoreFrame::Case {
+                scrutinee: 0,
+                binder: VarId(1),
+                alts: vec![Alt {
+                    con: AltCon::LitAlt(Literal::LitInt(1)),
+                    binders: vec![],
+                    body: 0,
+                }],
+            }, // 1
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap);
+        assert!(matches!(res, Err(EvalError::NoMatchingAlt)));
+    }
+
+    #[test]
+    fn test_eval_primop_arity_mismatch() {
+        let nodes = vec![
+            CoreFrame::Lit(Literal::LitInt(1)), // 0
+            CoreFrame::PrimOp {
+                op: PrimOpKind::IntAdd,
+                args: vec![0], // IntAdd expects 2 args
+            }, // 1
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap);
+        assert!(matches!(res, Err(EvalError::ArityMismatch { .. })));
+    }
+
+    #[test]
+    fn test_eval_force_non_thunk() {
+        let mut heap = crate::heap::VecHeap::new();
+        let val = Value::Lit(Literal::LitInt(42));
+        let res = force(val, &mut heap).unwrap();
+        if let Value::Lit(Literal::LitInt(n)) = res {
+            assert_eq!(n, 42);
+        } else {
+            panic!("Expected LitInt(42)");
+        }
+    }
+
+    #[test]
+    fn test_eval_deeply_nested_con() {
+        // Con(2, [Con(1, [Lit(42)])])
+        let nodes = vec![
+            CoreFrame::Lit(Literal::LitInt(42)), // 0
+            CoreFrame::Con {
+                tag: DataConId(1),
+                fields: vec![0],
+            }, // 1
+            CoreFrame::Con {
+                tag: DataConId(2),
+                fields: vec![1],
+            }, // 2
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
+        match res {
+            Value::Con(tag, fields) => {
+                assert_eq!(tag.0, 2);
+                assert_eq!(fields.len(), 1);
+                match &fields[0] {
+                    Value::Con(tag2, fields2) => {
+                        assert_eq!(tag2.0, 1);
+                        assert_eq!(fields2.len(), 1);
+                        match &fields2[0] {
+                            Value::Lit(Literal::LitInt(n)) => assert_eq!(*n, 42),
+                            _ => panic!("Expected LitInt(42)"),
+                        }
+                    }
+                    _ => panic!("Expected inner Con"),
+                }
+            }
+            _ => panic!("Expected outer Con"),
+        }
+    }
+
+    #[test]
+    fn test_eval_case_default_binder() {
+        // case 42 of x { DEFAULT -> x }
+        let nodes = vec![
+            CoreFrame::Lit(Literal::LitInt(42)), // 0
+            CoreFrame::Var(VarId(1)),            // 1: x
+            CoreFrame::Case {
+                scrutinee: 0,
+                binder: VarId(1),
+                alts: vec![Alt {
+                    con: AltCon::Default,
+                    binders: vec![],
+                    body: 1,
+                }],
+            }, // 2
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
+        if let Value::Lit(Literal::LitInt(n)) = res {
+            assert_eq!(n, 42);
+        } else {
+            panic!("Expected LitInt(42)");
+        }
+    }
+
+    #[test]
+    fn test_eval_empty_con() {
+        let nodes = vec![
+            CoreFrame::Con {
+                tag: DataConId(1),
+                fields: vec![],
+            },
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
+        if let Value::Con(tag, fields) = res {
+            assert_eq!(tag.0, 1);
+            assert!(fields.is_empty());
+        } else {
+            panic!("Expected empty Con");
+        }
+    }
+
+    #[test]
+    fn test_eval_unbound_var_lazy() {
+        // let x = 1 in let y = unbound in x
+        let nodes = vec![
+            CoreFrame::Lit(Literal::LitInt(1)), // 0
+            CoreFrame::Var(VarId(999)),          // 1: unbound
+            CoreFrame::Var(VarId(1)),            // 2: x
+            CoreFrame::LetNonRec {
+                binder: VarId(2),
+                rhs: 1,
+                body: 2,
+            }, // 3: let y = unbound in x
+            CoreFrame::LetNonRec {
+                binder: VarId(1),
+                rhs: 0,
+                body: 3,
+            }, // 4: let x = 1 in ...
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        // Since y is not forced, this should SUCCEED and return 1
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
+        if let Value::Lit(Literal::LitInt(n)) = res {
+            assert_eq!(n, 1);
+        } else {
+            panic!("Expected LitInt(1)");
+        }
+    }
+
+    #[test]
+    fn test_eval_unbound_var_forced_err() {
+        // let x = 1 in let y = unbound in y
+        let nodes = vec![
+            CoreFrame::Lit(Literal::LitInt(1)), // 0
+            CoreFrame::Var(VarId(999)),          // 1: unbound
+            CoreFrame::Var(VarId(2)),            // 2: y
+            CoreFrame::LetNonRec {
+                binder: VarId(2),
+                rhs: 1,
+                body: 2,
+            }, // 3: let y = unbound in y
+            CoreFrame::LetNonRec {
+                binder: VarId(1),
+                rhs: 0,
+                body: 3,
+            }, // 4: let x = 1 in ...
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        // Now y is forced, should FAIL
+        let res = eval(&expr, &Env::new(), &mut heap);
+        assert!(matches!(res, Err(EvalError::UnboundVar(VarId(999)))));
+    }
 }
