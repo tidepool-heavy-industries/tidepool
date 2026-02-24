@@ -25,6 +25,7 @@ pub const LIT_TAG_FLOAT: i64 = 3;
 pub const LIT_TAG_DOUBLE: i64 = 4;
 pub const LIT_TAG_STRING: i64 = 5;
 pub const LIT_TAG_ADDR: i64 = 6;
+pub const LIT_TAG_BYTEARRAY: i64 = 7;
 
 /// SSA value with boxed/unboxed tracking.
 #[derive(Debug, Clone, Copy)]

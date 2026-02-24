@@ -242,6 +242,43 @@ pub extern "C" fn debug_app_check(fun_ptr: *const u8) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ByteArray runtime functions
+// ---------------------------------------------------------------------------
+
+/// Allocate a new mutable byte array of `size` bytes, zeroed.
+/// Layout: [u64 length][u8 bytes...]
+/// Returns a raw pointer to the allocation (caller stores in Lit value slot).
+pub extern "C" fn runtime_new_byte_array(size: i64) -> i64 {
+    let total = 8 + size as usize;
+    let layout = std::alloc::Layout::from_size_align(total, 8).unwrap();
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+    if ptr.is_null() {
+        std::alloc::handle_alloc_error(layout);
+    }
+    // Write length prefix
+    unsafe { *(ptr as *mut u64) = size as u64; }
+    ptr as i64
+}
+
+/// Copy `len` bytes from `src` (Addr#) to `dest_ba` (ByteArray ptr) at `dest_off`.
+pub extern "C" fn runtime_copy_addr_to_byte_array(src: i64, dest_ba: i64, dest_off: i64, len: i64) {
+    let src_ptr = src as *const u8;
+    let dest_ptr = unsafe { (dest_ba as *mut u8).add(8 + dest_off as usize) };
+    unsafe { std::ptr::copy_nonoverlapping(src_ptr, dest_ptr, len as usize); }
+}
+
+/// Set `len` bytes in `ba` starting at `off` to `val`.
+pub extern "C" fn runtime_set_byte_array(ba: i64, off: i64, len: i64, val: i64) {
+    let ptr = unsafe { (ba as *mut u8).add(8 + off as usize) };
+    unsafe { std::ptr::write_bytes(ptr, val as u8, len as usize); }
+}
+
+/// Shrink a mutable byte array to `new_size` bytes (just updates the length prefix).
+pub extern "C" fn runtime_shrink_byte_array(ba: i64, new_size: i64) {
+    unsafe { *(ba as *mut u64) = new_size as u64; }
+}
+
 pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
     vec![
         ("gc_trigger", gc_trigger as *const u8),
@@ -250,5 +287,9 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
         ("unresolved_var_trap", unresolved_var_trap as *const u8),
         ("runtime_error", runtime_error as *const u8),
         ("debug_app_check", debug_app_check as *const u8),
+        ("runtime_new_byte_array", runtime_new_byte_array as *const u8),
+        ("runtime_copy_addr_to_byte_array", runtime_copy_addr_to_byte_array as *const u8),
+        ("runtime_set_byte_array", runtime_set_byte_array as *const u8),
+        ("runtime_shrink_byte_array", runtime_shrink_byte_array as *const u8),
     ]
 }

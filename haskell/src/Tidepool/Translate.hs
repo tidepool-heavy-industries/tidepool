@@ -22,7 +22,7 @@ import GHC.Core
 import GHC.Types.Id
 import GHC.Types.Var (isTyVar, varUnique)
 import GHC.Types.Unique (getKey)
-import GHC.Core.DataCon (DataCon, dataConRepArity, dataConRepArgTys, dataConFullSig, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, dataConOrigArgTys, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
+import GHC.Core.DataCon (DataCon, dataConRepArity, dataConRepArgTys, dataConFullSig, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, dataConOrigArgTys, isUnboxedTupleDataCon, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
 import Language.Haskell.Syntax.Basic (Boxity(..))
 import GHC.Builtin.Types (consDataCon, nilDataCon, trueDataCon, falseDataCon, charDataCon, unitDataCon, tupleDataCon, ordLTDataCon, ordEQDataCon, ordGTDataCon, intDataCon, wordDataCon, doubleDataCon, floatDataCon)
 import GHC.Builtin.PrimOps
@@ -41,7 +41,7 @@ import GHC.Types.Basic (JoinPointHood(..))
 import GHC.Utils.Outputable (showPprUnsafe)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
 import Data.Char (ord)
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, isInfixOf)
 import Data.Bits ((.&.), (.|.), shiftL)
 import Data.Word
 import Data.Int
@@ -487,6 +487,18 @@ translate expr =
         recordDC unitDataCon
         emitNode $ NCon (varId (dataConWorkId unitDataCon)) []
 
+    -- runRW# @rep @ty f  →  f realWorld#
+    -- runRW# applies f to realWorld# (a State# token), which we erase.
+    -- After type-arg stripping, args = [f]. Since f is \s -> body, translate body directly.
+    Var v | isRunRWVar v -> case args of
+      [Lam _ body] -> translate body
+      [f] -> do
+        -- f is a variable reference: apply it to a dummy unit (state token erased)
+        fIdx <- translate f
+        dummyIdx <- emitNode $ NLit (LEInt 0)
+        emitNode $ NApp fIdx dummyIdx
+      _   -> error $ "runRW# expected 1 value arg, got " ++ show (length args) ++ ": " ++ showPprUnsafe expr
+
     -- tagToEnum# @T arg → case arg of { 0# → C0; 1# → C1; ... }
     -- We desugar here because type information is erased downstream.
     Var v | Just pop <- isPrimOpId_maybe v
@@ -523,6 +535,12 @@ translate expr =
             childIdxs <- mapM translate args
             emitNode $ NJump (varId v) childIdxs
     
+    -- Foreign calls: map known FFI functions to our primops
+    Var v | isFCallId v -> do
+        let pprName = showPprUnsafe v
+        childIdxs <- mapM translate args
+        emitNode $ NPrimOp (mapFfiCall pprName) childIdxs
+
     _ -> do
       hIdx <- translateHead hd
       foldM (\fIdx arg -> do
@@ -537,7 +555,10 @@ translateHead = \case
         emitNode $ NVar (0x4500000000000000 .|. kind)  -- tag 'E' for error
     | isErrorVar v -> emitNode $ NVar 0x4500000000000002  -- tag 'E', kind 2 (error)
     | isUndefinedVar v -> emitNode $ NVar 0x4500000000000003  -- tag 'E', kind 3 (undefined)
-    | isTypeMetadataVar v -> emitNode $ NVar 0x4500000000000004  -- tag 'E', kind 4 (type metadata)
+    | isRealWorldVar v ->
+        emitNode $ NLit (LEInt 0)  -- realWorld# state token → dummy literal
+    | isTypeMetadataVar v ->
+        emitNode $ NVar 0x4500000000000004  -- tag 'E', kind 4 (type metadata)
     | otherwise -> do
         unresolved <- gets (Set.member (varId v) . tsUnresolvedIds)
         if unresolved
@@ -613,6 +634,65 @@ translateHead = \case
         rCaseIdx <- emitNode $ NCase rValIdx (varId rBinder) [FlatAlt FDefault [] bodyIdx]
         -- case qVal of qBinder { DEFAULT -> rCaseIdx }
         emitNode $ NCase qValIdx (varId qBinder) [FlatAlt FDefault [] rCaseIdx]
+  -- Desugar triple-return primops: case timesInt2# a b of (# hi, lo, ovf #) -> body
+  Case scrut _caseBinder _ty [Alt (DataAlt _dc) binders body]
+    | (Var v, allArgs) <- collectArgs scrut
+    , Just pop <- isPrimOpId_maybe v
+    , Just (op1Name, op2Name, op3Name) <- splitTripleReturnPrimOp pop
+    , let valArgs = filter isValueArg allArgs
+    , [a, b] <- valArgs
+    , vBinders <- filter (not . isTyVar) binders
+    , [b1, b2, b3] <- vBinders -> do
+        aIdx <- translate a
+        bIdx <- translate b
+        v1Idx <- emitNode $ NPrimOp op1Name [aIdx, bIdx]
+        v2Idx <- emitNode $ NPrimOp op2Name [aIdx, bIdx]
+        v3Idx <- emitNode $ NPrimOp op3Name [aIdx, bIdx]
+        bodyIdx <- translate body
+        c3 <- emitNode $ NCase v3Idx (varId b3) [FlatAlt FDefault [] bodyIdx]
+        c2 <- emitNode $ NCase v2Idx (varId b2) [FlatAlt FDefault [] c3]
+        emitNode $ NCase v1Idx (varId b1) [FlatAlt FDefault [] c2]
+  -- Desugar stateful primop/FFI calls returning unboxed tuples with a state token.
+  -- Pattern: case op args... s of (# s', results... #) -> body
+  -- Where op is a primop or FFI call and the case unpacks an unboxed tuple.
+  -- The state token (s and s') is erased, so we:
+  --   1. Drop the state token arg from the primop call
+  --   2. For 1 result binder: case op args of result { DEFAULT -> body }
+  --   3. For 0 result binders (void ops like write): run op, then body
+  Case scrut _caseBinder _ty [Alt (DataAlt dc) binders body]
+    | isUnboxedTupleDataCon dc
+    , (Var v, allArgs) <- collectArgs scrut
+    , isPrimOpId_maybe v /= Nothing || isFCallId v
+    , let valArgs = filter isValueArg allArgs
+    -- Drop the last value arg if it's realWorld# (a state token = Lit 0 after our translation)
+    , let nonStateArgs = case valArgs of
+            [] -> []
+            _  -> init valArgs  -- drop the last arg (state token)
+    , vBinders <- filter (not . isTyVar) binders -> do
+        childIdxs <- mapM translate nonStateArgs
+        -- Emit the primop or FFI call
+        opName <- case isPrimOpId_maybe v of
+                    Just pop -> return (mapPrimOp pop)
+                    Nothing  -> return (mapFfiCall (showPprUnsafe v))
+        primIdx <- emitNode $ NPrimOp opName childIdxs
+        -- Bind s' (state token) to a dummy value so downstream code referencing it doesn't fail
+        dummyState <- emitNode $ NLit (LEInt 0)
+        case vBinders of
+          [s']           -> do
+            -- Void op (e.g. writeWord8Array#): force primop for side effects, bind s'
+            bodyIdx <- translate body
+            inner <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
+            emitNode $ NCase primIdx (varId s') [FlatAlt FDefault [] inner]
+          [s', result]   -> do
+            bodyIdx <- translate body
+            inner <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
+            emitNode $ NCase primIdx (varId result) [FlatAlt FDefault [] inner]
+          [s', r1, r2]   -> do
+            bodyIdx <- translate body
+            c2 <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
+            c1 <- emitNode $ NCase primIdx (varId r2) [FlatAlt FDefault [] c2]
+            emitNode $ NCase primIdx (varId r1) [FlatAlt FDefault [] c1]
+          _ -> error $ "Unsupported unboxed tuple arity: " ++ show (length vBinders) ++ " binders"
   Case scrut b _alts_ty alts -> do
     scrutIdx <- translate scrut
     altData <- mapM translateAlt alts
@@ -776,6 +856,56 @@ mapPrimOp = \case
   -- Addr#
   IndexOffAddrOp_Char -> "IndexCharOffAddr"
   AddrAddOp           -> "PlusAddr"
+  -- ByteArray#
+  NewByteArrayOp_Char         -> "NewByteArray"
+  SizeofByteArrayOp           -> "SizeofByteArray"
+  SizeofMutableByteArrayOp    -> "SizeofByteArray"
+  UnsafeFreezeByteArrayOp     -> "UnsafeFreezeByteArray"
+  CopyAddrToByteArrayOp       -> "CopyAddrToByteArray"
+  ReadByteArrayOp_Word8       -> "ReadWord8Array"
+  WriteByteArrayOp_Word8      -> "WriteWord8Array"
+  IndexByteArrayOp_Word       -> "IndexWordArray"
+  WriteByteArrayOp_Word       -> "WriteWordArray"
+  ReadByteArrayOp_Word        -> "ReadWordArray"
+  SetByteArrayOp              -> "SetByteArray"
+  ShrinkMutableByteArrayOp_Char -> "ShrinkMutableByteArray"
+  IndexByteArrayOp_Word8      -> "IndexWord8Array"
+  IndexOffAddrOp_Word8        -> "IndexWord8OffAddr"
+  CopyByteArrayOp             -> "CopyByteArray"
+  CopyMutableByteArrayOp      -> "CopyMutableByteArray"
+  CompareByteArraysOp         -> "CompareByteArrays"
+  GetSizeofMutableByteArrayOp -> "SizeofByteArray"
+  ResizeMutableByteArrayOp_Char -> "ResizeMutableByteArray"
+  -- Word8
+  Word8ToWordOp               -> "Word8ToWord"
+  WordToWord8Op               -> "WordToWord8"
+  Word8AddOp                  -> "Word8Add"
+  Word8SubOp                  -> "Word8Sub"
+  Word8LtOp                   -> "Word8Lt"
+  Word8LeOp                   -> "Word8Le"
+  Word8GeOp                   -> "Word8Ge"
+  -- Int64
+  Int64AddOp                  -> "Int64Add"
+  Int64SubOp                  -> "Int64Sub"
+  Int64MulOp                  -> "Int64Mul"
+  Int64NegOp                  -> "Int64Negate"
+  Int64SllOp                  -> "Int64Shl"
+  Int64SraOp                  -> "Int64Shra"
+  Int64LtOp                   -> "Int64Lt"
+  Int64LeOp                   -> "Int64Le"
+  Int64GtOp                   -> "Int64Gt"
+  Int64GeOp                   -> "Int64Ge"
+  Int64ToIntOp                -> "Int64ToInt"
+  IntToInt64Op                -> "IntToInt64"
+  Int64ToWord64Op             -> "Int64ToWord64"
+  -- Word64
+  Word64ToInt64Op             -> "Word64ToInt64"
+  Word64SllOp                 -> "Word64Shl"
+  Word64OrOp                  -> "Word64Or"
+  Word64AndOp                 -> "Word64And"
+  -- Carry arithmetic and wide multiply handled by splitMultiReturnPrimOp / splitTripleReturnPrimOp
+  -- CLZ
+  Clz8Op                      -> "Clz8"
   -- Exception
   RaiseOp     -> "Raise"
   other       -> trace ("WARNING: unsupported primop: " ++ showPprUnsafe other ++ " (emitting Raise)") "Raise"
@@ -849,6 +979,17 @@ isUnsafeTakeVar v =
   let name = occNameString (nameOccName (idName v))
   in name == "$wunsafeTake" || name == "unsafeTake"
 
+isRealWorldVar :: Id -> Bool
+isRealWorldVar v = occNameString (nameOccName (idName v)) == "realWorld#"
+
+mapFfiCall :: String -> Text
+mapFfiCall pprName
+  | "strlen" `isInfixOf` pprName                = T.pack "FfiStrlen"
+  | "_hs_text_measure_off" `isInfixOf` pprName  = T.pack "FfiTextMeasureOff"
+  | "_hs_text_memchr" `isInfixOf` pprName       = T.pack "FfiTextMemchr"
+  | "_hs_text_reverse" `isInfixOf` pprName      = T.pack "FfiTextReverse"
+  | otherwise = trace ("WARNING: unsupported FFI call: " ++ pprName ++ " (emitting Raise)") $ T.pack "Raise"
+
 isRuntimeErrorVar :: Id -> Bool
 isRuntimeErrorVar v =
   let name = occNameString (nameOccName (idName v))
@@ -857,6 +998,9 @@ isRuntimeErrorVar v =
 isUnsafeEqualityProofVar :: Id -> Bool
 isUnsafeEqualityProofVar v =
   occNameString (nameOccName (idName v)) == "unsafeEqualityProof"
+
+isRunRWVar :: Id -> Bool
+isRunRWVar v = occNameString (nameOccName (idName v)) == "runRW#"
 
 -- | Recognize GHC type-representation metadata vars ($tc*, $trModule*, krep$*, $krep*).
 -- These have no runtime semantics and no unfoldings; emit as error VarId.
@@ -894,7 +1038,17 @@ splitMultiReturnPrimOp :: PrimOp -> Maybe (Text, Text)
 splitMultiReturnPrimOp = \case
   IntQuotRemOp  -> Just (T.pack "IntQuot", T.pack "IntRem")
   WordQuotRemOp -> Just (T.pack "WordQuot", T.pack "WordRem")
+  IntAddCOp     -> Just (T.pack "AddIntCVal", T.pack "AddIntCCarry")
+  WordAddCOp    -> Just (T.pack "AddWordCVal", T.pack "AddWordCCarry")
+  WordSubCOp    -> Just (T.pack "SubWordCVal", T.pack "SubWordCCarry")
+  WordMul2Op    -> Just (T.pack "TimesWord2Hi", T.pack "TimesWord2Lo")
   _             -> Nothing
+
+-- | Like splitMultiReturnPrimOp but for primops returning 3-element unboxed tuples.
+splitTripleReturnPrimOp :: PrimOp -> Maybe (Text, Text, Text)
+splitTripleReturnPrimOp = \case
+  IntMul2Op -> Just (T.pack "TimesInt2Hi", T.pack "TimesInt2Lo", T.pack "TimesInt2Overflow")
+  _         -> Nothing
 
 -- | Extract Addr# literal bytes from an expression.
 -- Handles both direct Lit and Var with an unfolding to Lit

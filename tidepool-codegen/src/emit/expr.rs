@@ -237,7 +237,7 @@ fn collapse_frame(
                 builder.declare_value_needs_stack_map(result);
                 return Ok(SsaVal::HeapPtr(result));
             }
-            primop::emit_primop(builder, op, args)
+            primop::emit_primop(pipeline, builder, vmctx, gc_sig, op, args)
         }
         EmitFrame::App { fun, arg } => {
             ctx.declare_env(builder);
