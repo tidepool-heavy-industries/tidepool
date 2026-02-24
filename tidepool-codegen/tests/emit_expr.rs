@@ -1266,6 +1266,110 @@ fn test_emit_int64_to_int_conversion() {
     let tree = RecursiveTree { nodes: vec![
         CoreFrame::Lit(Literal::LitInt(42)),
         CoreFrame::PrimOp { op: PrimOpKind::Int64ToInt, args: vec![0] },
+
+fn test_error_sentinel_let_non_rec_deferred() {
+    // let x = error_var in 42
+    // x should be deferred (poison closure) and not crash.
+    let error_var = VarId(0x4500000000000002); // UserError
+    let x = VarId(1);
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Var(error_var),                               // 0: RHS (error_var)
+        CoreFrame::Lit(Literal::LitInt(42)),                     // 1: body
+        CoreFrame::LetNonRec { binder: x, rhs: 0, body: 1 },    // 2: root
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 42); }
+    assert!(host_fns::take_runtime_error().is_none());
+}
+
+#[test]
+fn test_error_sentinel_let_non_rec_forced() {
+    // let x = error_var in x
+    // x is forced, should return poison closure and set error flag.
+    let error_var = VarId(0x4500000000000002);
+    let x = VarId(1);
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Var(error_var),                               // 0: RHS
+        CoreFrame::Var(x),                                       // 1: body
+        CoreFrame::LetNonRec { binder: x, rhs: 0, body: 1 },    // 2: root
+    ] };
+    let result = compile_and_run(&tree);
+    // Should be the poison closure
+    assert_eq!(result.result_ptr, host_fns::error_poison_ptr());
+    let err = host_fns::take_runtime_error();
+    assert!(err.is_none()); // Wait, LetNonRec only BINDS to poison, it doesn't CALL it.
+    // The error flag is set when runtime_error is CALLED (e.g. by Var(0x45...))
+    // but in LetNonRec it's DEFERRED.
+}
+
+#[test]
+fn test_error_sentinel_let_rec_deferred() {
+    // let rec x = error_var + 0; y = \n -> n in y 42
+    // We use a non-trivial RHS for x (IntAdd) to avoid the buggy Phase 2.5 path 
+    // for Var aliases in LetRec, ensuring it hits Phase 3c which has the fix.
+    let error_var = VarId(0x4500000000000002);
+    let x = VarId(1);
+    let y = VarId(2);
+    let n = VarId(3);
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Var(error_var),                               // 0
+        CoreFrame::Lit(Literal::LitInt(0)),                       // 1
+        CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![0, 1] }, // 2: x rhs (non-trivial)
+        CoreFrame::Var(n),                                       // 3: y lambda body
+        CoreFrame::Lam { binder: n, body: 3 },                  // 4: y rhs
+        CoreFrame::Lit(Literal::LitInt(42)),                    // 5: 42
+        CoreFrame::Var(y),                                       // 6: y
+        CoreFrame::App { fun: 6, arg: 5 },                      // 7: y 42
+        CoreFrame::LetRec { bindings: vec![(x, 2), (y, 4)], body: 7 }, // 8: root
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 42); }
+    assert!(host_fns::take_runtime_error().is_none());
+}
+
+#[test]
+fn test_error_sentinel_let_rec_no_rec_deferred() {
+    // let rec x = error_var in 42
+    // This hits the simple-only path in LetRec which correctly has the fix.
+    let error_var = VarId(0x4500000000000002);
+    let x = VarId(1);
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Var(error_var),                               // 0
+        CoreFrame::Lit(Literal::LitInt(42)),                    // 1
+        CoreFrame::LetRec { bindings: vec![(x, 0)], body: 1 },  // 2: root
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 42); }
+    assert!(host_fns::take_runtime_error().is_none());
+}
+
+#[test]
+fn test_error_sentinel_detection_in_complex_rhs() {
+    // let x = Con(error_var) in x
+    // x should be deferred because RHS free vars contain error_var.
+    // Body returns x, which should be the poison closure.
+    let error_var = VarId(0x4500000000000002);
+    let x = VarId(1);
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Var(error_var),                               // 0
+        CoreFrame::Con { tag: DataConId(0), fields: vec![0] },   // 1: Con(error_var)
+        CoreFrame::Var(x),                                       // 2: body (return x)
+        CoreFrame::LetNonRec { binder: x, rhs: 1, body: 2 },    // 3: root
+    ] };
+    let result = compile_and_run(&tree);
+    assert_eq!(result.result_ptr, host_fns::error_poison_ptr());
+    assert!(host_fns::take_runtime_error().is_none());
+}
+
+#[test]
+fn test_non_error_sentinel_not_deferred() {
+    // let x = 42 in x
+    // x is not an error sentinel, should be evaluated normally.
+    let x = VarId(1);
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(42)),                    // 0
+        CoreFrame::Var(x),                                       // 1
+        CoreFrame::LetNonRec { binder: x, rhs: 0, body: 1 },    // 2
     ] };
     let result = compile_and_run(&tree);
     unsafe { assert_eq!(read_lit_int(result.result_ptr), 42); }
