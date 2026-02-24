@@ -220,3 +220,221 @@ pub unsafe fn bump_alloc_from_vmctx(vmctx: &mut VMContext, size: usize) -> *mut 
     vmctx.alloc_ptr = new_ptr;
     ptr
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nursery::Nursery;
+    use tidepool_repr::{DataConId, Literal};
+    use std::sync::{Arc, Mutex};
+
+    extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext) {}
+
+    fn setup_vmctx(size: usize) -> (Nursery, VMContext) {
+        let mut nursery = Nursery::new(size);
+        let vmctx = nursery.make_vmctx(mock_gc_trigger);
+        (nursery, vmctx)
+    }
+
+    #[test]
+    fn test_lit_int_roundtrip() {
+        let (_nursery, mut vmctx) = setup_vmctx(1024);
+        let val = Value::Lit(Literal::LitInt(42));
+        unsafe {
+            let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
+            let back = heap_to_value(ptr).expect("heap_to_value failed");
+            if let Value::Lit(Literal::LitInt(n)) = back {
+                assert_eq!(n, 42);
+            } else {
+                panic!("Expected LitInt, got {:?}", back);
+            }
+        }
+    }
+
+    #[test]
+    fn test_lit_word_roundtrip() {
+        let (_nursery, mut vmctx) = setup_vmctx(1024);
+        let val = Value::Lit(Literal::LitWord(123));
+        unsafe {
+            let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
+            let back = heap_to_value(ptr).expect("heap_to_value failed");
+            if let Value::Lit(Literal::LitWord(n)) = back {
+                assert_eq!(n, 123);
+            } else {
+                panic!("Expected LitWord, got {:?}", back);
+            }
+        }
+    }
+
+    #[test]
+    fn test_lit_char_roundtrip() {
+        let (_nursery, mut vmctx) = setup_vmctx(1024);
+        let val = Value::Lit(Literal::LitChar('λ'));
+        unsafe {
+            let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
+            let back = heap_to_value(ptr).expect("heap_to_value failed");
+            if let Value::Lit(Literal::LitChar(c)) = back {
+                assert_eq!(c, 'λ');
+            } else {
+                panic!("Expected LitChar, got {:?}", back);
+            }
+        }
+    }
+
+    #[test]
+    fn test_lit_double_roundtrip() {
+        let (_nursery, mut vmctx) = setup_vmctx(1024);
+        let val = Value::Lit(Literal::LitDouble(f64::to_bits(3.14159)));
+        unsafe {
+            let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
+            let back = heap_to_value(ptr).expect("heap_to_value failed");
+            if let Value::Lit(Literal::LitDouble(bits)) = back {
+                assert_eq!(f64::from_bits(bits), 3.14159);
+            } else {
+                panic!("Expected LitDouble, got {:?}", back);
+            }
+        }
+    }
+
+    #[test]
+    fn test_lit_string_roundtrip() {
+        let (_nursery, mut vmctx) = setup_vmctx(1024);
+        let bytes = b"hello world".to_vec();
+        let val = Value::Lit(Literal::LitString(bytes.clone()));
+        unsafe {
+            let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
+            let back = heap_to_value(ptr).expect("heap_to_value failed");
+            if let Value::Lit(Literal::LitString(b)) = back {
+                assert_eq!(b, bytes);
+            } else {
+                panic!("Expected LitString, got {:?}", back);
+            }
+        }
+    }
+
+    #[test]
+    fn test_con_no_fields() {
+        let (_nursery, mut vmctx) = setup_vmctx(1024);
+        let val = Value::Con(DataConId(42), vec![]);
+        unsafe {
+            let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
+            let back = heap_to_value(ptr).expect("heap_to_value failed");
+            if let Value::Con(id, fields) = back {
+                assert_eq!(id.0, 42);
+                assert!(fields.is_empty());
+            } else {
+                panic!("Expected Con, got {:?}", back);
+            }
+        }
+    }
+
+    #[test]
+    fn test_con_lit_fields() {
+        let (_nursery, mut vmctx) = setup_vmctx(1024);
+        let val = Value::Con(DataConId(1), vec![
+            Value::Lit(Literal::LitInt(10)),
+            Value::Lit(Literal::LitChar('a')),
+        ]);
+        unsafe {
+            let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
+            let back = heap_to_value(ptr).expect("heap_to_value failed");
+            if let Value::Con(id, fields) = back {
+                assert_eq!(id.0, 1);
+                assert_eq!(fields.len(), 2);
+                match (&fields[0], &fields[1]) {
+                    (Value::Lit(Literal::LitInt(10)), Value::Lit(Literal::LitChar('a'))) => (),
+                    _ => panic!("Expected [LitInt(10), LitChar('a')], got {:?}", fields),
+                }
+            } else {
+                panic!("Expected Con, got {:?}", back);
+            }
+        }
+    }
+
+    #[test]
+    fn test_con_nested() {
+        let (_nursery, mut vmctx) = setup_vmctx(1024);
+        // Just (I# 42)
+        let inner = Value::Con(DataConId(2), vec![Value::Lit(Literal::LitInt(42))]);
+        let val = Value::Con(DataConId(1), vec![inner]);
+        unsafe {
+            let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
+            let back = heap_to_value(ptr).expect("heap_to_value failed");
+            
+            if let Value::Con(id, fields) = back {
+                assert_eq!(id.0, 1);
+                assert_eq!(fields.len(), 1);
+                if let Value::Con(id2, fields2) = &fields[0] {
+                    assert_eq!(id2.0, 2);
+                    assert_eq!(fields2.len(), 1);
+                    if let Value::Lit(Literal::LitInt(n)) = &fields2[0] {
+                        assert_eq!(*n, 42);
+                    } else {
+                        panic!("Expected LitInt");
+                    }
+                } else {
+                    panic!("Expected nested Con");
+                }
+            } else {
+                panic!("Expected Con");
+            }
+        }
+    }
+
+    #[test]
+    fn test_byte_array_roundtrip() {
+        let (_nursery, mut vmctx) = setup_vmctx(1024);
+        let data = vec![1, 2, 3, 4, 5];
+        let val = Value::ByteArray(Arc::new(Mutex::new(data.clone())));
+        unsafe {
+            let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
+            let back = heap_to_value(ptr).expect("heap_to_value failed");
+            if let Value::ByteArray(ba) = back {
+                assert_eq!(*ba.lock().unwrap(), data);
+            } else {
+                panic!("Expected ByteArray, got {:?}", back);
+            }
+        }
+    }
+
+    #[test]
+    fn test_bump_alloc_alignment() {
+        let (_nursery, mut vmctx) = setup_vmctx(1024);
+        unsafe {
+            let p1 = bump_alloc_from_vmctx(&mut vmctx, 1);
+            let p2 = bump_alloc_from_vmctx(&mut vmctx, 1);
+            assert_eq!(p1 as usize % 8, 0);
+            assert_eq!(p2 as usize % 8, 0);
+            assert_eq!(p2 as usize - p1 as usize, 8);
+        }
+    }
+
+    #[test]
+    fn test_bump_alloc_bounds() {
+        let (_nursery, mut vmctx) = setup_vmctx(16);
+        unsafe {
+            let p1 = bump_alloc_from_vmctx(&mut vmctx, 8);
+            assert!(!p1.is_null());
+            let p2 = bump_alloc_from_vmctx(&mut vmctx, 8);
+            assert!(!p2.is_null());
+            let p3 = bump_alloc_from_vmctx(&mut vmctx, 1);
+            assert!(p3.is_null());
+        }
+    }
+
+    #[test]
+    fn test_lit_float_roundtrip() {
+        let (_nursery, mut vmctx) = setup_vmctx(1024);
+        let bits = f32::to_bits(3.14f32) as u64;
+        let val = Value::Lit(Literal::LitFloat(bits));
+        unsafe {
+            let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
+            let back = heap_to_value(ptr).expect("heap_to_value failed");
+            if let Value::Lit(Literal::LitFloat(b)) = back {
+                assert_eq!(b, bits);
+            } else {
+                panic!("Expected LitFloat, got {:?}", back);
+            }
+        }
+    }
+}
