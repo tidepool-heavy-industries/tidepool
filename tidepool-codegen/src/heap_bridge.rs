@@ -66,6 +66,17 @@ pub unsafe fn heap_to_value(ptr: *const u8) -> Result<Value, BridgeError> {
                     // Wrap as empty LitString as graceful fallback.
                     Ok(Value::Lit(Literal::LitString(vec![])))
                 }
+                7 => {
+                    // ByteArray# — raw pointer to [len: u64][bytes...]
+                    let ba_ptr = raw_value as *const u8;
+                    if ba_ptr.is_null() {
+                        return Ok(Value::ByteArray(std::sync::Arc::new(std::sync::Mutex::new(vec![]))));
+                    }
+                    let len = std::ptr::read_unaligned(ba_ptr as *const u64) as usize;
+                    let bytes_ptr = ba_ptr.add(8);
+                    let bytes = std::slice::from_raw_parts(bytes_ptr, len).to_vec();
+                    Ok(Value::ByteArray(std::sync::Arc::new(std::sync::Mutex::new(bytes))))
+                }
                 other => Err(BridgeError::UnexpectedLitTag(other as u8)),
             }
         }
@@ -167,6 +178,26 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
             for (i, fp) in field_ptrs.into_iter().enumerate() {
                 *(ptr.add(layout::CON_FIELDS_OFFSET + 8 * i) as *mut *mut u8) = fp;
             }
+            Ok(ptr)
+        }
+        Value::ByteArray(bytes) => {
+            // ByteArray# stored as Lit with tag=7 (LIT_TAG_BYTEARRAY), value = ptr to [len: u64][bytes...]
+            let bytes = bytes.lock().unwrap();
+            let data_size = 8 + bytes.len();
+            let data_ptr = bump_alloc_from_vmctx(vmctx, data_size);
+            if data_ptr.is_null() {
+                return Err(BridgeError::NurseryExhausted);
+            }
+            *(data_ptr as *mut u64) = bytes.len() as u64;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr.add(8), bytes.len());
+
+            let ptr = bump_alloc_from_vmctx(vmctx, layout::LIT_SIZE);
+            if ptr.is_null() {
+                return Err(BridgeError::NurseryExhausted);
+            }
+            layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
+            *ptr.add(layout::LIT_TAG_OFFSET) = 7; // LIT_TAG_BYTEARRAY
+            *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = data_ptr as i64;
             Ok(ptr)
         }
         _ => Err(BridgeError::UnexpectedHeapTag(255)),

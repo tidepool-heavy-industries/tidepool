@@ -287,7 +287,17 @@ impl FromCore for String {
             {
                 let ba = match &fields[0] {
                     Value::ByteArray(bs) => bs.lock().unwrap().clone(),
-                    _ => return Err(type_mismatch("ByteArray in Text", &fields[0])),
+                    // Lifted ByteArray wrapper: Con("ByteArray", [Value::ByteArray(..)])
+                    Value::Con(ba_id, ba_fields)
+                        if ba_fields.len() == 1
+                            && table.get_by_name("ByteArray") == Some(*ba_id) =>
+                    {
+                        match &ba_fields[0] {
+                            Value::ByteArray(bs) => bs.lock().unwrap().clone(),
+                            _ => return Err(type_mismatch("ByteArray# in ByteArray", &ba_fields[0])),
+                        }
+                    }
+                    _ => return Err(type_mismatch("ByteArray or ByteArray# in Text", &fields[0])),
                 };
                 let off = i64::from_value(&fields[1], table)? as usize;
                 let len = i64::from_value(&fields[2], table)? as usize;
@@ -360,10 +370,18 @@ impl ToCore for String {
             .ok_or_else(|| BridgeError::UnknownDataConName("I#".into()))?;
         let bytes = self.as_bytes().to_vec();
         let len = bytes.len() as i64;
+        // GHC 9.12 Text uses lifted ByteArray (not raw ByteArray#):
+        //   data Text = Text !ByteArray !Int !Int
+        //   data ByteArray = ByteArray ByteArray#
+        let ba_raw = Value::ByteArray(Arc::new(Mutex::new(bytes)));
+        let ba_lifted = match table.get_by_name("ByteArray") {
+            Some(ba_id) => Value::Con(ba_id, vec![ba_raw]),
+            None => ba_raw, // fallback: use raw if no ByteArray constructor in table
+        };
         Ok(Value::Con(
             text_id,
             vec![
-                Value::ByteArray(Arc::new(Mutex::new(bytes))),
+                ba_lifted,
                 Value::Con(i_hash_id, vec![Value::Lit(Literal::LitInt(0))]),
                 Value::Con(i_hash_id, vec![Value::Lit(Literal::LitInt(len))]),
             ],

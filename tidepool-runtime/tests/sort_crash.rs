@@ -285,8 +285,8 @@ fn test_eq_char() {
 
 #[test]
 
-fn test_eq_string_empty() {
-    let json = run_plain("eqString \"\" \"\"");
+fn test_eq_text_empty() {
+    let json = run_plain("(\"\" :: Text) == \"\"");
     assert_eq!(json, serde_json::json!(true));
 }
 
@@ -306,46 +306,36 @@ fn test_case_eq_char() {
 
 #[test]
 
-fn test_eq_string_local() {
-    let json = run_mcp(&[
-        "let { myEq [] [] = True; myEq (x:xs) (y:ys) = x == y && myEq xs ys; myEq _ _ = False }",
-        "pure (myEq \"a\" \"a\")",
-    ]);
+fn test_eq_text_simple() {
+    let json = run_plain("(\"a\" :: Text) == \"a\"");
     assert_eq!(json, serde_json::json!(true));
 }
 
 #[test]
 
-fn test_eq_string_simple() {
-    let json = run_plain("eqString \"a\" \"a\"");
+fn test_eq_text_multi_char() {
+    let json = run_plain("(\"hello\" :: Text) == \"hello\"");
     assert_eq!(json, serde_json::json!(true));
 }
 
 #[test]
 
-fn test_eq_string_multi_char() {
-    let json = run_plain("eqString \"hello\" \"hello\"");
-    assert_eq!(json, serde_json::json!(true));
-}
-
-#[test]
-
-fn test_eq_string_diff_content() {
-    let json = run_plain("eqString \"abc\" \"abd\"");
+fn test_eq_text_diff_content() {
+    let json = run_plain("(\"abc\" :: Text) == \"abd\"");
     assert_eq!(json, serde_json::json!(false));
 }
 
 #[test]
 
-fn test_eq_string_diff_length() {
-    let json = run_plain("eqString \"ab\" \"abc\"");
+fn test_eq_text_diff_length() {
+    let json = run_plain("(\"ab\" :: Text) == \"abc\"");
     assert_eq!(json, serde_json::json!(false));
 }
 
 #[test]
 
-fn test_eq_string_diff() {
-    let json = run_plain("eqString \"a\" \"b\"");
+fn test_eq_text_diff() {
+    let json = run_plain("(\"a\" :: Text) == \"b\"");
     assert_eq!(json, serde_json::json!(false));
 }
 
@@ -511,7 +501,7 @@ fn test_mcp_filter() {
 }
 
 #[test]
-#[ignore] // SIGABRT — pre-existing issue with words on string literals
+
 fn test_mcp_words() {
     let json = run_mcp(&["pure (words \"hello world\")"]);
     assert_eq!(json, serde_json::json!(["hello", "world"]));

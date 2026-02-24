@@ -98,9 +98,21 @@ fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_json:
                 }
                 ("C#", [x]) => value_to_json(x, table, d),
 
-                // Text constructor: Text ByteArray# off len → JSON string
+                // Text constructor: Text ByteArray off len → JSON string
+                // ByteArray# may be raw Value::ByteArray or lifted Con("ByteArray", [Value::ByteArray(..)])
                 ("Text", [ba_val, off_val, len_val]) => {
-                    if let Value::ByteArray(bs) = ba_val {
+                    let raw_ba = match ba_val {
+                        Value::ByteArray(bs) => Some(bs.clone()),
+                        Value::Con(id, fields) if con_name(*id, table) == "ByteArray" && fields.len() == 1 => {
+                            if let Value::ByteArray(bs) = &fields[0] {
+                                Some(bs.clone())
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(bs) = raw_ba {
                         let borrowed = bs.lock().unwrap();
                         let off = extract_boxed_int(off_val, table).unwrap_or(0) as usize;
                         let len = extract_boxed_int(len_val, table).unwrap_or(borrowed.len() as i64) as usize;
