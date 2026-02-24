@@ -20,14 +20,7 @@ enum ConsoleReq {
 struct ConsoleHandler;
 
 impl DescribeEffect for ConsoleHandler {
-    fn effect_decl() -> EffectDecl {
-        EffectDecl {
-            type_name: "Console",
-            description: "Print text output.",
-            constructors: &["Print :: Text -> Console ()"],
-            type_defs: &[],
-        }
-    }
+    fn effect_decl() -> EffectDecl { tidepool_mcp::console_decl() }
 }
 
 impl EffectHandler<CapturedOutput> for ConsoleHandler {
@@ -70,19 +63,7 @@ impl KvHandler {
 }
 
 impl DescribeEffect for KvHandler {
-    fn effect_decl() -> EffectDecl {
-        EffectDecl {
-            type_name: "KV",
-            description: "Persistent key-value store. State survives across calls within one server session.",
-            constructors: &[
-                "KvGet :: Text -> KV (Maybe Text)",
-                "KvSet :: Text -> Text -> KV ()",
-                "KvDelete :: Text -> KV ()",
-                "KvKeys :: KV [Text]",
-            ],
-            type_defs: &[],
-        }
-    }
+    fn effect_decl() -> EffectDecl { tidepool_mcp::kv_decl() }
 }
 
 impl EffectHandler<CapturedOutput> for KvHandler {
@@ -167,17 +148,7 @@ impl FsHandler {
 }
 
 impl DescribeEffect for FsHandler {
-    fn effect_decl() -> EffectDecl {
-        EffectDecl {
-            type_name: "Fs",
-            description: "Read and write files (sandboxed to server working directory).",
-            constructors: &[
-                "FsRead :: Text -> Fs Text",
-                "FsWrite :: Text -> Text -> Fs ()",
-            ],
-            type_defs: &[],
-        }
-    }
+    fn effect_decl() -> EffectDecl { tidepool_mcp::fs_decl() }
 }
 
 impl EffectHandler<CapturedOutput> for FsHandler {
@@ -413,27 +384,7 @@ impl SgHandler {
 }
 
 impl DescribeEffect for SgHandler {
-    fn effect_decl() -> EffectDecl {
-        EffectDecl {
-            type_name: "SG",
-            description: concat!(
-                "Structural code search and rewrite via ast-grep. ",
-                "Use patterns with $VAR for single-node captures and $$$VAR for multi-node. ",
-                "Paths are relative to server working directory.",
-            ),
-            type_defs: &[
-                "data Lang = Rust | Python | TypeScript | JavaScript | Go | Java | C | Cpp | Haskell | Nix | Html | Css | Json | Yaml | Toml",
-                "data Match = Match { mText :: Text, mFile :: Text, mLine :: Int, mVars :: [(Text, Text)], mReplacement :: Text }",
-                "var :: Match -> Text -> Text",
-                "var (Match _ _ _ vs _) k = case [v | (k', v) <- vs, k' == k] of { (x:_) -> x; _ -> \"\" }",
-            ],
-            constructors: &[
-                "SgFind :: Lang -> Text -> [Text] -> SG [Match]",
-                "SgPreview :: Lang -> Text -> Text -> [Text] -> SG [Match]",
-                "SgReplace :: Lang -> Text -> Text -> [Text] -> SG Int",
-            ],
-        }
-    }
+    fn effect_decl() -> EffectDecl { tidepool_mcp::sg_decl() }
 }
 
 impl EffectHandler<CapturedOutput> for SgHandler {

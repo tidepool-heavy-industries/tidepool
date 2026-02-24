@@ -2395,6 +2395,7 @@ dependencies = [
  "tidepool-codegen",
  "tidepool-effect",
  "tidepool-eval",
+ "tidepool-mcp",
  "tidepool-repr",
 ]
 

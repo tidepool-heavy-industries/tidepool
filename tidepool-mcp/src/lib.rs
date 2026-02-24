@@ -68,6 +68,76 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Standard effect declarations
+// ---------------------------------------------------------------------------
+
+/// Console effect: print text output.
+pub fn console_decl() -> EffectDecl {
+    EffectDecl {
+        type_name: "Console",
+        description: "Print text output.",
+        constructors: &["Print :: Text -> Console ()"],
+        type_defs: &[],
+    }
+}
+
+/// Key-value store effect.
+pub fn kv_decl() -> EffectDecl {
+    EffectDecl {
+        type_name: "KV",
+        description: "Persistent key-value store. State survives across calls within one server session.",
+        constructors: &[
+            "KvGet :: Text -> KV (Maybe Text)",
+            "KvSet :: Text -> Text -> KV ()",
+            "KvDelete :: Text -> KV ()",
+            "KvKeys :: KV [Text]",
+        ],
+        type_defs: &[],
+    }
+}
+
+/// File I/O effect (sandboxed).
+pub fn fs_decl() -> EffectDecl {
+    EffectDecl {
+        type_name: "Fs",
+        description: "Read and write files (sandboxed to server working directory).",
+        constructors: &[
+            "FsRead :: Text -> Fs Text",
+            "FsWrite :: Text -> Text -> Fs ()",
+        ],
+        type_defs: &[],
+    }
+}
+
+/// Structural grep (ast-grep) effect.
+pub fn sg_decl() -> EffectDecl {
+    EffectDecl {
+        type_name: "SG",
+        description: concat!(
+            "Structural code search and rewrite via ast-grep. ",
+            "Use patterns with $VAR for single-node captures and $$$VAR for multi-node. ",
+            "Paths are relative to server working directory.",
+        ),
+        type_defs: &[
+            "data Lang = Rust | Python | TypeScript | JavaScript | Go | Java | C | Cpp | Haskell | Nix | Html | Css | Json | Yaml | Toml",
+            "data Match = Match { mText :: Text, mFile :: Text, mLine :: Int, mVars :: [(Text, Text)], mReplacement :: Text }",
+            "var :: Match -> Text -> Text",
+            "var (Match _ _ _ vs _) k = case [v | (k', v) <- vs, k' == k] of { (x:_) -> x; _ -> \"\" }",
+        ],
+        constructors: &[
+            "SgFind :: Lang -> Text -> [Text] -> SG [Match]",
+            "SgPreview :: Lang -> Text -> Text -> [Text] -> SG [Match]",
+            "SgReplace :: Lang -> Text -> Text -> [Text] -> SG Int",
+        ],
+    }
+}
+
+/// All standard effects in canonical order.
+pub fn standard_decls() -> Vec<EffectDecl> {
+    vec![console_decl(), kv_decl(), fs_decl(), sg_decl()]
+}
+
+// ---------------------------------------------------------------------------
 // Request types
 // ---------------------------------------------------------------------------
 
@@ -94,14 +164,14 @@ pub struct EvalRequest {
 // Templating
 // ---------------------------------------------------------------------------
 
-fn build_preamble(effects: &[EffectDecl]) -> String {
+pub fn build_preamble(effects: &[EffectDecl]) -> String {
     let mut out = String::new();
     out.push_str("{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, GADTs, PartialTypeSignatures, ScopedTypeVariables #-}\n");
     out.push_str("module Expr where\n");
     out.push_str("import Tidepool.Prelude\n");
     out.push_str("import qualified Data.Text as T\n");
     out.push_str("import Control.Monad.Freer\n");
-    out.push_str("default (Int)\n");
+    out.push_str("default (Int, String)\n");
     out.push('\n');
 
     for eff in effects {
@@ -125,7 +195,7 @@ fn build_preamble(effects: &[EffectDecl]) -> String {
     out
 }
 
-fn build_effect_stack_type(effects: &[EffectDecl]) -> String {
+pub fn build_effect_stack_type(effects: &[EffectDecl]) -> String {
     if effects.is_empty() {
         "'[]".to_string()
     } else {
@@ -160,7 +230,7 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
     desc
 }
 
-fn template_haskell(
+pub fn template_haskell(
     preamble: &str,
     effect_stack: &str,
     source: &[String],
@@ -173,7 +243,7 @@ fn template_haskell(
     // data declarations, type alias. User imports must go after standard imports
     // (after "import Control.Monad.Freer\n") and before "default".
     if !imports.is_empty() {
-        let insert_point = preamble.find("default (Int)").unwrap_or(preamble.len());
+        let insert_point = preamble.find("default (Int").unwrap_or(preamble.len());
         out.push_str(&preamble[..insert_point]);
         for imp in imports {
             out.push_str(&format!("import {}\n", imp));
