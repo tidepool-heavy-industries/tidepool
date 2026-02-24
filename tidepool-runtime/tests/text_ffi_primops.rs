@@ -1,4 +1,3 @@
-use frunk::HNil;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
@@ -29,21 +28,29 @@ fn test_decls() -> Vec<tidepool_mcp::EffectDecl> {
 }
 
 fn mcp_source_with_helpers(lines: &[&str], helpers: &[&str]) -> String {
+    mcp_source_with_imports(lines, helpers, &[])
+}
+
+fn mcp_source_with_imports(lines: &[&str], helpers: &[&str], imports: &[&str]) -> String {
     let decls = test_decls();
     let preamble = tidepool_mcp::build_preamble(&decls);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
     let helpers: Vec<String> = helpers.iter().map(|s| s.to_string()).collect();
-    tidepool_mcp::template_haskell(&preamble, &stack, &lines, &[], &helpers)
+    let imports: Vec<String> = imports.iter().map(|s| s.to_string()).collect();
+    tidepool_mcp::template_haskell(&preamble, &stack, &lines, &imports, &helpers)
 }
 
 fn plain_source(body: &str) -> String {
     format!(
-        r#"{{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, MagicHash, PartialTypeSignatures #-}}
+        r#"{{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, MagicHash, UnboxedTuples, PartialTypeSignatures #-}}
 module Test where
 import Tidepool.Prelude
 import qualified Data.Text as T
+import qualified Data.Text.Internal as T.Internal
 import GHC.Exts
+import GHC.Word
+import Prelude (fromIntegral)
 import Control.Monad.Freer
 
 result :: _
@@ -76,7 +83,15 @@ fn run_mcp_effectful_with_helpers(
     lines: &[&str],
     helpers: &[&str],
 ) -> (serde_json::Value, Vec<String>) {
-    let src = mcp_source_with_helpers(lines, helpers);
+    run_mcp_effectful_with_imports(lines, helpers, &[])
+}
+
+fn run_mcp_effectful_with_imports(
+    lines: &[&str],
+    helpers: &[&str],
+    imports: &[&str],
+) -> (serde_json::Value, Vec<String>) {
+    let src = mcp_source_with_imports(lines, helpers, imports);
     let pp = prelude_path();
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
@@ -339,29 +354,22 @@ fn test_jit_text_find_pure() {
 
 #[test]
 fn test_unbox_addr_bytearray_bug() {
-    // Tests whether unbox_addr correctly handles ByteArray# by adding +8 offset.
-    // If it doesn't, indexWord8OffAddr# will read from the length header.
-    let helpers = &[
-        r#"{-# LANGUAGE MagicHash, UnboxedTuples #-}"#,
-        r#"import GHC.Exts"#,
-        r#"import GHC.Word"#,
-        r#"import Data.Text.Internal (Text(..))"#,
-        r#"checkBA :: Text -> Int"#,
-        r#"checkBA (Text ba (I# off) (I# len)) = "#,
-        r#"  let "#,
-        r#"    w1 = fromIntegral (W8# (indexWord8Array# ba off)) "#,
-        r#"    w2 = fromIntegral (W8# (indexWord8OffAddr# (unsafeCoerce# ba) off)) "#,
-        r#"  in if w1 == (w2 :: Int) then 1 else 0"#,
-    ];
-    
-    let (json, _) = run_mcp_effectful_with_helpers(
-        &[
-            r#"send (KvSet "abc" "val")"#,
-            r#"keys <- send KvKeys"#,
-            r#"pure (map checkBA keys)"#,
-        ],
-        helpers
-    );
-    // If the bug is present, indexWord8OffAddr# reads from the header, returning a mismatch.
-    assert_eq!(json, serde_json::json!([1]));
+    // This test documents the unbox_addr bug for ByteArray#.
+    //
+    // The unbox_addr function in primop.rs only adds +8 for LIT_TAG_STRING (5),
+    // NOT for LIT_TAG_BYTEARRAY (7). This causes FFI functions receiving
+    // ByteArray# as Addr# to point to the header instead of the data.
+    //
+    // This is already exercised by test_jit_text_length_bridge, which calls 
+    // T.length (internally calling _hs_text_measure_off via unbox_addr) on a 
+    // bridge-injected Text object (which uses ByteArray#).
+    //
+    // As seen in test_jit_text_length_bridge, it currently returns -5 (reading 
+    // from the header) instead of 5 (reading from the data).
+    let (json, _) = run_mcp_effectful(&[
+        r#"send (KvSet "hello" "val")"#,
+        r#"keys <- send KvKeys"#,
+        r#"pure (map T.length keys)"#,
+    ]);
+    assert_eq!(json, serde_json::json!([5]));
 }
