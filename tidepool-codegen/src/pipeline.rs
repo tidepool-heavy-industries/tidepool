@@ -185,3 +185,144 @@ impl CodegenPipeline {
         registry
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    use cranelift_codegen::ir::InstBuilder;
+
+    #[test]
+    fn test_empty_pipeline() {
+        let mut pipeline = CodegenPipeline::new(&[]);
+        pipeline.finalize().unwrap();
+    }
+
+    #[test]
+    fn test_declare_define_finalize() {
+        let mut pipeline = CodegenPipeline::new(&[]);
+        let func_id = pipeline.declare_function("test_fn").unwrap();
+
+        let mut ctx = pipeline.module.make_context();
+        ctx.func.signature = pipeline.make_func_signature();
+        
+        let mut builder_context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
+
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+
+        let val = builder.ins().iconst(types::I64, 42);
+        builder.ins().return_(&[val]);
+        builder.finalize();
+
+        pipeline.define_function(func_id, &mut ctx).unwrap();
+        pipeline.finalize().unwrap();
+
+        let ptr = pipeline.get_function_ptr(func_id);
+        assert!(!ptr.is_null());
+
+        let func: unsafe extern "C" fn(usize) -> i64 = unsafe { std::mem::transmute(ptr) };
+        let res = unsafe { func(0) };
+        assert_eq!(res, 42);
+    }
+
+    #[test]
+    fn test_duplicate_declarations() {
+        let mut pipeline = CodegenPipeline::new(&[]);
+        let id1 = pipeline.declare_function("f1").unwrap();
+        let id2 = pipeline.declare_function("f2").unwrap();
+        assert_ne!(id1, id2);
+        
+        let id3 = pipeline.declare_function("f1").unwrap();
+        assert_eq!(id1, id3);
+    }
+
+    #[test]
+    fn test_get_function_ptr_after_finalize() {
+        let mut pipeline = CodegenPipeline::new(&[]);
+        let func_id = pipeline.declare_function("f1").unwrap();
+        
+        let mut ctx = pipeline.module.make_context();
+        ctx.func.signature = pipeline.make_func_signature();
+        let mut builder_context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+        let val = builder.ins().iconst(types::I64, 0);
+        builder.ins().return_(&[val]);
+        builder.finalize();
+
+        pipeline.define_function(func_id, &mut ctx).unwrap();
+        pipeline.finalize().unwrap();
+
+        let ptr = pipeline.get_function_ptr(func_id);
+        assert!(!ptr.is_null());
+    }
+
+    #[test]
+    fn test_build_lambda_registry() {
+        let mut pipeline = CodegenPipeline::new(&[]);
+        let func_id = pipeline.declare_function("f1").unwrap();
+        
+        let mut ctx = pipeline.module.make_context();
+        ctx.func.signature = pipeline.make_func_signature();
+        let mut builder_context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+        let val = builder.ins().iconst(types::I64, 0);
+        builder.ins().return_(&[val]);
+        builder.finalize();
+
+        pipeline.define_function(func_id, &mut ctx).unwrap();
+        pipeline.register_lambda(func_id, "my_lambda".to_string());
+        pipeline.finalize().unwrap();
+
+        let registry = pipeline.build_lambda_registry();
+        let ptr = pipeline.get_function_ptr(func_id);
+        assert_eq!(registry.lookup(ptr as usize), Some("my_lambda"));
+    }
+
+    #[test]
+    fn test_host_fn_symbols_integration() {
+        extern "C" fn my_host_fn() -> i64 { 123 }
+        let symbols = [("my_host_fn", my_host_fn as *const u8)];
+        let mut pipeline = CodegenPipeline::new(&symbols);
+        
+        let func_id = pipeline.declare_function("call_host").unwrap();
+        let mut ctx = pipeline.module.make_context();
+        ctx.func.signature = pipeline.make_func_signature();
+        
+        let mut builder_context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
+        
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+
+        let mut sig = ir::Signature::new(pipeline.isa.default_call_conv());
+        sig.returns.push(AbiParam::new(types::I64));
+        let callee = pipeline.module.declare_function("my_host_fn", Linkage::Import, &sig).unwrap();
+        let local_callee = pipeline.module.declare_func_in_func(callee, &mut builder.func);
+        
+        let call = builder.ins().call(local_callee, &[]);
+        let res = builder.inst_results(call)[0];
+        builder.ins().return_(&[res]);
+        builder.finalize();
+
+        pipeline.define_function(func_id, &mut ctx).unwrap();
+        pipeline.finalize().unwrap();
+
+        let ptr = pipeline.get_function_ptr(func_id);
+        let func: unsafe extern "C" fn(usize) -> i64 = unsafe { std::mem::transmute(ptr) };
+        assert_eq!(unsafe { func(0) }, 123);
+    }
+}
