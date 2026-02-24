@@ -1532,5 +1532,142 @@ fn test_emit_primop_bytearray_resize() {
     ] };
     let result = compile_and_run(&tree);
     unsafe { assert_eq!(read_lit_int(result.result_ptr), 20); }
+
+fn test_emit_primop_float_comparisons() {
+    fn run_cmp(op: PrimOpKind, a: f32, b: f32) -> i64 {
+        let tree = RecursiveTree { nodes: vec![
+            CoreFrame::Lit(Literal::LitFloat(f32::to_bits(a) as u64)),
+            CoreFrame::Lit(Literal::LitFloat(f32::to_bits(b) as u64)),
+            CoreFrame::PrimOp { op, args: vec![0, 1] },
+        ] };
+        let result = compile_and_run(&tree);
+        unsafe { read_lit_int(result.result_ptr) }
+    }
+    
+    assert_eq!(run_cmp(PrimOpKind::FloatEq, 1.0, 1.0), 1);
+    assert_eq!(run_cmp(PrimOpKind::FloatNe, 1.0, 2.0), 1);
+    assert_eq!(run_cmp(PrimOpKind::FloatLe, 1.0, 1.0), 1);
+    assert_eq!(run_cmp(PrimOpKind::FloatGt, 2.0, 1.0), 1);
+    assert_eq!(run_cmp(PrimOpKind::FloatGe, 2.0, 2.0), 1);
+}
+
+#[test]
+fn test_emit_primop_float_arith_extra() {
+    let tree_sub = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitFloat(f32::to_bits(5.0) as u64)),
+        CoreFrame::Lit(Literal::LitFloat(f32::to_bits(3.0) as u64)),
+        CoreFrame::PrimOp { op: PrimOpKind::FloatSub, args: vec![0, 1] },
+    ] };
+    let res_sub = compile_and_run(&tree_sub);
+    unsafe { assert_eq!(read_lit_float(res_sub.result_ptr), 2.0); }
+
+    let tree_div = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitFloat(f32::to_bits(10.0) as u64)),
+        CoreFrame::Lit(Literal::LitFloat(f32::to_bits(4.0) as u64)),
+        CoreFrame::PrimOp { op: PrimOpKind::FloatDiv, args: vec![0, 1] },
+    ] };
+    let res_div = compile_and_run(&tree_div);
+    unsafe { assert_eq!(read_lit_float(res_div.result_ptr), 2.5); }
+}
+
+#[test]
+fn test_emit_primop_double_comparisons() {
+    fn run_cmp(op: PrimOpKind, a: f64, b: f64) -> i64 {
+        let tree = RecursiveTree { nodes: vec![
+            CoreFrame::Lit(Literal::LitDouble(f64::to_bits(a))),
+            CoreFrame::Lit(Literal::LitDouble(f64::to_bits(b))),
+            CoreFrame::PrimOp { op, args: vec![0, 1] },
+        ] };
+        let result = compile_and_run(&tree);
+        unsafe { read_lit_int(result.result_ptr) }
+    }
+    
+    assert_eq!(run_cmp(PrimOpKind::DoubleNe, 1.0, 2.0), 1);
+    assert_eq!(run_cmp(PrimOpKind::DoubleLe, 1.0, 1.0), 1);
+    assert_eq!(run_cmp(PrimOpKind::DoubleGt, 2.0, 1.0), 1);
+    assert_eq!(run_cmp(PrimOpKind::DoubleGe, 2.0, 2.0), 1);
+}
+
+#[test]
+fn test_emit_primop_char_comparisons() {
+    fn run_cmp(op: PrimOpKind, a: char, b: char) -> i64 {
+        let tree = RecursiveTree { nodes: vec![
+            CoreFrame::Lit(Literal::LitChar(a)),
+            CoreFrame::Lit(Literal::LitChar(b)),
+            CoreFrame::PrimOp { op, args: vec![0, 1] },
+        ] };
+        let result = compile_and_run(&tree);
+        unsafe { read_lit_int(result.result_ptr) }
+    }
+    
+    assert_eq!(run_cmp(PrimOpKind::CharNe, 'a', 'b'), 1);
+    assert_eq!(run_cmp(PrimOpKind::CharLe, 'a', 'a'), 1);
+    assert_eq!(run_cmp(PrimOpKind::CharGt, 'b', 'a'), 1);
+    assert_eq!(run_cmp(PrimOpKind::CharGe, 'b', 'a'), 1);
+}
+
+#[test]
+fn test_emit_primop_word_comparisons_extra() {
+    fn run_cmp(op: PrimOpKind, a: u64, b: u64) -> i64 {
+        let tree = RecursiveTree { nodes: vec![
+            CoreFrame::Lit(Literal::LitWord(a)),
+            CoreFrame::Lit(Literal::LitWord(b)),
+            CoreFrame::PrimOp { op, args: vec![0, 1] },
+        ] };
+        let result = compile_and_run(&tree);
+        unsafe { read_lit_int(result.result_ptr) }
+    }
+    
+    assert_eq!(run_cmp(PrimOpKind::WordEq, 42, 42), 1);
+    assert_eq!(run_cmp(PrimOpKind::WordNe, 42, 43), 1);
+}
+
+#[test]
+fn test_emit_primop_word_bitwise_extra() {
+    let tree_xor = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitWord(0xFF)),
+        CoreFrame::Lit(Literal::LitWord(0x0F)),
+        CoreFrame::PrimOp { op: PrimOpKind::WordXor, args: vec![0, 1] },
+    ] };
+    let res_xor = compile_and_run(&tree_xor);
+    unsafe { assert_eq!(read_lit_int(res_xor.result_ptr) as u64, 0xF0); }
+
+    let tree_not = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitWord(0)),
+        CoreFrame::PrimOp { op: PrimOpKind::WordNot, args: vec![0] },
+    ] };
+    let res_not = compile_and_run(&tree_not);
+    unsafe { assert_eq!(read_lit_int(res_not.result_ptr) as u64, u64::MAX); }
+}
+
+#[test]
+fn test_emit_primop_conversions_extra() {
+    let tree_i2w = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(42)),
+        CoreFrame::PrimOp { op: PrimOpKind::Int2Word, args: vec![0] },
+    ] };
+    let res_i2w = compile_and_run(&tree_i2w);
+    unsafe { assert_eq!(read_lit_int(res_i2w.result_ptr), 42); }
+
+    let tree_w2i = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitWord(42)),
+        CoreFrame::PrimOp { op: PrimOpKind::Word2Int, args: vec![0] },
+    ] };
+    let res_w2i = compile_and_run(&tree_w2i);
+    unsafe { assert_eq!(read_lit_int(res_w2i.result_ptr), 42); }
+
+    let tree_d2f = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitDouble(f64::to_bits(1.5))),
+        CoreFrame::PrimOp { op: PrimOpKind::Double2Float, args: vec![0] },
+    ] };
+    let res_d2f = compile_and_run(&tree_d2f);
+    unsafe { assert_eq!(read_lit_float(res_d2f.result_ptr), 1.5); }
+
+    let tree_f2i = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitFloat(f32::to_bits(3.7) as u64)),
+        CoreFrame::PrimOp { op: PrimOpKind::Float2Int, args: vec![0] },
+    ] };
+    let res_f2i = compile_and_run(&tree_f2i);
+    unsafe { assert_eq!(read_lit_int(res_f2i.result_ptr), 3); }
 }
     
