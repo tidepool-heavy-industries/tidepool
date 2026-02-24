@@ -1106,3 +1106,216 @@ fn test_diag_map_run_twice_big_nursery() {
         .expect("thread panicked");
     assert_eq!(json2, serde_json::json!([[2, 20]]));
 }
+
+// ===========================================================================
+// KV Text bridge bugs
+//
+// When KvKeys returns Rust String keys converted via ToCore for String, the
+// resulting Text values have broken length/offset fields. T.length returns a
+// wrong (often negative) value, and T.drop/T.take treat the Text as empty.
+// Operations that scan raw bytes (T.isPrefixOf, ==) still work; operations
+// that use the len field (T.length, T.drop, T.take, T.splitAt) do not.
+// ===========================================================================
+
+/// T.length on a Text key returned by KvKeys should equal the number of chars.
+/// Bug: observed to return a negative value (e.g. -5 for "hello").
+#[test]
+fn test_kv_keys_text_length() {
+    let (json, _) = run_mcp_effectful(&[
+        r#"send (KvSet "hello" "world")"#,
+        r#"keys <- send KvKeys"#,
+        r#"pure (map T.length keys)"#,
+    ]);
+    assert_eq!(json, serde_json::json!([5]));
+}
+
+/// T.drop on a Text key from KvKeys should drop the first n characters.
+/// Bug: T.drop n k returns "" for any positive n because T.drop checks
+/// n >= T.length k, and if T.length k is negative, any positive n satisfies
+/// the check and the empty string is returned.
+#[test]
+fn test_kv_keys_text_drop() {
+    let (json, _) = run_mcp_effectful(&[
+        r#"send (KvSet "hello" "world")"#,
+        r#"keys <- send KvKeys"#,
+        r#"pure (map (T.drop 2) keys)"#,
+    ]);
+    assert_eq!(json, serde_json::json!(["llo"]));
+}
+
+/// T.take on a Text key from KvKeys should return the first n characters.
+/// Bug: T.take n k returns the full string (behaves as n <= 0) or empty
+/// string when the len field is wrong.
+#[test]
+fn test_kv_keys_text_take() {
+    let (json, _) = run_mcp_effectful(&[
+        r#"send (KvSet "hello" "world")"#,
+        r#"keys <- send KvKeys"#,
+        r#"pure (map (T.take 3) keys)"#,
+    ]);
+    assert_eq!(json, serde_json::json!(["hel"]));
+}
+
+/// Stripping a namespace prefix from KvKeys results is a common pattern.
+/// Bug: T.drop 3 "ns:foo" returns "" instead of "foo".
+#[test]
+fn test_kv_keys_strip_namespace_prefix() {
+    let (json, _) = run_mcp_effectful(&[
+        r#"send (KvSet "ns:foo" "v1")"#,
+        r#"send (KvSet "ns:bar" "v2")"#,
+        r#"keys <- send KvKeys"#,
+        r#"let stripped = sort (map (T.drop 3) keys)"#,
+        r#"pure stripped"#,
+    ]);
+    assert_eq!(json, serde_json::json!(["bar", "foo"]));
+}
+
+/// T.splitAt on a Text key from KvKeys.
+/// Bug: T.splitAt n k returns ("", k) because n >= T.length k (negative).
+#[test]
+fn test_kv_keys_text_split_at() {
+    let (json, _) = run_mcp_effectful(&[
+        r#"send (KvSet "hello" "world")"#,
+        r#"keys <- send KvKeys"#,
+        r#"pure (map (T.splitAt 3) keys)"#,
+    ]);
+    assert_eq!(json, serde_json::json!([["hel", "lo"]]));
+}
+
+/// T.null on a non-empty key from KvKeys should return False.
+/// Characterises whether T.null (len == 0 check) is affected by the bug.
+#[test]
+fn test_kv_keys_text_null() {
+    let (json, _) = run_mcp_effectful(&[
+        r#"send (KvSet "nonempty" "v")"#,
+        r#"keys <- send KvKeys"#,
+        r#"pure (map T.null keys)"#,
+    ]);
+    assert_eq!(json, serde_json::json!([false]));
+}
+
+/// T.reverse on a Text key from KvKeys.
+/// Characterises whether byte-scanning ops are affected alongside len-based ops.
+#[test]
+fn test_kv_keys_text_reverse() {
+    let (json, _) = run_mcp_effectful(&[
+        r#"send (KvSet "hello" "world")"#,
+        r#"keys <- send KvKeys"#,
+        r#"pure (map T.reverse keys)"#,
+    ]);
+    assert_eq!(json, serde_json::json!(["olleh"]));
+}
+
+/// T.append with a KvKeys key as the left operand.
+/// Characterises whether append works despite broken len field.
+#[test]
+fn test_kv_keys_text_append() {
+    let (json, _) = run_mcp_effectful(&[
+        r#"send (KvSet "hello" "world")"#,
+        r#"keys <- send KvKeys"#,
+        r#"pure (map (\k -> T.append k "!") keys)"#,
+    ]);
+    assert_eq!(json, serde_json::json!(["hello!"]));
+}
+
+/// T.splitOn on a Text key from KvKeys.
+/// Bug: likely fails since T.splitOn uses len to bound iteration.
+#[test]
+fn test_kv_keys_text_split_on() {
+    let (json, _) = run_mcp_effectful(&[
+        r#"send (KvSet "a:b:c" "v")"#,
+        r#"keys <- send KvKeys"#,
+        r#"pure (map (splitOn ":") keys)"#,
+    ]);
+    assert_eq!(json, serde_json::json!([["a", "b", "c"]]));
+}
+
+/// Equality comparison on a Text key from KvKeys should work correctly.
+/// Characterises whether == (byte comparison) survives the len-field bug.
+#[test]
+fn test_kv_keys_text_eq() {
+    let (json, _) = run_mcp_effectful(&[
+        r#"send (KvSet "hello" "world")"#,
+        r#"keys <- send KvKeys"#,
+        r#"pure (map (== "hello") keys)"#,
+    ]);
+    assert_eq!(json, serde_json::json!([true]));
+}
+
+/// T.isPrefixOf on a Text key from KvKeys — observed to work in live testing.
+/// Characterises which operations survive the len-field bug.
+#[test]
+fn test_kv_keys_text_is_prefix_of() {
+    let (json, _) = run_mcp_effectful(&[
+        r#"send (KvSet "prefix:a" "v1")"#,
+        r#"send (KvSet "other:b" "v2")"#,
+        r#"keys <- send KvKeys"#,
+        r#"let matching = filter (T.isPrefixOf "prefix:") keys"#,
+        r#"pure (length matching)"#,
+    ]);
+    assert_eq!(json, serde_json::json!(1));
+}
+
+/// T.words on a Text key from KvKeys that contains spaces.
+/// Bug: T.words uses len-bounded iteration; likely broken.
+#[test]
+fn test_kv_keys_text_words() {
+    let (json, _) = run_mcp_effectful(&[
+        r#"send (KvSet "foo bar baz" "v")"#,
+        r#"keys <- send KvKeys"#,
+        r#"pure (concatMap words keys)"#,
+    ]);
+    assert_eq!(json, serde_json::json!(["foo", "bar", "baz"]));
+}
+
+/// toUpper on a Text key from KvKeys.
+/// Characterises whether character-mapping ops are affected.
+#[test]
+fn test_kv_keys_text_to_upper() {
+    let (json, _) = run_mcp_effectful(&[
+        r#"send (KvSet "hello" "world")"#,
+        r#"keys <- send KvKeys"#,
+        r#"pure (map toUpper keys)"#,
+    ]);
+    assert_eq!(json, serde_json::json!(["HELLO"]));
+}
+
+/// T.length on a value retrieved via KvGet (in tests, values also come through
+/// ToCore for String). Pair with test_kv_keys_text_length to scope the bug:
+/// if both fail, all ToCore String paths are broken; if only Keys fails,
+/// the bug is specific to the Vec<String> key conversion.
+#[test]
+fn test_kv_get_value_text_length() {
+    let (json, _) = run_mcp_effectful(&[
+        r#"send (KvSet "k" "hello")"#,
+        r#"v <- send (KvGet "k")"#,
+        r#"pure (maybe (-999) T.length v)"#,
+    ]);
+    assert_eq!(json, serde_json::json!(5));
+}
+
+/// T.drop on a value retrieved via KvGet.
+/// Pair with test_kv_keys_text_drop to scope the bug.
+#[test]
+fn test_kv_get_value_text_drop() {
+    let (json, _) = run_mcp_effectful(&[
+        r#"send (KvSet "k" "hello")"#,
+        r#"v <- send (KvGet "k")"#,
+        r#"pure (maybe "none" (T.drop 2) v)"#,
+    ]);
+    assert_eq!(json, serde_json::json!("llo"));
+}
+
+/// Roundtrip: set namespaced keys, get keys, filter by prefix, drop prefix, sort.
+/// This is the canonical KV namespace pattern that currently breaks end-to-end.
+#[test]
+fn test_kv_keys_namespace_roundtrip() {
+    let (json, _) = run_mcp_effectful(&[
+        r#"mapM_ (\(k,v) -> send (KvSet k v)) [("cache:one","1"),("cache:two","2"),("cache:three","3")]"#,
+        r#"keys <- send KvKeys"#,
+        r#"let cacheKeys = filter (T.isPrefixOf "cache:") keys"#,
+        r#"let names = sort (map (T.drop 6) cacheKeys)"#,
+        r#"pure names"#,
+    ]);
+    assert_eq!(json, serde_json::json!(["one", "three", "two"]));
+}
