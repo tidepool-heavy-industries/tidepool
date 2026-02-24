@@ -39,6 +39,16 @@ unsafe fn read_lit_int(ptr: *const u8) -> i64 {
     *(ptr.add(16) as *const i64)
 }
 
+unsafe fn read_lit_double(ptr: *const u8) -> f64 {
+    assert_eq!(layout::read_tag(ptr), layout::TAG_LIT);
+    f64::from_bits(*(ptr.add(16) as *const u64))
+}
+
+unsafe fn read_lit_float(ptr: *const u8) -> f32 {
+    assert_eq!(layout::read_tag(ptr), layout::TAG_LIT);
+    f32::from_bits(*(ptr.add(16) as *const u32))
+}
+
 /// Helper: read con_tag from a ConObject.
 unsafe fn read_con_tag(ptr: *const u8) -> u64 {
     assert_eq!(layout::read_tag(ptr), layout::TAG_CON);
@@ -617,5 +627,164 @@ fn test_emit_primop_add_int_c() {
         assert_eq!(read_lit_int(f0), 1);
         assert_eq!(read_lit_int(f1), i64::MIN);
     }
+}
+
+#[test]
+fn test_emit_primop_double_add() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitDouble(f64::to_bits(1.5))),
+        CoreFrame::Lit(Literal::LitDouble(f64::to_bits(2.5))),
+        CoreFrame::PrimOp { op: PrimOpKind::DoubleAdd, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_double(result.result_ptr), 4.0); }
+}
+
+#[test]
+fn test_emit_primop_double_sub() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitDouble(f64::to_bits(5.0))),
+        CoreFrame::Lit(Literal::LitDouble(f64::to_bits(3.0))),
+        CoreFrame::PrimOp { op: PrimOpKind::DoubleSub, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_double(result.result_ptr), 2.0); }
+}
+
+#[test]
+fn test_emit_primop_double_mul() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitDouble(f64::to_bits(3.0))),
+        CoreFrame::Lit(Literal::LitDouble(f64::to_bits(4.0))),
+        CoreFrame::PrimOp { op: PrimOpKind::DoubleMul, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_double(result.result_ptr), 12.0); }
+}
+
+#[test]
+fn test_emit_primop_double_div() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitDouble(f64::to_bits(10.0))),
+        CoreFrame::Lit(Literal::LitDouble(f64::to_bits(4.0))),
+        CoreFrame::PrimOp { op: PrimOpKind::DoubleDiv, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_double(result.result_ptr), 2.5); }
+}
+
+#[test]
+fn test_emit_primop_double_negate() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitDouble(f64::to_bits(3.14))),
+        CoreFrame::PrimOp { op: PrimOpKind::DoubleNegate, args: vec![0] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_double(result.result_ptr), -3.14); }
+}
+
+#[test]
+fn test_emit_primop_double_eq() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitDouble(f64::to_bits(1.0))),
+        CoreFrame::Lit(Literal::LitDouble(f64::to_bits(1.0))),
+        CoreFrame::PrimOp { op: PrimOpKind::DoubleEq, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 1); }
+}
+
+#[test]
+fn test_emit_primop_double_lt() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitDouble(f64::to_bits(1.0))),
+        CoreFrame::Lit(Literal::LitDouble(f64::to_bits(2.0))),
+        CoreFrame::PrimOp { op: PrimOpKind::DoubleLt, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 1); }
+}
+
+#[test]
+fn test_emit_primop_float_add() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitFloat(f32::to_bits(1.5) as u64)),
+        CoreFrame::Lit(Literal::LitFloat(f32::to_bits(2.5) as u64)),
+        CoreFrame::PrimOp { op: PrimOpKind::FloatAdd, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_float(result.result_ptr), 4.0); }
+}
+
+#[test]
+fn test_emit_primop_float_mul() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitFloat(f32::to_bits(3.0) as u64)),
+        CoreFrame::Lit(Literal::LitFloat(f32::to_bits(4.0) as u64)),
+        CoreFrame::PrimOp { op: PrimOpKind::FloatMul, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_float(result.result_ptr), 12.0); }
+}
+
+#[test]
+fn test_emit_primop_float_negate() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitFloat(f32::to_bits(2.0) as u64)),
+        CoreFrame::PrimOp { op: PrimOpKind::FloatNegate, args: vec![0] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_float(result.result_ptr), -2.0); }
+}
+
+#[test]
+fn test_emit_primop_float_lt() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitFloat(f32::to_bits(1.0) as u64)),
+        CoreFrame::Lit(Literal::LitFloat(f32::to_bits(2.0) as u64)),
+        CoreFrame::PrimOp { op: PrimOpKind::FloatLt, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 1); }
+}
+
+#[test]
+fn test_emit_int2double_conversion() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(42)),
+        CoreFrame::PrimOp { op: PrimOpKind::Int2Double, args: vec![0] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_double(result.result_ptr), 42.0); }
+}
+
+#[test]
+fn test_emit_double2int_conversion() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitDouble(f64::to_bits(3.7))),
+        CoreFrame::PrimOp { op: PrimOpKind::Double2Int, args: vec![0] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 3); }
+}
+
+#[test]
+fn test_emit_int2float_conversion() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(42)),
+        CoreFrame::PrimOp { op: PrimOpKind::Int2Float, args: vec![0] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_float(result.result_ptr), 42.0); }
+}
+
+#[test]
+fn test_emit_float2double_conversion() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitFloat(f32::to_bits(1.5) as u64)),
+        CoreFrame::PrimOp { op: PrimOpKind::Float2Double, args: vec![0] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_double(result.result_ptr), 1.5); }
 }
     
