@@ -916,4 +916,68 @@ mod tests {
         let res = bool::from_value(&value, &table);
         assert!(matches!(res, Err(BridgeError::TypeMismatch { .. })));
     }
+
+    #[test]
+    fn test_string_unboxed_fields() {
+        let table = test_table();
+        let s = "hello".to_string();
+        let value = s.to_value(&table).expect("ToValue failed");
+        
+        if let Value::Con(id, fields) = value {
+            assert_eq!(table.name_of(id), Some("Text"));
+            assert_eq!(fields.len(), 3);
+            // First field: ByteArray# (unboxed)
+            assert!(matches!(fields[0], Value::ByteArray(_)));
+            // Second field: Int# 0 (unboxed literal)
+            assert!(matches!(fields[1], Value::Lit(Literal::LitInt(0))));
+            // Third field: Int# len (unboxed literal)
+            assert!(matches!(fields[2], Value::Lit(Literal::LitInt(5))));
+        } else {
+            panic!("Expected Con, got {:?}", value);
+        }
+    }
+
+    #[test]
+    fn test_unit_roundtrip() {
+        let table = test_table();
+        roundtrip((), &table);
+    }
+
+    #[test]
+    fn test_f64_boxed_roundtrip() {
+        let table = test_table();
+        roundtrip(3.14159f64, &table);
+    }
+
+    #[test]
+    fn test_u64_boxed_roundtrip() {
+        let table = test_table();
+        roundtrip(42u64, &table);
+    }
+
+    #[test]
+    fn test_char_boxed_roundtrip() {
+        let table = test_table();
+        roundtrip('a', &table);
+    }
+
+    #[test]
+    fn test_vec_string_roundtrip() {
+        let table = test_table();
+        roundtrip(vec!["a".to_string(), "b".to_string()], &table);
+    }
+
+    #[test]
+    fn test_option_nested_roundtrip() {
+        let table = test_table();
+        roundtrip(Some(vec![1i64, 2]), &table);
+        roundtrip(None::<Vec<i64>>, &table);
+    }
+
+    #[test]
+    fn test_result_nested_roundtrip() {
+        let table = test_table();
+        roundtrip(Ok::<Vec<i64>, String>(vec![1, 2]), &table);
+        roundtrip(Err::<Vec<i64>, String>("error".to_string()), &table);
+    }
 }
