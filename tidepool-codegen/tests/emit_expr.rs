@@ -72,6 +72,253 @@ fn test_emit_primop_int_add() {
 }
 
 #[test]
+fn test_emit_primop_int_and() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(0xFF)),
+        CoreFrame::Lit(Literal::LitInt(0x0F)),
+        CoreFrame::PrimOp { op: PrimOpKind::IntAnd, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 0x0F); }
+}
+
+#[test]
+fn test_emit_primop_int_or() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(0xF0)),
+        CoreFrame::Lit(Literal::LitInt(0x0F)),
+        CoreFrame::PrimOp { op: PrimOpKind::IntOr, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 0xFF); }
+}
+
+#[test]
+fn test_emit_primop_int_xor() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(0xFF)),
+        CoreFrame::Lit(Literal::LitInt(0x0F)),
+        CoreFrame::PrimOp { op: PrimOpKind::IntXor, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 0xF0); }
+}
+
+#[test]
+fn test_emit_primop_int_not() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(0)),
+        CoreFrame::PrimOp { op: PrimOpKind::IntNot, args: vec![0] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), -1); }
+}
+
+#[test]
+fn test_emit_primop_int_shl() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(1)),
+        CoreFrame::Lit(Literal::LitInt(8)),
+        CoreFrame::PrimOp { op: PrimOpKind::IntShl, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 256); }
+}
+
+#[test]
+fn test_emit_primop_int_shra() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(-16)),
+        CoreFrame::Lit(Literal::LitInt(2)),
+        CoreFrame::PrimOp { op: PrimOpKind::IntShra, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), -4); }
+}
+
+#[test]
+fn test_emit_primop_word_and() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitWord(0xFF)),
+        CoreFrame::Lit(Literal::LitWord(0x0F)),
+        CoreFrame::PrimOp { op: PrimOpKind::WordAnd, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 0x0F); }
+}
+
+#[test]
+fn test_emit_primop_word_or() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitWord(0xF0)),
+        CoreFrame::Lit(Literal::LitWord(0x0F)),
+        CoreFrame::PrimOp { op: PrimOpKind::WordOr, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 0xFF); }
+}
+
+#[test]
+fn test_emit_primop_word_shl() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitWord(1)),
+        CoreFrame::Lit(Literal::LitInt(32)),
+        CoreFrame::PrimOp { op: PrimOpKind::WordShl, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 1i64 << 32); }
+}
+
+#[test]
+fn test_emit_primop_word_shrl() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitWord(256)),
+        CoreFrame::Lit(Literal::LitInt(4)),
+        CoreFrame::PrimOp { op: PrimOpKind::WordShrl, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 16); }
+}
+
+#[test]
+fn test_emit_primop_narrow_narrow8int() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(257)),
+        CoreFrame::PrimOp { op: PrimOpKind::Narrow8Int, args: vec![0] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 1); }
+}
+
+#[test]
+fn test_emit_primop_narrow_narrow16int() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(65537)),
+        CoreFrame::PrimOp { op: PrimOpKind::Narrow16Int, args: vec![0] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 1); }
+}
+
+#[test]
+fn test_emit_primop_narrow_narrow8word() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitWord(0x1FF)),
+        CoreFrame::PrimOp { op: PrimOpKind::Narrow8Word, args: vec![0] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 0xFF); }
+}
+
+#[test]
+fn test_emit_primop_word_add_word_c_val() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitWord(10)),
+        CoreFrame::Lit(Literal::LitWord(20)),
+        CoreFrame::PrimOp { op: PrimOpKind::AddWordCVal, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 30); }
+}
+
+#[test]
+fn test_emit_primop_word_sub_word_c_val() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitWord(30)),
+        CoreFrame::Lit(Literal::LitWord(10)),
+        CoreFrame::PrimOp { op: PrimOpKind::SubWordCVal, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 20); }
+}
+
+#[test]
+fn test_emit_primop_word_add_word_c_carry() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitWord(u64::MAX)),
+        CoreFrame::Lit(Literal::LitWord(1)),
+        CoreFrame::PrimOp { op: PrimOpKind::AddWordCCarry, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 1); }
+}
+
+#[test]
+fn test_emit_primop_word_sub_word_c_carry() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitWord(0)),
+        CoreFrame::Lit(Literal::LitWord(1)),
+        CoreFrame::PrimOp { op: PrimOpKind::SubWordCCarry, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 1); }
+}
+
+#[test]
+fn test_emit_primop_word_quot() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitWord(100)),
+        CoreFrame::Lit(Literal::LitWord(7)),
+        CoreFrame::PrimOp { op: PrimOpKind::WordQuot, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 14); }
+}
+
+#[test]
+fn test_emit_primop_word_rem() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitWord(100)),
+        CoreFrame::Lit(Literal::LitWord(7)),
+        CoreFrame::PrimOp { op: PrimOpKind::WordRem, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 2); }
+}
+
+#[test]
+fn test_emit_primop_char_ord() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitChar('A')),
+        CoreFrame::PrimOp { op: PrimOpKind::Ord, args: vec![0] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 65); }
+}
+
+#[test]
+fn test_emit_primop_char_chr() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(65)),
+        CoreFrame::PrimOp { op: PrimOpKind::Chr, args: vec![0] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 65); }
+}
+
+#[test]
+fn test_emit_primop_char_eq() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitChar('a')),
+        CoreFrame::Lit(Literal::LitChar('a')),
+        CoreFrame::PrimOp { op: PrimOpKind::CharEq, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 1); }
+}
+
+#[test]
+fn test_emit_primop_char_lt() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitChar('a')),
+        CoreFrame::Lit(Literal::LitChar('b')),
+        CoreFrame::PrimOp { op: PrimOpKind::CharLt, args: vec![0, 1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 1); }
+}
+
+#[test]
 fn test_emit_con_fields() {
     let tree = RecursiveTree { nodes: vec![
         CoreFrame::Lit(Literal::LitInt(10)),   // 0
