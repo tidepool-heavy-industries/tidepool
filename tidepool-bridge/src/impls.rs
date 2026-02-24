@@ -923,8 +923,8 @@ mod tests {
         let s = "hello".to_string();
         let value = s.to_value(&table).expect("ToValue failed");
         
-        if let Value::Con(id, fields) = value {
-            assert_eq!(table.name_of(id), Some("Text"));
+        if let Value::Con(id, fields) = &value {
+            assert_eq!(table.name_of(*id), Some("Text"));
             assert_eq!(fields.len(), 3);
             // First field: ByteArray# (unboxed)
             assert!(matches!(fields[0], Value::ByteArray(_)));
