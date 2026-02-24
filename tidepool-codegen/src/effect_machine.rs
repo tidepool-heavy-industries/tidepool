@@ -88,17 +88,18 @@ impl CompiledEffectMachine {
 
     /// Parse a heap-allocated Eff result into a Yield.
     fn parse_result(&self, result: *mut u8) -> Yield {
+        // Check for runtime error FIRST (before null check), because runtime_error
+        // now returns a "poison" non-null Lit object to prevent segfaults in JIT code.
+        if let Some(err) = crate::host_fns::take_runtime_error() {
+            return Yield::Error(match err {
+                crate::host_fns::RuntimeError::DivisionByZero => YieldError::DivisionByZero,
+                crate::host_fns::RuntimeError::Overflow => YieldError::Overflow,
+                crate::host_fns::RuntimeError::UserError => YieldError::UserError,
+                crate::host_fns::RuntimeError::Undefined => YieldError::Undefined,
+                crate::host_fns::RuntimeError::TypeMetadata => YieldError::TypeMetadata,
+            });
+        }
         if result.is_null() {
-            // Check for runtime error set by JIT code (overflowError/divZeroError)
-            if let Some(err) = crate::host_fns::take_runtime_error() {
-                return Yield::Error(match err {
-                    crate::host_fns::RuntimeError::DivisionByZero => YieldError::DivisionByZero,
-                    crate::host_fns::RuntimeError::Overflow => YieldError::Overflow,
-                    crate::host_fns::RuntimeError::UserError => YieldError::UserError,
-                    crate::host_fns::RuntimeError::Undefined => YieldError::Undefined,
-                    crate::host_fns::RuntimeError::TypeMetadata => YieldError::TypeMetadata,
-                });
-            }
             return Yield::Error(YieldError::NullPointer);
         }
 

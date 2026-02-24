@@ -493,6 +493,16 @@ pub fn compile_expr(
 
 
 impl EmitContext {
+    /// Check if a binding's RHS references an error sentinel (tag 0x45).
+    /// GHC Core hoists `error "..."` into let bindings that are only forced on
+    /// impossible branches. Since our JIT is strict, we must not evaluate these
+    /// eagerly. Returns true if the RHS free vars contain an error sentinel.
+    fn rhs_has_error_sentinel(tree: &CoreExpr, rhs_idx: usize) -> bool {
+        let rhs_subtree = tree.extract_subtree(rhs_idx);
+        let rhs_fvs = tidepool_repr::free_vars::free_vars(&rhs_subtree);
+        rhs_fvs.iter().any(|v| (v.0 >> 56) as u8 == 0x45)
+    }
+
     pub fn emit_node(
         &mut self,
         pipeline: &mut CodegenPipeline,
@@ -511,9 +521,18 @@ impl EmitContext {
                 // Dead code elimination: skip RHS if binder is unused in body.
                 let body_fvs = tidepool_repr::free_vars::free_vars(&tree.extract_subtree(*body));
                 if body_fvs.contains(binder) {
-                    let rhs_val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *rhs)?;
-                    self.trace_scope(&format!("insert LetNonRec {:?}", binder));
-                    self.env.insert(*binder, rhs_val);
+                    if Self::rhs_has_error_sentinel(tree, *rhs) {
+                        // Bind to poison closure — a valid Closure that returns itself
+                        // and sets the runtime error flag on call.
+                        let poison_addr = crate::host_fns::error_poison_ptr() as i64;
+                        let poison_val = builder.ins().iconst(types::I64, poison_addr);
+                        self.trace_scope(&format!("defer error LetNonRec {:?}", binder));
+                        self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
+                    } else {
+                        let rhs_val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *rhs)?;
+                        self.trace_scope(&format!("insert LetNonRec {:?}", binder));
+                        self.env.insert(*binder, rhs_val);
+                    }
                     let_cleanup.push(LetCleanup::Single(*binder));
                 } else {
                     self.trace_scope(&format!("DCE skip LetNonRec {:?}", binder));
@@ -530,9 +549,16 @@ impl EmitContext {
                 // If no recursive bindings, evaluate all as simple
                 if rec_bindings.is_empty() {
                     for (binder, rhs_idx) in &simple_bindings {
-                        let rhs_val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *rhs_idx)?;
-                        self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
-                        self.env.insert(*binder, rhs_val);
+                        if Self::rhs_has_error_sentinel(tree, *rhs_idx) {
+                            let poison_addr = crate::host_fns::error_poison_ptr() as i64;
+                            let poison_val = builder.ins().iconst(types::I64, poison_addr);
+                            self.trace_scope(&format!("defer error LetRec(simple) {:?}", binder));
+                            self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
+                        } else {
+                            let rhs_val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *rhs_idx)?;
+                            self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
+                            self.env.insert(*binder, rhs_val);
+                        }
                     }
                     let_cleanup.push(LetCleanup::Rec(bindings.iter().map(|(b, _)| *b).collect()));
                     idx = *body;
@@ -755,10 +781,48 @@ impl EmitContext {
 
                 // Phase 3c: Evaluate deferred simple bindings (now that Con fields
                 // they may access at runtime are populated).
+                // Topologically sort: if binding A references binding B (both in
+                // deferred_simple), B must be evaluated first.
+                let deferred_simple = {
+                    let deferred_set: std::collections::HashSet<VarId> =
+                        deferred_simple.iter().map(|(b, _)| *b).collect();
+                    let mut sorted = Vec::with_capacity(deferred_simple.len());
+                    let mut remaining: Vec<(VarId, usize)> = deferred_simple;
+                    let mut progress = true;
+                    while !remaining.is_empty() && progress {
+                        progress = false;
+                        let mut next_remaining = Vec::new();
+                        for (binder, rhs_idx) in remaining {
+                            let rhs_fvs = tidepool_repr::free_vars::free_vars(&tree.extract_subtree(rhs_idx));
+                            let blocked = rhs_fvs.iter().any(|fv|
+                                deferred_set.contains(fv)
+                                    && !sorted.iter().any(|(b, _): &(VarId, usize)| *b == *fv)
+                                    && *fv != binder // self-reference is OK (will be in env from rec)
+                            );
+                            if blocked {
+                                next_remaining.push((binder, rhs_idx));
+                            } else {
+                                sorted.push((binder, rhs_idx));
+                                progress = true;
+                            }
+                        }
+                        remaining = next_remaining;
+                    }
+                    // Any remaining (cyclic deps) — append as-is
+                    sorted.extend(remaining);
+                    sorted
+                };
                 for (binder, rhs_idx) in &deferred_simple {
-                    let rhs_val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *rhs_idx)?;
-                    self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
-                    self.env.insert(*binder, rhs_val);
+                    if Self::rhs_has_error_sentinel(tree, *rhs_idx) {
+                        let poison_addr = crate::host_fns::error_poison_ptr() as i64;
+                        let poison_val = builder.ins().iconst(types::I64, poison_addr);
+                        self.trace_scope(&format!("defer error LetRec(deferred) {:?}", binder));
+                        self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
+                    } else {
+                        let rhs_val = self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *rhs_idx)?;
+                        self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
+                        self.env.insert(*binder, rhs_val);
+                    }
                 }
 
                 // Phase 3a': Fill closure capture slots. Deferred from Phase 3a

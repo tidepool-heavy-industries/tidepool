@@ -406,6 +406,12 @@ pub fn emit_primop(
         PrimOpKind::Int64Ge => emit_int_compare(builder, op, IntCC::SignedGreaterThanOrEqual, args, LIT_TAG_INT),
 
         // Word64 arithmetic/bitwise
+        PrimOpKind::Word64And => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().band(a, b), LIT_TAG_WORD))
+        }
         PrimOpKind::Word64Shl => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(builder, args[0]);
@@ -434,6 +440,15 @@ pub fn emit_primop(
             check_arity(op, 1, args.len())?;
             let v = unbox_int(builder, args[0]);
             Ok(SsaVal::Raw(v, LIT_TAG_WORD))
+        }
+        PrimOpKind::WordToWord8 => {
+            // wordToWord8# :: Word# -> Word8#
+            // Narrow to 8 bits
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(builder, args[0]);
+            let mask = builder.ins().iconst(types::I64, 0xFF);
+            let narrow = builder.ins().band(v, mask);
+            Ok(SsaVal::Raw(narrow, LIT_TAG_WORD))
         }
 
         // Word8 arithmetic/comparison
@@ -659,6 +674,139 @@ pub fn emit_primop(
                 &[AbiParam::new(types::I64), AbiParam::new(types::I64)],
                 &[],
                 &[ba, new_size])?;
+            Ok(SsaVal::Raw(builder.ins().iconst(types::I64, 0), LIT_TAG_INT))
+        }
+        PrimOpKind::ResizeMutableByteArray => {
+            // resizeMutableByteArray# :: MutableByteArray# s -> Int# -> State# s
+            //   -> (# State# s, MutableByteArray# s #)
+            // Returns the (possibly reallocated) byte array pointer.
+            let ba = unbox_bytearray(builder, args[0]);
+            let new_size = unbox_int(builder, args[1]);
+            let result = emit_runtime_call(pipeline, builder, "runtime_resize_byte_array",
+                &[AbiParam::new(types::I64), AbiParam::new(types::I64)],
+                &[AbiParam::new(types::I64)],
+                &[ba, new_size])?;
+            Ok(SsaVal::Raw(result, LIT_TAG_BYTEARRAY))
+        }
+
+        PrimOpKind::CopyByteArray => {
+            // copyByteArray# :: ByteArray# -> Int# -> MutableByteArray# s -> Int# -> Int# -> State# s -> State# s
+            // src, src_off, dest, dest_off, len
+            let src = unbox_bytearray(builder, args[0]);
+            let src_off = unbox_int(builder, args[1]);
+            let dest = unbox_bytearray(builder, args[2]);
+            let dest_off = unbox_int(builder, args[3]);
+            let len = unbox_int(builder, args[4]);
+            let _ = emit_runtime_call(pipeline, builder, "runtime_copy_byte_array",
+                &[AbiParam::new(types::I64), AbiParam::new(types::I64),
+                  AbiParam::new(types::I64), AbiParam::new(types::I64),
+                  AbiParam::new(types::I64)],
+                &[],
+                &[src, src_off, dest, dest_off, len])?;
+            Ok(SsaVal::Raw(builder.ins().iconst(types::I64, 0), LIT_TAG_INT))
+        }
+        PrimOpKind::CopyMutableByteArray => {
+            // copyMutableByteArray# — same args as CopyByteArray
+            let src = unbox_bytearray(builder, args[0]);
+            let src_off = unbox_int(builder, args[1]);
+            let dest = unbox_bytearray(builder, args[2]);
+            let dest_off = unbox_int(builder, args[3]);
+            let len = unbox_int(builder, args[4]);
+            let _ = emit_runtime_call(pipeline, builder, "runtime_copy_byte_array",
+                &[AbiParam::new(types::I64), AbiParam::new(types::I64),
+                  AbiParam::new(types::I64), AbiParam::new(types::I64),
+                  AbiParam::new(types::I64)],
+                &[],
+                &[src, src_off, dest, dest_off, len])?;
+            Ok(SsaVal::Raw(builder.ins().iconst(types::I64, 0), LIT_TAG_INT))
+        }
+        PrimOpKind::CompareByteArrays => {
+            // compareByteArrays# :: ByteArray# -> Int# -> ByteArray# -> Int# -> Int# -> Int#
+            let a = unbox_bytearray(builder, args[0]);
+            let a_off = unbox_int(builder, args[1]);
+            let b = unbox_bytearray(builder, args[2]);
+            let b_off = unbox_int(builder, args[3]);
+            let len = unbox_int(builder, args[4]);
+            let result = emit_runtime_call(pipeline, builder, "runtime_compare_byte_arrays",
+                &[AbiParam::new(types::I64), AbiParam::new(types::I64),
+                  AbiParam::new(types::I64), AbiParam::new(types::I64),
+                  AbiParam::new(types::I64)],
+                &[AbiParam::new(types::I64)],
+                &[a, a_off, b, b_off, len])?;
+            Ok(SsaVal::Raw(result, LIT_TAG_INT))
+        }
+        PrimOpKind::IndexWord8OffAddr => {
+            // indexWord8OffAddr# :: Addr# -> Int# -> Word#
+            let addr = unbox_addr(builder, args[0]);
+            let off = unbox_int(builder, args[1]);
+            let ptr = builder.ins().iadd(addr, off);
+            let byte = builder.ins().load(types::I8, MemFlags::trusted(), ptr, 0);
+            let word = builder.ins().uextend(types::I64, byte);
+            Ok(SsaVal::Raw(word, LIT_TAG_WORD))
+        }
+        PrimOpKind::Clz8 => {
+            // clz8# :: Word# -> Word#
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(builder, args[0]);
+            // clz of a byte: mask to 8 bits, count leading zeros of the 64-bit value, subtract 56
+            let mask = builder.ins().iconst(types::I64, 0xFF);
+            let masked = builder.ins().band(v, mask);
+            let clz64 = builder.ins().clz(masked);
+            let adj = builder.ins().iconst(types::I64, 56);
+            let result = builder.ins().isub(clz64, adj);
+            Ok(SsaVal::Raw(result, LIT_TAG_WORD))
+        }
+        PrimOpKind::Raise => {
+            // raise# :: a -> b — always errors
+            let kind = builder.ins().iconst(types::I64, 2); // 2 = UserError
+            let _ = emit_runtime_call(pipeline, builder, "runtime_error",
+                &[AbiParam::new(types::I64)],
+                &[AbiParam::new(types::I64)],
+                &[kind])?;
+            Ok(SsaVal::Raw(builder.ins().iconst(types::I64, 0), LIT_TAG_INT))
+        }
+        PrimOpKind::FfiStrlen => {
+            // strlen :: Addr# -> Int#
+            let addr = unbox_addr(builder, args[0]);
+            let result = emit_runtime_call(pipeline, builder, "runtime_strlen",
+                &[AbiParam::new(types::I64)],
+                &[AbiParam::new(types::I64)],
+                &[addr])?;
+            Ok(SsaVal::Raw(result, LIT_TAG_INT))
+        }
+        PrimOpKind::FfiTextMeasureOff => {
+            // _hs_text_measure_off :: Addr# -> Int# -> Int# -> Int#
+            let addr = unbox_addr(builder, args[0]);
+            let off = unbox_int(builder, args[1]);
+            let len = unbox_int(builder, args[2]);
+            let result = emit_runtime_call(pipeline, builder, "runtime_text_measure_off",
+                &[AbiParam::new(types::I64), AbiParam::new(types::I64), AbiParam::new(types::I64)],
+                &[AbiParam::new(types::I64)],
+                &[addr, off, len])?;
+            Ok(SsaVal::Raw(result, LIT_TAG_INT))
+        }
+        PrimOpKind::FfiTextMemchr => {
+            // _hs_text_memchr :: Addr# -> Int# -> Int# -> Int# -> Int#
+            let addr = unbox_addr(builder, args[0]);
+            let off = unbox_int(builder, args[1]);
+            let len = unbox_int(builder, args[2]);
+            let needle = unbox_int(builder, args[3]);
+            let result = emit_runtime_call(pipeline, builder, "runtime_text_memchr",
+                &[AbiParam::new(types::I64), AbiParam::new(types::I64),
+                  AbiParam::new(types::I64), AbiParam::new(types::I64)],
+                &[AbiParam::new(types::I64)],
+                &[addr, off, len, needle])?;
+            Ok(SsaVal::Raw(result, LIT_TAG_INT))
+        }
+        PrimOpKind::FfiTextReverse => {
+            // _hs_text_reverse :: Addr# -> Int# -> Addr# -> ()
+            let dest = unbox_addr(builder, args[0]);
+            let len = unbox_int(builder, args[1]);
+            let src = unbox_addr(builder, args[2]);
+            let _ = emit_runtime_call(pipeline, builder, "runtime_text_reverse",
+                &[AbiParam::new(types::I64), AbiParam::new(types::I64), AbiParam::new(types::I64)],
+                &[],
+                &[dest, len, src])?;
             Ok(SsaVal::Raw(builder.ins().iconst(types::I64, 0), LIT_TAG_INT))
         }
 

@@ -277,6 +277,36 @@ fn test_plain_sort() {
 }
 
 #[test]
+fn test_plain_map_fromlist() {
+    // Plain (non-effect) Map.fromList to isolate whether the error is from
+    // effect wrapping or from the map code itself.
+    let src = r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, PartialTypeSignatures #-}
+module Test where
+import Tidepool.Prelude
+import qualified Data.Text as T
+import Control.Monad.Freer
+import qualified Data.Map.Strict as Map
+
+result :: _
+result = Map.toList (Map.fromList [(1::Int,10::Int),(2,20)])
+"#;
+    let pp = prelude_path();
+    let src = src.to_owned();
+    let json = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let include = [pp.as_path()];
+            let val = compile_and_run_pure(&src, "result", &include)
+                .expect("compile_and_run_pure failed");
+            val.to_json()
+        })
+        .unwrap()
+        .join()
+        .expect("thread panicked");
+    assert_eq!(json, serde_json::json!([[1, 10], [2, 20]]));
+}
+
+#[test]
 
 fn test_eq_char() {
     let json = run_plain("'a' == 'a'");
@@ -907,4 +937,157 @@ fn test_filter_string_literal() {
 fn test_show_4_tuple() {
     let json = run_plain("show (1::Int, True, 'x', \"hi\" :: Text)");
     assert_eq!(json, serde_json::json!("(1,True,'x',\"hi\")"));
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic tests for JIT runtime cleanup issues
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_diag_map_compile_twice() {
+    // Does JIT compilation alone crash on 2nd invocation?
+    let src = mcp_source_with_imports(
+        &[
+            "let m = Map.fromList [(1::Int,10::Int),(2,20)]",
+            "pure (Map.toList m)",
+        ],
+        &[],
+        &["qualified Data.Map.Strict as Map"],
+    );
+    let r1 = compile_only(&src);
+    assert!(r1.is_ok(), "first compile failed: {:?}", r1);
+    let r2 = compile_only(&src);
+    assert!(r2.is_ok(), "second compile failed: {:?}", r2);
+}
+
+#[test]
+fn test_diag_map_run_then_compile() {
+    // Run a map test, then try to compile (not run) again.
+    let json = run_mcp_with_imports(
+        &[
+            "let m = Map.fromList [(1::Int,10::Int),(2,20)]",
+            "pure (Map.toList m)",
+        ],
+        &[],
+        &["qualified Data.Map.Strict as Map"],
+    );
+    assert_eq!(json, serde_json::json!([[1, 10], [2, 20]]));
+    // Now compile-only (no execution):
+    let src = mcp_source_with_imports(
+        &[
+            "let m = Map.fromList [(3::Int,30::Int)]",
+            "pure (Map.toList m)",
+        ],
+        &[],
+        &["qualified Data.Map.Strict as Map"],
+    );
+    let r = compile_only(&src);
+    assert!(r.is_ok(), "second compile-only failed: {:?}", r);
+}
+
+#[test]
+fn test_diag_map_run_then_run_simple() {
+    // Run a map test, then try to run a simple non-map test.
+    let json = run_mcp_with_imports(
+        &[
+            "let m = Map.fromList [(1::Int,10::Int),(2,20)]",
+            "pure (Map.toList m)",
+        ],
+        &[],
+        &["qualified Data.Map.Strict as Map"],
+    );
+    assert_eq!(json, serde_json::json!([[1, 10], [2, 20]]));
+    // Now run something simple:
+    let json2 = run_mcp(&["pure (42 :: Int)"]);
+    assert_eq!(json2, serde_json::json!(42));
+}
+
+#[test]
+fn test_diag_simple_run_then_map_run() {
+    // Run a simple test, then try to run a map test.
+    let json = run_mcp(&["pure (42 :: Int)"]);
+    assert_eq!(json, serde_json::json!(42));
+    // Now run a map test:
+    let json2 = run_mcp_with_imports(
+        &[
+            "let m = Map.fromList [(1::Int,10::Int),(2,20)]",
+            "pure (Map.toList m)",
+        ],
+        &[],
+        &["qualified Data.Map.Strict as Map"],
+    );
+    assert_eq!(json2, serde_json::json!([[1, 10], [2, 20]]));
+}
+
+#[test]
+fn test_diag_simple_run_twice() {
+    // Run two simple tests back to back.
+    let json = run_mcp(&["pure (42 :: Int)"]);
+    assert_eq!(json, serde_json::json!(42));
+    let json2 = run_mcp(&["pure (99 :: Int)"]);
+    assert_eq!(json2, serde_json::json!(99));
+}
+
+#[test]
+fn test_diag_map_run_twice() {
+    // Regression test: two sequential map runs in separate JIT machines.
+    let json1 = run_mcp_with_imports(
+        &["let m = Map.fromList [(1::Int,10::Int)]", "pure (Map.toList m)"],
+        &[], &["qualified Data.Map.Strict as Map"],
+    );
+    assert_eq!(json1, serde_json::json!([[1, 10]]));
+    let json2 = run_mcp_with_imports(
+        &["let m = Map.fromList [(2::Int,20::Int)]", "pure (Map.toList m)"],
+        &[], &["qualified Data.Map.Strict as Map"],
+    );
+    assert_eq!(json2, serde_json::json!([[2, 20]]));
+}
+
+#[test]
+fn test_diag_map_run_twice_big_nursery() {
+    // Same as map_run_twice but with 512MB nursery to test nursery overflow hypothesis.
+    use tidepool_runtime::compile_and_run_with_nursery_size;
+    let src1 = mcp_source_with_imports(
+        &[
+            "let m = Map.fromList [(1::Int,10::Int)]",
+            "pure (Map.toList m)",
+        ],
+        &[],
+        &["qualified Data.Map.Strict as Map"],
+    );
+    let src2 = mcp_source_with_imports(
+        &[
+            "let m = Map.fromList [(2::Int,20::Int)]",
+            "pure (Map.toList m)",
+        ],
+        &[],
+        &["qualified Data.Map.Strict as Map"],
+    );
+    let pp = prelude_path();
+    let pp2 = pp.clone();
+    let json = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let include = [pp.as_path()];
+            let val = compile_and_run_with_nursery_size(&src1, "result", &include, &mut HNil, &(), 1 << 29)
+                .expect("first run failed");
+            val.to_json()
+        })
+        .unwrap()
+        .join()
+        .expect("thread panicked");
+    assert_eq!(json, serde_json::json!([[1, 10]]));
+
+    let json2 = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let include = [pp2.as_path()];
+            let val = compile_and_run_with_nursery_size(&src2, "result", &include, &mut HNil, &(), 1 << 29)
+                .expect("second run failed");
+            val.to_json()
+        })
+        .unwrap()
+        .join()
+        .expect("thread panicked");
+    assert_eq!(json2, serde_json::json!([[2, 20]]));
 }

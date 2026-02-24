@@ -149,28 +149,28 @@ impl JitEffectMachine {
 
         let result_ptr: *mut u8 = unsafe { func_ptr(&mut vmctx) };
 
-        let result = if result_ptr.is_null() {
-            if let Some(err) = crate::host_fns::take_runtime_error() {
-                Err(JitError::Yield(match err {
-                    crate::host_fns::RuntimeError::DivisionByZero => {
-                        crate::yield_type::YieldError::DivisionByZero
-                    }
-                    crate::host_fns::RuntimeError::Overflow => {
-                        crate::yield_type::YieldError::Overflow
-                    }
-                    crate::host_fns::RuntimeError::UserError => {
-                        crate::yield_type::YieldError::UserError
-                    }
-                    crate::host_fns::RuntimeError::Undefined => {
-                        crate::yield_type::YieldError::Undefined
-                    }
-                    crate::host_fns::RuntimeError::TypeMetadata => {
-                        crate::yield_type::YieldError::TypeMetadata
-                    }
-                }))
-            } else {
-                Err(JitError::Yield(crate::yield_type::YieldError::NullPointer))
-            }
+        // Check for runtime error FIRST — runtime_error now returns a poison
+        // object instead of null, so we can't rely on null-check alone.
+        let result = if let Some(err) = crate::host_fns::take_runtime_error() {
+            Err(JitError::Yield(match err {
+                crate::host_fns::RuntimeError::DivisionByZero => {
+                    crate::yield_type::YieldError::DivisionByZero
+                }
+                crate::host_fns::RuntimeError::Overflow => {
+                    crate::yield_type::YieldError::Overflow
+                }
+                crate::host_fns::RuntimeError::UserError => {
+                    crate::yield_type::YieldError::UserError
+                }
+                crate::host_fns::RuntimeError::Undefined => {
+                    crate::yield_type::YieldError::Undefined
+                }
+                crate::host_fns::RuntimeError::TypeMetadata => {
+                    crate::yield_type::YieldError::TypeMetadata
+                }
+            }))
+        } else if result_ptr.is_null() {
+            Err(JitError::Yield(crate::yield_type::YieldError::NullPointer))
         } else {
             unsafe { heap_bridge::heap_to_value(result_ptr) }.map_err(JitError::HeapBridge)
         };
