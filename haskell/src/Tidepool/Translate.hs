@@ -42,7 +42,7 @@ import GHC.Utils.Outputable (showPprUnsafe)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
 import Data.Char (ord)
 import Data.List (isPrefixOf, isInfixOf)
-import Data.Bits ((.&.), (.|.), shiftL)
+import Data.Bits ((.&.), (.|.), shiftL, shiftR)
 import Data.Word
 import Data.Int
 import Data.Text (Text)
@@ -55,6 +55,8 @@ import qualified Data.Sequence as Seq
 import qualified Data.Map.Strict as Map
 import Control.Monad.State
 import Control.Monad (foldM, forM, when)
+import System.IO (hPutStrLn, stderr)
+import Numeric (showHex)
 
 import GHC.Driver.Env (HscEnv)
 import Tidepool.Resolve (resolveExternals, UnresolvedVar(..))
@@ -117,6 +119,83 @@ freshSynthVarId = do
 recordDC :: DataCon -> TransM ()
 recordDC dc = modify' $ \s ->
   s { tsUsedDCs = Map.insert (varId (dataConWorkId dc)) dc (tsUsedDCs s) }
+
+-- | Emit a runtime unpackCString# loop for a non-static Addr# value.
+-- Produces: letrec go = \a -> case indexCharOffAddr# a 0# of
+--             { '\0'# -> []; c -> C# c : go (plusAddr# a 1#) }
+--           in go addrIdx
+emitRuntimeUnpackCString :: Int -> TransM Int
+emitRuntimeUnpackCString addrIdx = do
+    goId <- freshSynthVarId
+    aId <- freshSynthVarId
+    let consId = varId (dataConWorkId consDataCon)
+        nilId  = varId (dataConWorkId nilDataCon)
+        charId = varId (dataConWorkId charDataCon)
+    recordDC consDataCon
+    recordDC nilDataCon
+    recordDC charDataCon
+    -- Body: indexCharOffAddr# a 0#
+    aRef <- emitNode $ NVar aId
+    lit0 <- emitNode $ NLit (LEInt 0)
+    charAt <- emitNode $ NPrimOp (T.pack "IndexCharOffAddr") [aRef, lit0]
+    -- [] (nil result)
+    nilIdx <- emitNode $ NCon nilId []
+    -- C# charAt : go (plusAddr# a 1#)
+    charBox <- emitNode $ NCon charId [charAt]
+    lit1 <- emitNode $ NLit (LEInt 1)
+    aRef2 <- emitNode $ NVar aId
+    nextAddr <- emitNode $ NPrimOp (T.pack "PlusAddr") [aRef2, lit1]
+    goRef <- emitNode $ NVar goId
+    goNext <- emitNode $ NApp goRef nextAddr
+    consResult <- emitNode $ NCon consId [charBox, goNext]
+    -- case charAt of { '\0'# -> []; DEFAULT -> consResult }
+    let nullAlt = FlatAlt (FLitAlt (LEChar 0)) [] nilIdx
+        defaultAlt = FlatAlt FDefault [] consResult
+    caseIdx <- emitNode $ NCase charAt 0 [nullAlt, defaultAlt]
+    -- \a -> case ...
+    lamA <- emitNode $ NLam aId caseIdx
+    -- go addrIdx
+    goRef2 <- emitNode $ NVar goId
+    appIdx <- emitNode $ NApp goRef2 addrIdx
+    -- letrec go = \a -> ... in go addrIdx
+    emitNode $ NLetRec [(goId, lamA)] appIdx
+
+-- | Emit a runtime unpackAppendCString# loop for a non-static Addr# value.
+-- Like emitRuntimeUnpackCString but appends suffix instead of []:
+-- letrec go = \a -> case indexCharOffAddr# a 0# of
+--           { '\0'# -> suffix; c -> C# c : go (plusAddr# a 1#) }
+--         in go addrIdx
+emitRuntimeUnpackAppendCString :: Int -> Int -> TransM Int
+emitRuntimeUnpackAppendCString addrIdx suffixIdx = do
+    goId <- freshSynthVarId
+    aId <- freshSynthVarId
+    let consId = varId (dataConWorkId consDataCon)
+        charId = varId (dataConWorkId charDataCon)
+    recordDC consDataCon
+    recordDC charDataCon
+    -- Body: indexCharOffAddr# a 0#
+    aRef <- emitNode $ NVar aId
+    lit0 <- emitNode $ NLit (LEInt 0)
+    charAt <- emitNode $ NPrimOp (T.pack "IndexCharOffAddr") [aRef, lit0]
+    -- C# charAt : go (plusAddr# a 1#)
+    charBox <- emitNode $ NCon charId [charAt]
+    lit1 <- emitNode $ NLit (LEInt 1)
+    aRef2 <- emitNode $ NVar aId
+    nextAddr <- emitNode $ NPrimOp (T.pack "PlusAddr") [aRef2, lit1]
+    goRef <- emitNode $ NVar goId
+    goNext <- emitNode $ NApp goRef nextAddr
+    consResult <- emitNode $ NCon consId [charBox, goNext]
+    -- case charAt of { '\0'# -> suffix; DEFAULT -> consResult }
+    let nullAlt = FlatAlt (FLitAlt (LEChar 0)) [] suffixIdx
+        defaultAlt = FlatAlt FDefault [] consResult
+    caseIdx <- emitNode $ NCase charAt 0 [nullAlt, defaultAlt]
+    -- \a -> case ...
+    lamA <- emitNode $ NLam aId caseIdx
+    -- go addrIdx
+    goRef2 <- emitNode $ NVar goId
+    appIdx <- emitNode $ NApp goRef2 addrIdx
+    -- letrec go = \a -> ... in go addrIdx
+    emitNode $ NLetRec [(goId, lamA)] appIdx
 
 translateBinds :: [CoreBind] -> [(String, Seq FlatNode)]
 translateBinds binds = concatMap translateBind binds
@@ -259,7 +338,50 @@ translateModuleClosed hscEnv allBinds targetName = do
       (nodes, usedDCs) = translateModule closedBinds targetName unresolvedIds
       referencedIds = foldl' (\acc n -> case n of { NVar v -> Set.insert v acc; _ -> acc }) Set.empty nodes
       trulyUnresolved = filter (\uv -> uvKey uv `Set.member` referencedIds) unresolved
+      -- Debug: find dangling NVar references (referenced but not bound by any Let/Lam/Case)
+      boundIds = foldl' collectBound Set.empty nodes
+      danglingIds = Set.filter (\v -> not (Set.member v boundIds) && v /= 0x4500000000000004) referencedIds
+  -- Debug: find and report dangling NVar references
+  let varRefMap = Map.fromList [(varId v, showPprUnsafe v) | v <- concatMap deepVarRefsOfCB closedBinds]
+  when (not (Set.null danglingIds)) $ do
+    let nameMap = Map.fromList [(varId b, showPprUnsafe b) | b <- concatMap bindersOfCB closedBinds]
+    hPutStrLn stderr $ "  [DEBUG] Dangling NVar references (" ++ show (Set.size danglingIds) ++ "):"
+    mapM_ (\v -> do
+      let tag = toEnum (fromIntegral (v `shiftR` 56)) :: Char
+          key = v .&. ((1 `shiftL` 56) - 1)
+          name = Map.findWithDefault "<unknown>" v nameMap
+          refName = Map.findWithDefault "<?>" v varRefMap
+      hPutStrLn stderr $ "    VarId(0x" ++ showHex v (") tag='" ++ [tag] ++ "' key=" ++ show key ++ " name=" ++ name ++ " ref=" ++ refName)
+      ) (Set.toList danglingIds)
   return (nodes, usedDCs, trulyUnresolved, closedBinds)
+  where
+    collectBound :: Set.Set Word64 -> FlatNode -> Set.Set Word64
+    collectBound acc (NLam b _) = Set.insert b acc
+    collectBound acc (NLetNonRec b _ _) = Set.insert b acc
+    collectBound acc (NLetRec pairs _) = foldl' (\a (b,_) -> Set.insert b a) acc pairs
+    collectBound acc (NCase _ b alts) =
+      let withBinder = Set.insert b acc
+      in foldl' (\a (FlatAlt _ bs _) -> foldl' (\a' b' -> Set.insert b' a') a bs) withBinder alts
+    collectBound acc (NJoin b params _ _) = foldl' (\a p -> Set.insert p a) (Set.insert b acc) params
+    collectBound acc _ = acc
+    bindersOfCB (NonRec b _) = [b]
+    bindersOfCB (Rec pairs)  = map fst pairs
+    -- Walk into all expressions to find ALL variable references (for debug naming)
+    deepVarRefsOfCB :: CoreBind -> [Id]
+    deepVarRefsOfCB (NonRec _ rhs) = deepVarRefsOfExpr rhs
+    deepVarRefsOfCB (Rec pairs) = concatMap (deepVarRefsOfExpr . snd) pairs
+    deepVarRefsOfExpr :: CoreExpr -> [Id]
+    deepVarRefsOfExpr (Var v) = [v]
+    deepVarRefsOfExpr (Lit _) = []
+    deepVarRefsOfExpr (App f a) = deepVarRefsOfExpr f ++ deepVarRefsOfExpr a
+    deepVarRefsOfExpr (Lam _ e) = deepVarRefsOfExpr e
+    deepVarRefsOfExpr (Let bind e) = deepVarRefsOfCB bind ++ deepVarRefsOfExpr e
+    deepVarRefsOfExpr (Case scrut _ _ alts) =
+      deepVarRefsOfExpr scrut ++ concatMap (\(Alt _ _ rhs) -> deepVarRefsOfExpr rhs) alts
+    deepVarRefsOfExpr (Cast e _) = deepVarRefsOfExpr e
+    deepVarRefsOfExpr (Tick _ e) = deepVarRefsOfExpr e
+    deepVarRefsOfExpr (Type _) = []
+    deepVarRefsOfExpr (Coercion _) = []
 
 -- | Collect all DataCons encountered during translation of Core bindings.
 -- This includes constructors from imported packages (e.g. freer-simple's
@@ -351,6 +473,65 @@ translate expr =
             charIdx <- emitNode $ NCon charId [unboxedCharIdx]
             emitNode $ NCon consId [charIdx, acc]
           ) nilIdx (reverse bytes)
+
+    -- Fallback: unpackCString# with non-static Addr# (e.g., computed via plusAddr#).
+    -- Desugar to runtime iteration using IndexCharOffAddr/PlusAddr primops.
+    Var v | isUnpackCStringVar v
+          , [arg] <- args -> do
+        return () -- unpackCString# non-literal fallback
+        argIdx <- translate arg
+        emitRuntimeUnpackCString argIdx
+
+    -- Fallback: unpackAppendCString# with non-static addr (e.g., show generates these)
+    -- Desugar to runtime iteration: go addr suffix where
+    --   go a s = case indexCharOffAddr# a 0# of { '\0'# -> s; c -> C# c : go (plusAddr# a 1#) s }
+    Var v | isUnpackAppendCStringVar v
+          , [litArg, suffixArg] <- args
+          , Nothing <- extractAddrLitBytes litArg -> do
+        return () -- unpackAppendCString# non-literal fallback
+        litIdx <- translate litArg
+        suffixIdx <- translate suffixArg
+        emitRuntimeUnpackAppendCString litIdx suffixIdx
+
+    -- Partial application of unpackAppendCString# (1 arg only — produces a lambda)
+    -- unpackAppendCString# addr → \suffix -> go addr suffix
+    Var v | isUnpackAppendCStringVar v
+          , [litArg] <- args -> do
+        return () -- unpackAppendCString# partial apply
+        case extractAddrLitBytes litArg of
+          Just bytes -> do
+            -- Static: build \suffix -> "prefix" ++ suffix (cons chain ending with suffix)
+            sufId <- freshSynthVarId
+            sufRef <- emitNode $ NVar sufId
+            let consId = varId (dataConWorkId consDataCon)
+                charId = varId (dataConWorkId charDataCon)
+            recordDC consDataCon
+            recordDC charDataCon
+            bodyIdx <- foldM (\acc byte -> do
+                unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral byte))
+                charIdx <- emitNode $ NCon charId [unboxedCharIdx]
+                emitNode $ NCon consId [charIdx, acc]
+              ) sufRef (reverse bytes)
+            emitNode $ NLam sufId bodyIdx
+          Nothing -> do
+            -- Dynamic: build \suffix -> runtime unpackAppend
+            litIdx <- translate litArg
+            sufId <- freshSynthVarId
+            sufRef <- emitNode $ NVar sufId
+            bodyIdx <- emitRuntimeUnpackAppendCString litIdx sufRef
+            emitNode $ NLam sufId bodyIdx
+
+    -- Zero-arg unpackAppendCString# (eta-reduced): emit as \addr -> \suffix -> go addr suffix
+    Var v | isUnpackAppendCStringVar v
+          , null args -> do
+        return () -- unpackAppendCString# zero-arg (eta-reduced)
+        adrId <- freshSynthVarId
+        sufId <- freshSynthVarId
+        adrRef <- emitNode $ NVar adrId
+        sufRef <- emitNode $ NVar sufId
+        bodyIdx <- emitRuntimeUnpackAppendCString adrRef sufRef
+        lamSuf <- emitNode $ NLam sufId bodyIdx
+        emitNode $ NLam adrId lamSuf
 
     -- Desugar unpackAppendCString# "prefix"# suffix to cons chain:
     -- (:) 'p' ((:) 'r' (... ((:) 'x' suffix)))

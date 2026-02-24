@@ -384,14 +384,12 @@ fn test_show_string() {
 }
 
 #[test]
-#[ignore] // SIGABRT — show Maybe hits runtime_error (kills test process)
 fn test_show_maybe_int() {
     let json = run_plain("show (Just 42 :: Maybe Int)");
     assert_eq!(json, serde_json::json!("Just 42"));
 }
 
 #[test]
-#[ignore] // SIGABRT — show Maybe hits runtime_error (kills test process)
 fn test_show_maybe_string() {
     let json = run_plain("show (Just \"hello\" :: Maybe String)");
     assert_eq!(json, serde_json::json!("Just \"hello\""));
@@ -674,7 +672,7 @@ fn test_effect_kv_overwrite() {
 }
 
 #[test]
-#[ignore] // SIGSEGV — Text from effect handler + words causes dangling NVar
+#[ignore] // SIGSEGV — dangling NVar $wlvl when Text from effect handler is used with words
 fn test_effect_words() {
     // FsRead returns "stub" by default in our mock
     let (json, _) = run_mcp_effectful(&[
@@ -906,7 +904,6 @@ fn test_filter_string_literal() {
 }
 
 #[test]
-#[ignore] // SIGILL on main — pre-existing issue
 fn test_show_4_tuple() {
     let json = run_plain("show (1::Int, True, 'x', \"hi\" :: Text)");
     assert_eq!(json, serde_json::json!("(1,True,'x',\"hi\")"));
