@@ -10,20 +10,11 @@ All rules from the exomonad project apply here. Additionally:
 
 ### Locked Decisions
 
-`plans/decisions.md` is the source of truth for all architectural decisions. Every entry is final. Do not deviate from locked decisions. Do not re-derive them. If you need a decision that isn't there, escalate to the human.
+The Key Decisions Reference section below is the source of truth for all architectural decisions. Every entry is final. Do not deviate from locked decisions. Do not re-derive them. If you need a decision that isn't there, escalate to the human.
 
 ### Plans
 
-`plans/README.md` is the master plan. Phase structure, dependency graph, spec docs per phase — it's all there. Read it before doing anything. Each spec doc in `plans/phase-*/` follows a structured format: Task, Read First, Steps, Verify, Done, Tests, Boundary, Domain Anti-Patterns.
-
-### Research
-
-`plans/research/` contains completed empirical research. These are verified findings, not speculation:
-- `01-freer-simple-core-output.md` — GHC 9.12.2 -O2 Core dump analysis (validates the entire premise)
-- `02-cranelift-stack-maps-jit.md` — Cranelift 0.116.1 stack map POC (6 tests, all pass)
-- `03-ghc-912-api-surface.md` — GHC 9.12 API signatures + freer-simple compatibility
-
-Reference these when implementing. They contain exact API signatures, anti-pattern rules, and empirical data.
+`plans/README.md` tracks the current active plan. Read it before starting new work.
 
 ---
 
@@ -50,10 +41,8 @@ tidepool/
 │   ├── tide/              ← Demo: REPL
 │   └── mcp-server/        ← Demo: MCP server with Console/Env handlers
 ├── haskell/               ← Haskell harness (tidepool-extract) + test suite
-├── plans/                 ← Spec docs, decisions, research
-│   ├── decisions.md       ← Locked architectural decisions
-│   ├── README.md          ← Master plan + dependency graph
-│   └── research/          ← Completed empirical research
+├── plans/                 ← Active plans and specs
+│   └── README.md          ← Current active plan
 ├── flake.nix              ← Dev shell (Rust + GHC 9.12)
 └── CLAUDE.md              ← YOU ARE HERE
 ```
@@ -157,7 +146,7 @@ PRs target parent branch (not main). Merged via recursive fold up the tree.
 
 ## Key Decisions Reference
 
-See `plans/decisions.md` for the full table. Critical ones for daily work:
+Critical architectural decisions for daily work:
 
 - **CoreFrame variants:** Var, Lit, App, Lam, LetNonRec, LetRec, Case, Con, Join, Jump, PrimOp
 - **No type variants** — types stripped at serialization in Haskell
