@@ -316,13 +316,13 @@ fn test_emit_unique_lambda_names() {
 
 #[test]
 fn test_emit_runtime_error_div_zero() {
-    // A Var with tag 'E' (0x45) and kind 0 should call runtime_error(0) and return null
+    // A Var with tag 'E' (0x45) and kind 0 should call runtime_error(0) and return a poison closure
     let div_zero_var = VarId(0x4500000000000000); // tag 'E', kind 0 = divZero
     let tree = RecursiveTree { nodes: vec![
         CoreFrame::Var(div_zero_var), // 0 (root)
     ] };
     let result = compile_and_run(&tree);
-    assert!(result.result_ptr.is_null());
+    assert!(!result.result_ptr.is_null()); // poison closure, not null
     let err = host_fns::take_runtime_error();
     assert!(matches!(err, Some(host_fns::RuntimeError::DivisionByZero)));
 }
@@ -334,7 +334,7 @@ fn test_emit_runtime_error_overflow() {
         CoreFrame::Var(overflow_var), // 0 (root)
     ] };
     let result = compile_and_run(&tree);
-    assert!(result.result_ptr.is_null());
+    assert!(!result.result_ptr.is_null()); // poison closure, not null
     let err = host_fns::take_runtime_error();
     assert!(matches!(err, Some(host_fns::RuntimeError::Overflow)));
 }
