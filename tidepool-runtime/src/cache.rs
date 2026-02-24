@@ -61,11 +61,15 @@ fn fingerprint_dir(dir: &Path, hasher: &mut blake3::Hasher) {
 
 /// Attempts to load the Core expression and metadata from the cache.
 /// Returns `Some((expr_bytes, meta_bytes))` on success.
-pub(crate) fn cache_load(_key: &str) -> Option<(Vec<u8>, Vec<u8>)> {
-    // FIXME: cache disabled during active development — the Haskell extractor
-    // is changing frequently and stale cache entries cause hard-to-debug issues.
-    // Re-enable once the translation pipeline stabilizes.
-    None
+pub(crate) fn cache_load(key: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+    let dir = cache_dir()?;
+    let expr_path = dir.join(format!("{}.cbor", key));
+    let meta_path = dir.join(format!("{}.meta.cbor", key));
+
+    let expr = fs::read(&expr_path).ok()?;
+    let meta = fs::read(&meta_path).ok()?;
+
+    Some((expr, meta))
 }
 
 /// Stores the compilation results in the cache atomically.
