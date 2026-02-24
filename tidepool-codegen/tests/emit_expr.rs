@@ -1117,6 +1117,90 @@ fn test_emit_primop_int64_ge() {
         CoreFrame::Lit(Literal::LitInt(2)),
         CoreFrame::Lit(Literal::LitInt(3)),
         CoreFrame::PrimOp { op: PrimOpKind::Int64Ge, args: vec![0, 1] },
+
+fn test_emit_primop_bytearray_set() {
+    let ba = VarId(1);
+    let dummy = VarId(2);
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(10)),                               // 0
+        CoreFrame::PrimOp { op: PrimOpKind::NewByteArray, args: vec![0] },    // 1
+        CoreFrame::Var(ba),                                           // 2
+        CoreFrame::Lit(Literal::LitInt(2)),                            // 3 (off)
+        CoreFrame::Lit(Literal::LitInt(4)),                            // 4 (len)
+        CoreFrame::Lit(Literal::LitInt(0xFF)),                         // 5 (val)
+        CoreFrame::PrimOp { op: PrimOpKind::SetByteArray, args: vec![2, 3, 4, 5] }, // 6
+        CoreFrame::Var(ba),                                           // 7
+        CoreFrame::Lit(Literal::LitInt(2)),                            // 8
+        CoreFrame::PrimOp { op: PrimOpKind::ReadWord8Array, args: vec![7, 8] }, // 9
+        CoreFrame::Var(dummy),                                        // 10
+        CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![9, 10] }, // 11
+        CoreFrame::LetNonRec { binder: dummy, rhs: 6, body: 11 },     // 12
+        CoreFrame::LetNonRec { binder: ba, rhs: 1, body: 12 },        // 13
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 0xFF); }
+}
+
+#[test]
+fn test_emit_primop_bytearray_shrink() {
+    let ba = VarId(1);
+    let dummy = VarId(2);
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(10)),                               // 0
+        CoreFrame::PrimOp { op: PrimOpKind::NewByteArray, args: vec![0] },    // 1
+        CoreFrame::Var(ba),                                           // 2
+        CoreFrame::Lit(Literal::LitInt(5)),                             // 3 (new size)
+        CoreFrame::PrimOp { op: PrimOpKind::ShrinkMutableByteArray, args: vec![2, 3] }, // 4
+        CoreFrame::Var(ba),                                           // 5
+        CoreFrame::PrimOp { op: PrimOpKind::SizeofByteArray, args: vec![5] }, // 6
+        CoreFrame::Var(dummy),                                        // 7
+        CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![6, 7] }, // 8
+        CoreFrame::LetNonRec { binder: dummy, rhs: 4, body: 8 },     // 9
+        CoreFrame::LetNonRec { binder: ba, rhs: 1, body: 9 },        // 10
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 5); }
+}
+
+#[test]
+fn test_emit_primop_bytearray_sizeof_mutable() {
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(24)),
+        CoreFrame::PrimOp { op: PrimOpKind::NewByteArray, args: vec![0] },
+        CoreFrame::PrimOp { op: PrimOpKind::SizeofMutableByteArray, args: vec![1] },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 24); }
+}
+
+#[test]
+fn test_emit_primop_bytearray_compare() {
+    let ba1 = VarId(1);
+    let ba2 = VarId(2);
+    let d1 = VarId(3);
+    let d2 = VarId(4);
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(10)),
+        CoreFrame::PrimOp { op: PrimOpKind::NewByteArray, args: vec![0] }, // 1
+        CoreFrame::PrimOp { op: PrimOpKind::NewByteArray, args: vec![0] }, // 2
+        CoreFrame::Var(ba1),
+        CoreFrame::Lit(Literal::LitInt(0)),
+        CoreFrame::Lit(Literal::LitInt(5)),
+        CoreFrame::Lit(Literal::LitInt(0xAA)),
+        CoreFrame::PrimOp { op: PrimOpKind::SetByteArray, args: vec![3, 4, 5, 6] }, // 7
+        CoreFrame::Var(ba2),
+        CoreFrame::PrimOp { op: PrimOpKind::SetByteArray, args: vec![8, 4, 5, 6] }, // 9
+        CoreFrame::Var(ba1),
+        CoreFrame::Var(ba2),
+        CoreFrame::PrimOp { op: PrimOpKind::CompareByteArrays, args: vec![10, 4, 11, 4, 5] }, // 12
+        CoreFrame::Var(d1),
+        CoreFrame::Var(d2),
+        CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![12, 13] },
+        CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![15, 14] },
+        CoreFrame::LetNonRec { binder: d2, rhs: 9, body: 16 },
+        CoreFrame::LetNonRec { binder: d1, rhs: 7, body: 17 },
+        CoreFrame::LetNonRec { binder: ba2, rhs: 2, body: 18 },
+        CoreFrame::LetNonRec { binder: ba1, rhs: 1, body: 19 },
     ] };
     let result = compile_and_run(&tree);
     unsafe { assert_eq!(read_lit_int(result.result_ptr), 0); }
@@ -1215,5 +1299,134 @@ fn test_emit_word64_to_int64_conversion() {
     ] };
     let result = compile_and_run(&tree);
     unsafe { assert_eq!(read_lit_int(result.result_ptr), -1); }
+
+fn test_emit_primop_bytearray_compare_unequal() {
+    let ba1 = VarId(1);
+    let ba2 = VarId(2);
+    let d1 = VarId(3);
+    let d2 = VarId(4);
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(10)),
+        CoreFrame::PrimOp { op: PrimOpKind::NewByteArray, args: vec![0] }, // 1
+        CoreFrame::PrimOp { op: PrimOpKind::NewByteArray, args: vec![0] }, // 2
+        CoreFrame::Var(ba1),
+        CoreFrame::Lit(Literal::LitInt(0)),
+        CoreFrame::Lit(Literal::LitInt(5)),
+        CoreFrame::Lit(Literal::LitInt(0xAA)),
+        CoreFrame::PrimOp { op: PrimOpKind::SetByteArray, args: vec![3, 4, 5, 6] }, // 7
+        CoreFrame::Var(ba2),
+        CoreFrame::Lit(Literal::LitInt(0xBB)),
+        CoreFrame::PrimOp { op: PrimOpKind::SetByteArray, args: vec![8, 4, 5, 9] }, // 10
+        CoreFrame::Var(ba1),
+        CoreFrame::Var(ba2),
+        CoreFrame::PrimOp { op: PrimOpKind::CompareByteArrays, args: vec![11, 4, 12, 4, 5] }, // 13
+        CoreFrame::Var(d1),
+        CoreFrame::Var(d2),
+        CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![13, 14] },
+        CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![16, 15] },
+        CoreFrame::LetNonRec { binder: d2, rhs: 10, body: 17 },
+        CoreFrame::LetNonRec { binder: d1, rhs: 7, body: 18 },
+        CoreFrame::LetNonRec { binder: ba2, rhs: 2, body: 19 },
+        CoreFrame::LetNonRec { binder: ba1, rhs: 1, body: 20 },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert!(read_lit_int(result.result_ptr) != 0); }
+}
+
+#[test]
+fn test_emit_primop_bytearray_copy_mutable() {
+    let ba1 = VarId(1);
+    let ba2 = VarId(2);
+    let d1 = VarId(3);
+    let d2 = VarId(4);
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(10)),
+        CoreFrame::PrimOp { op: PrimOpKind::NewByteArray, args: vec![0] }, // 1
+        CoreFrame::PrimOp { op: PrimOpKind::NewByteArray, args: vec![0] }, // 2
+        CoreFrame::Var(ba1),
+        CoreFrame::Lit(Literal::LitInt(0)),
+        CoreFrame::Lit(Literal::LitInt(5)),
+        CoreFrame::Lit(Literal::LitInt(0x42)),
+        CoreFrame::PrimOp { op: PrimOpKind::SetByteArray, args: vec![3, 4, 5, 6] }, // 7
+        CoreFrame::Var(ba1),
+        CoreFrame::Var(ba2),
+        CoreFrame::PrimOp { op: PrimOpKind::CopyMutableByteArray, args: vec![8, 4, 9, 4, 5] }, // 10
+        CoreFrame::Var(ba2),
+        CoreFrame::PrimOp { op: PrimOpKind::ReadWord8Array, args: vec![11, 4] }, // 12
+        CoreFrame::Var(d1),
+        CoreFrame::Var(d2),
+        CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![12, 13] },
+        CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![15, 14] },
+        CoreFrame::LetNonRec { binder: d2, rhs: 10, body: 16 },
+        CoreFrame::LetNonRec { binder: d1, rhs: 7, body: 17 },
+        CoreFrame::LetNonRec { binder: ba2, rhs: 2, body: 18 },
+        CoreFrame::LetNonRec { binder: ba1, rhs: 1, body: 19 },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 0x42); }
+}
+
+#[test]
+fn test_emit_primop_bytearray_index_word8() {
+    let ba = VarId(1);
+    let d1 = VarId(2);
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(10)),
+        CoreFrame::PrimOp { op: PrimOpKind::NewByteArray, args: vec![0] }, // 1
+        CoreFrame::Var(ba),
+        CoreFrame::Lit(Literal::LitInt(3)),
+        CoreFrame::Lit(Literal::LitWord(123)),
+        CoreFrame::PrimOp { op: PrimOpKind::WriteWord8Array, args: vec![2, 3, 4] }, // 5
+        CoreFrame::Var(ba),
+        CoreFrame::PrimOp { op: PrimOpKind::UnsafeFreezeByteArray, args: vec![6] }, // 7
+        CoreFrame::Lit(Literal::LitInt(3)),
+        CoreFrame::PrimOp { op: PrimOpKind::IndexWord8Array, args: vec![7, 8] }, // 9
+        CoreFrame::Var(d1),
+        CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![9, 10] }, // 11
+        CoreFrame::LetNonRec { binder: d1, rhs: 5, body: 11 },
+        CoreFrame::LetNonRec { binder: ba, rhs: 1, body: 12 },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 123); }
+}
+
+#[test]
+fn test_emit_primop_bytearray_copy_addr() {
+    let ba = VarId(1);
+    let d1 = VarId(2);
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitString(b"ABCDE".to_vec())), // 0
+        CoreFrame::Lit(Literal::LitInt(10)),
+        CoreFrame::PrimOp { op: PrimOpKind::NewByteArray, args: vec![1] }, // 2
+        CoreFrame::Var(ba),
+        CoreFrame::Lit(Literal::LitInt(2)), // dest off
+        CoreFrame::Lit(Literal::LitInt(3)), // len
+        CoreFrame::PrimOp { op: PrimOpKind::CopyAddrToByteArray, args: vec![0, 3, 4, 5] }, // 6
+        CoreFrame::Var(ba),
+        CoreFrame::Lit(Literal::LitInt(2)),
+        CoreFrame::PrimOp { op: PrimOpKind::ReadWord8Array, args: vec![7, 8] }, // 9
+        CoreFrame::Var(d1),
+        CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![9, 10] }, // 11
+        CoreFrame::LetNonRec { binder: d1, rhs: 6, body: 11 },
+        CoreFrame::LetNonRec { binder: ba, rhs: 2, body: 12 },
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 'A' as i64); }
+}
+
+#[test]
+fn test_emit_primop_bytearray_resize() {
+    let ba = VarId(1);
+    let tree = RecursiveTree { nodes: vec![
+        CoreFrame::Lit(Literal::LitInt(10)),
+        CoreFrame::PrimOp { op: PrimOpKind::NewByteArray, args: vec![0] }, // 1
+        CoreFrame::Var(ba),
+        CoreFrame::Lit(Literal::LitInt(20)),
+        CoreFrame::PrimOp { op: PrimOpKind::ResizeMutableByteArray, args: vec![2, 3] }, // 4
+        CoreFrame::PrimOp { op: PrimOpKind::SizeofByteArray, args: vec![4] }, // 5
+        CoreFrame::LetNonRec { binder: ba, rhs: 1, body: 5 }, // 6
+    ] };
+    let result = compile_and_run(&tree);
+    unsafe { assert_eq!(read_lit_int(result.result_ptr), 20); }
 }
     
