@@ -30,6 +30,47 @@ pub fn write_cbor(expr: &RecursiveTree<CoreFrame<usize>>) -> Result<Vec<u8>, Wri
     Ok(bytes)
 }
 
+/// Writes a DataConTable to CBOR-encoded metadata bytes.
+pub fn write_metadata(table: &crate::datacon_table::DataConTable) -> Result<Vec<u8>, WriteError> {
+    use crate::datacon::SrcBang;
+
+    let mut entries = Vec::with_capacity(table.len());
+    for dc in table.iter() {
+        let dcid = dc.id.0;
+        let name = &dc.name;
+        let tag = dc.tag as u64;
+        let arity = dc.rep_arity as u64;
+        let bangs = Value::Array(
+            dc.field_bangs
+                .iter()
+                .map(|b| {
+                    Value::Text(
+                        match b {
+                            SrcBang::SrcBang => "SrcBang",
+                            SrcBang::SrcUnpack => "SrcUnpack",
+                            SrcBang::NoSrcBang => "NoSrcBang",
+                        }
+                        .to_string(),
+                    )
+                })
+                .collect(),
+        );
+
+        entries.push(Value::Array(vec![
+            Value::Integer(dcid.into()),
+            Value::Text(name.clone()),
+            Value::Integer(tag.into()),
+            Value::Integer(arity.into()),
+            bangs,
+        ]));
+    }
+
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&Value::Array(entries), &mut bytes)
+        .map_err(|e| WriteError::Cbor(e.to_string()))?;
+    Ok(bytes)
+}
+
 fn encode_frame(frame: &CoreFrame<usize>) -> Value {
     match frame {
         CoreFrame::Var(id) => Value::Array(vec![

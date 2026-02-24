@@ -4,6 +4,7 @@ pub mod write;
 pub use read::read_cbor;
 pub use read::read_metadata;
 pub use write::write_cbor;
+pub use write::write_metadata;
 
 #[derive(Debug)]
 pub enum ReadError {
@@ -324,5 +325,31 @@ mod tests {
                 CoreFrame::App { fun: 1, arg: 2 }, // 3
             ],
         });
+    }
+
+    #[test]
+    fn test_roundtrip_metadata() {
+        use crate::datacon::{DataCon, SrcBang};
+        use crate::datacon_table::DataConTable;
+
+        let mut table = DataConTable::new();
+        table.insert(DataCon {
+            id: DataConId(1),
+            name: "Just".to_string(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![SrcBang::SrcBang],
+        });
+        table.insert(DataCon {
+            id: DataConId(2),
+            name: "Nothing".to_string(),
+            tag: 2,
+            rep_arity: 0,
+            field_bangs: vec![],
+        });
+
+        let bytes = write_metadata(&table).expect("write_metadata failed");
+        let recovered = read_metadata(&bytes).expect("read_metadata failed");
+        assert_eq!(table, recovered);
     }
 }

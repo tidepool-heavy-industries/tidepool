@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 /// Lookup table for data constructor metadata.
 /// Populated during deserialization from the CBOR metadata section.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DataConTable {
     by_id: HashMap<DataConId, DataCon>,
     by_name: HashMap<String, DataConId>,
