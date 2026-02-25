@@ -2429,6 +2429,7 @@ name = "tidepool-heap"
 version = "0.0.1"
 dependencies = [
  "bumpalo",
+ "proptest",
  "tidepool-eval",
  "tidepool-repr",
 ]
