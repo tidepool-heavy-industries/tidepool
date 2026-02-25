@@ -2476,6 +2476,8 @@ name = "tidepool-repr"
 version = "0.0.1"
 dependencies = [
  "ciborium",
+ "proptest",
+ "tidepool-testing",
 ]
 
 [[package]]

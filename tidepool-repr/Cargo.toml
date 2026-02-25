@@ -11,3 +11,7 @@ readme = "../README.md"
 
 [dependencies]
 ciborium = "0.2"
+
+[dev-dependencies]
+proptest = "1"
+tidepool-testing = { path = "../tidepool-testing" }
