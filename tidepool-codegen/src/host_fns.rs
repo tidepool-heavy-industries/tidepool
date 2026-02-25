@@ -442,13 +442,22 @@ pub extern "C" fn runtime_strlen(addr: i64) -> i64 {
     len
 }
 
-/// Measure the number of bytes in `len` UTF-8 codepoints starting at `addr + off`.
-pub extern "C" fn runtime_text_measure_off(addr: i64, off: i64, len: i64) -> i64 {
+/// Measure codepoints in a UTF-8 buffer. Matches text-2.1.2 `_hs_text_measure_off` semantics.
+///
+/// If the buffer contains >= `cnt` characters, returns the non-negative byte count
+/// of those `cnt` characters. If the buffer is shorter (< `cnt` chars), returns
+/// the non-positive negated total character count. Returns 0 if `len` = 0 or `cnt` = 0.
+pub extern "C" fn runtime_text_measure_off(addr: i64, off: i64, len: i64, cnt: i64) -> i64 {
+    if len <= 0 || cnt <= 0 {
+        return 0;
+    }
     let ptr = (addr + off) as *const u8;
-    let mut byte_count = 0i64;
-    let mut chars_left = len;
-    while chars_left > 0 {
-        let b = unsafe { *ptr.add(byte_count as usize) };
+    let len = len as usize;
+    let cnt = cnt as usize;
+    let mut byte_pos = 0usize;
+    let mut chars_found = 0usize;
+    while chars_found < cnt && byte_pos < len {
+        let b = unsafe { *ptr.add(byte_pos) };
         let char_len = if b < 0x80 {
             1
         } else if b < 0xE0 {
@@ -458,10 +467,16 @@ pub extern "C" fn runtime_text_measure_off(addr: i64, off: i64, len: i64) -> i64
         } else {
             4
         };
-        byte_count += char_len;
-        chars_left -= 1;
+        byte_pos += char_len;
+        chars_found += 1;
     }
-    byte_count
+    if chars_found >= cnt {
+        // Buffer had enough characters — return bytes consumed (non-negative)
+        byte_pos as i64
+    } else {
+        // Buffer exhausted before cnt — return negated char count (non-positive)
+        -(chars_found as i64)
+    }
 }
 
 /// Find a byte in a buffer. Returns offset from start, or -1 if not found.
@@ -474,9 +489,12 @@ pub extern "C" fn runtime_text_memchr(addr: i64, off: i64, len: i64, needle: i64
     }
 }
 
-/// Reverse UTF-8 text: reverse codepoints from src into dest.
-pub extern "C" fn runtime_text_reverse(dest: i64, len: i64, src: i64) {
-    let src_slice = unsafe { std::slice::from_raw_parts(src as *const u8, len as usize) };
+/// Reverse UTF-8 text. Matches text-2.1.2 `_hs_text_reverse(dst0, src0, off, len)`.
+///
+/// Reads `len` bytes from `src + off`, writes reversed codepoints starting at `dst`.
+pub extern "C" fn runtime_text_reverse(dest: i64, src: i64, off: i64, len: i64) {
+    let src_ptr = (src + off) as *const u8;
+    let src_slice = unsafe { std::slice::from_raw_parts(src_ptr, len as usize) };
     let dest_ptr = dest as *mut u8;
     // Decode UTF-8 codepoints, write in reverse order
     let mut read_pos = 0usize;
@@ -713,22 +731,122 @@ mod tests {
         }
     }
 
+    // ---------------------------------------------------------------
+    // runtime_text_measure_off — text-2.1.2 semantics:
+    //   cnt reached => return bytes consumed (non-negative)
+    //   buffer exhausted => return -(chars_found) (non-positive)
+    // ---------------------------------------------------------------
+
     #[test]
-    fn test_runtime_text_measure_off_ascii() {
+    fn test_measure_off_ascii_length() {
+        // T.length "hello" = negate(measure_off(p, 0, 5, maxBound))
         let s = b"hello";
-        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 5), 5);
-        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 1, 3), 3);
+        let r = runtime_text_measure_off(s.as_ptr() as i64, 0, 5, i64::MAX);
+        assert_eq!(r, -5); // buffer exhausted, 5 chars found
     }
 
     #[test]
-    fn test_runtime_text_measure_off_multi_byte() {
-        // "λ" is 2 bytes: CF BB
-        // "😀" is 4 bytes: F0 9F 98 80
+    fn test_measure_off_ascii_take() {
+        // T.take 3 "hello" => measure_off(p, 0, 5, 3)
+        let s = b"hello";
+        let r = runtime_text_measure_off(s.as_ptr() as i64, 0, 5, 3);
+        assert_eq!(r, 3); // 3 chars = 3 bytes consumed
+    }
+
+    #[test]
+    fn test_measure_off_ascii_take_all() {
+        // T.take 5 "hello" => cnt == total chars, returns bytes consumed
+        let s = b"hello";
+        let r = runtime_text_measure_off(s.as_ptr() as i64, 0, 5, 5);
+        assert_eq!(r, 5); // exactly 5 chars fit
+    }
+
+    #[test]
+    fn test_measure_off_ascii_take_more() {
+        // T.take 10 "hello" => cnt > total chars, buffer exhausted
+        let s = b"hello";
+        let r = runtime_text_measure_off(s.as_ptr() as i64, 0, 5, 10);
+        assert_eq!(r, -5); // only 5 chars available
+    }
+
+    #[test]
+    fn test_measure_off_ascii_drop() {
+        // T.drop 2 "hello" => measure_off(p, 0, 5, 2) = 2 bytes
+        let s = b"hello";
+        let r = runtime_text_measure_off(s.as_ptr() as i64, 0, 5, 2);
+        assert_eq!(r, 2);
+    }
+
+    #[test]
+    fn test_measure_off_with_offset() {
+        // Text with off=2, len=3 (substring "llo")
+        let s = b"hello";
+        let r = runtime_text_measure_off(s.as_ptr() as i64, 2, 3, i64::MAX);
+        assert_eq!(r, -3); // 3 chars in "llo"
+    }
+
+    #[test]
+    fn test_measure_off_empty() {
+        let s = b"hello";
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 0, 5), 0);
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 5, 0), 0);
+    }
+
+    #[test]
+    fn test_measure_off_utf8_length() {
+        // "café" = [63 61 66 C3 A9] = 5 bytes, 4 chars
+        let s = "café".as_bytes();
+        assert_eq!(s.len(), 5);
+        let r = runtime_text_measure_off(s.as_ptr() as i64, 0, 5, i64::MAX);
+        assert_eq!(r, -4); // 4 codepoints
+    }
+
+    #[test]
+    fn test_measure_off_utf8_take() {
+        // T.take 3 "café" => first 3 chars = "caf" = 3 bytes
+        let s = "café".as_bytes();
+        let r = runtime_text_measure_off(s.as_ptr() as i64, 0, 5, 3);
+        assert_eq!(r, 3); // 3 ASCII chars = 3 bytes
+    }
+
+    #[test]
+    fn test_measure_off_utf8_take_past_multibyte() {
+        // T.take 4 "café" => all 4 chars, 5 bytes. cnt == total, buffer exhausted
+        let s = "café".as_bytes();
+        let r = runtime_text_measure_off(s.as_ptr() as i64, 0, 5, 4);
+        // cnt=4, walk: c(1)+a(1)+f(1)+é(2) = 5 bytes, 4 chars found, chars_found==cnt
+        assert_eq!(r, 5); // bytes consumed
+    }
+
+    #[test]
+    fn test_measure_off_multibyte_chars() {
+        // "λ😀x" = [CE BB | F0 9F 98 80 | 78] = 7 bytes, 3 chars
         let s = "λ😀x".as_bytes();
-        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 1), 2); // λ
-        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 2), 6); // λ😀
-        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 2, 1), 4); // 😀
-        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 6, 1), 1); // x
+        assert_eq!(s.len(), 7);
+        // length
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 7, i64::MAX), -3);
+        // take 1 = "λ" = 2 bytes
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 7, 1), 2);
+        // take 2 = "λ😀" = 6 bytes
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 7, 2), 6);
+        // with offset 2 (past "λ"), len 5: "😀x" = 2 chars
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 2, 5, i64::MAX), -2);
+        // take 1 from offset 2: "😀" = 4 bytes
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 2, 5, 1), 4);
+    }
+
+    #[test]
+    fn test_measure_off_all_widths() {
+        // "Aλ文😀" = 1+2+3+4 = 10 bytes, 4 chars
+        let s = "Aλ文😀".as_bytes();
+        assert_eq!(s.len(), 10);
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 10, i64::MAX), -4);
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 10, 1), 1);  // "A"
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 10, 2), 3);  // "Aλ"
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 10, 3), 6);  // "Aλ文"
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 10, 4), 10); // all
+        // from offset 1 (past "A"), len 9: "λ文😀"
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 1, 9, 2), 5); // "λ文" = 2+3
     }
 
     #[test]
@@ -742,36 +860,86 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------
+    // runtime_text_reverse — text-2.1.2: reverse(dst, src, off, len)
+    // ---------------------------------------------------------------
+
     #[test]
-    fn test_runtime_text_reverse_ascii() {
+    fn test_reverse_ascii() {
         let src = b"hello";
         let mut dest = [0u8; 5];
-        runtime_text_reverse(dest.as_mut_ptr() as i64, 5, src.as_ptr() as i64);
+        runtime_text_reverse(dest.as_mut_ptr() as i64, src.as_ptr() as i64, 0, 5);
         assert_eq!(&dest, b"olleh");
     }
 
     #[test]
-    fn test_runtime_text_reverse_utf8() {
-        // "λ😀" -> CF BB | F0 9F 98 80
-        // Reversed should be "😀λ" -> F0 9F 98 80 | CF BB
+    fn test_reverse_ascii_with_offset() {
+        // src = "XXhello", off=2, len=5 → reverse "hello" → "olleh"
+        let src = b"XXhello";
+        let mut dest = [0u8; 5];
+        runtime_text_reverse(dest.as_mut_ptr() as i64, src.as_ptr() as i64, 2, 5);
+        assert_eq!(&dest, b"olleh");
+    }
+
+    #[test]
+    fn test_reverse_utf8() {
+        // "λ😀" -> CE BB | F0 9F 98 80 (6 bytes)
+        // Reversed should be "😀λ" -> F0 9F 98 80 | CE BB
         let src = "λ😀".as_bytes();
         let mut dest = [0u8; 6];
-        runtime_text_reverse(dest.as_mut_ptr() as i64, 6, src.as_ptr() as i64);
+        runtime_text_reverse(dest.as_mut_ptr() as i64, src.as_ptr() as i64, 0, 6);
         assert_eq!(std::str::from_utf8(&dest).unwrap(), "😀λ");
     }
 
     #[test]
-    fn test_runtime_text_measure_complex() {
-        // "Aλ文😀"
-        // A: 1 byte
-        // λ: 2 bytes
-        // 文: 3 bytes (E6 96 87)
-        // 😀: 4 bytes
-        let s = "Aλ文😀".as_bytes();
-        assert_eq!(
-            runtime_text_measure_off(s.as_ptr() as i64, 0, 4),
-            1 + 2 + 3 + 4
-        );
-        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 1, 2), 2 + 3);
+    fn test_reverse_all_widths() {
+        // "Aλ文😀" = 10 bytes → "😀文λA"
+        let src = "Aλ文😀".as_bytes();
+        let mut dest = [0u8; 10];
+        runtime_text_reverse(dest.as_mut_ptr() as i64, src.as_ptr() as i64, 0, 10);
+        assert_eq!(std::str::from_utf8(&dest).unwrap(), "😀文λA");
+    }
+
+    #[test]
+    fn test_reverse_single_char() {
+        let src = b"x";
+        let mut dest = [0u8; 1];
+        runtime_text_reverse(dest.as_mut_ptr() as i64, src.as_ptr() as i64, 0, 1);
+        assert_eq!(&dest, b"x");
+    }
+
+    // ---------------------------------------------------------------
+    // runtime_text_memchr — memchr(arr, off, len, byte) -> offset or -1
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_memchr_found() {
+        let s = b"hello:world";
+        assert_eq!(runtime_text_memchr(s.as_ptr() as i64, 0, 11, b':' as i64), 5);
+    }
+
+    #[test]
+    fn test_memchr_not_found() {
+        let s = b"hello";
+        assert_eq!(runtime_text_memchr(s.as_ptr() as i64, 0, 5, b':' as i64), -1);
+    }
+
+    #[test]
+    fn test_memchr_with_offset() {
+        let s = b"a:b:c";
+        // search from offset 2 (past "a:"), len 3 ("b:c")
+        assert_eq!(runtime_text_memchr(s.as_ptr() as i64, 2, 3, b':' as i64), 1);
+    }
+
+    #[test]
+    fn test_memchr_first_byte() {
+        let s = b":hello";
+        assert_eq!(runtime_text_memchr(s.as_ptr() as i64, 0, 6, b':' as i64), 0);
+    }
+
+    #[test]
+    fn test_memchr_last_byte() {
+        let s = b"hello:";
+        assert_eq!(runtime_text_memchr(s.as_ptr() as i64, 0, 6, b':' as i64), 5);
     }
 }

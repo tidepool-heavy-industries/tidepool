@@ -1001,10 +1001,12 @@ pub fn emit_primop(
             Ok(SsaVal::Raw(result, LIT_TAG_INT))
         }
         PrimOpKind::FfiTextMeasureOff => {
-            // _hs_text_measure_off :: Addr# -> Int# -> Int# -> Int#
-            let addr = unbox_addr(builder, args[0]);
+            // _hs_text_measure_off :: ByteArray# -> CSize -> CSize -> CSize -> CSsize
+            let ba = unbox_bytearray(builder, args[0]);
+            let data_ptr = builder.ins().iadd_imm(ba, 8); // skip length prefix
             let off = unbox_int(builder, args[1]);
             let len = unbox_int(builder, args[2]);
+            let cnt = unbox_int(builder, args[3]);
             let result = emit_runtime_call(
                 pipeline,
                 builder,
@@ -1013,15 +1015,17 @@ pub fn emit_primop(
                     AbiParam::new(types::I64),
                     AbiParam::new(types::I64),
                     AbiParam::new(types::I64),
+                    AbiParam::new(types::I64),
                 ],
                 &[AbiParam::new(types::I64)],
-                &[addr, off, len],
+                &[data_ptr, off, len, cnt],
             )?;
             Ok(SsaVal::Raw(result, LIT_TAG_INT))
         }
         PrimOpKind::FfiTextMemchr => {
-            // _hs_text_memchr :: Addr# -> Int# -> Int# -> Int# -> Int#
-            let addr = unbox_addr(builder, args[0]);
+            // _hs_text_memchr :: ByteArray# -> CSize -> CSize -> Word8 -> CSsize
+            let ba = unbox_bytearray(builder, args[0]);
+            let data_ptr = builder.ins().iadd_imm(ba, 8); // skip length prefix
             let off = unbox_int(builder, args[1]);
             let len = unbox_int(builder, args[2]);
             let needle = unbox_int(builder, args[3]);
@@ -1036,15 +1040,18 @@ pub fn emit_primop(
                     AbiParam::new(types::I64),
                 ],
                 &[AbiParam::new(types::I64)],
-                &[addr, off, len, needle],
+                &[data_ptr, off, len, needle],
             )?;
             Ok(SsaVal::Raw(result, LIT_TAG_INT))
         }
         PrimOpKind::FfiTextReverse => {
-            // _hs_text_reverse :: Addr# -> Int# -> Addr# -> ()
-            let dest = unbox_addr(builder, args[0]);
-            let len = unbox_int(builder, args[1]);
-            let src = unbox_addr(builder, args[2]);
+            // _hs_text_reverse :: MutableByteArray# -> ByteArray# -> CSize -> CSize -> ()
+            let dest_ba = unbox_bytearray(builder, args[0]);
+            let dest_ptr = builder.ins().iadd_imm(dest_ba, 8); // skip length prefix
+            let src_ba = unbox_bytearray(builder, args[1]);
+            let src_ptr = builder.ins().iadd_imm(src_ba, 8); // skip length prefix
+            let off = unbox_int(builder, args[2]);
+            let len = unbox_int(builder, args[3]);
             let _ = emit_runtime_call(
                 pipeline,
                 builder,
@@ -1053,9 +1060,10 @@ pub fn emit_primop(
                     AbiParam::new(types::I64),
                     AbiParam::new(types::I64),
                     AbiParam::new(types::I64),
+                    AbiParam::new(types::I64),
                 ],
                 &[],
-                &[dest, len, src],
+                &[dest_ptr, src_ptr, off, len],
             )?;
             Ok(SsaVal::Raw(
                 builder.ins().iconst(types::I64, 0),
