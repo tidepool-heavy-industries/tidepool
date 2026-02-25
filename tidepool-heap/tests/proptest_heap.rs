@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 use tidepool_heap::*;
-use tidepool_eval::{Env, Heap, ThunkState};
-use tidepool_repr::{RecursiveTree, CoreFrame, VarId};
+use tidepool_eval::{value::Value, Env, Heap, ThunkState};
+use tidepool_repr::{CoreFrame, RecursiveTree, VarId};
 
 // Strategies for generating heap object data
 fn any_tag() -> impl Strategy<Value = u8> {
@@ -158,5 +158,140 @@ proptest! {
         for i in mid..num_thunks {
             assert!(!table.is_reachable(ids[i]));
         }
+    }
+
+    /// Test that a long chain of thunks survives GC if the head is reachable.
+    #[test]
+    fn prop_gc_preserves_chain(chain_len in 1..100usize) {
+        let mut heap = ArenaHeap::new();
+        let expr = RecursiveTree {
+            nodes: vec![CoreFrame::Var(VarId(0))],
+        };
+
+        let mut prev_id = None;
+        let mut ids = Vec::new();
+
+        for i in 0..chain_len {
+            let mut env = Env::new();
+            if let Some(id) = prev_id {
+                env.insert(VarId(i as u64), Value::ThunkRef(id));
+            }
+            let id = heap.alloc(env, expr.clone());
+            ids.push(id);
+            prev_id = Some(id);
+        }
+
+        // The head of the chain (last allocated) is our root
+        let root = ids.last().cloned().unwrap();
+        let table = heap.collect_garbage(&[root]);
+
+        // All thunks in the chain should be reachable
+        for &id in &ids {
+            prop_assert!(table.is_reachable(id), "Thunk in chain should be reachable");
+        }
+
+        // Verify the chain structure is preserved
+        let mut current_new_id = table.lookup(root);
+        for i in (1..chain_len).rev() {
+            match heap.read(current_new_id) {
+                ThunkState::Unevaluated(env, _) => {
+                    let prev_old_id = ids[i-1];
+                    let expected_new_id = table.lookup(prev_old_id);
+                    match env.get(&VarId(i as u64)).expect("Value not found in env") {
+                        Value::ThunkRef(id) => {
+                            prop_assert_eq!(*id, expected_new_id, "Chain link broken at index {}", i);
+                            current_new_id = *id;
+                        }
+                        _ => panic!("Expected ThunkRef"),
+                    }
+                }
+                _ => panic!("Expected Unevaluated thunk"),
+            }
+        }
+    }
+
+    /// Test that objects surviving one GC also survive subsequent GCs if still reachable.
+    #[test]
+    fn prop_repeated_gc_stable(num_cycles in 2..5usize, objects_per_cycle in 5..20usize) {
+        let mut heap = ArenaHeap::new();
+        let expr = RecursiveTree {
+            nodes: vec![CoreFrame::Var(VarId(0))],
+        };
+
+        let mut roots = Vec::new();
+
+        for cycle in 0..num_cycles {
+            // Allocate new objects in each cycle
+            for i in 0..objects_per_cycle {
+                let id = heap.alloc(Env::new(), expr.clone());
+                // Only some of them become roots to be kept across cycles
+                if i % 2 == 0 {
+                    roots.push(id);
+                }
+            }
+
+            // Run GC
+            let table = heap.collect_garbage(&roots);
+
+            // Update roots with their new IDs
+            let mut new_roots = Vec::new();
+            for &old_root in &roots {
+                new_roots.push(table.lookup(old_root));
+            }
+            roots = new_roots;
+
+            // Verify all roots are valid
+            for &root in &roots {
+                match heap.read(root) {
+                    ThunkState::Unevaluated(_, _) => (),
+                    _ => panic!("Expected Unevaluated thunk after cycle {}", cycle),
+                }
+            }
+            
+            prop_assert_eq!(heap.thunk_count(), roots.len(), "Heap should only contain roots");
+        }
+    }
+
+    /// Test that GC reclaims space from unreachable objects.
+    #[test]
+    fn prop_gc_reclaims_proportionally(n_live in 10..50usize, n_dead in 10..50usize) {
+        let mut heap = ArenaHeap::new();
+        let expr = RecursiveTree {
+            nodes: vec![CoreFrame::Var(VarId(0))],
+        };
+
+        let mut live_ids = Vec::new();
+        for _ in 0..n_live {
+            live_ids.push(heap.alloc(Env::new(), expr.clone()));
+        }
+
+        for _ in 0..n_dead {
+            heap.alloc(Env::new(), expr.clone());
+        }
+
+        // Also allocate some raw memory in nursery
+        let raw_ptr = heap.alloc_raw(1024);
+        unsafe { write_header(raw_ptr, TAG_LIT, 1024); }
+        let used_before = heap.bytes_used();
+        prop_assert!(used_before >= 1024);
+
+        let pre_gc_thunk_count = heap.thunk_count();
+        prop_assert_eq!(pre_gc_thunk_count, n_live + n_dead);
+
+        // Run GC
+        let _table = heap.collect_garbage(&live_ids);
+
+        // Thunk count should be exactly n_live
+        prop_assert_eq!(heap.thunk_count(), n_live);
+
+        // Nursery should be reset
+        prop_assert_eq!(heap.bytes_used(), 0);
+
+        // We should be able to allocate at least as many as we had before in the nursery
+        // (and more, since it's empty now)
+        prop_assert!(heap.nursery_has_space(used_before));
+        let new_raw_ptr = heap.alloc_raw(used_before);
+        prop_assert_eq!(heap.bytes_used(), used_before);
+        unsafe { write_header(new_raw_ptr, TAG_LIT, used_before as u16); }
     }
 }
