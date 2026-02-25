@@ -49,6 +49,7 @@ pub const TAG_CLOSURE: u8 = HeapTag::Closure as u8;
 pub const TAG_THUNK: u8 = HeapTag::Thunk as u8;
 pub const TAG_CON: u8 = HeapTag::Con as u8;
 pub const TAG_LIT: u8 = HeapTag::Lit as u8;
+pub const TAG_FORWARDED: u8 = 0xFF;
 
 /// Discriminant for thunk evaluation state.
 /// Stored at the thunk state byte within a Thunk HeapObject.

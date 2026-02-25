@@ -1,4 +1,5 @@
 pub mod compact;
+pub mod raw;
 pub mod trace;
 
 use tidepool_eval::heap::{Heap, VecHeap};
