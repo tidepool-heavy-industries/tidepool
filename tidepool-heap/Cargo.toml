@@ -13,3 +13,6 @@ readme = "../README.md"
 tidepool-repr = { version = "0.0.1", path = "../tidepool-repr" }
 tidepool-eval = { version = "0.0.1", path = "../tidepool-eval" }
 bumpalo = "3"
+
+[dev-dependencies]
+proptest = "1"
