@@ -180,3 +180,123 @@ fn nested_expr_round_trip() {
         assert_eq!(expr, recovered, "failed at depth {}", depth);
     }
 }
+
+#[derive(Debug, Clone)]
+enum Mutation {
+    Flip(prop::sample::Index, u8),
+    Insert(prop::sample::Index, u8),
+    Delete(prop::sample::Index),
+}
+
+#[test]
+fn cbor_corrupt_bytes_no_panic() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let mut runner = TestRunner::new(Config::with_cases(256));
+            let mutation_strat = prop_oneof![
+                (any::<prop::sample::Index>(), any::<u8>()).prop_map(|(i, b)| Mutation::Flip(i, b)),
+                (any::<prop::sample::Index>(), any::<u8>()).prop_map(|(i, b)| Mutation::Insert(i, b)),
+                any::<prop::sample::Index>().prop_map(Mutation::Delete),
+            ];
+            runner
+                .run(
+                    &(arb_core_expr(), prop::collection::vec(mutation_strat, 1..10)),
+                    |(expr, mutations)| {
+                        let bytes = write_cbor(&expr).expect("write_cbor failed");
+                        let mut corrupted = bytes;
+                        for m in mutations {
+                            match m {
+                                Mutation::Flip(idx, b) => {
+                                    if !corrupted.is_empty() {
+                                        let i = idx.index(corrupted.len());
+                                        corrupted[i] = b;
+                                    }
+                                }
+                                Mutation::Insert(idx, b) => {
+                                    let i = idx.index(corrupted.len() + 1);
+                                    corrupted.insert(i, b);
+                                }
+                                Mutation::Delete(idx) => {
+                                    if !corrupted.is_empty() {
+                                        let i = idx.index(corrupted.len());
+                                        corrupted.remove(i);
+                                    }
+                                }
+                            }
+                        }
+                        let result = std::panic::catch_unwind(|| {
+                            let _ = read_cbor(&corrupted);
+                        });
+                        prop_assert!(
+                            result.is_ok(),
+                            "Deserialization panicked on corrupted bytes: {:?}",
+                            corrupted
+                        );
+                        Ok(())
+                    },
+                )
+                .unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn cbor_random_bytes_no_panic() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let mut runner = TestRunner::new(Config::with_cases(256));
+            runner
+                .run(&prop::collection::vec(any::<u8>(), 0..1024), |bytes| {
+                    let result = std::panic::catch_unwind(|| {
+                        let _ = read_cbor(&bytes);
+                    });
+                    prop_assert!(
+                        result.is_ok(),
+                        "Deserialization panicked on random bytes: {:?}",
+                        bytes
+                    );
+                    Ok(())
+                })
+                .unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn cbor_truncated_no_panic() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let mut runner = TestRunner::new(Config::with_cases(256));
+            runner
+                .run(
+                    &(arb_core_expr(), any::<prop::sample::Index>()),
+                    |(expr, idx)| {
+                        let bytes = write_cbor(&expr).expect("write_cbor failed");
+                        if !bytes.is_empty() {
+                            let truncate_at = idx.index(bytes.len());
+                            let truncated = &bytes[..truncate_at];
+                            let result = std::panic::catch_unwind(|| {
+                                let _ = read_cbor(truncated);
+                            });
+                            prop_assert!(
+                                result.is_ok(),
+                                "Deserialization panicked on truncated bytes: {:?}",
+                                truncated
+                            );
+                        }
+                        Ok(())
+                    },
+                )
+                .unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
