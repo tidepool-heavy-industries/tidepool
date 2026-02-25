@@ -58,6 +58,12 @@ pub enum YieldError {
     Undefined,
     /// GHC type metadata forced (should be dead code).
     TypeMetadata,
+    /// Unresolved external variable forced.
+    UnresolvedVar(u64),
+    /// Application of null function pointer.
+    NullFunPtr,
+    /// Application of non-closure heap object.
+    BadFunPtrTag(u8),
 }
 
 impl std::fmt::Display for YieldError {
@@ -78,6 +84,13 @@ impl std::fmt::Display for YieldError {
             YieldError::UserError => write!(f, "Haskell error called"),
             YieldError::Undefined => write!(f, "Haskell undefined forced"),
             YieldError::TypeMetadata => write!(f, "forced type metadata (should be dead code)"),
+            YieldError::UnresolvedVar(id) => {
+                let tag_char = (*id >> 56) as u8 as char;
+                let key = *id & ((1u64 << 56) - 1);
+                write!(f, "unresolved variable VarId({:#x}) [tag='{}', key={}]", id, tag_char, key)
+            }
+            YieldError::NullFunPtr => write!(f, "application of null function pointer"),
+            YieldError::BadFunPtrTag(tag) => write!(f, "application of non-closure (tag={})", tag),
         }
     }
 }

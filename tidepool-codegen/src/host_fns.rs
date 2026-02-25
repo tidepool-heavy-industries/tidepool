@@ -14,6 +14,9 @@ pub enum RuntimeError {
     UserError,
     Undefined,
     TypeMetadata,
+    UnresolvedVar(u64),
+    NullFunPtr,
+    BadFunPtrTag(u8),
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -24,6 +27,13 @@ impl std::fmt::Display for RuntimeError {
             RuntimeError::UserError => write!(f, "Haskell error called"),
             RuntimeError::Undefined => write!(f, "Haskell undefined forced"),
             RuntimeError::TypeMetadata => write!(f, "forced type metadata (should be dead code)"),
+            RuntimeError::UnresolvedVar(id) => {
+                let tag_char = (*id >> 56) as u8 as char;
+                let key = *id & ((1u64 << 56) - 1);
+                write!(f, "unresolved variable VarId({:#x}) [tag='{}', key={}]", id, tag_char, key)
+            }
+            RuntimeError::NullFunPtr => write!(f, "application of null function pointer"),
+            RuntimeError::BadFunPtrTag(tag) => write!(f, "application of non-closure (tag={})", tag),
         }
     }
 }
@@ -167,12 +177,13 @@ pub extern "C" fn unresolved_var_trap(var_id: u64) -> *mut u8 {
     let tag_char = (var_id >> 56) as u8 as char;
     let key = var_id & ((1u64 << 56) - 1);
     eprintln!(
-        "[FATAL] Forced unresolved external variable: VarId({:#x}) [tag='{}', key={}]",
+        "[JIT] Forced unresolved external variable: VarId({:#x}) [tag='{}', key={}]",
         var_id, tag_char, key
     );
-    use std::io::Write;
-    let _ = std::io::stderr().flush();
-    std::process::abort();
+    RUNTIME_ERROR.with(|cell| {
+        *cell.borrow_mut() = Some(RuntimeError::UnresolvedVar(var_id));
+    });
+    error_poison_ptr()
 }
 
 /// Called by JIT code for runtime errors (divZeroError, overflowError).
@@ -269,7 +280,6 @@ pub fn take_runtime_error() -> Option<RuntimeError> {
 ///
 /// `fun_ptr` must point to a valid HeapObject if not null.
 pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) {
-    use std::io::Write;
     // If a runtime error is already pending, don't abort on tag mismatches —
     // we're in error-propagation mode and the effect machine will handle it.
     let has_error = RUNTIME_ERROR.with(|cell| cell.borrow().is_some());
@@ -278,12 +288,10 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) {
             return; // Error already flagged, just continue
         }
         eprintln!("[JIT] App: fun_ptr is NULL — unresolved binding");
-        eprintln!(
-            "[JIT] Backtrace:\n{:?}",
-            std::backtrace::Backtrace::force_capture()
-        );
-        let _ = std::io::stderr().flush();
-        std::process::abort();
+        RUNTIME_ERROR.with(|cell| {
+            *cell.borrow_mut() = Some(RuntimeError::NullFunPtr);
+        });
+        return;
     }
     let tag = unsafe { *fun_ptr };
     if tag != tidepool_heap::layout::TAG_CLOSURE {
@@ -310,7 +318,10 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) {
             let _ = writeln!(stderr, "[JIT]   Con tag={}, num_fields={}", con_tag, num_fields);
         }
         let _ = stderr.flush();
-        std::process::abort();
+        RUNTIME_ERROR.with(|cell| {
+            *cell.borrow_mut() = Some(RuntimeError::BadFunPtrTag(tag));
+        });
+        return;
     }
 }
 

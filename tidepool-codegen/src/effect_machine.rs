@@ -97,6 +97,9 @@ impl CompiledEffectMachine {
                 crate::host_fns::RuntimeError::UserError => YieldError::UserError,
                 crate::host_fns::RuntimeError::Undefined => YieldError::Undefined,
                 crate::host_fns::RuntimeError::TypeMetadata => YieldError::TypeMetadata,
+                crate::host_fns::RuntimeError::UnresolvedVar(id) => YieldError::UnresolvedVar(id),
+                crate::host_fns::RuntimeError::NullFunPtr => YieldError::NullFunPtr,
+                crate::host_fns::RuntimeError::BadFunPtrTag(tag) => YieldError::BadFunPtrTag(tag),
             });
         }
         if result.is_null() {

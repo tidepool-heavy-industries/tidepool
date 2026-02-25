@@ -168,6 +168,15 @@ impl JitEffectMachine {
                 crate::host_fns::RuntimeError::TypeMetadata => {
                     crate::yield_type::YieldError::TypeMetadata
                 }
+                crate::host_fns::RuntimeError::UnresolvedVar(id) => {
+                    crate::yield_type::YieldError::UnresolvedVar(id)
+                }
+                crate::host_fns::RuntimeError::NullFunPtr => {
+                    crate::yield_type::YieldError::NullFunPtr
+                }
+                crate::host_fns::RuntimeError::BadFunPtrTag(tag) => {
+                    crate::yield_type::YieldError::BadFunPtrTag(tag)
+                }
             }))
         } else if result_ptr.is_null() {
             Err(JitError::Yield(crate::yield_type::YieldError::NullPointer))

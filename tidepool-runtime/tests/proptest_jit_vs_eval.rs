@@ -107,7 +107,6 @@ Expr: {:#?}",
 }
 
 #[test]
-#[ignore]
 fn jit_agrees_with_eval() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
@@ -128,7 +127,6 @@ fn jit_agrees_with_eval() {
 }
 
 #[test]
-#[ignore]
 fn jit_agrees_with_eval_after_optimize() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
@@ -150,7 +148,6 @@ fn jit_agrees_with_eval_after_optimize() {
 }
 
 #[test]
-#[ignore]
 fn jit_small_nursery_agrees() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
@@ -172,7 +169,6 @@ fn jit_small_nursery_agrees() {
 }
 
 #[test]
-#[ignore]
 fn jit_deterministic() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)

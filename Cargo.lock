@@ -2488,6 +2488,7 @@ version = "0.0.1"
 dependencies = [
  "blake3",
  "frunk",
+ "proptest",
  "serde_json",
  "tempfile",
  "tidepool-bridge",
@@ -2496,7 +2497,9 @@ dependencies = [
  "tidepool-effect",
  "tidepool-eval",
  "tidepool-mcp",
+ "tidepool-optimize",
  "tidepool-repr",
+ "tidepool-testing",
 ]
 
 [[package]]
