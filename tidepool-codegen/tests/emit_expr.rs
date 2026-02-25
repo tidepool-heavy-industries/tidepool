@@ -1306,18 +1306,28 @@ fn test_emit_primop_word8_ops() {
 
 #[test]
 fn test_emit_primop_clz8() {
-    let tree = RecursiveTree {
-        nodes: vec![
-            CoreFrame::Lit(Literal::LitWord(0x01)),
-            CoreFrame::PrimOp {
-                op: PrimOpKind::Clz8,
-                args: vec![0],
-            },
-        ],
-    };
-    let result = compile_and_run(&tree);
-    unsafe {
-        assert_eq!(read_lit_int(result.result_ptr), 7);
+    let cases = vec![
+        (0x01, 7),
+        (0x80, 0),
+        (0x00, 8),
+        (0xFF, 0),
+        (0x40, 1),
+    ];
+    for (input, expected) in cases {
+        let tree = RecursiveTree {
+            nodes: vec![
+                CoreFrame::Lit(Literal::LitWord(input)),
+                CoreFrame::PrimOp {
+                    op: PrimOpKind::Clz8,
+                    args: vec![0],
+                },
+            ],
+        };
+        let result = compile_and_run(&tree);
+        unsafe {
+            // Note: clz8# returns Word#, but we read as int for convenience
+            assert_eq!(read_lit_int(result.result_ptr), expected as i64);
+        }
     }
 }
 

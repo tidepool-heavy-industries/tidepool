@@ -1222,7 +1222,6 @@ fn test_kv_keys_text_append() {
 /// T.splitOn on a Text key from KvKeys.
 /// Bug: T.split infinite loop (pre-existing, not bridge-specific).
 #[test]
-#[ignore = "pre-existing: T.split infinite loop on all text"]
 fn test_kv_keys_text_split_on() {
     let (json, _) = run_mcp_effectful(&[
         r#"send (KvSet "a:b:c" "v")"#,
