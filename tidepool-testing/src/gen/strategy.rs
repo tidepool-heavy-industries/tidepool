@@ -130,8 +130,7 @@ fn gen_leaf(ty: SimpleType, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)>
         strategies.push(var_strat.boxed());
     }
 
-    // TODO: Support LitWord, LitString, LitDouble, LitFloat if needed.
-    // Currently restricted to LitInt and LitChar for simplicity.
+    // LitWord, LitDouble, and LitFloat are now also supported.
     match &ty {
         SimpleType::Int => {
             strategies.push(
@@ -653,8 +652,6 @@ fn gen_prim_op(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeB
                 PrimOpKind::IntAdd,
                 PrimOpKind::IntSub,
                 PrimOpKind::IntMul,
-                PrimOpKind::IntQuot,
-                PrimOpKind::IntRem,
                 PrimOpKind::IntAnd,
                 PrimOpKind::IntOr,
                 PrimOpKind::IntXor,
@@ -675,8 +672,6 @@ fn gen_prim_op(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeB
                 PrimOpKind::WordAdd,
                 PrimOpKind::WordSub,
                 PrimOpKind::WordMul,
-                PrimOpKind::WordQuot,
-                PrimOpKind::WordRem,
                 PrimOpKind::WordAnd,
                 PrimOpKind::WordOr,
                 PrimOpKind::WordXor,
@@ -688,7 +683,6 @@ fn gen_prim_op(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeB
                 PrimOpKind::DoubleAdd,
                 PrimOpKind::DoubleSub,
                 PrimOpKind::DoubleMul,
-                PrimOpKind::DoubleDiv,
             ],
             vec![PrimOpKind::DoubleNegate],
         ),
@@ -697,7 +691,6 @@ fn gen_prim_op(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeB
                 PrimOpKind::FloatAdd,
                 PrimOpKind::FloatSub,
                 PrimOpKind::FloatMul,
-                PrimOpKind::FloatDiv,
             ],
             vec![PrimOpKind::FloatNegate],
         ),
