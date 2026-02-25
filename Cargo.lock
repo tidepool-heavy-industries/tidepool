@@ -2380,6 +2380,7 @@ name = "tidepool-effect"
 version = "0.0.1"
 dependencies = [
  "frunk",
+ "proptest",
  "tidepool-bridge",
  "tidepool-eval",
  "tidepool-repr",
