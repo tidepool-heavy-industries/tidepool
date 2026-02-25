@@ -271,7 +271,7 @@ fn case_of_known_con_preserves_eval() {
 }
 
 #[test]
-fn random_beta_reduce_preserves_eval() {
+fn beta_reduce_on_random_expr_preserves_eval() {
     let handle = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -291,7 +291,7 @@ fn random_beta_reduce_preserves_eval() {
 }
 
 #[test]
-fn random_case_reduce_preserves_eval() {
+fn case_reduce_on_random_expr_preserves_eval() {
     let handle = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -311,7 +311,7 @@ fn random_case_reduce_preserves_eval() {
 }
 
 #[test]
-fn random_inline_preserves_eval() {
+fn inline_on_random_expr_preserves_eval() {
     let handle = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -331,7 +331,7 @@ fn random_inline_preserves_eval() {
 }
 
 #[test]
-fn random_dce_preserves_eval() {
+fn dce_on_random_expr_preserves_eval() {
     let handle = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
