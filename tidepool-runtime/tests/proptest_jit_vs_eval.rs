@@ -1,6 +1,7 @@
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
+use tidepool_codegen::yield_type::YieldError;
 use tidepool_eval::{eval, env_from_datacon_table, Value, VecHeap};
 use tidepool_optimize::pipeline::optimize;
 use tidepool_repr::datacon_table::DataConTable;
@@ -93,15 +94,15 @@ fn check_jit_vs_eval(expr: CoreExpr, nursery_size: usize) -> Result<(), TestCase
                 v1, v2, expr
             );
         }
-        (Ok(v1), Err(e)) => {
+        (Ok(_), Err(JitError::Yield(YieldError::HeapOverflow))) => {
             // HeapOverflow is acceptable — means GC couldn't free enough space
             // for a very small nursery. Skip these rather than failing.
-            let is_heap_overflow = format!("{}", e).contains("heap overflow");
-            if !is_heap_overflow {
-                prop_assert!(false,
-                    "JIT failed but eval succeeded.\nEval: {:?}\nJIT error: {:?}\nExpr: {:#?}",
-                    v1, e, expr);
-            }
+            prop_assume!(false, "HeapOverflow with tiny nursery");
+        }
+        (Ok(v1), Err(e)) => {
+            prop_assert!(false,
+                "JIT failed but eval succeeded.\nEval: {:?}\nJIT error: {:?}\nExpr: {:#?}",
+                v1, e, expr);
         }
         _ => {
             // Both fail or eval fails — skip

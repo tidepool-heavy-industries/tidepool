@@ -1,9 +1,15 @@
-//! End-to-end GC correctness tests.
+//! End-to-end JIT GC correctness tests (no direct frame-walker coverage).
 //!
 //! These tests compile expressions with tiny nurseries to force GC cycles,
-//! then verify the results match expected values.
+//! then verify the results match expected values at the language level.
+//!
+//! Note: this module no longer exercises `gc::frame_walker` root
+//! enumeration/rewriting behavior (e.g., verifying discovered roots and
+//! `rewrite_roots`) directly. Dedicated unit tests for frame-walker
+//! internals should live in a separate test module.
 
-use tidepool_codegen::jit_machine::JitEffectMachine;
+use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
+use tidepool_codegen::yield_type::YieldError;
 use tidepool_codegen::host_fns;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
@@ -35,18 +41,9 @@ fn build_con_chain(depth: usize) -> CoreExpr {
     let var_g1 = bld.push(CoreFrame::Var(VarId(1)));
     let g2_rhs = bld.push(CoreFrame::Con { tag: DataConId(1), fields: vec![var_g1] });
     
-    let return_x = bld.push(CoreFrame::Var(VarId(0))); // Return original x
-    
-    let let_g2 = bld.push(CoreFrame::LetNonRec { binder: VarId(2), rhs: g2_rhs, body: return_x });
-    let let_g1 = bld.push(CoreFrame::LetNonRec { binder: VarId(1), rhs: g1_rhs, body: let_g2 });
-    
-    let _lam_x = bld.push(CoreFrame::Lam { binder: VarId(0), body: let_g1 });
-    
-    // We want the final result to be a deeply nested Con chain like before,
-    // so `test_multiple_gc_cycles` can match it.
-    // Wait, the tests match `Value::Con(_, fields) ... ending in Lit(42)`.
-    // So `f` should ACTUALLY return `Con(1, [x])` but allocate extra garbage!
-    // `letrec f = \x -> let g1 = Con(1, [x]) in let g2 = Con(1, [g1]) in Con(1, [x])`
+    // The original let_g1/let_g2/_lam_x chain that returned `x` directly was
+    // unused. We now only use the version below that returns `Con(1, [x])`
+    // while still allocating extra garbage.
     
     let final_con = bld.push(CoreFrame::Con { tag: DataConId(1), fields: vec![var_x] });
     let let_g2_con = bld.push(CoreFrame::LetNonRec { binder: VarId(2), rhs: g2_rhs, body: final_con });
@@ -71,29 +68,23 @@ fn build_con_chain(depth: usize) -> CoreExpr {
 #[test]
 fn test_gc_actually_frees_memory() {
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(8 * 2048 * 2048)
         .spawn(|| {
-            // 512-byte nursery, depth-20 Con chain should require GC
-            let expr = build_con_chain(20);
+            // 2 KiB nursery, depth-40 Con chain should require GC but still succeed
+            let expr = build_con_chain(40);
             let table = make_table_with_con(DataConId(1), 1);
 
             host_fns::reset_test_counters();
-            let mut machine = JitEffectMachine::compile(&expr, &table, 512).unwrap();
-            let result = machine.run_pure();
+            let mut machine = JitEffectMachine::compile(&expr, &table, 2048).unwrap();
+            let _result = machine
+                .run_pure()
+                .expect("GC should free enough memory to evaluate depth-40 chain with 2 KiB nursery");
 
-            // Should succeed (GC freed memory) or HeapOverflow (nursery too small even after GC)
-            match result {
-                Ok(_) => {
-                    // GC must have fired for this to work with 512 bytes
-                    assert!(host_fns::gc_trigger_call_count() > 0,
-                        "Expected GC to fire with 512-byte nursery and depth-20 chain");
-                }
-                Err(e) => {
-                    // HeapOverflow is acceptable for very tiny nurseries
-                    assert!(format!("{}", e).contains("heap overflow"),
-                        "Expected HeapOverflow but got: {}", e);
-                }
-            }
+            // GC must have fired for this to work with a small nursery
+            assert!(
+                host_fns::gc_trigger_call_count() > 0,
+                "Expected GC to fire with 2 KiB nursery and depth-40 chain"
+            );
         })
         .unwrap()
         .join()
@@ -103,7 +94,7 @@ fn test_gc_actually_frees_memory() {
 #[test]
 fn test_gc_preserves_values() {
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(8 * 2048 * 2048)
         .spawn(|| {
             // Build: Con(1, [Lit(42)])
             let mut bld = TreeBuilder::new();
@@ -139,21 +130,21 @@ fn test_gc_preserves_values() {
 #[test]
 fn test_multiple_gc_cycles() {
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(8 * 2048 * 2048)
         .spawn(|| {
-            // Deep chain with very small nursery — forces multiple GC cycles
-            let expr = build_con_chain(15);
+            // Deep chain with small nursery — forces multiple GC cycles
+            let expr = build_con_chain(60);
             let table = make_table_with_con(DataConId(1), 1);
 
             host_fns::reset_test_counters();
-            let mut machine = JitEffectMachine::compile(&expr, &table, 256).unwrap();
+            let mut machine = JitEffectMachine::compile(&expr, &table, 2048).unwrap();
             let result = machine.run_pure();
 
             match result {
                 Ok(val) => {
                     // Verify the result is a nested Con chain ending in Lit(42)
                     let mut current = &val;
-                    for _ in 0..15 {
+                    for _ in 0..60 {
                         match current {
                             Value::Con(_, fields) => {
                                 assert_eq!(fields.len(), 1);
@@ -171,11 +162,10 @@ fn test_multiple_gc_cycles() {
                     assert!(gc_count > 1,
                         "Expected multiple GC cycles, got {}", gc_count);
                 }
-                Err(e) => {
-                    // HeapOverflow is acceptable for 256-byte nursery
-                    assert!(format!("{}", e).contains("heap overflow"),
-                        "Expected HeapOverflow but got: {}", e);
+                Err(JitError::Yield(YieldError::HeapOverflow)) => {
+                    // HeapOverflow is acceptable for small nursery
                 }
+                Err(e) => panic!("Expected HeapOverflow but got: {}", e),
             }
         })
         .unwrap()
