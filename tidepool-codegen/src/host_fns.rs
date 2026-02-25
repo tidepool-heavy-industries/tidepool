@@ -116,6 +116,45 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
                 // Walk frames starting from gc_trigger's own frame.
                 let roots = unsafe { frame_walker::walk_frames(rbp, registry, rsp) };
 
+                // ── Cheney copying GC ──────────────────────────────
+                GC_STATE.with(|gc_cell| {
+                    let mut gc_state = gc_cell.borrow_mut();
+                    if let Some(state) = gc_state.as_mut() {
+                        let from_start = state.active_start;
+                        let from_size = state.active_size;
+                        let from_end = unsafe { from_start.add(from_size) };
+
+                        let mut tospace = vec![0u8; from_size];
+
+                        // Convert StackRoot to raw slot pointers
+                        let root_slots: Vec<*mut *mut u8> = roots.iter()
+                            .map(|r| r.stack_slot_addr as *mut *mut u8)
+                            .collect();
+
+                        let result = unsafe {
+                            tidepool_heap::gc::raw::cheney_copy(
+                                &root_slots,
+                                from_start as *const u8,
+                                from_end as *const u8,
+                                &mut tospace,
+                            )
+                        };
+
+                        // Update GcState: swap to tospace
+                        let to_start = tospace.as_mut_ptr();
+                        state.active_start = to_start;
+                        // active_size stays the same
+                        state.active_buffer = Some(tospace); // drops old buffer if any
+
+                        // Update VMContext for resumed allocation
+                        unsafe {
+                            (*vmctx).alloc_ptr = to_start.add(result.bytes_copied);
+                            (*vmctx).alloc_limit = to_start.add(from_size) as *const u8;
+                        }
+                    }
+                });
+                // ── End GC ─────────────────────────────────────────
+
                 // Call test hook if present
                 HOOK.with(|hook_cell| {
                     if let Some(hook) = *hook_cell.borrow() {

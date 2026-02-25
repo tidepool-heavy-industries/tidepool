@@ -95,6 +95,10 @@ impl JitEffectMachine {
         // Install registries
         crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
         crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
+        crate::host_fns::set_gc_state(
+            self.nursery.start() as *mut u8,
+            self.nursery.size(),
+        );
 
         let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
             unsafe { std::mem::transmute(self.pipeline.get_function_ptr(self.func_id)) };
@@ -129,6 +133,7 @@ impl JitEffectMachine {
         };
 
         // Cleanup registries
+        crate::host_fns::clear_gc_state();
         crate::host_fns::clear_stack_map_registry();
         crate::debug::clear_lambda_registry();
 
@@ -144,6 +149,10 @@ impl JitEffectMachine {
         // Install registries
         crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
         crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
+        crate::host_fns::set_gc_state(
+            self.nursery.start() as *mut u8,
+            self.nursery.size(),
+        );
 
         let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
             unsafe { std::mem::transmute(self.pipeline.get_function_ptr(self.func_id)) };
@@ -188,6 +197,7 @@ impl JitEffectMachine {
         };
 
         // Cleanup registries
+        crate::host_fns::clear_gc_state();
         crate::host_fns::clear_stack_map_registry();
         crate::debug::clear_lambda_registry();
 
