@@ -271,6 +271,86 @@ fn case_of_known_con_preserves_eval() {
 }
 
 #[test]
+fn random_beta_reduce_preserves_eval() {
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let mut runner = TestRunner::new(Config {
+                cases: 200,
+                ..Config::default()
+            });
+            let pass = BetaReduce;
+            runner
+                .run(&arb_core_expr(), |expr| {
+                    check_pass_preserves_eval(&pass, expr)
+                })
+                .unwrap();
+        })
+        .unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn random_case_reduce_preserves_eval() {
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let mut runner = TestRunner::new(Config {
+                cases: 200,
+                ..Config::default()
+            });
+            let pass = CaseReduce;
+            runner
+                .run(&arb_core_expr(), |expr| {
+                    check_pass_preserves_eval(&pass, expr)
+                })
+                .unwrap();
+        })
+        .unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn random_inline_preserves_eval() {
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let mut runner = TestRunner::new(Config {
+                cases: 200,
+                ..Config::default()
+            });
+            let pass = Inline;
+            runner
+                .run(&arb_core_expr(), |expr| {
+                    check_pass_preserves_eval(&pass, expr)
+                })
+                .unwrap();
+        })
+        .unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn random_dce_preserves_eval() {
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let mut runner = TestRunner::new(Config {
+                cases: 200,
+                ..Config::default()
+            });
+            let pass = Dce;
+            runner
+                .run(&arb_core_expr(), |expr| {
+                    check_pass_preserves_eval(&pass, expr)
+                })
+                .unwrap();
+        })
+        .unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
 fn multiple_passes_preserve_eval() {
     let handle = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
@@ -412,4 +492,3 @@ Optimized Expr: {:#?}",
         .unwrap();
     handle.join().unwrap();
 }
-
