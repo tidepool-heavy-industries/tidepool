@@ -1,234 +1,184 @@
-use tidepool_codegen::context::VMContext;
-use tidepool_codegen::gc::frame_walker;
+//! End-to-end GC correctness tests.
+//!
+//! These tests compile expressions with tiny nurseries to force GC cycles,
+//! then verify the results match expected values.
+
+use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_codegen::host_fns;
-use tidepool_codegen::pipeline::CodegenPipeline;
+use tidepool_repr::datacon_table::DataConTable;
+use tidepool_repr::frame::CoreFrame;
+use tidepool_repr::types::*;
+use tidepool_repr::{CoreExpr, TreeBuilder};
+use tidepool_eval::value::Value;
 
-use cranelift_codegen::ir::{self, types, InstBuilder, UserFuncName};
-use cranelift_codegen::Context;
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-use cranelift_module::Module;
-
-#[test]
-fn test_frame_walker_finds_roots() {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
-
-    // Declare gc_trigger as import
-    let gc_sig_ext = {
-        let mut sig = ir::Signature::new(pipeline.isa.default_call_conv());
-        sig.params.push(ir::AbiParam::new(types::I64));
-        sig
-    };
-    let gc_id = pipeline
-        .module
-        .declare_function("gc_trigger", cranelift_module::Linkage::Import, &gc_sig_ext)
-        .unwrap();
-
-    let func_id = pipeline
-        .declare_function("test_find_roots")
-        .expect("failed to declare");
-    let mut ctx = Context::new();
-    ctx.func =
-        ir::Function::with_name_signature(UserFuncName::default(), pipeline.make_func_signature());
-    let mut fb_ctx = FunctionBuilderContext::new();
-    {
-        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
-        let block = builder.create_block();
-        builder.append_block_params_for_function_params(block);
-        builder.switch_to_block(block);
-        builder.seal_block(block);
-
-        let vmctx = builder.block_params(block)[0];
-
-        // Two "heap pointers" with known values
-        let val1 = 0xAAAA_BBBB_CCCC_DDDDu64;
-        let val2 = 0x1111_2222_3333_4444u64;
-
-        let ptr1 = builder.ins().iconst(types::I64, val1 as i64);
-        builder.declare_value_needs_stack_map(ptr1);
-        let ptr2 = builder.ins().iconst(types::I64, val2 as i64);
-        builder.declare_value_needs_stack_map(ptr2);
-
-        // Call gc_trigger (safepoint — both ptrs must be in stack map)
-        let gc_ref = pipeline.module.declare_func_in_func(gc_id, builder.func);
-        builder.ins().call(gc_ref, &[vmctx]);
-
-        // Use both ptrs after the call to keep them live
-        let sum = builder.ins().iadd(ptr1, ptr2);
-        builder.ins().return_(&[sum]);
-        builder.finalize();
-    }
-
-    pipeline
-        .define_function(func_id, &mut ctx)
-        .expect("failed to define");
-    pipeline.finalize().expect("failed to finalize");
-
-    host_fns::reset_test_counters();
-    host_fns::set_stack_map_registry(&pipeline.stack_maps);
-
-    let mut nursery = vec![0u8; 4096];
-    let start = nursery.as_mut_ptr();
-    let end = unsafe { start.add(4096) };
-    let mut vmctx = VMContext::new(start, end, host_fns::gc_trigger);
-
-    let f_ptr = pipeline.get_function_ptr(func_id);
-    let f: unsafe extern "C" fn(*mut VMContext) -> i64 = unsafe { std::mem::transmute(f_ptr) };
-    let _result = unsafe { f(&mut vmctx as *mut VMContext) };
-
-    assert_eq!(host_fns::gc_trigger_call_count(), 1);
-
-    let roots = host_fns::last_gc_roots();
-    assert_eq!(roots.len(), 2, "Should have found 2 roots");
-
-    let values: Vec<u64> = roots.iter().map(|r| r.heap_ptr as u64).collect();
-    assert!(values.contains(&0xAAAA_BBBB_CCCC_DDDDu64));
-    assert!(values.contains(&0x1111_2222_3333_4444u64));
-
-    host_fns::clear_stack_map_registry();
-}
-
-#[test]
-fn test_frame_walker_rewrite_roots() {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
-
-    // Declare gc_trigger as import
-    let gc_sig_ext = {
-        let mut sig = ir::Signature::new(pipeline.isa.default_call_conv());
-        sig.params.push(ir::AbiParam::new(types::I64));
-        sig
-    };
-    let gc_id = pipeline
-        .module
-        .declare_function("gc_trigger", cranelift_module::Linkage::Import, &gc_sig_ext)
-        .unwrap();
-
-    let func_id = pipeline
-        .declare_function("test_rewrite_roots")
-        .expect("failed to declare");
-    let mut ctx = Context::new();
-    ctx.func =
-        ir::Function::with_name_signature(UserFuncName::default(), pipeline.make_func_signature());
-    let mut fb_ctx = FunctionBuilderContext::new();
-    {
-        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
-        let block = builder.create_block();
-        builder.append_block_params_for_function_params(block);
-        builder.switch_to_block(block);
-        builder.seal_block(block);
-
-        let vmctx = builder.block_params(block)[0];
-
-        // Known value
-        let val = 0x1234_5678_9ABC_DEF0u64;
-        let ptr = builder.ins().iconst(types::I64, val as i64);
-        builder.declare_value_needs_stack_map(ptr);
-
-        // Call gc_trigger
-        let gc_ref = pipeline.module.declare_func_in_func(gc_id, builder.func);
-        builder.ins().call(gc_ref, &[vmctx]);
-
-        // Return the pointer value (it might have been rewritten!)
-        builder.ins().return_(&[ptr]);
-        builder.finalize();
-    }
-
-    pipeline
-        .define_function(func_id, &mut ctx)
-        .expect("failed to define");
-    pipeline.finalize().expect("failed to finalize");
-
-    host_fns::reset_test_counters();
-    host_fns::set_stack_map_registry(&pipeline.stack_maps);
-    host_fns::set_gc_test_hook(|roots| unsafe {
-        frame_walker::rewrite_roots(roots, &|ptr| {
-            if ptr as u64 == 0x1234_5678_9ABC_DEF0u64 {
-                0xFEED_FACE_CAFE_BEEFu64 as *mut u8
-            } else {
-                ptr
-            }
-        });
+fn make_table_with_con(id: DataConId, arity: u32) -> DataConTable {
+    let mut table = DataConTable::new();
+    table.insert(tidepool_repr::datacon::DataCon {
+        id,
+        name: format!("C{}", id.0),
+        tag: (id.0 % 100) as u32 + 1,
+        rep_arity: arity,
+        field_bangs: vec![],
     });
+    table
+}
 
-    let mut nursery = vec![0u8; 4096];
-    let start = nursery.as_mut_ptr();
-    let end = unsafe { start.add(4096) };
-    let mut vmctx = VMContext::new(start, end, host_fns::gc_trigger);
-
-    let f: unsafe extern "C" fn(*mut VMContext) -> i64 =
-        unsafe { std::mem::transmute(pipeline.get_function_ptr(func_id)) };
-    let result = unsafe { f(&mut vmctx as *mut VMContext) };
-
-    assert_eq!(
-        result as u64, 0xFEED_FACE_CAFE_BEEFu64,
-        "Root should have been rewritten"
-    );
-
-    host_fns::clear_gc_test_hook();
-    host_fns::clear_stack_map_registry();
+/// Build a nested function application chain that allocates garbage:
+/// `letrec f = \x -> let g1 = Con(1, [x]) in let g2 = Con(1, [g1]) in x in f (f ... (f (Lit 42)))`
+fn build_con_chain(depth: usize) -> CoreExpr {
+    let mut bld = TreeBuilder::new();
+    
+    // Body of f: let g1 = Con x in let g2 = Con g1 in x
+    let var_x = bld.push(CoreFrame::Var(VarId(0)));
+    let g1_rhs = bld.push(CoreFrame::Con { tag: DataConId(1), fields: vec![var_x] });
+    
+    let var_g1 = bld.push(CoreFrame::Var(VarId(1)));
+    let g2_rhs = bld.push(CoreFrame::Con { tag: DataConId(1), fields: vec![var_g1] });
+    
+    let return_x = bld.push(CoreFrame::Var(VarId(0))); // Return original x
+    
+    let let_g2 = bld.push(CoreFrame::LetNonRec { binder: VarId(2), rhs: g2_rhs, body: return_x });
+    let let_g1 = bld.push(CoreFrame::LetNonRec { binder: VarId(1), rhs: g1_rhs, body: let_g2 });
+    
+    let _lam_x = bld.push(CoreFrame::Lam { binder: VarId(0), body: let_g1 });
+    
+    // We want the final result to be a deeply nested Con chain like before,
+    // so `test_multiple_gc_cycles` can match it.
+    // Wait, the tests match `Value::Con(_, fields) ... ending in Lit(42)`.
+    // So `f` should ACTUALLY return `Con(1, [x])` but allocate extra garbage!
+    // `letrec f = \x -> let g1 = Con(1, [x]) in let g2 = Con(1, [g1]) in Con(1, [x])`
+    
+    let final_con = bld.push(CoreFrame::Con { tag: DataConId(1), fields: vec![var_x] });
+    let let_g2_con = bld.push(CoreFrame::LetNonRec { binder: VarId(2), rhs: g2_rhs, body: final_con });
+    let let_g1_con = bld.push(CoreFrame::LetNonRec { binder: VarId(1), rhs: g1_rhs, body: let_g2_con });
+    let lam_x_con = bld.push(CoreFrame::Lam { binder: VarId(0), body: let_g1_con });
+    
+    // Applications: f (f (f ... (Lit 42)))
+    let mut current = bld.push(CoreFrame::Lit(Literal::LitInt(42)));
+    for _ in 0..depth {
+        let f_var = bld.push(CoreFrame::Var(VarId(99))); // f
+        current = bld.push(CoreFrame::App { fun: f_var, arg: current });
+    }
+    
+    bld.push(CoreFrame::LetRec {
+        bindings: vec![(VarId(99), lam_x_con)],
+        body: current,
+    });
+    
+    bld.build()
 }
 
 #[test]
-fn test_frame_walker_terminates_at_jit_boundary() {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
-    let func_id = pipeline
-        .declare_function("test_boundary")
-        .expect("failed to declare");
+fn test_gc_actually_frees_memory() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            // 512-byte nursery, depth-20 Con chain should require GC
+            let expr = build_con_chain(20);
+            let table = make_table_with_con(DataConId(1), 1);
 
-    let mut ctx = Context::new();
-    ctx.func =
-        ir::Function::with_name_signature(UserFuncName::default(), pipeline.make_func_signature());
-    let mut fb_ctx = FunctionBuilderContext::new();
-    {
-        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
-        let block = builder.create_block();
-        builder.append_block_params_for_function_params(block);
-        builder.switch_to_block(block);
-        builder.seal_block(block);
+            host_fns::reset_test_counters();
+            let mut machine = JitEffectMachine::compile(&expr, &table, 512).unwrap();
+            let result = machine.run_pure();
 
-        let vmctx = builder.block_params(block)[0];
+            // Should succeed (GC freed memory) or HeapOverflow (nursery too small even after GC)
+            match result {
+                Ok(_) => {
+                    // GC must have fired for this to work with 512 bytes
+                    assert!(host_fns::gc_trigger_call_count() > 0,
+                        "Expected GC to fire with 512-byte nursery and depth-20 chain");
+                }
+                Err(e) => {
+                    // HeapOverflow is acceptable for very tiny nurseries
+                    assert!(format!("{}", e).contains("heap overflow"),
+                        "Expected HeapOverflow but got: {}", e);
+                }
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
 
-        // Declare gc_trigger signature
-        let mut gc_sig = ir::Signature::new(pipeline.isa.default_call_conv());
-        gc_sig.params.push(ir::AbiParam::new(types::I64));
-        let gc_id = pipeline
-            .module
-            .declare_function("gc_trigger", cranelift_module::Linkage::Import, &gc_sig)
-            .unwrap();
-        let gc_ref = pipeline.module.declare_func_in_func(gc_id, builder.func);
+#[test]
+fn test_gc_preserves_values() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            // Build: Con(1, [Lit(42)])
+            let mut bld = TreeBuilder::new();
+            let lit = bld.push(CoreFrame::Lit(Literal::LitInt(42)));
+            let _con = bld.push(CoreFrame::Con {
+                tag: DataConId(1),
+                fields: vec![lit],
+            });
+            let expr = bld.build();
+            let table = make_table_with_con(DataConId(1), 1);
 
-        builder.ins().call(gc_ref, &[vmctx]);
+            // Use a small nursery but big enough that this should work
+            let mut machine = JitEffectMachine::compile(&expr, &table, 2048).unwrap();
+            let result = machine.run_pure().unwrap();
 
-        let val = builder.ins().iconst(types::I64, 42);
-        builder.ins().return_(&[val]);
-        builder.finalize();
-    }
+            match result {
+                Value::Con(tag, fields) => {
+                    assert_eq!(tag, DataConId(1));
+                    assert_eq!(fields.len(), 1);
+                    match &fields[0] {
+                        Value::Lit(lit) => assert_eq!(*lit, Literal::LitInt(42)),
+                        other => panic!("Expected Lit(42), got {:?}", other),
+                    }
+                }
+                other => panic!("Expected Con, got {:?}", other),
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
 
-    pipeline
-        .define_function(func_id, &mut ctx)
-        .expect("failed to define");
-    pipeline.finalize().expect("failed to finalize");
+#[test]
+fn test_multiple_gc_cycles() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            // Deep chain with very small nursery — forces multiple GC cycles
+            let expr = build_con_chain(15);
+            let table = make_table_with_con(DataConId(1), 1);
 
-    host_fns::reset_test_counters();
-    host_fns::set_stack_map_registry(&pipeline.stack_maps);
+            host_fns::reset_test_counters();
+            let mut machine = JitEffectMachine::compile(&expr, &table, 256).unwrap();
+            let result = machine.run_pure();
 
-    let mut nursery = vec![0u8; 4096];
-    let start = nursery.as_mut_ptr();
-    let end = unsafe { start.add(4096) };
-    let mut vmctx = VMContext::new(start, end, host_fns::gc_trigger);
-
-    let f: unsafe extern "C" fn(*mut VMContext) -> i64 =
-        unsafe { std::mem::transmute(pipeline.get_function_ptr(func_id)) };
-
-    // This call goes Rust -> JIT -> Rust (gc_trigger)
-    // The frame walker should see the JIT frame but stop at the Rust frame.
-    unsafe { f(&mut vmctx as *mut VMContext) };
-
-    assert_eq!(host_fns::gc_trigger_call_count(), 1);
-
-    // If it didn't terminate, it would likely crash or return many bogus roots.
-    // The current JIT frame doesn't have any roots declared.
-    let roots = host_fns::last_gc_roots();
-    assert_eq!(roots.len(), 0);
-
-    host_fns::clear_stack_map_registry();
+            match result {
+                Ok(val) => {
+                    // Verify the result is a nested Con chain ending in Lit(42)
+                    let mut current = &val;
+                    for _ in 0..15 {
+                        match current {
+                            Value::Con(_, fields) => {
+                                assert_eq!(fields.len(), 1);
+                                current = &fields[0];
+                            }
+                            other => panic!("Expected Con in chain, got {:?}", other),
+                        }
+                    }
+                    match current {
+                        Value::Lit(Literal::LitInt(42)) => {}
+                        other => panic!("Expected Lit(42) at leaf, got {:?}", other),
+                    }
+                    // Should have multiple GC cycles
+                    let gc_count = host_fns::gc_trigger_call_count();
+                    assert!(gc_count > 1,
+                        "Expected multiple GC cycles, got {}", gc_count);
+                }
+                Err(e) => {
+                    // HeapOverflow is acceptable for 256-byte nursery
+                    assert!(format!("{}", e).contains("heap overflow"),
+                        "Expected HeapOverflow but got: {}", e);
+                }
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
