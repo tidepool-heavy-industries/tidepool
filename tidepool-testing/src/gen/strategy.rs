@@ -14,6 +14,9 @@ pub fn arb_core_expr() -> impl Strategy<Value = RecursiveTree<CoreFrame<usize>>>
 fn arb_simple_type() -> impl Strategy<Value = SimpleType> {
     let leaf = prop_oneof![
         Just(SimpleType::Int),
+        Just(SimpleType::Word),
+        Just(SimpleType::Double),
+        Just(SimpleType::Float),
         Just(SimpleType::Bool),
         Just(SimpleType::Char),
     ];
@@ -136,6 +139,39 @@ fn gen_leaf(ty: SimpleType, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)>
                     .prop_map(|i| {
                         let mut builder = TreeBuilder::new();
                         let idx = builder.push(CoreFrame::Lit(Literal::LitInt(i)));
+                        (builder, idx)
+                    })
+                    .boxed(),
+            );
+        }
+        SimpleType::Word => {
+            strategies.push(
+                any::<u64>()
+                    .prop_map(|w| {
+                        let mut builder = TreeBuilder::new();
+                        let idx = builder.push(CoreFrame::Lit(Literal::LitWord(w)));
+                        (builder, idx)
+                    })
+                    .boxed(),
+            );
+        }
+        SimpleType::Double => {
+            strategies.push(
+                any::<f64>()
+                    .prop_map(|d| {
+                        let mut builder = TreeBuilder::new();
+                        let idx = builder.push(CoreFrame::Lit(Literal::LitDouble(d.to_bits())));
+                        (builder, idx)
+                    })
+                    .boxed(),
+            );
+        }
+        SimpleType::Float => {
+            strategies.push(
+                any::<f32>()
+                    .prop_map(|f| {
+                        let mut builder = TreeBuilder::new();
+                        let idx = builder.push(CoreFrame::Lit(Literal::LitFloat(f.to_bits() as u64)));
                         (builder, idx)
                     })
                     .boxed(),
@@ -275,7 +311,7 @@ fn gen_let_non_rec(
 }
 
 fn gen_let_rec(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)> {
-    prop::collection::vec(arb_simple_type(), 1..3)
+    prop::collection::vec(arb_simple_type(), 1..6)
         .prop_flat_map(move |rhs_tys| {
             let mut ctx_body = ctx.clone();
             let mut binders = Vec::new();
@@ -322,24 +358,30 @@ fn gen_let_rec(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeB
 }
 
 fn gen_case(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)> {
-    let ty_c = ty.clone();
-    let ctx_c = ctx.clone();
+    let ty2 = ty.clone();
+    let ty3 = ty.clone();
+    let ty4 = ty.clone();
+    let ty5 = ty.clone();
+    let ctx2 = ctx.clone();
+    let ctx3 = ctx.clone();
+    let ctx4 = ctx.clone();
+    let ctx5 = ctx.clone();
 
     prop_oneof![
         // Case on Maybe
         arb_simple_type()
             .prop_flat_map(move |inner_ty| {
                 let scrut_ty = SimpleType::Maybe(Box::new(inner_ty.clone()));
-                let mut ctx_alt = ctx_c.clone();
+                let mut ctx_alt = ctx2.clone();
                 let binder = ctx_alt.add_var(scrut_ty.clone());
 
                 let mut ctx_just = ctx_alt.clone();
                 let just_binder = ctx_just.add_var(inner_ty);
 
                 (
-                    gen_expr(scrut_ty, depth, ctx_c.clone()),
-                    gen_expr(ty_c.clone(), depth, ctx_alt),
-                    gen_expr(ty_c.clone(), depth, ctx_just),
+                    gen_expr(scrut_ty, depth, ctx2.clone()),
+                    gen_expr(ty2.clone(), depth, ctx_alt),
+                    gen_expr(ty2.clone(), depth, ctx_just),
                     Just((binder, just_binder)),
                 )
             })
@@ -378,13 +420,13 @@ fn gen_case(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuil
         Just(())
             .prop_flat_map(move |_| {
                 let scrut_ty = SimpleType::Bool;
-                let mut ctx_alt = ctx.clone();
+                let mut ctx_alt = ctx3.clone();
                 let binder = ctx_alt.add_var(scrut_ty.clone());
 
                 (
-                    gen_expr(scrut_ty, depth, ctx.clone()),
-                    gen_expr(ty.clone(), depth, ctx_alt.clone()),
-                    gen_expr(ty.clone(), depth, ctx_alt),
+                    gen_expr(scrut_ty, depth, ctx3.clone()),
+                    gen_expr(ty3.clone(), depth, ctx_alt.clone()),
+                    gen_expr(ty3.clone(), depth, ctx_alt),
                     Just(binder),
                 )
             })
@@ -411,7 +453,80 @@ fn gen_case(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuil
                     alts,
                 });
                 (builder, root)
+            }),
+        // Case on Pair
+        (arb_simple_type(), arb_simple_type())
+            .prop_flat_map(move |(inner_a, inner_b)| {
+                let scrut_ty = SimpleType::Pair(Box::new(inner_a.clone()), Box::new(inner_b.clone()));
+                let mut ctx_alt = ctx4.clone();
+                let binder = ctx_alt.add_var(scrut_ty.clone());
+
+                let mut ctx_body = ctx_alt.clone();
+                let b1 = ctx_body.add_var(inner_a);
+                let b2 = ctx_body.add_var(inner_b);
+
+                (
+                    gen_expr(scrut_ty, depth, ctx4.clone()),
+                    gen_expr(ty4.clone(), depth, ctx_body),
+                    Just((binder, b1, b2)),
+                )
             })
+            .prop_map(
+                |((mut builder, r_scrut), (b_body, r_body), (binder, b1, b2))| {
+                    let off = builder.push_tree(b_body);
+                    let alts = vec![Alt {
+                        con: AltCon::DataAlt(DataConId(4)),
+                        binders: vec![b1, b2],
+                        body: r_body + off,
+                    }];
+                    let root = builder.push(CoreFrame::Case {
+                        scrutinee: r_scrut,
+                        binder,
+                        alts,
+                    });
+                    (builder, root)
+                }
+            ),
+        // Case on Int with DEFAULT
+        any::<i64>()
+            .prop_flat_map(move |val| {
+                let scrut_ty = SimpleType::Int;
+                let mut ctx_alt = ctx5.clone();
+                let binder = ctx_alt.add_var(scrut_ty.clone());
+
+                (
+                    gen_expr(scrut_ty, depth, ctx5.clone()),
+                    gen_expr(ty5.clone(), depth, ctx_alt.clone()),
+                    gen_expr(ty5.clone(), depth, ctx_alt),
+                    Just((binder, val)),
+                )
+            })
+            .prop_map(
+                |((mut builder, r_scrut), (b_lit, r_lit), (b_def, r_def), (binder, val))| {
+                    let off1 = builder.push_tree(b_lit);
+                    let off2 = builder.push_tree(b_def);
+
+                    let alts = vec![
+                        Alt {
+                            con: AltCon::LitAlt(Literal::LitInt(val)),
+                            binders: vec![],
+                            body: r_lit + off1,
+                        },
+                        Alt {
+                            con: AltCon::Default,
+                            binders: vec![],
+                            body: r_def + off2,
+                        },
+                    ];
+
+                    let root = builder.push(CoreFrame::Case {
+                        scrutinee: r_scrut,
+                        binder,
+                        alts,
+                    });
+                    (builder, root)
+                }
+            ),
     ]
     .boxed()
 }
@@ -472,7 +587,7 @@ fn gen_con(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuild
 fn gen_join_jump(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)> {
     let ty_c = ty.clone();
     let ctx_c = ctx.clone();
-    prop::collection::vec(arb_simple_type(), 1..3)
+    prop::collection::vec(arb_simple_type(), 1..5)
         .prop_flat_map(move |arg_tys| {
             let mut ctx_rhs = ctx_c.clone();
             let mut params = Vec::new();
@@ -532,33 +647,100 @@ fn gen_jump(
 }
 
 fn gen_prim_op(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)> {
-    // Only generate primitive operations for Int-typed expressions; for all other
-    // types (including Bool), fall back to leaf generation to preserve well-typedness.
-    if ty != SimpleType::Int {
-        return gen_leaf(ty, ctx);
-    }
+    let (binary_ops, unary_ops): (Vec<PrimOpKind>, Vec<PrimOpKind>) = match &ty {
+        SimpleType::Int => (
+            vec![
+                PrimOpKind::IntAdd,
+                PrimOpKind::IntSub,
+                PrimOpKind::IntMul,
+                PrimOpKind::IntQuot,
+                PrimOpKind::IntRem,
+                PrimOpKind::IntAnd,
+                PrimOpKind::IntOr,
+                PrimOpKind::IntXor,
+                PrimOpKind::IntShl,
+                PrimOpKind::IntShra,
+                PrimOpKind::IntShrl,
+                PrimOpKind::IntEq,
+                PrimOpKind::IntNe,
+                PrimOpKind::IntLt,
+                PrimOpKind::IntLe,
+                PrimOpKind::IntGt,
+                PrimOpKind::IntGe,
+            ],
+            vec![PrimOpKind::IntNegate, PrimOpKind::IntNot],
+        ),
+        SimpleType::Word => (
+            vec![
+                PrimOpKind::WordAdd,
+                PrimOpKind::WordSub,
+                PrimOpKind::WordMul,
+                PrimOpKind::WordQuot,
+                PrimOpKind::WordRem,
+                PrimOpKind::WordAnd,
+                PrimOpKind::WordOr,
+                PrimOpKind::WordXor,
+            ],
+            vec![PrimOpKind::WordNot],
+        ),
+        SimpleType::Double => (
+            vec![
+                PrimOpKind::DoubleAdd,
+                PrimOpKind::DoubleSub,
+                PrimOpKind::DoubleMul,
+                PrimOpKind::DoubleDiv,
+            ],
+            vec![PrimOpKind::DoubleNegate],
+        ),
+        SimpleType::Float => (
+            vec![
+                PrimOpKind::FloatAdd,
+                PrimOpKind::FloatSub,
+                PrimOpKind::FloatMul,
+                PrimOpKind::FloatDiv,
+            ],
+            vec![PrimOpKind::FloatNegate],
+        ),
+        _ => return gen_leaf(ty, ctx),
+    };
 
-    let ops = vec![PrimOpKind::IntAdd, PrimOpKind::IntSub, PrimOpKind::IntMul];
+    let all_ops: Vec<(PrimOpKind, bool)> = binary_ops
+        .into_iter()
+        .map(|op| (op, false))
+        .chain(unary_ops.into_iter().map(|op| (op, true)))
+        .collect();
 
-    prop::sample::select(ops)
-        .prop_flat_map(move |op| {
-            (
-                gen_expr(SimpleType::Int, depth, ctx.clone()),
-                gen_expr(SimpleType::Int, depth, ctx.clone()),
-                Just(op),
-            )
-        })
-        .prop_map(|((mut builder, r1), (b2, r2), op)| {
-            let off = builder.push_tree(b2);
-            let root = builder.push(CoreFrame::PrimOp {
-                op,
-                args: vec![r1, r2 + off],
-            });
-            (builder, root)
+    let arg_ty = ty.clone();
+    prop::sample::select(all_ops)
+        .prop_flat_map(move |(op, is_unary)| {
+            if is_unary {
+                gen_expr(arg_ty.clone(), depth, ctx.clone())
+                    .prop_map(move |(mut builder, r1)| {
+                        let root = builder.push(CoreFrame::PrimOp {
+                            op,
+                            args: vec![r1],
+                        });
+                        (builder, root)
+                    })
+                    .boxed()
+            } else {
+                (
+                    gen_expr(arg_ty.clone(), depth, ctx.clone()),
+                    gen_expr(arg_ty.clone(), depth, ctx.clone()),
+                )
+                    .prop_map(move |((mut builder, r1), (b2, r2))| {
+                        let off = builder.push_tree(b2);
+                        let root = builder.push(CoreFrame::PrimOp {
+                            op,
+                            args: vec![r1, r2 + off],
+                        });
+                        (builder, root)
+                    })
+                    .boxed()
+            }
         })
         .boxed()
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

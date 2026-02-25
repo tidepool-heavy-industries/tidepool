@@ -2,6 +2,9 @@
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SimpleType {
     Int,
+    Word,
+    Double,
+    Float,
     Bool,
     Char,
     Fun(Box<SimpleType>, Box<SimpleType>),
