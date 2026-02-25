@@ -10,12 +10,13 @@ fn is_in_range(ptr: *const u8, start: *const u8, end: *const u8) -> bool {
     (ptr as usize) >= (start as usize) && (ptr as usize) < (end as usize)
 }
 
+#[allow(unused_variables)]
 unsafe fn evacuate(
     old_ptr: *mut u8,
     to_base: *mut u8,
     free: &mut usize,
-    _from_start: *const u8,
-    _from_end: *const u8,
+    from_start: *const u8,
+    from_end: *const u8,
 ) -> *mut u8 {
     let tag = read_tag(old_ptr);
     if tag == TAG_FORWARDED {
