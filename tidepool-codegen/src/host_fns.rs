@@ -170,9 +170,6 @@ pub extern "C" fn unresolved_var_trap(var_id: u64) -> *mut u8 {
         "[FATAL] Forced unresolved external variable: VarId({:#x}) [tag='{}', key={}]",
         var_id, tag_char, key
     );
-    eprintln!("  Backtrace:");
-    let bt = std::backtrace::Backtrace::force_capture();
-    eprintln!("{}", bt);
     use std::io::Write;
     let _ = std::io::stderr().flush();
     std::process::abort();
@@ -290,6 +287,8 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) {
     }
     let tag = unsafe { *fun_ptr };
     if tag != tidepool_heap::layout::TAG_CLOSURE {
+        use std::io::Write;
+        let mut stderr = std::io::stderr().lock();
         if has_error {
             return; // Error already flagged, tag mismatch is expected (poison object)
         }
@@ -300,16 +299,17 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) {
             3 => "Lit",
             _ => "UNKNOWN",
         };
-        eprintln!(
+        let _ = writeln!(
+            stderr,
             "[JIT] App: fun_ptr={:p} has tag {} ({}) — expected Closure!",
             fun_ptr, tag, tag_name
         );
         if tag == tidepool_heap::layout::TAG_CON {
             let con_tag = unsafe { *(fun_ptr.add(8) as *const u64) };
             let num_fields = unsafe { *(fun_ptr.add(16) as *const u16) };
-            eprintln!("[JIT]   Con tag={}, num_fields={}", con_tag, num_fields);
+            let _ = writeln!(stderr, "[JIT]   Con tag={}, num_fields={}", con_tag, num_fields);
         }
-        let _ = std::io::stderr().flush();
+        let _ = stderr.flush();
         std::process::abort();
     }
 }

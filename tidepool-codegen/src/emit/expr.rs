@@ -839,6 +839,19 @@ impl EmitContext {
                                     CON_NUM_FIELDS_OFFSET,
                                 );
 
+                                // Zero-initialize Con fields so GC doesn't trace garbage
+                                // if triggered before Phase 3b/3d.
+                                let null_val = builder.ins().iconst(types::I64, 0);
+                                for i in 0..num_fields {
+                                    let offset = CON_FIELDS_START + 8 * i as i32;
+                                    builder.ins().store(
+                                        MemFlags::trusted(),
+                                        null_val,
+                                        ptr,
+                                        offset,
+                                    );
+                                }
+
                                 builder.declare_value_needs_stack_map(ptr);
                                 pre_allocs.push(PreAlloc::Con {
                                     binder: *binder,
@@ -882,11 +895,7 @@ impl EmitContext {
                     // We compile the inner function (which reads captures by slot
                     // position) and store code pointers, then fill capture slots
                     // in Phase 3a' after simple bindings are evaluated.
-                    struct PendingCaptures {
-                        closure_ptr: cranelift_codegen::ir::Value,
-                        fvs: Vec<VarId>,
-                    }
-                    let mut pending_captures: Vec<PendingCaptures> = Vec::new();
+                    let mut pending_capture_updates: std::collections::HashMap<VarId, Vec<(cranelift_codegen::ir::Value, i32)>> = std::collections::HashMap::new();
 
                     for pa in &pre_allocs {
                         let (closure_ptr, sorted_fvs, rhs_idx) = match pa {
@@ -989,13 +998,25 @@ impl EmitContext {
                             CLOSURE_CODE_PTR_OFFSET,
                         );
 
+                        // Zero-initialize capture slots so GC doesn't trace garbage
+                        // if triggered before Phase 3a'.
+                        let null_val = builder.ins().iconst(types::I64, 0);
+                        for i in 0..sorted_fvs.len() {
+                            let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
+                            builder.ins().store(
+                                MemFlags::trusted(),
+                                null_val,
+                                closure_ptr,
+                                offset,
+                            );
+                        }
+
                         // Fill captures that are already in env. Defer those that
                         // reference deferred simple bindings (not yet evaluated).
-                        let mut has_deferred = false;
                         for (i, var_id) in sorted_fvs.iter().enumerate() {
+                            let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
                             if let Some(ssaval) = self.env.get(var_id) {
                                 let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, *ssaval);
-                                let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
                                 builder.ins().store(
                                     MemFlags::trusted(),
                                     cap_val,
@@ -1003,14 +1024,11 @@ impl EmitContext {
                                     offset,
                                 );
                             } else {
-                                has_deferred = true;
+                                pending_capture_updates
+                                    .entry(*var_id)
+                                    .or_default()
+                                    .push((closure_ptr, offset));
                             }
-                        }
-                        if has_deferred {
-                            pending_captures.push(PendingCaptures {
-                                closure_ptr,
-                                fvs: sorted_fvs.clone(),
-                            });
                         }
                     }
 
@@ -1050,11 +1068,41 @@ impl EmitContext {
 
                     // Phase 3c: Evaluate deferred simple bindings (now that Con fields
                     // they may access at runtime are populated).
-                    // Topologically sort: if binding A references binding B (both in
-                    // deferred_simple), B must be evaluated first.
+                    // Topologically sort: if binding A references binding B in deferred_simple,
+                    // B must be evaluated first. This includes dependencies mediated by closures.
                     let deferred_simple = {
                         let deferred_set: std::collections::HashSet<VarId> =
                             deferred_simple.iter().map(|(b, _)| *b).collect();
+                        
+                        let mut direct_deps: std::collections::HashMap<VarId, Vec<VarId>> = std::collections::HashMap::new();
+                        for (binder, rhs_idx) in bindings {
+                            let fvs = tidepool_repr::free_vars::free_vars(&tree.extract_subtree(*rhs_idx));
+                            direct_deps.insert(*binder, fvs.into_iter().collect());
+                        }
+
+                        // Compute reachability on-demand using DFS
+                        let mut reachable_deferred: std::collections::HashMap<VarId, std::collections::HashSet<VarId>> = std::collections::HashMap::new();
+                        for &(start_node, _) in &deferred_simple {
+                            let mut visited = std::collections::HashSet::new();
+                            let mut stack = vec![start_node];
+                            let mut reached = std::collections::HashSet::new();
+                            
+                            while let Some(node) = stack.pop() {
+                                if !visited.insert(node) {
+                                    continue;
+                                }
+                                if node != start_node && deferred_set.contains(&node) {
+                                    reached.insert(node);
+                                }
+                                if let Some(neighbors) = direct_deps.get(&node) {
+                                    for &next in neighbors {
+                                        stack.push(next);
+                                    }
+                                }
+                            }
+                            reachable_deferred.insert(start_node, reached);
+                        }
+
                         let mut sorted = Vec::with_capacity(deferred_simple.len());
                         let mut remaining: Vec<(VarId, usize)> = deferred_simple;
                         let mut progress = true;
@@ -1062,18 +1110,9 @@ impl EmitContext {
                             progress = false;
                             let mut next_remaining = Vec::new();
                             for (binder, rhs_idx) in remaining {
-                                let rhs_fvs = tidepool_repr::free_vars::free_vars(
-                                    &tree.extract_subtree(rhs_idx),
-                                );
-                                let blocked = rhs_fvs.iter().any(
-                                    |fv| {
-                                        deferred_set.contains(fv)
-                                            && !sorted
-                                                .iter()
-                                                .any(|(b, _): &(VarId, usize)| *b == *fv)
-                                            && *fv != binder
-                                    }, // self-reference is OK (will be in env from rec)
-                                );
+                                let blocked = reachable_deferred[&binder].iter().any(|fv| {
+                                    !sorted.iter().any(|(b, _): &(VarId, usize)| *b == *fv)
+                                });
                                 if blocked {
                                     next_remaining.push((binder, rhs_idx));
                                 } else {
@@ -1087,6 +1126,7 @@ impl EmitContext {
                         sorted.extend(remaining);
                         sorted
                     };
+
                     for (binder, rhs_idx) in &deferred_simple {
                         if Self::rhs_has_error_sentinel(tree, *rhs_idx) {
                             let poison_addr = crate::host_fns::error_poison_ptr() as i64;
@@ -1099,23 +1139,39 @@ impl EmitContext {
                             self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
                             self.env.insert(*binder, rhs_val);
                         }
+                        
+                        // Incrementally fill pending captures as dependencies become available!
+                        // This guarantees that closures have their capture slots filled before
+                        // subsequent simple bindings in this LetRec are evaluated, which might
+                        // invoke those closures.
+                        if let Some(updates) = pending_capture_updates.remove(binder) {
+                            if let Some(ssaval) = self.env.get(binder) {
+                                let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, *ssaval);
+                                for (closure_ptr, offset) in updates {
+                                    builder.ins().store(
+                                        MemFlags::trusted(),
+                                        cap_val,
+                                        closure_ptr,
+                                        offset,
+                                    );
+                                }
+                            }
+                        }
                     }
 
-                    // Phase 3a': Fill closure capture slots. Deferred from Phase 3a
-                    // because some captures reference deferred simple bindings
-                    // (evaluated in Phase 3c). All captured VarIds are now in env.
-                    for pc in &pending_captures {
-                        for (i, var_id) in pc.fvs.iter().enumerate() {
-                            let ssaval = self.env.get(var_id).unwrap_or_else(|| {
-                            panic!("LetRec capture fill: VarId({:#x}) not in env after Phase 3c. env keys: {:?}",
-                                   var_id.0, self.env.keys().map(|k| format!("{:#x}", k.0)).collect::<Vec<_>>())
+                    // Phase 3a': Fill any remaining closure capture slots.
+                    // These are captures of Lam/Con bindings (or trivial simple bindings)
+                    // that were not in env during Phase 1 but are now in env.
+                    for (var_id, updates) in pending_capture_updates {
+                        let ssaval = self.env.get(&var_id).unwrap_or_else(|| {
+                            panic!("LetRec capture fill: VarId({:#x}) not in env after Phase 3c.", var_id.0);
                         });
-                            let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, *ssaval);
-                            let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
+                        let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, *ssaval);
+                        for (closure_ptr, offset) in updates {
                             builder.ins().store(
                                 MemFlags::trusted(),
                                 cap_val,
-                                pc.closure_ptr,
+                                closure_ptr,
                                 offset,
                             );
                         }

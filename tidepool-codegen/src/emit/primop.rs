@@ -963,12 +963,9 @@ pub fn emit_primop(
             // clz8# :: Word# -> Word#
             check_arity(op, 1, args.len())?;
             let v = unbox_int(builder, args[0]);
-            // clz of a byte: mask to 8 bits, count leading zeros of the 64-bit value, subtract 56
-            let mask = builder.ins().iconst(types::I64, 0xFF);
-            let masked = builder.ins().band(v, mask);
-            let clz64 = builder.ins().clz(masked);
-            let adj = builder.ins().iconst(types::I64, 56);
-            let result = builder.ins().isub(clz64, adj);
+            let narrow = builder.ins().ireduce(types::I8, v);
+            let clz8 = builder.ins().clz(narrow);
+            let result = builder.ins().uextend(types::I64, clz8);
             Ok(SsaVal::Raw(result, LIT_TAG_WORD))
         }
         PrimOpKind::Raise => {
