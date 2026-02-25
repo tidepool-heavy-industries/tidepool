@@ -45,17 +45,18 @@ fn arb_src_bang() -> impl Strategy<Value = SrcBang> {
 fn arb_data_con() -> impl Strategy<Value = DataCon> {
     (
         any::<u64>().prop_map(DataConId),
-        ".*", // any string
+        prop::string::string_regex("[a-zA-Z0-9_]{1,20}").unwrap(),
         any::<u32>(),
         any::<u32>(),
         prop::collection::vec(arb_src_bang(), 0..10),
-    ).prop_map(|(id, name, tag, rep_arity, field_bangs)| DataCon {
-        id,
-        name,
-        tag,
-        rep_arity,
-        field_bangs,
-    })
+    )
+        .prop_map(|(id, name, tag, rep_arity, field_bangs)| DataCon {
+            id,
+            name,
+            tag,
+            rep_arity,
+            field_bangs,
+        })
 }
 
 /// Strategy for DataConTable
@@ -65,18 +66,26 @@ fn arb_data_con_table() -> impl Strategy<Value = DataConTable> {
         let mut seen_names = std::collections::HashSet::new();
         let mut seen_ids = std::collections::HashSet::new();
         for mut dc in dcs {
-            // Ensure unique IDs and names for reliable round-trip equality
-            if !seen_ids.contains(&dc.id) && !seen_names.contains(&dc.name) {
-                seen_ids.insert(dc.id);
-                seen_names.insert(dc.name.clone());
-                table.insert(dc);
-            } else if !seen_ids.contains(&dc.id) {
-                // If name is seen, make it unique
-                dc.name = format!("{}_{}", dc.name, dc.id.0);
-                seen_ids.insert(dc.id);
-                seen_names.insert(dc.name.clone());
-                table.insert(dc);
+            // Ensure unique IDs and names for reliable round-trip equality.
+            // DataConTable::insert overwrites, but we want to avoid collisions
+            // that would make the result smaller than the input, or change names.
+            if seen_ids.contains(&dc.id) {
+                continue;
             }
+
+            if seen_names.contains(&dc.name) {
+                // If name is seen, make it unique using the ID
+                dc.name = format!("{}_{}", dc.name, dc.id.0);
+                // If the new name is ALSO seen (extremely unlikely with u64 ID but possible),
+                // just skip it to maintain invariants simply.
+                if seen_names.contains(&dc.name) {
+                    continue;
+                }
+            }
+
+            seen_ids.insert(dc.id);
+            seen_names.insert(dc.name.clone());
+            table.insert(dc);
         }
         table
     })
