@@ -19,6 +19,9 @@ tempfile = "3"
 blake3 = "1"
 
 [dev-dependencies]
+proptest = "1"
+tidepool-testing = { path = "../tidepool-testing" }
+tidepool-optimize = { path = "../tidepool-optimize" }
 frunk = "0.4"
 tidepool-bridge-derive = { version = "0.0.1", path = "../tidepool-bridge-derive" }
 tidepool-bridge = { version = "0.0.1", path = "../tidepool-bridge" }
