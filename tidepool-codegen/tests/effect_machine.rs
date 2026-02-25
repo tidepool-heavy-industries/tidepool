@@ -11,6 +11,7 @@ use tidepool_repr::{CoreExpr, CoreFrame, DataConId, VarId};
 use cranelift_codegen::ir::{self, types, AbiParam, InstBuilder, MemFlags, UserFuncName};
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_module::Module;
 
 const TAG_CON: u8 = 2;
 const TAG_LIT: u8 = 3;
@@ -30,7 +31,7 @@ fn build_test_fn<F>(
     unsafe extern "C" fn(*mut VMContext) -> *mut u8,
 )
 where
-    F: FnOnce(&mut FunctionBuilder, ir::Value, ir::SigRef),
+    F: FnOnce(&mut FunctionBuilder, ir::Value, ir::SigRef, ir::FuncRef),
 {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
     let func_id = pipeline.declare_function(name).expect("failed to declare");
@@ -53,7 +54,14 @@ where
         gc_sig.params.push(AbiParam::new(types::I64));
         let gc_sig_ref = builder.import_signature(gc_sig);
 
-        build_body(&mut builder, vmctx, gc_sig_ref);
+        let oom_func = {
+            let mut sig = ir::Signature::new(pipeline.isa.default_call_conv());
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = pipeline.module.declare_function("runtime_oom", cranelift_module::Linkage::Import, &sig).unwrap();
+            pipeline.module.declare_func_in_func(func_id, &mut builder.func)
+        };
+
+        build_body(&mut builder, vmctx, gc_sig_ref, oom_func);
 
         builder.finalize();
     }
@@ -75,9 +83,10 @@ fn emit_alloc_lit_int(
     builder: &mut FunctionBuilder,
     vmctx: ir::Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     value: i64,
 ) -> ir::Value {
-    let ptr = emit_alloc_fast_path(builder, vmctx, 24, gc_sig);
+    let ptr = emit_alloc_fast_path(builder, vmctx, 24, gc_sig, oom_func);
     let flags = MemFlags::trusted();
 
     // header(TAG_LIT=3, size=24)
@@ -102,9 +111,10 @@ fn emit_alloc_lit_word(
     builder: &mut FunctionBuilder,
     vmctx: ir::Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     value: u64,
 ) -> ir::Value {
-    let ptr = emit_alloc_fast_path(builder, vmctx, 24, gc_sig);
+    let ptr = emit_alloc_fast_path(builder, vmctx, 24, gc_sig, oom_func);
     let flags = MemFlags::trusted();
 
     // header(TAG_LIT=3, size=24)
@@ -129,11 +139,12 @@ fn emit_alloc_con1(
     builder: &mut FunctionBuilder,
     vmctx: ir::Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     con_tag: u64,
     field0: ir::Value,
 ) -> ir::Value {
     let size = 24 + 8; // header + con_tag + num_fields + padding + field0
-    let ptr = emit_alloc_fast_path(builder, vmctx, size as u64, gc_sig);
+    let ptr = emit_alloc_fast_path(builder, vmctx, size as u64, gc_sig, oom_func);
     let flags = MemFlags::trusted();
 
     // header(TAG_CON=2, size=32)
@@ -161,12 +172,13 @@ fn emit_alloc_con2(
     builder: &mut FunctionBuilder,
     vmctx: ir::Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     con_tag: u64,
     field0: ir::Value,
     field1: ir::Value,
 ) -> ir::Value {
     let size = 24 + 16; // header + con_tag + num_fields + padding + field0 + field1
-    let ptr = emit_alloc_fast_path(builder, vmctx, size as u64, gc_sig);
+    let ptr = emit_alloc_fast_path(builder, vmctx, size as u64, gc_sig, oom_func);
     let flags = MemFlags::trusted();
 
     // header(TAG_CON=2, size=40)
@@ -194,9 +206,9 @@ fn emit_alloc_con2(
 /// Test 1: Yield::Done from Val result.
 #[test]
 fn test_yield_done_val() {
-    let (_pipeline, func) = build_test_fn("test_val", |builder, vmctx, gc_sig| {
-        let lit_ptr = emit_alloc_lit_int(builder, vmctx, gc_sig, 42);
-        let val_ptr = emit_alloc_con1(builder, vmctx, gc_sig, VAL_CON_TAG, lit_ptr);
+    let (_pipeline, func) = build_test_fn("test_val", |builder, vmctx, gc_sig, oom_func| {
+        let lit_ptr = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 42);
+        let val_ptr = emit_alloc_con1(builder, vmctx, gc_sig, oom_func, VAL_CON_TAG, lit_ptr);
         builder.ins().return_(&[val_ptr]);
     });
 
@@ -233,16 +245,16 @@ fn test_yield_done_val() {
 /// Test 2: Yield::Request from E result.
 #[test]
 fn test_yield_request_e() {
-    let (_pipeline, func) = build_test_fn("test_e", |builder, vmctx, gc_sig| {
-        let request_lit = emit_alloc_lit_int(builder, vmctx, gc_sig, 99);
-        let tag_word = emit_alloc_lit_word(builder, vmctx, gc_sig, 7); // Tag value 7
+    let (_pipeline, func) = build_test_fn("test_e", |builder, vmctx, gc_sig, oom_func| {
+        let request_lit = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 99);
+        let tag_word = emit_alloc_lit_word(builder, vmctx, gc_sig, oom_func, 7); // Tag value 7
         let union_ptr =
-            emit_alloc_con2(builder, vmctx, gc_sig, UNION_CON_TAG, tag_word, request_lit);
+            emit_alloc_con2(builder, vmctx, gc_sig, oom_func, UNION_CON_TAG, tag_word, request_lit);
 
         // Placeholder for continuation
-        let cont_ptr = emit_alloc_lit_int(builder, vmctx, gc_sig, 0);
+        let cont_ptr = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 0);
 
-        let e_ptr = emit_alloc_con2(builder, vmctx, gc_sig, E_CON_TAG, union_ptr, cont_ptr);
+        let e_ptr = emit_alloc_con2(builder, vmctx, gc_sig, oom_func, E_CON_TAG, union_ptr, cont_ptr);
         builder.ins().return_(&[e_ptr]);
     });
 
@@ -295,8 +307,8 @@ fn test_machine_is_send() {
 /// Test 4: Unexpected tag → YieldError.
 #[test]
 fn test_unexpected_tag() {
-    let (_pipeline, func) = build_test_fn("test_lit_result", |builder, vmctx, gc_sig| {
-        let lit_ptr = emit_alloc_lit_int(builder, vmctx, gc_sig, 42);
+    let (_pipeline, func) = build_test_fn("test_lit_result", |builder, vmctx, gc_sig, oom_func| {
+        let lit_ptr = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 42);
         builder.ins().return_(&[lit_ptr]);
     });
 
@@ -324,7 +336,7 @@ fn test_unexpected_tag() {
 /// Test 5: runtime_error(0) → YieldError::DivisionByZero.
 #[test]
 fn test_runtime_error_div_zero() {
-    let (_pipeline, func) = build_test_fn("test_div_zero", |builder, _vmctx, _gc_sig| {
+    let (_pipeline, func) = build_test_fn("test_div_zero", |builder, _vmctx, _gc_sig, _oom_func| {
         // Call runtime_error(0) which sets thread-local and returns null
         let mut err_sig = ir::Signature::new(builder.func.signature.call_conv);
         err_sig.params.push(AbiParam::new(types::I64));
@@ -364,7 +376,7 @@ fn test_runtime_error_div_zero() {
 /// Test 6: runtime_error(1) → YieldError::Overflow.
 #[test]
 fn test_runtime_error_overflow() {
-    let (_pipeline, func) = build_test_fn("test_overflow", |builder, _vmctx, _gc_sig| {
+    let (_pipeline, func) = build_test_fn("test_overflow", |builder, _vmctx, _gc_sig, _oom_func| {
         let mut err_sig = ir::Signature::new(builder.func.signature.call_conv);
         err_sig.params.push(AbiParam::new(types::I64));
         err_sig.returns.push(AbiParam::new(types::I64));
@@ -403,7 +415,7 @@ fn test_runtime_error_overflow() {
 /// Test 7: null without runtime_error → YieldError::NullPointer (not a false positive).
 #[test]
 fn test_null_without_runtime_error() {
-    let (_pipeline, func) = build_test_fn("test_null", |builder, _vmctx, _gc_sig| {
+    let (_pipeline, func) = build_test_fn("test_null", |builder, _vmctx, _gc_sig, _oom_func| {
         let null = builder.ins().iconst(types::I64, 0);
         builder.ins().return_(&[null]);
     });
@@ -432,9 +444,9 @@ fn test_null_without_runtime_error() {
 /// Test 8: Unknown con_tag → YieldError.
 #[test]
 fn test_unexpected_con_tag() {
-    let (_pipeline, func) = build_test_fn("test_unknown_con", |builder, vmctx, gc_sig| {
-        let dummy_field = emit_alloc_lit_int(builder, vmctx, gc_sig, 0);
-        let con_ptr = emit_alloc_con1(builder, vmctx, gc_sig, 999, dummy_field);
+    let (_pipeline, func) = build_test_fn("test_unknown_con", |builder, vmctx, gc_sig, oom_func| {
+        let dummy_field = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 0);
+        let con_ptr = emit_alloc_con1(builder, vmctx, gc_sig, oom_func, 999, dummy_field);
         builder.ins().return_(&[con_ptr]);
     });
 

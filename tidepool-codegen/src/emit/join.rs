@@ -15,6 +15,7 @@ pub fn emit_join(
     builder: &mut FunctionBuilder,
     vmctx: Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     tree: &CoreExpr,
     label: &JoinId,
     params: &[VarId],
@@ -45,8 +46,8 @@ pub fn emit_join(
     );
 
     // 5. Emit body (the continuation that may contain Jumps)
-    let body_result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, tree, body_idx)?;
-    let body_val = ensure_heap_ptr(builder, vmctx, gc_sig, body_result);
+    let body_result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, body_idx)?;
+    let body_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, body_result);
     builder.ins().jump(merge_block, &[body_val]);
 
     // 6. Switch to join block, emit rhs
@@ -63,8 +64,8 @@ pub fn emit_join(
         old_env_vals.push((*param_var, old_val));
     }
 
-    let rhs_result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, tree, rhs_idx)?;
-    let rhs_val = ensure_heap_ptr(builder, vmctx, gc_sig, rhs_result);
+    let rhs_result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, rhs_idx)?;
+    let rhs_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, rhs_result);
     builder.ins().jump(merge_block, &[rhs_val]);
 
     // 7. Seal blocks
@@ -102,6 +103,7 @@ pub fn emit_jump(
     builder: &mut FunctionBuilder,
     vmctx: Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     tree: &CoreExpr,
     label: &JoinId,
     arg_indices: &[usize],
@@ -119,9 +121,9 @@ pub fn emit_jump(
     // 2. Emit each arg
     let mut arg_values = Vec::new();
     for &arg_idx in arg_indices {
-        let val = ctx.emit_node(pipeline, builder, vmctx, gc_sig, tree, arg_idx)?;
+        let val = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, arg_idx)?;
         // 3. Ensure all args are HeapPtr
-        arg_values.push(ensure_heap_ptr(builder, vmctx, gc_sig, val));
+        arg_values.push(ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val));
     }
 
     // 4. Jump

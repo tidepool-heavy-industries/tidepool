@@ -183,6 +183,7 @@ fn collapse_frame(
     builder: &mut FunctionBuilder,
     vmctx: Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     tree: &CoreExpr,
     frame: EmitFrame<SsaVal>,
 ) -> Result<SsaVal, EmitError> {
@@ -192,10 +193,11 @@ fn collapse_frame(
             builder,
             vmctx,
             gc_sig,
+            oom_func,
             bytes,
             &mut ctx.lambda_counter,
         ),
-        EmitFrame::Lit(ref lit) => emit_lit(builder, vmctx, gc_sig, lit),
+        EmitFrame::Lit(ref lit) => emit_lit(builder, vmctx, gc_sig, oom_func, lit),
         EmitFrame::Var(vid) => match ctx.env.get(&vid).copied() {
             Some(v) => Ok(v),
             None => {
@@ -244,12 +246,12 @@ fn collapse_frame(
         EmitFrame::Con { tag, fields } => {
             let field_vals: Vec<Value> = fields
                 .iter()
-                .map(|v| ensure_heap_ptr(builder, vmctx, gc_sig, *v))
+                .map(|v| ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *v))
                 .collect();
 
             let num_fields = field_vals.len();
             let size = 24 + 8 * num_fields as u64;
-            let ptr = emit_alloc_fast_path(builder, vmctx, size, gc_sig);
+            let ptr = emit_alloc_fast_path(builder, vmctx, size, gc_sig, oom_func);
 
             let tag_val = builder.ins().iconst(types::I8, layout::TAG_CON as i64);
             builder.ins().store(MemFlags::trusted(), tag_val, ptr, 0);
@@ -302,12 +304,12 @@ fn collapse_frame(
                 builder.declare_value_needs_stack_map(result);
                 return Ok(SsaVal::HeapPtr(result));
             }
-            primop::emit_primop(pipeline, builder, vmctx, gc_sig, op, args)
+            primop::emit_primop(pipeline, builder, vmctx, gc_sig, oom_func, op, args)
         }
         EmitFrame::App { fun, arg } => {
             ctx.declare_env(builder);
             let fun_ptr = fun.value();
-            let arg_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, arg);
+            let arg_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, arg);
 
             // Debug: call host fn to validate fun_ptr tag before call_indirect
             let check_fn = pipeline
@@ -343,14 +345,14 @@ fn collapse_frame(
             Ok(SsaVal::HeapPtr(ret_val))
         }
         EmitFrame::Lam { binder, body_idx } => emit_lam(
-            ctx, pipeline, builder, vmctx, gc_sig, tree, binder, body_idx,
+            ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, binder, body_idx,
         ),
         EmitFrame::Case {
             scrutinee,
             binder,
             alts,
         } => crate::emit::case::emit_case(
-            ctx, pipeline, builder, vmctx, gc_sig, tree, scrutinee, &binder, &alts,
+            ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, scrutinee, &binder, &alts,
         ),
         EmitFrame::Join {
             label,
@@ -358,7 +360,7 @@ fn collapse_frame(
             rhs_idx,
             body_idx,
         } => crate::emit::join::emit_join(
-            ctx, pipeline, builder, vmctx, gc_sig, tree, &label, &params, rhs_idx, body_idx,
+            ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, &label, &params, rhs_idx, body_idx,
         ),
         EmitFrame::Jump { label, args } => {
             let join_block = ctx
@@ -371,7 +373,7 @@ fn collapse_frame(
 
             let arg_values: Vec<Value> = args
                 .iter()
-                .map(|v| ensure_heap_ptr(builder, vmctx, gc_sig, *v))
+                .map(|v| ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *v))
                 .collect();
 
             builder.ins().jump(join_block, &arg_values);
@@ -385,7 +387,7 @@ fn collapse_frame(
                 LIT_TAG_INT,
             ))
         }
-        EmitFrame::LetBoundary(idx) => ctx.emit_node(pipeline, builder, vmctx, gc_sig, tree, idx),
+        EmitFrame::LetBoundary(idx) => ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, idx),
     }
 }
 
@@ -397,13 +399,14 @@ fn emit_subtree(
     builder: &mut FunctionBuilder,
     vmctx: Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     tree: &CoreExpr,
     idx: usize,
 ) -> Result<SsaVal, EmitError> {
     try_expand_and_collapse::<EmitFrameToken, _, _, _>(
         idx,
         |idx| expand_node(tree, idx),
-        |frame| collapse_frame(ctx, pipeline, builder, vmctx, gc_sig, tree, frame),
+        |frame| collapse_frame(ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, frame),
     )
 }
 
@@ -418,6 +421,7 @@ fn emit_lam(
     builder: &mut FunctionBuilder,
     vmctx: Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     tree: &CoreExpr,
     binder: VarId,
     body_idx: usize,
@@ -496,6 +500,13 @@ fn emit_lam(
     inner_gc_sig.params.push(AbiParam::new(types::I64));
     let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
 
+    let inner_oom_func = {
+        let mut sig = Signature::new(pipeline.isa.default_call_conv());
+        sig.returns.push(AbiParam::new(types::I64));
+        let func_id = pipeline.module.declare_function("runtime_oom", Linkage::Import, &sig).unwrap();
+        pipeline.module.declare_func_in_func(func_id, &mut inner_builder.func)
+    };
+
     let mut inner_emit = EmitContext::new(ctx.prefix.clone());
     inner_emit.lambda_counter = ctx.lambda_counter;
 
@@ -518,6 +529,7 @@ fn emit_lam(
         &mut inner_builder,
         inner_vmctx,
         inner_gc_sig_ref,
+        inner_oom_func,
         &body_tree,
         body_root,
     )?;
@@ -525,6 +537,7 @@ fn emit_lam(
         &mut inner_builder,
         inner_vmctx,
         inner_gc_sig_ref,
+        inner_oom_func,
         body_result,
     );
 
@@ -541,7 +554,7 @@ fn emit_lam(
 
     let num_captures = captures.len();
     let closure_size = 24 + 8 * num_captures as u64;
-    let closure_ptr = emit_alloc_fast_path(builder, vmctx, closure_size, gc_sig);
+    let closure_ptr = emit_alloc_fast_path(builder, vmctx, closure_size, gc_sig, oom_func);
 
     let tag_val = builder.ins().iconst(types::I8, layout::TAG_CLOSURE as i64);
     builder
@@ -567,7 +580,7 @@ fn emit_lam(
     );
 
     for (i, (_, ssaval)) in captures.iter().enumerate() {
-        let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, *ssaval);
+        let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
         let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
         builder
             .ins()
@@ -627,6 +640,13 @@ pub fn compile_expr(
     gc_sig.params.push(AbiParam::new(types::I64));
     let gc_sig_ref = builder.import_signature(gc_sig);
 
+    let oom_func = {
+        let mut sig = Signature::new(pipeline.isa.default_call_conv());
+        sig.returns.push(AbiParam::new(types::I64));
+        let func_id = pipeline.module.declare_function("runtime_oom", Linkage::Import, &sig).unwrap();
+        pipeline.module.declare_func_in_func(func_id, &mut builder.func)
+    };
+
     let mut emit_ctx = EmitContext::new(name.to_string());
 
     let result = emit_ctx.emit_node(
@@ -634,10 +654,11 @@ pub fn compile_expr(
         &mut builder,
         vmctx,
         gc_sig_ref,
+        oom_func,
         tree,
         tree.nodes.len() - 1,
     )?;
-    let ret = ensure_heap_ptr(&mut builder, vmctx, gc_sig_ref, result);
+    let ret = ensure_heap_ptr(&mut builder, vmctx, gc_sig_ref, oom_func, result);
 
     builder.ins().return_(&[ret]);
     builder.finalize();
@@ -664,6 +685,7 @@ impl EmitContext {
         builder: &mut FunctionBuilder,
         vmctx: Value,
         gc_sig: ir::SigRef,
+        oom_func: ir::FuncRef,
         tree: &CoreExpr,
         mut idx: usize,
     ) -> Result<SsaVal, EmitError> {
@@ -686,7 +708,7 @@ impl EmitContext {
                             self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
                         } else {
                             let rhs_val =
-                                self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *rhs)?;
+                                self.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs)?;
                             self.trace_scope(&format!("insert LetNonRec {:?}", binder));
                             self.env.insert(*binder, rhs_val);
                         }
@@ -719,9 +741,8 @@ impl EmitContext {
                                 ));
                                 self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
                             } else {
-                                let rhs_val = self
-                                    .emit_node(pipeline, builder, vmctx, gc_sig, tree, *rhs_idx)?;
-                                self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
+                                                            let rhs_val = self
+                                                                .emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx)?;                                self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
                                 self.env.insert(*binder, rhs_val);
                             }
                         }
@@ -784,7 +805,7 @@ impl EmitContext {
                                 let num_captures = sorted_fvs.len();
                                 let closure_size = 24 + 8 * num_captures as u64;
                                 let closure_ptr =
-                                    emit_alloc_fast_path(builder, vmctx, closure_size, gc_sig);
+                                    emit_alloc_fast_path(builder, vmctx, closure_size, gc_sig, oom_func);
 
                                 let tag_val =
                                     builder.ins().iconst(types::I8, layout::TAG_CLOSURE as i64);
@@ -816,7 +837,7 @@ impl EmitContext {
                             CoreFrame::Con { tag, fields } => {
                                 let num_fields = fields.len();
                                 let size = 24 + 8 * num_fields as u64;
-                                let ptr = emit_alloc_fast_path(builder, vmctx, size, gc_sig);
+                                let ptr = emit_alloc_fast_path(builder, vmctx, size, gc_sig, oom_func);
 
                                 let tag_val =
                                     builder.ins().iconst(types::I8, layout::TAG_CON as i64);
@@ -881,7 +902,7 @@ impl EmitContext {
                     for (binder, rhs_idx) in &simple_bindings {
                         if matches!(&tree.nodes[*rhs_idx], CoreFrame::Var(_)) {
                             let rhs_val =
-                                self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *rhs_idx)?;
+                                self.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx)?;
                             self.trace_scope(&format!("insert LetRec(trivial) {:?}", binder));
                             self.env.insert(*binder, rhs_val);
                         } else {
@@ -946,6 +967,13 @@ impl EmitContext {
                         inner_gc_sig.params.push(AbiParam::new(types::I64));
                         let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
 
+    let inner_oom_func = {
+        let mut sig = Signature::new(pipeline.isa.default_call_conv());
+        sig.returns.push(AbiParam::new(types::I64));
+        let func_id = pipeline.module.declare_function("runtime_oom", Linkage::Import, &sig).unwrap();
+        pipeline.module.declare_func_in_func(func_id, &mut inner_builder.func)
+    };
+
                         let mut inner_emit = EmitContext::new(self.prefix.clone());
                         inner_emit.lambda_counter = self.lambda_counter;
                         inner_emit
@@ -972,6 +1000,7 @@ impl EmitContext {
                             &mut inner_builder,
                             inner_vmctx,
                             inner_gc_sig_ref,
+                            inner_oom_func,
                             &lam_body_tree,
                             body_root,
                         )?;
@@ -979,6 +1008,7 @@ impl EmitContext {
                             &mut inner_builder,
                             inner_vmctx,
                             inner_gc_sig_ref,
+                            inner_oom_func,
                             body_result,
                         );
 
@@ -1016,7 +1046,7 @@ impl EmitContext {
                         for (i, var_id) in sorted_fvs.iter().enumerate() {
                             let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
                             if let Some(ssaval) = self.env.get(var_id) {
-                                let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, *ssaval);
+                                let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
                                 builder.ins().store(
                                     MemFlags::trusted(),
                                     cap_val,
@@ -1052,9 +1082,8 @@ impl EmitContext {
                                 deferred_cons.push((*ptr, field_indices.clone()));
                             } else {
                                 for (i, &f_idx) in field_indices.iter().enumerate() {
-                                    let val = self
-                                        .emit_node(pipeline, builder, vmctx, gc_sig, tree, f_idx)?;
-                                    let field_val = ensure_heap_ptr(builder, vmctx, gc_sig, val);
+                                                                let val = self
+                                                                    .emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx)?;                                    let field_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val);
                                     builder.ins().store(
                                         MemFlags::trusted(),
                                         field_val,
@@ -1135,7 +1164,7 @@ impl EmitContext {
                             self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
                         } else {
                             let rhs_val =
-                                self.emit_node(pipeline, builder, vmctx, gc_sig, tree, *rhs_idx)?;
+                                self.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx)?;
                             self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
                             self.env.insert(*binder, rhs_val);
                         }
@@ -1146,7 +1175,7 @@ impl EmitContext {
                         // invoke those closures.
                         if let Some(updates) = pending_capture_updates.remove(binder) {
                             if let Some(ssaval) = self.env.get(binder) {
-                                let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, *ssaval);
+                                let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
                                 for (closure_ptr, offset) in updates {
                                     builder.ins().store(
                                         MemFlags::trusted(),
@@ -1166,7 +1195,7 @@ impl EmitContext {
                         let ssaval = self.env.get(&var_id).unwrap_or_else(|| {
                             panic!("LetRec capture fill: VarId({:#x}) not in env after Phase 3c.", var_id.0);
                         });
-                        let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, *ssaval);
+                        let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
                         for (closure_ptr, offset) in updates {
                             builder.ins().store(
                                 MemFlags::trusted(),
@@ -1182,8 +1211,8 @@ impl EmitContext {
                     for (ptr, field_indices) in &deferred_cons {
                         for (i, &f_idx) in field_indices.iter().enumerate() {
                             let val =
-                                self.emit_node(pipeline, builder, vmctx, gc_sig, tree, f_idx)?;
-                            let field_val = ensure_heap_ptr(builder, vmctx, gc_sig, val);
+                                self.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx)?;
+                            let field_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val);
                             builder.ins().store(
                                 MemFlags::trusted(),
                                 field_val,
@@ -1199,7 +1228,7 @@ impl EmitContext {
                 }
                 // All non-Let nodes: delegate to stack-safe hylomorphism
                 _ => {
-                    break emit_subtree(self, pipeline, builder, vmctx, gc_sig, tree, idx);
+                    break emit_subtree(self, pipeline, builder, vmctx, gc_sig, oom_func, tree, idx);
                 }
             }
         }; // end loop
@@ -1233,9 +1262,10 @@ fn emit_lit(
     builder: &mut FunctionBuilder,
     vmctx: Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     lit: &Literal,
 ) -> Result<SsaVal, EmitError> {
-    let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig);
+    let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig, oom_func);
 
     let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);
     builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
@@ -1316,6 +1346,7 @@ fn emit_lit_string(
     builder: &mut FunctionBuilder,
     vmctx: Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     bytes: &[u8],
     counter: &mut u32,
 ) -> Result<SsaVal, EmitError> {
@@ -1346,7 +1377,7 @@ fn emit_lit_string(
     let data_ptr = builder.ins().symbol_value(types::I64, local_data);
 
     // Allocate 24-byte Lit heap object
-    let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig);
+    let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig, oom_func);
 
     let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);
     builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
@@ -1368,12 +1399,13 @@ pub(crate) fn ensure_heap_ptr(
     builder: &mut FunctionBuilder,
     vmctx: Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     val: SsaVal,
 ) -> Value {
     match val {
         SsaVal::HeapPtr(v) => v,
         SsaVal::Raw(v, lit_tag) => {
-            let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig);
+            let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig, oom_func);
             let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);
             builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
             let size = builder.ins().iconst(types::I16, LIT_TOTAL_SIZE as i64);

@@ -15,6 +15,7 @@ pub fn emit_case(
     builder: &mut FunctionBuilder,
     vmctx: Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     tree: &CoreExpr,
     scrut: SsaVal,
     binder: &VarId,
@@ -51,6 +52,7 @@ pub fn emit_case(
             builder,
             vmctx,
             gc_sig,
+            oom_func,
             tree,
             scrut_ptr,
             &data_alts,
@@ -64,6 +66,7 @@ pub fn emit_case(
             builder,
             vmctx,
             gc_sig,
+            oom_func,
             tree,
             scrut,
             &lit_alts,
@@ -72,8 +75,8 @@ pub fn emit_case(
         )?;
     } else if let Some(alt) = default_alt {
         // Default only
-        let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, tree, alt.body)?;
-        let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, result);
+        let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
+        let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
         builder.ins().jump(merge_block, &[result_ptr]);
     } else {
         // No alts? Trap.
@@ -102,6 +105,7 @@ fn emit_data_dispatch(
     builder: &mut FunctionBuilder,
     vmctx: Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     tree: &CoreExpr,
     scrut_ptr: Value,
     data_alts: &[&Alt<usize>],
@@ -144,8 +148,8 @@ fn emit_data_dispatch(
                 bound_vars.push(binder);
             }
 
-            let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, tree, alt.body)?;
-            let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, result);
+            let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
+            let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
             builder.ins().jump(merge_block, &[result_ptr]);
 
             // Clean up
@@ -162,8 +166,8 @@ fn emit_data_dispatch(
     // Default or trap
     if let Some(alt) = default_alt {
         ctx.declare_env(builder);
-        let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, tree, alt.body)?;
-        let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, result);
+        let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
+        let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
         builder.ins().jump(merge_block, &[result_ptr]);
     } else {
         builder.ins().trap(TrapCode::unwrap_user(2));
@@ -179,6 +183,7 @@ fn emit_lit_dispatch(
     builder: &mut FunctionBuilder,
     vmctx: Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     tree: &CoreExpr,
     scrut: SsaVal,
     lit_alts: &[&Alt<usize>],
@@ -260,8 +265,8 @@ fn emit_lit_dispatch(
         builder.switch_to_block(alt_block);
         builder.seal_block(alt_block);
         ctx.declare_env(builder);
-        let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, tree, alt.body)?;
-        let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, result);
+        let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
+        let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
         builder.ins().jump(merge_block, &[result_ptr]);
 
         // Continue to next check
@@ -272,8 +277,8 @@ fn emit_lit_dispatch(
     // Default or trap
     if let Some(alt) = default_alt {
         ctx.declare_env(builder);
-        let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, tree, alt.body)?;
-        let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, result);
+        let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
+        let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
         builder.ins().jump(merge_block, &[result_ptr]);
     } else {
         builder.ins().trap(TrapCode::unwrap_user(2));

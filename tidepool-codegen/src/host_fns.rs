@@ -17,6 +17,7 @@ pub enum RuntimeError {
     UnresolvedVar(u64),
     NullFunPtr,
     BadFunPtrTag(u8),
+    HeapOverflow,
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -34,6 +35,7 @@ impl std::fmt::Display for RuntimeError {
             }
             RuntimeError::NullFunPtr => write!(f, "application of null function pointer"),
             RuntimeError::BadFunPtrTag(tag) => write!(f, "application of non-closure (tag={})", tag),
+            RuntimeError::HeapOverflow => write!(f, "heap overflow (nursery exhausted after GC)"),
         }
     }
 }
@@ -51,6 +53,33 @@ thread_local! {
 
     /// Runtime error from JIT code. Checked after JIT returns.
     static RUNTIME_ERROR: RefCell<Option<RuntimeError>> = const { RefCell::new(None) };
+
+    pub(crate) static GC_STATE: RefCell<Option<GcState>> = const { RefCell::new(None) };
+}
+
+pub(crate) struct GcState {
+    pub active_start: *mut u8,
+    pub active_size: usize,
+    pub active_buffer: Option<Vec<u8>>,
+}
+
+// SAFETY: GcState contains raw pointers but is only accessed from the thread that created it.
+unsafe impl Send for GcState {}
+
+pub fn set_gc_state(start: *mut u8, size: usize) {
+    GC_STATE.with(|cell| {
+        *cell.borrow_mut() = Some(GcState {
+            active_start: start,
+            active_size: size,
+            active_buffer: None,
+        });
+    });
+}
+
+pub fn clear_gc_state() {
+    GC_STATE.with(|cell| {
+        cell.borrow_mut().take();
+    });
 }
 
 /// GC trigger: called by JIT code when alloc_ptr exceeds alloc_limit.
@@ -217,6 +246,13 @@ pub extern "C" fn runtime_error(kind: u64) -> *mut u8 {
     // heap object, so JIT code won't segfault when reading its tag byte.
     // The effect machine will detect the error flag and return Yield::Error
     // before this poison value reaches user code.
+    error_poison_ptr()
+}
+
+pub extern "C" fn runtime_oom() -> *mut u8 {
+    RUNTIME_ERROR.with(|cell| {
+        *cell.borrow_mut() = Some(RuntimeError::HeapOverflow);
+    });
     error_poison_ptr()
 }
 
@@ -536,6 +572,7 @@ pub extern "C" fn runtime_text_reverse(dest: i64, src: i64, off: i64, len: i64) 
 pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
     vec![
         ("gc_trigger", gc_trigger as *const u8),
+        ("runtime_oom", runtime_oom as *const u8),
         ("heap_alloc", heap_alloc as *const u8),
         ("heap_force", heap_force as *const u8),
         ("unresolved_var_trap", unresolved_var_trap as *const u8),

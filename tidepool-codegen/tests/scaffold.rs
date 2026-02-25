@@ -223,8 +223,15 @@ fn test_alloc_fast_path() {
         gc_sig.params.push(AbiParam::new(types::I64));
         let gc_sig_ref = builder.import_signature(gc_sig);
 
+        let oom_func = {
+            let mut sig = ir::Signature::new(pipeline.isa.default_call_conv());
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = pipeline.module.declare_function("runtime_oom", cranelift_module::Linkage::Import, &sig).unwrap();
+            pipeline.module.declare_func_in_func(func_id, &mut builder.func)
+        };
+
         // Allocate 24 bytes (will be aligned to 24)
-        let result = emit_alloc_fast_path(&mut builder, vmctx, 24, gc_sig_ref);
+        let result = emit_alloc_fast_path(&mut builder, vmctx, 24, gc_sig_ref, oom_func);
 
         builder.ins().return_(&[result]);
         builder.finalize();

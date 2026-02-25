@@ -16,6 +16,14 @@ impl Nursery {
         }
     }
 
+    pub fn start(&self) -> *const u8 {
+        self.buffer.as_ptr()
+    }
+
+    pub fn size(&self) -> usize {
+        self.buffer.len()
+    }
+
     /// Create a VMContext pointing into this nursery.
     ///
     /// The returned VMContext is valid as long as this Nursery is alive

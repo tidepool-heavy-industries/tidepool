@@ -64,6 +64,8 @@ pub enum YieldError {
     NullFunPtr,
     /// Application of non-closure heap object.
     BadFunPtrTag(u8),
+    /// Heap overflow after GC.
+    HeapOverflow,
 }
 
 impl std::fmt::Display for YieldError {
@@ -91,6 +93,7 @@ impl std::fmt::Display for YieldError {
             }
             YieldError::NullFunPtr => write!(f, "application of null function pointer"),
             YieldError::BadFunPtrTag(tag) => write!(f, "application of non-closure (tag={})", tag),
+            YieldError::HeapOverflow => write!(f, "heap overflow (nursery exhausted after GC)"),
         }
     }
 }

@@ -177,6 +177,9 @@ impl JitEffectMachine {
                 crate::host_fns::RuntimeError::BadFunPtrTag(tag) => {
                     crate::yield_type::YieldError::BadFunPtrTag(tag)
                 }
+                crate::host_fns::RuntimeError::HeapOverflow => {
+                    crate::yield_type::YieldError::HeapOverflow
+                }
             }))
         } else if result_ptr.is_null() {
             Err(JitError::Yield(crate::yield_type::YieldError::NullPointer))

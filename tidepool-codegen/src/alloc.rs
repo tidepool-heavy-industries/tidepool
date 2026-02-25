@@ -27,6 +27,7 @@ pub fn emit_alloc_fast_path(
     vmctx_val: Value,
     size: u64,
     gc_trigger_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
 ) -> Value {
     let aligned_size = (size + 7) & !7;
     // SAFETY: We use `MemFlags::trusted()` because all VMContext accesses here are
@@ -122,11 +123,12 @@ pub fn emit_alloc_fast_path(
         .store(flags, post_gc_new, vmctx_val, VMCTX_ALLOC_PTR_OFFSET);
     builder.ins().jump(continue_block, &[post_gc_ptr]);
 
-    // Slow path failure: allocation still does not fit, trap.
+    // Slow path failure: call runtime_oom instead of trapping
     builder.switch_to_block(slow_fail_block);
     builder.seal_block(slow_fail_block);
-    // Use a generic trap code for heap overflow.
-    builder.ins().trap(ir::TrapCode::unwrap_user(1));
+    let oom_result = builder.ins().call(oom_func, &[]);
+    let poison_ptr = builder.inst_results(oom_result)[0];
+    builder.ins().jump(continue_block, &[poison_ptr]);
 
     // --- Continue: result is the old alloc_ptr from whichever path ---
     builder.switch_to_block(continue_block);

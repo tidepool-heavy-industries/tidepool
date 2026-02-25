@@ -18,6 +18,7 @@ pub fn emit_primop(
     builder: &mut FunctionBuilder,
     vmctx: Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     op: &PrimOpKind,
     args: &[SsaVal],
 ) -> Result<SsaVal, EmitError> {
@@ -716,7 +717,7 @@ pub fn emit_primop(
                 &[size],
             )?;
             // Wrap in a Lit on the managed heap
-            Ok(emit_lit_bytearray(builder, vmctx, gc_sig, ba_ptr))
+            Ok(emit_lit_bytearray(builder, vmctx, gc_sig, oom_func, ba_ptr))
         }
 
         PrimOpKind::UnsafeFreezeByteArray => {
@@ -1224,9 +1225,10 @@ fn emit_lit_bytearray(
     builder: &mut FunctionBuilder,
     vmctx: Value,
     gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
     ba_ptr: Value,
 ) -> SsaVal {
-    let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig);
+    let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig, oom_func);
     let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);
     builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
     let size = builder.ins().iconst(types::I16, LIT_TOTAL_SIZE as i64);
