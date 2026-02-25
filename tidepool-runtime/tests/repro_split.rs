@@ -1,6 +1,4 @@
-use frunk::HNil;
 use std::path::Path;
-use tidepool_runtime::compile_and_run_pure;
 
 fn prelude_path() -> std::path::PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -8,7 +6,6 @@ fn prelude_path() -> std::path::PathBuf {
 }
 
 fn run_plain(body: &str) -> serde_json::Value {
-    std::env::set_var("TIDEPOOL_DUMP_TREE", "1");
     let src = format!(
         r#"{{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, PartialTypeSignatures #-}}
 module Test where
