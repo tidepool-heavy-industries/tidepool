@@ -112,7 +112,7 @@ fn jit_agrees_with_eval() {
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
             let mut runner = TestRunner::new(Config {
-                cases: 10,
+                cases: 50,
                 ..Config::default()
             });
             runner
@@ -132,7 +132,7 @@ fn jit_agrees_with_eval_after_optimize() {
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
             let mut runner = TestRunner::new(Config {
-                cases: 10,
+                cases: 50,
                 ..Config::default()
             });
             runner
@@ -153,7 +153,7 @@ fn jit_small_nursery_agrees() {
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
             let mut runner = TestRunner::new(Config {
-                cases: 10,
+                cases: 50,
                 ..Config::default()
             });
             runner
@@ -174,7 +174,7 @@ fn jit_deterministic() {
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
             let mut runner = TestRunner::new(Config {
-                cases: 10,
+                cases: 50,
                 ..Config::default()
             });
             runner
@@ -206,6 +206,27 @@ Expr: {:#?}",
                     }
 
                     Ok(())
+                })
+                .unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn jit_agrees_with_eval_optimized_small_nursery() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let mut runner = TestRunner::new(Config {
+                cases: 50,
+                ..Config::default()
+            });
+            runner
+                .run(&arb_core_expr(), |mut expr| {
+                    optimize(&mut expr);
+                    check_jit_vs_eval(expr, 4 * 1024)
                 })
                 .unwrap();
         })
