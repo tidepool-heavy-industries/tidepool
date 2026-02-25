@@ -10,13 +10,10 @@ fn is_in_range(ptr: *const u8, start: *const u8, end: *const u8) -> bool {
     (ptr as usize) >= (start as usize) && (ptr as usize) < (end as usize)
 }
 
-#[allow(unused_variables)]
 unsafe fn evacuate(
     old_ptr: *mut u8,
     to_base: *mut u8,
     free: &mut usize,
-    from_start: *const u8,
-    from_end: *const u8,
 ) -> *mut u8 {
     let tag = read_tag(old_ptr);
     if tag == TAG_FORWARDED {
@@ -79,7 +76,7 @@ pub unsafe fn cheney_copy(
     for &root_slot in root_ptrs {
         let old_ptr = *root_slot;
         if !old_ptr.is_null() && is_in_range(old_ptr as *const u8, from_start, from_end) {
-            let new_ptr = evacuate(old_ptr, to_base, &mut free, from_start, from_end);
+            let new_ptr = evacuate(old_ptr, to_base, &mut free);
             *root_slot = new_ptr;
         }
     }
@@ -92,7 +89,7 @@ pub unsafe fn cheney_copy(
         for_each_pointer_field(obj, |field_slot| {
             let field_val = *field_slot;
             if !field_val.is_null() && is_in_range(field_val as *const u8, from_start, from_end) {
-                let new_ptr = evacuate(field_val, to_base, &mut free, from_start, from_end);
+                let new_ptr = evacuate(field_val, to_base, &mut free);
                 *field_slot = new_ptr;
             }
         });
