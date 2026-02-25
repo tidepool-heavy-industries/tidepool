@@ -2,6 +2,7 @@
 
 use crate::layout::*;
 
+/// Result of a Cheney copying collection, containing statistics about the collection.
 pub struct CopyResult {
     pub bytes_copied: usize,
 }
@@ -20,7 +21,10 @@ unsafe fn evacuate(
         return *(old_ptr.add(8) as *const *mut u8);
     }
     let size = read_size(old_ptr) as usize;
-    let aligned = (size + 7) & !7;
+    let aligned = size
+        .checked_add(7)
+        .expect("heap object size too large to align")
+        & !7;
     let new_ptr = to_base.add(*free);
     std::ptr::copy_nonoverlapping(old_ptr, new_ptr, aligned);
     *old_ptr = TAG_FORWARDED;
@@ -29,6 +33,17 @@ unsafe fn evacuate(
     new_ptr
 }
 
+/// Invoke a callback for each pointer field in a heap object.
+///
+/// The callback receives a mutable pointer to each pointer field slot within the
+/// object, allowing the caller to read or update the stored pointer value.
+///
+/// # Safety
+///
+/// `obj` must point to a valid, properly aligned heap object with a valid tag and
+/// size as understood by this module's layout routines. The object must be
+/// located in memory such that all pointer fields are initialized and safe to
+/// read and write through the provided `*mut *mut u8` pointers.
 pub unsafe fn for_each_pointer_field(obj: *mut u8, mut f: impl FnMut(*mut *mut u8)) {
     let tag = read_tag(obj);
     let size = read_size(obj) as usize;
@@ -64,6 +79,20 @@ pub unsafe fn for_each_pointer_field(obj: *mut u8, mut f: impl FnMut(*mut *mut u
     }
 }
 
+/// Perform a Cheney semi-space copying garbage collection.
+///
+/// Scans a slice of root pointers, evacuating any live objects from the `from`
+/// space (defined by `from_start` and `from_end`) into `tospace`. Root pointers
+/// and any internal pointers within the copied objects are updated to point to
+/// the new locations in `tospace`.
+///
+/// # Safety
+///
+/// - `root_ptrs` must be a valid slice of valid mutable slots containing pointers.
+/// - `from_start` and `from_end` must define a valid memory range.
+/// - `tospace` must be disjoint from the from-space range and must have sufficient
+///   capacity to hold all live objects reachable from the provided roots. Exceeding
+///   the capacity of `tospace` will result in out-of-bounds writes.
 pub unsafe fn cheney_copy(
     root_ptrs: &[*mut *mut u8],
     from_start: *const u8,
@@ -85,7 +114,10 @@ pub unsafe fn cheney_copy(
     while scan < free {
         let obj = to_base.add(scan);
         let obj_size = read_size(obj) as usize;
-        let aligned = (obj_size + 7) & !7;
+        let aligned = obj_size
+            .checked_add(7)
+            .expect("heap object size too large to align")
+            & !7;
         for_each_pointer_field(obj, |field_slot| {
             let field_val = *field_slot;
             if !field_val.is_null() && is_in_range(field_val as *const u8, from_start, from_end) {
@@ -116,7 +148,10 @@ mod tests {
     unsafe fn write_con(buf: &mut [u8], offset: usize, con_tag: u64, fields: &[*mut u8]) -> usize {
         let ptr = buf.as_mut_ptr().add(offset);
         let size = (CON_FIELDS_OFFSET + fields.len() * FIELD_STRIDE) as u16;
-        let aligned = (size + 7) & !7;
+        let aligned = (size as usize)
+            .checked_add(7)
+            .expect("heap object size too large to align")
+            & !7;
         write_header(ptr, TAG_CON, size);
         *(ptr.add(CON_TAG_OFFSET) as *mut u64) = con_tag;
         *(ptr.add(CON_NUM_FIELDS_OFFSET) as *mut u16) = fields.len() as u16;
@@ -129,7 +164,10 @@ mod tests {
     unsafe fn write_closure(buf: &mut [u8], offset: usize, code_ptr: *const u8, captures: &[*mut u8]) -> usize {
         let ptr = buf.as_mut_ptr().add(offset);
         let size = (CLOSURE_CAPTURED_OFFSET + captures.len() * FIELD_STRIDE) as u16;
-        let aligned = (size + 7) & !7;
+        let aligned = (size as usize)
+            .checked_add(7)
+            .expect("heap object size too large to align")
+            & !7;
         write_header(ptr, TAG_CLOSURE, size);
         *(ptr.add(CLOSURE_CODE_PTR_OFFSET) as *mut *const u8) = code_ptr;
         *(ptr.add(CLOSURE_NUM_CAPTURED_OFFSET) as *mut u16) = captures.len() as u16;
@@ -354,6 +392,25 @@ mod tests {
                 ptrs.push(*p);
             });
             assert_eq!(ptrs, vec![0x3000 as *mut u8]); // code_ptr is excluded
+        }
+    }
+
+    // 11. test_for_each_pointer_field_thunk_blackhole
+    #[test]
+    fn test_for_each_pointer_field_thunk_blackhole() {
+        let mut buf_data = AlignedBuf([0u8; 1024]);
+        let buf = &mut buf_data.0;
+        unsafe {
+            let ptr = buf.as_mut_ptr();
+            // A blackhole thunk has size 16 (just header and state) and no pointers.
+            write_header(ptr, TAG_THUNK, 16);
+            *ptr.add(THUNK_STATE_OFFSET) = THUNK_BLACKHOLE;
+            
+            let mut count = 0;
+            for_each_pointer_field(ptr, |_| {
+                count += 1;
+            });
+            assert_eq!(count, 0, "blackhole thunks have no pointers to traverse");
         }
     }
 }
