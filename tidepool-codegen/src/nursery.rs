@@ -16,10 +16,12 @@ impl Nursery {
         }
     }
 
+    /// Get the start address of the nursery buffer.
     pub fn start(&self) -> *const u8 {
         self.buffer.as_ptr()
     }
 
+    /// Get the size of the nursery buffer in bytes.
     pub fn size(&self) -> usize {
         self.buffer.len()
     }

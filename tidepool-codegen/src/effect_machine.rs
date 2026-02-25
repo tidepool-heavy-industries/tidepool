@@ -100,6 +100,7 @@ impl CompiledEffectMachine {
                 crate::host_fns::RuntimeError::UnresolvedVar(id) => YieldError::UnresolvedVar(id),
                 crate::host_fns::RuntimeError::NullFunPtr => YieldError::NullFunPtr,
                 crate::host_fns::RuntimeError::BadFunPtrTag(tag) => YieldError::BadFunPtrTag(tag),
+                crate::host_fns::RuntimeError::HeapOverflow => YieldError::HeapOverflow,
             });
         }
         if result.is_null() {

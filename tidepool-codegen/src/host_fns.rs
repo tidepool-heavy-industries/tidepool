@@ -57,6 +57,7 @@ thread_local! {
     pub(crate) static GC_STATE: RefCell<Option<GcState>> = const { RefCell::new(None) };
 }
 
+/// Thread-local state for the copying garbage collector.
 pub(crate) struct GcState {
     pub active_start: *mut u8,
     pub active_size: usize,
@@ -66,6 +67,7 @@ pub(crate) struct GcState {
 // SAFETY: GcState contains raw pointers but is only accessed from the thread that created it.
 unsafe impl Send for GcState {}
 
+/// Set the active GC state for the current thread.
 pub fn set_gc_state(start: *mut u8, size: usize) {
     GC_STATE.with(|cell| {
         *cell.borrow_mut() = Some(GcState {
@@ -76,6 +78,7 @@ pub fn set_gc_state(start: *mut u8, size: usize) {
     });
 }
 
+/// Clear the active GC state for the current thread.
 pub fn clear_gc_state() {
     GC_STATE.with(|cell| {
         cell.borrow_mut().take();
