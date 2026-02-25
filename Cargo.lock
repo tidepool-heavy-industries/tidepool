@@ -2366,6 +2366,7 @@ dependencies = [
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
+ "proptest",
  "recursion",
  "target-lexicon",
  "tidepool-effect",
