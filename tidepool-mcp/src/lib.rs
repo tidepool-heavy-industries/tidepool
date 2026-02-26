@@ -10,9 +10,12 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tidepool_bridge::{FromCore, ToCore};
 use tidepool_runtime::DispatchEffect;
 use tokio::io::{stdin, stdout};
 
@@ -131,9 +134,25 @@ pub fn sg_decl() -> EffectDecl {
     }
 }
 
+/// Ask effect: suspend execution to ask the calling LLM a question.
+pub fn ask_decl() -> EffectDecl {
+    EffectDecl {
+        type_name: "Ask",
+        description: "Suspend execution and ask the calling LLM a question. The LLM calls the resume tool with an answer, and execution continues.",
+        constructors: &["Ask :: Text -> Ask Text"],
+        type_defs: &[],
+    }
+}
+
 /// All standard effects in canonical order.
 pub fn standard_decls() -> Vec<EffectDecl> {
-    vec![console_decl(), kv_decl(), fs_decl(), sg_decl()]
+    vec![
+        console_decl(),
+        kv_decl(),
+        fs_decl(),
+        sg_decl(),
+        ask_decl(),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +179,17 @@ pub struct EvalRequest {
     /// Optional JSON input injected as `input :: Aeson.Value` binding.
     #[serde(default)]
     pub input: Option<serde_json::Value>,
+}
+
+/// Request parameters for the `resume` tool.
+///
+/// Used to continue a suspended evaluation that hit an `Ask` effect.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ResumeRequest {
+    /// The continuation ID returned by a suspended eval call.
+    pub continuation_id: String,
+    /// The response text to feed back to the suspended Haskell program.
+    pub response: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -372,6 +402,98 @@ impl CapturedOutput {
 }
 
 // ---------------------------------------------------------------------------
+// Ask effect — channel-based suspension
+// ---------------------------------------------------------------------------
+
+/// Messages from the eval thread to the MCP server.
+enum SessionMessage {
+    /// The program hit an Ask effect and is waiting for a response.
+    Suspended { prompt: String },
+    /// The program completed successfully.
+    Completed { result: String, output: Vec<String> },
+    /// The program encountered an error.
+    Error { error: String },
+}
+
+/// A suspended evaluation session, waiting for a resume call.
+struct EvalSession {
+    /// Send a response string to unblock the eval thread's Ask handler.
+    response_tx: std::sync::mpsc::Sender<String>,
+    /// Receive the next message (Completed, Suspended, or Error) from the eval thread.
+    session_rx: tokio::sync::mpsc::UnboundedReceiver<SessionMessage>,
+    /// The Haskell source code, for error formatting on resume.
+    source: Arc<str>,
+    /// When this session was created, for TTL cleanup.
+    created_at: std::time::Instant,
+}
+
+/// Wraps an existing effect dispatcher and intercepts the Ask effect tag.
+///
+/// When the Ask tag is hit, sends a `Suspended` message via the session channel
+/// and blocks the current thread until a response arrives.
+struct AskDispatcher {
+    inner: Box<dyn McpEffectHandler>,
+    ask_tag: u64,
+    session_tx: tokio::sync::mpsc::UnboundedSender<SessionMessage>,
+    response_rx: std::sync::mpsc::Receiver<String>,
+}
+
+impl DispatchEffect<CapturedOutput> for AskDispatcher {
+    fn dispatch(
+        &mut self,
+        tag: u64,
+        request: &tidepool_eval::value::Value,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, CapturedOutput>,
+    ) -> Result<tidepool_eval::value::Value, tidepool_effect::error::EffectError> {
+        if tag == self.ask_tag {
+            // Extract prompt from Ask constructor: Con(Ask, [prompt_val])
+            let prompt = extract_ask_prompt(request, cx.table());
+
+            // Signal suspension to the MCP server
+            let _ = self.session_tx.send(SessionMessage::Suspended { prompt });
+
+            // Block until the MCP server sends a response via the resume tool
+            let response = self.response_rx.recv().map_err(|_| {
+                tidepool_effect::error::EffectError::Handler(
+                    "Ask session closed (timeout or client disconnected)".into(),
+                )
+            })?;
+
+            // Convert response string to a Haskell Text value
+            response
+                .to_value(cx.table())
+                .map_err(tidepool_effect::error::EffectError::Bridge)
+        } else {
+            self.inner.dispatch(tag, request, cx)
+        }
+    }
+}
+
+/// Best-effort extraction of the prompt string from an Ask request Value.
+///
+/// The request is `Con(Ask, [prompt_val])` where `prompt_val` is a Text value.
+fn extract_ask_prompt(
+    request: &tidepool_eval::value::Value,
+    table: &tidepool_repr::DataConTable,
+) -> String {
+    use tidepool_eval::value::Value;
+
+    if let Value::Con(_, fields) = request {
+        if let Some(prompt_val) = fields.first() {
+            // Try using FromCore (handles Text, LitString, [Char])
+            if let Ok(s) = String::from_value(prompt_val, table) {
+                return s;
+            }
+        }
+    }
+    // Fallback: debug representation
+    format!("{:?}", request)
+}
+
+/// TTL for parked continuations (5 minutes).
+const CONTINUATION_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+// ---------------------------------------------------------------------------
 // Server internals
 // ---------------------------------------------------------------------------
 
@@ -402,25 +524,28 @@ pub struct TidepoolMcpServerImpl {
     haskell_preamble: String,
     effect_stack_type: String,
     eval_tool_description: String,
-}
-
-struct HandlerWrapper<'a>(&'a mut dyn McpEffectHandler);
-
-impl<'a> DispatchEffect<CapturedOutput> for HandlerWrapper<'a> {
-    fn dispatch(
-        &mut self,
-        tag: u64,
-        request: &tidepool_eval::value::Value,
-        cx: &tidepool_effect::dispatch::EffectContext<'_, CapturedOutput>,
-    ) -> Result<tidepool_eval::value::Value, tidepool_effect::error::EffectError> {
-        self.0.dispatch(tag, request, cx)
-    }
+    // Ask effect support
+    ask_tag: u64,
+    continuations: Arc<std::sync::Mutex<HashMap<String, EvalSession>>>,
+    next_cont_id: Arc<AtomicU64>,
 }
 
 impl TidepoolMcpServerImpl {
+    fn next_continuation_id(&self) -> String {
+        let id = self.next_cont_id.fetch_add(1, Ordering::Relaxed);
+        format!("cont_{}", id)
+    }
+
+    fn cleanup_stale_continuations(&self) {
+        let mut conts = self.continuations.lock().unwrap();
+        let now = std::time::Instant::now();
+        conts.retain(|_, session| now.duration_since(session.created_at) < CONTINUATION_TTL);
+    }
+
     async fn eval(&self, req: EvalRequest) -> Result<CallToolResult, McpError> {
         tracing::info!(lines = req.source.len(), "eval request");
-        // Prepend aeson/lens-aeson standard imports to user imports
+        self.cleanup_stale_continuations();
+
         let mut all_imports = aeson_imports();
         all_imports.extend(req.imports);
         let source: Arc<str> = template_haskell(
@@ -433,64 +558,188 @@ impl TidepoolMcpServerImpl {
         )
         .into();
 
-        let mut handlers = dyn_clone::clone_box(&*self.handler_factory);
+        let handlers = dyn_clone::clone_box(&*self.handler_factory);
         let include_refs: Vec<PathBuf> = self.include.clone();
         let source_for_blocking = Arc::clone(&source);
         let captured = CapturedOutput::new();
         let captured_for_blocking = captured.clone();
+        let ask_tag = self.ask_tag;
 
-        let result = std::thread::Builder::new()
+        // Create channels for Ask effect communication
+        let (session_tx, mut session_rx) =
+            tokio::sync::mpsc::unbounded_channel::<SessionMessage>();
+        let (response_tx, response_rx) = std::sync::mpsc::channel::<String>();
+
+        // Spawn eval thread — does NOT join; communicates via channels
+        let thread_session_tx = session_tx;
+        let _handle = std::thread::Builder::new()
             .name("tidepool-eval".into())
-            .stack_size(8 * 1024 * 1024) // 8 MiB — JIT compilation + execution needs headroom
+            .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                let include_paths: Vec<&Path> = include_refs.iter().map(|p| p.as_path()).collect();
-                let mut wrapper = HandlerWrapper(handlers.as_mut());
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    tidepool_runtime::compile_and_run(
-                        &source_for_blocking,
-                        "result",
-                        &include_paths,
-                        &mut wrapper,
-                        &captured_for_blocking,
-                    )
-                }))
+                let include_paths: Vec<&Path> =
+                    include_refs.iter().map(|p| p.as_path()).collect();
+                let mut ask_dispatcher = AskDispatcher {
+                    inner: handlers,
+                    ask_tag,
+                    session_tx: thread_session_tx.clone(),
+                    response_rx,
+                };
+
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        tidepool_runtime::compile_and_run(
+                            &source_for_blocking,
+                            "result",
+                            &include_paths,
+                            &mut ask_dispatcher,
+                            &captured_for_blocking,
+                        )
+                    }));
+
+                let output_lines = captured_for_blocking.drain();
+                match result {
+                    Ok(Ok(eval_result)) => {
+                        let _ = thread_session_tx.send(SessionMessage::Completed {
+                            result: eval_result.to_string_pretty(),
+                            output: output_lines,
+                        });
+                    }
+                    Ok(Err(e)) => {
+                        let _ = thread_session_tx.send(SessionMessage::Error {
+                            error: e.to_string(),
+                        });
+                    }
+                    Err(panic_payload) => {
+                        let _ = thread_session_tx.send(SessionMessage::Error {
+                            error: format_panic_payload(panic_payload),
+                        });
+                    }
+                }
             })
-            .map_err(|e| McpError::internal_error(format!("thread spawn error: {}", e), None))?
-            .join()
-            .map_err(|_| McpError::internal_error("eval thread panicked", None))?;
+            .map_err(|e| {
+                McpError::internal_error(format!("thread spawn error: {}", e), None)
+            })?;
 
-        let output_lines = captured.drain();
-
-        match result {
-            Ok(Ok(eval_result)) => {
-                tracing::info!("eval succeeded");
+        // Await first message from the eval thread
+        match session_rx.recv().await {
+            Some(SessionMessage::Completed { result, output }) => {
+                tracing::info!("eval completed");
                 let mut response = String::new();
-                if !output_lines.is_empty() {
+                if !output.is_empty() {
                     response.push_str("## Output\n");
-                    for line in &output_lines {
+                    for line in &output {
                         response.push_str(line);
                         response.push('\n');
                     }
                     response.push_str("\n## Result\n");
                 }
-                response.push_str(&eval_result.to_string_pretty());
+                response.push_str(&result);
                 Ok(CallToolResult::success(vec![Content::text(response)]))
             }
-            Ok(Err(e)) => {
-                let error_msg = format_error_with_source("Error", &e.to_string(), &source);
-                tracing::error!("eval failed: {}", e);
-                Ok(CallToolResult::error(vec![Content::text(error_msg)]))
-            }
-            Err(panic_payload) => {
-                let panic_msg = format_panic_payload(panic_payload);
-                let error_msg = format_error_with_source(
-                    "Error",
-                    &format!("Internal panic: {}", panic_msg),
-                    &source,
+            Some(SessionMessage::Suspended { prompt }) => {
+                tracing::info!(prompt = %prompt, "eval suspended on Ask");
+                let cont_id = self.next_continuation_id();
+                let json = serde_json::json!({
+                    "suspended": true,
+                    "continuation_id": cont_id,
+                    "prompt": prompt,
+                });
+                self.continuations.lock().unwrap().insert(
+                    cont_id.clone(),
+                    EvalSession {
+                        response_tx,
+                        session_rx,
+                        source: Arc::clone(&source),
+                        created_at: std::time::Instant::now(),
+                    },
                 );
-                tracing::error!("eval panicked: {}", panic_msg);
+                Ok(CallToolResult::success(vec![Content::text(
+                    json.to_string(),
+                )]))
+            }
+            Some(SessionMessage::Error { error }) => {
+                let error_msg = format_error_with_source("Error", &error, &source);
+                tracing::error!("eval failed: {}", error);
                 Ok(CallToolResult::error(vec![Content::text(error_msg)]))
             }
+            None => Err(McpError::internal_error(
+                "eval thread died unexpectedly",
+                None,
+            )),
+        }
+    }
+
+    async fn resume(&self, req: ResumeRequest) -> Result<CallToolResult, McpError> {
+        tracing::info!(continuation_id = %req.continuation_id, "resume request");
+        self.cleanup_stale_continuations();
+
+        let mut session = {
+            let mut conts = self.continuations.lock().unwrap();
+            conts.remove(&req.continuation_id).ok_or_else(|| {
+                McpError::invalid_params(
+                    format!(
+                        "Unknown or expired continuation_id: {}",
+                        req.continuation_id
+                    ),
+                    None,
+                )
+            })?
+        };
+
+        // Send the response to the blocked eval thread
+        session.response_tx.send(req.response).map_err(|_| {
+            McpError::internal_error("eval thread is no longer running", None)
+        })?;
+
+        let source = session.source.clone();
+        let response_tx = session.response_tx.clone();
+
+        // Await the next message from the eval thread
+        match session.session_rx.recv().await {
+            Some(SessionMessage::Completed { result, output }) => {
+                tracing::info!("resumed eval completed");
+                let mut response = String::new();
+                if !output.is_empty() {
+                    response.push_str("## Output\n");
+                    for line in &output {
+                        response.push_str(line);
+                        response.push('\n');
+                    }
+                    response.push_str("\n## Result\n");
+                }
+                response.push_str(&result);
+                Ok(CallToolResult::success(vec![Content::text(response)]))
+            }
+            Some(SessionMessage::Suspended { prompt }) => {
+                tracing::info!(prompt = %prompt, "resumed eval suspended again");
+                let cont_id = self.next_continuation_id();
+                let json = serde_json::json!({
+                    "suspended": true,
+                    "continuation_id": cont_id,
+                    "prompt": prompt,
+                });
+                self.continuations.lock().unwrap().insert(
+                    cont_id.clone(),
+                    EvalSession {
+                        response_tx,
+                        session_rx: session.session_rx,
+                        source,
+                        created_at: std::time::Instant::now(),
+                    },
+                );
+                Ok(CallToolResult::success(vec![Content::text(
+                    json.to_string(),
+                )]))
+            }
+            Some(SessionMessage::Error { error }) => {
+                let error_msg = format_error_with_source("Error", &error, &source);
+                tracing::error!("resumed eval failed: {}", error);
+                Ok(CallToolResult::error(vec![Content::text(error_msg)]))
+            }
+            None => Err(McpError::internal_error(
+                "eval thread died unexpectedly",
+                None,
+            )),
         }
     }
 }
@@ -518,6 +767,13 @@ impl ServerHandler for TidepoolMcpServerImpl {
                     })?;
                 self.eval(req).await
             }
+            "resume" => {
+                let req: ResumeRequest =
+                    serde_json::from_value(serde_json::Value::Object(args)).map_err(|e| {
+                        McpError::invalid_params(format!("invalid params: {}", e), None)
+                    })?;
+                self.resume(req).await
+            }
             _ => Err(McpError {
                 code: ErrorCode::METHOD_NOT_FOUND,
                 message: format!("Tool not found: {}", request.name).into(),
@@ -543,17 +799,35 @@ impl ServerHandler for TidepoolMcpServerImpl {
             }
         }
 
-        let tools = vec![Tool {
-            name: "eval".into(),
-            title: None,
-            description: Some(self.eval_tool_description.clone().into()),
-            input_schema: schema_to_map(schemars::schema_for!(EvalRequest))?,
-            output_schema: None,
-            annotations: None,
-            icons: None,
-            meta: None,
-            execution: None,
-        }];
+        let tools = vec![
+            Tool {
+                name: "eval".into(),
+                title: None,
+                description: Some(self.eval_tool_description.clone().into()),
+                input_schema: schema_to_map(schemars::schema_for!(EvalRequest))?,
+                output_schema: None,
+                annotations: None,
+                icons: None,
+                meta: None,
+                execution: None,
+            },
+            Tool {
+                name: "resume".into(),
+                title: None,
+                description: Some(
+                    "Resume a suspended Haskell evaluation. When eval returns \
+                     {\"suspended\": true, \"continuation_id\": \"...\", \"prompt\": \"...\"}, \
+                     call this tool with the continuation_id and your response to the prompt."
+                        .into(),
+                ),
+                input_schema: schema_to_map(schemars::schema_for!(ResumeRequest))?,
+                output_schema: None,
+                annotations: None,
+                icons: None,
+                meta: None,
+                execution: None,
+            },
+        ];
 
         Ok(ListToolsResult {
             tools,
@@ -576,7 +850,9 @@ where
     /// Effect declarations are collected automatically from handlers that
     /// implement `DescribeEffect`.
     pub fn new(handler: H) -> Self {
-        let decls = H::collect_decls();
+        let mut decls = H::collect_decls();
+        let ask_tag = decls.len() as u64;
+        decls.push(ask_decl());
         Self {
             inner: TidepoolMcpServerImpl {
                 handler_factory: Arc::new(handler),
@@ -584,6 +860,9 @@ where
                 haskell_preamble: build_preamble(&decls),
                 effect_stack_type: build_effect_stack_type(&decls),
                 eval_tool_description: build_eval_tool_description(&decls),
+                ask_tag,
+                continuations: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                next_cont_id: Arc::new(AtomicU64::new(1)),
             },
             _phantom: PhantomData,
         }
@@ -754,5 +1033,47 @@ mod tests {
         assert!(formatted.contains("Type mismatch"));
         assert!(formatted.contains("## Compiled Source"));
         assert!(formatted.contains("```haskell\nmain = pure ()\n```"));
+    }
+
+    #[test]
+    fn test_ask_decl() {
+        let decl = ask_decl();
+        assert_eq!(decl.type_name, "Ask");
+        assert_eq!(decl.constructors.len(), 1);
+        assert!(decl.constructors[0].contains("Ask :: Text -> Ask Text"));
+    }
+
+    #[test]
+    fn test_standard_decls_includes_ask() {
+        let decls = standard_decls();
+        assert_eq!(decls.len(), 5);
+        assert_eq!(decls[4].type_name, "Ask");
+    }
+
+    #[test]
+    fn test_resume_request_parse() {
+        let json = serde_json::json!({
+            "continuation_id": "cont_1",
+            "response": "hello"
+        });
+        let req: ResumeRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.continuation_id, "cont_1");
+        assert_eq!(req.response, "hello");
+    }
+
+    #[test]
+    fn test_ask_in_preamble() {
+        let decls = standard_decls();
+        let preamble = build_preamble(&decls);
+        assert!(preamble.contains("data Ask a where"));
+        assert!(preamble.contains("  Ask :: Text -> Ask Text"));
+        assert!(preamble.contains("type M = Eff '[Console, KV, Fs, SG, Ask]"));
+    }
+
+    #[test]
+    fn test_ask_in_effect_stack_type() {
+        let decls = standard_decls();
+        let stack = build_effect_stack_type(&decls);
+        assert_eq!(stack, "'[Console, KV, Fs, SG, Ask]");
     }
 }
