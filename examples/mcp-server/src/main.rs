@@ -473,14 +473,80 @@ impl EffectHandler<CapturedOutput> for HttpHandler {
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<Value, EffectError> {
         match req {
-            HttpReq::Get(url) => {
-                let resp = ureq::get(&url)
+            HttpReq::Get(url_str) => {
+                let url = url::Url::parse(&url_str).map_err(|e| {
+                    EffectError::Handler(format!("Invalid URL '{}': {}", url_str, e))
+                })?;
+
+                if url.scheme() != "http" && url.scheme() != "https" {
+                    return Err(EffectError::Handler(format!(
+                        "Unsupported protocol '{}' for URL '{}'. Only http and https are allowed.",
+                        url.scheme(),
+                        url_str
+                    )));
+                }
+
+                if let Some(host) = url.host() {
+                    match host {
+                        url::Host::Ipv4(ip) => {
+                            if ip.is_loopback() || ip.is_private() || ip.is_link_local() {
+                                return Err(EffectError::Handler(format!(
+                                    "Access to internal IP address '{}' is restricted.",
+                                    ip
+                                )));
+                            }
+                        }
+                        url::Host::Ipv6(ip) => {
+                            if ip.is_loopback() || ip.is_unspecified() {
+                                return Err(EffectError::Handler(format!(
+                                    "Access to internal IP address '{}' is restricted.",
+                                    ip
+                                )));
+                            }
+                            // Simplified IPv6 private check (Unique Local Address)
+                            let segments = ip.segments();
+                            if (segments[0] & 0xfe00) == 0xfc00 {
+                                return Err(EffectError::Handler(format!(
+                                    "Access to internal IP address '{}' is restricted.",
+                                    ip
+                                )));
+                            }
+                        }
+                        url::Host::Domain(domain) => {
+                            if domain == "localhost" {
+                                return Err(EffectError::Handler(
+                                    "Access to 'localhost' is restricted.".into(),
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                let resp = match ureq::get(url.as_str())
                     .timeout(std::time::Duration::from_secs(30))
                     .call()
-                    .map_err(|e| EffectError::Handler(format!("HTTP GET failed: {}", e)))?;
-                let body = resp
-                    .into_string()
-                    .map_err(|e| EffectError::Handler(format!("Read body failed: {}", e)))?;
+                {
+                    Ok(resp) => resp,
+                    Err(err) => {
+                        let msg = match err {
+                            ureq::Error::Status(code, response) => format!(
+                                "HTTP GET to '{}' failed with status {} {}",
+                                url_str,
+                                code,
+                                response.status_text()
+                            ),
+                            ureq::Error::Transport(transport) => format!(
+                                "HTTP GET to '{}' failed due to transport error: {}",
+                                url_str, transport
+                            ),
+                        };
+                        return Err(EffectError::Handler(msg));
+                    }
+                };
+
+                let body = resp.into_string().map_err(|e| {
+                    EffectError::Handler(format!("Read body from '{}' failed: {}", url_str, e))
+                })?;
                 cx.respond(body)
             }
         }
