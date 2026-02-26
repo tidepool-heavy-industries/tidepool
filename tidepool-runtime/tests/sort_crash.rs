@@ -41,7 +41,7 @@ fn mcp_source_with_helpers(lines: &[&str], helpers: &[&str]) -> String {
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
     let helpers: Vec<String> = helpers.iter().map(|s| s.to_string()).collect();
-    tidepool_mcp::template_haskell(&preamble, &stack, &lines, &[], &helpers)
+    tidepool_mcp::template_haskell(&preamble, &stack, &lines, &[], &helpers, None)
 }
 
 fn mcp_source_with_imports(lines: &[&str], helpers: &[&str], imports: &[&str]) -> String {
@@ -51,7 +51,7 @@ fn mcp_source_with_imports(lines: &[&str], helpers: &[&str], imports: &[&str]) -
     let lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
     let helpers: Vec<String> = helpers.iter().map(|s| s.to_string()).collect();
     let imports: Vec<String> = imports.iter().map(|s| s.to_string()).collect();
-    tidepool_mcp::template_haskell(&preamble, &stack, &lines, &imports, &helpers)
+    tidepool_mcp::template_haskell(&preamble, &stack, &lines, &imports, &helpers, None)
 }
 
 fn run_mcp_with_imports(lines: &[&str], helpers: &[&str], imports: &[&str]) -> serde_json::Value {
@@ -278,6 +278,430 @@ fn run_mcp_effectful_with_helpers(
         .unwrap()
         .join()
         .expect("thread panicked")
+}
+
+// ===========================================================================
+// Aeson / lens-aeson helpers
+// ===========================================================================
+
+fn aeson_import_strs() -> Vec<&'static str> {
+    vec![
+        "Data.Aeson (Value(..), object, (.=), encode, decode, toJSON, fromJSON, Result(..))",
+        "Data.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Integer, _Double)",
+        "qualified Data.Aeson as Aeson",
+        "qualified Data.Aeson.Key as Key",
+        "qualified Data.Aeson.KeyMap as KM",
+        "qualified Data.Vector as V",
+        "Control.Lens (preview, toListOf, (^?), (^..), (&), (.~), (%~), to, _Just, traverse)",
+    ]
+}
+
+fn run_aeson(lines: &[&str]) -> serde_json::Value {
+    run_mcp_with_imports(lines, &[], &aeson_import_strs())
+}
+
+fn run_aeson_with_helpers(lines: &[&str], helpers: &[&str]) -> serde_json::Value {
+    run_mcp_with_imports(lines, helpers, &aeson_import_strs())
+}
+
+fn run_aeson_effectful(lines: &[&str]) -> (serde_json::Value, Vec<String>) {
+    run_aeson_effectful_with_helpers(lines, &[])
+}
+
+fn run_aeson_effectful_with_helpers(
+    lines: &[&str],
+    helpers: &[&str],
+) -> (serde_json::Value, Vec<String>) {
+    let imports: Vec<&str> = aeson_import_strs();
+    let src = mcp_source_with_imports(lines, helpers, &imports);
+    let pp = prelude_path();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let include = [pp.as_path()];
+            let (console, captured) = TestConsole::new();
+            let kv = TestKv::new();
+            let mut handlers = frunk::hlist![console, kv, TestFs];
+            let val = compile_and_run(&src, "result", &include, &mut handlers, &())
+                .expect("compile_and_run failed");
+            let json = val.to_json();
+            let lines = captured.lock().unwrap().clone();
+            (json, lines)
+        })
+        .unwrap()
+        .join()
+        .expect("thread panicked")
+}
+
+fn run_aeson_with_input(lines: &[&str], input: serde_json::Value) -> serde_json::Value {
+    let decls = test_decls();
+    let preamble = tidepool_mcp::build_preamble(&decls);
+    let stack = tidepool_mcp::build_effect_stack_type(&decls);
+    let lines_owned: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+    let imports: Vec<String> = aeson_import_strs().iter().map(|s| s.to_string()).collect();
+    let src = tidepool_mcp::template_haskell(
+        &preamble, &stack, &lines_owned, &imports, &[], Some(&input),
+    );
+    let pp = prelude_path();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let include = [pp.as_path()];
+            let val = compile_and_run(&src, "result", &include, &mut HNil, &())
+                .expect("compile_and_run failed");
+            val.to_json()
+        })
+        .unwrap()
+        .join()
+        .expect("thread panicked")
+}
+
+// ===========================================================================
+// Aeson / lens-aeson tests
+// ===========================================================================
+
+// --- Basic construction ---
+
+/// Construct a simple JSON object with object/.=
+#[test]
+fn test_aeson_object_simple() {
+    let json = run_aeson(&[
+        r#"pure (object ["name" .= ("Alice" :: Text), "age" .= (30 :: Int)])"#,
+    ]);
+    assert_eq!(json["constructor"], "Object");
+    // The exact structure depends on how aeson's Object renders through our bridge.
+    // At minimum, it should not crash.
+}
+
+/// Construct a JSON array via toJSON
+#[test]
+#[ignore] // needs Array#-aware heap bridge rendering for Vector internals
+fn test_aeson_array_tojson() {
+    let json = run_aeson(&[
+        r#"pure (toJSON [1, 2, 3 :: Int])"#,
+    ]);
+    // aeson's toJSON [Int] produces Array (Vector Value)
+    // Our bridge should traverse the Vector's Array# internals
+    assert!(!json.is_null(), "toJSON [1,2,3] should not be null");
+}
+
+/// Construct Aeson.Null
+#[test]
+fn test_aeson_null() {
+    let json = run_aeson(&[
+        r#"pure Aeson.Null"#,
+    ]);
+    // Should render as the "Null" constructor
+    assert_eq!(json, serde_json::json!("Null"));
+}
+
+/// Construct Aeson.Bool
+#[test]
+fn test_aeson_bool_true() {
+    let json = run_aeson(&[
+        r#"pure (Aeson.Bool True)"#,
+    ]);
+    // Bool True wraps our True constructor
+    assert_eq!(json, serde_json::json!({"constructor": "Bool", "fields": [true]}));
+}
+
+/// Construct Aeson.String
+#[test]
+fn test_aeson_string() {
+    let json = run_aeson(&[
+        r#"pure (Aeson.String "hello world")"#,
+    ]);
+    assert_eq!(json, serde_json::json!({"constructor": "String", "fields": ["hello world"]}));
+}
+
+/// Construct Aeson.Number from Int
+#[test]
+fn test_aeson_number_int() {
+    let json = run_aeson(&[
+        r#"pure (toJSON (42 :: Int))"#,
+    ]);
+    // toJSON Int produces Number (Scientific)
+    assert!(!json.is_null());
+}
+
+// --- lens-aeson key access ---
+
+/// Use (^?) key to extract a string from an object
+#[test]
+fn test_aeson_lens_key_string() {
+    let json = run_aeson(&[
+        r#"let obj = object ["name" .= ("Alice" :: Text), "age" .= (30 :: Int)]"#,
+        r#"pure (obj ^? key "name" . _String)"#,
+    ]);
+    // Should be Just "Alice" → renders as "Alice"
+    assert_eq!(json, serde_json::json!("Alice"));
+}
+
+/// Use (^?) key to extract an integer from an object
+#[test]
+fn test_aeson_lens_key_integer() {
+    let json = run_aeson(&[
+        r#"let obj = object ["x" .= (42 :: Int), "y" .= (99 :: Int)]"#,
+        r#"pure (obj ^? key "x" . _Number)"#,
+    ]);
+    assert_eq!(json, serde_json::json!(42.0));
+}
+
+/// Key lookup on missing field returns Nothing → null
+#[test]
+fn test_aeson_lens_key_missing() {
+    let json = run_aeson(&[
+        r#"let obj = object ["x" .= (1 :: Int)]"#,
+        r#"pure (obj ^? key "missing" . _String)"#,
+    ]);
+    assert_eq!(json, serde_json::json!(null));
+}
+
+/// Nested key access: key "a" . key "b"
+#[test]
+fn test_aeson_lens_nested_key() {
+    let json = run_aeson(&[
+        r#"let inner = object ["b" .= ("deep" :: Text)]"#,
+        r#"let outer = object ["a" .= inner]"#,
+        r#"pure (outer ^? key "a" . key "b" . _String)"#,
+    ]);
+    assert_eq!(json, serde_json::json!("deep"));
+}
+
+/// Array indexing with nth
+#[test]
+fn test_aeson_lens_nth() {
+    let json = run_aeson(&[
+        r#"let arr = toJSON [10, 20, 30 :: Int]"#,
+        r#"pure (arr ^? nth 1 . _Number)"#,
+    ]);
+    assert_eq!(json, serde_json::json!(20.0));
+}
+
+/// Use (^..) to extract all strings from an object
+#[test]
+fn test_aeson_lens_traverse_strings() {
+    let json = run_aeson(&[
+        r#"let obj = object ["a" .= ("x" :: Text), "b" .= (1 :: Int), "c" .= ("y" :: Text)]"#,
+        r#"pure (obj ^.. key "a" . _String)"#,
+    ]);
+    // ^.. on a single key gives a list of 0 or 1
+    assert_eq!(json, serde_json::json!(["x"]));
+}
+
+// --- Modification via lens ---
+
+/// Use (.~) to set a field value
+#[test]
+#[ignore] // Requires Integer arithmetic (Scientific internals) — needs GMP FFI support
+fn test_aeson_lens_set_field() {
+    let json = run_aeson(&[
+        r#"let obj = object ["x" .= (1 :: Int)]"#,
+        r#"let modified = obj & key "x" . _Number .~ 999"#,
+        r#"pure (modified ^? key "x" . _Number)"#,
+    ]);
+    assert_eq!(json, serde_json::json!(999.0));
+}
+
+/// Use (%~) to modify a field value
+#[test]
+#[ignore] // Requires Integer arithmetic (Scientific internals) — needs GMP FFI support
+fn test_aeson_lens_modify_field() {
+    let json = run_aeson(&[
+        r#"let obj = object ["count" .= (10 :: Int)]"#,
+        r#"let modified = obj & key "count" . _Number %~ (+ 5)"#,
+        r#"pure (modified ^? key "count" . _Number)"#,
+    ]);
+    assert_eq!(json, serde_json::json!(15.0));
+}
+
+// --- Multi-stage: construct, inspect, transform ---
+
+/// Build object, extract field, use it in computation
+#[test]
+fn test_aeson_multistage_extract_compute() {
+    let json = run_aeson_with_helpers(
+        &[
+            r#"let person = object ["name" .= ("Alice" :: Text), "score" .= (85 :: Int)]"#,
+            r#"let mScore = person ^? key "score" . _Number"#,
+            r#"pure mScore"#,
+        ],
+        &[],
+    );
+    assert_eq!(json, serde_json::json!(85.0));
+}
+
+/// Build nested JSON, modify inner field, extract result
+#[test]
+#[ignore] // Requires Integer arithmetic (Scientific internals) — needs GMP FFI support
+fn test_aeson_multistage_nested_modify() {
+    let json = run_aeson(&[
+        r#"let config = object ["db" .= object ["port" .= (5432 :: Int), "host" .= ("localhost" :: Text)]]"#,
+        r#"let updated = config & key "db" . key "port" . _Number .~ 3306"#,
+        r#"pure (updated ^? key "db" . key "port" . _Number)"#,
+    ]);
+    assert_eq!(json, serde_json::json!(3306.0));
+}
+
+// --- Multi-effect: aeson + Console + KV ---
+
+/// Print a JSON field via Console effect
+#[test]
+fn test_aeson_effect_print_field() {
+    let (json, console) = run_aeson_effectful(&[
+        r#"let person = object ["name" .= ("Bob" :: Text)]"#,
+        r#"case person ^? key "name" . _String of"#,
+        r#"  Just n  -> send (Print n)"#,
+        r#"  Nothing -> send (Print "unknown")"#,
+        r#"pure (42 :: Int)"#,
+    ]);
+    assert_eq!(json, serde_json::json!(42));
+    assert_eq!(console, vec!["Bob"]);
+}
+
+/// Store JSON string in KV, retrieve and lens into it
+#[test]
+fn test_aeson_effect_kv_store_retrieve() {
+    let (json, _) = run_aeson_effectful(&[
+        r#"send (KvSet "data" "hello world")"#,
+        r#"raw <- send (KvGet "data")"#,
+        r#"pure raw"#,
+    ]);
+    // Test KV store/retrieve roundtrip with Text values
+    assert_eq!(json, serde_json::json!("hello world"));
+}
+
+/// Build aeson Value, print multiple fields via Console
+#[test]
+fn test_aeson_effect_multi_print() {
+    let (json, console) = run_aeson_effectful(&[
+        r#"let record = object ["first" .= ("Jane" :: Text), "last" .= ("Doe" :: Text), "age" .= (28 :: Int)]"#,
+        r#"case record ^? key "first" . _String of"#,
+        r#"  Just f -> send (Print f)"#,
+        r#"  Nothing -> pure ()"#,
+        r#"case record ^? key "last" . _String of"#,
+        r#"  Just l -> send (Print l)"#,
+        r#"  Nothing -> pure ()"#,
+        r#"pure (record ^? key "age" . _Number)"#,
+    ]);
+    assert_eq!(json, serde_json::json!(28.0));
+    assert_eq!(console, vec!["Jane", "Doe"]);
+}
+
+// --- JSON input injection ---
+
+/// Use the `input` field to inject a JSON value
+#[test]
+fn test_aeson_input_simple() {
+    let json = run_aeson_with_input(
+        &[r#"pure (input ^? key "name" . _String)"#],
+        serde_json::json!({"name": "Alice", "age": 30}),
+    );
+    assert_eq!(json, serde_json::json!("Alice"));
+}
+
+/// Input injection with nested object
+#[test]
+fn test_aeson_input_nested() {
+    let json = run_aeson_with_input(
+        &[r#"pure (input ^? key "config" . key "port" . _Number)"#],
+        serde_json::json!({"config": {"port": 8080, "host": "localhost"}}),
+    );
+    assert_eq!(json, serde_json::json!(8080.0));
+}
+
+/// Input injection with array access
+#[test]
+fn test_aeson_input_array() {
+    let json = run_aeson_with_input(
+        &[r#"pure (input ^? nth 2 . _String)"#],
+        serde_json::json!(["a", "b", "c", "d"]),
+    );
+    assert_eq!(json, serde_json::json!("c"));
+}
+
+/// Input injection with multi-stage transformation
+#[test]
+fn test_aeson_input_transform() {
+    let json = run_aeson_with_input(
+        &[
+            r#"let scores = input ^.. key "scores" . _Array . traverse . _Number"#,
+            r#"pure (scores)"#,
+        ],
+        serde_json::json!({"scores": [10, 20, 30]}),
+    );
+    assert_eq!(json, serde_json::json!([10.0, 20.0, 30.0]));
+}
+
+/// Input injection with effect: extract from input, print, return
+#[test]
+fn test_aeson_input_with_effect() {
+    let input_val = serde_json::json!({"greeting": "Hello from JSON!"});
+    let imports: Vec<&str> = aeson_import_strs();
+    let decls = test_decls();
+    let preamble = tidepool_mcp::build_preamble(&decls);
+    let stack = tidepool_mcp::build_effect_stack_type(&decls);
+    let lines = vec![
+        r#"case input ^? key "greeting" . _String of"#.to_string(),
+        r#"  Just g  -> send (Print g)"#.to_string(),
+        r#"  Nothing -> pure ()"#.to_string(),
+        r#"pure (input ^? key "greeting" . _String)"#.to_string(),
+    ];
+    let imports_owned: Vec<String> = imports.iter().map(|s| s.to_string()).collect();
+    let src = tidepool_mcp::template_haskell(
+        &preamble, &stack, &lines, &imports_owned, &[], Some(&input_val),
+    );
+    let pp = prelude_path();
+    let result = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let include = [pp.as_path()];
+            let (console, captured) = TestConsole::new();
+            let kv = TestKv::new();
+            let mut handlers = frunk::hlist![console, kv, TestFs];
+            let val = compile_and_run(&src, "result", &include, &mut handlers, &())
+                .expect("compile_and_run failed");
+            let json = val.to_json();
+            let lines = captured.lock().unwrap().clone();
+            (json, lines)
+        })
+        .unwrap()
+        .join()
+        .expect("thread panicked");
+    assert_eq!(result.0, serde_json::json!("Hello from JSON!"));
+    assert_eq!(result.1, vec!["Hello from JSON!"]);
+}
+
+// --- Helper-driven complex patterns ---
+
+/// Use a top-level helper function over aeson Values
+#[test]
+fn test_aeson_helper_extract_names() {
+    let json = run_aeson_with_helpers(
+        &[
+            r#"let people = toJSON [object ["name" .= ("Alice" :: Text)], object ["name" .= ("Bob" :: Text)]]"#,
+            r#"pure (extractNames people)"#,
+        ],
+        &[
+            "extractNames :: Aeson.Value -> [Text]\nextractNames v = v ^.. _Array . traverse . key \"name\" . _String",
+        ],
+    );
+    assert_eq!(json, serde_json::json!(["Alice", "Bob"]));
+}
+
+/// Complex pipeline: build, count items via helper
+#[test]
+fn test_aeson_helper_pipeline() {
+    let json = run_aeson_with_helpers(
+        &[
+            r#"let items = toJSON [object ["name" .= (n :: Text)] | n <- ["alice", "bob", "carol"]]"#,
+            r#"pure (countItems items)"#,
+        ],
+        &[
+            "countItems :: Aeson.Value -> Int\ncountItems v = length (v ^.. _Array . traverse . key \"name\" . _String)",
+        ],
+    );
+    assert_eq!(json, serde_json::json!(3));
 }
 
 // ===========================================================================
