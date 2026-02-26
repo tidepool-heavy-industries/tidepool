@@ -78,7 +78,7 @@ module Tidepool.Prelude
     -- * Char/Enum
   , ord, chr, fromEnum
     -- * JSON (Data.Aeson)
-  , Value(..), object, (.=), encode, decode, toJSON, fromJSON, Result(..)
+  , Value, object, (.=), encode, decode, eitherDecode, eitherDecodeStrict, toJSON, fromJSON, Result(..)
   , ToJSON, FromJSON
     -- * JSON lenses (Data.Aeson.Lens + Control.Lens)
   , key, nth, _String, _Number, _Bool, _Array, _Object, _Integer, _Double
@@ -131,14 +131,10 @@ import Control.Monad
   , (=<<), (>=>), (<=<)
   , foldM, foldM_
   )
-import Data.Aeson (Value(..), object, (.=), encode, decode, toJSON, fromJSON, Result(..), ToJSON, FromJSON)
+import Data.Aeson (Value, object, (.=), encode, decode, eitherDecode, eitherDecodeStrict, toJSON, fromJSON, Result(..), ToJSON, FromJSON)
 import Data.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Integer, _Double)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KM
-import qualified Data.Vector as V
-import Control.Lens (preview, toListOf, (^?), (^..), (&), (.~), (%~), to, _Just, Prism', Getting, ASetter)
-import Data.Scientific (Scientific, toRealFloat, fromFloatDigits)
+import Control.Lens (preview, toListOf, (^?), (^..), (&), (.~), (%~), to, _Just)
+import Data.Scientific (Scientific)
 
 -- | Marker typeclass for types whose runtime values can be rendered to JSON
 -- by the Rust-side value_to_json renderer. Use @pure x@ to return values
