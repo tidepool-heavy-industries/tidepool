@@ -93,6 +93,7 @@ pub fn clear_gc_state() {
 ///
 /// The frame walker in gc_trigger reads RBP to walk the JIT stack.
 #[inline(never)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
     // Force a frame to be created
     let mut _dummy = [0u64; 2];
@@ -399,7 +400,6 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) {
         RUNTIME_ERROR.with(|cell| {
             *cell.borrow_mut() = Some(RuntimeError::BadFunPtrTag(tag));
         });
-        return;
     }
 }
 

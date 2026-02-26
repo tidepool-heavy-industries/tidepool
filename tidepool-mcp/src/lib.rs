@@ -708,6 +708,17 @@ mod tests {
     }
 
     #[test]
+    fn test_standard_decls_includes_http() {
+        let decls = standard_decls();
+        assert_eq!(decls.len(), 5);
+        assert_eq!(decls[0].type_name, "Console");
+        assert_eq!(decls[1].type_name, "KV");
+        assert_eq!(decls[2].type_name, "Fs");
+        assert_eq!(decls[3].type_name, "SG");
+        assert_eq!(decls[4].type_name, "Http");
+    }
+
+    #[test]
     fn test_template_haskell() {
         let effects = vec![EffectDecl {
             type_name: "Console",
