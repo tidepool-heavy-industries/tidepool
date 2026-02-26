@@ -448,6 +448,45 @@ impl EffectHandler<CapturedOutput> for SgHandler {
     }
 }
 
+// === Tag 4: Http ===
+
+#[derive(FromCore)]
+enum HttpReq {
+    #[core(name = "HttpGet")]
+    Get(String),
+}
+
+#[derive(Clone)]
+struct HttpHandler;
+
+impl DescribeEffect for HttpHandler {
+    fn effect_decl() -> EffectDecl {
+        tidepool_mcp::http_decl()
+    }
+}
+
+impl EffectHandler<CapturedOutput> for HttpHandler {
+    type Request = HttpReq;
+    fn handle(
+        &mut self,
+        req: HttpReq,
+        cx: &EffectContext<'_, CapturedOutput>,
+    ) -> Result<Value, EffectError> {
+        match req {
+            HttpReq::Get(url) => {
+                let resp = ureq::get(&url)
+                    .timeout(std::time::Duration::from_secs(30))
+                    .call()
+                    .map_err(|e| EffectError::Handler(format!("HTTP GET failed: {}", e)))?;
+                let body = resp
+                    .into_string()
+                    .map_err(|e| EffectError::Handler(format!("Read body failed: {}", e)))?;
+                cx.respond(body)
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -463,7 +502,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ConsoleHandler,
         KvHandler::new(),
         FsHandler::new(cwd.clone()),
-        SgHandler::new(cwd.clone())
+        SgHandler::new(cwd.clone()),
+        HttpHandler
     ];
 
     // Prelude lives at haskell/lib/ relative to repo root, or via TIDEPOOL_PRELUDE_DIR.

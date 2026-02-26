@@ -19,6 +19,7 @@ tidepool-repr = { path = "../../tidepool-repr" }
 ast-grep-core = "0.41"
 ast-grep-language = "0.41"
 frunk = "0.4"
+ureq = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

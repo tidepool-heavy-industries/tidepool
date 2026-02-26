@@ -131,9 +131,25 @@ pub fn sg_decl() -> EffectDecl {
     }
 }
 
+/// Http effect: fetch JSON from HTTP endpoints.
+pub fn http_decl() -> EffectDecl {
+    EffectDecl {
+        type_name: "Http",
+        description: "Fetch JSON from HTTP endpoints. Returns response body as Text.",
+        constructors: &["HttpGet :: Text -> Http Text"],
+        type_defs: &[],
+    }
+}
+
 /// All standard effects in canonical order.
 pub fn standard_decls() -> Vec<EffectDecl> {
-    vec![console_decl(), kv_decl(), fs_decl(), sg_decl()]
+    vec![
+        console_decl(),
+        kv_decl(),
+        fs_decl(),
+        sg_decl(),
+        http_decl(),
+    ]
 }
 
 // ---------------------------------------------------------------------------
