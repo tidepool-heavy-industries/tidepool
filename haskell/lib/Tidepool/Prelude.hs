@@ -8,7 +8,7 @@ module Tidepool.Prelude
   ( -- * Renderable marker
     Renderable
     -- * Types (re-exported from base)
-  , Int, Word, Char, Bool(..), Double, Float
+  , Int, Integer, Word, Char, Bool(..), Double, Float
   , String, Ordering(..), Maybe(..), Either(..)
   , IO
     -- * Text type (re-exported from Data.Text)
@@ -22,7 +22,8 @@ module Tidepool.Prelude
     -- * Text versions of words/lines
   , words, lines, unwords, unlines
     -- * Typeclasses (re-exported from base)
-  , Eq(..), Ord(..), Num(..), Integral(..), Show
+  , Eq(..), Ord(..), Num(..), Integral(..), Real, Fractional, Show
+  , fromIntegral, realToFrac
   , Functor(..), Applicative(..), Monad(..)
     -- * show (Text-returning shadow)
   , show
@@ -72,15 +73,18 @@ module Tidepool.Prelude
   , head
   , tail
   , last
+    -- * Numeric utilities
+  , even, odd
     -- * Char/Enum
   , ord, chr, fromEnum
   ) where
 
 import Prelude
-  ( Int, Word, Char, Bool(..), Double, Float
+  ( Int, Integer, Word, Char, Bool(..), Double, Float
   , String, Ordering(..), Maybe(..), Either(..)
   , IO
-  , Eq(..), Ord(..), Num(..), Integral(..), Show
+  , Eq(..), Ord(..), Num(..), Integral(..), Real, Fractional, Show
+  , fromIntegral, realToFrac, even, odd
   , Functor(..), Applicative(..), Monad(..)
   , id, const, flip, (.), ($), ($!)
   , not, (&&), (||), otherwise, seq
@@ -125,6 +129,7 @@ import Control.Monad
 -- instead of @send (Print (show x))@.
 class Renderable a
 instance Renderable Int
+instance Renderable Integer
 instance Renderable Word
 instance Renderable Char
 instance Renderable Double

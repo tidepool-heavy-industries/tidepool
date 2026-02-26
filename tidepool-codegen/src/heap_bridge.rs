@@ -81,6 +81,24 @@ pub unsafe fn heap_to_value(ptr: *const u8) -> Result<Value, BridgeError> {
                         std::sync::Mutex::new(bytes),
                     )))
                 }
+                8 | 9 => {
+                    // SmallArray# (8) / Array# (9) — boxed pointer arrays
+                    // Layout: [u64 length][ptr0][ptr1]...[ptrN-1]
+                    let arr_ptr = raw_value as *const u8;
+                    if arr_ptr.is_null() {
+                        return Ok(Value::Con(DataConId(0), vec![]));
+                    }
+                    let len = std::ptr::read_unaligned(arr_ptr as *const u64) as usize;
+                    let mut elems = Vec::with_capacity(len);
+                    for i in 0..len {
+                        let elem_ptr = *(arr_ptr.add(8 + 8 * i) as *const *const u8);
+                        elems.push(heap_to_value(elem_ptr)?);
+                    }
+                    // Return as a generic Con with fields — the renderer will
+                    // see the constructor names from the wrapping Con objects
+                    // (e.g., Vector's Array constructor wraps this)
+                    Ok(Value::Con(DataConId(0), elems))
+                }
                 other => Err(BridgeError::UnexpectedLitTag(other as u8)),
             }
         }

@@ -519,6 +519,82 @@ pub extern "C" fn runtime_compare_byte_arrays(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Boxed array runtime functions (SmallArray# / Array#)
+// ---------------------------------------------------------------------------
+
+/// Allocate a new boxed array of `len` pointer slots, each initialized to `init`.
+/// Layout: [u64 length][ptr0][ptr1]...[ptrN-1]
+/// Each slot is 8 bytes (a heap pointer).
+pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
+    let n = len as usize;
+    let total = 8 + 8 * n;
+    let layout = std::alloc::Layout::from_size_align(total, 8).unwrap();
+    let ptr = unsafe { std::alloc::alloc(layout) };
+    if ptr.is_null() {
+        std::alloc::handle_alloc_error(layout);
+    }
+    unsafe {
+        *(ptr as *mut u64) = n as u64;
+        let slots = ptr.add(8) as *mut i64;
+        for i in 0..n {
+            *slots.add(i) = init;
+        }
+    }
+    ptr as i64
+}
+
+/// Clone a sub-range of a boxed array: src[off..off+len].
+pub extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64) -> i64 {
+    let n = len as usize;
+    let total = 8 + 8 * n;
+    let layout = std::alloc::Layout::from_size_align(total, 8).unwrap();
+    let ptr = unsafe { std::alloc::alloc(layout) };
+    if ptr.is_null() {
+        std::alloc::handle_alloc_error(layout);
+    }
+    unsafe {
+        *(ptr as *mut u64) = n as u64;
+        let src_slots = (src as *const u8).add(8 + 8 * off as usize);
+        let dst_slots = ptr.add(8);
+        std::ptr::copy_nonoverlapping(src_slots, dst_slots, 8 * n);
+    }
+    ptr as i64
+}
+
+/// Copy `len` pointer slots from src[src_off..] to dest[dest_off..].
+pub extern "C" fn runtime_copy_boxed_array(
+    src: i64,
+    src_off: i64,
+    dest: i64,
+    dest_off: i64,
+    len: i64,
+) {
+    let src_ptr = unsafe { (src as *const u8).add(8 + 8 * src_off as usize) };
+    let dest_ptr = unsafe { (dest as *mut u8).add(8 + 8 * dest_off as usize) };
+    unsafe {
+        std::ptr::copy(src_ptr, dest_ptr, 8 * len as usize);
+    }
+}
+
+/// Shrink a boxed array (just update the length field).
+pub extern "C" fn runtime_shrink_boxed_array(arr: i64, new_len: i64) {
+    unsafe {
+        *(arr as *mut u64) = new_len as u64;
+    }
+}
+
+/// CAS on a boxed array slot: compare-and-swap arr[idx].
+/// Returns the old value. If old == expected, writes new.
+pub extern "C" fn runtime_cas_boxed_array(arr: i64, idx: i64, expected: i64, new: i64) -> i64 {
+    let slot = unsafe { (arr as *mut u8).add(8 + 8 * idx as usize) as *mut i64 };
+    let old = unsafe { *slot };
+    if old == expected {
+        unsafe { *slot = new };
+    }
+    old
+}
+
 /// strlen: count bytes until null terminator.
 pub extern "C" fn runtime_strlen(addr: i64) -> i64 {
     let ptr = addr as *const u8;
@@ -655,6 +731,26 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
         ),
         ("runtime_text_memchr", runtime_text_memchr as *const u8),
         ("runtime_text_reverse", runtime_text_reverse as *const u8),
+        (
+            "runtime_new_boxed_array",
+            runtime_new_boxed_array as *const u8,
+        ),
+        (
+            "runtime_clone_boxed_array",
+            runtime_clone_boxed_array as *const u8,
+        ),
+        (
+            "runtime_copy_boxed_array",
+            runtime_copy_boxed_array as *const u8,
+        ),
+        (
+            "runtime_shrink_boxed_array",
+            runtime_shrink_boxed_array as *const u8,
+        ),
+        (
+            "runtime_cas_boxed_array",
+            runtime_cas_boxed_array as *const u8,
+        ),
     ]
 }
 

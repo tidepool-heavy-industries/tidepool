@@ -670,6 +670,36 @@ pub fn emit_primop(
             ))
         }
 
+        // timesInt2# :: Int# -> Int# -> (# Int#, Int#, Int# #)
+        // Signed widening multiply: (hi, lo, overflow)
+        PrimOpKind::TimesInt2Hi => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().smulhi(a, b), LIT_TAG_INT))
+        }
+        PrimOpKind::TimesInt2Lo => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().imul(a, b), LIT_TAG_INT))
+        }
+        PrimOpKind::TimesInt2Overflow => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let b = unbox_int(builder, args[1]);
+            // Overflow if smulhi(a,b) != (imul(a,b) >>s 63)
+            // i.e., the high word differs from sign-extending the low word
+            let hi = builder.ins().smulhi(a, b);
+            let lo = builder.ins().imul(a, b);
+            let lo_sign = builder.ins().sshr_imm(lo, 63);
+            let overflow = builder.ins().icmp(IntCC::NotEqual, hi, lo_sign);
+            Ok(SsaVal::Raw(
+                builder.ins().uextend(types::I64, overflow),
+                LIT_TAG_INT,
+            ))
+        }
+
         // timesWord2# :: Word# -> Word# -> (# Word#, Word# #)
         // High and low words of 128-bit multiply
         PrimOpKind::TimesWord2Hi => {
@@ -1111,9 +1141,263 @@ pub fn emit_primop(
             emit_float_compare(builder, op, FloatCC::GreaterThanOrEqual, args, LIT_TAG_INT)
         }
 
-        PrimOpKind::TagToEnum | PrimOpKind::IndexArray | PrimOpKind::SeqOp => {
+        PrimOpKind::TagToEnum | PrimOpKind::SeqOp => {
             Err(EmitError::NotYetImplemented(format!("{:?}", op)))
         }
+
+        // ---------------------------------------------------------------
+        // SmallArray# / Array# primops — boxed pointer arrays
+        // Layout: [u64 length][ptr0][ptr1]...[ptrN-1]
+        // Stored in Lit with LIT_TAG_SMALLARRAY (8) or LIT_TAG_ARRAY (9)
+        // ---------------------------------------------------------------
+        PrimOpKind::NewSmallArray | PrimOpKind::NewArray => {
+            // newSmallArray# :: Int# -> a -> State# -> (# State#, SmallMutableArray# s a #)
+            let size = unbox_int(builder, args[0]);
+            let init_ptr = args[1].value();
+            let arr_ptr = emit_runtime_call(
+                pipeline,
+                builder,
+                "runtime_new_boxed_array",
+                &[AbiParam::new(types::I64), AbiParam::new(types::I64)],
+                &[AbiParam::new(types::I64)],
+                &[size, init_ptr],
+            )?;
+            let lit_tag = if matches!(op, PrimOpKind::NewSmallArray) {
+                LIT_TAG_SMALLARRAY
+            } else {
+                LIT_TAG_ARRAY
+            };
+            Ok(emit_lit_boxed_array(builder, vmctx, gc_sig, oom_func, arr_ptr, lit_tag))
+        }
+
+        PrimOpKind::ReadSmallArray
+        | PrimOpKind::IndexSmallArray
+        | PrimOpKind::ReadArray
+        | PrimOpKind::IndexArray => {
+            // readSmallArray# :: SmallMutableArray# s a -> Int# -> State# -> (# State#, a #)
+            // indexSmallArray# :: SmallArray# a -> Int# -> (# a #)
+            if args.len() < 2 {
+                return Err(EmitError::NotYetImplemented(format!(
+                    "{:?}: expected >=2 args, got {} (args: {:?})",
+                    op, args.len(), args
+                )));
+            }
+            let arr_ptr = unbox_bytearray(builder, args[0]);
+            let idx = unbox_int(builder, args[1]);
+            let base = builder.ins().iadd_imm(arr_ptr, 8);
+            let byte_offset = builder.ins().imul_imm(idx, 8);
+            let effective = builder.ins().iadd(base, byte_offset);
+            let loaded = builder.ins().load(types::I64, MemFlags::new(), effective, 0);
+            builder.declare_value_needs_stack_map(loaded);
+            Ok(SsaVal::HeapPtr(loaded))
+        }
+
+        PrimOpKind::WriteSmallArray | PrimOpKind::WriteArray => {
+            // writeSmallArray# :: SmallMutableArray# s a -> Int# -> a -> State# -> State#
+            let arr_ptr = unbox_bytearray(builder, args[0]);
+            let idx = unbox_int(builder, args[1]);
+            let val = args[2].value();
+            let base = builder.ins().iadd_imm(arr_ptr, 8);
+            let byte_offset = builder.ins().imul_imm(idx, 8);
+            let effective = builder.ins().iadd(base, byte_offset);
+            builder.ins().store(MemFlags::new(), val, effective, 0);
+            Ok(SsaVal::Raw(
+                builder.ins().iconst(types::I64, 0),
+                LIT_TAG_INT,
+            ))
+        }
+
+        PrimOpKind::SizeofSmallArray
+        | PrimOpKind::SizeofSmallMutableArray
+        | PrimOpKind::SizeofArray
+        | PrimOpKind::SizeofMutableArray => {
+            // sizeofSmallArray# :: SmallArray# a -> Int#
+            let arr_ptr = unbox_bytearray(builder, args[0]);
+            let len = builder.ins().load(types::I64, MemFlags::new(), arr_ptr, 0);
+            Ok(SsaVal::Raw(len, LIT_TAG_INT))
+        }
+
+        PrimOpKind::UnsafeFreezeSmallArray
+        | PrimOpKind::UnsafeThawSmallArray
+        | PrimOpKind::UnsafeFreezeArray
+        | PrimOpKind::UnsafeThawArray => {
+            // Identity — mutable and immutable have the same representation
+            Ok(args[0])
+        }
+
+        PrimOpKind::CopySmallArray
+        | PrimOpKind::CopySmallMutableArray
+        | PrimOpKind::CopyArray
+        | PrimOpKind::CopyMutableArray => {
+            // copySmallArray# :: src -> src_off -> dest -> dest_off -> len -> State# -> State#
+            let src = unbox_bytearray(builder, args[0]);
+            let src_off = unbox_int(builder, args[1]);
+            let dest = unbox_bytearray(builder, args[2]);
+            let dest_off = unbox_int(builder, args[3]);
+            let len = unbox_int(builder, args[4]);
+            let _ = emit_runtime_call(
+                pipeline,
+                builder,
+                "runtime_copy_boxed_array",
+                &[
+                    AbiParam::new(types::I64),
+                    AbiParam::new(types::I64),
+                    AbiParam::new(types::I64),
+                    AbiParam::new(types::I64),
+                    AbiParam::new(types::I64),
+                ],
+                &[],
+                &[src, src_off, dest, dest_off, len],
+            )?;
+            Ok(SsaVal::Raw(
+                builder.ins().iconst(types::I64, 0),
+                LIT_TAG_INT,
+            ))
+        }
+
+        PrimOpKind::CloneSmallArray | PrimOpKind::CloneSmallMutableArray => {
+            // cloneSmallArray# :: SmallArray# a -> Int# -> Int# -> SmallArray# a
+            let arr = unbox_bytearray(builder, args[0]);
+            let off = unbox_int(builder, args[1]);
+            let len = unbox_int(builder, args[2]);
+            let result = emit_runtime_call(
+                pipeline,
+                builder,
+                "runtime_clone_boxed_array",
+                &[
+                    AbiParam::new(types::I64),
+                    AbiParam::new(types::I64),
+                    AbiParam::new(types::I64),
+                ],
+                &[AbiParam::new(types::I64)],
+                &[arr, off, len],
+            )?;
+            Ok(emit_lit_boxed_array(
+                builder,
+                vmctx,
+                gc_sig,
+                oom_func,
+                result,
+                LIT_TAG_SMALLARRAY,
+            ))
+        }
+
+        PrimOpKind::CloneArray | PrimOpKind::CloneMutableArray => {
+            let arr = unbox_bytearray(builder, args[0]);
+            let off = unbox_int(builder, args[1]);
+            let len = unbox_int(builder, args[2]);
+            let result = emit_runtime_call(
+                pipeline,
+                builder,
+                "runtime_clone_boxed_array",
+                &[
+                    AbiParam::new(types::I64),
+                    AbiParam::new(types::I64),
+                    AbiParam::new(types::I64),
+                ],
+                &[AbiParam::new(types::I64)],
+                &[arr, off, len],
+            )?;
+            Ok(emit_lit_boxed_array(
+                builder, vmctx, gc_sig, oom_func, result, LIT_TAG_ARRAY,
+            ))
+        }
+
+        PrimOpKind::ShrinkSmallMutableArray => {
+            let arr = unbox_bytearray(builder, args[0]);
+            let new_len = unbox_int(builder, args[1]);
+            let _ = emit_runtime_call(
+                pipeline,
+                builder,
+                "runtime_shrink_boxed_array",
+                &[AbiParam::new(types::I64), AbiParam::new(types::I64)],
+                &[],
+                &[arr, new_len],
+            )?;
+            Ok(SsaVal::Raw(
+                builder.ins().iconst(types::I64, 0),
+                LIT_TAG_INT,
+            ))
+        }
+
+        PrimOpKind::CasSmallArray => {
+            // casSmallArray# :: SmallMutableArray# s a -> Int# -> a -> a -> State# s
+            //   -> (# State# s, Int#, a #)
+            // Returns (0#, old) if CAS succeeded, (1#, old) if failed.
+            // We simplify: return the old value (caller checks).
+            let arr = unbox_bytearray(builder, args[0]);
+            let idx = unbox_int(builder, args[1]);
+            let expected = args[2].value();
+            let new_val = args[3].value();
+            let old = emit_runtime_call(
+                pipeline,
+                builder,
+                "runtime_cas_boxed_array",
+                &[
+                    AbiParam::new(types::I64),
+                    AbiParam::new(types::I64),
+                    AbiParam::new(types::I64),
+                    AbiParam::new(types::I64),
+                ],
+                &[AbiParam::new(types::I64)],
+                &[arr, idx, expected, new_val],
+            )?;
+            // CAS returns the old value as a heap pointer
+            builder.declare_value_needs_stack_map(old);
+            Ok(SsaVal::HeapPtr(old))
+        }
+
+        // ---------------------------------------------------------------
+        // Bit operations — popCount, ctz
+        // ---------------------------------------------------------------
+        PrimOpKind::PopCnt | PrimOpKind::PopCnt64 => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            Ok(SsaVal::Raw(builder.ins().popcnt(a), LIT_TAG_WORD))
+        }
+        PrimOpKind::PopCnt8 => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let masked = builder.ins().band_imm(a, 0xFF);
+            Ok(SsaVal::Raw(builder.ins().popcnt(masked), LIT_TAG_WORD))
+        }
+        PrimOpKind::PopCnt16 => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let masked = builder.ins().band_imm(a, 0xFFFF);
+            Ok(SsaVal::Raw(builder.ins().popcnt(masked), LIT_TAG_WORD))
+        }
+        PrimOpKind::PopCnt32 => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let masked = builder.ins().band_imm(a, 0xFFFF_FFFF);
+            Ok(SsaVal::Raw(builder.ins().popcnt(masked), LIT_TAG_WORD))
+        }
+        PrimOpKind::Ctz | PrimOpKind::Ctz64 => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            Ok(SsaVal::Raw(builder.ins().ctz(a), LIT_TAG_WORD))
+        }
+        PrimOpKind::Ctz8 => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            // Set bit 8 so ctz stops there if all lower 8 bits are zero
+            let with_sentinel = builder.ins().bor_imm(a, 0x100);
+            Ok(SsaVal::Raw(builder.ins().ctz(with_sentinel), LIT_TAG_WORD))
+        }
+        PrimOpKind::Ctz16 => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let with_sentinel = builder.ins().bor_imm(a, 0x10000);
+            Ok(SsaVal::Raw(builder.ins().ctz(with_sentinel), LIT_TAG_WORD))
+        }
+        PrimOpKind::Ctz32 => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_int(builder, args[0]);
+            let with_sentinel = builder.ins().bor_imm(a, 0x1_0000_0000);
+            Ok(SsaVal::Raw(builder.ins().ctz(with_sentinel), LIT_TAG_WORD))
+        }
+
         _ => Err(EmitError::NotYetImplemented(format!("{:?}", op))),
     }
 }
@@ -1240,6 +1524,31 @@ fn emit_lit_bytearray(
     builder
         .ins()
         .store(MemFlags::trusted(), ba_ptr, ptr, LIT_VALUE_OFFSET);
+    builder.declare_value_needs_stack_map(ptr);
+    SsaVal::HeapPtr(ptr)
+}
+
+/// Allocate a Lit heap object for a boxed array (SmallArray# or Array#).
+fn emit_lit_boxed_array(
+    builder: &mut FunctionBuilder,
+    vmctx: Value,
+    gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
+    arr_ptr: Value,
+    lit_tag: i64,
+) -> SsaVal {
+    let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig, oom_func);
+    let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);
+    builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
+    let size = builder.ins().iconst(types::I16, LIT_TOTAL_SIZE as i64);
+    builder.ins().store(MemFlags::trusted(), size, ptr, 1);
+    let lt = builder.ins().iconst(types::I8, lit_tag);
+    builder
+        .ins()
+        .store(MemFlags::trusted(), lt, ptr, LIT_TAG_OFFSET);
+    builder
+        .ins()
+        .store(MemFlags::trusted(), arr_ptr, ptr, LIT_VALUE_OFFSET);
     builder.declare_value_needs_stack_map(ptr);
     SsaVal::HeapPtr(ptr)
 }

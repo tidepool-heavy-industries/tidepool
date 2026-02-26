@@ -148,6 +148,28 @@ fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_json:
                     json!(elems)
                 }
 
+                // Integer constructors (GHC.Num.Integer)
+                // IS Int# — small integer (fits in machine word)
+                ("IS", [x]) => value_to_json(x, table, d),
+                // IP ByteArray# — positive big integer (not yet supported, show as string)
+                ("IP", _) => json!("<big-integer>"),
+                // IN ByteArray# — negative big integer (not yet supported, show as string)
+                ("IN", _) => json!("<big-integer>"),
+
+                // Scientific (Data.Scientific) — coefficient × 10^exponent
+                ("Scientific", [coeff, exp_val]) => {
+                    let c = match value_to_json(coeff, table, d) {
+                        serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0),
+                        _ => 0.0,
+                    };
+                    let e = match value_to_json(exp_val, table, d) {
+                        serde_json::Value::Number(n) => n.as_i64().unwrap_or(0),
+                        _ => 0,
+                    };
+                    let val = c * 10f64.powi(e as i32);
+                    json!(val)
+                }
+
                 // Generic constructor
                 (_name, fields) => {
                     if fields.is_empty() {

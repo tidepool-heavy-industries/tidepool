@@ -123,6 +123,7 @@
             freer-simple
             aeson
             lens
+            lens-aeson
           ]);
           harness = hsPkgs.callCabal2nix "tidepool-harness" ./haskell {};
         in pkgs.writeShellScriptBin "tidepool-extract" ''

@@ -31,6 +31,7 @@ import GHC.Types.Name (nameOccName, isExternalName, isSystemName, nameModule_may
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Core.TyCon
 import GHC.Core.Type (splitTyConApp_maybe, isCoercionTy)
+import GHC.Builtin.Types.Prim (statePrimTyCon)
 import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Core.TyCo.FVs (tyConsOfType)
 import GHC.Core.FVs (exprSomeFreeVars)
@@ -851,35 +852,57 @@ translateHead = \case
     , (Var v, allArgs) <- collectArgs scrut
     , isPrimOpId_maybe v /= Nothing || isFCallId v
     , let valArgs = filter isValueArg allArgs
-    -- Drop the last value arg if it's realWorld# (a state token = Lit 0 after our translation)
-    , let nonStateArgs = case valArgs of
-            [] -> []
-            _  -> init valArgs  -- drop the last arg (state token)
-    , vBinders <- filter (not . isTyVar) binders -> do
+    -- Only drop the last value arg if the first result binder has State# type
+    -- (stateful primops like readSmallArray#). For pure primops returning unboxed
+    -- tuples (like indexSmallArray# :: SmallArray# a -> Int# -> (# a #)), keep all args.
+    , vBinders <- filter (not . isTyVar) binders
+    , let hasStateBinder = case vBinders of
+            (b:_) -> case splitTyConApp_maybe (idType b) of
+                       Just (tc, _) -> tc == statePrimTyCon
+                       Nothing      -> False
+            _ -> False
+    , let nonStateArgs = if hasStateBinder
+                         then case valArgs of { [] -> []; _ -> init valArgs }
+                         else valArgs
+    -> do
         childIdxs <- mapM translate nonStateArgs
         -- Emit the primop or FFI call
         opName <- case isPrimOpId_maybe v of
                     Just pop -> return (mapPrimOp pop)
                     Nothing  -> return (mapFfiCall (showPprUnsafe v))
         primIdx <- emitNode $ NPrimOp opName childIdxs
-        -- Bind s' (state token) to a dummy value so downstream code referencing it doesn't fail
-        dummyState <- emitNode $ NLit (LEInt 0)
-        case vBinders of
-          [s']           -> do
-            -- Void op (e.g. writeWord8Array#): force primop for side effects, bind s'
-            bodyIdx <- translate body
-            inner <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
-            emitNode $ NCase primIdx (varId s') [FlatAlt FDefault [] inner]
-          [s', result]   -> do
-            bodyIdx <- translate body
-            inner <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
-            emitNode $ NCase primIdx (varId result) [FlatAlt FDefault [] inner]
-          [s', r1, r2]   -> do
-            bodyIdx <- translate body
-            c2 <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
-            c1 <- emitNode $ NCase primIdx (varId r2) [FlatAlt FDefault [] c2]
-            emitNode $ NCase primIdx (varId r1) [FlatAlt FDefault [] c1]
-          _ -> error $ "Unsupported unboxed tuple arity: " ++ show (length vBinders) ++ " binders"
+        if hasStateBinder then do
+          -- Stateful primop: bind s' (state token) to dummy, bind results to primop
+          dummyState <- emitNode $ NLit (LEInt 0)
+          case vBinders of
+            [s']           -> do
+              -- Void op (e.g. writeWord8Array#): force primop for side effects, bind s'
+              bodyIdx <- translate body
+              inner <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
+              emitNode $ NCase primIdx (varId s') [FlatAlt FDefault [] inner]
+            [s', result]   -> do
+              bodyIdx <- translate body
+              inner <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
+              emitNode $ NCase primIdx (varId result) [FlatAlt FDefault [] inner]
+            [s', r1, r2]   -> do
+              bodyIdx <- translate body
+              c2 <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
+              c1 <- emitNode $ NCase primIdx (varId r2) [FlatAlt FDefault [] c2]
+              emitNode $ NCase primIdx (varId r1) [FlatAlt FDefault [] c1]
+            _ -> error $ "Unsupported stateful unboxed tuple arity: " ++ show (length vBinders) ++ " binders"
+        else do
+          -- Pure primop returning unboxed tuple (e.g. indexSmallArray# -> (# a #))
+          -- No state token: bind results directly to primop output
+          case vBinders of
+            [result] -> do
+              bodyIdx <- translate body
+              emitNode $ NCase primIdx (varId result) [FlatAlt FDefault [] bodyIdx]
+            [r1, r2] -> do
+              -- Pure 2-result primop (e.g. decodeDouble_Int64#, casSmallArray#)
+              bodyIdx <- translate body
+              c1 <- emitNode $ NCase primIdx (varId r2) [FlatAlt FDefault [] bodyIdx]
+              emitNode $ NCase primIdx (varId r1) [FlatAlt FDefault [] c1]
+            _ -> error $ "Unsupported pure unboxed tuple arity: " ++ show (length vBinders) ++ " binders"
   Case scrut b _alts_ty alts -> do
     scrutIdx <- translate scrut
     altData <- mapM translateAlt alts
@@ -1093,6 +1116,46 @@ mapPrimOp = \case
   -- Carry arithmetic and wide multiply handled by splitMultiReturnPrimOp / splitTripleReturnPrimOp
   -- CLZ
   Clz8Op                      -> "Clz8"
+  -- SmallArray#
+  NewSmallArrayOp             -> "NewSmallArray"
+  ReadSmallArrayOp            -> "ReadSmallArray"
+  WriteSmallArrayOp           -> "WriteSmallArray"
+  IndexSmallArrayOp           -> "IndexSmallArray"
+  SizeofSmallArrayOp          -> "SizeofSmallArray"
+  SizeofSmallMutableArrayOp   -> "SizeofSmallMutableArray"
+  GetSizeofSmallMutableArrayOp -> "SizeofSmallMutableArray"
+  UnsafeFreezeSmallArrayOp    -> "UnsafeFreezeSmallArray"
+  UnsafeThawSmallArrayOp      -> "UnsafeThawSmallArray"
+  CopySmallArrayOp            -> "CopySmallArray"
+  CopySmallMutableArrayOp     -> "CopySmallMutableArray"
+  CloneSmallArrayOp           -> "CloneSmallArray"
+  CloneSmallMutableArrayOp    -> "CloneSmallMutableArray"
+  ShrinkSmallMutableArrayOp_Char -> "ShrinkSmallMutableArray"
+  CasSmallArrayOp             -> "CasSmallArray"
+  -- Array#
+  NewArrayOp                  -> "NewArray"
+  ReadArrayOp                 -> "ReadArray"
+  WriteArrayOp                -> "WriteArray"
+  IndexArrayOp                -> "IndexArray"
+  SizeofArrayOp               -> "SizeofArray"
+  SizeofMutableArrayOp        -> "SizeofMutableArray"
+  UnsafeFreezeArrayOp         -> "UnsafeFreezeArray"
+  UnsafeThawArrayOp           -> "UnsafeThawArray"
+  CopyArrayOp                 -> "CopyArray"
+  CopyMutableArrayOp          -> "CopyMutableArray"
+  CloneArrayOp                -> "CloneArray"
+  CloneMutableArrayOp         -> "CloneMutableArray"
+  -- Bit operations
+  PopCntOp                    -> "PopCnt"
+  PopCnt8Op                   -> "PopCnt8"
+  PopCnt16Op                  -> "PopCnt16"
+  PopCnt32Op                  -> "PopCnt32"
+  PopCnt64Op                  -> "PopCnt64"
+  CtzOp                       -> "Ctz"
+  Ctz8Op                      -> "Ctz8"
+  Ctz16Op                     -> "Ctz16"
+  Ctz32Op                     -> "Ctz32"
+  Ctz64Op                     -> "Ctz64"
   -- Exception
   RaiseOp     -> "Raise"
   other       -> trace ("WARNING: unsupported primop: " ++ showPprUnsafe other ++ " (emitting Raise)") "Raise"

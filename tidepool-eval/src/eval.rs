@@ -1237,6 +1237,43 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             }
             Ok(Value::ByteArray(dst_ba.clone()))
         }
+
+        // SmallArray# / Array# / PopCnt / Ctz — only used by JIT, not tree-walker
+        PrimOpKind::NewSmallArray
+        | PrimOpKind::ReadSmallArray
+        | PrimOpKind::WriteSmallArray
+        | PrimOpKind::IndexSmallArray
+        | PrimOpKind::SizeofSmallArray
+        | PrimOpKind::SizeofSmallMutableArray
+        | PrimOpKind::UnsafeFreezeSmallArray
+        | PrimOpKind::UnsafeThawSmallArray
+        | PrimOpKind::CopySmallArray
+        | PrimOpKind::CopySmallMutableArray
+        | PrimOpKind::CloneSmallArray
+        | PrimOpKind::CloneSmallMutableArray
+        | PrimOpKind::ShrinkSmallMutableArray
+        | PrimOpKind::CasSmallArray
+        | PrimOpKind::NewArray
+        | PrimOpKind::ReadArray
+        | PrimOpKind::WriteArray
+        | PrimOpKind::SizeofArray
+        | PrimOpKind::SizeofMutableArray
+        | PrimOpKind::UnsafeFreezeArray
+        | PrimOpKind::UnsafeThawArray
+        | PrimOpKind::CopyArray
+        | PrimOpKind::CopyMutableArray
+        | PrimOpKind::CloneArray
+        | PrimOpKind::CloneMutableArray
+        | PrimOpKind::PopCnt
+        | PrimOpKind::PopCnt8
+        | PrimOpKind::PopCnt16
+        | PrimOpKind::PopCnt32
+        | PrimOpKind::PopCnt64
+        | PrimOpKind::Ctz
+        | PrimOpKind::Ctz8
+        | PrimOpKind::Ctz16
+        | PrimOpKind::Ctz32
+        | PrimOpKind::Ctz64 => Err(EvalError::UnsupportedPrimOp(op)),
     }
 }
 

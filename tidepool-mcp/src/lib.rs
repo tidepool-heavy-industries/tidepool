@@ -157,6 +157,9 @@ pub struct EvalRequest {
     /// Each entry is a complete Haskell definition (may be multi-line).
     #[serde(default)]
     pub helpers: Vec<String>,
+    /// Optional JSON input injected as `input :: Aeson.Value` binding.
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +195,20 @@ pub fn build_preamble(effects: &[EffectDecl]) -> String {
     }
 
     out
+}
+
+/// Standard aeson/lens-aeson imports for MCP eval. These require lens-aeson in the GHC package DB.
+pub fn aeson_imports() -> Vec<String> {
+    vec![
+        "Data.Aeson (Value(..), object, (.=), encode, decode, toJSON, fromJSON, Result(..))".into(),
+        "Data.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Integer, _Double)".into(),
+        "qualified Data.Aeson as Aeson".into(),
+        "qualified Data.Aeson.Key as Key".into(),
+        "qualified Data.Aeson.KeyMap as KM".into(),
+        "qualified Data.Vector as V".into(),
+        "Control.Lens (preview, toListOf, (^?), (^..), (&), (.~), (%~), to, _Just)".into(),
+        "Data.Scientific (Scientific)".into(),
+    ]
 }
 
 pub fn build_effect_stack_type(effects: &[EffectDecl]) -> String {
@@ -235,6 +252,7 @@ pub fn template_haskell(
     source: &[String],
     imports: &[String],
     helpers: &[String],
+    input: Option<&serde_json::Value>,
 ) -> String {
     let mut out = String::new();
 
@@ -260,6 +278,12 @@ pub fn template_haskell(
         out.push('\n');
     }
 
+    // Inject input binding if provided
+    if let Some(val) = input {
+        out.push_str("input :: Aeson.Value\n");
+        out.push_str(&format!("input = {}\n\n", json_to_haskell(val)));
+    }
+
     out.push_str(&format!("result :: Eff {} _\n", effect_stack));
     out.push_str("result = do\n");
     for line in source {
@@ -267,6 +291,37 @@ pub fn template_haskell(
     }
 
     out
+}
+
+/// Render a serde_json::Value as a Haskell aeson literal expression.
+fn json_to_haskell(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::Null => "Aeson.Null".into(),
+        serde_json::Value::Bool(b) => {
+            format!("Aeson.Bool {}", if *b { "True" } else { "False" })
+        }
+        serde_json::Value::Number(n) => {
+            format!("Aeson.Number (fromIntegral ({} :: Int))", n)
+        }
+        serde_json::Value::String(s) => {
+            let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("Aeson.String \"{}\"", escaped)
+        }
+        serde_json::Value::Array(arr) => {
+            let elems: Vec<String> = arr.iter().map(json_to_haskell).collect();
+            format!("toJSON [{}]", elems.join(", "))
+        }
+        serde_json::Value::Object(map) => {
+            let pairs: Vec<String> = map
+                .iter()
+                .map(|(k, v)| {
+                    let escaped_k = k.replace('\\', "\\\\").replace('"', "\\\"");
+                    format!("\"{}\" .= {}", escaped_k, json_to_haskell(v))
+                })
+                .collect();
+            format!("object [{}]", pairs.join(", "))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -368,12 +423,16 @@ impl<'a> DispatchEffect<CapturedOutput> for HandlerWrapper<'a> {
 impl TidepoolMcpServerImpl {
     async fn eval(&self, req: EvalRequest) -> Result<CallToolResult, McpError> {
         tracing::info!(lines = req.source.len(), "eval request");
+        // Prepend aeson/lens-aeson standard imports to user imports
+        let mut all_imports = aeson_imports();
+        all_imports.extend(req.imports);
         let source: Arc<str> = template_haskell(
             &self.haskell_preamble,
             &self.effect_stack_type,
             &req.source,
-            &req.imports,
+            &all_imports,
             &req.helpers,
+            req.input.as_ref(),
         )
         .into();
 
@@ -647,7 +706,7 @@ mod tests {
         let stack = build_effect_stack_type(&effects);
         let source = vec!["let x = 42".into(), "pure x".into()];
 
-        let result = template_haskell(&preamble, &stack, &source, &[], &[]);
+        let result = template_haskell(&preamble, &stack, &source, &[], &[], None);
 
         assert!(result.contains("module Expr where"));
         assert!(result.contains("import Control.Monad.Freer"));
