@@ -22,7 +22,12 @@ executable tidepool-harness
     process,
     text,
     cborg,
-    mtl
+    mtl,
+    aeson,
+    lens,
+    lens-aeson,
+    scientific,
+    vector
   default-language: GHC2024
   default-extensions: OverloadedStrings
   ghc-options:      -Wall

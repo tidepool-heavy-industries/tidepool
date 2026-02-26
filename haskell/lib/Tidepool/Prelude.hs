@@ -77,6 +77,14 @@ module Tidepool.Prelude
   , even, odd
     -- * Char/Enum
   , ord, chr, fromEnum
+    -- * JSON (Data.Aeson)
+  , Value(..), object, (.=), encode, decode, toJSON, fromJSON, Result(..)
+  , ToJSON, FromJSON
+    -- * JSON lenses (Data.Aeson.Lens + Control.Lens)
+  , key, nth, _String, _Number, _Bool, _Array, _Object, _Integer, _Double
+  , preview, toListOf, (^?), (^..), (&), (.~), (%~), to, _Just
+    -- * Scientific
+  , Scientific
   ) where
 
 import Prelude
@@ -123,6 +131,14 @@ import Control.Monad
   , (=<<), (>=>), (<=<)
   , foldM, foldM_
   )
+import Data.Aeson (Value(..), object, (.=), encode, decode, toJSON, fromJSON, Result(..), ToJSON, FromJSON)
+import Data.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Integer, _Double)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KM
+import qualified Data.Vector as V
+import Control.Lens (preview, toListOf, (^?), (^..), (&), (.~), (%~), to, _Just, Prism', Getting, ASetter)
+import Data.Scientific (Scientific, toRealFloat, fromFloatDigits)
 
 -- | Marker typeclass for types whose runtime values can be rendered to JSON
 -- by the Rust-side value_to_json renderer. Use @pure x@ to return values
@@ -142,6 +158,8 @@ instance Renderable a => Renderable (Maybe a)
 instance (Renderable a, Renderable b) => Renderable (a, b)
 instance (Renderable a, Renderable b, Renderable c) => Renderable (a, b, c)
 instance (Renderable a, Renderable b, Renderable c, Renderable d) => Renderable (a, b, c, d)
+instance Renderable Value
+instance Renderable Scientific
 
 -- | Text-returning show: @show x@ gives @Text@ instead of @String@.
 show :: Show a => a -> Text
