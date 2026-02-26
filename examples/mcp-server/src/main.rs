@@ -448,6 +448,87 @@ impl EffectHandler<CapturedOutput> for SgHandler {
     }
 }
 
+// === Tag 4: Http ===
+
+#[derive(FromCore)]
+enum HttpReq {
+    #[core(name = "HttpGet")]
+    Get(String),
+}
+
+#[derive(Clone)]
+struct HttpHandler;
+
+impl DescribeEffect for HttpHandler {
+    fn effect_decl() -> EffectDecl {
+        tidepool_mcp::http_decl()
+    }
+}
+
+impl EffectHandler<CapturedOutput> for HttpHandler {
+    type Request = HttpReq;
+    fn handle(
+        &mut self,
+        req: HttpReq,
+        cx: &EffectContext<'_, CapturedOutput>,
+    ) -> Result<Value, EffectError> {
+        match req {
+            HttpReq::Get(url_str) => {
+                let url = url::Url::parse(&url_str).map_err(|e| {
+                    EffectError::Handler(format!("Invalid URL '{}': {}", url_str, e))
+                })?;
+
+                if url.scheme() != "http" && url.scheme() != "https" {
+                    return Err(EffectError::Handler(format!(
+                        "Unsupported protocol '{}'. Only http/https allowed.",
+                        url.scheme()
+                    )));
+                }
+
+                if let Some(host) = url.host() {
+                    match host {
+                        url::Host::Ipv4(ip) => {
+                            if ip.is_loopback() || ip.is_private() || ip.is_link_local() {
+                                return Err(EffectError::Handler(format!(
+                                    "Access to internal IP '{}' is restricted.",
+                                    ip
+                                )));
+                            }
+                        }
+                        url::Host::Ipv6(ip) => {
+                            if ip.is_loopback() || ip.is_unspecified() {
+                                return Err(EffectError::Handler(format!(
+                                    "Access to internal IP '{}' is restricted.",
+                                    ip
+                                )));
+                            }
+                        }
+                        url::Host::Domain(domain) => {
+                            if domain == "localhost" {
+                                return Err(EffectError::Handler(
+                                    "Access to 'localhost' is restricted.".into(),
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                let resp = ureq::get(url.as_str())
+                    .timeout(std::time::Duration::from_secs(30))
+                    .call()
+                    .map_err(|e| {
+                        EffectError::Handler(format!("HTTP GET '{}' failed: {}", url_str, e))
+                    })?;
+
+                let body = resp.into_string().map_err(|e| {
+                    EffectError::Handler(format!("Read body from '{}' failed: {}", url_str, e))
+                })?;
+                cx.respond(body)
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -463,7 +544,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ConsoleHandler,
         KvHandler::new(),
         FsHandler::new(cwd.clone()),
-        SgHandler::new(cwd.clone())
+        SgHandler::new(cwd.clone()),
+        HttpHandler
     ];
 
     // Prelude lives at haskell/lib/ relative to repo root, or via TIDEPOOL_PRELUDE_DIR.

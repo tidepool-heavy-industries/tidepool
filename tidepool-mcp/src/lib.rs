@@ -134,6 +134,16 @@ pub fn sg_decl() -> EffectDecl {
     }
 }
 
+/// Http effect: fetch JSON from HTTP endpoints.
+pub fn http_decl() -> EffectDecl {
+    EffectDecl {
+        type_name: "Http",
+        description: "Fetch JSON from HTTP endpoints. Returns response body as Text.",
+        constructors: &["HttpGet :: Text -> Http Text"],
+        type_defs: &[],
+    }
+}
+
 /// Ask effect: suspend execution to ask the calling LLM a question.
 pub fn ask_decl() -> EffectDecl {
     EffectDecl {
@@ -151,6 +161,7 @@ pub fn standard_decls() -> Vec<EffectDecl> {
         kv_decl(),
         fs_decl(),
         sg_decl(),
+        http_decl(),
         ask_decl(),
     ]
 }
