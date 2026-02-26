@@ -1156,6 +1156,29 @@ impl EmitContext {
                         sorted
                     };
 
+                    // For each deferred Con, track which simple bindings it
+                    // depends on.  Once all deps are satisfied we fill ALL its
+                    // fields (not just the simple-binding ones).
+                    let mut deferred_con_deps: Vec<(
+                        cranelift_codegen::ir::Value,
+                        Vec<usize>,
+                        std::collections::HashSet<VarId>,
+                    )> = Vec::new();
+                    for (ptr, field_indices) in &deferred_cons {
+                        let deps: std::collections::HashSet<VarId> = field_indices
+                            .iter()
+                            .filter_map(|&f_idx| {
+                                if let CoreFrame::Var(v) = &tree.nodes[f_idx] {
+                                    if simple_binder_set.contains(v) {
+                                        return Some(*v);
+                                    }
+                                }
+                                None
+                            })
+                            .collect();
+                        deferred_con_deps.push((*ptr, field_indices.clone(), deps));
+                    }
+
                     for (binder, rhs_idx) in &deferred_simple {
                         if Self::rhs_has_error_sentinel(tree, *rhs_idx) {
                             let poison_addr = crate::host_fns::error_poison_ptr() as i64;
@@ -1168,7 +1191,7 @@ impl EmitContext {
                             self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
                             self.env.insert(*binder, rhs_val);
                         }
-                        
+
                         // Incrementally fill pending captures as dependencies become available!
                         // This guarantees that closures have their capture slots filled before
                         // subsequent simple bindings in this LetRec are evaluated, which might
@@ -1184,6 +1207,31 @@ impl EmitContext {
                                         offset,
                                     );
                                 }
+                            }
+                        }
+
+                        // Incrementally fill deferred Cons whose simple-binding
+                        // deps are now all satisfied.  Fill ALL fields at once so
+                        // that later simple bindings (or their callees) can safely
+                        // pattern-match on these Cons without hitting NULL fields.
+                        for (ptr, field_indices, remaining_deps) in deferred_con_deps.iter_mut() {
+                            remaining_deps.remove(binder);
+                            if remaining_deps.is_empty() && !field_indices.is_empty() {
+                                for (i, &f_idx) in field_indices.iter().enumerate() {
+                                    let val = self.emit_node(
+                                        pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                                    )?;
+                                    let field_val =
+                                        ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val);
+                                    builder.ins().store(
+                                        MemFlags::trusted(),
+                                        field_val,
+                                        *ptr,
+                                        CON_FIELDS_START + 8 * i as i32,
+                                    );
+                                }
+                                // Mark as filled so Phase 3d skips it.
+                                *field_indices = Vec::new();
                             }
                         }
                     }
@@ -1206,9 +1254,9 @@ impl EmitContext {
                         }
                     }
 
-                    // Phase 3d: Fill deferred Con fields (those that reference simple
-                    // binding results, e.g. Con_Return(result)).
-                    for (ptr, field_indices) in &deferred_cons {
+                    // Phase 3d: Fill any deferred Con fields not already filled
+                    // incrementally during Phase 3c.
+                    for (ptr, field_indices, _) in &deferred_con_deps {
                         for (i, &f_idx) in field_indices.iter().enumerate() {
                             let val =
                                 self.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx)?;

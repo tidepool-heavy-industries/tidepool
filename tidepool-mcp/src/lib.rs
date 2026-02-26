@@ -170,7 +170,7 @@ pub fn build_preamble(effects: &[EffectDecl]) -> String {
     out.push_str("import Tidepool.Prelude\n");
     out.push_str("import qualified Data.Text as T\n");
     out.push_str("import Control.Monad.Freer\n");
-    out.push_str("default (Int, String)\n");
+    out.push_str("default (Int, Text)\n");
     out.push('\n');
 
     for eff in effects {
