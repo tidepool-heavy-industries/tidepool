@@ -759,6 +759,10 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
             "runtime_cas_boxed_array",
             runtime_cas_boxed_array as *const u8,
         ),
+        (
+            "runtime_case_trap",
+            runtime_case_trap as *const u8,
+        ),
     ]
 }
 
@@ -1136,4 +1140,65 @@ mod tests {
         let s = b"hello:";
         assert_eq!(runtime_text_memchr(s.as_ptr() as i64, 0, 6, b':' as i64), 5);
     }
+}
+
+/// Debug: called instead of `trap user2` when TIDEPOOL_DEBUG_CASE is set.
+/// Prints diagnostic info about the scrutinee that failed case matching.
+/// `scrut_ptr` is the heap pointer to the scrutinee.
+/// `num_alts` is the number of data alt tags expected.
+/// `alt_tags` is a pointer to an array of expected tag u64 values.
+pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64) -> *mut u8 {
+    let ptr = scrut_ptr as *const u8;
+    if (scrut_ptr as u64) < 0x1000 {
+        eprintln!("[CASE TRAP] scrut_ptr is NULL/invalid: {:#x}", scrut_ptr);
+        std::process::abort();
+    }
+    let tag_byte = unsafe { *ptr };
+    let tag_name = match tag_byte {
+        0 => "Closure",
+        1 => "Thunk",
+        2 => "Con",
+        3 => "Lit",
+        0xFF => "Forwarded(GC bug!)",
+        _ => "UNKNOWN",
+    };
+
+    // Read expected alt tags
+    let expected: Vec<u64> = if num_alts > 0 && alt_tags != 0 {
+        (0..num_alts as usize).map(|i| unsafe {
+            *((alt_tags as *const u64).add(i))
+        }).collect()
+    } else {
+        vec![]
+    };
+
+    // Dump raw bytes for any object type
+    let raw_bytes: Vec<u8> = (0..32).map(|i| unsafe { *ptr.add(i) }).collect();
+    eprintln!(
+        "[CASE TRAP] raw bytes: {:02x?}", raw_bytes
+    );
+
+    if tag_byte == 2 {
+        // Con: read con_tag at offset 8, num_fields at offset 16
+        let con_tag = unsafe { *(ptr.add(8) as *const u64) };
+        let num_fields = unsafe { *(ptr.add(16) as *const u16) };
+        eprintln!(
+            "[CASE TRAP] Con: con_tag={:#x}, num_fields={}, expected_tags={:?}",
+            con_tag, num_fields, expected
+        );
+    } else if tag_byte == 3 {
+        // Lit: read lit_tag at offset 8, value at offset 16
+        let lit_tag = unsafe { *(ptr.add(8) as *const u64) };
+        let value = unsafe { *(ptr.add(16) as *const u64) };
+        eprintln!(
+            "[CASE TRAP] Lit: lit_tag={:#x}, value={:#x}, expected_tags={:?}",
+            lit_tag, value, expected
+        );
+    } else {
+        eprintln!(
+            "[CASE TRAP] tag_byte={} ({}), expected_tags={:?}",
+            tag_byte, tag_name, expected
+        );
+    }
+    std::process::abort();
 }

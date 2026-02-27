@@ -901,6 +901,12 @@ translateHead = \case
               c2 <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
               c1 <- emitNode $ NCase primIdx (varId r2) [FlatAlt FDefault [] c2]
               emitNode $ NCase primIdx (varId r1) [FlatAlt FDefault [] c1]
+            [s', r1, r2, r3] -> do
+              bodyIdx <- translate body
+              c3 <- emitNode $ NCase dummyState (varId s') [FlatAlt FDefault [] bodyIdx]
+              c2 <- emitNode $ NCase primIdx (varId r3) [FlatAlt FDefault [] c3]
+              c1 <- emitNode $ NCase primIdx (varId r2) [FlatAlt FDefault [] c2]
+              emitNode $ NCase primIdx (varId r1) [FlatAlt FDefault [] c1]
             _ -> error $ "Unsupported stateful unboxed tuple arity: " ++ show (length vBinders) ++ " binders"
         else do
           -- Pure primop returning unboxed tuple (e.g. indexSmallArray# -> (# a #))

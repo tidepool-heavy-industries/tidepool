@@ -2,9 +2,10 @@ use crate::emit::expr::ensure_heap_ptr;
 use crate::emit::*;
 use crate::pipeline::CodegenPipeline;
 use cranelift_codegen::ir::{
-    self, condcodes::IntCC, types, InstBuilder, MemFlags, TrapCode, Value,
+    self, condcodes::IntCC, types, AbiParam, InstBuilder, MemFlags, Signature, TrapCode, Value,
 };
 use cranelift_frontend::FunctionBuilder;
+use cranelift_module::{Linkage, Module};
 use tidepool_repr::{Alt, AltCon, CoreExpr, Literal, VarId};
 
 /// Emit Case dispatch. The scrutinee has already been evaluated (stack-safe).
@@ -170,9 +171,62 @@ fn emit_data_dispatch(
         let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
         builder.ins().jump(merge_block, &[result_ptr]);
     } else {
-        builder.ins().trap(TrapCode::unwrap_user(2));
+        emit_case_trap(pipeline, builder, scrut_ptr, data_alts)?;
     }
 
+    Ok(())
+}
+
+/// Emit a call to `runtime_case_trap` instead of a bare `trap user2`.
+/// Passes the scrutinee pointer and expected alt tags for diagnostic output.
+fn emit_case_trap(
+    pipeline: &mut CodegenPipeline,
+    builder: &mut FunctionBuilder,
+    scrut_ptr: Value,
+    data_alts: &[&Alt<usize>],
+) -> Result<(), EmitError> {
+    // Collect expected tags
+    let tags: Vec<u64> = data_alts
+        .iter()
+        .filter_map(|alt| {
+            if let AltCon::DataAlt(tag) = &alt.con {
+                Some(tag.0)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Store tags on stack
+    let num_alts = tags.len();
+    let ss = builder.create_sized_stack_slot(ir::StackSlotData::new(
+        ir::StackSlotKind::ExplicitSlot,
+        (num_alts * 8) as u32,
+        3, // align 8
+    ));
+    for (i, &tag) in tags.iter().enumerate() {
+        let tag_val = builder.ins().iconst(types::I64, tag as i64);
+        builder.ins().stack_store(tag_val, ss, (i * 8) as i32);
+    }
+    let tags_addr = builder.ins().stack_addr(types::I64, ss, 0);
+
+    let trap_fn = pipeline
+        .module
+        .declare_function("runtime_case_trap", Linkage::Import, &{
+            let mut sig = Signature::new(pipeline.isa.default_call_conv());
+            sig.params.push(AbiParam::new(types::I64)); // scrut_ptr
+            sig.params.push(AbiParam::new(types::I64)); // num_alts
+            sig.params.push(AbiParam::new(types::I64)); // alt_tags
+            sig.returns.push(AbiParam::new(types::I64)); // returns poison ptr
+            sig
+        })
+        .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+    let trap_ref = pipeline
+        .module
+        .declare_func_in_func(trap_fn, builder.func);
+    let num_alts_val = builder.ins().iconst(types::I64, num_alts as i64);
+    builder.ins().call(trap_ref, &[scrut_ptr, num_alts_val, tags_addr]);
+    builder.ins().trap(TrapCode::unwrap_user(2));
     Ok(())
 }
 
