@@ -962,8 +962,9 @@ varId v = case isDataConId_maybe v of
 stableVarId :: Name -> Word64
 stableVarId name =
   let modStr = case nameModule_maybe name of
-        Just m  -> moduleNameString (moduleName m)
+        Just m  -> normalizeMod (moduleNameString (moduleName m))
         Nothing -> "WiredIn"
+      normalizeMod s = T.unpack $ T.replace ".Internal" "" (T.pack s)
       occStr = occNameString (nameOccName name)
       fullStr = modStr ++ ":" ++ occStr
       Fingerprint h1 _ = fingerprintString fullStr
