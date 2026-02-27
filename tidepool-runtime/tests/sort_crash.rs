@@ -1264,7 +1264,6 @@ persist key filename = do
 // ===========================================================================
 
 #[test]
-#[ignore = "pre-existing: SIGILL in Map.differenceWith (likely unsupported primop)"]
 fn test_map_difference_with() {
     // Map.differenceWith uses fat interface bindings that may contain
     // Rec groups with join points. Previously failed with
@@ -1284,7 +1283,6 @@ fn test_map_difference_with() {
 }
 
 #[test]
-#[ignore = "pre-existing: SIGILL in Map.intersectionWith (likely unsupported primop)"]
 fn test_map_intersection_with() {
     // Another Map operation that exercises fat interface Rec groups.
     let json = run_mcp_with_imports(
