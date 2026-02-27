@@ -1,4 +1,5 @@
 use crate::context::VMContext;
+use tidepool_heap::layout;
 use crate::gc::frame_walker::{self, StackRoot};
 use crate::stack_map::StackMapRegistry;
 use std::cell::RefCell;
@@ -213,8 +214,38 @@ pub extern "C" fn heap_alloc(_vmctx: *mut VMContext, _size: u64) -> *mut u8 {
 }
 
 /// Force a thunk to WHNF.
-pub extern "C" fn heap_force(_vmctx: *mut VMContext, _thunk: *mut u8) -> *mut u8 {
-    std::ptr::null_mut() // Placeholder for scaffold
+pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
+    if obj.is_null() {
+        return obj;
+    }
+
+    unsafe {
+        let tag = layout::read_tag(obj);
+        if tag >= 2 {
+            return obj; // Con or Lit - already WHNF
+        }
+        if tag != layout::TAG_CLOSURE {
+            return obj; // Thunk (tag=1) or unknown - not handled here
+        }
+
+        // Closure: read code_ptr and num_captured
+        let code_ptr_val = *(obj.add(layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
+        let num_captured = *(obj.add(layout::CLOSURE_NUM_CAPTURED_OFFSET) as *const u16);
+
+        if num_captured != 0 {
+            return obj; // Has captures = partial application, not a thunk
+        }
+
+        if code_ptr_val == 0 {
+            return obj;
+        }
+
+        // 0-capture closure = thunk. Signature: fn(vmctx, self, arg) -> *mut u8
+        // Thunks (fully applied functions) typically have null arg.
+        let f: extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
+            std::mem::transmute(code_ptr_val);
+        f(vmctx, obj, std::ptr::null_mut())
+    }
 }
 
 // Test instrumentation — NOT part of the public API.

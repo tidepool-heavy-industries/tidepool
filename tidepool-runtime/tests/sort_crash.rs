@@ -3659,3 +3659,13 @@ fn test_ir_dump_eta() {
             eprintln!("Eta IR: {} nodes, {} bytes", expr.nodes.len(), ir.len());
         }).unwrap().join().expect("join");
 }
+
+#[test]
+fn test_group_b_simple_thunk() {
+    let json = run_aeson(&[
+        r#"let xs = [True, False]"#,
+        r#"case head xs of { True -> pure (toJSON (1.0 :: Double)); False -> pure (toJSON (0.0 :: Double)) }"#,
+    ]);
+    // Aeson Value rendered via to_json includes constructor name and fields
+    assert_eq!(json["fields"][0], serde_json::json!(1.0));
+}

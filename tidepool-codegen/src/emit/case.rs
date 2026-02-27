@@ -108,11 +108,52 @@ fn emit_data_dispatch(
     gc_sig: ir::SigRef,
     oom_func: ir::FuncRef,
     tree: &CoreExpr,
-    scrut_ptr: Value,
+    initial_scrut_ptr: Value,
     data_alts: &[&Alt<usize>],
     default_alt: Option<&Alt<usize>>,
     merge_block: ir::Block,
 ) -> Result<(), EmitError> {
+    // 1. Force if needed (tag < 2: Closure or Thunk)
+    let tag = builder
+        .ins()
+        .load(types::I8, MemFlags::trusted(), initial_scrut_ptr, 0);
+    let needs_force = builder.ins().icmp_imm(IntCC::UnsignedLessThan, tag, 2);
+
+    let force_block = builder.create_block();
+    let dispatch_block = builder.create_block();
+    builder.append_block_param(dispatch_block, types::I64);
+
+    builder
+        .ins()
+        .brif(needs_force, force_block, &[], dispatch_block, &[initial_scrut_ptr]);
+
+    // Force block: call host_fns::heap_force
+    builder.switch_to_block(force_block);
+    builder.seal_block(force_block);
+
+    let force_fn = pipeline
+        .module
+        .declare_function("heap_force", Linkage::Import, &{
+            let mut sig = Signature::new(pipeline.isa.default_call_conv());
+            sig.params.push(AbiParam::new(types::I64)); // vmctx
+            sig.params.push(AbiParam::new(types::I64)); // thunk
+            sig.returns.push(AbiParam::new(types::I64)); // result
+            sig
+        })
+        .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+    let force_ref = pipeline.module.declare_func_in_func(force_fn, builder.func);
+
+    let call = builder.ins().call(force_ref, &[vmctx, initial_scrut_ptr]);
+    let force_result = builder.inst_results(call)[0];
+    builder.declare_value_needs_stack_map(force_result);
+    builder.ins().jump(dispatch_block, &[force_result]);
+
+    // Dispatch block: actual pattern matching starts here
+    builder.switch_to_block(dispatch_block);
+    builder.seal_block(dispatch_block);
+    let scrut_ptr = builder.block_params(dispatch_block)[0];
+    builder.declare_value_needs_stack_map(scrut_ptr);
+
     // Load con_tag as u64 from offset 8
     let con_tag = builder
         .ins()
