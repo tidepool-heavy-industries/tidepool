@@ -56,6 +56,19 @@ thread_local! {
     static RUNTIME_ERROR: RefCell<Option<RuntimeError>> = const { RefCell::new(None) };
 
     pub(crate) static GC_STATE: RefCell<Option<GcState>> = const { RefCell::new(None) };
+
+    /// Captured JIT diagnostics.
+    static DIAGNOSTICS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Push a diagnostic message to the thread-local buffer.
+pub fn push_diagnostic(msg: String) {
+    DIAGNOSTICS.with(|d| d.borrow_mut().push(msg));
+}
+
+/// Drain all accumulated diagnostics.
+pub fn drain_diagnostics() -> Vec<String> {
+    DIAGNOSTICS.with(|d| d.borrow_mut().drain(..).collect())
 }
 
 /// Thread-local state for the copying garbage collector.
@@ -275,10 +288,12 @@ pub fn gc_trigger_last_vmctx() -> usize {
 pub extern "C" fn unresolved_var_trap(var_id: u64) -> *mut u8 {
     let tag_char = (var_id >> 56) as u8 as char;
     let key = var_id & ((1u64 << 56) - 1);
-    eprintln!(
+    let msg = format!(
         "[JIT] Forced unresolved external variable: VarId({:#x}) [tag='{}', key={}]",
         var_id, tag_char, key
     );
+    eprintln!("{}", msg);
+    push_diagnostic(msg);
     RUNTIME_ERROR.with(|cell| {
         *cell.borrow_mut() = Some(RuntimeError::UnresolvedVar(var_id));
     });
@@ -300,7 +315,9 @@ pub extern "C" fn runtime_error(kind: u64) -> *mut u8 {
         4 => "TypeMetadata",
         _ => "Unknown",
     };
-    eprintln!("[JIT] runtime_error called: kind={} ({})", kind, err_name);
+    let msg = format!("[JIT] runtime_error called: kind={} ({})", kind, err_name);
+    eprintln!("{}", msg);
+    push_diagnostic(msg);
     let err = match kind {
         0 => RuntimeError::DivisionByZero,
         1 => RuntimeError::Overflow,
@@ -393,7 +410,9 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) {
         if has_error {
             return; // Error already flagged, just continue
         }
-        eprintln!("[JIT] App: fun_ptr is NULL — unresolved binding");
+        let msg = "[JIT] App: fun_ptr is NULL — unresolved binding".to_string();
+        eprintln!("{}", msg);
+        push_diagnostic(msg);
         RUNTIME_ERROR.with(|cell| {
             *cell.borrow_mut() = Some(RuntimeError::NullFunPtr);
         });
@@ -413,15 +432,18 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) {
             3 => "Lit",
             _ => "UNKNOWN",
         };
-        let _ = writeln!(
-            stderr,
+        let msg = format!(
             "[JIT] App: fun_ptr={:p} has tag {} ({}) — expected Closure!",
             fun_ptr, tag, tag_name
         );
+        let _ = writeln!(stderr, "{}", msg);
+        push_diagnostic(msg);
         if tag == tidepool_heap::layout::TAG_CON {
             let con_tag = unsafe { *(fun_ptr.add(8) as *const u64) };
             let num_fields = unsafe { *(fun_ptr.add(16) as *const u16) };
-            let _ = writeln!(stderr, "[JIT]   Con tag={}, num_fields={}", con_tag, num_fields);
+            let msg2 = format!("[JIT]   Con tag={}, num_fields={}", con_tag, num_fields);
+            let _ = writeln!(stderr, "{}", msg2);
+            push_diagnostic(msg2);
         }
         let _ = stderr.flush();
         RUNTIME_ERROR.with(|cell| {
@@ -1328,6 +1350,21 @@ mod tests {
         let m = runtime_decode_double_mantissa(bits);
         let e = runtime_decode_double_exponent(bits);
         assert_eq!(m as f64 * (2.0f64).powi(e as i32), 3.14);
+    }
+
+    #[test]
+    fn test_diagnostics() {
+        // Clear any leftover diagnostics
+        let _ = drain_diagnostics();
+        
+        push_diagnostic("test1".to_string());
+        push_diagnostic("test2".to_string());
+        
+        let d = drain_diagnostics();
+        assert_eq!(d, vec!["test1".to_string(), "test2".to_string()]);
+        
+        let d2 = drain_diagnostics();
+        assert!(d2.is_empty());
     }
 }
 

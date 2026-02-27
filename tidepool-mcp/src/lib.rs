@@ -703,13 +703,31 @@ impl TidepoolMcpServerImpl {
                         });
                     }
                     Ok(Err(e)) => {
+                        let diagnostics = tidepool_codegen::host_fns::drain_diagnostics();
+                        let mut error_detail = e.to_string();
+                        if !diagnostics.is_empty() {
+                            error_detail.push_str("\n\n## JIT Diagnostics\n");
+                            for d in &diagnostics {
+                                error_detail.push_str(d);
+                                error_detail.push('\n');
+                            }
+                        }
                         let _ = thread_session_tx.send(SessionMessage::Error {
-                            error: e.to_string(),
+                            error: error_detail,
                         });
                     }
                     Err(panic_payload) => {
+                        let diagnostics = tidepool_codegen::host_fns::drain_diagnostics();
+                        let mut error_detail = format_panic_payload(panic_payload);
+                        if !diagnostics.is_empty() {
+                            error_detail.push_str("\n\n## JIT Diagnostics\n");
+                            for d in &diagnostics {
+                                error_detail.push_str(d);
+                                error_detail.push('\n');
+                            }
+                        }
                         let _ = thread_session_tx.send(SessionMessage::Error {
-                            error: format_panic_payload(panic_payload),
+                            error: error_detail,
                         });
                     }
                 }
@@ -761,7 +779,7 @@ impl TidepoolMcpServerImpl {
                 Ok(CallToolResult::error(vec![Content::text(error_msg)]))
             }
             None => Err(McpError::internal_error(
-                "eval thread died unexpectedly",
+                "Eval thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.",
                 None,
             )),
         }
@@ -835,7 +853,7 @@ impl TidepoolMcpServerImpl {
                 Ok(CallToolResult::error(vec![Content::text(error_msg)]))
             }
             None => Err(McpError::internal_error(
-                "eval thread died unexpectedly",
+                "Eval thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.",
                 None,
             )),
         }
