@@ -1737,7 +1737,7 @@ fn test_kv_keys_text_append() {
 
 /// T.splitOn on a Text key from KvKeys.
 #[test]
-#[ignore = "SIGILL in splitOn (wrapper fix resolved SIGSEGV, exposed deeper unsupported primop)"]
+#[ignore = "FIXED SIGSEGV via recursive unboxing, but now fails assertion (serialization of sliced Text results)"]
 fn test_kv_keys_text_split_on() {
     let (json, _) = run_mcp_effectful(&[
         r#"send (KvSet "a:b:c" "v")"#,

@@ -426,6 +426,15 @@ pub extern "C" fn runtime_new_byte_array(size: i64) -> i64 {
 
 /// Copy `len` bytes from `src` (Addr#) to `dest_ba` (ByteArray ptr) at `dest_off`.
 pub extern "C" fn runtime_copy_addr_to_byte_array(src: i64, dest_ba: i64, dest_off: i64, len: i64) {
+    if (src as u64) < 0x1000 || (dest_ba as u64) < 0x1000 {
+        eprintln!("[BUG] runtime_copy_addr_to_byte_array: bad pointer src={:#x} dest_ba={:#x} dest_off={} len={}", src, dest_ba, dest_off, len);
+        std::process::abort();
+    }
+    let dest_size = unsafe { *(dest_ba as *const u64) } as usize;
+    if (dest_off as usize + len as usize) > dest_size {
+        eprintln!("[BUG] runtime_copy_addr_to_byte_array: out of bounds! size={} off={} len={}", dest_size, dest_off, len);
+        std::process::abort();
+    }
     let src_ptr = src as *const u8;
     let dest_ptr = unsafe { (dest_ba as *mut u8).add(8 + dest_off as usize) };
     unsafe {
@@ -435,6 +444,10 @@ pub extern "C" fn runtime_copy_addr_to_byte_array(src: i64, dest_ba: i64, dest_o
 
 /// Set `len` bytes in `ba` starting at `off` to `val`.
 pub extern "C" fn runtime_set_byte_array(ba: i64, off: i64, len: i64, val: i64) {
+    if (ba as u64) < 0x1000 {
+        eprintln!("[BUG] runtime_set_byte_array: bad pointer ba={:#x} off={} len={} val={}", ba, off, len, val);
+        std::process::abort();
+    }
     let ptr = unsafe { (ba as *mut u8).add(8 + off as usize) };
     unsafe {
         std::ptr::write_bytes(ptr, val as u8, len as usize);
@@ -492,6 +505,10 @@ pub extern "C" fn runtime_copy_byte_array(
     dest_off: i64,
     len: i64,
 ) {
+    if (src as u64) < 0x1000 || (dest as u64) < 0x1000 {
+        eprintln!("[BUG] runtime_copy_byte_array: bad pointer src={:#x} src_off={} dest={:#x} dest_off={} len={}", src, src_off, dest, dest_off, len);
+        std::process::abort();
+    }
     let src_ptr = unsafe { (src as *const u8).add(8 + src_off as usize) };
     let dest_ptr = unsafe { (dest as *mut u8).add(8 + dest_off as usize) };
     // Use copy (not copy_nonoverlapping) since src and dest may be the same array
@@ -601,6 +618,10 @@ pub extern "C" fn runtime_cas_boxed_array(arr: i64, idx: i64, expected: i64, new
 
 /// strlen: count bytes until null terminator.
 pub extern "C" fn runtime_strlen(addr: i64) -> i64 {
+    if (addr as u64) < 0x1000 {
+        eprintln!("[BUG] runtime_strlen: bad pointer addr={:#x}", addr);
+        std::process::abort();
+    }
     let ptr = addr as *const u8;
     let mut len = 0i64;
     unsafe {
@@ -654,6 +675,13 @@ pub extern "C" fn runtime_text_measure_off(addr: i64, off: i64, len: i64, cnt: i
 
 /// Find a byte in a buffer. Returns offset from start, or -1 if not found.
 pub extern "C" fn runtime_text_memchr(addr: i64, off: i64, len: i64, needle: i64) -> i64 {
+    if (addr as u64) < 0x1000 {
+        eprintln!("[BUG] runtime_text_memchr: bad pointer addr={:#x} off={} len={} needle={}", addr, off, len, needle);
+        std::process::abort();
+    }
+    if len <= 0 {
+        return -1;
+    }
     let ptr = (addr + off) as *const u8;
     let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
     match slice.iter().position(|&b| b == needle as u8) {
@@ -666,6 +694,10 @@ pub extern "C" fn runtime_text_memchr(addr: i64, off: i64, len: i64, needle: i64
 ///
 /// Reads `len` bytes from `src + off`, writes reversed codepoints starting at `dst`.
 pub extern "C" fn runtime_text_reverse(dest: i64, src: i64, off: i64, len: i64) {
+    if (dest as u64) < 0x1000 || (src as u64) < 0x1000 {
+        eprintln!("[BUG] runtime_text_reverse: bad pointer dest={:#x} src={:#x} off={} len={}", dest, src, off, len);
+        std::process::abort();
+    }
     let src_ptr = (src + off) as *const u8;
     let src_slice = unsafe { std::slice::from_raw_parts(src_ptr, len as usize) };
     let dest_ptr = dest as *mut u8;

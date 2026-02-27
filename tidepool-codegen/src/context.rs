@@ -11,7 +11,7 @@ pub struct VMContext {
     /// End of the current nursery region.
     pub alloc_limit: *const u8,
     /// Host function called when alloc_ptr exceeds alloc_limit.
-    pub gc_trigger: extern "C" fn(*mut VMContext),
+    pub gc_trigger: unsafe extern "C" fn(*mut VMContext),
 }
 
 impl VMContext {
@@ -19,7 +19,7 @@ impl VMContext {
     pub fn new(
         nursery_start: *mut u8,
         nursery_end: *const u8,
-        gc_trigger: extern "C" fn(*mut VMContext),
+        gc_trigger: unsafe extern "C" fn(*mut VMContext),
     ) -> Self {
         Self {
             alloc_ptr: nursery_start,

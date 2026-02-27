@@ -641,7 +641,7 @@ translate expr =
         -- Build: case (IntLe i 0) of { DEFAULT -> <aCaseIdx>; 1# -> [] }
         iRef2 <- emitNode $ NVar iId
         lit0 <- emitNode $ NLit (LEInt 0)
-        leResult <- emitNode $ NPrimOp (T.pack "IntLe") [iRef2, lit0]
+        leResult <- emitOp (T.pack "IntLe") [iRef2, lit0]
         let leDefaultAlt = FlatAlt FDefault [] aCaseIdx
             leTrueAlt    = FlatAlt (FLitAlt (LEInt 1)) [] nilIdx
         leCaseIdx <- emitNode $ NCase leResult 0 [leDefaultAlt, leTrueAlt]
@@ -663,11 +663,9 @@ translate expr =
 
     -- DataCon wrapper Ids: the wrapper takes *boxed* args (e.g., ByteArray, Int)
     -- but we need *unboxed* args for the worker representation stored in NCon.
-    -- Strip single-field box constructors (I#, ByteArray, W#, etc.) from args.
-    -- This is needed because GHC unfoldings from .hi files may use the wrapper form
-    -- (e.g., Text (ByteArray ba#) (I# off#) (I# len#)) instead of the worker form
-    -- (Text ba# off# len#). Without stripping, the NCon fields would be nested Cons
-    -- instead of Lits, causing SIGSEGV when the JIT tries to unbox them.
+    -- We've updated the codegen's unbox_* helpers to handle both boxed and unboxed
+    -- values, so we can now leave the boxing in place. This ensures that Case
+    -- expressions matching on these fields (e.g. matching I# in Text offset) work.
     Var v | Just dc <- isDataConWrapId_maybe v
           , length args == valueRepArity dc -> do
         recordDC dc
@@ -727,7 +725,7 @@ translate expr =
     Var v | Just pop <- isPrimOpId_maybe v
           , length args == primOpArity pop -> do
         childIdxs <- mapM translate args
-        emitNode $ NPrimOp (mapPrimOp pop) childIdxs
+        emitOp (mapPrimOp pop) childIdxs
 
     Var v | Just arity <- isJoinId_maybe v
           , length allArgs == arity -> do
@@ -746,13 +744,16 @@ translate expr =
     Var v | isFCallId v -> do
         let pprName = showPprUnsafe v
         childIdxs <- mapM translate args
-        emitNode $ NPrimOp (mapFfiCall pprName) childIdxs
+        emitOp (mapFfiCall pprName) childIdxs
 
     _ -> do
       hIdx <- translateHead hd
       foldM (\fIdx arg -> do
         aIdx <- translate arg
         emitNode $ NApp fIdx aIdx) hIdx args
+
+emitOp :: Text -> [Int] -> TransM Int
+emitOp name args = emitNode $ NPrimOp name args
 
 translateHead :: CoreExpr -> TransM Int
 translateHead = \case
@@ -823,8 +824,9 @@ translateHead = \case
   --   case remInt# a b of r { DEFAULT ->
   --   body }}
   -- This ensures both components are forced and a/b are shared.
-  Case scrut _caseBinder _ty [Alt (DataAlt _dc) binders body]
-    | (Var v, allArgs) <- collectArgs scrut
+  Case scrut _caseBinder _ty [Alt (DataAlt dc) binders body]
+    | isUnboxedTupleDataCon dc
+    , (Var v, allArgs) <- collectArgs (stripTicksAndCasts scrut)
     , Just pop <- isPrimOpId_maybe v
     , Just (op1Name, op2Name) <- splitMultiReturnPrimOp pop
     , let valArgs = filter isValueArg allArgs
@@ -833,8 +835,8 @@ translateHead = \case
     , [qBinder, rBinder] <- vBinders -> do
         aIdx <- translate a
         bIdx <- translate b
-        qValIdx <- emitNode $ NPrimOp op1Name [aIdx, bIdx]
-        rValIdx <- emitNode $ NPrimOp op2Name [aIdx, bIdx]
+        qValIdx <- emitOp op1Name [aIdx, bIdx]
+        rValIdx <- emitOp op2Name [aIdx, bIdx]
         -- Bind q and r using Case to force them, then translate body
         bodyIdx <- translate body
         -- case rVal of rBinder { DEFAULT -> body }
@@ -842,8 +844,9 @@ translateHead = \case
         -- case qVal of qBinder { DEFAULT -> rCaseIdx }
         emitNode $ NCase qValIdx (varId qBinder) [FlatAlt FDefault [] rCaseIdx]
   -- Desugar triple-return primops: case timesInt2# a b of (# hi, lo, ovf #) -> body
-  Case scrut _caseBinder _ty [Alt (DataAlt _dc) binders body]
-    | (Var v, allArgs) <- collectArgs scrut
+  Case scrut _caseBinder _ty [Alt (DataAlt dc) binders body]
+    | isUnboxedTupleDataCon dc
+    , (Var v, allArgs) <- collectArgs (stripTicksAndCasts scrut)
     , Just pop <- isPrimOpId_maybe v
     , Just (op1Name, op2Name, op3Name) <- splitTripleReturnPrimOp pop
     , let valArgs = filter isValueArg allArgs
@@ -852,9 +855,9 @@ translateHead = \case
     , [b1, b2, b3] <- vBinders -> do
         aIdx <- translate a
         bIdx <- translate b
-        v1Idx <- emitNode $ NPrimOp op1Name [aIdx, bIdx]
-        v2Idx <- emitNode $ NPrimOp op2Name [aIdx, bIdx]
-        v3Idx <- emitNode $ NPrimOp op3Name [aIdx, bIdx]
+        v1Idx <- emitOp op1Name [aIdx, bIdx]
+        v2Idx <- emitOp op2Name [aIdx, bIdx]
+        v3Idx <- emitOp op3Name [aIdx, bIdx]
         bodyIdx <- translate body
         c3 <- emitNode $ NCase v3Idx (varId b3) [FlatAlt FDefault [] bodyIdx]
         c2 <- emitNode $ NCase v2Idx (varId b2) [FlatAlt FDefault [] c3]
@@ -868,7 +871,7 @@ translateHead = \case
   --   3. For 0 result binders (void ops like write): run op, then body
   Case scrut _caseBinder _ty [Alt (DataAlt dc) binders body]
     | isUnboxedTupleDataCon dc
-    , (Var v, allArgs) <- collectArgs scrut
+    , (Var v, allArgs) <- collectArgs (stripTicksAndCasts scrut)
     , isPrimOpId_maybe v /= Nothing || isFCallId v
     , let valArgs = filter isValueArg allArgs
     -- Only drop the last value arg if the first result binder has State# type
@@ -889,7 +892,7 @@ translateHead = \case
         opName <- case isPrimOpId_maybe v of
                     Just pop -> return (mapPrimOp pop)
                     Nothing  -> return (mapFfiCall (showPprUnsafe v))
-        primIdx <- emitNode $ NPrimOp opName childIdxs
+        primIdx <- emitOp opName childIdxs
         if hasStateBinder then do
           -- Stateful primop: bind s' (state token) to dummy, bind results to primop
           dummyState <- emitNode $ NLit (LEInt 0)
@@ -928,6 +931,23 @@ translateHead = \case
               c1 <- emitNode $ NCase primIdx (varId r2) [FlatAlt FDefault [] bodyIdx]
               emitNode $ NCase primIdx (varId r1) [FlatAlt FDefault [] c1]
             _ -> error $ "Unsupported pure unboxed tuple arity: " ++ show (length vBinders) ++ " binders"
+  Case scrut b _alts_ty [Alt (DataAlt dc) binders body]
+    | isUnboxedTupleDataCon dc -> do
+        scrutIdx <- translate scrut
+        let vBinders = filter (not . isTyVar) binders
+        bodyIdx <- translate body
+        case vBinders of
+          [valBinder] -> do
+            -- Single-element unboxed tuple: use FDefault to handle both Lit and Con.
+            -- This happens when a primop returns a raw literal that GHC wraps in (# #).
+            emitNode $ NCase scrutIdx (varId valBinder) [FlatAlt FDefault [] bodyIdx]
+          [] -> do
+            -- Zero-element unboxed tuple: use FDefault, bind to dummy.
+            emitNode $ NCase scrutIdx (varId b) [FlatAlt FDefault [] bodyIdx]
+          _ -> do
+            -- Multi-element: must be a heap box, use FDataAlt to bind fields.
+            recordDC dc
+            emitNode $ NCase scrutIdx (varId b) [FlatAlt (FDataAlt (varId (dataConWorkId dc))) (map varId vBinders) bodyIdx]
   Case scrut b _alts_ty alts -> do
     scrutIdx <- translate scrut
     altData <- mapM translateAlt alts
@@ -978,6 +998,11 @@ stableVarId name =
       fullStr = modStr ++ ":" ++ occStr
       Fingerprint h1 _ = fingerprintString fullStr
   in (0xFE `shiftL` 56) .|. (h1 .&. 0x00FFFFFFFFFFFFFF)
+
+stripTicksAndCasts :: CoreExpr -> CoreExpr
+stripTicksAndCasts (Tick _ e) = stripTicksAndCasts e
+stripTicksAndCasts (Cast e _) = stripTicksAndCasts e
+stripTicksAndCasts e          = e
 
 collectValueBinders :: Int -> CoreExpr -> ([Var], CoreExpr)
 collectValueBinders 0 e = ([], e)
