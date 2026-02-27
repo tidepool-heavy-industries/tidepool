@@ -3611,3 +3611,43 @@ fn test_orchestrate_moderate_scale() {
     // Sum of 10+20+...+100 = 550
     assert_eq!(json, 550);
 }
+
+#[test]
+fn test_ir_dump_pap() {
+    let src = mcp_source(&[
+        r#"send (KvSet "xx1" "v1")"#,
+        r#"keys <- send KvKeys"#,
+        r#"let results = map (T.drop 2) keys"#,
+        r#"pure (T.length (head results))"#,
+    ]);
+    let pp = prelude_path();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let include = [pp.as_path()];
+            let (expr, _table) = compile_haskell(&src, "result", &include).expect("compile");
+            let ir = tidepool_repr::pretty::pretty_print(&expr);
+            std::fs::write("/tmp/ir_pap.txt", &ir).unwrap();
+            eprintln!("PAP IR: {} nodes, {} bytes", expr.nodes.len(), ir.len());
+        }).unwrap().join().expect("join");
+}
+
+#[test]
+fn test_ir_dump_eta() {
+    let src = mcp_source(&[
+        r#"send (KvSet "xx1" "v1")"#,
+        r#"keys <- send KvKeys"#,
+        r#"let results = map (\x -> T.drop 2 x) keys"#,
+        r#"pure (T.length (head results))"#,
+    ]);
+    let pp = prelude_path();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let include = [pp.as_path()];
+            let (expr, _table) = compile_haskell(&src, "result", &include).expect("compile");
+            let ir = tidepool_repr::pretty::pretty_print(&expr);
+            std::fs::write("/tmp/ir_eta.txt", &ir).unwrap();
+            eprintln!("Eta IR: {} nodes, {} bytes", expr.nodes.len(), ir.len());
+        }).unwrap().join().expect("join");
+}
