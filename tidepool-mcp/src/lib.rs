@@ -38,6 +38,9 @@ pub struct EffectDecl {
     /// Extra Haskell type/function definitions emitted before the GADT.
     /// Use for supporting types (e.g. `data Lang = ...`) and helper functions.
     pub type_defs: &'static [&'static str],
+    /// Thin curried helper definitions emitted after the `type M` alias.
+    /// Each string is one or more lines of Haskell (signature + definition).
+    pub helpers: &'static [&'static str],
 }
 
 /// Trait for effect handlers that can describe their Haskell-side type.
@@ -79,6 +82,9 @@ pub fn console_decl() -> EffectDecl {
         description: "Print text output.",
         constructors: &["Print :: Text -> Console ()"],
         type_defs: &[],
+        helpers: &[
+            "say :: Text -> M ()\nsay = send . Print",
+        ],
     }
 }
 
@@ -95,6 +101,12 @@ pub fn kv_decl() -> EffectDecl {
             "KvKeys :: KV [Text]",
         ],
         type_defs: &[],
+        helpers: &[
+            "kvGet :: Text -> M (Maybe Text)\nkvGet = send . KvGet",
+            "kvSet :: Text -> Text -> M ()\nkvSet k v = send (KvSet k v)",
+            "kvDel :: Text -> M ()\nkvDel = send . KvDelete",
+            "kvKeys :: M [Text]\nkvKeys = send KvKeys",
+        ],
     }
 }
 
@@ -108,6 +120,10 @@ pub fn fs_decl() -> EffectDecl {
             "FsWrite :: Text -> Text -> Fs ()",
         ],
         type_defs: &[],
+        helpers: &[
+            "fsRead :: Text -> M Text\nfsRead = send . FsRead",
+            "fsWrite :: Text -> Text -> M ()\nfsWrite f c = send (FsWrite f c)",
+        ],
     }
 }
 
@@ -131,6 +147,11 @@ pub fn sg_decl() -> EffectDecl {
             "SgPreview :: Lang -> Text -> Text -> [Text] -> SG [Match]",
             "SgReplace :: Lang -> Text -> Text -> [Text] -> SG Int",
         ],
+        helpers: &[
+            "sgFind :: Lang -> Text -> [Text] -> M [Match]\nsgFind l p fs = send (SgFind l p fs)",
+            "sgPreview :: Lang -> Text -> Text -> [Text] -> M [Match]\nsgPreview l p r fs = send (SgPreview l p r fs)",
+            "sgReplace :: Lang -> Text -> Text -> [Text] -> M Int\nsgReplace l p r fs = send (SgReplace l p r fs)",
+        ],
     }
 }
 
@@ -141,6 +162,9 @@ pub fn http_decl() -> EffectDecl {
         description: "Fetch JSON from HTTP endpoints. Returns response body as Value.",
         constructors: &["HttpGet :: Text -> Http Value"],
         type_defs: &[],
+        helpers: &[
+            "httpGet :: Text -> M Value\nhttpGet = send . HttpGet",
+        ],
     }
 }
 
@@ -151,6 +175,9 @@ pub fn ask_decl() -> EffectDecl {
         description: "Suspend execution and ask the calling LLM a question. The LLM calls the resume tool with an answer, and execution continues.",
         constructors: &["Ask :: Text -> Ask Text"],
         type_defs: &[],
+        helpers: &[
+            "ask :: Text -> M Text\nask = send . Ask",
+        ],
     }
 }
 
@@ -266,6 +293,18 @@ pub fn build_preamble(effects: &[EffectDecl]) -> String {
         out.push_str(&format!("type M = Eff '[{}]\n\n", names.join(", ")));
     }
 
+    // Emit thin effect helpers
+    let has_helpers = effects.iter().any(|e| !e.helpers.is_empty());
+    if has_helpers {
+        for eff in effects {
+            for h in eff.helpers {
+                out.push_str(h);
+                out.push('\n');
+            }
+        }
+        out.push('\n');
+    }
+
     out
 }
 
@@ -308,6 +347,22 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
             for ctor in eff.constructors {
                 desc.push_str(&format!("  {}\n", ctor));
             }
+        }
+
+        // List built-in helpers
+        let has_helpers = effects.iter().any(|e| !e.helpers.is_empty());
+        if has_helpers {
+            desc.push_str("\nBuilt-in helpers (always available, no need to define):\n");
+            for eff in effects {
+                for h in eff.helpers {
+                    // Extract just the type signature line
+                    if let Some(sig) = h.lines().next() {
+                        desc.push_str(&format!("  {}\n", sig));
+                    }
+                }
+            }
+            desc.push_str("\nPrefer helpers over raw `send`: `say \"hi\"` not `send (Print \"hi\")`.\n");
+            desc.push_str("Use `>>=` chains and `<$>`/`<*>` for dense composition. Named bindings as escape hatch.\n");
         }
     }
 
@@ -982,6 +1037,7 @@ mod tests {
                 description: "Print output",
                 constructors: &["Print :: Text -> Console ()"],
                 type_defs: &[],
+                helpers: &[],
             },
             EffectDecl {
                 type_name: "KV",
@@ -991,6 +1047,7 @@ mod tests {
                     "KvSet :: Text -> Text -> KV ()",
                 ],
                 type_defs: &[],
+                helpers: &[],
             },
         ];
         let preamble = build_preamble(&effects);
@@ -1007,18 +1064,21 @@ mod tests {
                 description: "",
                 constructors: &[],
                 type_defs: &[],
+                helpers: &[],
             },
             EffectDecl {
                 type_name: "KV",
                 description: "",
                 constructors: &[],
                 type_defs: &[],
+                helpers: &[],
             },
             EffectDecl {
                 type_name: "Fs",
                 description: "",
                 constructors: &[],
                 type_defs: &[],
+                helpers: &[],
             },
         ];
         assert_eq!(build_effect_stack_type(&effects), "'[Console, KV, Fs]");
@@ -1032,6 +1092,7 @@ mod tests {
             description: "",
             constructors: &["Print :: Text -> Console ()"],
             type_defs: &[],
+            helpers: &[],
         }];
         let preamble = build_preamble(&effects);
         let stack = build_effect_stack_type(&effects);
@@ -1055,10 +1116,24 @@ mod tests {
             description: "Print to console",
             constructors: &["Print :: Text -> Console ()"],
             type_defs: &[],
+            helpers: &["say :: Text -> M ()\nsay = send . Print"],
         }];
         let desc = build_eval_tool_description(&effects);
         assert!(desc.contains("Console: Print to console"));
         assert!(desc.contains("Print :: Text -> Console ()"));
+        assert!(desc.contains("say :: Text -> M ()"));
+        assert!(desc.contains("Built-in helpers"));
+    }
+
+    #[test]
+    fn test_preamble_includes_helpers() {
+        let decls = standard_decls();
+        let preamble = build_preamble(&decls);
+        assert!(preamble.contains("say :: Text -> M ()\nsay = send . Print"));
+        assert!(preamble.contains("kvGet :: Text -> M (Maybe Text)\nkvGet = send . KvGet"));
+        assert!(preamble.contains("fsRead :: Text -> M Text\nfsRead = send . FsRead"));
+        assert!(preamble.contains("httpGet :: Text -> M Value\nhttpGet = send . HttpGet"));
+        assert!(preamble.contains("ask :: Text -> M Text\nask = send . Ask"));
     }
 
     #[test]
