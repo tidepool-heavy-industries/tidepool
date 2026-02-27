@@ -29,6 +29,8 @@ import GHC.Builtin.PrimOps
 import GHC.Types.Literal
 import GHC.Types.Name (nameOccName, isExternalName, isSystemName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Unit.Module (moduleName, moduleNameString)
+import GHC.Utils.Fingerprint (fingerprintString, Fingerprint(..))
 import GHC.Core.TyCon
 import GHC.Core.Type (splitTyConApp_maybe, isCoercionTy)
 import GHC.Builtin.Types.Prim (statePrimTyCon)
@@ -951,7 +953,22 @@ mapAltCon = \case
   DEFAULT    -> return FDefault
 
 varId :: Var -> Word64
-varId v = fromIntegral (getKey (varUnique v))
+varId v = case isDataConId_maybe v of
+  Just _  -> stableVarId (varName v)
+  Nothing -> if isExternalName (varName v)
+             then stableVarId (varName v)
+             else fromIntegral (getKey (varUnique v))
+
+stableVarId :: Name -> Word64
+stableVarId name =
+  let modStr = case nameModule_maybe name of
+        Just m  -> moduleNameString (moduleName m)
+        Nothing -> "WiredIn"
+      occStr = occNameString (nameOccName name)
+      fullStr = modStr ++ ":" ++ occStr
+      Fingerprint h1 _ = fingerprintString fullStr
+      res = (0xFE `shiftL` 56) .|. (h1 .&. 0x00FFFFFFFFFFFFFF)
+  in trace ("stableVarId: " ++ fullStr ++ " -> 0x" ++ showHex res "") res
 
 collectValueBinders :: Int -> CoreExpr -> ([Var], CoreExpr)
 collectValueBinders 0 e = ([], e)
