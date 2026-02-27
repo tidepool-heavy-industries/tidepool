@@ -18,6 +18,9 @@ use std::sync::Arc;
 use tidepool_bridge::{FromCore, ToCore};
 use tidepool_runtime::DispatchEffect;
 use tokio::io::{stdin, stdout};
+use tokio::time::{timeout, Duration};
+
+const EVAL_TIMEOUT_SECS: u64 = 30;
 
 // ---------------------------------------------------------------------------
 // Effect metadata — lives next to the handler, discovered via trait
@@ -719,8 +722,9 @@ impl TidepoolMcpServerImpl {
             })?;
 
         // Await first message from the eval thread
-        match session_rx.recv().await {
-            Some(SessionMessage::Completed { result, output }) => {
+        let eval_timeout = Duration::from_secs(EVAL_TIMEOUT_SECS);
+        match timeout(eval_timeout, session_rx.recv()).await {
+            Ok(Some(SessionMessage::Completed { result, output })) => {
                 tracing::info!("eval completed");
                 let mut response = String::new();
                 if !output.is_empty() {
@@ -734,7 +738,7 @@ impl TidepoolMcpServerImpl {
                 response.push_str(&result);
                 Ok(CallToolResult::success(vec![Content::text(response)]))
             }
-            Some(SessionMessage::Suspended { prompt }) => {
+            Ok(Some(SessionMessage::Suspended { prompt })) => {
                 tracing::info!(prompt = %prompt, "eval suspended on Ask");
                 let cont_id = self.next_continuation_id();
                 let json = serde_json::json!({
@@ -755,15 +759,27 @@ impl TidepoolMcpServerImpl {
                     json.to_string(),
                 )]))
             }
-            Some(SessionMessage::Error { error }) => {
+            Ok(Some(SessionMessage::Error { error })) => {
                 let error_msg = format_error_with_source("Error", &error, &source);
                 tracing::error!("eval failed: {}", error);
                 Ok(CallToolResult::error(vec![Content::text(error_msg)]))
             }
-            None => Err(McpError::internal_error(
+            Ok(None) => Err(McpError::internal_error(
                 "eval thread died unexpectedly",
                 None,
             )),
+            Err(_elapsed) => {
+                tracing::error!("eval timed out after {}s", EVAL_TIMEOUT_SECS);
+                let error_msg = format_error_with_source(
+                    "Timeout",
+                    &format!(
+                        "Evaluation timed out after {}s. This usually means an infinite loop or unbounded recursion.",
+                        EVAL_TIMEOUT_SECS
+                    ),
+                    &source,
+                );
+                Ok(CallToolResult::error(vec![Content::text(error_msg)]))
+            }
         }
     }
 
@@ -793,8 +809,9 @@ impl TidepoolMcpServerImpl {
         let response_tx = session.response_tx.clone();
 
         // Await the next message from the eval thread
-        match session.session_rx.recv().await {
-            Some(SessionMessage::Completed { result, output }) => {
+        let eval_timeout = Duration::from_secs(EVAL_TIMEOUT_SECS);
+        match timeout(eval_timeout, session.session_rx.recv()).await {
+            Ok(Some(SessionMessage::Completed { result, output })) => {
                 tracing::info!("resumed eval completed");
                 let mut response = String::new();
                 if !output.is_empty() {
@@ -808,7 +825,7 @@ impl TidepoolMcpServerImpl {
                 response.push_str(&result);
                 Ok(CallToolResult::success(vec![Content::text(response)]))
             }
-            Some(SessionMessage::Suspended { prompt }) => {
+            Ok(Some(SessionMessage::Suspended { prompt })) => {
                 tracing::info!(prompt = %prompt, "resumed eval suspended again");
                 let cont_id = self.next_continuation_id();
                 let json = serde_json::json!({
@@ -829,15 +846,27 @@ impl TidepoolMcpServerImpl {
                     json.to_string(),
                 )]))
             }
-            Some(SessionMessage::Error { error }) => {
+            Ok(Some(SessionMessage::Error { error })) => {
                 let error_msg = format_error_with_source("Error", &error, &source);
                 tracing::error!("resumed eval failed: {}", error);
                 Ok(CallToolResult::error(vec![Content::text(error_msg)]))
             }
-            None => Err(McpError::internal_error(
+            Ok(None) => Err(McpError::internal_error(
                 "eval thread died unexpectedly",
                 None,
             )),
+            Err(_elapsed) => {
+                tracing::error!("resumed eval timed out after {}s", EVAL_TIMEOUT_SECS);
+                let error_msg = format_error_with_source(
+                    "Timeout",
+                    &format!(
+                        "Evaluation timed out after {}s. This usually means an infinite loop or unbounded recursion.",
+                        EVAL_TIMEOUT_SECS
+                    ),
+                    &source,
+                );
+                Ok(CallToolResult::error(vec![Content::text(error_msg)]))
+            }
         }
     }
 }
