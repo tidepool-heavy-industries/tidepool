@@ -476,6 +476,79 @@ pub fn emit_primop(
             let a = unbox_double(pipeline, builder, args[0]);
             Ok(SsaVal::Raw(builder.ins().fneg(a), LIT_TAG_DOUBLE))
         }
+        PrimOpKind::DoubleFabs => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_double(pipeline, builder, args[0]);
+            Ok(SsaVal::Raw(builder.ins().fabs(a), LIT_TAG_DOUBLE))
+        }
+        // Double math unary: sqrt, exp, log, trig, etc. All via libm runtime calls.
+        PrimOpKind::DoubleSqrt => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_double(pipeline, builder, args[0]);
+            Ok(SsaVal::Raw(builder.ins().sqrt(a), LIT_TAG_DOUBLE))
+        }
+        PrimOpKind::DoubleExp
+        | PrimOpKind::DoubleExpM1
+        | PrimOpKind::DoubleLog
+        | PrimOpKind::DoubleLog1P
+        | PrimOpKind::DoubleSin
+        | PrimOpKind::DoubleCos
+        | PrimOpKind::DoubleTan
+        | PrimOpKind::DoubleAsin
+        | PrimOpKind::DoubleAcos
+        | PrimOpKind::DoubleAtan
+        | PrimOpKind::DoubleSinh
+        | PrimOpKind::DoubleCosh
+        | PrimOpKind::DoubleTanh
+        | PrimOpKind::DoubleAsinh
+        | PrimOpKind::DoubleAcosh
+        | PrimOpKind::DoubleAtanh => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_double(pipeline, builder, args[0]);
+            let fn_name = match op {
+                PrimOpKind::DoubleExp => "runtime_double_exp",
+                PrimOpKind::DoubleExpM1 => "runtime_double_expm1",
+                PrimOpKind::DoubleLog => "runtime_double_log",
+                PrimOpKind::DoubleLog1P => "runtime_double_log1p",
+                PrimOpKind::DoubleSin => "runtime_double_sin",
+                PrimOpKind::DoubleCos => "runtime_double_cos",
+                PrimOpKind::DoubleTan => "runtime_double_tan",
+                PrimOpKind::DoubleAsin => "runtime_double_asin",
+                PrimOpKind::DoubleAcos => "runtime_double_acos",
+                PrimOpKind::DoubleAtan => "runtime_double_atan",
+                PrimOpKind::DoubleSinh => "runtime_double_sinh",
+                PrimOpKind::DoubleCosh => "runtime_double_cosh",
+                PrimOpKind::DoubleTanh => "runtime_double_tanh",
+                PrimOpKind::DoubleAsinh => "runtime_double_asinh",
+                PrimOpKind::DoubleAcosh => "runtime_double_acosh",
+                PrimOpKind::DoubleAtanh => "runtime_double_atanh",
+                _ => unreachable!(),
+            };
+            let bits = builder.ins().bitcast(types::I64, MemFlags::new(), a);
+            let result = emit_runtime_call(
+                pipeline, builder, fn_name,
+                &[AbiParam::new(types::I64)],
+                &[AbiParam::new(types::I64)],
+                &[bits],
+            )?;
+            let d = builder.ins().bitcast(types::F64, MemFlags::new(), result);
+            Ok(SsaVal::Raw(d, LIT_TAG_DOUBLE))
+        }
+        PrimOpKind::DoublePower => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_double(pipeline, builder, args[0]);
+            let b = unbox_double(pipeline, builder, args[1]);
+            let bits_a = builder.ins().bitcast(types::I64, MemFlags::new(), a);
+            let bits_b = builder.ins().bitcast(types::I64, MemFlags::new(), b);
+            let result = emit_runtime_call(
+                pipeline, builder, "runtime_double_power",
+                &[AbiParam::new(types::I64), AbiParam::new(types::I64)],
+                &[AbiParam::new(types::I64)],
+                &[bits_a, bits_b],
+            )?;
+            let d = builder.ins().bitcast(types::F64, MemFlags::new(), result);
+            Ok(SsaVal::Raw(d, LIT_TAG_DOUBLE))
+        }
         PrimOpKind::FloatNegate => {
             check_arity(op, 1, args.len())?;
             let a = unbox_float(pipeline, builder, args[0]);

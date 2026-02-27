@@ -388,6 +388,56 @@ unsafe extern "C" fn poison_trampoline(
     error_poison_ptr()
 }
 
+/// Return a pre-allocated "lazy poison" Closure for a given error kind.
+/// Unlike `error_poison_ptr()`, this does NOT set the error flag at creation
+/// time. The error is only triggered when the closure is actually called
+/// (via `poison_trampoline_lazy`). This is critical for typeclass dictionaries
+/// where error methods exist as fields but may never be invoked.
+///
+/// kind: 0=DivisionByZero, 1=Overflow, 2=UserError, 3=Undefined, 4=TypeMetadata
+pub fn error_poison_ptr_lazy(kind: u64) -> *mut u8 {
+    use std::sync::OnceLock;
+    static LAZY_POISONS: OnceLock<[usize; 5]> = OnceLock::new();
+    let ptrs = LAZY_POISONS.get_or_init(|| {
+        let mut arr = [0usize; 5];
+        for k in 0..5u64 {
+            // Closure: header(8) + code_ptr(8) + num_captured(2+pad=8) + captured[0](8) = 32
+            let size = 32usize;
+            let lo = std::alloc::Layout::from_size_align(size, 8).unwrap();
+            let ptr = unsafe { std::alloc::alloc_zeroed(lo) };
+            if ptr.is_null() {
+                std::alloc::handle_alloc_error(lo);
+            }
+            unsafe {
+                tidepool_heap::layout::write_header(
+                    ptr,
+                    tidepool_heap::layout::TAG_CLOSURE,
+                    size as u16,
+                );
+                *(ptr.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *mut usize) =
+                    poison_trampoline_lazy as *const () as usize;
+                *(ptr.add(tidepool_heap::layout::CLOSURE_NUM_CAPTURED_OFFSET) as *mut u16) = 1;
+                *(ptr.add(tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET) as *mut u64) = k;
+            }
+            arr[k as usize] = ptr as usize;
+        }
+        arr
+    });
+    ptrs[kind.min(4) as usize] as *mut u8
+}
+
+/// Trampoline for lazy poison closures. Reads the error kind from captured[0]
+/// and calls `runtime_error(kind)` — setting the error flag only now, when the
+/// closure is actually invoked.
+unsafe extern "C" fn poison_trampoline_lazy(
+    _vmctx: *mut VMContext,
+    closure: *mut u8,
+    _arg: *mut u8,
+) -> *mut u8 {
+    let kind = *(closure.add(tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET) as *const u64);
+    runtime_error(kind)
+}
+
 /// Check and take any pending runtime error from JIT code.
 pub fn take_runtime_error() -> Option<RuntimeError> {
     RUNTIME_ERROR.with(|cell| cell.borrow_mut().take())
@@ -853,6 +903,40 @@ fn haskell_show_double(d: f64) -> String {
     }
 }
 
+// --- Double math runtime functions (libm wrappers) ---
+// All take f64-as-i64-bits and return f64-as-i64-bits.
+macro_rules! double_math_unary {
+    ($name:ident, $op:ident) => {
+        pub extern "C" fn $name(bits: i64) -> i64 {
+            let d = f64::from_bits(bits as u64);
+            f64::$op(d).to_bits() as i64
+        }
+    };
+}
+
+double_math_unary!(runtime_double_exp, exp);
+double_math_unary!(runtime_double_expm1, exp_m1);
+double_math_unary!(runtime_double_log, ln);
+double_math_unary!(runtime_double_log1p, ln_1p);
+double_math_unary!(runtime_double_sin, sin);
+double_math_unary!(runtime_double_cos, cos);
+double_math_unary!(runtime_double_tan, tan);
+double_math_unary!(runtime_double_asin, asin);
+double_math_unary!(runtime_double_acos, acos);
+double_math_unary!(runtime_double_atan, atan);
+double_math_unary!(runtime_double_sinh, sinh);
+double_math_unary!(runtime_double_cosh, cosh);
+double_math_unary!(runtime_double_tanh, tanh);
+double_math_unary!(runtime_double_asinh, asinh);
+double_math_unary!(runtime_double_acosh, acosh);
+double_math_unary!(runtime_double_atanh, atanh);
+
+pub extern "C" fn runtime_double_power(bits_a: i64, bits_b: i64) -> i64 {
+    let a = f64::from_bits(bits_a as u64);
+    let b = f64::from_bits(bits_b as u64);
+    a.powf(b).to_bits() as i64
+}
+
 pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
     vec![
         ("gc_trigger", gc_trigger as *const u8),
@@ -933,6 +1017,24 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
             "runtime_show_double_addr",
             runtime_show_double_addr as *const u8,
         ),
+        // Double math (libm wrappers)
+        ("runtime_double_exp", runtime_double_exp as *const u8),
+        ("runtime_double_expm1", runtime_double_expm1 as *const u8),
+        ("runtime_double_log", runtime_double_log as *const u8),
+        ("runtime_double_log1p", runtime_double_log1p as *const u8),
+        ("runtime_double_sin", runtime_double_sin as *const u8),
+        ("runtime_double_cos", runtime_double_cos as *const u8),
+        ("runtime_double_tan", runtime_double_tan as *const u8),
+        ("runtime_double_asin", runtime_double_asin as *const u8),
+        ("runtime_double_acos", runtime_double_acos as *const u8),
+        ("runtime_double_atan", runtime_double_atan as *const u8),
+        ("runtime_double_sinh", runtime_double_sinh as *const u8),
+        ("runtime_double_cosh", runtime_double_cosh as *const u8),
+        ("runtime_double_tanh", runtime_double_tanh as *const u8),
+        ("runtime_double_asinh", runtime_double_asinh as *const u8),
+        ("runtime_double_acosh", runtime_double_acosh as *const u8),
+        ("runtime_double_atanh", runtime_double_atanh as *const u8),
+        ("runtime_double_power", runtime_double_power as *const u8),
     ]
 }
 

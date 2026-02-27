@@ -203,22 +203,15 @@ fn collapse_frame(
             None => {
                 let tag = (vid.0 >> 56) as u8;
                 if tag == 0x45 {
+                    // Lazy poison: emit a constant pointer to a pre-allocated
+                    // poison closure. The error flag is NOT set now — only when
+                    // the closure is actually called (forced). This is critical
+                    // for typeclass dictionaries that contain error methods for
+                    // impossible branches (e.g., $fFloatingDouble).
                     let kind = vid.0 & 0xFF;
-                    let err_fn = pipeline
-                        .module
-                        .declare_function("runtime_error", Linkage::Import, &{
-                            let mut sig = Signature::new(pipeline.isa.default_call_conv());
-                            sig.params.push(AbiParam::new(types::I64));
-                            sig.returns.push(AbiParam::new(types::I64));
-                            sig
-                        })
-                        .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-                    let err_ref = pipeline.module.declare_func_in_func(err_fn, builder.func);
-                    let kind_val = builder.ins().iconst(types::I64, kind as i64);
-                    let inst = builder.ins().call(err_ref, &[kind_val]);
-                    let result = builder.inst_results(inst)[0];
-                    builder.declare_value_needs_stack_map(result);
-                    return Ok(SsaVal::HeapPtr(result));
+                    let poison_addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
+                    let poison_val = builder.ins().iconst(types::I64, poison_addr);
+                    return Ok(SsaVal::HeapPtr(poison_val));
                 }
 
                 ctx.trace_scope(&format!(
@@ -704,6 +697,18 @@ impl EmitContext {
         }
     }
 
+    /// Extract the error kind from an error call (walks App chain to find head Var).
+    fn extract_error_kind(tree: &CoreExpr, rhs_idx: usize) -> u64 {
+        let mut idx = rhs_idx;
+        loop {
+            match &tree.nodes[idx] {
+                CoreFrame::Var(v) if (v.0 >> 56) as u8 == 0x45 => return v.0 & 0xFF,
+                CoreFrame::App { fun, .. } => idx = *fun,
+                _ => return 2, // fallback: UserError
+            }
+        }
+    }
+
     pub fn emit_node(
         &mut self,
         pipeline: &mut CodegenPipeline,
@@ -725,9 +730,9 @@ impl EmitContext {
                         tidepool_repr::free_vars::free_vars(&tree.extract_subtree(*body));
                     if body_fvs.contains(binder) {
                         if Self::rhs_is_error_call(tree, *rhs) {
-                            // Bind to poison closure — a valid Closure that returns itself
-                            // and sets the runtime error flag on call.
-                            let poison_addr = crate::host_fns::error_poison_ptr() as i64;
+                            // Bind to lazy poison closure — error only triggers on call.
+                            let kind = Self::extract_error_kind(tree, *rhs);
+                            let poison_addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
                             let poison_val = builder.ins().iconst(types::I64, poison_addr);
                             self.trace_scope(&format!("defer error LetNonRec {:?}", binder));
                             self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
@@ -758,7 +763,8 @@ impl EmitContext {
                     if rec_bindings.is_empty() {
                         for (binder, rhs_idx) in &simple_bindings {
                             if Self::rhs_is_error_call(tree, *rhs_idx) {
-                                let poison_addr = crate::host_fns::error_poison_ptr() as i64;
+                                let kind = Self::extract_error_kind(tree, *rhs_idx);
+                                let poison_addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
                                 let poison_val = builder.ins().iconst(types::I64, poison_addr);
                                 self.trace_scope(&format!(
                                     "defer error LetRec(simple) {:?}",
@@ -926,7 +932,8 @@ impl EmitContext {
                     let mut deferred_simple = Vec::new();
                     for (binder, rhs_idx) in &simple_bindings {
                         if Self::rhs_is_error_call(tree, *rhs_idx) {
-                            let poison_addr = crate::host_fns::error_poison_ptr() as i64;
+                            let kind = Self::extract_error_kind(tree, *rhs_idx);
+                            let poison_addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
                             let poison_val = builder.ins().iconst(types::I64, poison_addr);
                             self.trace_scope(&format!("defer error LetRec(trivial) {:?}", binder));
                             self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
@@ -1211,7 +1218,8 @@ impl EmitContext {
 
                     for (binder, rhs_idx) in &deferred_simple {
                         if Self::rhs_is_error_call(tree, *rhs_idx) {
-                            let poison_addr = crate::host_fns::error_poison_ptr() as i64;
+                            let kind = Self::extract_error_kind(tree, *rhs_idx);
+                            let poison_addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
                             let poison_val = builder.ins().iconst(types::I64, poison_addr);
                             self.trace_scope(&format!("defer error LetRec(deferred) {:?}", binder));
                             self.env.insert(*binder, SsaVal::HeapPtr(poison_val));

@@ -461,6 +461,102 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let a = expect_double(&args[0])?;
             Ok(Value::Lit(Literal::LitDouble((-a).to_bits())))
         }
+        PrimOpKind::DoubleFabs => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.abs().to_bits())))
+        }
+        PrimOpKind::DoubleSqrt => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.sqrt().to_bits())))
+        }
+        PrimOpKind::DoubleExp => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.exp().to_bits())))
+        }
+        PrimOpKind::DoubleExpM1 => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.exp_m1().to_bits())))
+        }
+        PrimOpKind::DoubleLog => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.ln().to_bits())))
+        }
+        PrimOpKind::DoubleLog1P => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.ln_1p().to_bits())))
+        }
+        PrimOpKind::DoubleSin => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.sin().to_bits())))
+        }
+        PrimOpKind::DoubleCos => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.cos().to_bits())))
+        }
+        PrimOpKind::DoubleTan => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.tan().to_bits())))
+        }
+        PrimOpKind::DoubleAsin => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.asin().to_bits())))
+        }
+        PrimOpKind::DoubleAcos => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.acos().to_bits())))
+        }
+        PrimOpKind::DoubleAtan => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.atan().to_bits())))
+        }
+        PrimOpKind::DoubleSinh => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.sinh().to_bits())))
+        }
+        PrimOpKind::DoubleCosh => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.cosh().to_bits())))
+        }
+        PrimOpKind::DoubleTanh => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.tanh().to_bits())))
+        }
+        PrimOpKind::DoubleAsinh => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.asinh().to_bits())))
+        }
+        PrimOpKind::DoubleAcosh => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.acosh().to_bits())))
+        }
+        PrimOpKind::DoubleAtanh => {
+            if args.len() != 1 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 1, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(a.atanh().to_bits())))
+        }
+        PrimOpKind::DoublePower => {
+            if args.len() != 2 { return Err(EvalError::ArityMismatch { context: "arguments", expected: 2, got: args.len() }); }
+            let a = expect_double(&args[0])?;
+            let b = expect_double(&args[1])?;
+            Ok(Value::Lit(Literal::LitDouble(a.powf(b).to_bits())))
+        }
         PrimOpKind::FloatAdd => {
             let (a, b) = bin_op_float(op, &args)?;
             Ok(Value::Lit(Literal::LitFloat((a + b).to_bits() as u64)))

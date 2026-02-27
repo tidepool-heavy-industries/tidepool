@@ -840,7 +840,8 @@ fn test_emit_unique_lambda_names() {
 
 #[test]
 fn test_emit_runtime_error_div_zero() {
-    // A Var with tag 'E' (0x45) and kind 0 should call runtime_error(0) and return a poison closure
+    // A Var with tag 'E' (0x45) and kind 0 returns a lazy poison closure.
+    // Error flag is NOT set until the closure is actually called.
     let div_zero_var = VarId(0x4500000000000000); // tag 'E', kind 0 = divZero
     let tree = RecursiveTree {
         nodes: vec![
@@ -848,9 +849,11 @@ fn test_emit_runtime_error_div_zero() {
         ],
     };
     let result = compile_and_run(&tree);
-    assert!(!result.result_ptr.is_null()); // poison closure, not null
+    assert!(!result.result_ptr.is_null()); // lazy poison closure, not null
+    assert_eq!(result.result_ptr, host_fns::error_poison_ptr_lazy(0));
+    // Error flag is NOT set — lazy poison defers until call
     let err = host_fns::take_runtime_error();
-    assert!(matches!(err, Some(host_fns::RuntimeError::DivisionByZero)));
+    assert!(err.is_none());
 }
 
 #[test]
@@ -862,9 +865,11 @@ fn test_emit_runtime_error_overflow() {
         ],
     };
     let result = compile_and_run(&tree);
-    assert!(!result.result_ptr.is_null()); // poison closure, not null
+    assert!(!result.result_ptr.is_null()); // lazy poison closure, not null
+    assert_eq!(result.result_ptr, host_fns::error_poison_ptr_lazy(1));
+    // Error flag is NOT set — lazy poison defers until call
     let err = host_fns::take_runtime_error();
-    assert!(matches!(err, Some(host_fns::RuntimeError::Overflow)));
+    assert!(err.is_none());
 }
 
 #[test]
@@ -2121,12 +2126,10 @@ fn test_error_sentinel_let_non_rec_forced() {
         ],
     };
     let result = compile_and_run(&tree);
-    // Should be the poison closure
-    assert_eq!(result.result_ptr, host_fns::error_poison_ptr());
+    // Should be the lazy poison closure for kind 2 (UserError)
+    assert_eq!(result.result_ptr, host_fns::error_poison_ptr_lazy(2));
     let err = host_fns::take_runtime_error();
-    assert!(err.is_none()); // Wait, LetNonRec only BINDS to poison, it doesn't CALL it.
-                            // The error flag is set when runtime_error is CALLED (e.g. by Var(0x45...))
-                            // but in LetNonRec it's DEFERRED.
+    assert!(err.is_none()); // Error flag not set — lazy poison defers until call.
 }
 
 #[test]
@@ -2203,7 +2206,7 @@ fn test_error_sentinel_detection_in_complex_rhs() {
         ],
     };
     let result = compile_and_run(&tree);
-    assert_eq!(result.result_ptr, host_fns::error_poison_ptr());
+    assert_eq!(result.result_ptr, host_fns::error_poison_ptr_lazy(2));
     assert!(host_fns::take_runtime_error().is_none());
 }
 
