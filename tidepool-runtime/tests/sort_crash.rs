@@ -3658,3 +3658,117 @@ fn test_group_b_simple_thunk() {
     // Aeson Value rendered via to_json includes constructor name and fields
     assert_eq!(json["fields"][0], serde_json::json!(1.0));
 }
+
+// ---------------------------------------------------------------------------
+// ToCore JSON Value constructor ID tests
+// ---------------------------------------------------------------------------
+
+/// Diagnostic: dump the DataConTable entries for aeson Value constructor names.
+/// This reveals whether `get_by_name("Array")` etc. return the right DataConId.
+#[test]
+fn test_tocore_json_datacon_ids_match_haskell() {
+    use tidepool_bridge::ToCore;
+
+    // Compile a Haskell program that constructs each aeson Value variant
+    let src = mcp_source_with_imports(
+        &[r#"pure (Aeson.Array [Aeson.String "x", Aeson.Number 1.0, Aeson.Bool True, Aeson.Null])"#],
+        &[],
+        &aeson_import_strs(),
+    );
+    let pp = prelude_path();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let include = [pp.as_path()];
+            let val = compile_and_run(&src, "result", &include, &mut HNil, &())
+                .expect("compile_and_run failed");
+            let table = val.table().clone();
+            let haskell_val = val.into_value();
+
+            // The Haskell-produced value is Array [String "x", Number 1.0, Bool True, Null]
+            // Extract the Array constructor ID from the Haskell-side value
+            let haskell_array_id = match &haskell_val {
+                Value::Con(id, _) => *id,
+                other => panic!("expected Con(Array, ...), got {:?}", other),
+            };
+            let haskell_array_name = table.name_of(haskell_array_id).unwrap();
+            assert_eq!(haskell_array_name, "Array", "Haskell value should be Array constructor");
+
+            // Now construct the same thing via ToCore
+            let json = serde_json::json!(["x", 1.0, true, null]);
+            let tocore_val = json.to_value(&table).expect("ToCore should succeed");
+            let tocore_array_id = match &tocore_val {
+                Value::Con(id, _) => *id,
+                other => panic!("expected Con(Array, ...) from ToCore, got {:?}", other),
+            };
+
+            // Dump all names that ToCore uses
+            for name in &["Object", "Array", "String", "Number", "Bool", "Null", "Key", "Bin", "Tip"] {
+                let id = table.get_by_name(name);
+                eprintln!("  get_by_name({:?}) = {:?}", name, id);
+            }
+            // Dump ALL entries named "Array" or "String"
+            for dc in table.iter() {
+                if dc.name == "Array" || dc.name == "String" || dc.name == "Object" || dc.name == "Number" || dc.name == "Bool" || dc.name == "Null" {
+                    eprintln!("  DC: name={:?} id={:?} tag={} arity={}", dc.name, dc.id, dc.tag, dc.rep_arity);
+                }
+            }
+
+            // THE KEY ASSERTION: these should be the same DataConId
+            assert_eq!(
+                haskell_array_id, tocore_array_id,
+                "ToCore Array DataConId ({:?}, name={:?}) != Haskell Array DataConId ({:?}, name={:?})",
+                tocore_array_id, table.name_of(tocore_array_id),
+                haskell_array_id, table.name_of(haskell_array_id),
+            );
+
+            // Also check String
+            let haskell_elems = match &haskell_val {
+                Value::Con(_, fields) => fields,
+                _ => unreachable!(),
+            };
+            // Array field is a cons list; first element is the first Value in the array
+            // Navigate: Array [list] -> (:) head tail -> head = String "x"
+            let first_elem = match &haskell_elems[0] {
+                Value::Con(_, fields) => &fields[0], // (:) cons → head
+                other => panic!("expected cons list, got {:?}", other),
+            };
+            let haskell_string_id = match first_elem {
+                Value::Con(id, _) => *id,
+                other => panic!("expected Con(String, ...), got {:?}", other),
+            };
+
+            let json_str = serde_json::json!("x");
+            let tocore_str = json_str.to_value(&table).expect("ToCore String");
+            let tocore_string_id = match &tocore_str {
+                Value::Con(id, _) => *id,
+                other => panic!("expected Con(String, ...) from ToCore, got {:?}", other),
+            };
+
+            assert_eq!(
+                haskell_string_id, tocore_string_id,
+                "ToCore String DataConId ({:?}, name={:?}) != Haskell String DataConId ({:?}, name={:?})",
+                tocore_string_id, table.name_of(tocore_string_id),
+                haskell_string_id, table.name_of(haskell_string_id),
+            );
+
+            eprintln!("Haskell Array ID: {:?}, ToCore Array ID: {:?}", haskell_array_id, tocore_array_id);
+            eprintln!("Haskell String ID: {:?}, ToCore String ID: {:?}", haskell_string_id, tocore_string_id);
+        })
+        .unwrap()
+        .join()
+        .expect("thread panicked");
+}
+
+/// Test that _Array lens works on ToCore-produced Values (currently fails).
+#[test]
+fn test_tocore_json_array_lens_works() {
+    // Compile Haskell that takes an input Value and extracts via _Array lens
+    let input = serde_json::json!(["keep", "refactor", "skip"]);
+    let json = run_aeson_with_input(
+        &[r#"pure (input ^.. _Array . traverse . _String)"#],
+        input,
+    );
+    // Should extract the three strings
+    assert_eq!(json, serde_json::json!(["keep", "refactor", "skip"]));
+}

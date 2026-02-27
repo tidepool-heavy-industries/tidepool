@@ -173,10 +173,10 @@ pub fn ask_decl() -> EffectDecl {
     EffectDecl {
         type_name: "Ask",
         description: "Suspend execution and ask the calling LLM a question. The LLM calls the resume tool with an answer, and execution continues.",
-        constructors: &["Ask :: Text -> Ask Text"],
+        constructors: &["Ask :: Text -> Ask Value"],
         type_defs: &[],
         helpers: &[
-            "ask :: Text -> M Text\nask = send . Ask",
+            "ask :: Text -> M Value\nask = send . Ask",
         ],
     }
 }
@@ -555,8 +555,10 @@ impl DispatchEffect<CapturedOutput> for AskDispatcher {
                 )
             })?;
 
-            // Convert response string to a Haskell Text value
-            response
+            // Parse response as JSON → aeson Value; plain text wraps as Aeson.String
+            let json_val: serde_json::Value = serde_json::from_str(&response)
+                .unwrap_or_else(|_| serde_json::Value::String(response));
+            json_val
                 .to_value(cx.table())
                 .map_err(tidepool_effect::error::EffectError::Bridge)
         } else {
@@ -1133,7 +1135,7 @@ mod tests {
         assert!(preamble.contains("kvGet :: Text -> M (Maybe Text)\nkvGet = send . KvGet"));
         assert!(preamble.contains("fsRead :: Text -> M Text\nfsRead = send . FsRead"));
         assert!(preamble.contains("httpGet :: Text -> M Value\nhttpGet = send . HttpGet"));
-        assert!(preamble.contains("ask :: Text -> M Text\nask = send . Ask"));
+        assert!(preamble.contains("ask :: Text -> M Value\nask = send . Ask"));
     }
 
     #[test]
@@ -1170,7 +1172,7 @@ mod tests {
         let decl = ask_decl();
         assert_eq!(decl.type_name, "Ask");
         assert_eq!(decl.constructors.len(), 1);
-        assert!(decl.constructors[0].contains("Ask :: Text -> Ask Text"));
+        assert!(decl.constructors[0].contains("Ask :: Text -> Ask Value"));
     }
 
     #[test]
@@ -1197,7 +1199,7 @@ mod tests {
         let decls = standard_decls();
         let preamble = build_preamble(&decls);
         assert!(preamble.contains("data Ask a where"));
-        assert!(preamble.contains("  Ask :: Text -> Ask Text"));
+        assert!(preamble.contains("  Ask :: Text -> Ask Value"));
         assert!(preamble.contains("type M = Eff '[Console, KV, Fs, SG, Http, Ask]"));
     }
 

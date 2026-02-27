@@ -40,8 +40,22 @@ impl DataConTable {
     }
 
     /// Look up by name, returning the DataConId.
+    ///
+    /// **Warning**: Names are unqualified and can collide across types.
+    /// Prefer `get_by_name_arity` when the expected arity is known.
     pub fn get_by_name(&self, name: &str) -> Option<DataConId> {
         self.by_name.get(name).copied()
+    }
+
+    /// Look up by name AND expected arity, scanning all entries.
+    ///
+    /// This avoids the ambiguity of `get_by_name` when multiple constructors
+    /// share the same unqualified name (e.g. `Array` from aeson vs GHC internals).
+    pub fn get_by_name_arity(&self, name: &str, arity: u32) -> Option<DataConId> {
+        self.by_id
+            .values()
+            .find(|dc| dc.name == name && dc.rep_arity == arity)
+            .map(|dc| dc.id)
     }
 
     /// Number of entries.

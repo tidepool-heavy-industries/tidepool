@@ -19,17 +19,19 @@ use tidepool_repr::{DataConTable, Literal};
 /// `Value` (the aeson-compatible type) and accessed via lens combinators.
 impl ToCore for serde_json::Value {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+        // Use get_by_name_arity to disambiguate aeson Value constructors from
+        // GHC-internal types that share the same unqualified name (e.g. "Array").
         match self {
             serde_json::Value::Null => {
                 let id = table
-                    .get_by_name("Null")
+                    .get_by_name_arity("Null", 0)
                     .ok_or_else(|| BridgeError::UnknownDataConName("Null".into()))?;
                 Ok(Value::Con(id, vec![]))
             }
 
             serde_json::Value::Bool(b) => {
                 let id = table
-                    .get_by_name("Bool")
+                    .get_by_name_arity("Bool", 1)
                     .ok_or_else(|| BridgeError::UnknownDataConName("Bool".into()))?;
                 let inner = (*b).to_value(table)?;
                 Ok(Value::Con(id, vec![inner]))
@@ -37,7 +39,7 @@ impl ToCore for serde_json::Value {
 
             serde_json::Value::Number(n) => {
                 let id = table
-                    .get_by_name("Number")
+                    .get_by_name_arity("Number", 1)
                     .ok_or_else(|| BridgeError::UnknownDataConName("Number".into()))?;
                 let f = n.as_f64().unwrap_or(0.0);
                 Ok(Value::Con(id, vec![Value::Lit(Literal::LitDouble(f.to_bits()))]))
@@ -45,7 +47,7 @@ impl ToCore for serde_json::Value {
 
             serde_json::Value::String(s) => {
                 let id = table
-                    .get_by_name("String")
+                    .get_by_name_arity("String", 1)
                     .ok_or_else(|| BridgeError::UnknownDataConName("String".into()))?;
                 let inner = s.clone().to_value(table)?;
                 Ok(Value::Con(id, vec![inner]))
@@ -53,7 +55,7 @@ impl ToCore for serde_json::Value {
 
             serde_json::Value::Array(arr) => {
                 let id = table
-                    .get_by_name("Array")
+                    .get_by_name_arity("Array", 1)
                     .ok_or_else(|| BridgeError::UnknownDataConName("Array".into()))?;
                 // Vendored Value uses [Value] for Array (cons-list, not Vector).
                 let elements: Result<Vec<Value>, BridgeError> =
@@ -64,7 +66,7 @@ impl ToCore for serde_json::Value {
 
             serde_json::Value::Object(map) => {
                 let id = table
-                    .get_by_name("Object")
+                    .get_by_name_arity("Object", 1)
                     .ok_or_else(|| BridgeError::UnknownDataConName("Object".into()))?;
                 // KeyMap = Map Key Value (backed by Data.Map.Strict)
                 // Map is a balanced binary tree:
@@ -88,13 +90,13 @@ fn keymap_to_value(
     table: &DataConTable,
 ) -> Result<Value, BridgeError> {
     let bin_id = table
-        .get_by_name("Bin")
+        .get_by_name_arity("Bin", 5)
         .ok_or_else(|| BridgeError::UnknownDataConName("Bin".into()))?;
     let tip_id = table
-        .get_by_name("Tip")
+        .get_by_name_arity("Tip", 0)
         .ok_or_else(|| BridgeError::UnknownDataConName("Tip".into()))?;
     let key_con_id = table
-        .get_by_name("Key")
+        .get_by_name_arity("Key", 1)
         .ok_or_else(|| BridgeError::UnknownDataConName("Key".into()))?;
 
     // Collect and sort entries by key for balanced tree construction
