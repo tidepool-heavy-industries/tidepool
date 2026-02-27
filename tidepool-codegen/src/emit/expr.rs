@@ -688,10 +688,20 @@ impl EmitContext {
     /// GHC Core hoists `error "..."` into let bindings that are only forced on
     /// impossible branches. Since our JIT is strict, we must not evaluate these
     /// eagerly. Returns true if the RHS free vars contain an error sentinel.
-    fn rhs_has_error_sentinel(tree: &CoreExpr, rhs_idx: usize) -> bool {
-        let rhs_subtree = tree.extract_subtree(rhs_idx);
-        let rhs_fvs = tidepool_repr::free_vars::free_vars(&rhs_subtree);
-        rhs_fvs.iter().any(|v| (v.0 >> 56) as u8 == 0x45)
+    /// Check if the RHS is a direct error call: either a bare error Var,
+    /// or an App chain whose head function is an error Var.
+    /// This is more precise than the old free-vars check, which would
+    /// poison any binding that CONTAINED an error reference anywhere
+    /// (e.g., in a case branch fallback), even if the main path was valid.
+    fn rhs_is_error_call(tree: &CoreExpr, rhs_idx: usize) -> bool {
+        let mut idx = rhs_idx;
+        loop {
+            match &tree.nodes[idx] {
+                CoreFrame::Var(v) => return (v.0 >> 56) as u8 == 0x45,
+                CoreFrame::App { fun, .. } => idx = *fun,
+                _ => return false,
+            }
+        }
     }
 
     pub fn emit_node(
@@ -714,7 +724,7 @@ impl EmitContext {
                     let body_fvs =
                         tidepool_repr::free_vars::free_vars(&tree.extract_subtree(*body));
                     if body_fvs.contains(binder) {
-                        if Self::rhs_has_error_sentinel(tree, *rhs) {
+                        if Self::rhs_is_error_call(tree, *rhs) {
                             // Bind to poison closure — a valid Closure that returns itself
                             // and sets the runtime error flag on call.
                             let poison_addr = crate::host_fns::error_poison_ptr() as i64;
@@ -747,7 +757,7 @@ impl EmitContext {
                     // If no recursive bindings, evaluate all as simple
                     if rec_bindings.is_empty() {
                         for (binder, rhs_idx) in &simple_bindings {
-                            if Self::rhs_has_error_sentinel(tree, *rhs_idx) {
+                            if Self::rhs_is_error_call(tree, *rhs_idx) {
                                 let poison_addr = crate::host_fns::error_poison_ptr() as i64;
                                 let poison_val = builder.ins().iconst(types::I64, poison_addr);
                                 self.trace_scope(&format!(
@@ -915,7 +925,12 @@ impl EmitContext {
                     // free variables (e.g., substitute aliases like $fEqList_$s$c==1).
                     let mut deferred_simple = Vec::new();
                     for (binder, rhs_idx) in &simple_bindings {
-                        if matches!(&tree.nodes[*rhs_idx], CoreFrame::Var(_)) {
+                        if Self::rhs_is_error_call(tree, *rhs_idx) {
+                            let poison_addr = crate::host_fns::error_poison_ptr() as i64;
+                            let poison_val = builder.ins().iconst(types::I64, poison_addr);
+                            self.trace_scope(&format!("defer error LetRec(trivial) {:?}", binder));
+                            self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
+                        } else if matches!(&tree.nodes[*rhs_idx], CoreFrame::Var(_)) {
                             let rhs_val =
                                 self.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx)?;
                             self.trace_scope(&format!("insert LetRec(trivial) {:?}", binder));
@@ -1195,7 +1210,7 @@ impl EmitContext {
                     }
 
                     for (binder, rhs_idx) in &deferred_simple {
-                        if Self::rhs_has_error_sentinel(tree, *rhs_idx) {
+                        if Self::rhs_is_error_call(tree, *rhs_idx) {
                             let poison_addr = crate::host_fns::error_poison_ptr() as i64;
                             let poison_val = builder.ins().iconst(types::I64, poison_addr);
                             self.trace_scope(&format!("defer error LetRec(deferred) {:?}", binder));

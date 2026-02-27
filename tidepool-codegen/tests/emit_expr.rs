@@ -2131,30 +2131,25 @@ fn test_error_sentinel_let_non_rec_forced() {
 
 #[test]
 fn test_error_sentinel_let_rec_deferred() {
-    // let rec x = error_var + 0; y = \n -> n in y 42
-    // We use a non-trivial RHS for x (IntAdd) to avoid the buggy Phase 2.5 path
-    // for Var aliases in LetRec, ensuring it hits Phase 3c which has the fix.
+    // let rec x = error_var; y = \n -> n in y 42
+    // x is a direct error call (Var with 0x45 tag), so it gets poisoned.
+    // y 42 runs fine and returns 42 with no runtime error.
     let error_var = VarId(0x4500000000000002);
     let x = VarId(1);
     let y = VarId(2);
     let n = VarId(3);
     let tree = RecursiveTree {
         nodes: vec![
-            CoreFrame::Var(error_var),          // 0
-            CoreFrame::Lit(Literal::LitInt(0)), // 1
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntAdd,
-                args: vec![0, 1],
-            }, // 2: x rhs (non-trivial)
-            CoreFrame::Var(n),                  // 3: y lambda body
-            CoreFrame::Lam { binder: n, body: 3 }, // 4: y rhs
-            CoreFrame::Lit(Literal::LitInt(42)), // 5: 42
-            CoreFrame::Var(y),                  // 6: y
-            CoreFrame::App { fun: 6, arg: 5 },  // 7: y 42
+            CoreFrame::Var(error_var),          // 0: x rhs (direct error)
+            CoreFrame::Var(n),                  // 1: y lambda body
+            CoreFrame::Lam { binder: n, body: 1 }, // 2: y rhs
+            CoreFrame::Lit(Literal::LitInt(42)), // 3: 42
+            CoreFrame::Var(y),                  // 4: y
+            CoreFrame::App { fun: 4, arg: 3 },  // 5: y 42
             CoreFrame::LetRec {
-                bindings: vec![(x, 2), (y, 4)],
-                body: 7,
-            }, // 8: root
+                bindings: vec![(x, 0), (y, 2)],
+                body: 5,
+            }, // 6: root
         ],
     };
     let result = compile_and_run(&tree);
@@ -2189,24 +2184,22 @@ fn test_error_sentinel_let_rec_no_rec_deferred() {
 
 #[test]
 fn test_error_sentinel_detection_in_complex_rhs() {
-    // let x = Con(error_var) in x
-    // x should be deferred because RHS free vars contain error_var.
+    // let x = App(error_var, Lit(0)) in x
+    // x RHS is an App chain headed by error_var → detected as direct error call.
     // Body returns x, which should be the poison closure.
     let error_var = VarId(0x4500000000000002);
     let x = VarId(1);
     let tree = RecursiveTree {
         nodes: vec![
-            CoreFrame::Var(error_var), // 0
-            CoreFrame::Con {
-                tag: DataConId(0),
-                fields: vec![0],
-            }, // 1: Con(error_var)
-            CoreFrame::Var(x),         // 2: body (return x)
+            CoreFrame::Var(error_var),          // 0: error head
+            CoreFrame::Lit(Literal::LitInt(0)), // 1: arg
+            CoreFrame::App { fun: 0, arg: 1 },  // 2: App(error_var, 0)
+            CoreFrame::Var(x),                  // 3: body (return x)
             CoreFrame::LetNonRec {
                 binder: x,
-                rhs: 1,
-                body: 2,
-            }, // 3: root
+                rhs: 2,
+                body: 3,
+            }, // 4: root
         ],
     };
     let result = compile_and_run(&tree);

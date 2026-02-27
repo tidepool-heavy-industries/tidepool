@@ -228,20 +228,17 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
             return obj; // Thunk (tag=1) or unknown - not handled here
         }
 
-        // Closure: read code_ptr and num_captured
+        // Closure: read code_ptr
         let code_ptr_val = *(obj.add(layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
-        let num_captured = *(obj.add(layout::CLOSURE_NUM_CAPTURED_OFFSET) as *const u16);
-
-        if num_captured != 0 {
-            return obj; // Has captures = partial application, not a thunk
-        }
 
         if code_ptr_val == 0 {
             return obj;
         }
 
-        // 0-capture closure = thunk. Signature: fn(vmctx, self, arg) -> *mut u8
-        // Thunks (fully applied functions) typically have null arg.
+        // Force the closure. In a data-case scrutinee position, GHC Core
+        // guarantees the result must be a data constructor, so any closure
+        // here is a thunk (suspended computation) regardless of capture count.
+        // Signature: fn(vmctx, self, arg) -> *mut u8
         let f: extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
             std::mem::transmute(code_ptr_val);
         f(vmctx, obj, std::ptr::null_mut())
@@ -1211,9 +1208,12 @@ mod tests {
 /// `num_alts` is the number of data alt tags expected.
 /// `alt_tags` is a pointer to an array of expected tag u64 values.
 pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64) -> *mut u8 {
+    use std::io::Write;
     let ptr = scrut_ptr as *const u8;
     if (scrut_ptr as u64) < 0x1000 {
-        eprintln!("[CASE TRAP] scrut_ptr is NULL/invalid: {:#x}", scrut_ptr);
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "[CASE TRAP] scrut_ptr is NULL/invalid: {:#x}", scrut_ptr);
+        let _ = stderr.flush();
         std::process::abort();
     }
     let tag_byte = unsafe { *ptr };
@@ -1237,31 +1237,37 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
 
     // Dump raw bytes for any object type
     let raw_bytes: Vec<u8> = (0..32).map(|i| unsafe { *ptr.add(i) }).collect();
-    eprintln!(
-        "[CASE TRAP] raw bytes: {:02x?}", raw_bytes
-    );
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "[CASE TRAP] raw bytes: {:02x?}", raw_bytes);
 
     if tag_byte == 2 {
-        // Con: read con_tag at offset 8, num_fields at offset 16
         let con_tag = unsafe { *(ptr.add(8) as *const u64) };
         let num_fields = unsafe { *(ptr.add(16) as *const u16) };
-        eprintln!(
+        let _ = writeln!(stderr,
             "[CASE TRAP] Con: con_tag={:#x}, num_fields={}, expected_tags={:?}",
             con_tag, num_fields, expected
         );
     } else if tag_byte == 3 {
-        // Lit: read lit_tag at offset 8, value at offset 16
         let lit_tag = unsafe { *(ptr.add(8) as *const u64) };
         let value = unsafe { *(ptr.add(16) as *const u64) };
-        eprintln!(
+        let _ = writeln!(stderr,
             "[CASE TRAP] Lit: lit_tag={:#x}, value={:#x}, expected_tags={:?}",
             lit_tag, value, expected
         );
+    } else if tag_byte == 0 {
+        let code_ptr = unsafe { *(ptr.add(8) as *const u64) };
+        let num_captured = unsafe { *(ptr.add(16) as *const u16) };
+        let _ = writeln!(stderr,
+            "[CASE TRAP] Closure: code_ptr={:#x}, num_captured={}, expected_tags={:?}",
+            code_ptr, num_captured, expected
+        );
     } else {
-        eprintln!(
+        let _ = writeln!(stderr,
             "[CASE TRAP] tag_byte={} ({}), expected_tags={:?}",
             tag_byte, tag_name, expected
         );
     }
+    let _ = stderr.flush();
+    drop(stderr);
     std::process::abort();
 }

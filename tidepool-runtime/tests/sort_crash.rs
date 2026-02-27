@@ -499,7 +499,6 @@ fn test_aeson_lens_nested_key() {
 
 /// Array indexing with nth
 #[test]
-#[ignore = "pre-existing: SIGILL in nth (likely unsupported primop in Vector indexing)"]
 fn test_aeson_lens_nth() {
     let json = run_aeson(&[
         r#"let arr = toJSON [10, 20, 30 :: Int]"#,
@@ -639,7 +638,6 @@ fn test_aeson_input_nested() {
 
 /// Input injection with array access
 #[test]
-#[ignore = "pre-existing: SIGILL in nth (likely unsupported Vector indexing primop)"]
 fn test_aeson_input_array() {
     let json = run_aeson_with_input(
         &[r#"pure (input ^? nth 2 . _String)"#],
@@ -2300,7 +2298,6 @@ fn test_vendored_lens_triple_nested_key() {
 
 /// nth on nested array
 #[test]
-#[ignore = "pre-existing: SIGILL in nth (likely unsupported Vector indexing primop)"]
 fn test_vendored_lens_nth_nested() {
     let json = run_aeson(&[
         r#"let arr = toJSON [toJSON [10 :: Int, 20], toJSON [30 :: Int, 40]]"#,
@@ -2821,7 +2818,6 @@ fn test_vendored_edge_single_key_object() {
 
 /// Single-element array
 #[test]
-#[ignore = "pre-existing: SIGILL (likely unsupported primop in array indexing)"]
 fn test_vendored_edge_single_element_array() {
     let json = run_aeson(&[
         r#"let arr = toJSON ["solo" :: Text]"#,
@@ -3563,7 +3559,6 @@ fn test_orchestrate_instruction_dsl() {
 
 /// Lens set on deeply nested array element, then read it back.
 #[test]
-#[ignore = "pre-existing: SIGILL in deep array modify (likely nth/Vector primop)"]
 fn test_orchestrate_deep_array_modify() {
     let json = run_aeson(&[
         r#"let matrix = object ["grid" .= ([ [1,2,3], [4,5,6], [7,8,9] ] :: [[Int]])]"#,
@@ -3577,7 +3572,6 @@ fn test_orchestrate_deep_array_modify() {
 
 /// Combine toJSON with lens to do round-trip transformations.
 #[test]
-#[ignore = "pre-existing: SIGILL in toJSON/lens roundtrip (likely unsupported primop)"]
 fn test_orchestrate_tojson_lens_roundtrip() {
     let json = run_aeson(&[
         // Build structured data via toJSON
