@@ -662,19 +662,15 @@ translate expr =
         emitNode $ NCon (varId v) childIdxs
 
     -- DataCon wrapper Ids: the wrapper takes *boxed* args (e.g., ByteArray, Int)
-    -- but we need *unboxed* args for the worker representation stored in NCon.
-    -- We've updated the codegen's unbox_* helpers to handle both boxed and unboxed
-    -- values, so we can now leave the boxing in place. This ensures that Case
-    -- expressions matching on these fields (e.g. matching I# in Text offset) work.
+    -- but the worker representation stores *unboxed* fields.
+    -- We keep the boxing in place (translate args normally, no stripBoxCon) so that
+    -- Case expressions matching on these fields (e.g. matching I# in Text offset)
+    -- see proper Con values. The codegen's recursive unbox_* helpers handle both
+    -- boxed and unboxed values when primops need the raw Int#.
     Var v | Just dc <- isDataConWrapId_maybe v
           , length args == valueRepArity dc -> do
         recordDC dc
-        -- Only strip boxes for product types (single-constructor types like Text, Int, Word).
-        -- For sum types (e.g. Maybe), the worker expects pointer arguments.
-        let tc = dataConTyCon dc
-        childIdxs <- if isAlgTyCon tc && length (tyConDataCons tc) == 1
-                     then mapM stripBoxCon args
-                     else mapM translate args
+        childIdxs <- mapM translate args
         emitNode $ NCon (varId (dataConWorkId dc)) childIdxs
 
     -- unsafeEqualityProof → unit value (always matches the single UnsafeRefl alt)
@@ -1023,19 +1019,6 @@ isValueArg _ = True
 -- We need to strip the boxing to get the worker args:
 --   Text ba# off# len#
 -- This handles I#, W#, ByteArray, and any other single-field product constructor.
-stripBoxCon :: CoreExpr -> TransM Int
-stripBoxCon expr =
-  let (hd, allArgs) = collectArgs expr
-      vArgs = filter isValueArg allArgs
-  in case hd of
-    Var w | Just innerDc <- isDataConWorkId_maybe w
-          , let tc = dataConTyCon innerDc
-          , isAlgTyCon tc && length (tyConDataCons tc) == 1
-          , [inner] <- vArgs -> do
-        recordDC innerDc  -- still record the box constructor for DataConTable
-        translate inner
-    _ -> translate expr
-
 mapLit :: Literal -> LitEnc
 mapLit = \case
   LitNumber nt n  -> case nt of

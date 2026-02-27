@@ -1762,7 +1762,6 @@ fn test_kv_keys_text_eq() {
 /// T.isPrefixOf on a Text key from KvKeys — observed to work in live testing.
 /// Characterises which operations survive the len-field bug.
 #[test]
-#[ignore = "pre-existing: SIGILL in T.isPrefixOf (likely unsupported primop)"]
 fn test_kv_keys_text_is_prefix_of() {
     let (json, _) = run_mcp_effectful(&[
         r#"send (KvSet "prefix:a" "v1")"#,
@@ -2051,7 +2050,6 @@ fn test_primop_compare_sort() {
 
 /// T.find on bridge text — uses memchr to locate bytes.
 #[test]
-#[ignore = "pre-existing: SIGILL in T.find/memchr (likely unsupported primop)"]
 fn test_primop_memchr_find() {
     let (json, _) = run_mcp_effectful(&[
         r#"send (KvSet "hello" "x")"#,
@@ -2063,7 +2061,6 @@ fn test_primop_memchr_find() {
 
 /// T.find not found.
 #[test]
-#[ignore = "pre-existing: SIGILL in T.find/memchr (likely unsupported primop)"]
 fn test_primop_memchr_find_missing() {
     let (json, _) = run_mcp_effectful(&[
         r#"send (KvSet "hello" "x")"#,
@@ -2627,7 +2624,6 @@ fn test_vendored_helper_count_keys() {
 
 /// Helper: filter array elements by predicate
 #[test]
-#[ignore = "pre-existing: SIGILL (likely unsupported primop)"]
 fn test_vendored_helper_filter_array() {
     let json = run_aeson_with_helpers(
         &[
