@@ -155,8 +155,6 @@ instance (Renderable a, Renderable b, Renderable c, Renderable d) => Renderable 
 instance Renderable Value
 
 -- | show for Double, bypassing GHC's Integer-based floatToDigits.
--- Intercepted by Translate.hs → delegates to Rust digit conversion.
--- | show for Double, bypassing GHC's Integer-based floatToDigits.
 -- The body is a fallback that should never run — Translate.hs intercepts
 -- calls to showDouble and emits a ShowDoubleAddr primop instead.
 -- The Double arg must be used to prevent GHC worker-wrapper from dropping it.

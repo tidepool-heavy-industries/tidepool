@@ -559,3 +559,31 @@ fn show_double_int() {
     let s = collect_string(&val, &table);
     assert_eq!(s, "42.0", "expected \"42.0\", got \"{s}\"");
 }
+
+#[test]
+fn show_double_text() {
+    // T.pack (showDouble' 3.14) — produces Text, not String
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showDoubleText.cbor");
+    let val = eval_fixture(CBOR);
+    // Text is Con("Text", [ByteArray#, Int#, Int#]) — just check it doesn't crash
+    eprintln!("show_double_text result: {:?}", val);
+}
+
+#[test]
+fn show_double_prelude() {
+    // show (3.14 :: Double) using Prelude's show (not showDouble')
+    // GHC specializes this to $fShowDouble_$sshowSignedFloat — our intercept rewrites it
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showDoublePrelude.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let s = collect_string(&val, &table);
+    assert_eq!(s, "3.14");
+}
+
+#[test]
+fn show_double_prelude_text() {
+    // T.pack (show (3.14 :: Double)) — the MCP use case
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showDoublePreludeText.cbor");
+    let val = eval_fixture(CBOR);
+    eprintln!("show_double_prelude_text result: {:?}", val);
+}

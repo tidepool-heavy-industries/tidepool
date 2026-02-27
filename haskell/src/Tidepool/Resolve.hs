@@ -221,6 +221,12 @@ resolveExternals hscEnv binds = do
                       , "unpackFoldrCString#", "unpackFoldrCStringUtf8#"
                       , "showDouble", "showDouble'"
                       , "$fShowDouble_$cshow" ]
+         -- Block GHC's specialized showSignedFloat for Double and its
+         -- arguments (pulls in floatToDigits → Integer/GMP pipeline).
+         -- Translate.hs intercepts the call and emits ShowDoubleAddr.
+         || "$fShowDouble_$s" `isPrefixOf` name
+         || name == "$fShowDouble2"
+         || name == "minExpt"
 
 -- | Build a map from OccName string to (Var, CoreExpr) for all local binders.
 -- Used for Prelude substitution: when a specialized method can't be resolved,

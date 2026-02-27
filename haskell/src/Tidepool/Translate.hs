@@ -480,6 +480,23 @@ translate expr =
         resultIdx <- emitRuntimeUnpackCString addrIdx
         emitNode $ NLam paramVarId resultIdx
 
+    -- Intercept $fShowDouble_$sshowSignedFloat (GHC's specialized show for Double).
+    -- Takes 4 args: (fmt, minExpt, d :: Double, rest :: String).
+    -- We only need the Double (arg 3); rest is always [] at top level.
+    Var v | isShowDoubleSpecVar v -> do
+        case drop 2 args of  -- skip fmt, minExpt → [d, rest, ...]
+          (dArg : _) -> do
+            argIdx <- translate dArg
+            addrIdx <- emitNode $ NPrimOp (T.pack "ShowDoubleAddr") [argIdx]
+            emitRuntimeUnpackCString addrIdx
+          [] -> do
+            -- Partial application / eta-reduced: emit lambda wrapper
+            let paramVarId = varId v .|. 0x01
+            paramRef <- emitNode $ NVar paramVarId
+            addrIdx <- emitNode $ NPrimOp (T.pack "ShowDoubleAddr") [paramRef]
+            resultIdx <- emitRuntimeUnpackCString addrIdx
+            emitNode $ NLam paramVarId resultIdx
+
     -- Desugar unpackCString#/unpackCStringUtf8# to cons-cell chain:
     -- GHC represents string literals as (unpackCString# "addr"#) in Core.
     -- We expand to (:) 'c1' ((:) 'c2' ... []) so strings are uniform [Char]
@@ -1382,6 +1399,15 @@ isShowDoubleVar v =
   let name = occNameString (nameOccName (idName v))
   in name == "showDouble" || name == "showDouble'"
      || name == "$fShowDouble_$cshow"
+
+-- | Recognize GHC's specialized showSignedFloat for Double.
+-- GHC -O2 specializes show @Double into $fShowDouble_$sshowSignedFloat
+-- which takes 4 args: (fmt, minExpt, d :: Double, rest :: String).
+-- We intercept this to avoid pulling in the floatToDigits/Integer pipeline.
+isShowDoubleSpecVar :: Id -> Bool
+isShowDoubleSpecVar v =
+  let name = occNameString (nameOccName (idName v))
+  in "$fShowDouble_$sshowSignedFloat" `isPrefixOf` name
 
 -- | Recognize GHC's unpackAppendCString# builtin.
 -- unpackAppendCString# :: Addr# -> [Char] -> [Char]

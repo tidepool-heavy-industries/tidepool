@@ -1,5 +1,7 @@
 module Suite where
 
+import qualified Data.Text as T
+
 -- ============================================================
 -- Int literals (5)
 -- ============================================================
@@ -571,3 +573,13 @@ showDoubleInt = showDouble' (42.0 :: Double)
 {-# NOINLINE showDouble' #-}
 showDouble' :: Double -> String
 showDouble' d = show d
+
+showDoubleText :: T.Text
+showDoubleText = T.pack (showDouble' (3.14 :: Double))
+
+-- Use Prelude's show directly (not showDouble') to test the GHC compilation path
+showDoublePrelude :: String
+showDoublePrelude = show (3.14 :: Double)
+
+showDoublePreludeText :: T.Text
+showDoublePreludeText = T.pack (show (3.14 :: Double))
