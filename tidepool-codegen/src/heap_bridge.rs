@@ -210,13 +210,12 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
         }
         Value::ByteArray(bytes) => {
             // ByteArray# stored as Lit with tag=7 (LIT_TAG_BYTEARRAY), value = ptr to [len: u64][bytes...]
+            // The byte data buffer must be allocated outside the GC nursery (via malloc)
+            // because GC doesn't track the interior pointer from the Lit wrapper to the
+            // data buffer. Using bump_alloc would place data in the nursery; after a
+            // Cheney copy, the Lit's data_ptr would point to stale fromspace memory.
             let bytes = bytes.lock().unwrap();
-            let data_size = 8 + bytes.len();
-            let data_ptr = bump_alloc_from_vmctx(vmctx, data_size);
-            if data_ptr.is_null() {
-                return Err(BridgeError::NurseryExhausted);
-            }
-            *(data_ptr as *mut u64) = bytes.len() as u64;
+            let data_ptr = crate::host_fns::runtime_new_byte_array(bytes.len() as i64) as *mut u8;
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr.add(8), bytes.len());
 
             let ptr = bump_alloc_from_vmctx(vmctx, layout::LIT_SIZE);

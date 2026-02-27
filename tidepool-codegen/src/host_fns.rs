@@ -508,6 +508,10 @@ pub extern "C" fn runtime_compare_byte_arrays(
     b_off: i64,
     len: i64,
 ) -> i64 {
+    if (a as u64) < 0x1000 || (b as u64) < 0x1000 {
+        eprintln!("[BUG] runtime_compare_byte_arrays: bad pointer a={:#x} a_off={} b={:#x} b_off={} len={}", a, a_off, b, b_off, len);
+        std::process::abort();
+    }
     let a_ptr = unsafe { (a as *const u8).add(8 + a_off as usize) };
     let b_ptr = unsafe { (b as *const u8).add(8 + b_off as usize) };
     let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, len as usize) };
@@ -613,6 +617,10 @@ pub extern "C" fn runtime_strlen(addr: i64) -> i64 {
 /// of those `cnt` characters. If the buffer is shorter (< `cnt` chars), returns
 /// the non-positive negated total character count. Returns 0 if `len` = 0 or `cnt` = 0.
 pub extern "C" fn runtime_text_measure_off(addr: i64, off: i64, len: i64, cnt: i64) -> i64 {
+    if (addr as u64) < 0x1000 {
+        eprintln!("[BUG] runtime_text_measure_off: bad pointer addr={:#x} off={} len={} cnt={}", addr, off, len, cnt);
+        std::process::abort();
+    }
     if len <= 0 || cnt <= 0 {
         return 0;
     }

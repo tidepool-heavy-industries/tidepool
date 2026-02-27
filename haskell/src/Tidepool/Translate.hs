@@ -659,13 +659,17 @@ translate expr =
         childIdxs <- mapM translate args
         emitNode $ NCon (varId v) childIdxs
 
-    -- GADT constructors have separate wrapper Ids that handle type coercions.
-    -- isDataConWorkId_maybe returns Nothing for wrappers, so we check separately.
-    -- We emit NCon using the *worker* Id since that's what DataConTable indexes.
+    -- DataCon wrapper Ids: the wrapper takes *boxed* args (e.g., ByteArray, Int)
+    -- but we need *unboxed* args for the worker representation stored in NCon.
+    -- Strip single-field box constructors (I#, ByteArray, W#, etc.) from args.
+    -- This is needed because GHC unfoldings from .hi files may use the wrapper form
+    -- (e.g., Text (ByteArray ba#) (I# off#) (I# len#)) instead of the worker form
+    -- (Text ba# off# len#). Without stripping, the NCon fields would be nested Cons
+    -- instead of Lits, causing SIGSEGV when the JIT tries to unbox them.
     Var v | Just dc <- isDataConWrapId_maybe v
           , length args == valueRepArity dc -> do
         recordDC dc
-        childIdxs <- mapM translate args
+        childIdxs <- mapM stripBoxCon args
         emitNode $ NCon (varId (dataConWorkId dc)) childIdxs
 
     -- unsafeEqualityProof → unit value (always matches the single UnsafeRefl alt)
@@ -956,6 +960,24 @@ isValueArg (Type _) = False
 isValueArg (Coercion _) = False
 isValueArg _ = True
 
+-- | Strip a single-field box constructor from a wrapper DataCon arg.
+-- When a DataCon wrapper is applied, its args are boxed:
+--   Text (ByteArray ba#) (I# off#) (I# len#)
+-- We need to strip the boxing to get the worker args:
+--   Text ba# off# len#
+-- This handles I#, W#, ByteArray, and any other single-field product constructor.
+stripBoxCon :: CoreExpr -> TransM Int
+stripBoxCon expr =
+  let (hd, allArgs) = collectArgs expr
+      vArgs = filter isValueArg allArgs
+  in case hd of
+    Var w | Just innerDc <- isDataConWorkId_maybe w
+          , dataConRepArity innerDc == 1
+          , [inner] <- vArgs -> do
+        recordDC innerDc  -- still record the box constructor for DataConTable
+        translate inner
+    _ -> translate expr
+
 mapLit :: Literal -> LitEnc
 mapLit = \case
   LitNumber nt n  -> case nt of
@@ -1233,6 +1255,8 @@ isErrorVar :: Id -> Bool
 isErrorVar v =
   let name = occNameString (nameOccName (idName v))
   in name == "error" || name == "errorWithoutStackTrace"
+     || name == "patError" || name == "noMethodBindingError"
+     || name == "recSelError" || name == "recConError"
 
 isUndefinedVar :: Id -> Bool
 isUndefinedVar v = occNameString (nameOccName (idName v)) == "undefined"

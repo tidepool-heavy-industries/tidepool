@@ -545,6 +545,21 @@ fn emit_lam(
     inner_builder.finalize();
 
     ctx.lambda_counter = inner_emit.lambda_counter;
+
+    // Debug: dump Cranelift IR for each lambda when TIDEPOOL_DUMP_CLIF=1
+    if std::env::var("TIDEPOOL_DUMP_CLIF").is_ok() {
+        eprintln!("=== CLIF {} ({} captures) ===", lambda_name, captures.len());
+        for (i, (var_id, ssaval)) in captures.iter().enumerate() {
+            let kind = match ssaval {
+                SsaVal::HeapPtr(_) => "HeapPtr",
+                SsaVal::Raw(_, tag) => &format!("Raw(tag={})", tag),
+            };
+            eprintln!("  capture[{}]: VarId({:#x}) = {}", i, var_id.0, kind);
+        }
+        eprintln!("{}", inner_ctx.func.display());
+        eprintln!("=== END CLIF {} ===", lambda_name);
+    }
+
     pipeline.define_function(lambda_func_id, &mut inner_ctx)?;
 
     let func_ref = pipeline

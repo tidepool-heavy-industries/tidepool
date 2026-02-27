@@ -960,6 +960,9 @@ pub fn emit_primop(
         }
         PrimOpKind::CompareByteArrays => {
             // compareByteArrays# :: ByteArray# -> Int# -> ByteArray# -> Int# -> Int# -> Int#
+            if args.len() != 5 {
+                return Err(EmitError::InvalidArity(PrimOpKind::CompareByteArrays, 5, args.len()));
+            }
             let a = unbox_bytearray(builder, args[0]);
             let a_off = unbox_int(builder, args[1]);
             let b = unbox_bytearray(builder, args[2]);
