@@ -268,7 +268,7 @@ pub struct ResumeRequest {
 // Templating
 // ---------------------------------------------------------------------------
 
-pub fn build_preamble(effects: &[EffectDecl]) -> String {
+pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
     let mut out = String::new();
     out.push_str("{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, GADTs, PartialTypeSignatures, ScopedTypeVariables #-}\n");
     out.push_str("module Expr where\n");
@@ -277,6 +277,9 @@ pub fn build_preamble(effects: &[EffectDecl]) -> String {
     out.push_str("import qualified Data.Map.Strict as Map\n");
     out.push_str("import qualified Data.Set as Set\n");
     out.push_str("import Control.Monad.Freer\n");
+    if user_library {
+        out.push_str("import Library\n");
+    }
     out.push_str("default (Int, Text)\n");
     out.push('\n');
 
@@ -630,6 +633,8 @@ pub struct TidepoolMcpServerImpl {
     haskell_preamble: String,
     effect_stack_type: String,
     eval_tool_description: String,
+    // User library support
+    has_user_library: bool,
     // Ask effect support
     ask_tag: u64,
     continuations: Arc<std::sync::Mutex<HashMap<String, EvalSession>>>,
@@ -1007,9 +1012,10 @@ where
             inner: TidepoolMcpServerImpl {
                 handler_factory: Arc::new(handler),
                 include: Vec::new(),
-                haskell_preamble: build_preamble(&decls),
+                haskell_preamble: build_preamble(&decls, false),
                 effect_stack_type: build_effect_stack_type(&decls),
                 eval_tool_description: build_eval_tool_description(&decls),
+                has_user_library: false,
                 ask_tag,
                 continuations: Arc::new(std::sync::Mutex::new(HashMap::new())),
                 next_cont_id: Arc::new(AtomicU64::new(1)),
@@ -1038,6 +1044,25 @@ where
             .map(PathBuf::from)
             .unwrap_or(fallback);
         self.inner.include.push(prelude_dir);
+
+        // Probe for user library directory
+        let user_lib = PathBuf::from(".tidepool/lib");
+        if user_lib.is_dir() {
+            self.inner.has_user_library = user_lib.join("Library.hs").exists();
+            self.inner.include.push(user_lib);
+            if self.inner.has_user_library {
+                // Rebuild preamble with user library import
+                let mut decls = H::collect_decls();
+                decls.push(ask_decl());
+                self.inner.haskell_preamble = build_preamble(&decls, true);
+                // Append note to tool description
+                self.inner.eval_tool_description.push_str(
+                    "\n\nUser library: `Library` is auto-imported from `.tidepool/lib/Library.hs`. \
+                     Other modules in `.tidepool/lib/` can be imported explicitly via the `imports` field."
+                );
+            }
+        }
+
         self
     }
 
@@ -1104,7 +1129,7 @@ mod tests {
                 helpers: &[],
             },
         ];
-        let preamble = build_preamble(&effects);
+        let preamble = build_preamble(&effects, false);
         assert!(preamble.contains("data Console a where"));
         assert!(preamble.contains("  Print :: Text -> Console ()"));
         assert!(preamble.contains("data KV a where"));
@@ -1148,7 +1173,7 @@ mod tests {
             type_defs: &[],
             helpers: &[],
         }];
-        let preamble = build_preamble(&effects);
+        let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);
         let source = vec!["let x = 42".into(), "pure x".into()];
 
@@ -1182,7 +1207,7 @@ mod tests {
     #[test]
     fn test_preamble_includes_helpers() {
         let decls = standard_decls();
-        let preamble = build_preamble(&decls);
+        let preamble = build_preamble(&decls, false);
         assert!(preamble.contains("say :: Text -> M ()\nsay = send . Print"));
         assert!(preamble.contains("kvGet :: Text -> M (Maybe Value)\nkvGet = send . KvGet"));
         assert!(preamble.contains("fsRead :: Text -> M Text\nfsRead = send . FsRead"));
@@ -1249,7 +1274,7 @@ mod tests {
     #[test]
     fn test_ask_in_preamble() {
         let decls = standard_decls();
-        let preamble = build_preamble(&decls);
+        let preamble = build_preamble(&decls, false);
         assert!(preamble.contains("data Ask a where"));
         assert!(preamble.contains("  Ask :: Text -> Ask Value"));
         assert!(preamble.contains("type M = Eff '[Console, KV, Fs, SG, Http, Ask]"));
