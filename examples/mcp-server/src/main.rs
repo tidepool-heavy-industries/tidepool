@@ -647,10 +647,9 @@ impl ExecHandler {
         Self { root }
     }
 
-    /// Maximum stdout size (512 KB). Large JSON outputs create tens of thousands
-    /// of Value nodes that can crash the JIT. Pipe through `jq` or use flags like
-    /// `--no-deps` to reduce output.
-    const MAX_OUTPUT_BYTES: usize = 512 * 1024;
+    /// Maximum stdout size for RunJson (512 KB). Large JSON creates tens of
+    /// thousands of Value nodes that can crash the JIT.
+    const MAX_JSON_OUTPUT_BYTES: usize = 512 * 1024;
 
     fn run_command(&self, cmd: &str, dir: &std::path::Path) -> Result<(i64, String, String), EffectError> {
         let output = std::process::Command::new("sh")
@@ -661,15 +660,6 @@ impl ExecHandler {
             .stderr(std::process::Stdio::piped())
             .output()
             .map_err(|e| EffectError::Handler(format!("exec failed: {}", e)))?;
-
-        if output.stdout.len() > Self::MAX_OUTPUT_BYTES {
-            return Err(EffectError::Handler(format!(
-                "stdout too large ({} bytes, limit {}). Pipe through jq/head to reduce output, \
-                 e.g. `cargo metadata --format-version=1 --no-deps` or `cmd | jq .field`",
-                output.stdout.len(),
-                Self::MAX_OUTPUT_BYTES,
-            )));
-        }
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -702,6 +692,15 @@ impl EffectHandler<CapturedOutput> for ExecHandler {
                     return Err(EffectError::Handler(format!(
                         "command failed (exit {}): {}\n{}",
                         code, cmd, stderr
+                    )));
+                }
+                if stdout.len() > Self::MAX_JSON_OUTPUT_BYTES {
+                    return Err(EffectError::Handler(format!(
+                        "runJson: stdout too large ({} bytes, limit {}). Large JSON creates \
+                         too many Value nodes for the JIT. Pipe through jq or use flags like \
+                         --no-deps to reduce output.",
+                        stdout.len(),
+                        Self::MAX_JSON_OUTPUT_BYTES,
                     )));
                 }
                 let json_val: serde_json::Value = serde_json::from_str(&stdout)

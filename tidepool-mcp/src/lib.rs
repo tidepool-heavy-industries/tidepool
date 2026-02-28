@@ -1044,10 +1044,15 @@ impl TidepoolMcpServerImpl {
                 tracing::error!("eval failed: {}", error);
                 Ok(CallToolResult::error(vec![Content::text(error_msg)]))
             }
-            Ok(None) => Err(McpError::internal_error(
-                "Eval thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.",
-                None,
-            )),
+            Ok(None) => {
+                tracing::error!("eval thread crashed");
+                let error_msg = format_error_with_source(
+                    "Crash",
+                    "Eval thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.",
+                    &source,
+                );
+                Ok(CallToolResult::error(vec![Content::text(error_msg)]))
+            }
             Err(_elapsed) => {
                 tracing::error!("eval timed out after {}s", EVAL_TIMEOUT_SECS);
                 let error_msg = format_error_with_source(
@@ -1131,10 +1136,15 @@ impl TidepoolMcpServerImpl {
                 tracing::error!("resumed eval failed: {}", error);
                 Ok(CallToolResult::error(vec![Content::text(error_msg)]))
             }
-            Ok(None) => Err(McpError::internal_error(
-                "Eval thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.",
-                None,
-            )),
+            Ok(None) => {
+                tracing::error!("eval thread crashed");
+                let error_msg = format_error_with_source(
+                    "Crash",
+                    "Eval thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.",
+                    &source,
+                );
+                Ok(CallToolResult::error(vec![Content::text(error_msg)]))
+            }
             Err(_elapsed) => {
                 tracing::error!("resumed eval timed out after {}s", EVAL_TIMEOUT_SECS);
                 let error_msg = format_error_with_source(
