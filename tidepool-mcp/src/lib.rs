@@ -98,15 +98,15 @@ pub fn kv_decl() -> EffectDecl {
         description:
             "Persistent key-value store. State survives across calls within one server session.",
         constructors: &[
-            "KvGet :: Text -> KV (Maybe Text)",
-            "KvSet :: Text -> Text -> KV ()",
+            "KvGet :: Text -> KV (Maybe Value)",
+            "KvSet :: Text -> Value -> KV ()",
             "KvDelete :: Text -> KV ()",
             "KvKeys :: KV [Text]",
         ],
         type_defs: &[],
         helpers: &[
-            "kvGet :: Text -> M (Maybe Text)\nkvGet = send . KvGet",
-            "kvSet :: Text -> Text -> M ()\nkvSet k v = send (KvSet k v)",
+            "kvGet :: Text -> M (Maybe Value)\nkvGet = send . KvGet",
+            "kvSet :: Text -> Value -> M ()\nkvSet k v = send (KvSet k v)",
             "kvDel :: Text -> M ()\nkvDel = send . KvDelete",
             "kvKeys :: M [Text]\nkvKeys = send KvKeys",
         ],
@@ -274,6 +274,8 @@ pub fn build_preamble(effects: &[EffectDecl]) -> String {
     out.push_str("module Expr where\n");
     out.push_str("import Tidepool.Prelude\n");
     out.push_str("import qualified Data.Text as T\n");
+    out.push_str("import qualified Data.Map.Strict as Map\n");
+    out.push_str("import qualified Data.Set as Set\n");
     out.push_str("import Control.Monad.Freer\n");
     out.push_str("default (Int, Text)\n");
     out.push('\n');
@@ -410,11 +412,13 @@ pub fn template_haskell(
         out.push_str(&format!("input = {}\n\n", json_to_haskell(val)));
     }
 
-    out.push_str(&format!("result :: Eff {} _\n", effect_stack));
+    out.push_str(&format!("result :: Eff {} Value\n", effect_stack));
     out.push_str("result = do\n");
+    out.push_str("  _r <- do\n");
     for line in code {
-        out.push_str(&format!("  {}\n", line));
+        out.push_str(&format!("    {}\n", line));
     }
+    out.push_str("  pure (toJSON _r)\n");
 
     out
 }
@@ -1153,7 +1157,7 @@ mod tests {
         assert!(result.contains("module Expr where"));
         assert!(result.contains("import Control.Monad.Freer"));
         assert!(result.contains("data Console a where"));
-        assert!(result.contains("result :: Eff '[Console] _"));
+        assert!(result.contains("result :: Eff '[Console] Value"));
         assert!(result.contains("result = do"));
         assert!(result.contains("  let x = 42"));
         assert!(result.contains("  pure x"));
@@ -1180,7 +1184,7 @@ mod tests {
         let decls = standard_decls();
         let preamble = build_preamble(&decls);
         assert!(preamble.contains("say :: Text -> M ()\nsay = send . Print"));
-        assert!(preamble.contains("kvGet :: Text -> M (Maybe Text)\nkvGet = send . KvGet"));
+        assert!(preamble.contains("kvGet :: Text -> M (Maybe Value)\nkvGet = send . KvGet"));
         assert!(preamble.contains("fsRead :: Text -> M Text\nfsRead = send . FsRead"));
         assert!(preamble.contains("httpGet :: Text -> M Value\nhttpGet = send . HttpGet"));
         assert!(preamble.contains("ask :: Text -> M Value\nask = send . Ask"));

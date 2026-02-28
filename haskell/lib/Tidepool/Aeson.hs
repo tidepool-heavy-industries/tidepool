@@ -21,6 +21,8 @@ module Tidepool.Aeson
   , emptyArray
     -- * ToJSON class
   , ToJSON(..)
+    -- * Encoding
+  , encode
     -- * Result type
   , Result(..)
     -- * Lens accessors (from Tidepool.Aeson.Lens)

@@ -5,10 +5,8 @@
 -- Nothing from base Prelude is re-exported — every function is either
 -- defined here or explicitly re-exported from a known-safe base module.
 module Tidepool.Prelude
-  ( -- * Renderable marker
-    Renderable
-    -- * Types (re-exported from base)
-  , Int, Integer, Word, Char, Bool(..), Double, Float
+  ( -- * Types (re-exported from base)
+    Int, Integer, Word, Char, Bool(..), Double, Float
   , String, Ordering(..), Maybe(..), Either(..)
   , IO
     -- * Text type (re-exported from Data.Text)
@@ -63,6 +61,21 @@ module Tidepool.Prelude
   , intercalate
   , isPrefixOf
   , intersperse
+    -- * Additional list combinators
+  , find
+  , partition
+  , groupBy
+  , takeWhile
+  , tails
+  , unfoldr
+  , mapAccumL
+  , transpose
+  , genericLength
+  , zipWith3
+  , zipWith4
+    -- * Function combinators
+  , on
+  , comparing
     -- * Monadic combinators
   , mapM, mapM_, sequence, sequence_
   , when, unless, void, join, guard
@@ -80,9 +93,12 @@ module Tidepool.Prelude
   , even, odd
     -- * Char/Enum
   , ord, chr, fromEnum
+    -- * Map/Set types
+  , Map, Set
     -- * JSON (Tidepool.Aeson — vendored, construction-only)
   , Value, object, (.=), toJSON, Result(..)
   , ToJSON
+  , encode
     -- * JSON lenses (Tidepool.Aeson.Lens + Control.Lens)
   , key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double
   , preview, toListOf, (^?), (^..), (&), (.~), (%~), to, _Just, traverse
@@ -119,36 +135,18 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Char (ord, chr)
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe)
-import Data.List (foldl')
+import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength)
+import Data.Map.Strict (Map)
+import Data.Set (Set)
 import Control.Monad
   ( when, unless, void, join, guard
   , forM, forM_
   , (=<<), (>=>), (<=<)
   , foldM, foldM_
   )
-import Tidepool.Aeson (Value, object, (.=), toJSON, Result(..), ToJSON)
+import Tidepool.Aeson (Value, object, (.=), toJSON, Result(..), ToJSON, encode)
 import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double)
 import Control.Lens (preview, toListOf, (^?), (^..), (&), (.~), (%~), to, _Just, traverse)
-
--- | Marker typeclass for types whose runtime values can be rendered to JSON
--- by the Rust-side value_to_json renderer. Use @pure x@ to return values
--- instead of @send (Print (show x))@.
-class Renderable a
-instance Renderable Int
-instance Renderable Integer
-instance Renderable Word
-instance Renderable Char
-instance Renderable Double
-instance Renderable Float
-instance Renderable Bool
-instance Renderable ()
-instance Renderable Text
-instance Renderable a => Renderable [a]
-instance Renderable a => Renderable (Maybe a)
-instance (Renderable a, Renderable b) => Renderable (a, b)
-instance (Renderable a, Renderable b, Renderable c) => Renderable (a, b, c)
-instance (Renderable a, Renderable b, Renderable c, Renderable d) => Renderable (a, b, c, d)
-instance Renderable Value
 
 -- | show for Double, bypassing GHC's Integer-based floatToDigits.
 -- The body is a fallback that should never run — Translate.hs intercepts
@@ -407,4 +405,26 @@ even n = n `rem` 2 == 0
 odd :: Int -> Bool
 odd n = n `rem` 2 /= 0
 {-# INLINE odd #-}
+
+-- | Zip three lists with a function.
+zipWith3 :: (a -> b -> c -> d) -> [a] -> [b] -> [c] -> [d]
+zipWith3 f (a:as) (b:bs) (c:cs) = f a b c : zipWith3 f as bs cs
+zipWith3 _ _ _ _ = []
+{-# INLINE zipWith3 #-}
+
+-- | Zip four lists with a function.
+zipWith4 :: (a -> b -> c -> d -> e) -> [a] -> [b] -> [c] -> [d] -> [e]
+zipWith4 f (a:as) (b:bs) (c:cs) (d:ds) = f a b c d : zipWith4 f as bs cs ds
+zipWith4 _ _ _ _ _ = []
+{-# INLINE zipWith4 #-}
+
+-- | Apply a binary function with arguments from a projection.
+on :: (b -> b -> c) -> (a -> b) -> a -> a -> c
+on f g x y = f (g x) (g y)
+{-# INLINE on #-}
+
+-- | Build a comparison from a projection.
+comparing :: Ord b => (a -> b) -> a -> a -> Ordering
+comparing f x y = compare (f x) (f y)
+{-# INLINE comparing #-}
 
