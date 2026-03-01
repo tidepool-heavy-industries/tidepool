@@ -108,13 +108,16 @@ module Tidepool.Prelude
   , preview, toListOf, (^?), (^..), (&), (.~), (%~), to, _Just, traverse
     -- * JSON Value helpers
   , (?.), lookupKey, asText, asInt, asDouble, asBool, asArray, asObject
-    -- * Map operations (qualified: import Data.Map.Strict via Prelude)
+    -- * Map operations (qualified via Map prefix)
   , Map.fromList, Map.toList, Map.insert, Map.delete
   , Map.member, Map.size, Map.keys, Map.elems
   , Map.union, Map.intersection, Map.difference
+  , Map.foldlWithKey', Map.foldrWithKey
   , Map.mapKeys, Map.mapWithKey, Map.filterWithKey
   , Map.singleton, Map.empty
   , Map.findWithDefault, Map.adjust
+  , Map.unionWith, Map.intersectionWith
+    -- * Set type (use qualified Set.xxx via `import qualified Data.Set as Set`)
   ) where
 
 import Prelude
