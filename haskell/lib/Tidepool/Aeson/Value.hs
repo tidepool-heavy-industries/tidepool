@@ -70,7 +70,7 @@ data Value
   | Number !Double
   | Bool !Bool
   | Null
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 -- | Construct a JSON object from key-value pairs.
 object :: [Pair] -> Value

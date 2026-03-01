@@ -267,3 +267,73 @@ fn test_tree_hylo_merge_sort() {
     );
     assert_eq!(r, serde_json::json!([1, 2, 3, 4, 5, 8]));
 }
+
+// ===========================================================================
+// § Text Utilities
+// ===========================================================================
+
+#[test]
+fn test_chunks_of() {
+    let r = run_expr(r#"chunksOf 3 [1,2,3,4,5,6,7 :: Int]"#);
+    assert_eq!(r, serde_json::json!([[1,2,3],[4,5,6],[7]]));
+}
+
+#[test]
+fn test_windows() {
+    let r = run_expr(r#"windows 2 [1,2,3,4 :: Int]"#);
+    assert_eq!(r, serde_json::json!([[1,2],[2,3],[3,4]]));
+}
+
+#[test]
+fn test_indexed() {
+    let r = run_expr(r#"indexed [10,20,30 :: Int]"#);
+    assert_eq!(r, serde_json::json!([[0,10],[1,20],[2,30]]));
+}
+
+#[test]
+fn test_safe_index() {
+    let r = run_expr(r#"([10,20,30 :: Int] !? 1, [10,20,30 :: Int] !? 5)"#);
+    assert_eq!(r, serde_json::json!([20, null]));
+}
+
+#[test]
+fn test_histogram() {
+    let r = run_expr(r#"histogram [1,1,2,3,3,3 :: Int]"#);
+    assert_eq!(r, serde_json::json!([[1,2],[2,1],[3,3]]));
+}
+
+#[test]
+fn test_pad_right() {
+    let r = run_expr(r#"padRight 8 "hi""#);
+    assert_eq!(r, serde_json::json!("hi      "));
+}
+
+#[test]
+fn test_pad_left() {
+    let r = run_expr(r#"padLeft 8 "hi""#);
+    assert_eq!(r, serde_json::json!("      hi"));
+}
+
+#[test]
+fn test_insert_at() {
+    let r = run_expr(r#"insertAt 2 99 [1,2,3 :: Int]"#);
+    assert_eq!(r, serde_json::json!([1,2,99,3]));
+}
+
+#[test]
+fn test_remove_at() {
+    let r = run_expr(r#"removeAt [0,2] [10,20,30,40 :: Int]"#);
+    assert_eq!(r, serde_json::json!([20,40]));
+}
+
+#[test]
+fn test_chunks_of_empty() {
+    let r = run_expr(r#"chunksOf 3 ([] :: [Int])"#);
+    assert_eq!(r, serde_json::json!([]));
+}
+
+#[test]
+fn test_windows_too_short() {
+    let r = run_expr(r#"windows 5 [1,2,3 :: Int]"#);
+    assert_eq!(r, serde_json::json!([]));
+}

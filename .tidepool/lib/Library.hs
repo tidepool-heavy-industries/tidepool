@@ -169,3 +169,58 @@ tracedUnfoldM emit step seed = do
       emit b
       rest <- tracedUnfoldM emit step a'
       pure (b : rest)
+
+-- ===========================================================================
+-- § Text Utilities
+-- ===========================================================================
+
+-- | Pad a string to a given width with spaces on the right
+padRight :: Int -> [Char] -> [Char]
+padRight n s = s ++ Prelude.replicate (max 0 (n - Prelude.length s)) ' '
+
+-- | Pad a string to a given width with spaces on the left
+padLeft :: Int -> [Char] -> [Char]
+padLeft n s = Prelude.replicate (max 0 (n - Prelude.length s)) ' ' ++ s
+
+-- | Split a list into chunks of size n
+chunksOf :: Int -> [a] -> [[a]]
+chunksOf _ [] = []
+chunksOf n xs = let (a, b) = Prelude.splitAt n xs in a : chunksOf n b
+
+-- | Sliding window of size n over a list
+windows :: Int -> [a] -> [[a]]
+windows n xs
+  | Prelude.length xs < n = []
+  | otherwise = Prelude.take n xs : windows n (Prelude.drop 1 xs)
+
+-- | Zip a list with indices starting from 0
+indexed :: [a] -> [(Int, a)]
+indexed = go 0
+  where
+    go _ []     = []
+    go !n (x:xs) = (n, x) : go (n + 1) xs
+
+-- | Safe list indexing
+(!?) :: [a] -> Int -> Maybe a
+[] !? _ = Nothing
+(x:_)  !? 0 = Just x
+(_:xs) !? n = if n < 0 then Nothing else xs !? (n - 1)
+infixl 9 !?
+
+-- | Group consecutive equal elements and count them
+-- e.g., histogram [1,1,2,3,3,3] = [(1,2),(2,1),(3,3)]
+histogram :: Eq a => [a] -> [(a, Int)]
+histogram [] = []
+histogram (x:xs) =
+  let (same, rest) = Prelude.span (== x) xs
+  in  (x, 1 + Prelude.length same) : histogram rest
+
+-- | Remove elements at specified indices
+removeAt :: [Int] -> [a] -> [a]
+removeAt is = map snd . filter (\(i,_) -> not (elem i is)) . indexed
+
+-- | Insert an element at a given index
+insertAt :: Int -> a -> [a] -> [a]
+insertAt 0 y xs = y : xs
+insertAt _ y [] = [y]
+insertAt n y (x:xs) = x : insertAt (n - 1) y xs

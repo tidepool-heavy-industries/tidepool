@@ -528,6 +528,46 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
             "runJson :: Text -> M Value\n",
             "runJson = send . RunJson\n",
         ));
+        out.push_str(concat!(
+            "mapFile :: Text -> (Text -> Text) -> M ()\n",
+            "mapFile path f = fsRead path >>= \\c -> fsWrite path (f c)\n",
+        ));
+        out.push_str(concat!(
+            "mapFileM :: Text -> (Text -> M Text) -> M ()\n",
+            "mapFileM path f = fsRead path >>= f >>= fsWrite path\n",
+        ));
+        out.push_str(concat!(
+            "searchFiles :: Text -> Text -> M [(Text, Int, Text)]\n",
+            "searchFiles pat needle = do\n",
+            "  files <- fsGlob pat\n",
+            "  fmap concat $ forM files $ \\path -> do\n",
+            "    content <- fsRead path\n",
+            "    let ls = zip [(1::Int)..] (T.lines content)\n",
+            "    pure [(path, n, l) | (n, l) <- ls, T.isInfixOf needle l]\n",
+        ));
+        out.push_str(concat!(
+            "lineCount :: Text -> M Int\n",
+            "lineCount path = length . T.lines <$> fsRead path\n",
+        ));
+        out.push_str(concat!(
+            "fileContains :: Text -> Text -> M Bool\n",
+            "fileContains path needle = T.isInfixOf needle <$> fsRead path\n",
+        ));
+        out.push_str(concat!(
+            "kvAll :: M [(Text, Value)]\n",
+            "kvAll = do\n",
+            "  ks <- kvKeys\n",
+            "  vs <- mapM kvGet ks\n",
+            "  pure (zipWith (\\k mv -> (k, maybe Null id mv)) ks vs)\n",
+        ));
+        out.push_str(concat!(
+            "kvClear :: M ()\n",
+            "kvClear = kvKeys >>= mapM_ kvDel\n",
+        ));
+        out.push_str(concat!(
+            "runAll :: [Text] -> M [(Int, Text, Text)]\n",
+            "runAll = mapM run\n",
+        ));
         out.push('\n');
     }
 
@@ -1578,6 +1618,16 @@ mod tests {
         assert!(preamble.contains("else error (\"command failed: \""));
         // runJson is a thin wrapper over the effect constructor
         assert!(preamble.contains("runJson :: Text -> M Value\nrunJson = send . RunJson"));
+        // File manipulation helpers
+        assert!(preamble.contains("mapFile :: Text -> (Text -> Text) -> M ()"));
+        assert!(preamble.contains("mapFileM :: Text -> (Text -> M Text) -> M ()"));
+        assert!(preamble.contains("searchFiles :: Text -> Text -> M [(Text, Int, Text)]"));
+        assert!(preamble.contains("lineCount :: Text -> M Int"));
+        assert!(preamble.contains("fileContains :: Text -> Text -> M Bool"));
+        // KV batch helpers
+        assert!(preamble.contains("kvAll :: M [(Text, Value)]"));
+        assert!(preamble.contains("kvClear :: M ()"));
+        assert!(preamble.contains("runAll :: [Text] -> M [(Int, Text, Text)]"));
     }
 
     #[test]
