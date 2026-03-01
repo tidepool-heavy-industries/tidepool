@@ -3906,3 +3906,225 @@ fn test_sort_values() {
     ]);
     assert_eq!(json, serde_json::json!(["a", "b", "c"]));
 }
+
+// ===========================================================================
+// P1: Char predicates
+// ===========================================================================
+
+#[test]
+fn test_is_digit_true() {
+    let json = run_plain("isDigit '5'");
+    assert_eq!(json, serde_json::json!(true));
+}
+
+#[test]
+fn test_is_digit_false() {
+    let json = run_plain("isDigit 'a'");
+    assert_eq!(json, serde_json::json!(false));
+}
+
+#[test]
+fn test_is_alpha_true() {
+    let json = run_plain("isAlpha 'z'");
+    assert_eq!(json, serde_json::json!(true));
+}
+
+#[test]
+fn test_is_alpha_false() {
+    let json = run_plain("isAlpha '3'");
+    assert_eq!(json, serde_json::json!(false));
+}
+
+#[test]
+fn test_is_alpha_num() {
+    let json = run_plain("(isAlphaNum 'a', isAlphaNum '5', isAlphaNum '!')");
+    assert_eq!(json, serde_json::json!([true, true, false]));
+}
+
+#[test]
+fn test_is_space() {
+    let json = run_plain("(isSpace ' ', isSpace '\\t', isSpace 'x')");
+    assert_eq!(json, serde_json::json!([true, true, false]));
+}
+
+#[test]
+fn test_is_upper_lower() {
+    let json = run_plain("(isUpper 'A', isUpper 'a', isLower 'z', isLower 'Z')");
+    assert_eq!(json, serde_json::json!([true, false, true, false]));
+}
+
+#[test]
+fn test_digit_to_int() {
+    let json = run_plain("(digitToInt '0', digitToInt '9', digitToInt 'a', digitToInt 'F')");
+    assert_eq!(json, serde_json::json!([0, 9, 10, 15]));
+}
+
+#[test]
+fn test_to_lower_char() {
+    let json = run_plain("map toLowerChar (unpack \"Hello\")");
+    assert_eq!(json, serde_json::json!("hello"));
+}
+
+#[test]
+fn test_to_upper_char() {
+    let json = run_plain("map toUpperChar (unpack \"hello\")");
+    assert_eq!(json, serde_json::json!("HELLO"));
+}
+
+// ===========================================================================
+// P1: Monomorphic numeric helpers
+// ===========================================================================
+
+#[test]
+fn test_abs_prime() {
+    let json = run_plain("(abs' 5, abs' (-3), abs' 0)");
+    assert_eq!(json, serde_json::json!([5, 3, 0]));
+}
+
+#[test]
+fn test_signum_prime() {
+    let json = run_plain("(signum' 10, signum' (-5), signum' 0)");
+    assert_eq!(json, serde_json::json!([1, -1, 0]));
+}
+
+#[test]
+fn test_min_max_prime() {
+    let json = run_plain("(min' 3 7, max' 3 7)");
+    assert_eq!(json, serde_json::json!([3, 7]));
+}
+
+// ===========================================================================
+// P2: Additional list combinators
+// ===========================================================================
+
+#[test]
+fn test_elem_index() {
+    let json = run_plain("(elemIndex 3 [1,2,3,4 :: Int], elemIndex 9 [1,2,3 :: Int])");
+    assert_eq!(json, serde_json::json!([2, null]));
+}
+
+#[test]
+fn test_find_index() {
+    let json = run_plain("findIndex (> 3) [1,2,3,4,5 :: Int]");
+    assert_eq!(json, serde_json::json!(3));
+}
+
+#[test]
+fn test_zip3() {
+    let json = run_plain("zip3 [1,2 :: Int] [10,20 :: Int] [100,200 :: Int]");
+    assert_eq!(json, serde_json::json!([[1, 10, 100], [2, 20, 200]]));
+}
+
+#[test]
+fn test_unzip3() {
+    let json = run_plain("unzip3 [(1,10,100),(2,20,200) :: (Int,Int,Int)]");
+    assert_eq!(json, serde_json::json!([[1, 2], [10, 20], [100, 200]]));
+}
+
+// ===========================================================================
+// P3: Tidepool.Text module
+// ===========================================================================
+
+#[test]
+fn test_camel_to_snake() {
+    let json = run_mcp_with_imports(
+        &[r#"pure (camelToSnake "helloWorld" :: Text)"#],
+        &[],
+        &["Tidepool.Text"],
+    );
+    // camelToSnake prepends _ before uppercase: "helloWorld" -> "_hello_world" with leading _
+    // Actually let me check: go ('h':cs) -> 'h' : go cs, then 'e', ..., then 'W' -> '_':'w': go cs
+    // Wait no - first char 'h' is not upper, so it stays. Then 'W' is upper -> '_':'w'
+    // So result is "hello_world"
+    assert_eq!(json, serde_json::json!("hello_world"));
+}
+
+#[test]
+fn test_snake_to_camel() {
+    let json = run_mcp_with_imports(
+        &[r#"pure (snakeToCamel "hello_world" :: Text)"#],
+        &[],
+        &["Tidepool.Text"],
+    );
+    assert_eq!(json, serde_json::json!("helloWorld"));
+}
+
+#[test]
+fn test_capitalize() {
+    let json = run_mcp_with_imports(
+        &[r#"pure (capitalize "hello" :: Text)"#],
+        &[],
+        &["Tidepool.Text"],
+    );
+    assert_eq!(json, serde_json::json!("Hello"));
+}
+
+#[test]
+fn test_title_case() {
+    let json = run_mcp_with_imports(
+        &[r#"pure (titleCase "hello world" :: Text)"#],
+        &[],
+        &["Tidepool.Text"],
+    );
+    assert_eq!(json, serde_json::json!("Hello World"));
+}
+
+#[test]
+fn test_slugify() {
+    let json = run_mcp_with_imports(
+        &[r#"pure (slugify "Hello, World!" :: Text)"#],
+        &[],
+        &["Tidepool.Text"],
+    );
+    assert_eq!(json, serde_json::json!("hello-world"));
+}
+
+#[test]
+fn test_truncate_text() {
+    let json = run_mcp_with_imports(
+        &[r#"pure (truncateText 8 "Hello, World!" :: Text)"#],
+        &[],
+        &["Tidepool.Text"],
+    );
+    assert_eq!(json, serde_json::json!("Hello..."));
+}
+
+#[test]
+fn test_truncate_text_short() {
+    let json = run_mcp_with_imports(
+        &[r#"pure (truncateText 20 "Hello" :: Text)"#],
+        &[],
+        &["Tidepool.Text"],
+    );
+    assert_eq!(json, serde_json::json!("Hello"));
+}
+
+#[test]
+fn test_indent() {
+    let json = run_mcp_with_imports(
+        &[r#"pure (indent 4 "line1\nline2" :: Text)"#],
+        &[],
+        &["Tidepool.Text"],
+    );
+    assert_eq!(json, serde_json::json!("    line1\n    line2\n"));
+}
+
+#[test]
+fn test_pad_left_right() {
+    let json = run_mcp_with_imports(
+        &[r#"pure (padLeft 8 '0' "42", padRight 8 '.' "hi")"#],
+        &[],
+        &["Tidepool.Text"],
+    );
+    assert_eq!(json, serde_json::json!(["00000042", "hi......"]));
+}
+
+#[test]
+fn test_center() {
+    let json = run_mcp_with_imports(
+        &[r#"pure (center 10 '-' "hi" :: Text)"#],
+        &[],
+        &["Tidepool.Text"],
+    );
+    assert_eq!(json, serde_json::json!("----hi----"));
+}

@@ -93,8 +93,15 @@ module Tidepool.Prelude
   , even, odd
     -- * Text-to-number parsing
   , parseIntM, parseInt, parseDoubleM, parseDouble
-    -- * Char/Enum
+    -- * Char predicates & conversions
   , ord, chr, fromEnum
+  , isDigit, isAlpha, isAlphaNum, isSpace, isUpper, isLower
+  , digitToInt, toLowerChar, toUpperChar
+    -- * Monomorphic numeric helpers
+  , abs', signum', min', max'
+    -- * Additional list combinators (P2)
+  , elemIndex, findIndex
+  , zip3, unzip3
     -- * Map/Set types
   , Map, Set
     -- * JSON (Tidepool.Aeson — vendored, construction-only)
@@ -572,4 +579,125 @@ asObject :: Value -> Maybe (Map.Map Key Value)
 asObject (Object o) = Just o
 asObject _          = Nothing
 {-# INLINE asObject #-}
+
+-- ---------------------------------------------------------------------------
+-- Char predicates (monomorphic, range-based — avoids Data.Char dictionaries)
+-- ---------------------------------------------------------------------------
+
+-- | Is the character a decimal digit (0-9)?
+isDigit :: Char -> Bool
+isDigit c = c >= '0' && c <= '9'
+{-# INLINE isDigit #-}
+
+-- | Is the character an ASCII letter?
+isAlpha :: Char -> Bool
+isAlpha c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+{-# INLINE isAlpha #-}
+
+-- | Is the character an ASCII letter or digit?
+isAlphaNum :: Char -> Bool
+isAlphaNum c = isAlpha c || isDigit c
+{-# INLINE isAlphaNum #-}
+
+-- | Is the character ASCII whitespace?
+isSpace :: Char -> Bool
+isSpace c = c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
+{-# INLINE isSpace #-}
+
+-- | Is the character an ASCII uppercase letter?
+isUpper :: Char -> Bool
+isUpper c = c >= 'A' && c <= 'Z'
+{-# INLINE isUpper #-}
+
+-- | Is the character an ASCII lowercase letter?
+isLower :: Char -> Bool
+isLower c = c >= 'a' && c <= 'z'
+{-# INLINE isLower #-}
+
+-- | Convert a digit character to its numeric value.
+-- Returns -1 for non-digit characters (avoids pulling in error dictionaries).
+digitToInt :: Char -> Int
+digitToInt c
+  | c >= '0' && c <= '9' = ord c - ord '0'
+  | c >= 'a' && c <= 'f' = ord c - ord 'a' + 10
+  | c >= 'A' && c <= 'F' = ord c - ord 'A' + 10
+  | otherwise             = -1
+{-# INLINE digitToInt #-}
+
+-- | Convert an ASCII character to lowercase.
+toLowerChar :: Char -> Char
+toLowerChar c
+  | c >= 'A' && c <= 'Z' = chr (ord c + 32)
+  | otherwise             = c
+{-# INLINE toLowerChar #-}
+
+-- | Convert an ASCII character to uppercase.
+toUpperChar :: Char -> Char
+toUpperChar c
+  | c >= 'a' && c <= 'z' = chr (ord c - 32)
+  | otherwise             = c
+{-# INLINE toUpperChar #-}
+
+-- ---------------------------------------------------------------------------
+-- Monomorphic numeric helpers (avoids Num/Ord dictionary issues)
+-- ---------------------------------------------------------------------------
+
+-- | Monomorphic absolute value for Int.
+abs' :: Int -> Int
+abs' n = if n < 0 then negate n else n
+{-# INLINE abs' #-}
+
+-- | Monomorphic signum for Int.
+signum' :: Int -> Int
+signum' n
+  | n < 0     = -1
+  | n == 0    = 0
+  | otherwise = 1
+{-# INLINE signum' #-}
+
+-- | Monomorphic min for Int.
+min' :: Int -> Int -> Int
+min' a b = if a <= b then a else b
+{-# INLINE min' #-}
+
+-- | Monomorphic max for Int.
+max' :: Int -> Int -> Int
+max' a b = if a >= b then a else b
+{-# INLINE max' #-}
+
+-- ---------------------------------------------------------------------------
+-- Additional list combinators (P2)
+-- ---------------------------------------------------------------------------
+
+-- | Index of the first element equal to the target.
+elemIndex :: Eq a => a -> [a] -> Maybe Int
+elemIndex x = go 0
+  where
+    go _ []     = Nothing
+    go !i (y:ys)
+      | x == y    = Just i
+      | otherwise = go (i + 1) ys
+{-# INLINABLE elemIndex #-}
+
+-- | Index of the first element satisfying the predicate.
+findIndex :: (a -> Bool) -> [a] -> Maybe Int
+findIndex p = go 0
+  where
+    go _ []     = Nothing
+    go !i (x:xs)
+      | p x       = Just i
+      | otherwise = go (i + 1) xs
+{-# INLINE findIndex #-}
+
+-- | Zip three lists.
+zip3 :: [a] -> [b] -> [c] -> [(a, b, c)]
+zip3 (a:as) (b:bs) (c:cs) = (a, b, c) : zip3 as bs cs
+zip3 _ _ _ = []
+{-# INLINE zip3 #-}
+
+-- | Unzip a list of triples.
+unzip3 :: [(a, b, c)] -> ([a], [b], [c])
+unzip3 [] = ([], [], [])
+unzip3 ((a,b,c):rest) = let (as, bs, cs) = unzip3 rest in (a:as, b:bs, c:cs)
+{-# INLINE unzip3 #-}
 
