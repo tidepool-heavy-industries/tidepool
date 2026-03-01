@@ -111,8 +111,11 @@ instance ToJSON Float where
 instance ToJSON Bool where
   toJSON = Bool
 
-instance ToJSON a => ToJSON [a] where
+instance {-# OVERLAPPABLE #-} ToJSON a => ToJSON [a] where
   toJSON = Array . map toJSON
+
+instance {-# OVERLAPPING #-} ToJSON [Char] where
+  toJSON cs = String (T.pack cs)
 
 instance ToJSON a => ToJSON (Maybe a) where
   toJSON Nothing  = Null
@@ -147,6 +150,9 @@ instance (ToJSON a, ToJSON b, ToJSON c) => ToJSON (a, b, c) where
 
 instance (ToJSON a, ToJSON b, ToJSON c, ToJSON d) => ToJSON (a, b, c, d) where
   toJSON (a, b, c, d) = Array [toJSON a, toJSON b, toJSON c, toJSON d]
+
+instance (ToJSON a, ToJSON b, ToJSON c, ToJSON d, ToJSON e) => ToJSON (a, b, c, d, e) where
+  toJSON (a, b, c, d, e) = Array [toJSON a, toJSON b, toJSON c, toJSON d, toJSON e]
 
 instance ToJSON a => ToJSON (Map.Map Text a) where
   toJSON m = Object (Map.mapKeys Key (Map.map toJSON m))

@@ -22,7 +22,7 @@ module Tidepool.Prelude
     -- * Typeclasses (re-exported from base)
   , Eq(..), Ord(..), Num(..), Integral(..), Real, Fractional(..), Floating(..), Show
   , Semigroup(..), Monoid(..)
-  , fromIntegral, realToFrac
+  , fromIntegral, realToFrac, truncate, ceiling, floor
   , Functor(..), Applicative(..), Monad(..)
   , (<$>)
     -- * show (Text-returning shadow)
@@ -98,12 +98,22 @@ module Tidepool.Prelude
     -- * Map/Set types
   , Map, Set
     -- * JSON (Tidepool.Aeson — vendored, construction-only)
-  , Value, object, (.=), toJSON, Result(..)
+  , Value(..), Key, object, (.=), toJSON, Result(..)
   , ToJSON
   , encode
     -- * JSON lenses (Tidepool.Aeson.Lens + Control.Lens)
   , key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double
+  , members, values, _Null
   , preview, toListOf, (^?), (^..), (&), (.~), (%~), to, _Just, traverse
+    -- * JSON Value helpers
+  , (?.), lookupKey, asText, asInt, asDouble, asBool, asArray, asObject
+    -- * Map operations (qualified: import Data.Map.Strict via Prelude)
+  , Map.fromList, Map.toList, Map.insert, Map.delete
+  , Map.member, Map.size, Map.keys, Map.elems
+  , Map.union, Map.intersection, Map.difference
+  , Map.mapKeys, Map.mapWithKey, Map.filterWithKey
+  , Map.singleton, Map.empty
+  , Map.findWithDefault, Map.adjust
   ) where
 
 import Prelude
@@ -112,7 +122,7 @@ import Prelude
   , IO
   , Eq(..), Ord(..), Num(..), Integral(..), Real, Fractional(..), Floating(..), Show
   , Semigroup(..), Monoid(..)
-  , fromIntegral, realToFrac
+  , fromIntegral, realToFrac, truncate, ceiling, floor
   , Functor(..), Applicative(..), Monad(..)
   , (<$>)
   , id, const, flip, (.), ($), ($!)
@@ -146,9 +156,10 @@ import Control.Monad
   , (=<<), (>=>), (<=<)
   , foldM, foldM_
   )
-import Tidepool.Aeson (Value, object, (.=), toJSON, Result(..), ToJSON, encode)
-import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double)
+import Tidepool.Aeson (Value(..), Key, object, (.=), toJSON, Result(..), ToJSON, encode, fromText)
+import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double, members, values, _Null)
 import Control.Lens (preview, toListOf, (^?), (^..), (&), (.~), (%~), to, _Just, traverse)
+import qualified Data.Map.Strict as Map
 
 -- | show for Double, bypassing GHC's Integer-based floatToDigits.
 -- The body is a fallback that should never run — Translate.hs intercepts
@@ -491,4 +502,57 @@ parseDoubleM t = case T.uncons t of
 -- | Parse a Double from Text, calling error on failure.
 parseDouble :: Text -> Double
 parseDouble t = fromMaybe (error ("parseDouble: not a number: " <> T.unpack t)) (parseDoubleM t)
+
+-- ---------------------------------------------------------------------------
+-- JSON Value helpers
+-- ---------------------------------------------------------------------------
+
+-- | Safe key lookup: @v ?. "name"@ returns @Just val@ or @Nothing@.
+(?.) :: Value -> Text -> Maybe Value
+Object o ?. k = Map.lookup (fromText k) o
+_        ?. _ = Nothing
+infixl 9 ?.
+{-# INLINE (?.) #-}
+
+-- | Lookup a key in a Value, returning Nothing if not an Object or key missing.
+lookupKey :: Text -> Value -> Maybe Value
+lookupKey k (Object o) = Map.lookup (fromText k) o
+lookupKey _ _          = Nothing
+{-# INLINE lookupKey #-}
+
+-- | Extract Text from a String Value, or Nothing.
+asText :: Value -> Maybe Text
+asText (String t) = Just t
+asText _          = Nothing
+{-# INLINE asText #-}
+
+-- | Extract Int from a Number Value (truncates), or Nothing.
+asInt :: Value -> Maybe Int
+asInt (Number d) = Just (truncate d)
+asInt _          = Nothing
+{-# INLINE asInt #-}
+
+-- | Extract Double from a Number Value, or Nothing.
+asDouble :: Value -> Maybe Double
+asDouble (Number d) = Just d
+asDouble _          = Nothing
+{-# INLINE asDouble #-}
+
+-- | Extract Bool from a Bool Value, or Nothing.
+asBool :: Value -> Maybe Bool
+asBool (Bool b) = Just b
+asBool _        = Nothing
+{-# INLINE asBool #-}
+
+-- | Extract the array from an Array Value, or Nothing.
+asArray :: Value -> Maybe [Value]
+asArray (Array a) = Just a
+asArray _         = Nothing
+{-# INLINE asArray #-}
+
+-- | Extract the object from an Object Value, or Nothing.
+asObject :: Value -> Maybe (Map.Map Key Value)
+asObject (Object o) = Just o
+asObject _          = Nothing
+{-# INLINE asObject #-}
 

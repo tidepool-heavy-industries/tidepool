@@ -3,15 +3,8 @@
 //! Each test loads a pre-compiled CBOR fixture from haskell/test/TextSuite_cbor/,
 //! deserializes it, evaluates it, and asserts the expected result.
 //!
-//! Many of these tests will initially fail because Data.Text relies on
-//! ByteArray# primops that are not yet implemented. As we add primop support,
-//! tests will progressively pass.
-//!
-//! Primop tiers needed:
-//!   Tier 0 (no ByteArray): text_length, text_null_*, text_empty (GHC optimizes these)
-//!   Tier 1 (Word8/Int64 casts): word8ToWord#, wordToWord8#, int64 ops
-//!   Tier 2 (ByteArray core): newByteArray#, unsafeFreezeByteArray#, indexWord8Array#, writeWord8Array#
-//!   Tier 3 (ByteArray bulk): copyByteArray#, compareByteArrays#, sizeofByteArray#, etc.
+//! Test names mirror Haskell function names (e.g., text_toUpper, text_isPrefixOf).
+#![allow(non_snake_case)]
 
 use tidepool_eval::{deep_force, env_from_datacon_table, eval, Value, VecHeap};
 use tidepool_repr::serial::read::{read_cbor, read_metadata};
@@ -145,6 +138,7 @@ fn collect_list(val: &Value, table: &DataConTable) -> Vec<Value> {
 
 /// Extract a Text value's content as a Rust String.
 /// Data.Text internally is `Text (ByteArray#) offset length`.
+#[allow(dead_code)]
 fn extract_text(val: &Value, table: &DataConTable) -> String {
     if let Value::Con(id, fields) = val {
         let name = table.name_of(*id).unwrap_or("<unknown>");
@@ -773,34 +767,6 @@ fn text_filter_isInfixOf() {
 
 #[test]
 fn scan_sentinels() {
-    use tidepool_repr::frame::CoreFrame;
-    let fixtures: &[(&str, &[u8])] = &[
-        (
-            "text_null_nonempty",
-            include_bytes!("../../haskell/test/TextSuite_cbor/text_null_nonempty.cbor"),
-        ),
-        (
-            "text_pack",
-            include_bytes!("../../haskell/test/TextSuite_cbor/text_pack.cbor"),
-        ),
-        (
-            "text_singleton",
-            include_bytes!("../../haskell/test/TextSuite_cbor/text_singleton.cbor"),
-        ),
-        (
-            "text_head",
-            include_bytes!("../../haskell/test/TextSuite_cbor/text_head.cbor"),
-        ),
-        (
-            "text_empty",
-            include_bytes!("../../haskell/test/TextSuite_cbor/text_empty.cbor"),
-        ),
-        (
-            "text_length",
-            include_bytes!("../../haskell/test/TextSuite_cbor/text_length.cbor"),
-        ),
-    ];
-    // Dump all nodes of text_singleton
     let singleton_cbor: &[u8] =
         include_bytes!("../../haskell/test/TextSuite_cbor/text_singleton.cbor");
     let expr = read_cbor(singleton_cbor).unwrap();

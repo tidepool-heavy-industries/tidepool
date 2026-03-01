@@ -2955,23 +2955,17 @@ fn test_vendored_keymap_keys() {
     assert_eq!(json, serde_json::json!(["alpha", "beta"]));
 }
 
-/// KM.lookup on extracted object
+/// lookupKey from Prelude on extracted object
 #[test]
 fn test_vendored_keymap_lookup() {
-    let json = run_aeson_with_helpers(
+    let (json, _logs) = run_mcp_effectful(
         &[
             r#"let obj = object ["x" .= ("found" :: Text)]"#,
-            r#"pure (lookupKey "x" obj)"#,
-        ],
-        &[
-            "lookupKey :: Text -> Aeson.Value -> Maybe Aeson.Value\n\
-             lookupKey k v = case v ^? _Object of\n\
-             \x20 Just m -> KM.lookup (Aeson.fromText k) m\n\
-             \x20 Nothing -> Nothing",
+            r#"pure (toJSON (lookupKey "x" obj))"#,
         ],
     );
     // Should find String "found"
-    assert!(!json.is_null());
+    assert_eq!(json, serde_json::json!("found"));
 }
 
 // ===========================================================================
