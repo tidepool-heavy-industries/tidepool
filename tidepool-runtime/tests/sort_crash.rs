@@ -4128,3 +4128,70 @@ fn test_center() {
     );
     assert_eq!(json, serde_json::json!("----hi----"));
 }
+
+// ===========================================================================
+// P4: Tidepool.Table module
+// ===========================================================================
+
+#[test]
+fn test_parse_csv() {
+    let json = run_mcp_with_imports(
+        &[r#"pure (parseCsv "name,age\nAlice,30\nBob,25" :: [[Text]])"#],
+        &[],
+        &["Tidepool.Table"],
+    );
+    assert_eq!(json, serde_json::json!([["name", "age"], ["Alice", "30"], ["Bob", "25"]]));
+}
+
+#[test]
+fn test_parse_tsv() {
+    let json = run_mcp_with_imports(
+        &[r#"pure (parseTsv "a\tb\n1\t2" :: [[Text]])"#],
+        &[],
+        &["Tidepool.Table"],
+    );
+    assert_eq!(json, serde_json::json!([["a", "b"], ["1", "2"]]));
+}
+
+#[test]
+fn test_column() {
+    let json = run_mcp_with_imports(
+        &[
+            r#"let rows = parseCsv "name,age\nAlice,30\nBob,25""#,
+            r#"pure (column 0 rows :: [Text])"#,
+        ],
+        &[],
+        &["Tidepool.Table"],
+    );
+    assert_eq!(json, serde_json::json!(["name", "Alice", "Bob"]));
+}
+
+#[test]
+fn test_render_table() {
+    let json = run_mcp_with_imports(
+        &[
+            r#"let rows = [["Name","Age"],["Alice","30"],["Bob","25"]] :: [[Text]]"#,
+            r#"pure (renderTable rows :: Text)"#,
+        ],
+        &[],
+        &["Tidepool.Table"],
+    );
+    // Each row should be pipe-delimited with padding
+    let s = json.as_str().unwrap();
+    assert!(s.contains("| Name  | Age |"), "got: {s}");
+    assert!(s.contains("| Alice | 30  |"), "got: {s}");
+}
+
+#[test]
+fn test_sort_by_column() {
+    let json = run_mcp_with_imports(
+        &[
+            r#"let rows = parseCsv "name,age\nCharlie,20\nAlice,30\nBob,25""#,
+            r#"pure (sortByColumn 0 rows :: [[Text]])"#,
+        ],
+        &[],
+        &["Tidepool.Table"],
+    );
+    // Header stays, rest sorted by name
+    assert_eq!(json, serde_json::json!([["name", "age"], ["Alice", "30"], ["Bob", "25"], ["Charlie", "20"]]));
+}
