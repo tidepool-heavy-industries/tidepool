@@ -166,7 +166,10 @@ instance ToJSON a => ToJSON (Set.Set a) where
 -- | Encode a Value as JSON Text.
 encode :: Value -> Text
 encode (String t) = T.concat ["\"", escapeJSON t, "\""]
-encode (Number d) = T.pack (Prelude.show d)
+encode (Number d) = let n = Prelude.truncate d :: Int
+                     in if Prelude.fromIntegral n == d
+                        then T.pack (Prelude.show n)
+                        else T.pack (Prelude.show d)
 encode (Bool True) = "true"
 encode (Bool False) = "false"
 encode Null = "null"
