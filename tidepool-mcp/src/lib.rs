@@ -20,7 +20,7 @@ use tidepool_runtime::DispatchEffect;
 use tokio::io::{stdin, stdout};
 use tokio::time::{timeout, Duration};
 
-const EVAL_TIMEOUT_SECS: u64 = 30;
+const EVAL_TIMEOUT_SECS: u64 = 120;
 
 // ---------------------------------------------------------------------------
 // Effect metadata — lives next to the handler, discovered via trait
