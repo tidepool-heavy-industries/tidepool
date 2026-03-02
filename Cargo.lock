@@ -2540,6 +2540,7 @@ dependencies = [
 name = "tidepool-codegen"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-jit",
@@ -2685,6 +2686,7 @@ dependencies = [
  "tidepool-optimize",
  "tidepool-repr",
  "tidepool-testing",
+ "tokio",
 ]
 
 [[package]]

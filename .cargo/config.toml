@@ -1,0 +1,5 @@
+# Frame pointers are required for the GC frame walker to traverse
+# the call stack and find GC roots. Without this, aarch64 Darwin
+# may omit frame pointers for leaf functions, breaking the FP chain.
+[build]
+rustflags = ["-C", "force-frame-pointers=yes"]

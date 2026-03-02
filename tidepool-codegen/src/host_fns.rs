@@ -118,71 +118,83 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
 
     #[cfg(target_arch = "x86_64")]
     {
-        let rbp: usize;
-        let rsp: usize;
+        let fp: usize;
         unsafe {
-            std::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack));
-            std::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack));
+            std::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack));
         }
-
-        STACK_MAP_REGISTRY.with(|reg_cell| {
-            if let Some(registry_ptr) = *reg_cell.borrow() {
-                let registry = unsafe { &*registry_ptr };
-                // Walk frames starting from gc_trigger's own frame.
-                let roots = unsafe { frame_walker::walk_frames(rbp, registry, rsp) };
-
-                // ── Cheney copying GC ──────────────────────────────
-                GC_STATE.with(|gc_cell| {
-                    let mut gc_state = gc_cell.borrow_mut();
-                    if let Some(state) = gc_state.as_mut() {
-                        let from_start = state.active_start;
-                        let from_size = state.active_size;
-                        let from_end = unsafe { from_start.add(from_size) };
-
-                        let mut tospace = vec![0u8; from_size];
-
-                        // Convert StackRoot to raw slot pointers
-                        let root_slots: Vec<*mut *mut u8> = roots.iter()
-                            .map(|r| r.stack_slot_addr as *mut *mut u8)
-                            .collect();
-
-                        let result = unsafe {
-                            tidepool_heap::gc::raw::cheney_copy(
-                                &root_slots,
-                                from_start as *const u8,
-                                from_end as *const u8,
-                                &mut tospace,
-                            )
-                        };
-
-                        // Update GcState: swap to tospace
-                        let to_start = tospace.as_mut_ptr();
-                        state.active_start = to_start;
-                        // active_size stays the same
-                        state.active_buffer = Some(tospace); // drops old buffer if any
-
-                        // Update VMContext for resumed allocation
-                        unsafe {
-                            (*vmctx).alloc_ptr = to_start.add(result.bytes_copied);
-                            (*vmctx).alloc_limit = to_start.add(from_size) as *const u8;
-                        }
-                    }
-                });
-                // ── End GC ─────────────────────────────────────────
-
-                // Call test hook if present
-                HOOK.with(|hook_cell| {
-                    if let Some(hook) = *hook_cell.borrow() {
-                        hook(&roots);
-                    }
-                });
-
-                LAST_ROOTS.with(|roots_cell| {
-                    *roots_cell.borrow_mut() = roots;
-                });
-            }
-        });
+        perform_gc(fp, vmctx);
     }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let fp: usize;
+        unsafe {
+            std::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack));
+        }
+        perform_gc(fp, vmctx);
+    }
+}
+
+/// Shared GC body: walk frames, run Cheney copy, call hooks.
+#[inline(never)]
+fn perform_gc(fp: usize, vmctx: *mut VMContext) {
+    STACK_MAP_REGISTRY.with(|reg_cell| {
+        if let Some(registry_ptr) = *reg_cell.borrow() {
+            let registry = unsafe { &*registry_ptr };
+            // Walk frames starting from gc_trigger's own frame.
+            let roots = unsafe { frame_walker::walk_frames(fp, registry) };
+
+            // ── Cheney copying GC ──────────────────────────────
+            GC_STATE.with(|gc_cell| {
+                let mut gc_state = gc_cell.borrow_mut();
+                if let Some(state) = gc_state.as_mut() {
+                    let from_start = state.active_start;
+                    let from_size = state.active_size;
+                    let from_end = unsafe { from_start.add(from_size) };
+
+                    let mut tospace = vec![0u8; from_size];
+
+                    // Convert StackRoot to raw slot pointers
+                    let root_slots: Vec<*mut *mut u8> = roots.iter()
+                        .map(|r| r.stack_slot_addr as *mut *mut u8)
+                        .collect();
+
+                    let result = unsafe {
+                        tidepool_heap::gc::raw::cheney_copy(
+                            &root_slots,
+                            from_start as *const u8,
+                            from_end as *const u8,
+                            &mut tospace,
+                        )
+                    };
+
+                    // Update GcState: swap to tospace
+                    let to_start = tospace.as_mut_ptr();
+                    state.active_start = to_start;
+                    // active_size stays the same
+                    state.active_buffer = Some(tospace); // drops old buffer if any
+
+                    // Update VMContext for resumed allocation
+                    unsafe {
+                        (*vmctx).alloc_ptr = to_start.add(result.bytes_copied);
+                        (*vmctx).alloc_limit = to_start.add(from_size) as *const u8;
+                    }
+                }
+            });
+            // ── End GC ─────────────────────────────────────────
+
+            // Call test hook if present
+            HOOK.with(|hook_cell| {
+                if let Some(hook) = *hook_cell.borrow() {
+                    hook(&roots);
+                }
+            });
+
+            LAST_ROOTS.with(|roots_cell| {
+                *roots_cell.borrow_mut() = roots;
+            });
+        }
+    });
 }
 
 /// Set a hook to be called during gc_trigger with the collected roots.

@@ -1036,6 +1036,143 @@ fn test_replicate() {
 // MCP-style freer-simple tests (Eff '[Console, KV, Fs] _)
 // ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Full MCP preamble (all 8 effects) — matches the real MCP server exactly
+// ---------------------------------------------------------------------------
+
+fn full_mcp_decls() -> Vec<tidepool_mcp::EffectDecl> {
+    tidepool_mcp::standard_decls()
+}
+
+fn full_mcp_source(lines: &[&str]) -> String {
+    let decls = full_mcp_decls();
+    let preamble = tidepool_mcp::build_preamble(&decls, false);
+    let stack = tidepool_mcp::build_effect_stack_type(&decls);
+    let lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+    let imports = tidepool_mcp::aeson_imports();
+    tidepool_mcp::template_haskell(&preamble, &stack, &lines, &imports, &[], None, None)
+}
+
+fn run_full_mcp(lines: &[&str]) -> serde_json::Value {
+    let src = full_mcp_source(lines);
+    let pp = prelude_path();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let include = [pp.as_path()];
+            eprintln!("[test] compile_and_run starting...");
+            let val = compile_and_run(&src, "result", &include, &mut HNil, &())
+                .expect("compile_and_run failed");
+            eprintln!("[test] compile_and_run succeeded");
+            val.to_json()
+        })
+        .unwrap()
+        .join()
+        .expect("thread panicked")
+}
+
+/// Full MCP preamble (all 8 effects): pure (42 :: Int)
+#[test]
+fn test_full_mcp_pure_42() {
+    let json = run_full_mcp(&["pure (42 :: Int)"]);
+    assert_eq!(json, serde_json::json!(42));
+}
+
+/// Full MCP preamble with signal_safety::install() — matches real MCP server
+#[test]
+fn test_full_mcp_with_signal_install() {
+    let src = full_mcp_source(&["pure (42 :: Int)"]);
+    let pp = prelude_path();
+    let json = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            // This is what the MCP server does before compile_and_run
+            tidepool_codegen::signal_safety::install();
+            let include = [pp.as_path()];
+            eprintln!("[test+signal] compile_and_run starting...");
+            let val = compile_and_run(&src, "result", &include, &mut HNil, &())
+                .expect("compile_and_run failed");
+            eprintln!("[test+signal] compile_and_run succeeded");
+            val.to_json()
+        })
+        .unwrap()
+        .join()
+        .expect("thread panicked");
+    assert_eq!(json, serde_json::json!(42));
+}
+
+/// Full MCP preamble with the same tokio+channel pattern the MCP server uses.
+/// This exactly mirrors tidepool-mcp/src/lib.rs:1142-1222.
+#[tokio::test]
+async fn test_full_mcp_async_channel_pattern() {
+    let src = full_mcp_source(&["pure (42 :: Int)"]);
+    let pp = prelude_path();
+
+    // Same channel types as MCP server
+    let (session_tx, mut session_rx) =
+        tokio::sync::mpsc::unbounded_channel::<String>();
+
+    let _handle = std::thread::Builder::new()
+        .name("tidepool-eval".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            tidepool_codegen::signal_safety::install();
+            let include = [pp.as_path()];
+            eprintln!("[test+async] compile_and_run starting...");
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                compile_and_run(&src, "result", &include, &mut HNil, &())
+            }));
+            eprintln!("[test+async] compile_and_run finished");
+            match result {
+                Ok(Ok(val)) => {
+                    let json = val.to_json();
+                    let _ = session_tx.send(format!("OK:{}", json));
+                }
+                Ok(Err(e)) => {
+                    let _ = session_tx.send(format!("ERR:{}", e));
+                }
+                Err(panic) => {
+                    let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "unknown panic".into()
+                    };
+                    let _ = session_tx.send(format!("PANIC:{}", msg));
+                }
+            }
+        })
+        .unwrap();
+
+    // Same timeout pattern as MCP server (30s)
+    let eval_timeout = tokio::time::Duration::from_secs(30);
+    match tokio::time::timeout(eval_timeout, session_rx.recv()).await {
+        Ok(Some(msg)) => {
+            eprintln!("[test+async] received: {}", msg);
+            assert!(msg.starts_with("OK:"), "expected OK, got: {}", msg);
+            let json: serde_json::Value = serde_json::from_str(&msg[3..]).unwrap();
+            assert_eq!(json, serde_json::json!(42));
+        }
+        Ok(None) => panic!("channel closed without message (thread crashed)"),
+        Err(_) => panic!("TIMEOUT: eval did not complete in 30s"),
+    }
+}
+
+/// Full MCP preamble: pure string
+#[test]
+fn test_full_mcp_pure_string() {
+    let json = run_full_mcp(&["pure \"hello\""]);
+    assert_eq!(json, serde_json::json!("hello"));
+}
+
+/// Full MCP preamble: pure list
+#[test]
+fn test_full_mcp_pure_list() {
+    let json = run_full_mcp(&["pure [1,2,3 :: Int]"]);
+    assert_eq!(json, serde_json::json!([1, 2, 3]));
+}
+
 #[test]
 
 fn test_mcp_pure_lit() {

@@ -1,14 +1,22 @@
 //! Test that sigsetjmp/siglongjmp signal protection actually works.
 
+/// Trigger an illegal instruction (SIGILL).
+/// Separate function to prevent the compiler from optimizing away the fault.
+#[inline(never)]
+unsafe fn trigger_sigill() {
+    #[cfg(target_arch = "x86_64")]
+    std::arch::asm!("ud2");
+    #[cfg(target_arch = "aarch64")]
+    std::arch::asm!("udf #0");
+}
+
 #[test]
 fn test_sigill_returns_signal_error() {
     tidepool_codegen::signal_safety::install();
 
-    // Craft a minimal function that executes `ud2` (SIGILL on x86_64)
     let result = unsafe {
         tidepool_codegen::signal_safety::with_signal_protection(|| {
-            // ud2 = 0x0F 0x0B
-            std::arch::asm!("ud2");
+            trigger_sigill();
         })
     };
 
@@ -41,7 +49,7 @@ fn test_signal_recovery_allows_subsequent_calls() {
     // First call: crash
     let result1 = unsafe {
         tidepool_codegen::signal_safety::with_signal_protection(|| {
-            std::arch::asm!("ud2");
+            trigger_sigill();
         })
     };
     assert!(result1.is_err());

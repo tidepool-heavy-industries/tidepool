@@ -9,85 +9,58 @@ pub struct StackRoot {
     pub heap_ptr: *mut u8,
 }
 
-/// Walk JIT frames starting from the given RBP, collecting all GC roots.
+/// Walk JIT frames starting from the given frame pointer, collecting all GC roots.
+///
+/// Uses Cranelift's `frame_size` metadata (the FP-to-SP distance, aka `active_size()`)
+/// to compute SP at each safepoint: `SP = caller_FP - frame_size`. This is the same
+/// approach Wasmtime uses and is correct on both x86_64 and aarch64, regardless of
+/// prologue structure or callee-saved register layout.
 ///
 /// # Safety
-/// - `start_rbp` must be a valid frame pointer from within a JIT call chain.
+/// - `start_fp` must be a valid frame pointer from within a JIT call chain
+///   (typically gc_trigger's FP, read via inline asm).
 /// - `stack_maps` must contain entries for all JIT functions in the call chain.
-#[cfg(target_arch = "x86_64")]
+/// - All frames in the chain must have frame pointers (`force-frame-pointers = true`).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub unsafe fn walk_frames(
-    start_rbp: usize,
+    start_fp: usize,
     stack_maps: &StackMapRegistry,
-    start_rsp: usize,
 ) -> Vec<StackRoot> {
     let mut roots = Vec::new();
-    let mut rbp = start_rbp;
-
-    // First, try to find the first JIT return address by searching up from RSP.
-    // This handles cases where gc_trigger doesn't have a frame pointer.
-    let mut current_return_addr = None;
-    let mut search_ptr = start_rsp;
-    // We search up to RBP + 16 (where the JIT return addr would be if gc_trigger has no frame).
-    while search_ptr < start_rbp + 16 {
-        let val = *(search_ptr as *const usize);
-        if stack_maps.contains_address(val) {
-            current_return_addr = Some(val);
-            // If we found a JIT return address, the RBP for this frame is the current RBP
-            // if gc_trigger has no frame, or it's the saved RBP if it does.
-            // Actually, if we found a JIT return address at search_ptr,
-            // then search_ptr + 8 is the SP at the safepoint!
-            break;
-        }
-        search_ptr += 8;
-    }
+    let mut fp = start_fp;
 
     loop {
-        if rbp == 0 {
+        if fp == 0 {
             break;
         }
 
-        // Determine return address for this frame
-        let return_addr = if let Some(addr) = current_return_addr.take() {
-            addr
-        } else {
-            *((rbp + 8) as *const usize)
-        };
+        // [FP+8] = return address (into the caller of this frame's function)
+        let return_addr = *((fp + 8) as *const usize);
 
         // Check if this return address is in JIT code
         if !stack_maps.contains_address(return_addr) {
             if !roots.is_empty() {
                 // We were in JIT territory and now we left it. Stop.
                 break;
-            } else {
-                // We haven't hit JIT territory yet. Skip this frame.
-                let next_rbp = *(rbp as *const usize);
-                if next_rbp == 0 || next_rbp == rbp || next_rbp < rbp {
-                    break;
-                }
-                rbp = next_rbp;
-                continue;
             }
+            // We haven't hit JIT territory yet. Skip this frame
+            // (e.g., gc_trigger → perform_gc before reaching JIT frames).
+            let next_fp = *(fp as *const usize);
+            if next_fp == 0 || next_fp == fp || next_fp <= fp {
+                break;
+            }
+            fp = next_fp;
+            continue;
         }
 
-        // Look up stack map for this return address
+        // Found a JIT return address. The stack map at this address describes
+        // the caller's GC roots at the point it made the call.
         if let Some(info) = stack_maps.lookup(return_addr) {
-            // Compute SP at safepoint.
-            // Cranelift stack map offsets are SP-relative at the safepoint.
-            // The return address we found is the one pushed by the 'call' in JIT code.
-            // The SP just before that 'call' was (addr_of_return_addr + 8).
-
-            // We need to find where this return_addr was on the stack.
-            //
-            // If this is the first frame we found, and it was found via the initial RSP search
-            // (proxied by `search_ptr < start_rbp + 16`), we use that search address.
-            // Otherwise, for any subsequent JIT frames, the return address is at [rbp + 8].
-            let addr_of_return_addr = if roots.is_empty() && search_ptr < start_rbp + 16 {
-                search_ptr
-            } else {
-                rbp + 8
-            };
-
-            let sp_at_safepoint = addr_of_return_addr + 8;
+            // The caller's FP is saved at [current_FP + 0].
+            let caller_fp = *(fp as *const usize);
+            // SP at the safepoint = caller's FP - caller's active frame size.
+            // Cranelift's frame_size is active_size(): the distance from FP down to SP.
+            let sp_at_safepoint = caller_fp - info.frame_size as usize;
 
             for &offset in &info.offsets {
                 let root_addr = (sp_at_safepoint + offset as usize) as *mut u64;
@@ -99,14 +72,14 @@ pub unsafe fn walk_frames(
             }
         }
 
-        // Walk to next frame: *(rbp) is the saved caller RBP
-        let next_rbp = *(rbp as *const usize);
+        // Walk to next frame: [FP+0] is the saved caller FP
+        let next_fp = *(fp as *const usize);
 
-        // Basic sanity checks to prevent infinite loops or jumping to null
-        if next_rbp == 0 || next_rbp == rbp || next_rbp < rbp {
+        // Sanity checks to prevent infinite loops
+        if next_fp == 0 || next_fp == fp || next_fp <= fp {
             break;
         }
-        rbp = next_rbp;
+        fp = next_fp;
     }
 
     roots

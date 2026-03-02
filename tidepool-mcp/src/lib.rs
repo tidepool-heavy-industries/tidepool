@@ -176,7 +176,7 @@ pub fn sg_decl() -> EffectDecl {
             "rAny :: [Value] -> Value\nrAny rs = object [\"any\" .= rs]",
             "rNot :: Value -> Value\nrNot r = object [\"not\" .= r]",
             // Object merge (primary combinator) — left-biased key union
-            "infixr 6 .+.\n(.+.) :: Value -> Value -> Value\n(.+.) (Aeson.Object a) (Aeson.Object b) = Aeson.Object (KM.unionWith const a b)\n(.+.) a _ = a",
+            "infixr 6 .+.\n(.+.) :: Value -> Value -> Value\n(.+.) (Object a) (Object b) = Object (KM.unionWith const a b)\n(.+.) a _ = a",
             // Conjunction / Disjunction
             "infixr 5 .&.\n(.&.) :: Value -> Value -> Value\na .&. b = object [\"all\" .= [a, b]]",
             "infixr 4 .|.\n(.|.) :: Value -> Value -> Value\na .|. b = object [\"any\" .= [a, b]]",

@@ -181,7 +181,7 @@ class State:
             # Send initialized notification
             self.write_to_child(json.dumps({
                 "jsonrpc": "2.0",
-                "method": "initialized",
+                "method": "notifications/initialized",
             }))
 
         # Notify client that tools may have changed

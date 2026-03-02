@@ -1,12 +1,15 @@
 //! JIT signal safety via sigsetjmp/siglongjmp.
 //!
-//! JIT-compiled code can crash with SIGILL (case trap `ud2`) or SIGSEGV
+//! JIT-compiled code can crash with SIGILL (case trap) or SIGSEGV
 //! (bad memory access). This module provides `with_signal_protection` which
 //! wraps JIT calls so that these signals return a clean error instead of
 //! killing the process.
 //!
-//! This is the standard technique used by real JIT runtimes (Wasmtime, V8,
-//! SpiderMonkey) to recover from signals in generated code.
+//! The actual sigsetjmp call lives in C (`csrc/sigsetjmp_wrapper.c`) because
+//! sigsetjmp is a "returns_twice" function. LLVM requires the `returns_twice`
+//! attribute on the caller for correct codegen, but Rust doesn't expose this
+//! attribute. Calling sigsetjmp directly from Rust can cause the optimizer to
+//! break the second-return path, especially on aarch64.
 
 #[cfg(unix)]
 mod inner {
@@ -16,7 +19,7 @@ mod inner {
     // sigjmp_buf sizes vary by platform:
     //   - Linux x86_64 (glibc): __jmp_buf_tag[1] = 200 bytes
     //   - macOS x86_64: 37 ints + signal mask ≈ 296 bytes
-    //   - macOS aarch64: similar, ~304 bytes
+    //   - macOS aarch64: int[49] = 196 bytes
     // Use 512 bytes to cover all platforms with headroom.
     #[repr(C, align(16))]
     pub struct SigJmpBuf {
@@ -24,24 +27,15 @@ mod inner {
     }
 
     extern "C" {
-        // On Linux (glibc), sigsetjmp is a macro that calls __sigsetjmp.
-        // On macOS, sigsetjmp is a real function.
-        #[cfg(target_os = "linux")]
-        fn __sigsetjmp(env: *mut SigJmpBuf, savesigs: libc::c_int) -> libc::c_int;
-        #[cfg(not(target_os = "linux"))]
-        fn sigsetjmp(env: *mut SigJmpBuf, savesigs: libc::c_int) -> libc::c_int;
-
         fn siglongjmp(env: *mut SigJmpBuf, val: libc::c_int) -> !;
-    }
 
-    #[cfg(target_os = "linux")]
-    unsafe fn platform_sigsetjmp(env: *mut SigJmpBuf, savesigs: libc::c_int) -> libc::c_int {
-        unsafe { __sigsetjmp(env, savesigs) }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    unsafe fn platform_sigsetjmp(env: *mut SigJmpBuf, savesigs: libc::c_int) -> libc::c_int {
-        unsafe { sigsetjmp(env, savesigs) }
+        /// C wrapper: calls sigsetjmp, then callback(userdata) if it returns 0.
+        /// Returns 0 on normal completion, or the signal number on siglongjmp.
+        fn tidepool_sigsetjmp_call(
+            buf: *mut SigJmpBuf,
+            callback: unsafe extern "C" fn(*mut libc::c_void),
+            userdata: *mut libc::c_void,
+        ) -> libc::c_int;
     }
 
     /// Signal number that caused the jump.
@@ -64,6 +58,13 @@ mod inner {
     /// (MCP server is single-eval).
     static JMP_BUF: AtomicPtr<SigJmpBuf> = AtomicPtr::new(ptr::null_mut());
 
+    /// Trampoline called from C after sigsetjmp returns 0.
+    /// Casts userdata back to a `Box<dyn FnOnce()>` and calls it.
+    unsafe extern "C" fn trampoline(userdata: *mut libc::c_void) {
+        let closure: Box<Box<dyn FnOnce()>> = Box::from_raw(userdata as *mut Box<dyn FnOnce()>);
+        (*closure)();
+    }
+
     /// Wrap a JIT call with signal protection.
     ///
     /// If SIGILL/SIGSEGV/SIGBUS fires during `f()`, returns `Err(SignalError)`
@@ -77,17 +78,42 @@ mod inner {
     where
         F: FnOnce() -> R,
     {
+        // We need to pass the closure through C's void* callback interface.
+        // Use an UnsafeCell to get the return value out of the type-erased closure.
+        let result_cell = std::cell::UnsafeCell::new(None::<R>);
+        let result_ptr = &result_cell as *const std::cell::UnsafeCell<Option<R>>;
+
+        let wrapper: Box<dyn FnOnce()> = Box::new(move || {
+            let r = f();
+            // SAFETY: we're the only writer, and the reader waits until after we return.
+            unsafe { *(*result_ptr).get() = Some(r) };
+        });
+
         let mut buf: SigJmpBuf = std::mem::zeroed();
-        let val = platform_sigsetjmp(&mut buf, 1); // savesigs=1
+
+        // Store the jump buffer so the signal handler can find it.
+        JMP_BUF.store(&mut buf, Ordering::Relaxed);
+
+        // Double-box: outer Box for the fat pointer, inner Box<dyn FnOnce()>.
+        let boxed: Box<Box<dyn FnOnce()>> = Box::new(wrapper);
+        let userdata = Box::into_raw(boxed) as *mut libc::c_void;
+
+        let val = tidepool_sigsetjmp_call(
+            &mut buf,
+            trampoline,
+            userdata,
+        );
+
+        JMP_BUF.store(null_mut(), Ordering::Relaxed);
+
         if val != 0 {
-            // Jumped back from signal handler
-            JMP_BUF.store(null_mut(), Ordering::Relaxed);
+            // Signal was caught. The closure was interrupted by siglongjmp,
+            // so the Box was leaked. We can't recover it safely.
             return Err(SignalError(val));
         }
-        JMP_BUF.store(&mut buf, Ordering::Relaxed);
-        let result = f();
-        JMP_BUF.store(null_mut(), Ordering::Relaxed);
-        Ok(result)
+
+        // Closure completed normally.
+        Ok(result_cell.into_inner().unwrap())
     }
 
     extern "C" fn handler(
@@ -111,35 +137,37 @@ mod inner {
 
     /// Install signal handlers for SIGILL, SIGSEGV, SIGBUS on an alternate stack.
     ///
-    /// Idempotent — safe to call multiple times. Uses `sigaltstack` so the handler
-    /// works even on stack overflow.
+    /// Safe to call multiple times. Uses `sigaltstack` so the handler works even
+    /// on stack overflow.
     pub fn install() {
         use std::alloc::{alloc, Layout};
         use std::sync::atomic::AtomicBool;
 
-        static INSTALLED: AtomicBool = AtomicBool::new(false);
-        if INSTALLED.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
         const ALT_STACK_SIZE: usize = 64 * 1024;
 
-        unsafe {
-            // Allocate alternate signal stack
-            let layout = Layout::from_size_align(ALT_STACK_SIZE, 16).unwrap();
-            let alt_stack_ptr = alloc(layout);
-            if alt_stack_ptr.is_null() {
-                return;
+        // Allocate the alternate signal stack only once.
+        static ALT_STACK_ALLOCATED: AtomicBool = AtomicBool::new(false);
+        if !ALT_STACK_ALLOCATED.swap(true, Ordering::SeqCst) {
+            unsafe {
+                let layout = Layout::from_size_align(ALT_STACK_SIZE, 16).unwrap();
+                let alt_stack_ptr = alloc(layout);
+                if alt_stack_ptr.is_null() {
+                    ALT_STACK_ALLOCATED.store(false, Ordering::SeqCst);
+                    return;
+                }
+
+                let stack = libc::stack_t {
+                    ss_sp: alt_stack_ptr as *mut libc::c_void,
+                    ss_flags: 0,
+                    ss_size: ALT_STACK_SIZE,
+                };
+                libc::sigaltstack(&stack, ptr::null_mut());
             }
+        }
 
-            let stack = libc::stack_t {
-                ss_sp: alt_stack_ptr as *mut libc::c_void,
-                ss_flags: 0,
-                ss_size: ALT_STACK_SIZE,
-            };
-            libc::sigaltstack(&stack, ptr::null_mut());
-
-            // Install handler for SIGILL, SIGSEGV, SIGBUS
+        // Always (re)install signal handlers. Other code (Rust panic runtime,
+        // test harness) may overwrite them, so we reinstall on every call.
+        unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
             sa.sa_sigaction = handler as *const () as usize;
