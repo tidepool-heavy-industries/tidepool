@@ -1311,13 +1311,7 @@ fn test_emit_primop_word8_ops() {
 
 #[test]
 fn test_emit_primop_clz8() {
-    let cases = vec![
-        (0x01, 7),
-        (0x80, 0),
-        (0x00, 8),
-        (0xFF, 0),
-        (0x40, 1),
-    ];
+    let cases = vec![(0x01, 7), (0x80, 0), (0x00, 8), (0xFF, 0), (0x40, 1)];
     for (input, expected) in cases {
         let tree = RecursiveTree {
             nodes: vec![
@@ -2143,12 +2137,12 @@ fn test_error_sentinel_let_rec_deferred() {
     let n = VarId(3);
     let tree = RecursiveTree {
         nodes: vec![
-            CoreFrame::Var(error_var),          // 0: x rhs (direct error)
-            CoreFrame::Var(n),                  // 1: y lambda body
+            CoreFrame::Var(error_var),             // 0: x rhs (direct error)
+            CoreFrame::Var(n),                     // 1: y lambda body
             CoreFrame::Lam { binder: n, body: 1 }, // 2: y rhs
-            CoreFrame::Lit(Literal::LitInt(42)), // 3: 42
-            CoreFrame::Var(y),                  // 4: y
-            CoreFrame::App { fun: 4, arg: 3 },  // 5: y 42
+            CoreFrame::Lit(Literal::LitInt(42)),   // 3: 42
+            CoreFrame::Var(y),                     // 4: y
+            CoreFrame::App { fun: 4, arg: 3 },     // 5: y 42
             CoreFrame::LetRec {
                 bindings: vec![(x, 0), (y, 2)],
                 body: 5,

@@ -123,9 +123,13 @@ fn emit_data_dispatch(
     let dispatch_block = builder.create_block();
     builder.append_block_param(dispatch_block, types::I64);
 
-    builder
-        .ins()
-        .brif(needs_force, force_block, &[], dispatch_block, &[initial_scrut_ptr]);
+    builder.ins().brif(
+        needs_force,
+        force_block,
+        &[],
+        dispatch_block,
+        &[initial_scrut_ptr],
+    );
 
     // Force block: call host_fns::heap_force
     builder.switch_to_block(force_block);
@@ -190,7 +194,8 @@ fn emit_data_dispatch(
                 bound_vars.push(binder);
             }
 
-            let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
+            let result =
+                ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
             let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
             builder.ins().jump(merge_block, &[result_ptr]);
 
@@ -262,11 +267,11 @@ fn emit_case_trap(
             sig
         })
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-    let trap_ref = pipeline
-        .module
-        .declare_func_in_func(trap_fn, builder.func);
+    let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
     let num_alts_val = builder.ins().iconst(types::I64, num_alts as i64);
-    builder.ins().call(trap_ref, &[scrut_ptr, num_alts_val, tags_addr]);
+    builder
+        .ins()
+        .call(trap_ref, &[scrut_ptr, num_alts_val, tags_addr]);
     builder.ins().trap(TrapCode::unwrap_user(2));
     Ok(())
 }

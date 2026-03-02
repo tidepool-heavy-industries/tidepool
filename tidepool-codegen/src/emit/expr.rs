@@ -353,7 +353,8 @@ fn collapse_frame(
             rhs_idx,
             body_idx,
         } => crate::emit::join::emit_join(
-            ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, &label, &params, rhs_idx, body_idx,
+            ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, &label, &params, rhs_idx,
+            body_idx,
         ),
         EmitFrame::Jump { label, args } => {
             let join_block = ctx
@@ -380,7 +381,9 @@ fn collapse_frame(
                 LIT_TAG_INT,
             ))
         }
-        EmitFrame::LetBoundary(idx) => ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, idx),
+        EmitFrame::LetBoundary(idx) => {
+            ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, idx)
+        }
     }
 }
 
@@ -496,8 +499,13 @@ fn emit_lam(
     let inner_oom_func = {
         let mut sig = Signature::new(pipeline.isa.default_call_conv());
         sig.returns.push(AbiParam::new(types::I64));
-        let func_id = pipeline.module.declare_function("runtime_oom", Linkage::Import, &sig).unwrap();
-        pipeline.module.declare_func_in_func(func_id, inner_builder.func)
+        let func_id = pipeline
+            .module
+            .declare_function("runtime_oom", Linkage::Import, &sig)
+            .unwrap();
+        pipeline
+            .module
+            .declare_func_in_func(func_id, inner_builder.func)
     };
 
     let mut inner_emit = EmitContext::new(ctx.prefix.clone());
@@ -651,7 +659,10 @@ pub fn compile_expr(
     let oom_func = {
         let mut sig = Signature::new(pipeline.isa.default_call_conv());
         sig.returns.push(AbiParam::new(types::I64));
-        let func_id = pipeline.module.declare_function("runtime_oom", Linkage::Import, &sig).unwrap();
+        let func_id = pipeline
+            .module
+            .declare_function("runtime_oom", Linkage::Import, &sig)
+            .unwrap();
         pipeline.module.declare_func_in_func(func_id, builder.func)
     };
 
@@ -737,8 +748,9 @@ impl EmitContext {
                             self.trace_scope(&format!("defer error LetNonRec {:?}", binder));
                             self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
                         } else {
-                            let rhs_val =
-                                self.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs)?;
+                            let rhs_val = self.emit_node(
+                                pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs,
+                            )?;
                             self.trace_scope(&format!("insert LetNonRec {:?}", binder));
                             self.env.insert(*binder, rhs_val);
                         }
@@ -764,7 +776,8 @@ impl EmitContext {
                         for (binder, rhs_idx) in &simple_bindings {
                             if Self::rhs_is_error_call(tree, *rhs_idx) {
                                 let kind = Self::extract_error_kind(tree, *rhs_idx);
-                                let poison_addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
+                                let poison_addr =
+                                    crate::host_fns::error_poison_ptr_lazy(kind) as i64;
                                 let poison_val = builder.ins().iconst(types::I64, poison_addr);
                                 self.trace_scope(&format!(
                                     "defer error LetRec(simple) {:?}",
@@ -772,8 +785,10 @@ impl EmitContext {
                                 ));
                                 self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
                             } else {
-                                                            let rhs_val = self
-                                                                .emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx)?;                                self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
+                                let rhs_val = self.emit_node(
+                                    pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx,
+                                )?;
+                                self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
                                 self.env.insert(*binder, rhs_val);
                             }
                         }
@@ -835,8 +850,13 @@ impl EmitContext {
 
                                 let num_captures = sorted_fvs.len();
                                 let closure_size = 24 + 8 * num_captures as u64;
-                                let closure_ptr =
-                                    emit_alloc_fast_path(builder, vmctx, closure_size, gc_sig, oom_func);
+                                let closure_ptr = emit_alloc_fast_path(
+                                    builder,
+                                    vmctx,
+                                    closure_size,
+                                    gc_sig,
+                                    oom_func,
+                                );
 
                                 let tag_val =
                                     builder.ins().iconst(types::I8, layout::TAG_CLOSURE as i64);
@@ -868,7 +888,8 @@ impl EmitContext {
                             CoreFrame::Con { tag, fields } => {
                                 let num_fields = fields.len();
                                 let size = 24 + 8 * num_fields as u64;
-                                let ptr = emit_alloc_fast_path(builder, vmctx, size, gc_sig, oom_func);
+                                let ptr =
+                                    emit_alloc_fast_path(builder, vmctx, size, gc_sig, oom_func);
 
                                 let tag_val =
                                     builder.ins().iconst(types::I8, layout::TAG_CON as i64);
@@ -896,12 +917,9 @@ impl EmitContext {
                                 let null_val = builder.ins().iconst(types::I64, 0);
                                 for i in 0..num_fields {
                                     let offset = CON_FIELDS_START + 8 * i as i32;
-                                    builder.ins().store(
-                                        MemFlags::trusted(),
-                                        null_val,
-                                        ptr,
-                                        offset,
-                                    );
+                                    builder
+                                        .ins()
+                                        .store(MemFlags::trusted(), null_val, ptr, offset);
                                 }
 
                                 builder.declare_value_needs_stack_map(ptr);
@@ -938,8 +956,9 @@ impl EmitContext {
                             self.trace_scope(&format!("defer error LetRec(trivial) {:?}", binder));
                             self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
                         } else if matches!(&tree.nodes[*rhs_idx], CoreFrame::Var(_)) {
-                            let rhs_val =
-                                self.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx)?;
+                            let rhs_val = self.emit_node(
+                                pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx,
+                            )?;
                             self.trace_scope(&format!("insert LetRec(trivial) {:?}", binder));
                             self.env.insert(*binder, rhs_val);
                         } else {
@@ -953,7 +972,10 @@ impl EmitContext {
                     // We compile the inner function (which reads captures by slot
                     // position) and store code pointers, then fill capture slots
                     // in Phase 3a' after simple bindings are evaluated.
-                    let mut pending_capture_updates: std::collections::HashMap<VarId, Vec<(cranelift_codegen::ir::Value, i32)>> = std::collections::HashMap::new();
+                    let mut pending_capture_updates: std::collections::HashMap<
+                        VarId,
+                        Vec<(cranelift_codegen::ir::Value, i32)>,
+                    > = std::collections::HashMap::new();
 
                     for pa in &pre_allocs {
                         let (closure_ptr, sorted_fvs, rhs_idx) = match pa {
@@ -1004,12 +1026,17 @@ impl EmitContext {
                         inner_gc_sig.params.push(AbiParam::new(types::I64));
                         let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
 
-    let inner_oom_func = {
-        let mut sig = Signature::new(pipeline.isa.default_call_conv());
-        sig.returns.push(AbiParam::new(types::I64));
-        let func_id = pipeline.module.declare_function("runtime_oom", Linkage::Import, &sig).unwrap();
-        pipeline.module.declare_func_in_func(func_id, inner_builder.func)
-    };
+                        let inner_oom_func = {
+                            let mut sig = Signature::new(pipeline.isa.default_call_conv());
+                            sig.returns.push(AbiParam::new(types::I64));
+                            let func_id = pipeline
+                                .module
+                                .declare_function("runtime_oom", Linkage::Import, &sig)
+                                .unwrap();
+                            pipeline
+                                .module
+                                .declare_func_in_func(func_id, inner_builder.func)
+                        };
 
                         let mut inner_emit = EmitContext::new(self.prefix.clone());
                         inner_emit.lambda_counter = self.lambda_counter;
@@ -1070,12 +1097,9 @@ impl EmitContext {
                         let null_val = builder.ins().iconst(types::I64, 0);
                         for i in 0..sorted_fvs.len() {
                             let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
-                            builder.ins().store(
-                                MemFlags::trusted(),
-                                null_val,
-                                closure_ptr,
-                                offset,
-                            );
+                            builder
+                                .ins()
+                                .store(MemFlags::trusted(), null_val, closure_ptr, offset);
                         }
 
                         // Fill captures that are already in env. Defer those that
@@ -1083,7 +1107,8 @@ impl EmitContext {
                         for (i, var_id) in sorted_fvs.iter().enumerate() {
                             let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
                             if let Some(ssaval) = self.env.get(var_id) {
-                                let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
+                                let cap_val =
+                                    ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
                                 builder.ins().store(
                                     MemFlags::trusted(),
                                     cap_val,
@@ -1119,8 +1144,11 @@ impl EmitContext {
                                 deferred_cons.push((*ptr, field_indices.clone()));
                             } else {
                                 for (i, &f_idx) in field_indices.iter().enumerate() {
-                                                                let val = self
-                                                                    .emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx)?;                                    let field_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val);
+                                    let val = self.emit_node(
+                                        pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                                    )?;
+                                    let field_val =
+                                        ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val);
                                     builder.ins().store(
                                         MemFlags::trusted(),
                                         field_val,
@@ -1139,20 +1167,26 @@ impl EmitContext {
                     let deferred_simple = {
                         let deferred_set: std::collections::HashSet<VarId> =
                             deferred_simple.iter().map(|(b, _)| *b).collect();
-                        
-                        let mut direct_deps: std::collections::HashMap<VarId, Vec<VarId>> = std::collections::HashMap::new();
+
+                        let mut direct_deps: std::collections::HashMap<VarId, Vec<VarId>> =
+                            std::collections::HashMap::new();
                         for (binder, rhs_idx) in bindings {
-                            let fvs = tidepool_repr::free_vars::free_vars(&tree.extract_subtree(*rhs_idx));
+                            let fvs = tidepool_repr::free_vars::free_vars(
+                                &tree.extract_subtree(*rhs_idx),
+                            );
                             direct_deps.insert(*binder, fvs.into_iter().collect());
                         }
 
                         // Compute reachability on-demand using DFS
-                        let mut reachable_deferred: std::collections::HashMap<VarId, std::collections::HashSet<VarId>> = std::collections::HashMap::new();
+                        let mut reachable_deferred: std::collections::HashMap<
+                            VarId,
+                            std::collections::HashSet<VarId>,
+                        > = std::collections::HashMap::new();
                         for &(start_node, _) in &deferred_simple {
                             let mut visited = std::collections::HashSet::new();
                             let mut stack = vec![start_node];
                             let mut reached = std::collections::HashSet::new();
-                            
+
                             while let Some(node) = stack.pop() {
                                 if !visited.insert(node) {
                                     continue;
@@ -1224,8 +1258,9 @@ impl EmitContext {
                             self.trace_scope(&format!("defer error LetRec(deferred) {:?}", binder));
                             self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
                         } else {
-                            let rhs_val =
-                                self.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx)?;
+                            let rhs_val = self.emit_node(
+                                pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx,
+                            )?;
                             self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
                             self.env.insert(*binder, rhs_val);
                         }
@@ -1236,7 +1271,8 @@ impl EmitContext {
                         // invoke those closures.
                         if let Some(updates) = pending_capture_updates.remove(binder) {
                             if let Some(ssaval) = self.env.get(binder) {
-                                let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
+                                let cap_val =
+                                    ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
                                 for (closure_ptr, offset) in updates {
                                     builder.ins().store(
                                         MemFlags::trusted(),
@@ -1279,16 +1315,16 @@ impl EmitContext {
                     // that were not in env during Phase 1 but are now in env.
                     for (var_id, updates) in pending_capture_updates {
                         let ssaval = self.env.get(&var_id).unwrap_or_else(|| {
-                            panic!("LetRec capture fill: VarId({:#x}) not in env after Phase 3c.", var_id.0);
+                            panic!(
+                                "LetRec capture fill: VarId({:#x}) not in env after Phase 3c.",
+                                var_id.0
+                            );
                         });
                         let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
                         for (closure_ptr, offset) in updates {
-                            builder.ins().store(
-                                MemFlags::trusted(),
-                                cap_val,
-                                closure_ptr,
-                                offset,
-                            );
+                            builder
+                                .ins()
+                                .store(MemFlags::trusted(), cap_val, closure_ptr, offset);
                         }
                     }
 
@@ -1296,8 +1332,9 @@ impl EmitContext {
                     // incrementally during Phase 3c.
                     for (ptr, field_indices, _) in &deferred_con_deps {
                         for (i, &f_idx) in field_indices.iter().enumerate() {
-                            let val =
-                                self.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx)?;
+                            let val = self.emit_node(
+                                pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                            )?;
                             let field_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val);
                             builder.ins().store(
                                 MemFlags::trusted(),
@@ -1314,7 +1351,9 @@ impl EmitContext {
                 }
                 // All non-Let nodes: delegate to stack-safe hylomorphism
                 _ => {
-                    break emit_subtree(self, pipeline, builder, vmctx, gc_sig, oom_func, tree, idx);
+                    break emit_subtree(
+                        self, pipeline, builder, vmctx, gc_sig, oom_func, tree, idx,
+                    );
                 }
             }
         }; // end loop

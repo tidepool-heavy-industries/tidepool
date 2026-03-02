@@ -106,17 +106,36 @@ pub fn emit_primop(
         }
 
         // Int comparison \u2192 returns i64 (0=False, 1=True)
-        PrimOpKind::IntEq => emit_int_compare(pipeline, builder, op, IntCC::Equal, args, LIT_TAG_INT),
-        PrimOpKind::IntNe => emit_int_compare(pipeline, builder, op, IntCC::NotEqual, args, LIT_TAG_INT),
-        PrimOpKind::IntLt => {
-            emit_int_compare(pipeline, builder, op, IntCC::SignedLessThan, args, LIT_TAG_INT)
+        PrimOpKind::IntEq => {
+            emit_int_compare(pipeline, builder, op, IntCC::Equal, args, LIT_TAG_INT)
         }
-        PrimOpKind::IntLe => {
-            emit_int_compare(pipeline, builder, op, IntCC::SignedLessThanOrEqual, args, LIT_TAG_INT)
+        PrimOpKind::IntNe => {
+            emit_int_compare(pipeline, builder, op, IntCC::NotEqual, args, LIT_TAG_INT)
         }
-        PrimOpKind::IntGt => {
-            emit_int_compare(pipeline, builder, op, IntCC::SignedGreaterThan, args, LIT_TAG_INT)
-        }
+        PrimOpKind::IntLt => emit_int_compare(
+            pipeline,
+            builder,
+            op,
+            IntCC::SignedLessThan,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::IntLe => emit_int_compare(
+            pipeline,
+            builder,
+            op,
+            IntCC::SignedLessThanOrEqual,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::IntGt => emit_int_compare(
+            pipeline,
+            builder,
+            op,
+            IntCC::SignedGreaterThan,
+            args,
+            LIT_TAG_INT,
+        ),
         PrimOpKind::IntGe => emit_int_compare(
             pipeline,
             builder,
@@ -199,11 +218,20 @@ pub fn emit_primop(
         }
 
         // Word comparison (unsigned)
-        PrimOpKind::WordEq => emit_int_compare(pipeline, builder, op, IntCC::Equal, args, LIT_TAG_INT),
-        PrimOpKind::WordNe => emit_int_compare(pipeline, builder, op, IntCC::NotEqual, args, LIT_TAG_INT),
-        PrimOpKind::WordLt => {
-            emit_int_compare(pipeline, builder, op, IntCC::UnsignedLessThan, args, LIT_TAG_INT)
+        PrimOpKind::WordEq => {
+            emit_int_compare(pipeline, builder, op, IntCC::Equal, args, LIT_TAG_INT)
         }
+        PrimOpKind::WordNe => {
+            emit_int_compare(pipeline, builder, op, IntCC::NotEqual, args, LIT_TAG_INT)
+        }
+        PrimOpKind::WordLt => emit_int_compare(
+            pipeline,
+            builder,
+            op,
+            IntCC::UnsignedLessThan,
+            args,
+            LIT_TAG_INT,
+        ),
         PrimOpKind::WordLe => emit_int_compare(
             pipeline,
             builder,
@@ -212,9 +240,14 @@ pub fn emit_primop(
             args,
             LIT_TAG_INT,
         ),
-        PrimOpKind::WordGt => {
-            emit_int_compare(pipeline, builder, op, IntCC::UnsignedGreaterThan, args, LIT_TAG_INT)
-        }
+        PrimOpKind::WordGt => emit_int_compare(
+            pipeline,
+            builder,
+            op,
+            IntCC::UnsignedGreaterThan,
+            args,
+            LIT_TAG_INT,
+        ),
         PrimOpKind::WordGe => emit_int_compare(
             pipeline,
             builder,
@@ -251,29 +284,55 @@ pub fn emit_primop(
         }
 
         // Double comparison
-        PrimOpKind::DoubleEq => emit_float_compare(pipeline, builder, op, FloatCC::Equal, args, LIT_TAG_INT),
+        PrimOpKind::DoubleEq => {
+            emit_float_compare(pipeline, builder, op, FloatCC::Equal, args, LIT_TAG_INT)
+        }
         PrimOpKind::DoubleNe => {
             emit_float_compare(pipeline, builder, op, FloatCC::NotEqual, args, LIT_TAG_INT)
         }
         PrimOpKind::DoubleLt => {
             emit_float_compare(pipeline, builder, op, FloatCC::LessThan, args, LIT_TAG_INT)
         }
-        PrimOpKind::DoubleLe => {
-            emit_float_compare(pipeline, builder, op, FloatCC::LessThanOrEqual, args, LIT_TAG_INT)
-        }
-        PrimOpKind::DoubleGt => {
-            emit_float_compare(pipeline, builder, op, FloatCC::GreaterThan, args, LIT_TAG_INT)
-        }
-        PrimOpKind::DoubleGe => {
-            emit_float_compare(pipeline, builder, op, FloatCC::GreaterThanOrEqual, args, LIT_TAG_INT)
-        }
+        PrimOpKind::DoubleLe => emit_float_compare(
+            pipeline,
+            builder,
+            op,
+            FloatCC::LessThanOrEqual,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::DoubleGt => emit_float_compare(
+            pipeline,
+            builder,
+            op,
+            FloatCC::GreaterThan,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::DoubleGe => emit_float_compare(
+            pipeline,
+            builder,
+            op,
+            FloatCC::GreaterThanOrEqual,
+            args,
+            LIT_TAG_INT,
+        ),
 
         // Char comparison
-        PrimOpKind::CharEq => emit_int_compare(pipeline, builder, op, IntCC::Equal, args, LIT_TAG_INT),
-        PrimOpKind::CharNe => emit_int_compare(pipeline, builder, op, IntCC::NotEqual, args, LIT_TAG_INT),
-        PrimOpKind::CharLt => {
-            emit_int_compare(pipeline, builder, op, IntCC::UnsignedLessThan, args, LIT_TAG_INT)
+        PrimOpKind::CharEq => {
+            emit_int_compare(pipeline, builder, op, IntCC::Equal, args, LIT_TAG_INT)
         }
+        PrimOpKind::CharNe => {
+            emit_int_compare(pipeline, builder, op, IntCC::NotEqual, args, LIT_TAG_INT)
+        }
+        PrimOpKind::CharLt => emit_int_compare(
+            pipeline,
+            builder,
+            op,
+            IntCC::UnsignedLessThan,
+            args,
+            LIT_TAG_INT,
+        ),
         PrimOpKind::CharLe => emit_int_compare(
             pipeline,
             builder,
@@ -282,9 +341,14 @@ pub fn emit_primop(
             args,
             LIT_TAG_INT,
         ),
-        PrimOpKind::CharGt => {
-            emit_int_compare(pipeline, builder, op, IntCC::UnsignedGreaterThan, args, LIT_TAG_INT)
-        }
+        PrimOpKind::CharGt => emit_int_compare(
+            pipeline,
+            builder,
+            op,
+            IntCC::UnsignedGreaterThan,
+            args,
+            LIT_TAG_INT,
+        ),
         PrimOpKind::CharGe => emit_int_compare(
             pipeline,
             builder,
@@ -526,7 +590,9 @@ pub fn emit_primop(
             };
             let bits = builder.ins().bitcast(types::I64, MemFlags::new(), a);
             let result = emit_runtime_call(
-                pipeline, builder, fn_name,
+                pipeline,
+                builder,
+                fn_name,
                 &[AbiParam::new(types::I64)],
                 &[AbiParam::new(types::I64)],
                 &[bits],
@@ -541,7 +607,9 @@ pub fn emit_primop(
             let bits_a = builder.ins().bitcast(types::I64, MemFlags::new(), a);
             let bits_b = builder.ins().bitcast(types::I64, MemFlags::new(), b);
             let result = emit_runtime_call(
-                pipeline, builder, "runtime_double_power",
+                pipeline,
+                builder,
+                "runtime_double_power",
                 &[AbiParam::new(types::I64), AbiParam::new(types::I64)],
                 &[AbiParam::new(types::I64)],
                 &[bits_a, bits_b],
@@ -623,15 +691,30 @@ pub fn emit_primop(
         }
 
         // Int64 comparison
-        PrimOpKind::Int64Lt => {
-            emit_int_compare(pipeline, builder, op, IntCC::SignedLessThan, args, LIT_TAG_INT)
-        }
-        PrimOpKind::Int64Le => {
-            emit_int_compare(pipeline, builder, op, IntCC::SignedLessThanOrEqual, args, LIT_TAG_INT)
-        }
-        PrimOpKind::Int64Gt => {
-            emit_int_compare(pipeline, builder, op, IntCC::SignedGreaterThan, args, LIT_TAG_INT)
-        }
+        PrimOpKind::Int64Lt => emit_int_compare(
+            pipeline,
+            builder,
+            op,
+            IntCC::SignedLessThan,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::Int64Le => emit_int_compare(
+            pipeline,
+            builder,
+            op,
+            IntCC::SignedLessThanOrEqual,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::Int64Gt => emit_int_compare(
+            pipeline,
+            builder,
+            op,
+            IntCC::SignedGreaterThan,
+            args,
+            LIT_TAG_INT,
+        ),
         PrimOpKind::Int64Ge => emit_int_compare(
             pipeline,
             builder,
@@ -705,9 +788,14 @@ pub fn emit_primop(
                 LIT_TAG_WORD,
             ))
         }
-        PrimOpKind::Word8Lt => {
-            emit_int_compare(pipeline, builder, op, IntCC::UnsignedLessThan, args, LIT_TAG_INT)
-        }
+        PrimOpKind::Word8Lt => emit_int_compare(
+            pipeline,
+            builder,
+            op,
+            IntCC::UnsignedLessThan,
+            args,
+            LIT_TAG_INT,
+        ),
         PrimOpKind::Word8Le => emit_int_compare(
             pipeline,
             builder,
@@ -1084,7 +1172,11 @@ pub fn emit_primop(
         PrimOpKind::CompareByteArrays => {
             // compareByteArrays# :: ByteArray# -> Int# -> ByteArray# -> Int# -> Int# -> Int#
             if args.len() != 5 {
-                return Err(EmitError::InvalidArity(PrimOpKind::CompareByteArrays, 5, args.len()));
+                return Err(EmitError::InvalidArity(
+                    PrimOpKind::CompareByteArrays,
+                    5,
+                    args.len(),
+                ));
             }
             let a = unbox_bytearray(pipeline, builder, args[0]);
             let a_off = unbox_int(pipeline, builder, args[1]);
@@ -1250,22 +1342,39 @@ pub fn emit_primop(
             let b = unbox_float(pipeline, builder, args[1]);
             Ok(SsaVal::Raw(builder.ins().fdiv(a, b), LIT_TAG_FLOAT))
         }
-        PrimOpKind::FloatEq => emit_float_compare(pipeline, builder, op, FloatCC::Equal, args, LIT_TAG_INT),
+        PrimOpKind::FloatEq => {
+            emit_float_compare(pipeline, builder, op, FloatCC::Equal, args, LIT_TAG_INT)
+        }
         PrimOpKind::FloatNe => {
             emit_float_compare(pipeline, builder, op, FloatCC::NotEqual, args, LIT_TAG_INT)
         }
         PrimOpKind::FloatLt => {
             emit_float_compare(pipeline, builder, op, FloatCC::LessThan, args, LIT_TAG_INT)
         }
-        PrimOpKind::FloatLe => {
-            emit_float_compare(pipeline, builder, op, FloatCC::LessThanOrEqual, args, LIT_TAG_INT)
-        }
-        PrimOpKind::FloatGt => {
-            emit_float_compare(pipeline, builder, op, FloatCC::GreaterThan, args, LIT_TAG_INT)
-        }
-        PrimOpKind::FloatGe => {
-            emit_float_compare(pipeline, builder, op, FloatCC::GreaterThanOrEqual, args, LIT_TAG_INT)
-        }
+        PrimOpKind::FloatLe => emit_float_compare(
+            pipeline,
+            builder,
+            op,
+            FloatCC::LessThanOrEqual,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::FloatGt => emit_float_compare(
+            pipeline,
+            builder,
+            op,
+            FloatCC::GreaterThan,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::FloatGe => emit_float_compare(
+            pipeline,
+            builder,
+            op,
+            FloatCC::GreaterThanOrEqual,
+            args,
+            LIT_TAG_INT,
+        ),
 
         PrimOpKind::TagToEnum | PrimOpKind::SeqOp => {
             Err(EmitError::NotYetImplemented(format!("{:?}", op)))
@@ -1293,7 +1402,9 @@ pub fn emit_primop(
             } else {
                 LIT_TAG_ARRAY
             };
-            Ok(emit_lit_boxed_array(builder, vmctx, gc_sig, oom_func, arr_ptr, lit_tag))
+            Ok(emit_lit_boxed_array(
+                builder, vmctx, gc_sig, oom_func, arr_ptr, lit_tag,
+            ))
         }
 
         PrimOpKind::ReadSmallArray
@@ -1305,7 +1416,9 @@ pub fn emit_primop(
             if args.len() < 2 {
                 return Err(EmitError::NotYetImplemented(format!(
                     "{:?}: expected >=2 args, got {} (args: {:?})",
-                    op, args.len(), args
+                    op,
+                    args.len(),
+                    args
                 )));
             }
             let arr_ptr = unbox_bytearray(pipeline, builder, args[0]);
@@ -1313,7 +1426,9 @@ pub fn emit_primop(
             let base = builder.ins().iadd_imm(arr_ptr, 8);
             let byte_offset = builder.ins().imul_imm(idx, 8);
             let effective = builder.ins().iadd(base, byte_offset);
-            let loaded = builder.ins().load(types::I64, MemFlags::new(), effective, 0);
+            let loaded = builder
+                .ins()
+                .load(types::I64, MemFlags::new(), effective, 0);
             builder.declare_value_needs_stack_map(loaded);
             Ok(SsaVal::HeapPtr(loaded))
         }
@@ -1425,7 +1540,12 @@ pub fn emit_primop(
                 &[arr, off, len],
             )?;
             Ok(emit_lit_boxed_array(
-                builder, vmctx, gc_sig, oom_func, result, LIT_TAG_ARRAY,
+                builder,
+                vmctx,
+                gc_sig,
+                oom_func,
+                result,
+                LIT_TAG_ARRAY,
             ))
         }
 
@@ -1523,7 +1643,6 @@ pub fn emit_primop(
             let with_sentinel = builder.ins().bor_imm(a, 0x1_0000_0000);
             Ok(SsaVal::Raw(builder.ins().ctz(with_sentinel), LIT_TAG_WORD))
         }
-
     }
 }
 
@@ -1566,7 +1685,11 @@ fn emit_float_compare(
 }
 
 /// Unbox an Addr# value recursively.
-fn unbox_addr(_pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val: SsaVal) -> Value {
+fn unbox_addr(
+    _pipeline: &mut CodegenPipeline,
+    builder: &mut FunctionBuilder,
+    val: SsaVal,
+) -> Value {
     match val {
         SsaVal::Raw(v, _) => v,
         SsaVal::HeapPtr(v) => {
@@ -1574,35 +1697,48 @@ fn unbox_addr(_pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, va
             let next_block = builder.create_block();
             builder.append_block_param(start_block, types::I64);
             builder.append_block_param(next_block, types::I64);
-            
+
             builder.ins().jump(start_block, &[v]);
-            
+
             builder.switch_to_block(start_block);
             let curr_v = builder.block_params(start_block)[0];
-            let tag = builder.ins().load(types::I8, MemFlags::trusted(), curr_v, 0);
-            let is_con = builder.ins().icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
-            
+            let tag = builder
+                .ins()
+                .load(types::I8, MemFlags::trusted(), curr_v, 0);
+            let is_con = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
+
             let con_block = builder.create_block();
-            builder.ins().brif(is_con, con_block, &[], next_block, &[curr_v]);
-            
+            builder
+                .ins()
+                .brif(is_con, con_block, &[], next_block, &[curr_v]);
+
             builder.switch_to_block(con_block);
             builder.seal_block(con_block);
-            let field0 = builder.ins().load(types::I64, MemFlags::trusted(), curr_v, layout::CON_FIELDS_OFFSET as i32);
+            let field0 = builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                curr_v,
+                layout::CON_FIELDS_OFFSET as i32,
+            );
             builder.ins().jump(start_block, &[field0]);
-            
+
             builder.switch_to_block(next_block);
             builder.seal_block(start_block);
             builder.seal_block(next_block);
             let v_final = builder.block_params(next_block)[0];
-            
-            let raw_val = builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), v_final, LIT_VALUE_OFFSET);
-            let lit_tag = builder
-                .ins()
-                .load(types::I8, MemFlags::trusted(), v_final, LIT_TAG_OFFSET);
+
+            let raw_val =
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), v_final, LIT_VALUE_OFFSET);
+            let lit_tag =
+                builder
+                    .ins()
+                    .load(types::I8, MemFlags::trusted(), v_final, LIT_TAG_OFFSET);
             let lit_tag_ext = builder.ins().uextend(types::I64, lit_tag);
-            
+
             let is_string = builder
                 .ins()
                 .icmp_imm(IntCC::Equal, lit_tag_ext, LIT_TAG_STRING);
@@ -1617,7 +1753,11 @@ fn unbox_addr(_pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, va
 }
 
 /// Extract the raw ByteArray pointer from a Lit(BYTEARRAY) heap object recursively.
-fn unbox_bytearray(_pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val: SsaVal) -> Value {
+fn unbox_bytearray(
+    _pipeline: &mut CodegenPipeline,
+    builder: &mut FunctionBuilder,
+    val: SsaVal,
+) -> Value {
     match val {
         SsaVal::Raw(v, _) => v,
         SsaVal::HeapPtr(v) => {
@@ -1625,35 +1765,48 @@ fn unbox_bytearray(_pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilde
             let next_block = builder.create_block();
             builder.append_block_param(start_block, types::I64);
             builder.append_block_param(next_block, types::I64);
-            
+
             builder.ins().jump(start_block, &[v]);
-            
+
             builder.switch_to_block(start_block);
             let curr_v = builder.block_params(start_block)[0];
-            let tag = builder.ins().load(types::I8, MemFlags::trusted(), curr_v, 0);
-            let is_con = builder.ins().icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
-            
+            let tag = builder
+                .ins()
+                .load(types::I8, MemFlags::trusted(), curr_v, 0);
+            let is_con = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
+
             let con_block = builder.create_block();
-            builder.ins().brif(is_con, con_block, &[], next_block, &[curr_v]);
-            
+            builder
+                .ins()
+                .brif(is_con, con_block, &[], next_block, &[curr_v]);
+
             builder.switch_to_block(con_block);
             builder.seal_block(con_block);
-            let field0 = builder.ins().load(types::I64, MemFlags::trusted(), curr_v, layout::CON_FIELDS_OFFSET as i32);
+            let field0 = builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                curr_v,
+                layout::CON_FIELDS_OFFSET as i32,
+            );
             builder.ins().jump(start_block, &[field0]);
-            
+
             builder.switch_to_block(next_block);
             builder.seal_block(start_block);
             builder.seal_block(next_block);
             let v_final = builder.block_params(next_block)[0];
-            
-            let raw_val = builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), v_final, LIT_VALUE_OFFSET);
-            let lit_tag = builder
-                .ins()
-                .load(types::I8, MemFlags::trusted(), v_final, LIT_TAG_OFFSET);
+
+            let raw_val =
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), v_final, LIT_VALUE_OFFSET);
+            let lit_tag =
+                builder
+                    .ins()
+                    .load(types::I8, MemFlags::trusted(), v_final, LIT_TAG_OFFSET);
             let lit_tag_ext = builder.ins().uextend(types::I64, lit_tag);
-            
+
             // ByteArray# should also adjust for LIT_TAG_STRING if passed one.
             let is_string = builder
                 .ins()
@@ -1664,7 +1817,11 @@ fn unbox_bytearray(_pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilde
     }
 }
 
-pub fn unbox_int(_pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val: SsaVal) -> Value {
+pub fn unbox_int(
+    _pipeline: &mut CodegenPipeline,
+    builder: &mut FunctionBuilder,
+    val: SsaVal,
+) -> Value {
     match val {
         SsaVal::Raw(v, _) => v,
         SsaVal::HeapPtr(v) => {
@@ -1672,27 +1829,38 @@ pub fn unbox_int(_pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder,
             let next_block = builder.create_block();
             builder.append_block_param(start_block, types::I64);
             builder.append_block_param(next_block, types::I64);
-            
+
             builder.ins().jump(start_block, &[v]);
-            
+
             builder.switch_to_block(start_block);
             let curr_v = builder.block_params(start_block)[0];
-            let tag = builder.ins().load(types::I8, MemFlags::trusted(), curr_v, 0);
-            let is_con = builder.ins().icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
-            
+            let tag = builder
+                .ins()
+                .load(types::I8, MemFlags::trusted(), curr_v, 0);
+            let is_con = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
+
             let con_block = builder.create_block();
-            builder.ins().brif(is_con, con_block, &[], next_block, &[curr_v]);
-            
+            builder
+                .ins()
+                .brif(is_con, con_block, &[], next_block, &[curr_v]);
+
             builder.switch_to_block(con_block);
             builder.seal_block(con_block);
-            let field0 = builder.ins().load(types::I64, MemFlags::trusted(), curr_v, layout::CON_FIELDS_OFFSET as i32);
+            let field0 = builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                curr_v,
+                layout::CON_FIELDS_OFFSET as i32,
+            );
             builder.ins().jump(start_block, &[field0]);
-            
+
             builder.switch_to_block(next_block);
             builder.seal_block(start_block);
             builder.seal_block(next_block);
             let v_final = builder.block_params(next_block)[0];
-            
+
             builder
                 .ins()
                 .load(types::I64, MemFlags::trusted(), v_final, LIT_VALUE_OFFSET)
@@ -1700,7 +1868,11 @@ pub fn unbox_int(_pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder,
     }
 }
 
-pub fn unbox_double(_pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val: SsaVal) -> Value {
+pub fn unbox_double(
+    _pipeline: &mut CodegenPipeline,
+    builder: &mut FunctionBuilder,
+    val: SsaVal,
+) -> Value {
     match val {
         SsaVal::Raw(v, _) => v,
         SsaVal::HeapPtr(v) => {
@@ -1708,27 +1880,38 @@ pub fn unbox_double(_pipeline: &mut CodegenPipeline, builder: &mut FunctionBuild
             let next_block = builder.create_block();
             builder.append_block_param(start_block, types::I64);
             builder.append_block_param(next_block, types::I64);
-            
+
             builder.ins().jump(start_block, &[v]);
-            
+
             builder.switch_to_block(start_block);
             let curr_v = builder.block_params(start_block)[0];
-            let tag = builder.ins().load(types::I8, MemFlags::trusted(), curr_v, 0);
-            let is_con = builder.ins().icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
-            
+            let tag = builder
+                .ins()
+                .load(types::I8, MemFlags::trusted(), curr_v, 0);
+            let is_con = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
+
             let con_block = builder.create_block();
-            builder.ins().brif(is_con, con_block, &[], next_block, &[curr_v]);
-            
+            builder
+                .ins()
+                .brif(is_con, con_block, &[], next_block, &[curr_v]);
+
             builder.switch_to_block(con_block);
             builder.seal_block(con_block);
-            let field0 = builder.ins().load(types::I64, MemFlags::trusted(), curr_v, layout::CON_FIELDS_OFFSET as i32);
+            let field0 = builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                curr_v,
+                layout::CON_FIELDS_OFFSET as i32,
+            );
             builder.ins().jump(start_block, &[field0]);
-            
+
             builder.switch_to_block(next_block);
             builder.seal_block(start_block);
             builder.seal_block(next_block);
             let v_final = builder.block_params(next_block)[0];
-            
+
             builder
                 .ins()
                 .load(types::F64, MemFlags::trusted(), v_final, LIT_VALUE_OFFSET)
@@ -1736,7 +1919,11 @@ pub fn unbox_double(_pipeline: &mut CodegenPipeline, builder: &mut FunctionBuild
     }
 }
 
-pub fn unbox_float(_pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val: SsaVal) -> Value {
+pub fn unbox_float(
+    _pipeline: &mut CodegenPipeline,
+    builder: &mut FunctionBuilder,
+    val: SsaVal,
+) -> Value {
     match val {
         SsaVal::Raw(v, _) => v,
         SsaVal::HeapPtr(v) => {
@@ -1744,27 +1931,38 @@ pub fn unbox_float(_pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilde
             let next_block = builder.create_block();
             builder.append_block_param(start_block, types::I64);
             builder.append_block_param(next_block, types::I64);
-            
+
             builder.ins().jump(start_block, &[v]);
-            
+
             builder.switch_to_block(start_block);
             let curr_v = builder.block_params(start_block)[0];
-            let tag = builder.ins().load(types::I8, MemFlags::trusted(), curr_v, 0);
-            let is_con = builder.ins().icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
-            
+            let tag = builder
+                .ins()
+                .load(types::I8, MemFlags::trusted(), curr_v, 0);
+            let is_con = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
+
             let con_block = builder.create_block();
-            builder.ins().brif(is_con, con_block, &[], next_block, &[curr_v]);
-            
+            builder
+                .ins()
+                .brif(is_con, con_block, &[], next_block, &[curr_v]);
+
             builder.switch_to_block(con_block);
             builder.seal_block(con_block);
-            let field0 = builder.ins().load(types::I64, MemFlags::trusted(), curr_v, layout::CON_FIELDS_OFFSET as i32);
+            let field0 = builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                curr_v,
+                layout::CON_FIELDS_OFFSET as i32,
+            );
             builder.ins().jump(start_block, &[field0]);
-            
+
             builder.switch_to_block(next_block);
             builder.seal_block(start_block);
             builder.seal_block(next_block);
             let v_final = builder.block_params(next_block)[0];
-            
+
             builder
                 .ins()
                 .load(types::F32, MemFlags::trusted(), v_final, LIT_VALUE_OFFSET)

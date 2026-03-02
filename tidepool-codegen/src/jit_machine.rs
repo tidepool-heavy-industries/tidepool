@@ -95,22 +95,18 @@ impl JitEffectMachine {
         // Install registries
         crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
         crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
-        crate::host_fns::set_gc_state(
-            self.nursery.start() as *mut u8,
-            self.nursery.size(),
-        );
+        crate::host_fns::set_gc_state(self.nursery.start() as *mut u8, self.nursery.size());
 
         let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
             unsafe { std::mem::transmute(self.pipeline.get_function_ptr(self.func_id)) };
         let vmctx = self.nursery.make_vmctx(crate::host_fns::gc_trigger);
 
         let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
-        let mut yield_result = match unsafe {
-            crate::signal_safety::with_signal_protection(|| machine.step())
-        } {
-            Ok(y) => y,
-            Err(e) => Yield::Error(crate::yield_type::YieldError::Signal(e.0)),
-        };
+        let mut yield_result =
+            match unsafe { crate::signal_safety::with_signal_protection(|| machine.step()) } {
+                Ok(y) => y,
+                Err(e) => Yield::Error(crate::yield_type::YieldError::Signal(e.0)),
+            };
 
         let result = loop {
             match yield_result {
@@ -161,10 +157,7 @@ impl JitEffectMachine {
         // Install registries
         crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
         crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
-        crate::host_fns::set_gc_state(
-            self.nursery.start() as *mut u8,
-            self.nursery.size(),
-        );
+        crate::host_fns::set_gc_state(self.nursery.start() as *mut u8, self.nursery.size());
 
         let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
             unsafe { std::mem::transmute(self.pipeline.get_function_ptr(self.func_id)) };

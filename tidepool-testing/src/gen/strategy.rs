@@ -170,7 +170,8 @@ fn gen_leaf(ty: SimpleType, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)>
                 any::<f32>()
                     .prop_map(|f| {
                         let mut builder = TreeBuilder::new();
-                        let idx = builder.push(CoreFrame::Lit(Literal::LitFloat(f.to_bits() as u64)));
+                        let idx =
+                            builder.push(CoreFrame::Lit(Literal::LitFloat(f.to_bits() as u64)));
                         (builder, idx)
                     })
                     .boxed(),
@@ -456,7 +457,8 @@ fn gen_case(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuil
         // Case on Pair
         (arb_simple_type(), arb_simple_type())
             .prop_flat_map(move |(inner_a, inner_b)| {
-                let scrut_ty = SimpleType::Pair(Box::new(inner_a.clone()), Box::new(inner_b.clone()));
+                let scrut_ty =
+                    SimpleType::Pair(Box::new(inner_a.clone()), Box::new(inner_b.clone()));
                 let mut ctx_alt = ctx4.clone();
                 let binder = ctx_alt.add_var(scrut_ty.clone());
 
@@ -709,10 +711,7 @@ fn gen_prim_op(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeB
             if is_unary {
                 gen_expr(arg_ty.clone(), depth, ctx.clone())
                     .prop_map(move |(mut builder, r1)| {
-                        let root = builder.push(CoreFrame::PrimOp {
-                            op,
-                            args: vec![r1],
-                        });
+                        let root = builder.push(CoreFrame::PrimOp { op, args: vec![r1] });
                         (builder, root)
                     })
                     .boxed()

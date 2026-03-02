@@ -231,7 +231,8 @@ pub fn exec_decl() -> EffectDecl {
 pub fn meta_decl() -> EffectDecl {
     EffectDecl {
         type_name: "Meta",
-        description: "Self-mirror for the runtime. Query constructors, primops, effects, diagnostics.",
+        description:
+            "Self-mirror for the runtime. Query constructors, primops, effects, diagnostics.",
         constructors: &[
             "MetaConstructors :: Meta [(Text, Int)]",
             "MetaLookupCon    :: Text -> Meta (Maybe (Int, Int))",
@@ -328,7 +329,9 @@ fn deserialize_code<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String
 }
 
 /// Deserialize from either a string (split on newlines, empty lines filtered) or array of strings.
-fn deserialize_string_or_vec<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+fn deserialize_string_or_vec<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<String>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum StringOrVec {
@@ -336,7 +339,11 @@ fn deserialize_string_or_vec<'de, D: serde::Deserializer<'de>>(d: D) -> Result<V
         Vec(Vec<String>),
     }
     match StringOrVec::deserialize(d)? {
-        StringOrVec::Str(s) => Ok(s.lines().filter(|l| !l.trim().is_empty()).map(String::from).collect()),
+        StringOrVec::Str(s) => Ok(s
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(String::from)
+            .collect()),
         StringOrVec::Vec(v) => Ok(v),
     }
 }
@@ -426,10 +433,7 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
                 "  kvSet \"__sayChars\" (toJSON (cur + T.length t))\n",
             ));
         } else if has_console {
-            out.push_str(concat!(
-                "say :: Text -> M ()\n",
-                "say = send . Print\n",
-            ));
+            out.push_str(concat!("say :: Text -> M ()\n", "say = send . Print\n",));
         }
 
         out.push_str(concat!(
@@ -766,7 +770,9 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
                     }
                 }
             }
-            desc.push_str("\nPrefer helpers over raw `send`: `say \"hi\"` not `send (Print \"hi\")`.\n");
+            desc.push_str(
+                "\nPrefer helpers over raw `send`: `say \"hi\"` not `send (Print \"hi\")`.\n",
+            );
             desc.push_str("Use `>>=` chains and `<$>`/`<*>` for dense composition. Named bindings as escape hatch.\n");
         }
     }
@@ -828,7 +834,10 @@ pub fn template_haskell(
     if let Some(b) = budget {
         out.push_str("  _scV <- kvGet \"__sayChars\"\n");
         out.push_str("  let _sayC = case _scV of { Just b -> case b ^? _Number of { Just n -> round n; _ -> 0 }; Nothing -> 0 }\n");
-        out.push_str(&format!("  paginateResult (max' 100 ({} - _sayC)) (toJSON _r)\n", b));
+        out.push_str(&format!(
+            "  paginateResult (max' 100 ({} - _sayC)) (toJSON _r)\n",
+            b
+        ));
     } else {
         out.push_str("  paginateResult 4096 (toJSON _r)\n");
     }
@@ -1140,8 +1149,7 @@ impl TidepoolMcpServerImpl {
         let ask_tag = self.ask_tag;
 
         // Create channels for Ask effect communication
-        let (session_tx, mut session_rx) =
-            tokio::sync::mpsc::unbounded_channel::<SessionMessage>();
+        let (session_tx, mut session_rx) = tokio::sync::mpsc::unbounded_channel::<SessionMessage>();
         let (response_tx, response_rx) = std::sync::mpsc::channel::<String>();
 
         // Spawn eval thread — does NOT join; communicates via channels
@@ -1155,8 +1163,7 @@ impl TidepoolMcpServerImpl {
                 // the whole server process.
                 tidepool_codegen::signal_safety::install();
 
-                let include_paths: Vec<&Path> =
-                    include_refs.iter().map(|p| p.as_path()).collect();
+                let include_paths: Vec<&Path> = include_refs.iter().map(|p| p.as_path()).collect();
                 let mut ask_dispatcher = AskDispatcher {
                     inner: handlers,
                     ask_tag,
@@ -1164,16 +1171,15 @@ impl TidepoolMcpServerImpl {
                     response_rx,
                 };
 
-                let result =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        tidepool_runtime::compile_and_run(
-                            &source_for_blocking,
-                            "result",
-                            &include_paths,
-                            &mut ask_dispatcher,
-                            &captured_for_blocking,
-                        )
-                    }));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    tidepool_runtime::compile_and_run(
+                        &source_for_blocking,
+                        "result",
+                        &include_paths,
+                        &mut ask_dispatcher,
+                        &captured_for_blocking,
+                    )
+                }));
 
                 let output_lines = captured_for_blocking.drain();
                 match result {
@@ -1213,9 +1219,7 @@ impl TidepoolMcpServerImpl {
                     }
                 }
             })
-            .map_err(|e| {
-                McpError::internal_error(format!("thread spawn error: {}", e), None)
-            })?;
+            .map_err(|e| McpError::internal_error(format!("thread spawn error: {}", e), None))?;
 
         // Await first message from the eval thread
         let eval_timeout = Duration::from_secs(EVAL_TIMEOUT_SECS);
@@ -1302,9 +1306,10 @@ impl TidepoolMcpServerImpl {
         };
 
         // Send the response to the blocked eval thread
-        session.response_tx.send(req.response).map_err(|_| {
-            McpError::internal_error("eval thread is no longer running", None)
-        })?;
+        session
+            .response_tx
+            .send(req.response)
+            .map_err(|_| McpError::internal_error("eval thread is no longer running", None))?;
 
         let source = session.source.clone();
         let response_tx = session.response_tx.clone();
@@ -1401,8 +1406,8 @@ impl ServerHandler for TidepoolMcpServerImpl {
                 self.eval(req).await
             }
             "resume" => {
-                let req: ResumeRequest =
-                    serde_json::from_value(serde_json::Value::Object(args)).map_err(|e| {
+                let req: ResumeRequest = serde_json::from_value(serde_json::Value::Object(args))
+                    .map_err(|e| {
                         McpError::invalid_params(format!("invalid params: {}", e), None)
                     })?;
                 self.resume(req).await
@@ -1706,7 +1711,9 @@ mod tests {
         assert!(preamble.contains("kvGet :: Text -> M (Maybe Value)\nkvGet = send . KvGet"));
         assert!(preamble.contains("fsRead :: Text -> M Text\nfsRead = send . FsRead"));
         assert!(preamble.contains("httpGet :: Text -> M Value\nhttpGet = send . HttpGet"));
-        assert!(preamble.contains("metaConstructors :: M [(Text, Int)]\nmetaConstructors = send MetaConstructors"));
+        assert!(preamble.contains(
+            "metaConstructors :: M [(Text, Int)]\nmetaConstructors = send MetaConstructors"
+        ));
         assert!(preamble.contains("metaVersion :: M Text\nmetaVersion = send MetaVersion"));
         assert!(preamble.contains("ask :: Text -> M Value\nask = send . Ask"));
     }
@@ -1817,9 +1824,18 @@ mod tests {
     fn test_exec_decl_has_run_json() {
         let decl = exec_decl();
         assert_eq!(decl.type_name, "Exec");
-        assert!(decl.constructors.iter().any(|c| c.contains("RunJson :: Text -> Exec Value")));
-        assert!(decl.constructors.iter().any(|c| c.contains("Run :: Text -> Exec (Int, Text, Text)")));
-        assert!(decl.constructors.iter().any(|c| c.contains("RunIn :: Text -> Text -> Exec (Int, Text, Text)")));
+        assert!(decl
+            .constructors
+            .iter()
+            .any(|c| c.contains("RunJson :: Text -> Exec Value")));
+        assert!(decl
+            .constructors
+            .iter()
+            .any(|c| c.contains("Run :: Text -> Exec (Int, Text, Text)")));
+        assert!(decl
+            .constructors
+            .iter()
+            .any(|c| c.contains("RunIn :: Text -> Text -> Exec (Int, Text, Text)")));
     }
 
     #[test]

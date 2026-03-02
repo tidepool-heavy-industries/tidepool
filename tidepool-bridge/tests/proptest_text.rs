@@ -1,8 +1,8 @@
 use proptest::prelude::*;
 use std::sync::OnceLock;
 use tidepool_bridge::traits::{FromCore, ToCore};
-use tidepool_repr::{DataCon, DataConId, DataConTable, Literal, SrcBang};
 use tidepool_eval::Value;
+use tidepool_repr::{DataCon, DataConId, DataConTable, Literal, SrcBang};
 
 static TABLE: OnceLock<DataConTable> = OnceLock::new();
 
@@ -17,7 +17,7 @@ fn get_table() -> &'static DataConTable {
             rep_arity: 3,
             field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
         });
-        // I# (needed for i64/Int# fields of Text if they were boxed, 
+        // I# (needed for i64/Int# fields of Text if they were boxed,
         // but current impl uses literals for off/len)
         table.insert(DataCon {
             id: DataConId(7),
@@ -99,7 +99,7 @@ proptest! {
         let table = get_table();
         let v1 = s.to_value(table).expect("ToCore failed");
         let v2 = s.to_value(table).expect("ToCore failed");
-        
+
         assert!(compare_values(&v1, &v2), "ToCore is not deterministic for {:?}", s);
     }
 }
@@ -108,7 +108,9 @@ fn compare_values(v1: &Value, v2: &Value) -> bool {
     match (v1, v2) {
         (Value::Lit(l1), Value::Lit(l2)) => l1 == l2,
         (Value::Con(id1, f1), Value::Con(id2, f2)) => {
-            id1 == id2 && f1.len() == f2.len() && f1.iter().zip(f2.iter()).all(|(a, b)| compare_values(a, b))
+            id1 == id2
+                && f1.len() == f2.len()
+                && f1.iter().zip(f2.iter()).all(|(a, b)| compare_values(a, b))
         }
         (Value::ByteArray(ba1), Value::ByteArray(ba2)) => {
             *ba1.lock().unwrap() == *ba2.lock().unwrap()

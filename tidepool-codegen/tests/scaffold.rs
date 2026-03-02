@@ -226,8 +226,13 @@ fn test_alloc_fast_path() {
         let oom_func = {
             let mut sig = ir::Signature::new(pipeline.isa.default_call_conv());
             sig.returns.push(AbiParam::new(types::I64));
-            let func_id = pipeline.module.declare_function("runtime_oom", cranelift_module::Linkage::Import, &sig).unwrap();
-            pipeline.module.declare_func_in_func(func_id, &mut builder.func)
+            let func_id = pipeline
+                .module
+                .declare_function("runtime_oom", cranelift_module::Linkage::Import, &sig)
+                .unwrap();
+            pipeline
+                .module
+                .declare_func_in_func(func_id, &mut builder.func)
         };
 
         // Allocate 24 bytes (will be aligned to 24)

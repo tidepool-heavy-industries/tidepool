@@ -82,7 +82,7 @@ impl EffectHandler<()> for CountingHandler {
 fn make_single_effect(tag: u64, request_val: i64) -> CoreExpr {
     RecursiveTree {
         nodes: vec![
-            CoreFrame::Var(VarId(100)),                            // 0
+            CoreFrame::Var(VarId(100)), // 0
             CoreFrame::Con {
                 tag: DataConId(1),
                 fields: vec![0],
@@ -95,8 +95,8 @@ fn make_single_effect(tag: u64, request_val: i64) -> CoreExpr {
                 tag: DataConId(3),
                 fields: vec![2],
             }, // 3: Leaf(...)
-            CoreFrame::Lit(Literal::LitInt(request_val)),          // 4: request
-            CoreFrame::Lit(Literal::LitWord(tag)),                 // 5: tag
+            CoreFrame::Lit(Literal::LitInt(request_val)), // 4: request
+            CoreFrame::Lit(Literal::LitWord(tag)), // 5: tag
             CoreFrame::Con {
                 tag: DataConId(5),
                 fields: vec![5, 4],

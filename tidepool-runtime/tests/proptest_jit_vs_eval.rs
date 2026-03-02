@@ -2,7 +2,7 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
-use tidepool_eval::{eval, env_from_datacon_table, Value, VecHeap};
+use tidepool_eval::{env_from_datacon_table, eval, Value, VecHeap};
 use tidepool_optimize::pipeline::optimize;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
@@ -91,7 +91,9 @@ fn check_jit_vs_eval(expr: CoreExpr, nursery_size: usize) -> Result<(), TestCase
             prop_assert!(
                 values_equal(&v1, &v2),
                 "JIT and Eval results differ.\nEval: {:?}\nJIT:  {:?}\nExpr: {:#?}",
-                v1, v2, expr
+                v1,
+                v2,
+                expr
             );
         }
         (Ok(_), Err(JitError::Yield(YieldError::HeapOverflow))) => {
@@ -100,9 +102,13 @@ fn check_jit_vs_eval(expr: CoreExpr, nursery_size: usize) -> Result<(), TestCase
             prop_assume!(false, "HeapOverflow with tiny nursery");
         }
         (Ok(v1), Err(e)) => {
-            prop_assert!(false,
+            prop_assert!(
+                false,
                 "JIT failed but eval succeeded.\nEval: {:?}\nJIT error: {:?}\nExpr: {:#?}",
-                v1, e, expr);
+                v1,
+                e,
+                expr
+            );
         }
         _ => {
             // Both fail or eval fails — skip
@@ -123,9 +129,7 @@ fn jit_agrees_with_eval() {
                 ..Config::default()
             });
             runner
-                .run(&arb_core_expr(), |expr| {
-                    check_jit_vs_eval(expr, 64 * 1024)
-                })
+                .run(&arb_core_expr(), |expr| check_jit_vs_eval(expr, 64 * 1024))
                 .unwrap();
         })
         .unwrap()

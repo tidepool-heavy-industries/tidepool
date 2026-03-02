@@ -597,8 +597,7 @@ fn text_isInfixOf_replicated() {
 #[test]
 #[ignore = "T.unlines/T.lines drops lines — returns 4 instead of 8, separate bug"]
 fn text_lines_count() {
-    static CBOR: &[u8] =
-        include_bytes!("../../haskell/test/TextSuite_cbor/text_lines_count.cbor");
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/TextSuite_cbor/text_lines_count.cbor");
     let val = eval_fixture(CBOR);
     let table = table();
     assert_int(&val, 8, &table);
@@ -671,7 +670,12 @@ fn text_filter_isInfixOf_8_list() {
     for (i, item) in items.iter().enumerate() {
         eprintln!("  [{i}] {item:?}");
     }
-    assert_eq!(items.len(), 5, "expected 5 matching items, got {}", items.len());
+    assert_eq!(
+        items.len(),
+        5,
+        "expected 5 matching items, got {}",
+        items.len()
+    );
 }
 
 #[test]
@@ -746,8 +750,7 @@ fn text_filter_list_isInfixOf() {
 #[test]
 #[ignore = "depends on T.unlines/T.lines bug — T.lines drops lines"]
 fn text_filter_lines() {
-    static CBOR: &[u8] =
-        include_bytes!("../../haskell/test/TextSuite_cbor/text_filter_lines.cbor");
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/TextSuite_cbor/text_filter_lines.cbor");
     let val = eval_fixture(CBOR);
     let table = table();
     // filter (T.isInfixOf "import") over T.lines of multi-line text = 5 matches
@@ -762,7 +765,12 @@ fn text_filter_isInfixOf() {
     let table = table();
     // Should be a list of 3 Text values (the "import" lines)
     let items = collect_list(&val, &table);
-    assert_eq!(items.len(), 3, "expected 3 import lines, got {}", items.len());
+    assert_eq!(
+        items.len(),
+        3,
+        "expected 3 import lines, got {}",
+        items.len()
+    );
 }
 
 #[test]

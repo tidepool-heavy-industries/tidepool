@@ -1,6 +1,6 @@
 use proptest::prelude::*;
-use tidepool_codegen::host_fns::*;
 use std::alloc::{alloc_zeroed, dealloc, Layout};
+use tidepool_codegen::host_fns::*;
 
 /// Helper to create a byte slice from a string.
 fn make_text_buffer(s: &str) -> Vec<u8> {

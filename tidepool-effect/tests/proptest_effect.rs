@@ -13,7 +13,11 @@ struct MockHandler {
 
 impl EffectHandler<()> for MockHandler {
     type Request = Value;
-    fn handle(&mut self, _req: Self::Request, _cx: &EffectContext<'_, ()>) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        _req: Self::Request,
+        _cx: &EffectContext<'_, ()>,
+    ) -> Result<Value, EffectError> {
         Ok(Value::Lit(Literal::LitInt(self.id as i64)))
     }
 }
@@ -32,11 +36,11 @@ proptest! {
             MockHandler { id: 1 },
             MockHandler { id: 2 }
         ];
-        
+
         let table = empty_table();
         let cx = EffectContext::with_user(&table, &());
         let req = Value::Lit(Literal::LitInt(42));
-        
+
         let res = h3.dispatch(tag, &req, &cx).unwrap();
         if let Value::Lit(Literal::LitInt(id)) = res {
             prop_assert_eq!(id, tag as i64);
@@ -54,11 +58,11 @@ proptest! {
             MockHandler { id: 1 },
             MockHandler { id: 2 }
         ];
-        
+
         let table = empty_table();
         let cx = EffectContext::with_user(&table, &());
         let req = Value::Lit(Literal::LitInt(42));
-        
+
         let res = h3.dispatch(tag, &req, &cx);
         prop_assert!(res.is_err());
         match res {
@@ -80,12 +84,12 @@ proptest! {
                 Ok(req)
             }
         }
-        
+
         let mut handlers = hlist![EchoHandler];
         let table = empty_table();
         let cx = EffectContext::with_user(&table, &());
         let req = Value::Lit(Literal::LitInt(req_val));
-        
+
         let res = handlers.dispatch(0, &req, &cx).unwrap();
         // Compare using Debug representation as Value doesn't implement PartialEq
         prop_assert_eq!(format!("{:?}", res), format!("{:?}", req));
@@ -102,16 +106,16 @@ proptest! {
             MockHandler { id: 20 },
             MockHandler { id: 10 }
         ];
-        
+
         let table = empty_table();
         let cx = EffectContext::with_user(&table, &());
         let req = Value::Lit(Literal::LitInt(val));
-        
+
         // Handler with id 10 is at tag 0 in h_ab, and tag 1 in h_ba.
         let res_a0 = h_ab.dispatch(0, &req, &cx).unwrap();
         let res_a1 = h_ba.dispatch(1, &req, &cx).unwrap();
         prop_assert_eq!(format!("{:?}", res_a0), format!("{:?}", res_a1));
-        
+
         // Handler with id 20 is at tag 1 in h_ab, and tag 0 in h_ba.
         let res_b1 = h_ab.dispatch(1, &req, &cx).unwrap();
         let res_b0 = h_ba.dispatch(0, &req, &cx).unwrap();

@@ -74,8 +74,7 @@ pub fn write_metadata(table: &crate::datacon_table::DataConTable) -> Result<Vec<
     let root = Value::Array(vec![Value::Array(entries), warnings_map]);
 
     let mut bytes = Vec::new();
-    ciborium::ser::into_writer(&root, &mut bytes)
-        .map_err(|e| WriteError::Cbor(e.to_string()))?;
+    ciborium::ser::into_writer(&root, &mut bytes).map_err(|e| WriteError::Cbor(e.to_string()))?;
     Ok(bytes)
 }
 

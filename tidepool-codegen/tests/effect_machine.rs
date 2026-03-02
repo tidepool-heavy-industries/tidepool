@@ -57,8 +57,13 @@ where
         let oom_func = {
             let mut sig = ir::Signature::new(pipeline.isa.default_call_conv());
             sig.returns.push(AbiParam::new(types::I64));
-            let func_id = pipeline.module.declare_function("runtime_oom", cranelift_module::Linkage::Import, &sig).unwrap();
-            pipeline.module.declare_func_in_func(func_id, &mut builder.func)
+            let func_id = pipeline
+                .module
+                .declare_function("runtime_oom", cranelift_module::Linkage::Import, &sig)
+                .unwrap();
+            pipeline
+                .module
+                .declare_func_in_func(func_id, &mut builder.func)
         };
 
         build_body(&mut builder, vmctx, gc_sig_ref, oom_func);
@@ -248,13 +253,22 @@ fn test_yield_request_e() {
     let (_pipeline, func) = build_test_fn("test_e", |builder, vmctx, gc_sig, oom_func| {
         let request_lit = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 99);
         let tag_word = emit_alloc_lit_word(builder, vmctx, gc_sig, oom_func, 7); // Tag value 7
-        let union_ptr =
-            emit_alloc_con2(builder, vmctx, gc_sig, oom_func, UNION_CON_TAG, tag_word, request_lit);
+        let union_ptr = emit_alloc_con2(
+            builder,
+            vmctx,
+            gc_sig,
+            oom_func,
+            UNION_CON_TAG,
+            tag_word,
+            request_lit,
+        );
 
         // Placeholder for continuation
         let cont_ptr = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 0);
 
-        let e_ptr = emit_alloc_con2(builder, vmctx, gc_sig, oom_func, E_CON_TAG, union_ptr, cont_ptr);
+        let e_ptr = emit_alloc_con2(
+            builder, vmctx, gc_sig, oom_func, E_CON_TAG, union_ptr, cont_ptr,
+        );
         builder.ins().return_(&[e_ptr]);
     });
 
@@ -336,21 +350,22 @@ fn test_unexpected_tag() {
 /// Test 5: runtime_error(0) → YieldError::DivisionByZero.
 #[test]
 fn test_runtime_error_div_zero() {
-    let (_pipeline, func) = build_test_fn("test_div_zero", |builder, _vmctx, _gc_sig, _oom_func| {
-        // Call runtime_error(0) which sets thread-local and returns null
-        let mut err_sig = ir::Signature::new(builder.func.signature.call_conv);
-        err_sig.params.push(AbiParam::new(types::I64));
-        err_sig.returns.push(AbiParam::new(types::I64));
-        let err_sig_ref = builder.import_signature(err_sig);
+    let (_pipeline, func) =
+        build_test_fn("test_div_zero", |builder, _vmctx, _gc_sig, _oom_func| {
+            // Call runtime_error(0) which sets thread-local and returns null
+            let mut err_sig = ir::Signature::new(builder.func.signature.call_conv);
+            err_sig.params.push(AbiParam::new(types::I64));
+            err_sig.returns.push(AbiParam::new(types::I64));
+            let err_sig_ref = builder.import_signature(err_sig);
 
-        let err_ptr = builder
-            .ins()
-            .iconst(types::I64, host_fns::runtime_error as *const u8 as i64);
-        let kind = builder.ins().iconst(types::I64, 0); // divZero
-        let inst = builder.ins().call_indirect(err_sig_ref, err_ptr, &[kind]);
-        let result = builder.inst_results(inst)[0];
-        builder.ins().return_(&[result]);
-    });
+            let err_ptr = builder
+                .ins()
+                .iconst(types::I64, host_fns::runtime_error as *const u8 as i64);
+            let kind = builder.ins().iconst(types::I64, 0); // divZero
+            let inst = builder.ins().call_indirect(err_sig_ref, err_ptr, &[kind]);
+            let result = builder.inst_results(inst)[0];
+            builder.ins().return_(&[result]);
+        });
 
     let mut nursery = vec![0u8; 4096];
     let start = nursery.as_mut_ptr();
@@ -376,20 +391,21 @@ fn test_runtime_error_div_zero() {
 /// Test 6: runtime_error(1) → YieldError::Overflow.
 #[test]
 fn test_runtime_error_overflow() {
-    let (_pipeline, func) = build_test_fn("test_overflow", |builder, _vmctx, _gc_sig, _oom_func| {
-        let mut err_sig = ir::Signature::new(builder.func.signature.call_conv);
-        err_sig.params.push(AbiParam::new(types::I64));
-        err_sig.returns.push(AbiParam::new(types::I64));
-        let err_sig_ref = builder.import_signature(err_sig);
+    let (_pipeline, func) =
+        build_test_fn("test_overflow", |builder, _vmctx, _gc_sig, _oom_func| {
+            let mut err_sig = ir::Signature::new(builder.func.signature.call_conv);
+            err_sig.params.push(AbiParam::new(types::I64));
+            err_sig.returns.push(AbiParam::new(types::I64));
+            let err_sig_ref = builder.import_signature(err_sig);
 
-        let err_ptr = builder
-            .ins()
-            .iconst(types::I64, host_fns::runtime_error as *const u8 as i64);
-        let kind = builder.ins().iconst(types::I64, 1); // overflow
-        let inst = builder.ins().call_indirect(err_sig_ref, err_ptr, &[kind]);
-        let result = builder.inst_results(inst)[0];
-        builder.ins().return_(&[result]);
-    });
+            let err_ptr = builder
+                .ins()
+                .iconst(types::I64, host_fns::runtime_error as *const u8 as i64);
+            let kind = builder.ins().iconst(types::I64, 1); // overflow
+            let inst = builder.ins().call_indirect(err_sig_ref, err_ptr, &[kind]);
+            let result = builder.inst_results(inst)[0];
+            builder.ins().return_(&[result]);
+        });
 
     let mut nursery = vec![0u8; 4096];
     let start = nursery.as_mut_ptr();
@@ -444,11 +460,12 @@ fn test_null_without_runtime_error() {
 /// Test 8: Unknown con_tag → YieldError.
 #[test]
 fn test_unexpected_con_tag() {
-    let (_pipeline, func) = build_test_fn("test_unknown_con", |builder, vmctx, gc_sig, oom_func| {
-        let dummy_field = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 0);
-        let con_ptr = emit_alloc_con1(builder, vmctx, gc_sig, oom_func, 999, dummy_field);
-        builder.ins().return_(&[con_ptr]);
-    });
+    let (_pipeline, func) =
+        build_test_fn("test_unknown_con", |builder, vmctx, gc_sig, oom_func| {
+            let dummy_field = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 0);
+            let con_ptr = emit_alloc_con1(builder, vmctx, gc_sig, oom_func, 999, dummy_field);
+            builder.ins().return_(&[con_ptr]);
+        });
 
     let mut nursery = vec![0u8; 4096];
     let start = nursery.as_mut_ptr();
@@ -812,7 +829,7 @@ fn test_resume_node_with_effect_result() {
 
     let tree_returns_e = CoreExpr {
         nodes: vec![
-            CoreFrame::Var(x), // 0
+            CoreFrame::Var(x),                                 // 0
             CoreFrame::Lit(tidepool_repr::Literal::LitInt(0)), // 1
             CoreFrame::Con {
                 tag: leaf_con_id,
@@ -827,7 +844,7 @@ fn test_resume_node_with_effect_result() {
                 tag: e_con_id,
                 fields: vec![4, 2],
             }, // 5: E(...)
-            CoreFrame::Lam { binder: x, body: 5 }, // 6
+            CoreFrame::Lam { binder: x, body: 5 },             // 6
         ],
     };
 

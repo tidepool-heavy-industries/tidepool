@@ -8,14 +8,14 @@
 //! `rewrite_roots`) directly. Dedicated unit tests for frame-walker
 //! internals should live in a separate test module.
 
+use tidepool_codegen::host_fns;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
-use tidepool_codegen::host_fns;
+use tidepool_eval::value::Value;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
 use tidepool_repr::types::*;
 use tidepool_repr::{CoreExpr, TreeBuilder};
-use tidepool_eval::value::Value;
 
 fn make_table_with_con(id: DataConId, arity: u32) -> DataConTable {
     let mut table = DataConTable::new();
@@ -33,35 +33,58 @@ fn make_table_with_con(id: DataConId, arity: u32) -> DataConTable {
 /// `letrec f = \x -> let g1 = Con(1, [x]) in let g2 = Con(1, [g1]) in x in f (f ... (f (Lit 42)))`
 fn build_con_chain(depth: usize) -> CoreExpr {
     let mut bld = TreeBuilder::new();
-    
+
     // Body of f: let g1 = Con x in let g2 = Con g1 in x
     let var_x = bld.push(CoreFrame::Var(VarId(0)));
-    let g1_rhs = bld.push(CoreFrame::Con { tag: DataConId(1), fields: vec![var_x] });
-    
+    let g1_rhs = bld.push(CoreFrame::Con {
+        tag: DataConId(1),
+        fields: vec![var_x],
+    });
+
     let var_g1 = bld.push(CoreFrame::Var(VarId(1)));
-    let g2_rhs = bld.push(CoreFrame::Con { tag: DataConId(1), fields: vec![var_g1] });
-    
+    let g2_rhs = bld.push(CoreFrame::Con {
+        tag: DataConId(1),
+        fields: vec![var_g1],
+    });
+
     // The original let_g1/let_g2/_lam_x chain that returned `x` directly was
     // unused. We now only use the version below that returns `Con(1, [x])`
     // while still allocating extra garbage.
-    
-    let final_con = bld.push(CoreFrame::Con { tag: DataConId(1), fields: vec![var_x] });
-    let let_g2_con = bld.push(CoreFrame::LetNonRec { binder: VarId(2), rhs: g2_rhs, body: final_con });
-    let let_g1_con = bld.push(CoreFrame::LetNonRec { binder: VarId(1), rhs: g1_rhs, body: let_g2_con });
-    let lam_x_con = bld.push(CoreFrame::Lam { binder: VarId(0), body: let_g1_con });
-    
+
+    let final_con = bld.push(CoreFrame::Con {
+        tag: DataConId(1),
+        fields: vec![var_x],
+    });
+    let let_g2_con = bld.push(CoreFrame::LetNonRec {
+        binder: VarId(2),
+        rhs: g2_rhs,
+        body: final_con,
+    });
+    let let_g1_con = bld.push(CoreFrame::LetNonRec {
+        binder: VarId(1),
+        rhs: g1_rhs,
+        body: let_g2_con,
+    });
+    let lam_x_con = bld.push(CoreFrame::Lam {
+        binder: VarId(0),
+        body: let_g1_con,
+    });
+
     // Applications: f (f (f ... (Lit 42)))
     let mut current = bld.push(CoreFrame::Lit(Literal::LitInt(42)));
     for _ in 0..depth {
         let f_var = bld.push(CoreFrame::Var(VarId(99))); // f
-        current = bld.push(CoreFrame::App { fun: f_var, arg: current });
+        current = bld.push(CoreFrame::App {
+            fun: f_var,
+            arg: current,
+        });
     }
-    
+
     bld.push(CoreFrame::LetRec {
         bindings: vec![(VarId(99), lam_x_con)],
         body: current,
     });
-    
+
     bld.build()
 }
 
@@ -76,9 +99,9 @@ fn test_gc_actually_frees_memory() {
 
             host_fns::reset_test_counters();
             let mut machine = JitEffectMachine::compile(&expr, &table, 2048).unwrap();
-            let _result = machine
-                .run_pure()
-                .expect("GC should free enough memory to evaluate depth-40 chain with 2 KiB nursery");
+            let _result = machine.run_pure().expect(
+                "GC should free enough memory to evaluate depth-40 chain with 2 KiB nursery",
+            );
 
             // GC must have fired for this to work with a small nursery
             assert!(
@@ -159,8 +182,11 @@ fn test_multiple_gc_cycles() {
                     }
                     // Should have multiple GC cycles
                     let gc_count = host_fns::gc_trigger_call_count();
-                    assert!(gc_count > 1,
-                        "Expected multiple GC cycles, got {}", gc_count);
+                    assert!(
+                        gc_count > 1,
+                        "Expected multiple GC cycles, got {}",
+                        gc_count
+                    );
                 }
                 Err(JitError::Yield(YieldError::HeapOverflow)) => {
                     // HeapOverflow is acceptable for small nursery

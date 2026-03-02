@@ -1,8 +1,8 @@
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 use serial_test::serial;
+use tidepool_repr::serial::{read_cbor, read_metadata, write_cbor, write_metadata};
 use tidepool_repr::*;
-use tidepool_repr::serial::{read_cbor, write_cbor, read_metadata, write_metadata};
 use tidepool_testing::gen::arb_core_expr;
 
 // RecursiveTree's PartialEq is deeply recursive and can overflow the default
@@ -15,12 +15,14 @@ fn cbor_round_trip() {
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
             let mut runner = TestRunner::new(Config::default());
-            runner.run(&arb_core_expr(), |expr| {
-                let bytes = write_cbor(&expr).expect("write_cbor failed");
-                let recovered = read_cbor(&bytes).expect("read_cbor failed");
-                prop_assert_eq!(expr, recovered);
-                Ok(())
-            }).unwrap();
+            runner
+                .run(&arb_core_expr(), |expr| {
+                    let bytes = write_cbor(&expr).expect("write_cbor failed");
+                    let recovered = read_cbor(&bytes).expect("read_cbor failed");
+                    prop_assert_eq!(expr, recovered);
+                    Ok(())
+                })
+                .unwrap();
         })
         .unwrap()
         .join()
@@ -34,12 +36,14 @@ fn cbor_deterministic() {
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
             let mut runner = TestRunner::new(Config::default());
-            runner.run(&arb_core_expr(), |expr| {
-                let bytes1 = write_cbor(&expr).expect("write_cbor failed (1)");
-                let bytes2 = write_cbor(&expr).expect("write_cbor failed (2)");
-                prop_assert_eq!(bytes1, bytes2);
-                Ok(())
-            }).unwrap();
+            runner
+                .run(&arb_core_expr(), |expr| {
+                    let bytes1 = write_cbor(&expr).expect("write_cbor failed (1)");
+                    let bytes2 = write_cbor(&expr).expect("write_cbor failed (2)");
+                    prop_assert_eq!(bytes1, bytes2);
+                    Ok(())
+                })
+                .unwrap();
         })
         .unwrap()
         .join()
@@ -53,11 +57,13 @@ fn cbor_non_empty() {
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
             let mut runner = TestRunner::new(Config::default());
-            runner.run(&arb_core_expr(), |expr| {
-                let bytes = write_cbor(&expr).expect("write_cbor failed");
-                prop_assert!(!bytes.is_empty());
-                Ok(())
-            }).unwrap();
+            runner
+                .run(&arb_core_expr(), |expr| {
+                    let bytes = write_cbor(&expr).expect("write_cbor failed");
+                    prop_assert!(!bytes.is_empty());
+                    Ok(())
+                })
+                .unwrap();
         })
         .unwrap()
         .join()
@@ -204,12 +210,16 @@ fn cbor_corrupt_bytes_no_panic() {
             let mut runner = TestRunner::new(Config::with_cases(256));
             let mutation_strat = prop_oneof![
                 (any::<prop::sample::Index>(), any::<u8>()).prop_map(|(i, b)| Mutation::Flip(i, b)),
-                (any::<prop::sample::Index>(), any::<u8>()).prop_map(|(i, b)| Mutation::Insert(i, b)),
+                (any::<prop::sample::Index>(), any::<u8>())
+                    .prop_map(|(i, b)| Mutation::Insert(i, b)),
                 any::<prop::sample::Index>().prop_map(Mutation::Delete),
             ];
             runner
                 .run(
-                    &(arb_core_expr(), prop::collection::vec(mutation_strat, 1..10)),
+                    &(
+                        arb_core_expr(),
+                        prop::collection::vec(mutation_strat, 1..10),
+                    ),
                     |(expr, mutations)| {
                         let bytes = write_cbor(&expr).expect("write_cbor failed");
                         let mut corrupted = bytes;

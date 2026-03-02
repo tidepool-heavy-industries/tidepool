@@ -34,8 +34,8 @@ result = toJSON ({expr})
 "#
     );
     let include = [prelude_dir(), user_lib_dir()];
-    let result = compile_and_run_pure(&source, "result", &include)
-        .expect("compile_and_run_pure failed");
+    let result =
+        compile_and_run_pure(&source, "result", &include).expect("compile_and_run_pure failed");
     result.to_json()
 }
 
@@ -49,9 +49,7 @@ fn test_hylo_sum() {
 
 #[test]
 fn test_ana_squares() {
-    let r = run_expr(
-        r#"ana (\n -> if n > 5 then Nothing else Just (n*n, n+1)) (1 :: Int)"#,
-    );
+    let r = run_expr(r#"ana (\n -> if n > 5 then Nothing else Just (n*n, n+1)) (1 :: Int)"#);
     assert_eq!(r, serde_json::json!([1, 4, 9, 16, 25]));
 }
 
@@ -63,17 +61,14 @@ fn test_cata_sum() {
 
 #[test]
 fn test_para_with_tail() {
-    let r = run_expr(
-        r#"para (\x xs acc -> (x, length xs) : acc) ([] :: [(Int,Int)]) [10,20,30]"#,
-    );
+    let r = run_expr(r#"para (\x xs acc -> (x, length xs) : acc) ([] :: [(Int,Int)]) [10,20,30]"#);
     assert_eq!(r, serde_json::json!([[10, 2], [20, 1], [30, 0]]));
 }
 
 #[test]
 fn test_apo_short_circuit() {
-    let r = run_expr(
-        r#"apo (\n -> if n >= 3 then Left [99 :: Int] else Right (n, n+1)) (0 :: Int)"#,
-    );
+    let r =
+        run_expr(r#"apo (\n -> if n >= 3 then Left [99 :: Int] else Right (n, n+1)) (0 :: Int)"#);
     assert_eq!(r, serde_json::json!([0, 1, 2, 99]));
 }
 
@@ -185,9 +180,7 @@ fn test_compose_scanl_is_ana_with_accumulator() {
 fn test_compose_bounded_search() {
     // Pattern 4: iterateWhile (bounded producer) → cata (consumer)
     // Powers of 2 under 1000, then sum them
-    let r = run_expr(
-        r#"cata (+) (0 :: Int) (iterateWhile (< 1000) (* 2) 1)"#,
-    );
+    let r = run_expr(r#"cata (+) (0 :: Int) (iterateWhile (< 1000) (* 2) 1)"#);
     assert_eq!(r, serde_json::json!(1023)); // 1+2+4+...+512
 }
 
@@ -235,9 +228,8 @@ fn test_pipeline_pure() {
 #[test]
 fn test_fan_out_pure() {
     // fanOut over Identity: run same input through multiple fns
-    let r = run_expr(
-        r#"fanOut [\x -> Just (x*2), \x -> Just (x+100), \x -> Just (x*x)] (5 :: Int)"#,
-    );
+    let r =
+        run_expr(r#"fanOut [\x -> Just (x*2), \x -> Just (x+100), \x -> Just (x*x)] (5 :: Int)"#);
     assert_eq!(r, serde_json::json!([10, 105, 25]));
 }
 
@@ -254,9 +246,7 @@ fn test_fold_early() {
 fn test_retry_pure() {
     // retry over Maybe: succeed on 3rd try (simulated via list consumption)
     // We'll use a simpler test: retry with always-Nothing gives Nothing
-    let r = run_expr(
-        r#"retry 5 (Just (Nothing :: Maybe Int))"#,
-    );
+    let r = run_expr(r#"retry 5 (Just (Nothing :: Maybe Int))"#);
     assert_eq!(r, serde_json::json!(null));
 }
 
@@ -275,19 +265,19 @@ fn test_tree_hylo_merge_sort() {
 #[test]
 fn test_chunks_of() {
     let r = run_expr(r#"chunksOf 3 [1,2,3,4,5,6,7 :: Int]"#);
-    assert_eq!(r, serde_json::json!([[1,2,3],[4,5,6],[7]]));
+    assert_eq!(r, serde_json::json!([[1, 2, 3], [4, 5, 6], [7]]));
 }
 
 #[test]
 fn test_windows() {
     let r = run_expr(r#"windows 2 [1,2,3,4 :: Int]"#);
-    assert_eq!(r, serde_json::json!([[1,2],[2,3],[3,4]]));
+    assert_eq!(r, serde_json::json!([[1, 2], [2, 3], [3, 4]]));
 }
 
 #[test]
 fn test_indexed() {
     let r = run_expr(r#"indexed [10,20,30 :: Int]"#);
-    assert_eq!(r, serde_json::json!([[0,10],[1,20],[2,30]]));
+    assert_eq!(r, serde_json::json!([[0, 10], [1, 20], [2, 30]]));
 }
 
 #[test]
@@ -299,7 +289,7 @@ fn test_safe_index() {
 #[test]
 fn test_histogram() {
     let r = run_expr(r#"histogram [1,1,2,3,3,3 :: Int]"#);
-    assert_eq!(r, serde_json::json!([[1,2],[2,1],[3,3]]));
+    assert_eq!(r, serde_json::json!([[1, 2], [2, 1], [3, 3]]));
 }
 
 #[test]
@@ -317,13 +307,13 @@ fn test_pad_left() {
 #[test]
 fn test_insert_at() {
     let r = run_expr(r#"insertAt 2 99 [1,2,3 :: Int]"#);
-    assert_eq!(r, serde_json::json!([1,2,99,3]));
+    assert_eq!(r, serde_json::json!([1, 2, 99, 3]));
 }
 
 #[test]
 fn test_remove_at() {
     let r = run_expr(r#"removeAt [0,2] [10,20,30,40 :: Int]"#);
-    assert_eq!(r, serde_json::json!([20,40]));
+    assert_eq!(r, serde_json::json!([20, 40]));
 }
 
 #[test]

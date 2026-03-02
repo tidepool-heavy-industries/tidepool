@@ -102,19 +102,16 @@ mod inner {
         let mut buf: SigJmpBuf = std::mem::zeroed();
 
         // Store the jump buffer so the signal handler can find it.
-        JMP_BUF.store(&mut buf, Ordering::Relaxed);
+        // Release ensures the zeroed buf is visible before the handler reads it.
+        JMP_BUF.store(&mut buf, Ordering::Release);
 
         // Double-box: outer Box for the fat pointer, inner Box<dyn FnOnce()>.
         let boxed: Box<Box<dyn FnOnce()>> = Box::new(wrapper);
         let userdata = Box::into_raw(boxed) as *mut libc::c_void;
 
-        let val = tidepool_sigsetjmp_call(
-            &mut buf,
-            trampoline,
-            userdata,
-        );
+        let val = tidepool_sigsetjmp_call(&mut buf, trampoline, userdata);
 
-        JMP_BUF.store(null_mut(), Ordering::Relaxed);
+        JMP_BUF.store(null_mut(), Ordering::Release);
 
         if val != 0 {
             // Signal was caught. The closure was interrupted by siglongjmp,
@@ -126,12 +123,8 @@ mod inner {
         Ok(result_cell.into_inner().unwrap())
     }
 
-    extern "C" fn handler(
-        sig: libc::c_int,
-        _info: *mut libc::siginfo_t,
-        _ctx: *mut libc::c_void,
-    ) {
-        let buf = JMP_BUF.load(Ordering::Relaxed);
+    extern "C" fn handler(sig: libc::c_int, _info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
+        let buf = JMP_BUF.load(Ordering::Acquire);
         if !buf.is_null() {
             // In JIT context — jump back to sigsetjmp
             unsafe {

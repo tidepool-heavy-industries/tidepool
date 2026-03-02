@@ -91,7 +91,11 @@ impl std::fmt::Display for YieldError {
             YieldError::UnresolvedVar(id) => {
                 let tag_char = (*id >> 56) as u8 as char;
                 let key = *id & ((1u64 << 56) - 1);
-                write!(f, "unresolved variable VarId({:#x}) [tag='{}', key={}]", id, tag_char, key)
+                write!(
+                    f,
+                    "unresolved variable VarId({:#x}) [tag='{}', key={}]",
+                    id, tag_char, key
+                )
             }
             YieldError::NullFunPtr => write!(f, "application of null function pointer"),
             YieldError::BadFunPtrTag(tag) => write!(f, "application of non-closure (tag={})", tag),

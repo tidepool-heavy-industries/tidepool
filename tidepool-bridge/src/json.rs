@@ -42,7 +42,10 @@ impl ToCore for serde_json::Value {
                     .get_by_name_arity("Number", 1)
                     .ok_or_else(|| BridgeError::UnknownDataConName("Number".into()))?;
                 let f = n.as_f64().unwrap_or(0.0);
-                Ok(Value::Con(id, vec![Value::Lit(Literal::LitDouble(f.to_bits()))]))
+                Ok(Value::Con(
+                    id,
+                    vec![Value::Lit(Literal::LitDouble(f.to_bits()))],
+                ))
             }
 
             serde_json::Value::String(s) => {
@@ -117,15 +120,17 @@ fn keymap_to_value(
         let mid = entries.len() / 2;
         let (k, v) = entries[mid];
         let left = build_tree(&entries[..mid], bin_id, tip_id, i_hash_id, table)?;
-        let right =
-            build_tree(&entries[mid + 1..], bin_id, tip_id, i_hash_id, table)?;
+        let right = build_tree(&entries[mid + 1..], bin_id, tip_id, i_hash_id, table)?;
 
         // Key is a newtype for Text — GHC erases it, so store plain Text
         let key_val = k.clone().to_value(table)?;
 
         let json_val = v.to_value(table)?;
         // Bin's !Int field must be boxed as I#(n) to match GHC's heap representation
-        let size = Value::Con(i_hash_id, vec![Value::Lit(Literal::LitInt(entries.len() as i64))]);
+        let size = Value::Con(
+            i_hash_id,
+            vec![Value::Lit(Literal::LitInt(entries.len() as i64))],
+        );
 
         // Bin size key value left right
         Ok(Value::Con(

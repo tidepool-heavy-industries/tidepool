@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
-use tidepool_eval::{eval, env_from_datacon_table, Value, VecHeap};
+use tidepool_eval::{env_from_datacon_table, eval, Value, VecHeap};
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
 use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, PrimOpKind, VarId};

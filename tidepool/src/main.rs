@@ -85,7 +85,10 @@ impl KvHandler {
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(&self.path, serde_json::to_string_pretty(store).unwrap_or_default());
+        let _ = std::fs::write(
+            &self.path,
+            serde_json::to_string_pretty(store).unwrap_or_default(),
+        );
     }
 }
 
@@ -618,7 +621,8 @@ impl EffectHandler<CapturedOutput> for SgHandler {
                 cx.respond(matches)
             }
             SgReq::RuleReplace(lang, rule_json, rewrite, paths) => {
-                let count = self.run_rule_replace(lang, &rule_json, &rewrite, &paths, cx.table())?;
+                let count =
+                    self.run_rule_replace(lang, &rule_json, &rewrite, &paths, cx.table())?;
                 cx.respond(count)
             }
         }
@@ -642,9 +646,8 @@ struct HttpHandler;
 
 impl HttpHandler {
     fn validate_url(url_str: &str) -> Result<url::Url, EffectError> {
-        let url = url::Url::parse(url_str).map_err(|e| {
-            EffectError::Handler(format!("Invalid URL '{}': {}", url_str, e))
-        })?;
+        let url = url::Url::parse(url_str)
+            .map_err(|e| EffectError::Handler(format!("Invalid URL '{}': {}", url_str, e)))?;
 
         if url.scheme() != "http" && url.scheme() != "https" {
             return Err(EffectError::Handler(format!(
@@ -787,7 +790,11 @@ impl ExecHandler {
     /// thousands of Value nodes that can crash the JIT.
     const MAX_JSON_OUTPUT_BYTES: usize = 512 * 1024;
 
-    fn run_command(&self, cmd: &str, dir: &std::path::Path) -> Result<(i64, String, String), EffectError> {
+    fn run_command(
+        &self,
+        cmd: &str,
+        dir: &std::path::Path,
+    ) -> Result<(i64, String, String), EffectError> {
         let output = std::process::Command::new("sh")
             .arg("-c")
             .arg(cmd)
@@ -839,11 +846,9 @@ impl EffectHandler<CapturedOutput> for ExecHandler {
                         Self::MAX_JSON_OUTPUT_BYTES,
                     )));
                 }
-                let json_val: serde_json::Value = serde_json::from_str(&stdout)
-                    .map_err(|e| EffectError::Handler(format!(
-                        "runJson: invalid JSON from '{}': {}",
-                        cmd, e
-                    )))?;
+                let json_val: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| {
+                    EffectError::Handler(format!("runJson: invalid JSON from '{}': {}", cmd, e))
+                })?;
                 cx.respond(json_val)
             }
             ExecReq::RunIn(dir, cmd) => {
@@ -923,32 +928,64 @@ impl EffectHandler<CapturedOutput> for MetaHandler {
             }
             MetaReq::PrimOps => {
                 let primops: Vec<String> = vec![
-                    "+#", "-#", "*#", "negateInt#",
-                    "==#", "/=#", "<#", "<=#", ">#", ">=#",
-                    "quotInt#", "remInt#",
-                    "andI#", "orI#", "xorI#", "notI#",
-                    "uncheckedIShiftL#", "uncheckedIShiftRA#", "uncheckedIShiftRL#",
-                    "int2Double#", "double2Int#",
-                    "+##", "-##", "*##", "/##", "negateDouble#",
-                    "==##", "/=##", "<##", "<=##", ">##", ">=##",
-                    "sqrtDouble#", "sinDouble#", "cosDouble#", "expDouble#", "logDouble#",
-                    "**##", "fabsDouble#",
-                    "chr#", "ord#",
-                    "newMutVar#", "readMutVar#", "writeMutVar#",
-                    "seq#", "tagToEnum#",
-                ].into_iter().map(String::from).collect();
+                    "+#",
+                    "-#",
+                    "*#",
+                    "negateInt#",
+                    "==#",
+                    "/=#",
+                    "<#",
+                    "<=#",
+                    ">#",
+                    ">=#",
+                    "quotInt#",
+                    "remInt#",
+                    "andI#",
+                    "orI#",
+                    "xorI#",
+                    "notI#",
+                    "uncheckedIShiftL#",
+                    "uncheckedIShiftRA#",
+                    "uncheckedIShiftRL#",
+                    "int2Double#",
+                    "double2Int#",
+                    "+##",
+                    "-##",
+                    "*##",
+                    "/##",
+                    "negateDouble#",
+                    "==##",
+                    "/=##",
+                    "<##",
+                    "<=##",
+                    ">##",
+                    ">=##",
+                    "sqrtDouble#",
+                    "sinDouble#",
+                    "cosDouble#",
+                    "expDouble#",
+                    "logDouble#",
+                    "**##",
+                    "fabsDouble#",
+                    "chr#",
+                    "ord#",
+                    "newMutVar#",
+                    "readMutVar#",
+                    "writeMutVar#",
+                    "seq#",
+                    "tagToEnum#",
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect();
                 cx.respond(primops)
             }
-            MetaReq::Effects => {
-                cx.respond(self.effect_names.clone())
-            }
+            MetaReq::Effects => cx.respond(self.effect_names.clone()),
             MetaReq::Diagnostics => {
                 let diags = tidepool_runtime::drain_diagnostics();
                 cx.respond(diags)
             }
-            MetaReq::Version => {
-                cx.respond(env!("CARGO_PKG_VERSION").to_string())
-            }
+            MetaReq::Version => cx.respond(env!("CARGO_PKG_VERSION").to_string()),
         }
     }
 }

@@ -343,7 +343,13 @@ fn run_aeson_effectful_with_input(
     let imports: Vec<String> = aeson_import_strs().iter().map(|s| s.to_string()).collect();
     let helpers_owned: Vec<String> = helpers.iter().map(|s| s.to_string()).collect();
     let src = tidepool_mcp::template_haskell(
-        &preamble, &stack, &lines_owned, &imports, &helpers_owned, Some(&input), None,
+        &preamble,
+        &stack,
+        &lines_owned,
+        &imports,
+        &helpers_owned,
+        Some(&input),
+        None,
     );
     let pp = prelude_path();
     std::thread::Builder::new()
@@ -371,7 +377,13 @@ fn run_aeson_with_input(lines: &[&str], input: serde_json::Value) -> serde_json:
     let lines_owned: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
     let imports: Vec<String> = aeson_import_strs().iter().map(|s| s.to_string()).collect();
     let src = tidepool_mcp::template_haskell(
-        &preamble, &stack, &lines_owned, &imports, &[], Some(&input), None,
+        &preamble,
+        &stack,
+        &lines_owned,
+        &imports,
+        &[],
+        Some(&input),
+        None,
     );
     let pp = prelude_path();
     std::thread::Builder::new()
@@ -396,9 +408,7 @@ fn run_aeson_with_input(lines: &[&str], input: serde_json::Value) -> serde_json:
 /// Construct a simple JSON object with object/.=
 #[test]
 fn test_aeson_object_simple() {
-    let json = run_aeson(&[
-        r#"pure (object ["name" .= ("Alice" :: Text), "age" .= (30 :: Int)])"#,
-    ]);
+    let json = run_aeson(&[r#"pure (object ["name" .= ("Alice" :: Text), "age" .= (30 :: Int)])"#]);
     // Object now renders as a proper JSON object
     assert!(json.is_object());
 }
@@ -406,9 +416,7 @@ fn test_aeson_object_simple() {
 /// Construct a JSON array via toJSON
 #[test]
 fn test_aeson_array_tojson() {
-    let json = run_aeson(&[
-        r#"pure (toJSON [1, 2, 3 :: Int])"#,
-    ]);
+    let json = run_aeson(&[r#"pure (toJSON [1, 2, 3 :: Int])"#]);
     // aeson's toJSON [Int] produces Array (Vector Value)
     // Our bridge should traverse the Vector's Array# internals
     assert!(!json.is_null(), "toJSON [1,2,3] should not be null");
@@ -417,36 +425,28 @@ fn test_aeson_array_tojson() {
 /// Construct Aeson.Null
 #[test]
 fn test_aeson_null() {
-    let json = run_aeson(&[
-        r#"pure Aeson.Null"#,
-    ]);
+    let json = run_aeson(&[r#"pure Aeson.Null"#]);
     assert_eq!(json, serde_json::json!(null));
 }
 
 /// Construct Aeson.Bool
 #[test]
 fn test_aeson_bool_true() {
-    let json = run_aeson(&[
-        r#"pure (Aeson.Bool True)"#,
-    ]);
+    let json = run_aeson(&[r#"pure (Aeson.Bool True)"#]);
     assert_eq!(json, serde_json::json!(true));
 }
 
 /// Construct Aeson.String
 #[test]
 fn test_aeson_string() {
-    let json = run_aeson(&[
-        r#"pure (Aeson.String "hello world")"#,
-    ]);
+    let json = run_aeson(&[r#"pure (Aeson.String "hello world")"#]);
     assert_eq!(json, serde_json::json!("hello world"));
 }
 
 /// Construct Aeson.Number from Int
 #[test]
 fn test_aeson_number_int() {
-    let json = run_aeson(&[
-        r#"pure (toJSON (42 :: Int))"#,
-    ]);
+    let json = run_aeson(&[r#"pure (toJSON (42 :: Int))"#]);
     // toJSON Int produces Number (Scientific)
     assert!(!json.is_null());
 }
@@ -673,7 +673,13 @@ fn test_aeson_input_with_effect() {
     ];
     let imports_owned: Vec<String> = imports.iter().map(|s| s.to_string()).collect();
     let src = tidepool_mcp::template_haskell(
-        &preamble, &stack, &lines, &imports_owned, &[], Some(&input_val), None,
+        &preamble,
+        &stack,
+        &lines,
+        &imports_owned,
+        &[],
+        Some(&input_val),
+        None,
     );
     let pp = prelude_path();
     let result = std::thread::Builder::new()
@@ -976,9 +982,7 @@ fn test_show_value_in_list() {
 #[test]
 fn test_tojson_string() {
     // toJSON @String should produce String "hello", not Array of chars.
-    let (json, _logs) = run_mcp_effectful(&[
-        r#"pure (toJSON ("hello" :: String))"#,
-    ]);
+    let (json, _logs) = run_mcp_effectful(&[r#"pure (toJSON ("hello" :: String))"#]);
     assert_eq!(json, serde_json::json!("hello"));
 }
 
@@ -1109,8 +1113,7 @@ async fn test_full_mcp_async_channel_pattern() {
     let pp = prelude_path();
 
     // Same channel types as MCP server
-    let (session_tx, mut session_rx) =
-        tokio::sync::mpsc::unbounded_channel::<String>();
+    let (session_tx, mut session_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     let handle = std::thread::Builder::new()
         .name("tidepool-eval".into())
@@ -1307,7 +1310,8 @@ fn test_mcp_inline_sort() {
 
 fn test_effect_kv_set_get() {
     // The original bug: () return from KvSet must be TAG_CON
-    let (json, _) = run_mcp_effectful(&["kvSet \"k\" (toJSON (\"v\" :: Text))", "send (KvGet \"k\")"]);
+    let (json, _) =
+        run_mcp_effectful(&["kvSet \"k\" (toJSON (\"v\" :: Text))", "send (KvGet \"k\")"]);
     assert_eq!(json, serde_json::json!("v")); // Just "v" → unwrapped
 }
 
@@ -2647,15 +2651,13 @@ fn test_vendored_effect_json_driven_kv_batch() {
             r#"mapM_ (send . Print) (sort k)"#,
             r#"pure (length k)"#,
         ],
-        &[
-            "storeAll :: [Aeson.Value] -> Eff '[Console, KV, Fs] ()\n\
+        &["storeAll :: [Aeson.Value] -> Eff '[Console, KV, Fs] ()\n\
              storeAll [] = pure ()\n\
              storeAll (u:us) = do\n\
              \x20 case u ^? key \"name\" . _String of\n\
              \x20   Just n -> kvSet n (toJSON n)\n\
              \x20   Nothing -> pure ()\n\
-             \x20 storeAll us",
-        ],
+             \x20 storeAll us"],
     );
     assert_eq!(json, serde_json::json!(3));
     assert_eq!(console, vec!["alice", "bob", "carol"]);
@@ -2733,10 +2735,7 @@ fn test_vendored_input_null() {
 /// Inject boolean
 #[test]
 fn test_vendored_input_bool() {
-    let json = run_aeson_with_input(
-        &[r#"pure (input ^? _Bool)"#],
-        serde_json::json!(true),
-    );
+    let json = run_aeson_with_input(&[r#"pure (input ^? _Bool)"#], serde_json::json!(true));
     assert_eq!(json, serde_json::json!(true));
 }
 
@@ -2753,10 +2752,7 @@ fn test_vendored_input_string() {
 /// Inject number
 #[test]
 fn test_vendored_input_number() {
-    let json = run_aeson_with_input(
-        &[r#"pure (input ^? _Number)"#],
-        serde_json::json!(42),
-    );
+    let json = run_aeson_with_input(&[r#"pure (input ^? _Number)"#], serde_json::json!(42));
     assert_eq!(json, serde_json::json!(42));
 }
 
@@ -2785,14 +2781,12 @@ fn test_vendored_helper_extract_all_strings() {
             r#"let v = object ["a" .= ("x" :: Text), "b" .= object ["c" .= ("y" :: Text)]]"#,
             r#"pure (allStrings v)"#,
         ],
-        &[
-            "allStrings :: Aeson.Value -> [Text]\n\
+        &["allStrings :: Aeson.Value -> [Text]\n\
              allStrings v = case v of\n\
              \x20 Aeson.String s -> [s]\n\
              \x20 Aeson.Object _ -> v ^.. Aeson.members . to allStrings . traverse\n\
              \x20 Aeson.Array _ -> v ^.. Aeson.values . to allStrings . traverse\n\
-             \x20 _ -> []",
-        ],
+             \x20 _ -> []"],
     );
     // Map iteration order is alphabetical for our vendored KeyMap (Data.Map.Strict)
     assert_eq!(json, serde_json::json!(["x", "y"]));
@@ -2806,11 +2800,9 @@ fn test_vendored_helper_count_keys() {
             r#"let v = object ["a" .= (1 :: Int), "b" .= (2 :: Int), "c" .= (3 :: Int)]"#,
             r#"pure (countKeys v)"#,
         ],
-        &[
-            "countKeys :: Aeson.Value -> Int\n\
+        &["countKeys :: Aeson.Value -> Int\n\
              countKeys (Aeson.Object o) = KM.size o\n\
-             countKeys _ = 0",
-        ],
+             countKeys _ = 0"],
     );
     assert_eq!(json, serde_json::json!(3));
 }
@@ -2823,10 +2815,8 @@ fn test_vendored_helper_filter_array() {
             r#"let arr = toJSON ["alice" :: Text, "bob", "anna", "ben"]"#,
             r#"pure (filterStrings (T.isPrefixOf "a") arr)"#,
         ],
-        &[
-            "filterStrings :: (Text -> Bool) -> Aeson.Value -> [Text]\n\
-             filterStrings p v = filter p (v ^.. _Array . traverse . _String)",
-        ],
+        &["filterStrings :: (Text -> Bool) -> Aeson.Value -> [Text]\n\
+             filterStrings p v = filter p (v ^.. _Array . traverse . _String)"],
     );
     assert_eq!(json, serde_json::json!(["alice", "anna"]));
 }
@@ -2839,11 +2829,9 @@ fn test_vendored_helper_build_summary() {
             r#"let people = toJSON [object ["name" .= ("Alice" :: Text), "dept" .= ("eng" :: Text)], object ["name" .= ("Bob" :: Text), "dept" .= ("eng" :: Text)], object ["name" .= ("Carol" :: Text), "dept" .= ("sales" :: Text)]]"#,
             r#"pure (summarize people)"#,
         ],
-        &[
-            "summarize :: Aeson.Value -> (Int, [Text])\n\
+        &["summarize :: Aeson.Value -> (Int, [Text])\n\
              summarize v = let names = v ^.. _Array . traverse . key \"name\" . _String\n\
-             \x20             in (length names, names)",
-        ],
+             \x20             in (length names, names)"],
     );
     assert_eq!(json, serde_json::json!([3, ["Alice", "Bob", "Carol"]]));
 }
@@ -2968,7 +2956,13 @@ fn test_vendored_input_with_effects() {
     ];
     let imports_owned: Vec<String> = imports.iter().map(|s| s.to_string()).collect();
     let src = tidepool_mcp::template_haskell(
-        &preamble, &stack, &lines, &imports_owned, &[], Some(&input_val), None,
+        &preamble,
+        &stack,
+        &lines,
+        &imports_owned,
+        &[],
+        Some(&input_val),
+        None,
     );
     let pp = prelude_path();
     let result = std::thread::Builder::new()
@@ -3092,9 +3086,7 @@ fn test_vendored_edge_traverse_filters() {
 /// toJSON on pair produces two-element array
 #[test]
 fn test_vendored_edge_tojson_pair() {
-    let json = run_aeson(&[
-        r#"pure (toJSON ("key" :: Text, "value" :: Text))"#,
-    ]);
+    let json = run_aeson(&[r#"pure (toJSON ("key" :: Text, "value" :: Text))"#]);
     // Our ToJSON (a,b) produces Array [toJSON a, toJSON b]
     assert!(!json.is_null());
 }
@@ -3123,12 +3115,10 @@ fn test_vendored_keymap_keys() {
             r#"let obj = object ["alpha" .= (1 :: Int), "beta" .= (2 :: Int)]"#,
             r#"pure (getKeyNames obj)"#,
         ],
-        &[
-            "getKeyNames :: Aeson.Value -> [Text]\n\
+        &["getKeyNames :: Aeson.Value -> [Text]\n\
              getKeyNames v = case v ^? _Object of\n\
              \x20 Just m -> map Aeson.toText (KM.keys m)\n\
-             \x20 Nothing -> []",
-        ],
+             \x20 Nothing -> []"],
     );
     // Map keys are sorted alphabetically
     assert_eq!(json, serde_json::json!(["alpha", "beta"]));
@@ -3137,12 +3127,10 @@ fn test_vendored_keymap_keys() {
 /// lookupKey from Prelude on extracted object
 #[test]
 fn test_vendored_keymap_lookup() {
-    let (json, _logs) = run_mcp_effectful(
-        &[
-            r#"let obj = object ["x" .= ("found" :: Text)]"#,
-            r#"pure (toJSON (lookupKey "x" obj))"#,
-        ],
-    );
+    let (json, _logs) = run_mcp_effectful(&[
+        r#"let obj = object ["x" .= ("found" :: Text)]"#,
+        r#"pure (toJSON (lookupKey "x" obj))"#,
+    ]);
     // Should find String "found"
     assert_eq!(json, serde_json::json!("found"));
 }
@@ -3172,8 +3160,7 @@ fn test_orchestrate_json_command_interpreter() {
             r#"results <- mapM runCmd cmds"#,
             r#"pure results"#,
         ],
-        &[
-            "runCmd :: Aeson.Value -> M Aeson.Value\n\
+        &["runCmd :: Aeson.Value -> M Aeson.Value\n\
              runCmd cmd = do\n\
              \x20 let op  = fromMaybe \"\" (cmd ^? key \"op\" . _String)\n\
              \x20 let k   = fromMaybe \"\" (cmd ^? key \"key\" . _String)\n\
@@ -3190,8 +3177,7 @@ fn test_orchestrate_json_command_interpreter() {
              \x20     send (KvDelete k)\n\
              \x20     send (Print (\"DEL \" `T.append` k))\n\
              \x20     pure (object [\"status\" .= (\"deleted\" :: Text)])\n\
-             \x20   _ -> pure (object [\"error\" .= (\"unknown op\" :: Text)])",
-        ],
+             \x20   _ -> pure (object [\"error\" .= (\"unknown op\" :: Text)])"],
         input,
     );
     // Should be an array of 5 results
@@ -3402,13 +3388,11 @@ fn test_orchestrate_tree_flatten() {
             r#"                  ]"#,
             r#"pure (flattenTree tree)"#,
         ],
-        &[
-            "flattenTree :: Aeson.Value -> [Int]\n\
+        &["flattenTree :: Aeson.Value -> [Int]\n\
              flattenTree node =\n\
              \x20 let val = fromMaybe 0 (node ^? key \"value\" . _Int)\n\
              \x20     kids = node ^.. key \"children\" . _Array . traverse\n\
-             \x20 in fromIntegral val : concatMap flattenTree kids",
-        ],
+             \x20 in fromIntegral val : concatMap flattenTree kids"],
     );
     let arr = json.as_array().expect("should be array");
     let vals: Vec<i64> = arr.iter().map(|v| v.as_i64().unwrap()).collect();
@@ -3524,8 +3508,7 @@ fn test_orchestrate_dispatch_on_type() {
             r#"result <- dispatch typ payload"#,
             r#"pure result"#,
         ],
-        &[
-            "dispatch :: Text -> Aeson.Value -> M Aeson.Value\n\
+        &["dispatch :: Text -> Aeson.Value -> M Aeson.Value\n\
              dispatch typ payload = case typ of\n\
              \x20 \"greeting\" -> do\n\
              \x20   let name = fromMaybe \"stranger\" (payload ^? key \"name\" . _String)\n\
@@ -3538,8 +3521,7 @@ fn test_orchestrate_dispatch_on_type() {
              \x20   pure (object [\"response\" .= (\"Goodbye!\" :: Text)])\n\
              \x20 _ -> do\n\
              \x20   send (Print (\"unknown type: \" `T.append` typ))\n\
-             \x20   pure (object [\"error\" .= (\"unknown\" :: Text)])",
-        ],
+             \x20   pure (object [\"error\" .= (\"unknown\" :: Text)])"],
         input,
     );
     assert!(logs.iter().any(|l| l == "Hello, World!"));
@@ -3720,8 +3702,7 @@ fn test_orchestrate_instruction_dsl() {
             r#"results <- mapM execInstr program"#,
             r#"pure (catMaybes results)"#,
         ],
-        &[
-            "execInstr :: Aeson.Value -> M (Maybe Aeson.Value)\n\
+        &["execInstr :: Aeson.Value -> M (Maybe Aeson.Value)\n\
              execInstr instr = do\n\
              \x20 let op = fromMaybe \"\" (instr ^? key \"instr\" . _String)\n\
              \x20 case op of\n\
@@ -3738,8 +3719,7 @@ fn test_orchestrate_instruction_dsl() {
              \x20     let k = fromMaybe \"\" (instr ^? key \"k\" . _String)\n\
              \x20     v <- send (KvGet k)\n\
              \x20     pure (Just (object [\"loaded\" .= k, \"value\" .= v]))\n\
-             \x20   _ -> pure Nothing",
-        ],
+             \x20   _ -> pure Nothing"],
     );
     assert!(logs.iter().any(|l| l == "hello"));
     assert!(logs.iter().any(|l| l == "stored x"));
@@ -3789,13 +3769,11 @@ fn test_orchestrate_moderate_scale() {
             r#"let total = foldl' (\acc x -> acc + fromIntegral x) (0 :: Int) prices"#,
             r#"pure total"#,
         ],
-        &[
-            "mkItem :: Int -> Aeson.Value\n\
+        &["mkItem :: Int -> Aeson.Value\n\
              mkItem i = object [ \"id\" .= i\n\
              \x20                , \"name\" .= (\"item_\" `T.append` show i)\n\
              \x20                , \"price\" .= (i * 10)\n\
-             \x20                , \"tags\" .= ([\"t\" `T.append` show i, \"all\"] :: [Text]) ]",
-        ],
+             \x20                , \"tags\" .= ([\"t\" `T.append` show i, \"all\"] :: [Text]) ]"],
     );
     // Sum of 10+20+...+100 = 550
     assert_eq!(json, 550);
@@ -3818,7 +3796,10 @@ fn test_ir_dump_pap() {
             let ir = tidepool_repr::pretty::pretty_print(&expr);
             std::fs::write("/tmp/ir_pap.txt", &ir).unwrap();
             eprintln!("PAP IR: {} nodes, {} bytes", expr.nodes.len(), ir.len());
-        }).unwrap().join().expect("join");
+        })
+        .unwrap()
+        .join()
+        .expect("join");
 }
 
 #[test]
@@ -3838,7 +3819,10 @@ fn test_ir_dump_eta() {
             let ir = tidepool_repr::pretty::pretty_print(&expr);
             std::fs::write("/tmp/ir_eta.txt", &ir).unwrap();
             eprintln!("Eta IR: {} nodes, {} bytes", expr.nodes.len(), ir.len());
-        }).unwrap().join().expect("join");
+        })
+        .unwrap()
+        .join()
+        .expect("join");
 }
 
 #[test]
@@ -3863,7 +3847,9 @@ fn test_tocore_json_datacon_ids_match_haskell() {
 
     // Compile a Haskell program that constructs each aeson Value variant
     let src = mcp_source_with_imports(
-        &[r#"pure (Aeson.Array [Aeson.String "x", Aeson.Number 1.0, Aeson.Bool True, Aeson.Null])"#],
+        &[
+            r#"pure (Aeson.Array [Aeson.String "x", Aeson.Number 1.0, Aeson.Bool True, Aeson.Null])"#,
+        ],
         &[],
         &aeson_import_strs(),
     );
@@ -3957,10 +3943,7 @@ fn test_tocore_json_datacon_ids_match_haskell() {
 fn test_tocore_json_array_lens_works() {
     // Compile Haskell that takes an input Value and extracts via _Array lens
     let input = serde_json::json!(["keep", "refactor", "skip"]);
-    let json = run_aeson_with_input(
-        &[r#"pure (input ^.. _Array . traverse . _String)"#],
-        input,
-    );
+    let json = run_aeson_with_input(&[r#"pure (input ^.. _Array . traverse . _String)"#], input);
     // Should extract the three strings
     assert_eq!(json, serde_json::json!(["keep", "refactor", "skip"]));
 }
@@ -3992,9 +3975,7 @@ fn test_decode_array() {
 
 #[test]
 fn test_decode_invalid() {
-    let json = run_aeson(&[
-        r#"pure (decode "{bad}" :: Maybe Value)"#,
-    ]);
+    let json = run_aeson(&[r#"pure (decode "{bad}" :: Maybe Value)"#]);
     assert_eq!(json, serde_json::json!(null));
 }
 
@@ -4022,9 +4003,7 @@ fn test_decode_escapes() {
 
 #[test]
 fn test_decode_empty_structures() {
-    let json = run_aeson(&[
-        r#"pure (decode "{}" :: Maybe Value, decode "[]" :: Maybe Value)"#,
-    ]);
+    let json = run_aeson(&[r#"pure (decode "{}" :: Maybe Value, decode "[]" :: Maybe Value)"#]);
     assert_eq!(json, serde_json::json!([{}, []]));
 }
 
@@ -4278,7 +4257,10 @@ fn test_parse_csv() {
         &[],
         &["Tidepool.Table"],
     );
-    assert_eq!(json, serde_json::json!([["name", "age"], ["Alice", "30"], ["Bob", "25"]]));
+    assert_eq!(
+        json,
+        serde_json::json!([["name", "age"], ["Alice", "30"], ["Bob", "25"]])
+    );
 }
 
 #[test]
@@ -4331,7 +4313,15 @@ fn test_sort_by_column() {
         &["Tidepool.Table"],
     );
     // Header stays, rest sorted by name
-    assert_eq!(json, serde_json::json!([["name", "age"], ["Alice", "30"], ["Bob", "25"], ["Charlie", "20"]]));
+    assert_eq!(
+        json,
+        serde_json::json!([
+            ["name", "age"],
+            ["Alice", "30"],
+            ["Bob", "25"],
+            ["Charlie", "20"]
+        ])
+    );
 }
 
 // ===========================================================================
@@ -4357,7 +4347,12 @@ fn test_paginate_large_string() {
     ]);
     // Result should be a truncated string with a size marker
     let s = json.as_str().expect("should be string");
-    assert!(s.contains("...[5000 chars]"), "should contain size marker, got: {}...{}", &s[..50], &s[s.len()-30..]);
+    assert!(
+        s.contains("...[5000 chars]"),
+        "should contain size marker, got: {}...{}",
+        &s[..50],
+        &s[s.len() - 30..]
+    );
     assert!(s.len() < 5000, "should be truncated, len={}", s.len());
 }
 
@@ -4376,5 +4371,10 @@ fn test_paginate_say_passthrough() {
     assert_eq!(output.len(), 1);
     let line = &output[0];
     // say is a normal effect now — full text passes through
-    assert_eq!(line.len(), 5000, "say should pass full text, got len={}", line.len());
+    assert_eq!(
+        line.len(),
+        5000,
+        "say should pass full text, got len={}",
+        line.len()
+    );
 }

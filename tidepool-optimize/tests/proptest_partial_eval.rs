@@ -138,12 +138,18 @@ fn nested_known_con_case_reduces() {
                         alts: vec![alt],
                     });
                     let expr = b.build();
-                    
+
                     // Verify it actually reduces to just the literal
                     let mut optimized = expr.clone();
                     pass.run(&mut optimized);
-                    prop_assert_eq!(optimized.nodes.len(), 1, "Should have reduced to a single node");
-                    prop_assert!(matches!(optimized.nodes[0], CoreFrame::Lit(Literal::LitInt(v)) if v == val));
+                    prop_assert_eq!(
+                        optimized.nodes.len(),
+                        1,
+                        "Should have reduced to a single node"
+                    );
+                    prop_assert!(
+                        matches!(optimized.nodes[0], CoreFrame::Lit(Literal::LitInt(v)) if v == val)
+                    );
 
                     check_pass_preserves_eval(&pass, expr)
                 })

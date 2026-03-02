@@ -11,11 +11,7 @@ fn is_in_range(ptr: *const u8, start: *const u8, end: *const u8) -> bool {
     (ptr as usize) >= (start as usize) && (ptr as usize) < (end as usize)
 }
 
-unsafe fn evacuate(
-    old_ptr: *mut u8,
-    to_base: *mut u8,
-    free: &mut usize,
-) -> *mut u8 {
+unsafe fn evacuate(old_ptr: *mut u8, to_base: *mut u8, free: &mut usize) -> *mut u8 {
     let tag = read_tag(old_ptr);
     if tag == TAG_FORWARDED {
         return *(old_ptr.add(8) as *const *mut u8);
@@ -161,7 +157,12 @@ mod tests {
         offset + aligned as usize
     }
 
-    unsafe fn write_closure(buf: &mut [u8], offset: usize, code_ptr: *const u8, captures: &[*mut u8]) -> usize {
+    unsafe fn write_closure(
+        buf: &mut [u8],
+        offset: usize,
+        code_ptr: *const u8,
+        captures: &[*mut u8],
+    ) -> usize {
         let ptr = buf.as_mut_ptr().add(offset);
         let size = (CLOSURE_CAPTURED_OFFSET + captures.len() * FIELD_STRIDE) as u16;
         let aligned = (size as usize)
@@ -212,12 +213,12 @@ mod tests {
             let mut root = from.as_mut_ptr().add(off2);
             let roots = [&mut root as *mut *mut u8];
             let _res = cheney_copy(&roots, from.as_ptr(), from.as_ptr().add(1024), to);
-            
+
             assert_eq!(root, to.as_mut_ptr()); // con is copied first
             assert_eq!(read_tag(root), TAG_CON);
             let n_fields = *(root.add(CON_NUM_FIELDS_OFFSET) as *const u16);
             assert_eq!(n_fields, 2);
-            
+
             let f1 = *(root.add(CON_FIELDS_OFFSET) as *const *mut u8);
             let f2 = *(root.add(CON_FIELDS_OFFSET + FIELD_STRIDE) as *const *mut u8);
             assert_eq!(read_tag(f1), TAG_LIT);
@@ -242,11 +243,14 @@ mod tests {
             let mut root = from.as_mut_ptr().add(off1);
             let roots = [&mut root as *mut *mut u8];
             let _res = cheney_copy(&roots, from.as_ptr(), from.as_ptr().add(1024), to);
-            
+
             assert_eq!(root, to.as_mut_ptr());
             assert_eq!(read_tag(root), TAG_CLOSURE);
-            assert_eq!(*(root.add(CLOSURE_CODE_PTR_OFFSET) as *const *const u8), code_ptr);
-            
+            assert_eq!(
+                *(root.add(CLOSURE_CODE_PTR_OFFSET) as *const *const u8),
+                code_ptr
+            );
+
             let cap = *(root.add(CLOSURE_CAPTURED_OFFSET) as *const *mut u8);
             assert_eq!(read_tag(cap), TAG_LIT);
             assert_eq!(*(cap.add(LIT_VALUE_OFFSET) as *const i64), 100);
@@ -266,19 +270,19 @@ mod tests {
             let off2 = write_con(from, off1, 1, &[lit]);
             let con1 = from.as_mut_ptr().add(off1);
             let _off3 = write_con(from, off2, 2, &[con1]);
-            
+
             let mut root = from.as_mut_ptr().add(off2);
             let roots = [&mut root as *mut *mut u8];
             let _res = cheney_copy(&roots, from.as_ptr(), from.as_ptr().add(1024), to);
-            
+
             assert_eq!(root, to.as_mut_ptr());
             assert_eq!(read_tag(root), TAG_CON);
             assert_eq!(*(root.add(CON_TAG_OFFSET) as *const u64), 2);
-            
+
             let c1 = *(root.add(CON_FIELDS_OFFSET) as *const *mut u8);
             assert_eq!(read_tag(c1), TAG_CON);
             assert_eq!(*(c1.add(CON_TAG_OFFSET) as *const u64), 1);
-            
+
             let l1 = *(c1.add(CON_FIELDS_OFFSET) as *const *mut u8);
             assert_eq!(read_tag(l1), TAG_LIT);
             assert_eq!(*(l1.add(LIT_VALUE_OFFSET) as *const i64), 7);
@@ -298,7 +302,7 @@ mod tests {
             let mut root = from.as_mut_ptr();
             let roots = [&mut root as *mut *mut u8];
             let _res = cheney_copy(&roots, from.as_ptr(), from.as_ptr().add(1024), to);
-            
+
             assert_eq!(root, to.as_mut_ptr());
             let cap = *(root.add(CLOSURE_CAPTURED_OFFSET) as *const *mut u8);
             assert_eq!(cap, ext_ptr); // remains unchanged
@@ -318,9 +322,9 @@ mod tests {
             let mut root1 = lit;
             let mut root2 = lit;
             let roots = [&mut root1 as *mut *mut u8, &mut root2 as *mut *mut u8];
-            
+
             let res = cheney_copy(&roots, from.as_ptr(), from.as_ptr().add(1024), to);
-            
+
             assert_eq!(res.bytes_copied, LIT_SIZE); // copied only once
             assert_eq!(root1, root2);
             assert_eq!(root1, to.as_mut_ptr());
@@ -338,12 +342,12 @@ mod tests {
             let off1 = write_lit(from, 0, 1);
             let off2 = write_lit(from, off1, 2); // this one is rooted
             let _off3 = write_lit(from, off2, 3);
-            
+
             let mut root = from.as_mut_ptr().add(off1);
             let roots = [&mut root as *mut *mut u8];
-            
+
             let res = cheney_copy(&roots, from.as_ptr(), from.as_ptr().add(1024), to);
-            
+
             assert_eq!(res.bytes_copied, LIT_SIZE); // only 1 copied
             assert_eq!(read_tag(root), TAG_LIT);
             assert_eq!(*(root.add(LIT_VALUE_OFFSET) as *const i64), 2);
@@ -405,7 +409,7 @@ mod tests {
             // A blackhole thunk has size 16 (just header and state) and no pointers.
             write_header(ptr, TAG_THUNK, 16);
             *ptr.add(THUNK_STATE_OFFSET) = THUNK_BLACKHOLE;
-            
+
             let mut count = 0;
             for_each_pointer_field(ptr, |_| {
                 count += 1;

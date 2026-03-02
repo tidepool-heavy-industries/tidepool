@@ -8,8 +8,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
-use tidepool_codegen::jit_machine::JitEffectMachine;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
+use tidepool_codegen::jit_machine::JitEffectMachine;
 pub use tidepool_codegen::jit_machine::JitError;
 pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_eval::value::Value;
@@ -19,7 +19,7 @@ use tidepool_repr::{CoreExpr, DataConTable};
 mod cache;
 mod render;
 
-pub use render::{EvalResult, value_to_json};
+pub use render::{value_to_json, EvalResult};
 
 /// Result of successful Haskell compilation: a Core expression, DataCon metadata, and warnings.
 pub type CompileResult = (CoreExpr, DataConTable, MetaWarnings);

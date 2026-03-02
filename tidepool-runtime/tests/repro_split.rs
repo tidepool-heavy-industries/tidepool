@@ -141,65 +141,29 @@ fn test_split_first() {
 #[test]
 
 fn test_list_text() {
-
     let json = run_plain("([\"a\", \"b\"] :: [T.Text])");
 
     assert_eq!(json, serde_json::json!(["a", "b"]));
-
 }
-
-
 
 #[test]
 
-
-
 fn test_cmptest() {
-
-
-
     let src = std::fs::read_to_string("tests/haskell/cmptest.hs").unwrap();
-
-
 
     let pp = prelude_path();
 
-
-
     let include = [pp.as_path()];
 
-
-
     let val = tidepool_runtime::compile_and_run_pure(&src, "result", &include)
-
-
-
         .expect("compile_and_run_pure failed");
 
-
-
     assert_eq!(val.to_json(), serde_json::json!(1));
-
-
-
 }
-
-
-
-
-
-
 
 #[test]
 
-
-
 fn test_my_split() {
-
-
-
-
-
     let src = r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, PartialTypeSignatures #-}
 
 module Test where
@@ -229,9 +193,7 @@ result = mySplit (const False) "abc"
     let include = [pp.as_path()];
 
     let val = tidepool_runtime::compile_and_run_pure(&src, "result", &include)
-
         .expect("compile_and_run_pure failed");
 
     assert_eq!(val.to_json(), serde_json::json!(["abc"]));
-
 }

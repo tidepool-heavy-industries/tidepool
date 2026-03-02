@@ -1,6 +1,6 @@
 use proptest::prelude::*;
-use tidepool_heap::*;
 use tidepool_eval::{value::Value, Env, Heap, ThunkState};
+use tidepool_heap::*;
 use tidepool_repr::{CoreFrame, RecursiveTree, VarId};
 
 // Strategies for generating heap object data
@@ -247,7 +247,7 @@ proptest! {
                     _ => panic!("Expected Unevaluated thunk after cycle {}", cycle),
                 }
             }
-            
+
             prop_assert_eq!(heap.thunk_count(), roots.len(), "Heap should only contain roots");
         }
     }

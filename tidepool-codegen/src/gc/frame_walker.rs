@@ -22,10 +22,7 @@ pub struct StackRoot {
 /// - `stack_maps` must contain entries for all JIT functions in the call chain.
 /// - All frames in the chain must have frame pointers (`force-frame-pointers = true`).
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub unsafe fn walk_frames(
-    start_fp: usize,
-    stack_maps: &StackMapRegistry,
-) -> Vec<StackRoot> {
+pub unsafe fn walk_frames(start_fp: usize, stack_maps: &StackMapRegistry) -> Vec<StackRoot> {
     let mut roots = Vec::new();
     let mut fp = start_fp;
 

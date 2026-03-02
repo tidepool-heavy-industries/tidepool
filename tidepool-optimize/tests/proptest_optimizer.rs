@@ -250,7 +250,6 @@ fn wrap_in_known_con_case(body: CoreExpr, binder: VarId, tag: DataConId) -> Core
     b.build()
 }
 
-
 #[test]
 #[serial]
 fn case_of_known_con_preserves_eval() {

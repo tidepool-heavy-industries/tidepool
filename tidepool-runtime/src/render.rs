@@ -109,8 +109,7 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                             match cur {
                                 Value::ByteArray(bs) => break Some(bs.clone()),
                                 Value::Con(id, fields)
-                                    if con_name(*id, table) == "ByteArray"
-                                        && fields.len() == 1 =>
+                                    if con_name(*id, table) == "ByteArray" && fields.len() == 1 =>
                                 {
                                     cur = &fields[0];
                                 }
@@ -291,9 +290,7 @@ fn extract_boxed_int(val: &Value, table: &DataConTable) -> Option<i64> {
     loop {
         match cur {
             Value::Lit(Literal::LitInt(n)) => return Some(*n),
-            Value::Con(id, fields)
-                if fields.len() == 1 && table.get_by_name("I#") == Some(*id) =>
-            {
+            Value::Con(id, fields) if fields.len() == 1 && table.get_by_name("I#") == Some(*id) => {
                 cur = &fields[0];
             }
             _ => return None,

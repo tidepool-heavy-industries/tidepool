@@ -33,11 +33,7 @@ fn test_sigill_returns_signal_error() {
 fn test_normal_execution_returns_ok() {
     tidepool_codegen::signal_safety::install();
 
-    let result = unsafe {
-        tidepool_codegen::signal_safety::with_signal_protection(|| {
-            42i32
-        })
-    };
+    let result = unsafe { tidepool_codegen::signal_safety::with_signal_protection(|| 42i32) };
 
     assert_eq!(result.unwrap(), 42);
 }
@@ -55,10 +51,6 @@ fn test_signal_recovery_allows_subsequent_calls() {
     assert!(result1.is_err());
 
     // Second call: should still work
-    let result2 = unsafe {
-        tidepool_codegen::signal_safety::with_signal_protection(|| {
-            100i32
-        })
-    };
+    let result2 = unsafe { tidepool_codegen::signal_safety::with_signal_protection(|| 100i32) };
     assert_eq!(result2.unwrap(), 100);
 }

@@ -1,9 +1,9 @@
 use crate::context::VMContext;
-use tidepool_heap::layout;
 use crate::gc::frame_walker::{self, StackRoot};
 use crate::stack_map::StackMapRegistry;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use tidepool_heap::layout;
 
 type GcHook = fn(&[StackRoot]);
 
@@ -32,10 +32,16 @@ impl std::fmt::Display for RuntimeError {
             RuntimeError::UnresolvedVar(id) => {
                 let tag_char = (*id >> 56) as u8 as char;
                 let key = *id & ((1u64 << 56) - 1);
-                write!(f, "unresolved variable VarId({:#x}) [tag='{}', key={}]", id, tag_char, key)
+                write!(
+                    f,
+                    "unresolved variable VarId({:#x}) [tag='{}', key={}]",
+                    id, tag_char, key
+                )
             }
             RuntimeError::NullFunPtr => write!(f, "application of null function pointer"),
-            RuntimeError::BadFunPtrTag(tag) => write!(f, "application of non-closure (tag={})", tag),
+            RuntimeError::BadFunPtrTag(tag) => {
+                write!(f, "application of non-closure (tag={})", tag)
+            }
             RuntimeError::HeapOverflow => write!(f, "heap overflow (nursery exhausted after GC)"),
         }
     }
@@ -155,7 +161,8 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                     let mut tospace = vec![0u8; from_size];
 
                     // Convert StackRoot to raw slot pointers
-                    let root_slots: Vec<*mut *mut u8> = roots.iter()
+                    let root_slots: Vec<*mut *mut u8> = roots
+                        .iter()
                         .map(|r| r.stack_slot_addr as *mut *mut u8)
                         .collect();
 
@@ -265,7 +272,8 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
         // Force the closure. In a data-case scrutinee position, GHC Core
         // guarantees the result must be a data constructor, so any closure
         // here is a thunk (suspended computation) regardless of capture count.
-        // Signature: fn(vmctx, self, arg) -> *mut u8
+        // SAFETY: code_ptr is a JIT-compiled function pointer. The JIT guarantees
+        // it points to a function with this exact signature (closure calling convention).
         let f: extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
             std::mem::transmute(code_ptr_val);
         f(vmctx, obj, std::ptr::null_mut())
@@ -545,7 +553,10 @@ pub extern "C" fn runtime_copy_addr_to_byte_array(src: i64, dest_ba: i64, dest_o
     }
     let dest_size = unsafe { *(dest_ba as *const u64) } as usize;
     if (dest_off as usize + len as usize) > dest_size {
-        eprintln!("[BUG] runtime_copy_addr_to_byte_array: out of bounds! size={} off={} len={}", dest_size, dest_off, len);
+        eprintln!(
+            "[BUG] runtime_copy_addr_to_byte_array: out of bounds! size={} off={} len={}",
+            dest_size, dest_off, len
+        );
         std::process::abort();
     }
     let src_ptr = src as *const u8;
@@ -558,7 +569,10 @@ pub extern "C" fn runtime_copy_addr_to_byte_array(src: i64, dest_ba: i64, dest_o
 /// Set `len` bytes in `ba` starting at `off` to `val`.
 pub extern "C" fn runtime_set_byte_array(ba: i64, off: i64, len: i64, val: i64) {
     if (ba as u64) < 0x1000 {
-        eprintln!("[BUG] runtime_set_byte_array: bad pointer ba={:#x} off={} len={} val={}", ba, off, len, val);
+        eprintln!(
+            "[BUG] runtime_set_byte_array: bad pointer ba={:#x} off={} len={} val={}",
+            ba, off, len, val
+        );
         std::process::abort();
     }
     let ptr = unsafe { (ba as *mut u8).add(8 + off as usize) };
@@ -669,11 +683,13 @@ pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
         std::alloc::handle_alloc_error(layout);
     }
     unsafe {
-        *(ptr as *mut u64) = n as u64;
         let slots = ptr.add(8) as *mut i64;
         for i in 0..n {
             *slots.add(i) = init;
         }
+        // Write length after slots are initialized so a concurrent reader
+        // (e.g. GC walking) never sees a length prefix with uninit slots.
+        *(ptr as *mut u64) = n as u64;
     }
     ptr as i64
 }
@@ -793,13 +809,19 @@ pub extern "C" fn runtime_strlen(addr: i64) -> i64 {
 /// If the buffer contains >= `cnt` characters, returns the non-negative byte count
 /// of those `cnt` characters. If the buffer is shorter (< `cnt` chars), returns
 /// the non-positive negated total character count. Returns 0 if `len` = 0 or `cnt` = 0.
+///
+/// # Safety
+/// Input must be valid UTF-8. No validation is performed (matches C text library).
 pub extern "C" fn runtime_text_measure_off(addr: i64, off: i64, len: i64, cnt: i64) -> i64 {
-    if (addr as u64) < 0x1000 {
-        eprintln!("[BUG] runtime_text_measure_off: bad pointer addr={:#x} off={} len={} cnt={}", addr, off, len, cnt);
-        std::process::abort();
-    }
     if len <= 0 || cnt <= 0 {
         return 0;
+    }
+    if (addr as u64) < 0x1000 {
+        eprintln!(
+            "[BUG] runtime_text_measure_off: bad pointer addr={:#x} off={} len={} cnt={}",
+            addr, off, len, cnt
+        );
+        std::process::abort();
     }
     let ptr = (addr + off) as *const u8;
     let len = len as usize;
@@ -831,12 +853,15 @@ pub extern "C" fn runtime_text_measure_off(addr: i64, off: i64, len: i64, cnt: i
 
 /// Find a byte in a buffer. Returns offset from start, or -1 if not found.
 pub extern "C" fn runtime_text_memchr(addr: i64, off: i64, len: i64, needle: i64) -> i64 {
-    if (addr as u64) < 0x1000 {
-        eprintln!("[BUG] runtime_text_memchr: bad pointer addr={:#x} off={} len={} needle={}", addr, off, len, needle);
-        std::process::abort();
-    }
     if len <= 0 {
         return -1;
+    }
+    if (addr as u64) < 0x1000 {
+        eprintln!(
+            "[BUG] runtime_text_memchr: bad pointer addr={:#x} off={} len={} needle={}",
+            addr, off, len, needle
+        );
+        std::process::abort();
     }
     let ptr = (addr + off) as *const u8;
     let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
@@ -850,8 +875,14 @@ pub extern "C" fn runtime_text_memchr(addr: i64, off: i64, len: i64, needle: i64
 ///
 /// Reads `len` bytes from `src + off`, writes reversed codepoints starting at `dst`.
 pub extern "C" fn runtime_text_reverse(dest: i64, src: i64, off: i64, len: i64) {
+    if len <= 0 {
+        return;
+    }
     if (dest as u64) < 0x1000 || (src as u64) < 0x1000 {
-        eprintln!("[BUG] runtime_text_reverse: bad pointer dest={:#x} src={:#x} off={} len={}", dest, src, off, len);
+        eprintln!(
+            "[BUG] runtime_text_reverse: bad pointer dest={:#x} src={:#x} off={} len={}",
+            dest, src, off, len
+        );
         std::process::abort();
     }
     let src_ptr = (src + off) as *const u8;
@@ -909,7 +940,11 @@ fn haskell_show_double(d: f64) -> String {
     let abs = d.abs();
     if (0.1..1.0e7).contains(&abs) {
         let s = format!("{}", d);
-        if s.contains('.') { s } else { format!("{}.0", s) }
+        if s.contains('.') {
+            s
+        } else {
+            format!("{}.0", s)
+        }
     } else {
         // Scientific notation: Haskell uses e.g. "3.14e10"
         format!("{:e}", d)
@@ -1022,10 +1057,7 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
             "runtime_cas_boxed_array",
             runtime_cas_boxed_array as *const u8,
         ),
-        (
-            "runtime_case_trap",
-            runtime_case_trap as *const u8,
-        ),
+        ("runtime_case_trap", runtime_case_trap as *const u8),
         (
             "runtime_show_double_addr",
             runtime_show_double_addr as *const u8,
@@ -1307,13 +1339,19 @@ mod tests {
         let s = "λ😀x".as_bytes();
         assert_eq!(s.len(), 7);
         // length
-        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 7, i64::MAX), -3);
+        assert_eq!(
+            runtime_text_measure_off(s.as_ptr() as i64, 0, 7, i64::MAX),
+            -3
+        );
         // take 1 = "λ" = 2 bytes
         assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 7, 1), 2);
         // take 2 = "λ😀" = 6 bytes
         assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 7, 2), 6);
         // with offset 2 (past "λ"), len 5: "😀x" = 2 chars
-        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 2, 5, i64::MAX), -2);
+        assert_eq!(
+            runtime_text_measure_off(s.as_ptr() as i64, 2, 5, i64::MAX),
+            -2
+        );
         // take 1 from offset 2: "😀" = 4 bytes
         assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 2, 5, 1), 4);
     }
@@ -1323,12 +1361,15 @@ mod tests {
         // "Aλ文😀" = 1+2+3+4 = 10 bytes, 4 chars
         let s = "Aλ文😀".as_bytes();
         assert_eq!(s.len(), 10);
-        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 10, i64::MAX), -4);
-        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 10, 1), 1);  // "A"
-        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 10, 2), 3);  // "Aλ"
-        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 10, 3), 6);  // "Aλ文"
+        assert_eq!(
+            runtime_text_measure_off(s.as_ptr() as i64, 0, 10, i64::MAX),
+            -4
+        );
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 10, 1), 1); // "A"
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 10, 2), 3); // "Aλ"
+        assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 10, 3), 6); // "Aλ文"
         assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 0, 10, 4), 10); // all
-        // from offset 1 (past "A"), len 9: "λ文😀"
+                                                                               // from offset 1 (past "A"), len 9: "λ文😀"
         assert_eq!(runtime_text_measure_off(s.as_ptr() as i64, 1, 9, 2), 5); // "λ文" = 2+3
     }
 
@@ -1398,13 +1439,19 @@ mod tests {
     #[test]
     fn test_memchr_found() {
         let s = b"hello:world";
-        assert_eq!(runtime_text_memchr(s.as_ptr() as i64, 0, 11, b':' as i64), 5);
+        assert_eq!(
+            runtime_text_memchr(s.as_ptr() as i64, 0, 11, b':' as i64),
+            5
+        );
     }
 
     #[test]
     fn test_memchr_not_found() {
         let s = b"hello";
-        assert_eq!(runtime_text_memchr(s.as_ptr() as i64, 0, 5, b':' as i64), -1);
+        assert_eq!(
+            runtime_text_memchr(s.as_ptr() as i64, 0, 5, b':' as i64),
+            -1
+        );
     }
 
     #[test]
@@ -1489,7 +1536,11 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
     let ptr = scrut_ptr as *const u8;
     if (scrut_ptr as u64) < 0x1000 {
         let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(stderr, "[CASE TRAP] scrut_ptr is NULL/invalid: {:#x}", scrut_ptr);
+        let _ = writeln!(
+            stderr,
+            "[CASE TRAP] scrut_ptr is NULL/invalid: {:#x}",
+            scrut_ptr
+        );
         let _ = stderr.flush();
         std::process::abort();
     }
@@ -1505,9 +1556,9 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
 
     // Read expected alt tags
     let expected: Vec<u64> = if num_alts > 0 && alt_tags != 0 {
-        (0..num_alts as usize).map(|i| unsafe {
-            *((alt_tags as *const u64).add(i))
-        }).collect()
+        (0..num_alts as usize)
+            .map(|i| unsafe { *((alt_tags as *const u64).add(i)) })
+            .collect()
     } else {
         vec![]
     };
@@ -1520,26 +1571,30 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
     if tag_byte == 2 {
         let con_tag = unsafe { *(ptr.add(8) as *const u64) };
         let num_fields = unsafe { *(ptr.add(16) as *const u16) };
-        let _ = writeln!(stderr,
+        let _ = writeln!(
+            stderr,
             "[CASE TRAP] Con: con_tag={:#x}, num_fields={}, expected_tags={:?}",
             con_tag, num_fields, expected
         );
     } else if tag_byte == 3 {
         let lit_tag = unsafe { *(ptr.add(8) as *const u64) };
         let value = unsafe { *(ptr.add(16) as *const u64) };
-        let _ = writeln!(stderr,
+        let _ = writeln!(
+            stderr,
             "[CASE TRAP] Lit: lit_tag={:#x}, value={:#x}, expected_tags={:?}",
             lit_tag, value, expected
         );
     } else if tag_byte == 0 {
         let code_ptr = unsafe { *(ptr.add(8) as *const u64) };
         let num_captured = unsafe { *(ptr.add(16) as *const u16) };
-        let _ = writeln!(stderr,
+        let _ = writeln!(
+            stderr,
             "[CASE TRAP] Closure: code_ptr={:#x}, num_captured={}, expected_tags={:?}",
             code_ptr, num_captured, expected
         );
     } else {
-        let _ = writeln!(stderr,
+        let _ = writeln!(
+            stderr,
             "[CASE TRAP] tag_byte={} ({}), expected_tags={:?}",
             tag_byte, tag_name, expected
         );
