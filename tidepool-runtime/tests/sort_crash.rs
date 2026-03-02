@@ -1112,7 +1112,7 @@ async fn test_full_mcp_async_channel_pattern() {
     let (session_tx, mut session_rx) =
         tokio::sync::mpsc::unbounded_channel::<String>();
 
-    let _handle = std::thread::Builder::new()
+    let handle = std::thread::Builder::new()
         .name("tidepool-eval".into())
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
@@ -1157,6 +1157,7 @@ async fn test_full_mcp_async_channel_pattern() {
         Ok(None) => panic!("channel closed without message (thread crashed)"),
         Err(_) => panic!("TIMEOUT: eval did not complete in 30s"),
     }
+    handle.join().expect("eval thread panicked");
 }
 
 /// Full MCP preamble: pure string

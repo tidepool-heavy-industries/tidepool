@@ -60,9 +60,19 @@ mod inner {
 
     /// Trampoline called from C after sigsetjmp returns 0.
     /// Casts userdata back to a `Box<dyn FnOnce()>` and calls it.
+    /// Panics are caught to prevent unwinding across the C FFI boundary (which is UB).
     unsafe extern "C" fn trampoline(userdata: *mut libc::c_void) {
         let closure: Box<Box<dyn FnOnce()>> = Box::from_raw(userdata as *mut Box<dyn FnOnce()>);
-        (*closure)();
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            (*closure)();
+        }))
+        .is_err()
+        {
+            // Panic crossed into the trampoline. We can't propagate it across C,
+            // so abort. The caller (with_signal_protection) already wraps JIT calls
+            // in catch_unwind at a higher level, so this should never fire.
+            std::process::abort();
+        }
     }
 
     /// Wrap a JIT call with signal protection.
@@ -141,29 +151,34 @@ mod inner {
     /// on stack overflow.
     pub fn install() {
         use std::alloc::{alloc, Layout};
-        use std::sync::atomic::AtomicBool;
 
         const ALT_STACK_SIZE: usize = 64 * 1024;
 
-        // Allocate the alternate signal stack only once.
-        static ALT_STACK_ALLOCATED: AtomicBool = AtomicBool::new(false);
-        if !ALT_STACK_ALLOCATED.swap(true, Ordering::SeqCst) {
-            unsafe {
-                let layout = Layout::from_size_align(ALT_STACK_SIZE, 16).unwrap();
-                let alt_stack_ptr = alloc(layout);
-                if alt_stack_ptr.is_null() {
-                    ALT_STACK_ALLOCATED.store(false, Ordering::SeqCst);
-                    return;
-                }
-
-                let stack = libc::stack_t {
-                    ss_sp: alt_stack_ptr as *mut libc::c_void,
-                    ss_flags: 0,
-                    ss_size: ALT_STACK_SIZE,
-                };
-                libc::sigaltstack(&stack, ptr::null_mut());
-            }
+        // sigaltstack is per-thread, so each calling thread needs its own.
+        // Use a thread-local to allocate once per thread and leak (signal
+        // stacks must outlive the handler).
+        thread_local! {
+            static ALT_STACK_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         }
+        ALT_STACK_INSTALLED.with(|installed| {
+            if !installed.get() {
+                unsafe {
+                    let layout = Layout::from_size_align(ALT_STACK_SIZE, 16).unwrap();
+                    let alt_stack_ptr = alloc(layout);
+                    if alt_stack_ptr.is_null() {
+                        return;
+                    }
+
+                    let stack = libc::stack_t {
+                        ss_sp: alt_stack_ptr as *mut libc::c_void,
+                        ss_flags: 0,
+                        ss_size: ALT_STACK_SIZE,
+                    };
+                    libc::sigaltstack(&stack, ptr::null_mut());
+                }
+                installed.set(true);
+            }
+        });
 
         // Always (re)install signal handlers. Other code (Rust panic runtime,
         // test harness) may overwrite them, so we reinstall on every call.
