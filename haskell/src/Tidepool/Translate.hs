@@ -751,10 +751,27 @@ translate expr =
         recordDC unitDataCon
         emitNode $ NCon (varId (dataConWorkId unitDataCon)) []
 
-    -- runRW# is the primop underlying unsafePerformIO / unsafeDupablePerformIO.
-    -- IO operations are not supported — fail at extraction time.
-    Var v | isRunRWVar v ->
-      error "runRW# detected: IO operations (unsafePerformIO, etc.) are not supported in Tidepool"
+    -- runRW# :: (State# RealWorld -> o) -> o
+    -- Underlying primop for unsafePerformIO / unsafeDupablePerformIO.
+    -- Pure library code (Data.Text, etc.) uses unsafePerformIO internally for
+    -- buffer allocation, and --all-closed inlining exposes the runRW# call.
+    -- Desugar: runRW# f  →  f ()   (state token is erased at runtime)
+    Var v | isRunRWVar v
+          , length args == 1 -> do
+      recordDC unitDataCon
+      fIdx <- translate (head args)
+      tokIdx <- emitNode $ NCon (varId (dataConWorkId unitDataCon)) []
+      emitNode $ NApp fIdx tokIdx
+
+    -- runRW# applied to zero args (rare, but handle gracefully as a lambda)
+    Var v | isRunRWVar v
+          , null args -> do
+      recordDC unitDataCon
+      argId <- freshSynthVarId
+      tokIdx <- emitNode $ NCon (varId (dataConWorkId unitDataCon)) []
+      argRef <- emitNode $ NVar argId
+      body <- emitNode $ NApp argRef tokIdx
+      emitNode $ NLam argId body
 
     -- tagToEnum# @T arg → case arg of { 0# → C0; 1# → C1; ... }
     -- We desugar here because type information is erased downstream.
