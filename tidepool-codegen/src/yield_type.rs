@@ -66,7 +66,7 @@ pub enum YieldError {
     BadFunPtrTag(u8),
     /// Heap overflow after GC.
     HeapOverflow,
-    /// Fatal signal during JIT execution (SIGILL=4, SIGSEGV=11, SIGBUS=7).
+    /// Fatal signal during JIT execution (SIGILL, SIGSEGV, SIGBUS, SIGTRAP).
     Signal(i32),
 }
 
@@ -101,16 +101,41 @@ impl std::fmt::Display for YieldError {
             YieldError::BadFunPtrTag(tag) => write!(f, "application of non-closure (tag={})", tag),
             YieldError::HeapOverflow => write!(f, "heap overflow (nursery exhausted after GC)"),
             YieldError::Signal(sig) => {
-                let name = match *sig {
-                    4 => "SIGILL (illegal instruction — likely exhausted case branch)",
-                    11 => "SIGSEGV (segmentation fault — likely invalid memory access)",
-                    7 => "SIGBUS (bus error)",
-                    _ => "unknown signal",
-                };
-                write!(f, "JIT signal: {}", name)
+                #[cfg(unix)]
+                {
+                    let name = match *sig {
+                        libc::SIGILL => "SIGILL (illegal instruction — likely exhausted case branch)",
+                        libc::SIGSEGV => {
+                            "SIGSEGV (segmentation fault — likely invalid memory access)"
+                        }
+                        libc::SIGBUS => "SIGBUS (bus error)",
+                        libc::SIGTRAP => "SIGTRAP (trap — likely Cranelift trap instruction)",
+                        _ => return write!(f, "JIT signal: signal {} (unknown)", sig),
+                    };
+                    write!(f, "JIT signal: {}", name)
+                }
+                #[cfg(not(unix))]
+                write!(f, "JIT signal: signal {}", sig)
             }
         }
     }
 }
 
 impl std::error::Error for YieldError {}
+
+impl From<crate::host_fns::RuntimeError> for YieldError {
+    fn from(err: crate::host_fns::RuntimeError) -> Self {
+        use crate::host_fns::RuntimeError;
+        match err {
+            RuntimeError::DivisionByZero => YieldError::DivisionByZero,
+            RuntimeError::Overflow => YieldError::Overflow,
+            RuntimeError::UserError => YieldError::UserError,
+            RuntimeError::Undefined => YieldError::Undefined,
+            RuntimeError::TypeMetadata => YieldError::TypeMetadata,
+            RuntimeError::UnresolvedVar(id) => YieldError::UnresolvedVar(id),
+            RuntimeError::NullFunPtr => YieldError::NullFunPtr,
+            RuntimeError::BadFunPtrTag(tag) => YieldError::BadFunPtrTag(tag),
+            RuntimeError::HeapOverflow => YieldError::HeapOverflow,
+        }
+    }
+}

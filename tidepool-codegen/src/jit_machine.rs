@@ -105,7 +105,7 @@ impl JitEffectMachine {
         let mut yield_result =
             match unsafe { crate::signal_safety::with_signal_protection(|| machine.step()) } {
                 Ok(y) => y,
-                Err(e) => Yield::Error(crate::yield_type::YieldError::Signal(e.0)),
+                Err(e) => signal_error_to_yield(e),
             };
 
         let result = loop {
@@ -133,7 +133,7 @@ impl JitEffectMachine {
                         })
                     } {
                         Ok(y) => y,
-                        Err(e) => Yield::Error(crate::yield_type::YieldError::Signal(e.0)),
+                        Err(e) => signal_error_to_yield(e),
                     };
                 }
                 Yield::Error(e) => break Err(JitError::Yield(e)),
@@ -172,40 +172,14 @@ impl JitEffectMachine {
                 crate::host_fns::clear_gc_state();
                 crate::host_fns::clear_stack_map_registry();
                 crate::debug::clear_lambda_registry();
-                return Err(JitError::Yield(crate::yield_type::YieldError::Signal(e.0)));
+                return Err(JitError::Yield(runtime_error_or_signal(e.0)));
             }
         };
 
         // Check for runtime error FIRST — runtime_error now returns a poison
         // object instead of null, so we can't rely on null-check alone.
         let result = if let Some(err) = crate::host_fns::take_runtime_error() {
-            Err(JitError::Yield(match err {
-                crate::host_fns::RuntimeError::DivisionByZero => {
-                    crate::yield_type::YieldError::DivisionByZero
-                }
-                crate::host_fns::RuntimeError::Overflow => crate::yield_type::YieldError::Overflow,
-                crate::host_fns::RuntimeError::UserError => {
-                    crate::yield_type::YieldError::UserError
-                }
-                crate::host_fns::RuntimeError::Undefined => {
-                    crate::yield_type::YieldError::Undefined
-                }
-                crate::host_fns::RuntimeError::TypeMetadata => {
-                    crate::yield_type::YieldError::TypeMetadata
-                }
-                crate::host_fns::RuntimeError::UnresolvedVar(id) => {
-                    crate::yield_type::YieldError::UnresolvedVar(id)
-                }
-                crate::host_fns::RuntimeError::NullFunPtr => {
-                    crate::yield_type::YieldError::NullFunPtr
-                }
-                crate::host_fns::RuntimeError::BadFunPtrTag(tag) => {
-                    crate::yield_type::YieldError::BadFunPtrTag(tag)
-                }
-                crate::host_fns::RuntimeError::HeapOverflow => {
-                    crate::yield_type::YieldError::HeapOverflow
-                }
-            }))
+            Err(JitError::Yield(crate::yield_type::YieldError::from(err)))
         } else if result_ptr.is_null() {
             Err(JitError::Yield(crate::yield_type::YieldError::NullPointer))
         } else {
@@ -218,5 +192,53 @@ impl JitEffectMachine {
         crate::debug::clear_lambda_registry();
 
         result
+    }
+}
+
+/// Check for a pending RuntimeError (more specific) before falling back to the
+/// signal error. A runtime error like BadFunPtrTag is set by debug_app_check
+/// before the JIT continues and crashes — prefer it over the raw signal number.
+fn runtime_error_or_signal(sig: i32) -> crate::yield_type::YieldError {
+    if let Some(err) = crate::host_fns::take_runtime_error() {
+        crate::yield_type::YieldError::from(err)
+    } else {
+        crate::yield_type::YieldError::Signal(sig)
+    }
+}
+
+/// Convert a signal error into a Yield, preferring any pending RuntimeError.
+fn signal_error_to_yield(e: crate::signal_safety::SignalError) -> Yield {
+    Yield::Error(runtime_error_or_signal(e.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::yield_type::YieldError;
+
+    /// Regression test: when a RuntimeError is pending and a signal fires,
+    /// prefer the RuntimeError (more specific) over the raw signal number.
+    /// This prevents "JIT signal: unknown signal" when the real cause is
+    /// something like BadFunPtrTag(255).
+    #[test]
+    fn test_runtime_error_preferred_over_signal() {
+        // Set a pending runtime error via public API (kind=0 = DivisionByZero)
+        crate::host_fns::runtime_error(0);
+
+        // Signal fires after the runtime error was set
+        let err = runtime_error_or_signal(libc::SIGBUS);
+
+        // Should get DivisionByZero, not Signal(SIGBUS)
+        assert_eq!(err, YieldError::DivisionByZero);
+    }
+
+    /// When no RuntimeError is pending, the signal number comes through.
+    #[test]
+    fn test_signal_passthrough_without_runtime_error() {
+        // Ensure no pending error
+        crate::host_fns::take_runtime_error();
+
+        let err = runtime_error_or_signal(libc::SIGILL);
+        assert_eq!(err, YieldError::Signal(libc::SIGILL));
     }
 }

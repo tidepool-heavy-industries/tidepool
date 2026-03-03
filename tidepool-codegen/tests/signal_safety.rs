@@ -1,4 +1,12 @@
 //! Test that sigsetjmp/siglongjmp signal protection actually works.
+//!
+//! These tests MUST NOT run concurrently: the signal protection uses a global
+//! JMP_BUF, so concurrent signal-catching tests will race and crash.
+//! A shared mutex serializes them.
+
+use std::sync::Mutex;
+
+static SIGNAL_LOCK: Mutex<()> = Mutex::new(());
 
 /// Trigger an illegal instruction (SIGILL).
 /// Separate function to prevent the compiler from optimizing away the fault.
@@ -12,6 +20,7 @@ unsafe fn trigger_sigill() {
 
 #[test]
 fn test_sigill_returns_signal_error() {
+    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     tidepool_codegen::signal_safety::install();
 
     let result = unsafe {
@@ -31,6 +40,7 @@ fn test_sigill_returns_signal_error() {
 
 #[test]
 fn test_normal_execution_returns_ok() {
+    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     tidepool_codegen::signal_safety::install();
 
     let result = unsafe { tidepool_codegen::signal_safety::with_signal_protection(|| 42i32) };
@@ -40,6 +50,7 @@ fn test_normal_execution_returns_ok() {
 
 #[test]
 fn test_signal_recovery_allows_subsequent_calls() {
+    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     tidepool_codegen::signal_safety::install();
 
     // First call: crash

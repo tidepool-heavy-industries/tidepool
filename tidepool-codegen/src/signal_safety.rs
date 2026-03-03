@@ -48,7 +48,8 @@ mod inner {
                 libc::SIGILL => "SIGILL (illegal instruction — likely exhausted case branch)",
                 libc::SIGSEGV => "SIGSEGV (segmentation fault — likely invalid memory access)",
                 libc::SIGBUS => "SIGBUS (bus error)",
-                _ => "unknown signal",
+                libc::SIGTRAP => "SIGTRAP (trap — likely Cranelift trap instruction)",
+                _ => return write!(f, "JIT signal: signal {} (unknown)", self.0),
             };
             write!(f, "JIT signal: {}", name)
         }
@@ -189,6 +190,7 @@ mod inner {
             libc::sigaction(libc::SIGILL, &sa, ptr::null_mut());
             libc::sigaction(libc::SIGSEGV, &sa, ptr::null_mut());
             libc::sigaction(libc::SIGBUS, &sa, ptr::null_mut());
+            libc::sigaction(libc::SIGTRAP, &sa, ptr::null_mut());
         }
     }
 }

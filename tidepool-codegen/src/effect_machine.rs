@@ -91,17 +91,7 @@ impl CompiledEffectMachine {
         // Check for runtime error FIRST (before null check), because runtime_error
         // now returns a "poison" non-null Lit object to prevent segfaults in JIT code.
         if let Some(err) = crate::host_fns::take_runtime_error() {
-            return Yield::Error(match err {
-                crate::host_fns::RuntimeError::DivisionByZero => YieldError::DivisionByZero,
-                crate::host_fns::RuntimeError::Overflow => YieldError::Overflow,
-                crate::host_fns::RuntimeError::UserError => YieldError::UserError,
-                crate::host_fns::RuntimeError::Undefined => YieldError::Undefined,
-                crate::host_fns::RuntimeError::TypeMetadata => YieldError::TypeMetadata,
-                crate::host_fns::RuntimeError::UnresolvedVar(id) => YieldError::UnresolvedVar(id),
-                crate::host_fns::RuntimeError::NullFunPtr => YieldError::NullFunPtr,
-                crate::host_fns::RuntimeError::BadFunPtrTag(tag) => YieldError::BadFunPtrTag(tag),
-                crate::host_fns::RuntimeError::HeapOverflow => YieldError::HeapOverflow,
-            });
+            return Yield::Error(YieldError::from(err));
         }
         if result.is_null() {
             return Yield::Error(YieldError::NullPointer);
