@@ -1,3 +1,4 @@
+.tidepool/
 target/
 dist-newstyle/
 *.hi
