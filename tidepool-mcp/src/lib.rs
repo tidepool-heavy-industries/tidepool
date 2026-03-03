@@ -10,7 +10,6 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1000,8 +999,6 @@ struct EvalSession {
     session_rx: tokio::sync::mpsc::UnboundedReceiver<SessionMessage>,
     /// The Haskell source code, for error formatting on resume.
     source: Arc<str>,
-    /// When this session was created, for TTL cleanup.
-    created_at: std::time::Instant,
 }
 
 /// Wraps an existing effect dispatcher and intercepts the Ask effect tag.
@@ -1070,8 +1067,6 @@ fn extract_ask_prompt(
     format!("{:?}", request)
 }
 
-/// TTL for parked continuations (5 minutes).
-const CONTINUATION_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 // ---------------------------------------------------------------------------
 // Server internals
@@ -1106,9 +1101,11 @@ pub struct TidepoolMcpServerImpl {
     eval_tool_description: String,
     // User library support
     has_user_library: bool,
-    // Ask effect support
+    // Ask effect support — single-slot model: only one suspended session at a time.
+    // A new `eval` evicts any existing session (dropping channels, which cleanly
+    // terminates the old eval thread).
     ask_tag: u64,
-    continuations: Arc<std::sync::Mutex<HashMap<String, EvalSession>>>,
+    active_session: Arc<std::sync::Mutex<Option<(String, EvalSession)>>>,
     next_cont_id: Arc<AtomicU64>,
 }
 
@@ -1118,15 +1115,19 @@ impl TidepoolMcpServerImpl {
         format!("cont_{}", id)
     }
 
-    fn cleanup_stale_continuations(&self) {
-        let mut conts = self.continuations.lock().unwrap();
-        let now = std::time::Instant::now();
-        conts.retain(|_, session| now.duration_since(session.created_at) < CONTINUATION_TTL);
+    /// Evict any existing suspended session. Dropping the EvalSession closes
+    /// the response channel, which causes the blocked eval thread to receive
+    /// a RecvError and exit cleanly via the error path.
+    fn evict_active_session(&self) {
+        let mut slot = self.active_session.lock().unwrap();
+        if let Some((id, _session)) = slot.take() {
+            tracing::info!(continuation_id = %id, "evicting active session for new eval");
+        }
     }
 
     async fn eval(&self, req: EvalRequest) -> Result<CallToolResult, McpError> {
         tracing::info!(lines = req.code.len(), "eval request");
-        self.cleanup_stale_continuations();
+        self.evict_active_session();
 
         // Reject unsafe/IO imports before compilation
         for imp in &req.imports {
@@ -1256,15 +1257,14 @@ impl TidepoolMcpServerImpl {
                     "continuation_id": cont_id,
                     "prompt": prompt,
                 });
-                self.continuations.lock().unwrap().insert(
+                *self.active_session.lock().unwrap() = Some((
                     cont_id.clone(),
                     EvalSession {
                         response_tx,
                         session_rx,
                         source: Arc::clone(&source),
-                        created_at: std::time::Instant::now(),
                     },
-                );
+                ));
                 Ok(CallToolResult::success(vec![Content::text(
                     json.to_string(),
                 )]))
@@ -1300,19 +1300,32 @@ impl TidepoolMcpServerImpl {
 
     async fn resume(&self, req: ResumeRequest) -> Result<CallToolResult, McpError> {
         tracing::info!(continuation_id = %req.continuation_id, "resume request");
-        self.cleanup_stale_continuations();
 
         let mut session = {
-            let mut conts = self.continuations.lock().unwrap();
-            conts.remove(&req.continuation_id).ok_or_else(|| {
-                McpError::invalid_params(
-                    format!(
-                        "Unknown or expired continuation_id: {}",
-                        req.continuation_id
-                    ),
-                    None,
-                )
-            })?
+            let mut slot = self.active_session.lock().unwrap();
+            match slot.take() {
+                Some((id, session)) if id == req.continuation_id => session,
+                Some((id, session)) => {
+                    // Wrong ID — put it back
+                    *slot = Some((id, session));
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "Unknown continuation_id: {} (active session has a different id)",
+                            req.continuation_id
+                        ),
+                        None,
+                    ));
+                }
+                None => {
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "No active session (continuation_id: {} not found)",
+                            req.continuation_id
+                        ),
+                        None,
+                    ));
+                }
+            }
         };
 
         // Send the response to the blocked eval thread
@@ -1349,15 +1362,14 @@ impl TidepoolMcpServerImpl {
                     "continuation_id": cont_id,
                     "prompt": prompt,
                 });
-                self.continuations.lock().unwrap().insert(
+                *self.active_session.lock().unwrap() = Some((
                     cont_id.clone(),
                     EvalSession {
                         response_tx,
                         session_rx: session.session_rx,
                         source,
-                        created_at: std::time::Instant::now(),
                     },
-                );
+                ));
                 Ok(CallToolResult::success(vec![Content::text(
                     json.to_string(),
                 )]))
@@ -1510,7 +1522,7 @@ where
                 eval_tool_description: build_eval_tool_description(&decls),
                 has_user_library: false,
                 ask_tag,
-                continuations: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                active_session: Arc::new(std::sync::Mutex::new(None)),
                 next_cont_id: Arc::new(AtomicU64::new(1)),
             },
             _phantom: PhantomData,
