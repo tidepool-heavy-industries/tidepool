@@ -343,7 +343,29 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
         .map(|d| Path::new(&manifest_dir).join(d))
         .collect();
 
-    // Read include files and strip their module headers/pragmas
+    // Collect module names from included files so we can filter out inter-module imports
+    let mut included_module_names: Vec<String> = Vec::new();
+    for dir in &abs_includes {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().is_some_and(|ext| ext == "hs") {
+                    if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                        included_module_names.push(stem.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Read include files, collecting their pragmas, imports, and body
+    let mut all_extensions = vec![
+        "GADTs".to_string(),
+        "DataKinds".to_string(),
+        "TypeOperators".to_string(),
+        "FlexibleContexts".to_string(),
+    ];
+    let mut all_imports = vec!["import Control.Monad.Freer".to_string()];
     let mut include_bodies = String::new();
     for dir in &abs_includes {
         if let Ok(entries) = std::fs::read_dir(dir) {
@@ -351,7 +373,23 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
                 let p = entry.path();
                 if p.extension().is_some_and(|ext| ext == "hs") {
                     if let Ok(content) = std::fs::read_to_string(&p) {
-                        include_bodies.push_str(&strip_module_header(&content));
+                        let header = strip_module_header(&content);
+                        for ext in header.extensions {
+                            if !all_extensions.contains(&ext) {
+                                all_extensions.push(ext);
+                            }
+                        }
+                        for imp in header.imports {
+                            // Skip imports for modules being inlined
+                            let is_internal = included_module_names.iter().any(|m| {
+                                imp.trim().starts_with(&format!("import {}", m))
+                                    || imp.trim().starts_with(&format!("import qualified {}", m))
+                            });
+                            if !is_internal && !all_imports.contains(&imp) {
+                                all_imports.push(imp);
+                            }
+                        }
+                        include_bodies.push_str(&header.body);
                         include_bodies.push('\n');
                     }
                 }
@@ -361,9 +399,11 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
 
     // Build single-module source: header + included definitions + user code
     let source_text = parsed.source.value();
+    let extensions_str = all_extensions.join(", ");
+    let imports_str = all_imports.join("\n");
     let full_source = format!(
-        "{{-# LANGUAGE GADTs, DataKinds, TypeOperators, FlexibleContexts #-}}\nmodule {} where\nimport Control.Monad.Freer\n{}\n{}",
-        module_name, include_bodies, source_text
+        "{{-# LANGUAGE {} #-}}\nmodule {} where\n{}\n{}\n{}",
+        extensions_str, module_name, imports_str, include_bodies, source_text
     );
 
     // Write to target/tidepool-inline/<Module>.hs
@@ -454,27 +494,60 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
     }
 }
 
-/// Strip module header, language pragmas, and import lines from a Haskell source file.
-/// Returns only the body (data declarations, function definitions, etc.).
-fn strip_module_header(source: &str) -> String {
-    let mut lines: Vec<&str> = Vec::new();
+/// Parsed header info from a Haskell source file.
+struct HaskellHeader {
+    /// LANGUAGE extensions found in pragmas
+    extensions: Vec<String>,
+    /// Import lines (verbatim)
+    imports: Vec<String>,
+    /// Body (everything after header)
+    body: String,
+}
+
+/// Strip module header from a Haskell source file, collecting pragmas and imports.
+fn strip_module_header(source: &str) -> HaskellHeader {
+    let mut extensions = Vec::new();
+    let mut imports = Vec::new();
+    let mut body_lines: Vec<&str> = Vec::new();
     let mut past_header = false;
     for line in source.lines() {
         let trimmed = line.trim();
         if !past_header {
-            // Skip language pragmas, module declarations, and imports
+            if trimmed.starts_with("{-#") && trimmed.contains("LANGUAGE") {
+                // Extract extensions from pragma like {-# LANGUAGE Foo, Bar #-}
+                if let Some(start) = trimmed.find("LANGUAGE") {
+                    let after = &trimmed[start + "LANGUAGE".len()..];
+                    if let Some(end) = after.find("#-}") {
+                        let exts = &after[..end];
+                        for ext in exts.split(',') {
+                            let ext = ext.trim();
+                            if !ext.is_empty() {
+                                extensions.push(ext.to_string());
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             if trimmed.starts_with("{-#")
                 || trimmed.starts_with("module ")
-                || trimmed.starts_with("import ")
                 || trimmed.is_empty()
             {
                 continue;
             }
+            if trimmed.starts_with("import ") {
+                imports.push(line.to_string());
+                continue;
+            }
             past_header = true;
         }
-        lines.push(line);
+        body_lines.push(line);
     }
-    lines.join("\n")
+    HaskellHeader {
+        extensions,
+        imports,
+        body: body_lines.join("\n"),
+    }
 }
 
 fn capitalize(s: &str) -> String {

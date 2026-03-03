@@ -1,4 +1,7 @@
+{-# LANGUAGE OverloadedStrings #-}
 module Types where
+
+import Data.Text (Text)
 
 data BinOp = OpAdd | OpSub | OpMul | OpDiv
            | OpEq | OpNe | OpLt | OpGt | OpLe | OpGe
@@ -9,29 +12,29 @@ data BuiltinId = BPrint | BFetch | BReadFile | BWriteFile
 
 data TExpr
   = TInt Int
-  | TStr String
+  | TStr Text
   | TBool Bool
-  | TVar String
+  | TVar Text
   | TList [TExpr]
   | TApp TExpr [TExpr]
   | TBuiltin BuiltinId [TExpr]
-  | TLet String TExpr TExpr
-  | TLam [String] TExpr
+  | TLet Text TExpr TExpr
+  | TLam [Text] TExpr
   | TIf TExpr TExpr TExpr
   | TBinOp BinOp TExpr TExpr
-  | TBind String TExpr
+  | TBind Text TExpr
 
 data EvalError
-  = TypeError String
-  | UndefinedVar String
+  = TypeError Text
+  | UndefinedVar Text
   | NotAFunction
-  | ArityError String
+  | ArityError Text
 
 data TVal
   = VInt Int
-  | VStr String
+  | VStr Text
   | VBool Bool
   | VList [TVal]
   | VUnit
-  | VFun [String] TExpr [(String, TVal)]
+  | VFun [Text] TExpr [(Text, TVal)]
   | VError EvalError

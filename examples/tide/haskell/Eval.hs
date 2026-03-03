@@ -1,18 +1,20 @@
-{-# LANGUAGE DataKinds, TypeOperators #-}
+{-# LANGUAGE DataKinds, TypeOperators, OverloadedStrings #-}
 module Eval (eval, repl, showVal, showInt, showError) where
 
+import Data.Text (Text)
+import qualified Data.Text as T
 import Types
 import Effects
 
 type TideEffs = '[Repl, Console, Env, Net, Fs]
 
--- | Convert Int to String without using Prelude's show.
+-- | Convert Int to Text without using Prelude's show.
 -- Uses quot/rem separately (NOT quotRem which returns unboxed tuples).
-showInt :: Int -> String
+showInt :: Int -> Text
 showInt n
-  | n < (0 :: Int)  = '-' : showPos (negate n)
+  | n < (0 :: Int)  = T.pack ('-' : showPos (negate n))
   | n == (0 :: Int)  = "0"
-  | otherwise        = showPos n
+  | otherwise        = T.pack (showPos n)
 
 showPos :: Int -> String
 showPos n
@@ -34,29 +36,29 @@ digitToChar d = case d of
   _ -> '?'
 
 -- | Show an evaluation error.
-showError :: EvalError -> String
+showError :: EvalError -> Text
 showError e = case e of
-  TypeError s    -> "Type error: " ++ s
-  UndefinedVar x -> "Undefined: " ++ x
+  TypeError s    -> T.append "Type error: " s
+  UndefinedVar x -> T.append "Undefined: " x
   NotAFunction   -> "not a function"
   ArityError s   -> s
 
 -- | Convert TVal to display string.
-showVal :: TVal -> String
+showVal :: TVal -> Text
 showVal v = case v of
   VInt n     -> showInt n
   VStr s     -> s
   VBool b    -> if b then "true" else "false"
   VUnit      -> "()"
   VFun _ _ _ -> "<function>"
-  VList vs   -> "[" ++ showListVals vs ++ "]"
-  VError e   -> "<error: " ++ showError e ++ ">"
+  VList vs   -> T.append "[" (T.append (showListVals vs) "]")
+  VError e   -> T.append "<error: " (T.append (showError e) ">")
 
-showListVals :: [TVal] -> String
+showListVals :: [TVal] -> Text
 showListVals xs = case xs of
   []     -> ""
   (v:[]) -> showVal v
-  (v:vs) -> showVal v ++ ", " ++ showListVals vs
+  (v:vs) -> T.append (showVal v) (T.append ", " (showListVals vs))
 
 -- | Custom list length (avoids Foldable typeclass).
 listLength :: [a] -> Int
@@ -136,7 +138,7 @@ evalBinOp op lv rv = case op of
   OpGe     -> intOp lv rv (\a b -> VBool (a >= b))
   OpConcat -> case lv of
     VStr a -> case rv of
-      VStr b -> pure (VStr (a ++ b))
+      VStr b -> pure (VStr (T.append a b))
       _      -> pure (VError (TypeError "++ expects strings"))
     _      -> pure (VError (TypeError "++ expects strings"))
 
@@ -148,20 +150,10 @@ intOp _ _ _ = pure (VError (TypeError "expected integers"))
 -- | Value equality (structural).
 valEq :: TVal -> TVal -> Bool
 valEq (VInt a) (VInt b) = a == b
-valEq (VStr a) (VStr b) = strEq a b
+valEq (VStr a) (VStr b) = a == b
 valEq (VBool a) (VBool b) = if a then b else not b
 valEq VUnit VUnit = True
 valEq _ _ = False
-
--- | String equality (explicit recursion, avoids Eq [Char] typeclass).
-strEq :: String -> String -> Bool
-strEq xs ys = case xs of
-  [] -> case ys of
-    [] -> True
-    _  -> False
-  (a:as') -> case ys of
-    []      -> False
-    (b:bs) -> if a == b then strEq as' bs else False
 
 -- | Apply function value to arguments.
 applyFun :: TVal -> [TVal] -> Eff TideEffs TVal
@@ -180,7 +172,7 @@ applyFun fv args = case fv of
   _ -> pure (VError NotAFunction)
 
 -- | Save current bindings for parameter names.
-saveParams :: [String] -> Eff TideEffs [Maybe TVal]
+saveParams :: [Text] -> Eff TideEffs [Maybe TVal]
 saveParams ps = case ps of
   []     -> pure []
   (p:rest) -> do
@@ -189,7 +181,7 @@ saveParams ps = case ps of
     pure (old : olds)
 
 -- | Restore saved bindings for parameter names.
-restoreParams :: [String] -> [Maybe TVal] -> Eff TideEffs ()
+restoreParams :: [Text] -> [Maybe TVal] -> Eff TideEffs ()
 restoreParams ps olds = case (ps, olds) of
   ([], _) -> pure ()
   (_, []) -> pure ()
@@ -200,7 +192,7 @@ restoreParams ps olds = case (ps, olds) of
     restoreParams prest orest
 
 -- | Bind parameters in environment.
-bindParams :: [String] -> [TVal] -> Eff TideEffs ()
+bindParams :: [Text] -> [TVal] -> Eff TideEffs ()
 bindParams ps as' = case ps of
   [] -> pure ()
   (p:rest) -> case as' of
@@ -234,7 +226,7 @@ evalBuiltin bid args = case bid of
     _ -> pure (VError (ArityError "write_file: 2 string args expected"))
   BLen -> case args of
     (VList vs : []) -> pure (VInt (listLength vs))
-    (VStr s : [])   -> pure (VInt (listLength s))
+    (VStr s : [])   -> pure (VInt (T.length s))
     _ -> pure (VError (ArityError "len: list or string expected"))
   BStr -> case args of
     (v:[]) -> pure (VStr (showVal v))
@@ -243,7 +235,7 @@ evalBuiltin bid args = case bid of
     (VInt n : []) -> pure (VInt n)
     _ -> pure (VError (ArityError "int: numeric arg expected"))
   BConcat -> case args of
-    (VStr a : VStr b : []) -> pure (VStr (a ++ b))
+    (VStr a : VStr b : []) -> pure (VStr (T.append a b))
     _ -> pure (VError (ArityError "concat: 2 string args expected"))
 
 -- | Extract first elements from a list of pairs.
@@ -253,7 +245,7 @@ mapFst xs = case xs of
   ((a, _):rest) -> a : mapFst rest
 
 -- | Restore captured variable bindings into the environment.
-restoreCaps :: Member Env effs => [(String, TVal)] -> Eff effs ()
+restoreCaps :: Member Env effs => [(Text, TVal)] -> Eff effs ()
 restoreCaps caps = case caps of
   []            -> pure ()
   ((k, v):rest) -> do
@@ -270,6 +262,6 @@ repl = do
       val <- eval expr
       case val of
         VUnit    -> pure ()
-        VError e -> display ("Error: " ++ showError e)
+        VError e -> display (T.append "Error: " (showError e))
         _        -> display (showVal val)
       repl
