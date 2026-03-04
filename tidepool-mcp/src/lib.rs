@@ -914,23 +914,25 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
             ));
             out.push_str(concat!(
                 "instance Applicative Q where\n",
-                "  pure a = Q (SObj []) (const a) 0.7\n",
+                "  pure a = Q (SObj []) (const a) 0.6\n",
                 "  Q (SObj fs1) p1 t1 <*> Q (SObj fs2) p2 t2 = Q (SObj (fs1 ++ fs2)) (\\v -> p1 v (p2 v)) (if t1 >= t2 then t1 else t2)\n",
                 "  Q s1 p1 t1 <*> Q s2 p2 t2 = Q s1 (\\v -> p1 v (p2 v)) (if t1 >= t2 then t1 else t2)\n",
             ));
-            // Internal helpers: augment schema with _conf, extract confidence, strip _conf
+            // Internal helpers: augment schema with rubric, extract confidence, strip rubric
             out.push_str(concat!(
                 "h_aug :: Schema -> Schema\n",
-                "h_aug (SObj fs) = SObj (fs ++ [(\"_conf\", SNum)])\n",
-                "h_aug s = SObj [(\"value\", s), (\"_conf\", SNum)]\n",
+                "h_aug (SObj fs) = SObj (fs ++ [(\"_understood\", SBool), (\"_confident\", SBool), (\"_unambiguous\", SBool)])\n",
+                "h_aug s = SObj [(\"value\", s), (\"_understood\", SBool), (\"_confident\", SBool), (\"_unambiguous\", SBool)]\n",
             ));
             out.push_str(concat!(
                 "h_conf :: Value -> Double\n",
-                "h_conf v = case v ^? key \"_conf\" . _Number of { Just d -> d; _ -> 0.0 }\n",
+                "h_conf v =\n",
+                "  let b k = case v ^? key k . _Bool of { Just True -> 1.0; _ -> 0.0 }\n",
+                "  in (b \"_understood\" + b \"_confident\" + b \"_unambiguous\") / 3.0\n",
             ));
             out.push_str(concat!(
                 "h_strip :: Value -> Value\n",
-                "h_strip (Object kvs) = Object (KM.delete (KM.fromText \"_conf\") kvs)\n",
+                "h_strip (Object kvs) = Object (KM.delete (KM.fromText \"_unambiguous\") (KM.delete (KM.fromText \"_confident\") (KM.delete (KM.fromText \"_understood\") kvs)))\n",
                 "h_strip v = v\n",
             ));
             // ?? operator: ask Haiku, auto-escalate on low confidence
@@ -960,23 +962,23 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
             // Smart constructors
             out.push_str(concat!(
                 "pick :: [Text] -> Q Text\n",
-                "pick cats = Q (SObj [(\"pick\", SEnum cats)]) (\\v -> case v ^? key \"pick\" . _String of { Just s -> s; _ -> \"\" }) 0.7\n",
+                "pick cats = Q (SObj [(\"pick\", SEnum cats)]) (\\v -> case v ^? key \"pick\" . _String of { Just s -> s; _ -> \"\" }) 0.6\n",
             ));
             out.push_str(concat!(
                 "yn :: Q Bool\n",
-                "yn = Q (SObj [(\"answer\", SBool)]) (\\v -> case v ^? key \"answer\" . _Bool of { Just b -> b; _ -> False }) 0.7\n",
+                "yn = Q (SObj [(\"answer\", SBool)]) (\\v -> case v ^? key \"answer\" . _Bool of { Just b -> b; _ -> False }) 0.6\n",
             ));
             out.push_str(concat!(
                 "obj :: Schema -> Q Value\n",
-                "obj s = Q s id 0.7\n",
+                "obj s = Q s id 0.6\n",
             ));
             out.push_str(concat!(
                 "txt :: Text -> Q Text\n",
-                "txt k = Q (SObj [(k, SStr)]) (\\v -> case v ^? key k . _String of { Just s -> s; _ -> \"\" }) 0.7\n",
+                "txt k = Q (SObj [(k, SStr)]) (\\v -> case v ^? key k . _String of { Just s -> s; _ -> \"\" }) 0.6\n",
             ));
             out.push_str(concat!(
                 "num :: Text -> Q Double\n",
-                "num k = Q (SObj [(k, SNum)]) (\\v -> case v ^? key k . _Number of { Just n -> n; _ -> 0.0 }) 0.7\n",
+                "num k = Q (SObj [(k, SNum)]) (\\v -> case v ^? key k . _Number of { Just n -> n; _ -> 0.0 }) 0.6\n",
             ));
             out.push_str(concat!(
                 "bar :: Double -> Q a -> Q a\n",
