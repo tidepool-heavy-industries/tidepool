@@ -273,11 +273,13 @@ mod inner {
                 siglongjmp(buf, sig);
             }
         }
-        // Not in JIT context — log crash dump, restore default handler and re-raise
+        // Not in JIT context — log crash dump, terminate just this thread.
+        // pthread_exit is async-signal-safe (POSIX) and kills only the calling
+        // thread. The detached eval thread's channel sender drops, which the
+        // MCP server handles as "Eval thread crashed".
         unsafe {
             write_crash_dump(sig, _info);
-            libc::signal(sig, libc::SIG_DFL);
-            libc::raise(sig);
+            libc::pthread_exit(std::ptr::null_mut());
         }
     }
 
