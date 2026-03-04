@@ -1179,9 +1179,9 @@ impl EmitContext {
                             std::collections::HashSet<VarId>,
                         > = std::collections::HashMap::with_capacity(deferred_simple.len());
                         for &(start_node, _) in &deferred_simple {
-                            let mut visited = std::collections::HashSet::new();
+                            let mut visited = std::collections::HashSet::with_capacity(bindings.len());
                             let mut stack = vec![start_node];
-                            let mut reached = std::collections::HashSet::new();
+                            let mut reached = std::collections::HashSet::with_capacity(deferred_simple.len());
 
                             while let Some(node) = stack.pop() {
                                 if !visited.insert(node) {
