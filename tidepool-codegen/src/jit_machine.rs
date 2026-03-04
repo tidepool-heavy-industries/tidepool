@@ -19,6 +19,7 @@ pub enum JitError {
     Effect(EffectError),
     Yield(crate::yield_type::YieldError),
     HeapBridge(crate::heap_bridge::BridgeError),
+    Signal(crate::signal_safety::SignalError),
     EffectResponseTooLarge { nodes: usize, limit: usize },
 }
 
@@ -33,6 +34,7 @@ impl std::fmt::Display for JitError {
             JitError::Effect(e) => write!(f, "effect dispatch error: {}", e),
             JitError::Yield(e) => write!(f, "yield error: {}", e),
             JitError::HeapBridge(e) => write!(f, "heap bridge error: {}", e),
+            JitError::Signal(e) => write!(f, "JIT signal during heap bridge: {}", e),
             JitError::EffectResponseTooLarge { nodes, limit } => write!(
                 f,
                 "Effect handler response too large ({nodes} value nodes, max {limit}). \
@@ -118,8 +120,13 @@ impl JitEffectMachine {
         let result = loop {
             match yield_result {
                 Yield::Done(ptr) => {
-                    let val =
-                        unsafe { heap_bridge::heap_to_value(ptr) }.map_err(JitError::HeapBridge)?;
+                    let val = unsafe {
+                        crate::signal_safety::with_signal_protection(|| {
+                            heap_bridge::heap_to_value(ptr)
+                        })
+                    }
+                    .map_err(JitError::Signal)?
+                    .map_err(JitError::HeapBridge)?;
                     break Ok(val);
                 }
                 Yield::Request {
@@ -127,8 +134,13 @@ impl JitEffectMachine {
                     request,
                     continuation,
                 } => {
-                    let req_val = unsafe { heap_bridge::heap_to_value(request) }
-                        .map_err(JitError::HeapBridge)?;
+                    let req_val = unsafe {
+                        crate::signal_safety::with_signal_protection(|| {
+                            heap_bridge::heap_to_value(request)
+                        })
+                    }
+                    .map_err(JitError::Signal)?
+                    .map_err(JitError::HeapBridge)?;
                     let cx = EffectContext::with_user(table, user);
                     let resp_val = handlers.dispatch(tag, &req_val, &cx)?;
                     const MAX_EFFECT_RESPONSE_NODES: usize = 50_000;
@@ -139,9 +151,13 @@ impl JitEffectMachine {
                             limit: MAX_EFFECT_RESPONSE_NODES,
                         });
                     }
-                    let resp_ptr =
-                        unsafe { heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut()) }
-                            .map_err(JitError::HeapBridge)?;
+                    let resp_ptr = unsafe {
+                        crate::signal_safety::with_signal_protection(|| {
+                            heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut())
+                        })
+                    }
+                    .map_err(JitError::Signal)?
+                    .map_err(JitError::HeapBridge)?;
                     crate::host_fns::reset_call_depth();
                     yield_result = match unsafe {
                         crate::signal_safety::with_signal_protection(|| {
@@ -200,7 +216,13 @@ impl JitEffectMachine {
         } else if result_ptr.is_null() {
             Err(JitError::Yield(crate::yield_type::YieldError::NullPointer))
         } else {
-            unsafe { heap_bridge::heap_to_value(result_ptr) }.map_err(JitError::HeapBridge)
+            unsafe {
+                crate::signal_safety::with_signal_protection(|| {
+                    heap_bridge::heap_to_value(result_ptr)
+                })
+            }
+            .map_err(JitError::Signal)?
+            .map_err(JitError::HeapBridge)
         };
 
         // Cleanup registries
