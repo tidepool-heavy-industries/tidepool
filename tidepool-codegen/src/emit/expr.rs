@@ -446,20 +446,16 @@ fn emit_lam(
 
     let captures: Vec<(VarId, SsaVal)> = sorted_fvs
         .iter()
-        .map(|v| {
-            let val = ctx.env.get(v).unwrap_or_else(|| {
-                panic!(
-                    "Lam capture: VarId({:#x}) not in env. env keys: {:?}",
-                    v.0,
-                    ctx.env
-                        .keys()
-                        .map(|k| format!("{:#x}", k.0))
-                        .collect::<Vec<_>>()
+        .map(|v| -> Result<(VarId, SsaVal), EmitError> {
+            let val = ctx.env.get(v).ok_or_else(|| {
+                EmitError::MissingCaptureVar(
+                    *v,
+                    format!("Lam capture: not in env (env has {} vars)", ctx.env.len()),
                 )
-            });
-            (*v, *val)
+            })?;
+            Ok((*v, *val))
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     let lambda_name = ctx.next_lambda_name();
     let mut closure_sig = Signature::new(pipeline.isa.default_call_conv());
@@ -1314,12 +1310,12 @@ impl EmitContext {
                     // These are captures of Lam/Con bindings (or trivial simple bindings)
                     // that were not in env during Phase 1 but are now in env.
                     for (var_id, updates) in pending_capture_updates {
-                        let ssaval = self.env.get(&var_id).unwrap_or_else(|| {
-                            panic!(
-                                "LetRec capture fill: VarId({:#x}) not in env after Phase 3c.",
-                                var_id.0
-                            );
-                        });
+                        let ssaval = self.env.get(&var_id).ok_or_else(|| {
+                            EmitError::MissingCaptureVar(
+                                var_id,
+                                "LetRec Phase 3a' capture fill: not in env after Phase 3c".into(),
+                            )
+                        })?;
                         let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
                         for (closure_ptr, offset) in updates {
                             builder

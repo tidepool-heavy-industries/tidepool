@@ -68,6 +68,8 @@ pub enum EmitError {
     CraneliftError(String),
     Pipeline(crate::pipeline::PipelineError),
     InvalidArity(PrimOpKind, usize, usize),
+    /// A variable needed for closure capture was not found in the environment.
+    MissingCaptureVar(VarId, String),
 }
 
 impl std::fmt::Display for EmitError {
@@ -83,6 +85,9 @@ impl std::fmt::Display for EmitError {
                     "invalid arity for {:?}: expected {}, got {}",
                     op, expected, got
                 )
+            }
+            EmitError::MissingCaptureVar(v, ctx) => {
+                write!(f, "missing capture variable VarId({:#x}): {}", v.0, ctx)
             }
         }
     }
