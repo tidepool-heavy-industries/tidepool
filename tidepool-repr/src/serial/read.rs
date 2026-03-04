@@ -171,13 +171,10 @@ fn parse_warnings(val: &Value) -> MetaWarnings {
     if let Value::Map(pairs) = val {
         for (k, v) in pairs {
             if let Value::Text(key) = k {
-                match key.as_str() {
-                    "has_io" => {
-                        if let Value::Bool(b) = v {
-                            warnings.has_io = *b;
-                        }
+                if key.as_str() == "has_io" {
+                    if let Value::Bool(b) = v {
+                        warnings.has_io = *b;
                     }
-                    _ => {} // ignore unknown keys for forward compat
                 }
             }
         }
