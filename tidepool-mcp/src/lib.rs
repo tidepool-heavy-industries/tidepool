@@ -988,10 +988,19 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
                 "triage q render = mapM (\\x -> (,) x <$> (q ?? render x))\n",
             ));
             out.push_str(concat!(
-                "survey :: (Eq b, Ord b) => Q b -> (a -> Text) -> [a] -> M [(b, Int)]\n",
+                "findTally :: Eq a => a -> [(a, Int)] -> Maybe [(a, Int)]\n",
+                "findTally _ [] = Nothing\n",
+                "findTally x ((k, n):rest) = if x == k then Just ((k, n + 1) : rest) else case findTally x rest of { Just rest' -> Just ((k, n) : rest'); Nothing -> Nothing }\n",
+            ));
+            out.push_str(concat!(
+                "tallyList :: Eq a => [a] -> [(a, Int)]\n",
+                "tallyList = foldl' (\\acc x -> case findTally x acc of { Just acc' -> acc'; Nothing -> acc ++ [(x, 1)] }) []\n",
+            ));
+            out.push_str(concat!(
+                "survey :: Eq b => Q b -> (a -> Text) -> [a] -> M [(b, Int)]\n",
                 "survey q render xs = do\n",
                 "  bs <- mapM (\\x -> q ?? render x) xs\n",
-                "  pure (map (\\g -> (head g, length g)) (groupBy (==) (sort bs)))\n",
+                "  pure (tallyList bs)\n",
             ));
             out.push_str(concat!(
                 "sift :: Q Bool -> (a -> Text) -> [a] -> M ([a], [a])\n",
@@ -2240,7 +2249,7 @@ mod tests {
         assert!(preamble.contains("num :: Text -> Q Double"));
         assert!(preamble.contains("bar :: Double -> Q a -> Q a"));
         assert!(preamble.contains("triage :: Q b -> (a -> Text) -> [a] -> M [(a, b)]"));
-        assert!(preamble.contains("survey :: (Eq b, Ord b) => Q b -> (a -> Text) -> [a] -> M [(b, Int)]"));
+        assert!(preamble.contains("survey :: Eq b => Q b -> (a -> Text) -> [a] -> M [(b, Int)]"));
         assert!(preamble.contains("sift :: Q Bool -> (a -> Text) -> [a] -> M ([a], [a])"));
     }
 
