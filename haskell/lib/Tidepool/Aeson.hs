@@ -1,7 +1,6 @@
--- | Vendored aeson — re-exports construction types, lens accessors, and parser.
+-- | Vendored aeson — re-exports construction types and lens accessors.
 --
 -- Drop-in replacement for Data.Aeson + Data.Aeson.Lens.
--- Uses pure Haskell parser (no attoparsec, no FFI).
 module Tidepool.Aeson
   ( -- * Core types (from Tidepool.Aeson.Value)
     Value(..)
@@ -20,12 +19,6 @@ module Tidepool.Aeson
   , emptyArray
     -- * ToJSON class
   , ToJSON(..)
-    -- * Encoding / Decoding
-  , encode
-  , decode
-  , eitherDecode
-    -- * Result type
-  , Result(..)
     -- * Lens accessors (from Tidepool.Aeson.Lens)
   , key
   , members

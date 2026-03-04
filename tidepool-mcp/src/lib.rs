@@ -425,7 +425,7 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
         out.push_str("-- Pagination\n");
         out.push_str(concat!(
             "showI :: Int -> Text\n",
-            "showI n = encode (toJSON n)\n",
+            "showI n = show n\n",
         ));
         // say: normal Print effect + char counter in KV (when available)
         if has_console && has_kv {
@@ -524,7 +524,7 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
                 "        [] -> pure truncated\n",
                 "        _ -> do\n",
                 "          let stubInfo = Array (map (\\(sid, sv) -> object [\"id\" .= (\"stub_\" <> showI sid), \"size\" .= toJSON (valSize sv)]) stubs)\n",
-                "          resp <- ask (encode (object [\"paginated\" .= truncated, \"stubs\" .= stubInfo]))\n",
+                "          resp <- ask (\"[Pagination] truncated: \" <> show truncated <> \" stubs: \" <> show stubInfo)\n",
                 "          case resp ^? _String of\n",
                 "            Just s -> case parseIntM (T.drop 5 s) of\n",
                 "              Just sid -> case lookupStub sid stubs of\n",
