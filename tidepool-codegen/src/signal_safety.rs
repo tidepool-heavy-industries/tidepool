@@ -24,6 +24,117 @@ mod inner {
     static mut CRASH_DIR_PATH: [u8; 512] = [0u8; 512];
     static CRASH_DIR_PATH_LEN: AtomicUsize = AtomicUsize::new(0);
 
+    /// Format a crash log line into `buf`. Returns the number of bytes written.
+    /// Pure function — safe to call from tests. All inputs are plain data.
+    ///
+    /// # Safety
+    /// Caller must ensure `buf` is large enough (384 bytes recommended).
+    unsafe fn format_crash_line(
+        buf: &mut [u8],
+        sig: libc::c_int,
+        si_addr: usize,
+        jmp_set: bool,
+        timestamp: u64,
+        thread_id: u64,
+    ) -> usize {
+        let mut pos = 0;
+
+        // "[tidepool-crash] sig="
+        let sig_name: &[u8] = match sig {
+            libc::SIGILL => b"SIGILL",
+            libc::SIGSEGV => b"SIGSEGV",
+            libc::SIGBUS => b"SIGBUS",
+            libc::SIGTRAP => b"SIGTRAP",
+            _ => b"UNKNOWN",
+        };
+
+        let prefix = b"[tidepool-crash] sig=";
+        buf[pos..pos + prefix.len()].copy_from_slice(prefix);
+        pos += prefix.len();
+
+        buf[pos..pos + sig_name.len()].copy_from_slice(sig_name);
+        pos += sig_name.len();
+
+        // " addr="
+        let addr_prefix = b" addr=0x";
+        buf[pos..pos + addr_prefix.len()].copy_from_slice(addr_prefix);
+        pos += addr_prefix.len();
+
+        // Faulting address as hex
+        let hex_digits = b"0123456789abcdef";
+        let mut hex_buf = [b'0'; 16];
+        let mut val = si_addr;
+        for i in (0..16).rev() {
+            hex_buf[i] = hex_digits[val & 0xf];
+            val >>= 4;
+        }
+        buf[pos..pos + 16].copy_from_slice(&hex_buf);
+        pos += 16;
+
+        // " jmpbuf="
+        let jmp_prefix = b" jmpbuf=";
+        buf[pos..pos + jmp_prefix.len()].copy_from_slice(jmp_prefix);
+        pos += jmp_prefix.len();
+
+        if jmp_set {
+            buf[pos..pos + 3].copy_from_slice(b"set");
+            pos += 3;
+        } else {
+            buf[pos..pos + 4].copy_from_slice(b"null");
+            pos += 4;
+        }
+
+        // " ts="
+        let ts_prefix = b" ts=";
+        buf[pos..pos + ts_prefix.len()].copy_from_slice(ts_prefix);
+        pos += ts_prefix.len();
+
+        // Unix timestamp as decimal
+        let mut t = timestamp;
+        let mut ts_buf = [0u8; 20];
+        let mut ts_len = 0;
+        if t == 0 {
+            ts_buf[0] = b'0';
+            ts_len = 1;
+        } else {
+            while t > 0 {
+                ts_buf[ts_len] = b'0' + (t % 10) as u8;
+                t /= 10;
+                ts_len += 1;
+            }
+            ts_buf[..ts_len].reverse();
+        }
+        buf[pos..pos + ts_len].copy_from_slice(&ts_buf[..ts_len]);
+        pos += ts_len;
+
+        // " tid="
+        let tid_prefix = b" tid=";
+        buf[pos..pos + tid_prefix.len()].copy_from_slice(tid_prefix);
+        pos += tid_prefix.len();
+
+        let mut t = thread_id;
+        let mut tid_buf = [0u8; 20];
+        let mut tid_len = 0;
+        if t == 0 {
+            tid_buf[0] = b'0';
+            tid_len = 1;
+        } else {
+            while t > 0 {
+                tid_buf[tid_len] = b'0' + (t % 10) as u8;
+                t /= 10;
+                tid_len += 1;
+            }
+            tid_buf[..tid_len].reverse();
+        }
+        buf[pos..pos + tid_len].copy_from_slice(&tid_buf[..tid_len]);
+        pos += tid_len;
+
+        buf[pos] = b'\n';
+        pos += 1;
+
+        pos
+    }
+
     /// Write a crash dump using only async-signal-safe syscalls.
     /// No allocations, no locks, no std::fs — just raw libc open/write/close.
     unsafe fn write_crash_dump(sig: libc::c_int, info: *mut libc::siginfo_t) {
@@ -41,87 +152,23 @@ mod inner {
             return;
         }
 
-        // Write signal info
-        let sig_name: &[u8] = match sig {
-            libc::SIGILL => b"SIGILL",
-            libc::SIGSEGV => b"SIGSEGV",
-            libc::SIGBUS => b"SIGBUS",
-            libc::SIGTRAP => b"SIGTRAP",
-            _ => b"UNKNOWN",
-        };
-
-        let mut buf = [0u8; 256];
-        let mut pos = 0;
-
-        // "[tidepool-crash] sig="
-        let prefix = b"[tidepool-crash] sig=";
-        buf[pos..pos + prefix.len()].copy_from_slice(prefix);
-        pos += prefix.len();
-
-        buf[pos..pos + sig_name.len()].copy_from_slice(sig_name);
-        pos += sig_name.len();
-
-        // " addr="
-        let addr_prefix = b" addr=0x";
-        buf[pos..pos + addr_prefix.len()].copy_from_slice(addr_prefix);
-        pos += addr_prefix.len();
-
-        // Faulting address as hex
         let si_addr = if !info.is_null() {
             (*info).si_addr() as usize
         } else {
             0
         };
-        // Write hex digits
-        let hex_digits = b"0123456789abcdef";
-        let mut hex_buf = [b'0'; 16];
-        let mut val = si_addr;
-        for i in (0..16).rev() {
-            hex_buf[i] = hex_digits[val & 0xf];
-            val >>= 4;
-        }
-        buf[pos..pos + 16].copy_from_slice(&hex_buf);
-        pos += 16;
-
-        // " jmpbuf="
-        let jmp_prefix = b" jmpbuf=";
-        buf[pos..pos + jmp_prefix.len()].copy_from_slice(jmp_prefix);
-        pos += jmp_prefix.len();
-
         let jmp_set = JMP_BUF.with(|cell| !cell.get().is_null());
-        if jmp_set {
-            buf[pos..pos + 3].copy_from_slice(b"set");
-            pos += 3;
-        } else {
-            buf[pos..pos + 4].copy_from_slice(b"null");
-            pos += 4;
-        }
+        let ts = libc::time(ptr::null_mut()) as u64;
 
-        // " ts="
-        let ts_prefix = b" ts=";
-        buf[pos..pos + ts_prefix.len()].copy_from_slice(ts_prefix);
-        pos += ts_prefix.len();
+        #[cfg(target_os = "linux")]
+        let tid = libc::syscall(libc::SYS_gettid) as u64;
+        #[cfg(target_os = "macos")]
+        let tid = unsafe { libc::pthread_self() as u64 };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let tid = 0u64;
 
-        // Unix timestamp as decimal
-        let mut ts = libc::time(ptr::null_mut()) as u64;
-        let mut ts_buf = [0u8; 20];
-        let mut ts_len = 0;
-        if ts == 0 {
-            ts_buf[0] = b'0';
-            ts_len = 1;
-        } else {
-            while ts > 0 {
-                ts_buf[ts_len] = b'0' + (ts % 10) as u8;
-                ts /= 10;
-                ts_len += 1;
-            }
-            ts_buf[..ts_len].reverse();
-        }
-        buf[pos..pos + ts_len].copy_from_slice(&ts_buf[..ts_len]);
-        pos += ts_len;
-
-        buf[pos] = b'\n';
-        pos += 1;
+        let mut buf = [0u8; 384];
+        let pos = format_crash_line(&mut buf, sig, si_addr, jmp_set, ts, tid);
 
         libc::write(fd, buf.as_ptr() as *const libc::c_void, pos);
         libc::close(fd);
@@ -294,38 +341,43 @@ mod inner {
         // Pre-compute crash log path once (safe, non-signal context).
         static PATHS_INIT: Once = Once::new();
         PATHS_INIT.call_once(|| {
-            if let Ok(cwd) = std::env::current_dir() {
-                let cwd_bytes = cwd.as_os_str().as_encoded_bytes();
-                let log_suffix = b"/.tidepool/crash.log\0";
-                let dir_suffix = b"/.tidepool\0";
+            // Priority: $TIDEPOOL_CRASH_LOG > $CWD/.tidepool/crash.log > /tmp/tidepool-crash.log
+            let mut path: std::path::PathBuf = std::env::var_os("TIDEPOOL_CRASH_LOG")
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::current_dir().ok().map(|cwd| cwd.join(".tidepool/crash.log"))
+                })
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp/tidepool-crash.log"));
 
-                if cwd_bytes.len() + log_suffix.len() < 512 {
-                    unsafe {
-                        let log_ptr = addr_of_mut!(CRASH_LOG_PATH) as *mut u8;
-                        ptr::copy_nonoverlapping(cwd_bytes.as_ptr(), log_ptr, cwd_bytes.len());
-                        ptr::copy_nonoverlapping(
-                            log_suffix.as_ptr(),
-                            log_ptr.add(cwd_bytes.len()),
-                            log_suffix.len(),
-                        );
-                        CRASH_LOG_PATH_LEN
-                            .store(cwd_bytes.len() + log_suffix.len() - 1, Ordering::Relaxed);
+            let mut path_bytes = path.as_os_str().as_encoded_bytes();
 
-                        let dir_ptr = addr_of_mut!(CRASH_DIR_PATH) as *mut u8;
-                        ptr::copy_nonoverlapping(cwd_bytes.as_ptr(), dir_ptr, cwd_bytes.len());
-                        ptr::copy_nonoverlapping(
-                            dir_suffix.as_ptr(),
-                            dir_ptr.add(cwd_bytes.len()),
-                            dir_suffix.len(),
-                        );
-                        CRASH_DIR_PATH_LEN
-                            .store(cwd_bytes.len() + dir_suffix.len() - 1, Ordering::Relaxed);
+            // If the chosen path is too long, fallback to /tmp/tidepool-crash.log
+            if path_bytes.len() >= 511 {
+                path = std::path::PathBuf::from("/tmp/tidepool-crash.log");
+                path_bytes = path.as_os_str().as_encoded_bytes();
+            }
 
-                        // Ensure .tidepool/ directory exists (safe, non-signal context).
-                        libc::mkdir(
-                            addr_of!(CRASH_DIR_PATH) as *const libc::c_char,
-                            0o755,
-                        );
+            // At this point /tmp/tidepool-crash.log is guaranteed to be < 511.
+            unsafe {
+                let log_ptr = addr_of_mut!(CRASH_LOG_PATH) as *mut u8;
+                ptr::copy_nonoverlapping(path_bytes.as_ptr(), log_ptr, path_bytes.len());
+                *log_ptr.add(path_bytes.len()) = 0; // null terminate
+                CRASH_LOG_PATH_LEN.store(path_bytes.len(), Ordering::Relaxed);
+            }
+
+            // Ensure parent directory exists (safe, non-signal context).
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = std::fs::create_dir_all(parent);
+
+                    let dir_bytes = parent.as_os_str().as_encoded_bytes();
+                    if dir_bytes.len() < 511 {
+                        unsafe {
+                            let dir_ptr = addr_of_mut!(CRASH_DIR_PATH) as *mut u8;
+                            ptr::copy_nonoverlapping(dir_bytes.as_ptr(), dir_ptr, dir_bytes.len());
+                            *dir_ptr.add(dir_bytes.len()) = 0; // null terminate
+                            CRASH_DIR_PATH_LEN.store(dir_bytes.len(), Ordering::Relaxed);
+                        }
                     }
                 }
             }
@@ -369,6 +421,34 @@ mod inner {
             libc::sigaction(libc::SIGSEGV, &sa, ptr::null_mut());
             libc::sigaction(libc::SIGBUS, &sa, ptr::null_mut());
             libc::sigaction(libc::SIGTRAP, &sa, ptr::null_mut());
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_format_crash_line() {
+            let mut buf = [0u8; 384];
+            let len = unsafe {
+                format_crash_line(
+                    &mut buf,
+                    libc::SIGILL,
+                    0xdeadbeef,
+                    true,
+                    1700000000,
+                    12345,
+                )
+            };
+            let line = std::str::from_utf8(&buf[..len]).unwrap();
+            assert!(line.starts_with("[tidepool-crash] sig=SIGILL"));
+            assert!(line.contains("addr=0x"));
+            assert!(line.contains("deadbeef"));
+            assert!(line.contains("jmpbuf=set"));
+            assert!(line.contains("ts=1700000000"));
+            assert!(line.contains("tid=12345"));
+            assert!(line.ends_with('\n'));
         }
     }
 }
