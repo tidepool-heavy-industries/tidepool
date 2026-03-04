@@ -2185,6 +2185,36 @@ mod tests {
         assert!(matches!(req, ExecReq::RunIn(ref d, ref c) if d == "/tmp" && c == "ls"));
     }
 
+    #[test]
+    fn test_exec_run_truncation() {
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+        let mut handler = ExecHandler::new(std::env::current_dir().unwrap());
+
+        // Command that produces more than 2MB of output.
+        // 200,000 lines of ~20 bytes each is ~4MB.
+        let cmd = "for i in $(seq 1 200000); do echo \"hello world $i\"; done";
+
+        let result = handler.handle(ExecReq::Run(cmd.to_string()), &cx).unwrap();
+
+        // Exec result is (i64, String, String) -> (,,) I# Text Text
+        if let Value::Con(id, fields) = result {
+            assert_eq!(table.name_of(id).unwrap(), "(,,)");
+            assert_eq!(fields.len(), 3);
+
+            // fields[1] is stdout (Text)
+            let stdout: String = String::from_value(&fields[1], &table).unwrap();
+            assert!(stdout.len() >= ExecHandler::MAX_EXEC_OUTPUT_BYTES);
+            assert!(stdout.contains("...[truncated at 2MB]"));
+            // The length should be exactly MAX_EXEC_OUTPUT_BYTES + truncation message length
+            // but we use a range to be safe against small UTF-8 boundary variations.
+            assert!(stdout.len() < ExecHandler::MAX_EXEC_OUTPUT_BYTES + 100);
+        } else {
+            panic!("Expected (,,) Con, got {:?}", result);
+        }
+    }
+
     // === Meta roundtrip tests ===
 
     #[test]
