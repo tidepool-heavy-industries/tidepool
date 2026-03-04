@@ -10,6 +10,9 @@ pub enum BridgeError {
     UnexpectedLitTag(u8),
     NullPointer,
     NurseryExhausted,
+    TooManyFields { count: usize },
+    DataTooLarge { len: usize },
+    TooDeep,
 }
 
 impl fmt::Display for BridgeError {
@@ -19,6 +22,9 @@ impl fmt::Display for BridgeError {
             BridgeError::UnexpectedLitTag(t) => write!(f, "unexpected lit tag: {}", t),
             BridgeError::NullPointer => write!(f, "null pointer"),
             BridgeError::NurseryExhausted => write!(f, "nursery exhausted"),
+            BridgeError::TooManyFields { count } => write!(f, "too many Con fields: {}", count),
+            BridgeError::DataTooLarge { len } => write!(f, "data too large: {} bytes", len),
+            BridgeError::TooDeep => write!(f, "heap structure too deep (>10000 levels)"),
         }
     }
 }
@@ -31,8 +37,19 @@ impl std::error::Error for BridgeError {}
 ///
 /// `ptr` must point to a valid HeapObject allocated by the JIT nursery.
 pub unsafe fn heap_to_value(ptr: *const u8) -> Result<Value, BridgeError> {
+    heap_to_value_inner(ptr, 0)
+}
+
+const MAX_DEPTH: usize = 10_000;
+const MAX_FIELDS: usize = 1024;
+const MAX_DATA_SIZE: usize = 64 * 1024 * 1024; // 64MB
+
+unsafe fn heap_to_value_inner(ptr: *const u8, depth: usize) -> Result<Value, BridgeError> {
     if ptr.is_null() {
         return Err(BridgeError::NullPointer);
+    }
+    if depth > MAX_DEPTH {
+        return Err(BridgeError::TooDeep);
     }
 
     let tag = *ptr;
@@ -57,6 +74,9 @@ pub unsafe fn heap_to_value(ptr: *const u8) -> Result<Value, BridgeError> {
                         return Err(BridgeError::NullPointer);
                     }
                     let len = std::ptr::read_unaligned(data_ptr as *const u64) as usize;
+                    if len > MAX_DATA_SIZE {
+                        return Err(BridgeError::DataTooLarge { len });
+                    }
                     let bytes_ptr = data_ptr.add(8);
                     let bytes = std::slice::from_raw_parts(bytes_ptr, len).to_vec();
                     Ok(Value::Lit(Literal::LitString(bytes)))
@@ -75,6 +95,9 @@ pub unsafe fn heap_to_value(ptr: *const u8) -> Result<Value, BridgeError> {
                         )));
                     }
                     let len = std::ptr::read_unaligned(ba_ptr as *const u64) as usize;
+                    if len > MAX_DATA_SIZE {
+                        return Err(BridgeError::DataTooLarge { len });
+                    }
                     let bytes_ptr = ba_ptr.add(8);
                     let bytes = std::slice::from_raw_parts(bytes_ptr, len).to_vec();
                     Ok(Value::ByteArray(std::sync::Arc::new(
@@ -89,10 +112,13 @@ pub unsafe fn heap_to_value(ptr: *const u8) -> Result<Value, BridgeError> {
                         return Ok(Value::Con(DataConId(0), vec![]));
                     }
                     let len = std::ptr::read_unaligned(arr_ptr as *const u64) as usize;
+                    if len > MAX_DATA_SIZE {
+                        return Err(BridgeError::DataTooLarge { len });
+                    }
                     let mut elems = Vec::with_capacity(len);
                     for i in 0..len {
                         let elem_ptr = *(arr_ptr.add(8 + 8 * i) as *const *const u8);
-                        elems.push(heap_to_value(elem_ptr)?);
+                        elems.push(heap_to_value_inner(elem_ptr, depth + 1)?);
                     }
                     // Return as a generic Con with fields — the renderer will
                     // see the constructor names from the wrapping Con objects
@@ -105,10 +131,13 @@ pub unsafe fn heap_to_value(ptr: *const u8) -> Result<Value, BridgeError> {
         t if t == layout::TAG_CON => {
             let con_tag = *(ptr.add(layout::CON_TAG_OFFSET) as *const u64);
             let num_fields = *(ptr.add(layout::CON_NUM_FIELDS_OFFSET) as *const u16) as usize;
+            if num_fields > MAX_FIELDS {
+                return Err(BridgeError::TooManyFields { count: num_fields });
+            }
             let mut fields = Vec::with_capacity(num_fields);
             for i in 0..num_fields {
                 let field_ptr = *(ptr.add(layout::CON_FIELDS_OFFSET + 8 * i) as *const *const u8);
-                fields.push(heap_to_value(field_ptr)?);
+                fields.push(heap_to_value_inner(field_ptr, depth + 1)?);
             }
             Ok(Value::Con(DataConId(con_tag), fields))
         }
@@ -216,6 +245,9 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
             // Cheney copy, the Lit's data_ptr would point to stale fromspace memory.
             let bytes = bytes.lock().unwrap();
             let data_ptr = crate::host_fns::runtime_new_byte_array(bytes.len() as i64) as *mut u8;
+            if data_ptr.is_null() {
+                return Err(BridgeError::NurseryExhausted);
+            }
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr.add(8), bytes.len());
 
             let ptr = bump_alloc_from_vmctx(vmctx, layout::LIT_SIZE);
@@ -466,5 +498,18 @@ mod tests {
                 panic!("Expected LitFloat, got {:?}", back);
             }
         }
+    }
+
+    #[test]
+    fn test_null_pointer_error() {
+        let result = unsafe { heap_to_value(std::ptr::null()) };
+        assert!(matches!(result, Err(BridgeError::NullPointer)));
+    }
+
+    #[test]
+    fn test_invalid_heap_tag() {
+        let buf = [0xFFu8; 32];
+        let result = unsafe { heap_to_value(buf.as_ptr()) };
+        assert!(matches!(result, Err(BridgeError::UnexpectedHeapTag(0xFF))));
     }
 }
