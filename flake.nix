@@ -81,26 +81,8 @@
         rust = pkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "rust-analyzer" ];
         };
-      in {
-        devShells.default = pkgs.mkShell {
-          nativeBuildInputs = [
-            pkgs.pkg-config
-          ];
-          buildInputs = [
-            rust
-            pkgs.haskell.compiler.ghc912
-            pkgs.cabal-install
-            pkgs.openssl
-          ];
 
-          shellHook = ''
-            echo "tidepool dev shell"
-            echo "  Rust: $(rustc --version)"
-            echo "  GHC:  $(ghc --version)"
-          '';
-        };
-
-        packages.tidepool-extract = let
+        tidepool-extract = let
           # The overlay already wires patchedGhc into pkgs.haskell.packages.ghc912,
           # so this package set has fat interfaces AND rebuilds all deps from source.
           #
@@ -136,8 +118,28 @@
           export PATH="${ghcEnv}/bin:$PATH"
           exec ${harness}/bin/tidepool-extract-bin "$@"
         '';
+      in {
+        devShells.default = pkgs.mkShell {
+          nativeBuildInputs = [
+            pkgs.pkg-config
+          ];
+          buildInputs = [
+            rust
+            pkgs.haskell.compiler.ghc912
+            pkgs.cabal-install
+            pkgs.openssl
+            tidepool-extract
+          ];
 
-        packages.default = self.packages.${system}.tidepool-extract;
+          shellHook = ''
+            echo "tidepool dev shell"
+            echo "  Rust: $(rustc --version)"
+            echo "  GHC:  $(ghc --version)"
+          '';
+        };
+
+        packages.tidepool-extract = tidepool-extract;
+        packages.default = tidepool-extract;
       }
     );
 }

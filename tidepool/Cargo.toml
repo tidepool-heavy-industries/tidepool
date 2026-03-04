@@ -43,7 +43,7 @@ which = "7"
 clap = { version = "4", features = ["derive"] }
 axum = "0.8"
 rmcp = { version = "0.16", features = ["server", "transport-io", "transport-streamable-http-server"] }
-git2 = "0.19"
+git2 = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
 parking_lot = "0.12"
 
 [dev-dependencies]
