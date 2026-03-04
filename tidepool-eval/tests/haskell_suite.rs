@@ -242,7 +242,7 @@ suite_int!(lit_neg_large, -999_999);
 suite_char!(lit_char_a, 'a');
 suite_char!(lit_char_z, 'z');
 suite_char!(lit_char_newline, '\n');
-suite_double!(lit_double_pi, 3.14159);
+suite_double!(lit_double_pi, 3.1);
 suite_double!(lit_double_neg, -2.5);
 
 // =============================================================================

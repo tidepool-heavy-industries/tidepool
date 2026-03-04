@@ -109,7 +109,7 @@ mod tests {
             Value::Lit(Literal::LitString(b"with \"quotes\"".to_vec())).to_string(),
             "\"with \\\"quotes\\\"\""
         );
-        assert_eq!(Value::Lit(Literal::from(3.14f64)).to_string(), "3.14");
+        assert_eq!(Value::Lit(Literal::from(1.23f64)).to_string(), "1.23");
         assert_eq!(
             Value::Lit(Literal::LitFloat(0xFFFF_FFFF_FFFF_FFFF)).to_string(),
             "<invalid f32 bits=0xffffffffffffffff>"
