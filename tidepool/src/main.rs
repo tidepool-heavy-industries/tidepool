@@ -788,6 +788,7 @@ impl ExecHandler {
     /// Maximum stdout size for RunJson (512 KB). Large JSON creates tens of
     /// thousands of Value nodes that can crash the JIT.
     const MAX_JSON_OUTPUT_BYTES: usize = 512 * 1024;
+    const MAX_EXEC_OUTPUT_BYTES: usize = 2 * 1024 * 1024; // 2MB cap for Run/RunIn
 
     fn run_command(
         &self,
@@ -803,8 +804,27 @@ impl ExecHandler {
             .output()
             .map_err(|e| EffectError::Handler(format!("exec failed: {}", e)))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if stdout.len() > Self::MAX_EXEC_OUTPUT_BYTES {
+            let mut end = Self::MAX_EXEC_OUTPUT_BYTES;
+            while !stdout.is_char_boundary(end) {
+                end -= 1;
+            }
+            stdout.truncate(end);
+            stdout.push_str("\n...[truncated at 2MB]");
+        }
+
+        if stderr.len() > Self::MAX_EXEC_OUTPUT_BYTES {
+            let mut end = Self::MAX_EXEC_OUTPUT_BYTES;
+            while !stderr.is_char_boundary(end) {
+                end -= 1;
+            }
+            stderr.truncate(end);
+            stderr.push_str("\n...[truncated at 2MB]");
+        }
+
         let code = output.status.code().unwrap_or(-1) as i64;
         Ok((code, stdout, stderr))
     }
