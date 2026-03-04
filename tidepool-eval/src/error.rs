@@ -86,7 +86,7 @@ impl std::fmt::Display for EvalError {
             EvalError::UnboundJoin(id) => write!(f, "jump to unbound join point: j_{}", id.0),
             EvalError::UserError => write!(f, "Haskell error called"),
             EvalError::Undefined => write!(f, "Haskell undefined forced"),
-            EvalError::DepthLimit => write!(f, "recursion depth limit exceeded"),
+            EvalError::DepthLimit => write!(f, "deep_force depth limit exceeded"),
         }
     }
 }
@@ -116,6 +116,9 @@ mod tests {
             EvalError::HeapExhausted,
             EvalError::NotAFunction,
             EvalError::UnboundJoin(JoinId(7)),
+            EvalError::UserError,
+            EvalError::Undefined,
+            EvalError::DepthLimit,
         ];
 
         for err in errs {

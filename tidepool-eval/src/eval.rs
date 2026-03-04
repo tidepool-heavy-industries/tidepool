@@ -64,54 +64,58 @@ pub fn force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
     }
 }
 
-/// Recursively force a value — forces all thunks inside constructors,
-/// producing a fully-evaluated tree with no `ThunkRef` values.
-/// This implementation is iterative to avoid stack overflow on deep structures.
+/// Fully force a value — forces all thunks inside constructors,
+/// producing a fully evaluated tree with no `ThunkRef` values.
+/// Implemented iteratively to avoid stack overflow on deep structures.
 pub fn deep_force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
     const MAX_DEPTH: usize = 100_000;
 
     enum Work {
-        Force(Value),
+        Force(Value, usize),                  // (value, current_depth)
         BuildCon(DataConId, usize),           // (tag, num_fields)
         BuildConFun(DataConId, usize, usize), // (tag, arity, num_args)
     }
 
-    let mut stack: Vec<Work> = vec![Work::Force(val)];
+    let mut stack: Vec<Work> = vec![Work::Force(val, 0)];
     let mut results: Vec<Value> = Vec::new();
 
     while let Some(work) = stack.pop() {
-        if stack.len() > MAX_DEPTH {
-            return Err(EvalError::DepthLimit);
-        }
         match work {
-            Work::Force(v) => match v {
-                Value::ThunkRef(id) => {
-                    let forced = force(Value::ThunkRef(id), heap)?;
-                    stack.push(Work::Force(forced));
+            Work::Force(v, depth) => {
+                if depth > MAX_DEPTH {
+                    return Err(EvalError::DepthLimit);
                 }
-                Value::Con(tag, fields) => {
-                    let n = fields.len();
-                    stack.push(Work::BuildCon(tag, n));
-                    // Push fields in reverse so they're processed in order
-                    for f in fields.into_iter().rev() {
-                        stack.push(Work::Force(f));
+                match v {
+                    Value::ThunkRef(id) => {
+                        let forced = force(Value::ThunkRef(id), heap)?;
+                        stack.push(Work::Force(forced, depth));
                     }
-                }
-                Value::ConFun(tag, arity, args) => {
-                    let n = args.len();
-                    stack.push(Work::BuildConFun(tag, arity, n));
-                    for a in args.into_iter().rev() {
-                        stack.push(Work::Force(a));
+                    Value::Con(tag, fields) => {
+                        let n = fields.len();
+                        stack.push(Work::BuildCon(tag, n));
+                        // Push fields in reverse so they're processed in order
+                        for f in fields.into_iter().rev() {
+                            stack.push(Work::Force(f, depth + 1));
+                        }
                     }
+                    Value::ConFun(tag, arity, args) => {
+                        let n = args.len();
+                        stack.push(Work::BuildConFun(tag, arity, n));
+                        for a in args.into_iter().rev() {
+                            stack.push(Work::Force(a, depth + 1));
+                        }
+                    }
+                    other => results.push(other),
                 }
-                other => results.push(other),
-            },
+            }
             Work::BuildCon(tag, n) => {
+                debug_assert!(results.len() >= n, "deep_force: not enough fields for BuildCon");
                 let start = results.len() - n;
                 let fields = results.split_off(start);
                 results.push(Value::Con(tag, fields));
             }
             Work::BuildConFun(tag, arity, n) => {
+                debug_assert!(results.len() >= n, "deep_force: not enough args for BuildConFun");
                 let start = results.len() - n;
                 let args = results.split_off(start);
                 results.push(Value::ConFun(tag, arity, args));
@@ -119,7 +123,8 @@ pub fn deep_force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
         }
     }
 
-    Ok(results.pop().expect("deep_force produced no result"))
+    debug_assert_eq!(results.len(), 1, "deep_force: expected exactly one result");
+    results.pop().ok_or(EvalError::DepthLimit)
 }
 
 /// Evaluate the node at `idx` in the expression tree.
