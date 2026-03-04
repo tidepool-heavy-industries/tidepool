@@ -340,17 +340,13 @@ pub struct EvalRequest {
     /// Haskell do-notation code. Each line is indented into a do-block.
     /// Use `pure x` as the last line to return a value.
     /// Use `send (Constructor args)` to invoke effects.
-    /// Accepts either a single string (preferred) or array of lines (legacy).
-    #[serde(deserialize_with = "deserialize_code")]
-    pub code: Vec<String>,
+    pub code: String,
     /// Additional Haskell imports, one per line (e.g. "Data.List (sort)").
-    /// Accepts a string (one import per line, preferred) or array of strings.
-    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
-    pub imports: Vec<String>,
+    #[serde(default)]
+    pub imports: String,
     /// Top-level helper definitions placed before the main do-block.
-    /// Accepts a string (raw Haskell, preferred) or array of definition strings.
-    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
-    pub helpers: Vec<String>,
+    #[serde(default)]
+    pub helpers: String,
     /// Optional JSON input injected as `input :: Aeson.Value` binding.
     #[serde(default)]
     pub input: Option<serde_json::Value>,
@@ -359,40 +355,6 @@ pub struct EvalRequest {
     /// Default: 4096.
     #[serde(default)]
     pub max_len: Option<u32>,
-}
-
-/// Deserialize `code` from either a string (split on newlines) or array of strings.
-fn deserialize_code<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum StringOrVec {
-        Str(String),
-        Vec(Vec<String>),
-    }
-    match StringOrVec::deserialize(d)? {
-        StringOrVec::Str(s) => Ok(s.lines().map(String::from).collect()),
-        StringOrVec::Vec(v) => Ok(v),
-    }
-}
-
-/// Deserialize from either a string (split on newlines, empty lines filtered) or array of strings.
-fn deserialize_string_or_vec<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> Result<Vec<String>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum StringOrVec {
-        Str(String),
-        Vec(Vec<String>),
-    }
-    match StringOrVec::deserialize(d)? {
-        StringOrVec::Str(s) => Ok(s
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(String::from)
-            .collect()),
-        StringOrVec::Vec(v) => Ok(v),
-    }
 }
 
 /// Request parameters for the `resume` tool.
@@ -921,11 +883,12 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
 /// Qualified aeson imports for MCP eval. Unqualified symbols now come from Tidepool.Prelude.
 /// These provide `Aeson.` prefix (used by json_to_haskell for input injection) and
 /// qualified access to KeyMap/Vector for power users.
-pub fn aeson_imports() -> Vec<String> {
-    vec![
-        "qualified Tidepool.Aeson as Aeson".into(),
-        "qualified Tidepool.Aeson.KeyMap as KM".into(),
-    ]
+pub fn aeson_imports() -> String {
+    concat!(
+        "qualified Tidepool.Aeson as Aeson\n",
+        "qualified Tidepool.Aeson.KeyMap as KM\n",
+    )
+    .into()
 }
 
 pub fn build_effect_stack_type(effects: &[EffectDecl]) -> String {
@@ -993,9 +956,9 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
 pub fn template_haskell(
     preamble: &str,
     effect_stack: &str,
-    code: &[String],
-    imports: &[String],
-    helpers: &[String],
+    code: &str,
+    imports: &str,
+    helpers: &str,
     input: Option<&serde_json::Value>,
     budget: Option<u32>,
 ) -> String {
@@ -1007,7 +970,7 @@ pub fn template_haskell(
     if !imports.is_empty() {
         let insert_point = preamble.find("default (Int").unwrap_or(preamble.len());
         out.push_str(&preamble[..insert_point]);
-        for imp in imports {
+        for imp in imports.lines().filter(|l| !l.trim().is_empty()) {
             out.push_str(&format!("import {}\n", imp));
         }
         out.push_str(&preamble[insert_point..]);
@@ -1018,10 +981,8 @@ pub fn template_haskell(
     // Marker for user code section (used by error formatting to trim preamble)
     out.push_str("-- [user]\n");
 
-    for helper in helpers {
-        out.push_str(helper);
-        out.push('\n');
-    }
+    out.push_str(helpers);
+    out.push('\n');
     if !helpers.is_empty() {
         out.push('\n');
     }
@@ -1038,7 +999,7 @@ pub fn template_haskell(
         out.push_str("  kvSet \"__sayChars\" (toJSON (0 :: Int))\n");
     }
     out.push_str("  _r <- do\n");
-    for line in code {
+    for line in code.lines() {
         out.push_str(&format!("    {}\n", line));
     }
     if let Some(b) = budget {
@@ -1325,11 +1286,11 @@ impl TidepoolMcpServerImpl {
     }
 
     async fn eval(&self, req: EvalRequest) -> Result<CallToolResult, McpError> {
-        tracing::info!(lines = req.code.len(), "eval request");
+        tracing::info!(len = req.code.len(), "eval request");
         self.cleanup_stale_continuations();
 
         // Reject unsafe/IO imports before compilation
-        for imp in &req.imports {
+        for imp in req.imports.lines() {
             if let Some(module) = rejected_import(imp) {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Blocked import: `{}` is not available in the Tidepool sandbox.",
@@ -1339,7 +1300,7 @@ impl TidepoolMcpServerImpl {
         }
 
         let mut all_imports = aeson_imports();
-        all_imports.extend(req.imports);
+        all_imports.push_str(&req.imports);
         let source: Arc<str> = template_haskell(
             &self.haskell_preamble,
             &self.effect_stack_type,
@@ -1820,23 +1781,16 @@ mod tests {
     fn test_eval_request_string_code() {
         let json = serde_json::json!({"code": "let x = 1\npure x"});
         let req: EvalRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.code, vec!["let x = 1", "pure x"]);
+        assert_eq!(req.code, "let x = 1\npure x");
         assert!(req.imports.is_empty());
         assert!(req.helpers.is_empty());
-    }
-
-    #[test]
-    fn test_eval_request_array_code() {
-        let json = serde_json::json!({"code": ["pure 42"]});
-        let req: EvalRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.code, vec!["pure 42"]);
     }
 
     #[test]
     fn test_eval_request_string_imports() {
         let json = serde_json::json!({"code": "pure 42", "imports": "Data.List (sort)\nData.Char"});
         let req: EvalRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.imports, vec!["Data.List (sort)", "Data.Char"]);
+        assert_eq!(req.imports, "Data.List (sort)\nData.Char");
     }
 
     #[test]
@@ -1922,9 +1876,9 @@ mod tests {
         }];
         let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);
-        let source = vec!["let x = 42".into(), "pure x".into()];
+        let source = "let x = 42\npure x";
 
-        let result = template_haskell(&preamble, &stack, &source, &[], &[], None, None);
+        let result = template_haskell(&preamble, &stack, source, "", "", None, None);
 
         assert!(result.contains("module Expr where"));
         assert!(result.contains("import Control.Monad.Freer hiding (run)"));
@@ -2202,15 +2156,15 @@ mod tests {
         }];
         let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);
-        let source = vec!["pure 42".into()];
+        let source = "pure 42";
 
         // With budget
-        let result = template_haskell(&preamble, &stack, &source, &[], &[], None, Some(1024));
+        let result = template_haskell(&preamble, &stack, source, "", "", None, Some(1024));
         assert!(result.contains("kvSet \"__sayChars\" (toJSON (0 :: Int))"));
         assert!(result.contains("paginateResult (max' 100 (1024 - _sayC)) (toJSON _r)"));
 
         // Without budget (defaults to 4096)
-        let result = template_haskell(&preamble, &stack, &source, &[], &[], None, None);
+        let result = template_haskell(&preamble, &stack, source, "", "", None, None);
         assert!(result.contains("paginateResult 4096 (toJSON _r)"));
     }
 
@@ -2225,10 +2179,10 @@ mod tests {
         }];
         let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);
-        let source = vec!["pure 42".into()];
+        let source = "pure 42";
         let input = serde_json::json!({"val": 123});
 
-        let result = template_haskell(&preamble, &stack, &source, &[], &[], Some(&input), None);
+        let result = template_haskell(&preamble, &stack, source, "", "", Some(&input), None);
 
         assert!(result.contains("input :: Aeson.Value"));
         assert!(result.contains("input = object [\"val\" .= Aeson.Number (fromIntegral (123 :: Int))]"));
@@ -2265,7 +2219,7 @@ mod tests {
             "helpers": "foo :: Int -> Int\nfoo x = x + 1"
         });
         let req: EvalRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.helpers, vec!["foo :: Int -> Int", "foo x = x + 1"]);
+        assert_eq!(req.helpers, "foo :: Int -> Int\nfoo x = x + 1");
     }
 
     #[test]

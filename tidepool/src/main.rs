@@ -1571,8 +1571,8 @@ mod tests {
         let decls = tidepool_mcp::standard_decls();
         let preamble = tidepool_mcp::build_preamble(&decls, false);
         let stack = tidepool_mcp::build_effect_stack_type(&decls);
-        let code_lines: Vec<String> = code.iter().map(|s| s.to_string()).collect();
-        tidepool_mcp::template_haskell(&preamble, &stack, &code_lines, &[], &[], None, None)
+        let code_str = code.join("\n");
+        tidepool_mcp::template_haskell(&preamble, &stack, &code_str, "", "", None, None)
     }
 
     /// Compile and run a Haskell snippet through the JIT with the full handler stack.
