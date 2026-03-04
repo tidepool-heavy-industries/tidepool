@@ -3012,6 +3012,7 @@ version = "0.1.0"
 dependencies = [
  "bumpalo",
  "proptest",
+ "thiserror 1.0.69",
  "tidepool-eval",
  "tidepool-repr",
 ]

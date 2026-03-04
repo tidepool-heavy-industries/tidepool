@@ -11,6 +11,15 @@ fn is_in_range(ptr: *const u8, start: *const u8, end: *const u8) -> bool {
     (ptr as usize) >= (start as usize) && (ptr as usize) < (end as usize)
 }
 
+/// Copy a single heap object from `old_ptr` to `to_base + *free` and install a
+/// forwarding pointer at the old location. If the object has already been forwarded,
+/// returns the new location without copying.
+///
+/// # Safety
+///
+/// - `old_ptr` must point to a valid, 8-byte-aligned heap object with a valid tag/size header.
+/// - `to_base` must point to a buffer with enough space at offset `*free` to hold the object.
+/// - The caller must ensure `old_ptr` is not inside the to-space (no aliasing).
 unsafe fn evacuate(old_ptr: *mut u8, to_base: *mut u8, free: &mut usize) -> *mut u8 {
     let tag = read_tag(old_ptr);
     if tag == TAG_FORWARDED {

@@ -56,6 +56,8 @@ pub enum EvalError {
     UserError,
     /// Haskell `undefined` forced
     Undefined,
+    /// Recursion depth limit exceeded during deep_force
+    DepthLimit,
 }
 
 impl std::fmt::Display for EvalError {
@@ -84,6 +86,7 @@ impl std::fmt::Display for EvalError {
             EvalError::UnboundJoin(id) => write!(f, "jump to unbound join point: j_{}", id.0),
             EvalError::UserError => write!(f, "Haskell error called"),
             EvalError::Undefined => write!(f, "Haskell undefined forced"),
+            EvalError::DepthLimit => write!(f, "recursion depth limit exceeded"),
         }
     }
 }

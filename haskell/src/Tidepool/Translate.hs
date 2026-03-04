@@ -376,24 +376,6 @@ translateModuleClosed hscEnv allBinds targetName = do
       -- Debug: find dangling NVar references (referenced but not bound by any Let/Lam/Case)
       boundIds = foldl' collectBound Set.empty nodes
       danglingIds = Set.filter (\v -> not (Set.member v boundIds) && (v `shiftR` 56) /= 0x45) referencedIds
-  -- Debug: find and report dangling NVar references
-  let allVarRefs = concatMap deepVarRefsOfCB closedBinds
-      varRefMap = Map.fromList [(varId v, v) | v <- allVarRefs]
-  when (not (Set.null danglingIds)) $ do
-    let nameMap = Map.fromList [(varId b, showPprUnsafe b) | b <- concatMap bindersOfCB closedBinds]
-    hPutStrLn stderr $ "  [DEBUG] Dangling NVar references (" ++ show (Set.size danglingIds) ++ "):"
-    mapM_ (\v -> do
-      let tag = toEnum (fromIntegral (v `shiftR` 56)) :: Char
-          key = v .&. ((1 `shiftL` 56) - 1)
-          name = Map.findWithDefault "<unknown>" v nameMap
-          refInfo = case Map.lookup v varRefMap of
-            Just var -> showPprUnsafe var ++ " :: " ++ showPprUnsafe (idType var)
-                     ++ case nameModule_maybe (varName var) of
-                          Just m  -> " [" ++ moduleNameString (moduleName m) ++ "]"
-                          Nothing -> " [no module]"
-            Nothing -> "<?>"
-      hPutStrLn stderr $ "    VarId(0x" ++ showHex v (") tag='" ++ [tag] ++ "' key=" ++ show key ++ " name=" ++ name ++ " ref=" ++ refInfo)
-      ) (Set.toList danglingIds)
   return (nodes, usedDCs, trulyUnresolved, closedBinds)
   where
     collectBound :: Set.Set Word64 -> FlatNode -> Set.Set Word64

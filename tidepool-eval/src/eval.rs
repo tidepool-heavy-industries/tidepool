@@ -64,30 +64,65 @@ pub fn force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
     }
 }
 
-/// Recursively force a value — forces all thunks inside constructors,
+/// Iteratively force a value — forces all thunks inside constructors,
 /// producing a fully-evaluated tree with no `ThunkRef` values.
+/// Uses an explicit work stack instead of recursion to handle deep
+/// structures (e.g. 1000-element lists) without overflowing the Rust stack.
 pub fn deep_force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
-    match val {
-        Value::ThunkRef(id) => {
-            let forced = force(Value::ThunkRef(id), heap)?;
-            deep_force(forced, heap)
-        }
-        Value::Con(tag, fields) => {
-            let mut forced_fields = Vec::with_capacity(fields.len());
-            for f in fields {
-                forced_fields.push(deep_force(f, heap)?);
-            }
-            Ok(Value::Con(tag, forced_fields))
-        }
-        Value::ConFun(tag, arity, args) => {
-            let mut forced_args = Vec::with_capacity(args.len());
-            for a in args {
-                forced_args.push(deep_force(a, heap)?);
-            }
-            Ok(Value::ConFun(tag, arity, forced_args))
-        }
-        other => Ok(other), // Lit, Closure, JoinCont — already values
+    use tidepool_repr::DataConId;
+
+    const MAX_DEPTH: usize = 100_000;
+
+    enum Work {
+        Force(Value),
+        BuildCon(DataConId, usize),           // (tag, num_fields)
+        BuildConFun(DataConId, usize, usize), // (tag, arity, num_args)
     }
+
+    let mut stack: Vec<Work> = vec![Work::Force(val)];
+    let mut results: Vec<Value> = Vec::new();
+
+    while let Some(work) = stack.pop() {
+        if stack.len() > MAX_DEPTH {
+            return Err(EvalError::DepthLimit);
+        }
+        match work {
+            Work::Force(v) => match v {
+                Value::ThunkRef(id) => {
+                    let forced = force(Value::ThunkRef(id), heap)?;
+                    stack.push(Work::Force(forced));
+                }
+                Value::Con(tag, fields) => {
+                    let n = fields.len();
+                    stack.push(Work::BuildCon(tag, n));
+                    // Push fields in reverse so they're processed in order
+                    for f in fields.into_iter().rev() {
+                        stack.push(Work::Force(f));
+                    }
+                }
+                Value::ConFun(tag, arity, args) => {
+                    let n = args.len();
+                    stack.push(Work::BuildConFun(tag, arity, n));
+                    for a in args.into_iter().rev() {
+                        stack.push(Work::Force(a));
+                    }
+                }
+                other => results.push(other),
+            },
+            Work::BuildCon(tag, n) => {
+                let start = results.len() - n;
+                let fields = results.split_off(start);
+                results.push(Value::Con(tag, fields));
+            }
+            Work::BuildConFun(tag, arity, n) => {
+                let start = results.len() - n;
+                let args = results.split_off(start);
+                results.push(Value::ConFun(tag, arity, args));
+            }
+        }
+    }
+
+    Ok(results.pop().expect("deep_force produced no result"))
 }
 
 /// Evaluate the node at `idx` in the expression tree.

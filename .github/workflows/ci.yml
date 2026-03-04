@@ -19,6 +19,8 @@ jobs:
       - name: Enter dev shell and run checks
         run: |
           nix develop --command bash -c '
+            cargo fmt --all --check
+            cargo clippy --workspace -- -D warnings
             cargo check --workspace
             cargo test --workspace
           '

@@ -118,8 +118,8 @@ mod inner {
         JMP_BUF.with(|cell| cell.set(null_mut()));
 
         if val != 0 {
-            // Signal was caught. The closure was interrupted by siglongjmp,
-            // so the Box was leaked. We can't recover it safely.
+            // Signal was caught. Drop the closure that the trampoline never consumed.
+            drop(Box::from_raw(userdata as *mut Box<dyn FnOnce()>));
             return Err(SignalError(val));
         }
 

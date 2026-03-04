@@ -24,6 +24,12 @@ haskell/haskell/
 haskell/test/text_cbor/
 *.proptest-regressions
 
+# Debug artifacts
+*.cbor
+*.log
+dump_*.rs
+test_*.hs
+
 # Ad-hoc test artifacts
 haskell/Test*.hs
 haskell/TestB_cbor/
