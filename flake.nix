@@ -88,6 +88,7 @@
             pkgs.haskell.compiler.ghc912
             pkgs.cabal-install
             pkgs.pkg-config
+            pkgs.openssl
           ];
 
           shellHook = ''
