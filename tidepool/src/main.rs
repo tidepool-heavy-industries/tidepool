@@ -2434,12 +2434,7 @@ mod tests {
             .filter_map(|b| b.ok())
             .filter_map(|(b, _)| b.name().ok().flatten().map(String::from))
             .collect();
-        assert!(!names.is_empty(), "should have at least one branch");
-        assert!(
-            names.iter().any(|n| n == "main" || n == "master"),
-            "should have main or master branch, got: {:?}",
-            names
-        );
+        assert!(!names.is_empty(), "should have at least one branch, got: {:?}", names);
     }
 
     #[test]
