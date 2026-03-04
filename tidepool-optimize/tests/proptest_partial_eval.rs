@@ -172,50 +172,50 @@ fn nested_let_propagation() {
             runner
                 .run(&(any::<i64>(), any::<i64>(), any::<i64>()), |(a, b, c)| {
                     let mut builder = TreeBuilder::new();
-                    
-                    // let VarId(1) = Lit(a) in 
-                    // let VarId(2) = PrimOp(IntAdd, [Var(VarId(1)), Lit(b)]) in 
+
+                    // let VarId(1) = Lit(a) in
+                    // let VarId(2) = PrimOp(IntAdd, [Var(VarId(1)), Lit(b)]) in
                     // PrimOp(IntMul, [Var(VarId(2)), Lit(c)])
-                    
+
                     let lit_a = builder.push(CoreFrame::Lit(Literal::LitInt(a)));
                     let lit_b = builder.push(CoreFrame::Lit(Literal::LitInt(b)));
                     let lit_c = builder.push(CoreFrame::Lit(Literal::LitInt(c)));
-                    
+
                     let var1 = builder.push(CoreFrame::Var(VarId(1)));
                     let add = builder.push(CoreFrame::PrimOp {
                         op: PrimOpKind::IntAdd,
                         args: vec![var1, lit_b],
                     });
-                    
+
                     let var2 = builder.push(CoreFrame::Var(VarId(2)));
                     let mul = builder.push(CoreFrame::PrimOp {
                         op: PrimOpKind::IntMul,
                         args: vec![var2, lit_c],
                     });
-                    
+
                     let let2 = builder.push(CoreFrame::LetNonRec {
                         binder: VarId(2),
                         rhs: add,
                         body: mul,
                     });
-                    
+
                     builder.push(CoreFrame::LetNonRec {
                         binder: VarId(1),
                         rhs: lit_a,
                         body: let2,
                     });
-                    
+
                     let expr = builder.build();
-                    
+
                     // Expected value: (a.wrapping_add(b)).wrapping_mul(c)
                     let expected = (a.wrapping_add(b)).wrapping_mul(c);
-                    
+
                     let mut optimized = expr.clone();
                     pass.run(&mut optimized);
-                    
+
                     prop_assert_eq!(optimized.nodes.len(), 1, "Should have folded completely");
                     prop_assert!(matches!(optimized.nodes[0], CoreFrame::Lit(Literal::LitInt(v)) if v == expected));
-                    
+
                     check_pass_preserves_eval(&pass, expr)
                 })
                 .unwrap();
@@ -234,7 +234,7 @@ fn primop_fold_all_foldable_ops() {
                 ..Config::default()
             });
             let pass = PartialEval;
-            
+
             let ops = vec![
                 PrimOpKind::IntAdd,
                 PrimOpKind::IntSub,
@@ -258,7 +258,7 @@ fn primop_fold_all_foldable_ops() {
                         args: vec![lit_a, lit_b],
                     });
                     let expr = builder.build();
-                    
+
                     let expected = match op {
                         PrimOpKind::IntAdd => a.wrapping_add(b),
                         PrimOpKind::IntSub => a.wrapping_sub(b),
@@ -271,13 +271,13 @@ fn primop_fold_all_foldable_ops() {
                         PrimOpKind::IntGe => if a >= b { 1 } else { 0 },
                         _ => unreachable!(),
                     };
-                    
+
                     let mut optimized = expr.clone();
                     pass.run(&mut optimized);
-                    
+
                     prop_assert_eq!(optimized.nodes.len(), 1, "Should have folded {:?} completely", op);
                     prop_assert!(matches!(optimized.nodes[0], CoreFrame::Lit(Literal::LitInt(v)) if v == expected));
-                    
+
                     check_pass_preserves_eval(&pass, expr)
                 })
                 .unwrap();
@@ -305,15 +305,15 @@ fn primop_fold_negate() {
                         args: vec![lit_a],
                     });
                     let expr = builder.build();
-                    
+
                     let expected = a.wrapping_neg();
-                    
+
                     let mut optimized = expr.clone();
                     pass.run(&mut optimized);
-                    
+
                     prop_assert_eq!(optimized.nodes.len(), 1, "Should have folded IntNegate completely");
                     prop_assert!(matches!(optimized.nodes[0], CoreFrame::Lit(Literal::LitInt(v)) if v == expected));
-                    
+
                     check_pass_preserves_eval(&pass, expr)
                 })
                 .unwrap();

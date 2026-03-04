@@ -376,15 +376,8 @@ fn run_aeson_with_input(lines: &[&str], input: serde_json::Value) -> serde_json:
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let code = lines.join("\n");
     let imports = aeson_import_strs().join("\n");
-    let src = tidepool_mcp::template_haskell(
-        &preamble,
-        &stack,
-        &code,
-        &imports,
-        "",
-        Some(&input),
-        None,
-    );
+    let src =
+        tidepool_mcp::template_haskell(&preamble, &stack, &code, &imports, "", Some(&input), None);
     let pp = prelude_path();
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)

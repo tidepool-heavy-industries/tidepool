@@ -71,7 +71,11 @@ fn rewrite_value(val: &Value, table: &ForwardingTable) -> Value {
         Value::Closure(env, binder, expr) => {
             Value::Closure(rewrite_env(env, table), *binder, expr.clone())
         }
-        Value::ThunkRef(id) => Value::ThunkRef(table.lookup(*id).expect("Thunk must be reachable during compact")),
+        Value::ThunkRef(id) => Value::ThunkRef(
+            table
+                .lookup(*id)
+                .expect("Thunk must be reachable during compact"),
+        ),
         Value::JoinCont(binders, expr, env) => {
             Value::JoinCont(binders.clone(), expr.clone(), rewrite_env(env, table))
         }

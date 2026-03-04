@@ -1200,8 +1200,8 @@ impl DispatchEffect<CapturedOutput> for AskDispatcher {
             })?;
 
             // Parse response as JSON → aeson Value; plain text wraps as Aeson.String
-            let json_val: serde_json::Value = serde_json::from_str(&response)
-                .unwrap_or(serde_json::Value::String(response));
+            let json_val: serde_json::Value =
+                serde_json::from_str(&response).unwrap_or(serde_json::Value::String(response));
             let core_val = json_val
                 .to_value(cx.table())
                 .map_err(tidepool_effect::error::EffectError::Bridge)?;
@@ -1292,7 +1292,12 @@ impl TidepoolMcpServerImpl {
         self.cleanup_stale_continuations();
 
         // Reject unsafe/IO imports before compilation
-        for imp in req.imports.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+        for imp in req
+            .imports
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+        {
             if let Some(module) = rejected_import(imp) {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Blocked import: `{}` is not available in the Tidepool sandbox.",
@@ -1733,10 +1738,12 @@ where
     }
 
     /// Start the MCP server on streamable HTTP transport.
-    pub async fn serve_http(self, addr: std::net::SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn serve_http(
+        self,
+        addr: std::net::SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         use rmcp::transport::streamable_http_server::{
-            StreamableHttpService, StreamableHttpServerConfig,
-            session::local::LocalSessionManager,
+            session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
         };
         use std::sync::Arc;
 
@@ -1995,7 +2002,9 @@ mod tests {
         let preamble = build_preamble(&decls, false);
         assert!(preamble.contains("data Ask a where"));
         assert!(preamble.contains("  Ask :: Text -> Ask Value"));
-        assert!(preamble.contains("type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Ask]"));
+        assert!(
+            preamble.contains("type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Ask]")
+        );
     }
 
     #[test]
@@ -2127,7 +2136,8 @@ mod tests {
 
     #[test]
     fn test_parse_constructor_nested_types() {
-        let p = parse_constructor("HttpRequest :: Text -> Text -> [(Text,Text)] -> Text -> Http Value");
+        let p =
+            parse_constructor("HttpRequest :: Text -> Text -> [(Text,Text)] -> Text -> Http Value");
         assert_eq!(
             p,
             ParsedConstructor {
@@ -2187,7 +2197,9 @@ mod tests {
         let result = template_haskell(&preamble, &stack, source, "", "", Some(&input), None);
 
         assert!(result.contains("input :: Aeson.Value"));
-        assert!(result.contains("input = object [\"val\" .= Aeson.Number (fromIntegral (123 :: Int))]"));
+        assert!(
+            result.contains("input = object [\"val\" .= Aeson.Number (fromIntegral (123 :: Int))]")
+        );
     }
 
     #[test]
@@ -2253,6 +2265,8 @@ mod tests {
         assert!(haskell.contains("\"null\" .= Aeson.Null"));
         assert!(haskell.contains("\"num\" .= Aeson.Number (fromIntegral (42 :: Int))"));
         assert!(haskell.contains("\"arr\" .= toJSON [Aeson.Number (fromIntegral (1 :: Int)), Aeson.Number (fromIntegral (2 :: Int))]"));
-        assert!(haskell.contains("\"obj\" .= object [\"a\" .= Aeson.Number (fromIntegral (1 :: Int))]"));
+        assert!(
+            haskell.contains("\"obj\" .= object [\"a\" .= Aeson.Number (fromIntegral (1 :: Int))]")
+        );
     }
 }

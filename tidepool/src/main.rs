@@ -85,14 +85,20 @@ impl KvHandler {
     fn flush(&self, store: &HashMap<String, serde_json::Value>) {
         if let Some(parent) = self.path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!("[tidepool] KV flush: failed to create dir {:?}: {}", parent, e);
+                eprintln!(
+                    "[tidepool] KV flush: failed to create dir {:?}: {}",
+                    parent, e
+                );
                 return;
             }
         }
         match serde_json::to_string_pretty(store) {
             Ok(json) => {
                 if let Err(e) = std::fs::write(&self.path, json) {
-                    eprintln!("[tidepool] KV flush: failed to write {:?}: {}", self.path, e);
+                    eprintln!(
+                        "[tidepool] KV flush: failed to write {:?}: {}",
+                        self.path, e
+                    );
                 }
             }
             Err(e) => {
@@ -397,7 +403,10 @@ impl SgHandler {
             let entry = entry.map_err(|e| EffectError::Handler(e.to_string()))?;
             let path = entry.path();
             if path.is_dir() {
-                let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy())
+                    .unwrap_or_default();
                 if name.starts_with('.') || matches!(name.as_ref(), "target" | "node_modules") {
                     continue;
                 }
@@ -819,13 +828,17 @@ impl ExecHandler {
         let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
         if stdout.len() > Self::MAX_EXEC_OUTPUT_BYTES {
             let mut end = Self::MAX_EXEC_OUTPUT_BYTES;
-            while !stdout.is_char_boundary(end) { end -= 1; }
+            while !stdout.is_char_boundary(end) {
+                end -= 1;
+            }
             stdout.truncate(end);
             stdout.push_str("\n...[truncated at 2MB]");
         }
         if stderr.len() > Self::MAX_EXEC_OUTPUT_BYTES {
             let mut end = Self::MAX_EXEC_OUTPUT_BYTES;
-            while !stderr.is_char_boundary(end) { end -= 1; }
+            while !stderr.is_char_boundary(end) {
+                end -= 1;
+            }
             stderr.truncate(end);
             stderr.push_str("\n...[truncated at 2MB]");
         }
@@ -939,9 +952,9 @@ impl EffectHandler<CapturedOutput> for GitHandler {
         let repo = self.open_repo()?;
         match req {
             GitReq::Log(refspec, count) => {
-                let obj = repo
-                    .revparse_single(&refspec)
-                    .map_err(|e| EffectError::Handler(format!("git log: bad ref '{}': {}", refspec, e)))?;
+                let obj = repo.revparse_single(&refspec).map_err(|e| {
+                    EffectError::Handler(format!("git log: bad ref '{}': {}", refspec, e))
+                })?;
                 let mut revwalk = repo
                     .revwalk()
                     .map_err(|e| EffectError::Handler(format!("git log: revwalk: {}", e)))?;
@@ -956,8 +969,9 @@ impl EffectHandler<CapturedOutput> for GitHandler {
                     }
                     let oid = oid_result
                         .map_err(|e| EffectError::Handler(format!("git log: walk: {}", e)))?;
-                    let commit = repo.find_commit(oid)
-                        .map_err(|e| EffectError::Handler(format!("git log: find commit: {}", e)))?;
+                    let commit = repo.find_commit(oid).map_err(|e| {
+                        EffectError::Handler(format!("git log: find commit: {}", e))
+                    })?;
                     entries.push(serde_json::json!({
                         "hash": oid.to_string(),
                         "subject": commit.summary().unwrap_or(""),
@@ -970,9 +984,12 @@ impl EffectHandler<CapturedOutput> for GitHandler {
             GitReq::Show(hash) => {
                 let oid = repo
                     .revparse_single(&hash)
-                    .map_err(|e| EffectError::Handler(format!("git show: bad ref '{}': {}", hash, e)))?
+                    .map_err(|e| {
+                        EffectError::Handler(format!("git show: bad ref '{}': {}", hash, e))
+                    })?
                     .id();
-                let commit = repo.find_commit(oid)
+                let commit = repo
+                    .find_commit(oid)
                     .map_err(|e| EffectError::Handler(format!("git show: {}", e)))?;
                 let parents: Vec<String> = commit.parent_ids().map(|id| id.to_string()).collect();
                 let result = serde_json::json!({
@@ -988,17 +1005,26 @@ impl EffectHandler<CapturedOutput> for GitHandler {
             GitReq::Diff(hash) => {
                 let oid = repo
                     .revparse_single(&hash)
-                    .map_err(|e| EffectError::Handler(format!("git diff: bad ref '{}': {}", hash, e)))?
+                    .map_err(|e| {
+                        EffectError::Handler(format!("git diff: bad ref '{}': {}", hash, e))
+                    })?
                     .id();
-                let commit = repo.find_commit(oid)
+                let commit = repo
+                    .find_commit(oid)
                     .map_err(|e| EffectError::Handler(format!("git diff: {}", e)))?;
-                let tree = commit.tree()
+                let tree = commit
+                    .tree()
                     .map_err(|e| EffectError::Handler(format!("git diff: tree: {}", e)))?;
                 let parent_tree = if commit.parent_count() > 0 {
-                    Some(commit.parent(0)
-                        .map_err(|e| EffectError::Handler(format!("git diff: parent: {}", e)))?
-                        .tree()
-                        .map_err(|e| EffectError::Handler(format!("git diff: parent tree: {}", e)))?)
+                    Some(
+                        commit
+                            .parent(0)
+                            .map_err(|e| EffectError::Handler(format!("git diff: parent: {}", e)))?
+                            .tree()
+                            .map_err(|e| {
+                                EffectError::Handler(format!("git diff: parent tree: {}", e))
+                            })?,
+                    )
                 } else {
                     None
                 };
@@ -1065,20 +1091,21 @@ impl EffectHandler<CapturedOutput> for GitHandler {
                 cx.respond(hunks)
             }
             GitReq::Tree(commitish, path) => {
-                let obj = repo
-                    .revparse_single(&commitish)
-                    .map_err(|e| EffectError::Handler(format!("git tree: bad ref '{}': {}", commitish, e)))?;
+                let obj = repo.revparse_single(&commitish).map_err(|e| {
+                    EffectError::Handler(format!("git tree: bad ref '{}': {}", commitish, e))
+                })?;
                 let commit = obj
                     .peel_to_commit()
                     .map_err(|e| EffectError::Handler(format!("git tree: peel: {}", e)))?;
-                let tree = commit.tree()
+                let tree = commit
+                    .tree()
                     .map_err(|e| EffectError::Handler(format!("git tree: {}", e)))?;
                 let target_tree = if path == "." || path.is_empty() {
                     tree
                 } else {
-                    let entry = tree
-                        .get_path(std::path::Path::new(&path))
-                        .map_err(|e| EffectError::Handler(format!("git tree: path '{}': {}", path, e)))?;
+                    let entry = tree.get_path(std::path::Path::new(&path)).map_err(|e| {
+                        EffectError::Handler(format!("git tree: path '{}': {}", path, e))
+                    })?;
                     repo.find_tree(entry.id())
                         .map_err(|e| EffectError::Handler(format!("git tree: subtree: {}", e)))?
                 };
@@ -1105,12 +1132,7 @@ impl EffectHandler<CapturedOutput> for GitHandler {
                 for branch_result in branches {
                     let (branch, _branch_type) = branch_result
                         .map_err(|e| EffectError::Handler(format!("git branches: iter: {}", e)))?;
-                    let name = branch
-                        .name()
-                        .ok()
-                        .flatten()
-                        .unwrap_or("")
-                        .to_string();
+                    let name = branch.name().ok().flatten().unwrap_or("").to_string();
                     let is_head = branch.is_head();
                     let commit_hash = branch
                         .get()
@@ -1473,8 +1495,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use rmcp::ServiceExt;
         if let Some(addr) = http_addr {
             use rmcp::transport::streamable_http_server::{
-                StreamableHttpService, StreamableHttpServerConfig,
-                session::local::LocalSessionManager,
+                session::local::LocalSessionManager, StreamableHttpServerConfig,
+                StreamableHttpService,
             };
             let config = StreamableHttpServerConfig::default();
             let cancel = config.cancellation_token.clone();
@@ -1857,7 +1879,9 @@ mod tests {
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
         let (mut handler, _) = git_handler();
-        let result = handler.handle(GitReq::Tree("HEAD".into(), ".".into()), &cx).unwrap();
+        let result = handler
+            .handle(GitReq::Tree("HEAD".into(), ".".into()), &cx)
+            .unwrap();
         assert_is_haskell_list(&result, &table);
     }
 
@@ -1867,7 +1891,9 @@ mod tests {
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
         let (mut handler, _) = git_handler();
-        let result = handler.handle(GitReq::Blame("Cargo.toml".into(), 1, 5), &cx).unwrap();
+        let result = handler
+            .handle(GitReq::Blame("Cargo.toml".into(), 1, 5), &cx)
+            .unwrap();
         assert_is_haskell_list(&result, &table);
     }
 
@@ -2007,9 +2033,7 @@ mod tests {
         let decls = tidepool_mcp::standard_decls();
         // HList order from main(): Console(0), KV(1), Fs(2), SG(3), Http(4), Exec(5), Meta(6), Git(7)
         // Ask(8) is handled by MCP server, not in main HList
-        let expected = [
-            "Console", "KV", "Fs", "SG", "Http", "Exec", "Meta", "Git",
-        ];
+        let expected = ["Console", "KV", "Fs", "SG", "Http", "Exec", "Meta", "Git"];
         for (i, name) in expected.iter().enumerate() {
             assert_eq!(
                 decls[i].type_name, *name,
@@ -2157,7 +2181,10 @@ mod tests {
     fn test_http_from_core_post() {
         let table = full_effect_test_table();
         let con_id = table.get_by_name("HttpPost").unwrap();
-        let url = "https://example.com/api".to_string().to_value(&table).unwrap();
+        let url = "https://example.com/api"
+            .to_string()
+            .to_value(&table)
+            .unwrap();
         // Use a Null JSON value as body
         let null_id = table.get_by_name("Null").unwrap();
         let body = Value::Con(null_id, vec![]);
@@ -2318,15 +2345,16 @@ mod tests {
     #[test]
     fn test_jit_meta_version_roundtrip() {
         let result = jit_eval(&["v <- metaVersion", "pure (toJSON v)"]);
-        assert!(result.is_string(), "metaVersion should return a string, got {:?}", result);
+        assert!(
+            result.is_string(),
+            "metaVersion should return a string, got {:?}",
+            result
+        );
     }
 
     #[test]
     fn test_jit_meta_primops_roundtrip() {
-        let result = jit_eval(&[
-            "ops <- metaPrimOps",
-            "pure (toJSON (length ops > 0))",
-        ]);
+        let result = jit_eval(&["ops <- metaPrimOps", "pure (toJSON (length ops > 0))"]);
         assert_eq!(result, serde_json::json!(true));
     }
 
@@ -2337,7 +2365,11 @@ mod tests {
             "pure (toJSON (length commits))",
         ]);
         let n = result.as_i64().unwrap();
-        assert!(n > 0 && n <= 3, "gitLog should return 1-3 commits, got {}", n);
+        assert!(
+            n > 0 && n <= 3,
+            "gitLog should return 1-3 commits, got {}",
+            n
+        );
     }
 
     #[test]
@@ -2346,24 +2378,26 @@ mod tests {
             "c <- gitShow \"HEAD\"",
             "pure (toJSON (c ^? key \"subject\" . _String))",
         ]);
-        assert!(result.is_string(), "gitShow HEAD subject should be a string, got {:?}", result);
+        assert!(
+            result.is_string(),
+            "gitShow HEAD subject should be a string, got {:?}",
+            result
+        );
     }
 
     #[test]
     fn test_jit_git_diff_roundtrip() {
-        let result = jit_eval(&[
-            "diffs <- gitDiff \"HEAD\"",
-            "pure (toJSON (length diffs))",
-        ]);
-        assert!(result.is_number(), "gitDiff should return a count, got {:?}", result);
+        let result = jit_eval(&["diffs <- gitDiff \"HEAD\"", "pure (toJSON (length diffs))"]);
+        assert!(
+            result.is_number(),
+            "gitDiff should return a count, got {:?}",
+            result
+        );
     }
 
     #[test]
     fn test_jit_git_branches_roundtrip() {
-        let result = jit_eval(&[
-            "bs <- gitBranches",
-            "pure (toJSON (length bs > 0))",
-        ]);
+        let result = jit_eval(&["bs <- gitBranches", "pure (toJSON (length bs > 0))"]);
         assert_eq!(result, serde_json::json!(true));
     }
 
@@ -2462,7 +2496,9 @@ mod tests {
             .collect();
         assert!(!entries.is_empty(), "root tree should have entries");
         assert!(
-            entries.iter().any(|e| e == "Cargo.toml" || e == "CLAUDE.md"),
+            entries
+                .iter()
+                .any(|e| e == "Cargo.toml" || e == "CLAUDE.md"),
             "root tree should contain known files, got: {:?}",
             entries
         );
