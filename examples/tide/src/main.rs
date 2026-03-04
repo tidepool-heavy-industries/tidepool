@@ -63,12 +63,19 @@ fn run(args: Args) -> Result<()> {
         ConsoleHandler,
         EnvHandler::new(),
         NetHandler,
-        FsHandler,
+        FsHandler::new(std::env::current_dir()?),
     ];
 
     // Run: the JIT executes Haskell, yielding effect requests back to Rust.
-    vm.run(&table, &mut handlers, &())
-        .map_err(|e| anyhow::anyhow!("Runtime error: {}", e))?;
+    // Loop to keep the REPL alive on handler errors.
+    loop {
+        match vm.run(&table, &mut handlers, &()) {
+            Ok(_) => break,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+            }
+        }
+    }
 
     Ok(())
 }
