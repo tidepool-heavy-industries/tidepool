@@ -960,11 +960,11 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
             // Smart constructors
             out.push_str(concat!(
                 "pick :: [Text] -> Q Text\n",
-                "pick cats = Q (SObj [(\"pick\", SEnum cats)]) (\\v -> case v ^? key \"pick\" . _String of { Just s -> s; _ -> \"\" }) 0.7\n",
+                "pick cats = Q (SObj [(\"pick\", SEnum cats)]) (\\v -> case v ^? key \"pick\" . _String of { Just s -> s; _ -> error \"Q: missing 'pick' in response\" }) 0.7\n",
             ));
             out.push_str(concat!(
                 "yn :: Q Bool\n",
-                "yn = Q (SObj [(\"answer\", SBool)]) (\\v -> case v ^? key \"answer\" . _Bool of { Just b -> b; _ -> False }) 0.7\n",
+                "yn = Q (SObj [(\"answer\", SBool)]) (\\v -> case v ^? key \"answer\" . _Bool of { Just b -> b; _ -> error \"Q: missing 'answer' in response\" }) 0.7\n",
             ));
             out.push_str(concat!(
                 "obj :: Schema -> Q Value\n",
@@ -972,11 +972,11 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
             ));
             out.push_str(concat!(
                 "txt :: Text -> Q Text\n",
-                "txt k = Q (SObj [(k, SStr)]) (\\v -> case v ^? key k . _String of { Just s -> s; _ -> \"\" }) 0.7\n",
+                "txt k = Q (SObj [(k, SStr)]) (\\v -> case v ^? key k . _String of { Just s -> s; _ -> error (\"Q: missing '\" <> k <> \"' in response\") }) 0.7\n",
             ));
             out.push_str(concat!(
                 "num :: Text -> Q Double\n",
-                "num k = Q (SObj [(k, SNum)]) (\\v -> case v ^? key k . _Number of { Just n -> n; _ -> 0.0 }) 0.7\n",
+                "num k = Q (SObj [(k, SNum)]) (\\v -> case v ^? key k . _Number of { Just n -> n; _ -> error (\"Q: missing '\" <> k <> \"' in response\") }) 0.7\n",
             ));
             out.push_str(concat!(
                 "bar :: Double -> Q a -> Q a\n",
