@@ -971,7 +971,7 @@ impl EmitContext {
                     let mut pending_capture_updates: std::collections::HashMap<
                         VarId,
                         Vec<(cranelift_codegen::ir::Value, i32)>,
-                    > = std::collections::HashMap::with_capacity(rec_bindings.len());
+                    > = std::collections::HashMap::with_capacity(deferred_simple.len());
 
                     for pa in &pre_allocs {
                         let (closure_ptr, sorted_fvs, rhs_idx) = match pa {
@@ -1178,10 +1178,13 @@ impl EmitContext {
                             VarId,
                             std::collections::HashSet<VarId>,
                         > = std::collections::HashMap::with_capacity(deferred_simple.len());
+                        let mut visited = std::collections::HashSet::with_capacity(bindings.len());
+                        let mut stack = Vec::with_capacity(bindings.len());
                         for &(start_node, _) in &deferred_simple {
-                            let mut visited = std::collections::HashSet::with_capacity(bindings.len());
-                            let mut stack = vec![start_node];
-                            let mut reached = std::collections::HashSet::with_capacity(deferred_simple.len());
+                            visited.clear();
+                            stack.clear();
+                            stack.push(start_node);
+                            let mut reached = std::collections::HashSet::new();
 
                             while let Some(node) = stack.pop() {
                                 if !visited.insert(node) {
