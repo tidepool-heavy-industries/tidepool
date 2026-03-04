@@ -83,11 +83,14 @@
         };
       in {
         devShells.default = pkgs.mkShell {
+          nativeBuildInputs = [
+            pkgs.pkg-config
+          ];
           buildInputs = [
             rust
             pkgs.haskell.compiler.ghc912
             pkgs.cabal-install
-            pkgs.pkg-config
+            pkgs.openssl
           ];
 
           shellHook = ''

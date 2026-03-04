@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use tidepool_codegen::jit_machine::JitEffectMachine;
+use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
+use tidepool_effect::EffectError;
 use tidepool_macro::haskell_inline;
 use tidepool_tide::handlers::{ConsoleHandler, EnvHandler, FsHandler, NetHandler, ReplHandler};
 
@@ -63,12 +64,20 @@ fn run(args: Args) -> Result<()> {
         ConsoleHandler,
         EnvHandler::new(),
         NetHandler,
-        FsHandler,
+        FsHandler::new(std::env::current_dir()?),
     ];
 
     // Run: the JIT executes Haskell, yielding effect requests back to Rust.
-    vm.run(&table, &mut handlers, &())
-        .map_err(|e| anyhow::anyhow!("Runtime error: {}", e))?;
+    // Loop to keep the REPL alive on handler errors.
+    loop {
+        match vm.run(&table, &mut handlers, &()) {
+            Ok(_) => break,
+            Err(JitError::Effect(EffectError::Handler(e))) => {
+                eprintln!("Error: {}", e);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
 
     Ok(())
 }

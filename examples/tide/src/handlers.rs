@@ -325,7 +325,24 @@ pub enum FsReq {
     FsWrite(String, String),
 }
 
-pub struct FsHandler;
+pub struct FsHandler {
+    working_dir: PathBuf,
+}
+
+impl FsHandler {
+    pub fn new(working_dir: PathBuf) -> Self {
+        FsHandler { working_dir }
+    }
+
+    fn resolve(&self, path: &str) -> PathBuf {
+        let p = PathBuf::from(path);
+        if p.is_absolute() {
+            p
+        } else {
+            self.working_dir.join(p)
+        }
+    }
+}
 
 impl EffectHandler for FsHandler {
     type Request = FsReq;
@@ -333,13 +350,13 @@ impl EffectHandler for FsHandler {
     fn handle(&mut self, req: FsReq, cx: &EffectContext) -> Result<Value, EffectError> {
         match req {
             FsReq::FsRead(path) => {
-                let path = PathBuf::from(path);
+                let path = self.resolve(&path);
                 info!("Reading file: {}", path.display());
                 let contents = std::fs::read_to_string(&path).map_err(TideError::from)?;
                 cx.respond(contents)
             }
             FsReq::FsWrite(path, contents) => {
-                let path = PathBuf::from(path);
+                let path = self.resolve(&path);
                 info!("Writing file: {}", path.display());
                 std::fs::write(&path, &contents).map_err(TideError::from)?;
                 cx.respond(())
