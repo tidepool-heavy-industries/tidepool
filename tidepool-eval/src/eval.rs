@@ -66,28 +66,60 @@ pub fn force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
 
 /// Recursively force a value — forces all thunks inside constructors,
 /// producing a fully-evaluated tree with no `ThunkRef` values.
+/// This implementation is iterative to avoid stack overflow on deep structures.
 pub fn deep_force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
-    match val {
-        Value::ThunkRef(id) => {
-            let forced = force(Value::ThunkRef(id), heap)?;
-            deep_force(forced, heap)
-        }
-        Value::Con(tag, fields) => {
-            let mut forced_fields = Vec::with_capacity(fields.len());
-            for f in fields {
-                forced_fields.push(deep_force(f, heap)?);
-            }
-            Ok(Value::Con(tag, forced_fields))
-        }
-        Value::ConFun(tag, arity, args) => {
-            let mut forced_args = Vec::with_capacity(args.len());
-            for a in args {
-                forced_args.push(deep_force(a, heap)?);
-            }
-            Ok(Value::ConFun(tag, arity, forced_args))
-        }
-        other => Ok(other), // Lit, Closure, JoinCont — already values
+    const MAX_DEPTH: usize = 100_000;
+
+    enum Work {
+        Force(Value),
+        BuildCon(DataConId, usize),           // (tag, num_fields)
+        BuildConFun(DataConId, usize, usize), // (tag, arity, num_args)
     }
+
+    let mut stack: Vec<Work> = vec![Work::Force(val)];
+    let mut results: Vec<Value> = Vec::new();
+
+    while let Some(work) = stack.pop() {
+        if stack.len() > MAX_DEPTH {
+            return Err(EvalError::DepthLimit);
+        }
+        match work {
+            Work::Force(v) => match v {
+                Value::ThunkRef(id) => {
+                    let forced = force(Value::ThunkRef(id), heap)?;
+                    stack.push(Work::Force(forced));
+                }
+                Value::Con(tag, fields) => {
+                    let n = fields.len();
+                    stack.push(Work::BuildCon(tag, n));
+                    // Push fields in reverse so they're processed in order
+                    for f in fields.into_iter().rev() {
+                        stack.push(Work::Force(f));
+                    }
+                }
+                Value::ConFun(tag, arity, args) => {
+                    let n = args.len();
+                    stack.push(Work::BuildConFun(tag, arity, n));
+                    for a in args.into_iter().rev() {
+                        stack.push(Work::Force(a));
+                    }
+                }
+                other => results.push(other),
+            },
+            Work::BuildCon(tag, n) => {
+                let start = results.len() - n;
+                let fields = results.split_off(start);
+                results.push(Value::Con(tag, fields));
+            }
+            Work::BuildConFun(tag, arity, n) => {
+                let start = results.len() - n;
+                let args = results.split_off(start);
+                results.push(Value::ConFun(tag, arity, args));
+            }
+        }
+    }
+
+    Ok(results.pop().expect("deep_force produced no result"))
 }
 
 /// Evaluate the node at `idx` in the expression tree.
@@ -2481,5 +2513,35 @@ mod tests {
         // Now y is forced, should FAIL
         let res = eval(&expr, &Env::new(), &mut heap);
         assert!(matches!(res, Err(EvalError::UnboundVar(VarId(999)))));
+    }
+
+    #[test]
+    fn test_deep_force_iterative() {
+        // Construct a 200-deep chain of Con(DataConId(1), [prev])
+        // This would overflow the old recursive deep_force (~50 limit)
+        let mut current = Value::Lit(Literal::LitInt(42));
+        for _ in 0..200 {
+            current = Value::Con(DataConId(1), vec![current]);
+        }
+
+        let mut heap = crate::heap::VecHeap::new();
+        let forced = deep_force(current, &mut heap).unwrap();
+
+        // Verify we can traverse it
+        let mut current = forced;
+        for _ in 0..200 {
+            if let Value::Con(tag, fields) = current {
+                assert_eq!(tag.0, 1);
+                assert_eq!(fields.len(), 1);
+                current = fields.into_iter().next().unwrap();
+            } else {
+                panic!("Expected Con at depth");
+            }
+        }
+        if let Value::Lit(Literal::LitInt(n)) = current {
+            assert_eq!(n, 42);
+        } else {
+            panic!("Expected LitInt(42) at bottom");
+        }
     }
 }
