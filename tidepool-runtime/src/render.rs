@@ -119,10 +119,17 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                     };
                     if let Some(bs) = raw_ba {
                         let borrowed = bs.lock();
-                        let off = extract_boxed_int(off_val, table).unwrap_or(0) as usize;
-                        let len = extract_boxed_int(len_val, table).unwrap_or(borrowed.len() as i64)
-                            as usize;
-                        let end = (off + len).min(borrowed.len());
+                        let off_i64 = extract_boxed_int(off_val, table).unwrap_or(0);
+                        let len_i64 = extract_boxed_int(len_val, table).unwrap_or(borrowed.len() as i64);
+
+                        if off_i64 < 0 || len_i64 < 0 {
+                            return json!(format!("<Text invalid bounds off={}, len={}>", off_i64, len_i64));
+                        }
+
+                        let off = (off_i64 as usize).min(borrowed.len());
+                        let len = (len_i64 as usize).min(borrowed.len() - off);
+                        let end = off + len;
+
                         match std::str::from_utf8(&borrowed[off..end]) {
                             Ok(s) => json!(s),
                             Err(_) => json!(format!("<Text invalid UTF-8 len={}>", len)),
@@ -320,7 +327,11 @@ fn extract_char_inner(val: &Value, table: &DataConTable) -> Option<char> {
             if len != 1 {
                 return None;
             }
-            let off = extract_boxed_int(&fields[1], table).unwrap_or(0) as usize;
+            let off_i64 = extract_boxed_int(&fields[1], table).unwrap_or(0);
+            if off_i64 < 0 {
+                return None;
+            }
+            let off = off_i64 as usize;
             // Unwrap ByteArray layers to get the raw bytes
             let raw_ba = {
                 let mut cur = &fields[0];
