@@ -91,6 +91,7 @@
             pkgs.haskell.compiler.ghc912
             pkgs.cabal-install
             pkgs.openssl
+            self.packages.${system}.tidepool-extract
           ];
 
           shellHook = ''
