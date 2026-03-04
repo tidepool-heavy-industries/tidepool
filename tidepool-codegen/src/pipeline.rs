@@ -70,6 +70,11 @@ impl CodegenPipeline {
         // REQUIRED: enables RBP frame chain for GC stack walking
         flag_builder.set("preserve_frame_pointers", "true").unwrap();
         flag_builder.set("opt_level", "speed").unwrap();
+        // PIC mode: external symbols go through GOT entries so x86 PC-relative
+        // relocations don't overflow when JIT code is >2GB from host functions.
+        // Matches what JITBuilder::new() sets internally.
+        flag_builder.set("is_pic", "true").unwrap();
+        flag_builder.set("use_colocated_libcalls", "false").unwrap();
 
         let isa_builder = cranelift_native::builder().expect("host machine not supported");
         let isa = isa_builder
