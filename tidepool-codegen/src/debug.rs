@@ -10,8 +10,8 @@
 //! - `TIDEPOOL_TRACE=calls` — log each closure call (name, arg, result)
 //! - `TIDEPOOL_TRACE=heap` — also validate heap objects before use
 
-use std::collections::HashMap;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use tidepool_heap::layout;
 
 // ── Lambda Registry ──────────────────────────────────────────

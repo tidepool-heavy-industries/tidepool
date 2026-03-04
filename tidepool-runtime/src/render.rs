@@ -120,10 +120,14 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                     if let Some(bs) = raw_ba {
                         let borrowed = bs.lock();
                         let off_i64 = extract_boxed_int(off_val, table).unwrap_or(0);
-                        let len_i64 = extract_boxed_int(len_val, table).unwrap_or(borrowed.len() as i64);
+                        let len_i64 =
+                            extract_boxed_int(len_val, table).unwrap_or(borrowed.len() as i64);
 
                         if off_i64 < 0 || len_i64 < 0 {
-                            return json!(format!("<Text invalid bounds off={}, len={}>", off_i64, len_i64));
+                            return json!(format!(
+                                "<Text invalid bounds off={}, len={}>",
+                                off_i64, len_i64
+                            ));
                         }
 
                         let off = (off_i64 as usize).min(borrowed.len());
@@ -473,8 +477,8 @@ fn collect_list(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use parking_lot::Mutex;
+    use std::sync::Arc;
     use tidepool_repr::datacon::DataCon;
     use tidepool_repr::types::DataConId;
 

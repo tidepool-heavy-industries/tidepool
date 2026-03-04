@@ -2,8 +2,8 @@ use crate::env::Env;
 use crate::error::EvalError;
 use crate::heap::{Heap, ThunkState};
 use crate::value::Value;
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::sync::Arc;
 use tidepool_repr::{
     AltCon, CoreExpr, CoreFrame, DataConId, DataConTable, Literal, PrimOpKind, VarId,
 };

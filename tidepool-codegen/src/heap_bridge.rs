@@ -252,8 +252,8 @@ pub unsafe fn bump_alloc_from_vmctx(vmctx: &mut VMContext, size: usize) -> *mut 
 mod tests {
     use super::*;
     use crate::nursery::Nursery;
-    use std::sync::Arc;
     use parking_lot::Mutex;
+    use std::sync::Arc;
     use tidepool_repr::{DataConId, Literal};
 
     extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext) {}

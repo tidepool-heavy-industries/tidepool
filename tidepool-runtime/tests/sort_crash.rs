@@ -1,11 +1,11 @@
 use frunk::HNil;
+use parking_lot::Mutex;
 /// Reproducer for MCP `pure (sort [3,1,2 :: Int])` crash and broader
 /// freer-simple integration tests matching the exact source templates
 /// the MCP server generates.
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use parking_lot::Mutex;
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;

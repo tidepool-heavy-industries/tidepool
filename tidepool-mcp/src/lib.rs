@@ -5,6 +5,7 @@
 //! via `TidepoolMcpServer<H>`.
 
 use dyn_clone::{clone_trait_object, DynClone};
+use parking_lot::Mutex;
 use rmcp::{
     model::*, service::RequestContext, ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
 };
@@ -15,7 +16,6 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::Mutex;
 use tidepool_bridge::{FromCore, ToCore};
 use tidepool_runtime::DispatchEffect;
 use tokio::io::{stdin, stdout};

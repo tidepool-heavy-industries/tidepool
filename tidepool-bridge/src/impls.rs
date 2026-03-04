@@ -1,7 +1,7 @@
 use crate::error::BridgeError;
 use crate::traits::{FromCore, ToCore};
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::sync::Arc;
 use tidepool_eval::Value;
 use tidepool_repr::{DataConId, DataConTable, Literal};
 

@@ -1,6 +1,6 @@
 use crate::env::Env;
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::sync::Arc;
 use tidepool_repr::{CoreExpr, DataConId, Literal, VarId};
 
 /// Shared mutable byte array — `Arc<Mutex>` for in-place mutation semantics

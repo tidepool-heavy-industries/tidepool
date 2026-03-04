@@ -1,8 +1,8 @@
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use parking_lot::Mutex;
 
 use ast_grep_config::{DeserializeEnv, SerializableRule};
 use ast_grep_core::{Language as _, Pattern};
@@ -2434,7 +2434,11 @@ mod tests {
             .filter_map(|b| b.ok())
             .filter_map(|(b, _)| b.name().ok().flatten().map(String::from))
             .collect();
-        assert!(!names.is_empty(), "should have at least one branch, got: {:?}", names);
+        assert!(
+            !names.is_empty(),
+            "should have at least one branch, got: {:?}",
+            names
+        );
     }
 
     #[test]
