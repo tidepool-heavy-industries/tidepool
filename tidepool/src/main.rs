@@ -1151,6 +1151,162 @@ impl EffectHandler<CapturedOutput> for GitHandler {
     }
 }
 
+// === Tag 8: Llm (LLM calls via Anthropic API) ===
+
+#[derive(FromCore)]
+enum LlmReq {
+    #[core(name = "LlmChat")]
+    Chat(String),
+    #[core(name = "LlmStructured")]
+    Structured(String, Value), // Value is the Schema ADT, decoded in handler
+}
+
+#[derive(Clone)]
+struct LlmHandler {
+    api_key: String,
+    call_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+}
+
+const LLM_MODEL: &str = "claude-haiku-4-5-20251001";
+const LLM_MAX_CALLS: u32 = 200;
+
+impl LlmHandler {
+    fn new() -> Self {
+        let api_key = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| Self::read_key_file())
+            .unwrap_or_default();
+        Self {
+            api_key,
+            call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        }
+    }
+
+    /// Read API key from `.tidepool/anthropic.key` (cwd or ancestors).
+    fn read_key_file() -> Option<String> {
+        let mut dir = std::env::current_dir().ok()?;
+        loop {
+            let key_path = dir.join(".tidepool").join("anthropic.key");
+            if key_path.is_file() {
+                let contents = std::fs::read_to_string(&key_path).ok()?;
+                let trimmed = contents.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
+                }
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        None
+    }
+
+    fn check_rate_limit(&self) -> Result<(), EffectError> {
+        let count = self
+            .call_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if count >= LLM_MAX_CALLS {
+            Err(EffectError::Handler(format!(
+                "LLM call limit exceeded ({} calls max per eval)",
+                LLM_MAX_CALLS
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn check_api_key(&self) -> Result<(), EffectError> {
+        if self.api_key.is_empty() {
+            Err(EffectError::Handler(
+                "ANTHROPIC_API_KEY not set and no .tidepool/anthropic.key found".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn call_api(
+        &self,
+        messages: &serde_json::Value,
+        tools: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value, EffectError> {
+        let mut body = serde_json::json!({
+            "model": LLM_MODEL,
+            "max_tokens": 4096,
+            "messages": messages,
+        });
+        if let Some(tools_val) = tools {
+            body["tools"] = tools_val.clone();
+            body["tool_choice"] = serde_json::json!({"type": "any"});
+        }
+        let resp = ureq::post("https://api.anthropic.com/v1/messages")
+            .timeout(std::time::Duration::from_secs(60))
+            .set("x-api-key", &self.api_key)
+            .set("anthropic-version", "2023-06-01")
+            .set("Content-Type", "application/json")
+            .send_json(&body)
+            .map_err(|e| EffectError::Handler(format!("LLM API call failed: {}", e)))?;
+        let body_str = resp
+            .into_string()
+            .map_err(|e| EffectError::Handler(format!("LLM API response read failed: {}", e)))?;
+        serde_json::from_str(&body_str)
+            .map_err(|e| EffectError::Handler(format!("LLM API response parse failed: {}", e)))
+    }
+}
+
+impl DescribeEffect for LlmHandler {
+    fn effect_decl() -> EffectDecl {
+        tidepool_mcp::llm_decl()
+    }
+}
+
+impl EffectHandler<CapturedOutput> for LlmHandler {
+    type Request = LlmReq;
+    fn handle(
+        &mut self,
+        req: LlmReq,
+        cx: &EffectContext<'_, CapturedOutput>,
+    ) -> Result<Value, EffectError> {
+        self.check_api_key()?;
+        self.check_rate_limit()?;
+        match req {
+            LlmReq::Chat(prompt) => {
+                let messages = serde_json::json!([{"role": "user", "content": prompt}]);
+                let resp = self.call_api(&messages, None)?;
+                let text = resp["content"][0]["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                cx.respond(text)
+            }
+            LlmReq::Structured(prompt, schema_val) => {
+                let schema_json = tidepool_runtime::value_to_json(&schema_val, cx.table(), 0);
+                let tools = serde_json::json!([{
+                    "name": "structured_output",
+                    "description": "Return structured data matching the schema.",
+                    "input_schema": schema_json,
+                }]);
+                let messages = serde_json::json!([{"role": "user", "content": prompt}]);
+                let resp = self.call_api(&messages, Some(&tools))?;
+                // Extract tool use input from response
+                let input = resp["content"]
+                    .as_array()
+                    .and_then(|arr| {
+                        arr.iter().find(|block| block["type"] == "tool_use")
+                    })
+                    .and_then(|block| block.get("input"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                eprintln!("[llm-structured] API response input: {}", serde_json::to_string(&input).unwrap_or_default());
+                let result = cx.respond(input);
+                eprintln!("[llm-structured] cx.respond result: {}", result.is_ok());
+                result
+            }
+        }
+    }
+}
+
 // === Tag 6: Meta (runtime introspection) ===
 
 #[derive(FromCore)]
@@ -1579,7 +1735,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         HttpHandler,
         ExecHandler::new(cwd.clone()),
         MetaHandler::new(effect_names, helper_sigs),
-        GitHandler::new(cwd.clone())
+        GitHandler::new(cwd.clone()),
+        LlmHandler::new()
     ];
 
     let server = TidepoolMcpServer::new(handlers).with_prelude(prelude_dir);
@@ -1631,7 +1788,8 @@ mod tests {
             HttpHandler,
             ExecHandler::new(cwd.clone()),
             MetaHandler::new(vec![], vec![]),
-            GitHandler::new(cwd)
+            GitHandler::new(cwd),
+            LlmHandler::new()
         ];
         let result = tidepool_runtime::compile_and_run(
             &source,
@@ -1686,6 +1844,7 @@ mod tests {
                     tag: 1,
                     rep_arity: parsed.arity,
                     field_bangs: vec![],
+                    qualified_name: None,
                 });
                 next_id += 1;
             }
@@ -1731,6 +1890,7 @@ mod tests {
                 tag: 1,
                 rep_arity: arity,
                 field_bangs: vec![],
+                qualified_name: None,
             });
             next_id += 1;
         }
@@ -2024,7 +2184,7 @@ mod tests {
     }
 
     const EFFECTS_WITH_ROUNDTRIP_TESTS: &[&str] = &[
-        "Console", "KV", "Fs", "SG", "Http", "Exec", "Meta", "Git", "Ask",
+        "Console", "KV", "Fs", "SG", "Http", "Exec", "Meta", "Git", "Llm", "Ask",
     ];
 
     #[test]
@@ -2048,9 +2208,9 @@ mod tests {
     #[test]
     fn handler_order_matches_standard_decls() {
         let decls = tidepool_mcp::standard_decls();
-        // HList order from main(): Console(0), KV(1), Fs(2), SG(3), Http(4), Exec(5), Meta(6), Git(7)
-        // Ask(8) is handled by MCP server, not in main HList
-        let expected = ["Console", "KV", "Fs", "SG", "Http", "Exec", "Meta", "Git"];
+        // HList order from main(): Console(0), KV(1), Fs(2), SG(3), Http(4), Exec(5), Meta(6), Git(7), Llm(8)
+        // Ask(9) is handled by MCP server, not in main HList
+        let expected = ["Console", "KV", "Fs", "SG", "Http", "Exec", "Meta", "Git", "Llm"];
         for (i, name) in expected.iter().enumerate() {
             assert_eq!(
                 decls[i].type_name, *name,
@@ -2540,4 +2700,174 @@ mod tests {
         let content = std::fs::read_to_string(handler.root.join("Cargo.toml")).unwrap();
         assert!(!content.is_empty());
     }
+
+    // === LLM structured JSON round-trip through JIT ===
+
+    /// Mock LLM handler that returns a fixed JSON response instead of calling the API.
+    #[derive(Clone)]
+    struct MockLlmHandler {
+        response: serde_json::Value,
+    }
+
+    impl DescribeEffect for MockLlmHandler {
+        fn effect_decl() -> EffectDecl {
+            tidepool_mcp::llm_decl()
+        }
+    }
+
+    impl EffectHandler<CapturedOutput> for MockLlmHandler {
+        type Request = LlmReq;
+        fn handle(
+            &mut self,
+            req: LlmReq,
+            cx: &EffectContext<'_, CapturedOutput>,
+        ) -> Result<Value, EffectError> {
+            match req {
+                LlmReq::Chat(_) => cx.respond("mock response".to_string()),
+                LlmReq::Structured(_, _) => cx.respond(self.response.clone()),
+            }
+        }
+    }
+
+    fn jit_eval_with_mock_llm(code: &[&str], mock_response: serde_json::Value) -> serde_json::Value {
+        let source = jit_test_source(code);
+        let include = prelude_include();
+        let include_paths: Vec<&std::path::Path> = vec![include.as_path()];
+        let kv_path = std::env::temp_dir().join("tidepool_mock_llm_kv.json");
+        let cwd = repo_root();
+        let captured = CapturedOutput::new();
+        let mut handlers = frunk::hlist![
+            ConsoleHandler,
+            KvHandler::new(kv_path),
+            FsHandler::new(cwd.clone()),
+            SgHandler::new(cwd.clone()),
+            HttpHandler,
+            ExecHandler::new(cwd.clone()),
+            MetaHandler::new(vec![], vec![]),
+            GitHandler::new(cwd),
+            MockLlmHandler { response: mock_response }
+        ];
+        let result = tidepool_runtime::compile_and_run(
+            &source,
+            "result",
+            &include_paths,
+            &mut handlers,
+            &captured,
+        );
+        match result {
+            Ok(eval_result) => eval_result.to_json(),
+            Err(e) => panic!("JIT eval failed: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_llm_structured_simple_object() {
+        let mock = serde_json::json!({"greeting": "hello"});
+        let result = jit_eval_with_mock_llm(
+            &["llmJson \"test\" (SObj [(\"greeting\", SStr)])"],
+            mock,
+        );
+        assert_eq!(result["greeting"], "hello");
+    }
+
+    #[test]
+    fn test_llm_structured_nested_object() {
+        let mock = serde_json::json!({
+            "languages": [
+                {"name": "Haskell", "year": 1990},
+                {"name": "Rust", "year": 2010},
+                {"name": "Python", "year": 1991}
+            ]
+        });
+        let result = jit_eval_with_mock_llm(
+            &["llmJson \"test\" (SObj [(\"languages\", SArr (SObj [(\"name\", SStr), (\"year\", SNum)]))])"],
+            mock,
+        );
+        let langs = result["languages"].as_array().expect("languages should be array");
+        assert_eq!(langs.len(), 3);
+        assert_eq!(langs[0]["name"], "Haskell");
+    }
+
+    #[test]
+    fn test_llm_structured_encode_roundtrip() {
+        // This is the exact crash path: llmJson → encode result
+        let mock = serde_json::json!({"greeting": "hello"});
+        let result = jit_eval_with_mock_llm(
+            &[
+                "r <- llmJson \"test\" (SObj [(\"greeting\", SStr)])",
+                "say (encode r)",
+                "pure r",
+            ],
+            mock,
+        );
+        assert_eq!(result["greeting"], "hello");
+    }
+
+    #[test]
+    fn test_llm_structured_nested_encode_roundtrip() {
+        let mock = serde_json::json!({
+            "languages": [
+                {"name": "Haskell", "year": 1990},
+                {"name": "Rust", "year": 2010}
+            ]
+        });
+        let result = jit_eval_with_mock_llm(
+            &[
+                "r <- llmJson \"test\" (SObj [(\"languages\", SArr (SObj [(\"name\", SStr), (\"year\", SNum)]))])",
+                "say (encode r)",
+                "pure r",
+            ],
+            mock,
+        );
+        let langs = result["languages"].as_array().expect("languages should be array");
+        assert_eq!(langs.len(), 2);
+    }
+
+    #[test]
+    fn test_llm_structured_empty_object() {
+        let mock = serde_json::json!({});
+        let result = jit_eval_with_mock_llm(
+            &["llmJson \"test\" (SObj [])"],
+            mock,
+        );
+        assert!(result.is_object());
+        assert_eq!(result.as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_llm_structured_mixed_types() {
+        let mock = serde_json::json!({
+            "name": "test",
+            "count": 42,
+            "active": true
+        });
+        let result = jit_eval_with_mock_llm(
+            &["llmJson \"test\" (SObj [(\"name\", SStr), (\"count\", SNum), (\"active\", SBool)])"],
+            mock,
+        );
+        assert_eq!(result["name"], "test");
+        assert_eq!(result["count"], 42);
+        assert_eq!(result["active"], true);
+    }
+
+    #[test]
+    fn test_llm_structured_mixed_encode_roundtrip() {
+        let mock = serde_json::json!({
+            "name": "test",
+            "count": 42,
+            "active": true
+        });
+        let result = jit_eval_with_mock_llm(
+            &[
+                "r <- llmJson \"test\" (SObj [(\"name\", SStr), (\"count\", SNum), (\"active\", SBool)])",
+                "say (encode r)",
+                "pure r",
+            ],
+            mock,
+        );
+        assert_eq!(result["name"], "test");
+        assert_eq!(result["count"], 42);
+        assert_eq!(result["active"], true);
+    }
+
 }

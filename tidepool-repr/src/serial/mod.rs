@@ -339,6 +339,7 @@ mod tests {
             tag: 1,
             rep_arity: 1,
             field_bangs: vec![SrcBang::SrcBang],
+            qualified_name: None,
         });
         table.insert(DataCon {
             id: DataConId(2),
@@ -346,11 +347,107 @@ mod tests {
             tag: 2,
             rep_arity: 0,
             field_bangs: vec![],
+            qualified_name: None,
         });
 
         let bytes = write_metadata(&table).expect("write_metadata failed");
         let (recovered, warnings) = read_metadata(&bytes).expect("read_metadata failed");
         assert_eq!(table, recovered);
         assert!(!warnings.has_io);
+    }
+
+    #[test]
+    fn test_roundtrip_metadata_with_qualified_names() {
+        use crate::datacon::DataCon;
+        use crate::datacon_table::DataConTable;
+
+        let mut table = DataConTable::new();
+        table.insert(DataCon {
+            id: DataConId(100),
+            name: "Bin".to_string(),
+            tag: 1,
+            rep_arity: 5,
+            field_bangs: vec![],
+            qualified_name: Some("Data.Map.Bin".to_string()),
+        });
+        table.insert(DataCon {
+            id: DataConId(200),
+            name: "Tip".to_string(),
+            tag: 2,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: Some("Data.Map.Tip".to_string()),
+        });
+        table.insert(DataCon {
+            id: DataConId(300),
+            name: "Bin".to_string(),
+            tag: 1,
+            rep_arity: 3,
+            field_bangs: vec![],
+            qualified_name: Some("Data.Set.Bin".to_string()),
+        });
+
+        let bytes = write_metadata(&table).expect("write_metadata failed");
+        let (recovered, _) = read_metadata(&bytes).expect("read_metadata failed");
+
+        // Check by-id entries survived (HashMap order may differ, so check individually)
+        assert_eq!(recovered.len(), 3);
+        assert_eq!(recovered.get(DataConId(100)).unwrap().qualified_name, Some("Data.Map.Bin".to_string()));
+        assert_eq!(recovered.get(DataConId(200)).unwrap().qualified_name, Some("Data.Map.Tip".to_string()));
+        assert_eq!(recovered.get(DataConId(300)).unwrap().qualified_name, Some("Data.Set.Bin".to_string()));
+
+        // Verify qualified name index survived the round-trip
+        assert_eq!(
+            recovered.get_by_qualified_name("Data.Map.Bin"),
+            Some(DataConId(100))
+        );
+        assert_eq!(
+            recovered.get_by_qualified_name("Data.Set.Bin"),
+            Some(DataConId(300))
+        );
+        assert_eq!(
+            recovered.get_by_qualified_name("Data.Map.Tip"),
+            Some(DataConId(200))
+        );
+    }
+
+    #[test]
+    fn test_roundtrip_metadata_mixed_qualified_and_none() {
+        use crate::datacon::DataCon;
+        use crate::datacon_table::DataConTable;
+
+        let mut table = DataConTable::new();
+        table.insert(DataCon {
+            id: DataConId(1),
+            name: "Just".to_string(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![],
+            qualified_name: Some("Data.Maybe.Just".to_string()),
+        });
+        table.insert(DataCon {
+            id: DataConId(2),
+            name: "Nothing".to_string(),
+            tag: 2,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: None, // legacy: no qualified name
+        });
+
+        let bytes = write_metadata(&table).expect("write_metadata failed");
+        let (recovered, _) = read_metadata(&bytes).expect("read_metadata failed");
+
+        // Check individual entries (HashMap order may differ)
+        assert_eq!(recovered.len(), 2);
+        assert_eq!(
+            recovered.get(DataConId(1)).unwrap().qualified_name,
+            Some("Data.Maybe.Just".to_string())
+        );
+        assert_eq!(
+            recovered.get_by_qualified_name("Data.Maybe.Just"),
+            Some(DataConId(1))
+        );
+        // Nothing had no qualified name — should not be in the index
+        assert_eq!(recovered.get(DataConId(2)).unwrap().qualified_name, None);
     }
 }

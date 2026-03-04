@@ -83,14 +83,14 @@ encodeFlatAltCon = \case
   FLitAlt lit   -> encodeListLen 2 <> encodeString "LitAlt" <> encodeLitEnc lit
   FDefault      -> encodeListLen 1 <> encodeString "Default"
 
-encodeMetadata :: [(Word64, Text, Int, Int, [Text])] -> Bool -> ByteString
+encodeMetadata :: [(Word64, Text, Int, Int, [Text], Text)] -> Bool -> ByteString
 encodeMetadata entries hasIO = toStrictByteString $
   encodeListLen 2
   <> (encodeListLen (fromIntegral (length entries)) <> foldMap encodeMetaEntry entries)
   <> encodeMapLen 1 <> encodeString "has_io" <> encodeBool hasIO
 
-encodeMetaEntry :: (Word64, Text, Int, Int, [Text]) -> Encoding
-encodeMetaEntry (dcid, name, tag, arity, bangs) =
+encodeMetaEntry :: (Word64, Text, Int, Int, [Text], Text) -> Encoding
+encodeMetaEntry (dcid, name, tag, arity, bangs, qualName) =
   let
     tagWord :: Word
     tagWord =
@@ -98,10 +98,11 @@ encodeMetaEntry (dcid, name, tag, arity, bangs) =
         then error "encodeMetaEntry: negative constructor tag"
         else fromIntegral tag
   in
-  encodeListLen 5
+  encodeListLen 6
   <> encodeWord64 dcid
   <> encodeString name
   <> encodeWord tagWord
   <> encodeInt arity
   <> encodeListLen (fromIntegral (length bangs))
   <> foldMap encodeString bangs
+  <> encodeString qualName

@@ -3875,8 +3875,8 @@ fn test_tocore_json_datacon_ids_match_haskell() {
 
             // Dump all names that ToCore uses
             for name in &["Object", "Array", "String", "Number", "Bool", "Null", "Key", "Bin", "Tip"] {
-                let id = table.get_by_name(name);
-                eprintln!("  get_by_name({:?}) = {:?}", name, id);
+                let ids = table.get_all_by_name(name);
+                eprintln!("  get_all_by_name({:?}) = {:?}", name, ids);
             }
             // Dump ALL entries named "Array" or "String"
             for dc in table.iter() {

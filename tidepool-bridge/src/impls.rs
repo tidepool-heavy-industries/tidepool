@@ -687,6 +687,7 @@ mod tests {
             tag: 1,
             rep_arity: 0,
             field_bangs: vec![],
+            qualified_name: None,
         });
         t.insert(DataCon {
             id: DataConId(1),
@@ -694,6 +695,7 @@ mod tests {
             tag: 2,
             rep_arity: 1,
             field_bangs: vec![],
+            qualified_name: None,
         });
         t.insert(DataCon {
             id: DataConId(2),
@@ -701,6 +703,7 @@ mod tests {
             tag: 1,
             rep_arity: 0,
             field_bangs: vec![],
+            qualified_name: None,
         });
         t.insert(DataCon {
             id: DataConId(3),
@@ -708,6 +711,7 @@ mod tests {
             tag: 2,
             rep_arity: 0,
             field_bangs: vec![],
+            qualified_name: None,
         });
         t.insert(DataCon {
             id: DataConId(4),
@@ -715,6 +719,7 @@ mod tests {
             tag: 1,
             rep_arity: 2,
             field_bangs: vec![],
+            qualified_name: None,
         });
         t.insert(DataCon {
             id: DataConId(5),
@@ -722,6 +727,7 @@ mod tests {
             tag: 1,
             rep_arity: 0,
             field_bangs: vec![],
+            qualified_name: None,
         });
         t.insert(DataCon {
             id: DataConId(6),
@@ -729,6 +735,7 @@ mod tests {
             tag: 2,
             rep_arity: 2,
             field_bangs: vec![],
+            qualified_name: None,
         });
         t.insert(DataCon {
             id: DataConId(7),
@@ -736,6 +743,7 @@ mod tests {
             tag: 1,
             rep_arity: 3,
             field_bangs: vec![],
+            qualified_name: None,
         });
         t.insert(DataCon {
             id: DataConId(8),
@@ -743,6 +751,7 @@ mod tests {
             tag: 2,
             rep_arity: 1,
             field_bangs: vec![],
+            qualified_name: None,
         });
         t.insert(DataCon {
             id: DataConId(9),
@@ -750,6 +759,7 @@ mod tests {
             tag: 1,
             rep_arity: 1,
             field_bangs: vec![],
+            qualified_name: None,
         });
         t.insert(DataCon {
             id: DataConId(10),
@@ -757,6 +767,7 @@ mod tests {
             tag: 1,
             rep_arity: 1,
             field_bangs: vec![],
+            qualified_name: None,
         });
         t.insert(DataCon {
             id: DataConId(11),
@@ -764,6 +775,7 @@ mod tests {
             tag: 1,
             rep_arity: 1,
             field_bangs: vec![],
+            qualified_name: None,
         });
         t.insert(DataCon {
             id: DataConId(12),
@@ -771,6 +783,7 @@ mod tests {
             tag: 1,
             rep_arity: 1,
             field_bangs: vec![],
+            qualified_name: None,
         });
         t.insert(DataCon {
             id: DataConId(13),
@@ -778,6 +791,7 @@ mod tests {
             tag: 1,
             rep_arity: 1,
             field_bangs: vec![],
+            qualified_name: None,
         });
         t.insert(DataCon {
             id: DataConId(14),
@@ -785,6 +799,7 @@ mod tests {
             tag: 1,
             rep_arity: 0,
             field_bangs: vec![],
+            qualified_name: None,
         });
         t.insert(DataCon {
             id: DataConId(15),
@@ -792,6 +807,7 @@ mod tests {
             tag: 1,
             rep_arity: 3,
             field_bangs: vec![],
+            qualified_name: None,
         });
         t
     }

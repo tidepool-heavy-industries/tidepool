@@ -56,13 +56,17 @@ pub fn write_metadata(table: &crate::datacon_table::DataConTable) -> Result<Vec<
                 .collect(),
         );
 
-        entries.push(Value::Array(vec![
+        let mut entry = vec![
             Value::Integer(dcid.into()),
             Value::Text(name.clone()),
             Value::Integer(tag.into()),
             Value::Integer(arity.into()),
             bangs,
-        ]));
+        ];
+        if let Some(ref qn) = dc.qualified_name {
+            entry.push(Value::Text(qn.clone()));
+        }
+        entries.push(Value::Array(entry));
     }
 
     // New format: [entries_array, warnings_map]

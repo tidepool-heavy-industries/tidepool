@@ -490,6 +490,7 @@ mod tests {
                 tag: id as u32,
                 rep_arity: arity,
                 field_bangs: vec![],
+                qualified_name: None,
             });
         }
         t

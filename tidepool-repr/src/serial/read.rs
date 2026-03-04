@@ -108,10 +108,10 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
     let mut table = DataConTable::new();
     for entry in &entries {
         let arr = match entry {
-            Value::Array(a) if a.len() == 5 => a,
+            Value::Array(a) if a.len() == 5 || a.len() == 6 => a,
             _ => {
                 return Err(ReadError::InvalidStructure(
-                    "Metadata entry must be array of 5".to_string(),
+                    "Metadata entry must be array of 5 or 6".to_string(),
                 ))
             }
         };
@@ -154,12 +154,23 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
             });
         }
 
+        // 6th element (optional): module-qualified name
+        let qualified_name = if arr.len() >= 6 {
+            match &arr[5] {
+                Value::Text(t) => Some(t.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         table.insert(DataCon {
             id: DataConId(dcid),
             name,
             tag,
             rep_arity: arity,
             field_bangs: bangs,
+            qualified_name,
         });
     }
 

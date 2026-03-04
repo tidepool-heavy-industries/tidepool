@@ -26,4 +26,6 @@ pub struct DataCon {
     pub rep_arity: u32,
     /// Strictness per field (from `dataConSrcBangs`). For debugging/pretty-printing only.
     pub field_bangs: Vec<SrcBang>,
+    /// Module-qualified name (e.g., "Data.Map.Bin"). None for legacy CBOR without this field.
+    pub qualified_name: Option<String>,
 }

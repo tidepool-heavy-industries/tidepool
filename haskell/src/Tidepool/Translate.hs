@@ -409,7 +409,7 @@ translateModuleClosed hscEnv allBinds targetName = do
 -- | Collect all DataCons encountered during translation of Core bindings.
 -- This includes constructors from imported packages (e.g. freer-simple's
 -- Val, E, Leaf, Node, Union) that aren't in the module's mg_tcs.
-collectUsedDataCons :: [CoreBind] -> [(Word64, Text, Int, Int, [Text])]
+collectUsedDataCons :: [CoreBind] -> [(Word64, Text, Int, Int, [Text], Text)]
 collectUsedDataCons binds =
   let allDCs = foldMap collectFromBind binds
   in map dcToMeta (Map.elems allDCs)
@@ -423,18 +423,19 @@ collectUsedDataCons binds =
         in tsUsedDCs s
       ) pairs
 
-dcToMeta :: DataCon -> (Word64, Text, Int, Int, [Text])
+dcToMeta :: DataCon -> (Word64, Text, Int, Int, [Text], Text)
 dcToMeta dc =
   ( varId (dataConWorkId dc)
   , T.pack (occNameString (nameOccName (dataConName dc)))
   , dataConTag dc
   , valueRepArity dc
   , map mapBang (dataConSrcBangs dc)
+  , qualifiedName (dataConName dc)
   )
 
 -- | Compute transitive closure of TyCons reachable from all binder types,
 -- expanding through newtypes, then return metadata for all their DataCons.
-collectTransitiveDCons :: [CoreBind] -> [(Word64, Text, Int, Int, [Text])]
+collectTransitiveDCons :: [CoreBind] -> [(Word64, Text, Int, Int, [Text], Text)]
 collectTransitiveDCons binds =
   let binderTypes = [ idType b | b <- concatMap bindersOfBind binds ]
       seedTyCons  = foldMap (nonDetEltsUniqSet . tyConsOfType) binderTypes
@@ -461,7 +462,7 @@ closeTyCons visited (tc:rest)
             Nothing  -> []
       in closeTyCons visited' (newtypeChildren ++ fieldChildren ++ rest)
 
-tyConToDCMeta :: TyCon -> [(Word64, Text, Int, Int, [Text])]
+tyConToDCMeta :: TyCon -> [(Word64, Text, Int, Int, [Text], Text)]
 tyConToDCMeta tc = case tyConDataCons_maybe tc of
   Just dcs -> map (\dc ->
     ( varId (dataConWorkId dc)
@@ -469,6 +470,7 @@ tyConToDCMeta tc = case tyConDataCons_maybe tc of
     , dataConTag dc
     , valueRepArity dc
     , map mapBang (dataConSrcBangs dc)
+    , qualifiedName (dataConName dc)
     )) dcs
   Nothing  -> []
 
@@ -1051,16 +1053,26 @@ varId v = case isDataConId_maybe v of
              then stableVarId (varName v)
              else fromIntegral (getKey (varUnique v))
 
+-- | Normalize a module name by stripping ".Internal" / "Internal." segments.
+normalizeMod :: String -> String
+normalizeMod s =
+  let t = T.pack s
+      t1 = T.replace ".Internal" "" t
+      t2 = T.replace "Internal." "" t1
+  in T.unpack t2
+
+-- | Module-qualified name for a DataCon (e.g. "Data.Map.Bin").
+-- Falls back to just the OccName for wired-in names without a module.
+qualifiedName :: Name -> Text
+qualifiedName name = case nameModule_maybe name of
+  Just m  -> T.pack (normalizeMod (moduleNameString (moduleName m)) ++ "." ++ occNameString (nameOccName name))
+  Nothing -> T.pack (occNameString (nameOccName name))
+
 stableVarId :: Name -> Word64
 stableVarId name =
   let modStr = case nameModule_maybe name of
         Just m  -> normalizeMod (moduleNameString (moduleName m))
         Nothing -> "WiredIn"
-      normalizeMod s =
-        let t = T.pack s
-            t1 = T.replace ".Internal" "" t
-            t2 = T.replace "Internal." "" t1
-        in T.unpack t2
       occStr = occNameString (nameOccName name)
       fullStr = modStr ++ ":" ++ occStr
       Fingerprint h1 _ = fingerprintString fullStr

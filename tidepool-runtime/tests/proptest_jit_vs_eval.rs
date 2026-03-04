@@ -65,6 +65,7 @@ fn build_table_for_expr(expr: &CoreExpr) -> DataConTable {
                 tag: (id.0 % 100) as u32 + 1,
                 rep_arity: arity,
                 field_bangs: vec![],
+                qualified_name: None,
             });
         }
     }

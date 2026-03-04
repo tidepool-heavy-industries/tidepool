@@ -34,6 +34,7 @@ fn test_table() -> DataConTable {
         tag: 1,
         rep_arity: 0,
         field_bangs: vec![],
+        qualified_name: None,
     });
     t.insert(DataCon {
         id: DataConId(21),
@@ -41,6 +42,7 @@ fn test_table() -> DataConTable {
         tag: 1,
         rep_arity: 3,
         field_bangs: vec![],
+        qualified_name: None,
     });
     t.insert(DataCon {
         id: DataConId(22),
@@ -48,6 +50,7 @@ fn test_table() -> DataConTable {
         tag: 1,
         rep_arity: 1,
         field_bangs: vec![],
+        qualified_name: None,
     });
     t.insert(DataCon {
         id: DataConId(23),
@@ -55,6 +58,7 @@ fn test_table() -> DataConTable {
         tag: 1,
         rep_arity: 0,
         field_bangs: vec![],
+        qualified_name: None,
     });
     t.insert(DataCon {
         id: DataConId(24),
@@ -62,6 +66,7 @@ fn test_table() -> DataConTable {
         tag: 1,
         rep_arity: 2,
         field_bangs: vec![],
+        qualified_name: None,
     });
     t
 }

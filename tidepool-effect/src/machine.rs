@@ -322,6 +322,7 @@ mod tests {
             tag: 1,
             rep_arity: 1,
             field_bangs: vec![],
+            qualified_name: None,
         });
         table.insert(DataCon {
             id: DataConId(2),
@@ -329,6 +330,7 @@ mod tests {
             tag: 2,
             rep_arity: 2,
             field_bangs: vec![],
+            qualified_name: None,
         });
         table.insert(DataCon {
             id: DataConId(3),
@@ -336,6 +338,7 @@ mod tests {
             tag: 1,
             rep_arity: 1,
             field_bangs: vec![],
+            qualified_name: None,
         });
         table.insert(DataCon {
             id: DataConId(4),
@@ -343,6 +346,7 @@ mod tests {
             tag: 2,
             rep_arity: 2,
             field_bangs: vec![],
+            qualified_name: None,
         });
         table.insert(DataCon {
             id: DataConId(5),
@@ -350,6 +354,7 @@ mod tests {
             tag: 1,
             rep_arity: 2,
             field_bangs: vec![],
+            qualified_name: None,
         });
         table
     }
@@ -564,6 +569,7 @@ mod async_tests {
             tag: 1,
             rep_arity: 1,
             field_bangs: vec![],
+            qualified_name: None,
         });
         table.insert(DataCon {
             id: DataConId(2),
@@ -571,6 +577,7 @@ mod async_tests {
             tag: 2,
             rep_arity: 2,
             field_bangs: vec![],
+            qualified_name: None,
         });
         table.insert(DataCon {
             id: DataConId(3),
@@ -578,6 +585,7 @@ mod async_tests {
             tag: 1,
             rep_arity: 1,
             field_bangs: vec![],
+            qualified_name: None,
         });
         table.insert(DataCon {
             id: DataConId(4),
@@ -585,6 +593,7 @@ mod async_tests {
             tag: 2,
             rep_arity: 2,
             field_bangs: vec![],
+            qualified_name: None,
         });
         table.insert(DataCon {
             id: DataConId(5),
@@ -592,6 +601,7 @@ mod async_tests {
             tag: 1,
             rep_arity: 2,
             field_bangs: vec![],
+            qualified_name: None,
         });
         table
     }
