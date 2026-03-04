@@ -35,7 +35,7 @@ lit_char_newline :: Char
 lit_char_newline = '\n'
 
 lit_double_pi :: Double
-lit_double_pi = 3.1
+lit_double_pi = 3.14159
 
 lit_double_neg :: Double
 lit_double_neg = -2.5
