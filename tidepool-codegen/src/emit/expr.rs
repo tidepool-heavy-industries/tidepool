@@ -720,6 +720,7 @@ impl EmitContext {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn emit_node(
         &mut self,
         pipeline: &mut CodegenPipeline,
