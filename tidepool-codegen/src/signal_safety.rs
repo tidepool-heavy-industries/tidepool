@@ -159,7 +159,13 @@ mod inner {
         };
         let jmp_set = JMP_BUF.with(|cell| !cell.get().is_null());
         let ts = libc::time(ptr::null_mut()) as u64;
+
+        #[cfg(target_os = "linux")]
         let tid = libc::syscall(libc::SYS_gettid) as u64;
+        #[cfg(target_os = "macos")]
+        let tid = unsafe { libc::pthread_self() as u64 };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let tid = 0u64;
 
         let mut buf = [0u8; 384];
         let pos = format_crash_line(&mut buf, sig, si_addr, jmp_set, ts, tid);
@@ -336,37 +342,42 @@ mod inner {
         static PATHS_INIT: Once = Once::new();
         PATHS_INIT.call_once(|| {
             // Priority: $TIDEPOOL_CRASH_LOG > $CWD/.tidepool/crash.log > /tmp/tidepool-crash.log
-            let path: Option<std::path::PathBuf> = std::env::var_os("TIDEPOOL_CRASH_LOG")
+            let mut path: std::path::PathBuf = std::env::var_os("TIDEPOOL_CRASH_LOG")
                 .map(std::path::PathBuf::from)
                 .or_else(|| {
                     std::env::current_dir().ok().map(|cwd| cwd.join(".tidepool/crash.log"))
-                });
+                })
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp/tidepool-crash.log"));
 
-            let path = path.unwrap_or_else(|| std::path::PathBuf::from("/tmp/tidepool-crash.log"));
-            let path_bytes = path.as_os_str().as_encoded_bytes();
+            let mut path_bytes = path.as_os_str().as_encoded_bytes();
 
-            if path_bytes.len() < 511 {
-                unsafe {
-                    let log_ptr = addr_of_mut!(CRASH_LOG_PATH) as *mut u8;
-                    ptr::copy_nonoverlapping(path_bytes.as_ptr(), log_ptr, path_bytes.len());
-                    *log_ptr.add(path_bytes.len()) = 0; // null terminate
-                    CRASH_LOG_PATH_LEN.store(path_bytes.len(), Ordering::Relaxed);
-                }
+            // If the chosen path is too long, fallback to /tmp/tidepool-crash.log
+            if path_bytes.len() >= 511 {
+                path = std::path::PathBuf::from("/tmp/tidepool-crash.log");
+                path_bytes = path.as_os_str().as_encoded_bytes();
             }
 
-            // Ensure parent directory exists
+            // At this point /tmp/tidepool-crash.log is guaranteed to be < 511.
+            unsafe {
+                let log_ptr = addr_of_mut!(CRASH_LOG_PATH) as *mut u8;
+                ptr::copy_nonoverlapping(path_bytes.as_ptr(), log_ptr, path_bytes.len());
+                *log_ptr.add(path_bytes.len()) = 0; // null terminate
+                CRASH_LOG_PATH_LEN.store(path_bytes.len(), Ordering::Relaxed);
+            }
+
+            // Ensure parent directory exists (safe, non-signal context).
             if let Some(parent) = path.parent() {
-                let dir_bytes = parent.as_os_str().as_encoded_bytes();
-                if dir_bytes.len() < 511 {
-                    unsafe {
-                        let dir_ptr = addr_of_mut!(CRASH_DIR_PATH) as *mut u8;
-                        ptr::copy_nonoverlapping(dir_bytes.as_ptr(), dir_ptr, dir_bytes.len());
-                        *dir_ptr.add(dir_bytes.len()) = 0; // null terminate
-                        CRASH_DIR_PATH_LEN.store(dir_bytes.len(), Ordering::Relaxed);
-                        libc::mkdir(
-                            addr_of!(CRASH_DIR_PATH) as *const libc::c_char,
-                            0o755,
-                        );
+                if !parent.as_os_str().is_empty() {
+                    let _ = std::fs::create_dir_all(parent);
+
+                    let dir_bytes = parent.as_os_str().as_encoded_bytes();
+                    if dir_bytes.len() < 511 {
+                        unsafe {
+                            let dir_ptr = addr_of_mut!(CRASH_DIR_PATH) as *mut u8;
+                            ptr::copy_nonoverlapping(dir_bytes.as_ptr(), dir_ptr, dir_bytes.len());
+                            *dir_ptr.add(dir_bytes.len()) = 0; // null terminate
+                            CRASH_DIR_PATH_LEN.store(dir_bytes.len(), Ordering::Relaxed);
+                        }
                     }
                 }
             }
