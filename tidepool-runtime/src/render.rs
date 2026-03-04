@@ -272,25 +272,22 @@ fn collect_map_entries(
     if depth > MAX_DEPTH {
         return;
     }
-    match val {
-        Value::Con(id, fields) => {
-            let name = con_name(*id, table);
-            match (name, fields.as_slice()) {
-                ("Tip", []) => {}
-                // Bin size key value left right
-                ("Bin", [_size, k, v, left, right]) => {
-                    collect_map_entries(left, table, depth + 1, out);
-                    let key_str = match value_to_json(k, table, depth + 1) {
-                        serde_json::Value::String(s) => s,
-                        other => other.to_string(),
-                    };
-                    out.insert(key_str, value_to_json(v, table, depth + 1));
-                    collect_map_entries(right, table, depth + 1, out);
-                }
-                _ => {}
+    if let Value::Con(id, fields) = val {
+        let name = con_name(*id, table);
+        match (name, fields.as_slice()) {
+            ("Tip", []) => {}
+            // Bin size key value left right
+            ("Bin", [_size, k, v, left, right]) => {
+                collect_map_entries(left, table, depth + 1, out);
+                let key_str = match value_to_json(k, table, depth + 1) {
+                    serde_json::Value::String(s) => s,
+                    other => other.to_string(),
+                };
+                out.insert(key_str, value_to_json(v, table, depth + 1));
+                collect_map_entries(right, table, depth + 1, out);
             }
+            _ => {}
         }
-        _ => {}
     }
 }
 
