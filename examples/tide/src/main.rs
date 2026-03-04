@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use tidepool_codegen::jit_machine::JitEffectMachine;
+use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
+use tidepool_effect::EffectError;
 use tidepool_macro::haskell_inline;
 use tidepool_tide::handlers::{ConsoleHandler, EnvHandler, FsHandler, NetHandler, ReplHandler};
 
@@ -71,9 +72,10 @@ fn run(args: Args) -> Result<()> {
     loop {
         match vm.run(&table, &mut handlers, &()) {
             Ok(_) => break,
-            Err(e) => {
+            Err(JitError::Effect(EffectError::Handler(e))) => {
                 eprintln!("Error: {}", e);
             }
+            Err(e) => return Err(e.into()),
         }
     }
 
