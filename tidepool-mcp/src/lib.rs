@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tidepool_bridge::{FromCore, ToCore};
 use tidepool_runtime::DispatchEffect;
@@ -1198,6 +1198,8 @@ struct EvalSession {
     response_tx: std::sync::mpsc::Sender<String>,
     /// Receive the next message (Completed, Suspended, or Error) from the eval thread.
     session_rx: tokio::sync::mpsc::UnboundedReceiver<SessionMessage>,
+    /// The thread handle, for joining when done.
+    handle: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
     /// The Haskell source code, for error formatting on resume.
     source: Arc<str>,
     /// When this session was created, for TTL cleanup.
@@ -1310,6 +1312,7 @@ pub struct TidepoolMcpServerImpl {
     ask_tag: u64,
     continuations: Arc<std::sync::Mutex<HashMap<String, EvalSession>>>,
     next_cont_id: Arc<AtomicU64>,
+    orphaned_threads: Arc<AtomicUsize>,
 }
 
 impl TidepoolMcpServerImpl {
@@ -1327,6 +1330,13 @@ impl TidepoolMcpServerImpl {
     async fn eval(&self, req: EvalRequest) -> Result<CallToolResult, McpError> {
         tracing::info!(lines = req.code.len(), "eval request");
         self.cleanup_stale_continuations();
+
+        let orphans = self.orphaned_threads.load(Ordering::Relaxed);
+        if orphans >= 10 {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Server overloaded: too many timed-out evaluations still running. Please wait."
+            )]));
+        }
 
         // Reject unsafe/IO imports before compilation
         for imp in &req.imports {
@@ -1364,7 +1374,7 @@ impl TidepoolMcpServerImpl {
 
         // Spawn eval thread — does NOT join; communicates via channels
         let thread_session_tx = session_tx;
-        let _handle = std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("tidepool-eval".into())
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
@@ -1430,12 +1440,16 @@ impl TidepoolMcpServerImpl {
                 }
             })
             .map_err(|e| McpError::internal_error(format!("thread spawn error: {}", e), None))?;
+        let handle = Arc::new(std::sync::Mutex::new(Some(handle)));
 
         // Await first message from the eval thread
         let eval_timeout = Duration::from_secs(EVAL_TIMEOUT_SECS);
         match timeout(eval_timeout, session_rx.recv()).await {
             Ok(Some(SessionMessage::Completed { result, output })) => {
                 tracing::info!("eval completed");
+                if let Some(h) = handle.lock().unwrap().take() {
+                    let _ = h.join();
+                }
                 let mut response = String::new();
                 if !output.is_empty() {
                     response.push_str("## Output\n");
@@ -1461,6 +1475,7 @@ impl TidepoolMcpServerImpl {
                     EvalSession {
                         response_tx,
                         session_rx,
+                        handle,
                         source: Arc::clone(&source),
                         created_at: std::time::Instant::now(),
                     },
@@ -1470,11 +1485,17 @@ impl TidepoolMcpServerImpl {
                 )]))
             }
             Ok(Some(SessionMessage::Error { error })) => {
+                if let Some(h) = handle.lock().unwrap().take() {
+                    let _ = h.join();
+                }
                 let error_msg = format_error_with_source("Error", &error, &source);
                 tracing::error!("eval failed: {}", error);
                 Ok(CallToolResult::error(vec![Content::text(error_msg)]))
             }
             Ok(None) => {
+                if let Some(h) = handle.lock().unwrap().take() {
+                    let _ = h.join();
+                }
                 tracing::error!("eval thread crashed");
                 let error_msg = format_error_with_source(
                     "Crash",
@@ -1485,6 +1506,24 @@ impl TidepoolMcpServerImpl {
             }
             Err(_elapsed) => {
                 tracing::error!("eval timed out after {}s", EVAL_TIMEOUT_SECS);
+                let orphan_count = Arc::clone(&self.orphaned_threads);
+                orphan_count.fetch_add(1, Ordering::Relaxed);
+                let handle_to_move = Arc::clone(&handle);
+                tokio::task::spawn_blocking(move || {
+                    // Give the thread 2s to finish naturally
+                    std::thread::sleep(Duration::from_secs(2));
+                    let h_opt = handle_to_move.lock().unwrap().take();
+                    if let Some(h) = h_opt {
+                        match h.join() {
+                            Ok(_) => {
+                                orphan_count.fetch_sub(1, Ordering::Relaxed);
+                            }
+                            Err(_) => {
+                                tracing::warn!("eval thread could not be joined");
+                            }
+                        }
+                    }
+                });
                 let error_msg = format_error_with_source(
                     "Timeout",
                     &format!(
@@ -1523,12 +1562,16 @@ impl TidepoolMcpServerImpl {
 
         let source = session.source.clone();
         let response_tx = session.response_tx.clone();
+        let handle = session.handle.clone();
 
         // Await the next message from the eval thread
         let eval_timeout = Duration::from_secs(EVAL_TIMEOUT_SECS);
         match timeout(eval_timeout, session.session_rx.recv()).await {
             Ok(Some(SessionMessage::Completed { result, output })) => {
                 tracing::info!("resumed eval completed");
+                if let Some(h) = handle.lock().unwrap().take() {
+                    let _ = h.join();
+                }
                 let mut response = String::new();
                 if !output.is_empty() {
                     response.push_str("## Output\n");
@@ -1554,6 +1597,7 @@ impl TidepoolMcpServerImpl {
                     EvalSession {
                         response_tx,
                         session_rx: session.session_rx,
+                        handle,
                         source,
                         created_at: std::time::Instant::now(),
                     },
@@ -1563,11 +1607,17 @@ impl TidepoolMcpServerImpl {
                 )]))
             }
             Ok(Some(SessionMessage::Error { error })) => {
+                if let Some(h) = handle.lock().unwrap().take() {
+                    let _ = h.join();
+                }
                 let error_msg = format_error_with_source("Error", &error, &source);
                 tracing::error!("resumed eval failed: {}", error);
                 Ok(CallToolResult::error(vec![Content::text(error_msg)]))
             }
             Ok(None) => {
+                if let Some(h) = handle.lock().unwrap().take() {
+                    let _ = h.join();
+                }
                 tracing::error!("eval thread crashed");
                 let error_msg = format_error_with_source(
                     "Crash",
@@ -1578,6 +1628,24 @@ impl TidepoolMcpServerImpl {
             }
             Err(_elapsed) => {
                 tracing::error!("resumed eval timed out after {}s", EVAL_TIMEOUT_SECS);
+                let orphan_count = Arc::clone(&self.orphaned_threads);
+                orphan_count.fetch_add(1, Ordering::Relaxed);
+                let handle_to_move = Arc::clone(&handle);
+                tokio::task::spawn_blocking(move || {
+                    // Give the thread 2s to finish naturally
+                    std::thread::sleep(Duration::from_secs(2));
+                    let h_opt = handle_to_move.lock().unwrap().take();
+                    if let Some(h) = h_opt {
+                        match h.join() {
+                            Ok(_) => {
+                                orphan_count.fetch_sub(1, Ordering::Relaxed);
+                            }
+                            Err(_) => {
+                                tracing::warn!("eval thread could not be joined");
+                            }
+                        }
+                    }
+                });
                 let error_msg = format_error_with_source(
                     "Timeout",
                     &format!(
@@ -1712,6 +1780,7 @@ where
                 ask_tag,
                 continuations: Arc::new(std::sync::Mutex::new(HashMap::new())),
                 next_cont_id: Arc::new(AtomicU64::new(1)),
+                orphaned_threads: Arc::new(AtomicUsize::new(0)),
             },
             _phantom: PhantomData,
         }
@@ -2179,5 +2248,24 @@ mod tests {
                 arity: 4
             }
         );
+    }
+
+    #[tokio::test]
+    async fn test_eval_rejection_on_too_many_orphans() {
+        let server = TidepoolMcpServer::new(frunk::HNil);
+        server.inner.orphaned_threads.store(10, Ordering::Relaxed);
+
+        let req = EvalRequest {
+            code: vec!["pure 42".into()],
+            imports: vec![],
+            helpers: vec![],
+            input: None,
+            max_len: None,
+        };
+
+        let res = server.inner.eval(req).await.unwrap();
+        assert_eq!(res.is_error, Some(true));
+        let output = format!("{:?}", res.content);
+        assert!(output.contains("Server overloaded"));
     }
 }
