@@ -1,7 +1,7 @@
 use crate::context::VMContext;
 use crate::gc::frame_walker::{self, StackRoot};
 use crate::stack_map::StackMapRegistry;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tidepool_heap::layout;
 
@@ -19,6 +19,7 @@ pub enum RuntimeError {
     NullFunPtr,
     BadFunPtrTag(u8),
     HeapOverflow,
+    StackOverflow,
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -43,6 +44,7 @@ impl std::fmt::Display for RuntimeError {
                 write!(f, "application of non-closure (tag={})", tag)
             }
             RuntimeError::HeapOverflow => write!(f, "heap overflow (nursery exhausted after GC)"),
+            RuntimeError::StackOverflow => write!(f, "stack overflow (likely infinite list or unbounded recursion — use zipWithIndex/imap/enumFromTo instead of [0..])"),
         }
     }
 }
@@ -62,6 +64,10 @@ thread_local! {
     static RUNTIME_ERROR: RefCell<Option<RuntimeError>> = const { RefCell::new(None) };
 
     pub(crate) static GC_STATE: RefCell<Option<GcState>> = const { RefCell::new(None) };
+
+    /// Call depth counter for detecting runaway recursion (e.g. infinite lists).
+    /// Reset before each JIT invocation; incremented in debug_app_check.
+    static CALL_DEPTH: Cell<u32> = const { Cell::new(0) };
 
     /// Captured JIT diagnostics.
     static DIAGNOSTICS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -465,6 +471,11 @@ pub fn take_runtime_error() -> Option<RuntimeError> {
     RUNTIME_ERROR.with(|cell| cell.borrow_mut().take())
 }
 
+/// Reset the call depth counter. Call before each JIT invocation.
+pub fn reset_call_depth() {
+    CALL_DEPTH.with(|c| c.set(0));
+}
+
 /// Return the list of host function symbols for JIT registration.
 ///
 /// Usage: `CodegenPipeline::new(&host_fn_symbols())`
@@ -474,13 +485,35 @@ pub fn take_runtime_error() -> Option<RuntimeError> {
 /// # Safety
 ///
 /// `fun_ptr` must point to a valid HeapObject if not null.
-pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) {
+/// Maximum call depth before raising StackOverflow. This catches infinite
+/// recursion (e.g. `[0..]` in non-fusing context) with a clean error
+/// instead of SIGSEGV from stack overflow.
+const MAX_CALL_DEPTH: u32 = 50_000;
+
+/// Returns 0 if the call is safe to proceed, or a poison pointer if the call
+/// should be short-circuited (runtime error already set or call depth exceeded).
+pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) -> *mut u8 {
     // If a runtime error is already pending, don't abort on tag mismatches —
     // we're in error-propagation mode and the effect machine will handle it.
     let has_error = RUNTIME_ERROR.with(|cell| cell.borrow().is_some());
+
+    // Check call depth to catch runaway recursion before stack overflow.
+    if !has_error {
+        let depth = CALL_DEPTH.with(|c| {
+            let d = c.get() + 1;
+            c.set(d);
+            d
+        });
+        if depth > MAX_CALL_DEPTH {
+            RUNTIME_ERROR.with(|cell| {
+                *cell.borrow_mut() = Some(RuntimeError::StackOverflow);
+            });
+            return error_poison_ptr();
+        }
+    }
     if fun_ptr.is_null() {
         if has_error {
-            return; // Error already flagged, just continue
+            return error_poison_ptr(); // Error already flagged, just continue
         }
         let msg = "[JIT] App: fun_ptr is NULL — unresolved binding".to_string();
         eprintln!("{}", msg);
@@ -488,14 +521,14 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) {
         RUNTIME_ERROR.with(|cell| {
             *cell.borrow_mut() = Some(RuntimeError::NullFunPtr);
         });
-        return;
+        return error_poison_ptr();
     }
     let tag = unsafe { *fun_ptr };
     if tag != tidepool_heap::layout::TAG_CLOSURE {
         use std::io::Write;
         let mut stderr = std::io::stderr().lock();
         if has_error {
-            return; // Error already flagged, tag mismatch is expected (poison object)
+            return error_poison_ptr(); // Error already flagged, tag mismatch is expected (poison object)
         }
         let tag_name = match tag {
             0 => "Closure",
@@ -521,7 +554,9 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) {
         RUNTIME_ERROR.with(|cell| {
             *cell.borrow_mut() = Some(RuntimeError::BadFunPtrTag(tag));
         });
+        return error_poison_ptr();
     }
+    std::ptr::null_mut() // 0 = ok, proceed with the call
 }
 
 // ---------------------------------------------------------------------------

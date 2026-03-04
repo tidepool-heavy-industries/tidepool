@@ -2,7 +2,8 @@ use crate::alloc::emit_alloc_fast_path;
 use crate::emit::*;
 use crate::pipeline::CodegenPipeline;
 use cranelift_codegen::ir::{
-    self, types, AbiParam, BlockArg, InstBuilder, MemFlags, Signature, UserFuncName, Value,
+    self, condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlags, Signature,
+    UserFuncName, Value,
 };
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -304,17 +305,32 @@ fn collapse_frame(
             let fun_ptr = fun.value();
             let arg_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, arg);
 
-            // Debug: call host fn to validate fun_ptr tag before call_indirect
+            // Debug: call host fn to validate fun_ptr tag before call_indirect.
+            // Returns 0 (null) if ok, or a poison pointer if call should be skipped.
             let check_fn = pipeline
                 .module
                 .declare_function("debug_app_check", Linkage::Import, &{
                     let mut sig = Signature::new(pipeline.isa.default_call_conv());
                     sig.params.push(AbiParam::new(types::I64)); // fun_ptr
+                    sig.returns.push(AbiParam::new(types::I64)); // 0 = ok, non-zero = poison
                     sig
                 })
                 .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
             let check_ref = pipeline.module.declare_func_in_func(check_fn, builder.func);
-            builder.ins().call(check_ref, &[fun_ptr]);
+            let check_inst = builder.ins().call(check_ref, &[fun_ptr]);
+            let check_result = builder.inst_results(check_inst)[0];
+
+            // If debug_app_check returned non-zero (poison), short-circuit
+            let call_block = builder.create_block();
+            let merge_block = builder.create_block();
+            builder.append_block_param(merge_block, types::I64);
+
+            let is_zero = builder.ins().icmp_imm(IntCC::Equal, check_result, 0);
+            builder.ins().brif(is_zero, call_block, &[], merge_block, &[BlockArg::Value(check_result)]);
+
+            // call_block: normal function call
+            builder.switch_to_block(call_block);
+            builder.seal_block(call_block);
 
             let code_ptr = builder.ins().load(
                 types::I64,
@@ -334,8 +350,14 @@ fn collapse_frame(
                 .ins()
                 .call_indirect(call_sig, code_ptr, &[vmctx, fun_ptr, arg_ptr]);
             let ret_val = builder.inst_results(inst)[0];
-            builder.declare_value_needs_stack_map(ret_val);
-            Ok(SsaVal::HeapPtr(ret_val))
+            builder.ins().jump(merge_block, &[BlockArg::Value(ret_val)]);
+
+            // merge_block: result is either poison or call result
+            builder.switch_to_block(merge_block);
+            builder.seal_block(merge_block);
+            let merged_val = builder.block_params(merge_block)[0];
+            builder.declare_value_needs_stack_map(merged_val);
+            Ok(SsaVal::HeapPtr(merged_val))
         }
         EmitFrame::Lam { binder, body_idx } => emit_lam(
             ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, binder, body_idx,

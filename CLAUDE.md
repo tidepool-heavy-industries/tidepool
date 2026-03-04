@@ -77,7 +77,7 @@ MCP users get `import Tidepool.Prelude hiding (error)` auto-imported. Additional
 Everything MCP users need in one import:
 - **Types**: Int, Double, Char, Bool, Text, String, Maybe, Either, Map, Set, Value
 - **Text ops**: pack/unpack, toUpper/toLower, strip, splitOn, replace, words/lines/unwords/unlines, isPrefixOf/isSuffixOf/isInfixOf
-- **List ops**: map, filter, foldl/foldr/foldl', sort/sortBy, nub/nubBy, groupBy, partition, transpose, intercalate, intersperse, zip/zip3/unzip/unzip3, elemIndex/findIndex, find, span/break/takeWhile/dropWhile, tails, unfoldr, mapAccumL, concatMap, reverse, splitAt, replicate, head/tail/last/init
+- **List ops**: map, filter, foldl/foldr/foldl', sort/sortBy, nub/nubBy, groupBy, partition, transpose, intercalate, intersperse, zip/zip3/unzip/unzip3, elemIndex/findIndex, find, span/break/takeWhile/dropWhile, tails, unfoldr, mapAccumL, concatMap, reverse, splitAt, replicate, head/tail/last/init, zipWithIndex, imap, enumFromTo
 - **Char**: isDigit, isAlpha, isAlphaNum, isSpace, isUpper, isLower, digitToInt, toLowerChar, toUpperChar, ord, chr
 - **Numeric**: even/odd, abs'/signum'/min'/max' (monomorphic Int), round (Double→Int), parseIntM/parseInt, parseDoubleM/parseDouble
 - **JSON**: Value(..), encode/decode/eitherDecode, toJSON, (.=), object, lenses (key/nth/_String/_Number/_Bool/_Array/_Object, ^?/^../preview/toListOf), helpers (?./lookupKey/asText/asInt)
@@ -95,3 +95,5 @@ Everything MCP users need in one import:
 ### Adding new Prelude functions
 
 Polymorphic base functions going through typeclass dictionaries often crash — the JIT eagerly evaluates error branches in dictionary records. Shadow with monomorphic versions using primops directly (e.g., `rem` instead of `Integral` dict). Avoid `maximum`/`minimum` from base (use manual `foldl'` with comparison).
+
+**Infinite lists crash**: The JIT evaluates data constructor fields eagerly (no thunks). Infinite list producers like `[0..]` or `myFrom n = n : myFrom (n+1)` cause SIGSEGV unless GHC fuses them away (e.g., `take 5 [0..]` works via build/foldr fusion, but `zipWith f xs [0..]` does not fuse). Use `zipWithIndex`, `imap`, or `enumFromTo` instead.

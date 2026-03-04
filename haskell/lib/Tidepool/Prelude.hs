@@ -96,6 +96,8 @@ module Tidepool.Prelude
   , ord, chr, fromEnum
   , isDigit, isAlpha, isAlphaNum, isSpace, isUpper, isLower
   , digitToInt, toLowerChar, toUpperChar
+    -- * Indexed list operations (safe alternatives to [0..])
+  , zipWithIndex, imap, enumFromTo
     -- * Monomorphic numeric helpers
   , abs', signum', min', max'
     -- * Additional list combinators (P2)
@@ -666,6 +668,38 @@ min' a b = if a <= b then a else b
 max' :: Int -> Int -> Int
 max' a b = if a >= b then a else b
 {-# INLINE max' #-}
+
+-- ---------------------------------------------------------------------------
+-- Indexed list operations (safe alternatives to [0..])
+-- The JIT evaluates data constructor fields eagerly, so infinite lists
+-- crash with SIGSEGV.  These helpers avoid infinite lists entirely.
+-- ---------------------------------------------------------------------------
+
+-- | Pair each element with its 0-based index.
+-- @zipWithIndex ["a","b","c"] == [(0,"a"),(1,"b"),(2,"c")]@
+zipWithIndex :: [a] -> [(Int, a)]
+zipWithIndex = go 0
+  where
+    go _ []     = []
+    go !i (x:xs) = (i, x) : go (i + 1) xs
+{-# INLINE zipWithIndex #-}
+
+-- | Map with 0-based index.
+-- @imap (\i x -> (i, x)) ["a","b"] == [(0,"a"),(1,"b")]@
+imap :: (Int -> a -> b) -> [a] -> [b]
+imap f = go 0
+  where
+    go _ []     = []
+    go !i (x:xs) = f i x : go (i + 1) xs
+{-# INLINE imap #-}
+
+-- | Monomorphic enumFromTo for Int. Finite range, no infinite lists.
+-- @enumFromTo 0 4 == [0,1,2,3,4]@
+enumFromTo :: Int -> Int -> [Int]
+enumFromTo lo hi
+  | lo > hi   = []
+  | otherwise = lo : enumFromTo (lo + 1) hi
+{-# INLINE enumFromTo #-}
 
 -- ---------------------------------------------------------------------------
 -- Additional list combinators (P2)

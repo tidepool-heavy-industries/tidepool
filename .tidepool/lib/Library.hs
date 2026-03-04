@@ -1,5 +1,7 @@
 module Library where
 
+import Data.Maybe (mapMaybe)
+
 -- ===========================================================================
 -- § Recursion Schemes
 -- ===========================================================================
@@ -224,3 +226,231 @@ insertAt :: Int -> a -> [a] -> [a]
 insertAt 0 y xs = y : xs
 insertAt _ y [] = [y]
 insertAt n y (x:xs) = x : insertAt (n - 1) y xs
+
+-- ===========================================================================
+-- § Classify & Group
+-- ===========================================================================
+
+-- | Group items by a classifier, preserving order of first occurrence.
+classifyBy :: Eq k => (a -> k) -> [a] -> [(k, [a])]
+classifyBy f = foldr insert []
+  where
+    insert x [] = [(f x, [x])]
+    insert x ((k, vs):rest)
+      | f x == k  = (k, x : vs) : rest
+      | otherwise = (k, vs) : insert x rest
+
+-- | Count items per group.
+tally :: [(k, [a])] -> [(k, Int)]
+tally = map (\(k, vs) -> (k, Prelude.length vs))
+
+-- | Apply an effectful action to each group, collecting results.
+batchMapM :: Monad m => (k -> [a] -> m [b]) -> [(k, [a])] -> m [(k, [b])]
+batchMapM f = mapM (\(k, vs) -> do { rs <- f k vs; pure (k, rs) })
+
+-- | Filter groups by a predicate on (key, items).
+groupFilter :: (k -> [a] -> Bool) -> [(k, [a])] -> [(k, [a])]
+groupFilter p = filter (\(k, vs) -> p k vs)
+
+-- | Flatten grouped results back to a list.
+flatten :: [(k, [a])] -> [a]
+flatten = concatMap snd
+
+-- | Transform group keys.
+rekey :: (k -> j) -> [(k, a)] -> [(j, a)]
+rekey f = map (\(k, v) -> (f k, v))
+
+-- | Monadic pipeline over groups: classify, transform each group, flatten.
+withGroups :: (Monad m, Eq k)
+           => (a -> k) -> (k -> [a] -> m [b]) -> [a] -> m [b]
+withGroups classify act xs =
+  flatten <$> batchMapM act (classifyBy classify xs)
+
+-- | Format groups as a text report. Render function gets (key, count).
+report :: (k -> Int -> [Char]) -> [(k, [a])] -> [Char]
+report fmt groups =
+  Prelude.unlines (map (\(k, vs) -> fmt k (Prelude.length vs)) groups)
+
+-- ===========================================================================
+-- § Oracle Combinators (ask-steered effectful folds)
+-- ===========================================================================
+
+-- | Walk a list with monadic steering at each element.
+--   The suspend function yields context and returns a response.
+--   The step function uses the response to decide: Left = stop, Right = continue.
+steer :: Monad m
+      => (Int -> Int -> a -> m r)
+      -> (r -> a -> b -> Either b b)
+      -> b -> [a] -> m b
+steer suspend step = go 0
+  where
+    go _ acc [] = pure acc
+    go i acc (x:xs) = do
+      resp <- suspend i (Prelude.length xs) x
+      case step resp x acc of
+        Left  b -> pure b
+        Right b -> go (i+1) b xs
+
+-- | Like steer but the step function is effectful.
+steerM :: Monad m
+       => (Int -> Int -> a -> m r)
+       -> (r -> a -> b -> m (Either b b))
+       -> b -> [a] -> m b
+steerM suspend step = go 0
+  where
+    go _ acc [] = pure acc
+    go i acc (x:xs) = do
+      resp <- suspend i (Prelude.length xs) x
+      r <- step resp x acc
+      case r of
+        Left  b -> pure b
+        Right b -> go (i+1) b xs
+
+-- | Oracle-steered unfold: suspend at each step, response steers next seed.
+oracleAna :: Monad m
+          => (r -> a -> m (Maybe (b, a)))
+          -> (a -> m r)
+          -> a -> m [b]
+oracleAna step suspend seed = do
+  resp <- suspend seed
+  r <- step resp seed
+  case r of
+    Nothing      -> pure []
+    Just (b, a') -> (b :) <$> oracleAna step suspend a'
+
+-- | Oracle hylo: unfold with steering, then fold the results.
+oracleHylo :: Monad m
+           => (r -> a -> m (Maybe (b, a)))
+           -> (a -> m r)
+           -> (b -> c -> c)
+           -> c -> a -> m c
+oracleHylo step suspend alg z seed = do
+  items <- oracleAna step suspend seed
+  pure (foldr alg z items)
+
+-- ===========================================================================
+-- § Rose Trees
+-- ===========================================================================
+
+data Rose a = Rose a [Rose a]
+
+roseVal :: Rose a -> a
+roseVal (Rose x _) = x
+
+roseChildren :: Rose a -> [Rose a]
+roseChildren (Rose _ cs) = cs
+
+foldRose :: (a -> [b] -> b) -> Rose a -> b
+foldRose f (Rose x cs) = f x (map (foldRose f) cs)
+
+mapRose :: (a -> b) -> Rose a -> Rose b
+mapRose f (Rose x cs) = Rose (f x) (map (mapRose f) cs)
+
+flattenRose :: Rose a -> [a]
+flattenRose (Rose x cs) = x : concatMap flattenRose cs
+
+roseDepth :: Rose a -> Int
+roseDepth (Rose _ []) = 0
+roseDepth (Rose _ cs) = 1 + foldl' (\acc c -> max acc (roseDepth c)) 0 cs
+
+roseSize :: Rose a -> Int
+roseSize = foldRose (\_ cs -> 1 + foldl' (+) 0 cs)
+
+-- | All root-to-leaf paths
+rosePaths :: Rose a -> [[a]]
+rosePaths (Rose x []) = [[x]]
+rosePaths (Rose x cs) = map (x :) (concatMap rosePaths cs)
+
+-- | Filter subtrees by predicate on node value (prunes entire subtree)
+roseFilter :: (a -> Bool) -> Rose a -> [Rose a]
+roseFilter p (Rose x cs)
+  | p x       = [Rose x (concatMap (roseFilter p) cs)]
+  | otherwise = []
+
+-- | Build a rose tree from a seed (anamorphism)
+unfoldRose :: (a -> (b, [a])) -> a -> Rose b
+unfoldRose f seed = let (b, seeds) = f seed in Rose b (map (unfoldRose f) seeds)
+
+-- | Monadic fold over a rose tree
+foldRoseM :: Monad m => (a -> [b] -> m b) -> Rose a -> m b
+foldRoseM f (Rose x cs) = mapM (foldRoseM f) cs >>= f x
+
+-- ===========================================================================
+-- § Ask-Steered Traversals (pure combinators, parameterized over monad)
+-- ===========================================================================
+
+-- | Walk items with monadic steering at each step.
+--   Present each item, fold responses into accumulator.
+--   Step function returns Left to halt, Right to continue.
+guidedFoldM :: Monad m
+            => (Int -> a -> m r)    -- ^ present item with index
+            -> (r -> a -> b -> Either b b)  -- ^ integrate response
+            -> b -> [a] -> m b
+guidedFoldM _ _ z [] = pure z
+guidedFoldM present step z (x:xs) = do
+  resp <- present (Prelude.length xs) x
+  case step resp x z of
+    Left  b -> pure b
+    Right b -> guidedFoldM present step b xs
+
+-- | Explore a rose tree with monadic guidance.
+--   At each non-leaf node, present the node and its children.
+--   The pick function selects which child indices to recurse into.
+guidedSearchM :: Monad m
+              => (a -> [a] -> Int -> m [Int])  -- ^ node, child vals, depth → selected indices
+              -> Rose a -> m [a]
+guidedSearchM pick = go 0
+  where
+    go d (Rose x []) = pure [x]
+    go d (Rose x cs) = do
+      indices <- pick x (map roseVal cs) d
+      let selected = mapMaybe (\i -> cs !? i) indices
+      results <- mapM (go (d+1)) selected
+      pure (x : concat results)
+
+-- | Iterative refinement: transform state, yield for feedback, repeat.
+--   Stops when the check function returns Nothing (= done).
+refineM :: Monad m
+        => Int                     -- ^ max iterations
+        -> (s -> m (Maybe s))      -- ^ present state, get adjusted state (Nothing = done)
+        -> s -> m s
+refineM 0 _ s = pure s
+refineM n step s = do
+  r <- step s
+  case r of
+    Nothing -> pure s
+    Just s' -> refineM (n - 1) step s'
+
+-- | Execute named phases with monadic review between each.
+--   Review function can revise the input for the next phase.
+phasesM :: Monad m
+        => (Prelude.String -> a -> m a)   -- ^ review: phase name, result → next input
+        -> [(Prelude.String, a -> m a)]   -- ^ named phases
+        -> a -> m [a]
+phasesM _ [] _ = pure []
+phasesM review ((name, act):rest) input = do
+  result <- act input
+  nextInput <- review name result
+  (result :) <$> phasesM review rest nextInput
+
+-- | Map over rose tree children with monadic filter.
+--   Useful for pruning subtrees based on effectful checks.
+pruneRoseM :: Monad m => (a -> m Bool) -> Rose a -> m (Maybe (Rose a))
+pruneRoseM p (Rose x cs) = do
+  keep <- p x
+  if keep
+    then do
+      cs' <- mapMaybeM (pruneRoseM p) cs
+      pure (Just (Rose x cs'))
+    else pure Nothing
+
+mapMaybeM :: Monad m => (a -> m (Maybe b)) -> [a] -> m [b]
+mapMaybeM _ [] = pure []
+mapMaybeM f (x:xs) = do
+  r <- f x
+  rest <- mapMaybeM f xs
+  case r of
+    Just b  -> pure (b : rest)
+    Nothing -> pure rest
+
+-- mapMaybe: use the one from Tidepool.Prelude (re-exported from Data.Maybe)

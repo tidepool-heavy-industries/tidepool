@@ -108,6 +108,7 @@ impl JitEffectMachine {
         let vmctx = self.nursery.make_vmctx(crate::host_fns::gc_trigger);
 
         let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
+        crate::host_fns::reset_call_depth();
         let mut yield_result =
             match unsafe { crate::signal_safety::with_signal_protection(|| machine.step()) } {
                 Ok(y) => y,
@@ -141,6 +142,7 @@ impl JitEffectMachine {
                     let resp_ptr =
                         unsafe { heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut()) }
                             .map_err(JitError::HeapBridge)?;
+                    crate::host_fns::reset_call_depth();
                     yield_result = match unsafe {
                         crate::signal_safety::with_signal_protection(|| {
                             machine.resume(continuation, resp_ptr)
@@ -177,6 +179,7 @@ impl JitEffectMachine {
             unsafe { std::mem::transmute(self.pipeline.get_function_ptr(self.func_id)) };
         let mut vmctx = self.nursery.make_vmctx(crate::host_fns::gc_trigger);
 
+        crate::host_fns::reset_call_depth();
         let result_ptr: *mut u8 = match unsafe {
             crate::signal_safety::with_signal_protection(|| func_ptr(&mut vmctx))
         } {

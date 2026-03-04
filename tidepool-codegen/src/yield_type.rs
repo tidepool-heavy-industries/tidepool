@@ -66,6 +66,8 @@ pub enum YieldError {
     BadFunPtrTag(u8),
     /// Heap overflow after GC.
     HeapOverflow,
+    /// Call depth exceeded (likely infinite list or unbounded recursion).
+    StackOverflow,
     /// Fatal signal during JIT execution (SIGILL, SIGSEGV, SIGBUS, SIGTRAP).
     Signal(i32),
 }
@@ -100,6 +102,7 @@ impl std::fmt::Display for YieldError {
             YieldError::NullFunPtr => write!(f, "application of null function pointer"),
             YieldError::BadFunPtrTag(tag) => write!(f, "application of non-closure (tag={})", tag),
             YieldError::HeapOverflow => write!(f, "heap overflow (nursery exhausted after GC)"),
+            YieldError::StackOverflow => write!(f, "stack overflow (likely infinite list or unbounded recursion — use zipWithIndex/imap/enumFromTo instead of [0..])"),
             YieldError::Signal(sig) => {
                 #[cfg(unix)]
                 {
@@ -138,6 +141,7 @@ impl From<crate::host_fns::RuntimeError> for YieldError {
             RuntimeError::NullFunPtr => YieldError::NullFunPtr,
             RuntimeError::BadFunPtrTag(tag) => YieldError::BadFunPtrTag(tag),
             RuntimeError::HeapOverflow => YieldError::HeapOverflow,
+            RuntimeError::StackOverflow => YieldError::StackOverflow,
         }
     }
 }

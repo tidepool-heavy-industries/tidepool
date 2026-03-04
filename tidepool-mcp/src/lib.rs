@@ -345,6 +345,7 @@ pub struct EvalRequest {
     #[serde(default)]
     pub imports: String,
     /// Top-level helper definitions placed before the main do-block.
+    /// Function definitions only — custom `data` declarations are not supported.
     #[serde(default)]
     pub helpers: String,
     /// Optional JSON input injected as `input :: Aeson.Value` binding.

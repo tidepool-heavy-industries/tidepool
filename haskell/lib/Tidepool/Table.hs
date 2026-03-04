@@ -27,6 +27,7 @@ import Prelude
   )
 import Data.Text (Text)
 import qualified Data.Text as T
+import Tidepool.Prelude (enumFromTo)
 
 -- ---------------------------------------------------------------------------
 -- Parsing
@@ -99,10 +100,7 @@ padRight w pad t
   | T.length t >= w = t
   | otherwise = t <> T.replicate (w - T.length t) (T.singleton pad)
 
-enumFromTo :: Int -> Int -> [Int]
-enumFromTo lo hi
-  | lo > hi   = []
-  | otherwise = lo : enumFromTo (lo + 1) hi
+-- enumFromTo moved to Tidepool.Prelude
 
 safeDrop :: Int -> [a] -> [a]
 safeDrop 0 xs     = xs
