@@ -68,9 +68,7 @@ pub fn emit_join(
 
     let rhs_result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, rhs_idx)?;
     let rhs_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, rhs_result);
-    builder
-        .ins()
-        .jump(merge_block, &[BlockArg::Value(rhs_val)]);
+    builder.ins().jump(merge_block, &[BlockArg::Value(rhs_val)]);
 
     // 7. Seal blocks
     // Body is emitted, so all Jumps to join_block are known.

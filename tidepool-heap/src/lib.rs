@@ -8,5 +8,5 @@ pub mod gc;
 pub mod layout;
 
 pub use arena::*;
-pub use layout::*;
 pub use gc::trace::GcError;
+pub use layout::*;

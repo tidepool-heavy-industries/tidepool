@@ -529,10 +529,7 @@ fn strip_module_header(source: &str) -> HaskellHeader {
                 }
                 continue;
             }
-            if trimmed.starts_with("{-#")
-                || trimmed.starts_with("module ")
-                || trimmed.is_empty()
-            {
+            if trimmed.starts_with("{-#") || trimmed.starts_with("module ") || trimmed.is_empty() {
                 continue;
             }
             if trimmed.starts_with("import ") {

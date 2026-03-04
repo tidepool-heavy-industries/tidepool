@@ -79,7 +79,9 @@ pub fn emit_case(
         // Default only
         let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
         let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
-        builder.ins().jump(merge_block, &[BlockArg::Value(result_ptr)]);
+        builder
+            .ins()
+            .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
         // No alts? Trap.
         builder.ins().trap(TrapCode::unwrap_user(2));
@@ -200,7 +202,9 @@ fn emit_data_dispatch(
             let result =
                 ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
             let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
-            builder.ins().jump(merge_block, &[BlockArg::Value(result_ptr)]);
+            builder
+                .ins()
+                .jump(merge_block, &[BlockArg::Value(result_ptr)]);
 
             // Clean up
             for binder in bound_vars {
@@ -218,7 +222,9 @@ fn emit_data_dispatch(
         ctx.declare_env(builder);
         let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
         let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
-        builder.ins().jump(merge_block, &[BlockArg::Value(result_ptr)]);
+        builder
+            .ins()
+            .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
         emit_case_trap(pipeline, builder, scrut_ptr, data_alts)?;
     }
@@ -370,7 +376,9 @@ fn emit_lit_dispatch(
         ctx.declare_env(builder);
         let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
         let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
-        builder.ins().jump(merge_block, &[BlockArg::Value(result_ptr)]);
+        builder
+            .ins()
+            .jump(merge_block, &[BlockArg::Value(result_ptr)]);
 
         // Continue to next check
         builder.switch_to_block(next_check_block);
@@ -382,7 +390,9 @@ fn emit_lit_dispatch(
         ctx.declare_env(builder);
         let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
         let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
-        builder.ins().jump(merge_block, &[BlockArg::Value(result_ptr)]);
+        builder
+            .ins()
+            .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
         builder.ins().trap(TrapCode::unwrap_user(2));
     }

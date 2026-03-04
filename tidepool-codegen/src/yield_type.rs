@@ -104,7 +104,9 @@ impl std::fmt::Display for YieldError {
                 #[cfg(unix)]
                 {
                     let name = match *sig {
-                        libc::SIGILL => "SIGILL (illegal instruction — likely exhausted case branch)",
+                        libc::SIGILL => {
+                            "SIGILL (illegal instruction — likely exhausted case branch)"
+                        }
                         libc::SIGSEGV => {
                             "SIGSEGV (segmentation fault — likely invalid memory access)"
                         }

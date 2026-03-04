@@ -39,19 +39,19 @@ fn mcp_source_with_helpers(lines: &[&str], helpers: &[&str]) -> String {
     let decls = test_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
-    let lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
-    let helpers: Vec<String> = helpers.iter().map(|s| s.to_string()).collect();
-    tidepool_mcp::template_haskell(&preamble, &stack, &lines, &[], &helpers, None, None)
+    let code = lines.join("\n");
+    let helpers = helpers.join("\n");
+    tidepool_mcp::template_haskell(&preamble, &stack, &code, "", &helpers, None, None)
 }
 
 fn mcp_source_with_imports(lines: &[&str], helpers: &[&str], imports: &[&str]) -> String {
     let decls = test_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
-    let lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
-    let helpers: Vec<String> = helpers.iter().map(|s| s.to_string()).collect();
-    let imports: Vec<String> = imports.iter().map(|s| s.to_string()).collect();
-    tidepool_mcp::template_haskell(&preamble, &stack, &lines, &imports, &helpers, None, None)
+    let code = lines.join("\n");
+    let helpers = helpers.join("\n");
+    let imports = imports.join("\n");
+    tidepool_mcp::template_haskell(&preamble, &stack, &code, &imports, &helpers, None, None)
 }
 
 fn run_mcp_with_imports(lines: &[&str], helpers: &[&str], imports: &[&str]) -> serde_json::Value {
@@ -339,15 +339,15 @@ fn run_aeson_effectful_with_input(
     let decls = test_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
-    let lines_owned: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
-    let imports: Vec<String> = aeson_import_strs().iter().map(|s| s.to_string()).collect();
-    let helpers_owned: Vec<String> = helpers.iter().map(|s| s.to_string()).collect();
+    let code = lines.join("\n");
+    let imports = aeson_import_strs().join("\n");
+    let helpers = helpers.join("\n");
     let src = tidepool_mcp::template_haskell(
         &preamble,
         &stack,
-        &lines_owned,
+        &code,
         &imports,
-        &helpers_owned,
+        &helpers,
         Some(&input),
         None,
     );
@@ -374,17 +374,10 @@ fn run_aeson_with_input(lines: &[&str], input: serde_json::Value) -> serde_json:
     let decls = test_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
-    let lines_owned: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
-    let imports: Vec<String> = aeson_import_strs().iter().map(|s| s.to_string()).collect();
-    let src = tidepool_mcp::template_haskell(
-        &preamble,
-        &stack,
-        &lines_owned,
-        &imports,
-        &[],
-        Some(&input),
-        None,
-    );
+    let code = lines.join("\n");
+    let imports = aeson_import_strs().join("\n");
+    let src =
+        tidepool_mcp::template_haskell(&preamble, &stack, &code, &imports, "", Some(&input), None);
     let pp = prelude_path();
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
@@ -661,23 +654,23 @@ fn test_aeson_input_transform() {
 #[test]
 fn test_aeson_input_with_effect() {
     let input_val = serde_json::json!({"greeting": "Hello from JSON!"});
-    let imports: Vec<&str> = aeson_import_strs();
     let decls = test_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let lines = vec![
-        r#"case input ^? key "greeting" . _String of"#.to_string(),
-        r#"  Just g  -> send (Print g)"#.to_string(),
-        r#"  Nothing -> pure ()"#.to_string(),
-        r#"pure (input ^? key "greeting" . _String)"#.to_string(),
+        r#"case input ^? key "greeting" . _String of"#,
+        r#"  Just g  -> send (Print g)"#,
+        r#"  Nothing -> pure ()"#,
+        r#"pure (input ^? key "greeting" . _String)"#,
     ];
-    let imports_owned: Vec<String> = imports.iter().map(|s| s.to_string()).collect();
+    let code = lines.join("\n");
+    let imports = aeson_import_strs().join("\n");
     let src = tidepool_mcp::template_haskell(
         &preamble,
         &stack,
-        &lines,
-        &imports_owned,
-        &[],
+        &code,
+        &imports,
+        "",
         Some(&input_val),
         None,
     );
@@ -1052,9 +1045,9 @@ fn full_mcp_source(lines: &[&str]) -> String {
     let decls = full_mcp_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
-    let lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+    let code = lines.join("\n");
     let imports = tidepool_mcp::aeson_imports();
-    tidepool_mcp::template_haskell(&preamble, &stack, &lines, &imports, &[], None, None)
+    tidepool_mcp::template_haskell(&preamble, &stack, &code, &imports, "", None, None)
 }
 
 fn run_full_mcp(lines: &[&str]) -> serde_json::Value {
@@ -2945,7 +2938,6 @@ fn test_vendored_effect_json_conditional() {
 #[test]
 fn test_vendored_input_with_effects() {
     let input_val = serde_json::json!({"items": ["task1", "task2", "task3"]});
-    let imports: Vec<&str> = aeson_import_strs();
     let decls = test_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
@@ -2954,13 +2946,14 @@ fn test_vendored_input_with_effects() {
         r#"mapM_ (send . Print) items"#.to_string(),
         r#"pure (length items)"#.to_string(),
     ];
-    let imports_owned: Vec<String> = imports.iter().map(|s| s.to_string()).collect();
+    let code = lines.join("\n");
+    let imports = aeson_import_strs().join("\n");
     let src = tidepool_mcp::template_haskell(
         &preamble,
         &stack,
-        &lines,
-        &imports_owned,
-        &[],
+        &code,
+        &imports,
+        "",
         Some(&input_val),
         None,
     );

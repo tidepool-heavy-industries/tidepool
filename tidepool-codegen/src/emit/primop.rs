@@ -1710,9 +1710,13 @@ fn unbox_addr(
                 .icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
 
             let con_block = builder.create_block();
-            builder
-                .ins()
-                .brif(is_con, con_block, &[], next_block, &[BlockArg::Value(curr_v)]);
+            builder.ins().brif(
+                is_con,
+                con_block,
+                &[],
+                next_block,
+                &[BlockArg::Value(curr_v)],
+            );
 
             builder.switch_to_block(con_block);
             builder.seal_block(con_block);
@@ -1778,9 +1782,13 @@ fn unbox_bytearray(
                 .icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
 
             let con_block = builder.create_block();
-            builder
-                .ins()
-                .brif(is_con, con_block, &[], next_block, &[BlockArg::Value(curr_v)]);
+            builder.ins().brif(
+                is_con,
+                con_block,
+                &[],
+                next_block,
+                &[BlockArg::Value(curr_v)],
+            );
 
             builder.switch_to_block(con_block);
             builder.seal_block(con_block);
@@ -1842,9 +1850,13 @@ pub fn unbox_int(
                 .icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
 
             let con_block = builder.create_block();
-            builder
-                .ins()
-                .brif(is_con, con_block, &[], next_block, &[BlockArg::Value(curr_v)]);
+            builder.ins().brif(
+                is_con,
+                con_block,
+                &[],
+                next_block,
+                &[BlockArg::Value(curr_v)],
+            );
 
             builder.switch_to_block(con_block);
             builder.seal_block(con_block);
@@ -1893,9 +1905,13 @@ pub fn unbox_double(
                 .icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
 
             let con_block = builder.create_block();
-            builder
-                .ins()
-                .brif(is_con, con_block, &[], next_block, &[BlockArg::Value(curr_v)]);
+            builder.ins().brif(
+                is_con,
+                con_block,
+                &[],
+                next_block,
+                &[BlockArg::Value(curr_v)],
+            );
 
             builder.switch_to_block(con_block);
             builder.seal_block(con_block);
@@ -1944,9 +1960,13 @@ pub fn unbox_float(
                 .icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
 
             let con_block = builder.create_block();
-            builder
-                .ins()
-                .brif(is_con, con_block, &[], next_block, &[BlockArg::Value(curr_v)]);
+            builder.ins().brif(
+                is_con,
+                con_block,
+                &[],
+                next_block,
+                &[BlockArg::Value(curr_v)],
+            );
 
             builder.switch_to_block(con_block);
             builder.seal_block(con_block);
