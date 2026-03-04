@@ -14,35 +14,26 @@
 #[cfg(unix)]
 mod inner {
     use std::cell::Cell;
-    use std::ptr::{self, null_mut};
+    use std::ptr::{self, addr_of, addr_of_mut, null_mut};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Pre-computed crash log path, populated once at `install()` time.
+    /// Stored as a fixed-size null-terminated byte buffer for async-signal-safety.
+    static mut CRASH_LOG_PATH: [u8; 512] = [0u8; 512];
+    static CRASH_LOG_PATH_LEN: AtomicUsize = AtomicUsize::new(0);
+    static mut CRASH_DIR_PATH: [u8; 512] = [0u8; 512];
+    static CRASH_DIR_PATH_LEN: AtomicUsize = AtomicUsize::new(0);
 
     /// Write a crash dump using only async-signal-safe syscalls.
     /// No allocations, no locks, no std::fs — just raw libc open/write/close.
     unsafe fn write_crash_dump(sig: libc::c_int, info: *mut libc::siginfo_t) {
-        // Build path: ~/.tidepool/crash.log
-        let home = std::env::var("HOME").unwrap_or_default();
-        if home.is_empty() {
+        let path_len = CRASH_LOG_PATH_LEN.load(Ordering::Relaxed);
+        if path_len == 0 {
             return;
         }
-        // Stack buffer for path
-        let mut path_buf = [0u8; 512];
-        let home_bytes = home.as_bytes();
-        if home_bytes.len() + 22 > path_buf.len() {
-            return;
-        }
-        path_buf[..home_bytes.len()].copy_from_slice(home_bytes);
-        let suffix = b"/.tidepool/crash.log\0";
-        path_buf[home_bytes.len()..home_bytes.len() + suffix.len()].copy_from_slice(suffix);
-
-        // Ensure directory exists
-        let mut dir_buf = [0u8; 512];
-        let dir_suffix = b"/.tidepool\0";
-        dir_buf[..home_bytes.len()].copy_from_slice(home_bytes);
-        dir_buf[home_bytes.len()..home_bytes.len() + dir_suffix.len()].copy_from_slice(dir_suffix);
-        libc::mkdir(dir_buf.as_ptr() as *const libc::c_char, 0o755);
 
         let fd = libc::open(
-            path_buf.as_ptr() as *const libc::c_char,
+            addr_of!(CRASH_LOG_PATH) as *const libc::c_char,
             libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
             0o644,
         );
@@ -138,27 +129,13 @@ mod inner {
 
     /// Write a simple crash message (for panics in trampoline).
     unsafe fn write_crash_dump_msg(msg: &[u8]) {
-        let home = std::env::var("HOME").unwrap_or_default();
-        if home.is_empty() {
+        let path_len = CRASH_LOG_PATH_LEN.load(Ordering::Relaxed);
+        if path_len == 0 {
             return;
         }
-        let mut path_buf = [0u8; 512];
-        let home_bytes = home.as_bytes();
-        if home_bytes.len() + 22 > path_buf.len() {
-            return;
-        }
-        path_buf[..home_bytes.len()].copy_from_slice(home_bytes);
-        let suffix = b"/.tidepool/crash.log\0";
-        path_buf[home_bytes.len()..home_bytes.len() + suffix.len()].copy_from_slice(suffix);
-
-        let mut dir_buf = [0u8; 512];
-        let dir_suffix = b"/.tidepool\0";
-        dir_buf[..home_bytes.len()].copy_from_slice(home_bytes);
-        dir_buf[home_bytes.len()..home_bytes.len() + dir_suffix.len()].copy_from_slice(dir_suffix);
-        libc::mkdir(dir_buf.as_ptr() as *const libc::c_char, 0o755);
 
         let fd = libc::open(
-            path_buf.as_ptr() as *const libc::c_char,
+            addr_of!(CRASH_LOG_PATH) as *const libc::c_char,
             libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
             0o644,
         );
@@ -310,8 +287,49 @@ mod inner {
     /// on stack overflow.
     pub fn install() {
         use std::alloc::{alloc, Layout};
+        use std::sync::Once;
 
         const ALT_STACK_SIZE: usize = 64 * 1024;
+
+        // Pre-compute crash log path once (safe, non-signal context).
+        static PATHS_INIT: Once = Once::new();
+        PATHS_INIT.call_once(|| {
+            if let Ok(cwd) = std::env::current_dir() {
+                let cwd_bytes = cwd.as_os_str().as_encoded_bytes();
+                let log_suffix = b"/.tidepool/crash.log\0";
+                let dir_suffix = b"/.tidepool\0";
+
+                if cwd_bytes.len() + log_suffix.len() < 512 {
+                    unsafe {
+                        let log_ptr = addr_of_mut!(CRASH_LOG_PATH) as *mut u8;
+                        ptr::copy_nonoverlapping(cwd_bytes.as_ptr(), log_ptr, cwd_bytes.len());
+                        ptr::copy_nonoverlapping(
+                            log_suffix.as_ptr(),
+                            log_ptr.add(cwd_bytes.len()),
+                            log_suffix.len(),
+                        );
+                        CRASH_LOG_PATH_LEN
+                            .store(cwd_bytes.len() + log_suffix.len() - 1, Ordering::Relaxed);
+
+                        let dir_ptr = addr_of_mut!(CRASH_DIR_PATH) as *mut u8;
+                        ptr::copy_nonoverlapping(cwd_bytes.as_ptr(), dir_ptr, cwd_bytes.len());
+                        ptr::copy_nonoverlapping(
+                            dir_suffix.as_ptr(),
+                            dir_ptr.add(cwd_bytes.len()),
+                            dir_suffix.len(),
+                        );
+                        CRASH_DIR_PATH_LEN
+                            .store(cwd_bytes.len() + dir_suffix.len() - 1, Ordering::Relaxed);
+
+                        // Ensure .tidepool/ directory exists (safe, non-signal context).
+                        libc::mkdir(
+                            addr_of!(CRASH_DIR_PATH) as *const libc::c_char,
+                            0o755,
+                        );
+                    }
+                }
+            }
+        });
 
         // sigaltstack is per-thread, so each calling thread needs its own.
         // Use a thread-local to allocate once per thread and leak (signal

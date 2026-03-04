@@ -312,6 +312,28 @@ pub fn git_decl() -> EffectDecl {
     }
 }
 
+/// LLM effect: call a fast LLM (Haiku) for classification, extraction, or judgment.
+pub fn llm_decl() -> EffectDecl {
+    EffectDecl {
+        type_name: "Llm",
+        description: "Call a fast LLM (Haiku) for classification, extraction, or judgment.",
+        constructors: &[
+            "LlmChat       :: Text -> Llm Text",
+            "LlmStructured :: Text -> Value -> Llm Value",
+        ],
+        type_defs: &[
+            "data Schema = SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema",
+        ],
+        helpers: &[
+            "llm :: Text -> M Text\nllm = send . LlmChat",
+            "llmJson :: Text -> Schema -> M Value\nllmJson prompt schema = send (LlmStructured prompt (schemaToValue schema))",
+            "isOpt :: Schema -> Bool\nisOpt (SOpt _) = True\nisOpt _ = False",
+            "innerSchema :: Schema -> Schema\ninnerSchema (SOpt s) = s\ninnerSchema s = s",
+            "schemaToValue :: Schema -> Value\nschemaToValue SStr = object [\"type\" .= (\"string\" :: Text)]\nschemaToValue SNum = object [\"type\" .= (\"number\" :: Text)]\nschemaToValue SBool = object [\"type\" .= (\"boolean\" :: Text)]\nschemaToValue (SEnum vs) = object [\"type\" .= (\"string\" :: Text), \"enum\" .= vs]\nschemaToValue (SArr item) = object [\"type\" .= (\"array\" :: Text), \"items\" .= schemaToValue item]\nschemaToValue (SOpt s) = schemaToValue s\nschemaToValue (SObj fields) = object [\"type\" .= (\"object\" :: Text), \"properties\" .= object (map (\\(k,s) -> k .= schemaToValue (innerSchema s)) fields), \"required\" .= map fst (filter (not . isOpt . snd) fields)]",
+        ],
+    }
+}
+
 /// All standard effects in canonical order.
 pub fn standard_decls() -> Vec<EffectDecl> {
     vec![
@@ -323,6 +345,7 @@ pub fn standard_decls() -> Vec<EffectDecl> {
         exec_decl(),
         meta_decl(),
         git_decl(),
+        llm_decl(),
         ask_decl(),
     ]
 }
@@ -1978,12 +2001,13 @@ mod tests {
     #[test]
     fn test_standard_decls_includes_ask() {
         let decls = standard_decls();
-        assert_eq!(decls.len(), 9);
+        assert_eq!(decls.len(), 10);
         assert_eq!(decls[4].type_name, "Http");
         assert_eq!(decls[5].type_name, "Exec");
         assert_eq!(decls[6].type_name, "Meta");
         assert_eq!(decls[7].type_name, "Git");
-        assert_eq!(decls[8].type_name, "Ask");
+        assert_eq!(decls[8].type_name, "Llm");
+        assert_eq!(decls[9].type_name, "Ask");
     }
 
     #[test]
@@ -2004,7 +2028,7 @@ mod tests {
         assert!(preamble.contains("data Ask a where"));
         assert!(preamble.contains("  Ask :: Text -> Ask Value"));
         assert!(
-            preamble.contains("type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Ask]")
+            preamble.contains("type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]")
         );
     }
 
@@ -2012,7 +2036,7 @@ mod tests {
     fn test_ask_in_effect_stack_type() {
         let decls = standard_decls();
         let stack = build_effect_stack_type(&decls);
-        assert_eq!(stack, "'[Console, KV, Fs, SG, Http, Exec, Meta, Git, Ask]");
+        assert_eq!(stack, "'[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]");
     }
 
     #[test]

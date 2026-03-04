@@ -234,10 +234,14 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
     user: &U,
     nursery_size: usize,
 ) -> Result<EvalResult, RuntimeError> {
-    let (expr, table, warnings) = compile_haskell(source, target, include)?;
+    let (expr, mut table, warnings) = compile_haskell(source, target, include)?;
     if warnings.has_io {
         return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
     }
+    // Populate type-sibling groups from case branches so that get_companion
+    // can disambiguate constructors sharing unqualified names (e.g. Bin/Tip
+    // from Data.Map vs Data.Set).
+    table.populate_siblings_from_expr(&expr);
     let mut machine = JitEffectMachine::compile(&expr, &table, nursery_size)?;
     let value = machine.run(&table, handlers, user)?;
     Ok(EvalResult::new(value, table))
@@ -252,10 +256,11 @@ pub fn compile_and_run_pure(
     target: &str,
     include: &[&Path],
 ) -> Result<EvalResult, RuntimeError> {
-    let (expr, table, warnings) = compile_haskell(source, target, include)?;
+    let (expr, mut table, warnings) = compile_haskell(source, target, include)?;
     if warnings.has_io {
         return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
     }
+    table.populate_siblings_from_expr(&expr);
     let mut machine = JitEffectMachine::compile(&expr, &table, DEFAULT_NURSERY_SIZE)?;
     let value = machine.run_pure()?;
     Ok(EvalResult::new(value, table))
