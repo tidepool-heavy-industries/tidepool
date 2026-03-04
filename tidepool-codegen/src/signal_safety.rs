@@ -61,12 +61,16 @@ mod inner {
     // the thread-local read async-signal-safe in practice.
     thread_local! {
         static JMP_BUF: Cell<*mut SigJmpBuf> = const { Cell::new(ptr::null_mut()) };
+        static CLOSURE_PTR: Cell<*mut libc::c_void> = const { Cell::new(ptr::null_mut()) };
     }
 
     /// Trampoline called from C after sigsetjmp returns 0.
     /// Casts userdata back to a `Box<dyn FnOnce()>` and calls it.
     /// Panics are caught to prevent unwinding across the C FFI boundary (which is UB).
     unsafe extern "C" fn trampoline(userdata: *mut libc::c_void) {
+        // Clear the thread-local pointer, as we're about to consume the Box.
+        CLOSURE_PTR.with(|cell| cell.set(null_mut()));
+
         let closure: Box<Box<dyn FnOnce()>> = Box::from_raw(userdata as *mut Box<dyn FnOnce()>);
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             (*closure)();
@@ -113,13 +117,22 @@ mod inner {
         let boxed: Box<Box<dyn FnOnce()>> = Box::new(wrapper);
         let userdata = Box::into_raw(boxed) as *mut libc::c_void;
 
+        // Store so we can recover on signal.
+        CLOSURE_PTR.with(|cell| cell.set(userdata));
+
         let val = tidepool_sigsetjmp_call(&mut buf, trampoline, userdata);
 
         JMP_BUF.with(|cell| cell.set(null_mut()));
+        let leaked_ptr = CLOSURE_PTR.with(|cell| cell.replace(null_mut()));
 
         if val != 0 {
-            // Signal was caught. The closure was interrupted by siglongjmp,
-            // so the Box was leaked. We can't recover it safely.
+            // Signal was caught. The trampoline never ran (or was interrupted),
+            // so the boxed closure was not consumed. Drop it to prevent leak.
+            if !leaked_ptr.is_null() {
+                // SAFETY: userdata was created by Box::into_raw above and was not
+                // consumed by the trampoline (signal interrupted it).
+                drop(Box::from_raw(leaked_ptr as *mut Box<dyn FnOnce()>));
+            }
             return Err(SignalError(val));
         }
 
