@@ -970,7 +970,7 @@ pub fn template_haskell(
     if !imports.is_empty() {
         let insert_point = preamble.find("default (Int").unwrap_or(preamble.len());
         out.push_str(&preamble[..insert_point]);
-        for imp in imports.lines().filter(|l| !l.trim().is_empty()) {
+        for imp in imports.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
             out.push_str(&format!("import {}\n", imp));
         }
         out.push_str(&preamble[insert_point..]);
@@ -981,9 +981,11 @@ pub fn template_haskell(
     // Marker for user code section (used by error formatting to trim preamble)
     out.push_str("-- [user]\n");
 
-    out.push_str(helpers);
-    out.push('\n');
     if !helpers.is_empty() {
+        out.push_str(helpers);
+        if !helpers.ends_with('\n') {
+            out.push('\n');
+        }
         out.push('\n');
     }
 
@@ -1290,7 +1292,7 @@ impl TidepoolMcpServerImpl {
         self.cleanup_stale_continuations();
 
         // Reject unsafe/IO imports before compilation
-        for imp in req.imports.lines() {
+        for imp in req.imports.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
             if let Some(module) = rejected_import(imp) {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Blocked import: `{}` is not available in the Tidepool sandbox.",

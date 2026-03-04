@@ -661,7 +661,6 @@ fn test_aeson_input_transform() {
 #[test]
 fn test_aeson_input_with_effect() {
     let input_val = serde_json::json!({"greeting": "Hello from JSON!"});
-    let imports: Vec<&str> = aeson_import_strs();
     let decls = test_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
@@ -2946,7 +2945,6 @@ fn test_vendored_effect_json_conditional() {
 #[test]
 fn test_vendored_input_with_effects() {
     let input_val = serde_json::json!({"items": ["task1", "task2", "task3"]});
-    let imports: Vec<&str> = aeson_import_strs();
     let decls = test_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
