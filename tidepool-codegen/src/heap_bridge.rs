@@ -71,14 +71,14 @@ pub unsafe fn heap_to_value(ptr: *const u8) -> Result<Value, BridgeError> {
                     let ba_ptr = raw_value as *const u8;
                     if ba_ptr.is_null() {
                         return Ok(Value::ByteArray(std::sync::Arc::new(
-                            std::sync::Mutex::new(vec![]),
+                            parking_lot::Mutex::new(vec![]),
                         )));
                     }
                     let len = std::ptr::read_unaligned(ba_ptr as *const u64) as usize;
                     let bytes_ptr = ba_ptr.add(8);
                     let bytes = std::slice::from_raw_parts(bytes_ptr, len).to_vec();
                     Ok(Value::ByteArray(std::sync::Arc::new(
-                        std::sync::Mutex::new(bytes),
+                        parking_lot::Mutex::new(bytes),
                     )))
                 }
                 8 | 9 => {
@@ -214,7 +214,7 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
             // because GC doesn't track the interior pointer from the Lit wrapper to the
             // data buffer. Using bump_alloc would place data in the nursery; after a
             // Cheney copy, the Lit's data_ptr would point to stale fromspace memory.
-            let bytes = bytes.lock().unwrap();
+            let bytes = bytes.lock();
             let data_ptr = crate::host_fns::runtime_new_byte_array(bytes.len() as i64) as *mut u8;
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr.add(8), bytes.len());
 
@@ -252,7 +252,8 @@ pub unsafe fn bump_alloc_from_vmctx(vmctx: &mut VMContext, size: usize) -> *mut 
 mod tests {
     use super::*;
     use crate::nursery::Nursery;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
+    use parking_lot::Mutex;
     use tidepool_repr::{DataConId, Literal};
 
     extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext) {}
@@ -420,7 +421,7 @@ mod tests {
             let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
             let back = heap_to_value(ptr).expect("heap_to_value failed");
             if let Value::ByteArray(ba) = back {
-                assert_eq!(*ba.lock().unwrap(), data);
+                assert_eq!(*ba.lock(), data);
             } else {
                 panic!("Expected ByteArray, got {:?}", back);
             }

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 
 use ast_grep_config::{DeserializeEnv, SerializableRule};
 use ast_grep_core::{Language as _, Pattern};
@@ -121,10 +122,7 @@ impl EffectHandler<CapturedOutput> for KvHandler {
         req: KvReq,
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<Value, EffectError> {
-        let mut store = self
-            .store
-            .lock()
-            .map_err(|e| EffectError::Handler(format!("Mutex poisoned: {}", e)))?;
+        let mut store = self.store.lock();
         match req {
             KvReq::Get(key) => {
                 let val: Option<serde_json::Value> = store.get(&key).cloned();

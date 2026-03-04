@@ -4,7 +4,8 @@ use frunk::HNil;
 /// the MCP server generates.
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
@@ -173,7 +174,7 @@ impl EffectHandler for TestConsole {
     fn handle(&mut self, req: ConsoleReq, cx: &EffectContext) -> Result<Value, EffectError> {
         match req {
             ConsoleReq::Print(s) => {
-                self.lines.lock().unwrap().push(s);
+                self.lines.lock().push(s);
                 cx.respond(())
             }
         }
@@ -273,7 +274,7 @@ fn run_mcp_effectful_with_helpers(
             let val = compile_and_run(&src, "result", &include, &mut handlers, &())
                 .expect("compile_and_run failed");
             let json = val.to_json();
-            let lines = captured.lock().unwrap().clone();
+            let lines = captured.lock().clone();
             (json, lines)
         })
         .unwrap()
@@ -323,7 +324,7 @@ fn run_aeson_effectful_with_helpers(
             let val = compile_and_run(&src, "result", &include, &mut handlers, &())
                 .expect("compile_and_run failed");
             let json = val.to_json();
-            let lines = captured.lock().unwrap().clone();
+            let lines = captured.lock().clone();
             (json, lines)
         })
         .unwrap()
@@ -362,7 +363,7 @@ fn run_aeson_effectful_with_input(
             let val = compile_and_run(&src, "result", &include, &mut handlers, &())
                 .expect("compile_and_run failed");
             let json = val.to_json();
-            let lines = captured.lock().unwrap().clone();
+            let lines = captured.lock().clone();
             (json, lines)
         })
         .unwrap()
@@ -685,7 +686,7 @@ fn test_aeson_input_with_effect() {
             let val = compile_and_run(&src, "result", &include, &mut handlers, &())
                 .expect("compile_and_run failed");
             let json = val.to_json();
-            let lines = captured.lock().unwrap().clone();
+            let lines = captured.lock().clone();
             (json, lines)
         })
         .unwrap()
@@ -2968,7 +2969,7 @@ fn test_vendored_input_with_effects() {
             let val = compile_and_run(&src, "result", &include, &mut handlers, &())
                 .expect("compile_and_run failed");
             let json = val.to_json();
-            let lines = captured.lock().unwrap().clone();
+            let lines = captured.lock().clone();
             (json, lines)
         })
         .unwrap()

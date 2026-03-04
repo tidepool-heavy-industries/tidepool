@@ -144,7 +144,7 @@ fn extract_text(val: &Value, table: &DataConTable) -> String {
         let name = table.name_of(*id).unwrap_or("<unknown>");
         if name == "Text" && fields.len() == 3 {
             let ba = match &fields[0] {
-                Value::ByteArray(bs) => bs.lock().unwrap().clone(),
+                Value::ByteArray(bs) => bs.lock().clone(),
                 other => panic!("expected ByteArray in Text, got {other:?}"),
             };
             let off = extract_int_field(&fields[1], table) as usize;

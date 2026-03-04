@@ -15,6 +15,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use parking_lot::Mutex;
 use tidepool_bridge::{FromCore, ToCore};
 use tidepool_runtime::DispatchEffect;
 use tokio::io::{stdin, stdout};
@@ -1121,7 +1122,7 @@ fn rejected_import(import_str: &str) -> Option<&str> {
 /// Clone is cheap (Arc-backed). Thread-safe for use across spawn_blocking.
 #[derive(Clone, Default)]
 pub struct CapturedOutput {
-    lines: Arc<std::sync::Mutex<Vec<String>>>,
+    lines: Arc<Mutex<Vec<String>>>,
 }
 
 impl CapturedOutput {
@@ -1131,12 +1132,12 @@ impl CapturedOutput {
 
     /// Push a line of output.
     pub fn push(&self, line: String) {
-        self.lines.lock().unwrap().push(line);
+        self.lines.lock().push(line);
     }
 
     /// Drain all captured lines, returning them and clearing the buffer.
     pub fn drain(&self) -> Vec<String> {
-        let mut lines = self.lines.lock().unwrap();
+        let mut lines = self.lines.lock();
         std::mem::take(&mut *lines)
     }
 }
@@ -1271,7 +1272,7 @@ pub struct TidepoolMcpServerImpl {
     has_user_library: bool,
     // Ask effect support
     ask_tag: u64,
-    continuations: Arc<std::sync::Mutex<HashMap<String, EvalSession>>>,
+    continuations: Arc<Mutex<HashMap<String, EvalSession>>>,
     next_cont_id: Arc<AtomicU64>,
 }
 
@@ -1282,7 +1283,7 @@ impl TidepoolMcpServerImpl {
     }
 
     fn cleanup_stale_continuations(&self) {
-        let mut conts = self.continuations.lock().unwrap();
+        let mut conts = self.continuations.lock();
         let now = std::time::Instant::now();
         conts.retain(|_, session| now.duration_since(session.created_at) < CONTINUATION_TTL);
     }
@@ -1424,7 +1425,7 @@ impl TidepoolMcpServerImpl {
                     "continuation_id": cont_id,
                     "prompt": prompt,
                 });
-                self.continuations.lock().unwrap().insert(
+                self.continuations.lock().insert(
                     cont_id.clone(),
                     EvalSession {
                         response_tx,
@@ -1471,7 +1472,7 @@ impl TidepoolMcpServerImpl {
         self.cleanup_stale_continuations();
 
         let mut session = {
-            let mut conts = self.continuations.lock().unwrap();
+            let mut conts = self.continuations.lock();
             conts.remove(&req.continuation_id).ok_or_else(|| {
                 McpError::invalid_params(
                     format!(
@@ -1517,7 +1518,7 @@ impl TidepoolMcpServerImpl {
                     "continuation_id": cont_id,
                     "prompt": prompt,
                 });
-                self.continuations.lock().unwrap().insert(
+                self.continuations.lock().insert(
                     cont_id.clone(),
                     EvalSession {
                         response_tx,
@@ -1678,7 +1679,7 @@ where
                 eval_tool_description: build_eval_tool_description(&decls),
                 has_user_library: false,
                 ask_tag,
-                continuations: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                continuations: Arc::new(Mutex::new(HashMap::new())),
                 next_cont_id: Arc::new(AtomicU64::new(1)),
             },
             _phantom: PhantomData,

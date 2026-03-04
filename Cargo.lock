@@ -2892,6 +2892,7 @@ dependencies = [
  "frunk",
  "git2",
  "glob",
+ "parking_lot",
  "rmcp",
  "serde_json",
  "tidepool-bridge",
@@ -2918,6 +2919,7 @@ dependencies = [
 name = "tidepool-bridge"
 version = "0.1.0"
 dependencies = [
+ "parking_lot",
  "proptest",
  "serde_json",
  "tidepool-eval",
@@ -2948,6 +2950,7 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "libc",
+ "parking_lot",
  "proptest",
  "recursion",
  "target-lexicon",
@@ -2974,6 +2977,7 @@ name = "tidepool-eval"
 version = "0.1.0"
 dependencies = [
  "im",
+ "parking_lot",
  "tidepool-repr",
 ]
 
@@ -3036,6 +3040,7 @@ dependencies = [
  "axum",
  "dyn-clone",
  "frunk",
+ "parking_lot",
  "rmcp",
  "schemars",
  "serde",
@@ -3077,6 +3082,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "frunk",
+ "parking_lot",
  "proptest",
  "serde_json",
  "tempfile",

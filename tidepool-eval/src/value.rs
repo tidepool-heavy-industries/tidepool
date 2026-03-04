@@ -1,5 +1,6 @@
 use crate::env::Env;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use tidepool_repr::{CoreExpr, DataConId, Literal, VarId};
 
 /// Shared mutable byte array — `Arc<Mutex>` for in-place mutation semantics
@@ -69,7 +70,7 @@ impl std::fmt::Display for Value {
                 write!(f, "<partial Con#{} {}/{}>", id.0, args.len(), arity)
             }
             Value::ByteArray(ba) => {
-                let bytes = ba.lock().unwrap();
+                let bytes = ba.lock();
                 write!(f, "<ByteArray# len={}>", bytes.len())
             }
         }

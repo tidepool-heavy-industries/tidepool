@@ -113,7 +113,7 @@ fn compare_values(v1: &Value, v2: &Value) -> bool {
                 && f1.iter().zip(f2.iter()).all(|(a, b)| compare_values(a, b))
         }
         (Value::ByteArray(ba1), Value::ByteArray(ba2)) => {
-            *ba1.lock().unwrap() == *ba2.lock().unwrap()
+            *ba1.lock() == *ba2.lock()
         }
         _ => false,
     }

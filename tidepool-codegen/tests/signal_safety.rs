@@ -4,7 +4,7 @@
 //! JMP_BUF, so concurrent signal-catching tests will race and crash.
 //! A shared mutex serializes them.
 
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 static SIGNAL_LOCK: Mutex<()> = Mutex::new(());
 
@@ -20,7 +20,7 @@ unsafe fn trigger_sigill() {
 
 #[test]
 fn test_sigill_returns_signal_error() {
-    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = SIGNAL_LOCK.lock();
     tidepool_codegen::signal_safety::install();
 
     let result = unsafe {
@@ -40,7 +40,7 @@ fn test_sigill_returns_signal_error() {
 
 #[test]
 fn test_normal_execution_returns_ok() {
-    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = SIGNAL_LOCK.lock();
     tidepool_codegen::signal_safety::install();
 
     let result = unsafe { tidepool_codegen::signal_safety::with_signal_protection(|| 42i32) };
@@ -50,7 +50,7 @@ fn test_normal_execution_returns_ok() {
 
 #[test]
 fn test_signal_recovery_allows_subsequent_calls() {
-    let _lock = SIGNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = SIGNAL_LOCK.lock();
     tidepool_codegen::signal_safety::install();
 
     // First call: crash

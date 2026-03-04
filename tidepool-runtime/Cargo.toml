@@ -17,6 +17,7 @@ tidepool-codegen = { version = "0.1.0", path = "../tidepool-codegen" }
 serde_json = "1"
 tempfile = "3"
 blake3 = "1"
+parking_lot = "0.12"
 
 [dev-dependencies]
 proptest = "1"

@@ -12,3 +12,4 @@ readme = "../README.md"
 [dependencies]
 tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
 im = "15"
+parking_lot = "0.12"

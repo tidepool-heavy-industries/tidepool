@@ -44,6 +44,7 @@ clap = { version = "4", features = ["derive"] }
 axum = "0.8"
 rmcp = { version = "0.16", features = ["server", "transport-io", "transport-streamable-http-server"] }
 git2 = "0.19"
+parking_lot = "0.12"
 
 [dev-dependencies]
 tidepool-testing = { path = "../tidepool-testing" }
