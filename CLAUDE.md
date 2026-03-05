@@ -129,11 +129,11 @@ To get named fields, return `Value` via `object ["name" .= x, "size" .= y]`.
 The JIT runs a strict subset of Haskell. These core idioms crash without useful error messages:
 
 - **Infinite lists**: `[0..]`, `repeat x`, `cycle xs`, `iterate f x` — the JIT evaluates data constructor fields eagerly (no thunks). Use `enumFromTo`, `replicate`, `zipWithIndex` instead.
-- **~~`maximum`/`minimum`/`sum`/`product`~~**: Now work (lazy poison closure fix defers error branches). `genericLength` still crashes — use `length` or `len` instead.
+- **~~`maximum`/`minimum`/`sum`/`product`/`genericLength`~~**: Now work (lazy poison closure fix defers error branches).
 - **`read`/`reads`**: Read typeclass crashes. Use `parseInt`/`parseDouble` from Prelude.
-- **Floating-point math**: `sqrt`, `sin`, `cos`, `exp`, `log` — the `Floating` dictionary has eager error branches. `Fractional` (`/`, `recip`) works fine.
+- **~~Floating-point math~~**: `sqrt`, `sin`, `cos`, `exp`, `log` now work (lazy poison closure fix).
 - **`zipWith f xs [0..]`**: Doesn't fuse, infinite list crashes. Use `zipWithIndex` or `imap`.
-- **Large Value trees**: >50K JSON nodes in a single eval can crash during lens traversals.
+- **~~Large Value trees~~**: Effect responses now capped at 10K Value nodes. RunJson also has a 512KB output cap.
 
 When you hit SIGILL or SIGSEGV, the error message will be opaque ("null pointer", "signal 4", etc.). The root cause is almost always one of the above patterns.
 
@@ -155,6 +155,6 @@ if shouldProceed answer
 
 ### Adding new Prelude functions
 
-Polymorphic base functions going through typeclass dictionaries often crash — the JIT eagerly evaluates error branches in dictionary records. Shadow with monomorphic versions using primops directly (e.g., `rem` instead of `Integral` dict). Avoid `maximum`/`minimum` from base (use manual `foldl'` with comparison).
+Polymorphic base functions going through typeclass dictionaries often crash — the JIT eagerly evaluates error branches in dictionary records. Shadow with monomorphic versions using primops directly (e.g., `rem` instead of `Integral` dict). Note: `sum`/`product`/`maximum`/`minimum`/`genericLength` now work (lazy poison closure fix), and `Floating` math now works too (lazy poison closure fix).
 
 **Infinite lists crash**: The JIT evaluates data constructor fields eagerly (no thunks). Infinite list producers like `[0..]` or `myFrom n = n : myFrom (n+1)` cause SIGSEGV unless GHC fuses them away (e.g., `take 5 [0..]` works via build/foldr fusion, but `zipWith f xs [0..]` does not fuse). Use `zipWithIndex`, `imap`, or `enumFromTo` instead.

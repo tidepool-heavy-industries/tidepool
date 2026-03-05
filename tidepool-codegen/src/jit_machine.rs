@@ -157,7 +157,7 @@ impl JitEffectMachine {
                     .map_err(JitError::HeapBridge)?;
                     let cx = EffectContext::with_user(table, user);
                     let resp_val = handlers.dispatch(tag, &req_val, &cx)?;
-                    const MAX_EFFECT_RESPONSE_NODES: usize = 50_000;
+                    const MAX_EFFECT_RESPONSE_NODES: usize = 10_000;
                     let nodes = resp_val.node_count();
                     if nodes > MAX_EFFECT_RESPONSE_NODES {
                         break Err(JitError::EffectResponseTooLarge {
