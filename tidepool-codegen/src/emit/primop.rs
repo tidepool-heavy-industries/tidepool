@@ -12,6 +12,25 @@ use cranelift_module::Module;
 use tidepool_heap::layout;
 use tidepool_repr::PrimOpKind;
 
+/// Emit a zero-divisor guard: if `divisor == 0`, trap; otherwise fall through.
+fn emit_div_zero_check(
+    builder: &mut FunctionBuilder,
+    divisor: Value,
+) {
+    let zero = builder.ins().iconst(types::I64, 0);
+    let is_zero = builder.ins().icmp(IntCC::Equal, divisor, zero);
+    let ok_block = builder.create_block();
+    let trap_block = builder.create_block();
+    builder.ins().brif(is_zero, trap_block, &[], ok_block, &[]);
+
+    builder.switch_to_block(trap_block);
+    builder.seal_block(trap_block);
+    builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(3));
+
+    builder.switch_to_block(ok_block);
+    builder.seal_block(ok_block);
+}
+
 /// Emit a primitive operation. Unboxes HeapPtr args, performs the op, returns Raw.
 pub fn emit_primop(
     pipeline: &mut CodegenPipeline,
@@ -51,12 +70,14 @@ pub fn emit_primop(
             check_arity(op, 2, args.len())?;
             let a = unbox_int(pipeline, builder, args[0]);
             let b = unbox_int(pipeline, builder, args[1]);
+            emit_div_zero_check(builder, b);
             Ok(SsaVal::Raw(builder.ins().sdiv(a, b), LIT_TAG_INT))
         }
         PrimOpKind::IntRem => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(pipeline, builder, args[0]);
             let b = unbox_int(pipeline, builder, args[1]);
+            emit_div_zero_check(builder, b);
             Ok(SsaVal::Raw(builder.ins().srem(a, b), LIT_TAG_INT))
         }
 
@@ -169,12 +190,14 @@ pub fn emit_primop(
             check_arity(op, 2, args.len())?;
             let a = unbox_int(pipeline, builder, args[0]);
             let b = unbox_int(pipeline, builder, args[1]);
+            emit_div_zero_check(builder, b);
             Ok(SsaVal::Raw(builder.ins().udiv(a, b), LIT_TAG_WORD))
         }
         PrimOpKind::WordRem => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(pipeline, builder, args[0]);
             let b = unbox_int(pipeline, builder, args[1]);
+            emit_div_zero_check(builder, b);
             Ok(SsaVal::Raw(builder.ins().urem(a, b), LIT_TAG_WORD))
         }
 
@@ -933,12 +956,14 @@ pub fn emit_primop(
             check_arity(op, 2, args.len())?;
             let a = unbox_int(pipeline, builder, args[0]);
             let b = unbox_int(pipeline, builder, args[1]);
+            emit_div_zero_check(builder, b);
             Ok(SsaVal::Raw(builder.ins().udiv(a, b), LIT_TAG_WORD))
         }
         PrimOpKind::QuotRemWordRem => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(pipeline, builder, args[0]);
             let b = unbox_int(pipeline, builder, args[1]);
+            emit_div_zero_check(builder, b);
             Ok(SsaVal::Raw(builder.ins().urem(a, b), LIT_TAG_WORD))
         }
 

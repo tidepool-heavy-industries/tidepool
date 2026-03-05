@@ -19,7 +19,7 @@ struct TestResult {
 }
 
 fn compile_and_run(tree: &CoreExpr) -> TestResult {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
     let func_id = compile_expr(&mut pipeline, tree, "test_fn").expect("compile_expr failed");
     pipeline.finalize().expect("failed to finalize");
 
@@ -455,7 +455,7 @@ fn compile_repl_cbor_inner() {
 
     let expr = tidepool_codegen::datacon_env::wrap_with_datacon_env(&expr, &table);
 
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
     let result = compile_expr(&mut pipeline, &expr, "repl");
     assert!(result.is_ok(), "compile_expr failed: {:?}", result.err());
     pipeline.finalize().expect("failed to finalize");

@@ -412,10 +412,16 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::WordGe => cmp_word(op, &args, |a, b| a >= b),
         PrimOpKind::WordQuot => {
             let (a, b) = bin_op_word(op, &args)?;
+            if b == 0 {
+                return Err(EvalError::InternalError("division by zero (quotWord#)".into()));
+            }
             Ok(Value::Lit(Literal::LitWord(a.wrapping_div(b))))
         }
         PrimOpKind::WordRem => {
             let (a, b) = bin_op_word(op, &args)?;
+            if b == 0 {
+                return Err(EvalError::InternalError("division by zero (remWord#)".into()));
+            }
             Ok(Value::Lit(Literal::LitWord(a.wrapping_rem(b))))
         }
         PrimOpKind::WordAnd => {
@@ -981,10 +987,16 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         }
         PrimOpKind::IntQuot => {
             let (a, b) = bin_op_int(op, &args)?;
+            if b == 0 {
+                return Err(EvalError::InternalError("division by zero (quotInt#)".into()));
+            }
             Ok(Value::Lit(Literal::LitInt(a.wrapping_div(b))))
         }
         PrimOpKind::IntRem => {
             let (a, b) = bin_op_int(op, &args)?;
+            if b == 0 {
+                return Err(EvalError::InternalError("division by zero (remInt#)".into()));
+            }
             Ok(Value::Lit(Literal::LitInt(a.wrapping_rem(b))))
         }
         PrimOpKind::Chr => {
@@ -1430,11 +1442,17 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::QuotRemWordVal => {
             // quotRemWord# quotient: a / b
             let (a, b) = bin_op_word(op, &args)?;
+            if b == 0 {
+                return Err(EvalError::InternalError("division by zero (quotRemWord# quot)".into()));
+            }
             Ok(Value::Lit(Literal::LitWord(a / b)))
         }
         PrimOpKind::QuotRemWordRem => {
             // quotRemWord# remainder: a % b
             let (a, b) = bin_op_word(op, &args)?;
+            if b == 0 {
+                return Err(EvalError::InternalError("division by zero (quotRemWord# rem)".into()));
+            }
             Ok(Value::Lit(Literal::LitWord(a % b)))
         }
 

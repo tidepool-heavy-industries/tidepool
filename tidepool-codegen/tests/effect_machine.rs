@@ -33,7 +33,7 @@ fn build_test_fn<F>(
 where
     F: FnOnce(&mut FunctionBuilder, ir::Value, ir::SigRef, ir::FuncRef),
 {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
     let func_id = pipeline.declare_function(name).expect("failed to declare");
 
     let mut ctx = Context::new();
@@ -543,7 +543,7 @@ unsafe fn alloc_con_heap(
 #[test]
 
 fn test_resume_leaf_identity() {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
 
     // Identity closure: \x -> Val(x)
 
@@ -631,7 +631,7 @@ fn test_resume_leaf_identity() {
 #[test]
 
 fn test_resume_node_identity() {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
 
     // Identity closure: \x -> Val(x)
 
@@ -765,7 +765,7 @@ fn test_resume_unknown_tag() {
 #[test]
 
 fn test_resume_node_with_effect_result() {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
 
     // f = \x -> E(Union(7, x), Leaf(identity))
 
@@ -848,7 +848,7 @@ fn test_resume_node_with_effect_result() {
         ],
     };
 
-    let mut pipeline2 = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    let mut pipeline2 = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
 
     let f_id = compile_expr(&mut pipeline2, &tree_returns_e, "returns_e").unwrap();
 

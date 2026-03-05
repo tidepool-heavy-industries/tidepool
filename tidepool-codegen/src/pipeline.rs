@@ -211,13 +211,13 @@ mod tests {
 
     #[test]
     fn test_empty_pipeline() {
-        let mut pipeline = CodegenPipeline::new(&[]);
+        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
         pipeline.finalize().unwrap();
     }
 
     #[test]
     fn test_declare_define_finalize() {
-        let mut pipeline = CodegenPipeline::new(&[]);
+        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
         let func_id = pipeline.declare_function("test_fn").unwrap();
 
         let mut ctx = pipeline.module.make_context();
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_declarations() {
-        let mut pipeline = CodegenPipeline::new(&[]);
+        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
         let id1 = pipeline.declare_function("f1").unwrap();
         let id2 = pipeline.declare_function("f2").unwrap();
         assert_ne!(id1, id2);
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn test_get_function_ptr_after_finalize() {
-        let mut pipeline = CodegenPipeline::new(&[]);
+        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
         let func_id = pipeline.declare_function("f1").unwrap();
 
         let mut ctx = pipeline.module.make_context();
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn test_build_lambda_registry() {
-        let mut pipeline = CodegenPipeline::new(&[]);
+        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
         let func_id = pipeline.declare_function("f1").unwrap();
 
         let mut ctx = pipeline.module.make_context();
@@ -313,7 +313,7 @@ mod tests {
             123
         }
         let symbols = [("my_host_fn", my_host_fn as *const u8)];
-        let mut pipeline = CodegenPipeline::new(&symbols);
+        let mut pipeline = CodegenPipeline::new(&symbols).unwrap();
 
         let func_id = pipeline.declare_function("call_host").unwrap();
         let mut ctx = pipeline.module.make_context();

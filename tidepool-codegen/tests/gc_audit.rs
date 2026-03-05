@@ -25,7 +25,7 @@ use tidepool_repr::*;
 
 #[test]
 fn test_stack_map_app_safepoints() {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
 
     // Core: \f -> f 1
     // Nodes:
@@ -57,7 +57,7 @@ fn test_stack_map_app_safepoints() {
 
 #[test]
 fn test_stack_map_case_safepoints() {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
 
     let mut nodes = Vec::new();
     // 0: Var(100) - f (free)
@@ -97,7 +97,7 @@ fn test_stack_map_case_safepoints() {
 
 #[test]
 fn test_stack_map_join_safepoints() {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
 
     // Core: join j z = (f z) in j 1
     // Nodes:

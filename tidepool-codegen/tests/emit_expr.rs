@@ -13,7 +13,7 @@ struct TestResult {
 
 /// Helper: set up pipeline + nursery, compile expr, call it, return result ptr.
 fn compile_and_run(tree: &CoreExpr) -> TestResult {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
     let func_id = compile_expr(&mut pipeline, tree, "test_fn").expect("compile_expr failed");
     pipeline.finalize().expect("failed to finalize");
 
@@ -810,7 +810,7 @@ fn test_emit_let_rec_mutual() {
 #[test]
 fn test_emit_unique_lambda_names() {
     // Compile two different expressions that both have lambdas using the same pipeline.
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
 
     let x = VarId(1);
     // λx.x

@@ -11,7 +11,7 @@ use cranelift_module::Module;
 /// Test 1: JIT boots, empty fn compiles and calls without crash.
 #[test]
 fn test_jit_boot_empty_fn() {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
     let func_id = pipeline
         .declare_function("test_empty")
         .expect("failed to declare");
@@ -65,7 +65,7 @@ fn test_stack_map_registry_populates() {
     }
     let mut symbols = host_fns::host_fn_symbols();
     symbols.push(("callee", dummy_callee as *const u8));
-    let mut pipeline = CodegenPipeline::new(&symbols);
+    let mut pipeline = CodegenPipeline::new(&symbols).unwrap();
 
     // Declare a callee function (simulates a safepoint call target)
     let callee_sig = {
@@ -134,7 +134,7 @@ fn test_stack_map_registry_populates() {
 fn test_gc_trigger_called_from_jit() {
     // We'll create a JIT function that calls gc_trigger, and verify via
     // host_fns counters that it was invoked with the expected VMContext.
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
 
     // Declare gc_trigger as importable
     let gc_sig = {
@@ -200,7 +200,7 @@ fn test_gc_trigger_called_from_jit() {
 /// Test 5: Alloc fast-path IR: allocates object, bumps pointer.
 #[test]
 fn test_alloc_fast_path() {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
     let func_id = pipeline
         .declare_function("test_alloc")
         .expect("failed to declare");
@@ -268,7 +268,7 @@ fn test_alloc_fast_path() {
 /// call gc_trigger, verify stack map entries are present and correct.
 #[test]
 fn test_stack_map_end_to_end() {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols());
+    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
 
     // Declare gc_trigger as import
     let gc_sig_ext = {
