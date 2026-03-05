@@ -22,6 +22,7 @@ pub enum RuntimeError {
     HeapOverflow,
     StackOverflow,
     BlackHole,
+    BadThunkState(u8),
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -48,6 +49,7 @@ impl std::fmt::Display for RuntimeError {
             RuntimeError::HeapOverflow => write!(f, "heap overflow (nursery exhausted after GC)"),
             RuntimeError::StackOverflow => write!(f, "stack overflow (likely infinite list or unbounded recursion — use zipWithIndex/imap/enumFromTo instead of [0..])"),
             RuntimeError::BlackHole => write!(f, "blackhole detected (infinite loop: thunk forced itself)"),
+            RuntimeError::BadThunkState(state) => write!(f, "thunk has invalid evaluation state: {}", state),
         }
     }
 }
@@ -274,6 +276,13 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                     // 2. Read code pointer
                     let code_ptr = *(obj.add(layout::THUNK_CODE_PTR_OFFSET) as *const usize);
 
+                    if code_ptr == 0 {
+                        RUNTIME_ERROR.with(|cell| {
+                            *cell.borrow_mut() = Some(RuntimeError::NullFunPtr);
+                        });
+                        return error_poison_ptr();
+                    }
+
                     // 3. Call thunk entry function
                     // Signature: fn(vmctx, thunk_ptr) -> whnf_ptr
                     let f: extern "C" fn(*mut VMContext, *mut u8) -> *mut u8 =
@@ -295,7 +304,7 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                     // Fast path: return cached result
                     return *(obj.add(layout::THUNK_INDIRECTION_OFFSET) as *const *mut u8);
                 }
-                _ => return obj,
+                other => return runtime_bad_thunk_state_trap(vmctx, other),
             }
         }
 
@@ -310,7 +319,10 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
         let code_ptr_val = *(obj.add(layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
 
         if code_ptr_val == 0 {
-            return obj;
+            RUNTIME_ERROR.with(|cell| {
+                *cell.borrow_mut() = Some(RuntimeError::NullFunPtr);
+            });
+            return error_poison_ptr();
         }
 
         // Force the closure. In a data-case scrutinee position, GHC Core
@@ -416,6 +428,17 @@ pub extern "C" fn runtime_blackhole_trap(_vmctx: *mut VMContext) -> *mut u8 {
     push_diagnostic(msg);
     RUNTIME_ERROR.with(|cell| {
         *cell.borrow_mut() = Some(RuntimeError::BlackHole);
+    });
+    error_poison_ptr()
+}
+
+/// Called by JIT code when a Thunk has an invalid state.
+pub extern "C" fn runtime_bad_thunk_state_trap(_vmctx: *mut VMContext, state: u8) -> *mut u8 {
+    let msg = format!("[JIT] Invalid thunk state: {}", state);
+    eprintln!("{}", msg);
+    push_diagnostic(msg);
+    RUNTIME_ERROR.with(|cell| {
+        *cell.borrow_mut() = Some(RuntimeError::BadThunkState(state));
     });
     error_poison_ptr()
 }
@@ -1077,6 +1100,7 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
         ("gc_trigger", gc_trigger as *const u8),
         ("runtime_oom", runtime_oom as *const u8),
         ("runtime_blackhole_trap", runtime_blackhole_trap as *const u8),
+        ("runtime_bad_thunk_state_trap", runtime_bad_thunk_state_trap as *const u8),
         ("heap_alloc", heap_alloc as *const u8),
         ("heap_force", heap_force as *const u8),
         ("unresolved_var_trap", unresolved_var_trap as *const u8),
@@ -1640,9 +1664,9 @@ mod tests {
             *(lit_ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = 42;
 
             // 2. Allocate a thunk object
-            let mut thunk_buf = [0u8; 24];
+            let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE];
             let thunk_ptr = thunk_buf.as_mut_ptr();
-            layout::write_header(thunk_ptr, layout::TAG_THUNK, 24);
+            layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
             *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_UNEVALUATED;
 
             TEST_RESULT.with(|r| r.set(lit_ptr));
@@ -1668,9 +1692,9 @@ mod tests {
             let lit_ptr = 0x12345678 as *mut u8;
 
             // 2. Already evaluated thunk
-            let mut thunk_buf = [0u8; 24];
+            let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE];
             let thunk_ptr = thunk_buf.as_mut_ptr();
-            layout::write_header(thunk_ptr, layout::TAG_THUNK, 24);
+            layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
             *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_EVALUATED;
             *(thunk_ptr.add(layout::THUNK_INDIRECTION_OFFSET) as *mut *mut u8) = lit_ptr;
 
@@ -1692,9 +1716,9 @@ mod tests {
             RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);
 
             // Blackholed thunk
-            let mut thunk_buf = [0u8; 24];
+            let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE];
             let thunk_ptr = thunk_buf.as_mut_ptr();
-            layout::write_header(thunk_ptr, layout::TAG_THUNK, 24);
+            layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
             *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_BLACKHOLE;
 
             let res = heap_force(&mut vmctx, thunk_ptr);
@@ -1703,6 +1727,53 @@ mod tests {
 
             let err = take_runtime_error().expect("Should have flagged error");
             assert!(matches!(err, RuntimeError::BlackHole));
+        }
+    }
+
+    #[test]
+    fn test_heap_force_thunk_null_code_ptr() {
+        unsafe {
+            let mut vmctx = VMContext {
+                alloc_ptr: std::ptr::null_mut(),
+                alloc_limit: std::ptr::null_mut(),
+                gc_trigger: mock_gc_trigger,
+            };
+
+            RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);
+
+            let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE];
+            let thunk_ptr = thunk_buf.as_mut_ptr();
+            layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+            *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_UNEVALUATED;
+            *(thunk_ptr.add(layout::THUNK_CODE_PTR_OFFSET) as *mut usize) = 0;
+
+            let res = heap_force(&mut vmctx, thunk_ptr);
+            assert_eq!(res, error_poison_ptr());
+            let err = take_runtime_error().expect("Should have flagged error");
+            assert!(matches!(err, RuntimeError::NullFunPtr));
+        }
+    }
+
+    #[test]
+    fn test_heap_force_thunk_bad_state() {
+        unsafe {
+            let mut vmctx = VMContext {
+                alloc_ptr: std::ptr::null_mut(),
+                alloc_limit: std::ptr::null_mut(),
+                gc_trigger: mock_gc_trigger,
+            };
+
+            RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);
+
+            let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE];
+            let thunk_ptr = thunk_buf.as_mut_ptr();
+            layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+            *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = 255; // Invalid state
+
+            let res = heap_force(&mut vmctx, thunk_ptr);
+            assert_eq!(res, error_poison_ptr());
+            let err = take_runtime_error().expect("Should have flagged error");
+            assert!(matches!(err, RuntimeError::BadThunkState(255)));
         }
     }
 }

@@ -183,6 +183,8 @@ pub const THUNK_CODE_PTR_OFFSET: usize = 16;
 pub const THUNK_INDIRECTION_OFFSET: usize = 16;
 /// Offset of first captured variable in a Thunk.
 pub const THUNK_CAPTURED_OFFSET: usize = 24;
+/// Minimum size of a Thunk (header(8) + state(8) + code_ptr(8) = 24).
+pub const THUNK_MIN_SIZE: usize = 24;
 
 // -- Lit layout (HeapTag::Lit) --
 /// Offset of lit_tag (LitTag byte) in a Lit.
