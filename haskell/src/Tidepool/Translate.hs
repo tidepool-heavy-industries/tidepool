@@ -1355,9 +1355,9 @@ hasIOType ty = case splitTyConApp_maybe ty of
     Just (_, _, _, ret) -> hasIOType ret
     Nothing -> False
 
-collectDataCons :: [TyCon] -> [(Word64, Text, Int, Int, [Text])]
+collectDataCons :: [TyCon] -> [(Word64, Text, Int, Int, [Text], Text)]
 collectDataCons tycons =
-  [ (varId (dataConWorkId dc), T.pack (occNameString (nameOccName (dataConName dc))), dataConTag dc, valueRepArity dc, map mapBang (dataConSrcBangs dc))
+  [ (varId (dataConWorkId dc), T.pack (occNameString (nameOccName (dataConName dc))), dataConTag dc, valueRepArity dc, map mapBang (dataConSrcBangs dc), qualifiedName (dataConName dc))
   | tc <- tycons
   , isAlgTyCon tc
   , dc <- tyConDataCons tc
@@ -1374,13 +1374,14 @@ mapBang (HsSrcBang _ (HsBang srcUnpack srcBang)) =
 -- mg_tcs or binder types. We include these unconditionally in metadata so
 -- that ToCore impls ((), Bool, Char, Int, Word, Double, Float, tuples,
 -- Ordering, lists) always find their constructors in the DataConTable.
-wiredInDataCons :: [(Word64, Text, Int, Int, [Text])]
+wiredInDataCons :: [(Word64, Text, Int, Int, [Text], Text)]
 wiredInDataCons = concatMap (\dc ->
     [( varId (dataConWorkId dc)
      , T.pack (occNameString (nameOccName (dataConName dc)))
      , dataConTag dc
      , valueRepArity dc
      , map mapBang (dataConSrcBangs dc)
+     , qualifiedName (dataConName dc)
      )]
   ) wiredInList
   where

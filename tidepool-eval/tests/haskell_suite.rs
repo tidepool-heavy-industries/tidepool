@@ -157,6 +157,35 @@ fn collect_string(val: &Value, table: &DataConTable) -> String {
     result
 }
 
+/// Collect a Haskell List of Int into a Vec<i64>.
+fn collect_int_list(val: &Value, table: &DataConTable) -> Vec<i64> {
+    let mut result = Vec::new();
+    let mut cur = val;
+    loop {
+        match cur {
+            Value::Con(id, fields) => {
+                let name = table.name_of(*id).expect("DataCon ID not found");
+                if name == "[]" {
+                    break;
+                } else if name == ":" {
+                    assert_eq!(fields.len(), 2, "(:) should have 2 fields");
+                    let inner = unbox(&fields[0], table);
+                    if let Value::Lit(Literal::LitInt(n)) = inner {
+                        result.push(n);
+                    } else {
+                        panic!("expected Int in list, got {inner:?}");
+                    }
+                    cur = &fields[1];
+                } else {
+                    panic!("expected [] or (:), got {name}");
+                }
+            }
+            other => panic!("expected list cons cell, got {other:?}"),
+        }
+    }
+    result
+}
+
 // =============================================================================
 // Macros
 // =============================================================================
@@ -173,6 +202,23 @@ macro_rules! suite_int {
             let val = eval_fixture(CBOR);
             let table = table();
             assert_int(&val, $expected, &table);
+        }
+    };
+}
+
+macro_rules! suite_int_list {
+    ($name:ident, $expected:expr) => {
+        #[test]
+        fn $name() {
+            static CBOR: &[u8] = include_bytes!(concat!(
+                "../../haskell/test/suite_cbor/",
+                stringify!($name),
+                ".cbor"
+            ));
+            let val = eval_fixture(CBOR);
+            let table = table();
+            let actual = collect_int_list(&val, &table);
+            assert_eq!(actual, $expected);
         }
     };
 }
@@ -586,4 +632,40 @@ fn show_double_prelude_text() {
     static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showDoublePreludeText.cbor");
     let val = eval_fixture(CBOR);
     eprintln!("show_double_prelude_text result: {:?}", val);
+}
+
+// =============================================================================
+// Lazy thunk tests (8)
+// =============================================================================
+
+suite_int_list!(thunk_repeat, vec![1, 1, 1, 1, 1]);
+suite_int_list!(thunk_iterate, vec![0, 1, 2, 3, 4]);
+suite_int_list!(thunk_cycle, vec![1, 2, 3, 1, 2, 3, 1]);
+suite_int_list!(thunk_zipwith, vec![10, 21, 32]);
+suite_int_list!(thunk_zipwith_inf, vec![100, 102, 104, 106]);
+suite_int_list!(thunk_map_inf, vec![0, 2, 4, 6, 8]);
+suite_int_list!(thunk_letrec_knot, vec![1, 1, 1, 1, 1]);
+
+#[test]
+fn thunk_blackhole() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/thunk_blackhole.cbor");
+    let expr = read_cbor(CBOR).unwrap();
+    let table = table();
+    let env = env_from_datacon_table(&table);
+    let mut heap = VecHeap::new();
+    let res = eval(&expr, &env, &mut heap);
+
+    // Evaluation might hit BlackHole directly if it's not wrapped in a Con,
+    // or deep_force might hit it.
+    match res {
+        Err(tidepool_eval::EvalError::InfiniteLoop(_)) => {}
+        Ok(val) => {
+            let res_force = deep_force(val, &mut heap);
+            match res_force {
+                Err(tidepool_eval::EvalError::InfiniteLoop(_)) => {}
+                other => panic!("expected InfiniteLoop, got {other:?}"),
+            }
+        }
+        other => panic!("expected InfiniteLoop, got {other:?}"),
+    }
 }
