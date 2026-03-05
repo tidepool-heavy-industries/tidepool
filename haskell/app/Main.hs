@@ -103,7 +103,7 @@ processFile args path = do
             BS.writeFile outFile cbor
             putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
             let usedMeta = map dcToMeta (Map.elems usedDCs)
-            return (acc `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- usedMeta], closedAcc ++ closedBinds)
+            return (acc `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- usedMeta], closedAcc ++ closedBinds)
           ) (Map.empty, []) uniqueNames
 
         -- Write merged metadata
@@ -111,11 +111,11 @@ processFile args path = do
             scanMeta = collectUsedDataCons allClosedBinds
             transitiveMeta = collectTransitiveDCons allClosedBinds
             wiredInMeta = wiredInDataCons
-            mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- wiredInMeta]
-                        `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- tyconMeta]
+            mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- wiredInMeta]
+                        `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- tyconMeta]
                         `Map.union` allMetaMap
-                        `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- scanMeta]
-                        `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- transitiveMeta]
+                        `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- scanMeta]
+                        `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- transitiveMeta]
             allMeta = Map.elems mergedMap
             hasIO = any (targetBindingHasIO binds) uniqueNames
         let metaCbor = encodeMetadata allMeta hasIO
@@ -143,15 +143,15 @@ processFile args path = do
             scanMeta = collectUsedDataCons closedBinds
             transitiveMeta = collectTransitiveDCons closedBinds
             wiredInMeta = wiredInDataCons
-            mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- wiredInMeta]
+            mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- wiredInMeta]
                         `Map.union`
-                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- tyconMeta]
+                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- tyconMeta]
                         `Map.union`
-                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- usedMeta]
+                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- usedMeta]
                         `Map.union`
-                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- scanMeta]
+                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- scanMeta]
                         `Map.union`
-                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- transitiveMeta]
+                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- transitiveMeta]
             allMeta = Map.elems mergedMap
             hasIO = targetBindingHasIO binds targetName
         let metaCbor = encodeMetadata allMeta hasIO
@@ -175,13 +175,13 @@ processFile args path = do
             usedMeta = collectUsedDataCons binds
             transitiveMeta = collectTransitiveDCons binds
             wiredInMeta = wiredInDataCons
-            mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- wiredInMeta]
+            mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- wiredInMeta]
                         `Map.union`
-                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- tyconMeta]
+                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- tyconMeta]
                         `Map.union`
-                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- usedMeta]
+                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- usedMeta]
                         `Map.union`
-                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _) <- transitiveMeta]
+                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- transitiveMeta]
             allMeta = Map.elems mergedMap
         let metaCbor = encodeMetadata allMeta False
         let metaFile = outDir </> "meta.cbor"

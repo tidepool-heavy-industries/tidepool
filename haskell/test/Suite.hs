@@ -583,3 +583,35 @@ showDoublePrelude = show (3.14 :: Double)
 
 showDoublePreludeText :: T.Text
 showDoublePreludeText = T.pack (show (3.14 :: Double))
+
+-- ============================================================
+-- Lazy thunk tests (8)
+-- ============================================================
+
+-- Infinite list producers
+thunk_repeat :: [Int]
+thunk_repeat = take 5 (repeat 1)
+
+thunk_iterate :: [Int]
+thunk_iterate = take 5 (iterate (+1) 0)
+
+thunk_cycle :: [Int]
+thunk_cycle = take 7 (cycle [1, 2, 3])
+
+-- Multi-input consumer (motivating case)
+thunk_zipwith :: [Int]
+thunk_zipwith = zipWith (+) [10, 20, 30] [0..]
+
+thunk_zipwith_inf :: [Int]
+thunk_zipwith_inf = take 4 (zipWith (+) [0..] [100..])
+
+thunk_map_inf :: [Int]
+thunk_map_inf = take 5 (map (*2) [0..])
+
+-- BlackHole detection
+thunk_blackhole :: Int
+thunk_blackhole = let x = x in x
+
+-- LetRec knot-tying still works
+thunk_letrec_knot :: [Int]
+thunk_letrec_knot = let xs = 1 : xs in take 5 xs
