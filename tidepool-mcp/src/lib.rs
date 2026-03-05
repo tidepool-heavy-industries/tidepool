@@ -396,6 +396,15 @@ pub struct ResumeRequest {
 // Templating
 // ---------------------------------------------------------------------------
 
+/// Generate the Haskell module preamble that wraps user code in `eval` calls.
+///
+/// Emits: language pragmas, `module Expr`, standard imports (`Tidepool.Prelude`,
+/// `Control.Monad.Freer`, qualified `Data.Text`/`Data.Map`/etc.), the user `Library`
+/// import (if present), GADT declarations for each registered effect, the `type M`
+/// alias over the full effect list, and thin helper functions (e.g. `say`, `kvGet`).
+///
+/// When `user_library` is true and both `Llm` and `Ask` effects are present, also
+/// emits the heuristic combinator definitions (`Q`, `??`, `pick`, `yn`, etc.).
 pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
     let mut out = String::new();
     out.push_str("{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables #-}\n");
@@ -943,7 +952,7 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
                 "  r <- llmJson prompt (h_aug schema)\n",
                 "  let c = h_conf r\n",
                 "  v <- if c >= threshold then pure (h_strip r)\n",
-                "       else ask (prompt <> \"\\n[haiku \" <> pack (showDouble c) <> \"]: \" <> encode (h_strip r))\n",
+                "       else ask (prompt <> \"\\n[haiku \" <> pack (showDouble c) <> \"]: \" <> show (h_strip r))\n",
                 "  pure (parse v)\n",
             ));
             // ?! operator: ask with evidence, returns Judged
@@ -956,7 +965,7 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
                 "  if c >= threshold\n",
                 "    then pure (Sure (parse (h_strip r)))\n",
                 "    else do\n",
-                "      v <- ask (prompt <> \"\\n[haiku \" <> pack (showDouble c) <> \"]: \" <> encode (h_strip r))\n",
+                "      v <- ask (prompt <> \"\\n[haiku \" <> pack (showDouble c) <> \"]: \" <> show (h_strip r))\n",
                 "      pure (Unsure c (parse v))\n",
             ));
             // Smart constructors
@@ -1083,7 +1092,13 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
             desc.push('\n');
             desc.push_str(concat!(
                 "User library: `Library` is auto-imported from `.tidepool/lib/Library.hs`. ",
-                "Other modules in `.tidepool/lib/` can be imported explicitly via the `imports` field.",
+                "Other modules in `.tidepool/lib/` can be imported explicitly via the `imports` field.\n\n",
+                "Prelude polymorphic ops: `len` for length of Text or [a], ",
+                "`isNull` for emptiness of Text or [a], ",
+                "`stake`/`sdrop` for take/drop on both Text and [a]. ",
+                "`intercalate` joins Text (not lists). ",
+                "`joinText` is an alias. `tReverse` reverses Text. ",
+                "List-only: `length`, `take`, `drop`, `null` remain unchanged.",
             ));
         }
 
@@ -1429,6 +1444,8 @@ pub struct TidepoolMcpServerImpl {
     has_user_library: bool,
     // Ask effect support
     ask_tag: u64,
+    // Effect names for error annotation (indexed by tag)
+    effect_names: Vec<String>,
     continuations: Arc<std::sync::Mutex<HashMap<String, EvalSession>>>,
     next_cont_id: Arc<AtomicU64>,
 }
@@ -1483,6 +1500,7 @@ impl TidepoolMcpServerImpl {
         let captured = CapturedOutput::new();
         let captured_for_blocking = captured.clone();
         let ask_tag = self.ask_tag;
+        let effect_names = self.effect_names.clone();
 
         // Create channels for Ask effect communication
         let (session_tx, mut session_rx) = tokio::sync::mpsc::unbounded_channel::<SessionMessage>();
@@ -1528,6 +1546,19 @@ impl TidepoolMcpServerImpl {
                     Ok(Err(e)) => {
                         let diagnostics = tidepool_runtime::drain_diagnostics();
                         let mut error_detail = e.to_string();
+                        // Annotate UnhandledEffect with effect names
+                        if error_detail.starts_with("Unhandled effect at tag") {
+                            let effects_list: String = effect_names
+                                .iter()
+                                .enumerate()
+                                .map(|(i, name)| format!("  {} = {}", i, name))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            error_detail.push_str(&format!(
+                                "\n\nRegistered effects:\n{}",
+                                effects_list
+                            ));
+                        }
                         if !diagnostics.is_empty() {
                             error_detail.push_str("\n\n## JIT Diagnostics\n");
                             for d in &diagnostics {
@@ -1827,6 +1858,7 @@ where
         let mut decls = H::collect_decls();
         let ask_tag = decls.len() as u64;
         decls.push(ask_decl());
+        let effect_names: Vec<String> = decls.iter().map(|d| d.type_name.to_string()).collect();
         Self {
             inner: TidepoolMcpServerImpl {
                 handler_factory: Arc::new(handler),
@@ -1836,6 +1868,7 @@ where
                 eval_tool_description: build_eval_tool_description(&decls),
                 has_user_library: false,
                 ask_tag,
+                effect_names,
                 continuations: Arc::new(std::sync::Mutex::new(HashMap::new())),
                 next_cont_id: Arc::new(AtomicU64::new(1)),
             },

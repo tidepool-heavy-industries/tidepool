@@ -2793,12 +2793,12 @@ mod tests {
 
     #[test]
     fn test_llm_structured_encode_roundtrip() {
-        // This is the exact crash path: llmJson → encode result
+        // Roundtrip: llmJson → show result
         let mock = serde_json::json!({"greeting": "hello"});
         let result = jit_eval_with_mock_llm(
             &[
                 "r <- llmJson \"test\" (SObj [(\"greeting\", SStr)])",
-                "say (encode r)",
+                "say (show r)",
                 "pure r",
             ],
             mock,
@@ -2817,7 +2817,7 @@ mod tests {
         let result = jit_eval_with_mock_llm(
             &[
                 "r <- llmJson \"test\" (SObj [(\"languages\", SArr (SObj [(\"name\", SStr), (\"year\", SNum)]))])",
-                "say (encode r)",
+                "say (show r)",
                 "pure r",
             ],
             mock,
@@ -2863,7 +2863,7 @@ mod tests {
         let result = jit_eval_with_mock_llm(
             &[
                 "r <- llmJson \"test\" (SObj [(\"name\", SStr), (\"count\", SNum), (\"active\", SBool)])",
-                "say (encode r)",
+                "say (show r)",
                 "pure r",
             ],
             mock,

@@ -381,14 +381,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "ambiguous")]
-    fn test_get_by_name_panics_on_ambiguity() {
+    fn test_get_by_name_returns_none_on_ambiguity() {
         let mut table = DataConTable::new();
         table.insert(make_datacon_qualified(100, "Tip", 1, 0, "Data.Map.Tip"));
         table.insert(make_datacon_qualified(200, "Tip", 1, 0, "Data.Set.Tip"));
 
-        // This should panic because "Tip" is ambiguous
-        let _ = table.get_by_name("Tip");
+        // Ambiguous name returns None — use get_by_qualified_name instead
+        assert_eq!(table.get_by_name("Tip"), None);
     }
 
     #[test]
@@ -432,13 +431,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "ambiguous")]
     fn test_get_by_name_ambiguous_without_qualified_names() {
         let mut table = DataConTable::new();
         // Two constructors with None qualified_name
         table.insert(make_datacon(100, "Dup", 1, 0));
         table.insert(make_datacon(200, "Dup", 1, 0));
-        let _ = table.get_by_name("Dup");
+        // Ambiguous name returns None
+        assert_eq!(table.get_by_name("Dup"), None);
     }
 
     #[test]

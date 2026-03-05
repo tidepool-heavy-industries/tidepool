@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns, NoImplicitPrelude #-}
+{-# LANGUAGE BangPatterns, NoImplicitPrelude, FlexibleInstances #-}
 -- | Self-contained prelude for Tidepool user code.
 --
 -- With NoImplicitPrelude in the MCP template, this is the single import.
@@ -10,7 +10,7 @@ module Tidepool.Prelude
   , String, Ordering(..), Maybe(..), Either(..)
     -- * Text type (re-exported from Data.Text)
   , Text
-  , pack, unpack
+  , Pack(..), unpack
   , toUpper, toLower
   , strip
   , splitOn
@@ -57,9 +57,14 @@ module Tidepool.Prelude
   , dropWhile
   , length
   , replicate
-  , intercalate
   , isPrefixOf
   , intersperse
+    -- * Text intercalate (shadows list version)
+  , intercalate
+  , joinText
+  , tReverse
+    -- * Polymorphic typeclasses (work on both Text and [a])
+  , Len(..), Null(..), Slice(..)
     -- * Additional list combinators
   , find
   , partition
@@ -186,9 +191,18 @@ show = T.pack . P.show
 showT :: Show a => a -> Text
 showT = show
 
--- Re-export Data.Text functions unqualified (non-colliding names)
-pack :: String -> Text
-pack = T.pack
+-- | Polymorphic pack: identity on Text, T.pack on String.
+-- Single-method typeclass, no error branches — JIT-safe.
+class Pack a where
+  pack :: a -> Text
+
+instance Pack String where
+  pack = T.pack
+  {-# INLINE pack #-}
+
+instance Pack Text where
+  pack = id
+  {-# INLINE pack #-}
 
 unpack :: Text -> String
 unpack = T.unpack
@@ -381,12 +395,73 @@ replicate n x = go n
     go !m = x : go (m - 1)
 {-# INLINE replicate #-}
 
--- | Insert a list between every element of a list of lists.
-intercalate :: [a] -> [[a]] -> [a]
-intercalate _   []     = []
-intercalate _   [x]    = x
-intercalate sep (x:xs) = x `append` (sep `append` intercalate sep xs)
+-- | Join a list of Texts with a separator. Shadows list intercalate.
+-- For list intercalate, use @import qualified Data.List as L@ then @L.intercalate@.
+intercalate :: Text -> [Text] -> Text
+intercalate = T.intercalate
 {-# INLINE intercalate #-}
+
+-- | Alias for 'intercalate' (for discoverability).
+joinText :: Text -> [Text] -> Text
+joinText = T.intercalate
+{-# INLINE joinText #-}
+
+-- | Reverse a Text.
+tReverse :: Text -> Text
+tReverse = T.reverse
+{-# INLINE tReverse #-}
+
+-- ---------------------------------------------------------------------------
+-- Polymorphic typeclasses (work on both Text and [a])
+-- ---------------------------------------------------------------------------
+
+-- | Length of a container. Works on both Text and lists.
+class Len a where
+  len :: a -> Int
+
+instance Len Text where
+  len = T.length
+  {-# INLINE len #-}
+
+instance Len [a] where
+  len [] = 0
+  len (_:xs) = 1 + len xs
+  {-# INLINE len #-}
+
+-- | Emptiness check. Works on both Text and lists.
+class Null a where
+  isNull :: a -> Bool
+
+instance Null Text where
+  isNull = T.null
+  {-# INLINE isNull #-}
+
+instance Null [a] where
+  isNull [] = True
+  isNull _  = False
+  {-# INLINE isNull #-}
+
+-- | Take/drop prefix. Works on both Text and lists.
+-- Named @stake@/@sdrop@ to avoid shadowing list @take@/@drop@.
+class Slice a where
+  stake :: Int -> a -> a
+  sdrop :: Int -> a -> a
+
+instance Slice Text where
+  stake = T.take
+  sdrop = T.drop
+  {-# INLINE stake #-}
+  {-# INLINE sdrop #-}
+
+instance Slice [a] where
+  stake 0 _  = []
+  stake _ [] = []
+  stake n (x:xs) = x : stake (n-1) xs
+  sdrop 0 xs = xs
+  sdrop _ [] = []
+  sdrop n (_:xs) = sdrop (n-1) xs
+  {-# INLINE stake #-}
+  {-# INLINE sdrop #-}
 
 -- | Is the first Text a prefix of the second?
 isPrefixOf :: Text -> Text -> Bool

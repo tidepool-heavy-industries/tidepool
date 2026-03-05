@@ -74,13 +74,17 @@ MCP users get `import Tidepool.Prelude hiding (error)` auto-imported. Additional
 
 ### Tidepool.Prelude (auto-imported)
 
-Everything MCP users need in one import:
+Everything MCP users need in one import.
+
+> **Text, not String — the #1 usability trap.** The Prelude standardizes on `Text`. `show` returns `Text` (not `String`), and `pack` is polymorphic (identity on Text, `T.pack` on String), so `pack (show x)` works fine. `lines`/`words`/`unlines`/`unwords` all operate on `Text`. `error` takes `Text`. String literals are `Text` via `OverloadedStrings`. The underlying `String` type (`[Char]`) exists but is expensive under the JIT's eager evaluation. Stick to `Text` everywhere.
+
 - **Types**: Int, Double, Char, Bool, Text, String, Maybe, Either, Map, Set, Value
-- **Text ops**: pack/unpack, toUpper/toLower, strip, splitOn, replace, words/lines/unwords/unlines, isPrefixOf/isSuffixOf/isInfixOf
-- **List ops**: map, filter, foldl/foldr/foldl', sort/sortBy, nub/nubBy, groupBy, partition, transpose, intercalate, intersperse, zip/zip3/unzip/unzip3, elemIndex/findIndex, find, span/break/takeWhile/dropWhile, tails, unfoldr, mapAccumL, concatMap, reverse, splitAt, replicate, head/tail/last/init, zipWithIndex, imap, enumFromTo
+- **Text ops**: pack/unpack, toUpper/toLower, strip, splitOn, replace, words/lines/unwords/unlines, isPrefixOf/isSuffixOf/isInfixOf, intercalate (Text→[Text]→Text), joinText, tReverse
+- **Polymorphic ops**: `pack` (String→Text or Text→Text identity), `len` (Text or [a] → Int), `isNull` (Text or [a] → Bool), `stake`/`sdrop` (like take/drop on both Text and [a])
+- **List ops**: map, filter, foldl/foldr/foldl', sort/sortBy, nub/nubBy, groupBy, partition, transpose, intersperse, zip/zip3/unzip/unzip3, elemIndex/findIndex, find, span/break/takeWhile/dropWhile, tails, unfoldr, mapAccumL, concatMap, reverse, splitAt, replicate, head/tail/last/init, zipWithIndex, imap, enumFromTo, length, take, drop, null (list-only versions still available)
 - **Char**: isDigit, isAlpha, isAlphaNum, isSpace, isUpper, isLower, digitToInt, toLowerChar, toUpperChar, ord, chr
 - **Numeric**: even/odd, abs'/signum'/min'/max' (monomorphic Int), round (Double→Int), parseIntM/parseInt, parseDoubleM/parseDouble
-- **JSON**: Value(..), encode/decode/eitherDecode, toJSON, (.=), object, lenses (key/nth/_String/_Number/_Bool/_Array/_Object, ^?/^../preview/toListOf), helpers (?./lookupKey/asText/asInt)
+- **JSON**: Value(..), toJSON, (.=), object, lenses (key/nth/_String/_Number/_Bool/_Array/_Object, ^?/^../preview/toListOf), helpers (?./lookupKey/asText/asInt). **No JSON parsing in Haskell** — `encode`/`decode` removed; use `runJson`/`httpGet` (parsed on Rust side)
 - **Map**: fromList/toList, insert/delete/adjust, union/intersection/difference/unionWith/intersectionWith, singleton/empty, findWithDefault, foldlWithKey'/foldrWithKey, mapKeys/mapWithKey/filterWithKey
 - **Monadic**: mapM/forM/foldM, when/unless/void/join/guard, (>=>)/(<=<)
 
@@ -101,6 +105,53 @@ First-class questions: `Q a` bundles schema + parser + confidence threshold.
 - Applicative: `(,) <$> pick cats <*> num "pri" ?? prompt` — one Haiku call, multiple extractions.
 - `q ?! prompt` — returns `Sure a | Unsure Double a` (preserves confidence).
 - `triage q render items`, `survey q render items`, `sift q render items` — batch ops.
+
+### Haskell → JSON Rendering
+
+Values returned via `pure x` are automatically rendered to JSON by the Rust runtime:
+
+| Haskell type | JSON |
+|-------------|------|
+| `Int`, `Double` | number |
+| `Text`, `String` | string |
+| `Bool` | true/false |
+| `[a]` | array |
+| `(a, b)`, `(a, b, c)` | array (tuples are arrays, not objects) |
+| `Maybe a` | value or null |
+| `Value` | passthrough |
+| `Map Text a` | object |
+| `()` | null |
+
+To get named fields, return `Value` via `object ["name" .= x, "size" .= y]`.
+
+### Dangerous Patterns (silent crash → SIGILL/SIGSEGV)
+
+The JIT runs a strict subset of Haskell. These core idioms crash without useful error messages:
+
+- **Infinite lists**: `[0..]`, `repeat x`, `cycle xs`, `iterate f x` — the JIT evaluates data constructor fields eagerly (no thunks). Use `enumFromTo`, `replicate`, `zipWithIndex` instead.
+- **~~`maximum`/`minimum`/`sum`/`product`~~**: Now work (lazy poison closure fix defers error branches). `genericLength` still crashes — use `length` or `len` instead.
+- **`read`/`reads`**: Read typeclass crashes. Use `parseInt`/`parseDouble` from Prelude.
+- **Floating-point math**: `sqrt`, `sin`, `cos`, `exp`, `log` — the `Floating` dictionary has eager error branches. `Fractional` (`/`, `recip`) works fine.
+- **`zipWith f xs [0..]`**: Doesn't fuse, infinite list crashes. Use `zipWithIndex` or `imap`.
+- **Large Value trees**: >50K JSON nodes in a single eval can crash during lens traversals.
+
+When you hit SIGILL or SIGSEGV, the error message will be opaque ("null pointer", "signal 4", etc.). The root cause is almost always one of the above patterns.
+
+### MCP Eval Patterns
+
+**Aperture pattern** (`ask` as decision gate): Place `ask` after data gathering, before expensive operations. The computation does the grunt work (scan files, parse, format a menu), then suspends. During the gap between suspend and resume, the caller can do independent scouting (bash, grep, other evals) using the surfaced information, then resume with an informed choice that steers the rest of the computation. The suspended eval is a coroutine checkpoint; the gap is a free-form intelligence window.
+
+```haskell
+-- Haskell gathers context, suspends for steering
+data <- expensiveScan
+answer <- ask (formatMenu data)
+-- Caller scouts independently, then resumes
+if shouldProceed answer
+  then expensiveAnalysis data  -- only runs if steering says yes
+  else pure "skipped"
+```
+
+**Census pattern**: One eval replaces N tool calls. `fsGlob` + `mapM fsMetadata` + filtering gives a codebase overview in a single round-trip.
 
 ### Adding new Prelude functions
 
