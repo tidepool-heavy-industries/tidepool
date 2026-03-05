@@ -270,54 +270,59 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
         loop {
             let tag = layout::read_tag(current);
 
-            if tag != layout::TAG_THUNK {
-                return current; // WHNF (Closure, Con, Lit) or unknown
-            }
+            if tag == layout::TAG_THUNK {
+                let state = *current.add(layout::THUNK_STATE_OFFSET);
+                match state {
+                    layout::THUNK_UNEVALUATED => {
+                        // 1. Eager blackhole
+                        *current.add(layout::THUNK_STATE_OFFSET) = layout::THUNK_BLACKHOLE;
 
-            let state = *current.add(layout::THUNK_STATE_OFFSET);
-            match state {
-                layout::THUNK_UNEVALUATED => {
-                    // 1. Eager blackhole
-                    *current.add(layout::THUNK_STATE_OFFSET) = layout::THUNK_BLACKHOLE;
+                        // 2. Read code pointer
+                        let code_ptr =
+                            *(current.add(layout::THUNK_CODE_PTR_OFFSET) as *const usize);
 
-                    // 2. Read code pointer
-                    let code_ptr =
-                        *(current.add(layout::THUNK_CODE_PTR_OFFSET) as *const usize);
+                        if code_ptr == 0 {
+                            RUNTIME_ERROR.with(|cell| {
+                                *cell.borrow_mut() = Some(RuntimeError::NullFunPtr);
+                            });
+                            return error_poison_ptr();
+                        }
 
-                    if code_ptr == 0 {
-                        RUNTIME_ERROR.with(|cell| {
-                            *cell.borrow_mut() = Some(RuntimeError::NullFunPtr);
-                        });
-                        return error_poison_ptr();
+                        // 3. Call thunk entry function
+                        // Signature: fn(vmctx, thunk_ptr) -> whnf_ptr
+                        let f: extern "C" fn(*mut VMContext, *mut u8) -> *mut u8 =
+                            std::mem::transmute(code_ptr);
+                        let result = f(vmctx, current);
+
+                        // 4. Write indirection (offset 16, overwriting code_ptr)
+                        *(current.add(layout::THUNK_INDIRECTION_OFFSET) as *mut *mut u8) = result;
+
+                        // 5. Set state = Evaluated
+                        *current.add(layout::THUNK_STATE_OFFSET) = layout::THUNK_EVALUATED;
+
+                        // Result may be another thunk — loop to force it
+                        current = result;
+                        continue;
                     }
-
-                    // 3. Call thunk entry function
-                    // Signature: fn(vmctx, thunk_ptr) -> whnf_ptr
-                    let f: extern "C" fn(*mut VMContext, *mut u8) -> *mut u8 =
-                        std::mem::transmute(code_ptr);
-                    let result = f(vmctx, current);
-
-                    // 4. Write indirection (offset 16, overwriting code_ptr)
-                    *(current.add(layout::THUNK_INDIRECTION_OFFSET) as *mut *mut u8) = result;
-
-                    // 5. Set state = Evaluated
-                    *current.add(layout::THUNK_STATE_OFFSET) = layout::THUNK_EVALUATED;
-
-                    // Result may be another thunk — loop to force it
-                    current = result;
-                    continue;
+                    layout::THUNK_BLACKHOLE => {
+                        return runtime_blackhole_trap(vmctx);
+                    }
+                    layout::THUNK_EVALUATED => {
+                        // Follow indirection — result may be another thunk
+                        current =
+                            *(current.add(layout::THUNK_INDIRECTION_OFFSET) as *const *mut u8);
+                        continue;
+                    }
+                    other => return runtime_bad_thunk_state_trap(vmctx, other),
                 }
-                layout::THUNK_BLACKHOLE => {
-                    return runtime_blackhole_trap(vmctx);
-                }
-                layout::THUNK_EVALUATED => {
-                    // Follow indirection — result may be another thunk
-                    current =
-                        *(current.add(layout::THUNK_INDIRECTION_OFFSET) as *const *mut u8);
-                    continue;
-                }
-                other => return runtime_bad_thunk_state_trap(vmctx, other),
             }
+
+            // Non-thunk tags (Closure, Con, Lit, unknown) — already WHNF.
+            // Note: the pre-thunk closure-forcing path was removed because
+            // TAG_THUNK now handles all lazy computations. TAG_CLOSURE objects
+            // are genuine lambdas (with captures/args) and must not be called
+            // with null arguments.
+            return current;
         }
     }
 }
