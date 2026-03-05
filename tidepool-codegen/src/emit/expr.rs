@@ -68,6 +68,13 @@ enum EmitFrame<A> {
         body_idx: usize,
     },
 
+    // Con with non-trivial fields: all field indices are raw usize,
+    // handled in collapse by emitting thunks for non-trivial fields.
+    ThunkCon {
+        tag: DataConId,
+        field_indices: Vec<usize>,
+    },
+
     // Let: delegate to emit_node's iterative loop
     LetBoundary(usize),
 }
@@ -117,6 +124,7 @@ impl MappableFrame for EmitFrameToken {
                 rhs_idx,
                 body_idx,
             },
+            EmitFrame::ThunkCon { tag, field_indices } => EmitFrame::ThunkCon { tag, field_indices },
             EmitFrame::LetBoundary(idx) => EmitFrame::LetBoundary(idx),
         }
     }
@@ -132,10 +140,20 @@ fn expand_node(tree: &CoreExpr, idx: usize) -> Result<EmitFrame<usize>, EmitErro
         CoreFrame::Var(v) => Ok(EmitFrame::Var(*v)),
         CoreFrame::Lit(Literal::LitString(bytes)) => Ok(EmitFrame::LitString(bytes.clone())),
         CoreFrame::Lit(lit) => Ok(EmitFrame::Lit(lit.clone())),
-        CoreFrame::Con { tag, fields } => Ok(EmitFrame::Con {
-            tag: *tag,
-            fields: fields.clone(),
-        }),
+        CoreFrame::Con { tag, fields } => {
+            let has_non_trivial = fields.iter().any(|&f| !is_trivial_field(f, tree));
+            if has_non_trivial {
+                Ok(EmitFrame::ThunkCon {
+                    tag: *tag,
+                    field_indices: fields.clone(),
+                })
+            } else {
+                Ok(EmitFrame::Con {
+                    tag: *tag,
+                    fields: fields.clone(),
+                })
+            }
+        }
         CoreFrame::App { fun, arg } => Ok(EmitFrame::App {
             fun: *fun,
             arg: *arg,
@@ -265,6 +283,55 @@ fn collapse_frame(
             );
 
             for (i, field_val) in field_vals.into_iter().enumerate() {
+                builder.ins().store(
+                    MemFlags::trusted(),
+                    field_val,
+                    ptr,
+                    CON_FIELDS_START + 8 * i as i32,
+                );
+            }
+
+            builder.declare_value_needs_stack_map(ptr);
+            Ok(SsaVal::HeapPtr(ptr))
+        }
+        EmitFrame::ThunkCon { tag, field_indices } => {
+            // Con with non-trivial fields: evaluate trivial fields eagerly,
+            // compile non-trivial fields as thunks.
+            let num_fields = field_indices.len();
+            let size = 24 + 8 * num_fields as u64;
+            let ptr = emit_alloc_fast_path(builder, vmctx, size, gc_sig, oom_func);
+
+            let tag_val = builder.ins().iconst(types::I8, layout::TAG_CON as i64);
+            builder.ins().store(MemFlags::trusted(), tag_val, ptr, 0);
+            let size_val = builder.ins().iconst(types::I16, size as i64);
+            builder.ins().store(MemFlags::trusted(), size_val, ptr, 1);
+
+            let con_tag_val = builder.ins().iconst(types::I64, tag.0 as i64);
+            builder
+                .ins()
+                .store(MemFlags::trusted(), con_tag_val, ptr, CON_TAG_OFFSET);
+            let num_fields_val = builder.ins().iconst(types::I16, num_fields as i64);
+            builder.ins().store(
+                MemFlags::trusted(),
+                num_fields_val,
+                ptr,
+                CON_NUM_FIELDS_OFFSET,
+            );
+
+            for (i, &f_idx) in field_indices.iter().enumerate() {
+                let field_val = if is_trivial_field(f_idx, tree) {
+                    // Trivial: evaluate eagerly (existing path)
+                    let val = ctx.emit_node(
+                        pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                    )?;
+                    ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
+                } else {
+                    // Non-trivial: compile as thunk
+                    let thunk_val = emit_thunk(
+                        ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                    )?;
+                    thunk_val.value()
+                };
                 builder.ins().store(
                     MemFlags::trusted(),
                     field_val,
@@ -426,6 +493,22 @@ fn emit_subtree(
         |idx| expand_node(tree, idx),
         |frame| collapse_frame(ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, frame),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Cheapness analysis: decide which Con fields need thunks
+// ---------------------------------------------------------------------------
+
+/// Returns true if the expression at `idx` is trivial (safe to evaluate eagerly).
+/// Trivial expressions are already in WHNF or produce values with no computation.
+fn is_trivial_field(idx: usize, expr: &CoreExpr) -> bool {
+    match &expr.nodes[idx] {
+        CoreFrame::Var(_) => true,
+        CoreFrame::Lit(_) => true,
+        CoreFrame::Lam { .. } => true, // Already WHNF (closure)
+        CoreFrame::Con { fields, .. } => fields.iter().all(|&f| is_trivial_field(f, expr)),
+        _ => false, // App, Case, PrimOp, LetNonRec, LetRec, Join, Jump
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -623,6 +706,220 @@ fn emit_lam(
 
     builder.declare_value_needs_stack_map(closure_ptr);
     Ok(SsaVal::HeapPtr(closure_ptr))
+}
+
+// ---------------------------------------------------------------------------
+// Thunk compilation helper
+// ---------------------------------------------------------------------------
+
+/// Compile a non-trivial sub-expression as a thunk: a separate Cranelift function
+/// with signature `(vmctx: i64, thunk_ptr: i64) -> i64` that loads captures from
+/// the thunk object and evaluates the deferred expression. Returns the allocated
+/// thunk heap pointer.
+///
+/// The thunk entry function is a pure computation — `heap_force` handles the
+/// state machine (blackhole, call entry, write indirection, set evaluated).
+#[allow(clippy::too_many_arguments)]
+fn emit_thunk(
+    ctx: &mut EmitContext,
+    pipeline: &mut CodegenPipeline,
+    builder: &mut FunctionBuilder,
+    vmctx: Value,
+    gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
+    tree: &CoreExpr,
+    body_idx: usize,
+) -> Result<SsaVal, EmitError> {
+    // Extract the sub-expression and compute free variables
+    let body_tree = tree.extract_subtree(body_idx);
+    let fvs = tidepool_repr::free_vars::free_vars(&body_tree);
+
+    let dropped: Vec<VarId> = fvs
+        .iter()
+        .filter(|v| !ctx.env.contains_key(v))
+        .copied()
+        .collect();
+    if !dropped.is_empty() {
+        ctx.trace_scope(&format!(
+            "thunk capture: dropped {} free vars not in scope: {:?}",
+            dropped.len(),
+            dropped
+        ));
+    }
+    let mut sorted_fvs: Vec<VarId> = fvs
+        .into_iter()
+        .filter(|v| ctx.env.contains_key(v))
+        .collect();
+    sorted_fvs.sort_by_key(|v| v.0);
+
+    let captures: Vec<(VarId, SsaVal)> = sorted_fvs
+        .iter()
+        .map(|v| {
+            let val = ctx.env.get(v).ok_or_else(|| {
+                EmitError::MissingCaptureVar(
+                    *v,
+                    format!("Thunk capture: not in env (env has {} vars)", ctx.env.len()),
+                )
+            })?;
+            Ok::<_, EmitError>((*v, *val))
+        })
+        .collect::<Result<Vec<_>, EmitError>>()?;
+
+    // Declare the thunk entry function: (vmctx, thunk_ptr) -> result
+    let thunk_name = ctx.next_thunk_name();
+    let mut thunk_sig = Signature::new(pipeline.isa.default_call_conv());
+    thunk_sig.params.push(AbiParam::new(types::I64)); // vmctx
+    thunk_sig.params.push(AbiParam::new(types::I64)); // thunk_ptr (self)
+    thunk_sig.returns.push(AbiParam::new(types::I64));
+
+    let thunk_func_id = pipeline
+        .module
+        .declare_function(&thunk_name, Linkage::Local, &thunk_sig)
+        .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+    pipeline.register_lambda(thunk_func_id, thunk_name.clone());
+
+    // Build the inner function
+    let mut inner_ctx = Context::new();
+    inner_ctx.func.signature = thunk_sig;
+    inner_ctx.func.name = UserFuncName::default();
+
+    let mut inner_fb_ctx = FunctionBuilderContext::new();
+    let mut inner_builder = FunctionBuilder::new(&mut inner_ctx.func, &mut inner_fb_ctx);
+    let inner_block = inner_builder.create_block();
+    inner_builder.append_block_params_for_function_params(inner_block);
+    inner_builder.switch_to_block(inner_block);
+    inner_builder.seal_block(inner_block);
+
+    let inner_vmctx = inner_builder.block_params(inner_block)[0];
+    let thunk_self = inner_builder.block_params(inner_block)[1];
+
+    inner_builder.declare_value_needs_stack_map(thunk_self);
+
+    let mut inner_gc_sig = Signature::new(pipeline.isa.default_call_conv());
+    inner_gc_sig.params.push(AbiParam::new(types::I64));
+    let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
+
+    let inner_oom_func = {
+        let mut sig = Signature::new(pipeline.isa.default_call_conv());
+        sig.returns.push(AbiParam::new(types::I64));
+        let func_id = pipeline
+            .module
+            .declare_function("runtime_oom", Linkage::Import, &sig)
+            .map_err(|e| EmitError::CraneliftError(format!("declare runtime_oom: {e}")))?;
+        pipeline
+            .module
+            .declare_func_in_func(func_id, inner_builder.func)
+    };
+
+    let mut inner_emit = EmitContext::new(ctx.prefix.clone());
+    inner_emit.lambda_counter = ctx.lambda_counter;
+
+    // Load captures from thunk object: thunk_ptr + THUNK_CAPTURED_START + 8*i
+    for (i, (var_id, _)) in captures.iter().enumerate() {
+        let offset = THUNK_CAPTURED_START + 8 * i as i32;
+        let val = inner_builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), thunk_self, offset);
+        inner_builder.declare_value_needs_stack_map(val);
+        inner_emit.trace_scope(&format!("insert thunk capture {:?}", var_id));
+        inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
+    }
+
+    // Emit the deferred expression body
+    let body_root = body_tree.nodes.len() - 1;
+    let body_result = inner_emit.emit_node(
+        pipeline,
+        &mut inner_builder,
+        inner_vmctx,
+        inner_gc_sig_ref,
+        inner_oom_func,
+        &body_tree,
+        body_root,
+    )?;
+    let ret_val = ensure_heap_ptr(
+        &mut inner_builder,
+        inner_vmctx,
+        inner_gc_sig_ref,
+        inner_oom_func,
+        body_result,
+    );
+
+    inner_builder.ins().return_(&[ret_val]);
+    inner_builder.finalize();
+
+    ctx.lambda_counter = inner_emit.lambda_counter;
+
+    // Debug: dump Cranelift IR for thunk when TIDEPOOL_DUMP_CLIF=1
+    if std::env::var("TIDEPOOL_DUMP_CLIF").is_ok() {
+        eprintln!(
+            "=== CLIF {} ({} captures) ===",
+            thunk_name,
+            captures.len()
+        );
+        for (i, (var_id, ssaval)) in captures.iter().enumerate() {
+            let kind = match ssaval {
+                SsaVal::HeapPtr(_) => "HeapPtr",
+                SsaVal::Raw(_, tag) => &format!("Raw(tag={})", tag),
+            };
+            eprintln!("  capture[{}]: VarId({:#x}) = {}", i, var_id.0, kind);
+        }
+        eprintln!("{}", inner_ctx.func.display());
+        eprintln!("=== END CLIF {} ===", thunk_name);
+    }
+
+    pipeline.define_function(thunk_func_id, &mut inner_ctx)?;
+
+    // Get code pointer in the parent function
+    let func_ref = pipeline
+        .module
+        .declare_func_in_func(thunk_func_id, builder.func);
+    let code_ptr = builder.ins().func_addr(types::I64, func_ref);
+
+    // Allocate the thunk heap object
+    let num_captures = captures.len();
+    let thunk_size = 24 + 8 * num_captures as u64;
+    let thunk_ptr = emit_alloc_fast_path(builder, vmctx, thunk_size, gc_sig, oom_func);
+
+    // Header: tag + size
+    let tag_val = builder.ins().iconst(types::I8, layout::TAG_THUNK as i64);
+    builder
+        .ins()
+        .store(MemFlags::trusted(), tag_val, thunk_ptr, 0);
+    let size_val = builder.ins().iconst(types::I16, thunk_size as i64);
+    builder
+        .ins()
+        .store(MemFlags::trusted(), size_val, thunk_ptr, 1);
+
+    // State = Unevaluated
+    let state_val = builder
+        .ins()
+        .iconst(types::I8, layout::THUNK_UNEVALUATED as i64);
+    builder.ins().store(
+        MemFlags::trusted(),
+        state_val,
+        thunk_ptr,
+        THUNK_STATE_OFFSET,
+    );
+
+    // Code pointer
+    builder.ins().store(
+        MemFlags::trusted(),
+        code_ptr,
+        thunk_ptr,
+        THUNK_CODE_PTR_OFFSET,
+    );
+
+    // Store captures
+    for (i, (_, ssaval)) in captures.iter().enumerate() {
+        let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
+        let offset = THUNK_CAPTURED_START + 8 * i as i32;
+        builder
+            .ins()
+            .store(MemFlags::trusted(), cap_val, thunk_ptr, offset);
+    }
+
+    builder.declare_value_needs_stack_map(thunk_ptr);
+    Ok(SsaVal::HeapPtr(thunk_ptr))
 }
 
 // ---------------------------------------------------------------------------

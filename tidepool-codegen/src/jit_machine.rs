@@ -135,8 +135,9 @@ impl JitEffectMachine {
             match yield_result {
                 Yield::Done(ptr) => {
                     let val = unsafe {
+                        let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
                         crate::signal_safety::with_signal_protection(|| {
-                            heap_bridge::heap_to_value(ptr)
+                            heap_bridge::heap_to_value_forcing(ptr, vmctx_ptr)
                         })
                     }
                     .map_err(JitError::Signal)?
@@ -149,12 +150,16 @@ impl JitEffectMachine {
                     continuation,
                 } => {
                     let req_val = unsafe {
+                        let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
                         crate::signal_safety::with_signal_protection(|| {
-                            heap_bridge::heap_to_value(request)
+                            heap_bridge::heap_to_value_forcing(request, vmctx_ptr)
                         })
                     }
                     .map_err(JitError::Signal)?
                     .map_err(JitError::HeapBridge)?;
+                    if std::env::var("TIDEPOOL_TRACE_EFFECTS").is_ok() {
+                        eprintln!("[jit_machine] effect tag={} request={:?}", tag, req_val);
+                    }
                     let cx = EffectContext::with_user(table, user);
                     let resp_val = handlers.dispatch(tag, &req_val, &cx)?;
                     const MAX_EFFECT_RESPONSE_NODES: usize = 10_000;
@@ -231,8 +236,9 @@ impl JitEffectMachine {
             Err(JitError::Yield(crate::yield_type::YieldError::NullPointer))
         } else {
             unsafe {
+                let vmctx_ptr = &mut vmctx as *mut VMContext;
                 crate::signal_safety::with_signal_protection(|| {
-                    heap_bridge::heap_to_value(result_ptr)
+                    heap_bridge::heap_to_value_forcing(result_ptr, vmctx_ptr)
                 })
             }
             .map_err(JitError::Signal)?

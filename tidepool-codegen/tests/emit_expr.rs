@@ -7,8 +7,16 @@ use tidepool_repr::*;
 
 struct TestResult {
     result_ptr: *const u8,
+    vmctx: VMContext,
     _nursery: Vec<u8>,
     _pipeline: CodegenPipeline,
+}
+
+impl TestResult {
+    /// Force a heap pointer (resolve thunks to WHNF).
+    unsafe fn force(&mut self, ptr: *const u8) -> *const u8 {
+        host_fns::heap_force(&mut self.vmctx, ptr as *mut u8) as *const u8
+    }
 }
 
 /// Helper: set up pipeline + nursery, compile expr, call it, return result ptr.
@@ -22,12 +30,16 @@ fn compile_and_run(tree: &CoreExpr) -> TestResult {
     let end = unsafe { start.add(nursery.len()) };
     let mut vmctx = VMContext::new(start, end, host_fns::gc_trigger);
 
+    host_fns::set_gc_state(start, nursery.len());
+    host_fns::set_stack_map_registry(&pipeline.stack_maps);
+
     let ptr = pipeline.get_function_ptr(func_id);
     let func: unsafe extern "C" fn(*mut VMContext) -> i64 = unsafe { std::mem::transmute(ptr) };
     let result = unsafe { func(&mut vmctx as *mut VMContext) };
 
     TestResult {
         result_ptr: result as *const u8,
+        vmctx,
         _nursery: nursery,
         _pipeline: pipeline,
     }
@@ -1267,10 +1279,10 @@ fn test_emit_primop_word_quot_rem() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let mut result = compile_and_run(&tree);
     unsafe {
-        let f0 = read_con_field(result.result_ptr, 0);
-        let f1 = read_con_field(result.result_ptr, 1);
+        let f0 = result.force(read_con_field(result.result_ptr, 0));
+        let f1 = result.force(read_con_field(result.result_ptr, 1));
         assert_eq!(read_lit_int(f0), 3);
         assert_eq!(read_lit_int(f1), 1);
     }
@@ -1367,10 +1379,10 @@ fn test_emit_primop_add_int_c() {
             },
         ],
     };
-    let result = compile_and_run(&tree);
+    let mut result = compile_and_run(&tree);
     unsafe {
-        let f0 = read_con_field(result.result_ptr, 0); // carry
-        let f1 = read_con_field(result.result_ptr, 1); // val
+        let f0 = result.force(read_con_field(result.result_ptr, 0)); // carry
+        let f1 = result.force(read_con_field(result.result_ptr, 1)); // val
         assert_eq!(read_lit_int(f0), 1);
         assert_eq!(read_lit_int(f1), i64::MIN);
     }

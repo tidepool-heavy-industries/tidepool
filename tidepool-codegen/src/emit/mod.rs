@@ -28,6 +28,9 @@ pub const LIT_TAG_ADDR: i64 = 6;
 pub const LIT_TAG_BYTEARRAY: i64 = 7;
 pub const LIT_TAG_SMALLARRAY: i64 = 8;
 pub const LIT_TAG_ARRAY: i64 = 9;
+pub const THUNK_STATE_OFFSET: i32 = 8;
+pub const THUNK_CODE_PTR_OFFSET: i32 = 16;
+pub const THUNK_CAPTURED_START: i32 = 24;
 
 /// SSA value with boxed/unboxed tracking.
 #[derive(Debug, Clone, Copy)]
@@ -139,5 +142,11 @@ impl EmitContext {
         let n = self.lambda_counter;
         self.lambda_counter += 1;
         format!("{}_lambda_{}", self.prefix, n)
+    }
+
+    pub fn next_thunk_name(&mut self) -> String {
+        let n = self.lambda_counter;
+        self.lambda_counter += 1;
+        format!("{}_thunk_{}", self.prefix, n)
     }
 }

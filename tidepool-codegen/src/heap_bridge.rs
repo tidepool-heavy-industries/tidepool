@@ -45,14 +45,32 @@ impl std::error::Error for BridgeError {}
 ///
 /// `ptr` must point to a valid HeapObject allocated by the JIT nursery.
 pub unsafe fn heap_to_value(ptr: *const u8) -> Result<Value, BridgeError> {
-    heap_to_value_inner(ptr, 0)
+    heap_to_value_inner(ptr, 0, std::ptr::null_mut())
+}
+
+/// Convert a heap-allocated object to a Value, forcing any unevaluated thunks
+/// encountered during traversal.
+///
+/// # Safety
+///
+/// `ptr` must point to a valid HeapObject allocated by the JIT nursery.
+/// `vmctx` must point to a valid VMContext (required for forcing thunks).
+pub unsafe fn heap_to_value_forcing(
+    ptr: *const u8,
+    vmctx: *mut VMContext,
+) -> Result<Value, BridgeError> {
+    heap_to_value_inner(ptr, 0, vmctx)
 }
 
 const MAX_DEPTH: usize = 10_000;
 const MAX_FIELDS: usize = 1024;
 const MAX_DATA_SIZE: usize = 64 * 1024 * 1024; // 64MB
 
-unsafe fn heap_to_value_inner(ptr: *const u8, depth: usize) -> Result<Value, BridgeError> {
+unsafe fn heap_to_value_inner(
+    ptr: *const u8,
+    depth: usize,
+    vmctx: *mut VMContext,
+) -> Result<Value, BridgeError> {
     if ptr.is_null() {
         return Err(BridgeError::NullPointer);
     }
@@ -126,7 +144,7 @@ unsafe fn heap_to_value_inner(ptr: *const u8, depth: usize) -> Result<Value, Bri
                     let mut elems = Vec::with_capacity(len);
                     for i in 0..len {
                         let elem_ptr = *(arr_ptr.add(8 + 8 * i) as *const *const u8);
-                        elems.push(heap_to_value_inner(elem_ptr, depth + 1)?);
+                        elems.push(heap_to_value_inner(elem_ptr, depth + 1, vmctx)?);
                     }
                     // Return as a generic Con with fields — the renderer will
                     // see the constructor names from the wrapping Con objects
@@ -145,7 +163,7 @@ unsafe fn heap_to_value_inner(ptr: *const u8, depth: usize) -> Result<Value, Bri
             let mut fields = Vec::with_capacity(num_fields);
             for i in 0..num_fields {
                 let field_ptr = *(ptr.add(layout::CON_FIELDS_OFFSET + 8 * i) as *const *const u8);
-                fields.push(heap_to_value_inner(field_ptr, depth + 1)?);
+                fields.push(heap_to_value_inner(field_ptr, depth + 1, vmctx)?);
             }
             Ok(Value::Con(DataConId(con_tag), fields))
         }
@@ -155,7 +173,16 @@ unsafe fn heap_to_value_inner(ptr: *const u8, depth: usize) -> Result<Value, Bri
                 layout::THUNK_EVALUATED => {
                     // Follow indirection pointer to the WHNF result
                     let target = *(ptr.add(layout::THUNK_INDIRECTION_OFFSET) as *const *const u8);
-                    heap_to_value_inner(target, depth + 1)
+                    heap_to_value_inner(target, depth + 1, vmctx)
+                }
+                _ if !vmctx.is_null() => {
+                    // Force the thunk via heap_force when vmctx is available
+                    let forced = crate::host_fns::heap_force(vmctx, ptr as *mut u8);
+                    if !forced.is_null() && forced != ptr as *mut u8 {
+                        heap_to_value_inner(forced as *const u8, depth + 1, vmctx)
+                    } else {
+                        Err(BridgeError::UnevaluatedThunk)
+                    }
                 }
                 layout::THUNK_UNEVALUATED => Err(BridgeError::UnevaluatedThunk),
                 layout::THUNK_BLACKHOLE => Err(BridgeError::BlackHole),

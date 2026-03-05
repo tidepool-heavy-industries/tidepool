@@ -2793,17 +2793,17 @@ mod tests {
 
     #[test]
     fn test_llm_structured_encode_roundtrip() {
-        // Roundtrip: llmJson → show result
+        // Roundtrip: llmJson → extract field → return via JSON bridge
         let mock = serde_json::json!({"greeting": "hello"});
         let result = jit_eval_with_mock_llm(
             &[
                 "r <- llmJson \"test\" (SObj [(\"greeting\", SStr)])",
-                "say (show r)",
-                "pure r",
+                "pure (object [\"result\" .= r, \"field\" .= (r ?. \"greeting\")])",
             ],
             mock,
         );
-        assert_eq!(result["greeting"], "hello");
+        assert_eq!(result["result"]["greeting"], "hello");
+        assert_eq!(result["field"], "hello");
     }
 
     #[test]
@@ -2817,7 +2817,6 @@ mod tests {
         let result = jit_eval_with_mock_llm(
             &[
                 "r <- llmJson \"test\" (SObj [(\"languages\", SArr (SObj [(\"name\", SStr), (\"year\", SNum)]))])",
-                "say (show r)",
                 "pure r",
             ],
             mock,
@@ -2863,7 +2862,6 @@ mod tests {
         let result = jit_eval_with_mock_llm(
             &[
                 "r <- llmJson \"test\" (SObj [(\"name\", SStr), (\"count\", SNum), (\"active\", SBool)])",
-                "say (show r)",
                 "pure r",
             ],
             mock,

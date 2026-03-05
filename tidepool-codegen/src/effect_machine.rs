@@ -87,12 +87,18 @@ impl CompiledEffectMachine {
     }
 
     /// Parse a heap-allocated Eff result into a Yield.
-    fn parse_result(&self, result: *mut u8) -> Yield {
+    fn parse_result(&mut self, result: *mut u8) -> Yield {
         // Check for runtime error FIRST (before null check), because runtime_error
         // now returns a "poison" non-null Lit object to prevent segfaults in JIT code.
         if let Some(err) = crate::host_fns::take_runtime_error() {
             return Yield::Error(YieldError::from(err));
         }
+        if result.is_null() {
+            return Yield::Error(YieldError::NullPointer);
+        }
+
+        // Force result if it's a thunk (lazy Con field from parent)
+        let result = self.force_ptr(result);
         if result.is_null() {
             return Yield::Error(YieldError::NullPointer);
         }
@@ -111,6 +117,8 @@ impl CompiledEffectMachine {
                 return Yield::Error(YieldError::BadValFields(num_fields));
             }
             let value = unsafe { *(result.add(layout::CON_FIELDS_OFFSET) as *const *mut u8) };
+            // Force value field — it may be a thunk
+            let value = self.force_ptr(value);
             Yield::Done(value)
         } else if con_tag == self.tags.e {
             // E(union, continuation) — extract Union and k
@@ -118,12 +126,24 @@ impl CompiledEffectMachine {
             if num_fields != 2 {
                 return Yield::Error(YieldError::BadEFields(num_fields));
             }
-            let union_ptr = unsafe { *(result.add(layout::CON_FIELDS_OFFSET) as *const *mut u8) };
-            let continuation =
+            let mut union_ptr =
+                unsafe { *(result.add(layout::CON_FIELDS_OFFSET) as *const *mut u8) };
+            let mut continuation =
                 unsafe { *(result.add(layout::CON_FIELDS_OFFSET + 8) as *const *mut u8) };
 
+            // Force all field pointers — they may be thunks from lazy Con fields
+            union_ptr = self.force_ptr(union_ptr);
             if union_ptr.is_null() {
                 return Yield::Error(YieldError::NullPointer);
+            }
+            continuation = self.force_ptr(continuation);
+            if continuation.is_null() {
+                return Yield::Error(YieldError::NullPointer);
+            }
+
+            let union_tag = unsafe { *union_ptr };
+            if union_tag != layout::TAG_CON {
+                return Yield::Error(YieldError::UnexpectedTag(union_tag));
             }
 
             let union_num_fields =
@@ -133,13 +153,24 @@ impl CompiledEffectMachine {
             }
 
             let tag_ptr = unsafe { *(union_ptr.add(layout::CON_FIELDS_OFFSET) as *const *mut u8) };
+            let tag_ptr = self.force_ptr(tag_ptr);
             if tag_ptr.is_null() {
                 return Yield::Error(YieldError::NullPointer);
             }
             // Read the actual tag value from the Lit HeapObject (offset 16 = LIT_VALUE_OFFSET)
+            let tag_ptr_tag = unsafe { *tag_ptr };
             let effect_tag = unsafe { *(tag_ptr.add(layout::LIT_VALUE_OFFSET) as *const u64) };
-            let request =
+            let mut request =
                 unsafe { *(union_ptr.add(layout::CON_FIELDS_OFFSET + 8) as *const *mut u8) };
+            request = self.force_ptr(request);
+
+            if std::env::var("TIDEPOOL_TRACE_EFFECTS").is_ok() {
+                eprintln!(
+                    "[effect_machine] effect_tag={} tag_ptr_tag={} union_con_tag={} request_tag={}",
+                    effect_tag, tag_ptr_tag, unsafe { *(union_ptr.add(layout::CON_TAG_OFFSET) as *const u64) },
+                    if request.is_null() { 255 } else { unsafe { *request } }
+                );
+            }
 
             Yield::Request {
                 tag: effect_tag,
@@ -148,6 +179,24 @@ impl CompiledEffectMachine {
             }
         } else {
             Yield::Error(YieldError::UnexpectedConTag(con_tag))
+        }
+    }
+
+    /// Force a heap pointer if it's a thunk, returning the WHNF result.
+    /// Loops to handle chains (thunk returning thunk).
+    fn force_ptr(&mut self, ptr: *mut u8) -> *mut u8 {
+        let mut current = ptr;
+        loop {
+            if current.is_null() {
+                return current;
+            }
+            let tag = unsafe { *current };
+            if tag == layout::TAG_THUNK {
+                let vmctx = &mut self.vmctx as *mut VMContext;
+                current = crate::host_fns::heap_force(vmctx, current);
+            } else {
+                return current;
+            }
         }
     }
 
@@ -166,6 +215,13 @@ impl CompiledEffectMachine {
             return std::ptr::null_mut();
         }
 
+        // Force k and arg in case they are thunks (lazy Con fields)
+        let k = self.force_ptr(k);
+        if k.is_null() {
+            return std::ptr::null_mut();
+        }
+        let arg = self.force_ptr(arg);
+
         let tag = *k;
         match tag {
             t if t == layout::TAG_CON => {
@@ -173,14 +229,20 @@ impl CompiledEffectMachine {
 
                 if con_tag == self.tags.leaf {
                     // Leaf(f) — extract closure f at field[0], call f(arg)
-                    let f = *(k.add(layout::CON_FIELDS_OFFSET) as *const *mut u8);
+                    let f = self.force_ptr(*(k.add(layout::CON_FIELDS_OFFSET) as *const *mut u8));
                     self.call_closure(f, arg)
                 } else if con_tag == self.tags.node {
                     // Node(k1, k2) — apply k1 to arg, then compose with k2
-                    let k1 = *(k.add(layout::CON_FIELDS_OFFSET) as *const *mut u8);
-                    let k2 = *(k.add(layout::CON_FIELDS_OFFSET + 8) as *const *mut u8);
+                    let k1 = self.force_ptr(*(k.add(layout::CON_FIELDS_OFFSET) as *const *mut u8));
+                    let k2 = self.force_ptr(*(k.add(layout::CON_FIELDS_OFFSET + 8) as *const *mut u8));
 
                     let result = self.apply_cont_heap(k1, arg);
+                    if result.is_null() {
+                        return std::ptr::null_mut();
+                    }
+
+                    // Force result in case it's a thunk
+                    let result = self.force_ptr(result);
                     if result.is_null() {
                         return std::ptr::null_mut();
                     }
@@ -195,13 +257,13 @@ impl CompiledEffectMachine {
 
                     if result_con_tag == self.tags.val {
                         // Val(y) — extract y, apply k2(y)
-                        let y = *(result.add(layout::CON_FIELDS_OFFSET) as *const *mut u8);
+                        let y = self.force_ptr(*(result.add(layout::CON_FIELDS_OFFSET) as *const *mut u8));
                         self.apply_cont_heap(k2, y)
                     } else if result_con_tag == self.tags.e {
                         // E(union, k') — compose: E(union, Node(k', k2))
-                        let union_val = *(result.add(layout::CON_FIELDS_OFFSET) as *const *mut u8);
+                        let union_val = self.force_ptr(*(result.add(layout::CON_FIELDS_OFFSET) as *const *mut u8));
                         let k_prime =
-                            *(result.add(layout::CON_FIELDS_OFFSET + 8) as *const *mut u8);
+                            self.force_ptr(*(result.add(layout::CON_FIELDS_OFFSET + 8) as *const *mut u8));
 
                         // Allocate Node(k', k2)
                         let new_node = self.alloc_con(self.tags.node, &[k_prime, k2]);
@@ -221,6 +283,10 @@ impl CompiledEffectMachine {
             t if t == layout::TAG_CLOSURE => {
                 // Raw closure (degenerate continuation fallback)
                 self.call_closure(k, arg)
+            }
+            t if t == layout::TAG_THUNK => {
+                // Thunk in continuation position — already forced above, shouldn't happen
+                std::ptr::null_mut()
             }
             _ => std::ptr::null_mut(),
         }

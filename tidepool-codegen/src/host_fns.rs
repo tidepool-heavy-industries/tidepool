@@ -257,7 +257,7 @@ pub extern "C" fn heap_alloc(_vmctx: *mut VMContext, _size: u64) -> *mut u8 {
     std::ptr::null_mut() // Placeholder for scaffold
 }
 
-/// Force a thunk to WHNF.
+/// Force a thunk to WHNF. Loops to handle chains (thunk returning thunk).
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
     if obj.is_null() {
@@ -265,74 +265,88 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
     }
 
     unsafe {
-        let tag = layout::read_tag(obj);
-        if tag == layout::TAG_THUNK {
-            let state = *obj.add(layout::THUNK_STATE_OFFSET);
-            match state {
-                layout::THUNK_UNEVALUATED => {
-                    // 1. Eager blackhole
-                    *obj.add(layout::THUNK_STATE_OFFSET) = layout::THUNK_BLACKHOLE;
+        let mut current = obj;
 
-                    // 2. Read code pointer
-                    let code_ptr = *(obj.add(layout::THUNK_CODE_PTR_OFFSET) as *const usize);
+        loop {
+            let tag = layout::read_tag(current);
 
-                    if code_ptr == 0 {
-                        RUNTIME_ERROR.with(|cell| {
-                            *cell.borrow_mut() = Some(RuntimeError::NullFunPtr);
-                        });
-                        return error_poison_ptr();
-                    }
-
-                    // 3. Call thunk entry function
-                    // Signature: fn(vmctx, thunk_ptr) -> whnf_ptr
-                    let f: extern "C" fn(*mut VMContext, *mut u8) -> *mut u8 =
-                        std::mem::transmute(code_ptr);
-                    let result = f(vmctx, obj);
-
-                    // 4. Write indirection (offset 16, overwriting code_ptr)
-                    *(obj.add(layout::THUNK_INDIRECTION_OFFSET) as *mut *mut u8) = result;
-
-                    // 5. Set state = Evaluated
-                    *obj.add(layout::THUNK_STATE_OFFSET) = layout::THUNK_EVALUATED;
-
-                    return result;
-                }
-                layout::THUNK_BLACKHOLE => {
-                    return runtime_blackhole_trap(vmctx);
-                }
-                layout::THUNK_EVALUATED => {
-                    // Fast path: return cached result
-                    return *(obj.add(layout::THUNK_INDIRECTION_OFFSET) as *const *mut u8);
-                }
-                other => return runtime_bad_thunk_state_trap(vmctx, other),
+            if tag >= 2 {
+                return current; // Con or Lit — already WHNF
             }
-        }
 
-        if tag >= 2 {
-            return obj; // Con or Lit - already WHNF
-        }
-        if tag != layout::TAG_CLOSURE {
-            return obj; // Unknown - not handled here
-        }
+            if tag == layout::TAG_THUNK {
+                let state = *current.add(layout::THUNK_STATE_OFFSET);
+                match state {
+                    layout::THUNK_UNEVALUATED => {
+                        // 1. Eager blackhole
+                        *current.add(layout::THUNK_STATE_OFFSET) = layout::THUNK_BLACKHOLE;
 
-        // Closure: read code_ptr
-        let code_ptr_val = *(obj.add(layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
+                        // 2. Read code pointer
+                        let code_ptr =
+                            *(current.add(layout::THUNK_CODE_PTR_OFFSET) as *const usize);
 
-        if code_ptr_val == 0 {
-            RUNTIME_ERROR.with(|cell| {
-                *cell.borrow_mut() = Some(RuntimeError::NullFunPtr);
-            });
-            return error_poison_ptr();
+                        if code_ptr == 0 {
+                            RUNTIME_ERROR.with(|cell| {
+                                *cell.borrow_mut() = Some(RuntimeError::NullFunPtr);
+                            });
+                            return error_poison_ptr();
+                        }
+
+                        // 3. Call thunk entry function
+                        // Signature: fn(vmctx, thunk_ptr) -> whnf_ptr
+                        let f: extern "C" fn(*mut VMContext, *mut u8) -> *mut u8 =
+                            std::mem::transmute(code_ptr);
+                        let result = f(vmctx, current);
+
+                        // 4. Write indirection (offset 16, overwriting code_ptr)
+                        *(current.add(layout::THUNK_INDIRECTION_OFFSET) as *mut *mut u8) = result;
+
+                        // 5. Set state = Evaluated
+                        *current.add(layout::THUNK_STATE_OFFSET) = layout::THUNK_EVALUATED;
+
+                        // Result may be another thunk — loop to force it
+                        current = result;
+                        continue;
+                    }
+                    layout::THUNK_BLACKHOLE => {
+                        return runtime_blackhole_trap(vmctx);
+                    }
+                    layout::THUNK_EVALUATED => {
+                        // Follow indirection — result may be another thunk
+                        current =
+                            *(current.add(layout::THUNK_INDIRECTION_OFFSET) as *const *mut u8);
+                        continue;
+                    }
+                    other => return runtime_bad_thunk_state_trap(vmctx, other),
+                }
+            }
+
+            if tag != layout::TAG_CLOSURE {
+                return current; // Unknown — not handled here
+            }
+
+            // Closure: read code_ptr
+            let code_ptr_val = *(current.add(layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
+
+            if code_ptr_val == 0 {
+                RUNTIME_ERROR.with(|cell| {
+                    *cell.borrow_mut() = Some(RuntimeError::NullFunPtr);
+                });
+                return error_poison_ptr();
+            }
+
+            // Force the closure. In a data-case scrutinee position, GHC Core
+            // guarantees the result must be a data constructor, so any closure
+            // here is a thunk (suspended computation) regardless of capture count.
+            // SAFETY: code_ptr is a JIT-compiled function pointer. The JIT guarantees
+            // it points to a function with this exact signature (closure calling convention).
+            let f: extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
+                std::mem::transmute(code_ptr_val);
+            let result = f(vmctx, current, std::ptr::null_mut());
+
+            // Closure result may be a thunk — loop to force it
+            current = result;
         }
-
-        // Force the closure. In a data-case scrutinee position, GHC Core
-        // guarantees the result must be a data constructor, so any closure
-        // here is a thunk (suspended computation) regardless of capture count.
-        // SAFETY: code_ptr is a JIT-compiled function pointer. The JIT guarantees
-        // it points to a function with this exact signature (closure calling convention).
-        let f: extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
-            std::mem::transmute(code_ptr_val);
-        f(vmctx, obj, std::ptr::null_mut())
     }
 }
 
@@ -1688,10 +1702,12 @@ mod tests {
                 gc_trigger: mock_gc_trigger,
             };
 
-            // 1. Result pointer
-            let lit_ptr = 0x12345678 as *mut u8;
+            // 1. Result: a real heap object (Lit) so the force loop can read its tag
+            let mut lit_buf = [0u8; 32];
+            let lit_ptr = lit_buf.as_mut_ptr();
+            layout::write_header(lit_ptr, layout::TAG_LIT, 32);
 
-            // 2. Already evaluated thunk
+            // 2. Already evaluated thunk pointing to that Lit
             let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE];
             let thunk_ptr = thunk_buf.as_mut_ptr();
             layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
