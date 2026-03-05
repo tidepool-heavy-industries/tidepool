@@ -2,6 +2,7 @@ use crate::context::VMContext;
 use crate::gc::frame_walker::{self, StackRoot};
 use crate::stack_map::StackMapRegistry;
 use std::cell::{Cell, RefCell};
+use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tidepool_heap::layout;
 
@@ -20,10 +21,11 @@ pub enum RuntimeError {
     BadFunPtrTag(u8),
     HeapOverflow,
     StackOverflow,
+    BlackHole,
 }
 
 impl std::fmt::Display for RuntimeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RuntimeError::DivisionByZero => write!(f, "division by zero"),
             RuntimeError::Overflow => write!(f, "arithmetic overflow"),
@@ -45,6 +47,7 @@ impl std::fmt::Display for RuntimeError {
             }
             RuntimeError::HeapOverflow => write!(f, "heap overflow (nursery exhausted after GC)"),
             RuntimeError::StackOverflow => write!(f, "stack overflow (likely infinite list or unbounded recursion — use zipWithIndex/imap/enumFromTo instead of [0..])"),
+            RuntimeError::BlackHole => write!(f, "blackhole detected (infinite loop: thunk forced itself)"),
         }
     }
 }
@@ -261,11 +264,46 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
 
     unsafe {
         let tag = layout::read_tag(obj);
+        if tag == layout::TAG_THUNK {
+            let state = *obj.add(layout::THUNK_STATE_OFFSET);
+            match state {
+                layout::THUNK_UNEVALUATED => {
+                    // 1. Eager blackhole
+                    *obj.add(layout::THUNK_STATE_OFFSET) = layout::THUNK_BLACKHOLE;
+
+                    // 2. Read code pointer
+                    let code_ptr = *(obj.add(layout::THUNK_CODE_PTR_OFFSET) as *const usize);
+
+                    // 3. Call thunk entry function
+                    // Signature: fn(vmctx, thunk_ptr) -> whnf_ptr
+                    let f: extern "C" fn(*mut VMContext, *mut u8) -> *mut u8 =
+                        std::mem::transmute(code_ptr);
+                    let result = f(vmctx, obj);
+
+                    // 4. Write indirection (offset 16, overwriting code_ptr)
+                    *(obj.add(layout::THUNK_INDIRECTION_OFFSET) as *mut *mut u8) = result;
+
+                    // 5. Set state = Evaluated
+                    *obj.add(layout::THUNK_STATE_OFFSET) = layout::THUNK_EVALUATED;
+
+                    return result;
+                }
+                layout::THUNK_BLACKHOLE => {
+                    return runtime_blackhole_trap(vmctx);
+                }
+                layout::THUNK_EVALUATED => {
+                    // Fast path: return cached result
+                    return *(obj.add(layout::THUNK_INDIRECTION_OFFSET) as *const *mut u8);
+                }
+                _ => return obj,
+            }
+        }
+
         if tag >= 2 {
             return obj; // Con or Lit - already WHNF
         }
         if tag != layout::TAG_CLOSURE {
-            return obj; // Thunk (tag=1) or unknown - not handled here
+            return obj; // Unknown - not handled here
         }
 
         // Closure: read code_ptr
@@ -367,6 +405,17 @@ pub extern "C" fn runtime_error(kind: u64) -> *mut u8 {
 pub extern "C" fn runtime_oom() -> *mut u8 {
     RUNTIME_ERROR.with(|cell| {
         *cell.borrow_mut() = Some(RuntimeError::HeapOverflow);
+    });
+    error_poison_ptr()
+}
+
+/// Called by JIT code when a BlackHole is encountered (thunk forcing itself).
+pub extern "C" fn runtime_blackhole_trap(_vmctx: *mut VMContext) -> *mut u8 {
+    let msg = "[JIT] BlackHole detected: infinite loop (thunk forcing itself)".to_string();
+    eprintln!("{}", msg);
+    push_diagnostic(msg);
+    RUNTIME_ERROR.with(|cell| {
+        *cell.borrow_mut() = Some(RuntimeError::BlackHole);
     });
     error_poison_ptr()
 }
@@ -1027,6 +1076,7 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
     vec![
         ("gc_trigger", gc_trigger as *const u8),
         ("runtime_oom", runtime_oom as *const u8),
+        ("runtime_blackhole_trap", runtime_blackhole_trap as *const u8),
         ("heap_alloc", heap_alloc as *const u8),
         ("heap_force", heap_force as *const u8),
         ("unresolved_var_trap", unresolved_var_trap as *const u8),
@@ -1561,6 +1611,99 @@ mod tests {
         assert_eq!(d, vec!["test1".to_string(), "test2".to_string()]);
         let d2 = drain_diagnostics();
         assert!(d2.is_empty());
+    }
+
+    extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext) {}
+
+    thread_local! {
+        static TEST_RESULT: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
+    }
+
+    unsafe extern "C" fn test_thunk_entry(_vmctx: *mut VMContext, _thunk: *mut u8) -> *mut u8 {
+        TEST_RESULT.with(|r| r.get())
+    }
+
+    #[test]
+    fn test_heap_force_thunk_unevaluated() {
+        unsafe {
+            let mut vmctx = VMContext {
+                alloc_ptr: std::ptr::null_mut(),
+                alloc_limit: std::ptr::null_mut(),
+                gc_trigger: mock_gc_trigger,
+            };
+
+            // 1. Allocate a Lit object for the result
+            let mut lit_buf = [0u8; layout::LIT_SIZE];
+            let lit_ptr = lit_buf.as_mut_ptr();
+            layout::write_header(lit_ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
+            *(lit_ptr.add(layout::LIT_TAG_OFFSET)) = 0; // Int#
+            *(lit_ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = 42;
+
+            // 2. Allocate a thunk object
+            let mut thunk_buf = [0u8; 24];
+            let thunk_ptr = thunk_buf.as_mut_ptr();
+            layout::write_header(thunk_ptr, layout::TAG_THUNK, 24);
+            *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_UNEVALUATED;
+
+            TEST_RESULT.with(|r| r.set(lit_ptr));
+            *(thunk_ptr.add(layout::THUNK_CODE_PTR_OFFSET) as *mut usize) = test_thunk_entry as *const () as usize;
+
+            let res = heap_force(&mut vmctx, thunk_ptr);
+            assert_eq!(res, lit_ptr);
+            assert_eq!(*(thunk_ptr.add(layout::THUNK_STATE_OFFSET)), layout::THUNK_EVALUATED);
+            assert_eq!(*(thunk_ptr.add(layout::THUNK_INDIRECTION_OFFSET) as *const *mut u8), lit_ptr);
+        }
+    }
+
+    #[test]
+    fn test_heap_force_thunk_evaluated() {
+        unsafe {
+            let mut vmctx = VMContext {
+                alloc_ptr: std::ptr::null_mut(),
+                alloc_limit: std::ptr::null_mut(),
+                gc_trigger: mock_gc_trigger,
+            };
+
+            // 1. Result pointer
+            let lit_ptr = 0x12345678 as *mut u8;
+
+            // 2. Already evaluated thunk
+            let mut thunk_buf = [0u8; 24];
+            let thunk_ptr = thunk_buf.as_mut_ptr();
+            layout::write_header(thunk_ptr, layout::TAG_THUNK, 24);
+            *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_EVALUATED;
+            *(thunk_ptr.add(layout::THUNK_INDIRECTION_OFFSET) as *mut *mut u8) = lit_ptr;
+
+            let res = heap_force(&mut vmctx, thunk_ptr);
+            assert_eq!(res, lit_ptr);
+        }
+    }
+
+    #[test]
+    fn test_heap_force_thunk_blackhole() {
+        unsafe {
+            let mut vmctx = VMContext {
+                alloc_ptr: std::ptr::null_mut(),
+                alloc_limit: std::ptr::null_mut(),
+                gc_trigger: mock_gc_trigger,
+            };
+
+            // Reset runtime error
+            RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);
+
+            // Blackholed thunk
+            let mut thunk_buf = [0u8; 24];
+            let thunk_ptr = thunk_buf.as_mut_ptr();
+            layout::write_header(thunk_ptr, layout::TAG_THUNK, 24);
+            *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_BLACKHOLE;
+
+            let res = heap_force(&mut vmctx, thunk_ptr);
+            // Result should be the poison object
+            assert_eq!(res, error_poison_ptr());
+
+            let err = take_runtime_error().expect("Should have flagged error");
+            assert!(matches!(err, RuntimeError::BlackHole));
+        }
     }
 }
 

@@ -13,6 +13,9 @@ pub enum BridgeError {
     TooManyFields { count: usize },
     DataTooLarge { len: usize },
     TooDeep,
+    UnevaluatedThunk,
+    BlackHole,
+    UnknownThunkState(u8),
     InternalError(String),
 }
 
@@ -26,6 +29,9 @@ impl fmt::Display for BridgeError {
             BridgeError::TooManyFields { count } => write!(f, "too many Con fields: {}", count),
             BridgeError::DataTooLarge { len } => write!(f, "data too large: {} bytes", len),
             BridgeError::TooDeep => write!(f, "heap structure too deep (>10000 levels)"),
+            BridgeError::UnevaluatedThunk => write!(f, "unevaluated thunk"),
+            BridgeError::BlackHole => write!(f, "blackhole (thunk forcing itself)"),
+            BridgeError::UnknownThunkState(state) => write!(f, "unknown thunk state: {}", state),
             BridgeError::InternalError(msg) => write!(f, "internal error: {}", msg),
         }
     }
@@ -143,8 +149,21 @@ unsafe fn heap_to_value_inner(ptr: *const u8, depth: usize) -> Result<Value, Bri
             }
             Ok(Value::Con(DataConId(con_tag), fields))
         }
-        t if t == layout::TAG_CLOSURE || t == layout::TAG_THUNK => {
-            // Unevaluated closure/thunk — return as opaque Value.
+        t if t == layout::TAG_THUNK => {
+            let state = *ptr.add(layout::THUNK_STATE_OFFSET);
+            match state {
+                layout::THUNK_EVALUATED => {
+                    // Follow indirection pointer to the WHNF result
+                    let target = *(ptr.add(layout::THUNK_INDIRECTION_OFFSET) as *const *const u8);
+                    heap_to_value_inner(target, depth + 1)
+                }
+                layout::THUNK_UNEVALUATED => Err(BridgeError::UnevaluatedThunk),
+                layout::THUNK_BLACKHOLE => Err(BridgeError::BlackHole),
+                _ => Err(BridgeError::UnknownThunkState(state)),
+            }
+        }
+        t if t == layout::TAG_CLOSURE => {
+            // Unevaluated closure — return as opaque Value.
             // This can happen when Array# elements haven't been forced.
             // We represent it as a dummy Closure with empty env and body.
             use tidepool_eval::env::Env;
