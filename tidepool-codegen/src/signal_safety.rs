@@ -274,11 +274,16 @@ mod inner {
             }
         }
         // Not in JIT context — log crash dump, terminate just this thread.
-        // pthread_exit is async-signal-safe (POSIX) and kills only the calling
-        // thread. The detached eval thread's channel sender drops, which the
+        // Raw syscall SYS_exit (NOT exit_group) terminates only the calling
+        // thread at the kernel level. It's async-signal-safe (raw syscall)
+        // and avoids pthread_exit's TLS destructor/deadlock issues.
+        // The detached eval thread's channel sender drops, which the
         // MCP server handles as "Eval thread crashed".
         unsafe {
             write_crash_dump(sig, _info);
+            #[cfg(target_os = "linux")]
+            libc::syscall(libc::SYS_exit, 0);
+            #[cfg(not(target_os = "linux"))]
             libc::pthread_exit(std::ptr::null_mut());
         }
     }
