@@ -1776,6 +1776,7 @@ mod tests {
     /// Compile and run a Haskell snippet through the JIT with the full handler stack.
     /// Returns the result as serde_json::Value, or panics on error.
     fn jit_eval(code: &[&str]) -> serde_json::Value {
+        tidepool_codegen::signal_safety::install();
         let source = jit_test_source(code);
         let include = prelude_include();
         let include_paths: Vec<&std::path::Path> = vec![include.as_path()];

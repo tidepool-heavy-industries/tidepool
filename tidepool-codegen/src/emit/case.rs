@@ -117,18 +117,20 @@ fn emit_data_dispatch(
     default_alt: Option<&Alt<usize>>,
     merge_block: ir::Block,
 ) -> Result<(), EmitError> {
-    // 1. Force if needed (tag < 2: Closure or Thunk)
+    // 1. Force if needed (tag == TAG_THUNK)
     let tag = builder
         .ins()
         .load(types::I8, MemFlags::trusted(), initial_scrut_ptr, 0);
-    let needs_force = builder.ins().icmp_imm(IntCC::UnsignedLessThan, tag, 2);
+    let is_thunk = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, tag, layout::TAG_THUNK as i64);
 
     let force_block = builder.create_block();
     let dispatch_block = builder.create_block();
     builder.append_block_param(dispatch_block, types::I64);
 
     builder.ins().brif(
-        needs_force,
+        is_thunk,
         force_block,
         &[],
         dispatch_block,

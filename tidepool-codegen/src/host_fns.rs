@@ -270,8 +270,8 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
         loop {
             let tag = layout::read_tag(current);
 
-            if tag >= 2 {
-                return current; // Con or Lit — already WHNF
+            if tag >= 2 || tag == layout::TAG_CLOSURE {
+                return current; // Con, Lit, or Closure — already WHNF
             }
 
             if tag == layout::TAG_THUNK {
@@ -321,31 +321,7 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                 }
             }
 
-            if tag != layout::TAG_CLOSURE {
-                return current; // Unknown — not handled here
-            }
-
-            // Closure: read code_ptr
-            let code_ptr_val = *(current.add(layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
-
-            if code_ptr_val == 0 {
-                RUNTIME_ERROR.with(|cell| {
-                    *cell.borrow_mut() = Some(RuntimeError::NullFunPtr);
-                });
-                return error_poison_ptr();
-            }
-
-            // Force the closure. In a data-case scrutinee position, GHC Core
-            // guarantees the result must be a data constructor, so any closure
-            // here is a thunk (suspended computation) regardless of capture count.
-            // SAFETY: code_ptr is a JIT-compiled function pointer. The JIT guarantees
-            // it points to a function with this exact signature (closure calling convention).
-            let f: extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
-                std::mem::transmute(code_ptr_val);
-            let result = f(vmctx, current, std::ptr::null_mut());
-
-            // Closure result may be a thunk — loop to force it
-            current = result;
+            return current; // Unknown — not handled here
         }
     }
 }
