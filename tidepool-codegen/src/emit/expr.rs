@@ -494,25 +494,11 @@ fn emit_lam(
     binder: VarId,
     body_idx: usize,
 ) -> Result<SsaVal, EmitError> {
-    let body_tree = tree.extract_subtree(body_idx);
-    let mut fvs = tidepool_repr::free_vars::free_vars(&body_tree);
-    fvs.remove(&binder);
-
-    let dropped: Vec<VarId> = fvs
-        .iter()
-        .filter(|v| !ctx.env.contains_key(v))
-        .copied()
-        .collect();
-    if !dropped.is_empty() {
-        ctx.trace_scope(&format!(
-            "lam capture: dropped {} free vars not in scope: {:?}",
-            dropped.len(),
-            dropped
-        ));
-    }
-    let mut sorted_fvs: Vec<VarId> = fvs
+    // 1. Find variables to capture (stack-safe)
+    let used_vars = collect_used_vars(tree, body_idx);
+    let mut sorted_fvs: Vec<VarId> = used_vars
         .into_iter()
-        .filter(|v| ctx.env.contains_key(v))
+        .filter(|v| *v != binder && ctx.env.contains_key(v))
         .collect();
     sorted_fvs.sort_by_key(|v| v.0);
 
@@ -592,15 +578,14 @@ fn emit_lam(
         inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
     }
 
-    let body_root = body_tree.nodes.len() - 1;
     let body_result = inner_emit.emit_node(
         pipeline,
         &mut inner_builder,
         inner_vmctx,
         inner_gc_sig_ref,
         inner_oom_func,
-        &body_tree,
-        body_root,
+        tree,
+        body_idx,
     )?;
     let ret_val = ensure_heap_ptr(
         &mut inner_builder,
@@ -689,23 +674,9 @@ fn emit_thunk(
     tree: &CoreExpr,
     body_idx: usize,
 ) -> Result<Value, EmitError> {
-    // 1. Extract subtree and find free variables
-    let body_tree = tree.extract_subtree(body_idx);
-    let fvs = tidepool_repr::free_vars::free_vars(&body_tree);
-
-    let dropped: Vec<VarId> = fvs
-        .iter()
-        .filter(|v| !ctx.env.contains_key(v))
-        .copied()
-        .collect();
-    if !dropped.is_empty() {
-        ctx.trace_scope(&format!(
-            "thunk capture: dropped {} free vars not in scope: {:?}",
-            dropped.len(),
-            dropped
-        ));
-    }
-    let mut sorted_fvs: Vec<VarId> = fvs
+    // 1. Find variables to capture (stack-safe)
+    let used_vars = collect_used_vars(tree, body_idx);
+    let mut sorted_fvs: Vec<VarId> = used_vars
         .into_iter()
         .filter(|v| ctx.env.contains_key(v))
         .collect();
@@ -785,15 +756,14 @@ fn emit_thunk(
     }
 
     // 5. Compile thunked expression body
-    let body_root = body_tree.nodes.len() - 1;
     let body_result = inner_emit.emit_node(
         pipeline,
         &mut inner_builder,
         inner_vmctx,
         inner_gc_sig_ref,
         inner_oom_func,
-        &body_tree,
-        body_root,
+        tree,
+        body_idx,
     )?;
     let ret_val = ensure_heap_ptr(
         &mut inner_builder,
@@ -886,7 +856,7 @@ pub fn compile_expr(
             tree.nodes.len(),
             tidepool_repr::pretty::pretty_print(tree)
         );
-        let fvs = tidepool_repr::free_vars::free_vars(tree);
+        let fvs = collect_used_vars(tree, tree.nodes.len() - 1);
         if !fvs.is_empty() {
             eprintln!(
                 "[tree] WARNING: {} free vars in input: {:?}",
@@ -997,10 +967,8 @@ impl EmitContext {
         let result = loop {
             match &tree.nodes[idx] {
                 CoreFrame::LetNonRec { binder, rhs, body } => {
-                    // Dead code elimination: skip RHS if binder is unused in body.
-                    let body_fvs =
-                        tidepool_repr::free_vars::free_vars(&tree.extract_subtree(*body));
-                    if body_fvs.contains(binder) {
+                    // Dead code elimination: skip RHS if binder is unused in body (stack-safe).
+                    if is_var_used(tree, *body, *binder) {
                         if Self::rhs_is_error_call(tree, *rhs) {
                             // Bind to lazy poison closure — error only triggers on call.
                             let kind = Self::extract_error_kind(tree, *rhs);
@@ -1081,8 +1049,7 @@ impl EmitContext {
                                 binder: lam_binder,
                                 body: lam_body,
                             } => {
-                                let lam_body_tree = tree.extract_subtree(*lam_body);
-                                let mut fvs = tidepool_repr::free_vars::free_vars(&lam_body_tree);
+                                let mut fvs = collect_used_vars(tree, *lam_body);
                                 fvs.remove(lam_binder);
                                 let dropped_fvs: Vec<VarId> = fvs
                                     .iter()
@@ -1253,7 +1220,6 @@ impl EmitContext {
                                 "LetRec phase 3a: expected Lam, got {:?}", other
                             ))),
                         };
-                        let lam_body_tree = tree.extract_subtree(lam_body);
 
                         let lambda_name = self.next_lambda_name();
                         let mut closure_sig = Signature::new(pipeline.isa.default_call_conv());
@@ -1323,15 +1289,14 @@ impl EmitContext {
                             inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
                         }
 
-                        let body_root = lam_body_tree.nodes.len() - 1;
                         let body_result = inner_emit.emit_node(
                             pipeline,
                             &mut inner_builder,
                             inner_vmctx,
                             inner_gc_sig_ref,
                             inner_oom_func,
-                            &lam_body_tree,
-                            body_root,
+                            tree,
+                            lam_body,
                         )?;
                         let ret_val = ensure_heap_ptr(
                             &mut inner_builder,
@@ -1441,10 +1406,8 @@ impl EmitContext {
                         let mut direct_deps: std::collections::HashMap<VarId, Vec<VarId>> =
                             std::collections::HashMap::with_capacity(bindings.len());
                         for (binder, rhs_idx) in bindings {
-                            let fvs = tidepool_repr::free_vars::free_vars(
-                                &tree.extract_subtree(*rhs_idx),
-                            );
-                            direct_deps.insert(*binder, fvs.into_iter().collect());
+                            let used = collect_used_vars(tree, *rhs_idx);
+                            direct_deps.insert(*binder, used.into_iter().collect());
                         }
 
                         // Compute reachability on-demand using DFS
@@ -1827,4 +1790,135 @@ pub(crate) fn ensure_heap_ptr(
             ptr
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stack-safe tree traversal helpers
+// ---------------------------------------------------------------------------
+
+/// Collect all VarIds used in the expression tree rooted at idx.
+/// Stack-safe iterative implementation using an explicit stack.
+fn collect_used_vars(tree: &CoreExpr, root_idx: usize) -> std::collections::HashSet<VarId> {
+    let mut used = std::collections::HashSet::new();
+    let mut stack = vec![root_idx];
+    let mut visited = std::collections::HashSet::new();
+
+    while let Some(idx) = stack.pop() {
+        if !visited.insert(idx) {
+            continue;
+        }
+        match &tree.nodes[idx] {
+            CoreFrame::Var(v) => {
+                used.insert(*v);
+            }
+            CoreFrame::Lit(_) => {}
+            CoreFrame::App { fun, arg } => {
+                stack.push(*fun);
+                stack.push(*arg);
+            }
+            CoreFrame::Lam { body, .. } => {
+                stack.push(*body);
+            }
+            CoreFrame::LetNonRec { rhs, body, .. } => {
+                stack.push(*rhs);
+                stack.push(*body);
+            }
+            CoreFrame::LetRec { bindings, body } => {
+                for (_, rhs) in bindings {
+                    stack.push(*rhs);
+                }
+                stack.push(*body);
+            }
+            CoreFrame::Case {
+                scrutinee, alts, ..
+            } => {
+                stack.push(*scrutinee);
+                for alt in alts {
+                    stack.push(alt.body);
+                }
+            }
+            CoreFrame::Con { fields, .. } => {
+                for &f_idx in fields {
+                    stack.push(f_idx);
+                }
+            }
+            CoreFrame::Join { rhs, body, .. } => {
+                stack.push(*rhs);
+                stack.push(*body);
+            }
+            CoreFrame::Jump { args, .. } => {
+                for &a in args {
+                    stack.push(a);
+                }
+            }
+            CoreFrame::PrimOp { args, .. } => {
+                for &a in args {
+                    stack.push(a);
+                }
+            }
+        }
+    }
+    used
+}
+
+/// Check if a specific VarId is used in the expression tree rooted at root_idx.
+/// Stack-safe iterative implementation.
+fn is_var_used(tree: &CoreExpr, root_idx: usize, target: VarId) -> bool {
+    let mut stack = vec![root_idx];
+    let mut visited = std::collections::HashSet::new();
+
+    while let Some(idx) = stack.pop() {
+        if !visited.insert(idx) {
+            continue;
+        }
+        match &tree.nodes[idx] {
+            CoreFrame::Var(v) if *v == target => return true,
+            CoreFrame::Var(_) | CoreFrame::Lit(_) => {}
+            CoreFrame::App { fun, arg } => {
+                stack.push(*fun);
+                stack.push(*arg);
+            }
+            CoreFrame::Lam { body, .. } => {
+                stack.push(*body);
+            }
+            CoreFrame::LetNonRec { rhs, body, .. } => {
+                stack.push(*rhs);
+                stack.push(*body);
+            }
+            CoreFrame::LetRec { bindings, body } => {
+                for (_, rhs) in bindings {
+                    stack.push(*rhs);
+                }
+                stack.push(*body);
+            }
+            CoreFrame::Case {
+                scrutinee, alts, ..
+            } => {
+                stack.push(*scrutinee);
+                for alt in alts {
+                    stack.push(alt.body);
+                }
+            }
+            CoreFrame::Con { fields, .. } => {
+                for &f_idx in fields {
+                    stack.push(f_idx);
+                }
+            }
+            CoreFrame::Join { rhs, body, .. } => {
+                stack.push(*rhs);
+                stack.push(*body);
+            }
+            CoreFrame::Jump { args, .. } => {
+                for &a in args {
+                    stack.push(a);
+                }
+            }
+            CoreFrame::PrimOp { args, .. } => {
+                for &a in args {
+                    stack.push(a);
+                }
+            }
+        }
+    }
+    false
 }
