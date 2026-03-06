@@ -13,10 +13,7 @@ use tidepool_heap::layout;
 use tidepool_repr::PrimOpKind;
 
 /// Emit a zero-divisor guard: if `divisor == 0`, trap; otherwise fall through.
-fn emit_div_zero_check(
-    builder: &mut FunctionBuilder,
-    divisor: Value,
-) {
+fn emit_div_zero_check(builder: &mut FunctionBuilder, divisor: Value) {
     let zero = builder.ins().iconst(types::I64, 0);
     let is_zero = builder.ins().icmp(IntCC::Equal, divisor, zero);
     let ok_block = builder.create_block();
@@ -25,7 +22,9 @@ fn emit_div_zero_check(
 
     builder.switch_to_block(trap_block);
     builder.seal_block(trap_block);
-    builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(3));
+    builder
+        .ins()
+        .trap(cranelift_codegen::ir::TrapCode::unwrap_user(3));
 
     builder.switch_to_block(ok_block);
     builder.seal_block(ok_block);
@@ -609,9 +608,12 @@ pub fn emit_primop(
                 PrimOpKind::DoubleAsinh => "runtime_double_asinh",
                 PrimOpKind::DoubleAcosh => "runtime_double_acosh",
                 PrimOpKind::DoubleAtanh => "runtime_double_atanh",
-                _ => return Err(EmitError::InternalError(format!(
-                    "unexpected double primop variant: {:?}", op
-                ))),
+                _ => {
+                    return Err(EmitError::InternalError(format!(
+                        "unexpected double primop variant: {:?}",
+                        op
+                    )))
+                }
             };
             let bits = builder.ins().bitcast(types::I64, MemFlags::new(), a);
             let result = emit_runtime_call(

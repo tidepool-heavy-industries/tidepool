@@ -297,14 +297,20 @@ impl FromCore for String {
                 if fields.len() == 3 && table.get_by_name("Text") == Some(*id) =>
             {
                 let ba = match &fields[0] {
-                    Value::ByteArray(bs) => bs.lock().map_err(|_| BridgeError::InternalError("mutex poisoned".into()))?.clone(),
+                    Value::ByteArray(bs) => bs
+                        .lock()
+                        .map_err(|_| BridgeError::InternalError("mutex poisoned".into()))?
+                        .clone(),
                     // Lifted ByteArray wrapper: Con("ByteArray", [Value::ByteArray(..)])
                     Value::Con(ba_id, ba_fields)
                         if ba_fields.len() == 1
                             && table.get_by_name("ByteArray") == Some(*ba_id) =>
                     {
                         match &ba_fields[0] {
-                            Value::ByteArray(bs) => bs.lock().map_err(|_| BridgeError::InternalError("mutex poisoned".into()))?.clone(),
+                            Value::ByteArray(bs) => bs
+                                .lock()
+                                .map_err(|_| BridgeError::InternalError("mutex poisoned".into()))?
+                                .clone(),
                             _ => {
                                 return Err(type_mismatch("ByteArray# in ByteArray", &ba_fields[0]))
                             }

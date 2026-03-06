@@ -71,14 +71,13 @@ fn rewrite_value(val: &Value, table: &ForwardingTable) -> Value {
         Value::Closure(env, binder, expr) => {
             Value::Closure(rewrite_env(env, table), *binder, expr.clone())
         }
-        Value::ThunkRef(id) => Value::ThunkRef(
-            table
-                .lookup(*id)
-                .unwrap_or_else(|_| {
-                    eprintln!("GC compact: ThunkRef({}) not in forwarding table — GC trace bug, keeping original", id.0);
-                    *id
-                }),
-        ),
+        Value::ThunkRef(id) => Value::ThunkRef(table.lookup(*id).unwrap_or_else(|_| {
+            eprintln!(
+                "GC compact: ThunkRef({}) not in forwarding table — GC trace bug, keeping original",
+                id.0
+            );
+            *id
+        })),
         Value::JoinCont(binders, expr, env) => {
             Value::JoinCont(binders.clone(), expr.clone(), rewrite_env(env, table))
         }

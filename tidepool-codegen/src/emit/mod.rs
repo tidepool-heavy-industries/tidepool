@@ -55,6 +55,8 @@ pub struct EmitContext {
     pub join_blocks: HashMap<JoinId, JoinInfo>,
     pub lambda_counter: u32,
     pub prefix: String,
+    /// Storage for LetRec deferred state, indexed by work items.
+    pub(crate) letrec_states: Vec<crate::emit::expr::LetRecDeferredState>,
 }
 
 /// Placeholder for join point info (used by case/join leaf later).
@@ -114,6 +116,7 @@ impl EmitContext {
             join_blocks: HashMap::new(),
             lambda_counter: 0,
             prefix,
+            letrec_states: Vec::new(),
         }
     }
 

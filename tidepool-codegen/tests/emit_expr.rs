@@ -2795,11 +2795,11 @@ fn test_thunk_con_basic() {
     let x = VarId(0x100);
     let tree = RecursiveTree {
         nodes: vec![
-            CoreFrame::Var(x),                       // 0: body of identity lambda
-            CoreFrame::Lit(Literal::LitInt(2)),       // 1: argument to identity
-            CoreFrame::Lam { binder: x, body: 0 },   // 2: identity lambda: \x -> x
-            CoreFrame::App { fun: 2, arg: 1 },        // 3: App(identity, 2)
-            CoreFrame::Lit(Literal::LitInt(1)),       // 4: first field
+            CoreFrame::Var(x),                     // 0: body of identity lambda
+            CoreFrame::Lit(Literal::LitInt(2)),    // 1: argument to identity
+            CoreFrame::Lam { binder: x, body: 0 }, // 2: identity lambda: \x -> x
+            CoreFrame::App { fun: 2, arg: 1 },     // 3: App(identity, 2)
+            CoreFrame::Lit(Literal::LitInt(1)),    // 4: first field
             CoreFrame::Con {
                 tag: DataConId(42),
                 fields: vec![4, 3],
@@ -2816,18 +2816,30 @@ fn test_thunk_con_basic() {
 
         // Field 0: should be Lit(1) — evaluated eagerly
         let f0 = read_con_field(result.result_ptr, 0);
-        assert_eq!(layout::read_tag(f0), layout::TAG_LIT, "field 0 should be Lit");
+        assert_eq!(
+            layout::read_tag(f0),
+            layout::TAG_LIT,
+            "field 0 should be Lit"
+        );
         assert_eq!(read_lit_int(f0), 1);
 
         // Field 1: should be a THUNK (not yet evaluated)
         let f1 = read_con_field(result.result_ptr, 1);
         let f1_tag = layout::read_tag(f1);
-        eprintln!("field 1 tag = {} (expected TAG_THUNK={})", f1_tag, layout::TAG_THUNK);
+        eprintln!(
+            "field 1 tag = {} (expected TAG_THUNK={})",
+            f1_tag,
+            layout::TAG_THUNK
+        );
         assert_eq!(f1_tag, layout::TAG_THUNK, "field 1 should be a thunk");
 
         // Force the thunk
         let f1_forced = result.force(f1);
-        assert_eq!(layout::read_tag(f1_forced), layout::TAG_LIT, "forced thunk should be Lit");
+        assert_eq!(
+            layout::read_tag(f1_forced),
+            layout::TAG_LIT,
+            "forced thunk should be Lit"
+        );
         assert_eq!(read_lit_int(f1_forced), 2, "forced thunk should be 2");
     }
 }
@@ -2851,28 +2863,26 @@ fn test_thunk_con_recursive() {
         nodes: vec![
             // Lambda body for go:
             //   Con(:, [Var(n), App(Var(go), PrimOp(IntAdd, [Var(n), Lit(1)]))])
-            CoreFrame::Var(n),                          // 0: field 0 of Con (head = n)
-            CoreFrame::Var(n),                          // 1: arg to IntAdd
-            CoreFrame::Lit(Literal::LitInt(1)),         // 2: Lit(1)
+            CoreFrame::Var(n),                  // 0: field 0 of Con (head = n)
+            CoreFrame::Var(n),                  // 1: arg to IntAdd
+            CoreFrame::Lit(Literal::LitInt(1)), // 2: Lit(1)
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![1, 2],
-            },                                          // 3: IntAdd(n, 1)
-            CoreFrame::Var(go),                         // 4: go
-            CoreFrame::App { fun: 4, arg: 3 },          // 5: App(go, n+1) - recursive call
+            }, // 3: IntAdd(n, 1)
+            CoreFrame::Var(go),                 // 4: go
+            CoreFrame::App { fun: 4, arg: 3 },  // 5: App(go, n+1) - recursive call
             CoreFrame::Con {
                 tag: cons_tag,
                 fields: vec![0, 5],
-            },                                          // 6: Con(:, [n, App(go, n+1)])
-            CoreFrame::Lam { binder: n, body: 6 },     // 7: \n -> Con(:, [n, go(n+1)])
-
+            }, // 6: Con(:, [n, App(go, n+1)])
+            CoreFrame::Lam { binder: n, body: 6 }, // 7: \n -> Con(:, [n, go(n+1)])
             // Case scrutinee: App(go, 42)
-            CoreFrame::Var(go),                         // 8: go
-            CoreFrame::Lit(Literal::LitInt(42)),        // 9: Lit(42)
-            CoreFrame::App { fun: 8, arg: 9 },          // 10: App(go, 42)
-
+            CoreFrame::Var(go),                  // 8: go
+            CoreFrame::Lit(Literal::LitInt(42)), // 9: Lit(42)
+            CoreFrame::App { fun: 8, arg: 9 },   // 10: App(go, 42)
             // Case: match on the list, extract head
-            CoreFrame::Var(x),                          // 11: body of case alt (return x)
+            CoreFrame::Var(x), // 11: body of case alt (return x)
             CoreFrame::Case {
                 scrutinee: 10,
                 binder: VarId(0x600),
@@ -2881,13 +2891,12 @@ fn test_thunk_con_recursive() {
                     binders: vec![x, xs],
                     body: 11,
                 }],
-            },                                          // 12: Case (go 42) of { (:) x _ -> x }
-
+            }, // 12: Case (go 42) of { (:) x _ -> x }
             // LetRec: go = \n -> ...
             CoreFrame::LetRec {
                 bindings: vec![(go, 7)],
                 body: 12,
-            },                                          // 13 (root)
+            }, // 13 (root)
         ],
     };
 
@@ -2896,10 +2905,15 @@ fn test_thunk_con_recursive() {
     unsafe {
         // Result should be Lit(42) — the head of go 42
         eprintln!("result tag = {}", layout::read_tag(result.result_ptr));
-        assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT,
-            "result should be Lit (head of go 42)");
-        assert_eq!(read_lit_int(result.result_ptr), 42,
-            "head of go 42 should be 42");
+        assert_eq!(
+            layout::read_tag(result.result_ptr),
+            layout::TAG_LIT,
+            "result should be Lit (head of go 42)"
+        );
+        assert_eq!(
+            read_lit_int(result.result_ptr),
+            42,
+            "head of go 42 should be 42"
+        );
     }
 }
-

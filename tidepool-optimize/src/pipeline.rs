@@ -24,7 +24,10 @@ pub struct PipelineStats {
 /// Returns stats about how many iterations and per-pass invocations.
 ///
 /// Returns `Err` if the number of iterations exceeds MAX_PIPELINE_ITERATIONS.
-pub fn run_pipeline(passes: &[Box<dyn Pass>], expr: &mut CoreExpr) -> Result<PipelineStats, String> {
+pub fn run_pipeline(
+    passes: &[Box<dyn Pass>],
+    expr: &mut CoreExpr,
+) -> Result<PipelineStats, String> {
     let mut stats = PipelineStats {
         iterations: 0,
         pass_invocations: passes.iter().map(|p| (p.name().to_string(), 0)).collect(),

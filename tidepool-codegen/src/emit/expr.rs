@@ -124,7 +124,9 @@ impl MappableFrame for EmitFrameToken {
                 rhs_idx,
                 body_idx,
             },
-            EmitFrame::ThunkCon { tag, field_indices } => EmitFrame::ThunkCon { tag, field_indices },
+            EmitFrame::ThunkCon { tag, field_indices } => {
+                EmitFrame::ThunkCon { tag, field_indices }
+            }
             EmitFrame::LetBoundary(idx) => EmitFrame::LetBoundary(idx),
         }
     }
@@ -321,15 +323,13 @@ fn collapse_frame(
             for (i, &f_idx) in field_indices.iter().enumerate() {
                 let field_val = if is_trivial_field(f_idx, tree) {
                     // Trivial: evaluate eagerly (existing path)
-                    let val = ctx.emit_node(
-                        pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
-                    )?;
+                    let val =
+                        ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx)?;
                     ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
                 } else {
                     // Non-trivial: compile as thunk
-                    let thunk_val = emit_thunk(
-                        ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
-                    )?;
+                    let thunk_val =
+                        emit_thunk(ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx)?;
                     thunk_val.value()
                 };
                 builder.ins().store(
@@ -382,12 +382,9 @@ fn collapse_frame(
             // Force thunked function values. Case alt binders can be
             // thunks (lazy fields), so when one is applied as a function,
             // we must force it to get the underlying closure.
-            let fun_tag = builder.ins().load(
-                types::I8,
-                MemFlags::trusted(),
-                raw_fun_ptr,
-                0,
-            );
+            let fun_tag = builder
+                .ins()
+                .load(types::I8, MemFlags::trusted(), raw_fun_ptr, 0);
             let is_thunk = builder.ins().icmp_imm(
                 IntCC::Equal,
                 fun_tag,
@@ -423,10 +420,9 @@ fn collapse_frame(
             let force_call = builder.ins().call(force_ref, &[vmctx, raw_fun_ptr]);
             let forced_fun = builder.inst_results(force_call)[0];
             builder.declare_value_needs_stack_map(forced_fun);
-            builder.ins().jump(
-                fun_ready_block,
-                &[BlockArg::Value(forced_fun)],
-            );
+            builder
+                .ins()
+                .jump(fun_ready_block, &[BlockArg::Value(forced_fun)]);
 
             builder.switch_to_block(fun_ready_block);
             builder.seal_block(fun_ready_block);
@@ -454,7 +450,13 @@ fn collapse_frame(
             builder.append_block_param(merge_block, types::I64);
 
             let is_zero = builder.ins().icmp_imm(IntCC::Equal, check_result, 0);
-            builder.ins().brif(is_zero, call_block, &[], merge_block, &[BlockArg::Value(check_result)]);
+            builder.ins().brif(
+                is_zero,
+                call_block,
+                &[],
+                merge_block,
+                &[BlockArg::Value(check_result)],
+            );
 
             // call_block: normal function call
             builder.switch_to_block(call_block);
@@ -912,11 +914,7 @@ fn emit_thunk(
 
     // Debug: dump Cranelift IR for thunk when TIDEPOOL_DUMP_CLIF=1
     if std::env::var("TIDEPOOL_DUMP_CLIF").is_ok() {
-        eprintln!(
-            "=== CLIF {} ({} captures) ===",
-            thunk_name,
-            captures.len()
-        );
+        eprintln!("=== CLIF {} ({} captures) ===", thunk_name, captures.len());
         for (i, (var_id, ssaval)) in captures.iter().enumerate() {
             let kind = match ssaval {
                 SsaVal::HeapPtr(_) => "HeapPtr",
@@ -1096,6 +1094,14 @@ impl EmitContext {
         }
     }
 
+    /// Trampoline-based emit_node: converts recursive Let-chain evaluation to
+    /// an explicit work stack. This prevents Rust stack overflow during JIT
+    /// compilation of deeply nested GHC Core ASTs.
+    ///
+    /// Recursive calls that remain (bounded, safe):
+    /// - emit_lam/emit_thunk: create new EmitContext, bounded by lambda nesting
+    /// - emit_case/emit_join: called from hylomorphism collapse, bounded by case nesting
+    /// - Trivial Con field eval: constant stack depth (Var/Lit)
     pub fn emit_node(
         &mut self,
         pipeline: &mut CodegenPipeline,
@@ -1104,695 +1110,834 @@ impl EmitContext {
         gc_sig: ir::SigRef,
         oom_func: ir::FuncRef,
         tree: &CoreExpr,
-        mut idx: usize,
+        root_idx: usize,
     ) -> Result<SsaVal, EmitError> {
-        // Iterative tail-position loop: LetNonRec/LetRec body is in tail position,
-        // so we iterate instead of recursing to avoid stack overflow on deep let-chains.
-        let mut let_cleanup: Vec<LetCleanup> = Vec::new();
-        let result = loop {
-            match &tree.nodes[idx] {
-                CoreFrame::LetNonRec { binder, rhs, body } => {
-                    // Dead code elimination: skip RHS if binder is unused in body.
-                    let body_fvs =
-                        tidepool_repr::free_vars::free_vars(&tree.extract_subtree(*body));
-                    if body_fvs.contains(binder) {
-                        if Self::rhs_is_error_call(tree, *rhs) {
-                            // Bind to lazy poison closure — error only triggers on call.
-                            let kind = Self::extract_error_kind(tree, *rhs);
-                            let poison_addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
-                            let poison_val = builder.ins().iconst(types::I64, poison_addr);
-                            self.trace_scope(&format!("defer error LetNonRec {:?}", binder));
-                            self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
-                        } else {
-                            let rhs_val = self.emit_node(
-                                pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs,
-                            )?;
-                            self.trace_scope(&format!("insert LetNonRec {:?}", binder));
-                            self.env.insert(*binder, rhs_val);
-                        }
-                        let_cleanup.push(LetCleanup::Single(*binder));
-                    } else {
-                        self.trace_scope(&format!("DCE skip LetNonRec {:?}", binder));
-                    }
-                    idx = *body;
-                    continue;
-                }
-                CoreFrame::LetRec { bindings, body } => {
-                    // Split bindings: Lam/Con need 3-phase pre-allocation (recursive),
-                    // everything else is evaluated eagerly as simple bindings first.
-                    let (rec_bindings, simple_bindings): (Vec<_>, Vec<_>) =
-                        bindings.iter().partition(|(_, rhs_idx)| {
-                            matches!(
-                                &tree.nodes[*rhs_idx],
-                                CoreFrame::Lam { .. } | CoreFrame::Con { .. }
-                            )
-                        });
-                    // If no recursive bindings, evaluate all as simple
-                    if rec_bindings.is_empty() {
-                        for (binder, rhs_idx) in &simple_bindings {
-                            if Self::rhs_is_error_call(tree, *rhs_idx) {
-                                let kind = Self::extract_error_kind(tree, *rhs_idx);
-                                let poison_addr =
-                                    crate::host_fns::error_poison_ptr_lazy(kind) as i64;
-                                let poison_val = builder.ins().iconst(types::I64, poison_addr);
-                                self.trace_scope(&format!(
-                                    "defer error LetRec(simple) {:?}",
-                                    binder
-                                ));
-                                self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
-                            } else {
-                                let rhs_val = self.emit_node(
-                                    pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx,
-                                )?;
-                                self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
-                                self.env.insert(*binder, rhs_val);
-                            }
-                        }
-                        let_cleanup
-                            .push(LetCleanup::Rec(bindings.iter().map(|(b, _)| *b).collect()));
-                        idx = *body;
-                        continue;
-                    }
+        let mut work: Vec<EmitWork> = vec![EmitWork::Eval(root_idx)];
+        let mut vals: Vec<SsaVal> = Vec::new();
 
-                    // Phase 1: Pre-allocate all recursive bindings (Lam and Con)
-                    enum PreAlloc {
-                        Lam {
-                            binder: VarId,
-                            ptr: cranelift_codegen::ir::Value,
-                            fvs: Vec<VarId>,
-                            rhs_idx: usize,
-                        },
-                        Con {
-                            binder: VarId,
-                            ptr: cranelift_codegen::ir::Value,
-                            field_indices: Vec<usize>,
-                        },
-                    }
-                    let mut pre_allocs = Vec::with_capacity(rec_bindings.len());
-
-                    for (binder, rhs_idx) in &rec_bindings {
-                        match &tree.nodes[*rhs_idx] {
-                            CoreFrame::Lam {
-                                binder: lam_binder,
-                                body: lam_body,
-                            } => {
-                                let lam_body_tree = tree.extract_subtree(*lam_body);
-                                let mut fvs = tidepool_repr::free_vars::free_vars(&lam_body_tree);
-                                fvs.remove(lam_binder);
-                                let dropped_fvs: Vec<VarId> = fvs
-                                    .iter()
-                                    .filter(|v| {
-                                        !self.env.contains_key(v)
-                                            && !rec_bindings.iter().any(|(b, _)| b == *v)
-                                            && !simple_bindings.iter().any(|(b, _)| b == *v)
-                                    })
-                                    .copied()
-                                    .collect();
-                                if !dropped_fvs.is_empty() {
-                                    self.trace_scope(&format!(
-                                        "LetRec lam {:?}: dropped FVs {:?}",
-                                        binder, dropped_fvs
-                                    ));
-                                }
-                                let mut sorted_fvs: Vec<VarId> = fvs
-                                    .into_iter()
-                                    .filter(|v| {
-                                        self.env.contains_key(v)
-                                            || rec_bindings.iter().any(|(b, _)| b == v)
-                                            || simple_bindings.iter().any(|(b, _)| b == v)
-                                    })
-                                    .collect();
-                                sorted_fvs.sort_by_key(|v| v.0);
-
-                                let num_captures = sorted_fvs.len();
-                                let closure_size = 24 + 8 * num_captures as u64;
-                                let closure_ptr = emit_alloc_fast_path(
-                                    builder,
-                                    vmctx,
-                                    closure_size,
-                                    gc_sig,
-                                    oom_func,
+        while let Some(item) = work.pop() {
+            match item {
+                EmitWork::Eval(start_idx) => {
+                    // Inner iterative loop: skip through Let chains in tail position
+                    let mut idx = start_idx;
+                    loop {
+                        match &tree.nodes[idx] {
+                            CoreFrame::LetNonRec { binder, rhs, body } => {
+                                let binder = *binder;
+                                let rhs = *rhs;
+                                let body = *body;
+                                // Dead code elimination: skip RHS if binder is unused in body.
+                                let body_fvs = tidepool_repr::free_vars::free_vars(
+                                    &tree.extract_subtree(body),
                                 );
-
-                                let tag_val =
-                                    builder.ins().iconst(types::I8, layout::TAG_CLOSURE as i64);
-                                builder
-                                    .ins()
-                                    .store(MemFlags::trusted(), tag_val, closure_ptr, 0);
-                                let size_val =
-                                    builder.ins().iconst(types::I16, closure_size as i64);
-                                builder
-                                    .ins()
-                                    .store(MemFlags::trusted(), size_val, closure_ptr, 1);
-                                let num_cap_val =
-                                    builder.ins().iconst(types::I16, num_captures as i64);
-                                builder.ins().store(
-                                    MemFlags::trusted(),
-                                    num_cap_val,
-                                    closure_ptr,
-                                    CLOSURE_NUM_CAPTURED_OFFSET,
-                                );
-
-                                builder.declare_value_needs_stack_map(closure_ptr);
-                                pre_allocs.push(PreAlloc::Lam {
-                                    binder: *binder,
-                                    ptr: closure_ptr,
-                                    fvs: sorted_fvs,
-                                    rhs_idx: *rhs_idx,
-                                });
-                            }
-                            CoreFrame::Con { tag, fields } => {
-                                let num_fields = fields.len();
-                                let size = 24 + 8 * num_fields as u64;
-                                let ptr =
-                                    emit_alloc_fast_path(builder, vmctx, size, gc_sig, oom_func);
-
-                                let tag_val =
-                                    builder.ins().iconst(types::I8, layout::TAG_CON as i64);
-                                builder.ins().store(MemFlags::trusted(), tag_val, ptr, 0);
-                                let size_val = builder.ins().iconst(types::I16, size as i64);
-                                builder.ins().store(MemFlags::trusted(), size_val, ptr, 1);
-                                let con_tag_val = builder.ins().iconst(types::I64, tag.0 as i64);
-                                builder.ins().store(
-                                    MemFlags::trusted(),
-                                    con_tag_val,
-                                    ptr,
-                                    CON_TAG_OFFSET,
-                                );
-                                let num_fields_val =
-                                    builder.ins().iconst(types::I16, num_fields as i64);
-                                builder.ins().store(
-                                    MemFlags::trusted(),
-                                    num_fields_val,
-                                    ptr,
-                                    CON_NUM_FIELDS_OFFSET,
-                                );
-
-                                // Zero-initialize Con fields so GC doesn't trace garbage
-                                // if triggered before Phase 3b/3d.
-                                let null_val = builder.ins().iconst(types::I64, 0);
-                                for i in 0..num_fields {
-                                    let offset = CON_FIELDS_START + 8 * i as i32;
-                                    builder
-                                        .ins()
-                                        .store(MemFlags::trusted(), null_val, ptr, offset);
-                                }
-
-                                builder.declare_value_needs_stack_map(ptr);
-                                pre_allocs.push(PreAlloc::Con {
-                                    binder: *binder,
-                                    ptr,
-                                    field_indices: fields.clone(),
-                                });
-                            }
-                            other => return Err(EmitError::InternalError(format!(
-                                "LetRec phase 1: expected Lam or Con, got {:?}", other
-                            ))),
-                        }
-                    }
-
-                    // Phase 2: Bind all to their pre-allocated pointers
-                    for pa in &pre_allocs {
-                        let (binder, ptr) = match pa {
-                            PreAlloc::Lam { binder, ptr, .. } => (*binder, *ptr),
-                            PreAlloc::Con { binder, ptr, .. } => (*binder, *ptr),
-                        };
-                        self.trace_scope(&format!("insert LetRec(rec) {:?}", binder));
-                        self.env.insert(binder, SsaVal::HeapPtr(ptr));
-                    }
-
-                    // Phase 2.5: Evaluate trivial simple bindings (Var aliases) before
-                    // Lam body compilation. These are just env lookups that don't depend
-                    // on closure code pointers. Resolved Lam bodies may capture them as
-                    // free variables (e.g., substitute aliases like $fEqList_$s$c==1).
-                    let mut deferred_simple = Vec::with_capacity(simple_bindings.len());
-                    for (binder, rhs_idx) in &simple_bindings {
-                        if Self::rhs_is_error_call(tree, *rhs_idx) {
-                            let kind = Self::extract_error_kind(tree, *rhs_idx);
-                            let poison_addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
-                            let poison_val = builder.ins().iconst(types::I64, poison_addr);
-                            self.trace_scope(&format!("defer error LetRec(trivial) {:?}", binder));
-                            self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
-                        } else if matches!(&tree.nodes[*rhs_idx], CoreFrame::Var(_)) {
-                            let rhs_val = self.emit_node(
-                                pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx,
-                            )?;
-                            self.trace_scope(&format!("insert LetRec(trivial) {:?}", binder));
-                            self.env.insert(*binder, rhs_val);
-                        } else {
-                            deferred_simple.push((*binder, *rhs_idx));
-                        }
-                    }
-
-                    // Phase 3a: Compile Lam bodies and set code pointers.
-                    // Capture VALUES are NOT filled here — some captures reference
-                    // deferred simple bindings (Phase 3c) that aren't in env yet.
-                    // We compile the inner function (which reads captures by slot
-                    // position) and store code pointers, then fill capture slots
-                    // in Phase 3a' after simple bindings are evaluated.
-                    let mut pending_capture_updates: std::collections::HashMap<
-                        VarId,
-                        Vec<(cranelift_codegen::ir::Value, i32)>,
-                    > = std::collections::HashMap::with_capacity(rec_bindings.len());
-
-                    for pa in &pre_allocs {
-                        let (closure_ptr, sorted_fvs, rhs_idx) = match pa {
-                            PreAlloc::Lam {
-                                ptr, fvs, rhs_idx, ..
-                            } => (*ptr, fvs, *rhs_idx),
-                            PreAlloc::Con { .. } => continue,
-                        };
-                        let (lam_binder, lam_body) = match &tree.nodes[rhs_idx] {
-                            CoreFrame::Lam { binder, body } => (*binder, *body),
-                            other => return Err(EmitError::InternalError(format!(
-                                "LetRec phase 3a: expected Lam, got {:?}", other
-                            ))),
-                        };
-                        let lam_body_tree = tree.extract_subtree(lam_body);
-
-                        let lambda_name = self.next_lambda_name();
-                        let mut closure_sig = Signature::new(pipeline.isa.default_call_conv());
-                        closure_sig.params.push(AbiParam::new(types::I64));
-                        closure_sig.params.push(AbiParam::new(types::I64));
-                        closure_sig.params.push(AbiParam::new(types::I64));
-                        closure_sig.returns.push(AbiParam::new(types::I64));
-
-                        let lambda_func_id = pipeline
-                            .module
-                            .declare_function(&lambda_name, Linkage::Local, &closure_sig)
-                            .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-                        pipeline.register_lambda(lambda_func_id, lambda_name.clone());
-
-                        let mut inner_ctx = Context::new();
-                        inner_ctx.func.signature = closure_sig;
-                        inner_ctx.func.name = UserFuncName::default();
-
-                        let mut inner_fb_ctx = FunctionBuilderContext::new();
-                        let mut inner_builder =
-                            FunctionBuilder::new(&mut inner_ctx.func, &mut inner_fb_ctx);
-                        let inner_block = inner_builder.create_block();
-                        inner_builder.append_block_params_for_function_params(inner_block);
-                        inner_builder.switch_to_block(inner_block);
-                        inner_builder.seal_block(inner_block);
-
-                        let inner_vmctx = inner_builder.block_params(inner_block)[0];
-                        let inner_self = inner_builder.block_params(inner_block)[1];
-                        let inner_arg = inner_builder.block_params(inner_block)[2];
-
-                        inner_builder.declare_value_needs_stack_map(inner_self);
-                        inner_builder.declare_value_needs_stack_map(inner_arg);
-
-                        let mut inner_gc_sig = Signature::new(pipeline.isa.default_call_conv());
-                        inner_gc_sig.params.push(AbiParam::new(types::I64));
-                        let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
-
-                        let inner_oom_func = {
-                            let mut sig = Signature::new(pipeline.isa.default_call_conv());
-                            sig.returns.push(AbiParam::new(types::I64));
-                            let func_id = pipeline
-                                .module
-                                .declare_function("runtime_oom", Linkage::Import, &sig)
-                                .map_err(|e| EmitError::CraneliftError(format!("declare runtime_oom: {e}")))?;
-                            pipeline
-                                .module
-                                .declare_func_in_func(func_id, inner_builder.func)
-                        };
-
-                        let mut inner_emit = EmitContext::new(self.prefix.clone());
-                        inner_emit.lambda_counter = self.lambda_counter;
-                        inner_emit
-                            .env
-                            .insert(lam_binder, SsaVal::HeapPtr(inner_arg));
-
-                        // Load captures by position — the inner function doesn't need
-                        // the outer SSA values, just the slot offsets.
-                        for (i, var_id) in sorted_fvs.iter().enumerate() {
-                            let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
-                            let val = inner_builder.ins().load(
-                                types::I64,
-                                MemFlags::trusted(),
-                                inner_self,
-                                offset,
-                            );
-                            inner_builder.declare_value_needs_stack_map(val);
-                            inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
-                        }
-
-                        let body_root = lam_body_tree.nodes.len() - 1;
-                        let body_result = inner_emit.emit_node(
-                            pipeline,
-                            &mut inner_builder,
-                            inner_vmctx,
-                            inner_gc_sig_ref,
-                            inner_oom_func,
-                            &lam_body_tree,
-                            body_root,
-                        )?;
-                        let ret_val = ensure_heap_ptr(
-                            &mut inner_builder,
-                            inner_vmctx,
-                            inner_gc_sig_ref,
-                            inner_oom_func,
-                            body_result,
-                        );
-
-                        inner_builder.ins().return_(&[ret_val]);
-                        inner_builder.finalize();
-                        self.lambda_counter = inner_emit.lambda_counter;
-                        pipeline.define_function(lambda_func_id, &mut inner_ctx)?;
-
-                        let func_ref = pipeline
-                            .module
-                            .declare_func_in_func(lambda_func_id, builder.func);
-                        let code_ptr = builder.ins().func_addr(types::I64, func_ref);
-                        builder.ins().store(
-                            MemFlags::trusted(),
-                            code_ptr,
-                            closure_ptr,
-                            CLOSURE_CODE_PTR_OFFSET,
-                        );
-
-                        // Zero-initialize capture slots so GC doesn't trace garbage
-                        // if triggered before Phase 3a'.
-                        let null_val = builder.ins().iconst(types::I64, 0);
-                        for i in 0..sorted_fvs.len() {
-                            let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
-                            builder
-                                .ins()
-                                .store(MemFlags::trusted(), null_val, closure_ptr, offset);
-                        }
-
-                        // Fill captures that are already in env. Defer those that
-                        // reference deferred simple bindings (not yet evaluated).
-                        for (i, var_id) in sorted_fvs.iter().enumerate() {
-                            let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
-                            if let Some(ssaval) = self.env.get(var_id) {
-                                let cap_val =
-                                    ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
-                                builder.ins().store(
-                                    MemFlags::trusted(),
-                                    cap_val,
-                                    closure_ptr,
-                                    offset,
-                                );
-                            } else {
-                                pending_capture_updates
-                                    .entry(*var_id)
-                                    .or_default()
-                                    .push((closure_ptr, offset));
-                            }
-                        }
-                    }
-
-                    // Phase 3b: Fill Con fields that DON'T reference deferred simple
-                    // bindings. These are safe to fill now — at runtime, function calls
-                    // in simple bindings may pattern-match on these Cons, so their fields
-                    // must be populated before any simple binding evaluation.
-                    let simple_binder_set: std::collections::HashSet<VarId> =
-                        deferred_simple.iter().map(|(b, _)| *b).collect();
-                    let mut deferred_cons: Vec<(VarId, cranelift_codegen::ir::Value, Vec<usize>)> =
-                        Vec::with_capacity(rec_bindings.len());
-                    let mut deferred_con_binders: std::collections::HashSet<VarId> =
-                        std::collections::HashSet::new();
-                    for pa in &pre_allocs {
-                        if let PreAlloc::Con {
-                            binder, ptr, field_indices,
-                        } = pa
-                        {
-                            let needs_simple = field_indices.iter().any(|&f_idx| {
-                            matches!(&tree.nodes[f_idx], CoreFrame::Var(v) if simple_binder_set.contains(v))
-                        });
-                            if needs_simple {
-                                deferred_cons.push((*binder, *ptr, field_indices.clone()));
-                                deferred_con_binders.insert(*binder);
-                            } else {
-                                for (i, &f_idx) in field_indices.iter().enumerate() {
-                                    let field_val = if is_trivial_field(f_idx, tree) {
-                                        let val = self.emit_node(
-                                            pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
-                                        )?;
-                                        ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
+                                if body_fvs.contains(&binder) {
+                                    if Self::rhs_is_error_call(tree, rhs) {
+                                        // Bind to lazy poison closure — error only triggers on call.
+                                        let kind = Self::extract_error_kind(tree, rhs);
+                                        let poison_addr =
+                                            crate::host_fns::error_poison_ptr_lazy(kind) as i64;
+                                        let poison_val =
+                                            builder.ins().iconst(types::I64, poison_addr);
+                                        self.trace_scope(&format!(
+                                            "defer error LetNonRec {:?}",
+                                            binder
+                                        ));
+                                        self.env.insert(binder, SsaVal::HeapPtr(poison_val));
+                                        // No RHS eval needed, just push cleanup and continue to body
+                                        work.push(EmitWork::LetCleanupMark(LetCleanup::Single(
+                                            binder,
+                                        )));
                                     } else {
-                                        let thunk_val = emit_thunk(
-                                            self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
-                                        )?;
-                                        thunk_val.value()
-                                    };
-                                    builder.ins().store(
-                                        MemFlags::trusted(),
-                                        field_val,
-                                        *ptr,
-                                        CON_FIELDS_START + 8 * i as i32,
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    // Phase 3c: Evaluate deferred simple bindings (now that Con fields
-                    // they may access at runtime are populated).
-                    // Topologically sort: if binding A references binding B in deferred_simple,
-                    // B must be evaluated first. This includes dependencies mediated by closures.
-                    let deferred_simple = {
-                        let deferred_set: std::collections::HashSet<VarId> =
-                            deferred_simple.iter().map(|(b, _)| *b).collect();
-
-                        let mut direct_deps: std::collections::HashMap<VarId, Vec<VarId>> =
-                            std::collections::HashMap::with_capacity(bindings.len());
-                        for (binder, rhs_idx) in bindings {
-                            let fvs = tidepool_repr::free_vars::free_vars(
-                                &tree.extract_subtree(*rhs_idx),
-                            );
-                            direct_deps.insert(*binder, fvs.into_iter().collect());
-                        }
-
-                        // Compute reachability on-demand using DFS
-                        let mut reachable_deferred: std::collections::HashMap<
-                            VarId,
-                            std::collections::HashSet<VarId>,
-                        > = std::collections::HashMap::with_capacity(deferred_simple.len());
-                        for &(start_node, _) in &deferred_simple {
-                            let mut visited = std::collections::HashSet::new();
-                            let mut stack = vec![start_node];
-                            let mut reached = std::collections::HashSet::new();
-
-                            while let Some(node) = stack.pop() {
-                                if !visited.insert(node) {
-                                    continue;
-                                }
-                                if node != start_node && deferred_set.contains(&node) {
-                                    reached.insert(node);
-                                }
-                                if let Some(neighbors) = direct_deps.get(&node) {
-                                    for &next in neighbors {
-                                        stack.push(next);
+                                        // Push work in LIFO order: cleanup, eval body, bind, eval rhs
+                                        // After rhs eval → bind → eval body → cleanup
+                                        work.push(EmitWork::LetCleanupMark(LetCleanup::Single(
+                                            binder,
+                                        )));
+                                        work.push(EmitWork::Eval(body));
+                                        work.push(EmitWork::Bind(binder));
+                                        work.push(EmitWork::Eval(rhs));
+                                        break; // exit inner loop, process work stack
                                     }
-                                }
-                            }
-                            reachable_deferred.insert(start_node, reached);
-                        }
-
-                        let mut sorted = Vec::with_capacity(deferred_simple.len());
-                        let mut remaining: Vec<(VarId, usize)> = deferred_simple;
-                        let mut progress = true;
-                        while !remaining.is_empty() && progress {
-                            progress = false;
-                            let mut next_remaining = Vec::with_capacity(remaining.len());
-                            for (binder, rhs_idx) in remaining {
-                                let blocked = reachable_deferred[&binder].iter().any(|fv| {
-                                    !sorted.iter().any(|(b, _): &(VarId, usize)| *b == *fv)
-                                });
-                                if blocked {
-                                    next_remaining.push((binder, rhs_idx));
                                 } else {
-                                    sorted.push((binder, rhs_idx));
-                                    progress = true;
+                                    self.trace_scope(&format!("DCE skip LetNonRec {:?}", binder));
                                 }
+                                idx = body;
+                                continue;
                             }
-                            remaining = next_remaining;
-                        }
-                        // Any remaining (cyclic deps) — append as-is
-                        sorted.extend(remaining);
-                        sorted
-                    };
-
-                    // For each deferred Con, track which simple bindings it
-                    // depends on.  Once all deps are satisfied we fill ALL its
-                    // fields (not just the simple-binding ones).
-                    let mut deferred_con_deps: Vec<(
-                        VarId,
-                        cranelift_codegen::ir::Value,
-                        Vec<usize>,
-                        std::collections::HashSet<VarId>,
-                    )> = Vec::with_capacity(deferred_cons.len());
-                    for (con_binder, ptr, field_indices) in &deferred_cons {
-                        let deps: std::collections::HashSet<VarId> = field_indices
-                            .iter()
-                            .filter_map(|&f_idx| {
-                                if let CoreFrame::Var(v) = &tree.nodes[f_idx] {
-                                    if simple_binder_set.contains(v) {
-                                        return Some(*v);
-                                    }
-                                }
-                                None
-                            })
-                            .collect();
-                        deferred_con_deps.push((*con_binder, *ptr, field_indices.clone(), deps));
-                    }
-
-                    for (binder, rhs_idx) in &deferred_simple {
-                        if Self::rhs_is_error_call(tree, *rhs_idx) {
-                            let kind = Self::extract_error_kind(tree, *rhs_idx);
-                            let poison_addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
-                            let poison_val = builder.ins().iconst(types::I64, poison_addr);
-                            self.trace_scope(&format!("defer error LetRec(deferred) {:?}", binder));
-                            self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
-                        } else {
-                            // If any deferred Con depends on this simple binding,
-                            // emit as a thunk. Eagerly evaluating it could
-                            // transitively access unfilled Con fields → SIGSEGV.
-                            let refs_deferred_con = !deferred_con_binders.is_empty()
-                                && deferred_con_deps.iter().any(
-                                    |(_, _, _, simple_deps)| simple_deps.contains(binder),
-                                );
-                            let rhs_val = if refs_deferred_con {
-                                let thunk_val = emit_thunk(
-                                    self, pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx,
+                            CoreFrame::LetRec { bindings, body } => {
+                                let bindings = bindings.clone();
+                                let body = *body;
+                                // Run phases 1-3b inline, push deferred evals + finish + cleanup
+                                let cleanup_vars: Vec<VarId> =
+                                    bindings.iter().map(|(b, _)| *b).collect();
+                                work.push(EmitWork::LetCleanupMark(LetCleanup::Rec(cleanup_vars)));
+                                self.emit_letrec_phases(
+                                    pipeline, builder, vmctx, gc_sig, oom_func, tree, &bindings,
+                                    body, &mut work,
                                 )?;
-                                thunk_val
-                            } else {
-                                self.emit_node(
-                                    pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx,
-                                )?
-                            };
-                            self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
-                            self.env.insert(*binder, rhs_val);
-                        }
-
-                        // Incrementally fill pending captures as dependencies become available!
-                        // This guarantees that closures have their capture slots filled before
-                        // subsequent simple bindings in this LetRec are evaluated, which might
-                        // invoke those closures.
-                        if let Some(updates) = pending_capture_updates.remove(binder) {
-                            if let Some(ssaval) = self.env.get(binder) {
-                                let cap_val =
-                                    ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
-                                for (closure_ptr, offset) in updates {
-                                    builder.ins().store(
-                                        MemFlags::trusted(),
-                                        cap_val,
-                                        closure_ptr,
-                                        offset,
-                                    );
-                                }
+                                break; // exit inner loop
                             }
-                        }
-
-                        // Incrementally fill deferred Cons whose simple-binding
-                        // deps are now all satisfied.  Fill ALL fields at once so
-                        // that later simple bindings (or their callees) can safely
-                        // pattern-match on these Cons without hitting NULL fields.
-                        for (_cb, ptr, field_indices, remaining_deps) in deferred_con_deps.iter_mut() {
-                            remaining_deps.remove(binder);
-                            if remaining_deps.is_empty() && !field_indices.is_empty() {
-                                for (i, &f_idx) in field_indices.iter().enumerate() {
-                                    let field_val = if is_trivial_field(f_idx, tree) {
-                                        let val = self.emit_node(
-                                            pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
-                                        )?;
-                                        ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
-                                    } else {
-                                        let thunk_val = emit_thunk(
-                                            self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
-                                        )?;
-                                        thunk_val.value()
-                                    };
-                                    builder.ins().store(
-                                        MemFlags::trusted(),
-                                        field_val,
-                                        *ptr,
-                                        CON_FIELDS_START + 8 * i as i32,
-                                    );
-                                }
-                                // Mark as filled so Phase 3d skips it.
-                                *field_indices = Vec::new();
+                            // All non-Let nodes: delegate to stack-safe hylomorphism
+                            _ => {
+                                let result = emit_subtree(
+                                    self, pipeline, builder, vmctx, gc_sig, oom_func, tree, idx,
+                                )?;
+                                vals.push(result);
+                                break;
                             }
                         }
                     }
-
-                    // Phase 3a': Fill any remaining closure capture slots.
-                    // These are captures of Lam/Con bindings (or trivial simple bindings)
-                    // that were not in env during Phase 1 but are now in env.
-                    for (var_id, updates) in pending_capture_updates {
-                        let ssaval = self.env.get(&var_id).ok_or_else(|| {
-                            EmitError::MissingCaptureVar(
-                                var_id,
-                                "LetRec Phase 3a' capture fill: not in env after Phase 3c".into(),
-                            )
-                        })?;
-                        let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
-                        for (closure_ptr, offset) in updates {
-                            builder
-                                .ins()
-                                .store(MemFlags::trusted(), cap_val, closure_ptr, offset);
-                        }
-                    }
-
-                    // Phase 3d: Fill any deferred Con fields not already filled
-                    // incrementally during Phase 3c.
-                    for (_cb, ptr, field_indices, _) in &deferred_con_deps {
-                        for (i, &f_idx) in field_indices.iter().enumerate() {
-                            let field_val = if is_trivial_field(f_idx, tree) {
-                                let val = self.emit_node(
-                                    pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
-                                )?;
-                                ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
-                            } else {
-                                let thunk_val = emit_thunk(
-                                    self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
-                                )?;
-                                thunk_val.value()
-                            };
-                            builder.ins().store(
-                                MemFlags::trusted(),
-                                field_val,
-                                *ptr,
-                                CON_FIELDS_START + 8 * i as i32,
-                            );
-                        }
-                    }
-
-                    let_cleanup.push(LetCleanup::Rec(bindings.iter().map(|(b, _)| *b).collect()));
-                    idx = *body;
-                    continue;
                 }
-                // All non-Let nodes: delegate to stack-safe hylomorphism
-                _ => {
-                    break emit_subtree(
-                        self, pipeline, builder, vmctx, gc_sig, oom_func, tree, idx,
-                    );
+                EmitWork::Bind(binder) => {
+                    let val = vals.pop().ok_or_else(|| {
+                        EmitError::InternalError("Bind: empty value stack".into())
+                    })?;
+                    self.trace_scope(&format!("insert LetNonRec {:?}", binder));
+                    self.env.insert(binder, val);
+                }
+                EmitWork::LetRecPostSimple { binder, state_idx } => {
+                    let val = vals.pop().ok_or_else(|| {
+                        EmitError::InternalError("LetRecPostSimple: empty value stack".into())
+                    })?;
+                    self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
+                    self.env.insert(binder, val);
+                    self.letrec_post_simple_step(
+                        builder, vmctx, gc_sig, oom_func, tree, &binder, state_idx, pipeline,
+                    )?;
+                }
+                EmitWork::LetRecFinish { body, state_idx } => {
+                    self.letrec_finish_phases(
+                        builder, vmctx, gc_sig, oom_func, tree, state_idx, pipeline,
+                    )?;
+                    // Push body evaluation
+                    work.push(EmitWork::Eval(body));
+                }
+                EmitWork::LetCleanupMark(cleanup) => match &cleanup {
+                    LetCleanup::Single(var) => {
+                        self.trace_scope(&format!("remove LetCleanup {:?}", var));
+                        self.env.remove(var);
+                    }
+                    LetCleanup::Rec(vars) => {
+                        for var in vars {
+                            self.trace_scope(&format!("remove LetCleanup(rec) {:?}", var));
+                        }
+                        for var in vars {
+                            self.env.remove(var);
+                        }
+                    }
+                },
+            }
+        }
+
+        vals.pop()
+            .ok_or_else(|| EmitError::InternalError("emit_node: empty value stack".into()))
+    }
+
+    /// Execute LetRec phases 1-3a inline, then push deferred-simple evals
+    /// and finish onto the work stack.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_letrec_phases(
+        &mut self,
+        pipeline: &mut CodegenPipeline,
+        builder: &mut FunctionBuilder,
+        vmctx: Value,
+        gc_sig: ir::SigRef,
+        oom_func: ir::FuncRef,
+        tree: &CoreExpr,
+        bindings: &[(VarId, usize)],
+        body: usize,
+        work: &mut Vec<EmitWork>,
+    ) -> Result<(), EmitError> {
+        // Split bindings: Lam/Con need 3-phase pre-allocation (recursive),
+        // everything else is evaluated eagerly as simple bindings first.
+        let (rec_bindings, simple_bindings): (Vec<_>, Vec<_>) =
+            bindings.iter().partition(|(_, rhs_idx)| {
+                matches!(
+                    &tree.nodes[*rhs_idx],
+                    CoreFrame::Lam { .. } | CoreFrame::Con { .. }
+                )
+            });
+
+        // If no recursive bindings, push simple evals onto work stack
+        if rec_bindings.is_empty() {
+            // Store empty deferred state for post-simple steps
+            let state_idx = self.push_letrec_state(LetRecDeferredState {
+                pending_capture_updates: std::collections::HashMap::new(),
+                deferred_con_deps: Vec::new(),
+                deferred_con_binders: std::collections::HashSet::new(),
+            });
+
+            // Push finish + simple evals in reverse order (LIFO)
+            work.push(EmitWork::LetRecFinish { body, state_idx });
+            for (binder, rhs_idx) in simple_bindings.iter().rev() {
+                if Self::rhs_is_error_call(tree, *rhs_idx) {
+                    let kind = Self::extract_error_kind(tree, *rhs_idx);
+                    let poison_addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
+                    let poison_val = builder.ins().iconst(types::I64, poison_addr);
+                    self.trace_scope(&format!("defer error LetRec(simple) {:?}", binder));
+                    self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
+                } else {
+                    work.push(EmitWork::LetRecPostSimple {
+                        binder: *binder,
+                        state_idx,
+                    });
+                    work.push(EmitWork::Eval(*rhs_idx));
                 }
             }
-        }; // end loop
-           // Clean up let-bindings in reverse order
-        for cleanup in let_cleanup.into_iter().rev() {
-            match cleanup {
-                LetCleanup::Single(var) => {
-                    self.trace_scope(&format!("remove LetCleanup {:?}", var));
-                    self.env.remove(&var);
-                }
-                LetCleanup::Rec(vars) => {
-                    for var in &vars {
-                        self.trace_scope(&format!("remove LetCleanup(rec) {:?}", var));
+            return Ok(());
+        }
+
+        // Phase 1: Pre-allocate all recursive bindings (Lam and Con)
+        enum PreAlloc {
+            Lam {
+                binder: VarId,
+                ptr: cranelift_codegen::ir::Value,
+                fvs: Vec<VarId>,
+                rhs_idx: usize,
+            },
+            Con {
+                binder: VarId,
+                ptr: cranelift_codegen::ir::Value,
+                field_indices: Vec<usize>,
+            },
+        }
+        let mut pre_allocs = Vec::with_capacity(rec_bindings.len());
+
+        for (binder, rhs_idx) in &rec_bindings {
+            match &tree.nodes[*rhs_idx] {
+                CoreFrame::Lam {
+                    binder: lam_binder,
+                    body: lam_body,
+                } => {
+                    let lam_body_tree = tree.extract_subtree(*lam_body);
+                    let mut fvs = tidepool_repr::free_vars::free_vars(&lam_body_tree);
+                    fvs.remove(lam_binder);
+                    let dropped_fvs: Vec<VarId> = fvs
+                        .iter()
+                        .filter(|v| {
+                            !self.env.contains_key(v)
+                                && !rec_bindings.iter().any(|(b, _)| b == *v)
+                                && !simple_bindings.iter().any(|(b, _)| b == *v)
+                        })
+                        .copied()
+                        .collect();
+                    if !dropped_fvs.is_empty() {
+                        self.trace_scope(&format!(
+                            "LetRec lam {:?}: dropped FVs {:?}",
+                            binder, dropped_fvs
+                        ));
                     }
-                    for var in vars {
-                        self.env.remove(&var);
+                    let mut sorted_fvs: Vec<VarId> = fvs
+                        .into_iter()
+                        .filter(|v| {
+                            self.env.contains_key(v)
+                                || rec_bindings.iter().any(|(b, _)| b == v)
+                                || simple_bindings.iter().any(|(b, _)| b == v)
+                        })
+                        .collect();
+                    sorted_fvs.sort_by_key(|v| v.0);
+
+                    let num_captures = sorted_fvs.len();
+                    let closure_size = 24 + 8 * num_captures as u64;
+                    let closure_ptr =
+                        emit_alloc_fast_path(builder, vmctx, closure_size, gc_sig, oom_func);
+
+                    let tag_val = builder.ins().iconst(types::I8, layout::TAG_CLOSURE as i64);
+                    builder
+                        .ins()
+                        .store(MemFlags::trusted(), tag_val, closure_ptr, 0);
+                    let size_val = builder.ins().iconst(types::I16, closure_size as i64);
+                    builder
+                        .ins()
+                        .store(MemFlags::trusted(), size_val, closure_ptr, 1);
+                    let num_cap_val = builder.ins().iconst(types::I16, num_captures as i64);
+                    builder.ins().store(
+                        MemFlags::trusted(),
+                        num_cap_val,
+                        closure_ptr,
+                        CLOSURE_NUM_CAPTURED_OFFSET,
+                    );
+
+                    builder.declare_value_needs_stack_map(closure_ptr);
+                    pre_allocs.push(PreAlloc::Lam {
+                        binder: *binder,
+                        ptr: closure_ptr,
+                        fvs: sorted_fvs,
+                        rhs_idx: *rhs_idx,
+                    });
+                }
+                CoreFrame::Con { tag, fields } => {
+                    let num_fields = fields.len();
+                    let size = 24 + 8 * num_fields as u64;
+                    let ptr = emit_alloc_fast_path(builder, vmctx, size, gc_sig, oom_func);
+
+                    let tag_val = builder.ins().iconst(types::I8, layout::TAG_CON as i64);
+                    builder.ins().store(MemFlags::trusted(), tag_val, ptr, 0);
+                    let size_val = builder.ins().iconst(types::I16, size as i64);
+                    builder.ins().store(MemFlags::trusted(), size_val, ptr, 1);
+                    let con_tag_val = builder.ins().iconst(types::I64, tag.0 as i64);
+                    builder
+                        .ins()
+                        .store(MemFlags::trusted(), con_tag_val, ptr, CON_TAG_OFFSET);
+                    let num_fields_val = builder.ins().iconst(types::I16, num_fields as i64);
+                    builder.ins().store(
+                        MemFlags::trusted(),
+                        num_fields_val,
+                        ptr,
+                        CON_NUM_FIELDS_OFFSET,
+                    );
+
+                    // Zero-initialize Con fields so GC doesn't trace garbage
+                    // if triggered before Phase 3b/3d.
+                    let null_val = builder.ins().iconst(types::I64, 0);
+                    for i in 0..num_fields {
+                        let offset = CON_FIELDS_START + 8 * i as i32;
+                        builder
+                            .ins()
+                            .store(MemFlags::trusted(), null_val, ptr, offset);
+                    }
+
+                    builder.declare_value_needs_stack_map(ptr);
+                    pre_allocs.push(PreAlloc::Con {
+                        binder: *binder,
+                        ptr,
+                        field_indices: fields.clone(),
+                    });
+                }
+                other => {
+                    return Err(EmitError::InternalError(format!(
+                        "LetRec phase 1: expected Lam or Con, got {:?}",
+                        other
+                    )))
+                }
+            }
+        }
+
+        // Phase 2: Bind all to their pre-allocated pointers
+        for pa in &pre_allocs {
+            let (binder, ptr) = match pa {
+                PreAlloc::Lam { binder, ptr, .. } => (*binder, *ptr),
+                PreAlloc::Con { binder, ptr, .. } => (*binder, *ptr),
+            };
+            self.trace_scope(&format!("insert LetRec(rec) {:?}", binder));
+            self.env.insert(binder, SsaVal::HeapPtr(ptr));
+        }
+
+        // Phase 2.5: Evaluate trivial simple bindings (Var aliases) before
+        // Lam body compilation. These are just env lookups that don't depend
+        // on closure code pointers.
+        let mut deferred_simple = Vec::with_capacity(simple_bindings.len());
+        for (binder, rhs_idx) in &simple_bindings {
+            if Self::rhs_is_error_call(tree, *rhs_idx) {
+                let kind = Self::extract_error_kind(tree, *rhs_idx);
+                let poison_addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
+                let poison_val = builder.ins().iconst(types::I64, poison_addr);
+                self.trace_scope(&format!("defer error LetRec(trivial) {:?}", binder));
+                self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
+            } else if matches!(&tree.nodes[*rhs_idx], CoreFrame::Var(_)) {
+                // Var aliases are trivial — just an env lookup via emit_subtree
+                let rhs_val = emit_subtree(
+                    self, pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx,
+                )?;
+                self.trace_scope(&format!("insert LetRec(trivial) {:?}", binder));
+                self.env.insert(*binder, rhs_val);
+            } else {
+                deferred_simple.push((*binder, *rhs_idx));
+            }
+        }
+
+        // Phase 3a: Compile Lam bodies and set code pointers.
+        // Capture VALUES are NOT filled here — some captures reference
+        // deferred simple bindings (Phase 3c) that aren't in env yet.
+        let mut pending_capture_updates: std::collections::HashMap<
+            VarId,
+            Vec<(cranelift_codegen::ir::Value, i32)>,
+        > = std::collections::HashMap::with_capacity(rec_bindings.len());
+
+        for pa in &pre_allocs {
+            let (closure_ptr, sorted_fvs, rhs_idx) = match pa {
+                PreAlloc::Lam {
+                    ptr, fvs, rhs_idx, ..
+                } => (*ptr, fvs, *rhs_idx),
+                PreAlloc::Con { .. } => continue,
+            };
+            let (lam_binder, lam_body) = match &tree.nodes[rhs_idx] {
+                CoreFrame::Lam { binder, body } => (*binder, *body),
+                other => {
+                    return Err(EmitError::InternalError(format!(
+                        "LetRec phase 3a: expected Lam, got {:?}",
+                        other
+                    )))
+                }
+            };
+            let lam_body_tree = tree.extract_subtree(lam_body);
+
+            let lambda_name = self.next_lambda_name();
+            let mut closure_sig = Signature::new(pipeline.isa.default_call_conv());
+            closure_sig.params.push(AbiParam::new(types::I64));
+            closure_sig.params.push(AbiParam::new(types::I64));
+            closure_sig.params.push(AbiParam::new(types::I64));
+            closure_sig.returns.push(AbiParam::new(types::I64));
+
+            let lambda_func_id = pipeline
+                .module
+                .declare_function(&lambda_name, Linkage::Local, &closure_sig)
+                .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+            pipeline.register_lambda(lambda_func_id, lambda_name.clone());
+
+            let mut inner_ctx = Context::new();
+            inner_ctx.func.signature = closure_sig;
+            inner_ctx.func.name = UserFuncName::default();
+
+            let mut inner_fb_ctx = FunctionBuilderContext::new();
+            let mut inner_builder = FunctionBuilder::new(&mut inner_ctx.func, &mut inner_fb_ctx);
+            let inner_block = inner_builder.create_block();
+            inner_builder.append_block_params_for_function_params(inner_block);
+            inner_builder.switch_to_block(inner_block);
+            inner_builder.seal_block(inner_block);
+
+            let inner_vmctx = inner_builder.block_params(inner_block)[0];
+            let inner_self = inner_builder.block_params(inner_block)[1];
+            let inner_arg = inner_builder.block_params(inner_block)[2];
+
+            inner_builder.declare_value_needs_stack_map(inner_self);
+            inner_builder.declare_value_needs_stack_map(inner_arg);
+
+            let mut inner_gc_sig = Signature::new(pipeline.isa.default_call_conv());
+            inner_gc_sig.params.push(AbiParam::new(types::I64));
+            let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
+
+            let inner_oom_func = {
+                let mut sig = Signature::new(pipeline.isa.default_call_conv());
+                sig.returns.push(AbiParam::new(types::I64));
+                let func_id = pipeline
+                    .module
+                    .declare_function("runtime_oom", Linkage::Import, &sig)
+                    .map_err(|e| EmitError::CraneliftError(format!("declare runtime_oom: {e}")))?;
+                pipeline
+                    .module
+                    .declare_func_in_func(func_id, inner_builder.func)
+            };
+
+            let mut inner_emit = EmitContext::new(self.prefix.clone());
+            inner_emit.lambda_counter = self.lambda_counter;
+            inner_emit
+                .env
+                .insert(lam_binder, SsaVal::HeapPtr(inner_arg));
+
+            // Load captures by position
+            for (i, var_id) in sorted_fvs.iter().enumerate() {
+                let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
+                let val =
+                    inner_builder
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), inner_self, offset);
+                inner_builder.declare_value_needs_stack_map(val);
+                inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
+            }
+
+            let body_root = lam_body_tree.nodes.len() - 1;
+            let body_result = inner_emit.emit_node(
+                pipeline,
+                &mut inner_builder,
+                inner_vmctx,
+                inner_gc_sig_ref,
+                inner_oom_func,
+                &lam_body_tree,
+                body_root,
+            )?;
+            let ret_val = ensure_heap_ptr(
+                &mut inner_builder,
+                inner_vmctx,
+                inner_gc_sig_ref,
+                inner_oom_func,
+                body_result,
+            );
+
+            inner_builder.ins().return_(&[ret_val]);
+            inner_builder.finalize();
+            self.lambda_counter = inner_emit.lambda_counter;
+            pipeline.define_function(lambda_func_id, &mut inner_ctx)?;
+
+            let func_ref = pipeline
+                .module
+                .declare_func_in_func(lambda_func_id, builder.func);
+            let code_ptr = builder.ins().func_addr(types::I64, func_ref);
+            builder.ins().store(
+                MemFlags::trusted(),
+                code_ptr,
+                closure_ptr,
+                CLOSURE_CODE_PTR_OFFSET,
+            );
+
+            // Zero-initialize capture slots so GC doesn't trace garbage
+            let null_val = builder.ins().iconst(types::I64, 0);
+            for i in 0..sorted_fvs.len() {
+                let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
+                builder
+                    .ins()
+                    .store(MemFlags::trusted(), null_val, closure_ptr, offset);
+            }
+
+            // Fill captures already in env. Defer those referencing deferred simple bindings.
+            for (i, var_id) in sorted_fvs.iter().enumerate() {
+                let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
+                if let Some(ssaval) = self.env.get(var_id) {
+                    let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
+                    builder
+                        .ins()
+                        .store(MemFlags::trusted(), cap_val, closure_ptr, offset);
+                } else {
+                    pending_capture_updates
+                        .entry(*var_id)
+                        .or_default()
+                        .push((closure_ptr, offset));
+                }
+            }
+        }
+
+        // Phase 3b: Fill Con fields that DON'T reference deferred simple bindings.
+        let simple_binder_set: std::collections::HashSet<VarId> =
+            deferred_simple.iter().map(|(b, _)| *b).collect();
+        let mut deferred_cons: Vec<(VarId, cranelift_codegen::ir::Value, Vec<usize>)> =
+            Vec::with_capacity(rec_bindings.len());
+        let mut deferred_con_binders: std::collections::HashSet<VarId> =
+            std::collections::HashSet::new();
+        for pa in &pre_allocs {
+            if let PreAlloc::Con {
+                binder,
+                ptr,
+                field_indices,
+            } = pa
+            {
+                let needs_simple = field_indices.iter().any(|&f_idx| {
+                    matches!(&tree.nodes[f_idx], CoreFrame::Var(v) if simple_binder_set.contains(v))
+                });
+                if needs_simple {
+                    deferred_cons.push((*binder, *ptr, field_indices.clone()));
+                    deferred_con_binders.insert(*binder);
+                } else {
+                    for (i, &f_idx) in field_indices.iter().enumerate() {
+                        let field_val = if is_trivial_field(f_idx, tree) {
+                            let val = emit_subtree(
+                                self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                            )?;
+                            ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
+                        } else {
+                            let thunk_val = emit_thunk(
+                                self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                            )?;
+                            thunk_val.value()
+                        };
+                        builder.ins().store(
+                            MemFlags::trusted(),
+                            field_val,
+                            *ptr,
+                            CON_FIELDS_START + 8 * i as i32,
+                        );
                     }
                 }
             }
         }
-        result
+
+        // Topological sort for deferred simple bindings
+        let deferred_simple = {
+            let deferred_set: std::collections::HashSet<VarId> =
+                deferred_simple.iter().map(|(b, _)| *b).collect();
+
+            let mut direct_deps: std::collections::HashMap<VarId, Vec<VarId>> =
+                std::collections::HashMap::with_capacity(bindings.len());
+            for (binder, rhs_idx) in bindings {
+                let fvs = tidepool_repr::free_vars::free_vars(&tree.extract_subtree(*rhs_idx));
+                direct_deps.insert(*binder, fvs.into_iter().collect());
+            }
+
+            let mut reachable_deferred: std::collections::HashMap<
+                VarId,
+                std::collections::HashSet<VarId>,
+            > = std::collections::HashMap::with_capacity(deferred_simple.len());
+            for &(start_node, _) in &deferred_simple {
+                let mut visited = std::collections::HashSet::new();
+                let mut stack = vec![start_node];
+                let mut reached = std::collections::HashSet::new();
+
+                while let Some(node) = stack.pop() {
+                    if !visited.insert(node) {
+                        continue;
+                    }
+                    if node != start_node && deferred_set.contains(&node) {
+                        reached.insert(node);
+                    }
+                    if let Some(neighbors) = direct_deps.get(&node) {
+                        for &next in neighbors {
+                            stack.push(next);
+                        }
+                    }
+                }
+                reachable_deferred.insert(start_node, reached);
+            }
+
+            let mut sorted = Vec::with_capacity(deferred_simple.len());
+            let mut remaining: Vec<(VarId, usize)> = deferred_simple;
+            let mut progress = true;
+            while !remaining.is_empty() && progress {
+                progress = false;
+                let mut next_remaining = Vec::with_capacity(remaining.len());
+                for (binder, rhs_idx) in remaining {
+                    let blocked = reachable_deferred[&binder]
+                        .iter()
+                        .any(|fv| !sorted.iter().any(|(b, _): &(VarId, usize)| *b == *fv));
+                    if blocked {
+                        next_remaining.push((binder, rhs_idx));
+                    } else {
+                        sorted.push((binder, rhs_idx));
+                        progress = true;
+                    }
+                }
+                remaining = next_remaining;
+            }
+            sorted.extend(remaining);
+            sorted
+        };
+
+        // Build deferred Con deps tracking
+        let mut deferred_con_deps: Vec<DeferredConDep> = Vec::with_capacity(deferred_cons.len());
+        for (con_binder, ptr, field_indices) in &deferred_cons {
+            let deps: std::collections::HashSet<VarId> = field_indices
+                .iter()
+                .filter_map(|&f_idx| {
+                    if let CoreFrame::Var(v) = &tree.nodes[f_idx] {
+                        if simple_binder_set.contains(v) {
+                            return Some(*v);
+                        }
+                    }
+                    None
+                })
+                .collect();
+            deferred_con_deps.push(DeferredConDep {
+                _binder: *con_binder,
+                ptr: *ptr,
+                field_indices: field_indices.clone(),
+                remaining_deps: deps,
+            });
+        }
+
+        // Store deferred state for LetRecSimpleEval/LetRecPostSimple/LetRecFinish
+        let state_idx = self.push_letrec_state(LetRecDeferredState {
+            pending_capture_updates,
+            deferred_con_deps,
+            deferred_con_binders,
+        });
+
+        // Push work items in LIFO order: finish, then simple evals (reversed)
+        work.push(EmitWork::LetRecFinish { body, state_idx });
+
+        for (binder, rhs_idx) in deferred_simple.iter().rev() {
+            if Self::rhs_is_error_call(tree, *rhs_idx) {
+                let kind = Self::extract_error_kind(tree, *rhs_idx);
+                let poison_addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
+                let poison_val = builder.ins().iconst(types::I64, poison_addr);
+                self.trace_scope(&format!("defer error LetRec(deferred) {:?}", binder));
+                self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
+                // Run post-step inline: closures may capture error-poisoned
+                // bindings, and deferred Cons may depend on them. Without this,
+                // capture slots stay zero-initialized → SIGSEGV instead of
+                // clean poison closure invocation.
+                self.letrec_post_simple_step(
+                    builder, vmctx, gc_sig, oom_func, tree, binder, state_idx, pipeline,
+                )?;
+            } else {
+                let refs_deferred_con = !self.letrec_states[state_idx]
+                    .deferred_con_binders
+                    .is_empty()
+                    && self.letrec_states[state_idx]
+                        .deferred_con_deps
+                        .iter()
+                        .any(|d| d.remaining_deps.contains(binder));
+                if refs_deferred_con {
+                    // Thunked: compile as thunk inline (no work stack needed,
+                    // emit_thunk creates a new EmitContext — bounded recursion).
+                    let thunk_val = emit_thunk(
+                        self, pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx,
+                    )?;
+                    self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
+                    self.env.insert(*binder, thunk_val);
+                    self.letrec_post_simple_step(
+                        builder, vmctx, gc_sig, oom_func, tree, binder, state_idx, pipeline,
+                    )?;
+                } else {
+                    // Non-thunked: push eval + post-step onto work stack
+                    work.push(EmitWork::LetRecPostSimple {
+                        binder: *binder,
+                        state_idx,
+                    });
+                    work.push(EmitWork::Eval(*rhs_idx));
+                }
+            }
+        }
+
+        Ok(())
     }
+
+    /// Post-step after evaluating a deferred simple binding: fill pending
+    /// captures and incrementally fill deferred Con fields.
+    #[allow(clippy::too_many_arguments)]
+    fn letrec_post_simple_step(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        vmctx: Value,
+        gc_sig: ir::SigRef,
+        oom_func: ir::FuncRef,
+        tree: &CoreExpr,
+        binder: &VarId,
+        state_idx: usize,
+        pipeline: &mut CodegenPipeline,
+    ) -> Result<(), EmitError> {
+        // Fill pending captures — take updates out to avoid borrowing self
+        let updates = self.letrec_states[state_idx]
+            .pending_capture_updates
+            .remove(binder);
+        if let Some(updates) = updates {
+            if let Some(ssaval) = self.env.get(binder) {
+                let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
+                for (closure_ptr, offset) in updates {
+                    builder
+                        .ins()
+                        .store(MemFlags::trusted(), cap_val, closure_ptr, offset);
+                }
+            }
+        }
+
+        // Incrementally fill deferred Cons whose deps are all satisfied.
+        // Take out deferred_con_deps to avoid double-borrowing self
+        // (emit_subtree/emit_thunk need &mut self).
+        let mut con_deps = std::mem::take(&mut self.letrec_states[state_idx].deferred_con_deps);
+        for dep in con_deps.iter_mut() {
+            dep.remaining_deps.remove(binder);
+            if dep.remaining_deps.is_empty() && !dep.field_indices.is_empty() {
+                for (i, &f_idx) in dep.field_indices.iter().enumerate() {
+                    let field_val = if is_trivial_field(f_idx, tree) {
+                        let val = emit_subtree(
+                            self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                        )?;
+                        ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
+                    } else {
+                        let thunk_val = emit_thunk(
+                            self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                        )?;
+                        thunk_val.value()
+                    };
+                    builder.ins().store(
+                        MemFlags::trusted(),
+                        field_val,
+                        dep.ptr,
+                        CON_FIELDS_START + 8 * i as i32,
+                    );
+                }
+                dep.field_indices.clear();
+            }
+        }
+        self.letrec_states[state_idx].deferred_con_deps = con_deps;
+
+        Ok(())
+    }
+
+    /// LetRec phases 3a' and 3d: fill remaining captures and Con fields.
+    #[allow(clippy::too_many_arguments)]
+    fn letrec_finish_phases(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        vmctx: Value,
+        gc_sig: ir::SigRef,
+        oom_func: ir::FuncRef,
+        tree: &CoreExpr,
+        state_idx: usize,
+        pipeline: &mut CodegenPipeline,
+    ) -> Result<(), EmitError> {
+        // Phase 3a': Fill any remaining closure capture slots.
+        let pending = std::mem::take(&mut self.letrec_states[state_idx].pending_capture_updates);
+        for (var_id, updates) in pending {
+            let ssaval = self.env.get(&var_id).ok_or_else(|| {
+                EmitError::MissingCaptureVar(
+                    var_id,
+                    "LetRec Phase 3a' capture fill: not in env after Phase 3c".into(),
+                )
+            })?;
+            let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
+            for (closure_ptr, offset) in updates {
+                builder
+                    .ins()
+                    .store(MemFlags::trusted(), cap_val, closure_ptr, offset);
+            }
+        }
+
+        // Phase 3d: Fill any deferred Con fields not already filled.
+        let con_deps = std::mem::take(&mut self.letrec_states[state_idx].deferred_con_deps);
+        for dep in &con_deps {
+            for (i, &f_idx) in dep.field_indices.iter().enumerate() {
+                let field_val = if is_trivial_field(f_idx, tree) {
+                    let val = emit_subtree(
+                        self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                    )?;
+                    ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
+                } else {
+                    let thunk_val = emit_thunk(
+                        self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                    )?;
+                    thunk_val.value()
+                };
+                builder.ins().store(
+                    MemFlags::trusted(),
+                    field_val,
+                    dep.ptr,
+                    CON_FIELDS_START + 8 * i as i32,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn push_letrec_state(&mut self, state: LetRecDeferredState) -> usize {
+        let idx = self.letrec_states.len();
+        self.letrec_states.push(state);
+        idx
+    }
+}
+
+/// Work items for the emit_node trampoline. Replaces recursive calls
+/// with an explicit LIFO stack.
+enum EmitWork {
+    /// Evaluate node at tree index → push result onto value stack
+    Eval(usize),
+    /// Pop value stack, bind to env
+    Bind(VarId),
+    /// After deferred simple binding eval: pop value, bind, fill captures + Cons
+    LetRecPostSimple { binder: VarId, state_idx: usize },
+    /// Phases 3a'/3d + push body eval
+    LetRecFinish { body: usize, state_idx: usize },
+    /// Pop cleanup on return
+    LetCleanupMark(LetCleanup),
+}
+
+/// Deferred state for LetRec phases 3c/3a'/3d, stored in EmitContext
+/// so work items can reference it by index.
+pub(crate) struct LetRecDeferredState {
+    pending_capture_updates:
+        std::collections::HashMap<VarId, Vec<(cranelift_codegen::ir::Value, i32)>>,
+    deferred_con_deps: Vec<DeferredConDep>,
+    deferred_con_binders: std::collections::HashSet<VarId>,
+}
+
+/// A pre-allocated Con whose field filling is deferred until its
+/// simple-binding dependencies are satisfied.
+struct DeferredConDep {
+    _binder: VarId,
+    ptr: cranelift_codegen::ir::Value,
+    /// Field indices to fill. Emptied once filled (sentinel for "done").
+    field_indices: Vec<usize>,
+    /// Simple bindings this Con depends on. Entries removed as deps are satisfied.
+    remaining_deps: std::collections::HashSet<VarId>,
 }
 
 enum LetCleanup {
@@ -1949,14 +2094,10 @@ pub(crate) fn force_thunk_ssaval(
     match val {
         SsaVal::Raw(_, _) => Ok(val),
         SsaVal::HeapPtr(ptr) => {
-            let tag = builder
+            let tag = builder.ins().load(types::I8, MemFlags::trusted(), ptr, 0);
+            let is_thunk = builder
                 .ins()
-                .load(types::I8, MemFlags::trusted(), ptr, 0);
-            let is_thunk = builder.ins().icmp_imm(
-                IntCC::Equal,
-                tag,
-                layout::TAG_THUNK as i64,
-            );
+                .icmp_imm(IntCC::Equal, tag, layout::TAG_THUNK as i64);
 
             let force_block = builder.create_block();
             let ready_block = builder.create_block();
@@ -1983,15 +2124,11 @@ pub(crate) fn force_thunk_ssaval(
                     sig
                 })
                 .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-            let force_ref = pipeline
-                .module
-                .declare_func_in_func(force_fn, builder.func);
+            let force_ref = pipeline.module.declare_func_in_func(force_fn, builder.func);
             let call = builder.ins().call(force_ref, &[vmctx, ptr]);
             let forced = builder.inst_results(call)[0];
             builder.declare_value_needs_stack_map(forced);
-            builder
-                .ins()
-                .jump(ready_block, &[BlockArg::Value(forced)]);
+            builder.ins().jump(ready_block, &[BlockArg::Value(forced)]);
 
             builder.switch_to_block(ready_block);
             builder.seal_block(ready_block);

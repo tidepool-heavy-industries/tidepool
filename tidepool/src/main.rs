@@ -1294,13 +1294,14 @@ impl EffectHandler<CapturedOutput> for LlmHandler {
                 // Extract tool use input from response
                 let input = resp["content"]
                     .as_array()
-                    .and_then(|arr| {
-                        arr.iter().find(|block| block["type"] == "tool_use")
-                    })
+                    .and_then(|arr| arr.iter().find(|block| block["type"] == "tool_use"))
                     .and_then(|block| block.get("input"))
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
-                eprintln!("[llm-structured] API response input: {}", serde_json::to_string(&input).unwrap_or_default());
+                eprintln!(
+                    "[llm-structured] API response input: {}",
+                    serde_json::to_string(&input).unwrap_or_default()
+                );
                 let result = cx.respond(input);
                 eprintln!("[llm-structured] cx.respond result: {}", result.is_ok());
                 result
@@ -2213,7 +2214,9 @@ mod tests {
         let decls = tidepool_mcp::standard_decls();
         // HList order from main(): Console(0), KV(1), Fs(2), SG(3), Http(4), Exec(5), Meta(6), Git(7), Llm(8)
         // Ask(9) is handled by MCP server, not in main HList
-        let expected = ["Console", "KV", "Fs", "SG", "Http", "Exec", "Meta", "Git", "Llm"];
+        let expected = [
+            "Console", "KV", "Fs", "SG", "Http", "Exec", "Meta", "Git", "Llm",
+        ];
         for (i, name) in expected.iter().enumerate() {
             assert_eq!(
                 decls[i].type_name, *name,
@@ -2732,7 +2735,10 @@ mod tests {
         }
     }
 
-    fn jit_eval_with_mock_llm(code: &[&str], mock_response: serde_json::Value) -> serde_json::Value {
+    fn jit_eval_with_mock_llm(
+        code: &[&str],
+        mock_response: serde_json::Value,
+    ) -> serde_json::Value {
         let source = jit_test_source(code);
         let include = prelude_include();
         let include_paths: Vec<&std::path::Path> = vec![include.as_path()];
@@ -2748,7 +2754,9 @@ mod tests {
             ExecHandler::new(cwd.clone()),
             MetaHandler::new(vec![], vec![]),
             GitHandler::new(cwd),
-            MockLlmHandler { response: mock_response }
+            MockLlmHandler {
+                response: mock_response
+            }
         ];
         let result = tidepool_runtime::compile_and_run(
             &source,
@@ -2766,10 +2774,8 @@ mod tests {
     #[test]
     fn test_llm_structured_simple_object() {
         let mock = serde_json::json!({"greeting": "hello"});
-        let result = jit_eval_with_mock_llm(
-            &["llmJson \"test\" (SObj [(\"greeting\", SStr)])"],
-            mock,
-        );
+        let result =
+            jit_eval_with_mock_llm(&["llmJson \"test\" (SObj [(\"greeting\", SStr)])"], mock);
         assert_eq!(result["greeting"], "hello");
     }
 
@@ -2786,7 +2792,9 @@ mod tests {
             &["llmJson \"test\" (SObj [(\"languages\", SArr (SObj [(\"name\", SStr), (\"year\", SNum)]))])"],
             mock,
         );
-        let langs = result["languages"].as_array().expect("languages should be array");
+        let langs = result["languages"]
+            .as_array()
+            .expect("languages should be array");
         assert_eq!(langs.len(), 3);
         assert_eq!(langs[0]["name"], "Haskell");
     }
@@ -2821,17 +2829,16 @@ mod tests {
             ],
             mock,
         );
-        let langs = result["languages"].as_array().expect("languages should be array");
+        let langs = result["languages"]
+            .as_array()
+            .expect("languages should be array");
         assert_eq!(langs.len(), 2);
     }
 
     #[test]
     fn test_llm_structured_empty_object() {
         let mock = serde_json::json!({});
-        let result = jit_eval_with_mock_llm(
-            &["llmJson \"test\" (SObj [])"],
-            mock,
-        );
+        let result = jit_eval_with_mock_llm(&["llmJson \"test\" (SObj [])"], mock);
         assert!(result.is_object());
         assert_eq!(result.as_object().unwrap().len(), 0);
     }
@@ -2870,5 +2877,4 @@ mod tests {
         assert_eq!(result["count"], 42);
         assert_eq!(result["active"], true);
     }
-
 }

@@ -392,9 +392,18 @@ mod tests {
 
         // Check by-id entries survived (HashMap order may differ, so check individually)
         assert_eq!(recovered.len(), 3);
-        assert_eq!(recovered.get(DataConId(100)).unwrap().qualified_name, Some("Data.Map.Bin".to_string()));
-        assert_eq!(recovered.get(DataConId(200)).unwrap().qualified_name, Some("Data.Map.Tip".to_string()));
-        assert_eq!(recovered.get(DataConId(300)).unwrap().qualified_name, Some("Data.Set.Bin".to_string()));
+        assert_eq!(
+            recovered.get(DataConId(100)).unwrap().qualified_name,
+            Some("Data.Map.Bin".to_string())
+        );
+        assert_eq!(
+            recovered.get(DataConId(200)).unwrap().qualified_name,
+            Some("Data.Map.Tip".to_string())
+        );
+        assert_eq!(
+            recovered.get(DataConId(300)).unwrap().qualified_name,
+            Some("Data.Set.Bin".to_string())
+        );
 
         // Verify qualified name index survived the round-trip
         assert_eq!(

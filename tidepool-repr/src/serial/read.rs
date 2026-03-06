@@ -88,7 +88,11 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
                 // New format
                 let entries = match &root[0] {
                     Value::Array(a) => a.clone(),
-                    _ => return Err(ReadError::InvalidStructure("expected Array for entries".to_string())),
+                    _ => {
+                        return Err(ReadError::InvalidStructure(
+                            "expected Array for entries".to_string(),
+                        ))
+                    }
                 };
                 let warnings = parse_warnings(&root[1]);
                 (entries, warnings)

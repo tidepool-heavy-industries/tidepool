@@ -61,7 +61,10 @@ pub fn set_lambda_registry(registry: LambdaRegistry) -> Option<LambdaRegistry> {
 
 /// Clear the global registry.
 pub fn clear_lambda_registry() -> Option<LambdaRegistry> {
-    LAMBDA_REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).take()
+    LAMBDA_REGISTRY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
 }
 
 /// Look up a code pointer in the global registry.

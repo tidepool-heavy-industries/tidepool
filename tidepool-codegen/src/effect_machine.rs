@@ -167,8 +167,14 @@ impl CompiledEffectMachine {
             if std::env::var("TIDEPOOL_TRACE_EFFECTS").is_ok() {
                 eprintln!(
                     "[effect_machine] effect_tag={} tag_ptr_tag={} union_con_tag={} request_tag={}",
-                    effect_tag, tag_ptr_tag, unsafe { *(union_ptr.add(layout::CON_TAG_OFFSET) as *const u64) },
-                    if request.is_null() { 255 } else { unsafe { *request } }
+                    effect_tag,
+                    tag_ptr_tag,
+                    unsafe { *(union_ptr.add(layout::CON_TAG_OFFSET) as *const u64) },
+                    if request.is_null() {
+                        255
+                    } else {
+                        unsafe { *request }
+                    }
                 );
             }
 
@@ -234,7 +240,8 @@ impl CompiledEffectMachine {
                 } else if con_tag == self.tags.node {
                     // Node(k1, k2) — apply k1 to arg, then compose with k2
                     let k1 = self.force_ptr(*(k.add(layout::CON_FIELDS_OFFSET) as *const *mut u8));
-                    let k2 = self.force_ptr(*(k.add(layout::CON_FIELDS_OFFSET + 8) as *const *mut u8));
+                    let k2 =
+                        self.force_ptr(*(k.add(layout::CON_FIELDS_OFFSET + 8) as *const *mut u8));
 
                     let result = self.apply_cont_heap(k1, arg);
                     if result.is_null() {
@@ -257,13 +264,16 @@ impl CompiledEffectMachine {
 
                     if result_con_tag == self.tags.val {
                         // Val(y) — extract y, apply k2(y)
-                        let y = self.force_ptr(*(result.add(layout::CON_FIELDS_OFFSET) as *const *mut u8));
+                        let y = self
+                            .force_ptr(*(result.add(layout::CON_FIELDS_OFFSET) as *const *mut u8));
                         self.apply_cont_heap(k2, y)
                     } else if result_con_tag == self.tags.e {
                         // E(union, k') — compose: E(union, Node(k', k2))
-                        let union_val = self.force_ptr(*(result.add(layout::CON_FIELDS_OFFSET) as *const *mut u8));
-                        let k_prime =
-                            self.force_ptr(*(result.add(layout::CON_FIELDS_OFFSET + 8) as *const *mut u8));
+                        let union_val = self
+                            .force_ptr(*(result.add(layout::CON_FIELDS_OFFSET) as *const *mut u8));
+                        let k_prime = self.force_ptr(
+                            *(result.add(layout::CON_FIELDS_OFFSET + 8) as *const *mut u8),
+                        );
 
                         // Allocate Node(k', k2)
                         let new_node = self.alloc_con(self.tags.node, &[k_prime, k2]);

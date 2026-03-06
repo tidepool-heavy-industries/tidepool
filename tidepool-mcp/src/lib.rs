@@ -463,10 +463,7 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
         let has_kv = effects.iter().any(|e| e.type_name == "KV");
 
         out.push_str("-- Pagination\n");
-        out.push_str(concat!(
-            "showI :: Int -> Text\n",
-            "showI n = show n\n",
-        ));
+        out.push_str(concat!("showI :: Int -> Text\n", "showI n = show n\n",));
         // say: normal Print effect + char counter in KV (when available)
         if has_console && has_kv {
             out.push_str(concat!(
@@ -1304,7 +1301,10 @@ impl CapturedOutput {
 
     /// Push a line of output.
     pub fn push(&self, line: String) {
-        self.lines.lock().unwrap_or_else(|e| e.into_inner()).push(line);
+        self.lines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(line);
     }
 
     /// Drain all captured lines, returning them and clearing the buffer.
@@ -1510,7 +1510,7 @@ impl TidepoolMcpServerImpl {
         let thread_session_tx = session_tx;
         let _handle = std::thread::Builder::new()
             .name("tidepool-eval".into())
-            .stack_size(8 * 1024 * 1024)
+            .stack_size(32 * 1024 * 1024)
             .spawn(move || {
                 // Install signal handlers so SIGILL/SIGSEGV from JIT code
                 // are caught via sigsetjmp/siglongjmp instead of killing
@@ -1554,10 +1554,8 @@ impl TidepoolMcpServerImpl {
                                 .map(|(i, name)| format!("  {} = {}", i, name))
                                 .collect::<Vec<_>>()
                                 .join("\n");
-                            error_detail.push_str(&format!(
-                                "\n\nRegistered effects:\n{}",
-                                effects_list
-                            ));
+                            error_detail
+                                .push_str(&format!("\n\nRegistered effects:\n{}", effects_list));
                         }
                         if !diagnostics.is_empty() {
                             error_detail.push_str("\n\n## JIT Diagnostics\n");
@@ -1613,15 +1611,18 @@ impl TidepoolMcpServerImpl {
                     "continuation_id": cont_id,
                     "prompt": prompt,
                 });
-                self.continuations.lock().unwrap_or_else(|e| e.into_inner()).insert(
-                    cont_id.clone(),
-                    EvalSession {
-                        response_tx,
-                        session_rx,
-                        source: Arc::clone(&source),
-                        created_at: std::time::Instant::now(),
-                    },
-                );
+                self.continuations
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(
+                        cont_id.clone(),
+                        EvalSession {
+                            response_tx,
+                            session_rx,
+                            source: Arc::clone(&source),
+                            created_at: std::time::Instant::now(),
+                        },
+                    );
                 Ok(CallToolResult::success(vec![Content::text(
                     json.to_string(),
                 )]))
@@ -1706,15 +1707,18 @@ impl TidepoolMcpServerImpl {
                     "continuation_id": cont_id,
                     "prompt": prompt,
                 });
-                self.continuations.lock().unwrap_or_else(|e| e.into_inner()).insert(
-                    cont_id.clone(),
-                    EvalSession {
-                        response_tx,
-                        session_rx: session.session_rx,
-                        source,
-                        created_at: std::time::Instant::now(),
-                    },
-                );
+                self.continuations
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(
+                        cont_id.clone(),
+                        EvalSession {
+                            response_tx,
+                            session_rx: session.session_rx,
+                            source,
+                            created_at: std::time::Instant::now(),
+                        },
+                    );
                 Ok(CallToolResult::success(vec![Content::text(
                     json.to_string(),
                 )]))
@@ -2194,16 +2198,18 @@ mod tests {
         let preamble = build_preamble(&decls, false);
         assert!(preamble.contains("data Ask a where"));
         assert!(preamble.contains("  Ask :: Text -> Ask Value"));
-        assert!(
-            preamble.contains("type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]")
-        );
+        assert!(preamble
+            .contains("type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]"));
     }
 
     #[test]
     fn test_ask_in_effect_stack_type() {
         let decls = standard_decls();
         let stack = build_effect_stack_type(&decls);
-        assert_eq!(stack, "'[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]");
+        assert_eq!(
+            stack,
+            "'[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]"
+        );
     }
 
     #[test]
@@ -2343,7 +2349,8 @@ mod tests {
     #[test]
     fn test_parse_constructor_nested_types() {
         let p =
-            parse_constructor("HttpRequest :: Text -> Text -> [(Text,Text)] -> Text -> Http Value").unwrap();
+            parse_constructor("HttpRequest :: Text -> Text -> [(Text,Text)] -> Text -> Http Value")
+                .unwrap();
         assert_eq!(
             p,
             ParsedConstructor {

@@ -291,7 +291,9 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
             // because GC doesn't track the interior pointer from the Lit wrapper to the
             // data buffer. Using bump_alloc would place data in the nursery; after a
             // Cheney copy, the Lit's data_ptr would point to stale fromspace memory.
-            let bytes = bytes.lock().map_err(|e| BridgeError::InternalError(format!("mutex poisoned: {e}")))?;
+            let bytes = bytes
+                .lock()
+                .map_err(|e| BridgeError::InternalError(format!("mutex poisoned: {e}")))?;
             let data_ptr = crate::host_fns::runtime_new_byte_array(bytes.len() as i64) as *mut u8;
             if data_ptr.is_null() {
                 return Err(BridgeError::NurseryExhausted);

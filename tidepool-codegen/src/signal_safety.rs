@@ -326,10 +326,7 @@ mod inner {
                             .store(cwd_bytes.len() + dir_suffix.len() - 1, Ordering::Relaxed);
 
                         // Ensure .tidepool/ directory exists (safe, non-signal context).
-                        libc::mkdir(
-                            addr_of!(CRASH_DIR_PATH) as *const libc::c_char,
-                            0o755,
-                        );
+                        libc::mkdir(addr_of!(CRASH_DIR_PATH) as *const libc::c_char, 0o755);
                     }
                 }
             }

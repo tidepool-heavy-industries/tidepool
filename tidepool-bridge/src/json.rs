@@ -556,7 +556,9 @@ mod tests {
     #[test]
     fn test_object_two_keys() {
         let table = json_test_table();
-        let val = serde_json::json!({"a": 1, "b": 2}).to_value(&table).unwrap();
+        let val = serde_json::json!({"a": 1, "b": 2})
+            .to_value(&table)
+            .unwrap();
         match &val {
             Value::Con(id, fields) => {
                 assert_eq!(table.name_of(*id), Some("Object"));
@@ -584,7 +586,9 @@ mod tests {
     #[test]
     fn test_object_three_keys_balanced() {
         let table = json_test_table();
-        let val = serde_json::json!({"a": 1, "b": 2, "c": 3}).to_value(&table).unwrap();
+        let val = serde_json::json!({"a": 1, "b": 2, "c": 3})
+            .to_value(&table)
+            .unwrap();
         match &val {
             Value::Con(id, fields) => {
                 assert_eq!(table.name_of(*id), Some("Object"));
@@ -593,10 +597,8 @@ mod tests {
                     Value::Con(bin_id, bin_fields) => {
                         assert_eq!(table.name_of(*bin_id), Some("Bin"));
                         // At least one child should be a Bin (not both Tip)
-                        let left_is_bin =
-                            matches!(&bin_fields[3], Value::Con(id, _) if table.name_of(*id) == Some("Bin"));
-                        let right_is_bin =
-                            matches!(&bin_fields[4], Value::Con(id, _) if table.name_of(*id) == Some("Bin"));
+                        let left_is_bin = matches!(&bin_fields[3], Value::Con(id, _) if table.name_of(*id) == Some("Bin"));
+                        let right_is_bin = matches!(&bin_fields[4], Value::Con(id, _) if table.name_of(*id) == Some("Bin"));
                         assert!(
                             left_is_bin || right_is_bin,
                             "Expected at least one Bin child for 3-entry map"

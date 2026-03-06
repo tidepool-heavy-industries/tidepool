@@ -97,12 +97,7 @@ impl DataConTable {
     /// Uses sibling groups populated by `populate_siblings_from_expr` — if two
     /// DataCons appear as alternatives in the same case expression, they're from
     /// the same type. Falls back to scanning all entries if no sibling info exists.
-    pub fn get_companion(
-        &self,
-        known_id: DataConId,
-        name: &str,
-        arity: u32,
-    ) -> Option<DataConId> {
+    pub fn get_companion(&self, known_id: DataConId, name: &str, arity: u32) -> Option<DataConId> {
         // First try sibling groups (reliable, derived from case branches)
         if let Some(sibs) = self.siblings.get(&known_id) {
             for &sib_id in sibs {
@@ -323,14 +318,8 @@ mod tests {
         table.insert(make_datacon(100, "Bin", 1, 5));
         table.insert(make_datacon(200, "Bin", 1, 3));
 
-        assert_eq!(
-            table.get_by_name_arity("Bin", 5),
-            Some(DataConId(100))
-        );
-        assert_eq!(
-            table.get_by_name_arity("Bin", 3),
-            Some(DataConId(200))
-        );
+        assert_eq!(table.get_by_name_arity("Bin", 5), Some(DataConId(100)));
+        assert_eq!(table.get_by_name_arity("Bin", 3), Some(DataConId(200)));
     }
 
     #[test]
@@ -402,28 +391,19 @@ mod tests {
     fn test_overwrite_cleans_old_qualified_name() {
         let mut table = DataConTable::new();
         table.insert(make_datacon_qualified(1, "Foo", 1, 0, "Mod.A.Foo"));
-        assert_eq!(
-            table.get_by_qualified_name("Mod.A.Foo"),
-            Some(DataConId(1))
-        );
+        assert_eq!(table.get_by_qualified_name("Mod.A.Foo"), Some(DataConId(1)));
 
         // Overwrite same id with different qualified name
         table.insert(make_datacon_qualified(1, "Foo", 1, 0, "Mod.B.Foo"));
         assert_eq!(table.get_by_qualified_name("Mod.A.Foo"), None);
-        assert_eq!(
-            table.get_by_qualified_name("Mod.B.Foo"),
-            Some(DataConId(1))
-        );
+        assert_eq!(table.get_by_qualified_name("Mod.B.Foo"), Some(DataConId(1)));
     }
 
     #[test]
     fn test_overwrite_qualified_to_none() {
         let mut table = DataConTable::new();
         table.insert(make_datacon_qualified(1, "Foo", 1, 0, "Mod.Foo"));
-        assert_eq!(
-            table.get_by_qualified_name("Mod.Foo"),
-            Some(DataConId(1))
-        );
+        assert_eq!(table.get_by_qualified_name("Mod.Foo"), Some(DataConId(1)));
 
         // Overwrite with None qualified name — old mapping should be removed
         table.insert(make_datacon(1, "Foo", 1, 0));
@@ -475,9 +455,6 @@ mod tests {
             Some(DataConId(200))
         );
         // get_by_name_arity returns one of them (last inserted)
-        assert_eq!(
-            table.get_by_name_arity("Tip", 0),
-            Some(DataConId(200))
-        );
+        assert_eq!(table.get_by_name_arity("Tip", 0), Some(DataConId(200)));
     }
 }

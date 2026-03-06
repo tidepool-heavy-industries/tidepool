@@ -69,15 +69,19 @@ impl CodegenPipeline {
     pub fn new(symbols: &[(&str, *const u8)]) -> Result<Self, PipelineError> {
         let mut flag_builder = settings::builder();
         // REQUIRED: enables RBP frame chain for GC stack walking
-        flag_builder.set("preserve_frame_pointers", "true")
+        flag_builder
+            .set("preserve_frame_pointers", "true")
             .map_err(|e| PipelineError::Init(format!("set preserve_frame_pointers: {e}")))?;
-        flag_builder.set("opt_level", "speed")
+        flag_builder
+            .set("opt_level", "speed")
             .map_err(|e| PipelineError::Init(format!("set opt_level: {e}")))?;
         // ArenaMemoryProvider allocates code/GOT/readonly from a single contiguous
         // reservation, so PIC is not needed — cranelift-jit 0.129+ requires is_pic=false.
-        flag_builder.set("is_pic", "false")
+        flag_builder
+            .set("is_pic", "false")
             .map_err(|e| PipelineError::Init(format!("set is_pic: {e}")))?;
-        flag_builder.set("use_colocated_libcalls", "true")
+        flag_builder
+            .set("use_colocated_libcalls", "true")
             .map_err(|e| PipelineError::Init(format!("set use_colocated_libcalls: {e}")))?;
 
         let isa_builder = cranelift_native::builder()
@@ -147,9 +151,9 @@ impl CodegenPipeline {
             .map_err(|e| PipelineError::Definition(format!("{:?}", e)))?;
 
         // Extract stack maps from the same compilation
-        let compiled = ctx
-            .compiled_code()
-            .ok_or_else(|| PipelineError::Compilation("compiled_code missing after define_function".into()))?;
+        let compiled = ctx.compiled_code().ok_or_else(|| {
+            PipelineError::Compilation("compiled_code missing after define_function".into())
+        })?;
         let func_size = compiled.code_buffer().len() as u32;
         let raw_maps: Vec<RawStackMap> = compiled
             .buffer

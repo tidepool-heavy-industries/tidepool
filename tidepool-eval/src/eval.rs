@@ -229,8 +229,10 @@ fn eval_at(
                 // infinite structures like `cycle` and `zipWith ... [0..]`
                 // don't diverge at construction time.
                 match &expr.nodes[f] {
-                    CoreFrame::Var(_) | CoreFrame::Lit(_)
-                    | CoreFrame::Con { .. } | CoreFrame::Lam { .. } => {
+                    CoreFrame::Var(_)
+                    | CoreFrame::Lit(_)
+                    | CoreFrame::Con { .. }
+                    | CoreFrame::Lam { .. } => {
                         field_vals.push(eval_at(expr, f, env, heap)?);
                     }
                     _ => {
@@ -425,14 +427,18 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::WordQuot => {
             let (a, b) = bin_op_word(op, &args)?;
             if b == 0 {
-                return Err(EvalError::InternalError("division by zero (quotWord#)".into()));
+                return Err(EvalError::InternalError(
+                    "division by zero (quotWord#)".into(),
+                ));
             }
             Ok(Value::Lit(Literal::LitWord(a.wrapping_div(b))))
         }
         PrimOpKind::WordRem => {
             let (a, b) = bin_op_word(op, &args)?;
             if b == 0 {
-                return Err(EvalError::InternalError("division by zero (remWord#)".into()));
+                return Err(EvalError::InternalError(
+                    "division by zero (remWord#)".into(),
+                ));
             }
             Ok(Value::Lit(Literal::LitWord(a.wrapping_rem(b))))
         }
@@ -1000,14 +1006,18 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::IntQuot => {
             let (a, b) = bin_op_int(op, &args)?;
             if b == 0 {
-                return Err(EvalError::InternalError("division by zero (quotInt#)".into()));
+                return Err(EvalError::InternalError(
+                    "division by zero (quotInt#)".into(),
+                ));
             }
             Ok(Value::Lit(Literal::LitInt(a.wrapping_div(b))))
         }
         PrimOpKind::IntRem => {
             let (a, b) = bin_op_int(op, &args)?;
             if b == 0 {
-                return Err(EvalError::InternalError("division by zero (remInt#)".into()));
+                return Err(EvalError::InternalError(
+                    "division by zero (remInt#)".into(),
+                ));
             }
             Ok(Value::Lit(Literal::LitInt(a.wrapping_rem(b))))
         }
@@ -1092,7 +1102,9 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::ReadWord8Array => {
             let ba = expect_byte_array(&args[0])?;
             let idx = expect_int(&args[1])? as usize;
-            let bytes = ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+            let bytes = ba
+                .lock()
+                .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
             let val = *bytes.get(idx).unwrap_or(&0);
             Ok(Value::Lit(Literal::LitWord(val as u64)))
         }
@@ -1100,7 +1112,9 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let ba = expect_byte_array(&args[0])?;
             let idx = expect_int(&args[1])? as usize;
             let val = expect_int_like(&args[2])? as u8;
-            let mut bytes = ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+            let mut bytes = ba
+                .lock()
+                .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
             if idx < bytes.len() {
                 bytes[idx] = val;
             }
@@ -1108,7 +1122,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         }
         PrimOpKind::SizeofMutableByteArray => {
             let ba = expect_byte_array(&args[0])?;
-            let len = ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?.len();
+            let len = ba
+                .lock()
+                .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?
+                .len();
             Ok(Value::Lit(Literal::LitInt(len as i64)))
         }
         PrimOpKind::UnsafeFreezeByteArray => {
@@ -1124,11 +1141,15 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let len = expect_int(&args[4])? as usize;
             // Clone src data first to avoid double-lock deadlock when src == dst
             let src_data: Vec<u8> = {
-                let src = src_ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+                let src = src_ba
+                    .lock()
+                    .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
                 src[src_off..src_off + len].to_vec()
             };
             {
-                let mut dst = dst_ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+                let mut dst = dst_ba
+                    .lock()
+                    .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
                 dst[dst_off..dst_off + len].copy_from_slice(&src_data);
             }
             Ok(Value::ByteArray(dst_ba.clone()))
@@ -1147,7 +1168,9 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let dst_ba = expect_byte_array(&args[1])?;
             let dst_off = expect_int(&args[2])? as usize;
             let len = expect_int(&args[3])? as usize;
-            let mut dst = dst_ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+            let mut dst = dst_ba
+                .lock()
+                .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
             let src_end = std::cmp::min(src_bytes.len(), len);
             dst[dst_off..dst_off + src_end].copy_from_slice(&src_bytes[..src_end]);
             drop(dst);
@@ -1156,13 +1179,17 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::ShrinkMutableByteArray => {
             let ba = expect_byte_array(&args[0])?;
             let new_size = expect_int(&args[1])? as usize;
-            ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?.truncate(new_size);
+            ba.lock()
+                .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?
+                .truncate(new_size);
             Ok(Value::ByteArray(ba.clone()))
         }
         PrimOpKind::ResizeMutableByteArray => {
             let ba = expect_byte_array(&args[0])?;
             let new_size = expect_int(&args[1])? as usize;
-            let mut bytes = ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+            let mut bytes = ba
+                .lock()
+                .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
             bytes.resize(new_size, 0);
             drop(bytes);
             Ok(Value::ByteArray(ba.clone()))
@@ -1192,14 +1219,19 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 }
                 PrimOpKind::TimesInt2Hi => Ok(Value::Lit(Literal::LitInt((result >> 64) as i64))),
                 PrimOpKind::TimesInt2Lo => Ok(Value::Lit(Literal::LitInt(result as i64))),
-                _ => Err(EvalError::InternalError(format!("unexpected TimesInt2 variant: {:?}", op))),
+                _ => Err(EvalError::InternalError(format!(
+                    "unexpected TimesInt2 variant: {:?}",
+                    op
+                ))),
             }
         }
 
         PrimOpKind::IndexWord8Array => {
             let ba = expect_byte_array(&args[0])?;
             let idx = expect_int(&args[1])? as usize;
-            let bytes = ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+            let bytes = ba
+                .lock()
+                .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
             let val = *bytes.get(idx).unwrap_or(&0);
             Ok(Value::Lit(Literal::LitWord(val as u64)))
         }
@@ -1227,11 +1259,15 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let len = expect_int(&args[4])? as usize;
             // Clone to avoid potential double-lock if ba1 == ba2
             let slice1: Vec<u8> = {
-                let b = ba1.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+                let b = ba1
+                    .lock()
+                    .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
                 b[off1..off1 + len].to_vec()
             };
             let slice2: Vec<u8> = {
-                let b = ba2.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+                let b = ba2
+                    .lock()
+                    .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
                 b[off2..off2 + len].to_vec()
             };
             let result = slice1.cmp(&slice2);
@@ -1302,7 +1338,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         }
         PrimOpKind::SizeofByteArray => {
             let ba = expect_byte_array(&args[0])?;
-            let len = ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?.len();
+            let len = ba
+                .lock()
+                .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?
+                .len();
             Ok(Value::Lit(Literal::LitInt(len as i64)))
         }
         PrimOpKind::IndexWordArray => {
@@ -1310,7 +1349,9 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // Read a machine word (8 bytes on 64-bit) at index i (word-sized offset)
             let ba = expect_byte_array(&args[0])?;
             let idx = expect_int_like(&args[1])? as usize;
-            let bytes = ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+            let bytes = ba
+                .lock()
+                .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
             let offset = idx * 8;
             if offset + 8 > bytes.len() {
                 return Err(EvalError::TypeMismatch {
@@ -1322,7 +1363,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     )),
                 });
             }
-            let word = u64::from_ne_bytes(bytes[offset..offset + 8].try_into().map_err(|_| EvalError::InternalError("8-byte slice conversion failed".into()))?);
+            let word =
+                u64::from_ne_bytes(bytes[offset..offset + 8].try_into().map_err(|_| {
+                    EvalError::InternalError("8-byte slice conversion failed".into())
+                })?);
             Ok(Value::Lit(Literal::LitWord(word)))
         }
         PrimOpKind::Int64Mul => {
@@ -1371,7 +1415,9 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let idx = expect_int_like(&args[1])? as usize;
             let val = expect_word(&args[2])?;
             let offset = idx * 8;
-            let mut bytes = ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+            let mut bytes = ba
+                .lock()
+                .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
             if offset + 8 <= bytes.len() {
                 bytes[offset..offset + 8].copy_from_slice(&val.to_ne_bytes());
             }
@@ -1381,7 +1427,9 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // readWordArray# :: MutableByteArray# -> Int# -> State# -> (# State#, Word# #)
             let ba = expect_byte_array(&args[0])?;
             let idx = expect_int_like(&args[1])? as usize;
-            let bytes = ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+            let bytes = ba
+                .lock()
+                .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
             let offset = idx * 8;
             if offset + 8 > bytes.len() {
                 return Err(EvalError::TypeMismatch {
@@ -1393,7 +1441,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     )),
                 });
             }
-            let word = u64::from_ne_bytes(bytes[offset..offset + 8].try_into().map_err(|_| EvalError::InternalError("8-byte slice conversion failed".into()))?);
+            let word =
+                u64::from_ne_bytes(bytes[offset..offset + 8].try_into().map_err(|_| {
+                    EvalError::InternalError("8-byte slice conversion failed".into())
+                })?);
             Ok(Value::Lit(Literal::LitWord(word)))
         }
         PrimOpKind::SetByteArray => {
@@ -1403,7 +1454,9 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let offset = expect_int_like(&args[1])? as usize;
             let count = expect_int_like(&args[2])? as usize;
             let val = expect_int_like(&args[3])? as u8;
-            let mut bytes = ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+            let mut bytes = ba
+                .lock()
+                .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
             let end = (offset + count).min(bytes.len());
             for b in &mut bytes[offset..end] {
                 *b = val;
@@ -1455,7 +1508,9 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // quotRemWord# quotient: a / b
             let (a, b) = bin_op_word(op, &args)?;
             if b == 0 {
-                return Err(EvalError::InternalError("division by zero (quotRemWord# quot)".into()));
+                return Err(EvalError::InternalError(
+                    "division by zero (quotRemWord# quot)".into(),
+                ));
             }
             Ok(Value::Lit(Literal::LitWord(a / b)))
         }
@@ -1463,7 +1518,9 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // quotRemWord# remainder: a % b
             let (a, b) = bin_op_word(op, &args)?;
             if b == 0 {
-                return Err(EvalError::InternalError("division by zero (quotRemWord# rem)".into()));
+                return Err(EvalError::InternalError(
+                    "division by zero (quotRemWord# rem)".into(),
+                ));
             }
             Ok(Value::Lit(Literal::LitWord(a % b)))
         }
@@ -1489,7 +1546,9 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let ba = expect_byte_array(&args[0])?;
             let off = expect_int_like(&args[1])? as usize;
             let n_chars = expect_int_like(&args[2])? as usize;
-            let bytes = ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+            let bytes = ba
+                .lock()
+                .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
             let slice = &bytes[off..];
             let mut byte_count = 0usize;
             let mut chars_counted = 0usize;
@@ -1517,7 +1576,9 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let off = expect_int_like(&args[1])? as usize;
             let len = expect_int_like(&args[2])? as usize;
             let needle = expect_int_like(&args[3])? as u8;
-            let bytes = ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+            let bytes = ba
+                .lock()
+                .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
             let end = std::cmp::min(off + len, bytes.len());
             let result = bytes[off..end].iter().position(|&b| b == needle);
             Ok(Value::Lit(Literal::LitInt(match result {
@@ -1534,7 +1595,9 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let len = expect_int_like(&args[3])? as usize;
             // Clone src to avoid double-lock if src == dst
             let src_slice: Vec<u8> = {
-                let src = src_ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+                let src = src_ba
+                    .lock()
+                    .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
                 src[off..off + len].to_vec()
             };
             // Parse UTF-8 chars and reverse
@@ -1558,7 +1621,9 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             chars.reverse();
             let reversed: Vec<u8> = chars.into_iter().flatten().copied().collect();
             {
-                let mut dst = dst_ba.lock().map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+                let mut dst = dst_ba
+                    .lock()
+                    .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
                 let copy_len = std::cmp::min(reversed.len(), dst.len());
                 dst[..copy_len].copy_from_slice(&reversed[..copy_len]);
             }

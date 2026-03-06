@@ -26,10 +26,7 @@ unsafe fn evacuate(old_ptr: *mut u8, to_base: *mut u8, free: &mut usize) -> *mut
         return *(old_ptr.add(8) as *const *mut u8);
     }
     let size = read_size(old_ptr) as usize;
-    let aligned = size
-        .checked_add(7)
-        .unwrap_or(size)
-        & !7;
+    let aligned = size.checked_add(7).unwrap_or(size) & !7;
     let new_ptr = to_base.add(*free);
     std::ptr::copy_nonoverlapping(old_ptr, new_ptr, aligned);
     *old_ptr = TAG_FORWARDED;
@@ -119,10 +116,7 @@ pub unsafe fn cheney_copy(
     while scan < free {
         let obj = to_base.add(scan);
         let obj_size = read_size(obj) as usize;
-        let aligned = obj_size
-            .checked_add(7)
-            .unwrap_or(obj_size)
-            & !7;
+        let aligned = obj_size.checked_add(7).unwrap_or(obj_size) & !7;
         for_each_pointer_field(obj, |field_slot| {
             let field_val = *field_slot;
             if !field_val.is_null() && is_in_range(field_val as *const u8, from_start, from_end) {

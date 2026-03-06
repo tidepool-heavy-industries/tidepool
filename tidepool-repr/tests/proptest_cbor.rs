@@ -89,14 +89,16 @@ fn arb_data_con() -> impl Strategy<Value = DataCon> {
         prop::collection::vec(arb_src_bang(), 0..10),
         prop::option::of(prop::string::string_regex("[A-Z][a-z]+\\.[A-Z][a-z]+").unwrap()),
     )
-        .prop_map(|(id, name, tag, rep_arity, field_bangs, qualified_name)| DataCon {
-            id,
-            name,
-            tag,
-            rep_arity,
-            field_bangs,
-            qualified_name,
-        })
+        .prop_map(
+            |(id, name, tag, rep_arity, field_bangs, qualified_name)| DataCon {
+                id,
+                name,
+                tag,
+                rep_arity,
+                field_bangs,
+                qualified_name,
+            },
+        )
 }
 
 /// Strategy for DataConTable

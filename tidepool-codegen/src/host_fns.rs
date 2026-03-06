@@ -308,7 +308,8 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                         return runtime_blackhole_trap(vmctx);
                     }
                     layout::THUNK_EVALUATED => {
-                        let next = *(current.add(layout::THUNK_INDIRECTION_OFFSET) as *const *mut u8);
+                        let next =
+                            *(current.add(layout::THUNK_INDIRECTION_OFFSET) as *const *mut u8);
                         current = next;
                         continue;
                     }
@@ -445,7 +446,8 @@ pub fn error_poison_ptr() -> *mut u8 {
     let addr = *POISON.get_or_init(|| {
         // Closure size: header(8) + code_ptr(8) + num_captured(8) = 24
         let size = 24usize;
-        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap_or_else(|_| std::process::abort());
+        let layout =
+            std::alloc::Layout::from_size_align(size, 8).unwrap_or_else(|_| std::process::abort());
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
@@ -493,7 +495,8 @@ pub fn error_poison_ptr_lazy(kind: u64) -> *mut u8 {
         for k in 0..5u64 {
             // Closure: header(8) + code_ptr(8) + num_captured(2+pad=8) + captured[0](8) = 32
             let size = 32usize;
-            let lo = std::alloc::Layout::from_size_align(size, 8).unwrap_or_else(|_| std::process::abort());
+            let lo = std::alloc::Layout::from_size_align(size, 8)
+                .unwrap_or_else(|_| std::process::abort());
             let ptr = unsafe { std::alloc::alloc_zeroed(lo) };
             if ptr.is_null() {
                 std::alloc::handle_alloc_error(lo);
@@ -630,7 +633,8 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) -> *mut u8 {
 /// Returns a raw pointer to the allocation (caller stores in Lit value slot).
 pub extern "C" fn runtime_new_byte_array(size: i64) -> i64 {
     let total = 8 + size as usize;
-    let layout = std::alloc::Layout::from_size_align(total, 8).unwrap_or_else(|_| std::process::abort());
+    let layout =
+        std::alloc::Layout::from_size_align(total, 8).unwrap_or_else(|_| std::process::abort());
     let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     if ptr.is_null() {
         std::alloc::handle_alloc_error(layout);
@@ -693,7 +697,8 @@ pub extern "C" fn runtime_resize_byte_array(ba: i64, new_size: i64) -> i64 {
     let new_size = new_size as usize;
 
     let new_total = 8 + new_size;
-    let new_layout = std::alloc::Layout::from_size_align(new_total, 8).unwrap_or_else(|_| std::process::abort());
+    let new_layout =
+        std::alloc::Layout::from_size_align(new_total, 8).unwrap_or_else(|_| std::process::abort());
     let new_ptr = unsafe { std::alloc::alloc_zeroed(new_layout) };
     if new_ptr.is_null() {
         std::alloc::handle_alloc_error(new_layout);
@@ -712,7 +717,8 @@ pub extern "C" fn runtime_resize_byte_array(ba: i64, new_size: i64) -> i64 {
 
     // Free old buffer
     let old_total = 8 + old_size;
-    let old_layout = std::alloc::Layout::from_size_align(old_total, 8).unwrap_or_else(|_| std::process::abort());
+    let old_layout =
+        std::alloc::Layout::from_size_align(old_total, 8).unwrap_or_else(|_| std::process::abort());
     unsafe {
         std::alloc::dealloc(old_ptr, old_layout);
     }
@@ -774,7 +780,8 @@ pub extern "C" fn runtime_compare_byte_arrays(
 pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
     let n = len as usize;
     let total = 8 + 8 * n;
-    let layout = std::alloc::Layout::from_size_align(total, 8).unwrap_or_else(|_| std::process::abort());
+    let layout =
+        std::alloc::Layout::from_size_align(total, 8).unwrap_or_else(|_| std::process::abort());
     let ptr = unsafe { std::alloc::alloc(layout) };
     if ptr.is_null() {
         std::alloc::handle_alloc_error(layout);
@@ -795,7 +802,8 @@ pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
 pub extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64) -> i64 {
     let n = len as usize;
     let total = 8 + 8 * n;
-    let layout = std::alloc::Layout::from_size_align(total, 8).unwrap_or_else(|_| std::process::abort());
+    let layout =
+        std::alloc::Layout::from_size_align(total, 8).unwrap_or_else(|_| std::process::abort());
     let ptr = unsafe { std::alloc::alloc(layout) };
     if ptr.is_null() {
         std::alloc::handle_alloc_error(layout);
@@ -1089,8 +1097,14 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
     vec![
         ("gc_trigger", gc_trigger as *const u8),
         ("runtime_oom", runtime_oom as *const u8),
-        ("runtime_blackhole_trap", runtime_blackhole_trap as *const u8),
-        ("runtime_bad_thunk_state_trap", runtime_bad_thunk_state_trap as *const u8),
+        (
+            "runtime_blackhole_trap",
+            runtime_blackhole_trap as *const u8,
+        ),
+        (
+            "runtime_bad_thunk_state_trap",
+            runtime_bad_thunk_state_trap as *const u8,
+        ),
         ("heap_alloc", heap_alloc as *const u8),
         ("heap_force", heap_force as *const u8),
         ("unresolved_var_trap", unresolved_var_trap as *const u8),
@@ -1660,12 +1674,19 @@ mod tests {
             *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_UNEVALUATED;
 
             TEST_RESULT.with(|r| r.set(lit_ptr));
-            *(thunk_ptr.add(layout::THUNK_CODE_PTR_OFFSET) as *mut usize) = test_thunk_entry as *const () as usize;
+            *(thunk_ptr.add(layout::THUNK_CODE_PTR_OFFSET) as *mut usize) =
+                test_thunk_entry as *const () as usize;
 
             let res = heap_force(&mut vmctx, thunk_ptr);
             assert_eq!(res, lit_ptr);
-            assert_eq!(*(thunk_ptr.add(layout::THUNK_STATE_OFFSET)), layout::THUNK_EVALUATED);
-            assert_eq!(*(thunk_ptr.add(layout::THUNK_INDIRECTION_OFFSET) as *const *mut u8), lit_ptr);
+            assert_eq!(
+                *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)),
+                layout::THUNK_EVALUATED
+            );
+            assert_eq!(
+                *(thunk_ptr.add(layout::THUNK_INDIRECTION_OFFSET) as *const *mut u8),
+                lit_ptr
+            );
         }
     }
 
