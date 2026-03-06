@@ -15,6 +15,10 @@ pub const CLOSURE_CAPTURED_START: i32 = 24;
 pub const CON_TAG_OFFSET: i32 = 8;
 pub const CON_NUM_FIELDS_OFFSET: i32 = 16;
 pub const CON_FIELDS_START: i32 = 24;
+// -- Thunk layout constants (i32 offsets for Cranelift) --
+pub const THUNK_STATE_OFFSET: i32 = 8;
+pub const THUNK_CODE_PTR_OFFSET: i32 = 16;
+pub const THUNK_CAPTURED_START: i32 = 24;
 pub const LIT_TAG_OFFSET: i32 = 8;
 pub const LIT_VALUE_OFFSET: i32 = 16;
 pub const LIT_TOTAL_SIZE: u64 = 24;

@@ -32,7 +32,7 @@ enum EmitFrame<A> {
     // Simple recursive — children are A (stack-safe)
     Con {
         tag: DataConId,
-        fields: Vec<A>,
+        field_indices: Vec<usize>, // Raw tree indices — NOT mapped by hylomorphism
     },
     App {
         fun: A,
@@ -80,9 +80,9 @@ impl MappableFrame for EmitFrameToken {
             EmitFrame::Var(v) => EmitFrame::Var(v),
             EmitFrame::Lit(l) => EmitFrame::Lit(l),
             EmitFrame::LitString(b) => EmitFrame::LitString(b),
-            EmitFrame::Con { tag, fields } => EmitFrame::Con {
+            EmitFrame::Con { tag, field_indices } => EmitFrame::Con {
                 tag,
-                fields: fields.into_iter().map(&mut f).collect(),
+                field_indices, // Not mapped — raw indices preserved
             },
             EmitFrame::App { fun, arg } => EmitFrame::App {
                 fun: f(fun),
@@ -134,7 +134,7 @@ fn expand_node(tree: &CoreExpr, idx: usize) -> Result<EmitFrame<usize>, EmitErro
         CoreFrame::Lit(lit) => Ok(EmitFrame::Lit(lit.clone())),
         CoreFrame::Con { tag, fields } => Ok(EmitFrame::Con {
             tag: *tag,
-            fields: fields.clone(),
+            field_indices: fields.clone(),
         }),
         CoreFrame::App { fun, arg } => Ok(EmitFrame::App {
             fun: *fun,
@@ -237,13 +237,26 @@ fn collapse_frame(
                 Ok(SsaVal::HeapPtr(result))
             }
         },
-        EmitFrame::Con { tag, fields } => {
-            let field_vals: Vec<Value> = fields
-                .iter()
-                .map(|v| ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *v))
-                .collect();
+        EmitFrame::Con { tag, field_indices } => {
+            let num_fields = field_indices.len();
+            let mut field_vals: Vec<Value> = Vec::with_capacity(num_fields);
 
-            let num_fields = field_vals.len();
+            for &idx in &field_indices {
+                if is_trivial_con_field(tree, idx, &ctx.env) {
+                    // Trivial field: evaluate eagerly via emit_node (same as before)
+                    let val = ctx.emit_node(
+                        pipeline, builder, vmctx, gc_sig, oom_func, tree, idx,
+                    )?;
+                    field_vals.push(ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val));
+                } else {
+                    // Non-trivial field: compile as thunk
+                    let thunk_val = emit_thunk(
+                        ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, idx,
+                    )?;
+                    field_vals.push(thunk_val);
+                }
+            }
+
             let size = 24 + 8 * num_fields as u64;
             let ptr = emit_alloc_fast_path(builder, vmctx, size, gc_sig, oom_func);
 
@@ -426,6 +439,17 @@ fn emit_subtree(
         |idx| expand_node(tree, idx),
         |frame| collapse_frame(ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, frame),
     )
+}
+
+/// Determine if a Con field expression is trivial (should be evaluated eagerly).
+/// Trivial: Var that's already in the environment, or Lit.
+/// Non-trivial: App, Case, Con-with-children, PrimOp, etc. → thunkify.
+fn is_trivial_con_field(tree: &CoreExpr, idx: usize, env: &std::collections::HashMap<VarId, SsaVal>) -> bool {
+    match &tree.nodes[idx] {
+        CoreFrame::Var(v) => env.contains_key(v) || (v.0 >> 56) as u8 == 0x45, // bound var or error sentinel
+        CoreFrame::Lit(_) => true,
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -623,6 +647,199 @@ fn emit_lam(
 
     builder.declare_value_needs_stack_map(closure_ptr);
     Ok(SsaVal::HeapPtr(closure_ptr))
+}
+
+/// Compile a non-trivial Con field as a thunk — a zero-arg closure that
+/// evaluates the expression on first force. Mirrors `emit_lam` but with
+/// a 2-param calling convention (vmctx, thunk_ptr) → result.
+#[allow(clippy::too_many_arguments)]
+fn emit_thunk(
+    ctx: &mut EmitContext,
+    pipeline: &mut CodegenPipeline,
+    builder: &mut FunctionBuilder,
+    vmctx: Value,
+    gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
+    tree: &CoreExpr,
+    body_idx: usize,
+) -> Result<Value, EmitError> {
+    // 1. Extract subtree and find free variables
+    let body_tree = tree.extract_subtree(body_idx);
+    let fvs = tidepool_repr::free_vars::free_vars(&body_tree);
+
+    let dropped: Vec<VarId> = fvs
+        .iter()
+        .filter(|v| !ctx.env.contains_key(v))
+        .copied()
+        .collect();
+    if !dropped.is_empty() {
+        ctx.trace_scope(&format!(
+            "thunk capture: dropped {} free vars not in scope: {:?}",
+            dropped.len(),
+            dropped
+        ));
+    }
+    let mut sorted_fvs: Vec<VarId> = fvs
+        .into_iter()
+        .filter(|v| ctx.env.contains_key(v))
+        .collect();
+    sorted_fvs.sort_by_key(|v| v.0);
+
+    let captures: Vec<(VarId, SsaVal)> = sorted_fvs
+        .iter()
+        .map(|v| {
+            let val = ctx.env.get(v).ok_or_else(|| {
+                EmitError::MissingCaptureVar(
+                    *v,
+                    format!("Thunk capture: not in env (env has {} vars)", ctx.env.len()),
+                )
+            })?;
+            Ok::<_, EmitError>((*v, *val))
+        })
+        .collect::<Result<Vec<_>, EmitError>>()?;
+
+    // 2. Create thunk entry function: fn(vmctx, thunk_ptr) -> whnf_ptr
+    let thunk_name = ctx.next_lambda_name(); // reuse lambda naming
+    let mut thunk_sig = Signature::new(pipeline.isa.default_call_conv());
+    thunk_sig.params.push(AbiParam::new(types::I64)); // vmctx
+    thunk_sig.params.push(AbiParam::new(types::I64)); // thunk_ptr (self, for captures)
+    thunk_sig.returns.push(AbiParam::new(types::I64)); // result
+
+    let thunk_func_id = pipeline
+        .module
+        .declare_function(&thunk_name, Linkage::Local, &thunk_sig)
+        .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+    pipeline.register_lambda(thunk_func_id, thunk_name.clone());
+
+    // 3. Build inner function
+    let mut inner_ctx = Context::new();
+    inner_ctx.func.signature = thunk_sig;
+    inner_ctx.func.name = UserFuncName::default();
+
+    let mut inner_fb_ctx = FunctionBuilderContext::new();
+    let mut inner_builder = FunctionBuilder::new(&mut inner_ctx.func, &mut inner_fb_ctx);
+    let inner_block = inner_builder.create_block();
+    inner_builder.append_block_params_for_function_params(inner_block);
+    inner_builder.switch_to_block(inner_block);
+    inner_builder.seal_block(inner_block);
+
+    let inner_vmctx = inner_builder.block_params(inner_block)[0];
+    let thunk_self = inner_builder.block_params(inner_block)[1];
+    inner_builder.declare_value_needs_stack_map(thunk_self);
+
+    // GC sig + oom func for inner function
+    let mut inner_gc_sig = Signature::new(pipeline.isa.default_call_conv());
+    inner_gc_sig.params.push(AbiParam::new(types::I64));
+    let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
+
+    let inner_oom_func = {
+        let mut sig = Signature::new(pipeline.isa.default_call_conv());
+        sig.returns.push(AbiParam::new(types::I64));
+        let func_id = pipeline
+            .module
+            .declare_function("runtime_oom", Linkage::Import, &sig)
+            .map_err(|e| EmitError::CraneliftError(format!("declare runtime_oom: {e}")))?;
+        pipeline
+            .module
+            .declare_func_in_func(func_id, inner_builder.func)
+    };
+
+    // 4. Set up inner emit context, load captures from thunk_self
+    let mut inner_emit = EmitContext::new(ctx.prefix.clone());
+    inner_emit.lambda_counter = ctx.lambda_counter;
+
+    for (i, (var_id, _)) in captures.iter().enumerate() {
+        let offset = THUNK_CAPTURED_START + 8 * i as i32;
+        let val = inner_builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), thunk_self, offset);
+        inner_builder.declare_value_needs_stack_map(val);
+        inner_emit.trace_scope(&format!("insert thunk capture {:?}", var_id));
+        inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
+    }
+
+    // 5. Compile thunked expression body
+    let body_root = body_tree.nodes.len() - 1;
+    let body_result = inner_emit.emit_node(
+        pipeline,
+        &mut inner_builder,
+        inner_vmctx,
+        inner_gc_sig_ref,
+        inner_oom_func,
+        &body_tree,
+        body_root,
+    )?;
+    let ret_val = ensure_heap_ptr(
+        &mut inner_builder,
+        inner_vmctx,
+        inner_gc_sig_ref,
+        inner_oom_func,
+        body_result,
+    );
+
+    inner_builder.ins().return_(&[ret_val]);
+    inner_builder.finalize();
+
+    ctx.lambda_counter = inner_emit.lambda_counter;
+
+    // Debug: dump Cranelift IR when TIDEPOOL_DUMP_CLIF=1
+    if std::env::var("TIDEPOOL_DUMP_CLIF").is_ok() {
+        eprintln!("=== CLIF THUNK {} ({} captures) ===", thunk_name, captures.len());
+        for (i, (var_id, ssaval)) in captures.iter().enumerate() {
+            let kind = match ssaval {
+                SsaVal::HeapPtr(_) => "HeapPtr",
+                SsaVal::Raw(_, tag) => &format!("Raw(tag={})", tag),
+            };
+            eprintln!("  capture[{}]: VarId({:#x}) = {}", i, var_id.0, kind);
+        }
+        eprintln!("{}", inner_ctx.func.display());
+        eprintln!("=== END CLIF THUNK {} ===", thunk_name);
+    }
+
+    pipeline.define_function(thunk_func_id, &mut inner_ctx)?;
+
+    // 6. Allocate thunk heap object in outer function
+    let func_ref = pipeline
+        .module
+        .declare_func_in_func(thunk_func_id, builder.func);
+    let code_ptr = builder.ins().func_addr(types::I64, func_ref);
+
+    let num_captures = captures.len();
+    let thunk_size = 24 + 8 * num_captures as u64; // header(8) + state(8) + code_ptr(8) + captures
+    let thunk_ptr = emit_alloc_fast_path(builder, vmctx, thunk_size, gc_sig, oom_func);
+
+    // Write header: tag = TAG_THUNK, size
+    let tag_val = builder.ins().iconst(types::I8, layout::TAG_THUNK as i64);
+    builder
+        .ins()
+        .store(MemFlags::trusted(), tag_val, thunk_ptr, 0);
+    let size_val = builder.ins().iconst(types::I16, thunk_size as i64);
+    builder
+        .ins()
+        .store(MemFlags::trusted(), size_val, thunk_ptr, 1);
+
+    // Write state = Unevaluated (0) at offset 8
+    let state_val = builder.ins().iconst(types::I8, layout::THUNK_UNEVALUATED as i64);
+    builder
+        .ins()
+        .store(MemFlags::trusted(), state_val, thunk_ptr, THUNK_STATE_OFFSET);
+
+    // Write code pointer at offset 16
+    builder
+        .ins()
+        .store(MemFlags::trusted(), code_ptr, thunk_ptr, THUNK_CODE_PTR_OFFSET);
+
+    // Write captures at offset 24+
+    for (i, (_, ssaval)) in captures.iter().enumerate() {
+        let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
+        let offset = THUNK_CAPTURED_START + 8 * i as i32;
+        builder
+            .ins()
+            .store(MemFlags::trusted(), cap_val, thunk_ptr, offset);
+    }
+
+    builder.declare_value_needs_stack_map(thunk_ptr);
+    Ok(thunk_ptr) // Return as Value (Cranelift), not SsaVal — caller wraps in Con
 }
 
 // ---------------------------------------------------------------------------
@@ -1166,11 +1383,16 @@ impl EmitContext {
                                 deferred_cons.push((*ptr, field_indices.clone()));
                             } else {
                                 for (i, &f_idx) in field_indices.iter().enumerate() {
-                                    let val = self.emit_node(
-                                        pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
-                                    )?;
-                                    let field_val =
-                                        ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val);
+                                    let field_val = if is_trivial_con_field(tree, f_idx, &self.env) {
+                                        let val = self.emit_node(
+                                            pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                                        )?;
+                                        ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
+                                    } else {
+                                        emit_thunk(
+                                            self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                                        )?
+                                    };
                                     builder.ins().store(
                                         MemFlags::trusted(),
                                         field_val,
@@ -1314,11 +1536,16 @@ impl EmitContext {
                             remaining_deps.remove(binder);
                             if remaining_deps.is_empty() && !field_indices.is_empty() {
                                 for (i, &f_idx) in field_indices.iter().enumerate() {
-                                    let val = self.emit_node(
-                                        pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
-                                    )?;
-                                    let field_val =
-                                        ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val);
+                                    let field_val = if is_trivial_con_field(tree, f_idx, &self.env) {
+                                        let val = self.emit_node(
+                                            pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                                        )?;
+                                        ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
+                                    } else {
+                                        emit_thunk(
+                                            self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                                        )?
+                                    };
                                     builder.ins().store(
                                         MemFlags::trusted(),
                                         field_val,
@@ -1354,10 +1581,16 @@ impl EmitContext {
                     // incrementally during Phase 3c.
                     for (ptr, field_indices, _) in &deferred_con_deps {
                         for (i, &f_idx) in field_indices.iter().enumerate() {
-                            let val = self.emit_node(
-                                pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
-                            )?;
-                            let field_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val);
+                            let field_val = if is_trivial_con_field(tree, f_idx, &self.env) {
+                                let val = self.emit_node(
+                                    pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                                )?;
+                                ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
+                            } else {
+                                emit_thunk(
+                                    self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                                )?
+                            };
                             builder.ins().store(
                                 MemFlags::trusted(),
                                 field_val,

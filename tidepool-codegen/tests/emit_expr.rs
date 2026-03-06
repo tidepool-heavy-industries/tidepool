@@ -2772,3 +2772,97 @@ fn test_emit_primop_conversions_extra() {
         assert_eq!(read_lit_int(res_f2i.result_ptr), 3);
     }
 }
+
+/// Test that a Con with a non-trivial field (App) creates a thunk
+/// that is correctly forced when the field is used via Case.
+#[test]
+fn test_con_thunk_field_forced_by_case() {
+    // Build:
+    // let y = 43 in
+    // let thunk_body = Con(1, [y]) in
+    // let c = Con(0, [thunk_body]) in
+    // case (case c of { Con(0) [f] -> f }) of { Con(1) [x] -> x }
+    //
+    // 1. thunk_body is non-trivial (Let node), so it's thunked when used as a field.
+    // 2. Inner case extracts the thunk.
+    // 3. Outer case forces the thunk, which evaluates to Con(1, [43]).
+    // 4. Outer case matches Con(1, [x]) and returns x (Literal 43).
+    let y_id = VarId(10);
+    let f_id = VarId(11);
+    let x_id = VarId(12);
+    let b1_id = VarId(13);
+    let b2_id = VarId(14);
+
+    let tree = RecursiveTree {
+        nodes: vec![
+            CoreFrame::Lit(Literal::LitInt(43)), // 0
+            CoreFrame::Var(y_id),                // 1
+            CoreFrame::Con {                     // 2: Con(1, [y])
+                tag: DataConId(1),
+                fields: vec![1],
+            },
+            CoreFrame::LetNonRec {               // 3: let y = 43 in Con(1, [y])
+                binder: y_id,
+                rhs: 0,
+                body: 2,
+            },
+            CoreFrame::Con {                     // 4: Con(0, [3]) -- 3 is Let, so non-trivial
+                tag: DataConId(0),
+                fields: vec![3],
+            },
+            CoreFrame::Var(f_id),                // 5
+            CoreFrame::Case {                    // 6: Inner case, extracts Thunk
+                scrutinee: 4,
+                binder: b1_id,
+                alts: vec![Alt {
+                    con: AltCon::DataAlt(DataConId(0)),
+                    binders: vec![f_id],
+                    body: 5,
+                }],
+            },
+            CoreFrame::Var(x_id),                // 7
+            CoreFrame::Case {                    // 8: Outer case, forces Thunk, matches Con(1)
+                scrutinee: 6,
+                binder: b2_id,
+                alts: vec![Alt {
+                    con: AltCon::DataAlt(DataConId(1)),
+                    binders: vec![x_id],
+                    body: 7,
+                }],
+            },
+        ],
+    };
+
+    let result = compile_and_run(&tree);
+    unsafe {
+        assert_eq!(read_lit_int(result.result_ptr), 43);
+    }
+}
+
+
+#[test]
+fn test_con_trivial_fields_stay_eager() {
+    // Con(0, [Lit(10), Lit(20)]) — all Lit fields are trivial, no thunks
+    let tree = RecursiveTree {
+        nodes: vec![
+            CoreFrame::Lit(Literal::LitInt(10)), // 0
+            CoreFrame::Lit(Literal::LitInt(20)), // 1
+            CoreFrame::Con {
+                tag: DataConId(5),
+                fields: vec![0, 1],
+            }, // 2 (root)
+        ],
+    };
+    let result = compile_and_run(&tree);
+    unsafe {
+        assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_CON);
+        assert_eq!(read_con_tag(result.result_ptr), 5);
+        // Fields should be direct values (Lit), not thunks
+        let f0 = read_con_field(result.result_ptr, 0);
+        let f1 = read_con_field(result.result_ptr, 1);
+        assert_eq!(layout::read_tag(f0), layout::TAG_LIT);
+        assert_eq!(layout::read_tag(f1), layout::TAG_LIT);
+        assert_eq!(read_lit_int(f0), 10);
+        assert_eq!(read_lit_int(f1), 20);
+    }
+}
