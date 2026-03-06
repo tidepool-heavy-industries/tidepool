@@ -2773,7 +2773,7 @@ fn test_emit_primop_conversions_extra() {
     }
 }
 
-/// Test that a Con with a non-trivial field (App) creates a thunk
+/// Test that a Con with a non-trivial field (LetNonRec) creates a thunk
 /// that is correctly forced when the field is used via Case.
 #[test]
 fn test_con_thunk_field_forced_by_case() {

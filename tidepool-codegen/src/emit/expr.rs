@@ -442,7 +442,7 @@ fn emit_subtree(
 }
 
 /// Determine if a Con field expression is trivial (should be evaluated eagerly).
-/// Trivial: Var that's already in the environment, or Lit.
+/// Trivial: Var that's already in the environment or an error sentinel (tag 0x45), or Lit.
 /// Non-trivial: App, Case, Con-with-children, PrimOp, etc. → thunkify.
 fn is_trivial_con_field(tree: &CoreExpr, idx: usize, env: &std::collections::HashMap<VarId, SsaVal>) -> bool {
     match &tree.nodes[idx] {
@@ -552,6 +552,11 @@ fn emit_lam(
 
     let mut inner_emit = EmitContext::new(ctx.prefix.clone());
     inner_emit.lambda_counter = ctx.lambda_counter;
+    inner_emit.depth = ctx.depth + 1;
+
+    if inner_emit.depth > 200 {
+        return Err(EmitError::DepthLimitExceeded);
+    }
 
     inner_emit.trace_scope(&format!("insert lam binder {:?}", binder));
     inner_emit.env.insert(binder, SsaVal::HeapPtr(arg_param));
@@ -747,6 +752,11 @@ fn emit_thunk(
     // 4. Set up inner emit context, load captures from thunk_self
     let mut inner_emit = EmitContext::new(ctx.prefix.clone());
     inner_emit.lambda_counter = ctx.lambda_counter;
+    inner_emit.depth = ctx.depth + 1;
+
+    if inner_emit.depth > 200 {
+        return Err(EmitError::DepthLimitExceeded);
+    }
 
     for (i, (var_id, _)) in captures.iter().enumerate() {
         let offset = THUNK_CAPTURED_START + 8 * i as i32;
@@ -1279,6 +1289,12 @@ impl EmitContext {
 
                         let mut inner_emit = EmitContext::new(self.prefix.clone());
                         inner_emit.lambda_counter = self.lambda_counter;
+                        inner_emit.depth = self.depth + 1;
+
+                        if inner_emit.depth > 200 {
+                            return Err(EmitError::DepthLimitExceeded);
+                        }
+
                         inner_emit
                             .env
                             .insert(lam_binder, SsaVal::HeapPtr(inner_arg));

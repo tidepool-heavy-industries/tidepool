@@ -56,6 +56,7 @@ pub struct EmitContext {
     pub join_blocks: HashMap<JoinId, JoinInfo>,
     pub lambda_counter: u32,
     pub prefix: String,
+    pub depth: usize,
 }
 
 /// Placeholder for join point info (used by case/join leaf later).
@@ -76,6 +77,8 @@ pub enum EmitError {
     MissingCaptureVar(VarId, String),
     /// Internal invariant violation (should never happen).
     InternalError(String),
+    /// Recursion depth limit exceeded during compilation
+    DepthLimitExceeded,
 }
 
 impl std::fmt::Display for EmitError {
@@ -96,6 +99,7 @@ impl std::fmt::Display for EmitError {
                 write!(f, "missing capture variable VarId({:#x}): {}", v.0, ctx)
             }
             EmitError::InternalError(msg) => write!(f, "internal error: {}", msg),
+            EmitError::DepthLimitExceeded => write!(f, "recursion depth limit exceeded during compilation"),
         }
     }
 }
@@ -115,6 +119,7 @@ impl EmitContext {
             join_blocks: HashMap::new(),
             lambda_counter: 0,
             prefix,
+            depth: 0,
         }
     }
 
