@@ -1634,9 +1634,24 @@ impl TidepoolMcpServerImpl {
             }
             Ok(None) => {
                 tracing::error!("eval thread crashed");
+                let mut crash_info = String::new();
+                if let Ok(content) = std::fs::read_to_string(".tidepool/crash.log") {
+                    let lines: Vec<_> = content.lines().rev().take(5).collect();
+                    if !lines.is_empty() {
+                        crash_info.push_str("\n\n## Recent Crash Log Entries\n```\n");
+                        for line in lines.into_iter().rev() {
+                            crash_info.push_str(line);
+                            crash_info.push('\n');
+                        }
+                        crash_info.push_str("```\n");
+                    }
+                }
                 let error_msg = format_error_with_source(
                     "Crash",
-                    "Eval thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.",
+                    &format!(
+                        "Eval thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.{}",
+                        crash_info
+                    ),
                     &source,
                 );
                 Ok(CallToolResult::error(vec![Content::text(error_msg)]))
@@ -1730,9 +1745,24 @@ impl TidepoolMcpServerImpl {
             }
             Ok(None) => {
                 tracing::error!("eval thread crashed");
+                let mut crash_info = String::new();
+                if let Ok(content) = std::fs::read_to_string(".tidepool/crash.log") {
+                    let lines: Vec<_> = content.lines().rev().take(5).collect();
+                    if !lines.is_empty() {
+                        crash_info.push_str("\n\n## Recent Crash Log Entries\n```\n");
+                        for line in lines.into_iter().rev() {
+                            crash_info.push_str(line);
+                            crash_info.push('\n');
+                        }
+                        crash_info.push_str("```\n");
+                    }
+                }
                 let error_msg = format_error_with_source(
                     "Crash",
-                    "Eval thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.",
+                    &format!(
+                        "Eval thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.{}",
+                        crash_info
+                    ),
                     &source,
                 );
                 Ok(CallToolResult::error(vec![Content::text(error_msg)]))

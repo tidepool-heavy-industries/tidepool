@@ -43,6 +43,24 @@ impl LambdaRegistry {
         self.entries.get(&code_ptr).map(|s| s.as_str())
     }
 
+    /// Look up a lambda name by an address within its body.
+    /// Finds the entry point <= addr that is closest to addr.
+    pub fn lookup_by_address(&self, addr: usize) -> Option<&str> {
+        let mut best: Option<(usize, &str)> = None;
+        for (&ptr, name) in &self.entries {
+            if ptr <= addr {
+                if let Some((best_ptr, _)) = best {
+                    if ptr > best_ptr {
+                        best = Some((ptr, name.as_str()));
+                    }
+                } else {
+                    best = Some((ptr, name.as_str()));
+                }
+            }
+        }
+        best.map(|(_, name)| name)
+    }
+
     /// Number of registered lambdas.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -73,6 +91,15 @@ pub fn lookup_lambda(code_ptr: usize) -> Option<String> {
     guard
         .as_ref()
         .and_then(|r| r.lookup(code_ptr))
+        .map(|s| s.to_string())
+}
+
+/// Look up a lambda name by an address within its body in the global registry.
+pub fn lookup_lambda_by_address(addr: usize) -> Option<String> {
+    let guard = LAMBDA_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .as_ref()
+        .and_then(|r| r.lookup_by_address(addr))
         .map(|s| s.to_string())
 }
 

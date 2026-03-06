@@ -125,6 +125,7 @@ impl JitEffectMachine {
 
         let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
         crate::host_fns::reset_call_depth();
+        crate::host_fns::set_exec_context("stepping main function");
         let mut yield_result =
             match unsafe { crate::signal_safety::with_signal_protection(|| machine.step()) } {
                 Ok(y) => y,
@@ -178,6 +179,7 @@ impl JitEffectMachine {
                     .map_err(JitError::Signal)?
                     .map_err(JitError::HeapBridge)?;
                     crate::host_fns::reset_call_depth();
+                    crate::host_fns::set_exec_context(&format!("resuming after effect tag={}", tag));
                     yield_result = match unsafe {
                         crate::signal_safety::with_signal_protection(|| {
                             machine.resume(continuation, resp_ptr)
@@ -215,6 +217,7 @@ impl JitEffectMachine {
         let mut vmctx = self.nursery.make_vmctx(crate::host_fns::gc_trigger);
 
         crate::host_fns::reset_call_depth();
+        crate::host_fns::set_exec_context("running pure computation");
         let result_ptr: *mut u8 = match unsafe {
             crate::signal_safety::with_signal_protection(|| func_ptr(&mut vmctx))
         } {
@@ -258,9 +261,26 @@ impl JitEffectMachine {
 /// signal error. A runtime error like BadFunPtrTag is set by debug_app_check
 /// before the JIT continues and crashes — prefer it over the raw signal number.
 fn runtime_error_or_signal(sig: i32) -> crate::yield_type::YieldError {
+    let fault_addr = crate::signal_safety::FAULTING_ADDR.with(|c| c.get());
     if let Some(err) = crate::host_fns::take_runtime_error() {
+        if fault_addr != 0 {
+            if let Some(name) = crate::debug::lookup_lambda_by_address(fault_addr) {
+                crate::host_fns::push_diagnostic(format!(
+                    "Faulting JIT function: {} (addr=0x{:x})",
+                    name, fault_addr
+                ));
+            }
+        }
         crate::yield_type::YieldError::from(err)
     } else {
+        if fault_addr != 0 {
+            if let Some(name) = crate::debug::lookup_lambda_by_address(fault_addr) {
+                crate::host_fns::push_diagnostic(format!(
+                    "Signal {} in JIT function: {} (addr=0x{:x})",
+                    sig, name, fault_addr
+                ));
+            }
+        }
         crate::yield_type::YieldError::Signal(sig)
     }
 }

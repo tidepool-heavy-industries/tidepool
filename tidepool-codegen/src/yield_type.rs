@@ -110,6 +110,7 @@ impl std::fmt::Display for YieldError {
             YieldError::BlackHole => write!(f, "blackhole detected (infinite loop: thunk forced itself)"),
             YieldError::BadThunkState(state) => write!(f, "thunk has invalid evaluation state: {}", state),
             YieldError::Signal(sig) => {
+                let ctx = crate::host_fns::get_exec_context();
                 #[cfg(unix)]
                 {
                     let name = match *sig {
@@ -121,12 +122,30 @@ impl std::fmt::Display for YieldError {
                         }
                         libc::SIGBUS => "SIGBUS (bus error)",
                         libc::SIGTRAP => "SIGTRAP (trap — likely Cranelift trap instruction)",
-                        _ => return write!(f, "JIT signal: signal {} (unknown)", sig),
+                        _ => {
+                            if !ctx.is_empty() {
+                                return write!(
+                                    f,
+                                    "JIT signal: signal {} (unknown, context: {})",
+                                    sig, ctx
+                                );
+                            } else {
+                                return write!(f, "JIT signal: signal {} (unknown)", sig);
+                            }
+                        }
                     };
-                    write!(f, "JIT signal: {}", name)
+                    if !ctx.is_empty() {
+                        write!(f, "JIT signal: {} (context: {})", name, ctx)
+                    } else {
+                        write!(f, "JIT signal: {}", name)
+                    }
                 }
                 #[cfg(not(unix))]
-                write!(f, "JIT signal: signal {}", sig)
+                if !ctx.is_empty() {
+                    write!(f, "JIT signal: signal {} (context: {})", sig, ctx)
+                } else {
+                    write!(f, "JIT signal: signal {}", sig)
+                }
             }
         }
     }

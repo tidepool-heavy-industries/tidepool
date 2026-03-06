@@ -51,7 +51,7 @@ mod inner {
             _ => b"UNKNOWN",
         };
 
-        let mut buf = [0u8; 256];
+        let mut buf = [0u8; 512];
         let mut pos = 0;
 
         // "[tidepool-crash] sig="
@@ -120,6 +120,22 @@ mod inner {
         }
         buf[pos..pos + ts_len].copy_from_slice(&ts_buf[..ts_len]);
         pos += ts_len;
+
+        // " ctx="
+        let ctx_prefix = b" ctx=";
+        buf[pos..pos + ctx_prefix.len()].copy_from_slice(ctx_prefix);
+        pos += ctx_prefix.len();
+
+        crate::host_fns::SIGNAL_SAFE_CTX_LEN.with(|c| {
+            let len = c.get();
+            crate::host_fns::SIGNAL_SAFE_CTX.with(|buf_cell| {
+                let s_buf = buf_cell.get();
+                if len > 0 {
+                    buf[pos..pos + len].copy_from_slice(&s_buf[..len]);
+                    pos += len;
+                }
+            });
+        });
 
         buf[pos] = b'\n';
         pos += 1;
@@ -198,6 +214,7 @@ mod inner {
     // the thread-local read async-signal-safe in practice.
     thread_local! {
         static JMP_BUF: Cell<*mut SigJmpBuf> = const { Cell::new(ptr::null_mut()) };
+        pub(crate) static FAULTING_ADDR: Cell<usize> = const { Cell::new(0) };
     }
 
     /// Trampoline called from C after sigsetjmp returns 0.
@@ -246,6 +263,7 @@ mod inner {
 
         // Store the jump buffer so the signal handler can find it.
         JMP_BUF.with(|cell| cell.set(&mut buf as *mut SigJmpBuf));
+        FAULTING_ADDR.with(|c| c.set(0));
 
         // Double-box: outer Box for the fat pointer, inner Box<dyn FnOnce()>.
         let boxed: Box<Box<dyn FnOnce()>> = Box::new(wrapper);
@@ -268,6 +286,13 @@ mod inner {
     extern "C" fn handler(sig: libc::c_int, _info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
         // Synchronous signals (SIGILL, SIGSEGV, SIGBUS) are delivered to the
         // faulting thread, so the thread-local read returns this thread's buf.
+        let si_addr = if !_info.is_null() {
+            unsafe { (*_info).si_addr() as usize }
+        } else {
+            0
+        };
+        FAULTING_ADDR.with(|c| c.set(si_addr));
+
         let buf = JMP_BUF.with(|cell| cell.get());
         if !buf.is_null() {
             // In JIT context — jump back to sigsetjmp

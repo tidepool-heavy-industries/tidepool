@@ -76,6 +76,32 @@ thread_local! {
 
     /// Captured JIT diagnostics.
     static DIAGNOSTICS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+
+    static EXEC_CONTEXT: RefCell<String> = const { RefCell::new(String::new()) };
+    pub(crate) static SIGNAL_SAFE_CTX: Cell<[u8; 128]> = const { Cell::new([0u8; 128]) };
+    pub(crate) static SIGNAL_SAFE_CTX_LEN: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Set the current execution context for JIT code.
+/// This is used to provide more info when a signal (SIGSEGV/SIGILL) occurs.
+pub fn set_exec_context(ctx: &str) {
+    EXEC_CONTEXT.with(|c| {
+        let mut s = c.borrow_mut();
+        s.clear();
+        s.push_str(ctx);
+    });
+    SIGNAL_SAFE_CTX.with(|c| {
+        let mut buf = [0u8; 128];
+        let len = ctx.len().min(128);
+        buf[..len].copy_from_slice(&ctx.as_bytes()[..len]);
+        c.set(buf);
+    });
+    SIGNAL_SAFE_CTX_LEN.with(|c| c.set(ctx.len().min(128)));
+}
+
+/// Get the current execution context.
+pub fn get_exec_context() -> String {
+    EXEC_CONTEXT.with(|c| c.borrow().clone())
 }
 
 /// Push a diagnostic message to the thread-local buffer.
