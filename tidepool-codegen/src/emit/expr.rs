@@ -1102,6 +1102,7 @@ impl EmitContext {
     /// - emit_lam/emit_thunk: create new EmitContext, bounded by lambda nesting
     /// - emit_case/emit_join: called from hylomorphism collapse, bounded by case nesting
     /// - Trivial Con field eval: constant stack depth (Var/Lit)
+    #[allow(clippy::too_many_arguments)]
     pub fn emit_node(
         &mut self,
         pipeline: &mut CodegenPipeline,
