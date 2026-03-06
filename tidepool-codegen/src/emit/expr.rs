@@ -1094,6 +1094,31 @@ impl EmitContext {
         }
     }
 
+    /// Extract the error message from an error call (walks App chain to find LitString).
+    fn extract_error_message(tree: &CoreExpr, rhs_idx: usize) -> Option<Vec<u8>> {
+        let mut idx = rhs_idx;
+        loop {
+            match &tree.nodes[idx] {
+                CoreFrame::App { fun, arg } => {
+                    // Check if arg is a LitString (the message)
+                    if let CoreFrame::Lit(Literal::LitString(bytes)) = &tree.nodes[*arg] {
+                        return Some(bytes.clone());
+                    }
+                    idx = *fun; // continue walking the App chain
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    fn emit_error_poison(&self, tree: &CoreExpr, rhs_idx: usize) -> i64 {
+        let kind = Self::extract_error_kind(tree, rhs_idx);
+        match Self::extract_error_message(tree, rhs_idx) {
+            Some(msg) => crate::host_fns::error_poison_ptr_lazy_msg(kind, &msg) as i64,
+            None => crate::host_fns::error_poison_ptr_lazy(kind) as i64,
+        }
+    }
+
     /// Trampoline-based emit_node: converts recursive Let-chain evaluation to
     /// an explicit work stack. This prevents Rust stack overflow during JIT
     /// compilation of deeply nested GHC Core ASTs.
@@ -1134,9 +1159,7 @@ impl EmitContext {
                                 if body_fvs.contains(&binder) {
                                     if Self::rhs_is_error_call(tree, rhs) {
                                         // Bind to lazy poison closure — error only triggers on call.
-                                        let kind = Self::extract_error_kind(tree, rhs);
-                                        let poison_addr =
-                                            crate::host_fns::error_poison_ptr_lazy(kind) as i64;
+                                        let poison_addr = self.emit_error_poison(tree, rhs);
                                         let poison_val =
                                             builder.ins().iconst(types::I64, poison_addr);
                                         self.trace_scope(&format!(
@@ -1272,8 +1295,7 @@ impl EmitContext {
             work.push(EmitWork::LetRecFinish { body, state_idx });
             for (binder, rhs_idx) in simple_bindings.iter().rev() {
                 if Self::rhs_is_error_call(tree, *rhs_idx) {
-                    let kind = Self::extract_error_kind(tree, *rhs_idx);
-                    let poison_addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
+                    let poison_addr = self.emit_error_poison(tree, *rhs_idx);
                     let poison_val = builder.ins().iconst(types::I64, poison_addr);
                     self.trace_scope(&format!("defer error LetRec(simple) {:?}", binder));
                     self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
@@ -1430,8 +1452,7 @@ impl EmitContext {
         let mut deferred_simple = Vec::with_capacity(simple_bindings.len());
         for (binder, rhs_idx) in &simple_bindings {
             if Self::rhs_is_error_call(tree, *rhs_idx) {
-                let kind = Self::extract_error_kind(tree, *rhs_idx);
-                let poison_addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
+                let poison_addr = self.emit_error_poison(tree, *rhs_idx);
                 let poison_val = builder.ins().iconst(types::I64, poison_addr);
                 self.trace_scope(&format!("defer error LetRec(trivial) {:?}", binder));
                 self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
@@ -1735,8 +1756,7 @@ impl EmitContext {
 
         for (binder, rhs_idx) in deferred_simple.iter().rev() {
             if Self::rhs_is_error_call(tree, *rhs_idx) {
-                let kind = Self::extract_error_kind(tree, *rhs_idx);
-                let poison_addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
+                let poison_addr = self.emit_error_poison(tree, *rhs_idx);
                 let poison_val = builder.ins().iconst(types::I64, poison_addr);
                 self.trace_scope(&format!("defer error LetRec(deferred) {:?}", binder));
                 self.env.insert(*binder, SsaVal::HeapPtr(poison_val));

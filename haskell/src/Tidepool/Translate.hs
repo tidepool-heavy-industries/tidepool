@@ -613,6 +613,22 @@ translate expr =
             emitNode $ NCon consId [charIdx, acc]
           ) suffixIdx (reverse bytes)
 
+    -- Intercept error calls to preserve message string
+    Var v | isErrorVar v -> do
+      hIdx <- emitNode $ NVar 0x4500000000000002
+      let findMsg [] = Nothing
+          findMsg (a:as) = case extractErrorMessage a of
+                             Just bs -> Just bs
+                             Nothing -> findMsg as
+      case findMsg (reverse args) of
+        Just bytes -> do
+          msgIdx <- emitNode $ NLit (LEString (BS.pack bytes))
+          emitNode $ NApp hIdx msgIdx
+        Nothing ->
+          foldM (\fIdx aArg -> do
+            aIdx <- translate aArg
+            emitNode $ NApp fIdx aIdx) hIdx args
+
     -- Desugar unpackFoldrCString# "lit"# f z → f (C# c1) (f (C# c2) (... (f (C# cn) z)))
     -- GHC's build/foldr fusion rewrites foldr/build pairs into unpackFoldrCString#,
     -- whose unfolding uses plusAddr#/indexCharOffAddr# (Addr# pointer arithmetic).
@@ -1521,6 +1537,19 @@ splitUnaryMultiReturnPrimOp :: PrimOp -> Maybe (Text, Text)
 splitUnaryMultiReturnPrimOp = \case
   DoubleDecode_Int64Op -> Just (T.pack "DecodeDoubleMantissa", T.pack "DecodeDoubleExponent")
   _                    -> Nothing
+
+-- | Extract error message from an expression.
+-- Handles both direct LitString and unpackCString# applications,
+-- and recursively peels off PushCallStack wrappers.
+extractErrorMessage :: CoreExpr -> Maybe [Word8]
+extractErrorMessage expr =
+  case collectArgs (stripTicksAndCasts expr) of
+    (Var v, [arg]) | isUnpackCStringVar v -> extractAddrLitBytes arg
+    (Var v, args) | occNameString (nameOccName (idName v)) == "PushCallStack"
+                  , (msg:_) <- filter isValueArg args -> extractErrorMessage msg
+    _ -> case stripTicksAndCasts expr of
+           Lit (LitString bs) -> Just (BS.unpack bs)
+           _ -> Nothing
 
 -- | Extract Addr# literal bytes from an expression.
 -- Handles both direct Lit and Var with an unfolding to Lit

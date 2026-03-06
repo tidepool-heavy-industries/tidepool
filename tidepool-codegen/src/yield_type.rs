@@ -34,7 +34,7 @@ impl std::fmt::Display for Yield {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum YieldError {
     /// Result HeapObject had unexpected tag byte.
     UnexpectedTag(u8),
@@ -54,6 +54,8 @@ pub enum YieldError {
     Overflow,
     /// Haskell `error` called in JIT code.
     UserError,
+    /// Haskell `error` called with a specific message.
+    UserErrorMsg(String),
     /// Haskell `undefined` forced in JIT code.
     Undefined,
     /// GHC type metadata forced (should be dead code).
@@ -92,6 +94,7 @@ impl std::fmt::Display for YieldError {
             YieldError::DivisionByZero => write!(f, "division by zero"),
             YieldError::Overflow => write!(f, "arithmetic overflow"),
             YieldError::UserError => write!(f, "Haskell error called"),
+            YieldError::UserErrorMsg(msg) => write!(f, "Haskell error: {}", msg),
             YieldError::Undefined => write!(f, "Haskell undefined forced"),
             YieldError::TypeMetadata => write!(f, "forced type metadata (should be dead code)"),
             YieldError::UnresolvedVar(id) => {
@@ -160,6 +163,7 @@ impl From<crate::host_fns::RuntimeError> for YieldError {
             RuntimeError::DivisionByZero => YieldError::DivisionByZero,
             RuntimeError::Overflow => YieldError::Overflow,
             RuntimeError::UserError => YieldError::UserError,
+            RuntimeError::UserErrorMsg(msg) => YieldError::UserErrorMsg(msg),
             RuntimeError::Undefined => YieldError::Undefined,
             RuntimeError::TypeMetadata => YieldError::TypeMetadata,
             RuntimeError::UnresolvedVar(id) => YieldError::UnresolvedVar(id),

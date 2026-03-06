@@ -2,8 +2,7 @@ use crate::emit::expr::ensure_heap_ptr;
 use crate::emit::*;
 use crate::pipeline::CodegenPipeline;
 use cranelift_codegen::ir::{
-    self, condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlags, Signature, TrapCode,
-    Value,
+    self, condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlags, Signature, Value,
 };
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
@@ -83,8 +82,8 @@ pub fn emit_case(
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
-        // No alts? Trap.
-        builder.ins().trap(TrapCode::unwrap_user(2));
+        // No alts? Call runtime_case_trap to handle pending errors gracefully.
+        emit_case_trap(pipeline, builder, scrut_ptr, &[], merge_block)?;
     }
 
     // Seal merge block
@@ -230,7 +229,7 @@ fn emit_data_dispatch(
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
-        emit_case_trap(pipeline, builder, scrut_ptr, data_alts)?;
+        emit_case_trap(pipeline, builder, scrut_ptr, data_alts, merge_block)?;
     }
 
     Ok(())
@@ -243,6 +242,7 @@ fn emit_case_trap(
     builder: &mut FunctionBuilder,
     scrut_ptr: Value,
     data_alts: &[&Alt<usize>],
+    merge_block: ir::Block,
 ) -> Result<(), EmitError> {
     // Collect expected tags
     let tags: Vec<u64> = data_alts
@@ -282,10 +282,11 @@ fn emit_case_trap(
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
     let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
     let num_alts_val = builder.ins().iconst(types::I64, num_alts as i64);
-    builder
+    let call = builder
         .ins()
         .call(trap_ref, &[scrut_ptr, num_alts_val, tags_addr]);
-    builder.ins().trap(TrapCode::unwrap_user(2));
+    let result = builder.inst_results(call)[0];
+    builder.ins().jump(merge_block, &[BlockArg::Value(result)]);
     Ok(())
 }
 
@@ -398,7 +399,9 @@ fn emit_lit_dispatch(
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
-        builder.ins().trap(TrapCode::unwrap_user(2));
+        // No alts matched.
+        // We pass empty data_alts since these are lit alts.
+        emit_case_trap(pipeline, builder, scrut_value, &[], merge_block)?;
     }
 
     Ok(())

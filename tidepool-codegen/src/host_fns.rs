@@ -23,6 +23,7 @@ pub enum RuntimeError {
     StackOverflow,
     BlackHole,
     BadThunkState(u8),
+    UserErrorMsg(String), // NEW: error with preserved message
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -31,6 +32,7 @@ impl std::fmt::Display for RuntimeError {
             RuntimeError::DivisionByZero => write!(f, "division by zero"),
             RuntimeError::Overflow => write!(f, "arithmetic overflow"),
             RuntimeError::UserError => write!(f, "Haskell error called"),
+            RuntimeError::UserErrorMsg(msg) => write!(f, "Haskell error: {}", msg),
             RuntimeError::Undefined => write!(f, "Haskell undefined forced"),
             RuntimeError::TypeMetadata => write!(f, "forced type metadata (should be dead code)"),
             RuntimeError::UnresolvedVar(id) => {
@@ -431,6 +433,43 @@ pub extern "C" fn runtime_error(kind: u64) -> *mut u8 {
     error_poison_ptr()
 }
 
+/// Called by JIT code for runtime errors with a specific message.
+pub extern "C" fn runtime_error_with_msg(kind: u64, msg_ptr: *const u8, msg_len: u64) -> *mut u8 {
+    let msg = if !msg_ptr.is_null() && msg_len > 0 {
+        let slice = unsafe { std::slice::from_raw_parts(msg_ptr, msg_len as usize) };
+        String::from_utf8_lossy(slice).to_string()
+    } else {
+        String::new()
+    };
+    let err_name = match kind {
+        0 => "DivisionByZero",
+        1 => "Overflow",
+        2 => "UserError",
+        3 => "Undefined",
+        4 => "TypeMetadata",
+        _ => "Unknown",
+    };
+    let diag = format!(
+        "[JIT] runtime_error called: kind={} ({}) msg={:?}",
+        kind, err_name, msg
+    );
+    eprintln!("{}", diag);
+    push_diagnostic(diag);
+    let err = match kind {
+        2 if !msg.is_empty() => RuntimeError::UserErrorMsg(msg),
+        0 => RuntimeError::DivisionByZero,
+        1 => RuntimeError::Overflow,
+        2 => RuntimeError::UserError,
+        3 => RuntimeError::Undefined,
+        4 => RuntimeError::TypeMetadata,
+        _ => RuntimeError::UserError,
+    };
+    RUNTIME_ERROR.with(|cell| {
+        *cell.borrow_mut() = Some(err);
+    });
+    error_poison_ptr()
+}
+
 pub extern "C" fn runtime_oom() -> *mut u8 {
     RUNTIME_ERROR.with(|cell| {
         *cell.borrow_mut() = Some(RuntimeError::HeapOverflow);
@@ -551,10 +590,66 @@ pub fn error_poison_ptr_lazy(kind: u64) -> *mut u8 {
 unsafe extern "C" fn poison_trampoline_lazy(
     _vmctx: *mut VMContext,
     closure: *mut u8,
+    arg: *mut u8,
+) -> *mut u8 {
+    let kind = *(closure.add(tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET) as *const u64);
+
+    // If the argument is a LitString, use it as the error message.
+    if !arg.is_null() && tidepool_heap::layout::read_tag(arg) == tidepool_heap::layout::TAG_LIT {
+        let lit_tag = *arg.add(tidepool_heap::layout::LIT_TAG_OFFSET);
+        if lit_tag == 5 {
+            // LIT_TAG_STRING
+            let raw_ptr = *(arg.add(tidepool_heap::layout::LIT_VALUE_OFFSET) as *const *const u8);
+            if !raw_ptr.is_null() {
+                let len = *(raw_ptr as *const u64);
+                let bytes_ptr = raw_ptr.add(8);
+                return runtime_error_with_msg(kind, bytes_ptr, len);
+            }
+        }
+    }
+
+    runtime_error(kind)
+}
+
+/// Create a pre-allocated "lazy poison" Closure for a given error kind and message.
+pub fn error_poison_ptr_lazy_msg(kind: u64, msg: &[u8]) -> *mut u8 {
+    // Leak the message bytes so they live forever
+    let msg_bytes = msg.to_vec().into_boxed_slice();
+    let msg_ptr = msg_bytes.as_ptr();
+    let msg_len = msg_bytes.len();
+    std::mem::forget(msg_bytes);
+
+    // Allocate closure with 3 captures: kind, msg_ptr, msg_len
+    // Closure: header(8) + code_ptr(8) + num_captured(2+pad=8) + 3*8 = 48
+    let size = tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET + 3 * 8;
+    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+    if ptr.is_null() {
+        std::alloc::handle_alloc_error(layout);
+    }
+    unsafe {
+        tidepool_heap::layout::write_header(ptr, tidepool_heap::layout::TAG_CLOSURE, size as u16);
+        *(ptr.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *mut usize) =
+            poison_trampoline_lazy_msg as *const () as usize;
+        *(ptr.add(tidepool_heap::layout::CLOSURE_NUM_CAPTURED_OFFSET) as *mut u16) = 3;
+        *(ptr.add(tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET) as *mut u64) = kind;
+        *(ptr.add(tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET + 8) as *mut usize) =
+            msg_ptr as usize;
+        *(ptr.add(tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET + 16) as *mut u64) = msg_len as u64;
+    }
+    ptr
+}
+
+unsafe extern "C" fn poison_trampoline_lazy_msg(
+    _vmctx: *mut VMContext,
+    closure: *mut u8,
     _arg: *mut u8,
 ) -> *mut u8 {
     let kind = *(closure.add(tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET) as *const u64);
-    runtime_error(kind)
+    let msg_ptr =
+        *(closure.add(tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET + 8) as *const *const u8);
+    let msg_len = *(closure.add(tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET + 16) as *const u64);
+    runtime_error_with_msg(kind, msg_ptr, msg_len)
 }
 
 /// Check and take any pending runtime error from JIT code.
@@ -1135,6 +1230,10 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
         ("heap_force", heap_force as *const u8),
         ("unresolved_var_trap", unresolved_var_trap as *const u8),
         ("runtime_error", runtime_error as *const u8),
+        (
+            "runtime_error_with_msg",
+            runtime_error_with_msg as *const u8,
+        ),
         ("debug_app_check", debug_app_check as *const u8),
         (
             "runtime_new_byte_array",
@@ -1832,8 +1931,22 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
         return error_poison_ptr();
     }
 
-    use std::io::Write;
     let ptr = scrut_ptr as *const u8;
+
+    // Check if the scrutinee is a lazy poison closure. If so, trigger it to set the error flag.
+    if !ptr.is_null() && unsafe { tidepool_heap::layout::read_tag(ptr) } == tidepool_heap::layout::TAG_CLOSURE {
+        let code_ptr = unsafe { *(ptr.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *const usize) };
+        if code_ptr == poison_trampoline_lazy as *const () as usize || code_ptr == poison_trampoline_lazy_msg as *const () as usize {
+            // Trigger the error by calling the trampoline
+            unsafe {
+                let func: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 = std::mem::transmute(code_ptr);
+                func(std::ptr::null_mut(), ptr as *mut u8, std::ptr::null_mut());
+            }
+            return error_poison_ptr();
+        }
+    }
+
+    use std::io::Write;
     if (scrut_ptr as u64) < 0x1000 {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
