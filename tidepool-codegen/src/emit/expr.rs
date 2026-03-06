@@ -19,6 +19,16 @@ use tidepool_repr::*;
 /// Uninhabited token type for MappableFrame impl.
 enum EmitFrameToken {}
 
+/// Classification of a Con field for the hylomorphism.
+/// Eager fields are stack-safe hylo children; Deferred fields are compiled as thunks.
+#[derive(Debug, Clone)]
+enum ConField<A> {
+    /// Processed by the hylomorphism's explicit stack (Var, Lit, Con, Lam, PrimOp, Jump, Join).
+    Eager(A),
+    /// Raw tree index, compiled as a thunk in the collapse phase (App, Case, LetNonRec, LetRec).
+    Deferred(usize),
+}
+
 /// A single emission frame. `A` positions are children processed stack-safely
 /// by the hylomorphism's internal explicit stack. Raw `usize` positions require
 /// top-down context setup (block creation, pattern binding) and are processed
@@ -32,7 +42,7 @@ enum EmitFrame<A> {
     // Simple recursive — children are A (stack-safe)
     Con {
         tag: DataConId,
-        field_indices: Vec<usize>, // Raw tree indices — NOT mapped by hylomorphism
+        fields: Vec<ConField<A>>,
     },
     App {
         fun: A,
@@ -80,9 +90,15 @@ impl MappableFrame for EmitFrameToken {
             EmitFrame::Var(v) => EmitFrame::Var(v),
             EmitFrame::Lit(l) => EmitFrame::Lit(l),
             EmitFrame::LitString(b) => EmitFrame::LitString(b),
-            EmitFrame::Con { tag, field_indices } => EmitFrame::Con {
+            EmitFrame::Con { tag, fields } => EmitFrame::Con {
                 tag,
-                field_indices, // Not mapped — raw indices preserved
+                fields: fields
+                    .into_iter()
+                    .map(|cf| match cf {
+                        ConField::Eager(a) => ConField::Eager(f(a)),
+                        ConField::Deferred(idx) => ConField::Deferred(idx),
+                    })
+                    .collect(),
             },
             EmitFrame::App { fun, arg } => EmitFrame::App {
                 fun: f(fun),
@@ -134,7 +150,16 @@ fn expand_node(tree: &CoreExpr, idx: usize) -> Result<EmitFrame<usize>, EmitErro
         CoreFrame::Lit(lit) => Ok(EmitFrame::Lit(lit.clone())),
         CoreFrame::Con { tag, fields } => Ok(EmitFrame::Con {
             tag: *tag,
-            field_indices: fields.clone(),
+            fields: fields
+                .iter()
+                .map(|&f| {
+                    if should_thunkify_con_field(tree, f) {
+                        ConField::Deferred(f)
+                    } else {
+                        ConField::Eager(f)
+                    }
+                })
+                .collect(),
         }),
         CoreFrame::App { fun, arg } => Ok(EmitFrame::App {
             fun: *fun,
@@ -237,23 +262,21 @@ fn collapse_frame(
                 Ok(SsaVal::HeapPtr(result))
             }
         },
-        EmitFrame::Con { tag, field_indices } => {
-            let num_fields = field_indices.len();
+        EmitFrame::Con { tag, fields } => {
+            let num_fields = fields.len();
             let mut field_vals: Vec<Value> = Vec::with_capacity(num_fields);
 
-            for &idx in &field_indices {
-                if is_trivial_con_field(tree, idx, &ctx.env) {
-                    // Trivial field: evaluate eagerly via emit_node (same as before)
-                    let val = ctx.emit_node(
-                        pipeline, builder, vmctx, gc_sig, oom_func, tree, idx,
-                    )?;
-                    field_vals.push(ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val));
-                } else {
-                    // Non-trivial field: compile as thunk
-                    let thunk_val = emit_thunk(
-                        ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, idx,
-                    )?;
-                    field_vals.push(thunk_val);
+            for cf in &fields {
+                match cf {
+                    ConField::Eager(val) => {
+                        field_vals.push(ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *val));
+                    }
+                    ConField::Deferred(idx) => {
+                        let thunk_val = emit_thunk(
+                            ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, *idx,
+                        )?;
+                        field_vals.push(thunk_val);
+                    }
                 }
             }
 
@@ -441,15 +464,18 @@ fn emit_subtree(
     )
 }
 
-/// Determine if a Con field expression is trivial (should be evaluated eagerly).
-/// Trivial: Var that's already in the environment, or Lit.
-/// Non-trivial: App, Case, Con-with-children, PrimOp, etc. → thunkify.
-fn is_trivial_con_field(tree: &CoreExpr, idx: usize, env: &std::collections::HashMap<VarId, SsaVal>) -> bool {
-    match &tree.nodes[idx] {
-        CoreFrame::Var(v) => env.contains_key(v) || (v.0 >> 56) as u8 == 0x45, // bound var or error sentinel
-        CoreFrame::Lit(_) => true,
-        _ => false,
-    }
+/// Determine if a Con field should be compiled as a thunk (deferred evaluation).
+/// Only genuinely computational expressions that might diverge or contain function calls
+/// are thunked. Data construction (Con, Lit, Var, Lam, PrimOp) stays eager and is
+/// processed by the hylomorphism's stack-safe explicit stack.
+fn should_thunkify_con_field(tree: &CoreExpr, idx: usize) -> bool {
+    matches!(
+        &tree.nodes[idx],
+        CoreFrame::App { .. }
+            | CoreFrame::Case { .. }
+            | CoreFrame::LetNonRec { .. }
+            | CoreFrame::LetRec { .. }
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1383,15 +1409,15 @@ impl EmitContext {
                                 deferred_cons.push((*ptr, field_indices.clone()));
                             } else {
                                 for (i, &f_idx) in field_indices.iter().enumerate() {
-                                    let field_val = if is_trivial_con_field(tree, f_idx, &self.env) {
+                                    let field_val = if should_thunkify_con_field(tree, f_idx) {
+                                        emit_thunk(
+                                            self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                                        )?
+                                    } else {
                                         let val = self.emit_node(
                                             pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
                                         )?;
                                         ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
-                                    } else {
-                                        emit_thunk(
-                                            self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
-                                        )?
                                     };
                                     builder.ins().store(
                                         MemFlags::trusted(),
@@ -1536,15 +1562,15 @@ impl EmitContext {
                             remaining_deps.remove(binder);
                             if remaining_deps.is_empty() && !field_indices.is_empty() {
                                 for (i, &f_idx) in field_indices.iter().enumerate() {
-                                    let field_val = if is_trivial_con_field(tree, f_idx, &self.env) {
+                                    let field_val = if should_thunkify_con_field(tree, f_idx) {
+                                        emit_thunk(
+                                            self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                                        )?
+                                    } else {
                                         let val = self.emit_node(
                                             pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
                                         )?;
                                         ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
-                                    } else {
-                                        emit_thunk(
-                                            self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
-                                        )?
                                     };
                                     builder.ins().store(
                                         MemFlags::trusted(),
@@ -1581,15 +1607,15 @@ impl EmitContext {
                     // incrementally during Phase 3c.
                     for (ptr, field_indices, _) in &deferred_con_deps {
                         for (i, &f_idx) in field_indices.iter().enumerate() {
-                            let field_val = if is_trivial_con_field(tree, f_idx, &self.env) {
+                            let field_val = if should_thunkify_con_field(tree, f_idx) {
+                                emit_thunk(
+                                    self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                                )?
+                            } else {
                                 let val = self.emit_node(
                                     pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
                                 )?;
                                 ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
-                            } else {
-                                emit_thunk(
-                                    self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
-                                )?
                             };
                             builder.ins().store(
                                 MemFlags::trusted(),
