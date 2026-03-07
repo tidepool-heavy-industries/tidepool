@@ -355,6 +355,54 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
     }
 }
 
+/// Resolve pending tail calls from VMContext. Called by non-tail App sites
+/// when the callee returned null (indicating a tail call was stored).
+///
+/// Loop: read tail_callee+tail_arg from VMContext, clear them, call the closure,
+/// check if result is null (another tail call) or a real value.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn trampoline_resolve(vmctx: *mut VMContext) -> *mut u8 {
+    unsafe {
+        loop {
+            let callee = (*vmctx).tail_callee;
+            let arg = (*vmctx).tail_arg;
+
+            // Clear tail fields immediately
+            (*vmctx).tail_callee = std::ptr::null_mut();
+            (*vmctx).tail_arg = std::ptr::null_mut();
+
+            if callee.is_null() {
+                // No pending tail call — shouldn't happen, propagate null
+                return std::ptr::null_mut();
+            }
+
+            // Reset call depth so tail-recursive loops don't hit the limit
+            reset_call_depth();
+
+            // Read code pointer from closure
+            let code_ptr = *(callee.add(8) as *const usize); // CLOSURE_CODE_PTR_OFFSET = 8
+
+            // Call the closure: fn(vmctx, self, arg) -> result
+            let func: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
+                std::mem::transmute(code_ptr);
+            let result = func(vmctx, callee, arg);
+
+            if !result.is_null() {
+                // Real return value — done
+                return result;
+            }
+
+            // Result is null — check if another tail call was stored
+            if (*vmctx).tail_callee.is_null() {
+                // Null result with no pending tail call — propagate null (error)
+                return std::ptr::null_mut();
+            }
+
+            // Another tail call pending — loop
+        }
+    }
+}
+
 // Test instrumentation — NOT part of the public API.
 // These use atomics to be thread-safe during parallel test execution.
 static GC_TRIGGER_CALL_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -1235,6 +1283,7 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
             runtime_error_with_msg as *const u8,
         ),
         ("debug_app_check", debug_app_check as *const u8),
+        ("trampoline_resolve", trampoline_resolve as *const u8),
         (
             "runtime_new_byte_array",
             runtime_new_byte_array as *const u8,
@@ -1783,6 +1832,8 @@ mod tests {
                 alloc_ptr: std::ptr::null_mut(),
                 alloc_limit: std::ptr::null_mut(),
                 gc_trigger: mock_gc_trigger,
+                tail_callee: std::ptr::null_mut(),
+                tail_arg: std::ptr::null_mut(),
             };
 
             // 1. Allocate a Lit object for the result
@@ -1822,6 +1873,8 @@ mod tests {
                 alloc_ptr: std::ptr::null_mut(),
                 alloc_limit: std::ptr::null_mut(),
                 gc_trigger: mock_gc_trigger,
+                tail_callee: std::ptr::null_mut(),
+                tail_arg: std::ptr::null_mut(),
             };
 
             // 1. Result: a real heap object (Lit) so the force loop can read its tag
@@ -1848,6 +1901,8 @@ mod tests {
                 alloc_ptr: std::ptr::null_mut(),
                 alloc_limit: std::ptr::null_mut(),
                 gc_trigger: mock_gc_trigger,
+                tail_callee: std::ptr::null_mut(),
+                tail_arg: std::ptr::null_mut(),
             };
 
             // Reset runtime error
@@ -1875,6 +1930,8 @@ mod tests {
                 alloc_ptr: std::ptr::null_mut(),
                 alloc_limit: std::ptr::null_mut(),
                 gc_trigger: mock_gc_trigger,
+                tail_callee: std::ptr::null_mut(),
+                tail_arg: std::ptr::null_mut(),
             };
 
             RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);
@@ -1899,6 +1956,8 @@ mod tests {
                 alloc_ptr: std::ptr::null_mut(),
                 alloc_limit: std::ptr::null_mut(),
                 gc_trigger: mock_gc_trigger,
+                tail_callee: std::ptr::null_mut(),
+                tail_arg: std::ptr::null_mut(),
             };
 
             RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);

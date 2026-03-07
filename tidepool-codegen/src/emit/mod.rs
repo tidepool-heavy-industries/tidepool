@@ -32,6 +32,10 @@ pub const THUNK_STATE_OFFSET: i32 = 8;
 pub const THUNK_CODE_PTR_OFFSET: i32 = 16;
 pub const THUNK_CAPTURED_START: i32 = 24;
 
+// VMContext offsets for TCO tail call fields
+pub const VMCTX_TAIL_CALLEE_OFFSET: i32 = 24;
+pub const VMCTX_TAIL_ARG_OFFSET: i32 = 32;
+
 /// SSA value with boxed/unboxed tracking.
 #[derive(Debug, Clone, Copy)]
 pub enum SsaVal {
@@ -57,6 +61,8 @@ pub struct EmitContext {
     pub prefix: String,
     /// Storage for LetRec deferred state, indexed by work items.
     pub(crate) letrec_states: Vec<crate::emit::expr::LetRecDeferredState>,
+    /// TCO: whether current emission point is in tail position.
+    pub in_tail_position: bool,
 }
 
 /// Placeholder for join point info (used by case/join leaf later).
@@ -117,6 +123,7 @@ impl EmitContext {
             lambda_counter: 0,
             prefix,
             letrec_states: Vec::new(),
+            in_tail_position: false,
         }
     }
 
