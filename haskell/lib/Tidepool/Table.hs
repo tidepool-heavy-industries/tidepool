@@ -27,7 +27,7 @@ import Prelude
   )
 import Data.Text (Text)
 import qualified Data.Text as T
-import Tidepool.Prelude (enumFromTo, lines, splitOn)
+import Tidepool.Prelude (enumFromTo, lines, splitOn, sortBy, comparing)
 
 -- ---------------------------------------------------------------------------
 -- Parsing
@@ -100,8 +100,6 @@ padRight w pad t
   | T.length t >= w = t
   | otherwise = t <> T.replicate (w - T.length t) (T.singleton pad)
 
--- enumFromTo moved to Tidepool.Prelude
-
 safeDrop :: Int -> [a] -> [a]
 safeDrop 0 xs     = xs
 safeDrop _ []     = []
@@ -139,28 +137,3 @@ filterByColumn i p (header:rows) = header : filter (\r -> p (safeIdx i r)) rows
       []    -> T.empty
       (x:_) -> x
 
--- ---------------------------------------------------------------------------
--- Local sort (avoid importing from Prelude to keep module self-contained)
--- ---------------------------------------------------------------------------
-
-sortBy :: (a -> a -> Ordering) -> [a] -> [a]
-sortBy cmp = mergeSort
-  where
-    mergeSort []  = []
-    mergeSort [x] = [x]
-    mergeSort xs  = let (as, bs) = halve xs
-                    in merge (mergeSort as) (mergeSort bs)
-    halve []       = ([], [])
-    halve [x]      = ([x], [])
-    halve (x:y:zs) = let (as, bs) = halve zs in (x:as, y:bs)
-    merge [] ys = ys
-    merge xs [] = xs
-    merge (x:xs) (y:ys)
-      | cmp x y /= GT = x : merge xs (y:ys)
-      | otherwise      = y : merge (x:xs) ys
-
-comparing :: Ord b => (a -> b) -> a -> a -> Ordering
-comparing f x y = compare (f x) (f y)
-  where compare a b | a == b    = EQ
-                    | a <= b    = LT
-                    | otherwise = GT

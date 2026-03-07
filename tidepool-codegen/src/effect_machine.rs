@@ -84,7 +84,8 @@ impl CompiledEffectMachine {
     ///
     /// `continuation` and `response` must be valid heap pointers from the nursery.
     pub unsafe fn resume(&mut self, continuation: *mut u8, response: *mut u8) -> Yield {
-        let result = self.apply_cont_heap(continuation, response);
+        let mut result = self.apply_cont_heap(continuation, response);
+        self.resolve_tail_calls(&mut result);
         self.parse_result(result)
     }
 

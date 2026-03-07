@@ -31,34 +31,10 @@ import Prelude
   )
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Char (ord, chr)
-import Tidepool.Prelude (words, lines, splitOn)
-
--- ---------------------------------------------------------------------------
--- Internal char helpers (avoid Data.Char dictionary)
--- ---------------------------------------------------------------------------
-
-isUpper :: Char -> Bool
-isUpper c = c >= 'A' && c <= 'Z'
-
-isLower :: Char -> Bool
-isLower c = c >= 'a' && c <= 'z'
-
-isAlpha :: Char -> Bool
-isAlpha c = isUpper c || isLower c
-
-isAlphaNum :: Char -> Bool
-isAlphaNum c = isAlpha c || (c >= '0' && c <= '9')
-
-toLowerC :: Char -> Char
-toLowerC c
-  | isUpper c = chr (ord c + 32)
-  | otherwise = c
-
-toUpperC :: Char -> Char
-toUpperC c
-  | isLower c = chr (ord c - 32)
-  | otherwise = c
+import Tidepool.Prelude
+  ( words, lines, splitOn
+  , isUpper, isLower, isAlphaNum, toLowerChar, toUpperChar
+  )
 
 -- ---------------------------------------------------------------------------
 -- Case conversion
@@ -75,7 +51,7 @@ camelToSnake = T.pack . go . T.unpack
   where
     go [] = []
     go (c:cs)
-      | isUpper c = '_' : toLowerC c : go cs
+      | isUpper c = '_' : toLowerChar c : go cs
       | otherwise = c : go cs
 
 -- | Convert snake_case to camelCase.
@@ -94,7 +70,7 @@ snakeToCamel t = case splitOn "_" t of
 capitalize :: Text -> Text
 capitalize t = case T.uncons t of
   Nothing      -> T.empty
-  Just (c, cs) -> T.cons (toUpperC c) cs
+  Just (c, cs) -> T.cons (toUpperChar c) cs
 
 -- | Capitalize each word in a Text.
 --
@@ -174,7 +150,7 @@ slugify :: Text -> Text
 slugify = collapseHyphens . T.map toLowerOrHyphen . T.strip
   where
     toLowerOrHyphen c
-      | isAlphaNum c = toLowerC c
+      | isAlphaNum c = toLowerChar c
       | otherwise    = '-'
     collapseHyphens = T.intercalate "-" . filter (not . T.null) . splitOn "-"
 

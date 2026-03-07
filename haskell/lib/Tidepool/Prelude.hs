@@ -178,13 +178,15 @@ import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, 
 import Control.Lens (preview, toListOf, (^?), (^..), (&), (.~), (%~), to, _Just, traverse)
 import qualified Data.Map.Strict as Map
 
--- Rewrite text-package slice functions to safe pure-Haskell versions.
--- Fires at -O2 for all code that imports this module (MCP preamble does).
+-- FIXME(#157): T.words/T.lines/T.splitOn return corrupt ByteArray# slices
+-- under the JIT. These RULES rewrite qualified Data.Text calls to our safe
+-- pure-Haskell versions. Fires at -O2 for all code importing this module.
 {-# RULES "Data.Text.words/safe"   forall t.     T.words t   = words t   #-}
 {-# RULES "Data.Text.lines/safe"   forall t.     T.lines t   = lines t   #-}
 {-# RULES "Data.Text.splitOn/safe"  forall sep t. T.splitOn sep t = splitOn sep t #-}
 
--- | show for Double, bypassing GHC's Integer-based floatToDigits.
+-- FIXME(#160): Binding-level interception in Translate.hs.
+-- show for Double, bypassing GHC's Integer-based floatToDigits.
 -- The body is a fallback that should never run — Translate.hs intercepts
 -- calls to showDouble and emits a ShowDoubleAddr primop instead.
 -- The Double arg must be used to prevent GHC worker-wrapper from dropping it.
@@ -225,8 +227,8 @@ toLower = T.toLower
 strip :: Text -> Text
 strip = T.strip
 
--- | Split text on a delimiter.
--- Pure reimplementation — T.splitOn returns corrupt Text slices in JIT.
+-- FIXME(#157): Pure reimplementation — T.splitOn returns corrupt
+-- ByteArray# slices in JIT. Also needs unfolding (#156).
 splitOn :: Text -> Text -> [Text]
 splitOn sep t
   | T.null sep = map (\c -> T.pack [c]) (T.unpack t)
@@ -253,23 +255,22 @@ isSuffixOf = T.isSuffixOf
 isInfixOf :: Text -> Text -> Bool
 isInfixOf = T.isInfixOf
 
--- | Split text into words (whitespace-delimited).
--- Pure reimplementation — T.words returns corrupt Text slices in JIT.
+-- FIXME(#157): Pure reimplementation — T.words returns corrupt
+-- ByteArray# slices in JIT. Also needs unfolding (#156).
 words :: Text -> [Text]
 words t = go (T.unpack t)
   where
     go [] = []
-    go s  = let s'       = P.dropWhile isSpaceC s
+    go s  = let s'       = P.dropWhile isSpace s
                 (w, rest) = breakOnSpace s'
             in if P.null w then [] else T.pack w : go rest
-    isSpaceC c = c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
     breakOnSpace [] = ([], [])
     breakOnSpace (c:cs)
-      | isSpaceC c = ([], c:cs)
-      | otherwise  = let (w, r) = breakOnSpace cs in (c:w, r)
+      | isSpace c = ([], c:cs)
+      | otherwise = let (w, r) = breakOnSpace cs in (c:w, r)
 
--- | Split text into lines.
--- Pure reimplementation — T.lines returns corrupt Text slices in JIT.
+-- FIXME(#157): Pure reimplementation — T.lines returns corrupt
+-- ByteArray# slices in JIT. Also needs unfolding (#156).
 lines :: Text -> [Text]
 lines t = go (T.unpack t)
   where
@@ -356,7 +357,8 @@ init [_]    = []
 init (x:xs) = x : init xs
 {-# INLINE init #-}
 
--- | Remove duplicate elements (preserving first occurrence).
+-- FIXME(#156): Remove duplicate elements (preserving first occurrence).
+-- Pure reimplementation — Data.List.nub lacks unfoldings.
 nub :: Eq a => [a] -> [a]
 nub = go []
   where
@@ -382,7 +384,8 @@ nubBy eq = go []
     elemOf y (z:zs) = eq y z || elemOf y zs
 {-# INLINABLE nubBy #-}
 
--- | Sort a list using merge sort.
+-- FIXME(#156): Sort a list using merge sort.
+-- Pure reimplementation — Data.List.sort lacks unfoldings.
 sort :: Ord a => [a] -> [a]
 sort = mergeSort
   where
@@ -403,7 +406,8 @@ sort = mergeSort
       | otherwise  = y : merge (x:xs) ys
 {-# INLINABLE sort #-}
 
--- | Sort using a custom comparison function.
+-- FIXME(#156): Sort using a custom comparison function.
+-- Pure reimplementation — Data.List.sortBy lacks unfoldings.
 sortBy :: (a -> a -> Ordering) -> [a] -> [a]
 sortBy cmp = mergeSort
   where
@@ -543,9 +547,9 @@ last (_:xs) = last xs
 last []     = error "last: empty list"
 {-# INLINE last #-}
 
--- | Monomorphic even/odd for Int.
+-- FIXME(#155): Monomorphic even/odd for Int.
 -- The polymorphic Prelude versions go through the Integral typeclass
--- dictionary which contains error branches that the JIT evaluates eagerly.
+-- dictionary which contains error branches that the JIT evaluates eagerly (#158).
 even :: Int -> Bool
 even n = n `rem` 2 == 0
 {-# INLINE even #-}
@@ -554,10 +558,10 @@ odd :: Int -> Bool
 odd n = n `rem` 2 /= 0
 {-# INLINE odd #-}
 
--- | Monomorphic round :: Double -> Int.
+-- FIXME(#155): Monomorphic round :: Double -> Int.
 -- The polymorphic Prelude round goes through RealFrac/properFraction which
--- pulls in dictionary error branches. This uses truncate (which works) and
--- manual fractional-part checking for banker's rounding.
+-- pulls in dictionary error branches (#158). This uses truncate (which works)
+-- and manual fractional-part checking for banker's rounding.
 round :: Double -> Int
 round d =
   let n = truncate d :: Int
@@ -591,8 +595,8 @@ comparing :: Ord b => (a -> b) -> a -> a -> Ordering
 comparing f x y = compare (f x) (f y)
 {-# INLINE comparing #-}
 
--- | Compare two Texts lexicographically by Unicode codepoint.
--- Substitute for $fOrdText_$ccompare (text package Ord instance lacks unfoldings).
+-- FIXME(#159): Compare two Texts lexicographically by Unicode codepoint.
+-- Substitute for $fOrdText_$ccompare — text Ord uses FFI memcmp (#156).
 {-# NOINLINE compareText #-}
 compareText :: Text -> Text -> Ordering
 compareText a b = go (T.unpack a) (T.unpack b)
@@ -606,8 +610,8 @@ compareText a b = go (T.unpack a) (T.unpack b)
       | otherwise     = go xs ys
       where !ox = ord x; !oy = ord y
 
--- | Check two Texts for equality.
--- Substitute for $fEqText_$c== (text package Eq instance lacks unfoldings).
+-- FIXME(#159): Check two Texts for equality.
+-- Substitute for $fEqText_$c== — text Eq uses FFI memcmp (#156).
 {-# NOINLINE eqText #-}
 eqText :: Text -> Text -> Bool
 eqText a b = go (T.unpack a) (T.unpack b)
