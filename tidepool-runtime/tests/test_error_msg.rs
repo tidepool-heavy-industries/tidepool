@@ -22,11 +22,15 @@ result = f 0
     let pp = prelude_path();
     let include = [pp.as_path()];
     let res = tidepool_runtime::compile_and_run_pure(&src, "result", &include);
-    
+
     match res {
         Err(e) => {
             let msg = format!("{}", e);
-            assert!(msg.contains("head: empty list"), "Error message should contain 'head: empty list', got: {}", msg);
+            assert!(
+                msg.contains("head: empty list"),
+                "Error message should contain 'head: empty list', got: {}",
+                msg
+            );
         }
         Ok(_) => panic!("Expected error, got success"),
     }
@@ -48,12 +52,16 @@ result = f 1
     let pp = prelude_path();
     let include = [pp.as_path()];
     let res = tidepool_runtime::compile_and_run_pure(&src, "result", &include);
-    
+
     match res {
         Err(e) => {
             let msg = format!("{}", e);
             // patError usually contains the location and function name
-            assert!(msg.contains("function f"), "Error message should contain 'function f', got: {}", msg);
+            assert!(
+                msg.contains("function f"),
+                "Error message should contain 'function f', got: {}",
+                msg
+            );
         }
         Ok(_) => panic!("Expected error, got success"),
     }

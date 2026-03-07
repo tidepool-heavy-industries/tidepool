@@ -486,13 +486,9 @@ fn collapse_frame(
             let null_check_block = builder.create_block();
             let ret_ok_block = builder.create_block();
 
-            builder.ins().brif(
-                ret_is_null,
-                null_check_block,
-                &[],
-                ret_ok_block,
-                &[],
-            );
+            builder
+                .ins()
+                .brif(ret_is_null, null_check_block, &[], ret_ok_block, &[]);
 
             // ret_ok_block: normal return, jump to merge
             builder.switch_to_block(ret_ok_block);
@@ -504,32 +500,34 @@ fn collapse_frame(
             builder.seal_block(null_check_block);
 
             let tail_callee = builder.ins().load(
-                types::I64, MemFlags::trusted(), vmctx, VMCTX_TAIL_CALLEE_OFFSET,
+                types::I64,
+                MemFlags::trusted(),
+                vmctx,
+                VMCTX_TAIL_CALLEE_OFFSET,
             );
             let has_tail_call = builder.ins().icmp_imm(IntCC::NotEqual, tail_callee, 0);
 
             let resolve_block = builder.create_block();
             let null_propagate_block = builder.create_block();
 
-            builder.ins().brif(
-                has_tail_call,
-                resolve_block,
-                &[],
-                null_propagate_block,
-                &[],
-            );
+            builder
+                .ins()
+                .brif(has_tail_call, resolve_block, &[], null_propagate_block, &[]);
 
             // null_propagate_block: no tail call pending, propagate null (error)
             builder.switch_to_block(null_propagate_block);
             builder.seal_block(null_propagate_block);
             let null_val = builder.ins().iconst(types::I64, 0);
-            builder.ins().jump(merge_block, &[BlockArg::Value(null_val)]);
+            builder
+                .ins()
+                .jump(merge_block, &[BlockArg::Value(null_val)]);
 
             // resolve_block: call trampoline_resolve to execute the pending tail call
             builder.switch_to_block(resolve_block);
             builder.seal_block(resolve_block);
 
-            let resolve_fn = pipeline.module
+            let resolve_fn = pipeline
+                .module
                 .declare_function("trampoline_resolve", Linkage::Import, &{
                     let mut sig = Signature::new(pipeline.isa.default_call_conv());
                     sig.params.push(AbiParam::new(types::I64)); // vmctx
@@ -537,11 +535,15 @@ fn collapse_frame(
                     sig
                 })
                 .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-            let resolve_ref = pipeline.module.declare_func_in_func(resolve_fn, builder.func);
+            let resolve_ref = pipeline
+                .module
+                .declare_func_in_func(resolve_fn, builder.func);
             let resolve_inst = builder.ins().call(resolve_ref, &[vmctx]);
             let resolved_val = builder.inst_results(resolve_inst)[0];
             builder.declare_value_needs_stack_map(resolved_val);
-            builder.ins().jump(merge_block, &[BlockArg::Value(resolved_val)]);
+            builder
+                .ins()
+                .jump(merge_block, &[BlockArg::Value(resolved_val)]);
 
             // merge_block: result from any path
             builder.switch_to_block(merge_block);
@@ -1268,7 +1270,9 @@ impl EmitContext {
                             }
                             // All non-Let nodes: delegate to stack-safe hylomorphism
                             _ => {
-                                if self.in_tail_position && matches!(tree.nodes[idx], CoreFrame::App { .. }) {
+                                if self.in_tail_position
+                                    && matches!(tree.nodes[idx], CoreFrame::App { .. })
+                                {
                                     let result = self.emit_tail_app(
                                         pipeline, builder, vmctx, gc_sig, oom_func, tree, idx,
                                     )?;
@@ -1352,15 +1356,21 @@ impl EmitContext {
         // Evaluate fun and arg in NON-tail position
         let saved_tail = self.in_tail_position;
         self.in_tail_position = false;
-        let fun_val = emit_subtree(self, pipeline, builder, vmctx, gc_sig, oom_func, tree, fun_idx)?;
-        let arg_val = emit_subtree(self, pipeline, builder, vmctx, gc_sig, oom_func, tree, arg_idx)?;
+        let fun_val = emit_subtree(
+            self, pipeline, builder, vmctx, gc_sig, oom_func, tree, fun_idx,
+        )?;
+        let arg_val = emit_subtree(
+            self, pipeline, builder, vmctx, gc_sig, oom_func, tree, arg_idx,
+        )?;
         self.in_tail_position = saved_tail;
 
         let raw_fun_ptr = fun_val.value();
         let arg_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, arg_val);
 
         // Force thunked function (same as regular App path)
-        let fun_tag = builder.ins().load(types::I8, MemFlags::trusted(), raw_fun_ptr, 0);
+        let fun_tag = builder
+            .ins()
+            .load(types::I8, MemFlags::trusted(), raw_fun_ptr, 0);
         let is_thunk = builder.ins().icmp_imm(
             IntCC::Equal,
             fun_tag,
@@ -1382,7 +1392,8 @@ impl EmitContext {
         builder.switch_to_block(force_fun_block);
         builder.seal_block(force_fun_block);
 
-        let force_fn = pipeline.module
+        let force_fn = pipeline
+            .module
             .declare_function("heap_force", Linkage::Import, &{
                 let mut sig = Signature::new(pipeline.isa.default_call_conv());
                 sig.params.push(AbiParam::new(types::I64));
@@ -1395,7 +1406,9 @@ impl EmitContext {
         let force_call = builder.ins().call(force_ref, &[vmctx, raw_fun_ptr]);
         let forced_fun = builder.inst_results(force_call)[0];
         builder.declare_value_needs_stack_map(forced_fun);
-        builder.ins().jump(fun_ready_block, &[BlockArg::Value(forced_fun)]);
+        builder
+            .ins()
+            .jump(fun_ready_block, &[BlockArg::Value(forced_fun)]);
 
         builder.switch_to_block(fun_ready_block);
         builder.seal_block(fun_ready_block);
@@ -1403,7 +1416,8 @@ impl EmitContext {
         builder.declare_value_needs_stack_map(fun_ptr);
 
         // Debug validation (same as regular App)
-        let check_fn = pipeline.module
+        let check_fn = pipeline
+            .module
             .declare_function("debug_app_check", Linkage::Import, &{
                 let mut sig = Signature::new(pipeline.isa.default_call_conv());
                 sig.params.push(AbiParam::new(types::I64));
@@ -1420,7 +1434,9 @@ impl EmitContext {
         let poison_block = builder.create_block();
 
         let is_zero = builder.ins().icmp_imm(IntCC::Equal, check_result, 0);
-        builder.ins().brif(is_zero, store_block, &[], poison_block, &[]);
+        builder
+            .ins()
+            .brif(is_zero, store_block, &[], poison_block, &[]);
 
         // poison_block: return poison (error already set by debug_app_check)
         builder.switch_to_block(poison_block);
@@ -1432,9 +1448,16 @@ impl EmitContext {
         builder.seal_block(store_block);
 
         // Store fun_ptr (closure) to VMContext.tail_callee (offset 24)
-        builder.ins().store(MemFlags::trusted(), fun_ptr, vmctx, VMCTX_TAIL_CALLEE_OFFSET);
+        builder.ins().store(
+            MemFlags::trusted(),
+            fun_ptr,
+            vmctx,
+            VMCTX_TAIL_CALLEE_OFFSET,
+        );
         // Store arg_ptr to VMContext.tail_arg (offset 32)
-        builder.ins().store(MemFlags::trusted(), arg_ptr, vmctx, VMCTX_TAIL_ARG_OFFSET);
+        builder
+            .ins()
+            .store(MemFlags::trusted(), arg_ptr, vmctx, VMCTX_TAIL_ARG_OFFSET);
 
         // Return null to signal tail call
         let null_val = builder.ins().iconst(types::I64, 0);

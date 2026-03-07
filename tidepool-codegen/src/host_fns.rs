@@ -683,7 +683,8 @@ pub fn error_poison_ptr_lazy_msg(kind: u64, msg: &[u8]) -> *mut u8 {
         *(ptr.add(tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET) as *mut u64) = kind;
         *(ptr.add(tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET + 8) as *mut usize) =
             msg_ptr as usize;
-        *(ptr.add(tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET + 16) as *mut u64) = msg_len as u64;
+        *(ptr.add(tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET + 16) as *mut u64) =
+            msg_len as u64;
     }
     ptr
 }
@@ -1993,12 +1994,18 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
     let ptr = scrut_ptr as *const u8;
 
     // Check if the scrutinee is a lazy poison closure. If so, trigger it to set the error flag.
-    if !ptr.is_null() && unsafe { tidepool_heap::layout::read_tag(ptr) } == tidepool_heap::layout::TAG_CLOSURE {
-        let code_ptr = unsafe { *(ptr.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *const usize) };
-        if code_ptr == poison_trampoline_lazy as *const () as usize || code_ptr == poison_trampoline_lazy_msg as *const () as usize {
+    if !ptr.is_null()
+        && unsafe { tidepool_heap::layout::read_tag(ptr) } == tidepool_heap::layout::TAG_CLOSURE
+    {
+        let code_ptr =
+            unsafe { *(ptr.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *const usize) };
+        if code_ptr == poison_trampoline_lazy as *const () as usize
+            || code_ptr == poison_trampoline_lazy_msg as *const () as usize
+        {
             // Trigger the error by calling the trampoline
             unsafe {
-                let func: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 = std::mem::transmute(code_ptr);
+                let func: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
+                    std::mem::transmute(code_ptr);
                 func(std::ptr::null_mut(), ptr as *mut u8, std::ptr::null_mut());
             }
             return error_poison_ptr();

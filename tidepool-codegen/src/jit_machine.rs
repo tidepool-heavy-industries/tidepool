@@ -179,7 +179,10 @@ impl JitEffectMachine {
                     .map_err(JitError::Signal)?
                     .map_err(JitError::HeapBridge)?;
                     crate::host_fns::reset_call_depth();
-                    crate::host_fns::set_exec_context(&format!("resuming after effect tag={}", tag));
+                    crate::host_fns::set_exec_context(&format!(
+                        "resuming after effect tag={}",
+                        tag
+                    ));
                     yield_result = match unsafe {
                         crate::signal_safety::with_signal_protection(|| {
                             machine.resume(continuation, resp_ptr)
@@ -240,10 +243,16 @@ impl JitEffectMachine {
                 vmctx.tail_callee = std::ptr::null_mut();
                 vmctx.tail_arg = std::ptr::null_mut();
                 crate::host_fns::reset_call_depth();
-                let code_ptr = *(callee.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
-                let func: unsafe extern "C" fn(*mut crate::context::VMContext, *mut u8, *mut u8) -> *mut u8 =
-                    std::mem::transmute(code_ptr);
-                ptr = match crate::signal_safety::with_signal_protection(|| func(&mut vmctx, callee, arg)) {
+                let code_ptr =
+                    *(callee.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
+                let func: unsafe extern "C" fn(
+                    *mut crate::context::VMContext,
+                    *mut u8,
+                    *mut u8,
+                ) -> *mut u8 = std::mem::transmute(code_ptr);
+                ptr = match crate::signal_safety::with_signal_protection(|| {
+                    func(&mut vmctx, callee, arg)
+                }) {
                     Ok(p) => p,
                     Err(e) => {
                         crate::host_fns::clear_gc_state();

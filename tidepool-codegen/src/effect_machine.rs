@@ -74,7 +74,9 @@ impl CompiledEffectMachine {
     pub fn step(&mut self) -> Yield {
         let mut result: *mut u8 = unsafe { (self.func_ptr)(&mut self.vmctx) };
         // TCO: resolve pending tail calls
-        unsafe { self.resolve_tail_calls(&mut result); }
+        unsafe {
+            self.resolve_tail_calls(&mut result);
+        }
         self.parse_result(result)
     }
 

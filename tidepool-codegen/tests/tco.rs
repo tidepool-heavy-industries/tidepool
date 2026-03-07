@@ -107,8 +107,7 @@ fn test_tco_deep_self_recursion() {
     std::thread::spawn(|| {
         let expr = build_tail_recursive_countdown(100_000, 42);
         let table = empty_table();
-        let mut machine =
-            JitEffectMachine::compile(&expr, &table, 1 << 20).unwrap();
+        let mut machine = JitEffectMachine::compile(&expr, &table, 1 << 20).unwrap();
         let result = machine.run_pure().unwrap();
         assert_lit_int(&result, 42);
     })
