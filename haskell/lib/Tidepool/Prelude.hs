@@ -164,7 +164,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Char (ord, chr)
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe)
-import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength)
+import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, nub, nubBy)
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Control.Monad
@@ -347,73 +347,6 @@ init [_]    = []
 init (x:xs) = x : init xs
 {-# INLINE init #-}
 
--- FIXME(#156): Remove duplicate elements (preserving first occurrence).
--- Pure reimplementation — Data.List.nub lacks unfoldings.
-nub :: Eq a => [a] -> [a]
-nub = go []
-  where
-    go :: Eq a => [a] -> [a] -> [a]
-    go _ []     = []
-    go seen (x:xs)
-      | elemOf x seen = go seen xs
-      | otherwise      = x : go (x:seen) xs
-    elemOf :: Eq a => a -> [a] -> Bool
-    elemOf _ []     = False
-    elemOf y (z:zs) = y == z || elemOf y zs
-{-# INLINABLE nub #-}
-
--- | Remove duplicates using a custom equality function.
-nubBy :: (a -> a -> Bool) -> [a] -> [a]
-nubBy eq = go []
-  where
-    go _ []     = []
-    go seen (x:xs)
-      | elemOf x seen = go seen xs
-      | otherwise      = x : go (x:seen) xs
-    elemOf _ []     = False
-    elemOf y (z:zs) = eq y z || elemOf y zs
-{-# INLINABLE nubBy #-}
-
--- FIXME(#156): Sort a list using merge sort.
--- Pure reimplementation — Data.List.sort lacks unfoldings.
-sort :: Ord a => [a] -> [a]
-sort = mergeSort
-  where
-    mergeSort :: Ord a => [a] -> [a]
-    mergeSort []  = []
-    mergeSort [x] = [x]
-    mergeSort xs  = let (as, bs) = halve xs
-                    in merge (mergeSort as) (mergeSort bs)
-    halve :: [a] -> ([a], [a])
-    halve []       = ([], [])
-    halve [x]      = ([x], [])
-    halve (x:y:zs) = let (as, bs) = halve zs in (x:as, y:bs)
-    merge :: Ord a => [a] -> [a] -> [a]
-    merge [] ys = ys
-    merge xs [] = xs
-    merge (x:xs) (y:ys)
-      | x <= y    = x : merge xs (y:ys)
-      | otherwise  = y : merge (x:xs) ys
-{-# INLINABLE sort #-}
-
--- FIXME(#156): Sort using a custom comparison function.
--- Pure reimplementation — Data.List.sortBy lacks unfoldings.
-sortBy :: (a -> a -> Ordering) -> [a] -> [a]
-sortBy cmp = mergeSort
-  where
-    mergeSort []  = []
-    mergeSort [x] = [x]
-    mergeSort xs  = let (as, bs) = halve xs
-                    in merge (mergeSort as) (mergeSort bs)
-    halve []       = ([], [])
-    halve [x]      = ([x], [])
-    halve (x:y:zs) = let (as, bs) = halve zs in (x:as, y:bs)
-    merge [] ys = ys
-    merge xs [] = xs
-    merge (x:xs) (y:ys)
-      | cmp x y /= GT = x : merge xs (y:ys)
-      | otherwise      = y : merge (x:xs) ys
-{-# INLINABLE sortBy #-}
 
 -- | Map a function over a list and concatenate results.
 concatMap :: (a -> [b]) -> [a] -> [b]
