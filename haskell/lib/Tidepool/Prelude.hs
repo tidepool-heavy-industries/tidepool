@@ -136,7 +136,7 @@ import Prelude
   , String, Ordering(..), Maybe(..), Either(..)
   , Eq(..), Ord(..), Num(..), Integral(..), Real, Fractional(..), Floating(..), Show
   , Semigroup(..), Monoid(..)
-  , fromIntegral, realToFrac, truncate, ceiling, floor
+  , fromIntegral, realToFrac, truncate, ceiling, floor, even, odd
   , Functor(..), Applicative(..), Monad(..)
   , (<$>)
   , id, const, flip, (.), ($), ($!)
@@ -467,21 +467,13 @@ last (_:xs) = last xs
 last []     = error "last: empty list"
 {-# INLINE last #-}
 
--- FIXME(#155): Monomorphic even/odd for Int.
--- The polymorphic Prelude versions go through the Integral typeclass
--- dictionary which contains error branches that the JIT evaluates eagerly (#158).
-even :: Int -> Bool
-even n = n `rem` 2 == 0
-{-# INLINE even #-}
+-- #155: Monomorphic even/odd shadows removed — GHC specialization
+-- (re-enabled) eliminates Integral dictionary passing at compile time.
 
-odd :: Int -> Bool
-odd n = n `rem` 2 /= 0
-{-# INLINE odd #-}
-
--- FIXME(#155): Monomorphic round :: Double -> Int.
--- The polymorphic Prelude round goes through RealFrac/properFraction which
--- pulls in dictionary error branches (#158). This uses truncate (which works)
--- and manual fractional-part checking for banker's rounding.
+-- Monomorphic round :: Double -> Int.
+-- GHC specializes round @Double @Int but the specialized version calls
+-- rintDouble (FFI to C's rint()), which we don't support. This shadow
+-- avoids the FFI call entirely.
 round :: Double -> Int
 round d =
   let n = truncate d :: Int

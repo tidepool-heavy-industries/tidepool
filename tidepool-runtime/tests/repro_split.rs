@@ -197,3 +197,21 @@ result = mySplit (const False) "abc"
 
     assert_eq!(val.to_json(), serde_json::json!(["abc"]));
 }
+
+#[test]
+fn test_even() {
+    let json = run_plain("even (4 :: Int)");
+    assert_eq!(json, serde_json::json!(true));
+}
+
+#[test]
+fn test_odd() {
+    let json = run_plain("odd (3 :: Int)");
+    assert_eq!(json, serde_json::json!(true));
+}
+
+#[test]
+fn test_round() {
+    let json = run_plain("round (3.5 :: Double) :: Int");
+    assert_eq!(json, serde_json::json!(4));
+}
