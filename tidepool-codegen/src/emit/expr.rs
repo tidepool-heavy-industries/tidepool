@@ -480,9 +480,70 @@ fn collapse_frame(
                 .ins()
                 .call_indirect(call_sig, code_ptr, &[vmctx, fun_ptr, arg_ptr]);
             let ret_val = builder.inst_results(inst)[0];
+
+            // TCO null check: if callee returned null, it might be a tail call
+            let ret_is_null = builder.ins().icmp_imm(IntCC::Equal, ret_val, 0);
+            let null_check_block = builder.create_block();
+            let ret_ok_block = builder.create_block();
+
+            builder.ins().brif(
+                ret_is_null,
+                null_check_block,
+                &[],
+                ret_ok_block,
+                &[],
+            );
+
+            // ret_ok_block: normal return, jump to merge
+            builder.switch_to_block(ret_ok_block);
+            builder.seal_block(ret_ok_block);
             builder.ins().jump(merge_block, &[BlockArg::Value(ret_val)]);
 
-            // merge_block: result is either poison or call result
+            // null_check_block: check if VMContext has a pending tail call
+            builder.switch_to_block(null_check_block);
+            builder.seal_block(null_check_block);
+
+            let tail_callee = builder.ins().load(
+                types::I64, MemFlags::trusted(), vmctx, VMCTX_TAIL_CALLEE_OFFSET,
+            );
+            let has_tail_call = builder.ins().icmp_imm(IntCC::NotEqual, tail_callee, 0);
+
+            let resolve_block = builder.create_block();
+            let null_propagate_block = builder.create_block();
+
+            builder.ins().brif(
+                has_tail_call,
+                resolve_block,
+                &[],
+                null_propagate_block,
+                &[],
+            );
+
+            // null_propagate_block: no tail call pending, propagate null (error)
+            builder.switch_to_block(null_propagate_block);
+            builder.seal_block(null_propagate_block);
+            let null_val = builder.ins().iconst(types::I64, 0);
+            builder.ins().jump(merge_block, &[BlockArg::Value(null_val)]);
+
+            // resolve_block: call trampoline_resolve to execute the pending tail call
+            builder.switch_to_block(resolve_block);
+            builder.seal_block(resolve_block);
+
+            let resolve_fn = pipeline.module
+                .declare_function("trampoline_resolve", Linkage::Import, &{
+                    let mut sig = Signature::new(pipeline.isa.default_call_conv());
+                    sig.params.push(AbiParam::new(types::I64)); // vmctx
+                    sig.returns.push(AbiParam::new(types::I64)); // result
+                    sig
+                })
+                .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+            let resolve_ref = pipeline.module.declare_func_in_func(resolve_fn, builder.func);
+            let resolve_inst = builder.ins().call(resolve_ref, &[vmctx]);
+            let resolved_val = builder.inst_results(resolve_inst)[0];
+            builder.declare_value_needs_stack_map(resolved_val);
+            builder.ins().jump(merge_block, &[BlockArg::Value(resolved_val)]);
+
+            // merge_block: result from any path
             builder.switch_to_block(merge_block);
             builder.seal_block(merge_block);
             let merged_val = builder.block_params(merge_block)[0];
@@ -674,6 +735,7 @@ fn emit_lam(
 
     let mut inner_emit = EmitContext::new(ctx.prefix.clone());
     inner_emit.lambda_counter = ctx.lambda_counter;
+    inner_emit.in_tail_position = true; // lambda body is in tail position
 
     inner_emit.trace_scope(&format!("insert lam binder {:?}", binder));
     inner_emit.env.insert(binder, SsaVal::HeapPtr(arg_param));
@@ -1174,12 +1236,15 @@ impl EmitContext {
                                     } else {
                                         // Push work in LIFO order: cleanup, eval body, bind, eval rhs
                                         // After rhs eval → bind → eval body → cleanup
+                                        let saved_tail = self.in_tail_position;
                                         work.push(EmitWork::LetCleanupMark(LetCleanup::Single(
                                             binder,
                                         )));
                                         work.push(EmitWork::Eval(body));
+                                        work.push(EmitWork::SetTailPosition(saved_tail)); // restore before body eval
                                         work.push(EmitWork::Bind(binder));
                                         work.push(EmitWork::Eval(rhs));
+                                        work.push(EmitWork::SetTailPosition(false)); // RHS is NOT tail position
                                         break; // exit inner loop, process work stack
                                     }
                                 } else {
@@ -1203,10 +1268,17 @@ impl EmitContext {
                             }
                             // All non-Let nodes: delegate to stack-safe hylomorphism
                             _ => {
-                                let result = emit_subtree(
-                                    self, pipeline, builder, vmctx, gc_sig, oom_func, tree, idx,
-                                )?;
-                                vals.push(result);
+                                if self.in_tail_position && matches!(tree.nodes[idx], CoreFrame::App { .. }) {
+                                    let result = self.emit_tail_app(
+                                        pipeline, builder, vmctx, gc_sig, oom_func, tree, idx,
+                                    )?;
+                                    vals.push(result);
+                                } else {
+                                    let result = emit_subtree(
+                                        self, pipeline, builder, vmctx, gc_sig, oom_func, tree, idx,
+                                    )?;
+                                    vals.push(result);
+                                }
                                 break;
                             }
                         }
@@ -1250,11 +1322,131 @@ impl EmitContext {
                         }
                     }
                 },
+                EmitWork::SetTailPosition(val) => {
+                    self.in_tail_position = val;
+                }
             }
         }
 
         vals.pop()
             .ok_or_else(|| EmitError::InternalError("emit_node: empty value stack".into()))
+    }
+
+    /// Emit a tail-position App: store callee+arg to VMContext, return null.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_tail_app(
+        &mut self,
+        pipeline: &mut CodegenPipeline,
+        builder: &mut FunctionBuilder,
+        vmctx: Value,
+        gc_sig: ir::SigRef,
+        oom_func: ir::FuncRef,
+        tree: &CoreExpr,
+        idx: usize,
+    ) -> Result<SsaVal, EmitError> {
+        let (fun_idx, arg_idx) = match &tree.nodes[idx] {
+            CoreFrame::App { fun, arg } => (*fun, *arg),
+            _ => unreachable!(),
+        };
+
+        // Evaluate fun and arg in NON-tail position
+        let saved_tail = self.in_tail_position;
+        self.in_tail_position = false;
+        let fun_val = emit_subtree(self, pipeline, builder, vmctx, gc_sig, oom_func, tree, fun_idx)?;
+        let arg_val = emit_subtree(self, pipeline, builder, vmctx, gc_sig, oom_func, tree, arg_idx)?;
+        self.in_tail_position = saved_tail;
+
+        let raw_fun_ptr = fun_val.value();
+        let arg_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, arg_val);
+
+        // Force thunked function (same as regular App path)
+        let fun_tag = builder.ins().load(types::I8, MemFlags::trusted(), raw_fun_ptr, 0);
+        let is_thunk = builder.ins().icmp_imm(
+            IntCC::Equal,
+            fun_tag,
+            tidepool_heap::layout::TAG_THUNK as i64,
+        );
+
+        let force_fun_block = builder.create_block();
+        let fun_ready_block = builder.create_block();
+        builder.append_block_param(fun_ready_block, types::I64);
+
+        builder.ins().brif(
+            is_thunk,
+            force_fun_block,
+            &[],
+            fun_ready_block,
+            &[BlockArg::Value(raw_fun_ptr)],
+        );
+
+        builder.switch_to_block(force_fun_block);
+        builder.seal_block(force_fun_block);
+
+        let force_fn = pipeline.module
+            .declare_function("heap_force", Linkage::Import, &{
+                let mut sig = Signature::new(pipeline.isa.default_call_conv());
+                sig.params.push(AbiParam::new(types::I64));
+                sig.params.push(AbiParam::new(types::I64));
+                sig.returns.push(AbiParam::new(types::I64));
+                sig
+            })
+            .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+        let force_ref = pipeline.module.declare_func_in_func(force_fn, builder.func);
+        let force_call = builder.ins().call(force_ref, &[vmctx, raw_fun_ptr]);
+        let forced_fun = builder.inst_results(force_call)[0];
+        builder.declare_value_needs_stack_map(forced_fun);
+        builder.ins().jump(fun_ready_block, &[BlockArg::Value(forced_fun)]);
+
+        builder.switch_to_block(fun_ready_block);
+        builder.seal_block(fun_ready_block);
+        let fun_ptr = builder.block_params(fun_ready_block)[0];
+        builder.declare_value_needs_stack_map(fun_ptr);
+
+        // Debug validation (same as regular App)
+        let check_fn = pipeline.module
+            .declare_function("debug_app_check", Linkage::Import, &{
+                let mut sig = Signature::new(pipeline.isa.default_call_conv());
+                sig.params.push(AbiParam::new(types::I64));
+                sig.returns.push(AbiParam::new(types::I64));
+                sig
+            })
+            .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+        let check_ref = pipeline.module.declare_func_in_func(check_fn, builder.func);
+        let check_inst = builder.ins().call(check_ref, &[fun_ptr]);
+        let check_result = builder.inst_results(check_inst)[0];
+
+        // If debug_app_check returned non-zero (poison/error), return it directly
+        let store_block = builder.create_block();
+        let poison_block = builder.create_block();
+
+        let is_zero = builder.ins().icmp_imm(IntCC::Equal, check_result, 0);
+        builder.ins().brif(is_zero, store_block, &[], poison_block, &[]);
+
+        // poison_block: return poison (error already set by debug_app_check)
+        builder.switch_to_block(poison_block);
+        builder.seal_block(poison_block);
+        builder.ins().return_(&[check_result]);
+
+        // store_block: store callee+arg to VMContext, return null
+        builder.switch_to_block(store_block);
+        builder.seal_block(store_block);
+
+        // Store fun_ptr (closure) to VMContext.tail_callee (offset 24)
+        builder.ins().store(MemFlags::trusted(), fun_ptr, vmctx, VMCTX_TAIL_CALLEE_OFFSET);
+        // Store arg_ptr to VMContext.tail_arg (offset 32)
+        builder.ins().store(MemFlags::trusted(), arg_ptr, vmctx, VMCTX_TAIL_ARG_OFFSET);
+
+        // Return null to signal tail call
+        let null_val = builder.ins().iconst(types::I64, 0);
+        builder.ins().return_(&[null_val]);
+
+        // Dead block for subsequent code
+        let dead_block = builder.create_block();
+        builder.switch_to_block(dead_block);
+        builder.seal_block(dead_block);
+
+        let dummy = builder.ins().iconst(types::I64, 0);
+        Ok(SsaVal::HeapPtr(dummy))
     }
 
     /// Execute LetRec phases 1-3a inline, then push deferred-simple evals
@@ -1292,7 +1484,10 @@ impl EmitContext {
             });
 
             // Push finish + simple evals in reverse order (LIFO)
+            let saved_tail = self.in_tail_position;
             work.push(EmitWork::LetRecFinish { body, state_idx });
+            // Restore tail position before LetRecFinish (which pushes Eval(body))
+            work.push(EmitWork::SetTailPosition(saved_tail));
             for (binder, rhs_idx) in simple_bindings.iter().rev() {
                 if Self::rhs_is_error_call(tree, *rhs_idx) {
                     let poison_addr = self.emit_error_poison(tree, *rhs_idx);
@@ -1307,6 +1502,8 @@ impl EmitContext {
                     work.push(EmitWork::Eval(*rhs_idx));
                 }
             }
+            // Set false before first RHS eval
+            work.push(EmitWork::SetTailPosition(false));
             return Ok(());
         }
 
@@ -1543,6 +1740,7 @@ impl EmitContext {
 
             let mut inner_emit = EmitContext::new(self.prefix.clone());
             inner_emit.lambda_counter = self.lambda_counter;
+            inner_emit.in_tail_position = true; // lambda body is in tail position
             inner_emit
                 .env
                 .insert(lam_binder, SsaVal::HeapPtr(inner_arg));
@@ -1752,7 +1950,10 @@ impl EmitContext {
         });
 
         // Push work items in LIFO order: finish, then simple evals (reversed)
+        let saved_tail = self.in_tail_position;
         work.push(EmitWork::LetRecFinish { body, state_idx });
+        // Restore tail position before LetRecFinish (which pushes Eval(body))
+        work.push(EmitWork::SetTailPosition(saved_tail));
 
         for (binder, rhs_idx) in deferred_simple.iter().rev() {
             if Self::rhs_is_error_call(tree, *rhs_idx) {
@@ -1796,6 +1997,8 @@ impl EmitContext {
                 }
             }
         }
+        // Set false before first RHS eval
+        work.push(EmitWork::SetTailPosition(false));
 
         Ok(())
     }
@@ -1939,6 +2142,8 @@ enum EmitWork {
     LetRecFinish { body: usize, state_idx: usize },
     /// Pop cleanup on return
     LetCleanupMark(LetCleanup),
+    /// Set the in_tail_position flag on the EmitContext.
+    SetTailPosition(bool),
 }
 
 /// Deferred state for LetRec phases 3c/3a'/3d, stored in EmitContext

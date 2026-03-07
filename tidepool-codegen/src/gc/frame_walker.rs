@@ -36,12 +36,9 @@ pub unsafe fn walk_frames(start_fp: usize, stack_maps: &StackMapRegistry) -> Vec
 
         // Check if this return address is in JIT code
         if !stack_maps.contains_address(return_addr) {
-            if !roots.is_empty() {
-                // We were in JIT territory and now we left it. Stop.
-                break;
-            }
-            // We haven't hit JIT territory yet. Skip this frame
-            // (e.g., gc_trigger → perform_gc before reaching JIT frames).
+            // Not a JIT frame — skip it and keep walking.
+            // This handles both pre-JIT frames (gc_trigger → perform_gc)
+            // and JIT→Host→JIT sandwiches (heap_force, trampoline_resolve).
             let next_fp = *(fp as *const usize);
             if next_fp == 0 || next_fp == fp || next_fp <= fp {
                 break;

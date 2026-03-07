@@ -231,6 +231,31 @@ impl JitEffectMachine {
             }
         };
 
+        // TCO: resolve pending tail calls
+        let result_ptr = unsafe {
+            let mut ptr = result_ptr;
+            while ptr.is_null() && !vmctx.tail_callee.is_null() {
+                let callee = vmctx.tail_callee;
+                let arg = vmctx.tail_arg;
+                vmctx.tail_callee = std::ptr::null_mut();
+                vmctx.tail_arg = std::ptr::null_mut();
+                crate::host_fns::reset_call_depth();
+                let code_ptr = *(callee.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
+                let func: unsafe extern "C" fn(*mut crate::context::VMContext, *mut u8, *mut u8) -> *mut u8 =
+                    std::mem::transmute(code_ptr);
+                ptr = match crate::signal_safety::with_signal_protection(|| func(&mut vmctx, callee, arg)) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        crate::host_fns::clear_gc_state();
+                        crate::host_fns::clear_stack_map_registry();
+                        crate::debug::clear_lambda_registry();
+                        return Err(JitError::Yield(runtime_error_or_signal(e.0)));
+                    }
+                };
+            }
+            ptr
+        };
+
         // Check for runtime error FIRST — runtime_error now returns a poison
         // object instead of null, so we can't rely on null-check alone.
         let result = if let Some(err) = crate::host_fns::take_runtime_error() {

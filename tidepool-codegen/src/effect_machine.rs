@@ -72,7 +72,9 @@ impl CompiledEffectMachine {
 
     /// Execute the compiled function and parse the result.
     pub fn step(&mut self) -> Yield {
-        let result: *mut u8 = unsafe { (self.func_ptr)(&mut self.vmctx) };
+        let mut result: *mut u8 = unsafe { (self.func_ptr)(&mut self.vmctx) };
+        // TCO: resolve pending tail calls
+        unsafe { self.resolve_tail_calls(&mut result); }
         self.parse_result(result)
     }
 
@@ -350,7 +352,9 @@ impl CompiledEffectMachine {
 
         let func: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
             std::mem::transmute(code_ptr);
-        let result = func(&mut self.vmctx, closure, arg);
+        let mut result = func(&mut self.vmctx, closure, arg);
+        // TCO: resolve pending tail calls
+        self.resolve_tail_calls(&mut result);
 
         if trace >= crate::debug::TraceLevel::Calls {
             let name = crate::debug::lookup_lambda(code_ptr)
@@ -367,6 +371,24 @@ impl CompiledEffectMachine {
         }
 
         result
+    }
+
+    /// Resolve pending tail calls stored in VMContext by the JIT.
+    ///
+    /// # Safety
+    /// VMContext must have valid tail_callee/tail_arg if non-null.
+    unsafe fn resolve_tail_calls(&mut self, result: &mut *mut u8) {
+        while result.is_null() && !self.vmctx.tail_callee.is_null() {
+            let callee = self.vmctx.tail_callee;
+            let arg = self.vmctx.tail_arg;
+            self.vmctx.tail_callee = std::ptr::null_mut();
+            self.vmctx.tail_arg = std::ptr::null_mut();
+            crate::host_fns::reset_call_depth();
+            let code_ptr = *(callee.add(layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
+            let func: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
+                std::mem::transmute(code_ptr);
+            *result = func(&mut self.vmctx, callee, arg);
+        }
     }
 
     /// Allocate a Con HeapObject on the nursery with the given tag and fields.
