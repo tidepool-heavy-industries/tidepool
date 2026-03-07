@@ -698,7 +698,8 @@ pub fn error_poison_ptr_lazy_msg(kind: u64, msg: &[u8]) -> *mut u8 {
     // Allocate closure with 3 captures: kind, msg_ptr, msg_len
     // Closure: header(8) + code_ptr(8) + num_captured(2+pad=8) + 3*8 = 48
     let size = tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET + 3 * 8;
-    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+    let layout = std::alloc::Layout::from_size_align(size, 8)
+        .expect("constant size/align");
     // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
     let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     if ptr.is_null() {
