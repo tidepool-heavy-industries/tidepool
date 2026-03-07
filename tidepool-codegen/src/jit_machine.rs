@@ -119,6 +119,8 @@ impl JitEffectMachine {
         crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
         crate::host_fns::set_gc_state(self.nursery.start() as *mut u8, self.nursery.size());
 
+        // SAFETY: get_function_ptr returns a finalized JIT code pointer. Transmuting to the
+        // expected calling convention (vmctx -> result) is correct per our compilation contract.
         let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
             unsafe { std::mem::transmute(self.pipeline.get_function_ptr(self.func_id)) };
         let vmctx = self.nursery.make_vmctx(crate::host_fns::gc_trigger);
@@ -126,6 +128,8 @@ impl JitEffectMachine {
         let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
         crate::host_fns::reset_call_depth();
         crate::host_fns::set_exec_context("stepping main function");
+        // SAFETY: with_signal_protection wraps the JIT call with sigsetjmp for crash recovery.
+        // machine.step() calls the JIT function through a valid function pointer.
         let mut yield_result =
             match unsafe { crate::signal_safety::with_signal_protection(|| machine.step()) } {
                 Ok(y) => y,
@@ -135,6 +139,8 @@ impl JitEffectMachine {
         let result = loop {
             match yield_result {
                 Yield::Done(ptr) => {
+                    // SAFETY: ptr is a valid heap pointer returned by the JIT. vmctx_ptr is
+                    // valid for forcing thunks. Signal protection guards against crashes.
                     let val = unsafe {
                         let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
                         crate::signal_safety::with_signal_protection(|| {
@@ -150,6 +156,7 @@ impl JitEffectMachine {
                     request,
                     continuation,
                 } => {
+                    // SAFETY: request is a valid heap pointer from the JIT effect dispatch.
                     let req_val = unsafe {
                         let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
                         crate::signal_safety::with_signal_protection(|| {
@@ -171,6 +178,8 @@ impl JitEffectMachine {
                             limit: MAX_EFFECT_RESPONSE_NODES,
                         });
                     }
+                    // SAFETY: Converting a Value back to a heap object in the nursery.
+                    // vmctx has sufficient nursery space (GC may have reclaimed).
                     let resp_ptr = unsafe {
                         crate::signal_safety::with_signal_protection(|| {
                             heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut())
@@ -183,6 +192,8 @@ impl JitEffectMachine {
                         "resuming after effect tag={}",
                         tag
                     ));
+                    // SAFETY: continuation and resp_ptr are valid nursery heap pointers.
+                    // resume applies the continuation tree to the response.
                     yield_result = match unsafe {
                         crate::signal_safety::with_signal_protection(|| {
                             machine.resume(continuation, resp_ptr)
@@ -215,12 +226,16 @@ impl JitEffectMachine {
         crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
         crate::host_fns::set_gc_state(self.nursery.start() as *mut u8, self.nursery.size());
 
+        // SAFETY: get_function_ptr returns a finalized JIT code pointer. Transmuting to the
+        // expected calling convention (vmctx -> result) is correct per our compilation contract.
         let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
             unsafe { std::mem::transmute(self.pipeline.get_function_ptr(self.func_id)) };
         let mut vmctx = self.nursery.make_vmctx(crate::host_fns::gc_trigger);
 
         crate::host_fns::reset_call_depth();
         crate::host_fns::set_exec_context("running pure computation");
+        // SAFETY: Calling the JIT function through a valid function pointer with signal
+        // protection for crash recovery. vmctx is freshly created from the nursery.
         let result_ptr: *mut u8 = match unsafe {
             crate::signal_safety::with_signal_protection(|| func_ptr(&mut vmctx))
         } {
@@ -234,7 +249,9 @@ impl JitEffectMachine {
             }
         };
 
-        // TCO: resolve pending tail calls
+        // SAFETY: Resolving pending tail calls. vmctx.tail_callee/tail_arg are valid
+        // heap pointers set by JIT tail-call sites. Code pointers in closures point to
+        // finalized JIT functions. Signal protection guards each call.
         let result_ptr = unsafe {
             let mut ptr = result_ptr;
             while ptr.is_null() && !vmctx.tail_callee.is_null() {
@@ -272,6 +289,8 @@ impl JitEffectMachine {
         } else if result_ptr.is_null() {
             Err(JitError::Yield(crate::yield_type::YieldError::NullPointer))
         } else {
+            // SAFETY: result_ptr is a valid heap pointer returned by the JIT.
+            // vmctx_ptr is valid for forcing thunks during value conversion.
             unsafe {
                 let vmctx_ptr = &mut vmctx as *mut VMContext;
                 crate::signal_safety::with_signal_protection(|| {

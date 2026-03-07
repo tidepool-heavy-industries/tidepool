@@ -206,6 +206,7 @@ pub const HEADER_SIZE: usize = 8;
 ///
 /// ptr must point to a valid HeapObject.
 pub unsafe fn read_tag(ptr: *const u8) -> u8 {
+    // SAFETY: Caller guarantees ptr points to a valid HeapObject; tag is at byte offset 0.
     *ptr.add(OFFSET_TAG)
 }
 
@@ -215,6 +216,7 @@ pub unsafe fn read_tag(ptr: *const u8) -> u8 {
 ///
 /// ptr must point to a valid HeapObject.
 pub unsafe fn read_heap_tag(ptr: *const u8) -> Option<HeapTag> {
+    // SAFETY: Caller guarantees ptr points to a valid HeapObject; tag is at byte offset 0.
     HeapTag::from_byte(*ptr.add(OFFSET_TAG))
 }
 
@@ -224,9 +226,8 @@ pub unsafe fn read_heap_tag(ptr: *const u8) -> Option<HeapTag> {
 ///
 /// ptr must point to a valid HeapObject.
 pub unsafe fn read_size(ptr: *const u8) -> u16 {
-    // Size is stored at offset 1 as u16.
-    // Use read_unaligned in case the pointer itself is not perfectly aligned
-    // (though our objects should be 8-byte aligned).
+    // SAFETY: Caller guarantees ptr points to a valid HeapObject. Size is stored at offset 1
+    // as u16. read_unaligned handles the unaligned u16 read at byte offset 1.
     std::ptr::read_unaligned(ptr.add(OFFSET_SIZE) as *const u16)
 }
 
@@ -237,6 +238,8 @@ pub unsafe fn read_size(ptr: *const u8) -> u16 {
 /// ptr must point to allocated memory of at least `HEADER_SIZE` bytes.
 /// size must be at least `HEADER_SIZE`.
 pub unsafe fn write_header(ptr: *mut u8, tag: u8, size: u16) {
+    // SAFETY: Caller guarantees ptr points to at least HEADER_SIZE (8) bytes of writable memory.
+    // Tag is written at offset 0, size at offset 1 (unaligned u16), padding zeroed at offsets 3-7.
     *ptr.add(OFFSET_TAG) = tag;
     std::ptr::write_unaligned(ptr.add(OFFSET_SIZE) as *mut u16, size);
     // Padding bytes are from offset 3 to 7 (5 bytes).
@@ -260,6 +263,7 @@ mod tests {
         let mut buffer = [0u8; HEADER_SIZE];
         let ptr = buffer.as_mut_ptr();
 
+        // SAFETY: ptr points to an 8-byte stack buffer, sufficient for write_header/read_tag/read_size.
         unsafe {
             write_header(ptr, TAG_THUNK, 16);
             assert_eq!(read_tag(ptr), TAG_THUNK);
@@ -275,6 +279,7 @@ mod tests {
         for &size in &sizes {
             let mut buffer = [0u8; 8];
             let ptr = buffer.as_mut_ptr();
+            // SAFETY: ptr points to an 8-byte stack buffer, sufficient for header operations.
             unsafe {
                 write_header(ptr, TAG_CON, size);
                 assert_eq!(read_tag(ptr), TAG_CON);

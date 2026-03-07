@@ -245,7 +245,9 @@ mod tests {
         let ptr = pipeline.get_function_ptr(func_id);
         assert!(!ptr.is_null());
 
+        // SAFETY: ptr is a finalized JIT function pointer with the expected signature.
         let func: unsafe extern "C" fn(usize) -> i64 = unsafe { std::mem::transmute(ptr) };
+        // SAFETY: Calling the JIT-compiled function with a dummy vmctx (0).
         let res = unsafe { func(0) };
         assert_eq!(res, 42);
     }
@@ -350,7 +352,9 @@ mod tests {
         pipeline.finalize().unwrap();
 
         let ptr = pipeline.get_function_ptr(func_id);
+        // SAFETY: ptr is a finalized JIT function that calls my_host_fn.
         let func: unsafe extern "C" fn(usize) -> i64 = unsafe { std::mem::transmute(ptr) };
+        // SAFETY: Calling the JIT-compiled function with a dummy vmctx (0).
         assert_eq!(unsafe { func(0) }, 123);
     }
 }

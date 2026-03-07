@@ -32,6 +32,7 @@ impl Nursery {
     /// and not moved.
     pub fn make_vmctx(&mut self, gc_trigger: unsafe extern "C" fn(*mut VMContext)) -> VMContext {
         let start = self.buffer.as_mut_ptr();
+        // SAFETY: start points to a Vec<u8> buffer and adding its length stays within the allocation.
         let end = unsafe { start.add(self.buffer.len()) };
         VMContext::new(start, end as *const u8, gc_trigger)
     }
@@ -58,6 +59,7 @@ mod tests {
         let vmctx = nursery.make_vmctx(dummy_gc_trigger);
 
         assert_eq!(vmctx.alloc_ptr, nursery.buffer.as_mut_ptr());
+        // SAFETY: nursery.buffer is a valid Vec<u8> of `size` bytes; adding size stays within bounds.
         assert_eq!(vmctx.alloc_limit, unsafe {
             nursery.buffer.as_ptr().add(size)
         });

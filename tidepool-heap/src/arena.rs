@@ -252,6 +252,9 @@ mod tests {
         let size = 16;
         let ptr = heap.alloc_raw(size).unwrap();
 
+        // SAFETY: ptr was returned by alloc_raw(16), so it is 8-byte aligned and valid for
+        // 16 bytes -- sufficient for a HeapObject header. write_header/read_tag/read_size
+        // operate within this allocation.
         unsafe {
             write_header(ptr, TAG_CLOSURE, size as u16);
             assert_eq!(read_tag(ptr), TAG_CLOSURE);

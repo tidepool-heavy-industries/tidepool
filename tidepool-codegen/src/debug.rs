@@ -117,6 +117,7 @@ pub fn lookup_lambda_by_address(addr: usize) -> Option<String> {
 ///
 /// `ptr` must point to a valid heap object, or at least readable memory.
 pub unsafe fn heap_describe(ptr: *const u8) -> String {
+    // SAFETY: Caller guarantees ptr points to a valid heap object or readable memory.
     if ptr.is_null() {
         return "NULL".to_string();
     }
@@ -227,6 +228,7 @@ impl std::fmt::Display for HeapError {
 ///
 /// `ptr` must point to readable memory of at least `size` bytes.
 pub unsafe fn heap_validate(ptr: *const u8) -> Result<(), HeapError> {
+    // SAFETY: Caller guarantees ptr points to readable memory of at least `size` bytes.
     if ptr.is_null() {
         return Err(HeapError::NullPointer);
     }
@@ -292,6 +294,7 @@ pub unsafe fn heap_validate(ptr: *const u8) -> Result<(), HeapError> {
 ///
 /// All pointers must be readable.
 pub unsafe fn heap_validate_deep(ptr: *const u8) -> Result<(), HeapError> {
+    // SAFETY: Caller guarantees ptr and all reachable field pointers point to readable memory.
     heap_validate(ptr)?;
 
     let tag_byte = *ptr.add(layout::OFFSET_TAG);

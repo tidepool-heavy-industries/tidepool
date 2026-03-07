@@ -164,6 +164,8 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
     #[cfg(target_arch = "x86_64")]
     {
         let fp: usize;
+        // SAFETY: Reading the frame pointer register (RBP) via inline asm.
+        // nomem/nostack options are correct — this is a pure register read.
         unsafe {
             std::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack));
         }
@@ -173,6 +175,7 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
     #[cfg(target_arch = "aarch64")]
     {
         let fp: usize;
+        // SAFETY: Reading the frame pointer register (x29) via inline asm.
         unsafe {
             std::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack));
         }
@@ -185,8 +188,10 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
 fn perform_gc(fp: usize, vmctx: *mut VMContext) {
     STACK_MAP_REGISTRY.with(|reg_cell| {
         if let Some(registry_ptr) = *reg_cell.borrow() {
+            // SAFETY: registry_ptr was set by set_stack_map_registry and outlives JIT execution.
             let registry = unsafe { &*registry_ptr };
-            // Walk frames starting from gc_trigger's own frame.
+            // SAFETY: fp is a valid frame pointer read from gc_trigger's caller.
+            // registry contains stack maps for all JIT functions in the call chain.
             let roots = unsafe { frame_walker::walk_frames(fp, registry) };
 
             // ── Cheney copying GC ──────────────────────────────
@@ -195,6 +200,7 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                 if let Some(state) = gc_state.as_mut() {
                     let from_start = state.active_start;
                     let from_size = state.active_size;
+                    // SAFETY: from_start + from_size stays within the active GC region.
                     let from_end = unsafe { from_start.add(from_size) };
 
                     let mut tospace = vec![0u8; from_size];
@@ -205,6 +211,9 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                         .map(|r| r.stack_slot_addr as *mut *mut u8)
                         .collect();
 
+                    // SAFETY: root_slots point to valid stack locations from walk_frames.
+                    // from_start..from_end is the active nursery region. tospace is freshly
+                    // allocated with the same size.
                     let result = unsafe {
                         tidepool_heap::gc::raw::cheney_copy(
                             &root_slots,
@@ -220,7 +229,8 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                     // active_size stays the same
                     state.active_buffer = Some(tospace); // drops old buffer if any
 
-                    // Update VMContext for resumed allocation
+                    // SAFETY: vmctx is a valid pointer passed from JIT code. to_start points
+                    // to the new tospace buffer which is now the active nursery.
                     unsafe {
                         (*vmctx).alloc_ptr = to_start.add(result.bytes_copied);
                         (*vmctx).alloc_limit = to_start.add(from_size) as *const u8;
@@ -292,6 +302,9 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
         return obj;
     }
 
+    // SAFETY: obj is a valid heap pointer from the JIT nursery. The loop follows
+    // indirection chains (thunks) and calls thunk entry functions via transmuted
+    // code pointers stored in the thunk object. vmctx is passed through from JIT.
     unsafe {
         let mut current = obj;
 
@@ -362,6 +375,9 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
 /// check if result is null (another tail call) or a real value.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn trampoline_resolve(vmctx: *mut VMContext) -> *mut u8 {
+    // SAFETY: vmctx is a valid pointer from JIT code. tail_callee/tail_arg are valid
+    // heap pointers set by JIT tail-call sites. Code pointers in closures were set
+    // during compilation and point to finalized JIT functions.
     unsafe {
         loop {
             let callee = (*vmctx).tail_callee;
@@ -484,6 +500,8 @@ pub extern "C" fn runtime_error(kind: u64) -> *mut u8 {
 /// Called by JIT code for runtime errors with a specific message.
 pub extern "C" fn runtime_error_with_msg(kind: u64, msg_ptr: *const u8, msg_len: u64) -> *mut u8 {
     let msg = if !msg_ptr.is_null() && msg_len > 0 {
+        // SAFETY: msg_ptr is non-null and points to msg_len bytes of valid memory
+        // from a JIT-allocated LitString or leaked message buffer.
         let slice = unsafe { std::slice::from_raw_parts(msg_ptr, msg_len as usize) };
         String::from_utf8_lossy(slice).to_string()
     } else {
@@ -561,10 +579,13 @@ pub fn error_poison_ptr() -> *mut u8 {
         let size = 24usize;
         let layout =
             std::alloc::Layout::from_size_align(size, 8).unwrap_or_else(|_| std::process::abort());
+        // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
+        // SAFETY: ptr is a fresh allocation of 24 bytes. Writing the closure header,
+        // code pointer, and capture count at known offsets within that allocation.
         unsafe {
             tidepool_heap::layout::write_header(
                 ptr,
@@ -585,6 +606,8 @@ pub fn error_poison_ptr() -> *mut u8 {
 /// Trampoline for the poison closure. Returns the poison closure itself,
 /// so any chain of function applications on an error result just keeps
 /// returning the poison without crashing.
+// SAFETY: Only called via JIT code applying the poison closure. Returns the
+// static poison pointer — no memory writes, no side effects beyond the return.
 unsafe extern "C" fn poison_trampoline(
     _vmctx: *mut VMContext,
     _closure: *mut u8,
@@ -610,10 +633,13 @@ pub fn error_poison_ptr_lazy(kind: u64) -> *mut u8 {
             let size = 32usize;
             let lo = std::alloc::Layout::from_size_align(size, 8)
                 .unwrap_or_else(|_| std::process::abort());
+            // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
             let ptr = unsafe { std::alloc::alloc_zeroed(lo) };
             if ptr.is_null() {
                 std::alloc::handle_alloc_error(lo);
             }
+            // SAFETY: ptr is a fresh 32-byte allocation. Writing closure header, code pointer,
+            // capture count, and captured error kind at known offsets.
             unsafe {
                 tidepool_heap::layout::write_header(
                     ptr,
@@ -635,6 +661,8 @@ pub fn error_poison_ptr_lazy(kind: u64) -> *mut u8 {
 /// Trampoline for lazy poison closures. Reads the error kind from captured[0]
 /// and calls `runtime_error(kind)` — setting the error flag only now, when the
 /// closure is actually invoked.
+// SAFETY: closure points to a lazy poison closure allocated by error_poison_ptr_lazy
+// with captured[0] = error kind. arg may be null or a valid heap object.
 unsafe extern "C" fn poison_trampoline_lazy(
     _vmctx: *mut VMContext,
     closure: *mut u8,
@@ -671,10 +699,14 @@ pub fn error_poison_ptr_lazy_msg(kind: u64, msg: &[u8]) -> *mut u8 {
     // Closure: header(8) + code_ptr(8) + num_captured(2+pad=8) + 3*8 = 48
     let size = tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET + 3 * 8;
     let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+    // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
     let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     if ptr.is_null() {
         std::alloc::handle_alloc_error(layout);
     }
+    // SAFETY: ptr is a fresh allocation. Writing closure header, code pointer,
+    // capture count, and 3 captures (kind, msg_ptr, msg_len) at known offsets.
+    // msg_ptr is a leaked allocation that lives forever.
     unsafe {
         tidepool_heap::layout::write_header(ptr, tidepool_heap::layout::TAG_CLOSURE, size as u16);
         *(ptr.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *mut usize) =
@@ -689,6 +721,8 @@ pub fn error_poison_ptr_lazy_msg(kind: u64, msg: &[u8]) -> *mut u8 {
     ptr
 }
 
+// SAFETY: closure points to a lazy poison closure with 3 captures (kind, msg_ptr, msg_len)
+// allocated by error_poison_ptr_lazy_msg. The msg_ptr was leaked and remains valid.
 unsafe extern "C" fn poison_trampoline_lazy_msg(
     _vmctx: *mut VMContext,
     closure: *mut u8,
@@ -758,6 +792,8 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) -> *mut u8 {
         });
         return error_poison_ptr();
     }
+    // SAFETY: fun_ptr was checked non-null above; reading the tag byte at offset 0
+    // of a heap object is valid for any object allocated by the JIT nursery.
     let tag = unsafe { *fun_ptr };
     if tag != tidepool_heap::layout::TAG_CLOSURE {
         use std::io::Write;
@@ -779,6 +815,8 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) -> *mut u8 {
         let _ = writeln!(stderr, "{}", msg);
         push_diagnostic(msg);
         if tag == tidepool_heap::layout::TAG_CON {
+            // SAFETY: tag == TAG_CON confirms this is a Con heap object;
+            // reading con_tag at offset 8 and num_fields at offset 16 is valid.
             let con_tag = unsafe { *(fun_ptr.add(8) as *const u64) };
             let num_fields = unsafe { *(fun_ptr.add(16) as *const u16) };
             let msg2 = format!("[JIT]   Con tag={}, num_fields={}", con_tag, num_fields);
@@ -805,11 +843,12 @@ pub extern "C" fn runtime_new_byte_array(size: i64) -> i64 {
     let total = 8 + size as usize;
     let layout =
         std::alloc::Layout::from_size_align(total, 8).unwrap_or_else(|_| std::process::abort());
+    // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
     let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     if ptr.is_null() {
         std::alloc::handle_alloc_error(layout);
     }
-    // Write length prefix
+    // SAFETY: ptr is a valid fresh allocation; writing the u64 length prefix at offset 0.
     unsafe {
         *(ptr as *mut u64) = size as u64;
     }
@@ -822,6 +861,8 @@ pub extern "C" fn runtime_copy_addr_to_byte_array(src: i64, dest_ba: i64, dest_o
         eprintln!("[BUG] runtime_copy_addr_to_byte_array: bad pointer src={:#x} dest_ba={:#x} dest_off={} len={}", src, dest_ba, dest_off, len);
         std::process::abort();
     }
+    // SAFETY: dest_ba passed the null-guard above and points to a byte array
+    // with a u64 length prefix at offset 0.
     let dest_size = unsafe { *(dest_ba as *const u64) } as usize;
     if (dest_off as usize + len as usize) > dest_size {
         eprintln!(
@@ -831,7 +872,10 @@ pub extern "C" fn runtime_copy_addr_to_byte_array(src: i64, dest_ba: i64, dest_o
         std::process::abort();
     }
     let src_ptr = src as *const u8;
+    // SAFETY: dest_ba + 8 + dest_off is within the byte array (bounds checked above).
     let dest_ptr = unsafe { (dest_ba as *mut u8).add(8 + dest_off as usize) };
+    // SAFETY: src is a valid Addr# from JIT code, dest is within bounds, and regions
+    // do not overlap (src is external memory, dest is a byte array).
     unsafe {
         std::ptr::copy_nonoverlapping(src_ptr, dest_ptr, len as usize);
     }
@@ -846,7 +890,9 @@ pub extern "C" fn runtime_set_byte_array(ba: i64, off: i64, len: i64, val: i64) 
         );
         std::process::abort();
     }
+    // SAFETY: ba passed the null-guard above; offsetting past the 8-byte length prefix + off.
     let ptr = unsafe { (ba as *mut u8).add(8 + off as usize) };
+    // SAFETY: ptr is within the byte array allocation. Caller (JIT) ensures bounds.
     unsafe {
         std::ptr::write_bytes(ptr, val as u8, len as usize);
     }
@@ -854,6 +900,8 @@ pub extern "C" fn runtime_set_byte_array(ba: i64, off: i64, len: i64, val: i64) 
 
 /// Shrink a mutable byte array to `new_size` bytes (just updates the length prefix).
 pub extern "C" fn runtime_shrink_byte_array(ba: i64, new_size: i64) {
+    // SAFETY: ba is a valid byte array pointer from JIT code. Writing the length
+    // prefix at offset 0 with a smaller value (logical shrink, no reallocation).
     unsafe {
         *(ba as *mut u64) = new_size as u64;
     }
@@ -863,12 +911,14 @@ pub extern "C" fn runtime_shrink_byte_array(ba: i64, new_size: i64) {
 /// zeroes any new bytes, and frees the old buffer. Returns the new pointer.
 pub extern "C" fn runtime_resize_byte_array(ba: i64, new_size: i64) -> i64 {
     let old_ptr = ba as *mut u8;
+    // SAFETY: old_ptr is a valid byte array with a u64 length prefix at offset 0.
     let old_size = unsafe { *(old_ptr as *const u64) } as usize;
     let new_size = new_size as usize;
 
     let new_total = 8 + new_size;
     let new_layout =
         std::alloc::Layout::from_size_align(new_total, 8).unwrap_or_else(|_| std::process::abort());
+    // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
     let new_ptr = unsafe { std::alloc::alloc_zeroed(new_layout) };
     if new_ptr.is_null() {
         std::alloc::handle_alloc_error(new_layout);
@@ -876,11 +926,13 @@ pub extern "C" fn runtime_resize_byte_array(ba: i64, new_size: i64) -> i64 {
 
     // Copy existing data (up to min of old/new size)
     let copy_len = old_size.min(new_size);
+    // SAFETY: Both old and new buffers have data starting at offset 8.
+    // copy_len <= min(old_size, new_size) so both reads and writes are in bounds.
     unsafe {
         std::ptr::copy_nonoverlapping(old_ptr.add(8), new_ptr.add(8), copy_len);
     }
 
-    // Write new length prefix
+    // SAFETY: new_ptr is a valid fresh allocation; writing the u64 length prefix.
     unsafe {
         *(new_ptr as *mut u64) = new_size as u64;
     }
@@ -889,6 +941,7 @@ pub extern "C" fn runtime_resize_byte_array(ba: i64, new_size: i64) -> i64 {
     let old_total = 8 + old_size;
     let old_layout =
         std::alloc::Layout::from_size_align(old_total, 8).unwrap_or_else(|_| std::process::abort());
+    // SAFETY: old_ptr was allocated with this exact layout by a previous runtime_new/resize call.
     unsafe {
         std::alloc::dealloc(old_ptr, old_layout);
     }
@@ -909,9 +962,12 @@ pub extern "C" fn runtime_copy_byte_array(
         eprintln!("[BUG] runtime_copy_byte_array: bad pointer src={:#x} src_off={} dest={:#x} dest_off={} len={}", src, src_off, dest, dest_off, len);
         std::process::abort();
     }
+    // SAFETY: src and dest passed the null-guard above. Offsetting past the 8-byte
+    // length prefix + the respective offsets. Caller (JIT) ensures bounds.
     let src_ptr = unsafe { (src as *const u8).add(8 + src_off as usize) };
     let dest_ptr = unsafe { (dest as *mut u8).add(8 + dest_off as usize) };
-    // Use copy (not copy_nonoverlapping) since src and dest may be the same array
+    // SAFETY: Uses copy (not copy_nonoverlapping) because src and dest may be the
+    // same array with overlapping ranges. Caller ensures len is within both arrays.
     unsafe {
         std::ptr::copy(src_ptr, dest_ptr, len as usize);
     }
@@ -929,6 +985,8 @@ pub extern "C" fn runtime_compare_byte_arrays(
         eprintln!("[BUG] runtime_compare_byte_arrays: bad pointer a={:#x} a_off={} b={:#x} b_off={} len={}", a, a_off, b, b_off, len);
         std::process::abort();
     }
+    // SAFETY: a and b passed the null-guard above. Offsetting past the 8-byte length
+    // prefix + the respective offsets. Caller (JIT) ensures len bytes are within both arrays.
     let a_ptr = unsafe { (a as *const u8).add(8 + a_off as usize) };
     let b_ptr = unsafe { (b as *const u8).add(8 + b_off as usize) };
     let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, len as usize) };
@@ -952,10 +1010,13 @@ pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
     let total = 8 + 8 * n;
     let layout =
         std::alloc::Layout::from_size_align(total, 8).unwrap_or_else(|_| std::process::abort());
+    // SAFETY: alloc returns a valid allocation of the requested size.
     let ptr = unsafe { std::alloc::alloc(layout) };
     if ptr.is_null() {
         std::alloc::handle_alloc_error(layout);
     }
+    // SAFETY: ptr is a fresh allocation of (8 + 8*n) bytes. Initializing all
+    // pointer slots to `init` and then writing the length prefix.
     unsafe {
         let slots = ptr.add(8) as *mut i64;
         for i in 0..n {
@@ -974,10 +1035,13 @@ pub extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64) -> i64
     let total = 8 + 8 * n;
     let layout =
         std::alloc::Layout::from_size_align(total, 8).unwrap_or_else(|_| std::process::abort());
+    // SAFETY: alloc returns a valid allocation of the requested size.
     let ptr = unsafe { std::alloc::alloc(layout) };
     if ptr.is_null() {
         std::alloc::handle_alloc_error(layout);
     }
+    // SAFETY: ptr is a fresh allocation. src is a valid boxed array from JIT code.
+    // Copying len pointer slots from src[off..off+len] to the new array.
     unsafe {
         *(ptr as *mut u64) = n as u64;
         let src_slots = (src as *const u8).add(8 + 8 * off as usize);
@@ -995,6 +1059,9 @@ pub extern "C" fn runtime_copy_boxed_array(
     dest_off: i64,
     len: i64,
 ) {
+    // SAFETY: src and dest are valid boxed array pointers from JIT code. Offsetting
+    // past the 8-byte length prefix by the slot-sized offsets. Uses copy (not
+    // copy_nonoverlapping) because src and dest may be the same array.
     let src_ptr = unsafe { (src as *const u8).add(8 + 8 * src_off as usize) };
     let dest_ptr = unsafe { (dest as *mut u8).add(8 + 8 * dest_off as usize) };
     unsafe {
@@ -1004,6 +1071,8 @@ pub extern "C" fn runtime_copy_boxed_array(
 
 /// Shrink a boxed array (just update the length field).
 pub extern "C" fn runtime_shrink_boxed_array(arr: i64, new_len: i64) {
+    // SAFETY: arr is a valid boxed array pointer from JIT code. Writing the length
+    // prefix at offset 0 with a smaller value (logical shrink).
     unsafe {
         *(arr as *mut u64) = new_len as u64;
     }
@@ -1012,6 +1081,8 @@ pub extern "C" fn runtime_shrink_boxed_array(arr: i64, new_len: i64) {
 /// CAS on a boxed array slot: compare-and-swap arr[idx].
 /// Returns the old value. If old == expected, writes new.
 pub extern "C" fn runtime_cas_boxed_array(arr: i64, idx: i64, expected: i64, new: i64) -> i64 {
+    // SAFETY: arr is a valid boxed array pointer from JIT code. idx is within bounds
+    // (caller ensures). Reading and conditionally writing a single pointer-sized slot.
     let slot = unsafe { (arr as *mut u8).add(8 + 8 * idx as usize) as *mut i64 };
     let old = unsafe { *slot };
     if old == expected {
@@ -1071,6 +1142,8 @@ pub extern "C" fn runtime_strlen(addr: i64) -> i64 {
     }
     let ptr = addr as *const u8;
     let mut len = 0i64;
+    // SAFETY: addr passed the null-guard above. The pointer is a null-terminated
+    // C string from JIT data sections or unpackCString#. Scanning until '\0'.
     unsafe {
         while *ptr.add(len as usize) != 0 {
             len += 1;
@@ -1104,6 +1177,7 @@ pub extern "C" fn runtime_text_measure_off(addr: i64, off: i64, len: i64, cnt: i
     let mut byte_pos = 0usize;
     let mut chars_found = 0usize;
     while chars_found < cnt && byte_pos < len {
+        // SAFETY: byte_pos < len, so ptr + byte_pos is within the buffer.
         let b = unsafe { *ptr.add(byte_pos) };
         let char_len = if b < 0x80 {
             1
@@ -1139,6 +1213,8 @@ pub extern "C" fn runtime_text_memchr(addr: i64, off: i64, len: i64, needle: i64
         std::process::abort();
     }
     let ptr = (addr + off) as *const u8;
+    // SAFETY: addr passed the null-guard above. ptr = addr + off points into a valid
+    // Text buffer, and len bytes are readable from that position.
     let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
     match slice.iter().position(|&b| b == needle as u8) {
         Some(pos) => pos as i64,
@@ -1161,6 +1237,7 @@ pub extern "C" fn runtime_text_reverse(dest: i64, src: i64, off: i64, len: i64) 
         std::process::abort();
     }
     let src_ptr = (src + off) as *const u8;
+    // SAFETY: src + off points into a valid Text buffer and len bytes are readable.
     let src_slice = unsafe { std::slice::from_raw_parts(src_ptr, len as usize) };
     let dest_ptr = dest as *mut u8;
     // Decode UTF-8 codepoints, write in reverse order
@@ -1178,6 +1255,8 @@ pub extern "C" fn runtime_text_reverse(dest: i64, src: i64, off: i64, len: i64) 
             4
         };
         write_pos -= char_len;
+        // SAFETY: read_pos and write_pos are within their respective buffers.
+        // src and dest do not overlap (separate allocations from JIT code).
         unsafe {
             std::ptr::copy_nonoverlapping(
                 src_slice.as_ptr().add(read_pos),
@@ -1376,9 +1455,13 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
 
 #[cfg(test)]
 mod tests {
+    // SAFETY: All unsafe blocks in tests operate on allocations created within
+    // the test via runtime_new_byte_array or stack-allocated buffers with known
+    // sizes and layouts. Pointers and offsets are controlled by the test code.
     use super::*;
     use std::alloc::{dealloc, Layout};
 
+    // SAFETY: ptr was allocated by runtime_new_byte_array with layout [8 + size, align 8].
     unsafe fn free_byte_array(ptr: i64) {
         let old_ptr = ptr as *mut u8;
         let size = *(old_ptr as *const u64) as usize;
@@ -1822,6 +1905,7 @@ mod tests {
         static TEST_RESULT: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
     }
 
+    // SAFETY: Test-only mock thunk entry. Returns a pre-set pointer from thread-local storage.
     unsafe extern "C" fn test_thunk_entry(_vmctx: *mut VMContext, _thunk: *mut u8) -> *mut u8 {
         TEST_RESULT.with(|r| r.get())
     }
@@ -1995,14 +2079,18 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
 
     // Check if the scrutinee is a lazy poison closure. If so, trigger it to set the error flag.
     if !ptr.is_null()
+        // SAFETY: ptr is non-null (checked above). Reading the tag byte at offset 0.
         && unsafe { tidepool_heap::layout::read_tag(ptr) } == tidepool_heap::layout::TAG_CLOSURE
     {
+        // SAFETY: ptr is a Closure (tag confirmed above). Reading code_ptr at the known offset.
         let code_ptr =
             unsafe { *(ptr.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *const usize) };
         if code_ptr == poison_trampoline_lazy as *const () as usize
             || code_ptr == poison_trampoline_lazy_msg as *const () as usize
         {
-            // Trigger the error by calling the trampoline
+            // SAFETY: code_ptr is the poison trampoline function pointer. Calling it
+            // with null vmctx and arg triggers the lazy error flag without side effects
+            // beyond setting RUNTIME_ERROR.
             unsafe {
                 let func: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
                     std::mem::transmute(code_ptr);
@@ -2023,6 +2111,7 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
         let _ = stderr.flush();
         std::process::abort();
     }
+    // SAFETY: ptr passed the null/low-address guard above. Reading the tag byte at offset 0.
     let tag_byte = unsafe { *ptr };
     let tag_name = match tag_byte {
         0 => "Closure",
@@ -2034,6 +2123,7 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
     };
 
     // Read expected alt tags
+    // SAFETY: alt_tags points to a JIT data section array of num_alts u64 tag values.
     let expected: Vec<u64> = if num_alts > 0 && alt_tags != 0 {
         (0..num_alts as usize)
             .map(|i| unsafe { *((alt_tags as *const u64).add(i)) })
@@ -2043,11 +2133,14 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
     };
 
     // Dump raw bytes for any object type
+    // SAFETY: ptr points to a heap object. Reading 32 bytes for diagnostic dump.
+    // Heap objects are always at least this size (minimum header is 8 bytes + fields).
     let raw_bytes: Vec<u8> = (0..32).map(|i| unsafe { *ptr.add(i) }).collect();
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "[CASE TRAP] raw bytes: {:02x?}", raw_bytes);
 
     if tag_byte == 2 {
+        // SAFETY: tag_byte == 2 confirms Con; reading con_tag and num_fields at known offsets.
         let con_tag = unsafe { *(ptr.add(8) as *const u64) };
         let num_fields = unsafe { *(ptr.add(16) as *const u16) };
         let _ = writeln!(
@@ -2056,6 +2149,7 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
             con_tag, num_fields, expected
         );
     } else if tag_byte == 3 {
+        // SAFETY: tag_byte == 3 confirms Lit; reading lit_tag and value at known offsets.
         let lit_tag = unsafe { *(ptr.add(8) as *const u64) };
         let value = unsafe { *(ptr.add(16) as *const u64) };
         let _ = writeln!(
@@ -2064,6 +2158,7 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
             lit_tag, value, expected
         );
     } else if tag_byte == 0 {
+        // SAFETY: tag_byte == 0 confirms Closure; reading code_ptr and num_captured at known offsets.
         let code_ptr = unsafe { *(ptr.add(8) as *const u64) };
         let num_captured = unsafe { *(ptr.add(16) as *const u16) };
         let _ = writeln!(

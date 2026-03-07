@@ -26,6 +26,9 @@ mod inner {
 
     /// Write a crash dump using only async-signal-safe syscalls.
     /// No allocations, no locks, no std::fs — just raw libc open/write/close.
+    ///
+    // SAFETY: Called from signal handler context. Uses only async-signal-safe
+    // syscalls (open, write, close). Static buffers avoid heap allocation.
     unsafe fn write_crash_dump(sig: libc::c_int, info: *mut libc::siginfo_t) {
         let path_len = CRASH_LOG_PATH_LEN.load(Ordering::Relaxed);
         if path_len == 0 {
@@ -145,6 +148,7 @@ mod inner {
     }
 
     /// Write a simple crash message (for panics in trampoline).
+    // SAFETY: Same constraints as write_crash_dump — async-signal-safe syscalls only.
     unsafe fn write_crash_dump_msg(msg: &[u8]) {
         let path_len = CRASH_LOG_PATH_LEN.load(Ordering::Relaxed);
         if path_len == 0 {
@@ -220,6 +224,9 @@ mod inner {
     /// Trampoline called from C after sigsetjmp returns 0.
     /// Casts userdata back to a `Box<dyn FnOnce()>` and calls it.
     /// Panics are caught to prevent unwinding across the C FFI boundary (which is UB).
+    // SAFETY: userdata was created via Box::into_raw in with_signal_protection and
+    // points to a valid Box<Box<dyn FnOnce()>>. Panics are caught to prevent UB
+    // from unwinding across the C FFI boundary.
     unsafe extern "C" fn trampoline(userdata: *mut libc::c_void) {
         let closure: Box<Box<dyn FnOnce()>> = Box::from_raw(userdata as *mut Box<dyn FnOnce()>);
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -259,6 +266,7 @@ mod inner {
             unsafe { *(*result_ptr).get() = Some(r) };
         });
 
+        // SAFETY: SigJmpBuf is repr(C) POD — zeroed is a valid initial state for sigsetjmp.
         let mut buf: SigJmpBuf = std::mem::zeroed();
 
         // Store the jump buffer so the signal handler can find it.
@@ -274,7 +282,8 @@ mod inner {
         JMP_BUF.with(|cell| cell.set(null_mut()));
 
         if val != 0 {
-            // Signal was caught. Drop the closure that the trampoline never consumed.
+            // SAFETY: Signal was caught before trampoline ran. The Box is still valid
+            // because it was never consumed — reclaim and drop it to avoid a leak.
             drop(Box::from_raw(userdata as *mut Box<dyn FnOnce()>));
             return Err(SignalError(val));
         }
@@ -286,6 +295,7 @@ mod inner {
     extern "C" fn handler(sig: libc::c_int, _info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
         // Synchronous signals (SIGILL, SIGSEGV, SIGBUS) are delivered to the
         // faulting thread, so the thread-local read returns this thread's buf.
+        // SAFETY: _info is provided by the kernel signal delivery and is valid when non-null.
         let si_addr = if !_info.is_null() {
             unsafe { (*_info).si_addr() as usize }
         } else {
@@ -295,12 +305,14 @@ mod inner {
 
         let buf = JMP_BUF.with(|cell| cell.get());
         if !buf.is_null() {
-            // In JIT context — jump back to sigsetjmp
+            // SAFETY: buf is a valid sigjmp_buf set by tidepool_sigsetjmp_call on this thread.
+            // siglongjmp to a valid buf is the intended recovery path for JIT signal handling.
             unsafe {
                 siglongjmp(buf, sig);
             }
         }
-        // Not in JIT context — log crash dump, terminate only this thread
+        // SAFETY: Not in JIT context — writing crash dump with async-signal-safe calls,
+        // then terminating this thread only (not the process) to avoid killing the MCP server.
         unsafe {
             write_crash_dump(sig, _info);
             #[cfg(target_os = "linux")]
@@ -329,6 +341,9 @@ mod inner {
                 let dir_suffix = b"/.tidepool\0";
 
                 if cwd_bytes.len() + log_suffix.len() < 512 {
+                    // SAFETY: CRASH_LOG_PATH/CRASH_DIR_PATH are static mut, accessed only
+                    // once here inside Once::call_once (no concurrent access). The copies
+                    // stay within the 512-byte buffer bounds (checked above).
                     unsafe {
                         let log_ptr = addr_of_mut!(CRASH_LOG_PATH) as *mut u8;
                         ptr::copy_nonoverlapping(cwd_bytes.as_ptr(), log_ptr, cwd_bytes.len());
@@ -365,6 +380,9 @@ mod inner {
         }
         ALT_STACK_INSTALLED.with(|installed| {
             if !installed.get() {
+                // SAFETY: Allocating an alternate signal stack via the global allocator.
+                // The memory is intentionally leaked (signal stacks must outlive the handler).
+                // sigaltstack is per-thread and called once per thread via the thread-local guard.
                 unsafe {
                     let Ok(layout) = Layout::from_size_align(ALT_STACK_SIZE, 16) else {
                         return;
@@ -387,6 +405,8 @@ mod inner {
 
         // Always (re)install signal handlers. Other code (Rust panic runtime,
         // test harness) may overwrite them, so we reinstall on every call.
+        // SAFETY: sigaction with SA_SIGINFO|SA_ONSTACK installs our handler on the alternate
+        // stack. The handler function pointer is valid for the process lifetime.
         unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;

@@ -72,8 +72,11 @@ impl CompiledEffectMachine {
 
     /// Execute the compiled function and parse the result.
     pub fn step(&mut self) -> Yield {
+        // SAFETY: func_ptr is a finalized JIT function pointer. vmctx is valid and
+        // owned by this machine. The function returns a heap pointer to an Eff value.
         let mut result: *mut u8 = unsafe { (self.func_ptr)(&mut self.vmctx) };
-        // TCO: resolve pending tail calls
+        // SAFETY: resolve_tail_calls reads/writes vmctx.tail_callee/tail_arg which
+        // are valid heap pointers set by JIT tail-call sites.
         unsafe {
             self.resolve_tail_calls(&mut result);
         }
@@ -86,6 +89,7 @@ impl CompiledEffectMachine {
     ///
     /// `continuation` and `response` must be valid heap pointers from the nursery.
     pub unsafe fn resume(&mut self, continuation: *mut u8, response: *mut u8) -> Yield {
+        // SAFETY: Caller guarantees continuation and response are valid nursery heap pointers.
         let mut result = self.apply_cont_heap(continuation, response);
         self.resolve_tail_calls(&mut result);
         self.parse_result(result)
@@ -108,6 +112,8 @@ impl CompiledEffectMachine {
             return Yield::Error(YieldError::NullPointer);
         }
 
+        // SAFETY: result is non-null (checked above) and points to a valid heap object.
+        // All field reads below use known layout offsets from tidepool_heap::layout.
         let tag = unsafe { *result };
         if tag != layout::TAG_CON {
             return Yield::Error(YieldError::UnexpectedTag(tag));
@@ -201,6 +207,7 @@ impl CompiledEffectMachine {
             if current.is_null() {
                 return current;
             }
+            // SAFETY: current is non-null (checked above) and points to a valid heap object.
             let tag = unsafe { *current };
             if tag == layout::TAG_THUNK {
                 let vmctx = &mut self.vmctx as *mut VMContext;
@@ -222,6 +229,8 @@ impl CompiledEffectMachine {
     ///
     /// `k` and `arg` must be valid heap pointers.
     unsafe fn apply_cont_heap(&mut self, k: *mut u8, arg: *mut u8) -> *mut u8 {
+        // SAFETY: k and arg are valid heap pointers (or null, handled below).
+        // All field reads use known layout offsets. Recursive calls maintain the invariant.
         if k.is_null() {
             return std::ptr::null_mut();
         }
@@ -313,6 +322,7 @@ impl CompiledEffectMachine {
     ///
     /// `closure` must point to a valid Closure HeapObject.
     unsafe fn call_closure(&mut self, closure: *mut u8, arg: *mut u8) -> *mut u8 {
+        // SAFETY: closure is a valid Closure heap object. Reading code_ptr at the known offset.
         let code_ptr = *(closure.add(layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
 
         let trace = crate::debug::trace_level();
@@ -353,10 +363,12 @@ impl CompiledEffectMachine {
             }
         }
 
+        // SAFETY: code_ptr was set during JIT compilation and points to a finalized
+        // Cranelift function with the closure calling convention (vmctx, self, arg) -> result.
         let func: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
             std::mem::transmute(code_ptr);
         let mut result = func(&mut self.vmctx, closure, arg);
-        // TCO: resolve pending tail calls
+        // SAFETY: After a closure call, pending tail calls may be stored in vmctx.
         unsafe {
             self.resolve_tail_calls(&mut result);
         }
@@ -383,6 +395,8 @@ impl CompiledEffectMachine {
     /// # Safety
     /// VMContext must have valid tail_callee/tail_arg if non-null.
     unsafe fn resolve_tail_calls(&mut self, result: &mut *mut u8) {
+        // SAFETY: tail_callee and tail_arg are valid heap pointers set by JIT tail-call
+        // sites. Code pointers in closures point to finalized JIT functions.
         while result.is_null() && !self.vmctx.tail_callee.is_null() {
             let callee = self.vmctx.tail_callee;
             let arg = self.vmctx.tail_arg;
@@ -398,6 +412,8 @@ impl CompiledEffectMachine {
 
     /// Allocate a Con HeapObject on the nursery with the given tag and fields.
     unsafe fn alloc_con(&mut self, con_tag: u64, fields: &[*mut u8]) -> *mut u8 {
+        // SAFETY: Bump-allocating from vmctx nursery. Writing Con header, tag,
+        // num_fields, and field pointers at known layout offsets within the allocation.
         let size = 24 + 8 * fields.len();
         let ptr = heap_bridge::bump_alloc_from_vmctx(&mut self.vmctx, size);
         if ptr.is_null() {

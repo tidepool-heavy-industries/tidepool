@@ -45,6 +45,7 @@ impl std::error::Error for BridgeError {}
 ///
 /// `ptr` must point to a valid HeapObject allocated by the JIT nursery.
 pub unsafe fn heap_to_value(ptr: *const u8) -> Result<Value, BridgeError> {
+    // SAFETY: Caller guarantees ptr is a valid HeapObject from the JIT nursery.
     heap_to_value_inner(ptr, 0, std::ptr::null_mut())
 }
 
@@ -59,6 +60,7 @@ pub unsafe fn heap_to_value_forcing(
     ptr: *const u8,
     vmctx: *mut VMContext,
 ) -> Result<Value, BridgeError> {
+    // SAFETY: Caller guarantees ptr is a valid HeapObject and vmctx is a valid VMContext.
     heap_to_value_inner(ptr, 0, vmctx)
 }
 
@@ -71,6 +73,8 @@ unsafe fn heap_to_value_inner(
     depth: usize,
     vmctx: *mut VMContext,
 ) -> Result<Value, BridgeError> {
+    // SAFETY: ptr is a valid HeapObject from the JIT nursery (checked non-null below).
+    // All field reads use known layout offsets. Recursion depth is bounded by MAX_DEPTH.
     if ptr.is_null() {
         return Err(BridgeError::NullPointer);
     }
@@ -210,6 +214,8 @@ unsafe fn heap_to_value_inner(
 ///
 /// `vmctx` must point to a valid VMContext with sufficient nursery space.
 pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u8, BridgeError> {
+    // SAFETY: Caller guarantees vmctx has a live nursery with sufficient space.
+    // All writes use known layout offsets within bump-allocated nursery memory.
     match val {
         Value::Lit(lit) => {
             let ptr = bump_alloc_from_vmctx(vmctx, layout::LIT_SIZE);
@@ -319,6 +325,8 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
 ///
 /// `vmctx` must point to a valid VMContext with a live nursery.
 pub unsafe fn bump_alloc_from_vmctx(vmctx: &mut VMContext, size: usize) -> *mut u8 {
+    // SAFETY: Caller guarantees vmctx points to a valid VMContext with a live nursery.
+    // alloc_ptr and alloc_limit delimit the available nursery region.
     // Align to 8 bytes
     let aligned_size = (size + 7) & !7;
     let ptr = vmctx.alloc_ptr;
@@ -332,6 +340,9 @@ pub unsafe fn bump_alloc_from_vmctx(vmctx: &mut VMContext, size: usize) -> *mut 
 
 #[cfg(test)]
 mod tests {
+    // SAFETY: All unsafe blocks in tests call value_to_heap/heap_to_value with
+    // nursery-backed VMContexts created by setup_vmctx. The nursery is kept alive
+    // for the duration of each test, ensuring all heap pointers remain valid.
     use super::*;
     use crate::nursery::Nursery;
     use std::sync::{Arc, Mutex};
