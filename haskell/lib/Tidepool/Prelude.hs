@@ -178,13 +178,6 @@ import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, 
 import Control.Lens (preview, toListOf, (^?), (^..), (&), (.~), (%~), to, _Just, traverse)
 import qualified Data.Map.Strict as Map
 
--- FIXME(#157): T.words/T.lines/T.splitOn return corrupt ByteArray# slices
--- under the JIT. These RULES rewrite qualified Data.Text calls to our safe
--- pure-Haskell versions. Fires at -O2 for all code importing this module.
-{-# RULES "Data.Text.words/safe"   forall t.     T.words t   = words t   #-}
-{-# RULES "Data.Text.lines/safe"   forall t.     T.lines t   = lines t   #-}
-{-# RULES "Data.Text.splitOn/safe"  forall sep t. T.splitOn sep t = splitOn sep t #-}
-
 -- FIXME(#160): Binding-level interception in Translate.hs.
 -- show for Double, bypassing GHC's Integer-based floatToDigits.
 -- The body is a fallback that should never run — Translate.hs intercepts
@@ -227,8 +220,7 @@ toLower = T.toLower
 strip :: Text -> Text
 strip = T.strip
 
--- FIXME(#157): Pure reimplementation — T.splitOn returns corrupt
--- ByteArray# slices in JIT. Also needs unfolding (#156).
+-- Pure reimplementation for Prelude export (avoids text-package dependency chain).
 splitOn :: Text -> Text -> [Text]
 splitOn sep t
   | T.null sep = map (\c -> T.pack [c]) (T.unpack t)
@@ -255,8 +247,7 @@ isSuffixOf = T.isSuffixOf
 isInfixOf :: Text -> Text -> Bool
 isInfixOf = T.isInfixOf
 
--- FIXME(#157): Pure reimplementation — T.words returns corrupt
--- ByteArray# slices in JIT. Also needs unfolding (#156).
+-- Pure reimplementation for Prelude export (avoids text-package dependency chain).
 words :: Text -> [Text]
 words t = go (T.unpack t)
   where
@@ -269,8 +260,7 @@ words t = go (T.unpack t)
       | isSpace c = ([], c:cs)
       | otherwise = let (w, r) = breakOnSpace cs in (c:w, r)
 
--- FIXME(#157): Pure reimplementation — T.lines returns corrupt
--- ByteArray# slices in JIT. Also needs unfolding (#156).
+-- Pure reimplementation for Prelude export (avoids text-package dependency chain).
 lines :: Text -> [Text]
 lines t = go (T.unpack t)
   where
