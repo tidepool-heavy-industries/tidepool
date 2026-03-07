@@ -101,21 +101,19 @@ fn build_tail_recursive_countdown(n: i64, result: i64) -> CoreExpr {
 }
 
 /// Deep self-recursion: `go 100000` should complete without stack overflow.
+/// Uses default thread stack size so this would overflow without TCO.
 #[test]
 fn test_tco_deep_self_recursion() {
-    std::thread::Builder::new()
-        .stack_size(32 * 1024 * 1024)
-        .spawn(|| {
-            let expr = build_tail_recursive_countdown(100_000, 42);
-            let table = empty_table();
-            let mut machine =
-                JitEffectMachine::compile(&expr, &table, 1 << 20).unwrap();
-            let result = machine.run_pure().unwrap();
-            assert_lit_int(&result, 42);
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    std::thread::spawn(|| {
+        let expr = build_tail_recursive_countdown(100_000, 42);
+        let table = empty_table();
+        let mut machine =
+            JitEffectMachine::compile(&expr, &table, 1 << 20).unwrap();
+        let result = machine.run_pure().unwrap();
+        assert_lit_int(&result, 42);
+    })
+    .join()
+    .unwrap();
 }
 
 /// Moderate recursion to verify basic correctness with a smaller depth.

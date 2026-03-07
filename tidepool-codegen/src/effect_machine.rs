@@ -354,7 +354,9 @@ impl CompiledEffectMachine {
             std::mem::transmute(code_ptr);
         let mut result = func(&mut self.vmctx, closure, arg);
         // TCO: resolve pending tail calls
-        self.resolve_tail_calls(&mut result);
+        unsafe {
+            self.resolve_tail_calls(&mut result);
+        }
 
         if trace >= crate::debug::TraceLevel::Calls {
             let name = crate::debug::lookup_lambda(code_ptr)
