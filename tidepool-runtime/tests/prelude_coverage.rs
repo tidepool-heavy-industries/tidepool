@@ -204,3 +204,30 @@ fn test_map_size() {
 fn test_map_find_with_default() {
     assert_eq!(run_plain(r#"Map.findWithDefault (0 :: Int) ("x" :: Text) (Map.fromList [("a" :: Text, 1 :: Int)])"#), json!(0));
 }
+
+// --- Set operations ---
+
+#[test]
+fn test_set_from_list() {
+    assert_eq!(run_plain(r#"toJSON (Set.fromList [1,2,3 :: Int])"#), json!([1,2,3]));
+}
+
+#[test]
+fn test_set_insert() {
+    assert_eq!(run_plain(r#"toJSON (Set.insert (4 :: Int) (Set.fromList [1,2,3 :: Int]))"#), json!([1,2,3,4]));
+}
+
+#[test]
+fn test_set_delete() {
+    assert_eq!(run_plain(r#"toJSON (Set.delete (2 :: Int) (Set.fromList [1,2,3 :: Int]))"#), json!([1,3]));
+}
+
+#[test]
+fn test_set_member() {
+    assert_eq!(run_plain(r#"Set.member (2 :: Int) (Set.fromList [1,2,3 :: Int])"#), json!(true));
+}
+
+#[test]
+fn test_set_size() {
+    assert_eq!(run_plain(r#"Set.size (Set.fromList [1,2,3 :: Int])"#), json!(3));
+}
