@@ -232,7 +232,8 @@ fn eval_at(
                     CoreFrame::Var(_)
                     | CoreFrame::Lit(_)
                     | CoreFrame::Con { .. }
-                    | CoreFrame::Lam { .. } => {
+                    | CoreFrame::Lam { .. }
+                    | CoreFrame::PrimOp { .. } => {
                         field_vals.push(eval_at(expr, f, env, heap)?);
                     }
                     _ => {
@@ -298,7 +299,37 @@ fn eval_at(
                 let val = force(eval_at(expr, arg, env, heap)?, heap)?;
                 arg_vals.push(val);
             }
-            dispatch_primop(*op, arg_vals)
+            // Handle primops that need heap access for deep forcing
+            match op {
+                PrimOpKind::ShowDoubleAddr => {
+                    if arg_vals.len() != 1 {
+                        return Err(EvalError::ArityMismatch {
+                            context: "arguments",
+                            expected: 1,
+                            got: arg_vals.len(),
+                        });
+                    }
+                    // Defense in depth: force through Con fields to handle thunked D# fields
+                    let d = match &arg_vals[0] {
+                        Value::Lit(Literal::LitDouble(bits)) => f64::from_bits(*bits),
+                        Value::Con(_, fields) if fields.len() == 1 => {
+                            let forced = force(fields[0].clone(), heap)?;
+                            expect_double(&forced)?
+                        }
+                        other => {
+                            return Err(EvalError::TypeMismatch {
+                                expected: "Double# or D# Double#",
+                                got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                            })
+                        }
+                    };
+                    let s = eval_haskell_show_double(d);
+                    let mut bytes = s.into_bytes();
+                    bytes.push(0); // null terminator for IndexCharOffAddr
+                    Ok(Value::Lit(Literal::LitString(bytes)))
+                }
+                _ => dispatch_primop(*op, arg_vals),
+            }
         }
         CoreFrame::Join {
             label,
@@ -908,28 +939,8 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             Ok(Value::Lit(Literal::LitInt(exp)))
         }
         PrimOpKind::ShowDoubleAddr => {
-            if args.len() != 1 {
-                return Err(EvalError::ArityMismatch {
-                    context: "arguments",
-                    expected: 1,
-                    got: args.len(),
-                });
-            }
-            // Accept both unboxed Double# and boxed D# Double#
-            let d = match &args[0] {
-                Value::Lit(Literal::LitDouble(bits)) => f64::from_bits(*bits),
-                Value::Con(_, fields) if fields.len() == 1 => expect_double(&fields[0])?,
-                other => {
-                    return Err(EvalError::TypeMismatch {
-                        expected: "Double# or D# Double#",
-                        got: crate::error::ValueKind::Other(format!("{:?}", other)),
-                    })
-                }
-            };
-            let s = eval_haskell_show_double(d);
-            let mut bytes = s.into_bytes();
-            bytes.push(0); // null terminator for IndexCharOffAddr
-            Ok(Value::Lit(Literal::LitString(bytes)))
+            // Handled in eval_at PrimOp arm (needs heap for deep forcing)
+            unreachable!("ShowDoubleAddr should be intercepted in eval_at")
         }
         PrimOpKind::Int2Float => {
             if args.len() != 1 {
@@ -1884,27 +1895,23 @@ fn expect_char(v: &Value) -> Result<char, EvalError> {
     }
 }
 
-fn bin_op_int(_op: PrimOpKind, args: &[Value]) -> Result<(i64, i64), EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::ArityMismatch {
-            context: "arguments",
-            expected: 2,
-            got: args.len(),
-        });
-    }
-    Ok((expect_int(&args[0])?, expect_int(&args[1])?))
+macro_rules! bin_op {
+    ($name:ident, $extract:ident, $t:ty) => {
+        fn $name(_op: PrimOpKind, args: &[Value]) -> Result<($t, $t), EvalError> {
+            if args.len() != 2 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 2,
+                    got: args.len(),
+                });
+            }
+            Ok(($extract(&args[0])?, $extract(&args[1])?))
+        }
+    };
 }
 
-fn bin_op_word(_op: PrimOpKind, args: &[Value]) -> Result<(u64, u64), EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::ArityMismatch {
-            context: "arguments",
-            expected: 2,
-            got: args.len(),
-        });
-    }
-    Ok((expect_word(&args[0])?, expect_word(&args[1])?))
-}
+bin_op!(bin_op_int, expect_int, i64);
+bin_op!(bin_op_word, expect_word, u64);
 
 fn eval_decode_double_int64(d: f64) -> (i64, i64) {
     if d == 0.0 || d.is_nan() {
@@ -1955,80 +1962,28 @@ fn eval_haskell_show_double(d: f64) -> String {
     }
 }
 
-fn bin_op_double(_op: PrimOpKind, args: &[Value]) -> Result<(f64, f64), EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::ArityMismatch {
-            context: "arguments",
-            expected: 2,
-            got: args.len(),
-        });
-    }
-    Ok((expect_double(&args[0])?, expect_double(&args[1])?))
+bin_op!(bin_op_double, expect_double, f64);
+bin_op!(bin_op_float, expect_float, f32);
+bin_op!(bin_op_char, expect_char, char);
+
+macro_rules! cmp_fn {
+    ($name:ident, $bin_op:ident, $t:ty) => {
+        fn $name(
+            op: PrimOpKind,
+            args: &[Value],
+            f: impl Fn($t, $t) -> bool,
+        ) -> Result<Value, EvalError> {
+            let (a, b) = $bin_op(op, args)?;
+            Ok(Value::Lit(Literal::LitInt(if f(a, b) { 1 } else { 0 })))
+        }
+    };
 }
 
-fn bin_op_float(_op: PrimOpKind, args: &[Value]) -> Result<(f32, f32), EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::ArityMismatch {
-            context: "arguments",
-            expected: 2,
-            got: args.len(),
-        });
-    }
-    Ok((expect_float(&args[0])?, expect_float(&args[1])?))
-}
-
-fn cmp_int(
-    op: PrimOpKind,
-    args: &[Value],
-    f: impl Fn(i64, i64) -> bool,
-) -> Result<Value, EvalError> {
-    let (a, b) = bin_op_int(op, args)?;
-    Ok(Value::Lit(Literal::LitInt(if f(a, b) { 1 } else { 0 })))
-}
-
-fn cmp_word(
-    op: PrimOpKind,
-    args: &[Value],
-    f: impl Fn(u64, u64) -> bool,
-) -> Result<Value, EvalError> {
-    let (a, b) = bin_op_word(op, args)?;
-    Ok(Value::Lit(Literal::LitInt(if f(a, b) { 1 } else { 0 })))
-}
-
-fn cmp_double(
-    op: PrimOpKind,
-    args: &[Value],
-    f: impl Fn(f64, f64) -> bool,
-) -> Result<Value, EvalError> {
-    let (a, b) = bin_op_double(op, args)?;
-    Ok(Value::Lit(Literal::LitInt(if f(a, b) { 1 } else { 0 })))
-}
-
-fn cmp_float(
-    op: PrimOpKind,
-    args: &[Value],
-    f: impl Fn(f32, f32) -> bool,
-) -> Result<Value, EvalError> {
-    let (a, b) = bin_op_float(op, args)?;
-    Ok(Value::Lit(Literal::LitInt(if f(a, b) { 1 } else { 0 })))
-}
-
-fn cmp_char(
-    _op: PrimOpKind,
-    args: &[Value],
-    f: impl Fn(char, char) -> bool,
-) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(EvalError::ArityMismatch {
-            context: "arguments",
-            expected: 2,
-            got: args.len(),
-        });
-    }
-    let a = expect_char(&args[0])?;
-    let b = expect_char(&args[1])?;
-    Ok(Value::Lit(Literal::LitInt(if f(a, b) { 1 } else { 0 })))
-}
+cmp_fn!(cmp_int, bin_op_int, i64);
+cmp_fn!(cmp_word, bin_op_word, u64);
+cmp_fn!(cmp_double, bin_op_double, f64);
+cmp_fn!(cmp_float, bin_op_float, f32);
+cmp_fn!(cmp_char, bin_op_char, char);
 
 #[cfg(test)]
 mod tests {

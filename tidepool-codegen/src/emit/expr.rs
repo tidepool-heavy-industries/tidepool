@@ -624,7 +624,8 @@ fn is_trivial_field(idx: usize, expr: &CoreExpr) -> bool {
         CoreFrame::Lit(_) => true,
         CoreFrame::Lam { .. } => true, // Already WHNF (closure)
         CoreFrame::Con { fields, .. } => fields.iter().all(|&f| is_trivial_field(f, expr)),
-        _ => false, // App, Case, PrimOp, LetNonRec, LetRec, Join, Jump
+        CoreFrame::PrimOp { args, .. } => args.iter().all(|&a| is_trivial_field(a, expr)),
+        _ => false, // App, Case, LetNonRec, LetRec, Join, Jump
     }
 }
 
