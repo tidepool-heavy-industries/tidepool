@@ -1568,13 +1568,25 @@ impl TidepoolMcpServerImpl {
             Ok(None) => {
                 tracing::error!("{} thread crashed", op);
                 let mut crash_info = String::new();
-                if let Ok(content) = tokio::fs::read_to_string(".tidepool/crash.log").await {
-                    let crash_log = if content.len() > 65536 {
-                        content[content.len() - 65536..].to_string()
-                    } else {
-                        content
-                    };
-                    let lines: Vec<&str> = crash_log.lines().rev().take(5).collect();
+                let crash_log = async {
+                    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+                    let mut file = tokio::fs::File::open(".tidepool/crash.log").await.ok()?;
+                    let meta = file.metadata().await.ok()?;
+                    let len = meta.len();
+                    const MAX_CRASH_LOG_BYTES: u64 = 65536;
+                    if len > MAX_CRASH_LOG_BYTES {
+                        file.seek(std::io::SeekFrom::End(-(MAX_CRASH_LOG_BYTES as i64)))
+                            .await
+                            .ok()?;
+                    }
+                    let mut buf = Vec::new();
+                    file.read_to_end(&mut buf).await.ok()?;
+                    Some(String::from_utf8_lossy(&buf).into_owned())
+                }
+                .await;
+
+                if let Some(content) = crash_log {
+                    let lines: Vec<&str> = content.lines().rev().take(5).collect();
                     if !lines.is_empty() {
                         crash_info.push_str("\n\n## Recent Crash Log Entries\n```\n");
                         for line in lines.into_iter().rev() {
