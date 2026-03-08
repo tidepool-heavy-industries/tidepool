@@ -1464,6 +1464,7 @@ impl TidepoolMcpServerImpl {
 
     async fn handle_session_result(
         &self,
+        op: &str,
         mut session_rx: tokio::sync::mpsc::UnboundedReceiver<SessionMessage>,
         source: Arc<str>,
         response_tx: std::sync::mpsc::Sender<String>,
@@ -1471,7 +1472,7 @@ impl TidepoolMcpServerImpl {
         let eval_timeout = Duration::from_secs(EVAL_TIMEOUT_SECS);
         match timeout(eval_timeout, session_rx.recv()).await {
             Ok(Some(SessionMessage::Completed { result, output })) => {
-                tracing::info!("eval completed");
+                tracing::info!("{} completed", op);
                 let mut response = String::new();
                 if !output.is_empty() {
                     response.push_str("## Output\n");
@@ -1485,7 +1486,7 @@ impl TidepoolMcpServerImpl {
                 Ok(CallToolResult::success(vec![Content::text(response)]))
             }
             Ok(Some(SessionMessage::Suspended { prompt })) => {
-                tracing::info!(prompt = %prompt, "eval suspended on Ask");
+                tracing::info!(prompt = %prompt, "{} suspended on Ask", op);
                 let cont_id = self.next_continuation_id();
                 let json = serde_json::json!({
                     "suspended": true,
@@ -1510,14 +1511,14 @@ impl TidepoolMcpServerImpl {
             }
             Ok(Some(SessionMessage::Error { error })) => {
                 let error_msg = format_error_with_source("Error", &error, &source);
-                tracing::error!("eval failed: {}", error);
+                tracing::error!("{} failed: {}", op, error);
                 Ok(CallToolResult::error(vec![Content::text(error_msg)]))
             }
             Ok(None) => {
-                tracing::error!("eval thread crashed");
+                tracing::error!("{} thread crashed", op);
                 let mut crash_info = String::new();
-                if let Ok(content) = std::fs::read_to_string(".tidepool/crash.log") {
-                    let lines: Vec<_> = content.lines().rev().take(5).collect();
+                if let Ok(content) = tokio::fs::read_to_string(".tidepool/crash.log").await {
+                    let lines: Vec<&str> = content.lines().rev().take(5).collect();
                     if !lines.is_empty() {
                         crash_info.push_str("\n\n## Recent Crash Log Entries\n```\n");
                         for line in lines.into_iter().rev() {
@@ -1530,20 +1531,20 @@ impl TidepoolMcpServerImpl {
                 let error_msg = format_error_with_source(
                     "Crash",
                     &format!(
-                        "Eval thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.{}",
-                        crash_info
+                        "{} thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.{}",
+                        op, crash_info
                     ),
                     &source,
                 );
                 Ok(CallToolResult::error(vec![Content::text(error_msg)]))
             }
             Err(_elapsed) => {
-                tracing::error!("eval timed out after {}s", EVAL_TIMEOUT_SECS);
+                tracing::error!("{} timed out after {}s", op, EVAL_TIMEOUT_SECS);
                 let error_msg = format_error_with_source(
                     "Timeout",
                     &format!(
-                        "Evaluation timed out after {}s. This usually means an infinite loop or unbounded recursion.",
-                        EVAL_TIMEOUT_SECS
+                        "{} timed out after {}s. This usually means an infinite loop or unbounded recursion.",
+                        op, EVAL_TIMEOUT_SECS
                     ),
                     &source,
                 );
@@ -1677,7 +1678,7 @@ impl TidepoolMcpServerImpl {
             .map_err(|e| McpError::internal_error(format!("thread spawn error: {}", e), None))?;
 
         // Await first message from the eval thread
-        self.handle_session_result(session_rx, source, response_tx)
+        self.handle_session_result("eval", session_rx, source, response_tx)
             .await
     }
 
@@ -1708,7 +1709,7 @@ impl TidepoolMcpServerImpl {
         let response_tx = session.response_tx.clone();
 
         // Await the next message from the eval thread
-        self.handle_session_result(session.session_rx, source, response_tx)
+        self.handle_session_result("resume", session.session_rx, source, response_tx)
             .await
     }
 }
@@ -2442,4 +2443,170 @@ mod tests {
             haskell.contains("\"obj\" .= object [\"a\" .= Aeson.Number (fromIntegral (1 :: Int))]")
         );
     }
+
+    #[tokio::test]
+    async fn test_handle_session_result_completed() {
+        let server = create_mock_server();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
+        let source: Arc<str> = "test source".into();
+
+        tx.send(SessionMessage::Completed {
+            result: "42".into(),
+            output: vec!["log1".into()],
+        })
+        .unwrap();
+
+        let res = server
+            .handle_session_result("eval", rx, source, resp_tx)
+            .await
+            .unwrap();
+        assert_eq!(res.is_error, Some(false));
+        let text = match &res.content[0].raw {
+            RawContent::Text(t) => &t.text,
+            _ => panic!("Expected text content"),
+        };
+        assert!(text.contains("## Output\nlog1\n"));
+        assert!(text.contains("\n## Result\n42"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_session_result_suspended() {
+        let server = create_mock_server();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
+        let source: Arc<str> = "test source".into();
+
+        tx.send(SessionMessage::Suspended {
+            prompt: "what is your name?".into(),
+        })
+        .unwrap();
+
+        let res = server
+            .handle_session_result("eval", rx, source, resp_tx)
+            .await
+            .unwrap();
+        assert_eq!(res.is_error, Some(false));
+        let text = match &res.content[0].raw {
+            RawContent::Text(t) => &t.text,
+            _ => panic!("Expected text content"),
+        };
+        let json: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(json["suspended"], true);
+        assert_eq!(json["prompt"], "what is your name?");
+        assert!(json["continuation_id"].as_str().unwrap().starts_with("cont_"));
+
+        // Check if it's in the continuations map
+        let cont_id = json["continuation_id"].as_str().unwrap();
+        let conts = server.continuations.lock().unwrap();
+        assert!(conts.contains_key(cont_id));
+    }
+
+    #[tokio::test]
+    async fn test_handle_session_result_error() {
+        let server = create_mock_server();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
+        let source: Arc<str> = "test source".into();
+
+        tx.send(SessionMessage::Error {
+            error: "oops".into(),
+        })
+        .unwrap();
+
+        let res = server
+            .handle_session_result("eval", rx, source, resp_tx)
+            .await
+            .unwrap();
+        assert_eq!(res.is_error, Some(true));
+        let text = match &res.content[0].raw {
+            RawContent::Text(t) => &t.text,
+            _ => panic!("Expected text content"),
+        };
+        assert!(text.contains("## Error"));
+        assert!(text.contains("oops"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_session_result_crash() {
+        let server = create_mock_server();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
+        let source: Arc<str> = "test source".into();
+
+        // Close the channel without sending anything
+        drop(tx);
+
+        let res = server
+            .handle_session_result("eval", rx, source, resp_tx)
+            .await
+            .unwrap();
+        assert_eq!(res.is_error, Some(true));
+        let text = match &res.content[0].raw {
+            RawContent::Text(t) => &t.text,
+            _ => panic!("Expected text content"),
+        };
+        assert!(text.contains("## Crash"));
+        assert!(text.contains("eval thread crashed"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_session_result_timeout() {
+        tokio::time::pause();
+
+        let server = create_mock_server();
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
+        let source: Arc<str> = "test source".into();
+
+        let handle = tokio::spawn(async move {
+            server
+                .handle_session_result("eval", rx, source, resp_tx)
+                .await
+        });
+
+        // Advance time past EVAL_TIMEOUT_SECS
+        tokio::time::advance(Duration::from_secs(EVAL_TIMEOUT_SECS + 1)).await;
+
+        let res = handle.await.unwrap().unwrap();
+        assert_eq!(res.is_error, Some(true));
+        let text = match &res.content[0].raw {
+            RawContent::Text(t) => &t.text,
+            _ => panic!("Expected text content"),
+        };
+        assert!(text.contains("## Timeout"));
+        assert!(text.contains("timed out"));
+    }
+
+    fn create_mock_server() -> TidepoolMcpServerImpl {
+        #[derive(Clone)]
+        struct MockHandler;
+        impl DispatchEffect<CapturedOutput> for MockHandler {
+            fn dispatch(
+                &mut self,
+                _tag: u64,
+                _request: &tidepool_eval::value::Value,
+                _cx: &tidepool_effect::EffectContext<'_, CapturedOutput>,
+            ) -> Result<tidepool_eval::value::Value, tidepool_effect::error::EffectError>
+            {
+                Ok(tidepool_eval::value::Value::Lit(
+                    tidepool_repr::Literal::LitInt(0),
+                ))
+            }
+        }
+
+        TidepoolMcpServerImpl {
+            handler_factory: Arc::new(MockHandler),
+            include: Vec::new(),
+            haskell_preamble: String::new(),
+            effect_stack_type: String::new(),
+            eval_tool_description: String::new(),
+            has_user_library: false,
+            ask_tag: 0,
+            effect_names: Vec::new(),
+            continuations: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            next_cont_id: Arc::new(AtomicU64::new(1)),
+        }
+    }
 }
+
