@@ -17,7 +17,6 @@ module Tidepool.Translate
   , UnresolvedVar(..)
   ) where
 
-import Debug.Trace (trace)
 import GHC
 import GHC.Core
 import GHC.Types.Id
@@ -296,14 +295,18 @@ translateModule allBinds targetName unresolvedIds =
           go visited [] = visited
           go visited (v:vs) = case Map.lookup v keyToIdx of
             Just idx | not (Set.member idx visited) ->
-              let (_, _, fvs) = pairInfo !! idx
+              let (_, _, fvs) = case drop idx pairInfo of
+                    (x:_) -> x
+                    []    -> error $ "reachableBinds: index " ++ show idx ++ " out of bounds (length " ++ show (length pairInfo) ++ ")"
               in go (Set.insert idx visited) (Set.toList fvs ++ vs)
             _ -> go visited vs
 
           targetKey = varId target
           reachable = case Map.lookup targetKey keyToIdx of
             Just idx ->
-              let (_, _, fvs) = pairInfo !! idx
+              let (_, _, fvs) = case drop idx pairInfo of
+                    (x:_) -> x
+                    []    -> error $ "reachableBinds: index " ++ show idx ++ " out of bounds (length " ++ show (length pairInfo) ++ ")"
               in go (Set.singleton idx) (Set.toList fvs)
             Nothing -> Set.empty
 
@@ -750,7 +753,9 @@ translate expr =
     Var v | isRunRWVar v
           , length args == 1 -> do
       recordDC unitDataCon
-      fIdx <- translate (head args)
+      fIdx <- case args of
+        [a] -> translate a
+        _   -> error $ "runRW#: expected 1 arg, got " ++ show (length args)
       tokIdx <- emitNode $ NCon (varId (dataConWorkId unitDataCon)) []
       emitNode $ NApp fIdx tokIdx
 
@@ -773,7 +778,9 @@ translate expr =
         case typeArgs of
           [Type ty] | Just (tc, _) <- splitTyConApp_maybe ty -> do
             let dcs = tyConDataCons tc
-            argIdx <- translate (head args)
+            argIdx <- case args of
+              [a] -> translate a
+              _   -> error $ "tagToEnum#: expected 1 arg, got " ++ show (length args)
             altData <- forM (zip [0..] dcs) $ \(i :: Int, dc) -> do
               recordDC dc
               conIdx <- emitNode $ NCon (varId (dataConWorkId dc)) []
@@ -1342,7 +1349,7 @@ mapPrimOp = \case
   Ctz64Op                     -> "Ctz64"
   -- Exception
   RaiseOp     -> "Raise"
-  other       -> trace ("WARNING: unsupported primop: " ++ showPprUnsafe other ++ " (emitting Raise)") "Raise"
+  other       -> error $ "Unsupported primop: " ++ showPprUnsafe other
 
 -- | Check whether a named top-level binding has IO in its result type.
 targetBindingHasIO :: [CoreBind] -> String -> Bool
@@ -1443,9 +1450,9 @@ mapFfiCall :: String -> Text
 mapFfiCall pprName
   | "strlen" `isInfixOf` pprName                = T.pack "FfiStrlen"
   | "_hs_text_measure_off" `isInfixOf` pprName  = T.pack "FfiTextMeasureOff"
-  | "_hs_text_memchr" `isInfixOf` pprName       = T.pack "FfiTextMemchr"
-  | "_hs_text_reverse" `isInfixOf` pprName      = T.pack "FfiTextReverse"
-  | otherwise = trace ("WARNING: unsupported FFI call: " ++ pprName ++ " (emitting Raise)") $ T.pack "Raise"
+    | "_hs_text_memchr" `isInfixOf` pprName  = T.pack "FfiTextMemchr"
+    | "_hs_text_reverse" `isInfixOf` pprName      = T.pack "FfiTextReverse"
+    | otherwise = error $ "Unsupported FFI call: " ++ pprName
 
 isRuntimeErrorVar :: Id -> Bool
 isRuntimeErrorVar v =

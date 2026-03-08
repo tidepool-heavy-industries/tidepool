@@ -56,7 +56,8 @@ runPipeline path includes = do
         isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
         (targetGuts, depGuts) = case filter isTargetMod results of
           (tgt:_) -> (tgt, [g | g <- results, mg_module g /= mg_module tgt])
-          []       -> (head results, tail results)
+          []       -> error $ "Target module '" ++ targetModName ++ "' not found among compiled modules: "
+                     ++ show (map (moduleNameString . moduleName . mg_module) results)
         allBinds = concatMap mg_binds depGuts ++ mg_binds targetGuts
         allTyCons = concatMap mg_tcs depGuts ++ mg_tcs targetGuts
     hscEnv <- getSession
