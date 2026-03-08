@@ -1462,131 +1462,12 @@ impl TidepoolMcpServerImpl {
         conts.retain(|_, session| now.duration_since(session.created_at) < CONTINUATION_TTL);
     }
 
-    async fn eval(&self, req: EvalRequest) -> Result<CallToolResult, McpError> {
-        tracing::info!(len = req.code.len(), "eval request");
-        self.cleanup_stale_continuations();
-
-        // Reject unsafe/IO imports before compilation
-        for imp in req
-            .imports
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
-        {
-            if let Some(module) = rejected_import(imp) {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Blocked import: `{}` is not available in the Tidepool sandbox.",
-                    module,
-                ))]));
-            }
-        }
-
-        let mut all_imports = aeson_imports();
-        all_imports.push_str(&req.imports);
-        let source: Arc<str> = template_haskell(
-            &self.haskell_preamble,
-            &self.effect_stack_type,
-            &req.code,
-            &all_imports,
-            &req.helpers,
-            req.input.as_ref(),
-            Some(req.max_len.unwrap_or(4096)),
-        )
-        .into();
-
-        let handlers = dyn_clone::clone_box(&*self.handler_factory);
-        let include_refs: Vec<PathBuf> = self.include.clone();
-        let source_for_blocking = Arc::clone(&source);
-        let captured = CapturedOutput::new();
-        let captured_for_blocking = captured.clone();
-        let ask_tag = self.ask_tag;
-        let effect_names = self.effect_names.clone();
-
-        // Create channels for Ask effect communication
-        let (session_tx, mut session_rx) = tokio::sync::mpsc::unbounded_channel::<SessionMessage>();
-        let (response_tx, response_rx) = std::sync::mpsc::channel::<String>();
-
-        // Spawn eval thread — does NOT join; communicates via channels
-        let thread_session_tx = session_tx;
-        let _handle = std::thread::Builder::new()
-            .name("tidepool-eval".into())
-            .stack_size(32 * 1024 * 1024)
-            .spawn(move || {
-                // Install signal handlers so SIGILL/SIGSEGV from JIT code
-                // are caught via sigsetjmp/siglongjmp instead of killing
-                // the whole server process.
-                tidepool_codegen::signal_safety::install();
-
-                let include_paths: Vec<&Path> = include_refs.iter().map(|p| p.as_path()).collect();
-                let mut ask_dispatcher = AskDispatcher {
-                    inner: handlers,
-                    ask_tag,
-                    session_tx: thread_session_tx.clone(),
-                    response_rx,
-                };
-
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    tidepool_runtime::compile_and_run(
-                        &source_for_blocking,
-                        "result",
-                        &include_paths,
-                        &mut ask_dispatcher,
-                        &captured_for_blocking,
-                    )
-                }));
-
-                let output_lines = captured_for_blocking.drain();
-                match result {
-                    Ok(Ok(eval_result)) => {
-                        let _ = thread_session_tx.send(SessionMessage::Completed {
-                            result: eval_result.to_string_pretty(),
-                            output: output_lines,
-                        });
-                    }
-                    Ok(Err(e)) => {
-                        let diagnostics = tidepool_runtime::drain_diagnostics();
-                        let mut error_detail = e.to_string();
-                        // Annotate UnhandledEffect with effect names
-                        if error_detail.starts_with("Unhandled effect at tag") {
-                            let effects_list: String = effect_names
-                                .iter()
-                                .enumerate()
-                                .map(|(i, name)| format!("  {} = {}", i, name))
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            error_detail
-                                .push_str(&format!("\n\nRegistered effects:\n{}", effects_list));
-                        }
-                        if !diagnostics.is_empty() {
-                            error_detail.push_str("\n\n## JIT Diagnostics\n");
-                            for d in &diagnostics {
-                                error_detail.push_str(d);
-                                error_detail.push('\n');
-                            }
-                        }
-                        let _ = thread_session_tx.send(SessionMessage::Error {
-                            error: error_detail,
-                        });
-                    }
-                    Err(panic_payload) => {
-                        let diagnostics = tidepool_runtime::drain_diagnostics();
-                        let mut error_detail = format_panic_payload(panic_payload);
-                        if !diagnostics.is_empty() {
-                            error_detail.push_str("\n\n## JIT Diagnostics\n");
-                            for d in &diagnostics {
-                                error_detail.push_str(d);
-                                error_detail.push('\n');
-                            }
-                        }
-                        let _ = thread_session_tx.send(SessionMessage::Error {
-                            error: error_detail,
-                        });
-                    }
-                }
-            })
-            .map_err(|e| McpError::internal_error(format!("thread spawn error: {}", e), None))?;
-
-        // Await first message from the eval thread
+    async fn handle_session_result(
+        &self,
+        mut session_rx: tokio::sync::mpsc::UnboundedReceiver<SessionMessage>,
+        source: Arc<str>,
+        response_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CallToolResult, McpError> {
         let eval_timeout = Duration::from_secs(EVAL_TIMEOUT_SECS);
         match timeout(eval_timeout, session_rx.recv()).await {
             Ok(Some(SessionMessage::Completed { result, output })) => {
@@ -1671,11 +1552,140 @@ impl TidepoolMcpServerImpl {
         }
     }
 
+    async fn eval(&self, req: EvalRequest) -> Result<CallToolResult, McpError> {
+        tracing::info!(len = req.code.len(), "eval request");
+        self.cleanup_stale_continuations();
+
+        // Reject unsafe/IO imports before compilation
+        for imp in req
+            .imports
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+        {
+            if let Some(module) = rejected_import(imp) {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Blocked import: `{}` is not available in the Tidepool sandbox.",
+                    module,
+                ))]));
+            }
+        }
+
+        let mut all_imports = aeson_imports();
+        all_imports.push_str(&req.imports);
+        let source: Arc<str> = template_haskell(
+            &self.haskell_preamble,
+            &self.effect_stack_type,
+            &req.code,
+            &all_imports,
+            &req.helpers,
+            req.input.as_ref(),
+            Some(req.max_len.unwrap_or(4096)),
+        )
+        .into();
+
+        let handlers = dyn_clone::clone_box(&*self.handler_factory);
+        let include_refs: Vec<PathBuf> = self.include.clone();
+        let source_for_blocking = Arc::clone(&source);
+        let captured = CapturedOutput::new();
+        let captured_for_blocking = captured.clone();
+        let ask_tag = self.ask_tag;
+        let effect_names = self.effect_names.clone();
+
+        // Create channels for Ask effect communication
+        let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel::<SessionMessage>();
+        let (response_tx, response_rx) = std::sync::mpsc::channel::<String>();
+
+        // Spawn eval thread — does NOT join; communicates via channels
+        let thread_session_tx = session_tx;
+        let _handle = std::thread::Builder::new()
+            .name("tidepool-eval".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                // Install signal handlers so SIGILL/SIGSEGV from JIT code
+                // are caught via sigsetjmp/siglongjmp instead of killing
+                // the whole server process.
+                tidepool_codegen::signal_safety::install();
+
+                let include_paths: Vec<&Path> = include_refs.iter().map(|p| p.as_path()).collect();
+                let mut ask_dispatcher = AskDispatcher {
+                    inner: handlers,
+                    ask_tag,
+                    session_tx: thread_session_tx.clone(),
+                    response_rx,
+                };
+
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    tidepool_runtime::compile_and_run(
+                        &source_for_blocking,
+                        "result",
+                        &include_paths,
+                        &mut ask_dispatcher,
+                        &captured_for_blocking,
+                    )
+                }));
+
+                let output_lines = captured_for_blocking.drain();
+                match result {
+                    Ok(Ok(eval_result)) => {
+                        let _ = thread_session_tx.send(SessionMessage::Completed {
+                            result: eval_result.to_string_pretty(),
+                            output: output_lines,
+                        });
+                    }
+                    Ok(Err(e)) => {
+                        let diagnostics = tidepool_runtime::drain_diagnostics();
+                        let mut error_detail = e.to_string();
+                        // Annotate UnhandledEffect with effect names
+                        if error_detail.starts_with("Unhandled effect at tag") {
+                            let effects_list: String = effect_names
+                                .iter()
+                                .enumerate()
+                                .map(|(i, name)| format!("  {} = {}", i, name))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            error_detail
+                                .push_str(&format!("\n\nRegistered effects:\n{}", effects_list));
+                        }
+                        if !diagnostics.is_empty() {
+                            error_detail.push_str("\n\n## JIT Diagnostics\n");
+                            for d in &diagnostics {
+                                error_detail.push_str(d);
+                                error_detail.push('\n');
+                            }
+                        }
+                        let _ = thread_session_tx.send(SessionMessage::Error {
+                            error: error_detail,
+                        });
+                    }
+                    Err(panic_payload) => {
+                        let diagnostics = tidepool_runtime::drain_diagnostics();
+                        let mut error_detail = format_panic_payload(panic_payload);
+                        if !diagnostics.is_empty() {
+                            error_detail.push_str("\n\n## JIT Diagnostics\n");
+                            for d in &diagnostics {
+                                error_detail.push_str(d);
+                                error_detail.push('\n');
+                            }
+                        }
+                        let _ = thread_session_tx.send(SessionMessage::Error {
+                            error: error_detail,
+                        });
+                    }
+                }
+            })
+            .map_err(|e| McpError::internal_error(format!("thread spawn error: {}", e), None))?;
+
+        // Await first message from the eval thread
+        self.handle_session_result(session_rx, source, response_tx)
+            .await
+    }
+
     async fn resume(&self, req: ResumeRequest) -> Result<CallToolResult, McpError> {
         tracing::info!(continuation_id = %req.continuation_id, "resume request");
         self.cleanup_stale_continuations();
 
-        let mut session = {
+        let session = {
             let mut conts = self.continuations.lock().unwrap_or_else(|e| e.into_inner());
             conts.remove(&req.continuation_id).ok_or_else(|| {
                 McpError::invalid_params(
@@ -1698,88 +1708,8 @@ impl TidepoolMcpServerImpl {
         let response_tx = session.response_tx.clone();
 
         // Await the next message from the eval thread
-        let eval_timeout = Duration::from_secs(EVAL_TIMEOUT_SECS);
-        match timeout(eval_timeout, session.session_rx.recv()).await {
-            Ok(Some(SessionMessage::Completed { result, output })) => {
-                tracing::info!("resumed eval completed");
-                let mut response = String::new();
-                if !output.is_empty() {
-                    response.push_str("## Output\n");
-                    for line in &output {
-                        response.push_str(line);
-                        response.push('\n');
-                    }
-                    response.push_str("\n## Result\n");
-                }
-                response.push_str(&result);
-                Ok(CallToolResult::success(vec![Content::text(response)]))
-            }
-            Ok(Some(SessionMessage::Suspended { prompt })) => {
-                tracing::info!(prompt = %prompt, "resumed eval suspended again");
-                let cont_id = self.next_continuation_id();
-                let json = serde_json::json!({
-                    "suspended": true,
-                    "continuation_id": cont_id,
-                    "prompt": prompt,
-                });
-                self.continuations
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(
-                        cont_id.clone(),
-                        EvalSession {
-                            response_tx,
-                            session_rx: session.session_rx,
-                            source,
-                            created_at: std::time::Instant::now(),
-                        },
-                    );
-                Ok(CallToolResult::success(vec![Content::text(
-                    json.to_string(),
-                )]))
-            }
-            Ok(Some(SessionMessage::Error { error })) => {
-                let error_msg = format_error_with_source("Error", &error, &source);
-                tracing::error!("resumed eval failed: {}", error);
-                Ok(CallToolResult::error(vec![Content::text(error_msg)]))
-            }
-            Ok(None) => {
-                tracing::error!("eval thread crashed");
-                let mut crash_info = String::new();
-                if let Ok(content) = std::fs::read_to_string(".tidepool/crash.log") {
-                    let lines: Vec<_> = content.lines().rev().take(5).collect();
-                    if !lines.is_empty() {
-                        crash_info.push_str("\n\n## Recent Crash Log Entries\n```\n");
-                        for line in lines.into_iter().rev() {
-                            crash_info.push_str(line);
-                            crash_info.push('\n');
-                        }
-                        crash_info.push_str("```\n");
-                    }
-                }
-                let error_msg = format_error_with_source(
-                    "Crash",
-                    &format!(
-                        "Eval thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.{}",
-                        crash_info
-                    ),
-                    &source,
-                );
-                Ok(CallToolResult::error(vec![Content::text(error_msg)]))
-            }
-            Err(_elapsed) => {
-                tracing::error!("resumed eval timed out after {}s", EVAL_TIMEOUT_SECS);
-                let error_msg = format_error_with_source(
-                    "Timeout",
-                    &format!(
-                        "Evaluation timed out after {}s. This usually means an infinite loop or unbounded recursion.",
-                        EVAL_TIMEOUT_SECS
-                    ),
-                    &source,
-                );
-                Ok(CallToolResult::error(vec![Content::text(error_msg)]))
-            }
-        }
+        self.handle_session_result(session.session_rx, source, response_tx)
+            .await
     }
 }
 

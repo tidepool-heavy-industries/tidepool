@@ -290,11 +290,6 @@ pub fn last_gc_roots() -> Vec<StackRoot> {
     LAST_ROOTS.with(|roots_cell| roots_cell.borrow().clone())
 }
 
-/// Heap allocation: called by JIT code for large or slow-path allocations.
-pub extern "C" fn heap_alloc(_vmctx: *mut VMContext, _size: u64) -> *mut u8 {
-    std::ptr::null_mut() // Placeholder for scaffold
-}
-
 /// Force a thunk to WHNF. Loops to handle chains (thunk returning thunk).
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
@@ -1355,7 +1350,6 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
             "runtime_bad_thunk_state_trap",
             runtime_bad_thunk_state_trap as *const u8,
         ),
-        ("heap_alloc", heap_alloc as *const u8),
         ("heap_force", heap_force as *const u8),
         ("unresolved_var_trap", unresolved_var_trap as *const u8),
         ("runtime_error", runtime_error as *const u8),

@@ -1298,13 +1298,7 @@ impl EffectHandler<CapturedOutput> for LlmHandler {
                     .and_then(|block| block.get("input"))
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
-                eprintln!(
-                    "[llm-structured] API response input: {}",
-                    serde_json::to_string(&input).unwrap_or_default()
-                );
-                let result = cx.respond(input);
-                eprintln!("[llm-structured] cx.respond result: {}", result.is_ok());
-                result
+                cx.respond(input)
             }
         }
     }

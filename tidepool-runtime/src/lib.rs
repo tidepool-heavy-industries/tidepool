@@ -267,7 +267,7 @@ pub fn compile_and_run_pure(
 }
 
 /// Compile Haskell source and run it with the given effect handlers,
-/// using the default nursery size (1 MiB).
+/// using the default nursery size (64 MiB).
 ///
 /// # Arguments
 /// * `source` - The Haskell source code to compile.
