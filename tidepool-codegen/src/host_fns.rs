@@ -746,7 +746,7 @@ pub fn reset_call_depth() {
 
 /// Check pointer validity; if bad, set runtime error and return true.
 fn check_ptr_invalid(ptr: *const u8, fn_name: &str) -> bool {
-    if (ptr as u64) < MIN_VALID_ADDR {
+    if (ptr as i64) < MIN_VALID_ADDR as i64 {
         let msg = format!("[BUG] {}: bad pointer {:#x}", fn_name, ptr as u64);
         eprintln!("{}", msg);
         push_diagnostic(msg);
