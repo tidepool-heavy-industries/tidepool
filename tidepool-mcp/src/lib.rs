@@ -1406,9 +1406,6 @@ fn extract_ask_prompt(
     format!("{:?}", request)
 }
 
-/// TTL for parked continuations (5 minutes).
-const CONTINUATION_TTL: std::time::Duration = std::time::Duration::from_secs(300);
-
 // ---------------------------------------------------------------------------
 // Server internals
 // ---------------------------------------------------------------------------
@@ -1457,10 +1454,19 @@ impl TidepoolMcpServerImpl {
         format!("cont_{}", id)
     }
 
-    fn cleanup_stale_continuations(&self) {
+    /// Evict the oldest continuation, freeing its semaphore permit.
+    /// Dropping `EvalSession` drops `response_tx` → blocked eval thread's
+    /// `response_rx.recv()` returns Err → thread exits → permit freed.
+    fn evict_oldest_continuation(&self) {
         let mut conts = self.continuations.lock().unwrap_or_else(|e| e.into_inner());
-        let now = std::time::Instant::now();
-        conts.retain(|_, session| now.duration_since(session.created_at) < CONTINUATION_TTL);
+        if let Some(oldest_key) = conts
+            .iter()
+            .min_by_key(|(_, s)| s.created_at)
+            .map(|(k, _)| k.clone())
+        {
+            tracing::info!(cont_id = %oldest_key, "evicting oldest continuation under pressure");
+            conts.remove(&oldest_key);
+        }
     }
 
     async fn handle_session_result(
@@ -1556,7 +1562,6 @@ impl TidepoolMcpServerImpl {
 
     async fn eval(&self, req: EvalRequest) -> Result<CallToolResult, McpError> {
         tracing::info!(len = req.code.len(), "eval request");
-        self.cleanup_stale_continuations();
 
         // Reject unsafe/IO imports before compilation
         for imp in req
@@ -1598,16 +1603,24 @@ impl TidepoolMcpServerImpl {
         let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel::<SessionMessage>();
         let (response_tx, response_rx) = std::sync::mpsc::channel::<String>();
 
-        let permit = self
-            .eval_semaphore
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| {
-                McpError::internal_error(
-                    "Server busy: too many concurrent evaluations. Please try again in a moment.",
-                    None,
-                )
-            })?;
+        let permit = match self.eval_semaphore.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                // All slots busy — evict oldest suspended eval to free a permit
+                self.evict_oldest_continuation();
+                // Brief yield to let the evicted thread's permit release propagate
+                tokio::task::yield_now().await;
+                self.eval_semaphore
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| {
+                        McpError::internal_error(
+                            "Server busy: too many concurrent evaluations. Please try again in a moment.",
+                            None,
+                        )
+                    })?
+            }
+        };
 
         // Spawn eval thread — does NOT join; communicates via channels
         let thread_session_tx = session_tx;
@@ -1697,7 +1710,6 @@ impl TidepoolMcpServerImpl {
 
     async fn resume(&self, req: ResumeRequest) -> Result<CallToolResult, McpError> {
         tracing::info!(continuation_id = %req.continuation_id, "resume request");
-        self.cleanup_stale_continuations();
 
         let session = {
             let mut conts = self.continuations.lock().unwrap_or_else(|e| e.into_inner());
