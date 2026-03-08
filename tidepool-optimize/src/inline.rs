@@ -1,7 +1,6 @@
 use crate::occ::{get_occ, occ_analysis, Occ};
-use std::collections::HashMap;
 use tidepool_eval::{Changed, Pass};
-use tidepool_repr::{CoreExpr, CoreFrame, MapLayer};
+use tidepool_repr::{get_children, replace_subtree, CoreExpr, CoreFrame};
 
 /// Inlining pass: eliminates single-use `LetNonRec` bindings by substituting the RHS directly at the use site.
 pub struct Inline;
@@ -57,76 +56,6 @@ fn try_children(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> Op
         }
     }
     None
-}
-
-fn get_children(frame: &CoreFrame<usize>) -> Vec<usize> {
-    match frame {
-        CoreFrame::Var(_) | CoreFrame::Lit(_) => vec![],
-        CoreFrame::App { fun, arg } => vec![*fun, *arg],
-        CoreFrame::Lam { body, .. } => vec![*body],
-        CoreFrame::LetNonRec { rhs, body, .. } => vec![*rhs, *body],
-        CoreFrame::LetRec { bindings, body, .. } => {
-            let mut c: Vec<usize> = bindings.iter().map(|(_, r)| *r).collect();
-            c.push(*body);
-            c
-        }
-        CoreFrame::Case {
-            scrutinee, alts, ..
-        } => {
-            let mut c = vec![*scrutinee];
-            for alt in alts {
-                c.push(alt.body);
-            }
-            c
-        }
-        CoreFrame::Con { fields, .. } => fields.clone(),
-        CoreFrame::Join { rhs, body, .. } => vec![*rhs, *body],
-        CoreFrame::Jump { args, .. } => args.clone(),
-        CoreFrame::PrimOp { args, .. } => args.clone(),
-    }
-}
-
-fn replace_subtree(expr: &CoreExpr, target_idx: usize, replacement: &CoreExpr) -> CoreExpr {
-    let mut new_nodes = Vec::new();
-    let mut old_to_new = HashMap::new();
-    rebuild(
-        expr,
-        expr.nodes.len() - 1,
-        target_idx,
-        replacement,
-        &mut new_nodes,
-        &mut old_to_new,
-    );
-    CoreExpr { nodes: new_nodes }
-}
-
-fn rebuild(
-    expr: &CoreExpr,
-    idx: usize,
-    target: usize,
-    replacement: &CoreExpr,
-    new_nodes: &mut Vec<CoreFrame<usize>>,
-    old_to_new: &mut HashMap<usize, usize>,
-) -> usize {
-    if let Some(&ni) = old_to_new.get(&idx) {
-        return ni;
-    }
-    if idx == target {
-        let offset = new_nodes.len();
-        for node in &replacement.nodes {
-            new_nodes.push(node.clone().map_layer(|i| i + offset));
-        }
-        let root = new_nodes.len() - 1;
-        old_to_new.insert(idx, root);
-        return root;
-    }
-    let mapped = expr.nodes[idx]
-        .clone()
-        .map_layer(|child| rebuild(expr, child, target, replacement, new_nodes, old_to_new));
-    let new_idx = new_nodes.len();
-    new_nodes.push(mapped);
-    old_to_new.insert(idx, new_idx);
-    new_idx
 }
 
 #[cfg(test)]

@@ -1,6 +1,5 @@
-use std::collections::HashMap;
 use tidepool_eval::{Changed, Pass};
-use tidepool_repr::{CoreExpr, CoreFrame, MapLayer};
+use tidepool_repr::{replace_subtree, CoreExpr, CoreFrame};
 
 /// Beta reduction pass: find `App { fun, arg }` where `fun` is a `Lam { binder, body }`.
 /// Replaces it with `subst(body, binder, arg)`.
@@ -118,54 +117,6 @@ fn try_beta_at(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
             result
         }
     }
-}
-
-fn replace_subtree(expr: &CoreExpr, target_idx: usize, replacement: &CoreExpr) -> CoreExpr {
-    let mut new_nodes = Vec::new();
-    let mut old_to_new = HashMap::new();
-
-    fn rebuild(
-        expr: &CoreExpr,
-        idx: usize,
-        target: usize,
-        replacement: &CoreExpr,
-        new_nodes: &mut Vec<CoreFrame<usize>>,
-        old_to_new: &mut HashMap<usize, usize>,
-    ) -> usize {
-        if let Some(&ni) = old_to_new.get(&idx) {
-            return ni;
-        }
-
-        if idx == target {
-            // Splice replacement
-            let offset = new_nodes.len();
-            for node in &replacement.nodes {
-                let mapped = node.clone().map_layer(|i| i + offset);
-                new_nodes.push(mapped);
-            }
-            let root = new_nodes.len() - 1;
-            old_to_new.insert(idx, root);
-            return root;
-        }
-
-        let mapped = expr.nodes[idx]
-            .clone()
-            .map_layer(|child| rebuild(expr, child, target, replacement, new_nodes, old_to_new));
-        let new_idx = new_nodes.len();
-        new_nodes.push(mapped);
-        old_to_new.insert(idx, new_idx);
-        new_idx
-    }
-
-    rebuild(
-        expr,
-        expr.nodes.len() - 1,
-        target_idx,
-        replacement,
-        &mut new_nodes,
-        &mut old_to_new,
-    );
-    CoreExpr { nodes: new_nodes }
 }
 
 #[cfg(test)]

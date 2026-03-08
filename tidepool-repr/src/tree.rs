@@ -1,5 +1,6 @@
 use crate::frame::CoreFrame;
 use crate::types::Alt;
+use std::collections::HashMap;
 
 /// A tree stored as a flat vector of frames. Children are `usize` indices into `nodes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,13 +15,13 @@ where
     /// Extract a subtree rooted at `idx` into a new standalone tree.
     pub fn extract_subtree(&self, idx: usize) -> Self {
         let mut new_nodes = Vec::new();
-        let mut old_to_new = std::collections::HashMap::new();
+        let mut old_to_new = HashMap::new();
 
         fn collect<F>(
             idx: usize,
             tree: &RecursiveTree<F>,
             new_nodes: &mut Vec<F>,
-            old_to_new: &mut std::collections::HashMap<usize, usize>,
+            old_to_new: &mut HashMap<usize, usize>,
         ) -> usize
         where
             F: MapLayer<usize, usize, Output = F> + Clone,
@@ -42,6 +43,84 @@ where
         collect(idx, self, &mut new_nodes, &mut old_to_new);
         RecursiveTree { nodes: new_nodes }
     }
+}
+
+/// Get all child indices of a CoreFrame node.
+pub fn get_children(frame: &CoreFrame<usize>) -> Vec<usize> {
+    match frame {
+        CoreFrame::Var(_) | CoreFrame::Lit(_) => vec![],
+        CoreFrame::App { fun, arg } => vec![*fun, *arg],
+        CoreFrame::Lam { body, .. } => vec![*body],
+        CoreFrame::LetNonRec { rhs, body, .. } => vec![*rhs, *body],
+        CoreFrame::LetRec { bindings, body } => {
+            let mut c: Vec<usize> = bindings.iter().map(|(_, r)| *r).collect();
+            c.push(*body);
+            c
+        }
+        CoreFrame::Case {
+            scrutinee,
+            alts,
+            binder: _,
+        } => {
+            let mut c = vec![*scrutinee];
+            for alt in alts {
+                c.push(alt.body);
+            }
+            c
+        }
+        CoreFrame::Con { fields, .. } => fields.clone(),
+        CoreFrame::Join { rhs, body, .. } => vec![*rhs, *body],
+        CoreFrame::Jump { args, .. } => args.clone(),
+        CoreFrame::PrimOp { args, .. } => args.clone(),
+    }
+}
+
+/// Replace the subtree rooted at `target_idx` with `replacement`.
+pub fn replace_subtree(
+    expr: &RecursiveTree<CoreFrame<usize>>,
+    target_idx: usize,
+    replacement: &RecursiveTree<CoreFrame<usize>>,
+) -> RecursiveTree<CoreFrame<usize>> {
+    let mut new_nodes = Vec::new();
+    let mut old_to_new = HashMap::new();
+    rebuild(
+        expr,
+        expr.nodes.len() - 1,
+        target_idx,
+        replacement,
+        &mut new_nodes,
+        &mut old_to_new,
+    );
+    RecursiveTree { nodes: new_nodes }
+}
+
+fn rebuild(
+    expr: &RecursiveTree<CoreFrame<usize>>,
+    idx: usize,
+    target: usize,
+    replacement: &RecursiveTree<CoreFrame<usize>>,
+    new_nodes: &mut Vec<CoreFrame<usize>>,
+    old_to_new: &mut HashMap<usize, usize>,
+) -> usize {
+    if let Some(&ni) = old_to_new.get(&idx) {
+        return ni;
+    }
+    if idx == target {
+        let offset = new_nodes.len();
+        for node in &replacement.nodes {
+            new_nodes.push(node.clone().map_layer(|i| i + offset));
+        }
+        let root = new_nodes.len() - 1;
+        old_to_new.insert(idx, root);
+        return root;
+    }
+    let mapped = expr.nodes[idx]
+        .clone()
+        .map_layer(|child| rebuild(expr, child, target, replacement, new_nodes, old_to_new));
+    let new_idx = new_nodes.len();
+    new_nodes.push(mapped);
+    old_to_new.insert(idx, new_idx);
+    new_idx
 }
 
 /// Functor map over the recursive positions of a frame.
