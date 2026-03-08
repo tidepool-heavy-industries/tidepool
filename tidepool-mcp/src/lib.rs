@@ -1303,14 +1303,31 @@ impl CapturedOutput {
     pub fn push(&self, line: String) {
         self.lines
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                tracing::warn!("CapturedOutput mutex was poisoned, recovering");
+                e.into_inner()
+            })
             .push(line);
     }
 
     /// Drain all captured lines, returning them and clearing the buffer.
     pub fn drain(&self) -> Vec<String> {
-        let mut lines = self.lines.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lines = self.lines.lock().unwrap_or_else(|e| {
+            tracing::warn!("CapturedOutput mutex was poisoned, recovering");
+            e.into_inner()
+        });
         std::mem::take(&mut *lines)
+    }
+
+    /// Snapshot current captured lines without clearing the buffer.
+    pub fn snapshot(&self) -> Vec<String> {
+        self.lines
+            .lock()
+            .unwrap_or_else(|e| {
+                tracing::warn!("CapturedOutput mutex was poisoned, recovering");
+                e.into_inner()
+            })
+            .clone()
     }
 }
 
@@ -1323,7 +1340,7 @@ enum SessionMessage {
     /// The program hit an Ask effect and is waiting for a response.
     Suspended { prompt: String },
     /// The program completed successfully.
-    Completed { result: String, output: Vec<String> },
+    Completed { result: String },
     /// The program encountered an error.
     Error { error: String },
 }
@@ -1336,8 +1353,10 @@ struct EvalSession {
     session_rx: tokio::sync::mpsc::UnboundedReceiver<SessionMessage>,
     /// The Haskell source code, for error formatting on resume.
     source: Arc<str>,
-    /// When this session was created, for TTL cleanup.
+    /// When this session was created, for eviction ordering.
     created_at: std::time::Instant,
+    /// Output capture for this session.
+    captured_output: CapturedOutput,
 }
 
 /// Wraps an existing effect dispatcher and intercepts the Ask effect tag.
@@ -1475,56 +1494,101 @@ impl TidepoolMcpServerImpl {
         mut session_rx: tokio::sync::mpsc::UnboundedReceiver<SessionMessage>,
         source: Arc<str>,
         response_tx: std::sync::mpsc::Sender<String>,
+        captured_output: CapturedOutput,
     ) -> Result<CallToolResult, McpError> {
         let eval_timeout = Duration::from_secs(EVAL_TIMEOUT_SECS);
         match timeout(eval_timeout, session_rx.recv()).await {
-            Ok(Some(SessionMessage::Completed { result, output })) => {
-                tracing::info!("{} completed", op);
-                let mut response = String::new();
-                if !output.is_empty() {
-                    response.push_str("## Output\n");
-                    for line in &output {
-                        response.push_str(line);
-                        response.push('\n');
+            Ok(Some(message)) => {
+                let output = match &message {
+                    SessionMessage::Completed { .. } | SessionMessage::Error { .. } => {
+                        captured_output.drain()
                     }
-                    response.push_str("\n## Result\n");
+                    SessionMessage::Suspended { .. } => captured_output.snapshot(),
+                };
+
+                match message {
+                    SessionMessage::Completed { result } => {
+                        tracing::info!("{} completed", op);
+                        let mut response = String::new();
+                        if !output.is_empty() {
+                            response.push_str("## Output\n");
+                            for line in &output {
+                                response.push_str(line);
+                                response.push('\n');
+                            }
+                            response.push_str("\n## Result\n");
+                        }
+                        response.push_str(&result);
+                        Ok(CallToolResult::success(vec![Content::text(response)]))
+                    }
+                    SessionMessage::Suspended { prompt } => {
+                        tracing::info!(prompt = %prompt, "{} suspended on Ask", op);
+                        let cont_id = self.next_continuation_id();
+                        let mut json_obj = serde_json::json!({
+                            "suspended": true,
+                            "continuation_id": cont_id,
+                            "prompt": prompt,
+                        });
+                        if !output.is_empty() {
+                            if let Some(obj) = json_obj.as_object_mut() {
+                                obj.insert("output".into(), serde_json::Value::from(output));
+                            }
+                        }
+                        self.continuations
+                            .lock()
+                            .unwrap_or_else(|e| {
+                                tracing::warn!("continuation store mutex was poisoned, recovering");
+                                e.into_inner()
+                            })
+                            .insert(
+                                cont_id.clone(),
+                                EvalSession {
+                                    response_tx,
+                                    session_rx,
+                                    source: Arc::clone(&source),
+                                    created_at: std::time::Instant::now(),
+                                    captured_output,
+                                },
+                            );
+                        Ok(CallToolResult::success(vec![Content::text(
+                            json_obj.to_string(),
+                        )]))
+                    }
+                    SessionMessage::Error { error } => {
+                        let mut error_msg = format_error_with_source("Error", &error, &source);
+                        if !output.is_empty() {
+                            error_msg.push_str("\n\n## Output So Far\n");
+                            for line in &output {
+                                error_msg.push_str(line);
+                                error_msg.push('\n');
+                            }
+                        }
+                        tracing::error!("{} failed: {}", op, error);
+                        Ok(CallToolResult::error(vec![Content::text(error_msg)]))
+                    }
                 }
-                response.push_str(&result);
-                Ok(CallToolResult::success(vec![Content::text(response)]))
-            }
-            Ok(Some(SessionMessage::Suspended { prompt })) => {
-                tracing::info!(prompt = %prompt, "{} suspended on Ask", op);
-                let cont_id = self.next_continuation_id();
-                let json = serde_json::json!({
-                    "suspended": true,
-                    "continuation_id": cont_id,
-                    "prompt": prompt,
-                });
-                self.continuations
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(
-                        cont_id.clone(),
-                        EvalSession {
-                            response_tx,
-                            session_rx,
-                            source: Arc::clone(&source),
-                            created_at: std::time::Instant::now(),
-                        },
-                    );
-                Ok(CallToolResult::success(vec![Content::text(
-                    json.to_string(),
-                )]))
-            }
-            Ok(Some(SessionMessage::Error { error })) => {
-                let error_msg = format_error_with_source("Error", &error, &source);
-                tracing::error!("{} failed: {}", op, error);
-                Ok(CallToolResult::error(vec![Content::text(error_msg)]))
             }
             Ok(None) => {
                 tracing::error!("{} thread crashed", op);
                 let mut crash_info = String::new();
-                if let Ok(content) = tokio::fs::read_to_string(".tidepool/crash.log").await {
+                let crash_log = async {
+                    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+                    let mut file = tokio::fs::File::open(".tidepool/crash.log").await.ok()?;
+                    let meta = file.metadata().await.ok()?;
+                    let len = meta.len();
+                    const MAX_CRASH_LOG_BYTES: u64 = 65536;
+                    if len > MAX_CRASH_LOG_BYTES {
+                        file.seek(std::io::SeekFrom::End(-(MAX_CRASH_LOG_BYTES as i64)))
+                            .await
+                            .ok()?;
+                    }
+                    let mut buf = Vec::new();
+                    file.read_to_end(&mut buf).await.ok()?;
+                    Some(String::from_utf8_lossy(&buf).into_owned())
+                }
+                .await;
+
+                if let Some(content) = crash_log {
                     let lines: Vec<&str> = content.lines().rev().take(5).collect();
                     if !lines.is_empty() {
                         crash_info.push_str("\n\n## Recent Crash Log Entries\n```\n");
@@ -1652,19 +1716,23 @@ impl TidepoolMcpServerImpl {
                     )
                 }));
 
-                let output_lines = captured_for_blocking.drain();
                 match result {
                     Ok(Ok(eval_result)) => {
                         let _ = thread_session_tx.send(SessionMessage::Completed {
                             result: eval_result.to_string_pretty(),
-                            output: output_lines,
                         });
                     }
                     Ok(Err(e)) => {
                         let diagnostics = tidepool_runtime::drain_diagnostics();
                         let mut error_detail = e.to_string();
                         // Annotate UnhandledEffect with effect names
-                        if error_detail.starts_with("Unhandled effect at tag") {
+                        if let Some(tag_str) = error_detail.strip_prefix("Unhandled effect at tag ") {
+                            if let Ok(tag) = tag_str.trim().parse::<usize>() {
+                                if tag < effect_names.len() {
+                                    let effect_name = &effect_names[tag];
+                                    error_detail = format!("{} (effect: {})", error_detail, effect_name);
+                                }
+                            }
                             let effects_list: String = effect_names
                                 .iter()
                                 .enumerate()
@@ -1704,7 +1772,7 @@ impl TidepoolMcpServerImpl {
             .map_err(|e| McpError::internal_error(format!("thread spawn error: {}", e), None))?;
 
         // Await first message from the eval thread
-        self.handle_session_result("eval", session_rx, source, response_tx)
+        self.handle_session_result("eval", session_rx, source, response_tx, captured)
             .await
     }
 
@@ -1712,7 +1780,10 @@ impl TidepoolMcpServerImpl {
         tracing::info!(continuation_id = %req.continuation_id, "resume request");
 
         let session = {
-            let mut conts = self.continuations.lock().unwrap_or_else(|e| e.into_inner());
+            let mut conts = self.continuations.lock().unwrap_or_else(|e| {
+                tracing::warn!("continuation store mutex was poisoned, recovering");
+                e.into_inner()
+            });
             conts.remove(&req.continuation_id).ok_or_else(|| {
                 McpError::invalid_params(
                     format!(
@@ -1732,9 +1803,10 @@ impl TidepoolMcpServerImpl {
 
         let source = session.source.clone();
         let response_tx = session.response_tx.clone();
+        let captured = session.captured_output.clone();
 
         // Await the next message from the eval thread
-        self.handle_session_result("resume", session.session_rx, source, response_tx)
+        self.handle_session_result("resume", session.session_rx, source, response_tx, captured)
             .await
     }
 }
@@ -2476,15 +2548,16 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
         let source: Arc<str> = "test source".into();
+        let captured = CapturedOutput::new();
+        captured.push("log1".into());
 
         tx.send(SessionMessage::Completed {
             result: "42".into(),
-            output: vec!["log1".into()],
         })
         .unwrap();
 
         let res = server
-            .handle_session_result("eval", rx, source, resp_tx)
+            .handle_session_result("eval", rx, source, resp_tx, captured)
             .await
             .unwrap();
         assert_eq!(res.is_error, Some(false));
@@ -2502,6 +2575,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
         let source: Arc<str> = "test source".into();
+        let captured = CapturedOutput::new();
 
         tx.send(SessionMessage::Suspended {
             prompt: "what is your name?".into(),
@@ -2509,7 +2583,7 @@ mod tests {
         .unwrap();
 
         let res = server
-            .handle_session_result("eval", rx, source, resp_tx)
+            .handle_session_result("eval", rx, source, resp_tx, captured)
             .await
             .unwrap();
         assert_eq!(res.is_error, Some(false));
@@ -2534,6 +2608,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
         let source: Arc<str> = "test source".into();
+        let captured = CapturedOutput::new();
 
         tx.send(SessionMessage::Error {
             error: "oops".into(),
@@ -2541,7 +2616,7 @@ mod tests {
         .unwrap();
 
         let res = server
-            .handle_session_result("eval", rx, source, resp_tx)
+            .handle_session_result("eval", rx, source, resp_tx, captured)
             .await
             .unwrap();
         assert_eq!(res.is_error, Some(true));
@@ -2559,12 +2634,13 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
         let source: Arc<str> = "test source".into();
+        let captured = CapturedOutput::new();
 
         // Close the channel without sending anything
         drop(tx);
 
         let res = server
-            .handle_session_result("eval", rx, source, resp_tx)
+            .handle_session_result("eval", rx, source, resp_tx, captured)
             .await
             .unwrap();
         assert_eq!(res.is_error, Some(true));
@@ -2584,10 +2660,11 @@ mod tests {
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
         let source: Arc<str> = "test source".into();
+        let captured = CapturedOutput::new();
 
         let handle = tokio::spawn(async move {
             server
-                .handle_session_result("eval", rx, source, resp_tx)
+                .handle_session_result("eval", rx, source, resp_tx, captured)
                 .await
         });
 
