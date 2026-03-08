@@ -641,6 +641,39 @@ fn is_trivial_field(idx: usize, expr: &CoreExpr) -> bool {
 // Lam compilation helper (extracted for readability)
 // ---------------------------------------------------------------------------
 
+/// Compute sorted capture list for a closure/thunk body.
+/// If `exclude` is Some, that VarId is removed from free vars (for lambda binders).
+fn compute_captures(
+    ctx: &EmitContext,
+    tree: &CoreExpr,
+    body_idx: usize,
+    exclude: Option<VarId>,
+    label: &str,
+) -> (CoreExpr, Vec<VarId>) {
+    let body_tree = tree.extract_subtree(body_idx);
+    let mut fvs = tidepool_repr::free_vars::free_vars(&body_tree);
+    if let Some(binder) = exclude {
+        fvs.remove(&binder);
+    }
+    let dropped: Vec<VarId> = fvs
+        .iter()
+        .filter(|v| !ctx.env.contains_key(v))
+        .copied()
+        .collect();
+    if !dropped.is_empty() {
+        ctx.trace_scope(&format!(
+            "{} capture: dropped {} free vars not in scope: {:?}",
+            label, dropped.len(), dropped
+        ));
+    }
+    let mut sorted_fvs: Vec<VarId> = fvs
+        .into_iter()
+        .filter(|v| ctx.env.contains_key(v))
+        .collect();
+    sorted_fvs.sort_by_key(|v| v.0);
+    (body_tree, sorted_fvs)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_lam(
     ctx: &mut EmitContext,
@@ -653,27 +686,7 @@ fn emit_lam(
     binder: VarId,
     body_idx: usize,
 ) -> Result<SsaVal, EmitError> {
-    let body_tree = tree.extract_subtree(body_idx);
-    let mut fvs = tidepool_repr::free_vars::free_vars(&body_tree);
-    fvs.remove(&binder);
-
-    let dropped: Vec<VarId> = fvs
-        .iter()
-        .filter(|v| !ctx.env.contains_key(v))
-        .copied()
-        .collect();
-    if !dropped.is_empty() {
-        ctx.trace_scope(&format!(
-            "lam capture: dropped {} free vars not in scope: {:?}",
-            dropped.len(),
-            dropped
-        ));
-    }
-    let mut sorted_fvs: Vec<VarId> = fvs
-        .into_iter()
-        .filter(|v| ctx.env.contains_key(v))
-        .collect();
-    sorted_fvs.sort_by_key(|v| v.0);
+    let (body_tree, sorted_fvs) = compute_captures(ctx, tree, body_idx, Some(binder), "lam");
 
     let captures: Vec<(VarId, SsaVal)> = sorted_fvs
         .iter()
@@ -858,26 +871,7 @@ fn emit_thunk(
     body_idx: usize,
 ) -> Result<SsaVal, EmitError> {
     // Extract the sub-expression and compute free variables
-    let body_tree = tree.extract_subtree(body_idx);
-    let fvs = tidepool_repr::free_vars::free_vars(&body_tree);
-
-    let dropped: Vec<VarId> = fvs
-        .iter()
-        .filter(|v| !ctx.env.contains_key(v))
-        .copied()
-        .collect();
-    if !dropped.is_empty() {
-        ctx.trace_scope(&format!(
-            "thunk capture: dropped {} free vars not in scope: {:?}",
-            dropped.len(),
-            dropped
-        ));
-    }
-    let mut sorted_fvs: Vec<VarId> = fvs
-        .into_iter()
-        .filter(|v| ctx.env.contains_key(v))
-        .collect();
-    sorted_fvs.sort_by_key(|v| v.0);
+    let (body_tree, sorted_fvs) = compute_captures(ctx, tree, body_idx, None, "thunk");
 
     let captures: Vec<(VarId, SsaVal)> = sorted_fvs
         .iter()
