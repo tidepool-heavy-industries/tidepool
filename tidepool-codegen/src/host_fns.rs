@@ -333,6 +333,12 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                             std::mem::transmute(code_ptr);
                         let result = f(vmctx, current);
 
+                        // If GC ran during the call, current may have been forwarded.
+                        // Check for forwarding pointer and follow it.
+                        if layout::read_tag(current) == layout::TAG_FORWARDED {
+                            current = *(current.add(8) as *const *mut u8);
+                        }
+
                         // 4. Write indirection (offset 16, overwriting code_ptr)
                         *(current.add(layout::THUNK_INDIRECTION_OFFSET) as *mut *mut u8) = result;
 
