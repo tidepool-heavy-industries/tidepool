@@ -12,6 +12,13 @@ struct TestResult {
     _pipeline: CodegenPipeline,
 }
 
+impl Drop for TestResult {
+    fn drop(&mut self) {
+        host_fns::clear_gc_state();
+        host_fns::clear_stack_map_registry();
+    }
+}
+
 /// Helper: set up pipeline + nursery, compile expr, call it, return result ptr.
 fn compile_and_run(tree: &CoreExpr) -> TestResult {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
@@ -688,7 +695,7 @@ fn test_emit_primop_word_shl() {
     let tree = RecursiveTree {
         nodes: vec![
             CoreFrame::Lit(Literal::from(1u64)),
-            CoreFrame::Lit(Literal::from(8u64)),
+            CoreFrame::Lit(Literal::from(8i64)),
             CoreFrame::PrimOp {
                 op: PrimOpKind::WordShl,
                 args: vec![0, 1],
@@ -706,7 +713,7 @@ fn test_emit_primop_word_shrl() {
     let tree = RecursiveTree {
         nodes: vec![
             CoreFrame::Lit(Literal::from(256u64)),
-            CoreFrame::Lit(Literal::from(4u64)),
+            CoreFrame::Lit(Literal::from(4i64)),
             CoreFrame::PrimOp {
                 op: PrimOpKind::WordShrl,
                 args: vec![0, 1],
@@ -843,7 +850,7 @@ fn test_emit_primop_word8_sub() {
     };
     let result = compile_and_run(&tree);
     unsafe {
-        // 10 - 20 = -10, -10 % 256 = 246
+        // 10 - 20 = -10, which wraps to 246 (masking to 8 bits)
         assert_eq!(read_lit_word(result.result_ptr), 246);
     }
 }
