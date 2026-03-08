@@ -79,7 +79,7 @@ _1 f (a, b) = (\a' -> (a', b)) <$> f a
 _2 :: Functor f => (b -> f b) -> (a, b) -> f (a, b)
 _2 f (a, b) = (\b' -> (a, b')) <$> f b
 
-ix :: Int -> Applicative f => (a -> f a) -> [a] -> f [a]
+ix :: Applicative f => Int -> (a -> f a) -> [a] -> f [a]
 ix i f xs
   | i < 0     = pure xs
   | otherwise = case splitAt i xs of
@@ -98,7 +98,7 @@ converge :: Eq a => (a -> a) -> a -> a
 converge = convergeN 1000
 
 convergeN :: Eq a => Int -> (a -> a) -> a -> a
-convergeN 0 _ x = x
+convergeN n _ x | n <= 0 = x
 convergeN n f x = let x' = f x in if x == x' then x else convergeN (n - 1) f x'
 
 scanl' :: (b -> a -> b) -> b -> [a] -> [b]
