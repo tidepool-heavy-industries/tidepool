@@ -1,7 +1,6 @@
 use crate::emit::expr::ensure_heap_ptr;
 use crate::emit::*;
-use crate::pipeline::CodegenPipeline;
-use cranelift_codegen::ir::{self, types, BlockArg, InstBuilder, Value};
+use cranelift_codegen::ir::{types, BlockArg, InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
 use tidepool_repr::*;
 
@@ -11,12 +10,8 @@ use tidepool_repr::*;
 #[allow(clippy::too_many_arguments)]
 pub fn emit_join(
     ctx: &mut EmitContext,
-    pipeline: &mut CodegenPipeline,
+    sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
-    vmctx: Value,
-    gc_sig: ir::SigRef,
-    oom_func: ir::FuncRef,
-    tree: &CoreExpr,
     label: &JoinId,
     params: &[VarId],
     rhs_idx: usize,
@@ -46,8 +41,8 @@ pub fn emit_join(
     );
 
     // 5. Emit body (the continuation that may contain Jumps)
-    let body_result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, body_idx)?;
-    let body_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, body_result);
+    let body_result = ctx.emit_node(sess, builder, body_idx)?;
+    let body_val = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, body_result);
     builder
         .ins()
         .jump(merge_block, &[BlockArg::Value(body_val)]);
@@ -66,8 +61,8 @@ pub fn emit_join(
         old_env_vals.push((*param_var, old_val));
     }
 
-    let rhs_result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, rhs_idx)?;
-    let rhs_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, rhs_result);
+    let rhs_result = ctx.emit_node(sess, builder, rhs_idx)?;
+    let rhs_val = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, rhs_result);
     builder.ins().jump(merge_block, &[BlockArg::Value(rhs_val)]);
 
     // 7. Seal blocks
@@ -101,19 +96,12 @@ pub fn emit_join(
 #[allow(clippy::too_many_arguments)]
 pub fn emit_jump(
     ctx: &mut EmitContext,
-    pipeline: &mut CodegenPipeline,
+    sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
-    vmctx: Value,
-    gc_sig: ir::SigRef,
-    oom_func: ir::FuncRef,
-    tree: &CoreExpr,
     label: &JoinId,
     arg_indices: &[usize],
 ) -> Result<SsaVal, EmitError> {
     // 1. Look up label in ctx.join_blocks
-    // Note: JoinInfo must be cloned or copied out because we'll be using the builder.
-    // However, JoinInfo doesn't implement Clone. But Block and Value are Copy.
-    // Actually, JoinInfo is not needed, just the block.
     let join_block = ctx
         .join_blocks
         .get(label)
@@ -123,10 +111,10 @@ pub fn emit_jump(
     // 2. Emit each arg
     let mut arg_values: Vec<BlockArg> = Vec::new();
     for &arg_idx in arg_indices {
-        let val = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, arg_idx)?;
+        let val = ctx.emit_node(sess, builder, arg_idx)?;
         // 3. Ensure all args are HeapPtr
         arg_values.push(BlockArg::Value(ensure_heap_ptr(
-            builder, vmctx, gc_sig, oom_func, val,
+            builder, sess.vmctx, sess.gc_sig, sess.oom_func, val,
         )));
     }
 

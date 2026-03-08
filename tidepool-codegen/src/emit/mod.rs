@@ -3,9 +3,18 @@ pub mod expr;
 pub mod join;
 pub mod primop;
 
-use cranelift_codegen::ir::Value;
+use cranelift_codegen::ir::{FuncRef, SigRef, Value};
 use std::collections::HashMap;
-use tidepool_repr::{JoinId, PrimOpKind, VarId};
+use tidepool_repr::{CoreExpr, JoinId, PrimOpKind, VarId};
+
+/// Per-function compilation context bundling common parameters.
+pub struct EmitSession<'a> {
+    pub pipeline: &'a mut crate::pipeline::CodegenPipeline,
+    pub vmctx: Value,
+    pub gc_sig: SigRef,
+    pub oom_func: FuncRef,
+    pub tree: &'a CoreExpr,
+}
 
 // HeapObject layout constants
 pub const HEAP_HEADER_SIZE: u64 = 8;
