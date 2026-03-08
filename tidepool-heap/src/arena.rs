@@ -135,6 +135,12 @@ impl ArenaHeap {
         self.used.store(0, Ordering::SeqCst);
 
         // Nursery doubling: if live thunks > 75% of pre-GC count, grow capacity
+        self.grow_nursery_if_needed(reachable_count);
+
+        table
+    }
+
+    fn grow_nursery_if_needed(&mut self, reachable_count: usize) {
         if reachable_count > 0 {
             let pre_gc_capacity = self.nursery_limit;
             let live_bytes = self.thunks.len() * std::mem::size_of::<ThunkState>();
@@ -144,8 +150,6 @@ impl ArenaHeap {
                 }
             }
         }
-
-        table
     }
 
     /// Return all ThunkIds directly referenced by this thunk.
@@ -374,9 +378,9 @@ mod tests {
         let expr = RecursiveTree {
             nodes: vec![CoreFrame::Var(VarId(0))],
         };
-        // Allocate enough to trigger doubling (> 750KB)
-        // Assume ThunkState is at least 32 bytes
-        let count = (1024 * 1024 * 3 / 4 / 32) + 1000;
+        // Allocate enough to trigger doubling (> 75% of 1MB)
+        let thunk_size = std::mem::size_of::<ThunkState>();
+        let count = (1024 * 1024 * 3 / 4 / thunk_size) + 1000;
         let mut roots = Vec::new();
         for _ in 0..count {
             roots.push(heap.alloc(env.clone(), expr.clone()));
@@ -385,6 +389,22 @@ mod tests {
         heap.collect_garbage(&roots);
         // Should have doubled to 2MB
         assert_eq!(heap.nursery_limit(), 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_nursery_cap() {
+        let mut heap = ArenaHeap::with_capacity(MAX_NURSERY_SIZE - 1024);
+        
+        // Setup state to trigger doubling
+        let thunk_size = std::mem::size_of::<ThunkState>();
+        let count = (heap.nursery_limit * 3 / 4 / thunk_size) + 1000;
+        heap.thunks.resize(count, ThunkState::Evaluated(Value::Lit(tidepool_repr::Literal::LitInt(0))));
+        
+        // Trigger doubling directly via helper
+        heap.grow_nursery_if_needed(count);
+        
+        // Should be capped at MAX_NURSERY_SIZE
+        assert_eq!(heap.nursery_limit(), MAX_NURSERY_SIZE);
     }
 
     #[test]

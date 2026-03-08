@@ -1602,9 +1602,13 @@ impl TidepoolMcpServerImpl {
         let permit = self
             .eval_semaphore
             .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| McpError::internal_error("eval semaphore closed", None))?;
+            .try_acquire_owned()
+            .map_err(|_| {
+                McpError::internal_error(
+                    "Server busy: too many concurrent evaluations. Please try again in a moment.",
+                    None,
+                )
+            })?;
 
         // Spawn eval thread — does NOT join; communicates via channels
         let thread_session_tx = session_tx;
