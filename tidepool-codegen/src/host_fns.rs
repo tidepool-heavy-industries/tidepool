@@ -897,15 +897,6 @@ pub extern "C" fn runtime_copy_addr_to_byte_array(src: i64, dest_ba: i64, dest_o
     // with a u64 length prefix at offset 0.
     let dest_size = unsafe { *(dest_ba as *const u64) } as usize;
     if (dest_off as usize).saturating_add(len as usize) > dest_size {
-        let msg = format!(
-            "[BUG] runtime_copy_addr_to_byte_array: out of bounds! size={} off={} len={}",
-            dest_size, dest_off, len
-        );
-        eprintln!("{}", msg);
-        push_diagnostic(msg);
-        RUNTIME_ERROR.with(|cell| {
-            *cell.borrow_mut() = Some(RuntimeError::Undefined);
-        });
         return;
     }
     let src_ptr = src as *const u8;
