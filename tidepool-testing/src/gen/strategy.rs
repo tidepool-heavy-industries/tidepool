@@ -11,6 +11,34 @@ pub fn arb_core_expr() -> impl Strategy<Value = RecursiveTree<CoreFrame<usize>>>
     arb_simple_type().prop_flat_map(|ty| arb_typed_expr(ty, 3)) // depth limit reduced to 3
 }
 
+/// Ground types: no Fun at any level. Values of ground type are always
+/// structurally comparable (never closures).
+fn arb_ground_type() -> impl Strategy<Value = SimpleType> {
+    let leaf = prop_oneof![
+        Just(SimpleType::Int),
+        Just(SimpleType::Word),
+        Just(SimpleType::Double),
+        Just(SimpleType::Float),
+        Just(SimpleType::Bool),
+        Just(SimpleType::Char),
+    ];
+    leaf.prop_recursive(2, 5, 2, |inner| {
+        prop_oneof![
+            inner.clone().prop_map(|t| SimpleType::Maybe(Box::new(t))),
+            (inner.clone(), inner).prop_map(|(a, b)| SimpleType::Pair(Box::new(a), Box::new(b))),
+            // No Fun — ground types only
+        ]
+    })
+}
+
+/// Generate a random well-typed CoreExpr whose result type is ground.
+/// The expression itself may contain Lam nodes (via gen_app's internal
+/// Fun synthesis), but the top-level value is always non-closure and
+/// structurally comparable.
+pub fn arb_ground_expr() -> impl Strategy<Value = RecursiveTree<CoreFrame<usize>>> {
+    arb_ground_type().prop_flat_map(|ty| arb_typed_expr(ty, 3))
+}
+
 fn arb_simple_type() -> impl Strategy<Value = SimpleType> {
     let leaf = prop_oneof![
         Just(SimpleType::Int),
@@ -653,10 +681,24 @@ fn gen_jump(
         .boxed()
 }
 
+/// Represents a PrimOp with its argument type information.
+#[derive(Clone, Debug)]
+enum PrimOpSpec {
+    /// Unary op: (op, arg_type)
+    Unary(PrimOpKind, SimpleType),
+    /// Binary op: (op, arg_type) — both args same type
+    Binary(PrimOpKind, SimpleType),
+    /// Division/remainder: (op, arg_type) — needs non-zero divisor guard
+    DivOp(PrimOpKind, SimpleType),
+}
+
 fn gen_prim_op(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)> {
-    let (binary_ops, unary_ops): (Vec<PrimOpKind>, Vec<PrimOpKind>) = match &ty {
-        SimpleType::Int => (
-            vec![
+    let mut ops: Vec<PrimOpSpec> = Vec::new();
+
+    match &ty {
+        SimpleType::Int => {
+            // Same-type binary arithmetic
+            for op in [
                 PrimOpKind::IntAdd,
                 PrimOpKind::IntSub,
                 PrimOpKind::IntMul,
@@ -666,66 +708,184 @@ fn gen_prim_op(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeB
                 PrimOpKind::IntShl,
                 PrimOpKind::IntShra,
                 PrimOpKind::IntShrl,
+            ] {
+                ops.push(PrimOpSpec::Binary(op, SimpleType::Int));
+            }
+            // Int comparisons (return Int 0/1)
+            for op in [
                 PrimOpKind::IntEq,
                 PrimOpKind::IntNe,
                 PrimOpKind::IntLt,
                 PrimOpKind::IntLe,
                 PrimOpKind::IntGt,
                 PrimOpKind::IntGe,
-            ],
-            vec![PrimOpKind::IntNegate, PrimOpKind::IntNot],
-        ),
-        SimpleType::Word => (
-            vec![
+            ] {
+                ops.push(PrimOpSpec::Binary(op, SimpleType::Int));
+            }
+            // Word comparisons (return Int 0/1)
+            for op in [
+                PrimOpKind::WordEq,
+                PrimOpKind::WordNe,
+                PrimOpKind::WordLt,
+                PrimOpKind::WordLe,
+                PrimOpKind::WordGt,
+                PrimOpKind::WordGe,
+            ] {
+                ops.push(PrimOpSpec::Binary(op, SimpleType::Word));
+            }
+            // Double comparisons (return Int 0/1)
+            for op in [
+                PrimOpKind::DoubleEq,
+                PrimOpKind::DoubleNe,
+                PrimOpKind::DoubleLt,
+                PrimOpKind::DoubleLe,
+                PrimOpKind::DoubleGt,
+                PrimOpKind::DoubleGe,
+            ] {
+                ops.push(PrimOpSpec::Binary(op, SimpleType::Double));
+            }
+            // Float comparisons (return Int 0/1)
+            for op in [
+                PrimOpKind::FloatEq,
+                PrimOpKind::FloatNe,
+                PrimOpKind::FloatLt,
+                PrimOpKind::FloatLe,
+                PrimOpKind::FloatGt,
+                PrimOpKind::FloatGe,
+            ] {
+                ops.push(PrimOpSpec::Binary(op, SimpleType::Float));
+            }
+            // Char comparisons (return Int 0/1)
+            for op in [
+                PrimOpKind::CharEq,
+                PrimOpKind::CharNe,
+                PrimOpKind::CharLt,
+                PrimOpKind::CharLe,
+                PrimOpKind::CharGt,
+                PrimOpKind::CharGe,
+            ] {
+                ops.push(PrimOpSpec::Binary(op, SimpleType::Char));
+            }
+            // Conversions to Int
+            ops.push(PrimOpSpec::Unary(PrimOpKind::Double2Int, SimpleType::Double));
+            ops.push(PrimOpSpec::Unary(PrimOpKind::Word2Int, SimpleType::Word));
+            ops.push(PrimOpSpec::Unary(PrimOpKind::Ord, SimpleType::Char));
+            // Division with non-zero guard
+            ops.push(PrimOpSpec::DivOp(PrimOpKind::IntQuot, SimpleType::Int));
+            ops.push(PrimOpSpec::DivOp(PrimOpKind::IntRem, SimpleType::Int));
+            // Unary
+            ops.push(PrimOpSpec::Unary(PrimOpKind::IntNegate, SimpleType::Int));
+            ops.push(PrimOpSpec::Unary(PrimOpKind::IntNot, SimpleType::Int));
+        }
+        SimpleType::Word => {
+            for op in [
                 PrimOpKind::WordAdd,
                 PrimOpKind::WordSub,
                 PrimOpKind::WordMul,
                 PrimOpKind::WordAnd,
                 PrimOpKind::WordOr,
                 PrimOpKind::WordXor,
-            ],
-            vec![PrimOpKind::WordNot],
-        ),
-        SimpleType::Double => (
-            vec![
+            ] {
+                ops.push(PrimOpSpec::Binary(op, SimpleType::Word));
+            }
+            // Conversions to Word
+            ops.push(PrimOpSpec::Unary(PrimOpKind::Int2Word, SimpleType::Int));
+            // Division
+            ops.push(PrimOpSpec::DivOp(PrimOpKind::WordQuot, SimpleType::Word));
+            ops.push(PrimOpSpec::DivOp(PrimOpKind::WordRem, SimpleType::Word));
+            // Unary
+            ops.push(PrimOpSpec::Unary(PrimOpKind::WordNot, SimpleType::Word));
+        }
+        SimpleType::Double => {
+            for op in [
                 PrimOpKind::DoubleAdd,
                 PrimOpKind::DoubleSub,
                 PrimOpKind::DoubleMul,
-            ],
-            vec![PrimOpKind::DoubleNegate],
-        ),
-        SimpleType::Float => (
-            vec![
+                PrimOpKind::DoubleDiv,
+            ] {
+                ops.push(PrimOpSpec::Binary(op, SimpleType::Double));
+            }
+            // Conversions to Double
+            ops.push(PrimOpSpec::Unary(PrimOpKind::Int2Double, SimpleType::Int));
+            ops.push(PrimOpSpec::Unary(
+                PrimOpKind::Float2Double,
+                SimpleType::Float,
+            ));
+            // Unary
+            ops.push(PrimOpSpec::Unary(
+                PrimOpKind::DoubleNegate,
+                SimpleType::Double,
+            ));
+        }
+        SimpleType::Float => {
+            for op in [
                 PrimOpKind::FloatAdd,
                 PrimOpKind::FloatSub,
                 PrimOpKind::FloatMul,
-            ],
-            vec![PrimOpKind::FloatNegate],
-        ),
+                PrimOpKind::FloatDiv,
+            ] {
+                ops.push(PrimOpSpec::Binary(op, SimpleType::Float));
+            }
+            // Conversions to Float
+            ops.push(PrimOpSpec::Unary(PrimOpKind::Int2Float, SimpleType::Int));
+            // Unary
+            ops.push(PrimOpSpec::Unary(
+                PrimOpKind::FloatNegate,
+                SimpleType::Float,
+            ));
+        }
+        SimpleType::Char => {
+            // Chr: Int -> Char
+            ops.push(PrimOpSpec::Unary(PrimOpKind::Chr, SimpleType::Int));
+        }
         _ => return gen_leaf(ty, ctx),
     };
 
-    let all_ops: Vec<(PrimOpKind, bool)> = binary_ops
-        .into_iter()
-        .map(|op| (op, false))
-        .chain(unary_ops.into_iter().map(|op| (op, true)))
-        .collect();
+    if ops.is_empty() {
+        return gen_leaf(ty, ctx);
+    }
 
-    let arg_ty = ty.clone();
-    prop::sample::select(all_ops)
-        .prop_flat_map(move |(op, is_unary)| {
-            if is_unary {
-                gen_expr(arg_ty.clone(), depth, ctx.clone())
-                    .prop_map(move |(mut builder, r1)| {
-                        let root = builder.push(CoreFrame::PrimOp { op, args: vec![r1] });
-                        (builder, root)
-                    })
-                    .boxed()
-            } else {
-                (
-                    gen_expr(arg_ty.clone(), depth, ctx.clone()),
-                    gen_expr(arg_ty.clone(), depth, ctx.clone()),
-                )
+    prop::sample::select(ops)
+        .prop_flat_map(move |spec| match spec {
+            PrimOpSpec::Unary(op, arg_ty) => gen_expr(arg_ty, depth, ctx.clone())
+                .prop_map(move |(mut builder, r1)| {
+                    let root = builder.push(CoreFrame::PrimOp { op, args: vec![r1] });
+                    (builder, root)
+                })
+                .boxed(),
+            PrimOpSpec::Binary(op, arg_ty) => (
+                gen_expr(arg_ty.clone(), depth, ctx.clone()),
+                gen_expr(arg_ty, depth, ctx.clone()),
+            )
+                .prop_map(move |((mut builder, r1), (b2, r2))| {
+                    let off = builder.push_tree(b2);
+                    let root = builder.push(CoreFrame::PrimOp {
+                        op,
+                        args: vec![r1, r2 + off],
+                    });
+                    (builder, root)
+                })
+                .boxed(),
+            PrimOpSpec::DivOp(op, arg_ty) => {
+                // Generate a non-zero divisor: filter out 0
+                let divisor_strat = match &arg_ty {
+                    SimpleType::Int => (1i64..=i64::MAX)
+                        .prop_map(|i| {
+                            let mut builder = TreeBuilder::new();
+                            let idx = builder.push(CoreFrame::Lit(Literal::LitInt(i)));
+                            (builder, idx)
+                        })
+                        .boxed(),
+                    SimpleType::Word => (1u64..=u64::MAX)
+                        .prop_map(|w| {
+                            let mut builder = TreeBuilder::new();
+                            let idx = builder.push(CoreFrame::Lit(Literal::LitWord(w)));
+                            (builder, idx)
+                        })
+                        .boxed(),
+                    _ => unreachable!("DivOp only for Int/Word"),
+                };
+                (gen_expr(arg_ty, depth, ctx.clone()), divisor_strat)
                     .prop_map(move |((mut builder, r1), (b2, r2))| {
                         let off = builder.push_tree(b2);
                         let root = builder.push(CoreFrame::PrimOp {
@@ -742,9 +902,11 @@ fn gen_prim_op(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeB
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compare;
     use proptest::strategy::ValueTree;
     use proptest::test_runner::{Config, TestRunner};
     use std::collections::HashSet;
+    use tidepool_eval::{env::Env, eval::eval, heap::VecHeap};
 
     #[test]
     fn variant_coverage() {
@@ -847,6 +1009,89 @@ mod tests {
                         let bytes = tidepool_repr::serial::write_cbor(&expr).unwrap();
                         let recovered = tidepool_repr::serial::read_cbor(&bytes).unwrap();
                         assert_eq!(expr, recovered);
+                        Ok(())
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+        handle.join().unwrap();
+    }
+
+    /// Option 1: Eval never panics.
+    /// Every generated expression should either produce Ok(_) or a well-formed
+    /// EvalError — never panic or crash.
+    #[test]
+    fn eval_never_panics() {
+        let handle = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let mut runner = TestRunner::new(Config {
+                    cases: 200,
+                    ..Config::default()
+                });
+                runner
+                    .run(&arb_core_expr(), |expr| {
+                        let mut heap = VecHeap::new();
+                        let _ = eval(&expr, &Env::new(), &mut heap);
+                        Ok(())
+                    })
+                    .unwrap();
+            })
+            .unwrap();
+        handle.join().unwrap();
+    }
+
+    /// Option 6: CBOR roundtrip preserves evaluation semantics.
+    /// serialize → deserialize should produce an expression that evaluates
+    /// identically to the original.
+    #[test]
+    fn cbor_roundtrip_preserves_eval() {
+        let handle = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let mut runner = TestRunner::new(Config {
+                    cases: 100,
+                    ..Config::default()
+                });
+                runner
+                    .run(&arb_ground_expr(), |expr| {
+                        let bytes = tidepool_repr::serial::write_cbor(&expr).unwrap();
+                        let recovered = tidepool_repr::serial::read_cbor(&bytes).unwrap();
+
+                        let mut h1 = VecHeap::new();
+                        let mut h2 = VecHeap::new();
+                        let r1 = eval(&expr, &Env::new(), &mut h1);
+                        let r2 = eval(&recovered, &Env::new(), &mut h2);
+
+                        match (r1, r2) {
+                            (Ok(v1), Ok(v2)) => {
+                                let f1 = tidepool_eval::eval::deep_force(v1, &mut h1);
+                                let f2 = tidepool_eval::eval::deep_force(v2, &mut h2);
+                                match (f1, f2) {
+                                    (Ok(fv1), Ok(fv2)) => {
+                                        compare::assert_values_eq(&fv1, &fv2);
+                                    }
+                                    (Err(_), Err(_)) => {} // both error during deep_force — ok
+                                    (Ok(v), Err(e)) => {
+                                        panic!(
+                                            "CBOR roundtrip broke deep_force: original Ok({}) but recovered Err({:?})",
+                                            v, e
+                                        )
+                                    }
+                                    (Err(e), Ok(v)) => {
+                                        panic!(
+                                            "CBOR roundtrip broke deep_force: original Err({:?}) but recovered Ok({})",
+                                            e, v
+                                        )
+                                    }
+                                }
+                            }
+                            (Err(_), Err(_)) => {} // both error — acceptable
+                            (Ok(_), Err(e)) => {
+                                panic!("CBOR roundtrip broke eval: original Ok but recovered Err({:?})", e)
+                            }
+                            (Err(_), Ok(_)) => {} // original errors, recovered succeeds — acceptable
+                        }
                         Ok(())
                     })
                     .unwrap();

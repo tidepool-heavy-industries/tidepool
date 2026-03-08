@@ -14,6 +14,7 @@ tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
 tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
 tidepool-heap = { version = "0.1.0", path = "../tidepool-heap" }
 tidepool-optimize = { version = "0.1.0", path = "../tidepool-optimize" }
+tidepool-codegen = { version = "0.1.0", path = "../tidepool-codegen" }
 proptest = "1.10.0"
 criterion = { version = "0.5", features = ["html_reports"] }
 

@@ -30,3 +30,4 @@ cc = "1"
 
 [dev-dependencies]
 proptest = "1"
+tidepool-testing = { version = "0.1.0", path = "../tidepool-testing" }

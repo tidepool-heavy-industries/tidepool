@@ -120,7 +120,6 @@ tidepool-mcp/               MCP server library (generic over effect handlers)
 | Example | What it shows |
 |---------|--------------|
 | [`examples/guess/`](examples/guess/) | Number guessing game. Compile-time `haskell_inline!`, JIT, two effects (Console + Rng). The minimal "hello world". |
-| [`examples/guess-interpreted/`](examples/guess-interpreted/) | Same game, tree-walking interpreter instead of JIT. Shows the interpreter path. |
 | [`examples/tide/`](examples/tide/) | Interactive REPL with 5 effects (Repl, Console, Env, Net, Fs). Multi-effect composition at scale. |
 
 ## Using as a Rust Library

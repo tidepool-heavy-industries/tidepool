@@ -2955,6 +2955,7 @@ dependencies = [
  "tidepool-eval",
  "tidepool-heap",
  "tidepool-repr",
+ "tidepool-testing",
 ]
 
 [[package]]
@@ -3084,6 +3085,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "proptest",
+ "tidepool-codegen",
  "tidepool-eval",
  "tidepool-heap",
  "tidepool-optimize",

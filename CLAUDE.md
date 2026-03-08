@@ -124,7 +124,6 @@ tidepool/
 ├── tidepool-testing/      ← Test utilities + property-based generators (internal)
 ├── examples/
 │   ├── guess/             ← Demo: number guessing game
-│   ├── guess-interpreted/ ← Demo: interpreted version
 │   └── tide/              ← Demo: REPL
 ├── haskell/               ← Haskell harness (tidepool-extract) + test suite + stdlib
 │   └── lib/Tidepool/      ← Haskell stdlib (auto-imported in MCP)

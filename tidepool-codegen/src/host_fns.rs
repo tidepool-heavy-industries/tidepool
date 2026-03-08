@@ -774,6 +774,7 @@ fn check_ptr_invalid(ptr: *const u8, fn_name: &str) -> bool {
 /// # Safety
 ///
 /// `fun_ptr` must point to a valid HeapObject if not null.
+
 /// Maximum call depth before raising StackOverflow. This catches infinite
 /// recursion (e.g. `[0..]` in non-fusing context) with a clean error
 /// instead of SIGSEGV from stack overflow.

@@ -4,5 +4,6 @@
 //! enabling property-based testing of the Core representation, serialization,
 //! and evaluation.
 
+pub mod compare;
 pub mod gen;
 pub mod oracle;
