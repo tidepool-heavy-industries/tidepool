@@ -746,6 +746,21 @@ pub fn reset_call_depth() {
     CALL_DEPTH.with(|c| c.set(0));
 }
 
+/// Check pointer validity; if bad, set runtime error and return true.
+fn check_ptr_invalid(ptr: *const u8, fn_name: &str) -> bool {
+    if (ptr as u64) < 0x1000 {
+        let msg = format!("[BUG] {}: bad pointer {:#x}", fn_name, ptr as u64);
+        eprintln!("{}", msg);
+        push_diagnostic(msg);
+        RUNTIME_ERROR.with(|cell| {
+            *cell.borrow_mut() = Some(RuntimeError::Undefined);
+        });
+        true
+    } else {
+        false
+    }
+}
+
 /// Return the list of host function symbols for JIT registration.
 ///
 /// Usage: `CodegenPipeline::new(&host_fn_symbols())`
@@ -858,19 +873,25 @@ pub extern "C" fn runtime_new_byte_array(size: i64) -> i64 {
 
 /// Copy `len` bytes from `src` (Addr#) to `dest_ba` (ByteArray ptr) at `dest_off`.
 pub extern "C" fn runtime_copy_addr_to_byte_array(src: i64, dest_ba: i64, dest_off: i64, len: i64) {
-    if (src as u64) < 0x1000 || (dest_ba as u64) < 0x1000 {
-        eprintln!("[BUG] runtime_copy_addr_to_byte_array: bad pointer src={:#x} dest_ba={:#x} dest_off={} len={}", src, dest_ba, dest_off, len);
-        std::process::abort();
+    if check_ptr_invalid(src as *const u8, "runtime_copy_addr_to_byte_array")
+        || check_ptr_invalid(dest_ba as *const u8, "runtime_copy_addr_to_byte_array")
+    {
+        return;
     }
     // SAFETY: dest_ba passed the null-guard above and points to a byte array
     // with a u64 length prefix at offset 0.
     let dest_size = unsafe { *(dest_ba as *const u64) } as usize;
     if (dest_off as usize + len as usize) > dest_size {
-        eprintln!(
+        let msg = format!(
             "[BUG] runtime_copy_addr_to_byte_array: out of bounds! size={} off={} len={}",
             dest_size, dest_off, len
         );
-        std::process::abort();
+        eprintln!("{}", msg);
+        push_diagnostic(msg);
+        RUNTIME_ERROR.with(|cell| {
+            *cell.borrow_mut() = Some(RuntimeError::Undefined);
+        });
+        return;
     }
     let src_ptr = src as *const u8;
     // SAFETY: dest_ba + 8 + dest_off is within the byte array (bounds checked above).
@@ -884,12 +905,8 @@ pub extern "C" fn runtime_copy_addr_to_byte_array(src: i64, dest_ba: i64, dest_o
 
 /// Set `len` bytes in `ba` starting at `off` to `val`.
 pub extern "C" fn runtime_set_byte_array(ba: i64, off: i64, len: i64, val: i64) {
-    if (ba as u64) < 0x1000 {
-        eprintln!(
-            "[BUG] runtime_set_byte_array: bad pointer ba={:#x} off={} len={} val={}",
-            ba, off, len, val
-        );
-        std::process::abort();
+    if check_ptr_invalid(ba as *const u8, "runtime_set_byte_array") {
+        return;
     }
     // SAFETY: ba passed the null-guard above; offsetting past the 8-byte length prefix + off.
     let ptr = unsafe { (ba as *mut u8).add(8 + off as usize) };
@@ -959,9 +976,10 @@ pub extern "C" fn runtime_copy_byte_array(
     dest_off: i64,
     len: i64,
 ) {
-    if (src as u64) < 0x1000 || (dest as u64) < 0x1000 {
-        eprintln!("[BUG] runtime_copy_byte_array: bad pointer src={:#x} src_off={} dest={:#x} dest_off={} len={}", src, src_off, dest, dest_off, len);
-        std::process::abort();
+    if check_ptr_invalid(src as *const u8, "runtime_copy_byte_array")
+        || check_ptr_invalid(dest as *const u8, "runtime_copy_byte_array")
+    {
+        return;
     }
     // SAFETY: src and dest passed the null-guard above. Offsetting past the 8-byte
     // length prefix + the respective offsets. Caller (JIT) ensures bounds.
@@ -982,9 +1000,10 @@ pub extern "C" fn runtime_compare_byte_arrays(
     b_off: i64,
     len: i64,
 ) -> i64 {
-    if (a as u64) < 0x1000 || (b as u64) < 0x1000 {
-        eprintln!("[BUG] runtime_compare_byte_arrays: bad pointer a={:#x} a_off={} b={:#x} b_off={} len={}", a, a_off, b, b_off, len);
-        std::process::abort();
+    if check_ptr_invalid(a as *const u8, "runtime_compare_byte_arrays")
+        || check_ptr_invalid(b as *const u8, "runtime_compare_byte_arrays")
+    {
+        return 0;
     }
     // SAFETY: a and b passed the null-guard above. Offsetting past the 8-byte length
     // prefix + the respective offsets. Caller (JIT) ensures len bytes are within both arrays.
@@ -1137,9 +1156,8 @@ fn decode_double_int64(d: f64) -> (i64, i64) {
 
 /// strlen: count bytes until null terminator.
 pub extern "C" fn runtime_strlen(addr: i64) -> i64 {
-    if (addr as u64) < 0x1000 {
-        eprintln!("[BUG] runtime_strlen: bad pointer addr={:#x}", addr);
-        std::process::abort();
+    if check_ptr_invalid(addr as *const u8, "runtime_strlen") {
+        return 0;
     }
     let ptr = addr as *const u8;
     let mut len = 0i64;
@@ -1165,12 +1183,8 @@ pub extern "C" fn runtime_text_measure_off(addr: i64, off: i64, len: i64, cnt: i
     if len <= 0 || cnt <= 0 {
         return 0;
     }
-    if (addr as u64) < 0x1000 {
-        eprintln!(
-            "[BUG] runtime_text_measure_off: bad pointer addr={:#x} off={} len={} cnt={}",
-            addr, off, len, cnt
-        );
-        std::process::abort();
+    if check_ptr_invalid(addr as *const u8, "runtime_text_measure_off") {
+        return 0;
     }
     let ptr = (addr + off) as *const u8;
     let len = len as usize;
@@ -1206,12 +1220,8 @@ pub extern "C" fn runtime_text_memchr(addr: i64, off: i64, len: i64, needle: i64
     if len <= 0 {
         return -1;
     }
-    if (addr as u64) < 0x1000 {
-        eprintln!(
-            "[BUG] runtime_text_memchr: bad pointer addr={:#x} off={} len={} needle={}",
-            addr, off, len, needle
-        );
-        std::process::abort();
+    if check_ptr_invalid(addr as *const u8, "runtime_text_memchr") {
+        return -1;
     }
     let ptr = (addr + off) as *const u8;
     // SAFETY: addr passed the null-guard above. ptr = addr + off points into a valid
@@ -1230,12 +1240,10 @@ pub extern "C" fn runtime_text_reverse(dest: i64, src: i64, off: i64, len: i64) 
     if len <= 0 {
         return;
     }
-    if (dest as u64) < 0x1000 || (src as u64) < 0x1000 {
-        eprintln!(
-            "[BUG] runtime_text_reverse: bad pointer dest={:#x} src={:#x} off={} len={}",
-            dest, src, off, len
-        );
-        std::process::abort();
+    if check_ptr_invalid(dest as *const u8, "runtime_text_reverse")
+        || check_ptr_invalid(src as *const u8, "runtime_text_reverse")
+    {
+        return;
     }
     let src_ptr = (src + off) as *const u8;
     // SAFETY: src + off points into a valid Text buffer and len bytes are readable.
@@ -1276,7 +1284,12 @@ pub extern "C" fn runtime_show_double_addr(bits: i64) -> i64 {
     let s = haskell_show_double(d);
     let c_str = match std::ffi::CString::new(s) {
         Ok(c) => c,
-        Err(_) => std::process::abort(),
+        Err(_) => {
+            RUNTIME_ERROR.with(|cell| {
+                *cell.borrow_mut() = Some(RuntimeError::Undefined);
+            });
+            return error_poison_ptr() as i64;
+        }
     };
     let ptr = c_str.into_raw();
     ptr as i64
@@ -2102,15 +2115,8 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
     }
 
     use std::io::Write;
-    if (scrut_ptr as u64) < 0x1000 {
-        let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(
-            stderr,
-            "[CASE TRAP] scrut_ptr is NULL/invalid: {:#x}",
-            scrut_ptr
-        );
-        let _ = stderr.flush();
-        std::process::abort();
+    if check_ptr_invalid(scrut_ptr as *const u8, "runtime_case_trap") {
+        return error_poison_ptr();
     }
     // SAFETY: ptr passed the null/low-address guard above. Reading the tag byte at offset 0.
     let tag_byte = unsafe { *ptr };
@@ -2176,5 +2182,8 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
     }
     let _ = stderr.flush();
     drop(stderr);
-    std::process::abort();
+    RUNTIME_ERROR.with(|cell| {
+        *cell.borrow_mut() = Some(RuntimeError::Undefined);
+    });
+    error_poison_ptr()
 }
