@@ -81,6 +81,17 @@ pub struct JitEffectMachine {
     func_id: FuncId,
 }
 
+/// Ensures thread-local JIT registries are cleaned up even on early error return.
+struct RegistryGuard;
+
+impl Drop for RegistryGuard {
+    fn drop(&mut self) {
+        crate::host_fns::clear_gc_state();
+        crate::host_fns::clear_stack_map_registry();
+        crate::debug::clear_lambda_registry();
+    }
+}
+
 impl JitEffectMachine {
     /// Compile a CoreExpr for JIT execution.
     pub fn compile(
@@ -118,6 +129,7 @@ impl JitEffectMachine {
         crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
         crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
         crate::host_fns::set_gc_state(self.nursery.start() as *mut u8, self.nursery.size());
+        let _guard = RegistryGuard;
 
         // SAFETY: get_function_ptr returns a finalized JIT code pointer. Transmuting to the
         // expected calling convention (vmctx -> result) is correct per our compilation contract.
@@ -207,11 +219,6 @@ impl JitEffectMachine {
             }
         };
 
-        // Cleanup registries
-        crate::host_fns::clear_gc_state();
-        crate::host_fns::clear_stack_map_registry();
-        crate::debug::clear_lambda_registry();
-
         result
     }
 
@@ -225,6 +232,7 @@ impl JitEffectMachine {
         crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
         crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
         crate::host_fns::set_gc_state(self.nursery.start() as *mut u8, self.nursery.size());
+        let _guard = RegistryGuard;
 
         // SAFETY: get_function_ptr returns a finalized JIT code pointer. Transmuting to the
         // expected calling convention (vmctx -> result) is correct per our compilation contract.
@@ -241,10 +249,6 @@ impl JitEffectMachine {
         } {
             Ok(ptr) => ptr,
             Err(e) => {
-                // Cleanup registries before returning error
-                crate::host_fns::clear_gc_state();
-                crate::host_fns::clear_stack_map_registry();
-                crate::debug::clear_lambda_registry();
                 return Err(JitError::Yield(runtime_error_or_signal(e.0)));
             }
         };
@@ -272,9 +276,6 @@ impl JitEffectMachine {
                 }) {
                     Ok(p) => p,
                     Err(e) => {
-                        crate::host_fns::clear_gc_state();
-                        crate::host_fns::clear_stack_map_registry();
-                        crate::debug::clear_lambda_registry();
                         return Err(JitError::Yield(runtime_error_or_signal(e.0)));
                     }
                 };
@@ -300,11 +301,6 @@ impl JitEffectMachine {
             .map_err(JitError::Signal)?
             .map_err(JitError::HeapBridge)
         };
-
-        // Cleanup registries
-        crate::host_fns::clear_gc_state();
-        crate::host_fns::clear_stack_map_registry();
-        crate::debug::clear_lambda_registry();
 
         result
     }
