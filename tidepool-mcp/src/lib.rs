@@ -1265,16 +1265,15 @@ fn rejected_import(import_str: &str) -> Option<&str> {
         "Network",
         "Control.Concurrent",
     ];
-    // Extract module name (first whitespace-delimited token, or before '(')
-    let module = import_str
-        .split(|c: char| c.is_whitespace() || c == '(')
-        .next()
-        .unwrap_or(import_str)
-        .trim_start_matches("qualified ");
-    let module = module
-        .split(|c: char| c.is_whitespace() || c == '(')
-        .next()
-        .unwrap_or(module);
+    // Extract module name: skip 'qualified' if present, then take the first token
+    let mut parts = import_str.split_whitespace();
+    let mut module = parts.next().unwrap_or("");
+    if module == "qualified" {
+        module = parts.next().unwrap_or("");
+    }
+    // Remove anything from '(' onwards (for imports like "Data.Map (Map)")
+    let module = module.split('(').next().unwrap_or("").trim();
+    
     for prefix in BLOCKED {
         if module.starts_with(prefix) {
             return Some(module);
@@ -2623,6 +2622,55 @@ mod tests {
             next_cont_id: Arc::new(AtomicU64::new(1)),
             eval_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_EVALS)),
         }
+    }
+
+    #[test]
+    fn test_rejected_import_edge_cases() {
+        // Qualified unsafe
+        assert!(rejected_import("qualified System.IO.Unsafe as Safe").is_some());
+        // Extra whitespace
+        assert!(rejected_import("  System.IO.Unsafe  ").is_some());
+        // Safe Data imports
+        assert!(rejected_import("Data.Map (Map, fromList)").is_none());
+        // Tidepool modules
+        assert!(rejected_import("Tidepool.Table").is_none());
+        // Empty string
+        assert!(rejected_import("").is_none());
+    }
+
+    #[test]
+    fn test_format_error_with_source_multiline() {
+        let title = "Compile Error";
+        let error = "Variable not in scope: x";
+        let source = "module Test where\n-- [user]\nmain = do\n  print x\n  print y\n  print z";
+        let formatted = format_error_with_source(title, error, source);
+
+        assert!(formatted.contains("## Compile Error"));
+        assert!(formatted.contains("Variable not in scope: x"));
+        assert!(formatted.contains("## User Code"));
+        assert!(formatted.contains("main = do\n  print x\n  print y\n  print z"));
+        assert!(!formatted.contains("module Test where"));
+    }
+
+    #[test]
+    fn test_format_error_empty_source() {
+        let formatted = format_error_with_source("Error", "msg", "");
+        assert!(formatted.contains("## Error"));
+        assert!(formatted.contains("msg"));
+        assert!(formatted.contains("## User Code"));
+    }
+
+    #[test]
+    fn test_captured_output_drain() {
+        let output = CapturedOutput::new();
+        output.push("line 1".to_string());
+        output.push("line 2".to_string());
+        
+        let drained = output.drain();
+        assert_eq!(drained, vec!["line 1", "line 2"]);
+        
+        let empty = output.drain();
+        assert!(empty.is_empty());
     }
 }
 
