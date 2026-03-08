@@ -200,25 +200,21 @@ fn expand_node(tree: &CoreExpr, idx: usize) -> Result<EmitFrame<usize>, EmitErro
 #[allow(clippy::too_many_arguments)]
 fn collapse_frame(
     ctx: &mut EmitContext,
-    pipeline: &mut CodegenPipeline,
+    sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
-    vmctx: Value,
-    gc_sig: ir::SigRef,
-    oom_func: ir::FuncRef,
-    tree: &CoreExpr,
     frame: EmitFrame<SsaVal>,
 ) -> Result<SsaVal, EmitError> {
     match frame {
         EmitFrame::LitString(ref bytes) => emit_lit_string(
-            pipeline,
+            sess.pipeline,
             builder,
-            vmctx,
-            gc_sig,
-            oom_func,
+            sess.vmctx,
+            sess.gc_sig,
+            sess.oom_func,
             bytes,
             &mut ctx.lambda_counter,
         ),
-        EmitFrame::Lit(ref lit) => emit_lit(builder, vmctx, gc_sig, oom_func, lit),
+        EmitFrame::Lit(ref lit) => emit_lit(builder, sess.vmctx, sess.gc_sig, sess.oom_func, lit),
         EmitFrame::Var(vid) => match ctx.env.get(&vid).copied() {
             Some(v) => Ok(v),
             None => {
@@ -240,16 +236,16 @@ fn collapse_frame(
                     vid,
                     ctx.env.len()
                 ));
-                let trap_fn = pipeline
+                let trap_fn = sess.pipeline
                     .module
                     .declare_function("unresolved_var_trap", Linkage::Import, &{
-                        let mut sig = Signature::new(pipeline.isa.default_call_conv());
+                        let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
                         sig.params.push(AbiParam::new(types::I64));
                         sig.returns.push(AbiParam::new(types::I64));
                         sig
                     })
                     .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-                let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
+                let trap_ref = sess.pipeline.module.declare_func_in_func(trap_fn, builder.func);
                 let var_id_val = builder.ins().iconst(types::I64, vid.0 as i64);
                 let inst = builder.ins().call(trap_ref, &[var_id_val]);
                 let result = builder.inst_results(inst)[0];
@@ -260,12 +256,12 @@ fn collapse_frame(
         EmitFrame::Con { tag, fields } => {
             let field_vals: Vec<Value> = fields
                 .iter()
-                .map(|v| ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *v))
+                .map(|v| ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, *v))
                 .collect();
 
             let num_fields = field_vals.len();
             let size = 24 + 8 * num_fields as u64;
-            let ptr = emit_alloc_fast_path(builder, vmctx, size, gc_sig, oom_func);
+            let ptr = emit_alloc_fast_path(builder, sess.vmctx, size, sess.gc_sig, sess.oom_func);
 
             let tag_val = builder.ins().iconst(types::I8, layout::TAG_CON as i64);
             builder.ins().store(MemFlags::trusted(), tag_val, ptr, 0);
@@ -301,7 +297,7 @@ fn collapse_frame(
             // compile non-trivial fields as thunks.
             let num_fields = field_indices.len();
             let size = 24 + 8 * num_fields as u64;
-            let ptr = emit_alloc_fast_path(builder, vmctx, size, gc_sig, oom_func);
+            let ptr = emit_alloc_fast_path(builder, sess.vmctx, size, sess.gc_sig, sess.oom_func);
 
             let tag_val = builder.ins().iconst(types::I8, layout::TAG_CON as i64);
             builder.ins().store(MemFlags::trusted(), tag_val, ptr, 0);
@@ -321,15 +317,15 @@ fn collapse_frame(
             );
 
             for (i, &f_idx) in field_indices.iter().enumerate() {
-                let field_val = if is_trivial_field(f_idx, tree) {
+                let field_val = if is_trivial_field(f_idx, sess.tree) {
                     // Trivial: evaluate eagerly (existing path)
                     let val =
-                        ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx)?;
-                    ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
+                        ctx.emit_node(sess, builder, f_idx)?;
+                    ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, val)
                 } else {
                     // Non-trivial: compile as thunk
                     let thunk_val =
-                        emit_thunk(ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx)?;
+                        emit_thunk(ctx, sess, builder, f_idx)?;
                     thunk_val.value()
                 };
                 builder.ins().store(
@@ -343,41 +339,41 @@ fn collapse_frame(
             builder.declare_value_needs_stack_map(ptr);
             Ok(SsaVal::HeapPtr(ptr))
         }
-        EmitFrame::PrimOp { ref op, ref args } => {
-            if matches!(op, tidepool_repr::PrimOpKind::Raise) {
-                // raise# is GHC's exception primitive — used for impossible branches
-                // and `error` calls. Emit a call to runtime_error(2) which sets a
-                // thread-local error flag and returns null. The JIT machine converts
-                // null results to Result::Err(JitError::Yield(UserError)).
-                let err_fn = pipeline
-                    .module
-                    .declare_function("runtime_error", Linkage::Import, &{
-                        let mut sig = Signature::new(pipeline.isa.default_call_conv());
-                        sig.params.push(AbiParam::new(types::I64));
-                        sig.returns.push(AbiParam::new(types::I64));
-                        sig
-                    })
-                    .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-                let err_ref = pipeline.module.declare_func_in_func(err_fn, builder.func);
-                let kind_val = builder.ins().iconst(types::I64, 2); // UserError
-                let inst = builder.ins().call(err_ref, &[kind_val]);
-                let result = builder.inst_results(inst)[0];
-                builder.declare_value_needs_stack_map(result);
-                return Ok(SsaVal::HeapPtr(result));
-            }
-            // Force thunked args: PrimOps are strict in all arguments.
-            // Case alt binders can be thunks (lazy Con fields), so force
-            // them before passing to primop unboxing.
-            let forced_args: Vec<SsaVal> = args
-                .iter()
-                .map(|a| force_thunk_ssaval(pipeline, builder, vmctx, *a))
-                .collect::<Result<Vec<_>, EmitError>>()?;
-            primop::emit_primop(pipeline, builder, vmctx, gc_sig, oom_func, op, &forced_args)
-        }
+                EmitFrame::PrimOp { ref op, ref args } => {
+                    if matches!(op, tidepool_repr::PrimOpKind::Raise) {
+                        // raise# is GHC's exception primitive — used for impossible branches
+                        // and `error` calls. Emit a call to runtime_error(2) which sets a
+                        // thread-local error flag and returns null. The JIT machine converts
+                        // null results to Result::Err(JitError::Yield(UserError)).
+                        let err_fn = sess.pipeline
+                            .module
+                            .declare_function("runtime_error", Linkage::Import, &{
+                                let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
+                                sig.params.push(AbiParam::new(types::I64));
+                                sig.returns.push(AbiParam::new(types::I64));
+                                sig
+                            })
+                            .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+                        let err_ref = sess.pipeline.module.declare_func_in_func(err_fn, builder.func);
+                        let kind_val = builder.ins().iconst(types::I64, 2); // UserError
+                        let inst = builder.ins().call(err_ref, &[kind_val]);
+                        let result = builder.inst_results(inst)[0];
+                        builder.declare_value_needs_stack_map(result);
+                        return Ok(SsaVal::HeapPtr(result));
+                    }
+                    // Force thunked args: PrimOps are strict in all arguments.
+                    // Case alt binders can be thunks (lazy Con fields), so force
+                    // them before passing to primop unboxing.
+                    let forced_args: Vec<SsaVal> = args
+                        .iter()
+                        .map(|a| force_thunk_ssaval(sess.pipeline, builder, sess.vmctx, *a))
+                        .collect::<Result<Vec<_>, EmitError>>()?;
+                    primop::emit_primop(sess, builder, op, &forced_args)
+                }
         EmitFrame::App { fun, arg } => {
             ctx.declare_env(builder);
             let raw_fun_ptr = fun.value();
-            let arg_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, arg);
+            let arg_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, arg);
 
             // Force thunked function values. Case alt binders can be
             // thunks (lazy fields), so when one is applied as a function,
@@ -406,18 +402,18 @@ fn collapse_frame(
             builder.switch_to_block(force_fun_block);
             builder.seal_block(force_fun_block);
 
-            let force_fn = pipeline
+            let force_fn = sess.pipeline
                 .module
                 .declare_function("heap_force", Linkage::Import, &{
-                    let mut sig = Signature::new(pipeline.isa.default_call_conv());
+                    let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
                     sig.params.push(AbiParam::new(types::I64)); // vmctx
                     sig.params.push(AbiParam::new(types::I64)); // thunk
                     sig.returns.push(AbiParam::new(types::I64)); // result
                     sig
                 })
                 .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-            let force_ref = pipeline.module.declare_func_in_func(force_fn, builder.func);
-            let force_call = builder.ins().call(force_ref, &[vmctx, raw_fun_ptr]);
+            let force_ref = sess.pipeline.module.declare_func_in_func(force_fn, builder.func);
+            let force_call = builder.ins().call(force_ref, &[sess.vmctx, raw_fun_ptr]);
             let forced_fun = builder.inst_results(force_call)[0];
             builder.declare_value_needs_stack_map(forced_fun);
             builder
@@ -431,16 +427,16 @@ fn collapse_frame(
 
             // Debug: call host fn to validate fun_ptr tag before call_indirect.
             // Returns 0 (null) if ok, or a poison pointer if call should be skipped.
-            let check_fn = pipeline
+            let check_fn = sess.pipeline
                 .module
                 .declare_function("debug_app_check", Linkage::Import, &{
-                    let mut sig = Signature::new(pipeline.isa.default_call_conv());
+                    let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
                     sig.params.push(AbiParam::new(types::I64)); // fun_ptr
                     sig.returns.push(AbiParam::new(types::I64)); // 0 = ok, non-zero = poison
                     sig
                 })
                 .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-            let check_ref = pipeline.module.declare_func_in_func(check_fn, builder.func);
+            let check_ref = sess.pipeline.module.declare_func_in_func(check_fn, builder.func);
             let check_inst = builder.ins().call(check_ref, &[fun_ptr]);
             let check_result = builder.inst_results(check_inst)[0];
 
@@ -469,7 +465,7 @@ fn collapse_frame(
                 CLOSURE_CODE_PTR_OFFSET,
             );
 
-            let mut sig = Signature::new(pipeline.isa.default_call_conv());
+            let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
             sig.params.push(AbiParam::new(types::I64)); // vmctx
             sig.params.push(AbiParam::new(types::I64)); // self
             sig.params.push(AbiParam::new(types::I64)); // arg
@@ -478,7 +474,7 @@ fn collapse_frame(
 
             let inst = builder
                 .ins()
-                .call_indirect(call_sig, code_ptr, &[vmctx, fun_ptr, arg_ptr]);
+                .call_indirect(call_sig, code_ptr, &[sess.vmctx, fun_ptr, arg_ptr]);
             let ret_val = builder.inst_results(inst)[0];
 
             // TCO null check: if callee returned null, it might be a tail call
@@ -502,7 +498,7 @@ fn collapse_frame(
             let tail_callee = builder.ins().load(
                 types::I64,
                 MemFlags::trusted(),
-                vmctx,
+                sess.vmctx,
                 VMCTX_TAIL_CALLEE_OFFSET,
             );
             let has_tail_call = builder.ins().icmp_imm(IntCC::NotEqual, tail_callee, 0);
@@ -526,19 +522,19 @@ fn collapse_frame(
             builder.switch_to_block(resolve_block);
             builder.seal_block(resolve_block);
 
-            let resolve_fn = pipeline
+            let resolve_fn = sess.pipeline
                 .module
                 .declare_function("trampoline_resolve", Linkage::Import, &{
-                    let mut sig = Signature::new(pipeline.isa.default_call_conv());
+                    let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
                     sig.params.push(AbiParam::new(types::I64)); // vmctx
                     sig.returns.push(AbiParam::new(types::I64)); // result
                     sig
                 })
-                .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-            let resolve_ref = pipeline
+                .map_err(|e: cranelift_module::ModuleError| EmitError::CraneliftError(e.to_string()))?;
+            let resolve_ref = sess.pipeline
                 .module
                 .declare_func_in_func(resolve_fn, builder.func);
-            let resolve_inst = builder.ins().call(resolve_ref, &[vmctx]);
+            let resolve_inst = builder.ins().call(resolve_ref, &[sess.vmctx]);
             let resolved_val = builder.inst_results(resolve_inst)[0];
             builder.declare_value_needs_stack_map(resolved_val);
             builder
@@ -553,14 +549,14 @@ fn collapse_frame(
             Ok(SsaVal::HeapPtr(merged_val))
         }
         EmitFrame::Lam { binder, body_idx } => emit_lam(
-            ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, binder, body_idx,
+            ctx, sess, builder, binder, body_idx,
         ),
         EmitFrame::Case {
             scrutinee,
             binder,
             alts,
         } => crate::emit::case::emit_case(
-            ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, scrutinee, &binder, &alts,
+            ctx, sess, builder, scrutinee, &binder, &alts,
         ),
         EmitFrame::Join {
             label,
@@ -568,8 +564,7 @@ fn collapse_frame(
             rhs_idx,
             body_idx,
         } => crate::emit::join::emit_join(
-            ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, &label, &params, rhs_idx,
-            body_idx,
+            ctx, sess, builder, &label, &params, rhs_idx, body_idx,
         ),
         EmitFrame::Jump { label, args } => {
             let join_block = ctx
@@ -582,7 +577,7 @@ fn collapse_frame(
 
             let arg_values: Vec<BlockArg> = args
                 .iter()
-                .map(|v| BlockArg::Value(ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *v)))
+                .map(|v| BlockArg::Value(ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, *v)))
                 .collect();
 
             builder.ins().jump(join_block, &arg_values);
@@ -597,7 +592,7 @@ fn collapse_frame(
             ))
         }
         EmitFrame::LetBoundary(idx) => {
-            ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, idx)
+            ctx.emit_node(sess, builder, idx)
         }
     }
 }
@@ -606,18 +601,14 @@ fn collapse_frame(
 #[allow(clippy::too_many_arguments)]
 fn emit_subtree(
     ctx: &mut EmitContext,
-    pipeline: &mut CodegenPipeline,
+    sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
-    vmctx: Value,
-    gc_sig: ir::SigRef,
-    oom_func: ir::FuncRef,
-    tree: &CoreExpr,
     idx: usize,
 ) -> Result<SsaVal, EmitError> {
     try_expand_and_collapse::<EmitFrameToken, _, _, _>(
         idx,
-        |idx| expand_node(tree, idx),
-        |frame| collapse_frame(ctx, pipeline, builder, vmctx, gc_sig, oom_func, tree, frame),
+        |idx| expand_node(sess.tree, idx),
+        |frame| collapse_frame(ctx, sess, builder, frame),
     )
 }
 
@@ -677,16 +668,12 @@ fn compute_captures(
 #[allow(clippy::too_many_arguments)]
 fn emit_lam(
     ctx: &mut EmitContext,
-    pipeline: &mut CodegenPipeline,
+    sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
-    vmctx: Value,
-    gc_sig: ir::SigRef,
-    oom_func: ir::FuncRef,
-    tree: &CoreExpr,
     binder: VarId,
     body_idx: usize,
 ) -> Result<SsaVal, EmitError> {
-    let (body_tree, sorted_fvs) = compute_captures(ctx, tree, body_idx, Some(binder), "lam");
+    let (body_tree, sorted_fvs) = compute_captures(ctx, sess.tree, body_idx, Some(binder), "lam");
 
     let captures: Vec<(VarId, SsaVal)> = sorted_fvs
         .iter()
@@ -702,17 +689,17 @@ fn emit_lam(
         .collect::<Result<Vec<_>, EmitError>>()?;
 
     let lambda_name = ctx.next_lambda_name();
-    let mut closure_sig = Signature::new(pipeline.isa.default_call_conv());
+    let mut closure_sig = Signature::new(sess.pipeline.isa.default_call_conv());
     closure_sig.params.push(AbiParam::new(types::I64)); // vmctx
     closure_sig.params.push(AbiParam::new(types::I64)); // self
     closure_sig.params.push(AbiParam::new(types::I64)); // arg
     closure_sig.returns.push(AbiParam::new(types::I64));
 
-    let lambda_func_id = pipeline
+    let lambda_func_id = sess.pipeline
         .module
         .declare_function(&lambda_name, Linkage::Local, &closure_sig)
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-    pipeline.register_lambda(lambda_func_id, lambda_name.clone());
+    sess.pipeline.register_lambda(lambda_func_id, lambda_name.clone());
 
     let mut inner_ctx = Context::new();
     inner_ctx.func.signature = closure_sig;
@@ -732,18 +719,18 @@ fn emit_lam(
     inner_builder.declare_value_needs_stack_map(closure_self);
     inner_builder.declare_value_needs_stack_map(arg_param);
 
-    let mut inner_gc_sig = Signature::new(pipeline.isa.default_call_conv());
+    let mut inner_gc_sig = Signature::new(sess.pipeline.isa.default_call_conv());
     inner_gc_sig.params.push(AbiParam::new(types::I64));
     let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
 
     let inner_oom_func = {
-        let mut sig = Signature::new(pipeline.isa.default_call_conv());
+        let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
         sig.returns.push(AbiParam::new(types::I64));
-        let func_id = pipeline
+        let func_id = sess.pipeline
             .module
             .declare_function("runtime_oom", Linkage::Import, &sig)
             .map_err(|e| EmitError::CraneliftError(format!("declare runtime_oom: {e}")))?;
-        pipeline
+        sess.pipeline
             .module
             .declare_func_in_func(func_id, inner_builder.func)
     };
@@ -766,13 +753,16 @@ fn emit_lam(
     }
 
     let body_root = body_tree.nodes.len() - 1;
+    let mut inner_sess = EmitSession {
+        pipeline: sess.pipeline,
+        vmctx: inner_vmctx,
+        gc_sig: inner_gc_sig_ref,
+        oom_func: inner_oom_func,
+        tree: &body_tree,
+    };
     let body_result = inner_emit.emit_node(
-        pipeline,
+        &mut inner_sess,
         &mut inner_builder,
-        inner_vmctx,
-        inner_gc_sig_ref,
-        inner_oom_func,
-        &body_tree,
         body_root,
     )?;
     let ret_val = ensure_heap_ptr(
@@ -802,16 +792,16 @@ fn emit_lam(
         eprintln!("=== END CLIF {} ===", lambda_name);
     }
 
-    pipeline.define_function(lambda_func_id, &mut inner_ctx)?;
+    sess.pipeline.define_function(lambda_func_id, &mut inner_ctx)?;
 
-    let func_ref = pipeline
+    let func_ref = sess.pipeline
         .module
         .declare_func_in_func(lambda_func_id, builder.func);
     let code_ptr = builder.ins().func_addr(types::I64, func_ref);
 
     let num_captures = captures.len();
     let closure_size = 24 + 8 * num_captures as u64;
-    let closure_ptr = emit_alloc_fast_path(builder, vmctx, closure_size, gc_sig, oom_func);
+    let closure_ptr = emit_alloc_fast_path(builder, sess.vmctx, closure_size, sess.gc_sig, sess.oom_func);
 
     let tag_val = builder.ins().iconst(types::I8, layout::TAG_CLOSURE as i64);
     builder
@@ -837,7 +827,7 @@ fn emit_lam(
     );
 
     for (i, (_, ssaval)) in captures.iter().enumerate() {
-        let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
+        let cap_val = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, *ssaval);
         let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
         builder
             .ins()
@@ -862,16 +852,12 @@ fn emit_lam(
 #[allow(clippy::too_many_arguments)]
 fn emit_thunk(
     ctx: &mut EmitContext,
-    pipeline: &mut CodegenPipeline,
+    sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
-    vmctx: Value,
-    gc_sig: ir::SigRef,
-    oom_func: ir::FuncRef,
-    tree: &CoreExpr,
     body_idx: usize,
 ) -> Result<SsaVal, EmitError> {
     // Extract the sub-expression and compute free variables
-    let (body_tree, sorted_fvs) = compute_captures(ctx, tree, body_idx, None, "thunk");
+    let (body_tree, sorted_fvs) = compute_captures(ctx, sess.tree, body_idx, None, "thunk");
 
     let captures: Vec<(VarId, SsaVal)> = sorted_fvs
         .iter()
@@ -888,16 +874,16 @@ fn emit_thunk(
 
     // Declare the thunk entry function: (vmctx, thunk_ptr) -> result
     let thunk_name = ctx.next_thunk_name();
-    let mut thunk_sig = Signature::new(pipeline.isa.default_call_conv());
+    let mut thunk_sig = Signature::new(sess.pipeline.isa.default_call_conv());
     thunk_sig.params.push(AbiParam::new(types::I64)); // vmctx
     thunk_sig.params.push(AbiParam::new(types::I64)); // thunk_ptr (self)
     thunk_sig.returns.push(AbiParam::new(types::I64));
 
-    let thunk_func_id = pipeline
+    let thunk_func_id = sess.pipeline
         .module
         .declare_function(&thunk_name, Linkage::Local, &thunk_sig)
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-    pipeline.register_lambda(thunk_func_id, thunk_name.clone());
+    sess.pipeline.register_lambda(thunk_func_id, thunk_name.clone());
 
     // Build the inner function
     let mut inner_ctx = Context::new();
@@ -916,18 +902,18 @@ fn emit_thunk(
 
     inner_builder.declare_value_needs_stack_map(thunk_self);
 
-    let mut inner_gc_sig = Signature::new(pipeline.isa.default_call_conv());
+    let mut inner_gc_sig = Signature::new(sess.pipeline.isa.default_call_conv());
     inner_gc_sig.params.push(AbiParam::new(types::I64));
     let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
 
     let inner_oom_func = {
-        let mut sig = Signature::new(pipeline.isa.default_call_conv());
+        let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
         sig.returns.push(AbiParam::new(types::I64));
-        let func_id = pipeline
+        let func_id = sess.pipeline
             .module
             .declare_function("runtime_oom", Linkage::Import, &sig)
             .map_err(|e| EmitError::CraneliftError(format!("declare runtime_oom: {e}")))?;
-        pipeline
+        sess.pipeline
             .module
             .declare_func_in_func(func_id, inner_builder.func)
     };
@@ -948,13 +934,16 @@ fn emit_thunk(
 
     // Emit the deferred expression body
     let body_root = body_tree.nodes.len() - 1;
+    let mut inner_sess = EmitSession {
+        pipeline: sess.pipeline,
+        vmctx: inner_vmctx,
+        gc_sig: inner_gc_sig_ref,
+        oom_func: inner_oom_func,
+        tree: &body_tree,
+    };
     let body_result = inner_emit.emit_node(
-        pipeline,
+        &mut inner_sess,
         &mut inner_builder,
-        inner_vmctx,
-        inner_gc_sig_ref,
-        inner_oom_func,
-        &body_tree,
         body_root,
     )?;
     let ret_val = ensure_heap_ptr(
@@ -984,10 +973,10 @@ fn emit_thunk(
         eprintln!("=== END CLIF {} ===", thunk_name);
     }
 
-    pipeline.define_function(thunk_func_id, &mut inner_ctx)?;
+    sess.pipeline.define_function(thunk_func_id, &mut inner_ctx)?;
 
     // Get code pointer in the parent function
-    let func_ref = pipeline
+    let func_ref = sess.pipeline
         .module
         .declare_func_in_func(thunk_func_id, builder.func);
     let code_ptr = builder.ins().func_addr(types::I64, func_ref);
@@ -995,7 +984,7 @@ fn emit_thunk(
     // Allocate the thunk heap object
     let num_captures = captures.len();
     let thunk_size = 24 + 8 * num_captures as u64;
-    let thunk_ptr = emit_alloc_fast_path(builder, vmctx, thunk_size, gc_sig, oom_func);
+    let thunk_ptr = emit_alloc_fast_path(builder, sess.vmctx, thunk_size, sess.gc_sig, sess.oom_func);
 
     // Header: tag + size
     let tag_val = builder.ins().iconst(types::I8, layout::TAG_THUNK as i64);
@@ -1028,7 +1017,7 @@ fn emit_thunk(
 
     // Store captures
     for (i, (_, ssaval)) in captures.iter().enumerate() {
-        let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
+        let cap_val = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, *ssaval);
         let offset = THUNK_CAPTURED_START + 8 * i as i32;
         builder
             .ins()
@@ -1100,13 +1089,17 @@ pub fn compile_expr(
 
     let mut emit_ctx = EmitContext::new(name.to_string());
 
-    let result = emit_ctx.emit_node(
+    let mut sess = EmitSession {
         pipeline,
-        &mut builder,
         vmctx,
-        gc_sig_ref,
+        gc_sig: gc_sig_ref,
         oom_func,
         tree,
+    };
+
+    let result = emit_ctx.emit_node(
+        &mut sess,
+        &mut builder,
         tree.nodes.len() - 1,
     )?;
     let ret = ensure_heap_ptr(&mut builder, vmctx, gc_sig_ref, oom_func, result);
@@ -1188,12 +1181,8 @@ impl EmitContext {
     #[allow(clippy::too_many_arguments)]
     pub fn emit_node(
         &mut self,
-        pipeline: &mut CodegenPipeline,
+        sess: &mut EmitSession,
         builder: &mut FunctionBuilder,
-        vmctx: Value,
-        gc_sig: ir::SigRef,
-        oom_func: ir::FuncRef,
-        tree: &CoreExpr,
         root_idx: usize,
     ) -> Result<SsaVal, EmitError> {
         let mut work: Vec<EmitWork> = vec![EmitWork::Eval(root_idx)];
@@ -1205,19 +1194,19 @@ impl EmitContext {
                     // Inner iterative loop: skip through Let chains in tail position
                     let mut idx = start_idx;
                     loop {
-                        match &tree.nodes[idx] {
+                        match &sess.tree.nodes[idx] {
                             CoreFrame::LetNonRec { binder, rhs, body } => {
                                 let binder = *binder;
                                 let rhs = *rhs;
                                 let body = *body;
                                 // Dead code elimination: skip RHS if binder is unused in body.
                                 let body_fvs = tidepool_repr::free_vars::free_vars(
-                                    &tree.extract_subtree(body),
+                                    &sess.tree.extract_subtree(body),
                                 );
                                 if body_fvs.contains(&binder) {
-                                    if Self::rhs_is_error_call(tree, rhs) {
+                                    if Self::rhs_is_error_call(sess.tree, rhs) {
                                         // Bind to lazy poison closure — error only triggers on call.
-                                        let poison_addr = self.emit_error_poison(tree, rhs);
+                                        let poison_addr = self.emit_error_poison(sess.tree, rhs);
                                         let poison_val =
                                             builder.ins().iconst(types::I64, poison_addr);
                                         self.trace_scope(&format!(
@@ -1257,7 +1246,7 @@ impl EmitContext {
                                     bindings.iter().map(|(b, _)| *b).collect();
                                 work.push(EmitWork::LetCleanupMark(LetCleanup::Rec(cleanup_vars)));
                                 self.emit_letrec_phases(
-                                    pipeline, builder, vmctx, gc_sig, oom_func, tree, &bindings,
+                                    sess, builder, &bindings,
                                     body, &mut work,
                                 )?;
                                 break; // exit inner loop
@@ -1265,15 +1254,15 @@ impl EmitContext {
                             // All non-Let nodes: delegate to stack-safe hylomorphism
                             _ => {
                                 if self.in_tail_position
-                                    && matches!(tree.nodes[idx], CoreFrame::App { .. })
+                                    && matches!(sess.tree.nodes[idx], CoreFrame::App { .. })
                                 {
                                     let result = self.emit_tail_app(
-                                        pipeline, builder, vmctx, gc_sig, oom_func, tree, idx,
+                                        sess, builder, idx,
                                     )?;
                                     vals.push(result);
                                 } else {
                                     let result = emit_subtree(
-                                        self, pipeline, builder, vmctx, gc_sig, oom_func, tree, idx,
+                                        self, sess, builder, idx,
                                     )?;
                                     vals.push(result);
                                 }
@@ -1296,12 +1285,12 @@ impl EmitContext {
                     self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
                     self.env.insert(binder, val);
                     self.letrec_post_simple_step(
-                        builder, vmctx, gc_sig, oom_func, tree, &binder, state_idx, pipeline,
+                        sess, builder, &binder, state_idx,
                     )?;
                 }
                 EmitWork::LetRecFinish { body, state_idx } => {
                     self.letrec_finish_phases(
-                        builder, vmctx, gc_sig, oom_func, tree, state_idx, pipeline,
+                        sess, builder, state_idx,
                     )?;
                     // Push body evaluation
                     work.push(EmitWork::Eval(body));
@@ -1330,19 +1319,13 @@ impl EmitContext {
             .ok_or_else(|| EmitError::InternalError("emit_node: empty value stack".into()))
     }
 
-    /// Emit a tail-position App: store callee+arg to VMContext, return null.
-    #[allow(clippy::too_many_arguments)]
     fn emit_tail_app(
         &mut self,
-        pipeline: &mut CodegenPipeline,
+        sess: &mut EmitSession,
         builder: &mut FunctionBuilder,
-        vmctx: Value,
-        gc_sig: ir::SigRef,
-        oom_func: ir::FuncRef,
-        tree: &CoreExpr,
         idx: usize,
     ) -> Result<SsaVal, EmitError> {
-        let (fun_idx, arg_idx) = match &tree.nodes[idx] {
+        let (fun_idx, arg_idx) = match &sess.tree.nodes[idx] {
             CoreFrame::App { fun, arg } => (*fun, *arg),
             _ => unreachable!(),
         };
@@ -1351,15 +1334,15 @@ impl EmitContext {
         let saved_tail = self.in_tail_position;
         self.in_tail_position = false;
         let fun_val = emit_subtree(
-            self, pipeline, builder, vmctx, gc_sig, oom_func, tree, fun_idx,
+            self, sess, builder, fun_idx,
         )?;
         let arg_val = emit_subtree(
-            self, pipeline, builder, vmctx, gc_sig, oom_func, tree, arg_idx,
+            self, sess, builder, arg_idx,
         )?;
         self.in_tail_position = saved_tail;
 
         let raw_fun_ptr = fun_val.value();
-        let arg_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, arg_val);
+        let arg_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, arg_val);
 
         // Force thunked function (same as regular App path)
         let fun_tag = builder
@@ -1386,18 +1369,18 @@ impl EmitContext {
         builder.switch_to_block(force_fun_block);
         builder.seal_block(force_fun_block);
 
-        let force_fn = pipeline
+        let force_fn = sess.pipeline
             .module
             .declare_function("heap_force", Linkage::Import, &{
-                let mut sig = Signature::new(pipeline.isa.default_call_conv());
+                let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
                 sig.params.push(AbiParam::new(types::I64));
                 sig.params.push(AbiParam::new(types::I64));
                 sig.returns.push(AbiParam::new(types::I64));
                 sig
             })
             .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-        let force_ref = pipeline.module.declare_func_in_func(force_fn, builder.func);
-        let force_call = builder.ins().call(force_ref, &[vmctx, raw_fun_ptr]);
+        let force_ref = sess.pipeline.module.declare_func_in_func(force_fn, builder.func);
+        let force_call = builder.ins().call(force_ref, &[sess.vmctx, raw_fun_ptr]);
         let forced_fun = builder.inst_results(force_call)[0];
         builder.declare_value_needs_stack_map(forced_fun);
         builder
@@ -1410,16 +1393,16 @@ impl EmitContext {
         builder.declare_value_needs_stack_map(fun_ptr);
 
         // Debug validation (same as regular App)
-        let check_fn = pipeline
+        let check_fn = sess.pipeline
             .module
             .declare_function("debug_app_check", Linkage::Import, &{
-                let mut sig = Signature::new(pipeline.isa.default_call_conv());
+                let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
                 sig.params.push(AbiParam::new(types::I64));
                 sig.returns.push(AbiParam::new(types::I64));
                 sig
             })
             .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-        let check_ref = pipeline.module.declare_func_in_func(check_fn, builder.func);
+        let check_ref = sess.pipeline.module.declare_func_in_func(check_fn, builder.func);
         let check_inst = builder.ins().call(check_ref, &[fun_ptr]);
         let check_result = builder.inst_results(check_inst)[0];
 
@@ -1445,13 +1428,13 @@ impl EmitContext {
         builder.ins().store(
             MemFlags::trusted(),
             fun_ptr,
-            vmctx,
+            sess.vmctx,
             VMCTX_TAIL_CALLEE_OFFSET,
         );
         // Store arg_ptr to VMContext.tail_arg (offset 32)
         builder
             .ins()
-            .store(MemFlags::trusted(), arg_ptr, vmctx, VMCTX_TAIL_ARG_OFFSET);
+            .store(MemFlags::trusted(), arg_ptr, sess.vmctx, VMCTX_TAIL_ARG_OFFSET);
 
         // Return null to signal tail call
         let null_val = builder.ins().iconst(types::I64, 0);
@@ -1471,12 +1454,8 @@ impl EmitContext {
     #[allow(clippy::too_many_arguments)]
     fn emit_letrec_phases(
         &mut self,
-        pipeline: &mut CodegenPipeline,
+        sess: &mut EmitSession,
         builder: &mut FunctionBuilder,
-        vmctx: Value,
-        gc_sig: ir::SigRef,
-        oom_func: ir::FuncRef,
-        tree: &CoreExpr,
         bindings: &[(VarId, usize)],
         body: usize,
         work: &mut Vec<EmitWork>,
@@ -1486,7 +1465,7 @@ impl EmitContext {
         let (rec_bindings, simple_bindings): (Vec<_>, Vec<_>) =
             bindings.iter().partition(|(_, rhs_idx)| {
                 matches!(
-                    &tree.nodes[*rhs_idx],
+                    &sess.tree.nodes[*rhs_idx],
                     CoreFrame::Lam { .. } | CoreFrame::Con { .. }
                 )
             });
@@ -1506,8 +1485,8 @@ impl EmitContext {
             // Restore tail position before LetRecFinish (which pushes Eval(body))
             work.push(EmitWork::SetTailPosition(saved_tail));
             for (binder, rhs_idx) in simple_bindings.iter().rev() {
-                if Self::rhs_is_error_call(tree, *rhs_idx) {
-                    let poison_addr = self.emit_error_poison(tree, *rhs_idx);
+                if Self::rhs_is_error_call(sess.tree, *rhs_idx) {
+                    let poison_addr = self.emit_error_poison(sess.tree, *rhs_idx);
                     let poison_val = builder.ins().iconst(types::I64, poison_addr);
                     self.trace_scope(&format!("defer error LetRec(simple) {:?}", binder));
                     self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
@@ -1541,14 +1520,14 @@ impl EmitContext {
         let mut pre_allocs = Vec::with_capacity(rec_bindings.len());
 
         for (binder, rhs_idx) in &rec_bindings {
-            match &tree.nodes[*rhs_idx] {
+            match &sess.tree.nodes[*rhs_idx] {
                 CoreFrame::Lam {
                     binder: lam_binder,
                     body: lam_body,
                 } => {
-                    let lam_body_tree = tree.extract_subtree(*lam_body);
+                    let lam_body_tree = sess.tree.extract_subtree(*lam_body);
                     let mut fvs = tidepool_repr::free_vars::free_vars(&lam_body_tree);
-                    fvs.remove(lam_binder);
+                    fvs.remove(&lam_binder);
                     let dropped_fvs: Vec<VarId> = fvs
                         .iter()
                         .filter(|v| {
@@ -1577,7 +1556,7 @@ impl EmitContext {
                     let num_captures = sorted_fvs.len();
                     let closure_size = 24 + 8 * num_captures as u64;
                     let closure_ptr =
-                        emit_alloc_fast_path(builder, vmctx, closure_size, gc_sig, oom_func);
+                        emit_alloc_fast_path(builder, sess.vmctx, closure_size, sess.gc_sig, sess.oom_func);
 
                     let tag_val = builder.ins().iconst(types::I8, layout::TAG_CLOSURE as i64);
                     builder
@@ -1606,7 +1585,7 @@ impl EmitContext {
                 CoreFrame::Con { tag, fields } => {
                     let num_fields = fields.len();
                     let size = 24 + 8 * num_fields as u64;
-                    let ptr = emit_alloc_fast_path(builder, vmctx, size, gc_sig, oom_func);
+                    let ptr = emit_alloc_fast_path(builder, sess.vmctx, size, sess.gc_sig, sess.oom_func);
 
                     let tag_val = builder.ins().iconst(types::I8, layout::TAG_CON as i64);
                     builder.ins().store(MemFlags::trusted(), tag_val, ptr, 0);
@@ -1665,15 +1644,15 @@ impl EmitContext {
         // on closure code pointers.
         let mut deferred_simple = Vec::with_capacity(simple_bindings.len());
         for (binder, rhs_idx) in &simple_bindings {
-            if Self::rhs_is_error_call(tree, *rhs_idx) {
-                let poison_addr = self.emit_error_poison(tree, *rhs_idx);
+            if Self::rhs_is_error_call(sess.tree, *rhs_idx) {
+                let poison_addr = self.emit_error_poison(sess.tree, *rhs_idx);
                 let poison_val = builder.ins().iconst(types::I64, poison_addr);
                 self.trace_scope(&format!("defer error LetRec(trivial) {:?}", binder));
                 self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
-            } else if matches!(&tree.nodes[*rhs_idx], CoreFrame::Var(_)) {
+            } else if matches!(&sess.tree.nodes[*rhs_idx], CoreFrame::Var(_)) {
                 // Var aliases are trivial — just an env lookup via emit_subtree
                 let rhs_val = emit_subtree(
-                    self, pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx,
+                    self, sess, builder, *rhs_idx,
                 )?;
                 self.trace_scope(&format!("insert LetRec(trivial) {:?}", binder));
                 self.env.insert(*binder, rhs_val);
@@ -1697,108 +1676,113 @@ impl EmitContext {
                 } => (*ptr, fvs, *rhs_idx),
                 PreAlloc::Con { .. } => continue,
             };
-            let (lam_binder, lam_body) = match &tree.nodes[rhs_idx] {
-                CoreFrame::Lam { binder, body } => (*binder, *body),
-                other => {
-                    return Err(EmitError::InternalError(format!(
-                        "LetRec phase 3a: expected Lam, got {:?}",
-                        other
-                    )))
-                }
-            };
-            let lam_body_tree = tree.extract_subtree(lam_body);
-
-            let lambda_name = self.next_lambda_name();
-            let mut closure_sig = Signature::new(pipeline.isa.default_call_conv());
-            closure_sig.params.push(AbiParam::new(types::I64));
-            closure_sig.params.push(AbiParam::new(types::I64));
-            closure_sig.params.push(AbiParam::new(types::I64));
-            closure_sig.returns.push(AbiParam::new(types::I64));
-
-            let lambda_func_id = pipeline
-                .module
-                .declare_function(&lambda_name, Linkage::Local, &closure_sig)
-                .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-            pipeline.register_lambda(lambda_func_id, lambda_name.clone());
-
-            let mut inner_ctx = Context::new();
-            inner_ctx.func.signature = closure_sig;
-            inner_ctx.func.name = UserFuncName::default();
-
-            let mut inner_fb_ctx = FunctionBuilderContext::new();
-            let mut inner_builder = FunctionBuilder::new(&mut inner_ctx.func, &mut inner_fb_ctx);
-            let inner_block = inner_builder.create_block();
-            inner_builder.append_block_params_for_function_params(inner_block);
-            inner_builder.switch_to_block(inner_block);
-            inner_builder.seal_block(inner_block);
-
-            let inner_vmctx = inner_builder.block_params(inner_block)[0];
-            let inner_self = inner_builder.block_params(inner_block)[1];
-            let inner_arg = inner_builder.block_params(inner_block)[2];
-
-            inner_builder.declare_value_needs_stack_map(inner_self);
-            inner_builder.declare_value_needs_stack_map(inner_arg);
-
-            let mut inner_gc_sig = Signature::new(pipeline.isa.default_call_conv());
-            inner_gc_sig.params.push(AbiParam::new(types::I64));
-            let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
-
-            let inner_oom_func = {
-                let mut sig = Signature::new(pipeline.isa.default_call_conv());
-                sig.returns.push(AbiParam::new(types::I64));
-                let func_id = pipeline
-                    .module
-                    .declare_function("runtime_oom", Linkage::Import, &sig)
-                    .map_err(|e| EmitError::CraneliftError(format!("declare runtime_oom: {e}")))?;
-                pipeline
-                    .module
-                    .declare_func_in_func(func_id, inner_builder.func)
-            };
-
-            let mut inner_emit = EmitContext::new(self.prefix.clone());
-            inner_emit.lambda_counter = self.lambda_counter;
-            inner_emit.in_tail_position = true; // lambda body is in tail position
-            inner_emit
-                .env
-                .insert(lam_binder, SsaVal::HeapPtr(inner_arg));
-
-            // Load captures by position
-            for (i, var_id) in sorted_fvs.iter().enumerate() {
-                let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
-                let val =
-                    inner_builder
-                        .ins()
-                        .load(types::I64, MemFlags::trusted(), inner_self, offset);
-                inner_builder.declare_value_needs_stack_map(val);
-                inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
-            }
-
-            let body_root = lam_body_tree.nodes.len() - 1;
-            let body_result = inner_emit.emit_node(
-                pipeline,
-                &mut inner_builder,
-                inner_vmctx,
-                inner_gc_sig_ref,
-                inner_oom_func,
-                &lam_body_tree,
-                body_root,
-            )?;
-            let ret_val = ensure_heap_ptr(
-                &mut inner_builder,
-                inner_vmctx,
-                inner_gc_sig_ref,
-                inner_oom_func,
-                body_result,
-            );
-
-            inner_builder.ins().return_(&[ret_val]);
-            inner_builder.finalize();
-            self.lambda_counter = inner_emit.lambda_counter;
-            pipeline.define_function(lambda_func_id, &mut inner_ctx)?;
-
-            let func_ref = pipeline
-                .module
-                .declare_func_in_func(lambda_func_id, builder.func);
+                        let (lam_binder, lam_body) = match &sess.tree.nodes[rhs_idx] {
+                            CoreFrame::Lam { binder, body } => (*binder, *body),
+                            other => {
+                                return Err(EmitError::InternalError(format!(
+                                    "LetRec phase 3a: expected Lam, got {:?}",
+                                    other
+                                )))
+                            }
+                        };
+                        let lam_body_tree = sess.tree.extract_subtree(lam_body);
+            
+                        let lambda_name = self.next_lambda_name();
+                        let mut closure_sig = Signature::new(sess.pipeline.isa.default_call_conv());
+                        closure_sig.params.push(AbiParam::new(types::I64));
+                        closure_sig.params.push(AbiParam::new(types::I64));
+                        closure_sig.params.push(AbiParam::new(types::I64));
+                        closure_sig.returns.push(AbiParam::new(types::I64));
+            
+                        let lambda_func_id = sess.pipeline
+                            .module
+                            .declare_function(&lambda_name, Linkage::Local, &closure_sig)
+                            .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+                        sess.pipeline.register_lambda(lambda_func_id, lambda_name.clone());
+            
+                        let mut inner_ctx = Context::new();
+                        inner_ctx.func.signature = closure_sig;
+                        inner_ctx.func.name = UserFuncName::default();
+            
+                        let mut inner_fb_ctx = FunctionBuilderContext::new();
+                        let mut inner_builder = FunctionBuilder::new(&mut inner_ctx.func, &mut inner_fb_ctx);
+                        let inner_block = inner_builder.create_block();
+                        inner_builder.append_block_params_for_function_params(inner_block);
+                        inner_builder.switch_to_block(inner_block);
+                        inner_builder.seal_block(inner_block);
+            
+                        let inner_vmctx = inner_builder.block_params(inner_block)[0];
+                        let inner_self = inner_builder.block_params(inner_block)[1];
+                        let inner_arg = inner_builder.block_params(inner_block)[2];
+            
+                        inner_builder.declare_value_needs_stack_map(inner_self);
+                        inner_builder.declare_value_needs_stack_map(inner_arg);
+            
+                        let mut inner_gc_sig = Signature::new(sess.pipeline.isa.default_call_conv());
+                        inner_gc_sig.params.push(AbiParam::new(types::I64));
+                        let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
+            
+                        let inner_oom_func = {
+                            let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
+                            sig.returns.push(AbiParam::new(types::I64));
+                            let func_id = sess.pipeline
+                                .module
+                                .declare_function("runtime_oom", Linkage::Import, &sig)
+                                .map_err(|e| EmitError::CraneliftError(format!("declare runtime_oom: {e}")))?;
+                            sess.pipeline
+                                .module
+                                .declare_func_in_func(func_id, inner_builder.func)
+                        };
+            
+                        let mut inner_emit = EmitContext::new(self.prefix.clone());
+                        inner_emit.lambda_counter = self.lambda_counter;
+                        inner_emit.in_tail_position = true; // lambda body is in tail position
+                        inner_emit
+                            .env
+                            .insert(lam_binder, SsaVal::HeapPtr(inner_arg));
+            
+                        // Load captures by position
+                        for (i, var_id) in sorted_fvs.iter().enumerate() {
+                            let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
+                            let val =
+                                inner_builder
+                                    .ins()
+                                    .load(types::I64, MemFlags::trusted(), inner_self, offset);
+                            inner_builder.declare_value_needs_stack_map(val);
+                            inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
+                        }
+            
+                        let body_root = lam_body_tree.nodes.len() - 1;
+                        let mut inner_sess = EmitSession {
+                            pipeline: sess.pipeline,
+                            vmctx: inner_vmctx,
+                            gc_sig: inner_gc_sig_ref,
+                            oom_func: inner_oom_func,
+                            tree: &lam_body_tree,
+                        };
+                        let body_result = inner_emit.emit_node(
+                            &mut inner_sess,
+                            &mut inner_builder,
+                            body_root,
+                        )?;
+                        let ret_val = ensure_heap_ptr(
+                            &mut inner_builder,
+                            inner_vmctx,
+                            inner_gc_sig_ref,
+                            inner_oom_func,
+                            body_result,
+                        );
+            
+                        inner_builder.ins().return_(&[ret_val]);
+                        inner_builder.finalize();
+            
+                        self.lambda_counter = inner_emit.lambda_counter;
+            
+                        sess.pipeline.define_function(lambda_func_id, &mut inner_ctx)?;
+            
+                        let func_ref = sess.pipeline
+                            .module
+                            .declare_func_in_func(lambda_func_id, builder.func);
             let code_ptr = builder.ins().func_addr(types::I64, func_ref);
             builder.ins().store(
                 MemFlags::trusted(),
@@ -1820,7 +1804,7 @@ impl EmitContext {
             for (i, var_id) in sorted_fvs.iter().enumerate() {
                 let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
                 if let Some(ssaval) = self.env.get(var_id) {
-                    let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
+                    let cap_val = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, *ssaval);
                     builder
                         .ins()
                         .store(MemFlags::trusted(), cap_val, closure_ptr, offset);
@@ -1848,21 +1832,21 @@ impl EmitContext {
             } = pa
             {
                 let needs_simple = field_indices.iter().any(|&f_idx| {
-                    matches!(&tree.nodes[f_idx], CoreFrame::Var(v) if simple_binder_set.contains(v))
+                    matches!(&sess.tree.nodes[f_idx], CoreFrame::Var(v) if simple_binder_set.contains(&v))
                 });
                 if needs_simple {
                     deferred_cons.push((*binder, *ptr, field_indices.clone()));
                     deferred_con_binders.insert(*binder);
                 } else {
                     for (i, &f_idx) in field_indices.iter().enumerate() {
-                        let field_val = if is_trivial_field(f_idx, tree) {
+                        let field_val = if is_trivial_field(f_idx, sess.tree) {
                             let val = emit_subtree(
-                                self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                                self, sess, builder, f_idx,
                             )?;
-                            ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
+                            ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, val)
                         } else {
                             let thunk_val = emit_thunk(
-                                self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                                self, sess, builder, f_idx,
                             )?;
                             thunk_val.value()
                         };
@@ -1885,7 +1869,7 @@ impl EmitContext {
             let mut direct_deps: std::collections::HashMap<VarId, Vec<VarId>> =
                 std::collections::HashMap::with_capacity(bindings.len());
             for (binder, rhs_idx) in bindings {
-                let fvs = tidepool_repr::free_vars::free_vars(&tree.extract_subtree(*rhs_idx));
+                let fvs = tidepool_repr::free_vars::free_vars(&sess.tree.extract_subtree(*rhs_idx));
                 direct_deps.insert(*binder, fvs.into_iter().collect());
             }
 
@@ -1943,7 +1927,7 @@ impl EmitContext {
             let deps: std::collections::HashSet<VarId> = field_indices
                 .iter()
                 .filter_map(|&f_idx| {
-                    if let CoreFrame::Var(v) = &tree.nodes[f_idx] {
+                    if let CoreFrame::Var(v) = &sess.tree.nodes[f_idx] {
                         if simple_binder_set.contains(v) {
                             return Some(*v);
                         }
@@ -1973,8 +1957,8 @@ impl EmitContext {
         work.push(EmitWork::SetTailPosition(saved_tail));
 
         for (binder, rhs_idx) in deferred_simple.iter().rev() {
-            if Self::rhs_is_error_call(tree, *rhs_idx) {
-                let poison_addr = self.emit_error_poison(tree, *rhs_idx);
+            if Self::rhs_is_error_call(sess.tree, *rhs_idx) {
+                let poison_addr = self.emit_error_poison(sess.tree, *rhs_idx);
                 let poison_val = builder.ins().iconst(types::I64, poison_addr);
                 self.trace_scope(&format!("defer error LetRec(deferred) {:?}", binder));
                 self.env.insert(*binder, SsaVal::HeapPtr(poison_val));
@@ -1983,7 +1967,7 @@ impl EmitContext {
                 // capture slots stay zero-initialized → SIGSEGV instead of
                 // clean poison closure invocation.
                 self.letrec_post_simple_step(
-                    builder, vmctx, gc_sig, oom_func, tree, binder, state_idx, pipeline,
+                    sess, builder, binder, state_idx,
                 )?;
             } else {
                 let refs_deferred_con = !self.letrec_states[state_idx]
@@ -1998,7 +1982,7 @@ impl EmitContext {
                 // current env. Sibling deferred simple bindings not yet in env
                 // would be dropped from captures → unresolved var at runtime.
                 let can_thunkify = if refs_deferred_con {
-                    let body_tree = tree.extract_subtree(*rhs_idx);
+                    let body_tree = sess.tree.extract_subtree(*rhs_idx);
                     let fvs = tidepool_repr::free_vars::free_vars(&body_tree);
                     !fvs.iter().any(|v| {
                         !self.env.contains_key(v) && deferred_simple.iter().any(|(b, _)| b == v)
@@ -2010,12 +1994,12 @@ impl EmitContext {
                     // Thunked: compile as thunk inline (no work stack needed,
                     // emit_thunk creates a new EmitContext — bounded recursion).
                     let thunk_val = emit_thunk(
-                        self, pipeline, builder, vmctx, gc_sig, oom_func, tree, *rhs_idx,
+                        self, sess, builder, *rhs_idx,
                     )?;
                     self.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
                     self.env.insert(*binder, thunk_val);
                     self.letrec_post_simple_step(
-                        builder, vmctx, gc_sig, oom_func, tree, binder, state_idx, pipeline,
+                        sess, builder, binder, state_idx,
                     )?;
                 } else {
                     // Non-thunked: push eval + post-step onto work stack
@@ -2038,14 +2022,10 @@ impl EmitContext {
     #[allow(clippy::too_many_arguments)]
     fn letrec_post_simple_step(
         &mut self,
+        sess: &mut EmitSession,
         builder: &mut FunctionBuilder,
-        vmctx: Value,
-        gc_sig: ir::SigRef,
-        oom_func: ir::FuncRef,
-        tree: &CoreExpr,
         binder: &VarId,
         state_idx: usize,
-        pipeline: &mut CodegenPipeline,
     ) -> Result<(), EmitError> {
         // Fill pending captures — take updates out to avoid borrowing self
         let updates = self.letrec_states[state_idx]
@@ -2053,7 +2033,7 @@ impl EmitContext {
             .remove(binder);
         if let Some(updates) = updates {
             if let Some(ssaval) = self.env.get(binder) {
-                let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
+                let cap_val = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, *ssaval);
                 for (closure_ptr, offset) in updates {
                     builder
                         .ins()
@@ -2070,14 +2050,14 @@ impl EmitContext {
             dep.remaining_deps.remove(binder);
             if dep.remaining_deps.is_empty() && !dep.field_indices.is_empty() {
                 for (i, &f_idx) in dep.field_indices.iter().enumerate() {
-                    let field_val = if is_trivial_field(f_idx, tree) {
+                    let field_val = if is_trivial_field(f_idx, sess.tree) {
                         let val = emit_subtree(
-                            self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                            self, sess, builder, f_idx,
                         )?;
-                        ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
+                        ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, val)
                     } else {
                         let thunk_val = emit_thunk(
-                            self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                            self, sess, builder, f_idx,
                         )?;
                         thunk_val.value()
                     };
@@ -2100,13 +2080,9 @@ impl EmitContext {
     #[allow(clippy::too_many_arguments)]
     fn letrec_finish_phases(
         &mut self,
+        sess: &mut EmitSession,
         builder: &mut FunctionBuilder,
-        vmctx: Value,
-        gc_sig: ir::SigRef,
-        oom_func: ir::FuncRef,
-        tree: &CoreExpr,
         state_idx: usize,
-        pipeline: &mut CodegenPipeline,
     ) -> Result<(), EmitError> {
         // Phase 3a': Fill any remaining closure capture slots.
         let pending = std::mem::take(&mut self.letrec_states[state_idx].pending_capture_updates);
@@ -2117,7 +2093,7 @@ impl EmitContext {
                     "LetRec Phase 3a' capture fill: not in env after Phase 3c".into(),
                 )
             })?;
-            let cap_val = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, *ssaval);
+            let cap_val = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, *ssaval);
             for (closure_ptr, offset) in updates {
                 builder
                     .ins()
@@ -2129,14 +2105,14 @@ impl EmitContext {
         let con_deps = std::mem::take(&mut self.letrec_states[state_idx].deferred_con_deps);
         for dep in &con_deps {
             for (i, &f_idx) in dep.field_indices.iter().enumerate() {
-                let field_val = if is_trivial_field(f_idx, tree) {
+                let field_val = if is_trivial_field(f_idx, sess.tree) {
                     let val = emit_subtree(
-                        self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                        self, sess, builder, f_idx,
                     )?;
-                    ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, val)
+                    ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, val)
                 } else {
                     let thunk_val = emit_thunk(
-                        self, pipeline, builder, vmctx, gc_sig, oom_func, tree, f_idx,
+                        self, sess, builder, f_idx,
                     )?;
                     thunk_val.value()
                 };

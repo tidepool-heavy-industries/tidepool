@@ -1,23 +1,18 @@
 use crate::emit::expr::ensure_heap_ptr;
 use crate::emit::*;
-use crate::pipeline::CodegenPipeline;
 use cranelift_codegen::ir::{
     self, condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlags, Signature, Value,
 };
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
-use tidepool_repr::{Alt, AltCon, CoreExpr, Literal, VarId};
+use tidepool_repr::{Alt, AltCon, Literal, VarId};
 
 /// Emit Case dispatch. The scrutinee has already been evaluated (stack-safe).
 #[allow(clippy::too_many_arguments)]
 pub fn emit_case(
     ctx: &mut EmitContext,
-    pipeline: &mut CodegenPipeline,
+    sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
-    vmctx: Value,
-    gc_sig: ir::SigRef,
-    oom_func: ir::FuncRef,
-    tree: &CoreExpr,
     scrut: SsaVal,
     binder: &VarId,
     alts: &[Alt<usize>],
@@ -49,12 +44,8 @@ pub fn emit_case(
     if !data_alts.is_empty() {
         emit_data_dispatch(
             ctx,
-            pipeline,
+            sess,
             builder,
-            vmctx,
-            gc_sig,
-            oom_func,
-            tree,
             scrut_ptr,
             &data_alts,
             default_alt,
@@ -63,12 +54,8 @@ pub fn emit_case(
     } else if !lit_alts.is_empty() {
         emit_lit_dispatch(
             ctx,
-            pipeline,
+            sess,
             builder,
-            vmctx,
-            gc_sig,
-            oom_func,
-            tree,
             scrut,
             &lit_alts,
             default_alt,
@@ -76,14 +63,14 @@ pub fn emit_case(
         )?;
     } else if let Some(alt) = default_alt {
         // Default only
-        let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
-        let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
+        let result = ctx.emit_node(sess, builder, alt.body)?;
+        let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
         builder
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
         // No alts? Call runtime_case_trap to handle pending errors gracefully.
-        emit_case_trap(pipeline, builder, scrut_ptr, &[], merge_block)?;
+        emit_case_trap(sess, builder, scrut_ptr, &[], merge_block)?;
     }
 
     // Seal merge block
@@ -104,12 +91,8 @@ pub fn emit_case(
 #[allow(clippy::too_many_arguments)]
 fn emit_data_dispatch(
     ctx: &mut EmitContext,
-    pipeline: &mut CodegenPipeline,
+    sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
-    vmctx: Value,
-    gc_sig: ir::SigRef,
-    oom_func: ir::FuncRef,
-    tree: &CoreExpr,
     initial_scrut_ptr: Value,
     data_alts: &[&Alt<usize>],
     default_alt: Option<&Alt<usize>>,
@@ -137,19 +120,19 @@ fn emit_data_dispatch(
     builder.switch_to_block(force_block);
     builder.seal_block(force_block);
 
-    let force_fn = pipeline
+    let force_fn = sess.pipeline
         .module
         .declare_function("heap_force", Linkage::Import, &{
-            let mut sig = Signature::new(pipeline.isa.default_call_conv());
+            let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
             sig.params.push(AbiParam::new(types::I64)); // vmctx
             sig.params.push(AbiParam::new(types::I64)); // thunk
             sig.returns.push(AbiParam::new(types::I64)); // result
             sig
         })
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-    let force_ref = pipeline.module.declare_func_in_func(force_fn, builder.func);
+    let force_ref = sess.pipeline.module.declare_func_in_func(force_fn, builder.func);
 
-    let call = builder.ins().call(force_ref, &[vmctx, initial_scrut_ptr]);
+    let call = builder.ins().call(force_ref, &[sess.vmctx, initial_scrut_ptr]);
     let force_result = builder.inst_results(call)[0];
     builder.declare_value_needs_stack_map(force_result);
     builder
@@ -203,8 +186,8 @@ fn emit_data_dispatch(
             }
 
             let result =
-                ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
-            let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
+                ctx.emit_node(sess, builder, alt.body)?;
+            let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
             builder
                 .ins()
                 .jump(merge_block, &[BlockArg::Value(result_ptr)]);
@@ -223,13 +206,13 @@ fn emit_data_dispatch(
     // Default or trap
     if let Some(alt) = default_alt {
         ctx.declare_env(builder);
-        let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
-        let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
+        let result = ctx.emit_node(sess, builder, alt.body)?;
+        let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
         builder
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
-        emit_case_trap(pipeline, builder, scrut_ptr, data_alts, merge_block)?;
+        emit_case_trap(sess, builder, scrut_ptr, data_alts, merge_block)?;
     }
 
     Ok(())
@@ -238,7 +221,7 @@ fn emit_data_dispatch(
 /// Emit a call to `runtime_case_trap` instead of a bare `trap user2`.
 /// Passes the scrutinee pointer and expected alt tags for diagnostic output.
 fn emit_case_trap(
-    pipeline: &mut CodegenPipeline,
+    sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
     scrut_ptr: Value,
     data_alts: &[&Alt<usize>],
@@ -269,10 +252,10 @@ fn emit_case_trap(
     }
     let tags_addr = builder.ins().stack_addr(types::I64, ss, 0);
 
-    let trap_fn = pipeline
+    let trap_fn = sess.pipeline
         .module
         .declare_function("runtime_case_trap", Linkage::Import, &{
-            let mut sig = Signature::new(pipeline.isa.default_call_conv());
+            let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
             sig.params.push(AbiParam::new(types::I64)); // scrut_ptr
             sig.params.push(AbiParam::new(types::I64)); // num_alts
             sig.params.push(AbiParam::new(types::I64)); // alt_tags
@@ -280,7 +263,7 @@ fn emit_case_trap(
             sig
         })
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-    let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
+    let trap_ref = sess.pipeline.module.declare_func_in_func(trap_fn, builder.func);
     let num_alts_val = builder.ins().iconst(types::I64, num_alts as i64);
     let call = builder
         .ins()
@@ -293,12 +276,8 @@ fn emit_case_trap(
 #[allow(clippy::too_many_arguments)]
 fn emit_lit_dispatch(
     ctx: &mut EmitContext,
-    pipeline: &mut CodegenPipeline,
+    sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
-    vmctx: Value,
-    gc_sig: ir::SigRef,
-    oom_func: ir::FuncRef,
-    tree: &CoreExpr,
     scrut: SsaVal,
     lit_alts: &[&Alt<usize>],
     default_alt: Option<&Alt<usize>>,
@@ -379,8 +358,8 @@ fn emit_lit_dispatch(
         builder.switch_to_block(alt_block);
         builder.seal_block(alt_block);
         ctx.declare_env(builder);
-        let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
-        let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
+        let result = ctx.emit_node(sess, builder, alt.body)?;
+        let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
         builder
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
@@ -393,15 +372,15 @@ fn emit_lit_dispatch(
     // Default or trap
     if let Some(alt) = default_alt {
         ctx.declare_env(builder);
-        let result = ctx.emit_node(pipeline, builder, vmctx, gc_sig, oom_func, tree, alt.body)?;
-        let result_ptr = ensure_heap_ptr(builder, vmctx, gc_sig, oom_func, result);
+        let result = ctx.emit_node(sess, builder, alt.body)?;
+        let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
         builder
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
         // No alts matched.
         // We pass empty data_alts since these are lit alts.
-        emit_case_trap(pipeline, builder, scrut_value, &[], merge_block)?;
+        emit_case_trap(sess, builder, scrut_value, &[], merge_block)?;
     }
 
     Ok(())
