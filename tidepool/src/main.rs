@@ -70,7 +70,16 @@ impl KvHandler {
     fn new(path: PathBuf) -> Self {
         let store = if path.exists() {
             match std::fs::read_to_string(&path) {
-                Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+                Ok(contents) => match serde_json::from_str(&contents) {
+                    Ok(map) => map,
+                    Err(e) => {
+                        eprintln!(
+                            "[tidepool] WARNING: KV store at {:?} contains invalid JSON ({}), starting fresh",
+                            path, e
+                        );
+                        HashMap::new()
+                    }
+                },
                 Err(_) => HashMap::new(),
             }
         } else {
@@ -250,10 +259,24 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                 if pattern.contains("..") {
                     return cx.respond(Vec::<String>::new());
                 }
+                if pattern.starts_with('/') || pattern.starts_with('\\') {
+                    return Err(EffectError::Handler(
+                        "absolute glob patterns not allowed".to_string(),
+                    ));
+                }
                 let full_pattern = self.root.join(&pattern).to_string_lossy().to_string();
+                let canonical_root = self
+                    .root
+                    .canonicalize()
+                    .unwrap_or_else(|_| self.root.clone());
                 let paths: Vec<String> = glob::glob(&full_pattern)
                     .map_err(|e| EffectError::Handler(format!("invalid glob: {}", e)))?
                     .filter_map(|e| e.ok())
+                    .filter(|p| {
+                        p.canonicalize()
+                            .map(|cp| cp.starts_with(&canonical_root))
+                            .unwrap_or(false)
+                    })
                     .filter_map(|p| {
                         p.strip_prefix(&self.root)
                             .ok()

@@ -81,23 +81,25 @@ pub(crate) fn cache_store(key: &str, expr_bytes: &[u8], meta_bytes: &[u8]) {
         return;
     }
 
-    let expr_path = dir.join(format!("{}.cbor", key));
-    let meta_path = dir.join(format!("{}.meta.cbor", key));
+    // Write both to temp files first
+    let tmp_expr = dir.join(format!("{}.cbor.tmp", key));
+    let tmp_meta = dir.join(format!("{}.meta.cbor.tmp", key));
 
-    let _ = atomic_write(&expr_path, expr_bytes);
-    let _ = atomic_write(&meta_path, meta_bytes);
-}
+    if fs::write(&tmp_expr, expr_bytes).is_err() {
+        return;
+    }
+    if fs::write(&tmp_meta, meta_bytes).is_err() {
+        let _ = fs::remove_file(&tmp_expr);
+        return;
+    }
 
-/// Writes data to a temporary file then renames it to the target path
-/// to ensure that readers never see partially written or corrupted files.
-fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("no parent dir"))?;
-    let mut temp = tempfile::NamedTempFile::new_in(dir)?;
-    use std::io::Write;
-    temp.write_all(data)?;
-    temp.persist(path).map(|_| ()).map_err(|e| e.error)
+    // Atomic rename
+    let final_expr = dir.join(format!("{}.cbor", key));
+    let final_meta = dir.join(format!("{}.meta.cbor", key));
+
+    if fs::rename(&tmp_expr, &final_expr).is_ok() {
+        let _ = fs::rename(&tmp_meta, &final_meta);
+    }
 }
 
 #[cfg(test)]
