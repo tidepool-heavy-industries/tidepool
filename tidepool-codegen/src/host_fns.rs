@@ -866,7 +866,7 @@ pub extern "C" fn runtime_new_byte_array(size: i64) -> i64 {
                 "negative size in byte array allocation".to_string(),
             ));
         });
-        return 0i64;
+        return error_poison_ptr() as i64;
     }
     let total = 8usize.saturating_add(size as usize);
     let layout =
@@ -931,8 +931,12 @@ pub extern "C" fn runtime_set_byte_array(ba: i64, off: i64, len: i64, val: i64) 
 
 /// Shrink a mutable byte array to `new_size` bytes (just updates the length prefix).
 pub extern "C" fn runtime_shrink_byte_array(ba: i64, new_size: i64) {
-    if new_size < 0 {
+    if new_size < 0 || (ba as u64) < MIN_VALID_ADDR {
         return;
+    }
+    let old_size = unsafe { *(ba as *const u64) } as i64;
+    if new_size > old_size {
+        return; // only allow shrink, not grow
     }
     // SAFETY: ba is a valid byte array pointer from JIT code. Writing the length
     // prefix at offset 0 with a smaller value (logical shrink, no reallocation).
@@ -950,10 +954,13 @@ pub extern "C" fn runtime_resize_byte_array(ba: i64, new_size: i64) -> i64 {
                 "negative size in byte array allocation".to_string(),
             ));
         });
-        return 0i64;
+        return error_poison_ptr() as i64;
+    }
+    if (ba as u64) < MIN_VALID_ADDR {
+        return error_poison_ptr() as i64;
     }
     let old_ptr = ba as *mut u8;
-    // SAFETY: old_ptr is a valid byte array with a u64 length prefix at offset 0.
+    // SAFETY: old_ptr passed the validity check above and has a u64 length prefix at offset 0.
     let old_size = unsafe { *(old_ptr as *const u64) } as usize;
     let new_size = new_size as usize;
 
@@ -1080,7 +1087,7 @@ pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
                 "negative length in array allocation".to_string(),
             ));
         });
-        return 0i64;
+        return error_poison_ptr() as i64;
     }
     let n = len as usize;
     let slot_bytes = match n.checked_mul(8) {
@@ -1089,7 +1096,7 @@ pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
             RUNTIME_ERROR.with(|cell| {
                 *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg("array size overflow".to_string()));
             });
-            return 0i64;
+            return error_poison_ptr() as i64;
         }
     };
     let total = match 8usize.checked_add(slot_bytes) {
@@ -1098,7 +1105,7 @@ pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
             RUNTIME_ERROR.with(|cell| {
                 *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg("array size overflow".to_string()));
             });
-            return 0i64;
+            return error_poison_ptr() as i64;
         }
     };
     let layout =
@@ -1124,13 +1131,16 @@ pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
 
 /// Clone a sub-range of a boxed array: src[off..off+len].
 pub extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64) -> i64 {
+    if (src as u64) < MIN_VALID_ADDR {
+        return error_poison_ptr() as i64;
+    }
     if len < 0 {
         RUNTIME_ERROR.with(|cell| {
             *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
                 "negative length in array allocation".to_string(),
             ));
         });
-        return 0i64;
+        return error_poison_ptr() as i64;
     }
     let n = len as usize;
     let slot_bytes = match n.checked_mul(8) {
@@ -1139,7 +1149,7 @@ pub extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64) -> i64
             RUNTIME_ERROR.with(|cell| {
                 *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg("array size overflow".to_string()));
             });
-            return 0i64;
+            return error_poison_ptr() as i64;
         }
     };
     let total = match 8usize.checked_add(slot_bytes) {
@@ -1148,14 +1158,14 @@ pub extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64) -> i64
             RUNTIME_ERROR.with(|cell| {
                 *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg("array size overflow".to_string()));
             });
-            return 0i64;
+            return error_poison_ptr() as i64;
         }
     };
 
     // Before the pointer arithmetic, validate offsets against source
     let src_n = unsafe { *(src as *const u64) } as usize;
     if off < 0 || (off as usize).saturating_add(n) > src_n {
-        return 0i64; // silently return
+        return error_poison_ptr() as i64; // silently return
     }
 
     let layout =
@@ -1184,12 +1194,14 @@ pub extern "C" fn runtime_copy_boxed_array(
     dest_off: i64,
     len: i64,
 ) {
-    // Before the pointer arithmetic, validate offsets
+    if (src as u64) < MIN_VALID_ADDR || (dest as u64) < MIN_VALID_ADDR {
+        return;
+    }
+    if src_off < 0 || dest_off < 0 || len < 0 {
+        return;
+    }
     let src_n = unsafe { *(src as *const u64) } as usize;
     let dest_n = unsafe { *(dest as *const u64) } as usize;
-    if src_off < 0 || dest_off < 0 || len < 0 {
-        return; // silently return
-    }
     let src_off = src_off as usize;
     let dest_off = dest_off as usize;
     let len = len as usize;
@@ -1209,8 +1221,12 @@ pub extern "C" fn runtime_copy_boxed_array(
 
 /// Shrink a boxed array (just update the length field).
 pub extern "C" fn runtime_shrink_boxed_array(arr: i64, new_len: i64) {
-    if new_len < 0 {
+    if new_len < 0 || (arr as u64) < MIN_VALID_ADDR {
         return;
+    }
+    let old_len = unsafe { *(arr as *const u64) } as i64;
+    if new_len > old_len {
+        return; // only allow shrink, not grow
     }
     // SAFETY: arr is a valid boxed array pointer from JIT code. Writing the length
     // prefix at offset 0 with a smaller value (logical shrink).
@@ -1222,12 +1238,12 @@ pub extern "C" fn runtime_shrink_boxed_array(arr: i64, new_len: i64) {
 /// CAS on a boxed array slot: compare-and-swap arr[idx].
 /// Returns the old value. If old == expected, writes new.
 pub extern "C" fn runtime_cas_boxed_array(arr: i64, idx: i64, expected: i64, new: i64) -> i64 {
-    if idx < 0 {
-        return 0;
+    if (arr as u64) < MIN_VALID_ADDR || idx < 0 {
+        return error_poison_ptr() as i64;
     }
     let n = unsafe { *(arr as *const u64) } as usize;
     if idx as usize >= n {
-        return 0;
+        return error_poison_ptr() as i64;
     }
     // SAFETY: arr is a valid boxed array pointer from JIT code. idx is within bounds.
     // Reading and conditionally writing a single pointer-sized slot.
