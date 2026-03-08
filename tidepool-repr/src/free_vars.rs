@@ -261,4 +261,57 @@ mod tests {
         expected.insert(x);
         assert_eq!(free_vars(&expr), expected);
     }
+
+    #[test]
+    fn test_free_vars_join_spec() {
+        // join j(x) = x + y in jump j(z)
+        // Free vars should include y and z but NOT x (bound by join param)
+        let y = VarId(1);
+        let x = VarId(2);
+        let z = VarId(3);
+        let j = JoinId(1);
+        let tree_expr = tree(vec![
+            CoreFrame::Var(x),           // 0: x (in rhs)
+            CoreFrame::Var(y),           // 1: y (in rhs)
+            CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![0, 1] }, // 2: x + y (rhs)
+            CoreFrame::Var(z),           // 3: z (jump arg)
+            CoreFrame::Jump { label: j, args: vec![3] }, // 4: jump j(z) (body)
+            CoreFrame::Join { label: j, params: vec![x], rhs: 2, body: 4 }, // 5: root
+        ]);
+        let fvs = free_vars(&tree_expr);
+        assert!(fvs.contains(&y), "y should be free");
+        assert!(fvs.contains(&z), "z should be free");
+        assert!(!fvs.contains(&x), "x should be bound by join param");
+    }
+
+    #[test]
+    fn test_free_vars_primop_free() {
+        // x + y where both are free
+        let x = VarId(1);
+        let y = VarId(2);
+        let tree_expr = tree(vec![
+            CoreFrame::Var(x),
+            CoreFrame::Var(y),
+            CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![0, 1] },
+        ]);
+        let fvs = free_vars(&tree_expr);
+        assert!(fvs.contains(&x));
+        assert!(fvs.contains(&y));
+        assert_eq!(fvs.len(), 2);
+    }
+
+    #[test]
+    fn test_free_vars_con_fields_spec() {
+        // Con(tag=0, [x, y]) — both x and y should be free
+        let x = VarId(1);
+        let y = VarId(2);
+        let tree_expr = tree(vec![
+            CoreFrame::Var(x),
+            CoreFrame::Var(y),
+            CoreFrame::Con { tag: DataConId(0), fields: vec![0, 1] },
+        ]);
+        let fvs = free_vars(&tree_expr);
+        assert!(fvs.contains(&x));
+        assert!(fvs.contains(&y));
+    }
 }
