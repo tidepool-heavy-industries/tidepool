@@ -21,6 +21,7 @@ use tokio::io::{stdin, stdout};
 use tokio::time::{timeout, Duration};
 
 const EVAL_TIMEOUT_SECS: u64 = 120;
+const MAX_CONCURRENT_EVALS: usize = 4;
 
 // ---------------------------------------------------------------------------
 // Effect metadata — lives next to the handler, discovered via trait
@@ -1448,6 +1449,7 @@ pub struct TidepoolMcpServerImpl {
     effect_names: Vec<String>,
     continuations: Arc<std::sync::Mutex<HashMap<String, EvalSession>>>,
     next_cont_id: Arc<AtomicU64>,
+    eval_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl TidepoolMcpServerImpl {
@@ -1597,12 +1599,24 @@ impl TidepoolMcpServerImpl {
         let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel::<SessionMessage>();
         let (response_tx, response_rx) = std::sync::mpsc::channel::<String>();
 
+        let permit = self
+            .eval_semaphore
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                McpError::internal_error(
+                    "Server busy: too many concurrent evaluations. Please try again in a moment.",
+                    None,
+                )
+            })?;
+
         // Spawn eval thread — does NOT join; communicates via channels
         let thread_session_tx = session_tx;
         let _handle = std::thread::Builder::new()
             .name("tidepool-eval".into())
             .stack_size(32 * 1024 * 1024)
             .spawn(move || {
+                let _permit = permit;
                 // Install signal handlers so SIGILL/SIGSEGV from JIT code
                 // are caught via sigsetjmp/siglongjmp instead of killing
                 // the whole server process.
@@ -1836,6 +1850,7 @@ where
                 effect_names,
                 continuations: Arc::new(std::sync::Mutex::new(HashMap::new())),
                 next_cont_id: Arc::new(AtomicU64::new(1)),
+                eval_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_EVALS)),
             },
             _phantom: PhantomData,
         }
@@ -2606,6 +2621,7 @@ mod tests {
             effect_names: Vec::new(),
             continuations: Arc::new(std::sync::Mutex::new(HashMap::new())),
             next_cont_id: Arc::new(AtomicU64::new(1)),
+            eval_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_EVALS)),
         }
     }
 }
