@@ -860,7 +860,15 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) -> *mut u8 {
 /// Layout: [u64 length][u8 bytes...]
 /// Returns a raw pointer to the allocation (caller stores in Lit value slot).
 pub extern "C" fn runtime_new_byte_array(size: i64) -> i64 {
-    let total = 8 + size as usize;
+    if size < 0 {
+        RUNTIME_ERROR.with(|cell| {
+            *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
+                "negative size in byte array allocation".to_string(),
+            ));
+        });
+        return error_poison_ptr() as i64;
+    }
+    let total = 8usize.saturating_add(size as usize);
     let layout =
         std::alloc::Layout::from_size_align(total, 8).unwrap_or_else(|_| std::process::abort());
     // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
@@ -882,19 +890,13 @@ pub extern "C" fn runtime_copy_addr_to_byte_array(src: i64, dest_ba: i64, dest_o
     {
         return;
     }
+    if dest_off < 0 || len < 0 {
+        return;
+    }
     // SAFETY: dest_ba passed the null-guard above and points to a byte array
     // with a u64 length prefix at offset 0.
     let dest_size = unsafe { *(dest_ba as *const u64) } as usize;
-    if (dest_off as usize + len as usize) > dest_size {
-        let msg = format!(
-            "[BUG] runtime_copy_addr_to_byte_array: out of bounds! size={} off={} len={}",
-            dest_size, dest_off, len
-        );
-        eprintln!("{}", msg);
-        push_diagnostic(msg);
-        RUNTIME_ERROR.with(|cell| {
-            *cell.borrow_mut() = Some(RuntimeError::Undefined);
-        });
+    if (dest_off as usize).saturating_add(len as usize) > dest_size {
         return;
     }
     let src_ptr = src as *const u8;
@@ -912,9 +914,16 @@ pub extern "C" fn runtime_set_byte_array(ba: i64, off: i64, len: i64, val: i64) 
     if check_ptr_invalid(ba as *const u8, "runtime_set_byte_array") {
         return;
     }
+    if off < 0 || len < 0 {
+        return;
+    }
+    let ba_size = unsafe { *(ba as *const u64) } as usize;
+    if (off as usize).saturating_add(len as usize) > ba_size {
+        return;
+    }
     // SAFETY: ba passed the null-guard above; offsetting past the 8-byte length prefix + off.
     let ptr = unsafe { (ba as *mut u8).add(8 + off as usize) };
-    // SAFETY: ptr is within the byte array allocation. Caller (JIT) ensures bounds.
+    // SAFETY: ptr is within the byte array allocation.
     unsafe {
         std::ptr::write_bytes(ptr, val as u8, len as usize);
     }
@@ -922,6 +931,13 @@ pub extern "C" fn runtime_set_byte_array(ba: i64, off: i64, len: i64, val: i64) 
 
 /// Shrink a mutable byte array to `new_size` bytes (just updates the length prefix).
 pub extern "C" fn runtime_shrink_byte_array(ba: i64, new_size: i64) {
+    if new_size < 0 || (ba as u64) < MIN_VALID_ADDR {
+        return;
+    }
+    let old_size = unsafe { *(ba as *const u64) } as i64;
+    if new_size > old_size {
+        return; // only allow shrink, not grow
+    }
     // SAFETY: ba is a valid byte array pointer from JIT code. Writing the length
     // prefix at offset 0 with a smaller value (logical shrink, no reallocation).
     unsafe {
@@ -932,12 +948,23 @@ pub extern "C" fn runtime_shrink_byte_array(ba: i64, new_size: i64) {
 /// Resize a mutable byte array. Allocates a new buffer, copies existing data,
 /// zeroes any new bytes, and frees the old buffer. Returns the new pointer.
 pub extern "C" fn runtime_resize_byte_array(ba: i64, new_size: i64) -> i64 {
+    if new_size < 0 {
+        RUNTIME_ERROR.with(|cell| {
+            *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
+                "negative size in byte array allocation".to_string(),
+            ));
+        });
+        return error_poison_ptr() as i64;
+    }
+    if (ba as u64) < MIN_VALID_ADDR {
+        return error_poison_ptr() as i64;
+    }
     let old_ptr = ba as *mut u8;
-    // SAFETY: old_ptr is a valid byte array with a u64 length prefix at offset 0.
+    // SAFETY: old_ptr passed the validity check above and has a u64 length prefix at offset 0.
     let old_size = unsafe { *(old_ptr as *const u64) } as usize;
     let new_size = new_size as usize;
 
-    let new_total = 8 + new_size;
+    let new_total = 8usize.saturating_add(new_size);
     let new_layout =
         std::alloc::Layout::from_size_align(new_total, 8).unwrap_or_else(|_| std::process::abort());
     // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
@@ -985,14 +1012,27 @@ pub extern "C" fn runtime_copy_byte_array(
     {
         return;
     }
+    // Before the pointer arithmetic, validate offsets
+    let src_size = unsafe { *(src as *const u64) } as usize;
+    let dest_size = unsafe { *(dest as *const u64) } as usize;
+    if src_off < 0 || dest_off < 0 || len < 0 {
+        return; // silently return for negative offsets (matches GHC behavior)
+    }
+    let src_off = src_off as usize;
+    let dest_off = dest_off as usize;
+    let len = len as usize;
+    if src_off.saturating_add(len) > src_size || dest_off.saturating_add(len) > dest_size {
+        return; // out of bounds
+    }
+
     // SAFETY: src and dest passed the null-guard above. Offsetting past the 8-byte
-    // length prefix + the respective offsets. Caller (JIT) ensures bounds.
-    let src_ptr = unsafe { (src as *const u8).add(8 + src_off as usize) };
-    let dest_ptr = unsafe { (dest as *mut u8).add(8 + dest_off as usize) };
+    // length prefix + the respective offsets.
+    let src_ptr = unsafe { (src as *const u8).add(8 + src_off) };
+    let dest_ptr = unsafe { (dest as *mut u8).add(8 + dest_off) };
     // SAFETY: Uses copy (not copy_nonoverlapping) because src and dest may be the
-    // same array with overlapping ranges. Caller ensures len is within both arrays.
+    // same array with overlapping ranges.
     unsafe {
-        std::ptr::copy(src_ptr, dest_ptr, len as usize);
+        std::ptr::copy(src_ptr, dest_ptr, len);
     }
 }
 
@@ -1009,8 +1049,19 @@ pub extern "C" fn runtime_compare_byte_arrays(
     {
         return 0;
     }
+    if a_off < 0 || b_off < 0 || len < 0 {
+        return 0;
+    }
+    let a_size = unsafe { *(a as *const u64) } as usize;
+    let b_size = unsafe { *(b as *const u64) } as usize;
+    if (a_off as usize).saturating_add(len as usize) > a_size
+        || (b_off as usize).saturating_add(len as usize) > b_size
+    {
+        return 0;
+    }
+
     // SAFETY: a and b passed the null-guard above. Offsetting past the 8-byte length
-    // prefix + the respective offsets. Caller (JIT) ensures len bytes are within both arrays.
+    // prefix + the respective offsets.
     let a_ptr = unsafe { (a as *const u8).add(8 + a_off as usize) };
     let b_ptr = unsafe { (b as *const u8).add(8 + b_off as usize) };
     let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, len as usize) };
@@ -1030,8 +1081,33 @@ pub extern "C" fn runtime_compare_byte_arrays(
 /// Layout: [u64 length][ptr0][ptr1]...[ptrN-1]
 /// Each slot is 8 bytes (a heap pointer).
 pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
+    if len < 0 {
+        RUNTIME_ERROR.with(|cell| {
+            *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
+                "negative length in array allocation".to_string(),
+            ));
+        });
+        return error_poison_ptr() as i64;
+    }
     let n = len as usize;
-    let total = 8 + 8 * n;
+    let slot_bytes = match n.checked_mul(8) {
+        Some(v) => v,
+        None => {
+            RUNTIME_ERROR.with(|cell| {
+                *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg("array size overflow".to_string()));
+            });
+            return error_poison_ptr() as i64;
+        }
+    };
+    let total = match 8usize.checked_add(slot_bytes) {
+        Some(v) => v,
+        None => {
+            RUNTIME_ERROR.with(|cell| {
+                *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg("array size overflow".to_string()));
+            });
+            return error_poison_ptr() as i64;
+        }
+    };
     let layout =
         std::alloc::Layout::from_size_align(total, 8).unwrap_or_else(|_| std::process::abort());
     // SAFETY: alloc returns a valid allocation of the requested size.
@@ -1055,8 +1131,43 @@ pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
 
 /// Clone a sub-range of a boxed array: src[off..off+len].
 pub extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64) -> i64 {
+    if (src as u64) < MIN_VALID_ADDR {
+        return error_poison_ptr() as i64;
+    }
+    if len < 0 {
+        RUNTIME_ERROR.with(|cell| {
+            *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
+                "negative length in array allocation".to_string(),
+            ));
+        });
+        return error_poison_ptr() as i64;
+    }
     let n = len as usize;
-    let total = 8 + 8 * n;
+    let slot_bytes = match n.checked_mul(8) {
+        Some(v) => v,
+        None => {
+            RUNTIME_ERROR.with(|cell| {
+                *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg("array size overflow".to_string()));
+            });
+            return error_poison_ptr() as i64;
+        }
+    };
+    let total = match 8usize.checked_add(slot_bytes) {
+        Some(v) => v,
+        None => {
+            RUNTIME_ERROR.with(|cell| {
+                *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg("array size overflow".to_string()));
+            });
+            return error_poison_ptr() as i64;
+        }
+    };
+
+    // Before the pointer arithmetic, validate offsets against source
+    let src_n = unsafe { *(src as *const u64) } as usize;
+    if off < 0 || (off as usize).saturating_add(n) > src_n {
+        return error_poison_ptr() as i64; // silently return
+    }
+
     let layout =
         std::alloc::Layout::from_size_align(total, 8).unwrap_or_else(|_| std::process::abort());
     // SAFETY: alloc returns a valid allocation of the requested size.
@@ -1083,18 +1194,40 @@ pub extern "C" fn runtime_copy_boxed_array(
     dest_off: i64,
     len: i64,
 ) {
+    if (src as u64) < MIN_VALID_ADDR || (dest as u64) < MIN_VALID_ADDR {
+        return;
+    }
+    if src_off < 0 || dest_off < 0 || len < 0 {
+        return;
+    }
+    let src_n = unsafe { *(src as *const u64) } as usize;
+    let dest_n = unsafe { *(dest as *const u64) } as usize;
+    let src_off = src_off as usize;
+    let dest_off = dest_off as usize;
+    let len = len as usize;
+    if src_off.saturating_add(len) > src_n || dest_off.saturating_add(len) > dest_n {
+        return; // out of bounds
+    }
+
     // SAFETY: src and dest are valid boxed array pointers from JIT code. Offsetting
     // past the 8-byte length prefix by the slot-sized offsets. Uses copy (not
     // copy_nonoverlapping) because src and dest may be the same array.
-    let src_ptr = unsafe { (src as *const u8).add(8 + 8 * src_off as usize) };
-    let dest_ptr = unsafe { (dest as *mut u8).add(8 + 8 * dest_off as usize) };
+    let src_ptr = unsafe { (src as *const u8).add(8 + 8 * src_off) };
+    let dest_ptr = unsafe { (dest as *mut u8).add(8 + 8 * dest_off) };
     unsafe {
-        std::ptr::copy(src_ptr, dest_ptr, 8 * len as usize);
+        std::ptr::copy(src_ptr, dest_ptr, 8 * len);
     }
 }
 
 /// Shrink a boxed array (just update the length field).
 pub extern "C" fn runtime_shrink_boxed_array(arr: i64, new_len: i64) {
+    if new_len < 0 || (arr as u64) < MIN_VALID_ADDR {
+        return;
+    }
+    let old_len = unsafe { *(arr as *const u64) } as i64;
+    if new_len > old_len {
+        return; // only allow shrink, not grow
+    }
     // SAFETY: arr is a valid boxed array pointer from JIT code. Writing the length
     // prefix at offset 0 with a smaller value (logical shrink).
     unsafe {
@@ -1105,8 +1238,15 @@ pub extern "C" fn runtime_shrink_boxed_array(arr: i64, new_len: i64) {
 /// CAS on a boxed array slot: compare-and-swap arr[idx].
 /// Returns the old value. If old == expected, writes new.
 pub extern "C" fn runtime_cas_boxed_array(arr: i64, idx: i64, expected: i64, new: i64) -> i64 {
-    // SAFETY: arr is a valid boxed array pointer from JIT code. idx is within bounds
-    // (caller ensures). Reading and conditionally writing a single pointer-sized slot.
+    if (arr as u64) < MIN_VALID_ADDR || idx < 0 {
+        return error_poison_ptr() as i64;
+    }
+    let n = unsafe { *(arr as *const u64) } as usize;
+    if idx as usize >= n {
+        return error_poison_ptr() as i64;
+    }
+    // SAFETY: arr is a valid boxed array pointer from JIT code. idx is within bounds.
+    // Reading and conditionally writing a single pointer-sized slot.
     let slot = unsafe { (arr as *mut u8).add(8 + 8 * idx as usize) as *mut i64 };
     let old = unsafe { *slot };
     if old == expected {
