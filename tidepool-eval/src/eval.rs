@@ -1030,9 +1030,11 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 });
             }
             let n = expect_int(&args[0])?;
-            Ok(Value::Lit(Literal::LitChar(
-                char::from_u32(n as u32).unwrap_or('\0'),
-            )))
+            let c = char::from_u32(n as u32).ok_or_else(|| EvalError::TypeMismatch {
+                expected: "valid Unicode codepoint",
+                got: crate::error::ValueKind::Other(format!("invalid codepoint: {}", n)),
+            })?;
+            Ok(Value::Lit(Literal::LitChar(c)))
         }
         PrimOpKind::Ord => {
             if args.len() != 1 {
@@ -1228,7 +1230,14 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
 
         PrimOpKind::IndexWord8Array => {
             let ba = expect_byte_array(&args[0])?;
-            let idx = expect_int(&args[1])? as usize;
+            let idx_val = expect_int(&args[1])?;
+            if idx_val < 0 {
+                return Err(EvalError::TypeMismatch {
+                    expected: "non-negative array index",
+                    got: crate::error::ValueKind::Other(format!("negative index: {}", idx_val)),
+                });
+            }
+            let idx = idx_val as usize;
             let bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
@@ -1348,7 +1357,14 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // indexWordArray# :: ByteArray# -> Int# -> Word#
             // Read a machine word (8 bytes on 64-bit) at index i (word-sized offset)
             let ba = expect_byte_array(&args[0])?;
-            let idx = expect_int_like(&args[1])? as usize;
+            let idx_val = expect_int_like(&args[1])?;
+            if idx_val < 0 {
+                return Err(EvalError::TypeMismatch {
+                    expected: "non-negative array index",
+                    got: crate::error::ValueKind::Other(format!("negative index: {}", idx_val)),
+                });
+            }
+            let idx = idx_val as usize;
             let bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
@@ -1412,7 +1428,14 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::WriteWordArray => {
             // writeWordArray# :: MutableByteArray# -> Int# -> Word# -> State# -> State#
             let ba = expect_byte_array(&args[0])?;
-            let idx = expect_int_like(&args[1])? as usize;
+            let idx_val = expect_int_like(&args[1])?;
+            if idx_val < 0 {
+                return Err(EvalError::TypeMismatch {
+                    expected: "non-negative array index",
+                    got: crate::error::ValueKind::Other(format!("negative index: {}", idx_val)),
+                });
+            }
+            let idx = idx_val as usize;
             let val = expect_word(&args[2])?;
             let offset = idx * 8;
             let mut bytes = ba
@@ -1426,7 +1449,14 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::ReadWordArray => {
             // readWordArray# :: MutableByteArray# -> Int# -> State# -> (# State#, Word# #)
             let ba = expect_byte_array(&args[0])?;
-            let idx = expect_int_like(&args[1])? as usize;
+            let idx_val = expect_int_like(&args[1])?;
+            if idx_val < 0 {
+                return Err(EvalError::TypeMismatch {
+                    expected: "non-negative array index",
+                    got: crate::error::ValueKind::Other(format!("negative index: {}", idx_val)),
+                });
+            }
+            let idx = idx_val as usize;
             let bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
@@ -1549,6 +1579,12 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+            if off > bytes.len() {
+                return Err(EvalError::TypeMismatch {
+                    expected: "valid byte offset",
+                    got: crate::error::ValueKind::Other(format!("offset {} exceeds length {}", off, bytes.len())),
+                });
+            }
             let slice = &bytes[off..];
             let mut byte_count = 0usize;
             let mut chars_counted = 0usize;
@@ -1598,6 +1634,12 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 let src = src_ba
                     .lock()
                     .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+                if off + len > src.len() {
+                    return Err(EvalError::TypeMismatch {
+                        expected: "valid byte range",
+                        got: crate::error::ValueKind::Other(format!("range {}..{} exceeds length {}", off, off + len, src.len())),
+                    });
+                }
                 src[off..off + len].to_vec()
             };
             // Parse UTF-8 chars and reverse
@@ -2453,6 +2495,62 @@ mod tests {
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap);
         assert!(matches!(res, Err(EvalError::NoMatchingAlt)));
+    }
+
+    #[test]
+    fn test_eval_primop_invalid_char() {
+        let nodes = vec![
+            CoreFrame::Lit(Literal::LitInt(0x110000)), // 0: invalid codepoint
+            CoreFrame::PrimOp {
+                op: PrimOpKind::Chr,
+                args: vec![0],
+            }, // 1: chr# 0x110000
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap);
+        assert!(matches!(res, Err(EvalError::TypeMismatch { .. })));
+    }
+
+    #[test]
+    fn test_eval_primop_ffi_bounds() {
+        let ba = std::sync::Arc::new(std::sync::Mutex::new(vec![0u8; 10]));
+        let mut env = Env::new();
+        env.insert(VarId(100), Value::ByteArray(ba));
+
+        let nodes = vec![
+            CoreFrame::Var(VarId(100)),          // 0: ba
+            CoreFrame::Lit(Literal::LitInt(20)), // 1: off
+            CoreFrame::Lit(Literal::LitInt(1)),  // 2: n_chars
+            CoreFrame::PrimOp {
+                op: PrimOpKind::FfiTextMeasureOff,
+                args: vec![0, 1, 2],
+            }, // 3: _hs_text_measure_off ba 20 1
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &env, &mut heap);
+        assert!(matches!(res, Err(EvalError::TypeMismatch { .. })));
+    }
+
+    #[test]
+    fn test_eval_primop_negative_index() {
+        let ba = std::sync::Arc::new(std::sync::Mutex::new(vec![0u8; 16]));
+        let mut env = Env::new();
+        env.insert(VarId(100), Value::ByteArray(ba));
+
+        let nodes = vec![
+            CoreFrame::Var(VarId(100)),          // 0: ba
+            CoreFrame::Lit(Literal::LitInt(-1)), // 1: idx
+            CoreFrame::PrimOp {
+                op: PrimOpKind::IndexWordArray,
+                args: vec![0, 1],
+            }, // 2: indexWordArray# ba (-1)
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &env, &mut heap);
+        assert!(matches!(res, Err(EvalError::TypeMismatch { .. })));
     }
 
     #[test]
