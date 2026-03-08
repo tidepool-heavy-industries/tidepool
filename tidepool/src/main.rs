@@ -379,15 +379,19 @@ impl SgHandler {
         paths: &[String],
     ) -> Result<Vec<PathBuf>, EffectError> {
         let mut files = Vec::new();
+        let canonical_root = self
+            .root
+            .canonicalize()
+            .map_err(|e| EffectError::Handler(e.to_string()))?;
         if paths.is_empty() {
-            self.walk_dir(&self.root, lang, &mut files)?;
+            self.walk_dir(&canonical_root, lang, &mut files)?;
         } else {
             for p in paths {
                 let full = self.root.join(p);
                 let canonical = full
                     .canonicalize()
                     .map_err(|e| EffectError::Handler(format!("Bad path {}: {}", p, e)))?;
-                if !canonical.starts_with(&self.root) {
+                if !canonical.starts_with(&canonical_root) {
                     return Err(EffectError::Handler(format!("Path escapes sandbox: {}", p)));
                 }
                 if canonical.is_file() {
@@ -821,10 +825,14 @@ impl ExecHandler {
 
     fn resolve_dir(&self, rel: &str) -> Result<PathBuf, EffectError> {
         let target = self.root.join(rel);
+        let canonical_root = self
+            .root
+            .canonicalize()
+            .map_err(|e| EffectError::Handler(e.to_string()))?;
         let canonical = target
             .canonicalize()
             .map_err(|e| EffectError::Handler(format!("Cannot resolve directory: {}", e)))?;
-        if !canonical.starts_with(&self.root) {
+        if !canonical.starts_with(&canonical_root) {
             return Err(EffectError::Handler(format!("Path escapes sandbox: {}", rel)));
         }
         Ok(canonical)
