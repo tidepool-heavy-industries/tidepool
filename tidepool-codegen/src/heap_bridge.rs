@@ -1,4 +1,8 @@
 use crate::context::VMContext;
+use crate::emit::{
+    LIT_TAG_ADDR, LIT_TAG_ARRAY, LIT_TAG_BYTEARRAY, LIT_TAG_CHAR, LIT_TAG_DOUBLE, LIT_TAG_FLOAT,
+    LIT_TAG_INT, LIT_TAG_SMALLARRAY, LIT_TAG_STRING, LIT_TAG_WORD,
+};
 use std::fmt;
 use tidepool_eval::value::Value;
 use tidepool_heap::layout;
@@ -89,14 +93,14 @@ unsafe fn heap_to_value_inner(
             let raw_value = *(ptr.add(layout::LIT_VALUE_OFFSET) as *const i64);
 
             match lit_tag {
-                0 => Ok(Value::Lit(Literal::LitInt(raw_value))),
-                1 => Ok(Value::Lit(Literal::LitWord(raw_value as u64))),
-                2 => Ok(Value::Lit(Literal::LitChar(
+                x if x == LIT_TAG_INT => Ok(Value::Lit(Literal::LitInt(raw_value))),
+                x if x == LIT_TAG_WORD => Ok(Value::Lit(Literal::LitWord(raw_value as u64))),
+                x if x == LIT_TAG_CHAR => Ok(Value::Lit(Literal::LitChar(
                     char::from_u32(raw_value as u32).unwrap_or('\0'),
                 ))),
-                3 => Ok(Value::Lit(Literal::LitFloat(raw_value as u64))),
-                4 => Ok(Value::Lit(Literal::LitDouble(raw_value as u64))),
-                5 => {
+                x if x == LIT_TAG_FLOAT => Ok(Value::Lit(Literal::LitFloat(raw_value as u64))),
+                x if x == LIT_TAG_DOUBLE => Ok(Value::Lit(Literal::LitDouble(raw_value as u64))),
+                x if x == LIT_TAG_STRING => {
                     // LitString: value is pointer to [len: u64][bytes...]
                     // Use read_unaligned because JIT data sections may not be 8-byte aligned
                     let data_ptr = raw_value as *const u8;
@@ -111,12 +115,12 @@ unsafe fn heap_to_value_inner(
                     let bytes = std::slice::from_raw_parts(bytes_ptr, len).to_vec();
                     Ok(Value::Lit(Literal::LitString(bytes)))
                 }
-                6 => {
+                x if x == LIT_TAG_ADDR => {
                     // Addr# — intermediate value, shouldn't normally be a final result.
                     // Wrap as empty LitString as graceful fallback.
                     Ok(Value::Lit(Literal::LitString(vec![])))
                 }
-                7 => {
+                x if x == LIT_TAG_BYTEARRAY => {
                     // ByteArray# — raw pointer to [len: u64][bytes...]
                     let ba_ptr = raw_value as *const u8;
                     if ba_ptr.is_null() {
@@ -134,7 +138,7 @@ unsafe fn heap_to_value_inner(
                         std::sync::Mutex::new(bytes),
                     )))
                 }
-                8 | 9 => {
+                x if x == LIT_TAG_SMALLARRAY || x == LIT_TAG_ARRAY => {
                     // SmallArray# (8) / Array# (9) — boxed pointer arrays
                     // Layout: [u64 length][ptr0][ptr1]...[ptrN-1]
                     let arr_ptr = raw_value as *const u8;
@@ -226,27 +230,27 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
             match lit {
                 Literal::LitInt(n) => {
                     layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-                    *ptr.add(layout::LIT_TAG_OFFSET) = 0;
+                    *ptr.add(layout::LIT_TAG_OFFSET) = LIT_TAG_INT as u8;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *n;
                 }
                 Literal::LitWord(n) => {
                     layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-                    *ptr.add(layout::LIT_TAG_OFFSET) = 1;
+                    *ptr.add(layout::LIT_TAG_OFFSET) = LIT_TAG_WORD as u8;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *n as i64;
                 }
                 Literal::LitChar(c) => {
                     layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-                    *ptr.add(layout::LIT_TAG_OFFSET) = 2;
+                    *ptr.add(layout::LIT_TAG_OFFSET) = LIT_TAG_CHAR as u8;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *c as i64;
                 }
                 Literal::LitFloat(bits) => {
                     layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-                    *ptr.add(layout::LIT_TAG_OFFSET) = 3;
+                    *ptr.add(layout::LIT_TAG_OFFSET) = LIT_TAG_FLOAT as u8;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *bits as i64;
                 }
                 Literal::LitDouble(bits) => {
                     layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-                    *ptr.add(layout::LIT_TAG_OFFSET) = 4;
+                    *ptr.add(layout::LIT_TAG_OFFSET) = LIT_TAG_DOUBLE as u8;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *bits as i64;
                 }
                 Literal::LitString(bytes) => {
@@ -263,7 +267,7 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
 
                     // Only write the header once we're sure all allocations succeeded
                     layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-                    *ptr.add(layout::LIT_TAG_OFFSET) = 5;
+                    *ptr.add(layout::LIT_TAG_OFFSET) = LIT_TAG_STRING as u8;
                     *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = data_ptr as i64;
                 }
             }
@@ -311,7 +315,7 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
                 return Err(BridgeError::NurseryExhausted);
             }
             layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-            *ptr.add(layout::LIT_TAG_OFFSET) = 7; // LIT_TAG_BYTEARRAY
+            *ptr.add(layout::LIT_TAG_OFFSET) = LIT_TAG_BYTEARRAY as u8;
             *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = data_ptr as i64;
             Ok(ptr)
         }

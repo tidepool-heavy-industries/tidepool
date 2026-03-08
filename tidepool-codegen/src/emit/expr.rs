@@ -223,7 +223,7 @@ fn collapse_frame(
             Some(v) => Ok(v),
             None => {
                 let tag = (vid.0 >> 56) as u8;
-                if tag == 0x45 {
+                if tag == tidepool_repr::ERROR_SENTINEL_TAG {
                     // Lazy poison: emit a constant pointer to a pre-allocated
                     // poison closure. The error flag is NOT set now — only when
                     // the closure is actually called (forced). This is critical
@@ -1120,7 +1120,7 @@ pub fn compile_expr(
 }
 
 impl EmitContext {
-    /// Check if a binding's RHS references an error sentinel (tag 0x45).
+    /// Check if a binding's RHS references an error sentinel (tag ERROR_SENTINEL_TAG).
     /// GHC Core hoists `error "..."` into let bindings that are only forced on
     /// impossible branches. Since our JIT is strict, we must not evaluate these
     /// eagerly. Returns true if the RHS free vars contain an error sentinel.
@@ -1133,7 +1133,7 @@ impl EmitContext {
         let mut idx = rhs_idx;
         loop {
             match &tree.nodes[idx] {
-                CoreFrame::Var(v) => return (v.0 >> 56) as u8 == 0x45,
+                CoreFrame::Var(v) => return (v.0 >> 56) as u8 == tidepool_repr::ERROR_SENTINEL_TAG,
                 CoreFrame::App { fun, .. } => idx = *fun,
                 _ => return false,
             }
@@ -1145,7 +1145,7 @@ impl EmitContext {
         let mut idx = rhs_idx;
         loop {
             match &tree.nodes[idx] {
-                CoreFrame::Var(v) if (v.0 >> 56) as u8 == 0x45 => return v.0 & 0xFF,
+                CoreFrame::Var(v) if (v.0 >> 56) as u8 == tidepool_repr::ERROR_SENTINEL_TAG => return v.0 & 0xFF,
                 CoreFrame::App { fun, .. } => idx = *fun,
                 _ => return 2, // fallback: UserError
             }

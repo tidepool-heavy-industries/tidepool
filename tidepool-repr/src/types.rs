@@ -1,3 +1,6 @@
+/// Tag byte stored in high bits of VarId to mark error-sentinel bindings.
+pub const ERROR_SENTINEL_TAG: u8 = 0x45;
+
 /// Variable identifier. Wraps a numeric ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VarId(pub u64);

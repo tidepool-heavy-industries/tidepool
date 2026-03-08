@@ -138,7 +138,7 @@ fn eval_at(
     match &expr.nodes[idx] {
         CoreFrame::Var(v) => {
             let tag = (v.0 >> 56) as u8;
-            if tag == 0x45 {
+            if tag == tidepool_repr::ERROR_SENTINEL_TAG {
                 // 'E' = error tag: synthetic error VarIds from Translate.hs
                 let kind = v.0 & 0xFF;
                 return Err(match kind {

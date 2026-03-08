@@ -8,6 +8,9 @@ use tidepool_heap::layout;
 
 type GcHook = fn(&[StackRoot]);
 
+/// Addresses below this are considered invalid (null page guard).
+const MIN_VALID_ADDR: u64 = 0x1000;
+
 /// Runtime errors raised by JIT code via host functions.
 #[derive(Debug, Clone)]
 pub enum RuntimeError {
@@ -743,7 +746,7 @@ pub fn reset_call_depth() {
 
 /// Check pointer validity; if bad, set runtime error and return true.
 fn check_ptr_invalid(ptr: *const u8, fn_name: &str) -> bool {
-    if (ptr as u64) < 0x1000 {
+    if (ptr as u64) < MIN_VALID_ADDR {
         let msg = format!("[BUG] {}: bad pointer {:#x}", fn_name, ptr as u64);
         eprintln!("{}", msg);
         push_diagnostic(msg);
