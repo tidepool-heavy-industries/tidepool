@@ -290,23 +290,24 @@ translateModule allBinds targetName unresolvedIds =
           keyToIdx = Map.fromList
             [(k, i) | (i, (_, k, _)) <- zip [0..] pairInfo]
 
+          pairInfoLen = length pairInfo
+          pairInfoAt idx = case drop idx pairInfo of
+            (x:_) -> x
+            []    -> error $ "reachableBinds: index " ++ show idx ++ " out of bounds (length " ++ show pairInfoLen ++ ")"
+
           -- DFS collecting reachable pair indices
           go :: Set.Set Int -> [Word64] -> Set.Set Int
           go visited [] = visited
           go visited (v:vs) = case Map.lookup v keyToIdx of
             Just idx | not (Set.member idx visited) ->
-              let (_, _, fvs) = case drop idx pairInfo of
-                    (x:_) -> x
-                    []    -> error $ "reachableBinds: index " ++ show idx ++ " out of bounds (length " ++ show (length pairInfo) ++ ")"
+              let (_, _, fvs) = pairInfoAt idx
               in go (Set.insert idx visited) (Set.toList fvs ++ vs)
             _ -> go visited vs
 
           targetKey = varId target
           reachable = case Map.lookup targetKey keyToIdx of
             Just idx ->
-              let (_, _, fvs) = case drop idx pairInfo of
-                    (x:_) -> x
-                    []    -> error $ "reachableBinds: index " ++ show idx ++ " out of bounds (length " ++ show (length pairInfo) ++ ")"
+              let (_, _, fvs) = pairInfoAt idx
               in go (Set.singleton idx) (Set.toList fvs)
             Nothing -> Set.empty
 
@@ -751,11 +752,9 @@ translate expr =
     -- buffer allocation, and --all-closed inlining exposes the runRW# call.
     -- Desugar: runRW# f  →  f ()   (state token is erased at runtime)
     Var v | isRunRWVar v
-          , length args == 1 -> do
+          , [f] <- args -> do
       recordDC unitDataCon
-      fIdx <- case args of
-        [a] -> translate a
-        _   -> error $ "runRW#: expected 1 arg, got " ++ show (length args)
+      fIdx <- translate f
       tokIdx <- emitNode $ NCon (varId (dataConWorkId unitDataCon)) []
       emitNode $ NApp fIdx tokIdx
 
@@ -773,14 +772,12 @@ translate expr =
     -- We desugar here because type information is erased downstream.
     Var v | Just pop <- isPrimOpId_maybe v
           , pop == TagToEnumOp
-          , length args == 1 -> do
+          , [arg] <- args -> do
         let typeArgs = filter (not . isValueArg) allArgs
         case typeArgs of
           [Type ty] | Just (tc, _) <- splitTyConApp_maybe ty -> do
             let dcs = tyConDataCons tc
-            argIdx <- case args of
-              [a] -> translate a
-              _   -> error $ "tagToEnum#: expected 1 arg, got " ++ show (length args)
+            argIdx <- translate arg
             altData <- forM (zip [0..] dcs) $ \(i :: Int, dc) -> do
               recordDC dc
               conIdx <- emitNode $ NCon (varId (dataConWorkId dc)) []
@@ -1450,9 +1447,9 @@ mapFfiCall :: String -> Text
 mapFfiCall pprName
   | "strlen" `isInfixOf` pprName                = T.pack "FfiStrlen"
   | "_hs_text_measure_off" `isInfixOf` pprName  = T.pack "FfiTextMeasureOff"
-    | "_hs_text_memchr" `isInfixOf` pprName  = T.pack "FfiTextMemchr"
-    | "_hs_text_reverse" `isInfixOf` pprName      = T.pack "FfiTextReverse"
-    | otherwise = error $ "Unsupported FFI call: " ++ pprName
+  | "_hs_text_memchr" `isInfixOf` pprName       = T.pack "FfiTextMemchr"
+  | "_hs_text_reverse" `isInfixOf` pprName      = T.pack "FfiTextReverse"
+  | otherwise = error $ "Unsupported FFI call: " ++ pprName
 
 isRuntimeErrorVar :: Id -> Bool
 isRuntimeErrorVar v =
