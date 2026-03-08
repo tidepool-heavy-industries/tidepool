@@ -116,8 +116,8 @@ dedent t =
   let ls = lines t
       nonEmpty = filter (not . T.null . T.stripStart) ls
       minIndent = case nonEmpty of
-        [] -> 0
-        _  -> foldl' (\acc l -> min' acc (countLeading l)) 999999 nonEmpty
+        []     -> 0
+        (x:xs) -> foldl' (\acc l -> min' acc (countLeading l)) (countLeading x) xs
   in  T.unlines (map (T.drop minIndent) ls)
   where
     countLeading = T.length . T.takeWhile (== ' ')

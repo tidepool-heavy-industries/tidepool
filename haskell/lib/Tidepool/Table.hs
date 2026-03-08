@@ -27,7 +27,7 @@ import Prelude
   )
 import Data.Text (Text)
 import qualified Data.Text as T
-import Tidepool.Prelude (enumFromTo, lines, splitOn, sortBy, comparing)
+import Tidepool.Prelude (enumFromTo, lines, splitOn, sortBy, comparing, strip)
 
 -- ---------------------------------------------------------------------------
 -- Parsing
@@ -45,7 +45,7 @@ parseTsv = parseDelimited '\t'
 -- | Parse text delimited by the given character into rows of fields.
 parseDelimited :: Char -> Text -> [[Text]]
 parseDelimited delim t =
-  let ls = filter (not . T.null) (lines t)
+  let ls = filter (not . T.null . strip) (lines t)
   in  map (splitOn (T.singleton delim)) ls
 
 -- ---------------------------------------------------------------------------

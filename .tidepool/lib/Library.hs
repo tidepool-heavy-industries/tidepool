@@ -79,12 +79,12 @@ _1 f (a, b) = (\a' -> (a', b)) <$> f a
 _2 :: Functor f => (b -> f b) -> (a, b) -> f (a, b)
 _2 f (a, b) = (\b' -> (a, b')) <$> f b
 
-ix :: Int -> Functor f => (a -> f a) -> [a] -> f [a]
-ix i f xs = case splitAt i xs of
-  (before, x:after) -> (\x' -> before ++ [x'] ++ after) <$> f x
-  _ -> case xs of
-    (x:_) -> (\_ -> xs) <$> f x
-    []    -> (\_ -> xs) <$> f (error "ix: empty list")
+ix :: Int -> Applicative f => (a -> f a) -> [a] -> f [a]
+ix i f xs
+  | i < 0     = pure xs
+  | otherwise = case splitAt i xs of
+      (before, x:after) -> (\x' -> before ++ [x'] ++ after) <$> f x
+      _                 -> pure xs  -- index out of bounds: no-op
 
 -- ===========================================================================
 -- § Bounded Iteration
@@ -95,7 +95,11 @@ iterateN 0 f x = []
 iterateN n f x = x : iterateN (n - 1) f (f x)
 
 converge :: Eq a => (a -> a) -> a -> a
-converge f x = let x' = f x in if x == x' then x else converge f x'
+converge = convergeN 1000
+
+convergeN :: Eq a => Int -> (a -> a) -> a -> a
+convergeN 0 _ x = x
+convergeN n f x = let x' = f x in if x == x' then x else convergeN (n - 1) f x'
 
 scanl' :: (b -> a -> b) -> b -> [a] -> [b]
 scanl' f z []     = [z]
