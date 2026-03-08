@@ -1030,7 +1030,11 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 });
             }
             let n = expect_int(&args[0])?;
-            let c = char::from_u32(n as u32).ok_or_else(|| EvalError::TypeMismatch {
+            let code = u32::try_from(n).map_err(|_| EvalError::TypeMismatch {
+                expected: "valid Unicode codepoint (0..=0x10FFFF)",
+                got: crate::error::ValueKind::Other(format!("out of range: {}", n)),
+            })?;
+            let c = char::from_u32(code).ok_or_else(|| EvalError::TypeMismatch {
                 expected: "valid Unicode codepoint",
                 got: crate::error::ValueKind::Other(format!("invalid codepoint: {}", n)),
             })?;
@@ -1634,8 +1638,16 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // _hs_text_measure_off(ByteArray#, off, len) -> Int#
             // Walk UTF-8 bytes counting `len` chars, return byte offset
             let ba = expect_byte_array(&args[0])?;
-            let off = expect_int_like(&args[1])? as usize;
-            let n_chars = expect_int_like(&args[2])? as usize;
+            let off_raw = expect_int_like(&args[1])?;
+            let n_chars_raw = expect_int_like(&args[2])?;
+            if off_raw < 0 || n_chars_raw < 0 {
+                return Err(EvalError::TypeMismatch {
+                    expected: "non-negative offset and length",
+                    got: crate::error::ValueKind::Other(format!("off={}, n_chars={}", off_raw, n_chars_raw)),
+                });
+            }
+            let off = off_raw as usize;
+            let n_chars = n_chars_raw as usize;
             let bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
@@ -1669,8 +1681,16 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // Find byte in array starting at off, return RELATIVE offset from off, or -1
             // Matches C: ptr - (arr + off), NOT absolute position
             let ba = expect_byte_array(&args[0])?;
-            let off = expect_int_like(&args[1])? as usize;
-            let len = expect_int_like(&args[2])? as usize;
+            let off_raw = expect_int_like(&args[1])?;
+            let len_raw = expect_int_like(&args[2])?;
+            if off_raw < 0 || len_raw < 0 {
+                return Err(EvalError::TypeMismatch {
+                    expected: "non-negative offset and length",
+                    got: crate::error::ValueKind::Other(format!("off={}, len={}", off_raw, len_raw)),
+                });
+            }
+            let off = off_raw as usize;
+            let len = len_raw as usize;
             let needle = expect_int_like(&args[3])? as u8;
             let bytes = ba
                 .lock()
@@ -1693,8 +1713,16 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // Reverse UTF-8 chars from src[off..off+len] into dst
             let dst_ba = expect_byte_array(&args[0])?;
             let src_ba = expect_byte_array(&args[1])?;
-            let off = expect_int_like(&args[2])? as usize;
-            let len = expect_int_like(&args[3])? as usize;
+            let off_raw = expect_int_like(&args[2])?;
+            let len_raw = expect_int_like(&args[3])?;
+            if off_raw < 0 || len_raw < 0 {
+                return Err(EvalError::TypeMismatch {
+                    expected: "non-negative offset and length",
+                    got: crate::error::ValueKind::Other(format!("off={}, len={}", off_raw, len_raw)),
+                });
+            }
+            let off = off_raw as usize;
+            let len = len_raw as usize;
             // Clone src to avoid double-lock if src == dst
             let src_slice: Vec<u8> = {
                 let src = src_ba
@@ -2593,6 +2621,30 @@ mod tests {
                 op: PrimOpKind::FfiTextMeasureOff,
                 args: vec![0, 1, 2],
             }, // 3: _hs_text_measure_off ba 20 1
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &env, &mut heap);
+        assert!(matches!(res, Err(EvalError::TypeMismatch { .. })));
+    }
+
+    #[test]
+    fn test_eval_primop_ffi_text_reverse_negative() {
+        let src = std::sync::Arc::new(std::sync::Mutex::new(vec![b'a', b'b', b'c']));
+        let dst = std::sync::Arc::new(std::sync::Mutex::new(vec![0u8; 3]));
+        let mut env = Env::new();
+        env.insert(VarId(100), Value::ByteArray(dst));
+        env.insert(VarId(101), Value::ByteArray(src));
+
+        let nodes = vec![
+            CoreFrame::Var(VarId(100)),           // 0: dst
+            CoreFrame::Var(VarId(101)),           // 1: src
+            CoreFrame::Lit(Literal::LitInt(-1)),  // 2: off (negative!)
+            CoreFrame::Lit(Literal::LitInt(3)),   // 3: len
+            CoreFrame::PrimOp {
+                op: PrimOpKind::FfiTextReverse,
+                args: vec![0, 1, 2, 3],
+            },
         ];
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
