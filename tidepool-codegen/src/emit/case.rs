@@ -1,4 +1,4 @@
-use crate::emit::expr::ensure_heap_ptr;
+use crate::emit::expr::{ensure_heap_ptr, force_thunk_ssaval};
 use crate::emit::*;
 use cranelift_codegen::ir::{
     self, condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlags, Signature, Value,
@@ -173,6 +173,15 @@ fn emit_data_dispatch(
             // remain as thunks until used in a strict context (case scrutiny,
             // primop args, etc.). Forcing here causes infinite loops for
             // self-referencing structures like `xs = 1 : map (+1) xs`.
+            //
+            // INVARIANT: All strict consumers must force thunked values before
+            // reading heap layout. The forcing points are:
+            //   - emit_lit_dispatch: force_thunk_ssaval on scrutinee
+            //   - emit_data_dispatch: tag < 2 check → heap_force on scrutinee
+            //   - PrimOp collapse: force_thunk_ssaval on all args
+            //   - App collapse: tag check → heap_force on fun position
+            //   - unbox_int/unbox_double/unbox_float: defensive trap on TAG_THUNK
+            // See force_thunk_ssaval in expr.rs.
             let mut bound_vars = Vec::new();
             for (i, &binder) in alt.binders.iter().enumerate() {
                 let offset = CON_FIELDS_START + (8 * i as i32);
@@ -283,6 +292,10 @@ fn emit_lit_dispatch(
     default_alt: Option<&Alt<usize>>,
     merge_block: ir::Block,
 ) -> Result<(), EmitError> {
+    // Force thunked scrutinees: literal case dispatch is strict —
+    // ThunkCon fields extracted by data alt matching may still be thunks.
+    let scrut = force_thunk_ssaval(sess.pipeline, builder, sess.vmctx, scrut)?;
+
     // Unbox scrutinee: Raw values are already unboxed, HeapPtr needs LIT_VALUE_OFFSET load
     let scrut_value = match scrut {
         SsaVal::Raw(v, _) => v,

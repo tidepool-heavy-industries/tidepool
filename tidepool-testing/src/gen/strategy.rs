@@ -221,12 +221,18 @@ fn gen_leaf(ty: SimpleType, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)>
     }
 
     if strategies.is_empty() {
+        // Fallback for types that have no literal form (Fun, Pair).
+        // CRITICAL: use depth=0 (not 1). Using depth=1 allows gen_expr to pick
+        // gen_app, which calls arb_simple_type() to invent new Fun/Pair types.
+        // Those types at depth=0 hit this same fallback at depth=1 again →
+        // unbounded recursion → stack overflow. With depth=0, gen_expr only
+        // calls gen_leaf, and recursion is bounded by type nesting depth.
         match ty {
             SimpleType::Fun(a, b) => {
-                return gen_lam(SimpleType::Fun(a, b), 1, ctx);
+                return gen_lam(SimpleType::Fun(a, b), 0, ctx);
             }
             SimpleType::Pair(a, b) => {
-                return gen_con(SimpleType::Pair(a, b), 1, ctx);
+                return gen_con(SimpleType::Pair(a, b), 0, ctx);
             }
             _ => {
                 panic!(

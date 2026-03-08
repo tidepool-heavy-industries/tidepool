@@ -1876,12 +1876,13 @@ pub fn unbox_int(
                 .icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
 
             let con_block = builder.create_block();
+            let check_thunk_block = builder.create_block();
             builder.ins().brif(
                 is_con,
                 con_block,
                 &[],
-                next_block,
-                &[BlockArg::Value(curr_v)],
+                check_thunk_block,
+                &[],
             );
 
             builder.switch_to_block(con_block);
@@ -1893,6 +1894,26 @@ pub fn unbox_int(
                 layout::CON_FIELDS_OFFSET as i32,
             );
             builder.ins().jump(start_block, &[BlockArg::Value(field0)]);
+
+            // Defensive: trap if TAG_THUNK — callers must force thunks before unboxing.
+            builder.switch_to_block(check_thunk_block);
+            builder.seal_block(check_thunk_block);
+            let is_thunk = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, tag, layout::TAG_THUNK as i64);
+            let thunk_trap_block = builder.create_block();
+            builder.ins().brif(
+                is_thunk,
+                thunk_trap_block,
+                &[],
+                next_block,
+                &[BlockArg::Value(curr_v)],
+            );
+            builder.switch_to_block(thunk_trap_block);
+            builder.seal_block(thunk_trap_block);
+            builder
+                .ins()
+                .trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
 
             builder.switch_to_block(next_block);
             builder.seal_block(start_block);
@@ -1931,12 +1952,13 @@ pub fn unbox_double(
                 .icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
 
             let con_block = builder.create_block();
+            let check_thunk_block = builder.create_block();
             builder.ins().brif(
                 is_con,
                 con_block,
                 &[],
-                next_block,
-                &[BlockArg::Value(curr_v)],
+                check_thunk_block,
+                &[],
             );
 
             builder.switch_to_block(con_block);
@@ -1948,6 +1970,26 @@ pub fn unbox_double(
                 layout::CON_FIELDS_OFFSET as i32,
             );
             builder.ins().jump(start_block, &[BlockArg::Value(field0)]);
+
+            // Defensive: trap if TAG_THUNK — callers must force thunks before unboxing.
+            builder.switch_to_block(check_thunk_block);
+            builder.seal_block(check_thunk_block);
+            let is_thunk = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, tag, layout::TAG_THUNK as i64);
+            let thunk_trap_block = builder.create_block();
+            builder.ins().brif(
+                is_thunk,
+                thunk_trap_block,
+                &[],
+                next_block,
+                &[BlockArg::Value(curr_v)],
+            );
+            builder.switch_to_block(thunk_trap_block);
+            builder.seal_block(thunk_trap_block);
+            builder
+                .ins()
+                .trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
 
             builder.switch_to_block(next_block);
             builder.seal_block(start_block);
@@ -1986,12 +2028,13 @@ pub fn unbox_float(
                 .icmp_imm(IntCC::Equal, tag, layout::TAG_CON as i64);
 
             let con_block = builder.create_block();
+            let check_thunk_block = builder.create_block();
             builder.ins().brif(
                 is_con,
                 con_block,
                 &[],
-                next_block,
-                &[BlockArg::Value(curr_v)],
+                check_thunk_block,
+                &[],
             );
 
             builder.switch_to_block(con_block);
@@ -2003,6 +2046,26 @@ pub fn unbox_float(
                 layout::CON_FIELDS_OFFSET as i32,
             );
             builder.ins().jump(start_block, &[BlockArg::Value(field0)]);
+
+            // Defensive: trap if TAG_THUNK — callers must force thunks before unboxing.
+            builder.switch_to_block(check_thunk_block);
+            builder.seal_block(check_thunk_block);
+            let is_thunk = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, tag, layout::TAG_THUNK as i64);
+            let thunk_trap_block = builder.create_block();
+            builder.ins().brif(
+                is_thunk,
+                thunk_trap_block,
+                &[],
+                next_block,
+                &[BlockArg::Value(curr_v)],
+            );
+            builder.switch_to_block(thunk_trap_block);
+            builder.seal_block(thunk_trap_block);
+            builder
+                .ins()
+                .trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
 
             builder.switch_to_block(next_block);
             builder.seal_block(start_block);
