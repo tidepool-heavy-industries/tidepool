@@ -74,30 +74,38 @@ pub(crate) fn cache_load(key: &str) -> Option<(Vec<u8>, Vec<u8>)> {
     Some((expr, meta))
 }
 
-/// Stores the compilation results in the cache atomically.
+/// Stores the compilation results in the cache. Each file is replaced atomically
+/// via rename, but the two-file update as a whole is not atomic.
 pub(crate) fn cache_store(key: &str, expr_bytes: &[u8], meta_bytes: &[u8]) {
     let Some(dir) = cache_dir() else { return };
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
 
-    let expr_path = dir.join(format!("{}.cbor", key));
-    let meta_path = dir.join(format!("{}.meta.cbor", key));
-
-    let _ = atomic_write(&expr_path, expr_bytes);
-    let _ = atomic_write(&meta_path, meta_bytes);
-}
-
-/// Writes data to a temporary file then renames it to the target path
-/// to ensure that readers never see partially written or corrupted files.
-fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("no parent dir"))?;
-    let mut temp = tempfile::NamedTempFile::new_in(dir)?;
     use std::io::Write;
-    temp.write_all(data)?;
-    temp.persist(path).map(|_| ()).map_err(|e| e.error)
+
+    // Use NamedTempFile to get random names and automatic cleanup if we return early.
+    let Ok(mut tmp_expr) = tempfile::NamedTempFile::new_in(&dir) else {
+        return;
+    };
+    let Ok(mut tmp_meta) = tempfile::NamedTempFile::new_in(&dir) else {
+        return;
+    };
+
+    if tmp_expr.write_all(expr_bytes).is_err() {
+        return;
+    }
+    if tmp_meta.write_all(meta_bytes).is_err() {
+        return;
+    }
+
+    // Atomic renames via persist
+    let final_expr = dir.join(format!("{}.cbor", key));
+    let final_meta = dir.join(format!("{}.meta.cbor", key));
+
+    if tmp_expr.persist(&final_expr).is_ok() {
+        let _ = tmp_meta.persist(&final_meta);
+    }
 }
 
 #[cfg(test)]
