@@ -8,8 +8,7 @@ struct AlignedBuf<const N: usize>([u8; N]);
 #[test]
 fn test_for_each_pointer_field_con_zero_fields() {
     let mut buf_data = AlignedBuf::<1024>([0u8; 1024]);
-    let buf = &mut buf_data.0;
-    let ptr = buf.as_mut_ptr();
+    let ptr = buf_data.0.as_mut_ptr();
     unsafe {
         let size = CON_FIELDS_OFFSET;
         write_header(ptr, TAG_CON, size as u16);
@@ -27,8 +26,7 @@ fn test_for_each_pointer_field_con_zero_fields() {
 #[test]
 fn test_for_each_pointer_field_closure_zero_captures() {
     let mut buf_data = AlignedBuf::<1024>([0u8; 1024]);
-    let buf = &mut buf_data.0;
-    let ptr = buf.as_mut_ptr();
+    let ptr = buf_data.0.as_mut_ptr();
     unsafe {
         let size = CLOSURE_CAPTURED_OFFSET;
         write_header(ptr, TAG_CLOSURE, size as u16);
@@ -69,8 +67,7 @@ fn test_offset_calculations() {
 #[test]
 fn test_thunk_state_machine() {
     let mut buf_data = AlignedBuf::<THUNK_MIN_SIZE>([0u8; THUNK_MIN_SIZE]);
-    let buf = &mut buf_data.0;
-    let ptr = buf.as_mut_ptr();
+    let ptr = buf_data.0.as_mut_ptr();
     unsafe {
         write_header(ptr, TAG_THUNK, THUNK_MIN_SIZE as u16);
         

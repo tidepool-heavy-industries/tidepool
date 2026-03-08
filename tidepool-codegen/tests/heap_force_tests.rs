@@ -56,8 +56,7 @@ extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext) {}
 fn test_heap_force_on_evaluated_thunk() {
     unsafe {
         let mut nursery_u64 = vec![0u64; 128]; // 1024 bytes
-        let nursery_ptr = nursery_u64.as_mut_ptr() as *mut u8;
-        let start = nursery_ptr;
+        let start = nursery_u64.as_mut_ptr() as *mut u8;
         let end = start.add(1024);
         let mut vmctx = VMContext::new(start, end, mock_gc_trigger);
 
@@ -83,8 +82,7 @@ fn test_heap_force_on_evaluated_thunk() {
 fn test_heap_force_on_lit_object() {
     unsafe {
         let mut nursery_u64 = vec![0u64; 128]; // 1024 bytes
-        let nursery_ptr = nursery_u64.as_mut_ptr() as *mut u8;
-        let start = nursery_ptr;
+        let start = nursery_u64.as_mut_ptr() as *mut u8;
         let end = start.add(1024);
         let mut vmctx = VMContext::new(start, end, mock_gc_trigger);
 
@@ -103,8 +101,7 @@ fn test_heap_force_on_lit_object() {
 fn test_heap_force_on_con_object() {
     unsafe {
         let mut nursery_u64 = vec![0u64; 128]; // 1024 bytes
-        let nursery_ptr = nursery_u64.as_mut_ptr() as *mut u8;
-        let start = nursery_ptr;
+        let start = nursery_u64.as_mut_ptr() as *mut u8;
         let end = start.add(1024);
         let mut vmctx = VMContext::new(start, end, mock_gc_trigger);
 

@@ -9,8 +9,7 @@ struct AlignedBuf<const N: usize>([u8; N]);
 #[test]
 fn test_heap_to_value_lit_int() {
     let mut buf_data = AlignedBuf::<{layout::LIT_SIZE}>([0u8; layout::LIT_SIZE]);
-    let buf = &mut buf_data.0;
-    let ptr = buf.as_mut_ptr();
+    let ptr = buf_data.0.as_mut_ptr();
     unsafe {
         layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
         *(ptr.add(layout::LIT_TAG_OFFSET)) = layout::LitTag::Int as u8;
@@ -29,8 +28,7 @@ fn test_heap_to_value_lit_int() {
 fn test_heap_to_value_con_pair() {
     // A pair: Con(DataConId(1), [LitInt(10), LitInt(20)])
     let mut buf_data = AlignedBuf::<1024>([0u8; 1024]);
-    let buf = &mut buf_data.0;
-    let start = buf.as_mut_ptr();
+    let start = buf_data.0.as_mut_ptr();
     unsafe {
         let lit1 = start;
         layout::write_header(lit1, layout::TAG_LIT, layout::LIT_SIZE as u16);
@@ -68,8 +66,7 @@ fn test_heap_to_value_con_pair() {
 fn test_heap_to_value_deeply_nested_cons() {
     // Chain of 100 nested Cons: Con(0, [Con(0, [ ... LitInt(0) ... ])])
     let mut buf_data = AlignedBuf::<{1024 * 64}>([0u8; 1024 * 64]);
-    let buf = &mut buf_data.0;
-    let start = buf.as_mut_ptr();
+    let start = buf_data.0.as_mut_ptr();
     unsafe {
         let mut current = start;
         
