@@ -73,8 +73,8 @@ impl KvHandler {
                 Ok(contents) => match serde_json::from_str(&contents) {
                     Ok(map) => map,
                     Err(e) => {
-                        eprintln!(
-                            "[tidepool] WARNING: KV store at {:?} contains invalid JSON ({}), starting fresh",
+                        tracing::warn!(
+                            "KV store at {:?} contains invalid JSON ({}), starting fresh",
                             path, e
                         );
                         HashMap::new()
@@ -94,8 +94,8 @@ impl KvHandler {
     fn flush(&self, store: &HashMap<String, serde_json::Value>) {
         if let Some(parent) = self.path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!(
-                    "[tidepool] KV flush: failed to create dir {:?}: {}",
+                tracing::warn!(
+                    "KV flush: failed to create dir {:?}: {}",
                     parent, e
                 );
                 return;
@@ -104,14 +104,14 @@ impl KvHandler {
         match serde_json::to_string_pretty(store) {
             Ok(json) => {
                 if let Err(e) = std::fs::write(&self.path, json) {
-                    eprintln!(
-                        "[tidepool] KV flush: failed to write {:?}: {}",
+                    tracing::warn!(
+                        "KV flush: failed to write {:?}: {}",
                         self.path, e
                     );
                 }
             }
             Err(e) => {
-                eprintln!("[tidepool] KV flush: serialization failed: {}", e);
+                tracing::warn!("KV flush: serialization failed: {}", e);
             }
         }
     }
@@ -1682,7 +1682,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .append(true)
             .open(&path)
             .and_then(|mut f| std::io::Write::write_all(&mut f, msg.as_bytes()));
-        eprintln!("[tidepool] PANIC — see {}", path.display());
+        tracing::debug!("PANIC — see {}", path.display());
     }));
 
     use clap::Parser;
@@ -1727,7 +1727,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .route("/health", axum::routing::get(health))
                 .nest_service("/mcp", service);
             let listener = tokio::net::TcpListener::bind(addr).await?;
-            eprintln!(
+            tracing::debug!(
                 "Tidepool MCP v{} listening on http://{}/mcp (setup mode)",
                 env!("CARGO_PKG_VERSION"),
                 addr,

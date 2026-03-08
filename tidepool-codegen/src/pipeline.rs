@@ -65,7 +65,7 @@ impl CodegenPipeline {
     /// Create a new CodegenPipeline with default x86-64 settings.
     ///
     /// `symbols` is a list of (name, pointer) pairs for host functions
-    /// that JIT code can call (e.g., gc_trigger, heap_alloc).
+    /// that JIT code can call (e.g., gc_trigger).
     pub fn new(symbols: &[(&str, *const u8)]) -> Result<Self, PipelineError> {
         let mut flag_builder = settings::builder();
         // REQUIRED: enables RBP frame chain for GC stack walking

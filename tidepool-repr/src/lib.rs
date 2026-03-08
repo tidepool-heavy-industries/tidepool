@@ -3,7 +3,6 @@
 //! Defines `CoreExpr` (a recursive tree of `CoreFrame` nodes), `DataConTable`,
 //! literals, variables, and CBOR serialization.
 
-pub mod alpha;
 pub mod builder;
 pub mod datacon;
 pub mod datacon_table;
