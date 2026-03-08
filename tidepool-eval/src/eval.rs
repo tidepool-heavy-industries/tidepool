@@ -1088,6 +1088,12 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 }
             };
             let offset = expect_int(&args[1])? as usize;
+            if offset > bytes.len() {
+                return Err(EvalError::TypeMismatch {
+                    expected: "valid byte offset",
+                    got: crate::error::ValueKind::Other(format!("offset {} exceeds length {}", offset, bytes.len())),
+                });
+            }
             Ok(Value::Lit(Literal::LitString(bytes[offset..].to_vec())))
         }
         PrimOpKind::ReallyUnsafePtrEquality => Ok(Value::Lit(Literal::LitInt(0))),
@@ -1146,13 +1152,27 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 let src = src_ba
                     .lock()
                     .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
-                src[src_off..src_off + len].to_vec()
+                let end = src_off.checked_add(len);
+                if end.is_none() || end.unwrap() > src.len() {
+                    return Err(EvalError::TypeMismatch {
+                        expected: "valid src range",
+                        got: crate::error::ValueKind::Other(format!("range {}..{} exceeds length {}", src_off, src_off + len, src.len())),
+                    });
+                }
+                src[src_off..end.unwrap()].to_vec()
             };
             {
                 let mut dst = dst_ba
                     .lock()
                     .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
-                dst[dst_off..dst_off + len].copy_from_slice(&src_data);
+                let end = dst_off.checked_add(len);
+                if end.is_none() || end.unwrap() > dst.len() {
+                    return Err(EvalError::TypeMismatch {
+                        expected: "valid dst range",
+                        got: crate::error::ValueKind::Other(format!("range {}..{} exceeds length {}", dst_off, dst_off + len, dst.len())),
+                    });
+                }
+                dst[dst_off..end.unwrap()].copy_from_slice(&src_data);
             }
             Ok(Value::ByteArray(dst_ba.clone()))
         }
@@ -1174,7 +1194,14 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
             let src_end = std::cmp::min(src_bytes.len(), len);
-            dst[dst_off..dst_off + src_end].copy_from_slice(&src_bytes[..src_end]);
+            let end = dst_off.checked_add(src_end);
+            if end.is_none() || end.unwrap() > dst.len() {
+                return Err(EvalError::TypeMismatch {
+                    expected: "valid dst range",
+                    got: crate::error::ValueKind::Other(format!("range {}..{} exceeds length {}", dst_off, dst_off + src_end, dst.len())),
+                });
+            }
+            dst[dst_off..end.unwrap()].copy_from_slice(&src_bytes[..src_end]);
             drop(dst);
             Ok(Value::ByteArray(dst_ba.clone()))
         }
@@ -1271,13 +1298,27 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 let b = ba1
                     .lock()
                     .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
-                b[off1..off1 + len].to_vec()
+                let end1 = off1.checked_add(len);
+                if end1.is_none() || end1.unwrap() > b.len() {
+                    return Err(EvalError::TypeMismatch {
+                        expected: "valid byte range for ba1",
+                        got: crate::error::ValueKind::Other(format!("range {}..{} exceeds length {}", off1, off1 + len, b.len())),
+                    });
+                }
+                b[off1..end1.unwrap()].to_vec()
             };
             let slice2: Vec<u8> = {
                 let b = ba2
                     .lock()
                     .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
-                b[off2..off2 + len].to_vec()
+                let end2 = off2.checked_add(len);
+                if end2.is_none() || end2.unwrap() > b.len() {
+                    return Err(EvalError::TypeMismatch {
+                        expected: "valid byte range for ba2",
+                        got: crate::error::ValueKind::Other(format!("range {}..{} exceeds length {}", off2, off2 + len, b.len())),
+                    });
+                }
+                b[off2..end2.unwrap()].to_vec()
             };
             let result = slice1.cmp(&slice2);
             Ok(Value::Lit(Literal::LitInt(match result {
@@ -1368,8 +1409,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
-            let offset = idx * 8;
-            if offset + 8 > bytes.len() {
+            let offset = idx.checked_mul(8);
+            let end = offset.and_then(|o| o.checked_add(8));
+
+            if offset.is_none() || end.is_none() || end.unwrap() > bytes.len() {
                 return Err(EvalError::TypeMismatch {
                     expected: "valid IndexWordArray index",
                     got: crate::error::ValueKind::Other(format!(
@@ -1379,8 +1422,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     )),
                 });
             }
+            let offset = offset.unwrap();
+            let end = end.unwrap();
             let word =
-                u64::from_ne_bytes(bytes[offset..offset + 8].try_into().map_err(|_| {
+                u64::from_ne_bytes(bytes[offset..end].try_into().map_err(|_| {
                     EvalError::InternalError("8-byte slice conversion failed".into())
                 })?);
             Ok(Value::Lit(Literal::LitWord(word)))
@@ -1437,12 +1482,17 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             }
             let idx = idx_val as usize;
             let val = expect_word(&args[2])?;
-            let offset = idx * 8;
             let mut bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
-            if offset + 8 <= bytes.len() {
-                bytes[offset..offset + 8].copy_from_slice(&val.to_ne_bytes());
+
+            let offset = idx.checked_mul(8);
+            let end = offset.and_then(|o| o.checked_add(8));
+
+            if let (Some(o), Some(e)) = (offset, end) {
+                if e <= bytes.len() {
+                    bytes[o..e].copy_from_slice(&val.to_ne_bytes());
+                }
             }
             Ok(Value::ByteArray(ba.clone()))
         }
@@ -1460,8 +1510,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
-            let offset = idx * 8;
-            if offset + 8 > bytes.len() {
+            let offset = idx.checked_mul(8);
+            let end = offset.and_then(|o| o.checked_add(8));
+
+            if offset.is_none() || end.is_none() || end.unwrap() > bytes.len() {
                 return Err(EvalError::TypeMismatch {
                     expected: "valid ReadWordArray index",
                     got: crate::error::ValueKind::Other(format!(
@@ -1471,8 +1523,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     )),
                 });
             }
+            let offset = offset.unwrap();
+            let end = end.unwrap();
             let word =
-                u64::from_ne_bytes(bytes[offset..offset + 8].try_into().map_err(|_| {
+                u64::from_ne_bytes(bytes[offset..end].try_into().map_err(|_| {
                     EvalError::InternalError("8-byte slice conversion failed".into())
                 })?);
             Ok(Value::Lit(Literal::LitWord(word)))
@@ -1487,7 +1541,13 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let mut bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
-            let end = (offset + count).min(bytes.len());
+            if offset > bytes.len() {
+                return Err(EvalError::TypeMismatch {
+                    expected: "valid byte offset",
+                    got: crate::error::ValueKind::Other(format!("offset {} exceeds length {}", offset, bytes.len())),
+                });
+            }
+            let end = offset.checked_add(count).unwrap_or(bytes.len()).min(bytes.len());
             for b in &mut bytes[offset..end] {
                 *b = val;
             }
@@ -1615,7 +1675,13 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
-            let end = std::cmp::min(off + len, bytes.len());
+            if off > bytes.len() {
+                return Err(EvalError::TypeMismatch {
+                    expected: "valid byte offset",
+                    got: crate::error::ValueKind::Other(format!("offset {} exceeds length {}", off, bytes.len())),
+                });
+            }
+            let end = off.checked_add(len).unwrap_or(bytes.len()).min(bytes.len());
             let result = bytes[off..end].iter().position(|&b| b == needle);
             Ok(Value::Lit(Literal::LitInt(match result {
                 Some(pos) => pos as i64,
@@ -1634,13 +1700,14 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 let src = src_ba
                     .lock()
                     .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
-                if off + len > src.len() {
+                let end = off.checked_add(len);
+                if end.is_none() || end.unwrap() > src.len() {
                     return Err(EvalError::TypeMismatch {
                         expected: "valid byte range",
                         got: crate::error::ValueKind::Other(format!("range {}..{} exceeds length {}", off, off + len, src.len())),
                     });
                 }
-                src[off..off + len].to_vec()
+                src[off..end.unwrap()].to_vec()
             };
             // Parse UTF-8 chars and reverse
             let mut chars: Vec<&[u8]> = Vec::new();
