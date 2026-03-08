@@ -268,7 +268,7 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                 let canonical_root = self
                     .root
                     .canonicalize()
-                    .unwrap_or_else(|_| self.root.clone());
+                    .map_err(|e| EffectError::Handler(e.to_string()))?;
                 let paths: Vec<String> = glob::glob(&full_pattern)
                     .map_err(|e| EffectError::Handler(format!("invalid glob: {}", e)))?
                     .filter_map(|e| e.ok())
