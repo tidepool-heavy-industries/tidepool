@@ -1,6 +1,5 @@
-use std::collections::HashMap;
 use tidepool_eval::{Changed, Pass};
-use tidepool_repr::{AltCon, CoreExpr, CoreFrame, MapLayer};
+use tidepool_repr::{get_children, replace_subtree, AltCon, CoreExpr, CoreFrame};
 
 /// A pass that performs case-of-known-constructor and case-of-known-literal reductions.
 pub struct CaseReduce;
@@ -52,16 +51,16 @@ fn try_case_reduce_at(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
                             }
                         }
 
-                        let mut body = extract_subtree(expr, alt.body);
+                        let mut body = expr.extract_subtree(alt.body);
                         // Bind fields to alt binders
                         if let AltCon::DataAlt(_) = &alt.con {
                             for (alt_binder, field_idx) in alt.binders.iter().zip(fields.iter()) {
-                                let field_tree = extract_subtree(expr, *field_idx);
+                                let field_tree = expr.extract_subtree(*field_idx);
                                 body = tidepool_repr::subst::subst(&body, *alt_binder, &field_tree);
                             }
                         }
                         // Substitute case binder with scrutinee
-                        let scrut_tree = extract_subtree(expr, *scrutinee);
+                        let scrut_tree = expr.extract_subtree(*scrutinee);
                         body = tidepool_repr::subst::subst(&body, *binder, &scrut_tree);
                         Some(replace_subtree(expr, idx, &body))
                     } else {
@@ -76,9 +75,9 @@ fn try_case_reduce_at(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
                         .or_else(|| alts.iter().find(|a| matches!(&a.con, AltCon::Default)));
 
                     if let Some(alt) = alt {
-                        let mut body = extract_subtree(expr, alt.body);
+                        let mut body = expr.extract_subtree(alt.body);
                         // Substitute case binder with scrutinee literal
-                        let scrut_tree = extract_subtree(expr, *scrutinee);
+                        let scrut_tree = expr.extract_subtree(*scrutinee);
                         body = tidepool_repr::subst::subst(&body, *binder, &scrut_tree);
                         Some(replace_subtree(expr, idx, &body))
                     } else {
@@ -100,101 +99,6 @@ fn try_children(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
         }
     }
     None
-}
-
-fn get_children(frame: &CoreFrame<usize>) -> Vec<usize> {
-    match frame {
-        CoreFrame::Var(_) | CoreFrame::Lit(_) => vec![],
-        CoreFrame::App { fun, arg } => vec![*fun, *arg],
-        CoreFrame::Lam { body, .. } => vec![*body],
-        CoreFrame::LetNonRec { rhs, body, .. } => vec![*rhs, *body],
-        CoreFrame::LetRec { bindings, body, .. } => {
-            let mut c: Vec<usize> = bindings.iter().map(|(_, r)| *r).collect();
-            c.push(*body);
-            c
-        }
-        CoreFrame::Case {
-            scrutinee, alts, ..
-        } => {
-            let mut c = vec![*scrutinee];
-            for alt in alts {
-                c.push(alt.body);
-            }
-            c
-        }
-        CoreFrame::Con { fields, .. } => fields.clone(),
-        CoreFrame::Join { rhs, body, .. } => vec![*rhs, *body],
-        CoreFrame::Jump { args, .. } => args.clone(),
-        CoreFrame::PrimOp { args, .. } => args.clone(),
-    }
-}
-
-fn extract_subtree(expr: &CoreExpr, root_idx: usize) -> CoreExpr {
-    let mut new_nodes = Vec::new();
-    let mut old_to_new = HashMap::new();
-    collect(root_idx, expr, &mut new_nodes, &mut old_to_new);
-    CoreExpr { nodes: new_nodes }
-}
-
-fn collect(
-    idx: usize,
-    expr: &CoreExpr,
-    new_nodes: &mut Vec<CoreFrame<usize>>,
-    old_to_new: &mut HashMap<usize, usize>,
-) -> usize {
-    if let Some(&new_idx) = old_to_new.get(&idx) {
-        return new_idx;
-    }
-    let mapped = expr.nodes[idx]
-        .clone()
-        .map_layer(|child| collect(child, expr, new_nodes, old_to_new));
-    let new_idx = new_nodes.len();
-    new_nodes.push(mapped);
-    old_to_new.insert(idx, new_idx);
-    new_idx
-}
-
-fn replace_subtree(expr: &CoreExpr, target_idx: usize, replacement: &CoreExpr) -> CoreExpr {
-    let mut new_nodes = Vec::new();
-    let mut old_to_new = HashMap::new();
-    rebuild(
-        expr,
-        expr.nodes.len() - 1,
-        target_idx,
-        replacement,
-        &mut new_nodes,
-        &mut old_to_new,
-    );
-    CoreExpr { nodes: new_nodes }
-}
-
-fn rebuild(
-    expr: &CoreExpr,
-    idx: usize,
-    target: usize,
-    replacement: &CoreExpr,
-    new_nodes: &mut Vec<CoreFrame<usize>>,
-    old_to_new: &mut HashMap<usize, usize>,
-) -> usize {
-    if let Some(&ni) = old_to_new.get(&idx) {
-        return ni;
-    }
-    if idx == target {
-        let offset = new_nodes.len();
-        for node in &replacement.nodes {
-            new_nodes.push(node.clone().map_layer(|i| i + offset));
-        }
-        let root = new_nodes.len() - 1;
-        old_to_new.insert(idx, root);
-        return root;
-    }
-    let mapped = expr.nodes[idx]
-        .clone()
-        .map_layer(|child| rebuild(expr, child, target, replacement, new_nodes, old_to_new));
-    let new_idx = new_nodes.len();
-    new_nodes.push(mapped);
-    old_to_new.insert(idx, new_idx);
-    new_idx
 }
 
 #[cfg(test)]
