@@ -81,6 +81,20 @@ pub fn replace_subtree(
     target_idx: usize,
     replacement: &RecursiveTree<CoreFrame<usize>>,
 ) -> RecursiveTree<CoreFrame<usize>> {
+    if expr.nodes.is_empty() {
+        return expr.clone();
+    }
+    if replacement.nodes.is_empty() {
+        // Replacing with an empty tree is not valid for CoreExpr, but we avoid panicking.
+        return expr.clone();
+    }
+    assert!(
+        target_idx < expr.nodes.len(),
+        "target_idx {} out of bounds (len {})",
+        target_idx,
+        expr.nodes.len()
+    );
+
     let mut new_nodes = Vec::new();
     let mut old_to_new = HashMap::new();
     rebuild(
@@ -110,7 +124,7 @@ fn rebuild(
         for node in &replacement.nodes {
             new_nodes.push(node.clone().map_layer(|i| i + offset));
         }
-        let root = new_nodes.len() - 1;
+        let root = new_nodes.len().checked_sub(1).expect("replacement tree must not be empty");
         old_to_new.insert(idx, root);
         return root;
     }
@@ -202,22 +216,22 @@ mod tests {
 
     fn sample_frames() -> Vec<CoreFrame<usize>> {
         vec![
-            CoreFrame::Var(VarId(1)),
-            CoreFrame::Lit(Literal::LitInt(42)),
-            CoreFrame::App { fun: 0, arg: 1 },
+            CoreFrame::Var(VarId(1)),            // 0
+            CoreFrame::Lit(Literal::LitInt(42)), // 1
+            CoreFrame::App { fun: 0, arg: 1 },   // 2
             CoreFrame::Lam {
                 binder: VarId(2),
                 body: 0,
-            },
+            }, // 3
             CoreFrame::LetNonRec {
                 binder: VarId(3),
                 rhs: 1,
                 body: 2,
-            },
+            }, // 4
             CoreFrame::LetRec {
                 bindings: vec![(VarId(4), 0), (VarId(5), 1)],
                 body: 2,
-            },
+            }, // 5
             CoreFrame::Case {
                 scrutinee: 0,
                 binder: VarId(6),
@@ -226,26 +240,83 @@ mod tests {
                     binders: vec![],
                     body: 1,
                 }],
-            },
+            }, // 6
             CoreFrame::Con {
                 tag: DataConId(7),
                 fields: vec![0, 1],
-            },
+            }, // 7
             CoreFrame::Join {
                 label: JoinId(8),
                 params: vec![VarId(9)],
                 rhs: 0,
                 body: 1,
-            },
+            }, // 8
             CoreFrame::Jump {
                 label: JoinId(10),
                 args: vec![0, 1],
-            },
+            }, // 9
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![0, 1],
-            },
+            }, // 10
         ]
+    }
+
+    #[test]
+    fn test_get_children() {
+        let frames = sample_frames();
+        assert_eq!(get_children(&frames[0]), Vec::<usize>::new()); // Var
+        assert_eq!(get_children(&frames[1]), Vec::<usize>::new()); // Lit
+        assert_eq!(get_children(&frames[2]), vec![0, 1]); // App
+        assert_eq!(get_children(&frames[3]), vec![0]); // Lam
+        assert_eq!(get_children(&frames[4]), vec![1, 2]); // LetNonRec
+        assert_eq!(get_children(&frames[5]), vec![0, 1, 2]); // LetRec
+        assert_eq!(get_children(&frames[6]), vec![0, 1]); // Case
+        assert_eq!(get_children(&frames[7]), vec![0, 1]); // Con
+        assert_eq!(get_children(&frames[8]), vec![0, 1]); // Join
+        assert_eq!(get_children(&frames[9]), vec![0, 1]); // Jump
+        assert_eq!(get_children(&frames[10]), vec![0, 1]); // PrimOp
+    }
+
+    #[test]
+    fn test_replace_subtree_root() {
+        let nodes = vec![
+            CoreFrame::Lit(Literal::LitInt(1)), // 0
+        ];
+        let expr = RecursiveTree { nodes };
+        let replacement = RecursiveTree {
+            nodes: vec![CoreFrame::Lit(Literal::LitInt(2))],
+        };
+        let result = replace_subtree(&expr, 0, &replacement);
+        assert_eq!(result.nodes.len(), 1);
+        assert_eq!(result.nodes[0], CoreFrame::Lit(Literal::LitInt(2)));
+    }
+
+    #[test]
+    fn test_replace_subtree_nested() {
+        // App(Var(x), Lit(1))
+        let nodes = vec![
+            CoreFrame::Var(VarId(1)),          // 0: x
+            CoreFrame::Lit(Literal::LitInt(1)), // 1: 1
+            CoreFrame::App { fun: 0, arg: 1 },  // 2: x 1
+        ];
+        let expr = RecursiveTree { nodes };
+
+        // Replace Lit(1) with Lit(2)
+        let replacement = RecursiveTree {
+            nodes: vec![CoreFrame::Lit(Literal::LitInt(2))],
+        };
+        let result = replace_subtree(&expr, 1, &replacement);
+
+        // Result should be App(Var(x), Lit(2))
+        // The order might change depending on implementation, but let's check structure.
+        let root_idx = result.nodes.len() - 1;
+        if let CoreFrame::App { fun, arg } = &result.nodes[root_idx] {
+            assert_eq!(result.nodes[*fun], CoreFrame::Var(VarId(1)));
+            assert_eq!(result.nodes[*arg], CoreFrame::Lit(Literal::LitInt(2)));
+        } else {
+            panic!("Root should be App");
+        }
     }
 
     #[test]
