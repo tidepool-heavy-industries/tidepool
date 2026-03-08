@@ -24,6 +24,7 @@ pub enum Literal {
 macro_rules! define_primops {
     ( $( $variant:ident => $serial:literal, $display:literal; )* ) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        /// Kind of primitive operation.
         pub enum PrimOpKind {
             $( $variant, )*
         }
@@ -38,6 +39,11 @@ macro_rules! define_primops {
         }
 
         impl PrimOpKind {
+            /// All variants of PrimOpKind.
+            pub const ALL_VARIANTS: &'static [Self] = &[
+                $( Self::$variant, )*
+            ];
+
             /// Name used in CBOR serialization.
             pub fn serial_name(&self) -> &'static str {
                 match self {
@@ -410,6 +416,21 @@ mod tests {
         assert_eq!(PrimOpKind::IntAdd.to_string(), "+#");
         assert_eq!(PrimOpKind::DoubleDiv.to_string(), "/##");
         assert_eq!(PrimOpKind::SeqOp.to_string(), "seq");
+    }
+
+    #[test]
+    fn test_primop_serial_invariant() {
+        for op in PrimOpKind::ALL_VARIANTS {
+            let name = op.serial_name();
+            let recovered = PrimOpKind::from_serial_name(name);
+            assert_eq!(
+                recovered,
+                Some(*op),
+                "PrimOpKind variant {:?} failed round-trip through serial name '{}'",
+                op,
+                name
+            );
+        }
     }
 
     #[test]

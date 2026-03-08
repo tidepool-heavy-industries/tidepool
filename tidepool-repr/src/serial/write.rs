@@ -194,7 +194,7 @@ fn encode_frame(frame: &CoreFrame<usize>) -> Value {
     }
 }
 
-pub fn encode_primop(op: &PrimOpKind) -> &'static str {
+fn encode_primop(op: &PrimOpKind) -> &'static str {
     op.serial_name()
 }
 
