@@ -54,10 +54,12 @@ runPipeline path includes = do
     -- Merge: dependency module bindings first, target module last
     let targetModName = capitalize (takeBaseName path)
         isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
-        (targetGuts, depGuts) = case filter isTargetMod results of
-          (tgt:_) -> (tgt, [g | g <- results, mg_module g /= mg_module tgt])
-          []       -> (head results, tail results)
-        allBinds = concatMap mg_binds depGuts ++ mg_binds targetGuts
+    (targetGuts, depGuts) <- case filter isTargetMod results of
+      (tgt:_) -> return (tgt, [g | g <- results, mg_module g /= mg_module tgt])
+      []      -> liftIO $ ioError $ userError $
+        "Target module '" ++ targetModName ++ "' not found among compiled modules: "
+        ++ show (map (moduleNameString . moduleName . mg_module) results)
+    let allBinds = concatMap mg_binds depGuts ++ mg_binds targetGuts
         allTyCons = concatMap mg_tcs depGuts ++ mg_tcs targetGuts
     hscEnv <- getSession
     return PipelineResult
