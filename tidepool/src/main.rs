@@ -247,6 +247,9 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                 cx.respond(entries)
             }
             FsReq::Glob(pattern) => {
+                if pattern.contains("..") {
+                    return cx.respond(Vec::<String>::new());
+                }
                 let full_pattern = self.root.join(&pattern).to_string_lossy().to_string();
                 let paths: Vec<String> = glob::glob(&full_pattern)
                     .map_err(|e| EffectError::Handler(format!("invalid glob: {}", e)))?
@@ -381,10 +384,16 @@ impl SgHandler {
         } else {
             for p in paths {
                 let full = self.root.join(p);
-                if full.is_file() {
-                    files.push(full);
-                } else if full.is_dir() {
-                    self.walk_dir(&full, lang, &mut files)?;
+                let canonical = full
+                    .canonicalize()
+                    .map_err(|e| EffectError::Handler(format!("Bad path {}: {}", p, e)))?;
+                if !canonical.starts_with(&self.root) {
+                    return Err(EffectError::Handler(format!("Path escapes sandbox: {}", p)));
+                }
+                if canonical.is_file() {
+                    files.push(canonical);
+                } else if canonical.is_dir() {
+                    self.walk_dir(&canonical, lang, &mut files)?;
                 }
             }
         }
@@ -810,6 +819,17 @@ impl ExecHandler {
     /// commands that produce unbounded output (e.g. `find /`, `yes`).
     const MAX_EXEC_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 
+    fn resolve_dir(&self, rel: &str) -> Result<PathBuf, EffectError> {
+        let target = self.root.join(rel);
+        let canonical = target
+            .canonicalize()
+            .map_err(|e| EffectError::Handler(format!("Cannot resolve directory: {}", e)))?;
+        if !canonical.starts_with(&self.root) {
+            return Err(EffectError::Handler(format!("Path escapes sandbox: {}", rel)));
+        }
+        Ok(canonical)
+    }
+
     fn run_command(
         &self,
         cmd: &str,
@@ -888,13 +908,7 @@ impl EffectHandler<CapturedOutput> for ExecHandler {
                 cx.respond(json_val)
             }
             ExecReq::RunIn(dir, cmd) => {
-                let target = self.root.join(&dir);
-                if !target.is_dir() {
-                    return Err(EffectError::Handler(format!(
-                        "directory '{}' does not exist",
-                        dir
-                    )));
-                }
+                let target = self.resolve_dir(&dir)?;
                 let (code, stdout, stderr) = self.run_command(&cmd, &target)?;
                 cx.respond((code, stdout, stderr))
             }
