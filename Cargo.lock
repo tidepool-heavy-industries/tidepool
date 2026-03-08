@@ -3065,6 +3065,7 @@ dependencies = [
  "frunk",
  "proptest",
  "serde_json",
+ "serial_test",
  "tempfile",
  "tidepool-bridge",
  "tidepool-bridge-derive",

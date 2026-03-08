@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use tidepool_runtime::compile_haskell;
+use serial_test::serial;
 
 fn prelude_path() -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -34,7 +35,7 @@ impl Drop for EnvGuard {
 }
 
 #[test]
-#[ignore = "mutates env vars, run with --test-threads=1"]
+#[serial]
 fn test_cache_hit_same_source() {
     let cache_root = TempDir::new().unwrap();
     let _guard = EnvGuard::set("XDG_CACHE_HOME", cache_root.path().to_path_buf());
@@ -62,7 +63,7 @@ fn test_cache_hit_same_source() {
 }
 
 #[test]
-#[ignore = "mutates env vars, run with --test-threads=1"]
+#[serial]
 fn test_cache_miss_different_source() {
     let cache_root = TempDir::new().unwrap();
     let _guard = EnvGuard::set("XDG_CACHE_HOME", cache_root.path().to_path_buf());
@@ -86,7 +87,7 @@ fn test_cache_miss_different_source() {
 }
 
 #[test]
-#[ignore = "mutates env vars, run with --test-threads=1"]
+#[serial]
 fn test_cache_miss_modified_include() {
     let cache_root = TempDir::new().unwrap();
     let _guard = EnvGuard::set("XDG_CACHE_HOME", cache_root.path().to_path_buf());
@@ -115,7 +116,7 @@ fn test_cache_miss_modified_include() {
 }
 
 #[test]
-#[ignore = "mutates env vars, run with --test-threads=1"]
+#[serial]
 fn test_corrupted_cache_recovery() {
     let cache_root = TempDir::new().unwrap();
     let _guard = EnvGuard::set("XDG_CACHE_HOME", cache_root.path().to_path_buf());
