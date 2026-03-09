@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "exomonad": {
+      "args": [
+        "mcp-stdio",
+        "--role",
+        "tl",
+        "--name",
+        "root"
+      ],
+      "command": "exomonad",
+      "type": "stdio"
+    }
+  }
+}

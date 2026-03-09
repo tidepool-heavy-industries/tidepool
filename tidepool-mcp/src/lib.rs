@@ -1379,7 +1379,8 @@ impl DispatchEffect<CapturedOutput> for AskDispatcher {
     ) -> Result<tidepool_eval::value::Value, tidepool_effect::error::EffectError> {
         if tag == self.ask_tag {
             // Extract prompt from Ask constructor: Con(Ask, [prompt_val])
-            let prompt = extract_ask_prompt(request, cx.table());
+            let prompt = extract_ask_prompt(request, cx.table())
+                .map_err(tidepool_effect::error::EffectError::Handler)?;
 
             // Signal suspension to the MCP server
             let _ = self.session_tx.send(SessionMessage::Suspended { prompt });
@@ -1404,25 +1405,39 @@ impl DispatchEffect<CapturedOutput> for AskDispatcher {
     }
 }
 
-/// Best-effort extraction of the prompt string from an Ask request Value.
+/// Extract the prompt string from an Ask request Value.
 ///
 /// The request is `Con(Ask, [prompt_val])` where `prompt_val` is a Text value.
+/// Returns an error if the prompt cannot be extracted (e.g., unevaluated closure
+/// due to a crash in the string-building expression).
 fn extract_ask_prompt(
     request: &tidepool_eval::value::Value,
     table: &tidepool_repr::DataConTable,
-) -> String {
+) -> Result<String, String> {
     use tidepool_eval::value::Value;
 
     if let Value::Con(_, fields) = request {
         if let Some(prompt_val) = fields.first() {
             // Try using FromCore (handles Text, LitString, [Char])
-            if let Ok(s) = String::from_value(prompt_val, table) {
-                return s;
+            match String::from_value(prompt_val, table) {
+                Ok(s) => return Ok(s),
+                Err(e) => {
+                    // Provide diagnostic: the prompt text couldn't be extracted,
+                    // likely because the string-building expression crashed
+                    // (e.g., unresolved external, partial evaluation).
+                    return Err(format!(
+                        "ask prompt could not be evaluated to Text: {e}. \
+                         The expression passed to `ask` likely crashed during evaluation \
+                         (check for unresolved externals or runtime errors in the prompt string)."
+                    ));
+                }
             }
         }
     }
-    // Fallback: debug representation
-    format!("{:?}", request)
+    Err(format!(
+        "ask received unexpected request shape (expected Con(Ask, [text])): {:?}",
+        request
+    ))
 }
 
 // ---------------------------------------------------------------------------

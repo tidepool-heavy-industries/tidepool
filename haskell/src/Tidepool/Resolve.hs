@@ -1,7 +1,9 @@
 module Tidepool.Resolve (resolveExternals, UnresolvedVar(..)) where
 
-import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), maybeUnfoldingTemplate)
+import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..), maybeUnfoldingTemplate)
 import GHC.Core.FVs (exprSomeFreeVars)
+import GHC.Core.Subst (substExpr, mkEmptySubst)
+import GHC.Types.Var.Env (mkInScopeSet)
 import GHC.Types.Id (Id, idUnfolding, realIdUnfolding, isGlobalId, isPrimOpId_maybe, isDataConWorkId_maybe, isDataConWrapId_maybe, isDeadEndId)
 import GHC.Types.Var (Var, varName, varUnique)
 import GHC.Types.Var.Set (VarSet, emptyVarSet, unitVarSet, elemVarSet, extendVarSet)
@@ -77,9 +79,11 @@ resolveExternals hscEnv binds = do
       | otherwise = do
           let visited' = extendVarSet visited v
           let handleUnfolding unfoldingExpr =
-                let newBind = NonRec v unfoldingExpr
-                    newFVs = exprSomeFreeVars (const True) unfoldingExpr
-                    localSet' = extendVarSet localSet v
+                let renamedExpr = alphaRenameExpr localSet unfoldingExpr
+                    newBind = NonRec v renamedExpr
+                    newFVs = exprSomeFreeVars (const True) renamedExpr
+                    internalBinders = collectLocalBinders renamedExpr
+                    localSet' = foldl extendVarSet (extendVarSet localSet v) internalBinders
                     newExternals = filter (isResolvable localSet')
                                          (nonDetEltsUniqSet newFVs)
                 in go fatCache (newExternals ++ rest) visited' localSet' (newBind : acc) subAcc unres
@@ -92,10 +96,12 @@ resolveExternals hscEnv binds = do
                    mbFallback <- attemptSpecFallback hscEnv v
                    case mbFallback of
                      Just (genId, unfoldingExpr) ->
-                       let genBind = NonRec genId unfoldingExpr
-                           aliasBind = NonRec v (Var genId)  -- alias $s var → generic parent
-                           newFVs = exprSomeFreeVars (const True) unfoldingExpr
-                           localSet' = extendVarSet (extendVarSet localSet v) genId
+                       let renamedExpr = alphaRenameExpr localSet unfoldingExpr
+                           genBind = NonRec genId renamedExpr
+                           aliasBind = NonRec v (Var genId)
+                           newFVs = exprSomeFreeVars (const True) renamedExpr
+                           internalBinders = collectLocalBinders renamedExpr
+                           localSet' = foldl extendVarSet (extendVarSet (extendVarSet localSet v) genId) internalBinders
                            newExternals = filter (isResolvable localSet')
                                                  (nonDetEltsUniqSet newFVs)
                        in go fatCache (newExternals ++ rest) visited' localSet' (genBind : acc) (aliasBind : subAcc) unres
@@ -112,10 +118,13 @@ resolveExternals hscEnv binds = do
                                -- join points that siblings reference. Without all
                                -- members, join point definitions are missing and the
                                -- JIT emits "Jump to unknown label JoinId(...)".
-                               let fatBinds = [NonRec b e | (b, e) <- fatPairs]
-                                   allFVs = foldMap (exprSomeFreeVars (const True) . snd) fatPairs
-                                   binders = [b | (b, _) <- fatPairs]
-                                   localSet' = foldl extendVarSet localSet binders
+                               let binders = [b | (b, _) <- fatPairs]
+                                   localSetWithBinders = foldl extendVarSet localSet binders
+                                   renamedPairs = [(b, alphaRenameExpr localSetWithBinders e) | (b, e) <- fatPairs]
+                                   fatBinds = [NonRec b e | (b, e) <- renamedPairs]
+                                   allFVs = foldMap (exprSomeFreeVars (const True) . snd) renamedPairs
+                                   allInternalBinders = concatMap (collectLocalBinders . snd) renamedPairs
+                                   localSet' = foldl extendVarSet localSetWithBinders allInternalBinders
                                    visited'' = foldl extendVarSet visited' binders
                                    newExternals = filter (isResolvable localSet')
                                                         (nonDetEltsUniqSet allFVs)
@@ -184,6 +193,23 @@ resolveExternals hscEnv binds = do
     freeVarsOfBind :: CoreBind -> VarSet
     freeVarsOfBind (NonRec _ rhs) = exprSomeFreeVars (const True) rhs
     freeVarsOfBind (Rec pairs) = foldMap (exprSomeFreeVars (const True) . snd) pairs
+
+    alphaRenameExpr :: VarSet -> CoreExpr -> CoreExpr
+    alphaRenameExpr inScope expr =
+      substExpr (mkEmptySubst (mkInScopeSet inScope)) expr
+
+    collectLocalBinders :: CoreExpr -> [Var]
+    collectLocalBinders = go'
+      where
+        go' (Lam b e)                 = b : go' e
+        go' (Let (NonRec b rhs) body) = b : go' rhs ++ go' body
+        go' (Let (Rec pairs) body)    = map fst pairs ++ concatMap (go' . snd) pairs ++ go' body
+        go' (Case scrut b _ alts)     = b : go' scrut ++ concatMap goAlt alts
+        go' (App f a)                 = go' f ++ go' a
+        go' (Cast e _)                = go' e
+        go' (Tick _ e)                = go' e
+        go' _                         = []
+        goAlt (Alt _ bs e)            = bs ++ go' e
 
     isPrimOp :: Id -> Bool
     isPrimOp v = case isPrimOpId_maybe v of

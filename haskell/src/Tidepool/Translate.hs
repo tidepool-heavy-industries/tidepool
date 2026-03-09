@@ -1062,7 +1062,20 @@ varId v = case isDataConId_maybe v of
   Just dc -> stableVarId (varName (dataConWorkId dc))
   Nothing -> if isExternalName (varName v)
              then stableVarId (varName v)
-             else fromIntegral (getKey (varUnique v))
+             else localVarId v
+
+-- | For local (non-external) variables, hash the OccName together with the
+-- GHC unique to produce a disambiguated ID. Raw GHC uniques collide across
+-- modules after cross-module inlining: e.g., unique (X, 12) may appear in
+-- 63 different inlined bindings with names like exit_Xc, ww_Xc, ds_Xc.
+-- Including the OccName in the hash disambiguates them.
+localVarId :: Var -> Word64
+localVarId v =
+  let k = getKey (varUnique v)
+      occ = occNameString (nameOccName (varName v))
+      combined = occ ++ "#" ++ show k
+      Fingerprint h1 _ = fingerprintString combined
+  in h1 .&. 0x00FFFFFFFFFFFFFF
 
 -- | Normalize a module name by stripping ".Internal" / "Internal." segments.
 normalizeMod :: String -> String
