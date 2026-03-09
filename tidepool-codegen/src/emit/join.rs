@@ -41,7 +41,7 @@ pub fn emit_join(
     );
 
     // 5. Emit body (the continuation that may contain Jumps)
-    let body_result = ctx.emit_node(sess, builder, body_idx)?;
+    let body_result = ctx.emit_node(sess, builder, body_idx, TailCtx::NonTail)?;
     let body_val = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, body_result);
     builder
         .ins()
@@ -60,7 +60,7 @@ pub fn emit_join(
         ctx.env.insert_scoped(&mut scope, *param_var, SsaVal::HeapPtr(val));
     }
 
-    let rhs_result = ctx.emit_node(sess, builder, rhs_idx)?;
+    let rhs_result = ctx.emit_node(sess, builder, rhs_idx, TailCtx::NonTail)?;
     let rhs_val = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, rhs_result);
     builder.ins().jump(merge_block, &[BlockArg::Value(rhs_val)]);
 
@@ -104,7 +104,10 @@ pub fn emit_jump(
     // 2. Emit each arg
     let mut arg_values: Vec<BlockArg> = Vec::new();
     for &arg_idx in arg_indices {
-        let val = ctx.emit_node(sess, builder, arg_idx)?;
+        // Jump arguments are always evaluated before we emit the jump terminator,
+        // so they are not in tail position. Do NOT propagate any surrounding tail
+        // context into these expressions: they must always be emitted as NonTail.
+        let val = ctx.emit_node(sess, builder, arg_idx, TailCtx::NonTail)?;
         // 3. Ensure all args are HeapPtr
         arg_values.push(BlockArg::Value(ensure_heap_ptr(
             builder, sess.vmctx, sess.gc_sig, sess.oom_func, val,
