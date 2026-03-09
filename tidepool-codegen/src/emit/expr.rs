@@ -286,7 +286,7 @@ fn collapse_frame(
                     MemFlags::trusted(),
                     field_val,
                     ptr,
-                    CON_FIELDS_START + 8 * i as i32,
+                    CON_FIELDS_OFFSET + 8 * i as i32,
                 );
             }
 
@@ -333,7 +333,7 @@ fn collapse_frame(
                     MemFlags::trusted(),
                     field_val,
                     ptr,
-                    CON_FIELDS_START + 8 * i as i32,
+                    CON_FIELDS_OFFSET + 8 * i as i32,
                 );
             }
 
@@ -754,7 +754,7 @@ fn emit_lam(
     inner_emit.env.insert(binder, SsaVal::HeapPtr(arg_param));
 
     for (i, (var_id, _)) in captures.iter().enumerate() {
-        let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
+        let offset = CLOSURE_CAPTURED_OFFSET + 8 * i as i32;
         let val = inner_builder
             .ins()
             .load(types::I64, MemFlags::trusted(), closure_self, offset);
@@ -840,7 +840,7 @@ fn emit_lam(
 
     for (i, (_, ssaval)) in captures.iter().enumerate() {
         let cap_val = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, *ssaval);
-        let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
+        let offset = CLOSURE_CAPTURED_OFFSET + 8 * i as i32;
         builder
             .ins()
             .store(MemFlags::trusted(), cap_val, closure_ptr, offset);
@@ -933,9 +933,9 @@ fn emit_thunk(
     let mut inner_emit = EmitContext::new(ctx.prefix.clone());
     inner_emit.lambda_counter = ctx.lambda_counter;
 
-    // Load captures from thunk object: thunk_ptr + THUNK_CAPTURED_START + 8*i
+    // Load captures from thunk object: thunk_ptr + THUNK_CAPTURED_OFFSET + 8*i
     for (i, (var_id, _)) in captures.iter().enumerate() {
-        let offset = THUNK_CAPTURED_START + 8 * i as i32;
+        let offset = THUNK_CAPTURED_OFFSET + 8 * i as i32;
         let val = inner_builder
             .ins()
             .load(types::I64, MemFlags::trusted(), thunk_self, offset);
@@ -1031,7 +1031,7 @@ fn emit_thunk(
     // Store captures
     for (i, (_, ssaval)) in captures.iter().enumerate() {
         let cap_val = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, *ssaval);
-        let offset = THUNK_CAPTURED_START + 8 * i as i32;
+        let offset = THUNK_CAPTURED_OFFSET + 8 * i as i32;
         builder
             .ins()
             .store(MemFlags::trusted(), cap_val, thunk_ptr, offset);
@@ -1607,7 +1607,7 @@ impl EmitContext {
                     // if triggered before Phase 3b/3d.
                     let null_val = builder.ins().iconst(types::I64, 0);
                     for i in 0..num_fields {
-                        let offset = CON_FIELDS_START + 8 * i as i32;
+                        let offset = CON_FIELDS_OFFSET + 8 * i as i32;
                         builder
                             .ins()
                             .store(MemFlags::trusted(), null_val, ptr, offset);
@@ -1740,7 +1740,7 @@ impl EmitContext {
             
                         // Load captures by position
                         for (i, var_id) in sorted_fvs.iter().enumerate() {
-                            let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
+                            let offset = CLOSURE_CAPTURED_OFFSET + 8 * i as i32;
                             let val =
                                 inner_builder
                                     .ins()
@@ -1792,7 +1792,7 @@ impl EmitContext {
             // Zero-initialize capture slots so GC doesn't trace garbage
             let null_val = builder.ins().iconst(types::I64, 0);
             for i in 0..sorted_fvs.len() {
-                let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
+                let offset = CLOSURE_CAPTURED_OFFSET + 8 * i as i32;
                 builder
                     .ins()
                     .store(MemFlags::trusted(), null_val, closure_ptr, offset);
@@ -1800,7 +1800,7 @@ impl EmitContext {
 
             // Fill captures already in env. Defer those referencing deferred simple bindings.
             for (i, var_id) in sorted_fvs.iter().enumerate() {
-                let offset = CLOSURE_CAPTURED_START + 8 * i as i32;
+                let offset = CLOSURE_CAPTURED_OFFSET + 8 * i as i32;
                 if let Some(ssaval) = self.env.get(var_id) {
                     let cap_val = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, *ssaval);
                     builder
@@ -1852,7 +1852,7 @@ impl EmitContext {
                             MemFlags::trusted(),
                             field_val,
                             *ptr,
-                            CON_FIELDS_START + 8 * i as i32,
+                            CON_FIELDS_OFFSET + 8 * i as i32,
                         );
                     }
                 }
@@ -2059,7 +2059,7 @@ impl EmitContext {
                         MemFlags::trusted(),
                         field_val,
                         dep.ptr,
-                        CON_FIELDS_START + 8 * i as i32,
+                        CON_FIELDS_OFFSET + 8 * i as i32,
                     );
                 }
                 dep.field_indices.clear();
@@ -2117,7 +2117,7 @@ impl EmitContext {
                     MemFlags::trusted(),
                     field_val,
                     dep.ptr,
-                    CON_FIELDS_START + 8 * i as i32,
+                    CON_FIELDS_OFFSET + 8 * i as i32,
                 );
             }
         }

@@ -13,6 +13,7 @@ pub mod gc;
 pub mod heap_bridge;
 pub mod host_fns;
 pub mod jit_machine;
+pub(crate) mod layout;
 pub mod nursery;
 pub mod pipeline;
 pub mod signal_safety;

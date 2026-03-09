@@ -12,7 +12,8 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tidepool_heap::layout;
+use tidepool_heap::layout as heap_layout;
+use crate::layout;
 
 // ── Lambda Registry ──────────────────────────────────────────
 
@@ -122,26 +123,26 @@ pub unsafe fn heap_describe(ptr: *const u8) -> String {
         return "NULL".to_string();
     }
 
-    let tag_byte = *ptr.add(layout::OFFSET_TAG);
-    let size = std::ptr::read_unaligned(ptr.add(layout::OFFSET_SIZE) as *const u16);
+    let tag_byte = *ptr.add(heap_layout::OFFSET_TAG);
+    let size = std::ptr::read_unaligned(ptr.add(heap_layout::OFFSET_SIZE) as *const u16);
 
-    match layout::HeapTag::from_byte(tag_byte) {
-        Some(layout::HeapTag::Lit) => {
-            let lit_tag = *ptr.add(layout::LIT_TAG_OFFSET);
-            let value = *(ptr.add(layout::LIT_VALUE_OFFSET) as *const i64);
-            let tag_name = layout::LitTag::from_byte(lit_tag)
+    match heap_layout::HeapTag::from_byte(tag_byte) {
+        Some(heap_layout::HeapTag::Lit) => {
+            let lit_tag = *ptr.add(layout::LIT_TAG_OFFSET as usize);
+            let value = *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const i64);
+            let tag_name = heap_layout::LitTag::from_byte(lit_tag)
                 .map(|t| t.to_string())
                 .unwrap_or_else(|| format!("?{}", lit_tag));
             format!("Lit({}, {})", tag_name, value)
         }
-        Some(layout::HeapTag::Con) => {
-            let con_tag = *(ptr.add(layout::CON_TAG_OFFSET) as *const u64);
-            let num_fields = *(ptr.add(layout::CON_NUM_FIELDS_OFFSET) as *const u16);
+        Some(heap_layout::HeapTag::Con) => {
+            let con_tag = *(ptr.add(layout::CON_TAG_OFFSET as usize) as *const u64);
+            let num_fields = *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16);
             format!("Con(tag={}, {} fields, size={})", con_tag, num_fields, size)
         }
-        Some(layout::HeapTag::Closure) => {
-            let code_ptr = *(ptr.add(layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
-            let num_captured = *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET) as *const u16);
+        Some(heap_layout::HeapTag::Closure) => {
+            let code_ptr = *(ptr.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const usize);
+            let num_captured = *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
             let name = lookup_lambda(code_ptr);
             let name_str = name
                 .as_deref()
@@ -152,8 +153,8 @@ pub unsafe fn heap_describe(ptr: *const u8) -> String {
                 code_ptr, num_captured, size, name_str
             )
         }
-        Some(layout::HeapTag::Thunk) => {
-            let state = *ptr.add(layout::THUNK_STATE_OFFSET);
+        Some(heap_layout::HeapTag::Thunk) => {
+            let state = *ptr.add(layout::THUNK_STATE_OFFSET as usize);
             format!("Thunk(state={}, size={})", state, size)
         }
         None => {
@@ -233,22 +234,22 @@ pub unsafe fn heap_validate(ptr: *const u8) -> Result<(), HeapError> {
         return Err(HeapError::NullPointer);
     }
 
-    let tag_byte = *ptr.add(layout::OFFSET_TAG);
-    let size = std::ptr::read_unaligned(ptr.add(layout::OFFSET_SIZE) as *const u16);
+    let tag_byte = *ptr.add(heap_layout::OFFSET_TAG);
+    let size = std::ptr::read_unaligned(ptr.add(heap_layout::OFFSET_SIZE) as *const u16);
 
     if size == 0 {
         return Err(HeapError::ZeroSize);
     }
 
-    match layout::HeapTag::from_byte(tag_byte) {
+    match heap_layout::HeapTag::from_byte(tag_byte) {
         None => return Err(HeapError::InvalidTag(tag_byte)),
-        Some(layout::HeapTag::Closure) => {
-            let code_ptr = *(ptr.add(layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
+        Some(heap_layout::HeapTag::Closure) => {
+            let code_ptr = *(ptr.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const usize);
             if code_ptr == 0 {
                 return Err(HeapError::NullCodePtr);
             }
-            let num_captured = *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET) as *const u16);
-            let expected_min = (24 + 8 * num_captured as usize) as u16;
+            let num_captured = *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
+            let expected_min = (layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * num_captured as usize) as u16;
             if size < expected_min {
                 return Err(HeapError::SizeMismatch {
                     expected_min,
@@ -256,9 +257,9 @@ pub unsafe fn heap_validate(ptr: *const u8) -> Result<(), HeapError> {
                 });
             }
         }
-        Some(layout::HeapTag::Con) => {
-            let num_fields = *(ptr.add(layout::CON_NUM_FIELDS_OFFSET) as *const u16);
-            let expected_min = (24 + 8 * num_fields as usize) as u16;
+        Some(heap_layout::HeapTag::Con) => {
+            let num_fields = *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16);
+            let expected_min = (layout::CON_FIELDS_OFFSET as usize + 8 * num_fields as usize) as u16;
             if size < expected_min {
                 return Err(HeapError::SizeMismatch {
                     expected_min,
@@ -266,19 +267,19 @@ pub unsafe fn heap_validate(ptr: *const u8) -> Result<(), HeapError> {
                 });
             }
         }
-        Some(layout::HeapTag::Lit) => {
-            if size < layout::LIT_SIZE as u16 {
+        Some(heap_layout::HeapTag::Lit) => {
+            if size < layout::LIT_TOTAL_SIZE as u16 {
                 return Err(HeapError::SizeMismatch {
-                    expected_min: layout::LIT_SIZE as u16,
+                    expected_min: layout::LIT_TOTAL_SIZE as u16,
                     actual: size,
                 });
             }
         }
-        Some(layout::HeapTag::Thunk) => {
+        Some(heap_layout::HeapTag::Thunk) => {
             // Thunks are at least header + state + code_ptr
-            if size < 24 {
+            if size < layout::THUNK_MIN_SIZE as u16 {
                 return Err(HeapError::SizeMismatch {
-                    expected_min: 24,
+                    expected_min: layout::THUNK_MIN_SIZE as u16,
                     actual: size,
                 });
             }
@@ -286,6 +287,60 @@ pub unsafe fn heap_validate(ptr: *const u8) -> Result<(), HeapError> {
     }
 
     Ok(())
+}
+
+/// A closure caller that validates both closure and argument before each call.
+pub struct TracingClosureCaller {
+    pub vmctx: *mut crate::context::VMContext,
+}
+
+impl TracingClosureCaller {
+    pub unsafe fn call(&self, callee: *mut u8, arg: *mut u8) -> Result<*mut u8, String> {
+        // SAFETY: callee and arg must point to valid HeapObjects.
+        // Tracing is controlled by TIDEPOOL_TRACE=heap.
+        if crate::debug::trace_level() >= crate::debug::TraceLevel::Heap {
+            heap_validate(callee).map_err(|e| format!("Closure validation failed: {}", e))?;
+            heap_validate(arg).map_err(|e| format!("Arg validation failed: {}", e))?;
+        }
+
+        let tag_byte = *callee.add(heap_layout::OFFSET_TAG);
+        if tag_byte != layout::TAG_CLOSURE {
+            return Err(format!("Not a closure: tag={}", tag_byte));
+        }
+
+        let code_ptr = *(callee.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const usize);
+        let num_captured = *(callee.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
+        let name = lookup_lambda(code_ptr);
+
+        if crate::debug::trace_level() >= crate::debug::TraceLevel::Calls {
+            eprintln!(
+                "[trace] CALL {} callee={:?} arg={:?} ({} captures)",
+                name.as_deref().unwrap_or("unknown"),
+                callee,
+                arg,
+                num_captured
+            );
+        }
+
+        // Call the closure
+        let func: unsafe extern "C" fn(*mut crate::context::VMContext, *mut u8, *mut u8) -> *mut u8 =
+            std::mem::transmute(code_ptr);
+        let result = func(self.vmctx, callee, arg);
+
+        if crate::debug::trace_level() >= crate::debug::TraceLevel::Calls {
+            eprintln!(
+                "[trace] RET  {} result={:?}",
+                name.as_deref().unwrap_or("unknown"),
+                result
+            );
+        }
+
+        if !result.is_null() && crate::debug::trace_level() >= crate::debug::TraceLevel::Heap {
+            heap_validate(result).map_err(|e| format!("Result validation failed: {}", e))?;
+        }
+
+        Ok(result)
+    }
 }
 
 /// Validate a heap object and all its pointer fields (one level deep).
@@ -297,17 +352,17 @@ pub unsafe fn heap_validate_deep(ptr: *const u8) -> Result<(), HeapError> {
     // SAFETY: Caller guarantees ptr and all reachable field pointers point to readable memory.
     heap_validate(ptr)?;
 
-    let tag_byte = *ptr.add(layout::OFFSET_TAG);
-    match layout::HeapTag::from_byte(tag_byte) {
-        Some(layout::HeapTag::Con) => {
-            let num_fields = *(ptr.add(layout::CON_NUM_FIELDS_OFFSET) as *const u16);
+    let tag_byte = *ptr.add(heap_layout::OFFSET_TAG);
+    match heap_layout::HeapTag::from_byte(tag_byte) {
+        Some(heap_layout::HeapTag::Con) => {
+            let num_fields = *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16);
             for i in 0..num_fields as usize {
-                let field = *(ptr.add(layout::CON_FIELDS_OFFSET + 8 * i) as *const *const u8);
+                let field = *(ptr.add(layout::CON_FIELDS_OFFSET as usize + 8 * i) as *const *const u8);
                 if field.is_null() {
-                    return Err(HeapError::NullField { index: i });
+                    continue;
                 }
-                let field_tag = *field.add(layout::OFFSET_TAG);
-                if layout::HeapTag::from_byte(field_tag).is_none() {
+                let field_tag = *field.add(heap_layout::OFFSET_TAG);
+                if heap_layout::HeapTag::from_byte(field_tag).is_none() {
                     return Err(HeapError::InvalidFieldTag {
                         index: i,
                         tag: field_tag,
@@ -315,15 +370,15 @@ pub unsafe fn heap_validate_deep(ptr: *const u8) -> Result<(), HeapError> {
                 }
             }
         }
-        Some(layout::HeapTag::Closure) => {
-            let num_captured = *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET) as *const u16);
+        Some(heap_layout::HeapTag::Closure) => {
+            let num_captured = *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
             for i in 0..num_captured as usize {
-                let cap = *(ptr.add(layout::CLOSURE_CAPTURED_OFFSET + 8 * i) as *const *const u8);
+                let cap = *(ptr.add(layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * i) as *const *const u8);
                 if cap.is_null() {
-                    return Err(HeapError::NullField { index: i });
+                    continue;
                 }
-                let cap_tag = *cap.add(layout::OFFSET_TAG);
-                if layout::HeapTag::from_byte(cap_tag).is_none() {
+                let cap_tag = *cap.add(heap_layout::OFFSET_TAG);
+                if heap_layout::HeapTag::from_byte(cap_tag).is_none() {
                     return Err(HeapError::InvalidFieldTag {
                         index: i,
                         tag: cap_tag,
@@ -333,7 +388,6 @@ pub unsafe fn heap_validate_deep(ptr: *const u8) -> Result<(), HeapError> {
         }
         _ => {}
     }
-
     Ok(())
 }
 

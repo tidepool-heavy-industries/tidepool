@@ -1,12 +1,7 @@
 use cranelift_codegen::ir::{self, types, BlockArg, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
 
-/// Offset of alloc_ptr within VMContext (byte 0).
-const VMCTX_ALLOC_PTR_OFFSET: i32 = 0;
-/// Offset of alloc_limit within VMContext (byte 8).
-const VMCTX_ALLOC_LIMIT_OFFSET: i32 = 8;
-/// Offset of gc_trigger within VMContext (byte 16).
-const VMCTX_GC_TRIGGER_OFFSET: i32 = 16;
+use crate::layout::*;
 
 /// Emit the alloc fast-path as inline Cranelift IR.
 ///

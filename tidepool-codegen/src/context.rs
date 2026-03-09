@@ -37,10 +37,11 @@ impl VMContext {
 
 // Compile-time offset assertions
 const _: () = {
-    assert!(mem::offset_of!(VMContext, alloc_ptr) == 0);
-    assert!(mem::offset_of!(VMContext, alloc_limit) == 8);
-    assert!(mem::offset_of!(VMContext, gc_trigger) == 16);
-    assert!(mem::offset_of!(VMContext, tail_callee) == 24);
-    assert!(mem::offset_of!(VMContext, tail_arg) == 32);
+    use crate::layout::*;
+    assert!(mem::offset_of!(VMContext, alloc_ptr) == VMCTX_ALLOC_PTR_OFFSET as usize);
+    assert!(mem::offset_of!(VMContext, alloc_limit) == VMCTX_ALLOC_LIMIT_OFFSET as usize);
+    assert!(mem::offset_of!(VMContext, gc_trigger) == VMCTX_GC_TRIGGER_OFFSET as usize);
+    assert!(mem::offset_of!(VMContext, tail_callee) == VMCTX_TAIL_CALLEE_OFFSET as usize);
+    assert!(mem::offset_of!(VMContext, tail_arg) == VMCTX_TAIL_ARG_OFFSET as usize);
     assert!(mem::align_of::<VMContext>() == 16);
 };
