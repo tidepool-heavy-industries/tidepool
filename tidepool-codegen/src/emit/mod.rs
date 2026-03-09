@@ -163,23 +163,23 @@ pub(crate) struct JoinPointRegistry {
 }
 
 impl JoinPointRegistry {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             blocks: HashMap::new(),
         }
     }
 
-    pub fn register(&mut self, label: JoinId, info: JoinInfo) {
+    pub(crate) fn register(&mut self, label: JoinId, info: JoinInfo) {
         self.blocks.insert(label, info);
     }
 
-    pub fn get(&self, label: &JoinId) -> Result<&JoinInfo, EmitError> {
+    pub(crate) fn get(&self, label: &JoinId) -> Result<&JoinInfo, EmitError> {
         self.blocks.get(label).ok_or_else(|| {
             EmitError::NotYetImplemented(format!("Jump to unregistered join {:?}", label))
         })
     }
 
-    pub fn remove(&mut self, label: &JoinId) -> Option<JoinInfo> {
+    pub(crate) fn remove(&mut self, label: &JoinId) -> Option<JoinInfo> {
         self.blocks.remove(label)
     }
 }
