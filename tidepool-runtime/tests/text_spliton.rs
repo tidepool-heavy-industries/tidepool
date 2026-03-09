@@ -599,15 +599,108 @@ fn adversarial_group_by_first_char() {
     assert_eq!(result, json!([["a", 3], ["b", 2], ["c", 1]]));
 }
 
-// ========== Known bugs (not alpha-rename related) ==========
+// ========== Free-variable capture bug ==========
+//
+// Root cause: when a function captures a free variable (e.g. ["fixed"])
+// and uses (++) with it inside T.intercalate, the second call produces
+// wrong results or crashes. Making both lists ARGUMENTS instead of
+// free variables works fine. The issue is specific to T.intercalate
+// (T.concat, our Prelude intercalate, length, filter all work).
+//
+// Minimal repro: `let f b = T.intercalate "/" (["fixed"] ++ b)
+//                 in [f ["x"], f ["y"]]`
+// Expected: ["fixed/x", "fixed/y"]
+// Actual: "Haskell undefined forced" (MCP) or silently wrong (pure)
 
-/// zipWith with a lambda that calls T.intercalate on (a ++ b).
-/// Pre-existing JIT bug: silently drops intercalate on 2+ element lists.
+/// Two calls to f where f captures a free variable used with ++.
 #[test]
-fn zipwith_intercalate_two_lists() {
+fn freevar_intercalate_let_bindings() {
+    let result = run_mcp(
+        r#"let { f :: [Text] -> Text
+             ; f b = T.intercalate "/" (["fixed"] ++ b)
+             ; r1 = f ["x"]
+             ; r2 = f ["y"]
+             } in [r1, r2]"#,
+    );
+    assert_eq!(result, json!(["fixed/x", "fixed/y"]));
+}
+
+/// Same bug via list literal (no map/zipWith needed).
+#[test]
+fn freevar_intercalate_list_literal() {
+    let result = run_mcp(
+        r#"let { f :: [Text] -> Text
+             ; f b = T.intercalate "/" (["fixed"] ++ b)
+             } in [f ["x"], f ["y"]]"#,
+    );
+    assert_eq!(result, json!(["fixed/x", "fixed/y"]));
+}
+
+/// Same pattern through map — crashes on 2+ elements.
+#[test]
+fn freevar_intercalate_map() {
+    assert_eq!(
+        run_mcp(
+            r#"let { f :: [Text] -> Text
+                 ; f b = T.intercalate "/" (["fixed"] ++ b)
+                 } in map f [["x"], ["y"]]"#,
+        ),
+        json!(["fixed/x", "fixed/y"])
+    );
+}
+
+/// zipWith variant — the original failing test.
+#[test]
+fn freevar_intercalate_zipwith() {
     let result = run_mcp(
         r#"let { f :: [Text] -> [Text] -> Text ; f a b = T.intercalate "/" (a ++ b)
              } in zipWith f [["a","b"], ["c","d"]] [["1","2"], ["3","4"]]"#,
     );
     assert_eq!(result, json!(["a/b/1/2", "c/d/3/4"]));
+}
+
+/// Control: passing both lists as arguments works (no free variable capture).
+#[test]
+fn args_intercalate_works() {
+    let result = run_mcp(
+        r#"let { f :: [Text] -> [Text] -> Text
+             ; f a b = T.intercalate "/" (a ++ b)
+             ; r1 = f ["fixed"] ["x"]
+             ; r2 = f ["fixed"] ["y"]
+             } in [r1, r2]"#,
+    );
+    assert_eq!(result, json!(["fixed/x", "fixed/y"]));
+}
+
+/// Control: same pattern with T.concat instead of T.intercalate works.
+#[test]
+fn freevar_concat_works() {
+    let result = run_mcp(
+        r#"let { f :: [Text] -> Text
+             ; f b = T.concat (["fixed"] ++ b)
+             } in [f ["x"], f ["y"]]"#,
+    );
+    assert_eq!(result, json!(["fixedx", "fixedy"]));
+}
+
+/// Control: same pattern with Prelude intercalate works.
+#[test]
+fn freevar_prelude_intercalate_works() {
+    let result = run_mcp(
+        r#"let { f :: [Text] -> Text
+             ; f b = intercalate "/" (["fixed"] ++ b)
+             } in [f ["x"], f ["y"]]"#,
+    );
+    assert_eq!(result, json!(["fixed/x", "fixed/y"]));
+}
+
+/// Control: same pattern with length works.
+#[test]
+fn freevar_length_works() {
+    let result = run_mcp(
+        r#"let { f :: [Text] -> Int
+             ; f b = length (["fixed"] ++ b)
+             } in [f ["x"], f ["y"]]"#,
+    );
+    assert_eq!(result, json!([2, 2]));
 }
