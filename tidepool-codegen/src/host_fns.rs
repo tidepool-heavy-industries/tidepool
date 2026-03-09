@@ -838,8 +838,8 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) -> *mut u8 {
         if tag == tidepool_heap::layout::TAG_CON {
             // SAFETY: tag == TAG_CON confirms this is a Con heap object;
             // reading con_tag at offset 8 and num_fields at offset 16 is valid.
-            let con_tag = unsafe { *(fun_ptr.add(8) as *const u64) };
-            let num_fields = unsafe { *(fun_ptr.add(16) as *const u16) };
+            let con_tag = unsafe { *(fun_ptr.add(layout::CON_TAG_OFFSET as usize) as *const u64) };
+            let num_fields = unsafe { *(fun_ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
             let msg2 = format!("[JIT]   Con tag={}, num_fields={}", con_tag, num_fields);
             let _ = writeln!(stderr, "{}", msg2);
             push_diagnostic(msg2);

@@ -265,7 +265,7 @@ impl JitEffectMachine {
                 vmctx.tail_arg = std::ptr::null_mut();
                 crate::host_fns::reset_call_depth();
                 let code_ptr =
-                    *(callee.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
+                    *(callee.add(crate::layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const usize);
                 let func: unsafe extern "C" fn(
                     *mut crate::context::VMContext,
                     *mut u8,

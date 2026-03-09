@@ -1,8 +1,10 @@
 //! Canonical VMContext and HeapObject layout constants for codegen.
 //!
 //! These constants define the frozen layout of the VMContext struct and
-//! the various heap object types, ensuring consistency between the JIT
-//! and the runtime.
+//! the various heap object types as `i32`/`i64` values suitable for
+//! Cranelift IR emission. `tidepool_heap::layout` defines the same
+//! layout using native Rust types for runtime use — the two modules
+//! must stay in sync.
 
 // --- VMContext field offsets (i32 for Cranelift) ---
 
