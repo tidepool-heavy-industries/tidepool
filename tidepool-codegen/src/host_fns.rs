@@ -1,10 +1,11 @@
 use crate::context::VMContext;
 use crate::gc::frame_walker::{self, StackRoot};
+use crate::layout;
 use crate::stack_map::StackMapRegistry;
 use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use tidepool_heap::layout;
+use tidepool_heap::layout as heap_layout;
 
 type GcHook = fn(&[StackRoot]);
 
@@ -307,18 +308,17 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
         let mut current = obj;
 
         loop {
-            let tag = layout::read_tag(current);
-
-            if tag == layout::TAG_THUNK {
-                let state = *current.add(layout::THUNK_STATE_OFFSET);
-                match state {
-                    layout::THUNK_UNEVALUATED => {
-                        // 1. Mark blackhole for cycle detection
-                        *current.add(layout::THUNK_STATE_OFFSET) = layout::THUNK_BLACKHOLE;
-
-                        // 2. Read code pointer
-                        let code_ptr =
-                            *(current.add(layout::THUNK_CODE_PTR_OFFSET) as *const usize);
+                        let tag = heap_layout::read_tag(current);
+            
+                        if tag == layout::TAG_THUNK {
+                            let state = *current.add(layout::THUNK_STATE_OFFSET as usize);
+                            match state {
+                                layout::THUNK_UNEVALUATED => {
+                                    // 1. Mark blackhole for cycle detection
+                                    *current.add(layout::THUNK_STATE_OFFSET as usize) = layout::THUNK_BLACKHOLE;
+            
+                                    // 2. Read code pointer
+                                    let code_ptr = *(current.add(layout::THUNK_CODE_PTR_OFFSET as usize) as *const usize);
 
                         if code_ptr == 0 {
                             RUNTIME_ERROR.with(|cell| {
@@ -335,15 +335,15 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
 
                         // If GC ran during the call, current may have been forwarded.
                         // Check for forwarding pointer and follow it.
-                        if layout::read_tag(current) == layout::TAG_FORWARDED {
+                        if heap_layout::read_tag(current) == layout::TAG_FORWARDED {
                             current = *(current.add(8) as *const *mut u8);
                         }
 
                         // 4. Write indirection (offset 16, overwriting code_ptr)
-                        *(current.add(layout::THUNK_INDIRECTION_OFFSET) as *mut *mut u8) = result;
+                        *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *mut *mut u8) = result;
 
                         // 5. Set state = Evaluated
-                        *current.add(layout::THUNK_STATE_OFFSET) = layout::THUNK_EVALUATED;
+                        *current.add(layout::THUNK_STATE_OFFSET as usize) = layout::THUNK_EVALUATED;
 
                         // Result may be another thunk — loop to force it
                         current = result;
@@ -354,7 +354,7 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                     }
                     layout::THUNK_EVALUATED => {
                         let next =
-                            *(current.add(layout::THUNK_INDIRECTION_OFFSET) as *const *mut u8);
+                            *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *const *mut u8);
                         current = next;
                         continue;
                     }
@@ -400,7 +400,7 @@ pub extern "C" fn trampoline_resolve(vmctx: *mut VMContext) -> *mut u8 {
             reset_call_depth();
 
             // Read code pointer from closure
-            let code_ptr = *(callee.add(8) as *const usize); // CLOSURE_CODE_PTR_OFFSET = 8
+            let code_ptr = *(callee.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const usize);
 
             // Call the closure: fn(vmctx, self, arg) -> result
             let func: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
@@ -2080,30 +2080,30 @@ mod tests {
             };
 
             // 1. Allocate a Lit object for the result
-            let mut lit_buf = [0u8; layout::LIT_SIZE];
+            let mut lit_buf = [0u8; heap_layout::LIT_SIZE];
             let lit_ptr = lit_buf.as_mut_ptr();
-            layout::write_header(lit_ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-            *(lit_ptr.add(layout::LIT_TAG_OFFSET)) = 0; // Int#
-            *(lit_ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = 42;
+            heap_layout::write_header(lit_ptr, layout::TAG_LIT, heap_layout::LIT_SIZE as u16);
+            *(lit_ptr.add(layout::LIT_TAG_OFFSET as usize)) = 0; // Int#
+            *(lit_ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = 42;
 
             // 2. Allocate a thunk object
-            let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE];
+            let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
             let thunk_ptr = thunk_buf.as_mut_ptr();
-            layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
-            *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_UNEVALUATED;
+            heap_layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+            *(thunk_ptr.add(layout::THUNK_STATE_OFFSET as usize)) = layout::THUNK_UNEVALUATED;
 
             TEST_RESULT.with(|r| r.set(lit_ptr));
-            *(thunk_ptr.add(layout::THUNK_CODE_PTR_OFFSET) as *mut usize) =
+            *(thunk_ptr.add(layout::THUNK_CODE_PTR_OFFSET as usize) as *mut usize) =
                 test_thunk_entry as *const () as usize;
 
             let res = heap_force(&mut vmctx, thunk_ptr);
             assert_eq!(res, lit_ptr);
             assert_eq!(
-                *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)),
+                *(thunk_ptr.add(layout::THUNK_STATE_OFFSET as usize)),
                 layout::THUNK_EVALUATED
             );
             assert_eq!(
-                *(thunk_ptr.add(layout::THUNK_INDIRECTION_OFFSET) as *const *mut u8),
+                *(thunk_ptr.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *const *mut u8),
                 lit_ptr
             );
         }
@@ -2123,14 +2123,14 @@ mod tests {
             // 1. Result: a real heap object (Lit) so the force loop can read its tag
             let mut lit_buf = [0u8; 32];
             let lit_ptr = lit_buf.as_mut_ptr();
-            layout::write_header(lit_ptr, layout::TAG_LIT, 32);
+            heap_layout::write_header(lit_ptr, layout::TAG_LIT, 32);
 
             // 2. Already evaluated thunk pointing to that Lit
-            let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE];
+            let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
             let thunk_ptr = thunk_buf.as_mut_ptr();
-            layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
-            *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_EVALUATED;
-            *(thunk_ptr.add(layout::THUNK_INDIRECTION_OFFSET) as *mut *mut u8) = lit_ptr;
+            heap_layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+            *(thunk_ptr.add(layout::THUNK_STATE_OFFSET as usize)) = layout::THUNK_EVALUATED;
+            *(thunk_ptr.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *mut *mut u8) = lit_ptr;
 
             let res = heap_force(&mut vmctx, thunk_ptr);
             assert_eq!(res, lit_ptr);
@@ -2152,10 +2152,10 @@ mod tests {
             RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);
 
             // Blackholed thunk
-            let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE];
+            let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
             let thunk_ptr = thunk_buf.as_mut_ptr();
-            layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
-            *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_BLACKHOLE;
+            heap_layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+            *(thunk_ptr.add(layout::THUNK_STATE_OFFSET as usize)) = layout::THUNK_BLACKHOLE;
 
             let res = heap_force(&mut vmctx, thunk_ptr);
             // Result should be the poison object
@@ -2179,11 +2179,11 @@ mod tests {
 
             RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);
 
-            let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE];
+            let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
             let thunk_ptr = thunk_buf.as_mut_ptr();
-            layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
-            *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_UNEVALUATED;
-            *(thunk_ptr.add(layout::THUNK_CODE_PTR_OFFSET) as *mut usize) = 0;
+            heap_layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+            *(thunk_ptr.add(layout::THUNK_STATE_OFFSET as usize)) = layout::THUNK_UNEVALUATED;
+            *(thunk_ptr.add(layout::THUNK_CODE_PTR_OFFSET as usize) as *mut usize) = 0;
 
             let res = heap_force(&mut vmctx, thunk_ptr);
             assert_eq!(res, error_poison_ptr());
@@ -2205,10 +2205,10 @@ mod tests {
 
             RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);
 
-            let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE];
+            let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
             let thunk_ptr = thunk_buf.as_mut_ptr();
-            layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
-            *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = 255; // Invalid state
+            heap_layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+            *(thunk_ptr.add(layout::THUNK_STATE_OFFSET as usize)) = 255; // Invalid state
 
             let res = heap_force(&mut vmctx, thunk_ptr);
             assert_eq!(res, error_poison_ptr());
@@ -2290,28 +2290,28 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "[CASE TRAP] raw bytes: {:02x?}", raw_bytes);
 
-    if tag_byte == 2 {
-        // SAFETY: tag_byte == 2 confirms Con; reading con_tag and num_fields at known offsets.
-        let con_tag = unsafe { *(ptr.add(8) as *const u64) };
-        let num_fields = unsafe { *(ptr.add(16) as *const u16) };
+    if tag_byte == layout::TAG_CON {
+        // SAFETY: tag_byte == TAG_CON confirms Con; reading con_tag and num_fields at known offsets.
+        let con_tag = unsafe { *(ptr.add(layout::CON_TAG_OFFSET as usize) as *const u64) };
+        let num_fields = unsafe { *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
         let _ = writeln!(
             stderr,
             "[CASE TRAP] Con: con_tag={:#x}, num_fields={}, expected_tags={:?}",
             con_tag, num_fields, expected
         );
-    } else if tag_byte == 3 {
-        // SAFETY: tag_byte == 3 confirms Lit; reading lit_tag and value at known offsets.
-        let lit_tag = unsafe { *(ptr.add(8) as *const u64) };
-        let value = unsafe { *(ptr.add(16) as *const u64) };
+    } else if tag_byte == layout::TAG_LIT {
+        // SAFETY: tag_byte == TAG_LIT confirms Lit; reading lit_tag and value at known offsets.
+        let lit_tag = unsafe { *(ptr.add(layout::LIT_TAG_OFFSET as usize) as *const u64) };
+        let value = unsafe { *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) };
         let _ = writeln!(
             stderr,
             "[CASE TRAP] Lit: lit_tag={:#x}, value={:#x}, expected_tags={:?}",
             lit_tag, value, expected
         );
-    } else if tag_byte == 0 {
-        // SAFETY: tag_byte == 0 confirms Closure; reading code_ptr and num_captured at known offsets.
-        let code_ptr = unsafe { *(ptr.add(8) as *const u64) };
-        let num_captured = unsafe { *(ptr.add(16) as *const u16) };
+    } else if tag_byte == layout::TAG_CLOSURE {
+        // SAFETY: tag_byte == TAG_CLOSURE confirms Closure; reading code_ptr and num_captured at known offsets.
+        let code_ptr = unsafe { *(ptr.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const u64) };
+        let num_captured = unsafe { *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16) };
         let _ = writeln!(
             stderr,
             "[CASE TRAP] Closure: code_ptr={:#x}, num_captured={}, expected_tags={:?}",

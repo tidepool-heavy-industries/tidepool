@@ -1,11 +1,11 @@
 use crate::context::VMContext;
-use crate::emit::{
-    LIT_TAG_ADDR, LIT_TAG_ARRAY, LIT_TAG_BYTEARRAY, LIT_TAG_CHAR, LIT_TAG_DOUBLE, LIT_TAG_FLOAT,
-    LIT_TAG_INT, LIT_TAG_SMALLARRAY, LIT_TAG_STRING, LIT_TAG_WORD,
+use crate::layout::{
+    self, LIT_TAG_ADDR, LIT_TAG_ARRAY, LIT_TAG_BYTEARRAY, LIT_TAG_CHAR, LIT_TAG_DOUBLE,
+    LIT_TAG_FLOAT, LIT_TAG_INT, LIT_TAG_SMALLARRAY, LIT_TAG_STRING, LIT_TAG_WORD,
 };
 use std::fmt;
 use tidepool_eval::value::Value;
-use tidepool_heap::layout;
+use tidepool_heap::layout as heap_layout;
 use tidepool_repr::{DataConId, Literal};
 
 #[derive(Debug)]
@@ -89,8 +89,8 @@ unsafe fn heap_to_value_inner(
     let tag = *ptr;
     match tag {
         t if t == layout::TAG_LIT => {
-            let lit_tag = *ptr.add(layout::LIT_TAG_OFFSET) as i64;
-            let raw_value = *(ptr.add(layout::LIT_VALUE_OFFSET) as *const i64);
+            let lit_tag = *ptr.add(layout::LIT_TAG_OFFSET as usize) as i64;
+            let raw_value = *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const i64);
 
             match lit_tag {
                 x if x == LIT_TAG_INT => Ok(Value::Lit(Literal::LitInt(raw_value))),
@@ -163,24 +163,24 @@ unsafe fn heap_to_value_inner(
             }
         }
         t if t == layout::TAG_CON => {
-            let con_tag = *(ptr.add(layout::CON_TAG_OFFSET) as *const u64);
-            let num_fields = *(ptr.add(layout::CON_NUM_FIELDS_OFFSET) as *const u16) as usize;
+            let con_tag = *(ptr.add(layout::CON_TAG_OFFSET as usize) as *const u64);
+            let num_fields = *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) as usize;
             if num_fields > MAX_FIELDS {
                 return Err(BridgeError::TooManyFields { count: num_fields });
             }
             let mut fields = Vec::with_capacity(num_fields);
             for i in 0..num_fields {
-                let field_ptr = *(ptr.add(layout::CON_FIELDS_OFFSET + 8 * i) as *const *const u8);
+                let field_ptr = *(ptr.add(layout::CON_FIELDS_OFFSET as usize + 8 * i) as *const *const u8);
                 fields.push(heap_to_value_inner(field_ptr, depth + 1, vmctx)?);
             }
             Ok(Value::Con(DataConId(con_tag), fields))
         }
         t if t == layout::TAG_THUNK => {
-            let state = *ptr.add(layout::THUNK_STATE_OFFSET);
+            let state = unsafe { *ptr.add(layout::THUNK_STATE_OFFSET as usize) };
             match state {
                 layout::THUNK_EVALUATED => {
                     // Follow indirection pointer to the WHNF result
-                    let target = *(ptr.add(layout::THUNK_INDIRECTION_OFFSET) as *const *const u8);
+                    let target = unsafe { *(ptr.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *const *const u8) };
                     heap_to_value_inner(target, depth + 1, vmctx)
                 }
                 _ if !vmctx.is_null() => {
@@ -222,36 +222,36 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
     // All writes use known layout offsets within bump-allocated nursery memory.
     match val {
         Value::Lit(lit) => {
-            let ptr = bump_alloc_from_vmctx(vmctx, layout::LIT_SIZE);
+            let ptr = bump_alloc_from_vmctx(vmctx, layout::LIT_TOTAL_SIZE as usize);
             if ptr.is_null() {
                 return Err(BridgeError::NurseryExhausted);
             }
 
             match lit {
                 Literal::LitInt(n) => {
-                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-                    *ptr.add(layout::LIT_TAG_OFFSET) = LIT_TAG_INT as u8;
-                    *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *n;
+                    heap_layout::write_header(ptr, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u16);
+                    *ptr.add(layout::LIT_TAG_OFFSET as usize) = LIT_TAG_INT as u8;
+                    *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = *n;
                 }
                 Literal::LitWord(n) => {
-                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-                    *ptr.add(layout::LIT_TAG_OFFSET) = LIT_TAG_WORD as u8;
-                    *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *n as i64;
+                    heap_layout::write_header(ptr, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u16);
+                    *ptr.add(layout::LIT_TAG_OFFSET as usize) = LIT_TAG_WORD as u8;
+                    *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = *n as i64;
                 }
                 Literal::LitChar(c) => {
-                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-                    *ptr.add(layout::LIT_TAG_OFFSET) = LIT_TAG_CHAR as u8;
-                    *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *c as i64;
+                    heap_layout::write_header(ptr, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u16);
+                    *ptr.add(layout::LIT_TAG_OFFSET as usize) = LIT_TAG_CHAR as u8;
+                    *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = *c as i64;
                 }
                 Literal::LitFloat(bits) => {
-                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-                    *ptr.add(layout::LIT_TAG_OFFSET) = LIT_TAG_FLOAT as u8;
-                    *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *bits as i64;
+                    heap_layout::write_header(ptr, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u16);
+                    *ptr.add(layout::LIT_TAG_OFFSET as usize) = LIT_TAG_FLOAT as u8;
+                    *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = *bits as i64;
                 }
                 Literal::LitDouble(bits) => {
-                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-                    *ptr.add(layout::LIT_TAG_OFFSET) = LIT_TAG_DOUBLE as u8;
-                    *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = *bits as i64;
+                    heap_layout::write_header(ptr, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u16);
+                    *ptr.add(layout::LIT_TAG_OFFSET as usize) = LIT_TAG_DOUBLE as u8;
+                    *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = *bits as i64;
                 }
                 Literal::LitString(bytes) => {
                     // Allocate string data: [len: u64][bytes...]
@@ -266,9 +266,9 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
                     std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr.add(8), bytes.len());
 
                     // Only write the header once we're sure all allocations succeeded
-                    layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-                    *ptr.add(layout::LIT_TAG_OFFSET) = LIT_TAG_STRING as u8;
-                    *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = data_ptr as i64;
+                    heap_layout::write_header(ptr, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u16);
+                    *ptr.add(layout::LIT_TAG_OFFSET as usize) = LIT_TAG_STRING as u8;
+                    *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = data_ptr as i64;
                 }
             }
             Ok(ptr)
@@ -285,13 +285,13 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
             if ptr.is_null() {
                 return Err(BridgeError::NurseryExhausted);
             }
-            layout::write_header(ptr, layout::TAG_CON, size as u16);
+            heap_layout::write_header(ptr, layout::TAG_CON, size as u16);
 
-            *(ptr.add(layout::CON_TAG_OFFSET) as *mut u64) = id.0;
-            *(ptr.add(layout::CON_NUM_FIELDS_OFFSET) as *mut u16) = fields.len() as u16;
+            *(ptr.add(layout::CON_TAG_OFFSET as usize) as *mut u64) = id.0;
+            *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) = fields.len() as u16;
 
             for (i, fp) in field_ptrs.into_iter().enumerate() {
-                *(ptr.add(layout::CON_FIELDS_OFFSET + 8 * i) as *mut *mut u8) = fp;
+                *(ptr.add(layout::CON_FIELDS_OFFSET as usize + 8 * i) as *mut *mut u8) = fp;
             }
             Ok(ptr)
         }
@@ -310,13 +310,13 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
             }
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr.add(8), bytes.len());
 
-            let ptr = bump_alloc_from_vmctx(vmctx, layout::LIT_SIZE);
+            let ptr = bump_alloc_from_vmctx(vmctx, layout::LIT_TOTAL_SIZE as usize);
             if ptr.is_null() {
                 return Err(BridgeError::NurseryExhausted);
             }
-            layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-            *ptr.add(layout::LIT_TAG_OFFSET) = LIT_TAG_BYTEARRAY as u8;
-            *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = data_ptr as i64;
+            heap_layout::write_header(ptr, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u16);
+            *ptr.add(layout::LIT_TAG_OFFSET as usize) = LIT_TAG_BYTEARRAY as u8;
+            *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = data_ptr as i64;
             Ok(ptr)
         }
         _ => Err(BridgeError::UnexpectedHeapTag(255)),

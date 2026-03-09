@@ -192,7 +192,7 @@ fn emit_data_dispatch(
             // NOTE: EnvGuard cannot be used here because it would borrow ctx.env
             // mutably, preventing the use of ctx in emit_node.
             for (i, &binder) in alt.binders.iter().enumerate() {
-                let offset = CON_FIELDS_START + (8 * i as i32);
+                let offset = CON_FIELDS_OFFSET + (8 * i as i32);
                 let field_val =
                     builder
                         .ins()

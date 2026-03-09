@@ -7,6 +7,8 @@ use cranelift_codegen::ir::{FuncRef, SigRef, Value};
 use std::collections::HashMap;
 use tidepool_repr::{CoreExpr, JoinId, PrimOpKind, VarId};
 
+pub use crate::layout::*;
+
 /// Per-function compilation context bundling common parameters.
 pub struct EmitSession<'a> {
     pub pipeline: &'a mut crate::pipeline::CodegenPipeline,
@@ -15,35 +17,6 @@ pub struct EmitSession<'a> {
     pub oom_func: FuncRef,
     pub tree: &'a CoreExpr,
 }
-
-// HeapObject layout constants
-pub const HEAP_HEADER_SIZE: u64 = 8;
-pub const CLOSURE_CODE_PTR_OFFSET: i32 = 8;
-pub const CLOSURE_NUM_CAPTURED_OFFSET: i32 = 16;
-pub const CLOSURE_CAPTURED_START: i32 = 24;
-pub const CON_TAG_OFFSET: i32 = 8;
-pub const CON_NUM_FIELDS_OFFSET: i32 = 16;
-pub const CON_FIELDS_START: i32 = 24;
-pub const LIT_TAG_OFFSET: i32 = 8;
-pub const LIT_VALUE_OFFSET: i32 = 16;
-pub const LIT_TOTAL_SIZE: u64 = 24;
-pub const LIT_TAG_INT: i64 = 0;
-pub const LIT_TAG_WORD: i64 = 1;
-pub const LIT_TAG_CHAR: i64 = 2;
-pub const LIT_TAG_FLOAT: i64 = 3;
-pub const LIT_TAG_DOUBLE: i64 = 4;
-pub const LIT_TAG_STRING: i64 = 5;
-pub const LIT_TAG_ADDR: i64 = 6;
-pub const LIT_TAG_BYTEARRAY: i64 = 7;
-pub const LIT_TAG_SMALLARRAY: i64 = 8;
-pub const LIT_TAG_ARRAY: i64 = 9;
-pub const THUNK_STATE_OFFSET: i32 = 8;
-pub const THUNK_CODE_PTR_OFFSET: i32 = 16;
-pub const THUNK_CAPTURED_START: i32 = 24;
-
-// VMContext offsets for TCO tail call fields
-pub const VMCTX_TAIL_CALLEE_OFFSET: i32 = 24;
-pub const VMCTX_TAIL_ARG_OFFSET: i32 = 32;
 
 /// SSA value with boxed/unboxed tracking.
 #[derive(Debug, Clone, Copy)]

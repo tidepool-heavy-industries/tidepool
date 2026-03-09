@@ -1,7 +1,8 @@
 use crate::context::VMContext;
 use crate::heap_bridge;
+use crate::layout;
 use crate::yield_type::{Yield, YieldError};
-use tidepool_heap::layout;
+use tidepool_heap::layout as heap_layout;
 
 /// Constructor tags for the freer-simple Eff type.
 ///
@@ -119,28 +120,28 @@ impl CompiledEffectMachine {
             return Yield::Error(YieldError::UnexpectedTag(tag));
         }
 
-        let con_tag = unsafe { *(result.add(layout::CON_TAG_OFFSET) as *const u64) };
+        let con_tag = unsafe { *(result.add(layout::CON_TAG_OFFSET as usize) as *const u64) };
 
         if con_tag == self.tags.val {
             // Val(value) — extract value from fields[0]
-            let num_fields = unsafe { *(result.add(layout::CON_NUM_FIELDS_OFFSET) as *const u16) };
+            let num_fields = unsafe { *(result.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
             if num_fields < 1 {
                 return Yield::Error(YieldError::BadValFields(num_fields));
             }
-            let value = unsafe { *(result.add(layout::CON_FIELDS_OFFSET) as *const *mut u8) };
+            let value = unsafe { *(result.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) };
             // Force value field — it may be a thunk
             let value = self.force_ptr(value);
             Yield::Done(value)
         } else if con_tag == self.tags.e {
             // E(union, continuation) — extract Union and k
-            let num_fields = unsafe { *(result.add(layout::CON_NUM_FIELDS_OFFSET) as *const u16) };
+            let num_fields = unsafe { *(result.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
             if num_fields != 2 {
                 return Yield::Error(YieldError::BadEFields(num_fields));
             }
             let mut union_ptr =
-                unsafe { *(result.add(layout::CON_FIELDS_OFFSET) as *const *mut u8) };
+                unsafe { *(result.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) };
             let mut continuation =
-                unsafe { *(result.add(layout::CON_FIELDS_OFFSET + 8) as *const *mut u8) };
+                unsafe { *(result.add(layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8) };
 
             // Force all field pointers — they may be thunks from lazy Con fields
             union_ptr = self.force_ptr(union_ptr);
@@ -158,21 +159,21 @@ impl CompiledEffectMachine {
             }
 
             let union_num_fields =
-                unsafe { *(union_ptr.add(layout::CON_NUM_FIELDS_OFFSET) as *const u16) };
+                unsafe { *(union_ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
             if union_num_fields != 2 {
                 return Yield::Error(YieldError::BadUnionFields(union_num_fields));
             }
 
-            let tag_ptr = unsafe { *(union_ptr.add(layout::CON_FIELDS_OFFSET) as *const *mut u8) };
+            let tag_ptr = unsafe { *(union_ptr.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) };
             let tag_ptr = self.force_ptr(tag_ptr);
             if tag_ptr.is_null() {
                 return Yield::Error(YieldError::NullPointer);
             }
             // Read the actual tag value from the Lit HeapObject (offset 16 = LIT_VALUE_OFFSET)
             let tag_ptr_tag = unsafe { *tag_ptr };
-            let effect_tag = unsafe { *(tag_ptr.add(layout::LIT_VALUE_OFFSET) as *const u64) };
+            let effect_tag = unsafe { *(tag_ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) };
             let mut request =
-                unsafe { *(union_ptr.add(layout::CON_FIELDS_OFFSET + 8) as *const *mut u8) };
+                unsafe { *(union_ptr.add(layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8) };
             request = self.force_ptr(request);
 
             if std::env::var("TIDEPOOL_TRACE_EFFECTS").is_ok() {
@@ -180,7 +181,7 @@ impl CompiledEffectMachine {
                     "[effect_machine] effect_tag={} tag_ptr_tag={} union_con_tag={} request_tag={}",
                     effect_tag,
                     tag_ptr_tag,
-                    unsafe { *(union_ptr.add(layout::CON_TAG_OFFSET) as *const u64) },
+                    unsafe { *(union_ptr.add(layout::CON_TAG_OFFSET as usize) as *const u64) },
                     if request.is_null() {
                         255
                     } else {
@@ -245,17 +246,17 @@ impl CompiledEffectMachine {
         let tag = *k;
         match tag {
             t if t == layout::TAG_CON => {
-                let con_tag = *(k.add(layout::CON_TAG_OFFSET) as *const u64);
+                let con_tag = unsafe { *(k.add(layout::CON_TAG_OFFSET as usize) as *const u64) };
 
                 if con_tag == self.tags.leaf {
                     // Leaf(f) — extract closure f at field[0], call f(arg)
-                    let f = self.force_ptr(*(k.add(layout::CON_FIELDS_OFFSET) as *const *mut u8));
+                    let f = self.force_ptr(unsafe { *(k.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) });
                     self.call_closure(f, arg)
                 } else if con_tag == self.tags.node {
                     // Node(k1, k2) — apply k1 to arg, then compose with k2
-                    let k1 = self.force_ptr(*(k.add(layout::CON_FIELDS_OFFSET) as *const *mut u8));
+                    let k1 = self.force_ptr(unsafe { *(k.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) });
                     let k2 =
-                        self.force_ptr(*(k.add(layout::CON_FIELDS_OFFSET + 8) as *const *mut u8));
+                        self.force_ptr(unsafe { *(k.add(layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8) });
 
                     let result = self.apply_cont_heap(k1, arg);
                     if result.is_null() {
@@ -269,25 +270,25 @@ impl CompiledEffectMachine {
                     }
 
                     // Check if result is Val or E
-                    let result_tag = *result;
+                    let result_tag = unsafe { *result };
                     if result_tag != layout::TAG_CON {
                         return std::ptr::null_mut();
                     }
 
-                    let result_con_tag = *(result.add(layout::CON_TAG_OFFSET) as *const u64);
+                    let result_con_tag = unsafe { *(result.add(layout::CON_TAG_OFFSET as usize) as *const u64) };
 
                     if result_con_tag == self.tags.val {
                         // Val(y) — extract y, apply k2(y)
                         let y = self
-                            .force_ptr(*(result.add(layout::CON_FIELDS_OFFSET) as *const *mut u8));
+                            .force_ptr(unsafe { *(result.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) });
                         self.apply_cont_heap(k2, y)
                     } else if result_con_tag == self.tags.e {
                         // E(union, k') — compose: E(union, Node(k', k2))
                         let union_val = self
-                            .force_ptr(*(result.add(layout::CON_FIELDS_OFFSET) as *const *mut u8));
-                        let k_prime = self.force_ptr(
-                            *(result.add(layout::CON_FIELDS_OFFSET + 8) as *const *mut u8),
-                        );
+                            .force_ptr(unsafe { *(result.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) });
+                        let k_prime = self.force_ptr(unsafe {
+                            *(result.add(layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8)
+                        });
 
                         // Allocate Node(k', k2)
                         let new_node = self.alloc_con(self.tags.node, &[k_prime, k2]);
@@ -323,7 +324,7 @@ impl CompiledEffectMachine {
     /// `closure` must point to a valid Closure HeapObject.
     unsafe fn call_closure(&mut self, closure: *mut u8, arg: *mut u8) -> *mut u8 {
         // SAFETY: closure is a valid Closure heap object. Reading code_ptr at the known offset.
-        let code_ptr = *(closure.add(layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
+        let code_ptr = *(closure.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const usize);
 
         let trace = crate::debug::trace_level();
         if trace >= crate::debug::TraceLevel::Calls {
@@ -347,10 +348,10 @@ impl CompiledEffectMachine {
                 return std::ptr::null_mut();
             }
             // Dump captures
-            let num_captured = *(closure.add(layout::CLOSURE_NUM_CAPTURED_OFFSET) as *const u16);
+            let num_captured = *(closure.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
             for i in 0..num_captured as usize {
                 let cap =
-                    *(closure.add(layout::CLOSURE_CAPTURED_OFFSET + 8 * i) as *const *const u8);
+                    *(closure.add(layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * i) as *const *const u8);
                 if cap.is_null() {
                     eprintln!("[trace]   capture[{}] = NULL", i);
                 } else {
@@ -403,7 +404,7 @@ impl CompiledEffectMachine {
             self.vmctx.tail_callee = std::ptr::null_mut();
             self.vmctx.tail_arg = std::ptr::null_mut();
             crate::host_fns::reset_call_depth();
-            let code_ptr = *(callee.add(layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
+            let code_ptr = *(callee.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const usize);
             let func: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
                 std::mem::transmute(code_ptr);
             *result = func(&mut self.vmctx, callee, arg);
@@ -419,11 +420,11 @@ impl CompiledEffectMachine {
         if ptr.is_null() {
             return std::ptr::null_mut();
         }
-        layout::write_header(ptr, layout::TAG_CON, size as u16);
-        *(ptr.add(layout::CON_TAG_OFFSET) as *mut u64) = con_tag;
-        *(ptr.add(layout::CON_NUM_FIELDS_OFFSET) as *mut u16) = fields.len() as u16;
+        heap_layout::write_header(ptr, layout::TAG_CON, size as u16);
+        *(ptr.add(layout::CON_TAG_OFFSET as usize) as *mut u64) = con_tag;
+        *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) = fields.len() as u16;
         for (i, &fp) in fields.iter().enumerate() {
-            *(ptr.add(layout::CON_FIELDS_OFFSET + 8 * i) as *mut *mut u8) = fp;
+            *(ptr.add(layout::CON_FIELDS_OFFSET as usize + 8 * i) as *mut *mut u8) = fp;
         }
         ptr
     }
