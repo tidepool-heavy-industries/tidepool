@@ -17,20 +17,11 @@ use tidepool_testing::gen::arb_ground_expr;
 /// Compile and run an expression through the JIT, returning the result pointer.
 /// Panics on compilation failure — the generator produces well-typed expressions
 /// that the JIT should always be able to compile.
-fn jit_compile_and_run(
-    tree: &CoreExpr,
-) -> (
-    *const u8,
-    VMContext,
-    Vec<u8>,
-    CodegenPipeline,
-) {
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols())
-        .expect("pipeline creation failed");
-    let func_id = compile_expr(&mut pipeline, tree, "diff_test")
-        .expect("compile_expr failed");
-    pipeline.finalize()
-        .expect("pipeline finalization failed");
+fn jit_compile_and_run(tree: &CoreExpr) -> (*const u8, VMContext, Vec<u8>, CodegenPipeline) {
+    let mut pipeline =
+        CodegenPipeline::new(&host_fns::host_fn_symbols()).expect("pipeline creation failed");
+    let func_id = compile_expr(&mut pipeline, tree, "diff_test").expect("compile_expr failed");
+    pipeline.finalize().expect("pipeline finalization failed");
 
     let mut nursery = vec![0u8; 65536];
     let start = nursery.as_mut_ptr();
@@ -41,8 +32,7 @@ fn jit_compile_and_run(
     host_fns::set_stack_map_registry(&pipeline.stack_maps);
 
     let ptr = pipeline.get_function_ptr(func_id);
-    let func: unsafe extern "C" fn(*mut VMContext) -> i64 =
-        unsafe { std::mem::transmute(ptr) };
+    let func: unsafe extern "C" fn(*mut VMContext) -> i64 = unsafe { std::mem::transmute(ptr) };
     let result = unsafe { func(&mut vmctx as *mut VMContext) };
 
     (result as *const u8, vmctx, nursery, pipeline)
@@ -71,8 +61,7 @@ fn interpreter_matches_jit() {
                     let eval_result = eval(&expr, &Env::new(), &mut heap);
 
                     // 2. JIT — compilation must succeed
-                    let (result_ptr, mut vmctx, _nursery, _pipeline) =
-                        jit_compile_and_run(&expr);
+                    let (result_ptr, mut vmctx, _nursery, _pipeline) = jit_compile_and_run(&expr);
 
                     // Check for JIT runtime error (e.g., division by zero, stack overflow)
                     let jit_runtime_error = host_fns::take_runtime_error();
@@ -81,15 +70,12 @@ fn interpreter_matches_jit() {
                     match (&eval_result, &jit_runtime_error) {
                         (Ok(eval_val), None) => {
                             // Both succeeded — compare values
-                            let forced = tidepool_eval::eval::deep_force(
-                                eval_val.clone(),
-                                &mut heap,
-                            );
+                            let forced =
+                                tidepool_eval::eval::deep_force(eval_val.clone(), &mut heap);
                             match forced {
                                 Ok(fv) => {
-                                    let jit_val = unsafe {
-                                        compare::heap_to_value(result_ptr, &mut vmctx)
-                                    };
+                                    let jit_val =
+                                        unsafe { compare::heap_to_value(result_ptr, &mut vmctx) };
                                     compare::assert_values_eq(&fv, &jit_val);
                                     compared.set(compared.get() + 1);
                                 }

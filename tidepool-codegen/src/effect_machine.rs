@@ -124,17 +124,20 @@ impl CompiledEffectMachine {
 
         if con_tag == self.tags.val {
             // Val(value) — extract value from fields[0]
-            let num_fields = unsafe { *(result.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
+            let num_fields =
+                unsafe { *(result.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
             if num_fields < 1 {
                 return Yield::Error(YieldError::BadValFields(num_fields));
             }
-            let value = unsafe { *(result.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) };
+            let value =
+                unsafe { *(result.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) };
             // Force value field — it may be a thunk
             let value = self.force_ptr(value);
             Yield::Done(value)
         } else if con_tag == self.tags.e {
             // E(union, continuation) — extract Union and k
-            let num_fields = unsafe { *(result.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
+            let num_fields =
+                unsafe { *(result.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
             if num_fields != 2 {
                 return Yield::Error(YieldError::BadEFields(num_fields));
             }
@@ -164,16 +167,19 @@ impl CompiledEffectMachine {
                 return Yield::Error(YieldError::BadUnionFields(union_num_fields));
             }
 
-            let tag_ptr = unsafe { *(union_ptr.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) };
+            let tag_ptr =
+                unsafe { *(union_ptr.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) };
             let tag_ptr = self.force_ptr(tag_ptr);
             if tag_ptr.is_null() {
                 return Yield::Error(YieldError::NullPointer);
             }
             // Read the actual tag value from the Lit HeapObject (offset 16 = LIT_VALUE_OFFSET)
             let tag_ptr_tag = unsafe { *tag_ptr };
-            let effect_tag = unsafe { *(tag_ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) };
-            let mut request =
-                unsafe { *(union_ptr.add(layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8) };
+            let effect_tag =
+                unsafe { *(tag_ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) };
+            let mut request = unsafe {
+                *(union_ptr.add(layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8)
+            };
             request = self.force_ptr(request);
 
             if std::env::var("TIDEPOOL_TRACE_EFFECTS").is_ok() {
@@ -250,13 +256,18 @@ impl CompiledEffectMachine {
 
                 if con_tag == self.tags.leaf {
                     // Leaf(f) — extract closure f at field[0], call f(arg)
-                    let f = self.force_ptr(unsafe { *(k.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) });
+                    let f = self.force_ptr(unsafe {
+                        *(k.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8)
+                    });
                     self.call_closure(f, arg)
                 } else if con_tag == self.tags.node {
                     // Node(k1, k2) — apply k1 to arg, then compose with k2
-                    let k1 = self.force_ptr(unsafe { *(k.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) });
-                    let k2 =
-                        self.force_ptr(unsafe { *(k.add(layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8) });
+                    let k1 = self.force_ptr(unsafe {
+                        *(k.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8)
+                    });
+                    let k2 = self.force_ptr(unsafe {
+                        *(k.add(layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8)
+                    });
 
                     let result = self.apply_cont_heap(k1, arg);
                     if result.is_null() {
@@ -275,17 +286,20 @@ impl CompiledEffectMachine {
                         return std::ptr::null_mut();
                     }
 
-                    let result_con_tag = unsafe { *(result.add(layout::CON_TAG_OFFSET as usize) as *const u64) };
+                    let result_con_tag =
+                        unsafe { *(result.add(layout::CON_TAG_OFFSET as usize) as *const u64) };
 
                     if result_con_tag == self.tags.val {
                         // Val(y) — extract y, apply k2(y)
-                        let y = self
-                            .force_ptr(unsafe { *(result.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) });
+                        let y = self.force_ptr(unsafe {
+                            *(result.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8)
+                        });
                         self.apply_cont_heap(k2, y)
                     } else if result_con_tag == self.tags.e {
                         // E(union, k') — compose: E(union, Node(k', k2))
-                        let union_val = self
-                            .force_ptr(unsafe { *(result.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) });
+                        let union_val = self.force_ptr(unsafe {
+                            *(result.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8)
+                        });
                         let k_prime = self.force_ptr(unsafe {
                             *(result.add(layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8)
                         });
@@ -348,10 +362,11 @@ impl CompiledEffectMachine {
                 return std::ptr::null_mut();
             }
             // Dump captures
-            let num_captured = *(closure.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
+            let num_captured =
+                *(closure.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
             for i in 0..num_captured as usize {
-                let cap =
-                    *(closure.add(layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * i) as *const *const u8);
+                let cap = *(closure.add(layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * i)
+                    as *const *const u8);
                 if cap.is_null() {
                     eprintln!("[trace]   capture[{}] = NULL", i);
                 } else {

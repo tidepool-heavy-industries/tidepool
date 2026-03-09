@@ -767,7 +767,10 @@ fn gen_prim_op(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeB
                 ops.push(PrimOpSpec::Binary(op, SimpleType::Char));
             }
             // Conversions to Int
-            ops.push(PrimOpSpec::Unary(PrimOpKind::Double2Int, SimpleType::Double));
+            ops.push(PrimOpSpec::Unary(
+                PrimOpKind::Double2Int,
+                SimpleType::Double,
+            ));
             ops.push(PrimOpSpec::Unary(PrimOpKind::Word2Int, SimpleType::Word));
             ops.push(PrimOpSpec::Unary(PrimOpKind::Ord, SimpleType::Char));
             // Division with non-zero guard

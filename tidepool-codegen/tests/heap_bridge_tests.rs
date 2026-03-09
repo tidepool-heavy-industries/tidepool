@@ -1,14 +1,14 @@
 use tidepool_codegen::heap_bridge::heap_to_value;
+use tidepool_eval::value::Value;
 use tidepool_heap::layout;
 use tidepool_repr::*;
-use tidepool_eval::value::Value;
 
 #[repr(align(8))]
 struct AlignedBuf<const N: usize>([u8; N]);
 
 #[test]
 fn test_heap_to_value_lit_int() {
-    let mut buf_data = AlignedBuf::<{layout::LIT_SIZE}>([0u8; layout::LIT_SIZE]);
+    let mut buf_data = AlignedBuf::<{ layout::LIT_SIZE }>([0u8; layout::LIT_SIZE]);
     let ptr = buf_data.0.as_mut_ptr();
     unsafe {
         layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
@@ -65,19 +65,19 @@ fn test_heap_to_value_con_pair() {
 #[test]
 fn test_heap_to_value_deeply_nested_cons() {
     // Chain of 100 nested Cons: Con(0, [Con(0, [ ... LitInt(0) ... ])])
-    let mut buf_data = AlignedBuf::<{1024 * 64}>([0u8; 1024 * 64]);
+    let mut buf_data = AlignedBuf::<{ 1024 * 64 }>([0u8; 1024 * 64]);
     let start = buf_data.0.as_mut_ptr();
     unsafe {
         let mut current = start;
-        
+
         // Leaf LitInt(0)
         layout::write_header(current, layout::TAG_LIT, layout::LIT_SIZE as u16);
         *(current.add(layout::LIT_TAG_OFFSET)) = layout::LitTag::Int as u8;
         *(current.add(layout::LIT_VALUE_OFFSET) as *mut i64) = 0;
-        
+
         let mut last_ptr = current;
         current = current.add(layout::LIT_SIZE);
-        
+
         for _ in 0..100 {
             let num_fields = 1;
             let con_size = layout::CON_FIELDS_OFFSET + num_fields * 8;
@@ -85,13 +85,13 @@ fn test_heap_to_value_deeply_nested_cons() {
             *(current.add(layout::CON_TAG_OFFSET) as *mut u64) = 0;
             *(current.add(layout::CON_NUM_FIELDS_OFFSET) as *mut u16) = num_fields as u16;
             *(current.add(layout::CON_FIELDS_OFFSET) as *mut *const u8) = last_ptr;
-            
+
             last_ptr = current;
             current = current.add(con_size);
         }
 
         let res = heap_to_value(last_ptr).expect("heap_to_value failed on deep structure");
-        
+
         // Verify depth
         let mut depth = 0;
         let mut v = res;

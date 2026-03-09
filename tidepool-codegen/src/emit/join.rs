@@ -59,7 +59,8 @@ pub fn emit_join(
     for (i, param_var) in params.iter().enumerate() {
         let val = block_params[i];
         builder.declare_value_needs_stack_map(val); // CRITICAL
-        ctx.env.insert_scoped(&mut scope, *param_var, SsaVal::HeapPtr(val));
+        ctx.env
+            .insert_scoped(&mut scope, *param_var, SsaVal::HeapPtr(val));
     }
 
     let rhs_result = ctx.emit_node(sess, builder, rhs_idx, TailCtx::NonTail)?;
@@ -108,7 +109,11 @@ pub fn emit_jump(
         let val = ctx.emit_node(sess, builder, arg_idx, TailCtx::NonTail)?;
         // 3. Ensure all args are HeapPtr
         arg_values.push(BlockArg::Value(ensure_heap_ptr(
-            builder, sess.vmctx, sess.gc_sig, sess.oom_func, val,
+            builder,
+            sess.vmctx,
+            sess.gc_sig,
+            sess.oom_func,
+            val,
         )));
     }
 

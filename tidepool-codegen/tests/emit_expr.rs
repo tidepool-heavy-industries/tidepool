@@ -2948,23 +2948,21 @@ fn test_thunkcon_field_in_lit_case() {
     let tree = RecursiveTree {
         nodes: vec![
             // PrimOp: 3 - 1
-            CoreFrame::Lit(Literal::LitInt(3)),    // 0
-            CoreFrame::Lit(Literal::LitInt(1)),    // 1
+            CoreFrame::Lit(Literal::LitInt(3)), // 0
+            CoreFrame::Lit(Literal::LitInt(1)), // 1
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntSub,
                 args: vec![0, 1],
             }, // 2: IntSub(3, 1) → non-trivial, will be thunked
-
             // Con(I#, [thunked_sub]) → ThunkCon
             CoreFrame::Con {
                 tag: i_hash,
                 fields: vec![2],
             }, // 3: I#(3 - 1)
-
             // Inner case: case n# of { 2# -> 42; _ -> 99 }
-            CoreFrame::Var(n),                      // 4: scrutinee = n#
-            CoreFrame::Lit(Literal::LitInt(42)),   // 5: match body
-            CoreFrame::Lit(Literal::LitInt(99)),   // 6: default body
+            CoreFrame::Var(n),                   // 4: scrutinee = n#
+            CoreFrame::Lit(Literal::LitInt(42)), // 5: match body
+            CoreFrame::Lit(Literal::LitInt(99)), // 6: default body
             CoreFrame::Case {
                 scrutinee: 4,
                 binder: inner_binder,
@@ -2981,7 +2979,6 @@ fn test_thunkcon_field_in_lit_case() {
                     },
                 ],
             }, // 7: case n# of { 2# -> 42; _ -> 99 }
-
             // Outer case: case boxed of { I# n# -> <inner case> }
             CoreFrame::Case {
                 scrutinee: 3,
@@ -3029,27 +3026,24 @@ fn test_thunkcon_field_in_primop() {
     let tree = RecursiveTree {
         nodes: vec![
             // PrimOp: 10 - 3
-            CoreFrame::Lit(Literal::LitInt(10)),   // 0
-            CoreFrame::Lit(Literal::LitInt(3)),    // 1
+            CoreFrame::Lit(Literal::LitInt(10)), // 0
+            CoreFrame::Lit(Literal::LitInt(3)),  // 1
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntSub,
                 args: vec![0, 1],
             }, // 2: IntSub(10, 3) → thunked
-
             // Con(I#, [thunked_sub]) → ThunkCon
             CoreFrame::Con {
                 tag: i_hash,
                 fields: vec![2],
             }, // 3: I#(10 - 3)
-
             // Body: n# + 5
-            CoreFrame::Var(n),                     // 4: n# (thunked field)
-            CoreFrame::Lit(Literal::LitInt(5)),    // 5
+            CoreFrame::Var(n),                  // 4: n# (thunked field)
+            CoreFrame::Lit(Literal::LitInt(5)), // 5
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![4, 5],
             }, // 6: IntAdd(n#, 5)
-
             // case boxed of { I# n# -> n# + 5 }
             CoreFrame::Case {
                 scrutinee: 3,
@@ -3104,25 +3098,21 @@ fn test_thunkcon_recursive_countdown() {
             // case seed of { I# n# -> case n# of { 0# -> I# 0; _ -> go f (f seed) } }
 
             // Inner literals
-            CoreFrame::Lit(Literal::LitInt(0)),    // 0: lit 0 for base case
+            CoreFrame::Lit(Literal::LitInt(0)), // 0: lit 0 for base case
             CoreFrame::Con {
                 tag: i_hash,
                 fields: vec![0],
             }, // 1: I# 0 (base case result)
-
             // Default branch: go f (f seed)
-            CoreFrame::Var(f),                     // 2
-            CoreFrame::Var(seed),                  // 3
-            CoreFrame::App { fun: 2, arg: 3 },     // 4: f seed
-
-            CoreFrame::Var(go),                    // 5
-            CoreFrame::Var(f),                     // 6
-            CoreFrame::App { fun: 5, arg: 6 },     // 7: go f
-
-            CoreFrame::App { fun: 7, arg: 4 },     // 8: go f (f seed) — TAIL CALL
-
+            CoreFrame::Var(f),                 // 2
+            CoreFrame::Var(seed),              // 3
+            CoreFrame::App { fun: 2, arg: 3 }, // 4: f seed
+            CoreFrame::Var(go),                // 5
+            CoreFrame::Var(f),                 // 6
+            CoreFrame::App { fun: 5, arg: 6 }, // 7: go f
+            CoreFrame::App { fun: 7, arg: 4 }, // 8: go f (f seed) — TAIL CALL
             // Inner case: case n# of { 0# -> I# 0; _ -> go f (f seed) }
-            CoreFrame::Var(n),                     // 9: scrutinee = n#
+            CoreFrame::Var(n), // 9: scrutinee = n#
             CoreFrame::Case {
                 scrutinee: 9,
                 binder: case_b2,
@@ -3139,9 +3129,8 @@ fn test_thunkcon_recursive_countdown() {
                     },
                 ],
             }, // 10: inner case
-
             // Outer case: case seed of { I# n# -> <inner case> }
-            CoreFrame::Var(seed),                  // 11: scrutinee
+            CoreFrame::Var(seed), // 11: scrutinee
             CoreFrame::Case {
                 scrutinee: 11,
                 binder: case_b1,
@@ -3151,14 +3140,15 @@ fn test_thunkcon_recursive_countdown() {
                     body: 10,
                 }],
             }, // 12: outer case
-
             // go = \f -> \seed -> <outer case>
             CoreFrame::Lam {
                 binder: seed,
                 body: 12,
             }, // 13
-            CoreFrame::Lam { binder: f, body: 13 }, // 14: go = \f seed -> ...
-
+            CoreFrame::Lam {
+                binder: f,
+                body: 13,
+            }, // 14: go = \f seed -> ...
             // === f's lambda body ===
             // \x -> case x of { I# m -> I#(m - 1) }
             CoreFrame::Var(VarId(0x6100_0000_0000_0010)), // 15: m (extracted)
@@ -3167,12 +3157,10 @@ fn test_thunkcon_recursive_countdown() {
                 op: PrimOpKind::IntSub,
                 args: vec![15, 16],
             }, // 17: m - 1 → NON-TRIVIAL → will be thunked in Con
-
             CoreFrame::Con {
                 tag: i_hash,
                 fields: vec![17],
             }, // 18: I#(m - 1) → ThunkCon!
-
             CoreFrame::Var(VarId(0x6100_0000_0000_0010)), // 19: scrutinee
             CoreFrame::Case {
                 scrutinee: 19,
@@ -3183,26 +3171,22 @@ fn test_thunkcon_recursive_countdown() {
                     body: 18,
                 }],
             }, // 20: case x of { I# m -> I#(m-1) }
-
             CoreFrame::Lam {
                 binder: VarId(0x6100_0000_0000_0010),
                 body: 20,
             }, // 21: f = \x -> case x of { I# m -> I#(m-1) }
-
             // === entry point ===
             // let boxed_3 = I# 3
-            CoreFrame::Lit(Literal::LitInt(3)),    // 22
+            CoreFrame::Lit(Literal::LitInt(3)), // 22
             CoreFrame::Con {
                 tag: i_hash,
                 fields: vec![22],
             }, // 23: I# 3
-
             // go f (I# 3)
-            CoreFrame::Var(go),                    // 24
-            CoreFrame::Var(f),                     // 25
-            CoreFrame::App { fun: 24, arg: 25 },   // 26: go f
-            CoreFrame::App { fun: 26, arg: 23 },   // 27: go f (I# 3)
-
+            CoreFrame::Var(go),                  // 24
+            CoreFrame::Var(f),                   // 25
+            CoreFrame::App { fun: 24, arg: 25 }, // 26: go f
+            CoreFrame::App { fun: 26, arg: 23 }, // 27: go f (I# 3)
             // LetRec
             CoreFrame::LetRec {
                 bindings: vec![(go, 14), (f, 21)],
@@ -3249,8 +3233,8 @@ fn test_thunkcon_primop_field_in_data_case() {
 
     let tree = RecursiveTree {
         nodes: vec![
-            CoreFrame::Lit(Literal::LitInt(3)),    // 0
-            CoreFrame::Lit(Literal::LitInt(1)),    // 1
+            CoreFrame::Lit(Literal::LitInt(3)), // 0
+            CoreFrame::Lit(Literal::LitInt(1)), // 1
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntSub,
                 args: vec![0, 1],
@@ -3259,7 +3243,7 @@ fn test_thunkcon_primop_field_in_data_case() {
                 tag: just_tag,
                 fields: vec![2],
             }, // 3: Just(thunked 3-1)
-            CoreFrame::Var(v),                     // 4: extracted field
+            CoreFrame::Var(v),                  // 4: extracted field
             CoreFrame::Case {
                 scrutinee: 3,
                 binder: scrut_binder,
@@ -3304,21 +3288,18 @@ fn test_thunkcon_app_field_in_lit_case() {
             // identity = \x -> x
             CoreFrame::Var(x),                     // 0
             CoreFrame::Lam { binder: x, body: 0 }, // 1: identity
-
             // App(identity, Lit(5)) → non-trivial, thunked
-            CoreFrame::Lit(Literal::LitInt(5)),    // 2
-            CoreFrame::App { fun: 1, arg: 2 },     // 3: identity 5
-
+            CoreFrame::Lit(Literal::LitInt(5)), // 2
+            CoreFrame::App { fun: 1, arg: 2 },  // 3: identity 5
             // Con(I#, [thunked_app])
             CoreFrame::Con {
                 tag: i_hash,
                 fields: vec![3],
             }, // 4: I#(identity 5) → ThunkCon
-
             // Inner case: case n# of { 5# -> 42; _ -> 99 }
-            CoreFrame::Var(n),                     // 5: scrutinee = n#
-            CoreFrame::Lit(Literal::LitInt(42)),   // 6: match body
-            CoreFrame::Lit(Literal::LitInt(99)),   // 7: default body
+            CoreFrame::Var(n),                   // 5: scrutinee = n#
+            CoreFrame::Lit(Literal::LitInt(42)), // 6: match body
+            CoreFrame::Lit(Literal::LitInt(99)), // 7: default body
             CoreFrame::Case {
                 scrutinee: 5,
                 binder: inner_binder,
@@ -3335,7 +3316,6 @@ fn test_thunkcon_app_field_in_lit_case() {
                     },
                 ],
             }, // 8: literal dispatch forces thunked n#
-
             // Outer case: case boxed of { I# n# -> <inner> }
             CoreFrame::Case {
                 scrutinee: 4,
@@ -3382,25 +3362,21 @@ fn test_thunkcon_app_field_in_primop() {
             // identity = \x -> x
             CoreFrame::Var(x),                     // 0
             CoreFrame::Lam { binder: x, body: 0 }, // 1: identity
-
             // App(identity, Lit(7)) → non-trivial, thunked
-            CoreFrame::Lit(Literal::LitInt(7)),    // 2
-            CoreFrame::App { fun: 1, arg: 2 },     // 3: identity 7
-
+            CoreFrame::Lit(Literal::LitInt(7)), // 2
+            CoreFrame::App { fun: 1, arg: 2 },  // 3: identity 7
             // Con(I#, [thunked_app])
             CoreFrame::Con {
                 tag: i_hash,
                 fields: vec![3],
             }, // 4: I#(identity 7) → ThunkCon
-
             // Body: n# + 3
-            CoreFrame::Var(n),                     // 5: n# (thunked field)
-            CoreFrame::Lit(Literal::LitInt(3)),    // 6
+            CoreFrame::Var(n),                  // 5: n# (thunked field)
+            CoreFrame::Lit(Literal::LitInt(3)), // 6
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![5, 6],
             }, // 7: IntAdd forces thunked n#
-
             // case boxed of { I# n# -> n# + 3 }
             CoreFrame::Case {
                 scrutinee: 4,
@@ -3445,9 +3421,9 @@ fn test_thunkcon_case_field_in_lit_case() {
     let tree = RecursiveTree {
         nodes: vec![
             // Case expression: case 1 of { 1# -> 5; _ -> 0 } → non-trivial, thunked
-            CoreFrame::Lit(Literal::LitInt(1)),    // 0: scrutinee
-            CoreFrame::Lit(Literal::LitInt(5)),    // 1: match body
-            CoreFrame::Lit(Literal::LitInt(0)),    // 2: default body
+            CoreFrame::Lit(Literal::LitInt(1)), // 0: scrutinee
+            CoreFrame::Lit(Literal::LitInt(5)), // 1: match body
+            CoreFrame::Lit(Literal::LitInt(0)), // 2: default body
             CoreFrame::Case {
                 scrutinee: 0,
                 binder: inner_case_binder,
@@ -3464,17 +3440,15 @@ fn test_thunkcon_case_field_in_lit_case() {
                     },
                 ],
             }, // 3: evaluates to 5
-
             // Con(I#, [thunked_case])
             CoreFrame::Con {
                 tag: i_hash,
                 fields: vec![3],
             }, // 4: I#(case result) → ThunkCon
-
             // Literal case: case n# of { 5# -> 42; _ -> 99 }
-            CoreFrame::Var(n),                     // 5: n# (thunked field)
-            CoreFrame::Lit(Literal::LitInt(42)),   // 6: match body
-            CoreFrame::Lit(Literal::LitInt(99)),   // 7: default body
+            CoreFrame::Var(n),                   // 5: n# (thunked field)
+            CoreFrame::Lit(Literal::LitInt(42)), // 6: match body
+            CoreFrame::Lit(Literal::LitInt(99)), // 7: default body
             CoreFrame::Case {
                 scrutinee: 5,
                 binder: outer_lit_binder,
@@ -3491,7 +3465,6 @@ fn test_thunkcon_case_field_in_lit_case() {
                     },
                 ],
             }, // 8: literal dispatch forces thunked n#
-
             // Outer case: case boxed of { I# n# -> <lit case> }
             CoreFrame::Case {
                 scrutinee: 4,
@@ -3539,35 +3512,31 @@ fn test_thunkcon_nested_in_primop() {
     let tree = RecursiveTree {
         nodes: vec![
             // IntSub(10, 3) → non-trivial
-            CoreFrame::Lit(Literal::LitInt(10)),   // 0
-            CoreFrame::Lit(Literal::LitInt(3)),    // 1
+            CoreFrame::Lit(Literal::LitInt(10)), // 0
+            CoreFrame::Lit(Literal::LitInt(3)),  // 1
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntSub,
                 args: vec![0, 1],
             }, // 2: IntSub(10,3)
-
             // Inner Con(I#, [thunked_sub]) → ThunkCon (PrimOp field)
             CoreFrame::Con {
                 tag: i_hash,
                 fields: vec![2],
             }, // 3: I#(10-3)
-
             // Outer Con(I#, [inner_con]) → ThunkCon (inner Con is non-trivial)
             CoreFrame::Con {
                 tag: i_hash,
                 fields: vec![3],
             }, // 4: I#(I#(10-3))
-
             // Body: n + 1
-            CoreFrame::Var(n),                     // 5: n (from inner unbox)
-            CoreFrame::Lit(Literal::LitInt(1)),    // 6
+            CoreFrame::Var(n),                  // 5: n (from inner unbox)
+            CoreFrame::Lit(Literal::LitInt(1)), // 6
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![5, 6],
             }, // 7: n + 1 (PrimOp forces thunked n)
-
             // Inner case: case boxed2 of { I# n -> n + 1 }
-            CoreFrame::Var(boxed2),                // 8: boxed2 (thunk, forced by data dispatch)
+            CoreFrame::Var(boxed2), // 8: boxed2 (thunk, forced by data dispatch)
             CoreFrame::Case {
                 scrutinee: 8,
                 binder: inner_binder,
@@ -3577,7 +3546,6 @@ fn test_thunkcon_nested_in_primop() {
                     body: 7,
                 }],
             }, // 9: data dispatch forces boxed2 thunk
-
             // Outer case: case outer of { I# boxed2 -> <inner case> }
             CoreFrame::Case {
                 scrutinee: 4,
@@ -3628,35 +3596,31 @@ fn test_adversarial_multi_field_thunkcon() {
     let tree = RecursiveTree {
         nodes: vec![
             // Field 0: IntSub(10, 3) = 7
-            CoreFrame::Lit(Literal::LitInt(10)),   // 0
-            CoreFrame::Lit(Literal::LitInt(3)),    // 1
+            CoreFrame::Lit(Literal::LitInt(10)), // 0
+            CoreFrame::Lit(Literal::LitInt(3)),  // 1
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntSub,
                 args: vec![0, 1],
             }, // 2: non-trivial → thunked
-
             // Field 1: IntMul(4, 5) = 20
-            CoreFrame::Lit(Literal::LitInt(4)),    // 3
-            CoreFrame::Lit(Literal::LitInt(5)),    // 4
+            CoreFrame::Lit(Literal::LitInt(4)), // 3
+            CoreFrame::Lit(Literal::LitInt(5)), // 4
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntMul,
                 args: vec![3, 4],
             }, // 5: non-trivial → thunked
-
             // Con(Pair, [thunk0, thunk1])
             CoreFrame::Con {
                 tag: pair_tag,
                 fields: vec![2, 5],
             }, // 6: ThunkCon with 2 fields
-
             // Body: a + b
-            CoreFrame::Var(a),                     // 7
-            CoreFrame::Var(b),                     // 8
+            CoreFrame::Var(a), // 7
+            CoreFrame::Var(b), // 8
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![7, 8],
             }, // 9: forces both thunks
-
             // case pair of { Pair a b -> a + b }
             CoreFrame::Case {
                 scrutinee: 6,
@@ -3706,8 +3670,8 @@ fn test_adversarial_thunk_forces_to_con_in_data_dispatch() {
     let tree = RecursiveTree {
         nodes: vec![
             // Inner case: case 1 of { 1# -> Just(42); _ -> Nothing }
-            CoreFrame::Lit(Literal::LitInt(1)),    // 0: scrutinee
-            CoreFrame::Lit(Literal::LitInt(42)),   // 1
+            CoreFrame::Lit(Literal::LitInt(1)),  // 0: scrutinee
+            CoreFrame::Lit(Literal::LitInt(42)), // 1
             CoreFrame::Con {
                 tag: just_tag,
                 fields: vec![1],
@@ -3732,17 +3696,15 @@ fn test_adversarial_thunk_forces_to_con_in_data_dispatch() {
                     },
                 ],
             }, // 4: Case → non-trivial → thunked in outer Con
-
             // Outer Con(Box, [thunked_case])
             CoreFrame::Con {
                 tag: box_tag,
                 fields: vec![4],
             }, // 5: Box(thunk) → ThunkCon
-
             // Inner dispatch: case inner of { Just v -> v; Nothing -> 0 }
-            CoreFrame::Var(inner),                 // 6: inner (thunk from Box extraction)
-            CoreFrame::Var(v),                     // 7: v from Just
-            CoreFrame::Lit(Literal::LitInt(0)),    // 8: Nothing branch
+            CoreFrame::Var(inner), // 6: inner (thunk from Box extraction)
+            CoreFrame::Var(v),     // 7: v from Just
+            CoreFrame::Lit(Literal::LitInt(0)), // 8: Nothing branch
             CoreFrame::Case {
                 scrutinee: 6,
                 binder: b2,
@@ -3759,7 +3721,6 @@ fn test_adversarial_thunk_forces_to_con_in_data_dispatch() {
                     },
                 ],
             }, // 9: data dispatch on inner — must force thunk!
-
             // Outer dispatch: case box of { Box inner -> <inner dispatch> }
             CoreFrame::Case {
                 scrutinee: 5,
@@ -3807,30 +3768,25 @@ fn test_adversarial_thunked_closure_in_app_fun() {
             // identity = \x -> x
             CoreFrame::Var(x),                     // 0
             CoreFrame::Lam { binder: x, body: 0 }, // 1
-
             // closure = \y -> y + 10
-            CoreFrame::Var(y),                     // 2
-            CoreFrame::Lit(Literal::LitInt(10)),   // 3
+            CoreFrame::Var(y),                   // 2
+            CoreFrame::Lit(Literal::LitInt(10)), // 3
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![2, 3],
             }, // 4: y + 10
             CoreFrame::Lam { binder: y, body: 4 }, // 5: \y -> y + 10
-
             // App(identity, closure) → non-trivial → thunked in Con
-            CoreFrame::App { fun: 1, arg: 5 },     // 6: identity(closure) = closure
-
+            CoreFrame::App { fun: 1, arg: 5 }, // 6: identity(closure) = closure
             // Con(Box, [thunked App])
             CoreFrame::Con {
                 tag: box_tag,
                 fields: vec![6],
             }, // 7: Box(thunk) → ThunkCon
-
             // Body: f 5
-            CoreFrame::Var(f),                     // 8: f (thunked closure)
-            CoreFrame::Lit(Literal::LitInt(5)),    // 9
-            CoreFrame::App { fun: 8, arg: 9 },     // 10: f 5 — App forces f (TAG_THUNK → heap_force)
-
+            CoreFrame::Var(f),                  // 8: f (thunked closure)
+            CoreFrame::Lit(Literal::LitInt(5)), // 9
+            CoreFrame::App { fun: 8, arg: 9 },  // 10: f 5 — App forces f (TAG_THUNK → heap_force)
             // case box of { Box f -> f 5 }
             CoreFrame::Case {
                 scrutinee: 7,
@@ -3875,16 +3831,15 @@ fn test_adversarial_join_point_thunked_arg() {
     let tree = RecursiveTree {
         nodes: vec![
             // Join RHS: n + 1
-            CoreFrame::Var(n),                     // 0
-            CoreFrame::Lit(Literal::LitInt(1)),    // 1
+            CoreFrame::Var(n),                  // 0
+            CoreFrame::Lit(Literal::LitInt(1)), // 1
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![0, 1],
             }, // 2: n + 1 (PrimOp forces thunked n)
-
             // Join body:
-            CoreFrame::Lit(Literal::LitInt(10)),   // 3
-            CoreFrame::Lit(Literal::LitInt(3)),    // 4
+            CoreFrame::Lit(Literal::LitInt(10)), // 3
+            CoreFrame::Lit(Literal::LitInt(3)),  // 4
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntSub,
                 args: vec![3, 4],
@@ -3893,7 +3848,7 @@ fn test_adversarial_join_point_thunked_arg() {
                 tag: i_hash,
                 fields: vec![5],
             }, // 6: I#(thunked 7)
-            CoreFrame::Var(field),                 // 7: extracted field (thunk)
+            CoreFrame::Var(field),               // 7: extracted field (thunk)
             CoreFrame::Jump {
                 label: j,
                 args: vec![7],
@@ -3907,7 +3862,6 @@ fn test_adversarial_join_point_thunked_arg() {
                     body: 8,
                 }],
             }, // 9: case ... of { I# field -> jump j field }
-
             // Join
             CoreFrame::Join {
                 label: j,
@@ -3945,22 +3899,20 @@ fn test_adversarial_litchar_thunk_dispatch() {
 
     let tree = RecursiveTree {
         nodes: vec![
-            CoreFrame::Lit(Literal::LitInt(65)),   // 0: ord 'A'
-            CoreFrame::Lit(Literal::LitInt(1)),    // 1
+            CoreFrame::Lit(Literal::LitInt(65)), // 0: ord 'A'
+            CoreFrame::Lit(Literal::LitInt(1)),  // 1
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![0, 1],
             }, // 2: 66 = ord 'B', thunked
-
             CoreFrame::Con {
                 tag: i_hash,
                 fields: vec![2],
             }, // 3: I#(thunked 66)
-
             // Inner: case n of { 'B' -> 42; _ -> 99 }
-            CoreFrame::Var(n),                     // 4
-            CoreFrame::Lit(Literal::LitInt(42)),   // 5
-            CoreFrame::Lit(Literal::LitInt(99)),   // 6
+            CoreFrame::Var(n),                   // 4
+            CoreFrame::Lit(Literal::LitInt(42)), // 5
+            CoreFrame::Lit(Literal::LitInt(99)), // 6
             CoreFrame::Case {
                 scrutinee: 4,
                 binder: inner_b,
@@ -3977,7 +3929,6 @@ fn test_adversarial_litchar_thunk_dispatch() {
                     },
                 ],
             }, // 7
-
             // Outer: case boxed of { I# n -> <inner> }
             CoreFrame::Case {
                 scrutinee: 3,
@@ -4018,22 +3969,20 @@ fn test_adversarial_double_thunk_in_lit_dispatch() {
 
     let tree = RecursiveTree {
         nodes: vec![
-            CoreFrame::Lit(Literal::LitDouble(f64::to_bits(3.5))),  // 0
-            CoreFrame::Lit(Literal::LitDouble(f64::to_bits(1.0))),  // 1
+            CoreFrame::Lit(Literal::LitDouble(f64::to_bits(3.5))), // 0
+            CoreFrame::Lit(Literal::LitDouble(f64::to_bits(1.0))), // 1
             CoreFrame::PrimOp {
                 op: PrimOpKind::DoubleSub,
                 args: vec![0, 1],
             }, // 2: 2.5, thunked
-
             CoreFrame::Con {
                 tag: d_hash,
                 fields: vec![2],
             }, // 3: D#(thunked 2.5)
-
             // Inner: case d of { 2.5 -> 42; _ -> 99 }
-            CoreFrame::Var(d),                     // 4
-            CoreFrame::Lit(Literal::LitInt(42)),   // 5
-            CoreFrame::Lit(Literal::LitInt(99)),   // 6
+            CoreFrame::Var(d),                   // 4
+            CoreFrame::Lit(Literal::LitInt(42)), // 5
+            CoreFrame::Lit(Literal::LitInt(99)), // 6
             CoreFrame::Case {
                 scrutinee: 4,
                 binder: inner_b,
@@ -4050,7 +3999,6 @@ fn test_adversarial_double_thunk_in_lit_dispatch() {
                     },
                 ],
             }, // 7
-
             // Outer: case boxed of { D# d -> <inner> }
             CoreFrame::Case {
                 scrutinee: 3,
@@ -4094,31 +4042,27 @@ fn test_adversarial_thunked_arg_through_app() {
 
     let tree = RecursiveTree {
         nodes: vec![
-            CoreFrame::Lit(Literal::LitInt(10)),   // 0
-            CoreFrame::Lit(Literal::LitInt(3)),    // 1
+            CoreFrame::Lit(Literal::LitInt(10)), // 0
+            CoreFrame::Lit(Literal::LitInt(3)),  // 1
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntSub,
                 args: vec![0, 1],
             }, // 2: thunked
-
             CoreFrame::Con {
                 tag: i_hash,
                 fields: vec![2],
             }, // 3: I#(thunked 7)
-
             // Lambda: \x -> x + 1
-            CoreFrame::Var(x),                     // 4
-            CoreFrame::Lit(Literal::LitInt(1)),    // 5
+            CoreFrame::Var(x),                  // 4
+            CoreFrame::Lit(Literal::LitInt(1)), // 5
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![4, 5],
             }, // 6: x + 1
             CoreFrame::Lam { binder: x, body: 6 }, // 7: \x -> x + 1
-
             // App(\x -> x+1, field)
-            CoreFrame::Var(field),                 // 8: field (thunk)
-            CoreFrame::App { fun: 7, arg: 8 },     // 9: apply — arg NOT forced by App
-
+            CoreFrame::Var(field),             // 8: field (thunk)
+            CoreFrame::App { fun: 7, arg: 8 }, // 9: apply — arg NOT forced by App
             // case boxed of { I# field -> <App> }
             CoreFrame::Case {
                 scrutinee: 3,
@@ -4168,13 +4112,13 @@ fn test_adversarial_multi_alt_after_thunk_force() {
     let tree = RecursiveTree {
         nodes: vec![
             // case 1 of { 0# -> Left(99); _ -> Right(42) }
-            CoreFrame::Lit(Literal::LitInt(1)),    // 0: scrutinee
-            CoreFrame::Lit(Literal::LitInt(99)),   // 1
+            CoreFrame::Lit(Literal::LitInt(1)),  // 0: scrutinee
+            CoreFrame::Lit(Literal::LitInt(99)), // 1
             CoreFrame::Con {
                 tag: left_tag,
                 fields: vec![1],
             }, // 2: Left(99)
-            CoreFrame::Lit(Literal::LitInt(42)),   // 3
+            CoreFrame::Lit(Literal::LitInt(42)), // 3
             CoreFrame::Con {
                 tag: right_tag,
                 fields: vec![3],
@@ -4195,16 +4139,14 @@ fn test_adversarial_multi_alt_after_thunk_force() {
                     },
                 ],
             }, // 5: evaluates to Right(42) → non-trivial → thunked
-
             // Box(thunked_case)
             CoreFrame::Con {
                 tag: box_tag,
                 fields: vec![5],
             }, // 6: ThunkCon
-
             // case inner of { Left n -> n; Right n -> n }
-            CoreFrame::Var(inner),                 // 7
-            CoreFrame::Var(n),                     // 8: n from either branch
+            CoreFrame::Var(inner), // 7
+            CoreFrame::Var(n),     // 8: n from either branch
             CoreFrame::Case {
                 scrutinee: 7,
                 binder: b2,
@@ -4221,7 +4163,6 @@ fn test_adversarial_multi_alt_after_thunk_force() {
                     },
                 ],
             }, // 9: data dispatch on thunked inner
-
             // case box of { Box inner -> <dispatch> }
             CoreFrame::Case {
                 scrutinee: 6,
@@ -4267,8 +4208,8 @@ fn test_holistic_let_nonrec_thunked_con_rhs() {
 
     let tree = RecursiveTree {
         nodes: vec![
-            CoreFrame::Lit(Literal::LitInt(10)),   // 0
-            CoreFrame::Lit(Literal::LitInt(3)),    // 1
+            CoreFrame::Lit(Literal::LitInt(10)), // 0
+            CoreFrame::Lit(Literal::LitInt(3)),  // 1
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntSub,
                 args: vec![0, 1],
@@ -4278,9 +4219,9 @@ fn test_holistic_let_nonrec_thunked_con_rhs() {
                 fields: vec![2],
             }, // 3: I#(thunk(7))
             // Body: case x of { I# n -> n + 1 }
-            CoreFrame::Var(x),                     // 4
-            CoreFrame::Var(n),                     // 5
-            CoreFrame::Lit(Literal::LitInt(1)),    // 6
+            CoreFrame::Var(x),                  // 4
+            CoreFrame::Var(n),                  // 5
+            CoreFrame::Lit(Literal::LitInt(1)), // 6
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![5, 6],
@@ -4331,19 +4272,19 @@ fn test_holistic_letrec_case_scrutinee() {
     let tree = RecursiveTree {
         nodes: vec![
             // f body: x + 1
-            CoreFrame::Var(x),                     // 0
-            CoreFrame::Lit(Literal::LitInt(1)),    // 1
+            CoreFrame::Var(x),                  // 0
+            CoreFrame::Lit(Literal::LitInt(1)), // 1
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![0, 1],
             }, // 2: x + 1
             CoreFrame::Lam { binder: x, body: 2 }, // 3: \x -> x + 1
             // Body: case f 5 of { 6# -> 100; _ -> 0 }
-            CoreFrame::Var(f),                     // 4
-            CoreFrame::Lit(Literal::LitInt(5)),    // 5
-            CoreFrame::App { fun: 4, arg: 5 },     // 6: f 5
-            CoreFrame::Lit(Literal::LitInt(100)),  // 7
-            CoreFrame::Lit(Literal::LitInt(0)),    // 8
+            CoreFrame::Var(f),                    // 4
+            CoreFrame::Lit(Literal::LitInt(5)),   // 5
+            CoreFrame::App { fun: 4, arg: 5 },    // 6: f 5
+            CoreFrame::Lit(Literal::LitInt(100)), // 7
+            CoreFrame::Lit(Literal::LitInt(0)),   // 8
             CoreFrame::Case {
                 scrutinee: 6,
                 binder: b,
@@ -4397,8 +4338,8 @@ fn test_holistic_default_only_case_thunked_scrutinee() {
 
     let tree = RecursiveTree {
         nodes: vec![
-            CoreFrame::Lit(Literal::LitInt(3)),    // 0
-            CoreFrame::Lit(Literal::LitInt(4)),    // 1
+            CoreFrame::Lit(Literal::LitInt(3)), // 0
+            CoreFrame::Lit(Literal::LitInt(4)), // 1
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![0, 1],
@@ -4408,9 +4349,9 @@ fn test_holistic_default_only_case_thunked_scrutinee() {
                 fields: vec![2],
             }, // 3: I#(thunk(7))
             // Inner case: case x of { I# n -> n + 10 }
-            CoreFrame::Var(x),                     // 4
-            CoreFrame::Var(n),                     // 5
-            CoreFrame::Lit(Literal::LitInt(10)),   // 6
+            CoreFrame::Var(x),                   // 4
+            CoreFrame::Var(n),                   // 5
+            CoreFrame::Lit(Literal::LitInt(10)), // 6
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![5, 6],
@@ -4424,9 +4365,8 @@ fn test_holistic_default_only_case_thunked_scrutinee() {
                     body: 7,
                 }],
             }, // 8: data dispatch forces the Con
-
             // Outer case: case x of { _ -> inner_case }
-            CoreFrame::Var(x),                     // 9
+            CoreFrame::Var(x), // 9
             CoreFrame::Case {
                 scrutinee: 9,
                 binder: b1,
@@ -4436,7 +4376,6 @@ fn test_holistic_default_only_case_thunked_scrutinee() {
                     body: 8,
                 }],
             }, // 10: default-only case (does NOT force)
-
             CoreFrame::LetNonRec {
                 binder: x,
                 rhs: 3,
@@ -4475,8 +4414,8 @@ fn test_holistic_zero_field_con() {
                 tag: true_tag,
                 fields: vec![],
             }, // 0: True
-            CoreFrame::Lit(Literal::LitInt(1)),    // 1
-            CoreFrame::Lit(Literal::LitInt(0)),    // 2
+            CoreFrame::Lit(Literal::LitInt(1)), // 1
+            CoreFrame::Lit(Literal::LitInt(0)), // 2
             CoreFrame::Case {
                 scrutinee: 0,
                 binder: b,
@@ -4533,8 +4472,8 @@ fn test_holistic_nested_let_nonrec_thunk_chain() {
     let tree = RecursiveTree {
         nodes: vec![
             // a rhs
-            CoreFrame::Lit(Literal::LitInt(3)),    // 0
-            CoreFrame::Lit(Literal::LitInt(4)),    // 1
+            CoreFrame::Lit(Literal::LitInt(3)), // 0
+            CoreFrame::Lit(Literal::LitInt(4)), // 1
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntMul,
                 args: vec![0, 1],
@@ -4543,10 +4482,9 @@ fn test_holistic_nested_let_nonrec_thunk_chain() {
                 tag: i_hash,
                 fields: vec![2],
             }, // 3: I#(thunk(12))
-
             // b rhs
-            CoreFrame::Lit(Literal::LitInt(5)),    // 4
-            CoreFrame::Lit(Literal::LitInt(6)),    // 5
+            CoreFrame::Lit(Literal::LitInt(5)), // 4
+            CoreFrame::Lit(Literal::LitInt(6)), // 5
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![4, 5],
@@ -4555,12 +4493,11 @@ fn test_holistic_nested_let_nonrec_thunk_chain() {
                 tag: i_hash,
                 fields: vec![6],
             }, // 7: I#(thunk(11))
-
             // body: case a of { I# x -> case b of { I# y -> x + y } }
-            CoreFrame::Var(a),                     // 8
-            CoreFrame::Var(b),                     // 9
-            CoreFrame::Var(x),                     // 10
-            CoreFrame::Var(y),                     // 11
+            CoreFrame::Var(a), // 8
+            CoreFrame::Var(b), // 9
+            CoreFrame::Var(x), // 10
+            CoreFrame::Var(y), // 11
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![10, 11],
@@ -4629,27 +4566,25 @@ fn test_holistic_letrec_con_with_closure_sibling() {
     let tree = RecursiveTree {
         nodes: vec![
             // f body: x + 1
-            CoreFrame::Var(x),                     // 0
-            CoreFrame::Lit(Literal::LitInt(1)),    // 1
+            CoreFrame::Var(x),                  // 0
+            CoreFrame::Lit(Literal::LitInt(1)), // 1
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![0, 1],
             }, // 2: x + 1
             CoreFrame::Lam { binder: x, body: 2 }, // 3: \x -> x + 1
-
             // pair: Con(Pair, [Lit(10), Var(f)])
-            CoreFrame::Lit(Literal::LitInt(10)),   // 4
-            CoreFrame::Var(f),                     // 5
+            CoreFrame::Lit(Literal::LitInt(10)), // 4
+            CoreFrame::Var(f),                   // 5
             CoreFrame::Con {
                 tag: pair_tag,
                 fields: vec![4, 5],
             }, // 6: Pair(10, f) — trivial fields (Lit, Var)
-
             // body: case pair of { Pair a g -> g a }
-            CoreFrame::Var(pair),                  // 7
-            CoreFrame::Var(g),                     // 8
-            CoreFrame::Var(a),                     // 9
-            CoreFrame::App { fun: 8, arg: 9 },     // 10: g a
+            CoreFrame::Var(pair),              // 7
+            CoreFrame::Var(g),                 // 8
+            CoreFrame::Var(a),                 // 9
+            CoreFrame::App { fun: 8, arg: 9 }, // 10: g a
             CoreFrame::Case {
                 scrutinee: 7,
                 binder: b,
@@ -4659,7 +4594,6 @@ fn test_holistic_letrec_con_with_closure_sibling() {
                     body: 10,
                 }],
             }, // 11
-
             CoreFrame::LetRec {
                 bindings: vec![(f, 3), (pair, 6)],
                 body: 11,
@@ -4698,27 +4632,25 @@ fn test_holistic_join_in_letrec_body() {
     let tree = RecursiveTree {
         nodes: vec![
             // f body: x * 2
-            CoreFrame::Var(x),                     // 0
-            CoreFrame::Lit(Literal::LitInt(2)),    // 1
+            CoreFrame::Var(x),                  // 0
+            CoreFrame::Lit(Literal::LitInt(2)), // 1
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntMul,
                 args: vec![0, 1],
             }, // 2: x * 2
             CoreFrame::Lam { binder: x, body: 2 }, // 3: \x -> x * 2
-
             // Join rhs: f n
-            CoreFrame::Var(f),                     // 4
-            CoreFrame::Var(n),                     // 5
-            CoreFrame::App { fun: 4, arg: 5 },     // 6: f n
-
+            CoreFrame::Var(f),                 // 4
+            CoreFrame::Var(n),                 // 5
+            CoreFrame::App { fun: 4, arg: 5 }, // 6: f n
             // Join body: case 3 of { 3# -> jump j 5; _ -> jump j 0 }
-            CoreFrame::Lit(Literal::LitInt(3)),    // 7: scrutinee
-            CoreFrame::Lit(Literal::LitInt(5)),    // 8: arg for jump
+            CoreFrame::Lit(Literal::LitInt(3)), // 7: scrutinee
+            CoreFrame::Lit(Literal::LitInt(5)), // 8: arg for jump
             CoreFrame::Jump {
                 label: j,
                 args: vec![8],
             }, // 9: jump j 5
-            CoreFrame::Lit(Literal::LitInt(0)),    // 10
+            CoreFrame::Lit(Literal::LitInt(0)), // 10
             CoreFrame::Jump {
                 label: j,
                 args: vec![10],
@@ -4739,14 +4671,12 @@ fn test_holistic_join_in_letrec_body() {
                     },
                 ],
             }, // 12
-
             CoreFrame::Join {
                 label: j,
                 params: vec![n],
                 rhs: 6,
                 body: 12,
             }, // 13
-
             CoreFrame::LetRec {
                 bindings: vec![(f, 3)],
                 body: 13,
@@ -4793,8 +4723,8 @@ fn test_holistic_multi_layer_thunk_force() {
     let tree = RecursiveTree {
         nodes: vec![
             // inner Con
-            CoreFrame::Lit(Literal::LitInt(1)),    // 0
-            CoreFrame::Lit(Literal::LitInt(2)),    // 1
+            CoreFrame::Lit(Literal::LitInt(1)), // 0
+            CoreFrame::Lit(Literal::LitInt(2)), // 1
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![0, 1],
@@ -4811,11 +4741,10 @@ fn test_holistic_multi_layer_thunk_force() {
                 tag: box_tag,
                 fields: vec![3],
             }, // 4: Box(thunk(I#(thunk(3))))
-
             // body
-            CoreFrame::Var(payload),               // 5
-            CoreFrame::Var(n),                     // 6
-            CoreFrame::Lit(Literal::LitInt(100)),  // 7
+            CoreFrame::Var(payload),              // 5
+            CoreFrame::Var(n),                    // 6
+            CoreFrame::Lit(Literal::LitInt(100)), // 7
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![6, 7],
@@ -4877,28 +4806,26 @@ fn test_holistic_case_binder_reuse() {
     let tree = RecursiveTree {
         nodes: vec![
             // scrutinee: Pair(10, 20)
-            CoreFrame::Lit(Literal::LitInt(10)),   // 0
-            CoreFrame::Lit(Literal::LitInt(20)),   // 1
+            CoreFrame::Lit(Literal::LitInt(10)), // 0
+            CoreFrame::Lit(Literal::LitInt(20)), // 1
             CoreFrame::Con {
                 tag: pair_tag,
                 fields: vec![0, 1],
             }, // 2: Pair(10, 20) — trivial fields
-
             // Inner case body: x + y + a
-            CoreFrame::Var(x_var),                 // 3
-            CoreFrame::Var(y_var),                 // 4
+            CoreFrame::Var(x_var), // 3
+            CoreFrame::Var(y_var), // 4
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![3, 4],
             }, // 5: x + y
-            CoreFrame::Var(a_var),                 // 6
+            CoreFrame::Var(a_var), // 6
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args: vec![5, 6],
             }, // 7: (x+y) + a
-
             // Inner case: case pair of { Pair x y -> x+y+a }
-            CoreFrame::Var(pair_binder),           // 8
+            CoreFrame::Var(pair_binder), // 8
             CoreFrame::Case {
                 scrutinee: 8,
                 binder: b2,
@@ -4908,7 +4835,6 @@ fn test_holistic_case_binder_reuse() {
                     body: 7,
                 }],
             }, // 9
-
             // Outer case: case Pair(10,20) of pair { Pair a b -> inner }
             CoreFrame::Case {
                 scrutinee: 2,
@@ -4951,17 +4877,17 @@ fn test_holistic_letrec_recursive_with_case() {
     let tree = RecursiveTree {
         nodes: vec![
             // f body: case n of { 0# -> 42; _ -> f(n-1) }
-            CoreFrame::Var(n),                     // 0: n (scrutinee)
-            CoreFrame::Lit(Literal::LitInt(42)),   // 1: base case result
+            CoreFrame::Var(n),                   // 0: n (scrutinee)
+            CoreFrame::Lit(Literal::LitInt(42)), // 1: base case result
             // default: f(n-1)
-            CoreFrame::Var(n),                     // 2
-            CoreFrame::Lit(Literal::LitInt(1)),    // 3
+            CoreFrame::Var(n),                  // 2
+            CoreFrame::Lit(Literal::LitInt(1)), // 3
             CoreFrame::PrimOp {
                 op: PrimOpKind::IntSub,
                 args: vec![2, 3],
             }, // 4: n - 1
-            CoreFrame::Var(f),                     // 5
-            CoreFrame::App { fun: 5, arg: 4 },     // 6: f (n-1)
+            CoreFrame::Var(f),                  // 5
+            CoreFrame::App { fun: 5, arg: 4 },  // 6: f (n-1)
             CoreFrame::Case {
                 scrutinee: 0,
                 binder: b,
@@ -4979,12 +4905,10 @@ fn test_holistic_letrec_recursive_with_case() {
                 ],
             }, // 7: case n of ...
             CoreFrame::Lam { binder: n, body: 7 }, // 8: \n -> case n of ...
-
             // main body: f 5
-            CoreFrame::Var(f),                     // 9
-            CoreFrame::Lit(Literal::LitInt(5)),    // 10
-            CoreFrame::App { fun: 9, arg: 10 },    // 11: f 5
-
+            CoreFrame::Var(f),                  // 9
+            CoreFrame::Lit(Literal::LitInt(5)), // 10
+            CoreFrame::App { fun: 9, arg: 10 }, // 11: f 5
             CoreFrame::LetRec {
                 bindings: vec![(f, 8)],
                 body: 11,

@@ -1,5 +1,5 @@
-use std::path::Path;
 use serde_json::json;
+use std::path::Path;
 
 fn prelude_path() -> std::path::PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -28,12 +28,18 @@ result = {body}
 
 #[test]
 fn test_camel_to_snake() {
-    assert_eq!(run_plain(r#"camelToSnake "helloWorld""#), json!("hello_world"));
+    assert_eq!(
+        run_plain(r#"camelToSnake "helloWorld""#),
+        json!("hello_world")
+    );
 }
 
 #[test]
 fn test_snake_to_camel() {
-    assert_eq!(run_plain(r#"snakeToCamel "hello_world""#), json!("helloWorld"));
+    assert_eq!(
+        run_plain(r#"snakeToCamel "hello_world""#),
+        json!("helloWorld")
+    );
 }
 
 #[test]
@@ -43,7 +49,10 @@ fn test_capitalize() {
 
 #[test]
 fn test_title_case() {
-    assert_eq!(run_plain(r#"titleCase "hello world""#), json!("Hello World"));
+    assert_eq!(
+        run_plain(r#"titleCase "hello world""#),
+        json!("Hello World")
+    );
 }
 
 #[test]

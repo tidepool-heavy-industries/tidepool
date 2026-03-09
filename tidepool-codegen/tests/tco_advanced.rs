@@ -28,45 +28,88 @@ fn test_mutual_tco_even() {
     // isEven body: case n == 0 of { 1 -> 1; _ -> isOdd(n-1) }
     let vn1 = bld.push(CoreFrame::Var(n));
     let lit0 = bld.push(CoreFrame::Lit(Literal::LitInt(0)));
-    let cmp1 = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntEq, args: vec![vn1, lit0] });
+    let cmp1 = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntEq,
+        args: vec![vn1, lit0],
+    });
     let lit1 = bld.push(CoreFrame::Lit(Literal::LitInt(1)));
     let vn2 = bld.push(CoreFrame::Var(n));
-    let sub1 = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntSub, args: vec![vn2, lit1] });
+    let sub1 = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntSub,
+        args: vec![vn2, lit1],
+    });
     let v_is_odd = bld.push(CoreFrame::Var(is_odd));
-    let call_odd = bld.push(CoreFrame::App { fun: v_is_odd, arg: sub1 });
+    let call_odd = bld.push(CoreFrame::App {
+        fun: v_is_odd,
+        arg: sub1,
+    });
     let case_even = bld.push(CoreFrame::Case {
         scrutinee: cmp1,
         binder,
         alts: vec![
-            Alt { con: AltCon::LitAlt(Literal::LitInt(1)), binders: vec![], body: lit1 },
-            Alt { con: AltCon::Default, binders: vec![], body: call_odd },
+            Alt {
+                con: AltCon::LitAlt(Literal::LitInt(1)),
+                binders: vec![],
+                body: lit1,
+            },
+            Alt {
+                con: AltCon::Default,
+                binders: vec![],
+                body: call_odd,
+            },
         ],
     });
-    let lam_even = bld.push(CoreFrame::Lam { binder: n, body: case_even });
+    let lam_even = bld.push(CoreFrame::Lam {
+        binder: n,
+        body: case_even,
+    });
 
     // isOdd body: case n == 0 of { 1 -> 0; _ -> isEven(n-1) }
     let vn3 = bld.push(CoreFrame::Var(n));
     let lit0_2 = bld.push(CoreFrame::Lit(Literal::LitInt(0)));
-    let cmp2 = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntEq, args: vec![vn3, lit0_2] });
+    let cmp2 = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntEq,
+        args: vec![vn3, lit0_2],
+    });
     let lit0_res = bld.push(CoreFrame::Lit(Literal::LitInt(0)));
     let vn4 = bld.push(CoreFrame::Var(n));
-    let sub2 = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntSub, args: vec![vn4, lit1] });
+    let sub2 = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntSub,
+        args: vec![vn4, lit1],
+    });
     let v_is_even = bld.push(CoreFrame::Var(is_even));
-    let call_even = bld.push(CoreFrame::App { fun: v_is_even, arg: sub2 });
+    let call_even = bld.push(CoreFrame::App {
+        fun: v_is_even,
+        arg: sub2,
+    });
     let case_odd = bld.push(CoreFrame::Case {
         scrutinee: cmp2,
         binder,
         alts: vec![
-            Alt { con: AltCon::LitAlt(Literal::LitInt(1)), binders: vec![], body: lit0_res },
-            Alt { con: AltCon::Default, binders: vec![], body: call_even },
+            Alt {
+                con: AltCon::LitAlt(Literal::LitInt(1)),
+                binders: vec![],
+                body: lit0_res,
+            },
+            Alt {
+                con: AltCon::Default,
+                binders: vec![],
+                body: call_even,
+            },
         ],
     });
-    let lam_odd = bld.push(CoreFrame::Lam { binder: n, body: case_odd });
+    let lam_odd = bld.push(CoreFrame::Lam {
+        binder: n,
+        body: case_odd,
+    });
 
     // isEven(100)
     let lit100 = bld.push(CoreFrame::Lit(Literal::LitInt(100)));
     let v_is_even_main = bld.push(CoreFrame::Var(is_even));
-    let app = bld.push(CoreFrame::App { fun: v_is_even_main, arg: lit100 });
+    let app = bld.push(CoreFrame::App {
+        fun: v_is_even_main,
+        arg: lit100,
+    });
 
     bld.push(CoreFrame::LetRec {
         bindings: vec![(is_even, lam_even), (is_odd, lam_odd)],
@@ -92,45 +135,88 @@ fn test_mutual_tco_odd() {
     // isEven body
     let vn1 = bld.push(CoreFrame::Var(n));
     let lit0 = bld.push(CoreFrame::Lit(Literal::LitInt(0)));
-    let cmp1 = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntEq, args: vec![vn1, lit0] });
+    let cmp1 = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntEq,
+        args: vec![vn1, lit0],
+    });
     let lit1 = bld.push(CoreFrame::Lit(Literal::LitInt(1)));
     let vn2 = bld.push(CoreFrame::Var(n));
-    let sub1 = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntSub, args: vec![vn2, lit1] });
+    let sub1 = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntSub,
+        args: vec![vn2, lit1],
+    });
     let v_is_odd = bld.push(CoreFrame::Var(is_odd));
-    let call_odd = bld.push(CoreFrame::App { fun: v_is_odd, arg: sub1 });
+    let call_odd = bld.push(CoreFrame::App {
+        fun: v_is_odd,
+        arg: sub1,
+    });
     let case_even = bld.push(CoreFrame::Case {
         scrutinee: cmp1,
         binder,
         alts: vec![
-            Alt { con: AltCon::LitAlt(Literal::LitInt(1)), binders: vec![], body: lit1 },
-            Alt { con: AltCon::Default, binders: vec![], body: call_odd },
+            Alt {
+                con: AltCon::LitAlt(Literal::LitInt(1)),
+                binders: vec![],
+                body: lit1,
+            },
+            Alt {
+                con: AltCon::Default,
+                binders: vec![],
+                body: call_odd,
+            },
         ],
     });
-    let lam_even = bld.push(CoreFrame::Lam { binder: n, body: case_even });
+    let lam_even = bld.push(CoreFrame::Lam {
+        binder: n,
+        body: case_even,
+    });
 
     // isOdd body
     let vn3 = bld.push(CoreFrame::Var(n));
     let lit0_2 = bld.push(CoreFrame::Lit(Literal::LitInt(0)));
-    let cmp2 = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntEq, args: vec![vn3, lit0_2] });
+    let cmp2 = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntEq,
+        args: vec![vn3, lit0_2],
+    });
     let lit0_res = bld.push(CoreFrame::Lit(Literal::LitInt(0)));
     let vn4 = bld.push(CoreFrame::Var(n));
-    let sub2 = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntSub, args: vec![vn4, lit1] });
+    let sub2 = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntSub,
+        args: vec![vn4, lit1],
+    });
     let v_is_even = bld.push(CoreFrame::Var(is_even));
-    let call_even = bld.push(CoreFrame::App { fun: v_is_even, arg: sub2 });
+    let call_even = bld.push(CoreFrame::App {
+        fun: v_is_even,
+        arg: sub2,
+    });
     let case_odd = bld.push(CoreFrame::Case {
         scrutinee: cmp2,
         binder,
         alts: vec![
-            Alt { con: AltCon::LitAlt(Literal::LitInt(1)), binders: vec![], body: lit0_res },
-            Alt { con: AltCon::Default, binders: vec![], body: call_even },
+            Alt {
+                con: AltCon::LitAlt(Literal::LitInt(1)),
+                binders: vec![],
+                body: lit0_res,
+            },
+            Alt {
+                con: AltCon::Default,
+                binders: vec![],
+                body: call_even,
+            },
         ],
     });
-    let lam_odd = bld.push(CoreFrame::Lam { binder: n, body: case_odd });
+    let lam_odd = bld.push(CoreFrame::Lam {
+        binder: n,
+        body: case_odd,
+    });
 
     // isEven(101)
     let lit101 = bld.push(CoreFrame::Lit(Literal::LitInt(101)));
     let v_is_even_main = bld.push(CoreFrame::Var(is_even));
-    let app = bld.push(CoreFrame::App { fun: v_is_even_main, arg: lit101 });
+    let app = bld.push(CoreFrame::App {
+        fun: v_is_even_main,
+        arg: lit101,
+    });
 
     bld.push(CoreFrame::LetRec {
         bindings: vec![(is_even, lam_even), (is_odd, lam_odd)],

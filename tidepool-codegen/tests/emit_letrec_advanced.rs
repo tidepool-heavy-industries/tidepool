@@ -46,15 +46,21 @@ fn test_letrec_all_simple() {
 
     let mut bld = TreeBuilder::new();
     let lit1 = bld.push(CoreFrame::Lit(Literal::LitInt(1)));
-    
+
     let vx = bld.push(CoreFrame::Var(x));
-    let add1 = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![vx, lit1] });
-    
+    let add1 = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntAdd,
+        args: vec![vx, lit1],
+    });
+
     let vy = bld.push(CoreFrame::Var(y));
-    let add2 = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![vy, lit1] });
-    
+    let add2 = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntAdd,
+        args: vec![vy, lit1],
+    });
+
     let vz = bld.push(CoreFrame::Var(z));
-    
+
     bld.push(CoreFrame::LetRec {
         bindings: vec![(x, lit1), (y, add1), (z, add2)],
         body: vz,
@@ -75,36 +81,59 @@ fn test_letrec_factorial() {
     let binder = VarId(3);
 
     let mut bld = TreeBuilder::new();
-    
+
     // Lambda body: case n == 0 of { 1 -> 1; _ -> n * f(n-1) }
     let vn = bld.push(CoreFrame::Var(n));
     let lit0 = bld.push(CoreFrame::Lit(Literal::LitInt(0)));
-    let cmp = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntEq, args: vec![vn, lit0] });
-    
+    let cmp = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntEq,
+        args: vec![vn, lit0],
+    });
+
     let lit1 = bld.push(CoreFrame::Lit(Literal::LitInt(1)));
-    
+
     let vn2 = bld.push(CoreFrame::Var(n));
     let vf = bld.push(CoreFrame::Var(f));
-    let sub1 = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntSub, args: vec![vn2, lit1] });
+    let sub1 = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntSub,
+        args: vec![vn2, lit1],
+    });
     let call = bld.push(CoreFrame::App { fun: vf, arg: sub1 });
     let vn3 = bld.push(CoreFrame::Var(n));
-    let mul = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntMul, args: vec![vn3, call] });
-    
+    let mul = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntMul,
+        args: vec![vn3, call],
+    });
+
     let case_node = bld.push(CoreFrame::Case {
         scrutinee: cmp,
         binder,
         alts: vec![
-            Alt { con: AltCon::LitAlt(Literal::LitInt(1)), binders: vec![], body: lit1 },
-            Alt { con: AltCon::Default, binders: vec![], body: mul },
+            Alt {
+                con: AltCon::LitAlt(Literal::LitInt(1)),
+                binders: vec![],
+                body: lit1,
+            },
+            Alt {
+                con: AltCon::Default,
+                binders: vec![],
+                body: mul,
+            },
         ],
     });
-    
-    let lam = bld.push(CoreFrame::Lam { binder: n, body: case_node });
-    
+
+    let lam = bld.push(CoreFrame::Lam {
+        binder: n,
+        body: case_node,
+    });
+
     let lit5 = bld.push(CoreFrame::Lit(Literal::LitInt(5)));
     let vf2 = bld.push(CoreFrame::Var(f));
-    let app = bld.push(CoreFrame::App { fun: vf2, arg: lit5 });
-    
+    let app = bld.push(CoreFrame::App {
+        fun: vf2,
+        arg: lit5,
+    });
+
     bld.push(CoreFrame::LetRec {
         bindings: vec![(f, lam)],
         body: app,
@@ -120,7 +149,7 @@ fn test_letrec_factorial() {
 #[test]
 fn test_letrec_cyclic_con() {
     // Build two Con objects that reference each other.
-    // letrec 
+    // letrec
     //   a = Con(0, [b])
     //   b = Con(0, [a])
     // in a
@@ -131,15 +160,21 @@ fn test_letrec_cyclic_con() {
     let mut bld = TreeBuilder::new();
     let va = bld.push(CoreFrame::Var(a));
     let vb = bld.push(CoreFrame::Var(b));
-    
-    let con_a = bld.push(CoreFrame::Con { tag, fields: vec![vb] });
-    let con_b = bld.push(CoreFrame::Con { tag, fields: vec![va] });
-    
+
+    let con_a = bld.push(CoreFrame::Con {
+        tag,
+        fields: vec![vb],
+    });
+    let con_b = bld.push(CoreFrame::Con {
+        tag,
+        fields: vec![va],
+    });
+
     bld.push(CoreFrame::LetRec {
         bindings: vec![(a, con_a), (b, con_b)],
         body: va,
     });
-    
+
     let tree = bld.build();
     let result = compile_and_run(&tree);
     unsafe {
@@ -164,35 +199,58 @@ fn test_letrec_deferred_simple() {
     let x = VarId(4);
 
     let mut bld = TreeBuilder::new();
-    
+
     // Lambda f
     let vn = bld.push(CoreFrame::Var(n));
     let lit0 = bld.push(CoreFrame::Lit(Literal::LitInt(0)));
-    let cmp = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntEq, args: vec![vn, lit0] });
+    let cmp = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntEq,
+        args: vec![vn, lit0],
+    });
     let lit1 = bld.push(CoreFrame::Lit(Literal::LitInt(1)));
     let vn2 = bld.push(CoreFrame::Var(n));
     let vf = bld.push(CoreFrame::Var(f));
-    let sub1 = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntSub, args: vec![vn2, lit1] });
+    let sub1 = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntSub,
+        args: vec![vn2, lit1],
+    });
     let call = bld.push(CoreFrame::App { fun: vf, arg: sub1 });
     let vn3 = bld.push(CoreFrame::Var(n));
-    let mul = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntMul, args: vec![vn3, call] });
+    let mul = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntMul,
+        args: vec![vn3, call],
+    });
     let case_node = bld.push(CoreFrame::Case {
         scrutinee: cmp,
         binder,
         alts: vec![
-            Alt { con: AltCon::LitAlt(Literal::LitInt(1)), binders: vec![], body: lit1 },
-            Alt { con: AltCon::Default, binders: vec![], body: mul },
+            Alt {
+                con: AltCon::LitAlt(Literal::LitInt(1)),
+                binders: vec![],
+                body: lit1,
+            },
+            Alt {
+                con: AltCon::Default,
+                binders: vec![],
+                body: mul,
+            },
         ],
     });
-    let lam = bld.push(CoreFrame::Lam { binder: n, body: case_node });
-    
+    let lam = bld.push(CoreFrame::Lam {
+        binder: n,
+        body: case_node,
+    });
+
     // x = f(5)
     let lit5 = bld.push(CoreFrame::Lit(Literal::LitInt(5)));
     let vf2 = bld.push(CoreFrame::Var(f));
-    let app = bld.push(CoreFrame::App { fun: vf2, arg: lit5 });
-    
+    let app = bld.push(CoreFrame::App {
+        fun: vf2,
+        arg: lit5,
+    });
+
     let vx = bld.push(CoreFrame::Var(x));
-    
+
     bld.push(CoreFrame::LetRec {
         bindings: vec![(f, lam), (x, app)],
         body: vx,

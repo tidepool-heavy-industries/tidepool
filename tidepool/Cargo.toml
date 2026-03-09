@@ -47,3 +47,4 @@ git2 = "0.19"
 
 [dev-dependencies]
 tidepool-testing = { path = "../tidepool-testing" }
+tempfile = "3"

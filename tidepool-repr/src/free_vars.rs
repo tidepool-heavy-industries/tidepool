@@ -271,12 +271,23 @@ mod tests {
         let z = VarId(3);
         let j = JoinId(1);
         let tree_expr = tree(vec![
-            CoreFrame::Var(x),           // 0: x (in rhs)
-            CoreFrame::Var(y),           // 1: y (in rhs)
-            CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![0, 1] }, // 2: x + y (rhs)
-            CoreFrame::Var(z),           // 3: z (jump arg)
-            CoreFrame::Jump { label: j, args: vec![3] }, // 4: jump j(z) (body)
-            CoreFrame::Join { label: j, params: vec![x], rhs: 2, body: 4 }, // 5: root
+            CoreFrame::Var(x), // 0: x (in rhs)
+            CoreFrame::Var(y), // 1: y (in rhs)
+            CoreFrame::PrimOp {
+                op: PrimOpKind::IntAdd,
+                args: vec![0, 1],
+            }, // 2: x + y (rhs)
+            CoreFrame::Var(z), // 3: z (jump arg)
+            CoreFrame::Jump {
+                label: j,
+                args: vec![3],
+            }, // 4: jump j(z) (body)
+            CoreFrame::Join {
+                label: j,
+                params: vec![x],
+                rhs: 2,
+                body: 4,
+            }, // 5: root
         ]);
         let fvs = free_vars(&tree_expr);
         assert!(fvs.contains(&y), "y should be free");
@@ -292,7 +303,10 @@ mod tests {
         let tree_expr = tree(vec![
             CoreFrame::Var(x),
             CoreFrame::Var(y),
-            CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![0, 1] },
+            CoreFrame::PrimOp {
+                op: PrimOpKind::IntAdd,
+                args: vec![0, 1],
+            },
         ]);
         let fvs = free_vars(&tree_expr);
         assert!(fvs.contains(&x));
@@ -308,7 +322,10 @@ mod tests {
         let tree_expr = tree(vec![
             CoreFrame::Var(x),
             CoreFrame::Var(y),
-            CoreFrame::Con { tag: DataConId(0), fields: vec![0, 1] },
+            CoreFrame::Con {
+                tag: DataConId(0),
+                fields: vec![0, 1],
+            },
         ]);
         let fvs = free_vars(&tree_expr);
         assert!(fvs.contains(&x));

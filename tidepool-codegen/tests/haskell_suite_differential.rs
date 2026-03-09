@@ -59,12 +59,7 @@ fn haskell_suite_differential() {
                     continue;
                 }
 
-                let name = path
-                    .file_stem()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .to_string();
+                let name = path.file_stem().unwrap().to_str().unwrap().to_string();
 
                 if should_skip(&name) {
                     skipped += 1;
@@ -87,10 +82,8 @@ fn haskell_suite_differential() {
 
                 // JIT (catch panics)
                 let jit_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut pipeline =
-                        CodegenPipeline::new(&host_fns::host_fn_symbols()).ok()?;
-                    let func_id =
-                        compile_expr(&mut pipeline, &expr, "suite_test").ok()?;
+                    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).ok()?;
+                    let func_id = compile_expr(&mut pipeline, &expr, "suite_test").ok()?;
                     pipeline.finalize().ok()?;
 
                     let mut nursery = vec![0u8; 1 << 20]; // 1MB nursery for real programs
@@ -115,15 +108,14 @@ fn haskell_suite_differential() {
                 match (&eval_forced, &jit_result) {
                     (Ok(eval_val), Ok(Some((jit_val, _, _)))) => {
                         // Haskell fixtures can evaluate to closures — keep closure checks here
-                        if !compare::contains_closure(eval_val) && !compare::contains_closure(jit_val) {
+                        if !compare::contains_closure(eval_val)
+                            && !compare::contains_closure(jit_val)
+                        {
                             if compare::values_equal(eval_val, jit_val) {
                                 compared += 1;
                             } else {
                                 mismatch += 1;
-                                eprintln!(
-                                    "MISMATCH {}: eval={} jit={}",
-                                    name, eval_val, jit_val
-                                );
+                                eprintln!("MISMATCH {}: eval={} jit={}", name, eval_val, jit_val);
                             }
                         } else {
                             closure_skip += 1;

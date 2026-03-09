@@ -308,17 +308,18 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
         let mut current = obj;
 
         loop {
-                        let tag = heap_layout::read_tag(current);
-            
-                        if tag == layout::TAG_THUNK {
-                            let state = *current.add(layout::THUNK_STATE_OFFSET as usize);
-                            match state {
-                                layout::THUNK_UNEVALUATED => {
-                                    // 1. Mark blackhole for cycle detection
-                                    *current.add(layout::THUNK_STATE_OFFSET as usize) = layout::THUNK_BLACKHOLE;
-            
-                                    // 2. Read code pointer
-                                    let code_ptr = *(current.add(layout::THUNK_CODE_PTR_OFFSET as usize) as *const usize);
+            let tag = heap_layout::read_tag(current);
+
+            if tag == layout::TAG_THUNK {
+                let state = *current.add(layout::THUNK_STATE_OFFSET as usize);
+                match state {
+                    layout::THUNK_UNEVALUATED => {
+                        // 1. Mark blackhole for cycle detection
+                        *current.add(layout::THUNK_STATE_OFFSET as usize) = layout::THUNK_BLACKHOLE;
+
+                        // 2. Read code pointer
+                        let code_ptr =
+                            *(current.add(layout::THUNK_CODE_PTR_OFFSET as usize) as *const usize);
 
                         if code_ptr == 0 {
                             RUNTIME_ERROR.with(|cell| {
@@ -340,7 +341,8 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                         }
 
                         // 4. Write indirection (offset 16, overwriting code_ptr)
-                        *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *mut *mut u8) = result;
+                        *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *mut *mut u8) =
+                            result;
 
                         // 5. Set state = Evaluated
                         *current.add(layout::THUNK_STATE_OFFSET as usize) = layout::THUNK_EVALUATED;
@@ -353,8 +355,8 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                         return runtime_blackhole_trap(vmctx);
                     }
                     layout::THUNK_EVALUATED => {
-                        let next =
-                            *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *const *mut u8);
+                        let next = *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize)
+                            as *const *mut u8);
                         current = next;
                         continue;
                     }
@@ -702,8 +704,7 @@ pub fn error_poison_ptr_lazy_msg(kind: u64, msg: &[u8]) -> *mut u8 {
     // Allocate closure with 3 captures: kind, msg_ptr, msg_len
     // Closure: header(8) + code_ptr(8) + num_captured(2+pad=8) + 3*8 = 48
     let size = tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET + 3 * 8;
-    let layout = std::alloc::Layout::from_size_align(size, 8)
-        .expect("constant size/align");
+    let layout = std::alloc::Layout::from_size_align(size, 8).expect("constant size/align");
     // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
     let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     if ptr.is_null() {
@@ -839,7 +840,8 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) -> *mut u8 {
             // SAFETY: tag == TAG_CON confirms this is a Con heap object;
             // reading con_tag at offset 8 and num_fields at offset 16 is valid.
             let con_tag = unsafe { *(fun_ptr.add(layout::CON_TAG_OFFSET as usize) as *const u64) };
-            let num_fields = unsafe { *(fun_ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
+            let num_fields =
+                unsafe { *(fun_ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
             let msg2 = format!("[JIT]   Con tag={}, num_fields={}", con_tag, num_fields);
             let _ = writeln!(stderr, "{}", msg2);
             push_diagnostic(msg2);
@@ -1095,7 +1097,9 @@ pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
         Some(v) => v,
         None => {
             RUNTIME_ERROR.with(|cell| {
-                *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg("array size overflow".to_string()));
+                *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
+                    "array size overflow".to_string(),
+                ));
             });
             return error_poison_ptr() as i64;
         }
@@ -1104,7 +1108,9 @@ pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
         Some(v) => v,
         None => {
             RUNTIME_ERROR.with(|cell| {
-                *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg("array size overflow".to_string()));
+                *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
+                    "array size overflow".to_string(),
+                ));
             });
             return error_poison_ptr() as i64;
         }
@@ -1148,7 +1154,9 @@ pub extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64) -> i64
         Some(v) => v,
         None => {
             RUNTIME_ERROR.with(|cell| {
-                *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg("array size overflow".to_string()));
+                *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
+                    "array size overflow".to_string(),
+                ));
             });
             return error_poison_ptr() as i64;
         }
@@ -1157,7 +1165,9 @@ pub extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64) -> i64
         Some(v) => v,
         None => {
             RUNTIME_ERROR.with(|cell| {
-                *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg("array size overflow".to_string()));
+                *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
+                    "array size overflow".to_string(),
+                ));
             });
             return error_poison_ptr() as i64;
         }
@@ -2293,7 +2303,8 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
     if tag_byte == layout::TAG_CON {
         // SAFETY: tag_byte == TAG_CON confirms Con; reading con_tag and num_fields at known offsets.
         let con_tag = unsafe { *(ptr.add(layout::CON_TAG_OFFSET as usize) as *const u64) };
-        let num_fields = unsafe { *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
+        let num_fields =
+            unsafe { *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
         let _ = writeln!(
             stderr,
             "[CASE TRAP] Con: con_tag={:#x}, num_fields={}, expected_tags={:?}",
@@ -2310,8 +2321,10 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
         );
     } else if tag_byte == layout::TAG_CLOSURE {
         // SAFETY: tag_byte == TAG_CLOSURE confirms Closure; reading code_ptr and num_captured at known offsets.
-        let code_ptr = unsafe { *(ptr.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const u64) };
-        let num_captured = unsafe { *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16) };
+        let code_ptr =
+            unsafe { *(ptr.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const u64) };
+        let num_captured =
+            unsafe { *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16) };
         let _ = writeln!(
             stderr,
             "[CASE TRAP] Closure: code_ptr={:#x}, num_captured={}, expected_tags={:?}",

@@ -164,13 +164,15 @@ unsafe fn heap_to_value_inner(
         }
         t if t == layout::TAG_CON => {
             let con_tag = *(ptr.add(layout::CON_TAG_OFFSET as usize) as *const u64);
-            let num_fields = *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) as usize;
+            let num_fields =
+                *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) as usize;
             if num_fields > MAX_FIELDS {
                 return Err(BridgeError::TooManyFields { count: num_fields });
             }
             let mut fields = Vec::with_capacity(num_fields);
             for i in 0..num_fields {
-                let field_ptr = *(ptr.add(layout::CON_FIELDS_OFFSET as usize + 8 * i) as *const *const u8);
+                let field_ptr =
+                    *(ptr.add(layout::CON_FIELDS_OFFSET as usize + 8 * i) as *const *const u8);
                 fields.push(heap_to_value_inner(field_ptr, depth + 1, vmctx)?);
             }
             Ok(Value::Con(DataConId(con_tag), fields))
@@ -180,7 +182,9 @@ unsafe fn heap_to_value_inner(
             match state {
                 layout::THUNK_EVALUATED => {
                     // Follow indirection pointer to the WHNF result
-                    let target = unsafe { *(ptr.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *const *const u8) };
+                    let target = unsafe {
+                        *(ptr.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *const *const u8)
+                    };
                     heap_to_value_inner(target, depth + 1, vmctx)
                 }
                 _ if !vmctx.is_null() => {

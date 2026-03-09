@@ -49,15 +49,34 @@ fn test_nested_joins() {
     // Inner join j2(y) = x + y
     let vx = bld.push(CoreFrame::Var(x));
     let vy = bld.push(CoreFrame::Var(y));
-    let add = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![vx, vy] });
+    let add = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntAdd,
+        args: vec![vx, vy],
+    });
     let lit10 = bld.push(CoreFrame::Lit(Literal::LitInt(10)));
-    let jump_j2 = bld.push(CoreFrame::Jump { label: j2, args: vec![lit10] });
-    let inner_join = bld.push(CoreFrame::Join { label: j2, params: vec![y], rhs: add, body: jump_j2 });
+    let jump_j2 = bld.push(CoreFrame::Jump {
+        label: j2,
+        args: vec![lit10],
+    });
+    let inner_join = bld.push(CoreFrame::Join {
+        label: j2,
+        params: vec![y],
+        rhs: add,
+        body: jump_j2,
+    });
 
     // Outer join j1(x) = inner_join in jump j1(20)
     let lit20 = bld.push(CoreFrame::Lit(Literal::LitInt(20)));
-    let jump_j1 = bld.push(CoreFrame::Jump { label: j1, args: vec![lit20] });
-    bld.push(CoreFrame::Join { label: j1, params: vec![x], rhs: inner_join, body: jump_j1 });
+    let jump_j1 = bld.push(CoreFrame::Jump {
+        label: j1,
+        args: vec![lit20],
+    });
+    bld.push(CoreFrame::Join {
+        label: j1,
+        params: vec![x],
+        rhs: inner_join,
+        body: jump_j1,
+    });
 
     let tree = bld.build();
     let result = compile_and_run(&tree);
@@ -83,19 +102,41 @@ fn test_join_nested_jump() {
     // j1(x) = x * 2
     let vx = bld.push(CoreFrame::Var(x));
     let lit2 = bld.push(CoreFrame::Lit(Literal::LitInt(2)));
-    let mul1 = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntMul, args: vec![vx, lit2] });
+    let mul1 = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntMul,
+        args: vec![vx, lit2],
+    });
 
     // j2(y) = jump j1(y * 2)
     let vy = bld.push(CoreFrame::Var(y));
-    let mul2 = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntMul, args: vec![vy, lit2] });
-    let jump_j1 = bld.push(CoreFrame::Jump { label: j1, args: vec![mul2] });
+    let mul2 = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntMul,
+        args: vec![vy, lit2],
+    });
+    let jump_j1 = bld.push(CoreFrame::Jump {
+        label: j1,
+        args: vec![mul2],
+    });
 
     // jump j2(5)
     let lit5 = bld.push(CoreFrame::Lit(Literal::LitInt(5)));
-    let jump_j2 = bld.push(CoreFrame::Jump { label: j2, args: vec![lit5] });
+    let jump_j2 = bld.push(CoreFrame::Jump {
+        label: j2,
+        args: vec![lit5],
+    });
 
-    let inner_join = bld.push(CoreFrame::Join { label: j2, params: vec![y], rhs: jump_j1, body: jump_j2 });
-    bld.push(CoreFrame::Join { label: j1, params: vec![x], rhs: mul1, body: inner_join });
+    let inner_join = bld.push(CoreFrame::Join {
+        label: j2,
+        params: vec![y],
+        rhs: jump_j1,
+        body: jump_j2,
+    });
+    bld.push(CoreFrame::Join {
+        label: j1,
+        params: vec![x],
+        rhs: mul1,
+        body: inner_join,
+    });
 
     let tree = bld.build();
     let result = compile_and_run(&tree);
@@ -116,15 +157,29 @@ fn test_join_three_params() {
     let va = bld.push(CoreFrame::Var(a));
     let vb = bld.push(CoreFrame::Var(b));
     let vc = bld.push(CoreFrame::Var(c));
-    let add1 = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![va, vb] });
-    let add2 = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![add1, vc] });
+    let add1 = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntAdd,
+        args: vec![va, vb],
+    });
+    let add2 = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntAdd,
+        args: vec![add1, vc],
+    });
 
     let lit1 = bld.push(CoreFrame::Lit(Literal::LitInt(1)));
     let lit2 = bld.push(CoreFrame::Lit(Literal::LitInt(2)));
     let lit3 = bld.push(CoreFrame::Lit(Literal::LitInt(3)));
-    let jump = bld.push(CoreFrame::Jump { label: j, args: vec![lit1, lit2, lit3] });
+    let jump = bld.push(CoreFrame::Jump {
+        label: j,
+        args: vec![lit1, lit2, lit3],
+    });
 
-    bld.push(CoreFrame::Join { label: j, params: vec![a, b, c], rhs: add2, body: jump });
+    bld.push(CoreFrame::Join {
+        label: j,
+        params: vec![a, b, c],
+        rhs: add2,
+        body: jump,
+    });
 
     let tree = bld.build();
     let result = compile_and_run(&tree);
@@ -140,8 +195,16 @@ fn test_join_zero_args() {
 
     let mut bld = TreeBuilder::new();
     let lit42 = bld.push(CoreFrame::Lit(Literal::LitInt(42)));
-    let jump = bld.push(CoreFrame::Jump { label: j, args: vec![] });
-    bld.push(CoreFrame::Join { label: j, params: vec![], rhs: lit42, body: jump });
+    let jump = bld.push(CoreFrame::Jump {
+        label: j,
+        args: vec![],
+    });
+    bld.push(CoreFrame::Join {
+        label: j,
+        params: vec![],
+        rhs: lit42,
+        body: jump,
+    });
 
     let tree = bld.build();
     let result = compile_and_run(&tree);
@@ -164,20 +227,42 @@ fn test_multiple_joins() {
     // j1(x) = x + 1
     let vx = bld.push(CoreFrame::Var(x));
     let lit1 = bld.push(CoreFrame::Lit(Literal::LitInt(1)));
-    let add = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![vx, lit1] });
+    let add = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntAdd,
+        args: vec![vx, lit1],
+    });
 
     // j2(y) = jump j1(y * 2)
     let vy = bld.push(CoreFrame::Var(y));
     let lit2 = bld.push(CoreFrame::Lit(Literal::LitInt(2)));
-    let mul = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntMul, args: vec![vy, lit2] });
-    let jump_j1 = bld.push(CoreFrame::Jump { label: j1, args: vec![mul] });
+    let mul = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntMul,
+        args: vec![vy, lit2],
+    });
+    let jump_j1 = bld.push(CoreFrame::Jump {
+        label: j1,
+        args: vec![mul],
+    });
 
     // jump j2(5)
     let lit5 = bld.push(CoreFrame::Lit(Literal::LitInt(5)));
-    let jump_j2 = bld.push(CoreFrame::Jump { label: j2, args: vec![lit5] });
+    let jump_j2 = bld.push(CoreFrame::Jump {
+        label: j2,
+        args: vec![lit5],
+    });
 
-    let inner_join = bld.push(CoreFrame::Join { label: j2, params: vec![y], rhs: jump_j1, body: jump_j2 });
-    bld.push(CoreFrame::Join { label: j1, params: vec![x], rhs: add, body: inner_join });
+    let inner_join = bld.push(CoreFrame::Join {
+        label: j2,
+        params: vec![y],
+        rhs: jump_j1,
+        body: jump_j2,
+    });
+    bld.push(CoreFrame::Join {
+        label: j1,
+        params: vec![x],
+        rhs: add,
+        body: inner_join,
+    });
 
     let tree = bld.build();
     let result = compile_and_run(&tree);

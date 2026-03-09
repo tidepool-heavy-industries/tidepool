@@ -1,5 +1,5 @@
-use std::path::Path;
 use serde_json::json;
+use std::path::Path;
 
 fn prelude_path() -> std::path::PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -31,17 +31,17 @@ result = {body}
 
 #[test]
 fn test_reverse() {
-    assert_eq!(run_plain(r#"reverse [1,2,3 :: Int]"#), json!([3,2,1]));
+    assert_eq!(run_plain(r#"reverse [1,2,3 :: Int]"#), json!([3, 2, 1]));
 }
 
 #[test]
 fn test_sort() {
-    assert_eq!(run_plain(r#"sort [3,1,2 :: Int]"#), json!([1,2,3]));
+    assert_eq!(run_plain(r#"sort [3,1,2 :: Int]"#), json!([1, 2, 3]));
 }
 
 #[test]
 fn test_drop() {
-    assert_eq!(run_plain(r#"drop 2 [1,2,3,4 :: Int]"#), json!([3,4]));
+    assert_eq!(run_plain(r#"drop 2 [1,2,3,4 :: Int]"#), json!([3, 4]));
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn test_head() {
 
 #[test]
 fn test_tail() {
-    assert_eq!(run_plain(r#"tail [1,2,3 :: Int]"#), json!([2,3]));
+    assert_eq!(run_plain(r#"tail [1,2,3 :: Int]"#), json!([2, 3]));
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn test_last() {
 
 #[test]
 fn test_init() {
-    assert_eq!(run_plain(r#"init [1,2,3 :: Int]"#), json!([1,2]));
+    assert_eq!(run_plain(r#"init [1,2,3 :: Int]"#), json!([1, 2]));
 }
 
 #[test]
@@ -96,7 +96,10 @@ fn test_elem() {
 
 #[test]
 fn test_partition() {
-    assert_eq!(run_plain(r#"partition even [1,2,3,4,5 :: Int]"#), json!([[2,4],[1,3,5]]));
+    assert_eq!(
+        run_plain(r#"partition even [1,2,3,4,5 :: Int]"#),
+        json!([[2, 4], [1, 3, 5]])
+    );
 }
 
 #[test]
@@ -123,12 +126,18 @@ fn test_strip() {
 
 #[test]
 fn test_split_on() {
-    assert_eq!(run_plain(r#"T.splitOn "," "a,b,c""#), json!(["a","b","c"]));
+    assert_eq!(
+        run_plain(r#"T.splitOn "," "a,b,c""#),
+        json!(["a", "b", "c"])
+    );
 }
 
 #[test]
 fn test_replace() {
-    assert_eq!(run_plain(r#"T.replace "old" "new" "the old way""#), json!("the new way"));
+    assert_eq!(
+        run_plain(r#"T.replace "old" "new" "the old way""#),
+        json!("the new way")
+    );
 }
 
 #[test]
@@ -148,12 +157,15 @@ fn test_is_infix_of() {
 
 #[test]
 fn test_words() {
-    assert_eq!(run_plain(r#"T.words "hello world foo""#), json!(["hello","world","foo"]));
+    assert_eq!(
+        run_plain(r#"T.words "hello world foo""#),
+        json!(["hello", "world", "foo"])
+    );
 }
 
 #[test]
 fn test_lines() {
-    assert_eq!(run_plain(r#"T.lines "a\nb\nc""#), json!(["a","b","c"]));
+    assert_eq!(run_plain(r#"T.lines "a\nb\nc""#), json!(["a", "b", "c"]));
 }
 
 // --- Parsing ---
@@ -182,52 +194,88 @@ fn test_parse_int_m_fail() {
 
 #[test]
 fn test_map_from_list() {
-    assert_eq!(run_plain(r#"toJSON (Map.fromList [("a" :: Text, 1 :: Int), ("b" :: Text, 2 :: Int)])"#), json!({"a":1,"b":2}));
+    assert_eq!(
+        run_plain(r#"toJSON (Map.fromList [("a" :: Text, 1 :: Int), ("b" :: Text, 2 :: Int)])"#),
+        json!({"a":1,"b":2})
+    );
 }
 
 #[test]
 fn test_map_insert() {
-    assert_eq!(run_plain(r#"toJSON (Map.insert ("c" :: Text) (3 :: Int) (Map.fromList [("a" :: Text, 1 :: Int), ("b" :: Text, 2 :: Int)]))"#), json!({"a":1,"b":2,"c":3}));
+    assert_eq!(
+        run_plain(
+            r#"toJSON (Map.insert ("c" :: Text) (3 :: Int) (Map.fromList [("a" :: Text, 1 :: Int), ("b" :: Text, 2 :: Int)]))"#
+        ),
+        json!({"a":1,"b":2,"c":3})
+    );
 }
 
 #[test]
 fn test_map_delete() {
-    assert_eq!(run_plain(r#"toJSON (Map.delete ("a" :: Text) (Map.fromList [("a" :: Text, 1 :: Int), ("b" :: Text, 2 :: Int)]))"#), json!({"b":2}));
+    assert_eq!(
+        run_plain(
+            r#"toJSON (Map.delete ("a" :: Text) (Map.fromList [("a" :: Text, 1 :: Int), ("b" :: Text, 2 :: Int)]))"#
+        ),
+        json!({"b":2})
+    );
 }
 
 #[test]
 fn test_map_size() {
-    assert_eq!(run_plain(r#"Map.size (Map.fromList [("a" :: Text, 1 :: Int), ("b" :: Text, 2 :: Int)])"#), json!(2));
+    assert_eq!(
+        run_plain(r#"Map.size (Map.fromList [("a" :: Text, 1 :: Int), ("b" :: Text, 2 :: Int)])"#),
+        json!(2)
+    );
 }
 
 #[test]
 fn test_map_find_with_default() {
-    assert_eq!(run_plain(r#"Map.findWithDefault (0 :: Int) ("x" :: Text) (Map.fromList [("a" :: Text, 1 :: Int)])"#), json!(0));
+    assert_eq!(
+        run_plain(
+            r#"Map.findWithDefault (0 :: Int) ("x" :: Text) (Map.fromList [("a" :: Text, 1 :: Int)])"#
+        ),
+        json!(0)
+    );
 }
 
 // --- Set operations ---
 
 #[test]
 fn test_set_from_list() {
-    assert_eq!(run_plain(r#"toJSON (Set.fromList [1,2,3 :: Int])"#), json!([1,2,3]));
+    assert_eq!(
+        run_plain(r#"toJSON (Set.fromList [1,2,3 :: Int])"#),
+        json!([1, 2, 3])
+    );
 }
 
 #[test]
 fn test_set_insert() {
-    assert_eq!(run_plain(r#"toJSON (Set.insert (4 :: Int) (Set.fromList [1,2,3 :: Int]))"#), json!([1,2,3,4]));
+    assert_eq!(
+        run_plain(r#"toJSON (Set.insert (4 :: Int) (Set.fromList [1,2,3 :: Int]))"#),
+        json!([1, 2, 3, 4])
+    );
 }
 
 #[test]
 fn test_set_delete() {
-    assert_eq!(run_plain(r#"toJSON (Set.delete (2 :: Int) (Set.fromList [1,2,3 :: Int]))"#), json!([1,3]));
+    assert_eq!(
+        run_plain(r#"toJSON (Set.delete (2 :: Int) (Set.fromList [1,2,3 :: Int]))"#),
+        json!([1, 3])
+    );
 }
 
 #[test]
 fn test_set_member() {
-    assert_eq!(run_plain(r#"Set.member (2 :: Int) (Set.fromList [1,2,3 :: Int])"#), json!(true));
+    assert_eq!(
+        run_plain(r#"Set.member (2 :: Int) (Set.fromList [1,2,3 :: Int])"#),
+        json!(true)
+    );
 }
 
 #[test]
 fn test_set_size() {
-    assert_eq!(run_plain(r#"Set.size (Set.fromList [1,2,3 :: Int])"#), json!(3));
+    assert_eq!(
+        run_plain(r#"Set.size (Set.fromList [1,2,3 :: Int])"#),
+        json!(3)
+    );
 }

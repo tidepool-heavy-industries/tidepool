@@ -108,7 +108,10 @@ fn t_spliton_comma() {
 
 #[test]
 fn t_spliton_slash() {
-    assert_eq!(run(r#"T.splitOn "/" "foo/bar/baz""#), json!(["foo", "bar", "baz"]));
+    assert_eq!(
+        run(r#"T.splitOn "/" "foo/bar/baz""#),
+        json!(["foo", "bar", "baz"])
+    );
 }
 
 #[test]
@@ -118,7 +121,10 @@ fn t_spliton_no_match() {
 
 #[test]
 fn t_spliton_empty_parts() {
-    assert_eq!(run(r#"T.splitOn "," ",a,,b,""#), json!(["", "a", "", "b", ""]));
+    assert_eq!(
+        run(r#"T.splitOn "," ",a,,b,""#),
+        json!(["", "a", "", "b", ""])
+    );
 }
 
 #[test]
@@ -133,7 +139,10 @@ fn t_words_simple() {
 
 #[test]
 fn t_words_multiple_spaces() {
-    assert_eq!(run(r#"T.words "hello  world  foo""#), json!(["hello", "world", "foo"]));
+    assert_eq!(
+        run(r#"T.words "hello  world  foo""#),
+        json!(["hello", "world", "foo"])
+    );
 }
 
 #[test]
@@ -143,19 +152,28 @@ fn t_lines_simple() {
 
 #[test]
 fn t_split_predicate() {
-    assert_eq!(run(r#"T.split (== '/') "foo/bar/baz""#), json!(["foo", "bar", "baz"]));
+    assert_eq!(
+        run(r#"T.split (== '/') "foo/bar/baz""#),
+        json!(["foo", "bar", "baz"])
+    );
 }
 
 // ========== Freer preamble (Freer, no Library) ==========
 
 #[test]
 fn freer_t_spliton_comma() {
-    assert_eq!(run_freer(r#"T.splitOn "," "a,b,c""#), json!(["a", "b", "c"]));
+    assert_eq!(
+        run_freer(r#"T.splitOn "," "a,b,c""#),
+        json!(["a", "b", "c"])
+    );
 }
 
 #[test]
 fn freer_t_words() {
-    assert_eq!(run_freer(r#"T.words "hello world""#), json!(["hello", "world"]));
+    assert_eq!(
+        run_freer(r#"T.words "hello world""#),
+        json!(["hello", "world"])
+    );
 }
 
 #[test]
@@ -329,7 +347,10 @@ result = do
 
 #[test]
 fn helpers_t_spliton() {
-    assert_eq!(run_mcp_with_helpers(r#"T.splitOn "," "a,b,c""#), json!(["a", "b", "c"]));
+    assert_eq!(
+        run_mcp_with_helpers(r#"T.splitOn "," "a,b,c""#),
+        json!(["a", "b", "c"])
+    );
 }
 
 #[test]
@@ -364,12 +385,18 @@ fn mcp_t_spliton_comma() {
 
 #[test]
 fn mcp_t_spliton_slash() {
-    assert_eq!(run_mcp(r#"T.splitOn "/" "foo/bar/baz""#), json!(["foo", "bar", "baz"]));
+    assert_eq!(
+        run_mcp(r#"T.splitOn "/" "foo/bar/baz""#),
+        json!(["foo", "bar", "baz"])
+    );
 }
 
 #[test]
 fn mcp_t_words() {
-    assert_eq!(run_mcp(r#"T.words "hello world""#), json!(["hello", "world"]));
+    assert_eq!(
+        run_mcp(r#"T.words "hello world""#),
+        json!(["hello", "world"])
+    );
 }
 
 #[test]
@@ -379,7 +406,10 @@ fn mcp_t_lines() {
 
 #[test]
 fn mcp_t_split() {
-    assert_eq!(run_mcp(r#"T.split (== '/') "foo/bar/baz""#), json!(["foo", "bar", "baz"]));
+    assert_eq!(
+        run_mcp(r#"T.split (== '/') "foo/bar/baz""#),
+        json!(["foo", "bar", "baz"])
+    );
 }
 
 // ========== Alpha-rename collision tests ==========
@@ -392,9 +422,8 @@ fn mcp_t_split() {
 /// unfoldings from Data.Text share local lambda binders.
 #[test]
 fn collision_dual_spliton() {
-    let result = run_mcp(
-        r#"let { a = T.splitOn "," "x,y" ; b = T.splitOn ":" "1:2:3" } in (a, b)"#,
-    );
+    let result =
+        run_mcp(r#"let { a = T.splitOn "," "x,y" ; b = T.splitOn ":" "1:2:3" } in (a, b)"#);
     // Tuples render as arrays
     assert_eq!(result, json!([["x", "y"], ["1", "2", "3"]]));
 }
@@ -423,11 +452,13 @@ fn collision_multi_text_ops() {
 /// small lambdas with local binders.
 #[test]
 fn collision_full_mcp_multi_ops() {
-    let result = run_full_mcp(r#"do
+    let result = run_full_mcp(
+        r#"do
         let a = T.splitOn "," "1,2,3"
             b = T.words "hello world"
             c = T.intercalate ";" a
-        pure (a, b, c)"#);
+        pure (a, b, c)"#,
+    );
     // Result goes through toJSON
     if let Some(fields) = result.get("fields") {
         if let Some(arr) = fields.get(0) {
@@ -436,7 +467,10 @@ fn collision_full_mcp_multi_ops() {
         }
     }
     // Direct result (no Value wrapper)
-    assert_eq!(result, json!([["1", "2", "3"], ["hello", "world"], "1;2;3"]));
+    assert_eq!(
+        result,
+        json!([["1", "2", "3"], ["hello", "world"], "1;2;3"])
+    );
 }
 
 // ========== Adversarial alpha-rename tests ==========
@@ -448,17 +482,26 @@ fn collision_full_mcp_multi_ops() {
 /// Maximizes reuse of Data.Text.splitOn's internal lambda binders.
 #[test]
 fn adversarial_six_splitons() {
-    let result = run_mcp(r#"let { a = T.splitOn "," "a,b"
+    let result = run_mcp(
+        r#"let { a = T.splitOn "," "a,b"
          ; b = T.splitOn ":" "1:2"
          ; c = T.splitOn "/" "x/y"
          ; d = T.splitOn "." "p.q"
          ; e = T.splitOn "-" "m-n"
          ; f = T.splitOn ";" "j;k"
-         } in [a, b, c, d, e, f]"#);
-    assert_eq!(result, json!([
-        ["a","b"], ["1","2"], ["x","y"],
-        ["p","q"], ["m","n"], ["j","k"]
-    ]));
+         } in [a, b, c, d, e, f]"#,
+    );
+    assert_eq!(
+        result,
+        json!([
+            ["a", "b"],
+            ["1", "2"],
+            ["x", "y"],
+            ["p", "q"],
+            ["m", "n"],
+            ["j", "k"]
+        ])
+    );
 }
 
 /// map over a list applying splitOn — forces the same inlined unfolding
@@ -467,7 +510,7 @@ fn adversarial_six_splitons() {
 fn adversarial_map_spliton() {
     assert_eq!(
         run_mcp(r#"map (T.splitOn ",") ["a,b", "c,d", "e,f"]"#),
-        json!([["a","b"], ["c","d"], ["e","f"]])
+        json!([["a", "b"], ["c", "d"], ["e", "f"]])
     );
 }
 
@@ -485,12 +528,14 @@ fn adversarial_split_rejoin_split() {
 /// all inlined together. Different modules may reuse unique namespaces.
 #[test]
 fn adversarial_cross_module() {
-    let result = run_mcp(r#"let { ws = T.words "k1 k2 k3"
+    let result = run_mcp(
+        r#"let { ws = T.words "k1 k2 k3"
          ; m = Map.fromList (zip ws [1::Int, 2, 3])
          ; ks = sort (Map.keys m)
          ; vs = Map.elems m
-         } in (ks, vs)"#);
-    assert_eq!(result, json!([["k1","k2","k3"], [1,2,3]]));
+         } in (ks, vs)"#,
+    );
+    assert_eq!(result, json!([["k1", "k2", "k3"], [1, 2, 3]]));
 }
 
 /// Text replace + splitOn + intercalate — three operations that share
@@ -508,28 +553,32 @@ fn adversarial_replace_split_join() {
 /// This is the exact pattern that triggered the original unique collision.
 #[test]
 fn adversarial_full_mcp_effect_plus_text() {
-    let result = run_full_mcp(r#"do
+    let result = run_full_mcp(
+        r#"do
         let items = T.splitOn "," "x,y,z"
             joined = T.intercalate ":" items
             ws = T.words "a b c"
             upper = map T.toUpper ws
-        pure (items, joined, upper)"#);
+        pure (items, joined, upper)"#,
+    );
     if let Some(fields) = result.get("fields") {
         if let Some(arr) = fields.get(0) {
-            assert_eq!(arr, &json!([["x","y","z"], "x:y:z", ["A","B","C"]]));
+            assert_eq!(arr, &json!([["x", "y", "z"], "x:y:z", ["A", "B", "C"]]));
             return;
         }
     }
-    assert_eq!(result, json!([["x","y","z"], "x:y:z", ["A","B","C"]]));
+    assert_eq!(result, json!([["x", "y", "z"], "x:y:z", ["A", "B", "C"]]));
 }
 
 /// Nested let bindings where inner bindings shadow outer text operations.
 /// Tests that alpha-rename handles nested scopes correctly.
 #[test]
 fn adversarial_nested_lets() {
-    let result = run_mcp(r#"let { outer = T.splitOn "," "a,b,c" } in
+    let result = run_mcp(
+        r#"let { outer = T.splitOn "," "a,b,c" } in
         let { inner = T.splitOn ":" (T.intercalate ":" outer) } in
-        let { final' = T.intercalate "-" inner } in final'"#);
+        let { final' = T.intercalate "-" inner } in final'"#,
+    );
     assert_eq!(result, json!("a-b-c"));
 }
 
@@ -547,16 +596,17 @@ fn adversarial_concatmap_split() {
 /// (isPrefixOf, isSuffixOf, isInfixOf) all inlined simultaneously.
 #[test]
 fn adversarial_text_predicates() {
-    let result = run_mcp(r#"let { xs = ["hello", "world", "help", "held"]
+    let result = run_mcp(
+        r#"let { xs = ["hello", "world", "help", "held"]
          ; pre = filter (T.isPrefixOf "hel") xs
          ; suf = filter (T.isSuffixOf "ld") xs
          ; inf = filter (T.isInfixOf "or") xs
-         } in (pre, suf, inf)"#);
-    assert_eq!(result, json!([
-        ["hello", "help", "held"],
-        ["world", "held"],
-        ["world"]
-    ]));
+         } in (pre, suf, inf)"#,
+    );
+    assert_eq!(
+        result,
+        json!([["hello", "help", "held"], ["world", "held"], ["world"]])
+    );
 }
 
 /// CSV parsing: split lines, split fields, build Map, query — exercises
@@ -704,4 +754,3 @@ fn freevar_length_works() {
     );
     assert_eq!(result, json!([2, 2]));
 }
-

@@ -153,9 +153,7 @@ impl EffectHandler for MockSg {
                 let empty: Vec<Value> = vec![];
                 cx.respond(empty)
             }
-            SgReq::SgReplace(_, _, _, _) | SgReq::SgRuleReplace(_, _, _, _) => {
-                cx.respond(0i64)
-            }
+            SgReq::SgReplace(_, _, _, _) | SgReq::SgRuleReplace(_, _, _, _) => cx.respond(0i64),
         }
     }
 }
@@ -194,7 +192,9 @@ impl EffectHandler for MockExec {
     type Request = ExecReq;
     fn handle(&mut self, req: ExecReq, cx: &EffectContext) -> Result<Value, EffectError> {
         match req {
-            ExecReq::Run(_) | ExecReq::RunIn(_, _) => cx.respond((0i64, String::new(), String::new())),
+            ExecReq::Run(_) | ExecReq::RunIn(_, _) => {
+                cx.respond((0i64, String::new(), String::new()))
+            }
             ExecReq::RunJson(_) => cx.respond(()),
         }
     }

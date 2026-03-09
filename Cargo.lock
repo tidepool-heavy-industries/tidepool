@@ -2894,6 +2894,7 @@ dependencies = [
  "glob",
  "rmcp",
  "serde_json",
+ "tempfile",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-codegen",

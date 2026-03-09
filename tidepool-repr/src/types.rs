@@ -323,8 +323,6 @@ impl std::fmt::Display for Literal {
     }
 }
 
-
-
 impl std::fmt::Display for AltCon {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

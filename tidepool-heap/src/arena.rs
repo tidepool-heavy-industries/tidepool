@@ -394,15 +394,18 @@ mod tests {
     #[test]
     fn test_nursery_cap() {
         let mut heap = ArenaHeap::with_capacity(MAX_NURSERY_SIZE - 1024);
-        
+
         // Setup state to trigger doubling
         let thunk_size = std::mem::size_of::<ThunkState>();
         let count = (heap.nursery_limit * 3 / 4 / thunk_size) + 1000;
-        heap.thunks.resize(count, ThunkState::Evaluated(Value::Lit(tidepool_repr::Literal::LitInt(0))));
-        
+        heap.thunks.resize(
+            count,
+            ThunkState::Evaluated(Value::Lit(tidepool_repr::Literal::LitInt(0))),
+        );
+
         // Trigger doubling directly via helper
         heap.grow_nursery_if_needed(count);
-        
+
         // Should be capped at MAX_NURSERY_SIZE
         assert_eq!(heap.nursery_limit(), MAX_NURSERY_SIZE);
     }

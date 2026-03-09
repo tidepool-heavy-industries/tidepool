@@ -41,7 +41,13 @@ impl EffectHandler for MockDataSource {
             DataSourceReq::GetItems => {
                 // Return a list of 50 strings to fill nursery
                 let items: Vec<String> = (0..50)
-                    .map(|i| format!("item_{:04}_padding_to_make_this_longer_{}", i, "x".repeat(50)))
+                    .map(|i| {
+                        format!(
+                            "item_{:04}_padding_to_make_this_longer_{}",
+                            i,
+                            "x".repeat(50)
+                        )
+                    })
                     .collect();
                 cx.respond(items)
             }
@@ -63,9 +69,7 @@ impl EffectHandler for MockClassifier {
     type Request = ClassifierReq;
     fn handle(&mut self, req: ClassifierReq, cx: &EffectContext) -> Result<Value, EffectError> {
         match req {
-            ClassifierReq::Classify(_prompt) => {
-                cx.respond("ok".to_string())
-            }
+            ClassifierReq::Classify(_prompt) => cx.respond("ok".to_string()),
         }
     }
 }
@@ -356,15 +360,8 @@ result = do
                 MockClassifierCustom("fail".to_string()),
                 MockConsole
             ];
-            compile_and_run_with_nursery_size(
-                &src,
-                "result",
-                &include,
-                &mut handlers,
-                &(),
-                1 << 20,
-            )
-            .expect("compile_and_run failed")
+            compile_and_run_with_nursery_size(&src, "result", &include, &mut handlers, &(), 1 << 20)
+                .expect("compile_and_run failed")
         })
         .unwrap()
         .join()
@@ -480,8 +477,5 @@ fn test_classify_value_then_conditional_branch() {
 "#,
         1 << 20,
     );
-    assert_eq!(
-        result.to_json(),
-        serde_json::json!("Found 50 items.")
-    );
+    assert_eq!(result.to_json(), serde_json::json!("Found 50 items."));
 }

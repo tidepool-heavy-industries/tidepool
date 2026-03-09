@@ -139,7 +139,8 @@ fn extract_module_name(source: &str) -> Option<String> {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("module ") {
             // "module Foo.Bar where" or "module Foo (" → take until whitespace/paren
-            let name: String = rest.trim_start()
+            let name: String = rest
+                .trim_start()
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '.' || *c == '_')
                 .collect();

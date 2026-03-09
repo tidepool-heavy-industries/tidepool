@@ -92,7 +92,10 @@ fn test_heap_force_on_lit_object() {
         *(lit_ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = 100;
 
         let res = host_fns::heap_force(&mut vmctx, lit_ptr);
-        assert_eq!(res, lit_ptr, "heap_force on Lit should return the pointer unchanged");
+        assert_eq!(
+            res, lit_ptr,
+            "heap_force on Lit should return the pointer unchanged"
+        );
         assert_eq!(read_lit_int(res), 100);
     }
 }
@@ -112,7 +115,10 @@ fn test_heap_force_on_con_object() {
         *(con_ptr.add(layout::CON_NUM_FIELDS_OFFSET) as *mut u16) = 0;
 
         let res = host_fns::heap_force(&mut vmctx, con_ptr);
-        assert_eq!(res, con_ptr, "heap_force on Con should return the pointer unchanged");
+        assert_eq!(
+            res, con_ptr,
+            "heap_force on Con should return the pointer unchanged"
+        );
         assert_eq!(layout::read_tag(res), layout::TAG_CON);
     }
 }
@@ -128,7 +134,7 @@ fn test_heap_force_thunk_evaluation() {
                 op: PrimOpKind::IntAdd,
                 args: vec![0, 1],
             }, // 2
-            CoreFrame::Var(VarId(1)), // 3
+            CoreFrame::Var(VarId(1)),           // 3
             CoreFrame::LetNonRec {
                 binder: VarId(1),
                 rhs: 2,
@@ -136,7 +142,7 @@ fn test_heap_force_thunk_evaluation() {
             }, // 4 (root)
         ],
     };
-    
+
     let mut result = compile_and_run(&tree);
     unsafe {
         // The result of LetNonRec might be a thunk if rhs was thunked.

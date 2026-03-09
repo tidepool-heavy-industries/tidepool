@@ -126,7 +126,8 @@ fn emit_data_dispatch(
     builder.switch_to_block(force_block);
     builder.seal_block(force_block);
 
-    let force_fn = sess.pipeline
+    let force_fn = sess
+        .pipeline
         .module
         .declare_function("heap_force", Linkage::Import, &{
             let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
@@ -136,9 +137,14 @@ fn emit_data_dispatch(
             sig
         })
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-    let force_ref = sess.pipeline.module.declare_func_in_func(force_fn, builder.func);
+    let force_ref = sess
+        .pipeline
+        .module
+        .declare_func_in_func(force_fn, builder.func);
 
-    let call = builder.ins().call(force_ref, &[sess.vmctx, initial_scrut_ptr]);
+    let call = builder
+        .ins()
+        .call(force_ref, &[sess.vmctx, initial_scrut_ptr]);
     let force_result = builder.inst_results(call)[0];
     builder.declare_value_needs_stack_map(force_result);
     builder
@@ -198,12 +204,13 @@ fn emit_data_dispatch(
                         .ins()
                         .load(types::I64, MemFlags::trusted(), scrut_ptr, offset);
                 builder.declare_value_needs_stack_map(field_val);
-                ctx.env.insert_scoped(&mut scope, binder, SsaVal::HeapPtr(field_val));
+                ctx.env
+                    .insert_scoped(&mut scope, binder, SsaVal::HeapPtr(field_val));
             }
 
-            let result =
-                ctx.emit_node(sess, builder, alt.body, tail)?;
-            let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
+            let result = ctx.emit_node(sess, builder, alt.body, tail)?;
+            let result_ptr =
+                ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
             builder
                 .ins()
                 .jump(merge_block, &[BlockArg::Value(result_ptr)]);
@@ -266,7 +273,8 @@ fn emit_case_trap(
     }
     let tags_addr = builder.ins().stack_addr(types::I64, ss, 0);
 
-    let trap_fn = sess.pipeline
+    let trap_fn = sess
+        .pipeline
         .module
         .declare_function("runtime_case_trap", Linkage::Import, &{
             let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
@@ -277,7 +285,10 @@ fn emit_case_trap(
             sig
         })
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-    let trap_ref = sess.pipeline.module.declare_func_in_func(trap_fn, builder.func);
+    let trap_ref = sess
+        .pipeline
+        .module
+        .declare_func_in_func(trap_fn, builder.func);
     let num_alts_val = builder.ins().iconst(types::I64, num_alts as i64);
     let call = builder
         .ins()

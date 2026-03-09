@@ -1,6 +1,6 @@
-use tidepool_bridge::{FromCore, ToCore, BridgeError};
+use tidepool_bridge::{BridgeError, FromCore, ToCore};
 use tidepool_eval::value::Value;
-use tidepool_repr::{DataCon, DataConId, DataConTable, SrcBang, Literal};
+use tidepool_repr::{DataCon, DataConId, DataConTable, Literal, SrcBang};
 
 fn get_table() -> DataConTable {
     let mut table = DataConTable::new();
@@ -97,14 +97,17 @@ fn test_arity_mismatch_tuple() {
     let table = get_table();
     let triple_id = table.get_by_name("(,,)").unwrap();
     // Try to deserialize a 3-field Con as a 2-field tuple
-    let val = Value::Con(triple_id, vec![
-        Value::Lit(Literal::LitInt(1)),
-        Value::Lit(Literal::LitInt(2)),
-        Value::Lit(Literal::LitInt(3)),
-    ]);
+    let val = Value::Con(
+        triple_id,
+        vec![
+            Value::Lit(Literal::LitInt(1)),
+            Value::Lit(Literal::LitInt(2)),
+            Value::Lit(Literal::LitInt(3)),
+        ],
+    );
     let res = <(i64, i64)>::from_value(&val, &table);
-    assert!(matches!(res, Err(BridgeError::UnknownDataCon(_)))); 
-    // Wait, the impl of (A, B) checks if id == pair_id. 
+    assert!(matches!(res, Err(BridgeError::UnknownDataCon(_))));
+    // Wait, the impl of (A, B) checks if id == pair_id.
     // If it's triple_id, it returns UnknownDataCon (or we could argue it's a type mismatch).
     // Let's check what the code does.
 }

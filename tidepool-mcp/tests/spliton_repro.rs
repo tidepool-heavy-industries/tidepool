@@ -41,7 +41,11 @@ fn repro_spliton_full_mcp() {
         Ok(val) => eprintln!("OK: {:?}", val.to_json()),
         Err(e) => eprintln!("ERROR: {}", e),
     }
-    assert!(result.is_ok(), "T.splitOn in full MCP context should work: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "T.splitOn in full MCP context should work: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -59,5 +63,9 @@ fn repro_spliton_no_user_library() {
         Ok(val) => eprintln!("OK: {:?}", val.to_json()),
         Err(e) => eprintln!("ERROR: {}", e),
     }
-    assert!(result.is_ok(), "T.splitOn without Library should work: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "T.splitOn without Library should work: {:?}",
+        result.err()
+    );
 }

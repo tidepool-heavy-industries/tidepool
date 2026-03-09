@@ -123,12 +123,24 @@ pub fn emit_primop(
         }
 
         // Int comparison \u2192 returns i64 (0=False, 1=True)
-        PrimOpKind::IntEq => {
-            emit_int_compare(sess.pipeline, builder, sess.vmctx, op, IntCC::Equal, args, LIT_TAG_INT)
-        }
-        PrimOpKind::IntNe => {
-            emit_int_compare(sess.pipeline, builder, sess.vmctx, op, IntCC::NotEqual, args, LIT_TAG_INT)
-        }
+        PrimOpKind::IntEq => emit_int_compare(
+            sess.pipeline,
+            builder,
+            sess.vmctx,
+            op,
+            IntCC::Equal,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::IntNe => emit_int_compare(
+            sess.pipeline,
+            builder,
+            sess.vmctx,
+            op,
+            IntCC::NotEqual,
+            args,
+            LIT_TAG_INT,
+        ),
         PrimOpKind::IntLt => emit_int_compare(
             sess.pipeline,
             builder,
@@ -241,12 +253,24 @@ pub fn emit_primop(
         }
 
         // Word comparison (unsigned)
-        PrimOpKind::WordEq => {
-            emit_int_compare(sess.pipeline, builder, sess.vmctx, op, IntCC::Equal, args, LIT_TAG_INT)
-        }
-        PrimOpKind::WordNe => {
-            emit_int_compare(sess.pipeline, builder, sess.vmctx, op, IntCC::NotEqual, args, LIT_TAG_INT)
-        }
+        PrimOpKind::WordEq => emit_int_compare(
+            sess.pipeline,
+            builder,
+            sess.vmctx,
+            op,
+            IntCC::Equal,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::WordNe => emit_int_compare(
+            sess.pipeline,
+            builder,
+            sess.vmctx,
+            op,
+            IntCC::NotEqual,
+            args,
+            LIT_TAG_INT,
+        ),
         PrimOpKind::WordLt => emit_int_compare(
             sess.pipeline,
             builder,
@@ -311,15 +335,33 @@ pub fn emit_primop(
         }
 
         // Double comparison
-        PrimOpKind::DoubleEq => {
-            emit_float_compare(sess.pipeline, builder, sess.vmctx, op, FloatCC::Equal, args, LIT_TAG_INT)
-        }
-        PrimOpKind::DoubleNe => {
-            emit_float_compare(sess.pipeline, builder, sess.vmctx, op, FloatCC::NotEqual, args, LIT_TAG_INT)
-        }
-        PrimOpKind::DoubleLt => {
-            emit_float_compare(sess.pipeline, builder, sess.vmctx, op, FloatCC::LessThan, args, LIT_TAG_INT)
-        }
+        PrimOpKind::DoubleEq => emit_float_compare(
+            sess.pipeline,
+            builder,
+            sess.vmctx,
+            op,
+            FloatCC::Equal,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::DoubleNe => emit_float_compare(
+            sess.pipeline,
+            builder,
+            sess.vmctx,
+            op,
+            FloatCC::NotEqual,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::DoubleLt => emit_float_compare(
+            sess.pipeline,
+            builder,
+            sess.vmctx,
+            op,
+            FloatCC::LessThan,
+            args,
+            LIT_TAG_INT,
+        ),
         PrimOpKind::DoubleLe => emit_float_compare(
             sess.pipeline,
             builder,
@@ -349,12 +391,24 @@ pub fn emit_primop(
         ),
 
         // Char comparison
-        PrimOpKind::CharEq => {
-            emit_int_compare(sess.pipeline, builder, sess.vmctx, op, IntCC::Equal, args, LIT_TAG_INT)
-        }
-        PrimOpKind::CharNe => {
-            emit_int_compare(sess.pipeline, builder, sess.vmctx, op, IntCC::NotEqual, args, LIT_TAG_INT)
-        }
+        PrimOpKind::CharEq => emit_int_compare(
+            sess.pipeline,
+            builder,
+            sess.vmctx,
+            op,
+            IntCC::Equal,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::CharNe => emit_int_compare(
+            sess.pipeline,
+            builder,
+            sess.vmctx,
+            op,
+            IntCC::NotEqual,
+            args,
+            LIT_TAG_INT,
+        ),
         PrimOpKind::CharLt => emit_int_compare(
             sess.pipeline,
             builder,
@@ -403,8 +457,7 @@ pub fn emit_primop(
             let zero = builder.ins().iconst(types::I64, 0);
             let max_valid = builder.ins().iconst(types::I64, 0x10FFFF);
             let is_negative = builder.ins().icmp(IntCC::SignedLessThan, v, zero);
-            let is_too_large =
-                builder.ins().icmp(IntCC::SignedGreaterThan, v, max_valid);
+            let is_too_large = builder.ins().icmp(IntCC::SignedGreaterThan, v, max_valid);
             let surrogate_lo = builder.ins().iconst(types::I64, 0xD800);
             let surrogate_hi = builder.ins().iconst(types::I64, 0xDFFF);
             let is_surr_lo = builder
@@ -1030,7 +1083,13 @@ pub fn emit_primop(
                 &[size],
             )?;
             // Wrap in a Lit on the managed heap
-            Ok(emit_lit_bytearray(builder, sess.vmctx, sess.gc_sig, sess.oom_func, ba_ptr))
+            Ok(emit_lit_bytearray(
+                builder,
+                sess.vmctx,
+                sess.gc_sig,
+                sess.oom_func,
+                ba_ptr,
+            ))
         }
 
         PrimOpKind::UnsafeFreezeByteArray => {
@@ -1414,15 +1473,33 @@ pub fn emit_primop(
             let b = unbox_float(sess.pipeline, builder, sess.vmctx, args[1]);
             Ok(SsaVal::Raw(builder.ins().fdiv(a, b), LIT_TAG_FLOAT))
         }
-        PrimOpKind::FloatEq => {
-            emit_float_compare(sess.pipeline, builder, sess.vmctx, op, FloatCC::Equal, args, LIT_TAG_INT)
-        }
-        PrimOpKind::FloatNe => {
-            emit_float_compare(sess.pipeline, builder, sess.vmctx, op, FloatCC::NotEqual, args, LIT_TAG_INT)
-        }
-        PrimOpKind::FloatLt => {
-            emit_float_compare(sess.pipeline, builder, sess.vmctx, op, FloatCC::LessThan, args, LIT_TAG_INT)
-        }
+        PrimOpKind::FloatEq => emit_float_compare(
+            sess.pipeline,
+            builder,
+            sess.vmctx,
+            op,
+            FloatCC::Equal,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::FloatNe => emit_float_compare(
+            sess.pipeline,
+            builder,
+            sess.vmctx,
+            op,
+            FloatCC::NotEqual,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::FloatLt => emit_float_compare(
+            sess.pipeline,
+            builder,
+            sess.vmctx,
+            op,
+            FloatCC::LessThan,
+            args,
+            LIT_TAG_INT,
+        ),
         PrimOpKind::FloatLe => emit_float_compare(
             sess.pipeline,
             builder,
@@ -1478,7 +1555,12 @@ pub fn emit_primop(
                 LIT_TAG_ARRAY
             };
             Ok(emit_lit_boxed_array(
-                builder, sess.vmctx, sess.gc_sig, sess.oom_func, arr_ptr, lit_tag,
+                builder,
+                sess.vmctx,
+                sess.gc_sig,
+                sess.oom_func,
+                arr_ptr,
+                lit_tag,
             ))
         }
 
@@ -1932,13 +2014,9 @@ fn unbox_numeric(
 
             let con_block = builder.create_block();
             let check_thunk_block = builder.create_block();
-            builder.ins().brif(
-                is_con,
-                con_block,
-                &[],
-                check_thunk_block,
-                &[],
-            );
+            builder
+                .ins()
+                .brif(is_con, con_block, &[], check_thunk_block, &[]);
 
             builder.switch_to_block(con_block);
             builder.seal_block(con_block);

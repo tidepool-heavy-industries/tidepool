@@ -149,10 +149,7 @@ pub fn check_jit_vs_eval(expr: CoreExpr, nursery_size: usize) -> Result<(), Test
 /// Evaluates the expression before and after the pass, then structurally
 /// compares results. If the original evaluation fails, the test case is
 /// skipped (passes only preserve behavior of well-defined programs).
-pub fn check_pass_preserves_eval(
-    pass: &dyn Pass,
-    expr: CoreExpr,
-) -> Result<(), TestCaseError> {
+pub fn check_pass_preserves_eval(pass: &dyn Pass, expr: CoreExpr) -> Result<(), TestCaseError> {
     let mut heap1 = VecHeap::new();
     let env = Env::new();
 

@@ -69,10 +69,7 @@ fn lits_equal(a: &Literal, b: &Literal) -> bool {
 /// Panics with a detailed message on mismatch.
 pub fn assert_values_eq(a: &Value, b: &Value) {
     if !values_equal(a, b) {
-        panic!(
-            "Value mismatch:\n  left:  {}\n  right: {}",
-            a, b,
-        );
+        panic!("Value mismatch:\n  left:  {}\n  right: {}", a, b,);
     }
 }
 
@@ -115,27 +112,23 @@ unsafe fn heap_to_value_inner(
         layout::TAG_LIT => {
             let lit_tag = *ptr.add(layout::LIT_TAG_OFFSET);
             match layout::LitTag::from_byte(lit_tag) {
-                Some(layout::LitTag::Int) => {
-                    Value::Lit(Literal::LitInt(*(ptr.add(layout::LIT_VALUE_OFFSET) as *const i64)))
-                }
-                Some(layout::LitTag::Word) => {
-                    Value::Lit(Literal::LitWord(*(ptr.add(layout::LIT_VALUE_OFFSET) as *const u64)))
-                }
+                Some(layout::LitTag::Int) => Value::Lit(Literal::LitInt(
+                    *(ptr.add(layout::LIT_VALUE_OFFSET) as *const i64),
+                )),
+                Some(layout::LitTag::Word) => Value::Lit(Literal::LitWord(
+                    *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u64),
+                )),
                 Some(layout::LitTag::Char) => {
                     let code = *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u32);
-                    Value::Lit(Literal::LitChar(
-                        char::from_u32(code).unwrap_or('\u{FFFD}'),
-                    ))
+                    Value::Lit(Literal::LitChar(char::from_u32(code).unwrap_or('\u{FFFD}')))
                 }
                 Some(layout::LitTag::Float) => {
                     let bits = *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u32);
                     Value::Lit(Literal::LitFloat(bits as u64))
                 }
-                Some(layout::LitTag::Double) => {
-                    Value::Lit(Literal::LitDouble(
-                        *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u64),
-                    ))
-                }
+                Some(layout::LitTag::Double) => Value::Lit(Literal::LitDouble(
+                    *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u64),
+                )),
                 None => {
                     // JIT uses extended lit tags (5=String, 7=ByteArray)
                     Value::ByteArray(std::sync::Arc::new(std::sync::Mutex::new(vec![])))
@@ -148,9 +141,8 @@ unsafe fn heap_to_value_inner(
             let num_fields = num_fields.min(MAX_CON_FIELDS);
             let fields = (0..num_fields)
                 .map(|i| {
-                    let field_ptr =
-                        *(ptr.add(layout::CON_FIELDS_OFFSET + layout::FIELD_STRIDE * i)
-                            as *const *const u8);
+                    let field_ptr = *(ptr.add(layout::CON_FIELDS_OFFSET + layout::FIELD_STRIDE * i)
+                        as *const *const u8);
                     heap_to_value_inner(field_ptr, vmctx, depth + 1)
                 })
                 .collect();

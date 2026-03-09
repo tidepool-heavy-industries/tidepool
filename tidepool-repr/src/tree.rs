@@ -124,7 +124,10 @@ fn rebuild(
         for node in &replacement.nodes {
             new_nodes.push(node.clone().map_layer(|i| i + offset));
         }
-        let root = new_nodes.len().checked_sub(1).expect("replacement tree must not be empty");
+        let root = new_nodes
+            .len()
+            .checked_sub(1)
+            .expect("replacement tree must not be empty");
         old_to_new.insert(idx, root);
         return root;
     }
@@ -296,7 +299,7 @@ mod tests {
     fn test_replace_subtree_nested() {
         // App(Var(x), Lit(1))
         let nodes = vec![
-            CoreFrame::Var(VarId(1)),          // 0: x
+            CoreFrame::Var(VarId(1)),           // 0: x
             CoreFrame::Lit(Literal::LitInt(1)), // 1: 1
             CoreFrame::App { fun: 0, arg: 1 },  // 2: x 1
         ];

@@ -87,7 +87,11 @@ result = case Bool True of
   Null     -> 6
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 5, "Bool True should match the Bool branch");
+    assert_eq!(
+        expect_int(&val),
+        5,
+        "Bool True should match the Bool branch"
+    );
 }
 
 #[test]
@@ -106,7 +110,11 @@ result = case Number 3.14 of
   Null     -> 6
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 4, "Number 3.14 should match the Number branch");
+    assert_eq!(
+        expect_int(&val),
+        4,
+        "Number 3.14 should match the Number branch"
+    );
 }
 
 #[test]
@@ -145,7 +153,11 @@ result = case Array [] of
   Null     -> 6
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 2, "Array [] should match the Array branch");
+    assert_eq!(
+        expect_int(&val),
+        2,
+        "Array [] should match the Array branch"
+    );
 }
 
 #[test]
@@ -164,7 +176,11 @@ result = case emptyObject of
   Null     -> 6
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 1, "emptyObject should match the Object branch");
+    assert_eq!(
+        expect_int(&val),
+        1,
+        "emptyObject should match the Object branch"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +208,11 @@ result :: Int
 result = valSize (String "hello")
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 7, "valSize (String \"hello\") = 5 + 2 = 7");
+    assert_eq!(
+        expect_int(&val),
+        7,
+        "valSize (String \"hello\") = 5 + 2 = 7"
+    );
 }
 
 #[test]
@@ -214,7 +234,11 @@ result :: Int
 result = valSize (Array [Null, Null])
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 99, "valSize (Array [...]) should match Array branch");
+    assert_eq!(
+        expect_int(&val),
+        99,
+        "valSize (Array [...]) should match Array branch"
+    );
 }
 
 #[test]
@@ -233,7 +257,11 @@ result = case emptyObject of
   Object _ -> 100
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 100, "valSize emptyObject should match Object branch");
+    assert_eq!(
+        expect_int(&val),
+        100,
+        "valSize emptyObject should match Object branch"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +297,11 @@ result = case String "abc" of
   _        -> 0
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 3, "Should extract string and get length 3");
+    assert_eq!(
+        expect_int(&val),
+        3,
+        "Should extract string and get length 3"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -289,7 +321,11 @@ result = case Number 1.0 of
   _        -> 99
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 99, "Number should fall through to default branch");
+    assert_eq!(
+        expect_int(&val),
+        99,
+        "Number should fall through to default branch"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +353,11 @@ result :: Int
 result = classify (Array [Number 42.0])
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 12, "Nested case: Array [Number _] should give 12");
+    assert_eq!(
+        expect_int(&val),
+        12,
+        "Nested case: Array [Number _] should give 12"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -336,7 +376,11 @@ result = case toJSON (42 :: Int) of
   _        -> 0
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 1, "toJSON 42 should produce Number, matching Number branch");
+    assert_eq!(
+        expect_int(&val),
+        1,
+        "toJSON 42 should produce Number, matching Number branch"
+    );
 }
 
 #[test]
@@ -351,7 +395,11 @@ result = case toJSON [1 :: Int, 2, 3] of
   _        -> 0
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 3, "toJSON [1,2,3] should produce Array with 3 elements");
+    assert_eq!(
+        expect_int(&val),
+        3,
+        "toJSON [1,2,3] should produce Array with 3 elements"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -378,7 +426,11 @@ result = case compare (Array []) Null of
   GT -> 3
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 1, "Array < Null in derived Ord (declaration order)");
+    assert_eq!(
+        expect_int(&val),
+        1,
+        "Array < Null in derived Ord (declaration order)"
+    );
 }
 
 #[test]
@@ -426,7 +478,11 @@ result = case toJSON [1 :: Int, 2, 3] of
   _        -> 0
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 1, "toJSON [1,2,3] via Prelude should match Array");
+    assert_eq!(
+        expect_int(&val),
+        1,
+        "toJSON [1,2,3] via Prelude should match Array"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -446,7 +502,11 @@ result = T.length (pack (show Null))
 "#;
     let val = run(src, "result");
     // show Null should produce "Null" (4 chars)
-    assert_eq!(expect_int(&val), 4, "show Null should produce \"Null\" (4 chars)");
+    assert_eq!(
+        expect_int(&val),
+        4,
+        "show Null should produce \"Null\" (4 chars)"
+    );
 }
 
 #[test]
@@ -463,7 +523,10 @@ result = T.length (pack (show emptyObject))
 "#;
     let val = run(src, "result");
     // show (Object (fromList [])) produces something non-empty
-    assert!(expect_int(&val) > 0, "show emptyObject should produce non-empty string");
+    assert!(
+        expect_int(&val) > 0,
+        "show emptyObject should produce non-empty string"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -490,7 +553,11 @@ result :: Int
 result = valSize (object ["name" .= (42 :: Int)])
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 100, "object [...] should match Object branch in valSize");
+    assert_eq!(
+        expect_int(&val),
+        100,
+        "object [...] should match Object branch in valSize"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -515,7 +582,11 @@ result :: Int
 result = classify (object ["a" .= (1 :: Int), "b" .= (2 :: Int)])
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 2, "Object with 2 keys should return Map.size = 2");
+    assert_eq!(
+        expect_int(&val),
+        2,
+        "Object with 2 keys should return Map.size = 2"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -567,7 +638,11 @@ result =
   in nid
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 0, "truncGo with large budget should return nid=0 (no truncation)");
+    assert_eq!(
+        expect_int(&val),
+        0,
+        "truncGo with large budget should return nid=0 (no truncation)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -585,7 +660,11 @@ result :: Int
 result = len (sort [Null, Bool True, Number 1.0, Bool False, Null])
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 5, "sort on [Value] should preserve length");
+    assert_eq!(
+        expect_int(&val),
+        5,
+        "sort on [Value] should preserve length"
+    );
 }
 
 #[test]
@@ -599,7 +678,11 @@ result :: Int
 result = len (nub [Null, Null, Bool True, Bool True, Number 1.0])
 "#;
     let val = run(src, "result");
-    assert_eq!(expect_int(&val), 3, "nub should remove duplicate Nulls and Bools");
+    assert_eq!(
+        expect_int(&val),
+        3,
+        "nub should remove duplicate Nulls and Bools"
+    );
 }
 
 // ===========================================================================
@@ -619,7 +702,10 @@ result :: Int
 result = T.length (pack (showDouble 3.14))
 "#;
     let val = run(src, "result");
-    assert!(expect_int(&val) > 0, "showDouble 3.14 should produce non-empty string");
+    assert!(
+        expect_int(&val) > 0,
+        "showDouble 3.14 should produce non-empty string"
+    );
 }
 
 #[test]
@@ -641,7 +727,10 @@ result =
   in T.length (pack (showDouble d))
 "#;
     let val = run(src, "result");
-    assert!(expect_int(&val) > 0, "showDouble on non-constant Double should work");
+    assert!(
+        expect_int(&val) > 0,
+        "showDouble on non-constant Double should work"
+    );
 }
 
 #[test]
@@ -663,7 +752,10 @@ result =
   in T.length (pack (showDouble d))
 "#;
     let val = run(src, "result");
-    assert!(expect_int(&val) > 0, "showDouble on recursive result should work");
+    assert!(
+        expect_int(&val) > 0,
+        "showDouble on recursive result should work"
+    );
 }
 
 #[test]
@@ -685,7 +777,10 @@ result =
   in T.length (show d)
 "#;
     let val = run(src, "result");
-    assert!(expect_int(&val) > 0, "show on non-constant Double should work");
+    assert!(
+        expect_int(&val) > 0,
+        "show on non-constant Double should work"
+    );
 }
 
 #[test]
@@ -708,7 +803,10 @@ result =
   in T.length (show v)
 "#;
     let val = run(src, "result");
-    assert!(expect_int(&val) > 0, "show (Number non-constant) should work");
+    assert!(
+        expect_int(&val) > 0,
+        "show (Number non-constant) should work"
+    );
 }
 
 #[test]
@@ -728,7 +826,10 @@ result =
   in T.length (pack (showDouble d))
 "#;
     let val = run(src, "result");
-    assert!(expect_int(&val) > 0, "showDouble on infinite list sum should work");
+    assert!(
+        expect_int(&val) > 0,
+        "showDouble on infinite list sum should work"
+    );
 }
 
 #[test]
@@ -760,7 +861,10 @@ result =
   in T.length (show stubInfo)
 "#;
     let val = run(src, "result");
-    assert!(expect_int(&val) > 0, "show stubInfo with Number from valSize should work");
+    assert!(
+        expect_int(&val) > 0,
+        "show stubInfo with Number from valSize should work"
+    );
 }
 
 #[test]
@@ -783,7 +887,10 @@ result =
   in T.length (show v)
 "#;
     let val = run(src, "result");
-    assert!(expect_int(&val) > 0, "show (Number (fromIntegral (go 5))) should work");
+    assert!(
+        expect_int(&val) > 0,
+        "show (Number (fromIntegral (go 5))) should work"
+    );
 }
 
 #[test]
@@ -885,7 +992,10 @@ result =
     let val = run(src, "result");
     match &val {
         Value::Con(_, fields) => {
-            assert!(!fields.is_empty(), "show stubInfo should produce non-empty Text");
+            assert!(
+                !fields.is_empty(),
+                "show stubInfo should produce non-empty Text"
+            );
         }
         _ => {}
     }
@@ -1015,7 +1125,10 @@ result = do
 #[test]
 fn show_double_exact_mcp_repro() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let repro_src = manifest.parent().unwrap().join("tidepool-runtime/tests/fixtures/mcp_showdouble_repro.hs");
+    let repro_src = manifest
+        .parent()
+        .unwrap()
+        .join("tidepool-runtime/tests/fixtures/mcp_showdouble_repro.hs");
     if !repro_src.exists() {
         eprintln!("Skipping: fixtures/mcp_showdouble_repro.hs not found");
         return;
@@ -1035,7 +1148,11 @@ fn show_double_exact_mcp_repro() {
         .unwrap()
         .join()
         .unwrap();
-    assert!(result.is_ok(), "MCP repro should not crash: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "MCP repro should not crash: {:?}",
+        result.err()
+    );
 }
 
 /// Test showDouble in an Eff-wrapped result binding with Library import.
@@ -1119,5 +1236,9 @@ result = do
         .unwrap()
         .join()
         .unwrap();
-    assert!(result.is_ok(), "Eff+Library showDouble should not crash: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Eff+Library showDouble should not crash: {:?}",
+        result.err()
+    );
 }

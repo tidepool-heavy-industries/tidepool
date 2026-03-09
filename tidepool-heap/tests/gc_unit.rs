@@ -1,6 +1,6 @@
-use tidepool_heap::layout::*;
-use tidepool_heap::gc::raw::for_each_pointer_field;
 use std::collections::HashSet;
+use tidepool_heap::gc::raw::for_each_pointer_field;
+use tidepool_heap::layout::*;
 
 #[repr(align(8))]
 struct AlignedBuf<const N: usize>([u8; N]);
@@ -37,19 +37,16 @@ fn test_for_each_pointer_field_closure_zero_captures() {
         for_each_pointer_field(ptr, |_| {
             count += 1;
         });
-        assert_eq!(count, 0, "Closure with 0 captures should have 0 pointer fields");
+        assert_eq!(
+            count, 0,
+            "Closure with 0 captures should have 0 pointer fields"
+        );
     }
 }
 
 #[test]
 fn test_layout_constant_sanity() {
-    let tags = vec![
-        TAG_CLOSURE,
-        TAG_THUNK,
-        TAG_CON,
-        TAG_LIT,
-        TAG_FORWARDED,
-    ];
+    let tags = vec![TAG_CLOSURE, TAG_THUNK, TAG_CON, TAG_LIT, TAG_FORWARDED];
     let mut set = HashSet::new();
     for tag in tags {
         assert!(set.insert(tag), "Duplicate tag found: {}", tag);
@@ -70,7 +67,7 @@ fn test_thunk_state_machine() {
     let ptr = buf_data.0.as_mut_ptr();
     unsafe {
         write_header(ptr, TAG_THUNK, THUNK_MIN_SIZE as u16);
-        
+
         // 1. Set Unevaluated
         *(ptr.add(THUNK_STATE_OFFSET)) = THUNK_UNEVALUATED;
         assert_eq!(*(ptr.add(THUNK_STATE_OFFSET)), THUNK_UNEVALUATED);

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
-use tidepool_runtime::{compile_and_run_pure, EvalResult, value_to_json};
 use std::thread;
+use tidepool_runtime::{compile_and_run_pure, value_to_json, EvalResult};
 
 fn prelude_path() -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -32,14 +32,20 @@ fn test_concurrent_eval_pure() {
 
     // Thread 3: List operations (explicit [Int] to avoid Integer/gmpn_cmp)
     handles.push(thread::spawn(|| {
-        let res = run_pure("module T3 where\nimport Data.List (sort)\nval :: [Int]\nval = sort [3, 1, 2]", "val");
+        let res = run_pure(
+            "module T3 where\nimport Data.List (sort)\nval :: [Int]\nval = sort [3, 1, 2]",
+            "val",
+        );
         let json = value_to_json(res.value(), res.table(), 0);
         assert_eq!(json, serde_json::json!([1, 2, 3]));
     }));
 
     // Thread 4: Higher-order functions (explicit [Int])
     handles.push(thread::spawn(|| {
-        let res = run_pure("module T4 where\nval :: [Int]\nval = map (+1) [1, 2, 3]", "val");
+        let res = run_pure(
+            "module T4 where\nval :: [Int]\nval = map (+1) [1, 2, 3]",
+            "val",
+        );
         let json = value_to_json(res.value(), res.table(), 0);
         assert_eq!(json, serde_json::json!([2, 3, 4]));
     }));

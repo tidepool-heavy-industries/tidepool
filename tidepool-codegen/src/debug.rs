@@ -10,10 +10,10 @@
 //! - `TIDEPOOL_TRACE=calls` — log each closure call (name, arg, result)
 //! - `TIDEPOOL_TRACE=heap` — also validate heap objects before use
 
+use crate::layout;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use tidepool_heap::layout as heap_layout;
-use crate::layout;
 
 // ── Lambda Registry ──────────────────────────────────────────
 
@@ -142,7 +142,8 @@ pub unsafe fn heap_describe(ptr: *const u8) -> String {
         }
         Some(heap_layout::HeapTag::Closure) => {
             let code_ptr = *(ptr.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const usize);
-            let num_captured = *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
+            let num_captured =
+                *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
             let name = lookup_lambda(code_ptr);
             let name_str = name
                 .as_deref()
@@ -248,8 +249,10 @@ pub unsafe fn heap_validate(ptr: *const u8) -> Result<(), HeapError> {
             if code_ptr == 0 {
                 return Err(HeapError::NullCodePtr);
             }
-            let num_captured = *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
-            let expected_min = (layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * num_captured as usize) as u16;
+            let num_captured =
+                *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
+            let expected_min =
+                (layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * num_captured as usize) as u16;
             if size < expected_min {
                 return Err(HeapError::SizeMismatch {
                     expected_min,
@@ -259,7 +262,8 @@ pub unsafe fn heap_validate(ptr: *const u8) -> Result<(), HeapError> {
         }
         Some(heap_layout::HeapTag::Con) => {
             let num_fields = *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16);
-            let expected_min = (layout::CON_FIELDS_OFFSET as usize + 8 * num_fields as usize) as u16;
+            let expected_min =
+                (layout::CON_FIELDS_OFFSET as usize + 8 * num_fields as usize) as u16;
             if size < expected_min {
                 return Err(HeapError::SizeMismatch {
                     expected_min,
@@ -309,7 +313,8 @@ impl TracingClosureCaller {
         }
 
         let code_ptr = *(callee.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const usize);
-        let num_captured = *(callee.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
+        let num_captured =
+            *(callee.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
         let name = lookup_lambda(code_ptr);
 
         if crate::debug::trace_level() >= crate::debug::TraceLevel::Calls {
@@ -323,8 +328,11 @@ impl TracingClosureCaller {
         }
 
         // Call the closure
-        let func: unsafe extern "C" fn(*mut crate::context::VMContext, *mut u8, *mut u8) -> *mut u8 =
-            std::mem::transmute(code_ptr);
+        let func: unsafe extern "C" fn(
+            *mut crate::context::VMContext,
+            *mut u8,
+            *mut u8,
+        ) -> *mut u8 = std::mem::transmute(code_ptr);
         let result = func(self.vmctx, callee, arg);
 
         if crate::debug::trace_level() >= crate::debug::TraceLevel::Calls {
@@ -357,7 +365,8 @@ pub unsafe fn heap_validate_deep(ptr: *const u8) -> Result<(), HeapError> {
         Some(heap_layout::HeapTag::Con) => {
             let num_fields = *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16);
             for i in 0..num_fields as usize {
-                let field = *(ptr.add(layout::CON_FIELDS_OFFSET as usize + 8 * i) as *const *const u8);
+                let field =
+                    *(ptr.add(layout::CON_FIELDS_OFFSET as usize + 8 * i) as *const *const u8);
                 if field.is_null() {
                     continue;
                 }
@@ -371,9 +380,11 @@ pub unsafe fn heap_validate_deep(ptr: *const u8) -> Result<(), HeapError> {
             }
         }
         Some(heap_layout::HeapTag::Closure) => {
-            let num_captured = *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
+            let num_captured =
+                *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
             for i in 0..num_captured as usize {
-                let cap = *(ptr.add(layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * i) as *const *const u8);
+                let cap = *(ptr.add(layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * i)
+                    as *const *const u8);
                 if cap.is_null() {
                     continue;
                 }

@@ -1,9 +1,9 @@
+use serial_test::serial;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use tidepool_runtime::compile_haskell;
-use serial_test::serial;
 
 fn prelude_path() -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));

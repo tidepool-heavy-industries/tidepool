@@ -102,4 +102,3 @@ impl<U, H: EffectHandler<U>, T: DispatchEffect<U>> DispatchEffect<U> for HCons<H
         }
     }
 }
-

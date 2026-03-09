@@ -1106,7 +1106,11 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             if offset > bytes.len() {
                 return Err(EvalError::TypeMismatch {
                     expected: "valid byte offset",
-                    got: crate::error::ValueKind::Other(format!("offset {} exceeds length {}", offset, bytes.len())),
+                    got: crate::error::ValueKind::Other(format!(
+                        "offset {} exceeds length {}",
+                        offset,
+                        bytes.len()
+                    )),
                 });
             }
             Ok(Value::Lit(Literal::LitString(bytes[offset..].to_vec())))
@@ -1171,7 +1175,12 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 if end.is_none() || end.unwrap() > src.len() {
                     return Err(EvalError::TypeMismatch {
                         expected: "valid src range",
-                        got: crate::error::ValueKind::Other(format!("range {}..{} exceeds length {}", src_off, src_off + len, src.len())),
+                        got: crate::error::ValueKind::Other(format!(
+                            "range {}..{} exceeds length {}",
+                            src_off,
+                            src_off + len,
+                            src.len()
+                        )),
                     });
                 }
                 src[src_off..end.unwrap()].to_vec()
@@ -1184,7 +1193,12 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 if end.is_none() || end.unwrap() > dst.len() {
                     return Err(EvalError::TypeMismatch {
                         expected: "valid dst range",
-                        got: crate::error::ValueKind::Other(format!("range {}..{} exceeds length {}", dst_off, dst_off + len, dst.len())),
+                        got: crate::error::ValueKind::Other(format!(
+                            "range {}..{} exceeds length {}",
+                            dst_off,
+                            dst_off + len,
+                            dst.len()
+                        )),
                     });
                 }
                 dst[dst_off..end.unwrap()].copy_from_slice(&src_data);
@@ -1213,7 +1227,12 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             if end.is_none() || end.unwrap() > dst.len() {
                 return Err(EvalError::TypeMismatch {
                     expected: "valid dst range",
-                    got: crate::error::ValueKind::Other(format!("range {}..{} exceeds length {}", dst_off, dst_off + src_end, dst.len())),
+                    got: crate::error::ValueKind::Other(format!(
+                        "range {}..{} exceeds length {}",
+                        dst_off,
+                        dst_off + src_end,
+                        dst.len()
+                    )),
                 });
             }
             dst[dst_off..end.unwrap()].copy_from_slice(&src_bytes[..src_end]);
@@ -1317,7 +1336,12 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 if end1.is_none() || end1.unwrap() > b.len() {
                     return Err(EvalError::TypeMismatch {
                         expected: "valid byte range for ba1",
-                        got: crate::error::ValueKind::Other(format!("range {}..{} exceeds length {}", off1, off1 + len, b.len())),
+                        got: crate::error::ValueKind::Other(format!(
+                            "range {}..{} exceeds length {}",
+                            off1,
+                            off1 + len,
+                            b.len()
+                        )),
                     });
                 }
                 b[off1..end1.unwrap()].to_vec()
@@ -1330,7 +1354,12 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 if end2.is_none() || end2.unwrap() > b.len() {
                     return Err(EvalError::TypeMismatch {
                         expected: "valid byte range for ba2",
-                        got: crate::error::ValueKind::Other(format!("range {}..{} exceeds length {}", off2, off2 + len, b.len())),
+                        got: crate::error::ValueKind::Other(format!(
+                            "range {}..{} exceeds length {}",
+                            off2,
+                            off2 + len,
+                            b.len()
+                        )),
                     });
                 }
                 b[off2..end2.unwrap()].to_vec()
@@ -1559,10 +1588,17 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             if offset > bytes.len() {
                 return Err(EvalError::TypeMismatch {
                     expected: "valid byte offset",
-                    got: crate::error::ValueKind::Other(format!("offset {} exceeds length {}", offset, bytes.len())),
+                    got: crate::error::ValueKind::Other(format!(
+                        "offset {} exceeds length {}",
+                        offset,
+                        bytes.len()
+                    )),
                 });
             }
-            let end = offset.checked_add(count).unwrap_or(bytes.len()).min(bytes.len());
+            let end = offset
+                .checked_add(count)
+                .unwrap_or(bytes.len())
+                .min(bytes.len());
             for b in &mut bytes[offset..end] {
                 *b = val;
             }
@@ -1654,7 +1690,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             if off_raw < 0 || n_chars_raw < 0 {
                 return Err(EvalError::TypeMismatch {
                     expected: "non-negative offset and length",
-                    got: crate::error::ValueKind::Other(format!("off={}, n_chars={}", off_raw, n_chars_raw)),
+                    got: crate::error::ValueKind::Other(format!(
+                        "off={}, n_chars={}",
+                        off_raw, n_chars_raw
+                    )),
                 });
             }
             let off = off_raw as usize;
@@ -1665,7 +1704,11 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             if off > bytes.len() {
                 return Err(EvalError::TypeMismatch {
                     expected: "valid byte offset",
-                    got: crate::error::ValueKind::Other(format!("offset {} exceeds length {}", off, bytes.len())),
+                    got: crate::error::ValueKind::Other(format!(
+                        "offset {} exceeds length {}",
+                        off,
+                        bytes.len()
+                    )),
                 });
             }
             let slice = &bytes[off..];
@@ -1697,7 +1740,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             if off_raw < 0 || len_raw < 0 {
                 return Err(EvalError::TypeMismatch {
                     expected: "non-negative offset and length",
-                    got: crate::error::ValueKind::Other(format!("off={}, len={}", off_raw, len_raw)),
+                    got: crate::error::ValueKind::Other(format!(
+                        "off={}, len={}",
+                        off_raw, len_raw
+                    )),
                 });
             }
             let off = off_raw as usize;
@@ -1709,7 +1755,11 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             if off > bytes.len() {
                 return Err(EvalError::TypeMismatch {
                     expected: "valid byte offset",
-                    got: crate::error::ValueKind::Other(format!("offset {} exceeds length {}", off, bytes.len())),
+                    got: crate::error::ValueKind::Other(format!(
+                        "offset {} exceeds length {}",
+                        off,
+                        bytes.len()
+                    )),
                 });
             }
             let end = off.checked_add(len).unwrap_or(bytes.len()).min(bytes.len());
@@ -1729,7 +1779,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             if off_raw < 0 || len_raw < 0 {
                 return Err(EvalError::TypeMismatch {
                     expected: "non-negative offset and length",
-                    got: crate::error::ValueKind::Other(format!("off={}, len={}", off_raw, len_raw)),
+                    got: crate::error::ValueKind::Other(format!(
+                        "off={}, len={}",
+                        off_raw, len_raw
+                    )),
                 });
             }
             let off = off_raw as usize;
@@ -1743,7 +1796,12 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 if end.is_none() || end.unwrap() > src.len() {
                     return Err(EvalError::TypeMismatch {
                         expected: "valid byte range",
-                        got: crate::error::ValueKind::Other(format!("range {}..{} exceeds length {}", off, off + len, src.len())),
+                        got: crate::error::ValueKind::Other(format!(
+                            "range {}..{} exceeds length {}",
+                            off,
+                            off + len,
+                            src.len()
+                        )),
                     });
                 }
                 src[off..end.unwrap()].to_vec()
@@ -2592,10 +2650,10 @@ mod tests {
         env.insert(VarId(101), Value::ByteArray(src));
 
         let nodes = vec![
-            CoreFrame::Var(VarId(100)),           // 0: dst
-            CoreFrame::Var(VarId(101)),           // 1: src
-            CoreFrame::Lit(Literal::LitInt(-1)),  // 2: off (negative!)
-            CoreFrame::Lit(Literal::LitInt(3)),   // 3: len
+            CoreFrame::Var(VarId(100)),          // 0: dst
+            CoreFrame::Var(VarId(101)),          // 1: src
+            CoreFrame::Lit(Literal::LitInt(-1)), // 2: off (negative!)
+            CoreFrame::Lit(Literal::LitInt(3)),  // 3: len
             CoreFrame::PrimOp {
                 op: PrimOpKind::FfiTextReverse,
                 args: vec![0, 1, 2, 3],

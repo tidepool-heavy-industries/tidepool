@@ -51,34 +51,29 @@ fn dump_core(src: &str) -> String {
 
 #[test]
 fn test_show_double_literal() {
-    let json = run(
-        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 result :: Text
 result = show (3.0 :: Double)
-"#,
-    );
+"#);
     assert_eq!(json, serde_json::json!("3.0"));
 }
 
 #[test]
 fn test_show_double_addition_literals() {
-    let json = run(
-        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 result :: Text
 result = show (1.0 + 2.0 :: Double)
-"#,
-    );
+"#);
     assert_eq!(json, serde_json::json!("3.0"));
 }
 
 #[test]
 fn test_show_double_from_case_on_bool() {
-    let json = run(
-        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 result :: Text
@@ -86,16 +81,14 @@ result =
   let a = case True of { True -> 1.0; False -> 0.0 :: Double }
       b = case True of { True -> 2.0; False -> 0.0 :: Double }
   in show (a + b)
-"#,
-    );
+"#);
     assert_eq!(json, serde_json::json!("3.0"));
 }
 
 #[test]
 fn test_lens_extract_individual_show() {
     // show on individual lens-extracted Doubles works
-    let json = run(
-        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 result :: Text
@@ -104,16 +97,14 @@ result =
       a = case v ^? key "x" . _Bool of { Just True -> 1.0; _ -> 0.0 :: Double }
       b = case v ^? key "y" . _Bool of { Just True -> 1.0; _ -> 0.0 :: Double }
   in show a <> " " <> show b
-"#,
-    );
+"#);
     assert_eq!(json, serde_json::json!("1.0 0.0"));
 }
 
 #[test]
 fn test_lens_extract_addition_no_show() {
     // a + b without show works
-    let json = run(
-        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 result :: Double
@@ -122,8 +113,7 @@ result =
       a = case v ^? key "x" . _Bool of { Just True -> 1.0; _ -> 0.0 :: Double }
       b = case v ^? key "y" . _Bool of { Just True -> 1.0; _ -> 0.0 :: Double }
   in a + b
-"#,
-    );
+"#);
     // serde_json normalizes 1.0 to 1 (no fractional part)
     assert!(json.is_number());
     assert_eq!(json.as_f64().unwrap(), 1.0);
@@ -134,8 +124,7 @@ result =
 #[test]
 fn test_show_sum_of_lens_extracted_doubles() {
     // SIGILL: show (a + b) where a, b from lens on Value
-    let json = run(
-        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 result :: Text
@@ -144,16 +133,14 @@ result =
       a = case v ^? key "x" . _Bool of { Just True -> 1.0; _ -> 0.0 :: Double }
       b = case v ^? key "y" . _Bool of { Just True -> 1.0; _ -> 0.0 :: Double }
   in show (a + b)
-"#,
-    );
+"#);
     assert_eq!(json, serde_json::json!("1.0"));
 }
 
 #[test]
 fn test_h_conf_pattern() {
     // The exact h_conf pattern from the ?? operator
-    let json = run(
-        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 result :: Text
@@ -162,8 +149,7 @@ result =
       b k = case v ^? key k . _Bool of { Just True -> 1.0; _ -> 0.0 :: Double }
       c = (b "_understood" + b "_confident" + b "_unambiguous") / 3.0
   in show c
-"#,
-    );
+"#);
     let s = json.as_str().unwrap();
     let n: f64 = s.parse().unwrap();
     assert!((n - 0.6666).abs() < 0.01);
@@ -172,8 +158,7 @@ result =
 #[test]
 fn test_show_double_on_lens_sum_via_show_double() {
     // showDouble returns String, so wrap with pack for Text result
-    let json = run(
-        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 result :: Text
@@ -182,8 +167,7 @@ result =
       a = case v ^? key "x" . _Bool of { Just True -> 1.0; _ -> 0.0 :: Double }
       b = case v ^? key "y" . _Bool of { Just True -> 2.0; _ -> 0.0 :: Double }
   in pack (showDouble (a + b))
-"#,
-    );
+"#);
     assert_eq!(json, serde_json::json!("3.0"));
 }
 
@@ -193,8 +177,7 @@ result =
 fn test_show_double_from_maybe_case() {
     // Reproduce the failing pattern WITHOUT lens: case on Maybe with Double
     // This tests if the issue is lens-specific or general Maybe-case-to-Double
-    let json = run(
-        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 result :: Text
@@ -202,16 +185,14 @@ result =
   let a = case Just True of { Just True -> 1.0; _ -> 0.0 :: Double }
       b = case Nothing of { Just True -> 1.0; _ -> 0.0 :: Double }
   in show (a + b)
-"#,
-    );
+"#);
     assert_eq!(json, serde_json::json!("1.0"));
 }
 
 #[test]
 fn test_show_double_opaque_maybe() {
     // Use a function to prevent constant folding
-    let json = run(
-        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 {-# NOINLINE mkMaybe #-}
@@ -224,16 +205,14 @@ result =
   let a = case mkMaybe True of { Just True -> 1.0; _ -> 0.0 :: Double }
       b = case mkMaybe False of { Just True -> 1.0; _ -> 0.0 :: Double }
   in show (a + b)
-"#,
-    );
+"#);
     assert_eq!(json, serde_json::json!("1.0"));
 }
 
 #[test]
 fn test_show_double_noinline_single() {
     // Even simpler: SINGLE opaque Maybe case, no addition
-    let json = run(
-        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 {-# NOINLINE mkMaybe #-}
@@ -245,16 +224,14 @@ result :: Text
 result =
   let a = case mkMaybe True of { Just True -> 1.0; _ -> 0.0 :: Double }
   in show a
-"#,
-    );
+"#);
     assert_eq!(json, serde_json::json!("1.0"));
 }
 
 #[test]
 fn test_show_double_noinline_add_no_show() {
     // a + b without show — should pass
-    let json = run(
-        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 {-# NOINLINE mkMaybe #-}
@@ -267,8 +244,7 @@ result =
   let a = case mkMaybe True of { Just True -> 1.0; _ -> 0.0 :: Double }
       b = case mkMaybe False of { Just True -> 1.0; _ -> 0.0 :: Double }
   in a + b
-"#,
-    );
+"#);
     assert!(json.is_number());
     assert_eq!(json.as_f64().unwrap(), 1.0);
 }
@@ -276,8 +252,7 @@ result =
 #[test]
 fn test_show_int_noinline() {
     // Same pattern but with Int instead of Double — is it Double-specific?
-    let json = run(
-        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 {-# NOINLINE mkMaybe #-}
@@ -290,8 +265,7 @@ result =
   let a = case mkMaybe True of { Just True -> 1; _ -> 0 :: Int }
       b = case mkMaybe False of { Just True -> 1; _ -> 0 :: Int }
   in show (a + b)
-"#,
-    );
+"#);
     assert_eq!(json, serde_json::json!("1"));
 }
 
@@ -468,18 +442,22 @@ result =
 
 #[test]
 fn test_interpreter_show_double_simple() {
-    let json = run_interp(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run_interp(
+        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 result :: Text
 result = show (1.0 + 2.0 :: Double)
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     assert_eq!(json, serde_json::json!("3.0"));
 }
 
 #[test]
 fn test_interpreter_addition_no_show_noinline() {
-    let json = run_interp(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run_interp(
+        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 {-# NOINLINE mkMaybe #-}
@@ -492,7 +470,9 @@ result =
   let a = case mkMaybe True of { Just True -> 1.0; _ -> 0.0 :: Double }
       b = case mkMaybe False of { Just True -> 1.0; _ -> 0.0 :: Double }
   in a + b
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     assert!(json.is_number());
     assert_eq!(json.as_f64().unwrap(), 1.0);
 }
@@ -500,7 +480,8 @@ result =
 #[test]
 fn test_interpreter_show_single_noinline() {
     // show a (single, no addition) where a from NOINLINE
-    let json = run_interp(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run_interp(
+        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 {-# NOINLINE mkMaybe #-}
@@ -512,14 +493,17 @@ result :: Text
 result =
   let a = case mkMaybe True of { Just True -> 1.0; _ -> 0.0 :: Double }
   in show a
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     assert_eq!(json, serde_json::json!("1.0"));
 }
 
 #[test]
 fn test_interpreter_show_int_noinline() {
     // Same pattern but Int instead of Double
-    let json = run_interp(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+    let json = run_interp(
+        r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 {-# NOINLINE mkMaybe #-}
@@ -532,6 +516,8 @@ result =
   let a = case mkMaybe True of { Just True -> 1; _ -> 0 :: Int }
       b = case mkMaybe False of { Just True -> 1; _ -> 0 :: Int }
   in show (a + b)
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     assert_eq!(json, serde_json::json!("1"));
 }

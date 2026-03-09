@@ -1273,7 +1273,7 @@ fn rejected_import(import_str: &str) -> Option<&str> {
     }
     // Remove anything from '(' onwards (for imports like "Data.Map (Map)")
     let module = module.split('(').next().unwrap_or("").trim();
-    
+
     for prefix in BLOCKED {
         if module.starts_with(prefix) {
             return Some(module);
@@ -1741,11 +1741,13 @@ impl TidepoolMcpServerImpl {
                         let diagnostics = tidepool_runtime::drain_diagnostics();
                         let mut error_detail = e.to_string();
                         // Annotate UnhandledEffect with effect names
-                        if let Some(tag_str) = error_detail.strip_prefix("Unhandled effect at tag ") {
+                        if let Some(tag_str) = error_detail.strip_prefix("Unhandled effect at tag ")
+                        {
                             if let Ok(tag) = tag_str.trim().parse::<usize>() {
                                 if tag < effect_names.len() {
                                     let effect_name = &effect_names[tag];
-                                    error_detail = format!("{} (effect: {})", error_detail, effect_name);
+                                    error_detail =
+                                        format!("{} (effect: {})", error_detail, effect_name);
                                 }
                             }
                             let effects_list: String = effect_names
@@ -2609,7 +2611,10 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(text).unwrap();
         assert_eq!(json["suspended"], true);
         assert_eq!(json["prompt"], "what is your name?");
-        assert!(json["continuation_id"].as_str().unwrap().starts_with("cont_"));
+        assert!(json["continuation_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("cont_"));
 
         // Check if it's in the continuations map
         let cont_id = json["continuation_id"].as_str().unwrap();
@@ -2769,12 +2774,11 @@ mod tests {
         let output = CapturedOutput::new();
         output.push("line 1".to_string());
         output.push("line 2".to_string());
-        
+
         let drained = output.drain();
         assert_eq!(drained, vec!["line 1", "line 2"]);
-        
+
         let empty = output.drain();
         assert!(empty.is_empty());
     }
 }
-

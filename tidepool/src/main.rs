@@ -75,7 +75,8 @@ impl KvHandler {
                     Err(e) => {
                         tracing::warn!(
                             "KV store at {:?} contains invalid JSON ({}), starting fresh",
-                            path, e
+                            path,
+                            e
                         );
                         HashMap::new()
                     }
@@ -94,20 +95,14 @@ impl KvHandler {
     fn flush(&self, store: &HashMap<String, serde_json::Value>) {
         if let Some(parent) = self.path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                tracing::warn!(
-                    "KV flush: failed to create dir {:?}: {}",
-                    parent, e
-                );
+                tracing::warn!("KV flush: failed to create dir {:?}: {}", parent, e);
                 return;
             }
         }
         match serde_json::to_string_pretty(store) {
             Ok(json) => {
                 if let Err(e) = std::fs::write(&self.path, json) {
-                    tracing::warn!(
-                        "KV flush: failed to write {:?}: {}",
-                        self.path, e
-                    );
+                    tracing::warn!("KV flush: failed to write {:?}: {}", self.path, e);
                 }
             }
             Err(e) => {
@@ -856,7 +851,10 @@ impl ExecHandler {
             .canonicalize()
             .map_err(|e| EffectError::Handler(format!("Cannot resolve directory: {}", e)))?;
         if !canonical.starts_with(&canonical_root) {
-            return Err(EffectError::Handler(format!("Path escapes sandbox: {}", rel)));
+            return Err(EffectError::Handler(format!(
+                "Path escapes sandbox: {}",
+                rel
+            )));
         }
         Ok(canonical)
     }
@@ -1866,6 +1864,91 @@ mod tests {
         (GitHandler::new(dir), repo)
     }
 
+    /// Create a temporary git repo with known state for deterministic git tests.
+    /// Returns (tempdir_guard, path) — the repo has:
+    ///   - 2 commits on "main" branch
+    ///   - A file "hello.txt" with known content
+    ///   - A file "data.csv" with 3 lines
+    fn test_git_repo() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().to_path_buf();
+        let repo = git2::Repository::init(&path).unwrap();
+
+        // Configure committer identity (required by libgit2)
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test User").unwrap();
+        config.set_str("user.email", "test@example.com").unwrap();
+
+        // First commit
+        std::fs::write(path.join("hello.txt"), "hello world\n").unwrap();
+        std::fs::write(path.join("data.csv"), "a,1\nb,2\nc,3\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("hello.txt")).unwrap();
+        index.add_path(std::path::Path::new("data.csv")).unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let sig = repo.signature().unwrap();
+        let c1 = repo
+            .commit(Some("HEAD"), &sig, &sig, "initial commit", &tree, &[])
+            .unwrap();
+
+        // Create "main" branch pointing at HEAD
+        let commit1 = repo.find_commit(c1).unwrap();
+        repo.branch("main", &commit1, false).ok(); // may already exist
+
+        // Second commit
+        std::fs::write(path.join("hello.txt"), "hello world\nupdated\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("hello.txt")).unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &sig,
+            &sig,
+            "second commit",
+            &tree,
+            &[&commit1],
+        )
+        .unwrap();
+
+        (tmp, path)
+    }
+
+    /// Like jit_eval but uses a custom git repo path instead of the workspace root.
+    fn jit_eval_in_git_repo(code: &[&str], git_root: &std::path::Path) -> serde_json::Value {
+        let source = jit_test_source(code);
+        let include = prelude_include();
+        let include_paths: Vec<&std::path::Path> = vec![include.as_path()];
+        let kv_path = std::env::temp_dir().join("tidepool_jit_git_test_kv.json");
+        let cwd = repo_root();
+        let captured = CapturedOutput::new();
+        let mut handlers = frunk::hlist![
+            ConsoleHandler,
+            KvHandler::new(kv_path),
+            FsHandler::new(cwd.clone()),
+            SgHandler::new(cwd.clone()),
+            HttpHandler,
+            ExecHandler::new(cwd),
+            MetaHandler::new(vec![], vec![]),
+            GitHandler::new(git_root.to_path_buf()),
+            LlmHandler::new()
+        ];
+        let result = tidepool_runtime::compile_and_run(
+            &source,
+            "result",
+            &include_paths,
+            &mut handlers,
+            &captured,
+        );
+        match result {
+            Ok(eval_result) => eval_result.to_json(),
+            Err(e) => panic!("JIT eval failed: {:?}", e),
+        }
+    }
+
     /// Build a DataConTable with standard types + all effect constructors + response types.
     /// Auto-generated from `standard_decls()` so it never goes stale.
     fn full_effect_test_table() -> DataConTable {
@@ -2582,77 +2665,94 @@ mod tests {
 
     #[test]
     fn test_jit_git_log_roundtrip() {
-        let result = jit_eval(&[
-            "commits <- gitLog \"HEAD\" 3",
-            "pure (toJSON (length commits))",
-        ]);
-        let n = result.as_i64().unwrap();
-        assert!(
-            n > 0 && n <= 3,
-            "gitLog should return 1-3 commits, got {}",
-            n
+        let (_tmp, path) = test_git_repo();
+        let result = jit_eval_in_git_repo(
+            &[
+                "commits <- gitLog \"HEAD\" 3",
+                "pure (toJSON (length commits))",
+            ],
+            &path,
         );
+        let n = result.as_i64().unwrap();
+        assert_eq!(n, 2, "test repo has exactly 2 commits, got {}", n);
     }
 
     #[test]
     fn test_jit_git_show_roundtrip() {
-        let result = jit_eval(&[
-            "c <- gitShow \"HEAD\"",
-            "pure (toJSON (c ^? key \"subject\" . _String))",
-        ]);
-        assert!(
-            result.is_string(),
-            "gitShow HEAD subject should be a string, got {:?}",
-            result
+        let (_tmp, path) = test_git_repo();
+        let result = jit_eval_in_git_repo(
+            &[
+                "c <- gitShow \"HEAD\"",
+                "pure (toJSON (c ^? key \"subject\" . _String))",
+            ],
+            &path,
         );
+        assert_eq!(result, serde_json::json!("second commit"));
     }
 
     #[test]
     fn test_jit_git_diff_roundtrip() {
-        let result = jit_eval(&["diffs <- gitDiff \"HEAD\"", "pure (toJSON (length diffs))"]);
-        assert!(
-            result.is_number(),
-            "gitDiff should return a count, got {:?}",
-            result
+        let (_tmp, path) = test_git_repo();
+        let result = jit_eval_in_git_repo(
+            &["diffs <- gitDiff \"HEAD\"", "pure (toJSON (length diffs))"],
+            &path,
         );
+        // HEAD commit modified hello.txt → 1 diff entry
+        assert_eq!(result, serde_json::json!(1));
     }
 
     #[test]
     fn test_jit_git_branches_roundtrip() {
-        let result = jit_eval(&["bs <- gitBranches", "pure (toJSON (length bs > 0))"]);
-        assert_eq!(result, serde_json::json!(true));
+        let (_tmp, path) = test_git_repo();
+        let result =
+            jit_eval_in_git_repo(&["bs <- gitBranches", "pure (toJSON (length bs))"], &path);
+        // test repo has exactly 1 branch ("main")
+        // (HEAD detached + "main" branch = may be 1 or 2 depending on git2)
+        let n = result.as_i64().unwrap();
+        assert!(n >= 1 && n <= 2, "expected 1-2 branches, got {}", n);
     }
 
     #[test]
     fn test_jit_git_tree_roundtrip() {
-        let result = jit_eval(&[
-            "entries <- gitTree \"HEAD\" \".\"",
-            "pure (toJSON (length entries > 0))",
-        ]);
-        assert_eq!(result, serde_json::json!(true));
+        let (_tmp, path) = test_git_repo();
+        let result = jit_eval_in_git_repo(
+            &[
+                "entries <- gitTree \"HEAD\" \".\"",
+                "pure (toJSON (length entries))",
+            ],
+            &path,
+        );
+        // test repo has hello.txt and data.csv → 2 entries
+        assert_eq!(result, serde_json::json!(2));
     }
 
     #[test]
     fn test_jit_git_blame_roundtrip() {
-        let result = jit_eval(&[
-            "hunks <- gitBlame \"Cargo.toml\" 1 3",
-            "pure (toJSON (length hunks))",
-        ]);
+        let (_tmp, path) = test_git_repo();
+        let result = jit_eval_in_git_repo(
+            &[
+                "hunks <- gitBlame \"data.csv\" 1 3",
+                "pure (toJSON (length hunks))",
+            ],
+            &path,
+        );
         let n = result.as_i64().unwrap();
         assert!(n > 0, "gitBlame should return at least 1 hunk, got {}", n);
     }
 
-    // === Raw git2 tests ===
+    // === Raw git2 tests (using tmpdir repo for determinism) ===
 
     #[test]
     fn test_git_open_repo() {
-        let (handler, _) = git_handler();
+        let (_tmp, path) = test_git_repo();
+        let handler = GitHandler::new(path);
         handler.open_repo().expect("should open repo");
     }
 
     #[test]
     fn test_git_branches() {
-        let (_, repo) = git_handler();
+        let (_tmp, path) = test_git_repo();
+        let repo = git2::Repository::open(&path).unwrap();
         let branches = repo.branches(None).unwrap();
         let names: Vec<String> = branches
             .filter_map(|b| b.ok())
@@ -2660,90 +2760,78 @@ mod tests {
             .collect();
         assert!(!names.is_empty(), "should have at least one branch");
         assert!(
-            names.iter().any(|n| n == "main" || n == "master"),
-            "should have main or master branch, got: {:?}",
+            names.iter().any(|n| n == "main"),
+            "should have main branch, got: {:?}",
             names
         );
     }
 
     #[test]
     fn test_git_log() {
-        let (_, repo) = git_handler();
+        let (_tmp, path) = test_git_repo();
+        let repo = git2::Repository::open(&path).unwrap();
         let obj = repo.revparse_single("HEAD").unwrap();
         let mut revwalk = repo.revwalk().unwrap();
         revwalk.push(obj.id()).unwrap();
         revwalk.set_sorting(git2::Sort::TIME).ok();
-        let commits: Vec<git2::Oid> = revwalk.take(3).filter_map(|r| r.ok()).collect();
-        assert!(!commits.is_empty(), "should have at least one commit");
+        let commits: Vec<git2::Oid> = revwalk.take(5).filter_map(|r| r.ok()).collect();
+        assert_eq!(commits.len(), 2, "test repo has exactly 2 commits");
         let commit = repo.find_commit(commits[0]).unwrap();
-        assert!(
-            commit.summary().is_some(),
-            "HEAD commit should have a summary"
-        );
+        assert_eq!(commit.summary().unwrap(), "second commit");
     }
 
     #[test]
     fn test_git_show() {
-        let (_, repo) = git_handler();
+        let (_tmp, path) = test_git_repo();
+        let repo = git2::Repository::open(&path).unwrap();
         let head = repo.head().unwrap().peel_to_commit().unwrap();
-        let oid = head.id();
-        let commit = repo.find_commit(oid).unwrap();
-        assert!(commit.summary().is_some());
-        assert!(commit.author().name().is_some());
+        assert_eq!(head.summary().unwrap(), "second commit");
+        assert_eq!(head.author().name().unwrap(), "Test User");
     }
 
     #[test]
     fn test_git_diff() {
-        let (_, repo) = git_handler();
+        let (_tmp, path) = test_git_repo();
+        let repo = git2::Repository::open(&path).unwrap();
         let head = repo.head().unwrap().peel_to_commit().unwrap();
         let tree = head.tree().unwrap();
-        if head.parent_count() > 0 {
-            let parent_tree = head.parent(0).unwrap().tree().unwrap();
-            let diff = repo
-                .diff_tree_to_tree(Some(&parent_tree), Some(&tree), None)
-                .unwrap();
-            // Just verify it doesn't panic — diff may be empty for merge commits
-            let _count = diff.deltas().count();
-        }
+        let parent_tree = head.parent(0).unwrap().tree().unwrap();
+        let diff = repo
+            .diff_tree_to_tree(Some(&parent_tree), Some(&tree), None)
+            .unwrap();
+        assert_eq!(diff.deltas().count(), 1, "second commit changed 1 file");
     }
 
     #[test]
     fn test_git_tree() {
-        let (_, repo) = git_handler();
+        let (_tmp, path) = test_git_repo();
+        let repo = git2::Repository::open(&path).unwrap();
         let head = repo.head().unwrap().peel_to_commit().unwrap();
         let tree = head.tree().unwrap();
         let entries: Vec<String> = tree
             .iter()
             .filter_map(|e| e.name().map(String::from))
             .collect();
-        assert!(!entries.is_empty(), "root tree should have entries");
-        assert!(
-            entries
-                .iter()
-                .any(|e| e == "Cargo.toml" || e == "CLAUDE.md"),
-            "root tree should contain known files, got: {:?}",
-            entries
-        );
+        assert_eq!(entries.len(), 2);
+        assert!(entries.contains(&"hello.txt".to_string()));
+        assert!(entries.contains(&"data.csv".to_string()));
     }
 
     #[test]
     fn test_git_blame() {
-        let (handler, repo) = git_handler();
+        let (_tmp, path) = test_git_repo();
+        let repo = git2::Repository::open(&path).unwrap();
         let mut opts = git2::BlameOptions::new();
         opts.min_line(1);
-        opts.max_line(5);
+        opts.max_line(3);
         let blame = repo
-            .blame_file(std::path::Path::new("Cargo.toml"), Some(&mut opts))
+            .blame_file(std::path::Path::new("data.csv"), Some(&mut opts))
             .unwrap();
         assert!(blame.len() > 0, "blame should have at least one hunk");
         let hunk = blame.get_index(0).unwrap();
-        assert!(
-            hunk.final_signature().name().is_some(),
-            "blame hunk should have an author"
-        );
-        // Verify file content reading works
-        let content = std::fs::read_to_string(handler.root.join("Cargo.toml")).unwrap();
-        assert!(!content.is_empty());
+        assert_eq!(hunk.final_signature().name().unwrap(), "Test User");
+        let content = std::fs::read_to_string(path.join("hello.txt")).unwrap();
+        assert_eq!(content, "hello world\nupdated\n");
     }
 
     // === LLM structured JSON round-trip through JIT ===

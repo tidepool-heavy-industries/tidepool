@@ -40,23 +40,33 @@ fn test_beta_dce_pipeline() {
     let x = VarId(1);
     let y = VarId(2);
     let mut bld = TreeBuilder::new();
-    
+
     let vy = bld.push(CoreFrame::Var(y));
-    let lam = bld.push(CoreFrame::Lam { binder: y, body: vy });
+    let lam = bld.push(CoreFrame::Lam {
+        binder: y,
+        body: vy,
+    });
     let lit10 = bld.push(CoreFrame::Lit(Literal::LitInt(10)));
-    let app = bld.push(CoreFrame::App { fun: lam, arg: lit10 });
-    
+    let app = bld.push(CoreFrame::App {
+        fun: lam,
+        arg: lit10,
+    });
+
     let lit42 = bld.push(CoreFrame::Lit(Literal::LitInt(42)));
-    bld.push(CoreFrame::LetNonRec { binder: x, rhs: lit42, body: app });
-    
+    bld.push(CoreFrame::LetNonRec {
+        binder: x,
+        rhs: lit42,
+        body: app,
+    });
+
     let expr = bld.build();
     let mut optimized = expr.clone();
-    
+
     BetaReduce.run(&mut optimized);
     Dce.run(&mut optimized);
-    
+
     assert_eval_equiv(&expr, &optimized);
-    
+
     // Check that it's simplified.
     assert!(optimized.nodes.len() < expr.nodes.len());
 }
@@ -67,25 +77,30 @@ fn test_case_reduce_pipeline() {
     let x = VarId(1);
     let tag = DataConId(0);
     let mut bld = TreeBuilder::new();
-    
+
     let lit42 = bld.push(CoreFrame::Lit(Literal::LitInt(42)));
-    let con = bld.push(CoreFrame::Con { tag, fields: vec![lit42] });
-    
+    let con = bld.push(CoreFrame::Con {
+        tag,
+        fields: vec![lit42],
+    });
+
     let vx = bld.push(CoreFrame::Var(x));
     let _case_node = bld.push(CoreFrame::Case {
         scrutinee: con,
         binder: VarId(0),
-        alts: vec![
-            Alt { con: AltCon::DataAlt(tag), binders: vec![x], body: vx }
-        ],
+        alts: vec![Alt {
+            con: AltCon::DataAlt(tag),
+            binders: vec![x],
+            body: vx,
+        }],
     });
-    
+
     let expr = bld.build();
     let mut optimized = expr.clone();
-    
+
     CaseReduce.run(&mut optimized);
     Dce.run(&mut optimized);
-    
+
     assert_eval_equiv(&expr, &optimized);
 }
 
@@ -94,26 +109,39 @@ fn test_full_pipeline() {
     // let f = \x -> x + 1 in f 10
     let f = VarId(1);
     let x = VarId(2);
-    
+
     let mut bld = TreeBuilder::new();
     let vx = bld.push(CoreFrame::Var(x));
     let lit1 = bld.push(CoreFrame::Lit(Literal::LitInt(1)));
-    let add = bld.push(CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![vx, lit1] });
-    let lam = bld.push(CoreFrame::Lam { binder: x, body: add });
-    
+    let add = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntAdd,
+        args: vec![vx, lit1],
+    });
+    let lam = bld.push(CoreFrame::Lam {
+        binder: x,
+        body: add,
+    });
+
     let lit10 = bld.push(CoreFrame::Lit(Literal::LitInt(10)));
     let vf = bld.push(CoreFrame::Var(f));
-    let app = bld.push(CoreFrame::App { fun: vf, arg: lit10 });
-    
-    bld.push(CoreFrame::LetNonRec { binder: f, rhs: lam, body: app });
-    
+    let app = bld.push(CoreFrame::App {
+        fun: vf,
+        arg: lit10,
+    });
+
+    bld.push(CoreFrame::LetNonRec {
+        binder: f,
+        rhs: lam,
+        body: app,
+    });
+
     let expr = bld.build();
     let mut optimized = expr.clone();
-    
+
     // Inline (f is used once) -> BetaReduce ((\x -> x + 1) 10) -> Dce
     Inline.run(&mut optimized);
     BetaReduce.run(&mut optimized);
     Dce.run(&mut optimized);
-    
+
     assert_eval_equiv(&expr, &optimized);
 }
