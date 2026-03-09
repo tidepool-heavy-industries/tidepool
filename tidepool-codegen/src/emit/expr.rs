@@ -203,6 +203,7 @@ fn collapse_frame(
     sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
     frame: EmitFrame<SsaVal>,
+    tail: TailCtx,
 ) -> Result<SsaVal, EmitError> {
     match frame {
         EmitFrame::LitString(ref bytes) => emit_lit_string(
@@ -556,7 +557,7 @@ fn collapse_frame(
             binder,
             alts,
         } => crate::emit::case::emit_case(
-            ctx, sess, builder, scrutinee, &binder, &alts,
+            ctx, sess, builder, scrutinee, &binder, &alts, tail,
         ),
         EmitFrame::Join {
             label,
@@ -610,10 +611,21 @@ fn emit_subtree(
     builder: &mut FunctionBuilder,
     idx: usize,
 ) -> Result<SsaVal, EmitError> {
+    emit_subtree_with_tail(ctx, sess, builder, idx, TailCtx::NonTail)
+}
+
+/// Stack-safe emission with explicit tail context. Case alt bodies inherit `tail`.
+fn emit_subtree_with_tail(
+    ctx: &mut EmitContext,
+    sess: &mut EmitSession,
+    builder: &mut FunctionBuilder,
+    idx: usize,
+    tail: TailCtx,
+) -> Result<SsaVal, EmitError> {
     try_expand_and_collapse::<EmitFrameToken, _, _, _>(
         idx,
         |idx| expand_node(sess.tree, idx),
-        |frame| collapse_frame(ctx, sess, builder, frame),
+        |frame| collapse_frame(ctx, sess, builder, frame, tail),
     )
 }
 
@@ -1268,8 +1280,8 @@ impl EmitContext {
                                     )?;
                                     vals.push(result);
                                 } else {
-                                    let result = emit_subtree(
-                                        self, sess, builder, idx,
+                                    let result = emit_subtree_with_tail(
+                                        self, sess, builder, idx, tail_ctx,
                                     )?;
                                     vals.push(result);
                                 }

@@ -16,6 +16,7 @@ pub fn emit_case(
     scrut: SsaVal,
     binder: &VarId,
     alts: &[Alt<usize>],
+    tail: TailCtx,
 ) -> Result<SsaVal, EmitError> {
     // 1. Scrutinee already evaluated
     let scrut_ptr = scrut.value();
@@ -50,6 +51,7 @@ pub fn emit_case(
             &data_alts,
             default_alt,
             merge_block,
+            tail,
         )?;
     } else if !lit_alts.is_empty() {
         emit_lit_dispatch(
@@ -60,10 +62,11 @@ pub fn emit_case(
             &lit_alts,
             default_alt,
             merge_block,
+            tail,
         )?;
     } else if let Some(alt) = default_alt {
         // Default only
-        let result = ctx.emit_node(sess, builder, alt.body, TailCtx::NonTail)?;
+        let result = ctx.emit_node(sess, builder, alt.body, tail)?;
         let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
         builder
             .ins()
@@ -101,6 +104,7 @@ fn emit_data_dispatch(
     data_alts: &[&Alt<usize>],
     default_alt: Option<&Alt<usize>>,
     merge_block: ir::Block,
+    tail: TailCtx,
 ) -> Result<(), EmitError> {
     // 1. Force if needed (tag < 2: Closure or Thunk)
     let tag = builder
@@ -199,7 +203,7 @@ fn emit_data_dispatch(
             }
 
             let result =
-                ctx.emit_node(sess, builder, alt.body, TailCtx::NonTail)?;
+                ctx.emit_node(sess, builder, alt.body, tail)?;
             let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
             builder
                 .ins()
@@ -223,7 +227,7 @@ fn emit_data_dispatch(
     // Default or trap
     if let Some(alt) = default_alt {
         ctx.declare_env(builder);
-        let result = ctx.emit_node(sess, builder, alt.body, TailCtx::NonTail)?;
+        let result = ctx.emit_node(sess, builder, alt.body, tail)?;
         let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
         builder
             .ins()
@@ -299,6 +303,7 @@ fn emit_lit_dispatch(
     lit_alts: &[&Alt<usize>],
     default_alt: Option<&Alt<usize>>,
     merge_block: ir::Block,
+    tail: TailCtx,
 ) -> Result<(), EmitError> {
     // Force thunked scrutinees: literal case dispatch is strict —
     // ThunkCon fields extracted by data alt matching may still be thunks.
@@ -379,7 +384,7 @@ fn emit_lit_dispatch(
         builder.switch_to_block(alt_block);
         builder.seal_block(alt_block);
         ctx.declare_env(builder);
-        let result = ctx.emit_node(sess, builder, alt.body, TailCtx::NonTail)?;
+        let result = ctx.emit_node(sess, builder, alt.body, tail)?;
         let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
         builder
             .ins()
@@ -393,7 +398,7 @@ fn emit_lit_dispatch(
     // Default or trap
     if let Some(alt) = default_alt {
         ctx.declare_env(builder);
-        let result = ctx.emit_node(sess, builder, alt.body, TailCtx::NonTail)?;
+        let result = ctx.emit_node(sess, builder, alt.body, tail)?;
         let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
         builder
             .ins()
