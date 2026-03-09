@@ -111,6 +111,9 @@ pub fn emit_jump(
     // 2. Emit each arg
     let mut arg_values: Vec<BlockArg> = Vec::new();
     for &arg_idx in arg_indices {
+        // Jump arguments are always evaluated before we emit the jump terminator,
+        // so they are not in tail position. Do NOT propagate any surrounding tail
+        // context into these expressions: they must always be emitted as NonTail.
         let val = ctx.emit_node(sess, builder, arg_idx, TailCtx::NonTail)?;
         // 3. Ensure all args are HeapPtr
         arg_values.push(BlockArg::Value(ensure_heap_ptr(
