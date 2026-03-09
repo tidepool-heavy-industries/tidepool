@@ -32,7 +32,7 @@ pub fn emit_join(
     // 4. Register the join point in ctx
     // We use a dummy Value(0) for param_types since Jump just needs to know they are heap pointers.
     let dummy_val = Value::from_u32(0);
-    ctx.join_blocks.insert(
+    ctx.join_blocks.register(
         *label,
         JoinInfo {
             block: join_block,
@@ -95,11 +95,7 @@ pub fn emit_jump(
     arg_indices: &[usize],
 ) -> Result<SsaVal, EmitError> {
     // 1. Look up label in ctx.join_blocks
-    let join_block = ctx
-        .join_blocks
-        .get(label)
-        .ok_or_else(|| EmitError::NotYetImplemented(format!("Jump to unknown label {:?}", label)))?
-        .block;
+    let join_block = ctx.join_blocks.get(label)?.block;
 
     // 2. Emit each arg
     let mut arg_values: Vec<BlockArg> = Vec::new();

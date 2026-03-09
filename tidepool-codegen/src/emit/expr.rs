@@ -568,13 +568,7 @@ fn collapse_frame(
             ctx, sess, builder, &label, &params, rhs_idx, body_idx,
         ),
         EmitFrame::Jump { label, args } => {
-            let join_block = ctx
-                .join_blocks
-                .get(&label)
-                .ok_or_else(|| {
-                    EmitError::NotYetImplemented(format!("Jump to unknown label {:?}", label))
-                })?
-                .block;
+            let join_block = ctx.join_blocks.get(&label)?.block;
 
             let arg_values: Vec<BlockArg> = args
                 .iter()
