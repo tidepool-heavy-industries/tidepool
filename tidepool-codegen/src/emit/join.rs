@@ -53,12 +53,11 @@ pub fn emit_join(
 
     // Bind params to block params
     let block_params = builder.block_params(join_block).to_vec();
-    let mut old_env_vals = Vec::new();
+    let mut scope = EnvScope::new();
     for (i, param_var) in params.iter().enumerate() {
         let val = block_params[i];
         builder.declare_value_needs_stack_map(val); // CRITICAL
-        let old_val = ctx.env.insert(*param_var, SsaVal::HeapPtr(val));
-        old_env_vals.push((*param_var, old_val));
+        ctx.env.insert_scoped(&mut scope, *param_var, SsaVal::HeapPtr(val));
     }
 
     let rhs_result = ctx.emit_node(sess, builder, rhs_idx, TailCtx::NonTail)?;
@@ -79,13 +78,7 @@ pub fn emit_join(
 
     // 9. Clean up
     ctx.join_blocks.remove(label);
-    for (param_var, old_val) in old_env_vals.into_iter().rev() {
-        if let Some(v) = old_val {
-            ctx.env.insert(param_var, v);
-        } else {
-            ctx.env.remove(&param_var);
-        }
-    }
+    ctx.env.restore_scope(scope);
 
     // 10. Return result
     Ok(SsaVal::HeapPtr(result))

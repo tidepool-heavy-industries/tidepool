@@ -74,9 +74,83 @@ impl TailCtx {
     }
 }
 
+/// A scoped environment mapping variables to SSA values.
+pub struct ScopedEnv {
+    inner: HashMap<VarId, SsaVal>,
+}
+
+impl ScopedEnv {
+    pub fn new() -> Self {
+        Self {
+            inner: HashMap::new(),
+        }
+    }
+
+    pub fn get(&self, var: &VarId) -> Option<&SsaVal> {
+        self.inner.get(var)
+    }
+
+    pub fn contains_key(&self, var: &VarId) -> bool {
+        self.inner.contains_key(var)
+    }
+
+    pub fn insert(&mut self, var: VarId, val: SsaVal) -> Option<SsaVal> {
+        self.inner.insert(var, val)
+    }
+
+    /// Restores a variable to its previous state.
+    pub fn restore(&mut self, var: VarId, old: Option<SsaVal>) {
+        if let Some(val) = old {
+            self.inner.insert(var, val);
+        } else {
+            self.inner.remove(&var);
+        }
+    }
+
+    pub fn iter(&self) -> std::collections::hash_map::Iter<'_, VarId, SsaVal> {
+        self.inner.iter()
+    }
+
+    pub fn keys(&self) -> std::collections::hash_map::Keys<'_, VarId, SsaVal> {
+        self.inner.keys()
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Inserts a variable into the environment and records the old value in the scope.
+    pub fn insert_scoped(&mut self, scope: &mut EnvScope, var: VarId, val: SsaVal) {
+        let old = self.insert(var, val);
+        scope.saved.push((var, old));
+    }
+
+    /// Restores all variables saved in the scope in reverse order.
+    pub fn restore_scope(&mut self, scope: EnvScope) {
+        for (var, old) in scope.saved.into_iter().rev() {
+            self.restore(var, old);
+        }
+    }
+}
+
+/// A set of saved environment bindings to be restored.
+pub struct EnvScope {
+    pub(crate) saved: Vec<(VarId, Option<SsaVal>)>,
+}
+
+impl EnvScope {
+    pub fn new() -> Self {
+        Self { saved: Vec::new() }
+    }
+}
+
 /// Emission context — bundles state during IR generation for one function.
 pub struct EmitContext {
-    pub env: HashMap<VarId, SsaVal>,
+    pub env: ScopedEnv,
     pub join_blocks: HashMap<JoinId, JoinInfo>,
     pub lambda_counter: u32,
     pub prefix: String,
@@ -137,7 +211,7 @@ impl From<crate::pipeline::PipelineError> for EmitError {
 impl EmitContext {
     pub fn new(prefix: String) -> Self {
         Self {
-            env: HashMap::new(),
+            env: ScopedEnv::new(),
             join_blocks: HashMap::new(),
             lambda_counter: 0,
             prefix,
@@ -154,8 +228,8 @@ impl EmitContext {
         let mut keys: Vec<_> = self.env.keys().collect();
         keys.sort_by_key(|v| v.0);
         for &k in keys {
-            if let SsaVal::HeapPtr(v) = self.env[&k] {
-                builder.declare_value_needs_stack_map(v);
+            if let Some(SsaVal::HeapPtr(v)) = self.env.get(&k) {
+                builder.declare_value_needs_stack_map(*v);
             }
         }
     }

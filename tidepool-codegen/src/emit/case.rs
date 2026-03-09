@@ -86,11 +86,7 @@ pub fn emit_case(
     ctx.declare_env(builder);
 
     // 6. Restore case binder
-    if let Some(v) = old_case_binder {
-        ctx.env.insert(*binder, v);
-    } else {
-        ctx.env.remove(binder);
-    }
+    ctx.env.restore(*binder, old_case_binder);
 
     Ok(SsaVal::HeapPtr(result))
 }
@@ -190,7 +186,7 @@ fn emit_data_dispatch(
             //   - App collapse: tag check → heap_force on fun position
             //   - unbox_int/unbox_double/unbox_float: defensive trap on TAG_THUNK
             // See force_thunk_ssaval in expr.rs.
-            let mut old_bound_vals: Vec<(VarId, Option<SsaVal>)> = Vec::new();
+            let mut scope = EnvScope::new();
             for (i, &binder) in alt.binders.iter().enumerate() {
                 let offset = CON_FIELDS_START + (8 * i as i32);
                 let field_val =
@@ -198,8 +194,7 @@ fn emit_data_dispatch(
                         .ins()
                         .load(types::I64, MemFlags::trusted(), scrut_ptr, offset);
                 builder.declare_value_needs_stack_map(field_val);
-                let old_val = ctx.env.insert(binder, SsaVal::HeapPtr(field_val));
-                old_bound_vals.push((binder, old_val));
+                ctx.env.insert_scoped(&mut scope, binder, SsaVal::HeapPtr(field_val));
             }
 
             let result =
@@ -210,13 +205,7 @@ fn emit_data_dispatch(
                 .jump(merge_block, &[BlockArg::Value(result_ptr)]);
 
             // Restore pattern variable bindings
-            for (binder, old_val) in old_bound_vals {
-                if let Some(v) = old_val {
-                    ctx.env.insert(binder, v);
-                } else {
-                    ctx.env.remove(&binder);
-                }
-            }
+            ctx.env.restore_scope(scope);
 
             // Continue to next check
             builder.switch_to_block(next_check_block);
