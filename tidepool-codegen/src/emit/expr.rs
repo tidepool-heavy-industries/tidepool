@@ -1488,7 +1488,6 @@ impl EmitContext {
             let state_idx = self.push_letrec_state(LetRecDeferredState {
                 pending_capture_updates: std::collections::HashMap::new(),
                 deferred_con_deps: Vec::new(),
-                deferred_con_binders: std::collections::HashSet::new(),
             });
 
             // Push finish + simple evals in reverse order (LIFO)
@@ -1671,10 +1670,8 @@ impl EmitContext {
         // Phase 3a: Compile Lam bodies and set code pointers.
         // Capture VALUES are NOT filled here — some captures reference
         // deferred simple bindings (Phase 3c) that aren't in env yet.
-        let mut pending_capture_updates: std::collections::HashMap<
-            VarId,
-            Vec<(cranelift_codegen::ir::Value, i32)>,
-        > = std::collections::HashMap::with_capacity(rec_bindings.len());
+        let mut pending_capture_updates: std::collections::HashMap<VarId, Vec<ClosureCaptureSlot>> =
+            std::collections::HashMap::with_capacity(rec_bindings.len());
 
         for pa in &pre_allocs {
             let (closure_ptr, sorted_fvs, rhs_idx) = match pa {
@@ -1819,7 +1816,10 @@ impl EmitContext {
                     pending_capture_updates
                         .entry(*var_id)
                         .or_default()
-                        .push((closure_ptr, offset));
+                        .push(ClosureCaptureSlot {
+                            closure_ptr,
+                            offset,
+                        });
                 }
             }
         }
@@ -1829,8 +1829,6 @@ impl EmitContext {
             deferred_simple.iter().map(|(b, _)| *b).collect();
         let mut deferred_cons: Vec<(VarId, cranelift_codegen::ir::Value, Vec<usize>)> =
             Vec::with_capacity(rec_bindings.len());
-        let mut deferred_con_binders: std::collections::HashSet<VarId> =
-            std::collections::HashSet::new();
         for pa in &pre_allocs {
             if let PreAlloc::Con {
                 binder,
@@ -1843,7 +1841,6 @@ impl EmitContext {
                 });
                 if needs_simple {
                     deferred_cons.push((*binder, *ptr, field_indices.clone()));
-                    deferred_con_binders.insert(*binder);
                 } else {
                     for (i, &f_idx) in field_indices.iter().enumerate() {
                         let field_val = if is_trivial_field(f_idx, sess.tree) {
@@ -1930,7 +1927,7 @@ impl EmitContext {
 
         // Build deferred Con deps tracking
         let mut deferred_con_deps: Vec<DeferredConDep> = Vec::with_capacity(deferred_cons.len());
-        for (con_binder, ptr, field_indices) in &deferred_cons {
+        for (_, ptr, field_indices) in &deferred_cons {
             let deps: std::collections::HashSet<VarId> = field_indices
                 .iter()
                 .filter_map(|&f_idx| {
@@ -1943,7 +1940,6 @@ impl EmitContext {
                 })
                 .collect();
             deferred_con_deps.push(DeferredConDep {
-                _binder: *con_binder,
                 ptr: *ptr,
                 field_indices: field_indices.clone(),
                 remaining_deps: deps,
@@ -1954,7 +1950,6 @@ impl EmitContext {
         let state_idx = self.push_letrec_state(LetRecDeferredState {
             pending_capture_updates,
             deferred_con_deps,
-            deferred_con_binders,
         });
 
         // Push work items in LIFO order: finish, then simple evals (reversed)
@@ -1975,7 +1970,7 @@ impl EmitContext {
                 )?;
             } else {
                 let refs_deferred_con = !self.letrec_states[state_idx]
-                    .deferred_con_binders
+                    .deferred_con_deps
                     .is_empty()
                     && self.letrec_states[state_idx]
                         .deferred_con_deps
@@ -2036,10 +2031,13 @@ impl EmitContext {
         if let Some(updates) = updates {
             if let Some(ssaval) = self.env.get(binder) {
                 let cap_val = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, *ssaval);
-                for (closure_ptr, offset) in updates {
-                    builder
-                        .ins()
-                        .store(MemFlags::trusted(), cap_val, closure_ptr, offset);
+                for slot in updates {
+                    builder.ins().store(
+                        MemFlags::trusted(),
+                        cap_val,
+                        slot.closure_ptr,
+                        slot.offset,
+                    );
                 }
             }
         }
@@ -2096,10 +2094,13 @@ impl EmitContext {
                 )
             })?;
             let cap_val = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, *ssaval);
-            for (closure_ptr, offset) in updates {
-                builder
-                    .ins()
-                    .store(MemFlags::trusted(), cap_val, closure_ptr, offset);
+            for slot in updates {
+                builder.ins().store(
+                    MemFlags::trusted(),
+                    cap_val,
+                    slot.closure_ptr,
+                    slot.offset,
+                );
             }
         }
 
@@ -2155,16 +2156,18 @@ enum EmitWork {
 /// Deferred state for LetRec phases 3c/3a'/3d, stored in EmitContext
 /// so work items can reference it by index.
 pub(crate) struct LetRecDeferredState {
-    pending_capture_updates:
-        std::collections::HashMap<VarId, Vec<(cranelift_codegen::ir::Value, i32)>>,
+    pending_capture_updates: std::collections::HashMap<VarId, Vec<ClosureCaptureSlot>>,
     deferred_con_deps: Vec<DeferredConDep>,
-    deferred_con_binders: std::collections::HashSet<VarId>,
+}
+
+pub(crate) struct ClosureCaptureSlot {
+    pub closure_ptr: cranelift_codegen::ir::Value,
+    pub offset: i32,
 }
 
 /// A pre-allocated Con whose field filling is deferred until its
 /// simple-binding dependencies are satisfied.
 struct DeferredConDep {
-    _binder: VarId,
     ptr: cranelift_codegen::ir::Value,
     /// Field indices to fill. Emptied once filled (sentinel for "done").
     field_indices: Vec<usize>,
