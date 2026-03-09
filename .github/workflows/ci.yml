@@ -8,6 +8,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: cargo test
-        run: nix develop --extra-experimental-features 'nix-command flakes' --command cargo test --workspace
+        run: nix develop --command cargo test --workspace
       - name: cargo clippy
-        run: nix develop --extra-experimental-features 'nix-command flakes' --command cargo clippy --workspace -- -D warnings
+        run: nix develop --command cargo clippy --workspace -- -D warnings
