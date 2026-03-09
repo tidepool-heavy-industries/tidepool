@@ -63,7 +63,7 @@ pub fn emit_case(
         )?;
     } else if let Some(alt) = default_alt {
         // Default only
-        let result = ctx.emit_node(sess, builder, alt.body)?;
+        let result = ctx.emit_node(sess, builder, alt.body, TailCtx::NonTail)?;
         let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
         builder
             .ins()
@@ -199,7 +199,7 @@ fn emit_data_dispatch(
             }
 
             let result =
-                ctx.emit_node(sess, builder, alt.body)?;
+                ctx.emit_node(sess, builder, alt.body, TailCtx::NonTail)?;
             let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
             builder
                 .ins()
@@ -223,7 +223,7 @@ fn emit_data_dispatch(
     // Default or trap
     if let Some(alt) = default_alt {
         ctx.declare_env(builder);
-        let result = ctx.emit_node(sess, builder, alt.body)?;
+        let result = ctx.emit_node(sess, builder, alt.body, TailCtx::NonTail)?;
         let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
         builder
             .ins()
@@ -379,7 +379,7 @@ fn emit_lit_dispatch(
         builder.switch_to_block(alt_block);
         builder.seal_block(alt_block);
         ctx.declare_env(builder);
-        let result = ctx.emit_node(sess, builder, alt.body)?;
+        let result = ctx.emit_node(sess, builder, alt.body, TailCtx::NonTail)?;
         let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
         builder
             .ins()
@@ -393,7 +393,7 @@ fn emit_lit_dispatch(
     // Default or trap
     if let Some(alt) = default_alt {
         ctx.declare_env(builder);
-        let result = ctx.emit_node(sess, builder, alt.body)?;
+        let result = ctx.emit_node(sess, builder, alt.body, TailCtx::NonTail)?;
         let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
         builder
             .ins()

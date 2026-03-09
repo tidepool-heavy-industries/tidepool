@@ -320,7 +320,7 @@ fn collapse_frame(
                 let field_val = if is_trivial_field(f_idx, sess.tree) {
                     // Trivial: evaluate eagerly (existing path)
                     let val =
-                        ctx.emit_node(sess, builder, f_idx)?;
+                        ctx.emit_node(sess, builder, f_idx, TailCtx::NonTail)?;
                     ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, val)
                 } else {
                     // Non-trivial: compile as thunk
@@ -597,11 +597,7 @@ fn collapse_frame(
             // the parent frame still has work to do after this sub-expression.
             // Without this, a LetRec body App inside a Case scrutinee gets
             // compiled as a tail call, bypassing the Case dispatch entirely.
-            let saved_tail = ctx.in_tail_position;
-            ctx.in_tail_position = false;
-            let result = ctx.emit_node(sess, builder, idx);
-            ctx.in_tail_position = saved_tail;
-            result
+            ctx.emit_node(sess, builder, idx, TailCtx::NonTail)
         }
     }
 }
@@ -747,7 +743,6 @@ fn emit_lam(
 
     let mut inner_emit = EmitContext::new(ctx.prefix.clone());
     inner_emit.lambda_counter = ctx.lambda_counter;
-    inner_emit.in_tail_position = true; // lambda body is in tail position
 
     inner_emit.trace_scope(&format!("insert lam binder {:?}", binder));
     inner_emit.env.insert(binder, SsaVal::HeapPtr(arg_param));
@@ -774,6 +769,7 @@ fn emit_lam(
         &mut inner_sess,
         &mut inner_builder,
         body_root,
+        TailCtx::Tail,
     )?;
     let ret_val = ensure_heap_ptr(
         &mut inner_builder,
@@ -955,6 +951,7 @@ fn emit_thunk(
         &mut inner_sess,
         &mut inner_builder,
         body_root,
+        TailCtx::NonTail,
     )?;
     let ret_val = ensure_heap_ptr(
         &mut inner_builder,
@@ -1111,6 +1108,7 @@ pub fn compile_expr(
         &mut sess,
         &mut builder,
         tree.nodes.len() - 1,
+        TailCtx::NonTail,
     )?;
     let ret = ensure_heap_ptr(&mut builder, vmctx, gc_sig_ref, oom_func, result);
 
@@ -1194,13 +1192,14 @@ impl EmitContext {
         sess: &mut EmitSession,
         builder: &mut FunctionBuilder,
         root_idx: usize,
+        tail: TailCtx,
     ) -> Result<SsaVal, EmitError> {
-        let mut work: Vec<EmitWork> = vec![EmitWork::Eval(root_idx)];
+        let mut work: Vec<EmitWork> = vec![EmitWork::Eval(root_idx, tail)];
         let mut vals: Vec<SsaVal> = Vec::new();
 
         while let Some(item) = work.pop() {
             match item {
-                EmitWork::Eval(start_idx) => {
+                EmitWork::Eval(start_idx, tail_ctx) => {
                     // Inner iterative loop: skip through Let chains in tail position
                     let mut idx = start_idx;
                     loop {
@@ -1231,16 +1230,13 @@ impl EmitContext {
                                     } else {
                                         // Push work in LIFO order: cleanup, eval body, bind, eval rhs
                                         // After rhs eval → bind → eval body → cleanup
-                                        let saved_tail = self.in_tail_position;
                                         let old_val = self.env.get(&binder).cloned();
                                         work.push(EmitWork::LetCleanupMark(LetCleanup::Single(
                                             binder, old_val,
                                         )));
-                                        work.push(EmitWork::Eval(body));
-                                        work.push(EmitWork::SetTailPosition(saved_tail)); // restore before body eval
+                                        work.push(EmitWork::Eval(body, tail_ctx));
                                         work.push(EmitWork::Bind(binder));
-                                        work.push(EmitWork::Eval(rhs));
-                                        work.push(EmitWork::SetTailPosition(false)); // RHS is NOT tail position
+                                        work.push(EmitWork::Eval(rhs, TailCtx::NonTail));
                                         break; // exit inner loop, process work stack
                                     }
                                 } else {
@@ -1258,13 +1254,13 @@ impl EmitContext {
                                 work.push(EmitWork::LetCleanupMark(LetCleanup::Rec(cleanup_vars)));
                                 self.emit_letrec_phases(
                                     sess, builder, &bindings,
-                                    body, &mut work,
+                                    body, &mut work, tail_ctx,
                                 )?;
                                 break; // exit inner loop
                             }
                             // All non-Let nodes: delegate to stack-safe hylomorphism
                             _ => {
-                                if self.in_tail_position
+                                if tail_ctx.is_tail()
                                     && matches!(sess.tree.nodes[idx], CoreFrame::App { .. })
                                 {
                                     let result = self.emit_tail_app(
@@ -1299,12 +1295,12 @@ impl EmitContext {
                         sess, builder, &binder, state_idx,
                     )?;
                 }
-                EmitWork::LetRecFinish { body, state_idx } => {
+                EmitWork::LetRecFinish { body, state_idx, tail } => {
                     self.letrec_finish_phases(
                         sess, builder, state_idx,
                     )?;
                     // Push body evaluation
-                    work.push(EmitWork::Eval(body));
+                    work.push(EmitWork::Eval(body, tail));
                 }
                 EmitWork::LetCleanupMark(cleanup) => match cleanup {
                     LetCleanup::Single(var, old_val) => {
@@ -1326,9 +1322,6 @@ impl EmitContext {
                         }
                     }
                 },
-                EmitWork::SetTailPosition(val) => {
-                    self.in_tail_position = val;
-                }
             }
         }
 
@@ -1348,15 +1341,12 @@ impl EmitContext {
         };
 
         // Evaluate fun and arg in NON-tail position
-        let saved_tail = self.in_tail_position;
-        self.in_tail_position = false;
         let fun_val = emit_subtree(
             self, sess, builder, fun_idx,
         )?;
         let arg_val = emit_subtree(
             self, sess, builder, arg_idx,
         )?;
-        self.in_tail_position = saved_tail;
 
         let raw_fun_ptr = fun_val.value();
         let arg_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, arg_val);
@@ -1476,6 +1466,7 @@ impl EmitContext {
         bindings: &[(VarId, usize)],
         body: usize,
         work: &mut Vec<EmitWork>,
+        tail: TailCtx,
     ) -> Result<(), EmitError> {
         // Split bindings: Lam/Con need 3-phase pre-allocation (recursive),
         // everything else is evaluated eagerly as simple bindings first.
@@ -1497,10 +1488,7 @@ impl EmitContext {
             });
 
             // Push finish + simple evals in reverse order (LIFO)
-            let saved_tail = self.in_tail_position;
-            work.push(EmitWork::LetRecFinish { body, state_idx });
-            // Restore tail position before LetRecFinish (which pushes Eval(body))
-            work.push(EmitWork::SetTailPosition(saved_tail));
+            work.push(EmitWork::LetRecFinish { body, state_idx, tail });
             for (binder, rhs_idx) in simple_bindings.iter().rev() {
                 if Self::rhs_is_error_call(sess.tree, *rhs_idx) {
                     let poison_addr = self.emit_error_poison(sess.tree, *rhs_idx);
@@ -1512,11 +1500,9 @@ impl EmitContext {
                         binder: *binder,
                         state_idx,
                     });
-                    work.push(EmitWork::Eval(*rhs_idx));
+                    work.push(EmitWork::Eval(*rhs_idx, TailCtx::NonTail));
                 }
             }
-            // Set false before first RHS eval
-            work.push(EmitWork::SetTailPosition(false));
             return Ok(());
         }
 
@@ -1753,7 +1739,6 @@ impl EmitContext {
             
                         let mut inner_emit = EmitContext::new(self.prefix.clone());
                         inner_emit.lambda_counter = self.lambda_counter;
-                        inner_emit.in_tail_position = true; // lambda body is in tail position
                         inner_emit
                             .env
                             .insert(lam_binder, SsaVal::HeapPtr(inner_arg));
@@ -1781,6 +1766,7 @@ impl EmitContext {
                             &mut inner_sess,
                             &mut inner_builder,
                             body_root,
+                            TailCtx::Tail,
                         )?;
                         let ret_val = ensure_heap_ptr(
                             &mut inner_builder,
@@ -1968,10 +1954,7 @@ impl EmitContext {
         });
 
         // Push work items in LIFO order: finish, then simple evals (reversed)
-        let saved_tail = self.in_tail_position;
-        work.push(EmitWork::LetRecFinish { body, state_idx });
-        // Restore tail position before LetRecFinish (which pushes Eval(body))
-        work.push(EmitWork::SetTailPosition(saved_tail));
+        work.push(EmitWork::LetRecFinish { body, state_idx, tail });
 
         for (binder, rhs_idx) in deferred_simple.iter().rev() {
             if Self::rhs_is_error_call(sess.tree, *rhs_idx) {
@@ -2024,12 +2007,10 @@ impl EmitContext {
                         binder: *binder,
                         state_idx,
                     });
-                    work.push(EmitWork::Eval(*rhs_idx));
+                    work.push(EmitWork::Eval(*rhs_idx, TailCtx::NonTail));
                 }
             }
         }
-        // Set false before first RHS eval
-        work.push(EmitWork::SetTailPosition(false));
 
         Ok(())
     }
@@ -2155,18 +2136,16 @@ impl EmitContext {
 /// Work items for the emit_node trampoline. Replaces recursive calls
 /// with an explicit LIFO stack.
 enum EmitWork {
-    /// Evaluate node at tree index → push result onto value stack
-    Eval(usize),
+    /// Evaluate node at tree index with given tail context → push result onto value stack
+    Eval(usize, TailCtx),
     /// Pop value stack, bind to env
     Bind(VarId),
     /// After deferred simple binding eval: pop value, bind, fill captures + Cons
     LetRecPostSimple { binder: VarId, state_idx: usize },
     /// Phases 3a'/3d + push body eval
-    LetRecFinish { body: usize, state_idx: usize },
+    LetRecFinish { body: usize, state_idx: usize, tail: TailCtx },
     /// Pop cleanup on return
     LetCleanupMark(LetCleanup),
-    /// Set the in_tail_position flag on the EmitContext.
-    SetTailPosition(bool),
 }
 
 /// Deferred state for LetRec phases 3c/3a'/3d, stored in EmitContext

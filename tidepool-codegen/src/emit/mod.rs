@@ -62,6 +62,18 @@ impl SsaVal {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TailCtx {
+    Tail,
+    NonTail,
+}
+
+impl TailCtx {
+    pub fn is_tail(self) -> bool {
+        matches!(self, TailCtx::Tail)
+    }
+}
+
 /// Emission context — bundles state during IR generation for one function.
 pub struct EmitContext {
     pub env: HashMap<VarId, SsaVal>,
@@ -70,8 +82,6 @@ pub struct EmitContext {
     pub prefix: String,
     /// Storage for LetRec deferred state, indexed by work items.
     pub(crate) letrec_states: Vec<crate::emit::expr::LetRecDeferredState>,
-    /// TCO: whether current emission point is in tail position.
-    pub in_tail_position: bool,
 }
 
 /// Placeholder for join point info (used by case/join leaf later).
@@ -132,7 +142,6 @@ impl EmitContext {
             lambda_counter: 0,
             prefix,
             letrec_states: Vec::new(),
-            in_tail_position: false,
         }
     }
 
