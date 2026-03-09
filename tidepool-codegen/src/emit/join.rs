@@ -54,6 +54,8 @@ pub fn emit_join(
     // Bind params to block params
     let block_params = builder.block_params(join_block).to_vec();
     let mut scope = EnvScope::new();
+    // NOTE: EnvGuard cannot be used here because it would borrow ctx.env mutably,
+    // preventing the use of ctx in emit_node.
     for (i, param_var) in params.iter().enumerate() {
         let val = block_params[i];
         builder.declare_value_needs_stack_map(val); // CRITICAL
