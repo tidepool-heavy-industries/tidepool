@@ -1963,10 +1963,10 @@ impl EmitContext {
                     sess, builder, binder, state_idx,
                 )?;
             } else {
-                let refs_deferred_con = !self.letrec_states[state_idx]
+                let refs_deferred_con = !self.letrec_state(state_idx)
                     .deferred_con_deps
                     .is_empty()
-                    && self.letrec_states[state_idx]
+                    && self.letrec_state(state_idx)
                         .deferred_con_deps
                         .iter()
                         .any(|d| d.remaining_deps.contains(binder));
@@ -2016,10 +2016,10 @@ impl EmitContext {
         sess: &mut EmitSession,
         builder: &mut FunctionBuilder,
         binder: &VarId,
-        state_idx: usize,
+        state_idx: LetRecStateId,
     ) -> Result<(), EmitError> {
         // Fill pending captures — take updates out to avoid borrowing self
-        let updates = self.letrec_states[state_idx]
+        let updates = self.letrec_state_mut(state_idx)
             .pending_capture_updates
             .remove(binder);
         if let Some(updates) = updates {
@@ -2039,7 +2039,7 @@ impl EmitContext {
         // Incrementally fill deferred Cons whose deps are all satisfied.
         // Take out deferred_con_deps to avoid double-borrowing self
         // (emit_subtree/emit_thunk need &mut self).
-        let mut con_deps = std::mem::take(&mut self.letrec_states[state_idx].deferred_con_deps);
+        let mut con_deps = std::mem::take(&mut self.letrec_state_mut(state_idx).deferred_con_deps);
         for dep in con_deps.iter_mut() {
             dep.remaining_deps.remove(binder);
             if dep.remaining_deps.is_empty() && !dep.field_indices.is_empty() {
@@ -2065,7 +2065,7 @@ impl EmitContext {
                 dep.field_indices.clear();
             }
         }
-        self.letrec_states[state_idx].deferred_con_deps = con_deps;
+        self.letrec_state_mut(state_idx).deferred_con_deps = con_deps;
 
         Ok(())
     }
@@ -2076,10 +2076,10 @@ impl EmitContext {
         &mut self,
         sess: &mut EmitSession,
         builder: &mut FunctionBuilder,
-        state_idx: usize,
+        state_idx: LetRecStateId,
     ) -> Result<(), EmitError> {
         // Phase 3a': Fill any remaining closure capture slots.
-        let pending = std::mem::take(&mut self.letrec_states[state_idx].pending_capture_updates);
+        let pending = std::mem::take(&mut self.letrec_state_mut(state_idx).pending_capture_updates);
         for (var_id, updates) in pending {
             let ssaval = self.env.get(&var_id).ok_or_else(|| {
                 EmitError::MissingCaptureVar(
@@ -2099,7 +2099,7 @@ impl EmitContext {
         }
 
         // Phase 3d: Fill any deferred Con fields not already filled.
-        let con_deps = std::mem::take(&mut self.letrec_states[state_idx].deferred_con_deps);
+        let con_deps = std::mem::take(&mut self.letrec_state_mut(state_idx).deferred_con_deps);
         for dep in &con_deps {
             for (i, &f_idx) in dep.field_indices.iter().enumerate() {
                 let field_val = if is_trivial_field(f_idx, sess.tree) {
@@ -2125,12 +2125,23 @@ impl EmitContext {
         Ok(())
     }
 
-    fn push_letrec_state(&mut self, state: LetRecDeferredState) -> usize {
+    fn push_letrec_state(&mut self, state: LetRecDeferredState) -> LetRecStateId {
         let idx = self.letrec_states.len();
         self.letrec_states.push(state);
-        idx
+        LetRecStateId(idx)
+    }
+
+    fn letrec_state(&self, id: LetRecStateId) -> &LetRecDeferredState {
+        &self.letrec_states[id.0]
+    }
+
+    fn letrec_state_mut(&mut self, id: LetRecStateId) -> &mut LetRecDeferredState {
+        &mut self.letrec_states[id.0]
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LetRecStateId(usize);
 
 /// Work items for the emit_node trampoline. Replaces recursive calls
 /// with an explicit LIFO stack.
@@ -2140,9 +2151,9 @@ enum EmitWork {
     /// Pop value stack, bind to env
     Bind(VarId),
     /// After deferred simple binding eval: pop value, bind, fill captures + Cons
-    LetRecPostSimple { binder: VarId, state_idx: usize },
+    LetRecPostSimple { binder: VarId, state_idx: LetRecStateId },
     /// Phases 3a'/3d + push body eval
-    LetRecFinish { body: usize, state_idx: usize, tail: TailCtx },
+    LetRecFinish { body: usize, state_idx: LetRecStateId, tail: TailCtx },
     /// Pop cleanup on return
     LetCleanupMark(LetCleanup),
 }
