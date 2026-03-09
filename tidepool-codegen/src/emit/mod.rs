@@ -151,11 +151,37 @@ impl EnvScope {
 /// Emission context — bundles state during IR generation for one function.
 pub struct EmitContext {
     pub env: ScopedEnv,
-    pub join_blocks: HashMap<JoinId, JoinInfo>,
+    pub(crate) join_blocks: JoinPointRegistry,
     pub lambda_counter: u32,
     pub prefix: String,
     /// Storage for LetRec deferred state, indexed by work items.
     pub(crate) letrec_states: Vec<crate::emit::expr::LetRecDeferredState>,
+}
+
+pub(crate) struct JoinPointRegistry {
+    blocks: HashMap<JoinId, JoinInfo>,
+}
+
+impl JoinPointRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            blocks: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn register(&mut self, label: JoinId, info: JoinInfo) {
+        self.blocks.insert(label, info);
+    }
+
+    pub(crate) fn get(&self, label: &JoinId) -> Result<&JoinInfo, EmitError> {
+        self.blocks.get(label).ok_or_else(|| {
+            EmitError::NotYetImplemented(format!("Jump to unregistered join {:?}", label))
+        })
+    }
+
+    pub(crate) fn remove(&mut self, label: &JoinId) -> Option<JoinInfo> {
+        self.blocks.remove(label)
+    }
 }
 
 /// Placeholder for join point info (used by case/join leaf later).
@@ -212,7 +238,7 @@ impl EmitContext {
     pub fn new(prefix: String) -> Self {
         Self {
             env: ScopedEnv::new(),
-            join_blocks: HashMap::new(),
+            join_blocks: JoinPointRegistry::new(),
             lambda_counter: 0,
             prefix,
             letrec_states: Vec::new(),
