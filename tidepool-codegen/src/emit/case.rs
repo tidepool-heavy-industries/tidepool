@@ -22,6 +22,8 @@ pub fn emit_case(
     let scrut_ptr = scrut.value();
 
     // 2. Bind case binder (save old value for restore)
+    // NOTE: EnvGuard cannot be used here because it would borrow ctx.env mutably,
+    // preventing the use of ctx in subsequent emit_* calls.
     let old_case_binder = ctx.env.insert(*binder, scrut);
 
     // 3. Classify alts
@@ -187,6 +189,8 @@ fn emit_data_dispatch(
             //   - unbox_int/unbox_double/unbox_float: defensive trap on TAG_THUNK
             // See force_thunk_ssaval in expr.rs.
             let mut scope = EnvScope::new();
+            // NOTE: EnvGuard cannot be used here because it would borrow ctx.env
+            // mutably, preventing the use of ctx in emit_node.
             for (i, &binder) in alt.binders.iter().enumerate() {
                 let offset = CON_FIELDS_START + (8 * i as i32);
                 let field_val =
