@@ -1,94 +1,72 @@
-# T.splitOn Bug Investigation Context
+# Current Investigation: Free-variable capture bug with T.intercalate
 
-## Bug Summary
-`T.splitOn`, `T.words`, `T.lines` from `Data.Text` crash with "unresolved variable VarId(0x580000000000000c) [tag='X', key=12]" in the MCP eval context but work fine in standalone tests.
+## What's Done (committed & pushed)
 
-## Root Cause (IDENTIFIED)
-**GHC Unique collision after cross-module inlining.**
+### Alpha-rename (commit 4c8ad2d)
+- `haskell/src/Tidepool/Resolve.hs` — `alphaRenameExpr` uses `substExpr` + `InScopeSet` to rename local binders in inlined unfoldings. Applied to all 3 inlining paths (standard, spec fallback, fat interface Rec).
+- `haskell/src/Tidepool/Translate.hs` — `localVarId` hashes OccName + unique as defense-in-depth.
+- `tidepool-mcp/src/lib.rs` — improved `ask` prompt extraction error handling.
+- `tidepool-mcp/tests/spliton_repro.rs` — cleaned up bisect scaffolding, kept 2 repro tests.
+- `tidepool-runtime/tests/text_spliton.rs` — 24 tests (original + collision + adversarial), all pass.
 
-VarId `0x580000000000000c` is NOT a single variable — it's **63 different GHC local variables** that all share the same Unique `(tag='X', key=12)`. They come from inlined unfoldings from different external modules (Data.Text.Internal, Data.Map, etc.).
+### Failing tests (commit 9adb940)
+- 4 failing tests documenting the free-variable capture bug
+- 4 passing control tests confirming the boundary
 
-### Mechanism:
-1. GHC's unique supply for system-generated variables (tag 'X') is only unique within a single compilation unit
-2. `resolveExternals` inlines unfoldings from multiple external modules
-3. The local binders within those inlined bodies can share the same Unique across modules
-4. `varId` for non-external names uses `fromIntegral (getKey (varUnique v))` — so all these distinct `Id`s map to the identical `Word64 = 0x580000000000000c`
-5. The JIT sees multiple binders and references all using the same VarId
-6. When one binding's scope doesn't contain a reference from a different inlined body, the lookup fails → `unresolved_var_trap`
+## The New Bug
 
-### Why only in MCP context:
-The full MCP preamble has ~300 lines of helper function bodies (effect orchestration, searchFiles, todoScan, etc.) that pull in additional external unfoldings. More inlined code = more chance of unique collisions.
+**Symptom**: `T.intercalate` silently dropped when called inside a closure that captures a free variable used with `(++)`.
 
-### Bisect results (from the agent that was interrupted):
-- The bisect agent created extensive tests in `tidepool-mcp/tests/spliton_repro.rs` with GROUP_A through GROUP_D constants
-- Individual groups pass, but combinations fail
-- The agent was deep into rounds 8-13 narrowing down to specific function pairs (kvAll + kvClear as one minimal trigger)
-- The test file has been modified with many bisect test functions — review before using
-
-## Key Variables Identified (from debug trace)
-The 63 colliding variables include: `exit_Xc`, `ww_Xc`, `ds_Xc`, `bx_Xc`, `$j5_Xc`, `r#1_Xc`, etc. All are:
-- `isLocal=True`, `isGlobal=False`, `isExternalName=False`
-- `module=<no-module>`
-- GHC unique = `(X, 12)` → `0x580000000000000c`
-
-## Fix Direction
-The fix needs to happen in `varId` in `haskell/src/Tidepool/Translate.hs` (line 1060). Currently:
-
+**Minimal repro**:
 ```haskell
-varId :: Var -> Word64
-varId v = case isDataConId_maybe v of
-  Just dc -> stableVarId (varName (dataConWorkId dc))
-  Nothing -> if isExternalName (varName v)
-             then stableVarId (varName v)
-             else fromIntegral (getKey (varUnique v))
+let f b = T.intercalate "/" (["fixed"] ++ b)
+in [f ["x"], f ["y"]]
+-- Expected: ["fixed/x", "fixed/y"]
+-- Actual:   [["fixed","x"], ["fixed","y"]]  (intercalate dropped, raw ++ result)
+-- In MCP eval context: "Haskell undefined forced" crash instead
 ```
 
-The `else` branch returns raw GHC uniques for local variables. When cross-module inlining brings in locals from different modules that happen to have the same Unique, they collide.
+**Boundary conditions** (all confirmed by tests):
+| Pattern | Result |
+|---------|--------|
+| `f` called once | ✓ works |
+| `f` called twice (let bindings, list literal, map, zipWith) | ✗ fails |
+| Both lists as **arguments** (not free vars) | ✓ works |
+| `T.concat` instead of `T.intercalate` | ✓ works |
+| Prelude `intercalate` (monomorphic shadow) | ✓ works |
+| `length` instead of `T.intercalate` | ✓ works |
+| `filter` on the `++` result | ✓ works |
+| Manual `myAppend` instead of `(++)` | ✓ works |
+| `intersperse` instead of `intercalate` | ✓ works |
+| `T.unwords` (which uses intercalate internally) | ✗ fails |
 
-### Possible fixes:
-1. **Make all variable IDs stable/unique**: Use a disambiguating counter or include more info in the ID (e.g., hash the OccName + parent binding context)
-2. **Rename colliding locals during resolution**: In `resolveExternals`, when inlining an unfolding, alpha-rename all local binders to fresh uniques
-3. **Use a different ID scheme for locals**: Instead of raw GHC Unique, use a monotonic counter during translation that guarantees uniqueness
+**Key insight**: It's NOT about the second call. Even `head [f ["x"], f ["y"]]` crashes. The mere existence of a second call site changes codegen enough to break the first.
 
-Option 2 (alpha-renaming during inlining) is the most principled fix — it's what GHC's own inliner does. The `resolveExternals` function should rename local binders in inlined unfoldings to avoid collisions with existing locals.
+## Hypotheses
+
+1. **Thunk sharing in `(++)`'s free-var tail**: `(++)` shares the captured `["fixed"]` list. `T.intercalate`'s strict traversal forces a thunk, and the second call site causes the codegen to share that thunk incorrectly.
+
+2. **Case binder aliasing in T.intercalate**: T.intercalate's inlined case expression has a binder that aliases the scrutinee. If compiled as a shared binding, the second call site sees stale data.
+
+3. **GHC float-out of `["fixed"]` or `(++) ["fixed"]`**: GHC floats the free-var expression to a shared let binding that gets thunkified and evaluated once.
+
+4. **T.intercalate's ByteArray# ops corrupt heap state**: The inlined Data.Text.intercalate uses Array operations that the JIT doesn't handle correctly on reuse.
+
+5. **VarId collision within the same handleUnfolding scope**: Alpha-rename operates per-handleUnfolding call but `(++)` and `T.intercalate` get inlined together, so internal binders may still collide.
+
+## Failing Tests
+```bash
+cargo test -p tidepool-runtime --test text_spliton -- freevar_  # 4 fail, expected
+cargo test -p tidepool-runtime --test text_spliton -- args_intercalate  # passes (control)
+cargo test -p tidepool-runtime --test text_spliton -- freevar_concat  # passes (control)
+cargo test -p tidepool-runtime --test text_spliton -- freevar_prelude  # passes (control)
+cargo test -p tidepool-runtime --test text_spliton -- freevar_length  # passes (control)
+```
 
 ## Key Files
-- `haskell/src/Tidepool/Translate.hs` — `varId` (line 1060), `translateModuleClosed` (line 364)
-- `haskell/src/Tidepool/Resolve.hs` — `resolveExternals`, `isResolvable`
-- `tidepool-mcp/src/lib.rs` — `build_preamble`, `template_haskell` (lines 409, 1127)
-- `tidepool-mcp/tests/spliton_repro.rs` — reproduction tests (MODIFIED with bisect tests)
-- `tidepool-runtime/tests/text_spliton.rs` — additional tests (all pass, less comprehensive)
-- `/tmp/tidepool_spliton_repro.hs` — dumped full MCP source (606 lines)
-
-## Reproduction
-```bash
-# Exact reproduction:
-cargo test -p tidepool-mcp --test spliton_repro repro_spliton_full_mcp -- --test-threads=1
-
-# Via MCP eval:
-# pure (T.splitOn "," "a,b,c")  → fails with unresolved variable
-
-# Passes without user_library helpers:
-cargo test -p tidepool-mcp --test spliton_repro repro_spliton_no_user_library -- --test-threads=1
-```
-
-## State of Working Tree
-- `tidepool-mcp/src/lib.rs` — has a temporary debug dump line (unconditional write to /tmp/tidepool_mcp_source.hs) that should be removed
-- `tidepool-mcp/tests/spliton_repro.rs` — has extensive bisect tests from the agent (large file, ~1400+ lines)
-- `tidepool-runtime/tests/text_spliton.rs` — has 3-preamble-level tests (all pass)
-- `haskell/src/Tidepool/Translate.hs` — was modified for debug traces but REVERTED (confirmed clean)
-
-## Translate.hs varId fix sketch
-```haskell
--- Option 2: alpha-rename in resolveExternals
--- In handleUnfolding, before adding the new bind:
---   1. Collect all local binders in unfoldingExpr
---   2. Generate fresh uniques for each
---   3. Substitute throughout unfoldingExpr
--- This ensures no two inlined unfoldings share local variable IDs.
-
--- Option 3: monotonic counter in varId (simpler but changes the whole ID scheme)
--- Replace the `else fromIntegral (getKey (varUnique v))` with a lookup
--- in a Map from Var to fresh Word64, populated during translation.
--- The TransState already has tsSynthCounter for fresh IDs.
-```
+- `tidepool-runtime/tests/text_spliton.rs` — all tests (passing + failing)
+- `tidepool-codegen/src/emit/expr.rs` — closure emission, LetRec phases, capture handling
+- `tidepool-codegen/src/emit/case.rs` — case binder compilation
+- `tidepool-codegen/src/host_fns.rs:298` — `heap_force` (thunk evaluation)
+- `haskell/src/Tidepool/Resolve.hs` — alpha-rename + unfolding inlining
+- `haskell/src/Tidepool/Translate.hs` — Core→IR translation, `varId`

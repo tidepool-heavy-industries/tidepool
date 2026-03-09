@@ -592,7 +592,16 @@ fn collapse_frame(
             ))
         }
         EmitFrame::LetBoundary(idx) => {
-            ctx.emit_node(sess, builder, idx)
+            // A LetBoundary appearing as a mapped child of a frame (e.g.,
+            // Case scrutinee, App argument) is NEVER in tail position —
+            // the parent frame still has work to do after this sub-expression.
+            // Without this, a LetRec body App inside a Case scrutinee gets
+            // compiled as a tail call, bypassing the Case dispatch entirely.
+            let saved_tail = ctx.in_tail_position;
+            ctx.in_tail_position = false;
+            let result = ctx.emit_node(sess, builder, idx);
+            ctx.in_tail_position = saved_tail;
+            result
         }
     }
 }
@@ -1214,17 +1223,18 @@ impl EmitContext {
                                             "defer error LetNonRec {:?}",
                                             binder
                                         ));
-                                        self.env.insert(binder, SsaVal::HeapPtr(poison_val));
+                                        let old_val = self.env.insert(binder, SsaVal::HeapPtr(poison_val));
                                         // No RHS eval needed, just push cleanup and continue to body
                                         work.push(EmitWork::LetCleanupMark(LetCleanup::Single(
-                                            binder,
+                                            binder, old_val,
                                         )));
                                     } else {
                                         // Push work in LIFO order: cleanup, eval body, bind, eval rhs
                                         // After rhs eval → bind → eval body → cleanup
                                         let saved_tail = self.in_tail_position;
+                                        let old_val = self.env.get(&binder).cloned();
                                         work.push(EmitWork::LetCleanupMark(LetCleanup::Single(
-                                            binder,
+                                            binder, old_val,
                                         )));
                                         work.push(EmitWork::Eval(body));
                                         work.push(EmitWork::SetTailPosition(saved_tail)); // restore before body eval
@@ -1243,8 +1253,8 @@ impl EmitContext {
                                 let bindings = bindings.clone();
                                 let body = *body;
                                 // Run phases 1-3b inline, push deferred evals + finish + cleanup
-                                let cleanup_vars: Vec<VarId> =
-                                    bindings.iter().map(|(b, _)| *b).collect();
+                                let cleanup_vars: Vec<(VarId, Option<SsaVal>)> =
+                                    bindings.iter().map(|(b, _)| (*b, self.env.get(b).cloned())).collect();
                                 work.push(EmitWork::LetCleanupMark(LetCleanup::Rec(cleanup_vars)));
                                 self.emit_letrec_phases(
                                     sess, builder, &bindings,
@@ -1296,17 +1306,23 @@ impl EmitContext {
                     // Push body evaluation
                     work.push(EmitWork::Eval(body));
                 }
-                EmitWork::LetCleanupMark(cleanup) => match &cleanup {
-                    LetCleanup::Single(var) => {
-                        self.trace_scope(&format!("remove LetCleanup {:?}", var));
-                        self.env.remove(var);
-                    }
-                    LetCleanup::Rec(vars) => {
-                        for var in vars {
-                            self.trace_scope(&format!("remove LetCleanup(rec) {:?}", var));
+                EmitWork::LetCleanupMark(cleanup) => match cleanup {
+                    LetCleanup::Single(var, old_val) => {
+                        self.trace_scope(&format!("restore LetCleanup {:?}", var));
+                        if let Some(v) = old_val {
+                            self.env.insert(var, v);
+                        } else {
+                            self.env.remove(&var);
                         }
-                        for var in vars {
-                            self.env.remove(var);
+                    }
+                    LetCleanup::Rec(entries) => {
+                        for (var, old_val) in entries {
+                            self.trace_scope(&format!("restore LetCleanup(rec) {:?}", var));
+                            if let Some(v) = old_val {
+                                self.env.insert(var, v);
+                            } else {
+                                self.env.remove(&var);
+                            }
                         }
                     }
                 },
@@ -1780,7 +1796,7 @@ impl EmitContext {
                         self.lambda_counter = inner_emit.lambda_counter;
             
                         sess.pipeline.define_function(lambda_func_id, &mut inner_ctx)?;
-            
+
                         let func_ref = sess.pipeline
                             .module
                             .declare_func_in_func(lambda_func_id, builder.func);
@@ -2174,8 +2190,8 @@ struct DeferredConDep {
 }
 
 enum LetCleanup {
-    Single(VarId),
-    Rec(Vec<VarId>),
+    Single(VarId, Option<SsaVal>),
+    Rec(Vec<(VarId, Option<SsaVal>)>),
 }
 
 fn emit_lit(

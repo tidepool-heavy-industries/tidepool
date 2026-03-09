@@ -704,3 +704,4 @@ fn freevar_length_works() {
     );
     assert_eq!(result, json!([2, 2]));
 }
+

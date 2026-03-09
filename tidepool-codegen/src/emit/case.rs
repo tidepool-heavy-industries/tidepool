@@ -20,8 +20,8 @@ pub fn emit_case(
     // 1. Scrutinee already evaluated
     let scrut_ptr = scrut.value();
 
-    // 2. Bind case binder
-    ctx.env.insert(*binder, scrut);
+    // 2. Bind case binder (save old value for restore)
+    let old_case_binder = ctx.env.insert(*binder, scrut);
 
     // 3. Classify alts
     let mut data_alts = Vec::new();
@@ -82,8 +82,12 @@ pub fn emit_case(
     builder.declare_value_needs_stack_map(result);
     ctx.declare_env(builder);
 
-    // 6. Clean up case binder
-    ctx.env.remove(binder);
+    // 6. Restore case binder
+    if let Some(v) = old_case_binder {
+        ctx.env.insert(*binder, v);
+    } else {
+        ctx.env.remove(binder);
+    }
 
     Ok(SsaVal::HeapPtr(result))
 }
@@ -182,7 +186,7 @@ fn emit_data_dispatch(
             //   - App collapse: tag check → heap_force on fun position
             //   - unbox_int/unbox_double/unbox_float: defensive trap on TAG_THUNK
             // See force_thunk_ssaval in expr.rs.
-            let mut bound_vars = Vec::new();
+            let mut old_bound_vals: Vec<(VarId, Option<SsaVal>)> = Vec::new();
             for (i, &binder) in alt.binders.iter().enumerate() {
                 let offset = CON_FIELDS_START + (8 * i as i32);
                 let field_val =
@@ -190,8 +194,8 @@ fn emit_data_dispatch(
                         .ins()
                         .load(types::I64, MemFlags::trusted(), scrut_ptr, offset);
                 builder.declare_value_needs_stack_map(field_val);
-                ctx.env.insert(binder, SsaVal::HeapPtr(field_val));
-                bound_vars.push(binder);
+                let old_val = ctx.env.insert(binder, SsaVal::HeapPtr(field_val));
+                old_bound_vals.push((binder, old_val));
             }
 
             let result =
@@ -201,9 +205,13 @@ fn emit_data_dispatch(
                 .ins()
                 .jump(merge_block, &[BlockArg::Value(result_ptr)]);
 
-            // Clean up
-            for binder in bound_vars {
-                ctx.env.remove(&binder);
+            // Restore pattern variable bindings
+            for (binder, old_val) in old_bound_vals {
+                if let Some(v) = old_val {
+                    ctx.env.insert(binder, v);
+                } else {
+                    ctx.env.remove(&binder);
+                }
             }
 
             // Continue to next check
