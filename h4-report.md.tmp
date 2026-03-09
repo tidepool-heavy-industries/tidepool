@@ -1,0 +1,33 @@
+# Investigation Report: ByteArray# PrimOps and T.intercalate
+
+## Listed ByteArray#-related primops in `primop.rs`
+The following `ByteArray#` operations are implemented in `tidepool-codegen/src/emit/primop.rs` and supported by `host_fns.rs`:
+- `NewByteArray` (allocates via `runtime_new_byte_array`)
+- `UnsafeFreezeByteArray` (identity function)
+- `SizeofByteArray` / `SizeofMutableByteArray` (reads u64 length prefix)
+- `ReadWord8Array` / `IndexWord8Array` (reads u8)
+- `WriteWord8Array` (writes u8)
+- `ReadWordArray` / `IndexWordArray` (reads u64)
+- `WriteWordArray` (writes u64)
+- `CopyAddrToByteArray`
+- `SetByteArray`
+- `ShrinkMutableByteArray` (updates length prefix in-place)
+- `ResizeMutableByteArray` (allocates new buffer, copies, and deallocs old buffer)
+- `CopyByteArray` / `CopyMutableByteArray`
+- `CompareByteArrays`
+
+## Checking for sharing/mutation bugs in ByteArray# handling
+After reviewing the implementations in `primop.rs` and `host_fns.rs`:
+1. **Allocation:** `NewByteArray` calls `runtime_new_byte_array` which uses `std::alloc::alloc_zeroed` to create a fresh, unshared buffer on the system heap every time it is executed. It wraps this in a fresh `LIT_TAG_BYTEARRAY` managed heap object.
+2. **State Tokens:** `Translate.hs` drops the `State#` token argument from stateful primop calls. However, it preserves the `Lam` binders for `State#` (since `isTyVar` does not match state tokens). This means a stateful allocation `\s -> newByteArray# sz s` is translated to `\s -> PrimOp(NewByteArray, [sz])`. Because the lambda is preserved, the allocation correctly happens **every time** the state thread advances, preventing accidental sharing across calls.
+3. **Resizing:** `ResizeMutableByteArray` correctly returns a new pointer and deallocates the old one. Since GHC semantics require the old array to be dead after a resize, `std::alloc::dealloc` is safe and won't corrupt live heap state.
+4. **Freezing:** `UnsafeFreezeByteArray` correctly acts as an identity operation, returning the same pointer for immutable access, matching GHC's in-place freeze semantics.
+
+## Determination on T.intercalate's specific primop usage
+The hypothesis that `T.intercalate` fails due to `ByteArray#` sharing/mutation bugs is **INCORRECT**. 
+
+The `ByteArray#` primops themselves are pure from the JIT's perspective (they just emit Cranelift instructions that call robust Rust host functions). If `f ["x"]` works but `f ["y"]` fails, it is not because the underlying byte arrays are illegally shared by the primops. The host functions do not cache or reuse allocations.
+
+Furthermore, the bug symptom ("`intercalate` silently dropped, raw `++` result returned") indicates that `T.intercalate`'s logic is being bypassed entirely at runtime, returning a `[Text]` instead of a `Text`. If the issue were corrupted `ByteArray#` memory, we would see corrupted strings, out-of-bounds traps, or segfaults during string operations, not the clean return of the unmodified list argument `["fixed", "x"]`.
+
+The root cause of the bug lies elsewhere in the AST evaluation (e.g., Case binder aliasing overwriting the environment, or Thunk sharing issues with the `(++)` free variable tail).
