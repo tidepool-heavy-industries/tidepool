@@ -1253,9 +1253,11 @@ impl EmitContext {
                                 let bindings = bindings.clone();
                                 let body = *body;
                                 // Run phases 1-3b inline, push deferred evals + finish + cleanup
-                                let cleanup_vars: Vec<(VarId, Option<SsaVal>)> =
-                                    bindings.iter().map(|(b, _)| (*b, self.env.get(b).cloned())).collect();
-                                work.push(EmitWork::LetCleanupMark(LetCleanup::Rec(cleanup_vars)));
+                                let mut scope = EnvScope::new();
+                                for (b, _) in &bindings {
+                                    scope.saved.push((*b, self.env.get(b).copied()));
+                                }
+                                work.push(EmitWork::LetCleanupMark(LetCleanup::Rec(scope)));
                                 self.emit_letrec_phases(
                                     sess, builder, &bindings,
                                     body, &mut work,
@@ -1309,21 +1311,11 @@ impl EmitContext {
                 EmitWork::LetCleanupMark(cleanup) => match cleanup {
                     LetCleanup::Single(var, old_val) => {
                         self.trace_scope(&format!("restore LetCleanup {:?}", var));
-                        if let Some(v) = old_val {
-                            self.env.insert(var, v);
-                        } else {
-                            self.env.remove(&var);
-                        }
+                        self.env.restore(var, old_val);
                     }
-                    LetCleanup::Rec(entries) => {
-                        for (var, old_val) in entries {
-                            self.trace_scope(&format!("restore LetCleanup(rec) {:?}", var));
-                            if let Some(v) = old_val {
-                                self.env.insert(var, v);
-                            } else {
-                                self.env.remove(&var);
-                            }
-                        }
+                    LetCleanup::Rec(scope) => {
+                        self.trace_scope("restore LetCleanup(rec)");
+                        self.env.restore_scope(scope);
                     }
                 },
                 EmitWork::SetTailPosition(val) => {
@@ -2191,7 +2183,7 @@ struct DeferredConDep {
 
 enum LetCleanup {
     Single(VarId, Option<SsaVal>),
-    Rec(Vec<(VarId, Option<SsaVal>)>),
+    Rec(EnvScope),
 }
 
 fn emit_lit(
