@@ -9,7 +9,7 @@ CABAL_BUILDDIR="${CABAL_BUILDDIR:-/var/lib/github-runner-cache/cabal/dist-newsty
 
 cd "$(dirname "$0")/../haskell"
 
-cabal update --store-dir="$CABAL_STORE"
+cabal update
 cabal build exe:tidepool-extract-bin \
   --store-dir="$CABAL_STORE" \
   --builddir="$CABAL_BUILDDIR"
