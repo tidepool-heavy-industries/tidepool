@@ -1482,13 +1482,13 @@ impl EffectHandler<CapturedOutput> for MetaHandler {
 // Embedded Haskell stdlib — written to ~/.tidepool/prelude/ on startup
 // ---------------------------------------------------------------------------
 
-const PRELUDE_HS: &str = include_str!("../../haskell/lib/Tidepool/Prelude.hs");
-const TEXT_HS: &str = include_str!("../../haskell/lib/Tidepool/Text.hs");
-const TABLE_HS: &str = include_str!("../../haskell/lib/Tidepool/Table.hs");
-const AESON_HS: &str = include_str!("../../haskell/lib/Tidepool/Aeson.hs");
-const AESON_VALUE_HS: &str = include_str!("../../haskell/lib/Tidepool/Aeson/Value.hs");
-const AESON_KEYMAP_HS: &str = include_str!("../../haskell/lib/Tidepool/Aeson/KeyMap.hs");
-const AESON_LENS_HS: &str = include_str!("../../haskell/lib/Tidepool/Aeson/Lens.hs");
+const PRELUDE_HS: &str = include_str!("../haskell-lib/Tidepool/Prelude.hs");
+const TEXT_HS: &str = include_str!("../haskell-lib/Tidepool/Text.hs");
+const TABLE_HS: &str = include_str!("../haskell-lib/Tidepool/Table.hs");
+const AESON_HS: &str = include_str!("../haskell-lib/Tidepool/Aeson.hs");
+const AESON_VALUE_HS: &str = include_str!("../haskell-lib/Tidepool/Aeson/Value.hs");
+const AESON_KEYMAP_HS: &str = include_str!("../haskell-lib/Tidepool/Aeson/KeyMap.hs");
+const AESON_LENS_HS: &str = include_str!("../haskell-lib/Tidepool/Aeson/Lens.hs");
 
 const EMBEDDED_FILES: &[(&str, &str)] = &[
     ("Tidepool/Prelude.hs", PRELUDE_HS),

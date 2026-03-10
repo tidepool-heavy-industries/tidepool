@@ -1,0 +1,1 @@
+../../../haskell/lib/Tidepool/Text.hs
