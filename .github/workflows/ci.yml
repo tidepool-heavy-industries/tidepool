@@ -11,8 +11,8 @@ jobs:
 
       - name: build tidepool-extract
         run: |
-          WRAPPER_DIR=$(nix develop --command .github/ci-build-extract.sh)
-          echo "$WRAPPER_DIR" >> "$GITHUB_PATH"
+          EXTRACT_BIN=$(.github/ci-build-extract.sh)
+          echo "$EXTRACT_BIN" >> "$GITHUB_PATH"
 
       - name: cargo test
         run: nix develop --command cargo test --workspace
