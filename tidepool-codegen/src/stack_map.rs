@@ -88,11 +88,11 @@ mod tests {
     #[test]
     fn test_stack_map_contains_address_boundaries() {
         let mut registry = StackMapRegistry::new();
-        let start = 0x1000;
-        let size = 0x100;
-        let end = start + size;
+        let start: usize = 0x1000;
+        let size: u32 = 0x100;
+        let end = start + size as usize;
 
-        registry.register(start, size as u32, &[]);
+        registry.register(start, size, &[]);
 
         // 1. addr == start → should return true (inclusive start)
         assert!(
