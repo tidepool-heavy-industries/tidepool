@@ -80,3 +80,42 @@ impl StackMapRegistry {
             .any(|(start, end)| addr >= *start && addr < *end)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stack_map_contains_address_boundaries() {
+        let mut registry = StackMapRegistry::new();
+        let start: usize = 0x1000;
+        let size: u32 = 0x100;
+        let end = start + size as usize;
+
+        registry.register(start, size, &[]);
+
+        // 1. addr == start → should return true (inclusive start)
+        assert!(
+            registry.contains_address(start),
+            "Address at exactly 'start' should be contained"
+        );
+
+        // 2. addr == end - 1 → should return true (last byte in range)
+        assert!(
+            registry.contains_address(end - 1),
+            "Address at 'end - 1' should be contained"
+        );
+
+        // 3. addr == end → should return false (exclusive end)
+        assert!(
+            !registry.contains_address(end),
+            "Address at exactly 'end' should NOT be contained"
+        );
+
+        // 4. addr == start - 1 → should return false (one byte before start)
+        assert!(
+            !registry.contains_address(start - 1),
+            "Address at 'start - 1' should NOT be contained"
+        );
+    }
+}
