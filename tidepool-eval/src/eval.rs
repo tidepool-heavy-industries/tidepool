@@ -2845,4 +2845,32 @@ mod tests {
         let res = eval(&expr, &Env::new(), &mut heap);
         assert!(matches!(res, Err(EvalError::UnboundVar(VarId(999)))));
     }
+
+    #[test]
+    fn test_transitive_thunk_forcing() {
+        let mut heap = crate::heap::VecHeap::new();
+
+        // Thunk B evaluates to 42
+        let id_b = heap.alloc(
+            Env::new(),
+            CoreExpr {
+                nodes: vec![CoreFrame::Lit(Literal::LitInt(42))],
+            },
+        );
+
+        // Thunk A is already evaluated to ThunkRef(B)
+        let id_a = heap.alloc(Env::new(), CoreExpr { nodes: vec![] });
+        heap.write(id_a, ThunkState::Evaluated(Value::ThunkRef(id_b)));
+
+        // Forcing A should transitively force B and return 42.
+        // If force() returned Ok(v) instead of recursing on Evaluated(v),
+        // it would return ThunkRef(id_b) instead of 42.
+        let res = force(Value::ThunkRef(id_a), &mut heap).unwrap();
+
+        if let Value::Lit(Literal::LitInt(n)) = res {
+            assert_eq!(n, 42);
+        } else {
+            panic!("Expected LitInt(42), got {:?}", res);
+        }
+    }
 }
