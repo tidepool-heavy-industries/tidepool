@@ -689,4 +689,34 @@ mod tests {
             panic!("Result should be Join");
         }
     }
+
+    #[test]
+    fn test_subst_lambda_shadow_exact() {
+        let x = VarId(1);
+        let y = VarId(2);
+        // \x -> x
+        let tree = RecursiveTree {
+            nodes: vec![
+                CoreFrame::Var(x),                     // 0
+                CoreFrame::Lam { binder: x, body: 0 }, // 1
+            ],
+        };
+        // Var(y)
+        let replacement = leaf(CoreFrame::Var(y));
+
+        let result = subst(&tree, x, &replacement);
+
+        // Result should be \x -> x (shadowed)
+        assert_eq!(result.nodes.len(), 2);
+        if let CoreFrame::Lam { binder, body } = &result.nodes[1] {
+            assert_eq!(*binder, x);
+            if let CoreFrame::Var(v) = &result.nodes[*body] {
+                assert_eq!(*v, x, "Shadowed variable should not be substituted");
+            } else {
+                panic!("Body should be Var(x)");
+            }
+        } else {
+            panic!("Result should be Lam");
+        }
+    }
 }
