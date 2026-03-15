@@ -150,17 +150,6 @@ impl ArenaHeap {
         }
     }
 
-    /// Return all ThunkIds directly referenced by this thunk.
-    pub fn children_of(&self, id: ThunkId) -> Vec<ThunkId> {
-        match self.read(id) {
-            ThunkState::Unevaluated(env, _) => {
-                env.values().flat_map(Self::collect_thunk_refs).collect()
-            }
-            ThunkState::BlackHole => vec![],
-            ThunkState::Evaluated(val) => Self::collect_thunk_refs(val),
-        }
-    }
-
     fn collect_thunk_refs(val: &Value) -> Vec<ThunkId> {
         match val {
             Value::ThunkRef(id) => vec![*id],
@@ -193,6 +182,16 @@ impl Heap for ArenaHeap {
 
     fn write(&mut self, id: ThunkId, state: ThunkState) {
         self.thunks[id.0 as usize] = state;
+    }
+
+    fn children_of(&self, id: ThunkId) -> Vec<ThunkId> {
+        match self.read(id) {
+            ThunkState::Unevaluated(env, _) => {
+                env.values().flat_map(Self::collect_thunk_refs).collect()
+            }
+            ThunkState::BlackHole => vec![],
+            ThunkState::Evaluated(val) => Self::collect_thunk_refs(val),
+        }
     }
 }
 

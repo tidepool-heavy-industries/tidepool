@@ -24,6 +24,9 @@ pub trait Heap {
 
     /// Write a new state to a thunk (for force protocol and LetRec back-patching).
     fn write(&mut self, id: ThunkId, state: ThunkState);
+
+    /// Return all ThunkIds directly referenced by this thunk.
+    fn children_of(&self, id: ThunkId) -> Vec<ThunkId>;
 }
 
 /// Simple Vec-backed heap for the interpreter. No GC.
@@ -35,6 +38,18 @@ pub struct VecHeap {
 impl VecHeap {
     pub fn new() -> Self {
         Self { thunks: Vec::new() }
+    }
+
+    fn collect_thunk_refs(val: &Value) -> Vec<ThunkId> {
+        match val {
+            Value::ThunkRef(id) => vec![*id],
+            Value::Con(_, fields) => fields.iter().flat_map(Self::collect_thunk_refs).collect(),
+            Value::ConFun(_, _, args) => args.iter().flat_map(Self::collect_thunk_refs).collect(),
+            Value::Closure(env, _, _) => env.values().flat_map(Self::collect_thunk_refs).collect(),
+            Value::JoinCont(_, _, env) => env.values().flat_map(Self::collect_thunk_refs).collect(),
+            Value::Lit(_) => vec![],
+            Value::ByteArray(_) => vec![],
+        }
     }
 }
 
@@ -51,6 +66,16 @@ impl Heap for VecHeap {
 
     fn write(&mut self, id: ThunkId, state: ThunkState) {
         self.thunks[id.0 as usize] = state;
+    }
+
+    fn children_of(&self, id: ThunkId) -> Vec<ThunkId> {
+        match self.read(id) {
+            ThunkState::Unevaluated(env, _) => {
+                env.values().flat_map(Self::collect_thunk_refs).collect()
+            }
+            ThunkState::BlackHole => vec![],
+            ThunkState::Evaluated(val) => Self::collect_thunk_refs(val),
+        }
     }
 }
 
