@@ -6,7 +6,8 @@ import System.Directory (createDirectoryIfMissing)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
-import Control.Exception (try, SomeException)
+import Control.Exception (evaluate, try, SomeException)
+import Data.List (isPrefixOf)
 import Control.Monad (foldM)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
@@ -80,30 +81,41 @@ processFile args path = do
         -- All-closed mode: translate each binding independently via translateModuleClosed
         -- Use original names (not deduped) since translateModuleClosed looks up by name.
         -- Skip duplicates (GHC may produce multiple bindings with the same name).
-        -- Only export bindings with External names (user-defined top-level).
-        -- GHC-floated locals (isEven, go, etc.) have Internal/System names.
-        let externalBinders = [ b | bind <- binds
-                              , b <- case bind of
-                                       NonRec b _ -> [b]
-                                       Rec pairs  -> map fst pairs
-                              , isExternalName (idName b) ]
+        -- Include all top-level binders, not just External ones.
+        -- GHC may mark user-defined bindings as Internal after optimization.
+        -- Filter out GHC-generated names (starting with '$').
+        -- Errors from translateModuleClosed are caught and those bindings are skipped.
+        let allBinders = [ b | bind <- binds
+                         , b <- case bind of
+                                  NonRec b _ -> [b]
+                                  Rec pairs  -> map fst pairs ]
             uniqueNames = Map.keys $ Map.fromList
-              [(n, ()) | b <- externalBinders
+              [(n, ()) | b <- allBinders
               , let n = occNameString (nameOccName (idName b))
-              , not (null n), head n /= '$']
+              , not ("$" `isPrefixOf` n)]
         (allMetaMap, allClosedBinds) <- foldM (\(acc, closedAcc) name -> do
-          (nodes, usedDCs, unresolved, closedBinds) <- translateModuleClosed hscEnv binds name
-          if not (null unresolved) then do
-            let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
-            putStrLn $ "  SKIPPED (" ++ name ++ "): unresolved external(s): " ++ unwords names
-            return (acc, closedAcc)
-          else do
-            let cbor = encodeTree nodes
-            let outFile = outDir </> name ++ ".cbor"
-            BS.writeFile outFile cbor
-            putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
-            let usedMeta = map dcToMeta (Map.elems usedDCs)
-            return (acc `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- usedMeta], closedAcc ++ closedBinds)
+          result <- try $ do
+            (nodes, usedDCs, unresolved, closedBinds) <- translateModuleClosed hscEnv binds name
+            if not (null unresolved) then do
+              let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
+              putStrLn $ "  SKIPPED (" ++ name ++ "): unresolved external(s): " ++ unwords names
+              return Nothing
+            else do
+              let cbor = encodeTree nodes
+              -- Force CBOR encoding to surface errors from lazy thunks (e.g. unsupported FFI calls)
+              _ <- evaluate (BS.length cbor)
+              let outFile = outDir </> name ++ ".cbor"
+              BS.writeFile outFile cbor
+              putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
+              let usedMeta = map dcToMeta (Map.elems usedDCs)
+              return (Just (Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- usedMeta], closedBinds))
+          case result of
+            Left (e :: SomeException) -> do
+              hPutStrLn stderr $ "  SKIPPED (" ++ name ++ "): " ++ show e
+              return (acc, closedAcc)
+            Right Nothing -> return (acc, closedAcc)
+            Right (Just (metaMap, closedBinds)) ->
+              return (acc `Map.union` metaMap, closedAcc ++ closedBinds)
           ) (Map.empty, []) uniqueNames
 
         -- Write merged metadata
