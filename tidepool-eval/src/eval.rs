@@ -2046,7 +2046,111 @@ cmp_fn!(cmp_char, bin_op_char, char);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_repr::{Alt, AltCon, CoreFrame, DataConId, JoinId, Literal, RecursiveTree, VarId};
+    use tidepool_repr::{
+        Alt, AltCon, CoreFrame, DataConId, JoinId, Literal, PrimOpKind, RecursiveTree, VarId,
+    };
+
+    #[test]
+    fn test_letrec_lambda_eager_eval_gap_fix() {
+        use crate::value::ThunkId;
+        // letrec {
+        //   f = \n -> g n;    // f is VarId(10)
+        //   g = \n -> n + 1;  // g is VarId(20)
+        // } in 42
+
+        let nodes = vec![
+            CoreFrame::Lit(Literal::LitInt(1)), // 0
+            CoreFrame::Var(VarId(2)),           // 1: n (for g)
+            CoreFrame::PrimOp {
+                op: PrimOpKind::IntAdd,
+                args: vec![1, 0],
+            }, // 2: n + 1 (body of g)
+            CoreFrame::Lam {
+                binder: VarId(2),
+                body: 2,
+            }, // 3: \n -> n + 1 (RHS of g)
+            CoreFrame::Var(VarId(3)),  // 4: n (for f)
+            CoreFrame::Var(VarId(20)), // 5: g
+            CoreFrame::App { fun: 5, arg: 4 }, // 6: g n (body of f)
+            CoreFrame::Lam {
+                binder: VarId(3),
+                body: 6,
+            }, // 7: \n -> g n (RHS of f)
+            CoreFrame::Lit(Literal::LitInt(42)), // 8: body of letrec
+            CoreFrame::LetRec {
+                bindings: vec![
+                    (VarId(10), 7), // f = index 7
+                    (VarId(20), 3), // g = index 3
+                ],
+                body: 8,
+            }, // 9
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+
+        // Evaluate the LetRec expression.
+        // The body is just 42, so we don't force f or g during body evaluation.
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
+        assert_eq!(res.to_string(), "42");
+
+        // Check the heap state for f and g.
+        // They are allocated as the first two thunks in the LetRec.
+        // f should be at ThunkId(0), g should be at ThunkId(1).
+
+        let f_state = heap.read(ThunkId(0));
+        let g_state = heap.read(ThunkId(1));
+
+        match f_state {
+            ThunkState::Evaluated(Value::Closure(..)) => (),
+            _ => panic!(
+                "Expected f to be eagerly evaluated to a Closure, got {:?}",
+                f_state
+            ),
+        }
+
+        match g_state {
+            ThunkState::Evaluated(Value::Closure(..)) => (),
+            _ => panic!(
+                "Expected g to be eagerly evaluated to a Closure, got {:?}",
+                g_state
+            ),
+        }
+
+        // Now also verify correctness by evaluating f 5.
+        // letrec { f = \n -> g n; g = \n -> n + 1 } in f 5
+        let nodes_with_call = vec![
+            CoreFrame::Lit(Literal::LitInt(1)), // 0
+            CoreFrame::Var(VarId(2)),           // 1: n
+            CoreFrame::PrimOp {
+                op: PrimOpKind::IntAdd,
+                args: vec![1, 0],
+            }, // 2: n + 1
+            CoreFrame::Lam {
+                binder: VarId(2),
+                body: 2,
+            }, // 3: \n -> n + 1
+            CoreFrame::Var(VarId(3)),  // 4: n
+            CoreFrame::Var(VarId(20)), // 5: g
+            CoreFrame::App { fun: 5, arg: 4 }, // 6: g n
+            CoreFrame::Lam {
+                binder: VarId(3),
+                body: 6,
+            }, // 7: \n -> g n
+            CoreFrame::Var(VarId(10)),          // 8: f
+            CoreFrame::Lit(Literal::LitInt(5)), // 9
+            CoreFrame::App { fun: 8, arg: 9 },  // 10: f 5
+            CoreFrame::LetRec {
+                bindings: vec![(VarId(10), 7), (VarId(20), 3)],
+                body: 10,
+            }, // 11
+        ];
+        let expr_with_call = CoreExpr {
+            nodes: nodes_with_call,
+        };
+        let mut heap2 = crate::heap::VecHeap::new();
+        let res_with_call = eval(&expr_with_call, &Env::new(), &mut heap2).unwrap();
+        assert_eq!(res_with_call.to_string(), "6");
+    }
 
     #[test]
     fn test_eval_lit() {
