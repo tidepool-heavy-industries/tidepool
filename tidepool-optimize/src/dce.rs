@@ -235,4 +235,51 @@ mod tests {
             _ => panic!("Expected literals"),
         }
     }
+
+    // 7. test_dce_letrec_mixed_liveness: letrec { f = 100; g = 200 } in f -> unchanged.
+    // g is Dead, but f is Once. The entire group must be kept because DCE currently
+    // only drops the entire LetRec group if ALL binders are dead.
+    // If it used .any() instead of .all(), it would incorrectly drop the whole group.
+    #[test]
+    fn test_dce_letrec_mixed_liveness() {
+        let f = VarId(1);
+        let g = VarId(2);
+        let expr = tree(vec![
+            CoreFrame::Lit(Literal::LitInt(100)), // 0: f's rhs
+            CoreFrame::Lit(Literal::LitInt(200)), // 1: g's rhs
+            CoreFrame::Var(f),                    // 2: body
+            CoreFrame::LetRec {
+                bindings: vec![(f, 0), (g, 1)],
+                body: 2,
+            }, // 3: root
+        ]);
+        let mut dce_expr = expr.clone();
+
+        let mut heap = VecHeap::new();
+        let env = Env::new();
+
+        // 1. Original evaluates to 100
+        let val_orig = eval(&expr, &env, &mut heap).expect("Original eval failed");
+        if let tidepool_eval::Value::Lit(Literal::LitInt(n)) = val_orig {
+            assert_eq!(n, 100);
+        } else {
+            panic!("Original should eval to 100, got {:?}", val_orig);
+        }
+
+        // 2. DCE should NOT drop the group because f is live
+        let changed = Dce.run(&mut dce_expr);
+        assert!(
+            !changed,
+            "DCE should not have changed the expression because f is live"
+        );
+        assert_eq!(dce_expr, expr);
+
+        // 3. Evaluates correctly after (no-op) DCE
+        let val_dce = eval(&dce_expr, &env, &mut heap).expect("DCE eval failed");
+        if let tidepool_eval::Value::Lit(Literal::LitInt(n)) = val_dce {
+            assert_eq!(n, 100);
+        } else {
+            panic!("Result after DCE should still eval to 100, got {:?}", val_dce);
+        }
+    }
 }
