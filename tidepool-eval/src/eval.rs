@@ -2376,6 +2376,35 @@ mod tests {
     }
 
     #[test]
+    fn test_eval_prim_sub_word_c_carry() {
+        let cases = vec![
+            (3u64, 5u64, 1), // a < b => 1 (borrow)
+            (5u64, 5u64, 0), // a == b => 0 (no borrow) - the boundary case
+            (7u64, 5u64, 0), // a > b => 0 (no borrow)
+        ];
+
+        for (a, b, expected) in cases {
+            let nodes = vec![
+                CoreFrame::Lit(Literal::LitWord(a)),
+                CoreFrame::Lit(Literal::LitWord(b)),
+                CoreFrame::PrimOp {
+                    op: PrimOpKind::SubWordCCarry,
+                    args: vec![0, 1],
+                },
+            ];
+            let expr = CoreExpr { nodes };
+            let mut heap = crate::heap::VecHeap::new();
+            let res = eval(&expr, &Env::new(), &mut heap)
+                .unwrap_or_else(|_| panic!("eval failed for a={}, b={}", a, b));
+            if let Value::Lit(Literal::LitInt(n)) = res {
+                assert_eq!(n, expected, "Failed for a={}, b={}", a, b);
+            } else {
+                panic!("Expected LitInt({}), got {:?}", expected, res);
+            }
+        }
+    }
+
+    #[test]
     fn test_eval_case_data() {
         let nodes = vec![
             CoreFrame::Lit(Literal::LitInt(42)),
