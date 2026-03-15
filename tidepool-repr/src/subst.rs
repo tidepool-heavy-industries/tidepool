@@ -630,4 +630,63 @@ mod tests {
             panic!("Result should be Join");
         }
     }
+
+    #[test]
+    fn test_subst_join_env_leak() {
+        let x = VarId(1);
+        let p = VarId(2);
+        let j = JoinId(1);
+
+        // Tree: Join j(p) = p in p
+        // We substitute x -> p.
+        // Param p MUST be renamed in RHS to avoid potentially capturing p in the replacement
+        // (the substitution algorithm renames all binders that conflict with free variables of the replacement).
+        // But it MUST NOT be renamed in the body, as the body is outside the scope of Join params.
+
+        let tree = RecursiveTree {
+            nodes: vec![
+                CoreFrame::Var(p), // 0: rhs
+                CoreFrame::Var(p), // 1: body
+                CoreFrame::Join {
+                    label: j,
+                    params: vec![p],
+                    rhs: 0,
+                    body: 1,
+                },
+            ],
+        };
+        let replacement = leaf(CoreFrame::Var(p));
+
+        let result = subst(&tree, x, &replacement);
+
+        if let CoreFrame::Join {
+            params, rhs, body, ..
+        } = &result.nodes[result.nodes.len() - 1]
+        {
+            let p_fresh = params[0];
+            assert_ne!(
+                p_fresh, p,
+                "Parameter p should have been renamed because it exists in fvs_replacement"
+            );
+
+            // RHS: Var(p) should have become Var(p_fresh)
+            if let CoreFrame::Var(v) = &result.nodes[*rhs] {
+                assert_eq!(*v, p_fresh, "RHS should use renamed parameter");
+            } else {
+                panic!("RHS should be Var");
+            }
+
+            // Body: Var(p) should REMAIN Var(p)
+            if let CoreFrame::Var(v) = &result.nodes[*body] {
+                assert_eq!(
+                    *v, p,
+                    "Body should NOT use renamed parameter (it is outside Join scope)"
+                );
+            } else {
+                panic!("Body should be Var");
+            }
+        } else {
+            panic!("Result should be Join");
+        }
+    }
 }
