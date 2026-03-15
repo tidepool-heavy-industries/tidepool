@@ -2280,7 +2280,6 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_primop_shifts() {
         let mut heap = crate::heap::VecHeap::new();
 
         // IntShra (Arithmetic Right Shift)
