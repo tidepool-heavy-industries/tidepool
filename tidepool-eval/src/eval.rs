@@ -2176,6 +2176,102 @@ mod tests {
     }
 
     #[test]
+    fn test_eval_primop_shifts() {
+        let mut heap = crate::heap::VecHeap::new();
+
+        // IntShra (Arithmetic Right Shift)
+        // 16 >> 2 = 4
+        {
+            let nodes = vec![
+                CoreFrame::Lit(Literal::LitInt(16)),
+                CoreFrame::Lit(Literal::LitInt(2)),
+                CoreFrame::PrimOp {
+                    op: PrimOpKind::IntShra,
+                    args: vec![0, 1],
+                },
+            ];
+            let res = eval(&CoreExpr { nodes }, &Env::new(), &mut heap).unwrap();
+            if let Value::Lit(Literal::LitInt(n)) = res {
+                assert_eq!(n, 4);
+            } else {
+                panic!("Expected LitInt(4), got {:?}", res);
+            }
+        }
+        // -16 >> 2 = -4 (preserves sign)
+        {
+            let nodes = vec![
+                CoreFrame::Lit(Literal::LitInt(-16)),
+                CoreFrame::Lit(Literal::LitInt(2)),
+                CoreFrame::PrimOp {
+                    op: PrimOpKind::IntShra,
+                    args: vec![0, 1],
+                },
+            ];
+            let res = eval(&CoreExpr { nodes }, &Env::new(), &mut heap).unwrap();
+            if let Value::Lit(Literal::LitInt(n)) = res {
+                assert_eq!(n, -4);
+            } else {
+                panic!("Expected LitInt(-4), got {:?}", res);
+            }
+        }
+        // 16 >> 0 = 16
+        {
+            let nodes = vec![
+                CoreFrame::Lit(Literal::LitInt(16)),
+                CoreFrame::Lit(Literal::LitInt(0)),
+                CoreFrame::PrimOp {
+                    op: PrimOpKind::IntShra,
+                    args: vec![0, 1],
+                },
+            ];
+            let res = eval(&CoreExpr { nodes }, &Env::new(), &mut heap).unwrap();
+            if let Value::Lit(Literal::LitInt(n)) = res {
+                assert_eq!(n, 16);
+            } else {
+                panic!("Expected LitInt(16), got {:?}", res);
+            }
+        }
+
+        // IntShrl (Logical Right Shift)
+        // -16 shrl 2 = 4611686018427387900
+        {
+            let nodes = vec![
+                CoreFrame::Lit(Literal::LitInt(-16)),
+                CoreFrame::Lit(Literal::LitInt(2)),
+                CoreFrame::PrimOp {
+                    op: PrimOpKind::IntShrl,
+                    args: vec![0, 1],
+                },
+            ];
+            let res = eval(&CoreExpr { nodes }, &Env::new(), &mut heap).unwrap();
+            if let Value::Lit(Literal::LitInt(n)) = res {
+                assert_eq!(n, 4611686018427387900);
+            } else {
+                panic!("Expected LitInt(4611686018427387900), got {:?}", res);
+            }
+        }
+
+        // IntShl (Logical Left Shift)
+        // 16 << 2 = 64
+        {
+            let nodes = vec![
+                CoreFrame::Lit(Literal::LitInt(16)),
+                CoreFrame::Lit(Literal::LitInt(2)),
+                CoreFrame::PrimOp {
+                    op: PrimOpKind::IntShl,
+                    args: vec![0, 1],
+                },
+            ];
+            let res = eval(&CoreExpr { nodes }, &Env::new(), &mut heap).unwrap();
+            if let Value::Lit(Literal::LitInt(n)) = res {
+                assert_eq!(n, 64);
+            } else {
+                panic!("Expected LitInt(64), got {:?}", res);
+            }
+        }
+    }
+
+    #[test]
     fn test_eval_case_data() {
         let nodes = vec![
             CoreFrame::Lit(Literal::LitInt(42)),
