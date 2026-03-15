@@ -1,9 +1,8 @@
 use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
-use tidepool_eval::env::Env;
-use tidepool_eval::heap::{Heap, ThunkState};
-use tidepool_eval::value::{ThunkId, Value};
+use tidepool_eval::heap::Heap;
+use tidepool_eval::value::ThunkId;
 
 /// Error during garbage collection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,9 +64,6 @@ pub fn trace(roots: &[ThunkId], heap: &dyn Heap) -> ForwardingTable {
             continue;
         }
 
-        // Validate the ID before potentially large resize to prevent OOM/DoS
-        let state = heap.read(old_id);
-
         if idx >= mapping.len() {
             mapping.resize(idx + 1, None);
         }
@@ -75,56 +71,20 @@ pub fn trace(roots: &[ThunkId], heap: &dyn Heap) -> ForwardingTable {
         mapping[idx] = Some(ThunkId(next_new_id));
         next_new_id += 1;
 
-        match state {
-            ThunkState::Unevaluated(env, _) => {
-                scan_env(env, &mut queue);
-            }
-            ThunkState::BlackHole => {}
-            ThunkState::Evaluated(val) => {
-                scan_value(val, &mut queue);
-            }
+        for child_id in heap.children_of(old_id) {
+            queue.push_back(child_id);
         }
     }
 
     ForwardingTable { mapping }
 }
 
-fn scan_value(val: &Value, queue: &mut VecDeque<ThunkId>) {
-    match val {
-        Value::Lit(_) => {}
-        Value::Con(_, fields) => {
-            for field in fields {
-                scan_value(field, queue);
-            }
-        }
-        Value::ConFun(_, _, args) => {
-            for arg in args {
-                scan_value(arg, queue);
-            }
-        }
-        Value::Closure(env, _, _) => {
-            scan_env(env, queue);
-        }
-        Value::ThunkRef(id) => {
-            queue.push_back(*id);
-        }
-        Value::JoinCont(_, _, env) => {
-            scan_env(env, queue);
-        }
-        Value::ByteArray(_) => {}
-    }
-}
-
-fn scan_env(env: &Env, queue: &mut VecDeque<ThunkId>) {
-    for val in env.values() {
-        scan_value(val, queue);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_eval::heap::VecHeap;
+    use tidepool_eval::env::Env;
+    use tidepool_eval::heap::{ThunkState, VecHeap};
+    use tidepool_eval::value::Value;
     use tidepool_repr::{CoreFrame, DataConId, Literal, RecursiveTree, VarId};
 
     fn empty_expr() -> tidepool_repr::CoreExpr {
