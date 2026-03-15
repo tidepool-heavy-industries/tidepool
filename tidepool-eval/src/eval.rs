@@ -3045,4 +3045,87 @@ mod tests {
         let res = eval(&expr, &Env::new(), &mut heap);
         assert!(matches!(res, Err(EvalError::UnboundVar(VarId(999)))));
     }
+
+    #[test]
+    fn test_transitive_thunk_forcing() {
+        let mut heap = crate::heap::VecHeap::new();
+
+        // Thunk B evaluates to 42
+        let id_b = heap.alloc(
+            Env::new(),
+            CoreExpr {
+                nodes: vec![CoreFrame::Lit(Literal::LitInt(42))],
+            },
+        );
+
+        // Thunk A is already evaluated to ThunkRef(B)
+        let id_a = heap.alloc(Env::new(), CoreExpr { nodes: vec![] });
+        heap.write(id_a, ThunkState::Evaluated(Value::ThunkRef(id_b)));
+
+        // Forcing A should transitively force B and return 42.
+        // If force() returned Ok(v) instead of recursing on Evaluated(v),
+        // it would return ThunkRef(id_b) instead of 42.
+        let res = force(Value::ThunkRef(id_a), &mut heap).unwrap();
+
+        if let Value::Lit(Literal::LitInt(n)) = res {
+            assert_eq!(n, 42);
+        } else {
+            panic!("Expected LitInt(42), got {:?}", res);
+        }
+
+        // Verify that B was also forced on the heap.
+        match heap.read(id_b) {
+            ThunkState::Evaluated(Value::Lit(Literal::LitInt(n))) => assert_eq!(*n, 42),
+            other => panic!("Expected id_b to be Evaluated(42), got {:?}", other),
+        }
+
+        // Forcing A again. It should still return 42.
+        // This time it hits: Evaluated(A) -> force(ThunkRef B) -> Evaluated(B) -> 42.
+        let res2 = force(Value::ThunkRef(id_a), &mut heap).unwrap();
+        if let Value::Lit(Literal::LitInt(n)) = res2 {
+            assert_eq!(n, 42);
+        } else {
+            panic!("Expected LitInt(42), got {:?}", res2);
+        }
+    }
+
+    #[test]
+    fn test_transitive_thunk_eval() {
+        let mut heap = crate::heap::VecHeap::new();
+        let mut env = Env::new();
+
+        // y = 42
+        let id_y = heap.alloc(
+            Env::new(),
+            CoreExpr {
+                nodes: vec![CoreFrame::Lit(Literal::LitInt(42))],
+            },
+        );
+        env.insert(VarId(10), Value::ThunkRef(id_y));
+
+        // x = y (where y is a ThunkRef)
+        let id_x = heap.alloc(
+            env.clone(),
+            CoreExpr {
+                nodes: vec![CoreFrame::Var(VarId(10))],
+            },
+        );
+
+        // Force x. This hits the Unevaluated branch for x.
+        // eval(Var y) returns force(ThunkRef y, heap) which is 42.
+        // x gets updated to Evaluated(42).
+        let res = force(Value::ThunkRef(id_x), &mut heap).unwrap();
+
+        if let Value::Lit(Literal::LitInt(n)) = res {
+            assert_eq!(n, 42);
+        } else {
+            panic!("Expected LitInt(42), got {:?}", res);
+        }
+
+        // In this case, x DOES get compressed because eval() forces.
+        match heap.read(id_x) {
+            ThunkState::Evaluated(Value::Lit(Literal::LitInt(n))) => assert_eq!(*n, 42),
+            other => panic!("Expected id_x to be Evaluated(42), got {:?}", other),
+        }
+    }
 }
