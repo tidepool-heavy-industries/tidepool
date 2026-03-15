@@ -7,6 +7,7 @@ use cranelift_codegen::ir::{self, types, AbiParam, InstBuilder, UserFuncName};
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::Module;
+use serial_test::serial;
 
 /// Test 1: JIT boots, empty fn compiles and calls without crash.
 #[test]
@@ -131,6 +132,7 @@ fn test_stack_map_registry_populates() {
 
 /// Test 4: gc_trigger can be called from JIT code with the correct VMContext.
 #[test]
+#[serial]
 fn test_gc_trigger_called_from_jit() {
     // We'll create a JIT function that calls gc_trigger, and verify via
     // host_fns counters that it was invoked with the expected VMContext.
@@ -199,6 +201,7 @@ fn test_gc_trigger_called_from_jit() {
 
 /// Test 5: Alloc fast-path IR: allocates object, bumps pointer.
 #[test]
+#[serial]
 fn test_alloc_fast_path() {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
     let func_id = pipeline
@@ -267,6 +270,7 @@ fn test_alloc_fast_path() {
 /// Test 6: Stack map end-to-end — compile fn with 2+ heap-ptr locals,
 /// call gc_trigger, verify stack map entries are present and correct.
 #[test]
+#[serial]
 fn test_stack_map_end_to_end() {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
 

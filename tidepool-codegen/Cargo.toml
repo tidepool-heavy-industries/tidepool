@@ -30,4 +30,5 @@ cc = "1"
 
 [dev-dependencies]
 proptest = "1"
+serial_test = "3"
 tidepool-testing = { path = "../tidepool-testing" }

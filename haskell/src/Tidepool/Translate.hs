@@ -256,12 +256,19 @@ translateModule allBinds targetName unresolvedIds =
     findTargetId name binds =
       case filter isTarget (concatMap bindersOf binds) of
         (b:_) -> b
-        []    -> error $ "translateModule: exported top-level binding '" ++ name ++ "' not found"
+        -- Fall back to name-only match if no External binding found
+        -- (GHC may mark user bindings as Internal after optimization)
+        []    -> case filter isNameMatch (concatMap bindersOf binds) of
+                   (b:_) -> b
+                   []    -> error $ "translateModule: exported top-level binding '" ++ name ++ "' not found"
       where
         isTarget b =
           occNameString (nameOccName (idName b)) == name
           && isExportedId b
           && isExternalName (idName b)
+          && not (isSystemName (idName b))
+        isNameMatch b =
+          occNameString (nameOccName (idName b)) == name
           && not (isSystemName (idName b))
 
     bindersOf (NonRec b _) = [b]
@@ -366,7 +373,7 @@ translateModuleClosed hscEnv allBinds targetName = do
   (closedBinds, unresolved) <- resolveExternals hscEnv allBinds
   let unresolvedIds = Set.fromList (map uvKey unresolved)
       (nodes, usedDCs) = translateModule closedBinds targetName unresolvedIds
-      referencedIds = foldl' (\acc n -> case n of { NVar v -> Set.insert v acc; _ -> acc }) Set.empty nodes
+  let referencedIds = foldl' (\acc n -> case n of { NVar v -> Set.insert v acc; _ -> acc }) Set.empty nodes
       trulyUnresolved = filter (\uv -> uvKey uv `Set.member` referencedIds) unresolved
       -- Debug: find dangling NVar references (referenced but not bound by any Let/Lam/Case)
       boundIds = foldl' collectBound Set.empty nodes
