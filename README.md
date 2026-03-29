@@ -52,19 +52,6 @@ The `tidepool` binary is an [MCP](https://modelcontextprotocol.io/) server that 
 }
 ```
 
-You can also use `mcp-wrapper.py` (from the repo) to add a `__mcp_restart` tool for hot-restarting the server:
-
-```json
-{
-  "mcpServers": {
-    "tidepool": {
-      "command": "python3",
-      "args": ["/path/to/tidepool/tools/mcp-wrapper.py", "tidepool"]
-    }
-  }
-}
-```
-
 **Environment variables:**
 - `TIDEPOOL_EXTRACT` — path to the `tidepool-extract` binary (falls back to `tidepool-extract` on `$PATH`)
 - `TIDEPOOL_PRELUDE_DIR` — override the Haskell stdlib location (normally embedded in the binary)

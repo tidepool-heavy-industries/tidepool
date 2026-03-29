@@ -30,7 +30,7 @@ Tidepool transforms `freer-simple` continuations into a state machine:
 ## Crate Responsibilities
 
 - **`tidepool-repr`**: Defines the Core IR, `Value` types, and handles CBOR serialization/deserialization.
-- **`tidepool-eval`**: A tree-walking interpreter used for constant folding and simple evaluation without the overhead of JIT.
+- **`tidepool-eval`**: A tree-walking interpreter for evaluating Core expressions without JIT overhead, used for testing and as a reference implementation.
 - **`tidepool-heap`**: Implements the manual memory layout (raw byte buffers) and the copying garbage collector used by the JIT runtime.
 - **`tidepool-optimize`**: Contains optimization passes like beta reduction, dead code elimination (DCE), inlining, and case reduction.
 - **`tidepool-codegen`**: The Cranelift-based compiler that generates native code and manages the `JitEffectMachine` lifecycle.
@@ -38,6 +38,7 @@ Tidepool transforms `freer-simple` continuations into a state machine:
 - **`tidepool-effect`**: Core traits and logic for effect dispatch and handling (`EffectHandler`, `DispatchEffect`).
 - **`tidepool-macro`**: Procedural macros for inlining Haskell code directly into Rust using `haskell_inline!`.
 - **`tidepool-bridge`**: Provides `FromCore` and `ToCore` traits for seamless data conversion between Rust types and Tidepool `Value`s.
+- **`tidepool-bridge-derive`**: Procedural macro crate providing `#[derive(FromCore)]` and `#[derive(ToCore)]`.
 - **`tidepool-testing`**: Internal utilities and property-based generators for testing the compiler and runtime.
 
 ## Data Flow
