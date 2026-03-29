@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "Compile Haskell effect stacks to Cranelift JIT, drive from Rust"
 readme = "../README.md"
 keywords = ["haskell", "jit", "cranelift", "effects", "compiler"]
-categories = ["compilers", "wasm"]
+categories = ["compilers"]
 
 [[bin]]
 name = "tidepool"
