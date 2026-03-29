@@ -85,6 +85,30 @@ pub struct CompiledEffectMachine {
 unsafe impl Send for CompiledEffectMachine {}
 
 impl CompiledEffectMachine {
+    /// Read the constructor tag from a Con heap object.
+    ///
+    /// # Safety
+    /// `ptr` must point to a valid Con heap object (tag byte == TAG_CON).
+    unsafe fn read_con_tag(ptr: *const u8) -> u64 {
+        *(ptr.add(layout::CON_TAG_OFFSET as usize) as *const u64)
+    }
+
+    /// Read the number of fields from a Con heap object.
+    ///
+    /// # Safety
+    /// `ptr` must point to a valid Con heap object.
+    unsafe fn read_con_num_fields(ptr: *const u8) -> u16 {
+        *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16)
+    }
+
+    /// Read a field pointer from a Con heap object by index.
+    ///
+    /// # Safety
+    /// `ptr` must point to a valid Con heap object with at least `index + 1` fields.
+    unsafe fn read_con_field(ptr: *const u8, index: usize) -> *mut u8 {
+        *(ptr.add(layout::CON_FIELDS_OFFSET as usize + 8 * index) as *const *mut u8)
+    }
+
     pub fn new(
         func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8,
         vmctx: VMContext,
@@ -151,31 +175,26 @@ impl CompiledEffectMachine {
             return Yield::Error(YieldError::UnexpectedTag(tag));
         }
 
-        let con_tag = unsafe { *(result.add(layout::CON_TAG_OFFSET as usize) as *const u64) };
+        let con_tag = unsafe { Self::read_con_tag(result) };
 
         if con_tag == self.tags.val {
             // Val(value) — extract value from fields[0]
-            let num_fields =
-                unsafe { *(result.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
+            let num_fields = unsafe { Self::read_con_num_fields(result) };
             if num_fields < 1 {
                 return Yield::Error(YieldError::BadValFields(num_fields));
             }
-            let value =
-                unsafe { *(result.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) };
+            let value = unsafe { Self::read_con_field(result, 0) };
             // Force value field — it may be a thunk
             let value = self.force_ptr(value);
             Yield::Done(value)
         } else if con_tag == self.tags.e {
             // E(union, continuation) — extract Union and k
-            let num_fields =
-                unsafe { *(result.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
+            let num_fields = unsafe { Self::read_con_num_fields(result) };
             if num_fields != 2 {
                 return Yield::Error(YieldError::BadEFields(num_fields));
             }
-            let mut union_ptr =
-                unsafe { *(result.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) };
-            let mut continuation =
-                unsafe { *(result.add(layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8) };
+            let mut union_ptr = unsafe { Self::read_con_field(result, 0) };
+            let mut continuation = unsafe { Self::read_con_field(result, 1) };
 
             // Force all field pointers — they may be thunks from lazy Con fields
             union_ptr = self.force_ptr(union_ptr);
@@ -192,14 +211,12 @@ impl CompiledEffectMachine {
                 return Yield::Error(YieldError::UnexpectedTag(union_tag));
             }
 
-            let union_num_fields =
-                unsafe { *(union_ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
+            let union_num_fields = unsafe { Self::read_con_num_fields(union_ptr) };
             if union_num_fields != 2 {
                 return Yield::Error(YieldError::BadUnionFields(union_num_fields));
             }
 
-            let tag_ptr =
-                unsafe { *(union_ptr.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8) };
+            let tag_ptr = unsafe { Self::read_con_field(union_ptr, 0) };
             let tag_ptr = self.force_ptr(tag_ptr);
             if tag_ptr.is_null() {
                 return Yield::Error(YieldError::NullPointer);
@@ -208,9 +225,7 @@ impl CompiledEffectMachine {
             let tag_ptr_tag = unsafe { *tag_ptr };
             let effect_tag =
                 unsafe { *(tag_ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) };
-            let mut request = unsafe {
-                *(union_ptr.add(layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8)
-            };
+            let mut request = unsafe { Self::read_con_field(union_ptr, 1) };
             request = self.force_ptr(request);
 
             if std::env::var("TIDEPOOL_TRACE_EFFECTS").is_ok() {
@@ -218,7 +233,7 @@ impl CompiledEffectMachine {
                     "[effect_machine] effect_tag={} tag_ptr_tag={} union_con_tag={} request_tag={}",
                     effect_tag,
                     tag_ptr_tag,
-                    unsafe { *(union_ptr.add(layout::CON_TAG_OFFSET as usize) as *const u64) },
+                    unsafe { Self::read_con_tag(union_ptr) },
                     if request.is_null() {
                         255
                     } else {
@@ -283,22 +298,16 @@ impl CompiledEffectMachine {
         let tag = *k;
         match tag {
             t if t == layout::TAG_CON => {
-                let con_tag = unsafe { *(k.add(layout::CON_TAG_OFFSET as usize) as *const u64) };
+                let con_tag = unsafe { Self::read_con_tag(k) };
 
                 if con_tag == self.tags.leaf {
                     // Leaf(f) — extract closure f at field[0], call f(arg)
-                    let f = self.force_ptr(unsafe {
-                        *(k.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8)
-                    });
+                    let f = self.force_ptr(unsafe { Self::read_con_field(k, 0) });
                     self.call_closure(f, arg)
                 } else if con_tag == self.tags.node {
                     // Node(k1, k2) — apply k1 to arg, then compose with k2
-                    let k1 = self.force_ptr(unsafe {
-                        *(k.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8)
-                    });
-                    let k2 = self.force_ptr(unsafe {
-                        *(k.add(layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8)
-                    });
+                    let k1 = self.force_ptr(unsafe { Self::read_con_field(k, 0) });
+                    let k2 = self.force_ptr(unsafe { Self::read_con_field(k, 1) });
 
                     let result = self.apply_cont_heap(k1, arg);
                     if result.is_null() {
@@ -317,23 +326,16 @@ impl CompiledEffectMachine {
                         return std::ptr::null_mut();
                     }
 
-                    let result_con_tag =
-                        unsafe { *(result.add(layout::CON_TAG_OFFSET as usize) as *const u64) };
+                    let result_con_tag = unsafe { Self::read_con_tag(result) };
 
                     if result_con_tag == self.tags.val {
                         // Val(y) — extract y, apply k2(y)
-                        let y = self.force_ptr(unsafe {
-                            *(result.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8)
-                        });
+                        let y = self.force_ptr(unsafe { Self::read_con_field(result, 0) });
                         self.apply_cont_heap(k2, y)
                     } else if result_con_tag == self.tags.e {
                         // E(union, k') — compose: E(union, Node(k', k2))
-                        let union_val = self.force_ptr(unsafe {
-                            *(result.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8)
-                        });
-                        let k_prime = self.force_ptr(unsafe {
-                            *(result.add(layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8)
-                        });
+                        let union_val = self.force_ptr(unsafe { Self::read_con_field(result, 0) });
+                        let k_prime = self.force_ptr(unsafe { Self::read_con_field(result, 1) });
 
                         // Allocate Node(k', k2)
                         let new_node = self.alloc_con(self.tags.node, &[k_prime, k2]);
