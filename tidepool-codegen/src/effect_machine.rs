@@ -4,6 +4,38 @@ use crate::layout;
 use crate::yield_type::{Yield, YieldError};
 use tidepool_heap::layout as heap_layout;
 
+/// The five freer-simple continuation constructors that the effect machine must resolve.
+#[derive(Debug, Clone, Copy)]
+pub enum EffContKind {
+    Val,
+    E,
+    Union,
+    Leaf,
+    Node,
+}
+
+impl EffContKind {
+    /// The constructor name as it appears in the DataConTable.
+    pub fn name(self) -> &'static str {
+        match self {
+            EffContKind::Val => "Val",
+            EffContKind::E => "E",
+            EffContKind::Union => "Union",
+            EffContKind::Leaf => "Leaf",
+            EffContKind::Node => "Node",
+        }
+    }
+
+    /// All variants in registration order.
+    pub const ALL: [EffContKind; 5] = [
+        EffContKind::Val,
+        EffContKind::E,
+        EffContKind::Union,
+        EffContKind::Leaf,
+        EffContKind::Node,
+    ];
+}
+
 /// Constructor tags for the freer-simple Eff type.
 ///
 /// These identify which DataCon a heap-allocated constructor represents,
@@ -24,14 +56,13 @@ pub struct ConTags {
 }
 
 impl ConTags {
-    /// Resolve freer-simple constructor tags from a DataConTable.
     pub fn from_table(table: &tidepool_repr::DataConTable) -> Option<Self> {
         Some(ConTags {
-            val: table.get_by_name("Val")?.0,
-            e: table.get_by_name("E")?.0,
-            union: table.get_by_name("Union")?.0,
-            leaf: table.get_by_name("Leaf")?.0,
-            node: table.get_by_name("Node")?.0,
+            val: table.get_by_name(EffContKind::Val.name())?.0,
+            e: table.get_by_name(EffContKind::E.name())?.0,
+            union: table.get_by_name(EffContKind::Union.name())?.0,
+            leaf: table.get_by_name(EffContKind::Leaf.name())?.0,
+            node: table.get_by_name(EffContKind::Node.name())?.0,
         })
     }
 }
