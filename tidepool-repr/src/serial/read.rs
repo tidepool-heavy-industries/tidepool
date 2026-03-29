@@ -293,69 +293,39 @@ fn validate_indices(nodes: &[CoreFrame<usize>]) -> Result<(), ReadError> {
 }
 
 fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
-    let arr = match val {
-        Value::Array(a) => a,
-        _ => {
-            return Err(ReadError::InvalidStructure(
-                "Frame must be array".to_string(),
-            ))
-        }
-    };
+    let arr = expect_array(val)?;
 
     if arr.is_empty() {
         return Err(ReadError::InvalidStructure("Empty frame array".to_string()));
     }
 
-    let tag = match &arr[0] {
-        Value::Text(t) => t.as_str(),
-        _ => return Err(ReadError::InvalidTag("Tag must be string".to_string())),
-    };
+    let tag = expect_text(&arr[0])?;
 
     match tag {
         "Var" => {
-            if arr.len() != 2 {
-                return Err(ReadError::InvalidStructure(
-                    "Var expects 1 field".to_string(),
-                ));
-            }
+            expect_array_len(val, 2)?;
             Ok(CoreFrame::Var(VarId(as_u64(&arr[1])?)))
         }
         "Lit" => {
-            if arr.len() != 2 {
-                return Err(ReadError::InvalidStructure(
-                    "Lit expects 1 field".to_string(),
-                ));
-            }
+            expect_array_len(val, 2)?;
             Ok(CoreFrame::Lit(decode_literal(&arr[1])?))
         }
         "App" => {
-            if arr.len() != 3 {
-                return Err(ReadError::InvalidStructure(
-                    "App expects 2 fields".to_string(),
-                ));
-            }
+            expect_array_len(val, 3)?;
             Ok(CoreFrame::App {
                 fun: as_usize(&arr[1])?,
                 arg: as_usize(&arr[2])?,
             })
         }
         "Lam" => {
-            if arr.len() != 3 {
-                return Err(ReadError::InvalidStructure(
-                    "Lam expects 2 fields".to_string(),
-                ));
-            }
+            expect_array_len(val, 3)?;
             Ok(CoreFrame::Lam {
                 binder: VarId(as_u64(&arr[1])?),
                 body: as_usize(&arr[2])?,
             })
         }
         "LetNonRec" => {
-            if arr.len() != 4 {
-                return Err(ReadError::InvalidStructure(
-                    "LetNonRec expects 3 fields".to_string(),
-                ));
-            }
+            expect_array_len(val, 4)?;
             Ok(CoreFrame::LetNonRec {
                 binder: VarId(as_u64(&arr[1])?),
                 rhs: as_usize(&arr[2])?,
@@ -363,29 +333,11 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
             })
         }
         "LetRec" => {
-            if arr.len() != 3 {
-                return Err(ReadError::InvalidStructure(
-                    "LetRec expects 2 fields".to_string(),
-                ));
-            }
-            let bindings_arr = match &arr[1] {
-                Value::Array(a) => a,
-                _ => {
-                    return Err(ReadError::InvalidStructure(
-                        "LetRec bindings must be array".to_string(),
-                    ))
-                }
-            };
+            expect_array_len(val, 3)?;
+            let bindings_arr = expect_array(&arr[1])?;
             let mut bindings = Vec::with_capacity(bindings_arr.len());
             for b_val in bindings_arr {
-                let b_arr = match b_val {
-                    Value::Array(a) if a.len() == 2 => a,
-                    _ => {
-                        return Err(ReadError::InvalidStructure(
-                            "LetRec binding must be array of 2".to_string(),
-                        ))
-                    }
-                };
+                let b_arr = expect_array_len(b_val, 2)?;
                 bindings.push((VarId(as_u64(&b_arr[0])?), as_usize(&b_arr[1])?));
             }
             Ok(CoreFrame::LetRec {
@@ -394,19 +346,8 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
             })
         }
         "Case" => {
-            if arr.len() != 4 {
-                return Err(ReadError::InvalidStructure(
-                    "Case expects 3 fields".to_string(),
-                ));
-            }
-            let alts_arr = match &arr[3] {
-                Value::Array(a) => a,
-                _ => {
-                    return Err(ReadError::InvalidStructure(
-                        "Case alts must be array".to_string(),
-                    ))
-                }
-            };
+            expect_array_len(val, 4)?;
+            let alts_arr = expect_array(&arr[3])?;
             let mut alts = Vec::with_capacity(alts_arr.len());
             for alt_val in alts_arr {
                 alts.push(decode_alt(alt_val)?);
@@ -418,19 +359,8 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
             })
         }
         "Con" => {
-            if arr.len() != 3 {
-                return Err(ReadError::InvalidStructure(
-                    "Con expects 2 fields".to_string(),
-                ));
-            }
-            let fields_arr = match &arr[2] {
-                Value::Array(a) => a,
-                _ => {
-                    return Err(ReadError::InvalidStructure(
-                        "Con fields must be array".to_string(),
-                    ))
-                }
-            };
+            expect_array_len(val, 3)?;
+            let fields_arr = expect_array(&arr[2])?;
             let mut fields = Vec::with_capacity(fields_arr.len());
             for f_val in fields_arr {
                 fields.push(as_usize(f_val)?);
@@ -441,19 +371,8 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
             })
         }
         "Join" => {
-            if arr.len() != 5 {
-                return Err(ReadError::InvalidStructure(
-                    "Join expects 4 fields".to_string(),
-                ));
-            }
-            let params_arr = match &arr[2] {
-                Value::Array(a) => a,
-                _ => {
-                    return Err(ReadError::InvalidStructure(
-                        "Join params must be array".to_string(),
-                    ))
-                }
-            };
+            expect_array_len(val, 5)?;
+            let params_arr = expect_array(&arr[2])?;
             let mut params = Vec::with_capacity(params_arr.len());
             for p_val in params_arr {
                 params.push(VarId(as_u64(p_val)?));
@@ -466,19 +385,8 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
             })
         }
         "Jump" => {
-            if arr.len() != 3 {
-                return Err(ReadError::InvalidStructure(
-                    "Jump expects 2 fields".to_string(),
-                ));
-            }
-            let args_arr = match &arr[2] {
-                Value::Array(a) => a,
-                _ => {
-                    return Err(ReadError::InvalidStructure(
-                        "Jump args must be array".to_string(),
-                    ))
-                }
-            };
+            expect_array_len(val, 3)?;
+            let args_arr = expect_array(&arr[2])?;
             let mut args = Vec::with_capacity(args_arr.len());
             for a_val in args_arr {
                 args.push(as_usize(a_val)?);
@@ -489,28 +397,10 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
             })
         }
         "PrimOp" => {
-            if arr.len() != 3 {
-                return Err(ReadError::InvalidStructure(
-                    "PrimOp expects 2 fields".to_string(),
-                ));
-            }
-            let op_name = match &arr[1] {
-                Value::Text(t) => t,
-                _ => {
-                    return Err(ReadError::InvalidPrimOp(
-                        "PrimOp op must be string".to_string(),
-                    ))
-                }
-            };
+            expect_array_len(val, 3)?;
+            let op_name = expect_text(&arr[1])?;
             let op = decode_primop(op_name)?;
-            let args_arr = match &arr[2] {
-                Value::Array(a) => a,
-                _ => {
-                    return Err(ReadError::InvalidStructure(
-                        "PrimOp args must be array".to_string(),
-                    ))
-                }
-            };
+            let args_arr = expect_array(&arr[2])?;
             let mut args = Vec::with_capacity(args_arr.len());
             for a_val in args_arr {
                 args.push(as_usize(a_val)?);
@@ -522,22 +412,8 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
 }
 
 fn decode_literal(val: &Value) -> Result<Literal, ReadError> {
-    let arr = match val {
-        Value::Array(a) if a.len() == 2 => a,
-        _ => {
-            return Err(ReadError::InvalidLiteral(
-                "Literal must be array of 2".to_string(),
-            ))
-        }
-    };
-    let tag = match &arr[0] {
-        Value::Text(t) => t.as_str(),
-        _ => {
-            return Err(ReadError::InvalidLiteral(
-                "Literal tag must be string".to_string(),
-            ))
-        }
-    };
+    let arr = expect_array_len(val, 2)?;
+    let tag = expect_text(&arr[0])?;
     match tag {
         "LitInt" => Ok(Literal::LitInt(as_i64(&arr[1])?)),
         "LitWord" => Ok(Literal::LitWord(as_u64(&arr[1])?)),
@@ -560,23 +436,9 @@ fn decode_literal(val: &Value) -> Result<Literal, ReadError> {
 }
 
 fn decode_alt(val: &Value) -> Result<Alt<usize>, ReadError> {
-    let arr = match val {
-        Value::Array(a) if a.len() == 3 => a,
-        _ => {
-            return Err(ReadError::InvalidStructure(
-                "Alt must be array of 3".to_string(),
-            ))
-        }
-    };
+    let arr = expect_array_len(val, 3)?;
     let con = decode_alt_con(&arr[0])?;
-    let binders_arr = match &arr[1] {
-        Value::Array(a) => a,
-        _ => {
-            return Err(ReadError::InvalidStructure(
-                "Alt binders must be array".to_string(),
-            ))
-        }
-    };
+    let binders_arr = expect_array(&arr[1])?;
     let mut binders = Vec::with_capacity(binders_arr.len());
     for b_val in binders_arr {
         binders.push(VarId(as_u64(b_val)?));
@@ -586,44 +448,22 @@ fn decode_alt(val: &Value) -> Result<Alt<usize>, ReadError> {
 }
 
 fn decode_alt_con(val: &Value) -> Result<AltCon, ReadError> {
-    let arr = match val {
-        Value::Array(a) => a,
-        _ => return Err(ReadError::InvalidAltCon("AltCon must be array".to_string())),
-    };
+    let arr = expect_array(val)?;
     if arr.is_empty() {
         return Err(ReadError::InvalidAltCon("Empty AltCon array".to_string()));
     }
-    let tag = match &arr[0] {
-        Value::Text(t) => t.as_str(),
-        _ => {
-            return Err(ReadError::InvalidAltCon(
-                "AltCon tag must be string".to_string(),
-            ))
-        }
-    };
+    let tag = expect_text(&arr[0])?;
     match tag {
         "DataAlt" => {
-            if arr.len() != 2 {
-                return Err(ReadError::InvalidAltCon(
-                    "DataAlt expects 1 field".to_string(),
-                ));
-            }
+            expect_array_len(val, 2)?;
             Ok(AltCon::DataAlt(DataConId(as_u64(&arr[1])?)))
         }
         "LitAlt" => {
-            if arr.len() != 2 {
-                return Err(ReadError::InvalidAltCon(
-                    "LitAlt expects 1 field".to_string(),
-                ));
-            }
+            expect_array_len(val, 2)?;
             Ok(AltCon::LitAlt(decode_literal(&arr[1])?))
         }
         "Default" => {
-            if arr.len() != 1 {
-                return Err(ReadError::InvalidAltCon(
-                    "Default expects 0 fields".to_string(),
-                ));
-            }
+            expect_array_len(val, 1)?;
             Ok(AltCon::Default)
         }
         _ => Err(ReadError::InvalidAltCon(tag.to_string())),
@@ -667,5 +507,29 @@ fn as_usize(val: &Value) -> Result<usize, ReadError> {
                 .map_err(|_| ReadError::InvalidStructure("Integer too large for usize".to_string()))
         }
         _ => Err(ReadError::InvalidStructure("Expected integer".to_string())),
+    }
+}
+
+fn expect_array(val: &Value) -> Result<&Vec<Value>, ReadError> {
+    match val {
+        Value::Array(a) => Ok(a),
+        _ => Err(ReadError::InvalidStructure("expected array".to_string())),
+    }
+}
+
+fn expect_array_len(val: &Value, n: usize) -> Result<&Vec<Value>, ReadError> {
+    match val {
+        Value::Array(a) if a.len() == n => Ok(a),
+        Value::Array(a) => Err(ReadError::InvalidStructure(
+            format!("expected array of length {}, got {}", n, a.len()),
+        )),
+        _ => Err(ReadError::InvalidStructure("expected array".to_string())),
+    }
+}
+
+fn expect_text(val: &Value) -> Result<&str, ReadError> {
+    match val {
+        Value::Text(t) => Ok(t.as_str()),
+        _ => Err(ReadError::InvalidStructure("expected text".to_string())),
     }
 }
