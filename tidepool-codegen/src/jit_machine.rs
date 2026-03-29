@@ -77,7 +77,7 @@ impl From<crate::pipeline::PipelineError> for JitError {
 pub struct JitEffectMachine {
     pipeline: CodegenPipeline,
     nursery: Nursery,
-    tags: Option<ConTags>,
+    tags: ConTags,
     func_id: FuncId,
 }
 
@@ -105,7 +105,7 @@ impl JitEffectMachine {
             .map_err(JitError::Compilation)?;
         pipeline.finalize()?;
 
-        let tags = ConTags::from_table(table);
+        let tags = ConTags::from_table(table).ok_or(JitError::MissingConTags)?;
         let nursery = Nursery::new(nursery_size);
 
         Ok(Self {
@@ -123,7 +123,7 @@ impl JitEffectMachine {
         handlers: &mut H,
         user: &U,
     ) -> Result<Value, JitError> {
-        let tags = self.tags.ok_or(JitError::MissingConTags)?;
+        let tags = self.tags;
 
         // Install registries
         crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
