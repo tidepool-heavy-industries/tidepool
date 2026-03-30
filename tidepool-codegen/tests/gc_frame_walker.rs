@@ -27,6 +27,22 @@ fn make_table_with_con(id: DataConId, arity: u32) -> DataConTable {
         field_bangs: vec![],
         qualified_name: None,
     });
+    // Add required freer-simple tags for JitEffectMachine::compile
+    use tidepool_codegen::effect_machine::EffContKind;
+    for (i, kind) in EffContKind::ALL.iter().enumerate() {
+        table.insert(tidepool_repr::datacon::DataCon {
+            id: DataConId(1000 + i as u64),
+            name: kind.name().to_string(),
+            tag: (1000 + i) as u32,
+            rep_arity: if matches!(kind, EffContKind::Node | EffContKind::Union) {
+                2
+            } else {
+                1
+            },
+            field_bangs: vec![],
+            qualified_name: None,
+        });
+    }
     table
 }
 

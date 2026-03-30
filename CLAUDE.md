@@ -131,8 +131,6 @@ tidepool/
 │   └── tide/              ← Demo: REPL
 ├── haskell/               ← Haskell harness (tidepool-extract) + test suite + stdlib
 │   └── lib/Tidepool/      ← Haskell stdlib (auto-imported in MCP)
-├── tools/
-│   └── mcp-wrapper.py     ← MCP stdio proxy with __mcp_restart tool
 ├── flake.nix              ← Dev shell (Rust + GHC 9.12 with fat interfaces)
 └── CLAUDE.md              ← YOU ARE HERE
 ```

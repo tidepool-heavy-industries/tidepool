@@ -34,8 +34,6 @@ cargo install --path tidepool
 tidepool # Communicates via JSON-RPC over stdio
 ```
 
-You can use the `tools/mcp-wrapper.py` script to add hot-restarting capabilities for your MCP client.
-
 ## Adding New Effects
 
 Adding an effect involves changes in both Haskell and Rust:
@@ -52,12 +50,12 @@ When adding or modifying functions in `haskell/lib/Tidepool/Prelude.hs`, keep th
 
 - **Monomorphization**: Polymorphic base functions that use typeclass dictionaries often crash when JIT-compiled because error branches in dictionaries are eagerly evaluated.
 - **Shadowing**: Shadow polymorphic base functions with monomorphic versions that use primops directly (e.g., use `rem` instead of the `Integral` typeclass version).
-- **Avoid Dictionary-Heavy Functions**: Avoid functions like `maximum` or `minimum` from `base`. Implement them manually using `foldl'` and direct comparison.
+- **Avoid Dictionary-Heavy Functions**: Functions like `sum`, `product`, `maximum`, and `minimum` now work via lazy poison closures.
 
 ## Testing Approach
 
 - **Rust Tests**: Use unit tests and integration tests in the `tests/` directory of each crate.
-- **Haskell Integration Tests**: Add test cases to `haskell/test/Suite.hs`. These tests are run by the `tidepool-harness` to ensure correctness across the Haskell/Rust boundary.
+- **Haskell Integration Tests**: Add test cases to `haskell/test/Suite.hs`. These tests are compiled to CBOR fixtures and verified by integration tests in `tidepool-eval/tests/haskell_suite.rs`.
 - **Property-Based Testing**: Use `proptest` for complex logic like the bridge conversion and the JIT machine state transitions.
 
 ## Code Style
