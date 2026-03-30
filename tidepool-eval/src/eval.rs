@@ -11,17 +11,19 @@ use tidepool_repr::{
 /// bound to its worker VarId, so that `Var` references to constructors
 /// in the expression tree resolve correctly.
 pub fn env_from_datacon_table(table: &DataConTable) -> Env {
-    let mut env = Env::new();
-    for dc in table.iter() {
-        let var = VarId(dc.id.0);
-        if dc.rep_arity == 0 {
-            // Nullary constructor: just a Con value
-            env.insert(var, Value::Con(dc.id, vec![]));
-        } else {
-            env.insert(var, Value::ConFun(dc.id, dc.rep_arity as usize, vec![]));
-        }
-    }
-    env
+    table
+        .iter()
+        .map(|dc| {
+            let var = VarId(dc.id.0);
+            let val = if dc.rep_arity == 0 {
+                // Nullary constructor: just a Con value
+                Value::Con(dc.id, vec![])
+            } else {
+                Value::ConFun(dc.id, dc.rep_arity as usize, vec![])
+            };
+            (var, val)
+        })
+        .collect()
 }
 
 /// Evaluate a CoreExpr to a Value.
@@ -221,28 +223,28 @@ fn eval_at(
             eval_at(expr, *body, &new_env, heap)
         }
         CoreFrame::Con { tag, fields } => {
-            let mut field_vals = Vec::with_capacity(fields.len());
-            for &f in fields {
-                // Thunkify non-trivial fields to enable lazy evaluation.
-                // Var and Lit are cheap lookups; everything else (App, Case,
-                // Let, PrimOp, nested Con) gets wrapped in a thunk so that
-                // infinite structures like `cycle` and `zipWith ... [0..]`
-                // don't diverge at construction time.
-                match &expr.nodes[f] {
-                    CoreFrame::Var(_)
-                    | CoreFrame::Lit(_)
-                    | CoreFrame::Con { .. }
-                    | CoreFrame::Lam { .. }
-                    | CoreFrame::PrimOp { .. } => {
-                        field_vals.push(eval_at(expr, f, env, heap)?);
+            let field_vals = fields
+                .iter()
+                .map(|&f| {
+                    // Thunkify non-trivial fields to enable lazy evaluation.
+                    // Var and Lit are cheap lookups; everything else (App, Case,
+                    // Let, PrimOp, nested Con) gets wrapped in a thunk so that
+                    // infinite structures like `cycle` and `zipWith ... [0..]`
+                    // don't diverge at construction time.
+                    match &expr.nodes[f] {
+                        CoreFrame::Var(_)
+                        | CoreFrame::Lit(_)
+                        | CoreFrame::Con { .. }
+                        | CoreFrame::Lam { .. }
+                        | CoreFrame::PrimOp { .. } => eval_at(expr, f, env, heap),
+                        _ => {
+                            let subtree = expr.extract_subtree(f);
+                            let thunk_id = heap.alloc(env.clone(), subtree);
+                            Ok(Value::ThunkRef(thunk_id))
+                        }
                     }
-                    _ => {
-                        let subtree = expr.extract_subtree(f);
-                        let thunk_id = heap.alloc(env.clone(), subtree);
-                        field_vals.push(Value::ThunkRef(thunk_id));
-                    }
-                }
-            }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::Con(*tag, field_vals))
         }
         CoreFrame::Case {
@@ -294,11 +296,10 @@ fn eval_at(
             Err(EvalError::NoMatchingAlt)
         }
         CoreFrame::PrimOp { op, args } => {
-            let mut arg_vals = Vec::with_capacity(args.len());
-            for &arg in args {
-                let val = force(eval_at(expr, arg, env, heap)?, heap)?;
-                arg_vals.push(val);
-            }
+            let arg_vals: Vec<Value> = args
+                .iter()
+                .map(|&arg| force(eval_at(expr, arg, env, heap)?, heap))
+                .collect::<Result<_, _>>()?;
             // Handle primops that need heap access for deep forcing
             match op {
                 PrimOpKind::ShowDoubleAddr => {
@@ -2100,21 +2101,19 @@ mod tests {
         let f_state = heap.read(ThunkId(0));
         let g_state = heap.read(ThunkId(1));
 
-        match f_state {
-            ThunkState::Evaluated(Value::Closure(..)) => (),
-            _ => panic!(
+        let ThunkState::Evaluated(Value::Closure(..)) = f_state else {
+            panic!(
                 "Expected f to be eagerly evaluated to a Closure, got {:?}",
                 f_state
-            ),
-        }
+            );
+        };
 
-        match g_state {
-            ThunkState::Evaluated(Value::Closure(..)) => (),
-            _ => panic!(
+        let ThunkState::Evaluated(Value::Closure(..)) = g_state else {
+            panic!(
                 "Expected g to be eagerly evaluated to a Closure, got {:?}",
                 g_state
-            ),
-        }
+            );
+        };
 
         // Now also verify correctness by evaluating f 5.
         // letrec { f = \n -> g n; g = \n -> n + 1 } in f 5
@@ -2159,11 +2158,10 @@ mod tests {
         };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 42);
-        } else {
+        let Value::Lit(Literal::LitInt(n)) = res else {
             panic!("Expected LitInt(42), got {:?}", res);
-        }
+        };
+        assert_eq!(n, 42);
     }
 
     #[test]
@@ -2175,11 +2173,10 @@ mod tests {
         env.insert(VarId(1), Value::Lit(Literal::LitInt(42)));
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &env, &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 42);
-        } else {
+        let Value::Lit(Literal::LitInt(n)) = res else {
             panic!("Expected LitInt(42), got {:?}", res);
-        }
+        };
+        assert_eq!(n, 42);
     }
 
     #[test]
@@ -2206,11 +2203,10 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 42);
-        } else {
+        let Value::Lit(Literal::LitInt(n)) = res else {
             panic!("Expected LitInt(42), got {:?}", res);
-        }
+        };
+        assert_eq!(n, 42);
     }
 
     #[test]
@@ -2227,11 +2223,10 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 1);
-        } else {
+        let Value::Lit(Literal::LitInt(n)) = res else {
             panic!("Expected LitInt(1), got {:?}", res);
-        }
+        };
+        assert_eq!(n, 1);
     }
 
     #[test]
@@ -2246,17 +2241,15 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Con(tag, fields) = res {
-            assert_eq!(tag.0, 1);
-            assert_eq!(fields.len(), 1);
-            if let Value::Lit(Literal::LitInt(n)) = fields[0] {
-                assert_eq!(n, 42);
-            } else {
-                panic!("Expected LitInt(42)");
-            }
-        } else {
-            panic!("Expected Con");
-        }
+        let Value::Con(tag, fields) = res else {
+            panic!("Expected Con, got {:?}", res);
+        };
+        assert_eq!(tag.0, 1);
+        assert_eq!(fields.len(), 1);
+        let Value::Lit(Literal::LitInt(n)) = fields[0] else {
+            panic!("Expected LitInt(42), got {:?}", fields[0]);
+        };
+        assert_eq!(n, 42);
     }
 
     #[test]
@@ -2272,11 +2265,10 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 3);
-        } else {
-            panic!("Expected LitInt(3)");
-        }
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("Expected LitInt(3), got {:?}", res);
+        };
+        assert_eq!(n, 3);
     }
 
     #[test]
@@ -2295,11 +2287,10 @@ mod tests {
                 },
             ];
             let res = eval(&CoreExpr { nodes }, &Env::new(), &mut heap).unwrap();
-            if let Value::Lit(Literal::LitInt(n)) = res {
-                assert_eq!(n, 4);
-            } else {
+            let Value::Lit(Literal::LitInt(n)) = res else {
                 panic!("Expected LitInt(4), got {:?}", res);
-            }
+            };
+            assert_eq!(n, 4);
         }
         // -16 >> 2 = -4 (preserves sign)
         {
@@ -2312,11 +2303,10 @@ mod tests {
                 },
             ];
             let res = eval(&CoreExpr { nodes }, &Env::new(), &mut heap).unwrap();
-            if let Value::Lit(Literal::LitInt(n)) = res {
-                assert_eq!(n, -4);
-            } else {
+            let Value::Lit(Literal::LitInt(n)) = res else {
                 panic!("Expected LitInt(-4), got {:?}", res);
-            }
+            };
+            assert_eq!(n, -4);
         }
         // 16 >> 0 = 16
         {
@@ -2329,11 +2319,10 @@ mod tests {
                 },
             ];
             let res = eval(&CoreExpr { nodes }, &Env::new(), &mut heap).unwrap();
-            if let Value::Lit(Literal::LitInt(n)) = res {
-                assert_eq!(n, 16);
-            } else {
+            let Value::Lit(Literal::LitInt(n)) = res else {
                 panic!("Expected LitInt(16), got {:?}", res);
-            }
+            };
+            assert_eq!(n, 16);
         }
 
         // IntShrl (Logical Right Shift)
@@ -2348,11 +2337,10 @@ mod tests {
                 },
             ];
             let res = eval(&CoreExpr { nodes }, &Env::new(), &mut heap).unwrap();
-            if let Value::Lit(Literal::LitInt(n)) = res {
-                assert_eq!(n, 4611686018427387900);
-            } else {
+            let Value::Lit(Literal::LitInt(n)) = res else {
                 panic!("Expected LitInt(4611686018427387900), got {:?}", res);
-            }
+            };
+            assert_eq!(n, 4611686018427387900);
         }
 
         // IntShl (Logical Left Shift)
@@ -2367,11 +2355,10 @@ mod tests {
                 },
             ];
             let res = eval(&CoreExpr { nodes }, &Env::new(), &mut heap).unwrap();
-            if let Value::Lit(Literal::LitInt(n)) = res {
-                assert_eq!(n, 64);
-            } else {
+            let Value::Lit(Literal::LitInt(n)) = res else {
                 panic!("Expected LitInt(64), got {:?}", res);
-            }
+            };
+            assert_eq!(n, 64);
         }
     }
 
@@ -2396,11 +2383,10 @@ mod tests {
             let mut heap = crate::heap::VecHeap::new();
             let res = eval(&expr, &Env::new(), &mut heap)
                 .unwrap_or_else(|_| panic!("eval failed for a={}, b={}", a, b));
-            if let Value::Lit(Literal::LitInt(n)) = res {
-                assert_eq!(n, expected, "Failed for a={}, b={}", a, b);
-            } else {
+            let Value::Lit(Literal::LitInt(n)) = res else {
                 panic!("Expected LitInt({}), got {:?}", expected, res);
-            }
+            };
+            assert_eq!(n, expected, "Failed for a={}, b={}", a, b);
         }
     }
 
@@ -2426,11 +2412,10 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 42);
-        } else {
-            panic!("Expected LitInt(42)");
-        }
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("Expected LitInt(42), got {:?}", res);
+        };
+        assert_eq!(n, 42);
     }
 
     #[test]
@@ -2455,11 +2440,10 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Con(tag, _) = res {
-            assert_eq!(tag.0, 1);
-        } else {
-            panic!("Expected Con");
-        }
+        let Value::Con(tag, _) = res else {
+            panic!("Expected Con, got {:?}", res);
+        };
+        assert_eq!(tag.0, 1);
     }
 
     #[test]
@@ -2494,11 +2478,10 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 30);
-        } else {
-            panic!("Expected LitInt(30)");
-        }
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("Expected LitInt(30), got {:?}", res);
+        };
+        assert_eq!(n, 30);
     }
 
     #[test]
@@ -2516,11 +2499,10 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 5);
-        } else {
-            panic!("Expected LitInt(5)");
-        }
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("Expected LitInt(5), got {:?}", res);
+        };
+        assert_eq!(n, 5);
     }
 
     #[test]
@@ -2538,11 +2520,10 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 1);
-        } else {
-            panic!("Expected LitInt(1)");
-        }
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("Expected LitInt(1), got {:?}", res);
+        };
+        assert_eq!(n, 1);
     }
 
     #[test]
@@ -2565,11 +2546,10 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 42);
-        } else {
+        let Value::Lit(Literal::LitInt(n)) = res else {
             panic!("Expected LitInt(42), got {:?}", res);
-        }
+        };
+        assert_eq!(n, 42);
     }
 
     #[test]
@@ -2598,11 +2578,10 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 3);
-        } else {
-            panic!("Expected LitInt(3)");
-        }
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("Expected LitInt(3), got {:?}", res);
+        };
+        assert_eq!(n, 3);
     }
 
     #[test]
@@ -2632,11 +2611,10 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 42);
-        } else {
-            panic!("Expected LitInt(42)");
-        }
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("Expected LitInt(42), got {:?}", res);
+        };
+        assert_eq!(n, 42);
     }
 
     #[test]
@@ -2662,11 +2640,10 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 4);
-        } else {
-            panic!("Expected LitInt(4)");
-        }
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("Expected LitInt(4), got {:?}", res);
+        };
+        assert_eq!(n, 4);
     }
 
     #[test]
@@ -2712,11 +2689,10 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 42);
-        } else {
-            panic!("Expected LitInt(42)");
-        }
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("Expected LitInt(42), got {:?}", res);
+        };
+        assert_eq!(n, 42);
     }
 
     #[test]
@@ -2760,11 +2736,10 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 101);
-        } else {
-            panic!("Expected LitInt(101)");
-        }
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("Expected LitInt(101), got {:?}", res);
+        };
+        assert_eq!(n, 101);
     }
 
     #[test]
@@ -2934,11 +2909,10 @@ mod tests {
         let mut heap = crate::heap::VecHeap::new();
         let val = Value::Lit(Literal::LitInt(42));
         let res = force(val, &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 42);
-        } else {
-            panic!("Expected LitInt(42)");
-        }
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("Expected LitInt(42), got {:?}", res);
+        };
+        assert_eq!(n, 42);
     }
 
     #[test]
@@ -2958,24 +2932,20 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        match res {
-            Value::Con(tag, fields) => {
-                assert_eq!(tag.0, 2);
-                assert_eq!(fields.len(), 1);
-                match &fields[0] {
-                    Value::Con(tag2, fields2) => {
-                        assert_eq!(tag2.0, 1);
-                        assert_eq!(fields2.len(), 1);
-                        match &fields2[0] {
-                            Value::Lit(Literal::LitInt(n)) => assert_eq!(*n, 42),
-                            _ => panic!("Expected LitInt(42)"),
-                        }
-                    }
-                    _ => panic!("Expected inner Con"),
-                }
-            }
-            _ => panic!("Expected outer Con"),
-        }
+        let Value::Con(tag, fields) = res else {
+            panic!("Expected outer Con, got {:?}", res);
+        };
+        assert_eq!(tag.0, 2);
+        assert_eq!(fields.len(), 1);
+        let Value::Con(tag2, fields2) = &fields[0] else {
+            panic!("Expected inner Con, got {:?}", fields[0]);
+        };
+        assert_eq!(tag2.0, 1);
+        assert_eq!(fields2.len(), 1);
+        let Value::Lit(Literal::LitInt(n)) = &fields2[0] else {
+            panic!("Expected LitInt(42), got {:?}", fields2[0]);
+        };
+        assert_eq!(*n, 42);
     }
 
     #[test]
@@ -2997,11 +2967,10 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 42);
-        } else {
-            panic!("Expected LitInt(42)");
-        }
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("Expected LitInt(42), got {:?}", res);
+        };
+        assert_eq!(n, 42);
     }
 
     #[test]
@@ -3013,12 +2982,11 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Con(tag, fields) = res {
-            assert_eq!(tag.0, 1);
-            assert!(fields.is_empty());
-        } else {
-            panic!("Expected empty Con");
-        }
+        let Value::Con(tag, fields) = res else {
+            panic!("Expected empty Con, got {:?}", res);
+        };
+        assert_eq!(tag.0, 1);
+        assert!(fields.is_empty());
     }
 
     #[test]
@@ -3043,11 +3011,10 @@ mod tests {
         let mut heap = crate::heap::VecHeap::new();
         // Since y is not forced, this should SUCCEED and return 1
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 1);
-        } else {
-            panic!("Expected LitInt(1)");
-        }
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("Expected LitInt(1), got {:?}", res);
+        };
+        assert_eq!(n, 1);
     }
 
     #[test]
@@ -3096,26 +3063,27 @@ mod tests {
         // it would return ThunkRef(id_b) instead of 42.
         let res = force(Value::ThunkRef(id_a), &mut heap).unwrap();
 
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 42);
-        } else {
+        let Value::Lit(Literal::LitInt(n)) = res else {
             panic!("Expected LitInt(42), got {:?}", res);
-        }
+        };
+        assert_eq!(n, 42);
 
         // Verify that B was also forced on the heap.
-        match heap.read(id_b) {
-            ThunkState::Evaluated(Value::Lit(Literal::LitInt(n))) => assert_eq!(*n, 42),
-            other => panic!("Expected id_b to be Evaluated(42), got {:?}", other),
-        }
+        let ThunkState::Evaluated(Value::Lit(Literal::LitInt(n_b))) = heap.read(id_b) else {
+            panic!(
+                "Expected id_b to be Evaluated(42), got {:?}",
+                heap.read(id_b)
+            );
+        };
+        assert_eq!(*n_b, 42);
 
         // Forcing A again. It should still return 42.
         // This time it hits: Evaluated(A) -> force(ThunkRef B) -> Evaluated(B) -> 42.
         let res2 = force(Value::ThunkRef(id_a), &mut heap).unwrap();
-        if let Value::Lit(Literal::LitInt(n)) = res2 {
-            assert_eq!(n, 42);
-        } else {
+        let Value::Lit(Literal::LitInt(n2)) = res2 else {
             panic!("Expected LitInt(42), got {:?}", res2);
-        }
+        };
+        assert_eq!(n2, 42);
     }
 
     #[test]
@@ -3145,16 +3113,18 @@ mod tests {
         // x gets updated to Evaluated(42).
         let res = force(Value::ThunkRef(id_x), &mut heap).unwrap();
 
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 42);
-        } else {
+        let Value::Lit(Literal::LitInt(n)) = res else {
             panic!("Expected LitInt(42), got {:?}", res);
-        }
+        };
+        assert_eq!(n, 42);
 
         // In this case, x DOES get compressed because eval() forces.
-        match heap.read(id_x) {
-            ThunkState::Evaluated(Value::Lit(Literal::LitInt(n))) => assert_eq!(*n, 42),
-            other => panic!("Expected id_x to be Evaluated(42), got {:?}", other),
-        }
+        let ThunkState::Evaluated(Value::Lit(Literal::LitInt(n_x))) = heap.read(id_x) else {
+            panic!(
+                "Expected id_x to be Evaluated(42), got {:?}",
+                heap.read(id_x)
+            );
+        };
+        assert_eq!(*n_x, 42);
     }
 }
