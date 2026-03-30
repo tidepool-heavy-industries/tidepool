@@ -33,89 +33,44 @@ fn try_beta_at(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
     match &expr.nodes[idx] {
         CoreFrame::App { fun, arg } => {
             // Check if fun is a Lam
-            if let CoreFrame::Lam { binder, body } = &expr.nodes[*fun] {
-                // Found a manifest beta redex!
-                let body_tree = expr.extract_subtree(*body);
-                let arg_tree = expr.extract_subtree(*arg);
-                let substituted = tidepool_repr::subst::subst(&body_tree, *binder, &arg_tree);
-                Some(replace_subtree(expr, idx, &substituted))
-            } else {
+            let CoreFrame::Lam { binder, body } = &expr.nodes[*fun] else {
                 // Try to find redex in children
-                try_beta_at(expr, *fun).or_else(|| try_beta_at(expr, *arg))
-            }
+                return try_beta_at(expr, *fun).or_else(|| try_beta_at(expr, *arg));
+            };
+            // Found a manifest beta redex!
+            let body_tree = expr.extract_subtree(*body);
+            let arg_tree = expr.extract_subtree(*arg);
+            let substituted = tidepool_repr::subst::subst(&body_tree, *binder, &arg_tree);
+            Some(replace_subtree(expr, idx, &substituted))
         }
         // For other nodes, try each child
-        other => {
-            let mut result = None;
-            // We need to visit children. Since map_layer is for remapping indices,
-            // we can use it to "visit" indices if we are careful.
-            // But it's easier to just match on the frame and visit children.
-            match other {
-                CoreFrame::Var(_) | CoreFrame::Lit(_) => {}
-                CoreFrame::App { .. } => {
-                    // App nodes are handled in the outer match — this arm should never fire.
-                    return None;
-                }
-                CoreFrame::Lam { body, .. } => {
-                    result = try_beta_at(expr, *body);
-                }
-                CoreFrame::LetNonRec { rhs, body, .. } => {
-                    result = try_beta_at(expr, *rhs).or_else(|| try_beta_at(expr, *body));
-                }
-                CoreFrame::LetRec { bindings, body } => {
-                    for (_, rhs) in bindings {
-                        result = try_beta_at(expr, *rhs);
-                        if result.is_some() {
-                            break;
-                        }
-                    }
-                    if result.is_none() {
-                        result = try_beta_at(expr, *body);
-                    }
-                }
-                CoreFrame::Case {
-                    scrutinee, alts, ..
-                } => {
-                    result = try_beta_at(expr, *scrutinee);
-                    if result.is_none() {
-                        for alt in alts {
-                            result = try_beta_at(expr, alt.body);
-                            if result.is_some() {
-                                break;
-                            }
-                        }
-                    }
-                }
-                CoreFrame::Con { fields, .. } => {
-                    for field in fields {
-                        result = try_beta_at(expr, *field);
-                        if result.is_some() {
-                            break;
-                        }
-                    }
-                }
-                CoreFrame::Join { rhs, body, .. } => {
-                    result = try_beta_at(expr, *rhs).or_else(|| try_beta_at(expr, *body));
-                }
-                CoreFrame::Jump { args, .. } => {
-                    for arg in args {
-                        result = try_beta_at(expr, *arg);
-                        if result.is_some() {
-                            break;
-                        }
-                    }
-                }
-                CoreFrame::PrimOp { args, .. } => {
-                    for arg in args {
-                        result = try_beta_at(expr, *arg);
-                        if result.is_some() {
-                            break;
-                        }
-                    }
-                }
+        other => match other {
+            CoreFrame::Var(_) | CoreFrame::Lit(_) => None,
+            CoreFrame::App { .. } => {
+                // App nodes are handled in the outer match — this arm should never fire.
+                None
             }
-            result
-        }
+            CoreFrame::Lam { body, .. } => try_beta_at(expr, *body),
+            CoreFrame::LetNonRec { rhs, body, .. } => {
+                try_beta_at(expr, *rhs).or_else(|| try_beta_at(expr, *body))
+            }
+            CoreFrame::LetRec { bindings, body } => bindings
+                .iter()
+                .find_map(|(_, rhs)| try_beta_at(expr, *rhs))
+                .or_else(|| try_beta_at(expr, *body)),
+            CoreFrame::Case {
+                scrutinee, alts, ..
+            } => try_beta_at(expr, *scrutinee)
+                .or_else(|| alts.iter().find_map(|alt| try_beta_at(expr, alt.body))),
+            CoreFrame::Con { fields, .. } => {
+                fields.iter().find_map(|field| try_beta_at(expr, *field))
+            }
+            CoreFrame::Join { rhs, body, .. } => {
+                try_beta_at(expr, *rhs).or_else(|| try_beta_at(expr, *body))
+            }
+            CoreFrame::Jump { args, .. } => args.iter().find_map(|arg| try_beta_at(expr, *arg)),
+            CoreFrame::PrimOp { args, .. } => args.iter().find_map(|arg| try_beta_at(expr, *arg)),
+        },
     }
 }
 
@@ -163,16 +118,13 @@ mod tests {
         assert!(changed);
         // Result should be λy.1
         let root = expr.nodes.len() - 1;
-        if let CoreFrame::Lam { binder, body } = &expr.nodes[root] {
-            assert_eq!(*binder, y);
-            if let CoreFrame::Lit(Literal::LitInt(1)) = &expr.nodes[*body] {
-                // OK
-            } else {
-                panic!("Body should be 1, got {:?}", expr.nodes[*body]);
-            }
-        } else {
+        let CoreFrame::Lam { binder, body } = &expr.nodes[root] else {
             panic!("Result should be Lam, got {:?}", expr.nodes[root]);
-        }
+        };
+        assert_eq!(*binder, y);
+        let CoreFrame::Lit(Literal::LitInt(1)) = &expr.nodes[*body] else {
+            panic!("Body should be 1, got {:?}", expr.nodes[*body]);
+        };
     }
 
     #[test]
@@ -207,16 +159,14 @@ mod tests {
 
         assert!(changed);
         let root = expr.nodes.len() - 1;
-        if let CoreFrame::Lam { binder, body } = &expr.nodes[root] {
-            assert_ne!(*binder, y); // Should be renamed
-            if let CoreFrame::Var(v) = &expr.nodes[*body] {
-                assert_eq!(*v, y); // Should refer to the free y
-            } else {
-                panic!("Body should be Var(y)");
-            }
-        } else {
+        let CoreFrame::Lam { binder, body } = &expr.nodes[root] else {
             panic!("Result should be Lam");
-        }
+        };
+        assert_ne!(*binder, y); // Should be renamed
+        let CoreFrame::Var(v) = &expr.nodes[*body] else {
+            panic!("Body should be Var(y)");
+        };
+        assert_eq!(*v, y); // Should refer to the free y
     }
 
     #[test]
@@ -244,22 +194,20 @@ mod tests {
         let val_orig = eval(&expr_orig, &env, &mut heap).expect("Original eval failed");
         let val_reduced = eval(&expr_reduced, &env, &mut heap).expect("Reduced eval failed");
 
-        if let (tidepool_eval::Value::Lit(l1), tidepool_eval::Value::Lit(l2)) =
+        let (tidepool_eval::Value::Lit(l1), tidepool_eval::Value::Lit(l2)) =
             (&val_orig, &val_reduced)
-        {
-            assert_eq!(l1, l2);
-        } else {
+        else {
             panic!(
                 "Expected literal results, got {:?} and {:?}",
                 val_orig, val_reduced
             );
-        }
+        };
+        assert_eq!(l1, l2);
 
-        if let tidepool_eval::Value::Lit(Literal::LitInt(n)) = val_orig {
-            assert_eq!(n, 42);
-        } else {
+        let tidepool_eval::Value::Lit(Literal::LitInt(n)) = val_orig else {
             panic!("Expected 42");
-        }
+        };
+        assert_eq!(n, 42);
     }
 
     #[test]
