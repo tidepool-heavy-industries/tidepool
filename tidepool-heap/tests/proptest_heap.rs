@@ -124,10 +124,9 @@ proptest! {
             assert!(table.is_reachable(id));
             let new_id = table.lookup(id).unwrap();
             // Verify we can still read the thunk
-            match heap.read(new_id) {
-                ThunkState::Unevaluated(_, _) => (),
-                _ => panic!("Expected Unevaluated thunk state after GC"),
-            }
+            let ThunkState::Unevaluated(_, _) = heap.read(new_id) else {
+                panic!("Expected Unevaluated thunk state after GC");
+            };
         }
     }
 
@@ -193,20 +192,16 @@ proptest! {
         // Verify the chain structure is preserved
         let mut current_new_id = table.lookup(root).unwrap();
         for i in (1..chain_len).rev() {
-            match heap.read(current_new_id) {
-                ThunkState::Unevaluated(env, _) => {
-                    let prev_old_id = ids[i-1];
-                    let expected_new_id = table.lookup(prev_old_id).unwrap();
-                    match env.get(&VarId(i as u64)).expect("Value not found in env") {
-                        Value::ThunkRef(id) => {
-                            prop_assert_eq!(*id, expected_new_id, "Chain link broken at index {}", i);
-                            current_new_id = table.lookup(prev_old_id).unwrap();
-                        }
-                        _ => panic!("Expected ThunkRef"),
-                    }
-                }
-                _ => panic!("Expected Unevaluated thunk"),
-            }
+            let ThunkState::Unevaluated(env, _) = heap.read(current_new_id) else {
+                panic!("Expected Unevaluated thunk");
+            };
+            let prev_old_id = ids[i - 1];
+            let expected_new_id = table.lookup(prev_old_id).unwrap();
+            let Value::ThunkRef(id) = env.get(&VarId(i as u64)).expect("Value not found in env") else {
+                panic!("Expected ThunkRef");
+            };
+            prop_assert_eq!(*id, expected_new_id, "Chain link broken at index {}", i);
+            current_new_id = table.lookup(prev_old_id).unwrap();
         }
     }
 
@@ -242,10 +237,9 @@ proptest! {
 
             // Verify all roots are valid
             for &root in &roots {
-                match heap.read(root) {
-                    ThunkState::Unevaluated(_, _) => (),
-                    _ => panic!("Expected Unevaluated thunk after cycle {}", cycle),
-                }
+                let ThunkState::Unevaluated(_, _) = heap.read(root) else {
+                    panic!("Expected Unevaluated thunk after cycle {}", cycle);
+                };
             }
 
             prop_assert_eq!(heap.thunk_count(), roots.len(), "Heap should only contain roots");

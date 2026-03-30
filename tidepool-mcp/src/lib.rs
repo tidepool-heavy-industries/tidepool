@@ -391,14 +391,14 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
     out.push('\n');
 
     for eff in effects {
-        for td in eff.type_defs {
+        eff.type_defs.iter().for_each(|td| {
             out.push_str(td);
             out.push('\n');
-        }
+        });
         out.push_str(&format!("data {} a where\n", eff.type_name));
-        for ctor in eff.constructors {
+        eff.constructors.iter().for_each(|ctor| {
             out.push_str(&format!("  {}\n", ctor));
-        }
+        });
         out.push('\n');
     }
 
@@ -865,9 +865,9 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
 
     if !effects.is_empty() {
         desc.push_str("\nAvailable effects (use `send` to invoke):\n");
-        for eff in effects {
+        effects.iter().for_each(|eff| {
             desc.push_str(&format!("\n{}: {}\n", eff.type_name, eff.description));
-        }
+        });
 
         // List built-in helpers
         let has_console = effects.iter().any(|e| e.type_name == "Console");
@@ -877,14 +877,12 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
             if has_console {
                 desc.push_str("  say :: Text -> M ()\n");
             }
-            for eff in effects {
-                for h in eff.helpers {
-                    // Extract just the type signature line
-                    if let Some(sig) = h.lines().next() {
-                        desc.push_str(&format!("  {}\n", sig));
-                    }
+            effects.iter().flat_map(|e| e.helpers).for_each(|h| {
+                // Extract just the type signature line
+                if let Some(sig) = h.lines().next() {
+                    desc.push_str(&format!("  {}\n", sig));
                 }
-            }
+            });
             desc.push_str(
                 "\nPrefer helpers over raw `send`: `say \"hi\"` not `send (Print \"hi\")`.\n",
             );
@@ -1218,28 +1216,34 @@ fn extract_ask_prompt(
 ) -> Result<String, String> {
     use tidepool_eval::value::Value;
 
-    if let Value::Con(_, fields) = request {
-        if let Some(prompt_val) = fields.first() {
-            // Try using FromCore (handles Text, LitString, [Char])
-            match String::from_value(prompt_val, table) {
-                Ok(s) => return Ok(s),
-                Err(e) => {
-                    // Provide diagnostic: the prompt text couldn't be extracted,
-                    // likely because the string-building expression crashed
-                    // (e.g., unresolved external, partial evaluation).
-                    return Err(format!(
-                        "ask prompt could not be evaluated to Text: {e}. \
-                         The expression passed to `ask` likely crashed during evaluation \
-                         (check for unresolved externals or runtime errors in the prompt string)."
-                    ));
-                }
-            }
+    let Value::Con(_, fields) = request else {
+        return Err(format!(
+            "ask received unexpected request shape (expected Con(Ask, [text])): {:?}",
+            request
+        ));
+    };
+
+    let Some(prompt_val) = fields.first() else {
+        return Err(format!(
+            "ask received unexpected request shape (expected Con(Ask, [text])): {:?}",
+            request
+        ));
+    };
+
+    // Try using FromCore (handles Text, LitString, [Char])
+    match String::from_value(prompt_val, table) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            // Provide diagnostic: the prompt text couldn't be extracted,
+            // likely because the string-building expression crashed
+            // (e.g., unresolved external, partial evaluation).
+            Err(format!(
+                "ask prompt could not be evaluated to Text: {e}. \
+                 The expression passed to `ask` likely crashed during evaluation \
+                 (check for unresolved externals or runtime errors in the prompt string)."
+            ))
         }
     }
-    Err(format!(
-        "ask received unexpected request shape (expected Con(Ask, [text])): {:?}",
-        request
-    ))
 }
 
 // ---------------------------------------------------------------------------
