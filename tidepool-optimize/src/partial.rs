@@ -76,13 +76,10 @@ fn partial_eval_at(
             (ni, PartialValue::Known(KnownValue::Lit(lit.clone())))
         }
         CoreFrame::Con { tag, fields } => {
-            let mut fi = Vec::new();
-            let mut fv = Vec::new();
-            for &f in fields {
-                let (i, v) = partial_eval_at(expr, f, env, new_nodes);
-                fi.push(i);
-                fv.push(v);
-            }
+            let (fi, fv): (Vec<_>, Vec<_>) = fields
+                .iter()
+                .map(|&f| partial_eval_at(expr, f, env, new_nodes))
+                .unzip();
             let ni = new_nodes.len();
             new_nodes.push(CoreFrame::Con {
                 tag: *tag,
@@ -121,11 +118,13 @@ fn partial_eval_at(
             for (b, _) in bindings {
                 new_env.insert(*b, PartialValue::Unknown);
             }
-            let mut nb = Vec::new();
-            for (b, r) in bindings {
-                let (ri, _) = partial_eval_at(expr, *r, &new_env, new_nodes);
-                nb.push((*b, ri));
-            }
+            let nb: Vec<_> = bindings
+                .iter()
+                .map(|(b, r)| {
+                    let (ri, _) = partial_eval_at(expr, *r, &new_env, new_nodes);
+                    (*b, ri)
+                })
+                .collect();
             let (bi, bv) = partial_eval_at(expr, *body, &new_env, new_nodes);
             let ni = new_nodes.len();
             new_nodes.push(CoreFrame::LetRec {
@@ -176,13 +175,10 @@ fn partial_eval_at(
             }
         }
         CoreFrame::PrimOp { op, args } => {
-            let mut ai = Vec::new();
-            let mut av = Vec::new();
-            for &a in args {
-                let (i, v) = partial_eval_at(expr, a, env, new_nodes);
-                ai.push(i);
-                av.push(v);
-            }
+            let (ai, av): (Vec<_>, Vec<_>) = args
+                .iter()
+                .map(|&a| partial_eval_at(expr, a, env, new_nodes))
+                .unzip();
             if let Some(result) = try_eval_primop(*op, &av) {
                 let ni = new_nodes.len();
                 new_nodes.push(CoreFrame::Lit(result.clone()));
@@ -227,11 +223,10 @@ fn partial_eval_at(
             (ni, bv)
         }
         CoreFrame::Jump { label, args } => {
-            let mut ai = Vec::new();
-            for &a in args {
-                let (i, _) = partial_eval_at(expr, a, env, new_nodes);
-                ai.push(i);
-            }
+            let ai: Vec<_> = args
+                .iter()
+                .map(|&a| partial_eval_at(expr, a, env, new_nodes).0)
+                .collect();
             let ni = new_nodes.len();
             new_nodes.push(CoreFrame::Jump {
                 label: *label,
@@ -273,19 +268,21 @@ fn emit_residual_case(
 ) -> (usize, PartialValue) {
     let mut new_env = env.clone();
     new_env.insert(*binder, PartialValue::Unknown);
-    let mut new_alts = Vec::new();
-    for alt in alts {
-        let mut alt_env = new_env.clone();
-        for b in &alt.binders {
-            alt_env.insert(*b, PartialValue::Unknown);
-        }
-        let (bi, _) = partial_eval_at(expr, alt.body, &alt_env, new_nodes);
-        new_alts.push(Alt {
-            con: alt.con.clone(),
-            binders: alt.binders.clone(),
-            body: bi,
-        });
-    }
+    let new_alts: Vec<_> = alts
+        .iter()
+        .map(|alt| {
+            let mut alt_env = new_env.clone();
+            for b in &alt.binders {
+                alt_env.insert(*b, PartialValue::Unknown);
+            }
+            let (bi, _) = partial_eval_at(expr, alt.body, &alt_env, new_nodes);
+            Alt {
+                con: alt.con.clone(),
+                binders: alt.binders.clone(),
+                body: bi,
+            }
+        })
+        .collect();
     let ni = new_nodes.len();
     new_nodes.push(CoreFrame::Case {
         scrutinee: scrut_idx,
@@ -546,14 +543,13 @@ mod tests {
         let mut heap_after = VecHeap::new();
         let val_after = eval(&expr, &Env::new(), &mut heap_after).unwrap();
 
-        if let (Value::Lit(Literal::LitInt(n1)), Value::Lit(Literal::LitInt(n2))) =
+        let (Value::Lit(Literal::LitInt(n1)), Value::Lit(Literal::LitInt(n2))) =
             (val_before, val_after)
-        {
-            assert_eq!(n1, 30);
-            assert_eq!(n2, 30);
-        } else {
+        else {
             panic!("Expected LitInt(30)");
-        }
+        };
+        assert_eq!(n1, 30);
+        assert_eq!(n2, 30);
     }
 
     #[test]

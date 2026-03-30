@@ -59,13 +59,9 @@ fn try_dce_at(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> Opti
 }
 
 fn try_children(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> Option<CoreExpr> {
-    let children = get_children(&expr.nodes[idx]);
-    for child in children {
-        if let Some(result) = try_dce_at(expr, child, occ_map) {
-            return Some(result);
-        }
-    }
-    None
+    get_children(&expr.nodes[idx])
+        .into_iter()
+        .find_map(|child| try_dce_at(expr, child, occ_map))
 }
 
 #[cfg(test)]
@@ -188,14 +184,13 @@ mod tests {
         assert_eq!(dce_expr.nodes.len(), 3);
         // The root should be a LetNonRec for x
         let root_idx = dce_expr.nodes.len() - 1;
-        if let CoreFrame::LetNonRec { binder, .. } = &dce_expr.nodes[root_idx] {
-            assert_eq!(*binder, x);
-        } else {
+        let CoreFrame::LetNonRec { binder, .. } = &dce_expr.nodes[root_idx] else {
             panic!(
                 "Root should be LetNonRec for x, got {:?}",
                 dce_expr.nodes[root_idx]
             );
-        }
+        };
+        assert_eq!(*binder, x);
     }
 
     // 6. test_dce_preserves_eval: let x = 42 in let y = 99 in x -> eval before/after, verify match.
@@ -260,11 +255,10 @@ mod tests {
 
         // 1. Original evaluates to 100
         let val_orig = eval(&expr, &env, &mut heap).expect("Original eval failed");
-        if let tidepool_eval::Value::Lit(Literal::LitInt(n)) = val_orig {
-            assert_eq!(n, 100);
-        } else {
+        let tidepool_eval::Value::Lit(Literal::LitInt(n)) = val_orig else {
             panic!("Original should eval to 100, got {:?}", val_orig);
-        }
+        };
+        assert_eq!(n, 100);
 
         // 2. DCE should NOT drop the group because f is live
         let changed = Dce.run(&mut dce_expr);
@@ -276,13 +270,12 @@ mod tests {
 
         // 3. Evaluates correctly after (no-op) DCE
         let val_dce = eval(&dce_expr, &env, &mut heap).expect("DCE eval failed");
-        if let tidepool_eval::Value::Lit(Literal::LitInt(n)) = val_dce {
-            assert_eq!(n, 100);
-        } else {
+        let tidepool_eval::Value::Lit(Literal::LitInt(n2)) = val_dce else {
             panic!(
                 "Result after DCE should still eval to 100, got {:?}",
                 val_dce
             );
-        }
+        };
+        assert_eq!(n2, 100);
     }
 }
