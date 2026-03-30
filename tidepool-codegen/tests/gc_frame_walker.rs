@@ -150,17 +150,15 @@ fn test_gc_preserves_values() {
             let mut machine = JitEffectMachine::compile(&expr, &table, 2048).unwrap();
             let result = machine.run_pure().unwrap();
 
-            match result {
-                Value::Con(tag, fields) => {
-                    assert_eq!(tag, DataConId(1));
-                    assert_eq!(fields.len(), 1);
-                    match &fields[0] {
-                        Value::Lit(lit) => assert_eq!(*lit, Literal::LitInt(42)),
-                        other => panic!("Expected Lit(42), got {:?}", other),
-                    }
-                }
-                other => panic!("Expected Con, got {:?}", other),
-            }
+            let Value::Con(tag, fields) = result else {
+                panic!("Expected Con, got {:?}", result);
+            };
+            assert_eq!(tag, DataConId(1));
+            assert_eq!(fields.len(), 1);
+            let Value::Lit(lit) = &fields[0] else {
+                panic!("Expected Lit(42), got {:?}", fields[0]);
+            };
+            assert_eq!(*lit, Literal::LitInt(42));
         })
         .unwrap()
         .join()
@@ -180,35 +178,30 @@ fn test_multiple_gc_cycles() {
             let mut machine = JitEffectMachine::compile(&expr, &table, 2048).unwrap();
             let result = machine.run_pure();
 
-            match result {
-                Ok(val) => {
-                    // Verify the result is a nested Con chain ending in Lit(42)
-                    let mut current = &val;
-                    for _ in 0..60 {
-                        match current {
-                            Value::Con(_, fields) => {
-                                assert_eq!(fields.len(), 1);
-                                current = &fields[0];
-                            }
-                            other => panic!("Expected Con in chain, got {:?}", other),
-                        }
-                    }
-                    match current {
-                        Value::Lit(Literal::LitInt(42)) => {}
-                        other => panic!("Expected Lit(42) at leaf, got {:?}", other),
-                    }
-                    // Should have multiple GC cycles
-                    let gc_count = host_fns::gc_trigger_call_count();
-                    assert!(
-                        gc_count > 1,
-                        "Expected multiple GC cycles, got {}",
-                        gc_count
-                    );
+            if let Ok(val) = result {
+                // Verify the result is a nested Con chain ending in Lit(42)
+                let mut current = &val;
+                for _ in 0..60 {
+                    let Value::Con(_, fields) = current else {
+                        panic!("Expected Con in chain, got {:?}", current);
+                    };
+                    assert_eq!(fields.len(), 1);
+                    current = &fields[0];
                 }
-                Err(JitError::Yield(YieldError::HeapOverflow)) => {
-                    // HeapOverflow is acceptable for small nursery
-                }
-                Err(e) => panic!("Expected HeapOverflow but got: {}", e),
+                let Value::Lit(Literal::LitInt(42)) = current else {
+                    panic!("Expected Lit(42) at leaf, got {:?}", current);
+                };
+                // Should have multiple GC cycles
+                let gc_count = host_fns::gc_trigger_call_count();
+                assert!(
+                    gc_count > 1,
+                    "Expected multiple GC cycles, got {}",
+                    gc_count
+                );
+            } else if let Err(JitError::Yield(YieldError::HeapOverflow)) = result {
+                // HeapOverflow is acceptable for small nursery
+            } else if let Err(e) = result {
+                panic!("Expected HeapOverflow but got: {}", e);
             }
         })
         .unwrap()

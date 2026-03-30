@@ -217,23 +217,20 @@ mod tests {
         assert_eq!(id1.0, 0);
         assert_eq!(id2.0, 1);
 
-        match heap.read(id1) {
-            ThunkState::Unevaluated(_, _) => (),
-            _ => panic!("Expected Unevaluated"),
-        }
+        let ThunkState::Unevaluated(_, _) = heap.read(id1) else {
+            panic!("Expected Unevaluated");
+        };
 
         heap.write(id1, ThunkState::BlackHole);
-        match heap.read(id1) {
-            ThunkState::BlackHole => (),
-            _ => panic!("Expected BlackHole"),
-        }
+        let ThunkState::BlackHole = heap.read(id1) else {
+            panic!("Expected BlackHole");
+        };
 
         let val = Value::Lit(Literal::LitInt(100));
         heap.write(id1, ThunkState::Evaluated(val));
-        match heap.read(id1) {
-            ThunkState::Evaluated(Value::Lit(Literal::LitInt(100))) => (),
-            _ => panic!("Expected Evaluated(100)"),
-        }
+        let ThunkState::Evaluated(Value::Lit(Literal::LitInt(100))) = heap.read(id1) else {
+            panic!("Expected Evaluated(100)");
+        };
     }
 
     #[test]
@@ -326,14 +323,12 @@ mod tests {
         assert_eq!(new_id2, ThunkId(1));
 
         // Both are readable
-        match heap.read(new_id0) {
-            ThunkState::Unevaluated(_, _) => (),
-            _ => panic!("Expected Unevaluated"),
-        }
-        match heap.read(new_id2) {
-            ThunkState::Unevaluated(_, _) => (),
-            _ => panic!("Expected Unevaluated"),
-        }
+        let ThunkState::Unevaluated(_, _) = heap.read(new_id0) else {
+            panic!("Expected Unevaluated");
+        };
+        let ThunkState::Unevaluated(_, _) = heap.read(new_id2) else {
+            panic!("Expected Unevaluated");
+        };
     }
 
     #[test]
@@ -355,17 +350,15 @@ mod tests {
 
         assert_eq!(heap.thunk_count(), 2);
         let new_id1 = table.lookup(id1).unwrap();
-        match heap.read(new_id1) {
-            ThunkState::Unevaluated(env, _) => {
-                // The ThunkRef should point to the NEW id for id0
-                let new_id0 = table.lookup(id0).unwrap();
-                match env.get(&VarId(42)).unwrap() {
-                    Value::ThunkRef(id) => assert_eq!(*id, new_id0),
-                    _ => panic!("Expected ThunkRef"),
-                }
-            }
-            _ => panic!("Expected Unevaluated"),
-        }
+        let ThunkState::Unevaluated(env, _) = heap.read(new_id1) else {
+            panic!("Expected Unevaluated");
+        };
+        // The ThunkRef should point to the NEW id for id0
+        let new_id0 = table.lookup(id0).unwrap();
+        let Value::ThunkRef(id) = env.get(&VarId(42)).unwrap() else {
+            panic!("Expected ThunkRef");
+        };
+        assert_eq!(*id, new_id0);
     }
 
     #[test]

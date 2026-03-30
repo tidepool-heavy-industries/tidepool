@@ -29,13 +29,11 @@ fn test_sigill_returns_signal_error() {
         })
     };
 
-    match result {
-        Err(e) => {
-            assert_eq!(e.0, libc::SIGILL, "expected SIGILL, got signal {}", e.0);
-            eprintln!("Signal caught correctly: {}", e);
-        }
-        Ok(()) => panic!("expected SignalError, got Ok"),
-    }
+    let Err(e) = result else {
+        panic!("expected SignalError, got Ok");
+    };
+    assert_eq!(e.0, libc::SIGILL, "expected SIGILL, got signal {}", e.0);
+    eprintln!("Signal caught correctly: {}", e);
 }
 
 #[test]

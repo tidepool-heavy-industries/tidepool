@@ -249,14 +249,9 @@ impl JitEffectMachine {
         crate::host_fns::set_exec_context("running pure computation");
         // SAFETY: Calling the JIT function through a valid function pointer with signal
         // protection for crash recovery. vmctx is freshly created from the nursery.
-        let result_ptr: *mut u8 = match unsafe {
-            crate::signal_safety::with_signal_protection(|| func_ptr(&mut vmctx))
-        } {
-            Ok(ptr) => ptr,
-            Err(e) => {
-                return Err(JitError::Yield(runtime_error_or_signal(e.0)));
-            }
-        };
+        let result_ptr: *mut u8 =
+            unsafe { crate::signal_safety::with_signal_protection(|| func_ptr(&mut vmctx)) }
+                .map_err(|e| JitError::Yield(runtime_error_or_signal(e.0)))?;
 
         // SAFETY: Resolving pending tail calls. vmctx.tail_callee/tail_arg are valid
         // heap pointers set by JIT tail-call sites. Code pointers in closures point to

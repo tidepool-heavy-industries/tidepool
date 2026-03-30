@@ -45,17 +45,22 @@ fn fingerprint_dir(dir: &Path, hasher: &mut blake3::Hasher) {
         let path = entry.path();
         if path.is_dir() {
             fingerprint_dir(&path, hasher);
-        } else if let Some(ext) = path.extension() {
-            if ext == "hs" || ext == "hs-boot" {
-                if let Ok(meta) = entry.metadata() {
-                    hasher.update(path.as_os_str().as_encoded_bytes());
-                    hasher.update(&meta.len().to_le_bytes());
-                    if let Ok(mtime) = meta.modified() {
-                        if let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH) {
-                            hasher.update(&dur.as_nanos().to_le_bytes());
-                        }
-                    }
-                }
+            continue;
+        }
+        let Some(ext) = path.extension() else {
+            continue;
+        };
+        if ext != "hs" && ext != "hs-boot" {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        hasher.update(path.as_os_str().as_encoded_bytes());
+        hasher.update(&meta.len().to_le_bytes());
+        if let Ok(mtime) = meta.modified() {
+            if let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH) {
+                hasher.update(&dur.as_nanos().to_le_bytes());
             }
         }
     }

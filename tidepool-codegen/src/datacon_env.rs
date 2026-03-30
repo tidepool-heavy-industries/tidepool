@@ -15,9 +15,7 @@ pub fn wrap_with_datacon_env(expr: &CoreExpr, table: &DataConTable) -> CoreExpr 
 
     // First, push all nodes from the original expression
     let mut src = TreeBuilder::new();
-    for node in &expr.nodes {
-        src.push(node.clone());
-    }
+    src.extend(expr.nodes.iter().cloned());
     let base = b.push_tree(src);
     let root = base + expr.nodes.len() - 1;
 

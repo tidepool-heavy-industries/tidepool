@@ -42,31 +42,31 @@ fn try_case_reduce_at(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
                         .find(|a| matches!(&a.con, AltCon::DataAlt(t) if t == tag))
                         .or_else(|| alts.iter().find(|a| matches!(&a.con, AltCon::Default)));
 
-                    if let Some(alt) = alt {
-                        // Arity check for DataAlt: binders must match fields.
-                        // If mismatch, skip this reduction (malformed IR).
-                        if let AltCon::DataAlt(_) = &alt.con {
-                            if alt.binders.len() != fields.len() {
-                                return try_children(expr, idx);
-                            }
-                        }
-
-                        let mut body = expr.extract_subtree(alt.body);
-                        // Bind fields to alt binders
-                        if let AltCon::DataAlt(_) = &alt.con {
-                            for (alt_binder, field_idx) in alt.binders.iter().zip(fields.iter()) {
-                                let field_tree = expr.extract_subtree(*field_idx);
-                                body = tidepool_repr::subst::subst(&body, *alt_binder, &field_tree);
-                            }
-                        }
-                        // Substitute case binder with scrutinee
-                        let scrut_tree = expr.extract_subtree(*scrutinee);
-                        body = tidepool_repr::subst::subst(&body, *binder, &scrut_tree);
-                        Some(replace_subtree(expr, idx, &body))
-                    } else {
+                    let Some(alt) = alt else {
                         // No matching alt — try children
-                        try_children(expr, idx)
+                        return try_children(expr, idx);
+                    };
+
+                    // Arity check for DataAlt: binders must match fields.
+                    // If mismatch, skip this reduction (malformed IR).
+                    if let AltCon::DataAlt(_) = &alt.con {
+                        if alt.binders.len() != fields.len() {
+                            return try_children(expr, idx);
+                        }
                     }
+
+                    let mut body = expr.extract_subtree(alt.body);
+                    // Bind fields to alt binders
+                    if let AltCon::DataAlt(_) = &alt.con {
+                        for (alt_binder, field_idx) in alt.binders.iter().zip(fields.iter()) {
+                            let field_tree = expr.extract_subtree(*field_idx);
+                            body = tidepool_repr::subst::subst(&body, *alt_binder, &field_tree);
+                        }
+                    }
+                    // Substitute case binder with scrutinee
+                    let scrut_tree = expr.extract_subtree(*scrutinee);
+                    body = tidepool_repr::subst::subst(&body, *binder, &scrut_tree);
+                    Some(replace_subtree(expr, idx, &body))
                 }
                 CoreFrame::Lit(lit) => {
                     let alt = alts
@@ -74,15 +74,15 @@ fn try_case_reduce_at(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
                         .find(|a| matches!(&a.con, AltCon::LitAlt(l) if l == lit))
                         .or_else(|| alts.iter().find(|a| matches!(&a.con, AltCon::Default)));
 
-                    if let Some(alt) = alt {
-                        let mut body = expr.extract_subtree(alt.body);
-                        // Substitute case binder with scrutinee literal
-                        let scrut_tree = expr.extract_subtree(*scrutinee);
-                        body = tidepool_repr::subst::subst(&body, *binder, &scrut_tree);
-                        Some(replace_subtree(expr, idx, &body))
-                    } else {
-                        try_children(expr, idx)
-                    }
+                    let Some(alt) = alt else {
+                        return try_children(expr, idx);
+                    };
+
+                    let mut body = expr.extract_subtree(alt.body);
+                    // Substitute case binder with scrutinee literal
+                    let scrut_tree = expr.extract_subtree(*scrutinee);
+                    body = tidepool_repr::subst::subst(&body, *binder, &scrut_tree);
+                    Some(replace_subtree(expr, idx, &body))
                 }
                 _ => try_children(expr, idx),
             }
@@ -92,13 +92,9 @@ fn try_case_reduce_at(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
 }
 
 fn try_children(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
-    let children = get_children(&expr.nodes[idx]);
-    for child in children {
-        if let Some(result) = try_case_reduce_at(expr, child) {
-            return Some(result);
-        }
-    }
-    None
+    get_children(&expr.nodes[idx])
+        .into_iter()
+        .find_map(|child| try_case_reduce_at(expr, child))
 }
 
 #[cfg(test)]
@@ -176,17 +172,13 @@ mod tests {
         let mut heap2 = VecHeap::new();
         let val_after = tidepool_eval::eval(&expr, &Env::new(), &mut heap2).unwrap();
 
-        match (val_before, val_after) {
-            (Value::Lit(l1), Value::Lit(l2)) => {
-                assert_eq!(l1, l2);
-                if let Literal::LitInt(3) = l1 {
-                    // OK
-                } else {
-                    panic!("Expected 3, got {:?}", l1);
-                }
-            }
-            (v1, v2) => panic!("Value mismatch or not Lit: {:?}, {:?}", v1, v2),
-        }
+        let (Value::Lit(l1), Value::Lit(l2)) = (val_before, val_after) else {
+            panic!("Value mismatch or not Lit");
+        };
+        assert_eq!(l1, l2);
+        let Literal::LitInt(3) = l1 else {
+            panic!("Expected 3, got {:?}", l1);
+        };
     }
 
     #[test]
@@ -312,17 +304,14 @@ mod tests {
         let changed = pass.run(&mut expr);
         assert!(changed);
         // Result should be Con(tag=1, [42])
-        if let CoreFrame::Con { tag, fields } = &expr.nodes[expr.nodes.len() - 1] {
-            assert_eq!(tag.0, 1);
-            assert_eq!(fields.len(), 1);
-            if let CoreFrame::Lit(Literal::LitInt(42)) = &expr.nodes[fields[0]] {
-                // OK
-            } else {
-                panic!("Expected field to be 42");
-            }
-        } else {
+        let CoreFrame::Con { tag, fields } = &expr.nodes[expr.nodes.len() - 1] else {
             panic!("Expected Con, got {:?}", expr.nodes[expr.nodes.len() - 1]);
-        }
+        };
+        assert_eq!(tag.0, 1);
+        assert_eq!(fields.len(), 1);
+        let CoreFrame::Lit(Literal::LitInt(42)) = &expr.nodes[fields[0]] else {
+            panic!("Expected field to be 42");
+        };
     }
 
     #[test]
@@ -377,9 +366,10 @@ mod tests {
                 assert_eq!(f1.len(), f2.len());
                 // Simple check for literals in fields
                 for (v1, v2) in f1.iter().zip(f2.iter()) {
-                    if let (Value::Lit(ll1), Value::Lit(ll2)) = (v1, v2) {
-                        assert_eq!(ll1, ll2);
-                    }
+                    let (Value::Lit(ll1), Value::Lit(ll2)) = (v1, v2) else {
+                        continue;
+                    };
+                    assert_eq!(ll1, ll2);
                 }
             }
             (v1, v2) => panic!(

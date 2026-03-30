@@ -8,6 +8,12 @@ pub fn pretty_print(expr: &CoreExpr) -> String {
     pp_at(expr, expr.nodes.len() - 1)
 }
 
+impl std::fmt::Display for crate::tree::RecursiveTree<CoreFrame<usize>> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", pretty_print(self))
+    }
+}
+
 fn pp_at(expr: &CoreExpr, idx: usize) -> String {
     match &expr.nodes[idx] {
         CoreFrame::Var(id) => format_var(id),

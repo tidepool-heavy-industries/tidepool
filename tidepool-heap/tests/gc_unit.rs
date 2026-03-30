@@ -111,19 +111,18 @@ fn test_gc_thunkref_tracing() {
     let new_id_a = table.lookup(id_a).expect("Thunk A should be alive");
 
     // Check what id_a points to now
-    let new_id_b = match heap.read(new_id_a) {
-        ThunkState::Evaluated(Value::ThunkRef(id)) => *id,
-        _ => panic!("Expected Thunk A to be Evaluated(ThunkRef(_))"),
+    let ThunkState::Evaluated(Value::ThunkRef(new_id_b)) = heap.read(new_id_a) else {
+        panic!("Expected Thunk A to be Evaluated(ThunkRef(_))");
     };
+    let new_id_b = *new_id_b;
 
     // Assert id_b survived and has correct value
-    match heap.read(new_id_b) {
-        ThunkState::Evaluated(Value::Lit(Literal::LitInt(99))) => (),
-        other => panic!(
+    let ThunkState::Evaluated(Value::Lit(Literal::LitInt(99))) = heap.read(new_id_b) else {
+        panic!(
             "Expected Thunk B to be Evaluated(LitInt(99)), got {:?}",
-            other
-        ),
-    }
+            heap.read(new_id_b)
+        );
+    };
 
     // Also verify B is in the forwarding table
     assert!(

@@ -49,13 +49,9 @@ fn try_inline_at(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> O
 }
 
 fn try_children(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> Option<CoreExpr> {
-    let children = get_children(&expr.nodes[idx]);
-    for child in children {
-        if let Some(result) = try_inline_at(expr, child, occ_map) {
-            return Some(result);
-        }
-    }
-    None
+    get_children(&expr.nodes[idx])
+        .into_iter()
+        .find_map(|child| try_inline_at(expr, child, occ_map))
 }
 
 #[cfg(test)]
@@ -198,16 +194,14 @@ mod tests {
 
         // Result should be \y'. y
         let root = expr.nodes.len() - 1;
-        if let CoreFrame::Lam { binder, body } = &expr.nodes[root] {
-            assert_ne!(*binder, y);
-            if let CoreFrame::Var(v) = &expr.nodes[*body] {
-                assert_eq!(*v, y);
-            } else {
-                panic!("Body should be Var(y)");
-            }
-        } else {
+        let CoreFrame::Lam { binder, body } = &expr.nodes[root] else {
             panic!("Result should be Lam");
-        }
+        };
+        assert_ne!(*binder, y);
+        let CoreFrame::Var(v) = &expr.nodes[*body] else {
+            panic!("Body should be Var(y)");
+        };
+        assert_eq!(*v, y);
     }
 
     // 7. test_inline_preserves_eval: Build let x = 21 in x + x (Many, no inline) and let x = 21 in x (Once, inline). Eval before/after, verify match.

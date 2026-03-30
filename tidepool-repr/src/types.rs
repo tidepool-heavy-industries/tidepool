@@ -62,6 +62,13 @@ macro_rules! define_primops {
                 }
             }
         }
+
+        impl std::str::FromStr for PrimOpKind {
+            type Err = String;
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                Self::from_serial_name(s).ok_or_else(|| format!("unknown primop: {}", s))
+            }
+        }
     };
 }
 
@@ -431,7 +438,18 @@ mod tests {
                 op,
                 name
             );
+
+            // Test FromStr
+            let from_str: PrimOpKind = name.parse().unwrap();
+            assert_eq!(from_str, *op);
         }
+    }
+
+    #[test]
+    fn test_primop_from_str_error() {
+        let res: Result<PrimOpKind, _> = "NoSuchOp".parse();
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "unknown primop: NoSuchOp");
     }
 
     #[test]
