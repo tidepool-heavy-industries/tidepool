@@ -56,13 +56,16 @@ pub struct ConTags {
 }
 
 impl ConTags {
-    pub fn from_table(table: &tidepool_repr::DataConTable) -> Option<Self> {
-        Some(ConTags {
-            val: table.get_by_name(EffContKind::Val.name())?.0,
-            e: table.get_by_name(EffContKind::E.name())?.0,
-            union: table.get_by_name(EffContKind::Union.name())?.0,
-            leaf: table.get_by_name(EffContKind::Leaf.name())?.0,
-            node: table.get_by_name(EffContKind::Node.name())?.0,
+    pub fn from_table(table: &tidepool_repr::DataConTable) -> Result<Self, EffContKind> {
+        let resolve = |kind: EffContKind| -> Result<u64, EffContKind> {
+            table.get_by_name(kind.name()).map(|t| t.0).ok_or(kind)
+        };
+        Ok(ConTags {
+            val: resolve(EffContKind::Val)?,
+            e: resolve(EffContKind::E)?,
+            union: resolve(EffContKind::Union)?,
+            leaf: resolve(EffContKind::Leaf)?,
+            node: resolve(EffContKind::Node)?,
         })
     }
 }
