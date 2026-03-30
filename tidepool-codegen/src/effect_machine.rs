@@ -326,6 +326,10 @@ impl CompiledEffectMachine {
                     // Check if result is Val or E
                     let result_tag = unsafe { *result };
                     if result_tag != layout::TAG_CON {
+                        crate::host_fns::push_diagnostic(format!(
+                            "apply_cont_heap: Node(k1,k2) result has unexpected tag {} (expected TAG_CON)",
+                            result_tag
+                        ));
                         return std::ptr::null_mut();
                     }
 
@@ -348,10 +352,18 @@ impl CompiledEffectMachine {
                         // Allocate E(union, new_node)
                         self.alloc_con(self.tags.e, &[union_val, new_node])
                     } else {
+                        crate::host_fns::push_diagnostic(format!(
+                            "apply_cont_heap: Node result con_tag {} is neither Val nor E",
+                            result_con_tag
+                        ));
                         std::ptr::null_mut()
                     }
                 } else {
                     // Unknown Con tag in continuation position — error
+                    crate::host_fns::push_diagnostic(format!(
+                        "apply_cont_heap: unexpected continuation con_tag {} (expected Leaf or Node)",
+                        con_tag
+                    ));
                     std::ptr::null_mut()
                 }
             }
@@ -359,11 +371,13 @@ impl CompiledEffectMachine {
                 // Raw closure (degenerate continuation fallback)
                 self.call_closure(k, arg)
             }
-            t if t == layout::TAG_THUNK => {
-                // Thunk in continuation position — already forced above, shouldn't happen
+            _ => {
+                crate::host_fns::push_diagnostic(format!(
+                    "apply_cont_heap: unexpected heap tag {} in continuation position",
+                    tag
+                ));
                 std::ptr::null_mut()
             }
-            _ => std::ptr::null_mut(),
         }
     }
 
