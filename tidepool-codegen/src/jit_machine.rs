@@ -15,7 +15,7 @@ use crate::yield_type::Yield;
 pub enum JitError {
     Compilation(crate::emit::EmitError),
     Pipeline(crate::pipeline::PipelineError),
-    MissingConTags,
+    MissingConTags(&'static str),
     Effect(EffectError),
     Yield(crate::yield_type::YieldError),
     HeapBridge(crate::heap_bridge::BridgeError),
@@ -28,8 +28,8 @@ impl std::fmt::Display for JitError {
         match self {
             JitError::Compilation(e) => write!(f, "JIT compilation error: {}", e),
             JitError::Pipeline(e) => write!(f, "pipeline error: {}", e),
-            JitError::MissingConTags => {
-                write!(f, "missing freer-simple constructors in DataConTable")
+            JitError::MissingConTags(name) => {
+                write!(f, "missing freer-simple constructor '{}' in DataConTable", name)
             }
             JitError::Effect(e) => write!(f, "effect dispatch error: {}", e),
             JitError::Yield(e) => write!(f, "yield error: {}", e),
@@ -77,7 +77,7 @@ impl From<crate::pipeline::PipelineError> for JitError {
 pub struct JitEffectMachine {
     pipeline: CodegenPipeline,
     nursery: Nursery,
-    tags: Option<ConTags>,
+    tags: Result<ConTags, &'static str>,
     func_id: FuncId,
 }
 
@@ -105,7 +105,7 @@ impl JitEffectMachine {
             .map_err(JitError::Compilation)?;
         pipeline.finalize()?;
 
-        let tags = ConTags::from_table(table);
+        let tags = ConTags::from_table(table).map_err(|kind| kind.name());
         let nursery = Nursery::new(nursery_size);
 
         Ok(Self {
@@ -116,6 +116,13 @@ impl JitEffectMachine {
         })
     }
 
+    fn install_registries(&mut self) -> RegistryGuard {
+        crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
+        crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
+        crate::host_fns::set_gc_state(self.nursery.start() as *mut u8, self.nursery.size());
+        RegistryGuard
+    }
+
     /// Run to completion, dispatching effects through the handler HList.
     pub fn run<U, H: DispatchEffect<U>>(
         &mut self,
@@ -123,13 +130,10 @@ impl JitEffectMachine {
         handlers: &mut H,
         user: &U,
     ) -> Result<Value, JitError> {
-        let tags = self.tags.ok_or(JitError::MissingConTags)?;
+        let tags = self.tags.map_err(JitError::MissingConTags)?;
 
         // Install registries
-        crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
-        crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
-        crate::host_fns::set_gc_state(self.nursery.start() as *mut u8, self.nursery.size());
-        let _guard = RegistryGuard;
+        let _guard = self.install_registries();
 
         // SAFETY: get_function_ptr returns a finalized JIT code pointer. Transmuting to the
         // expected calling convention (vmctx -> result) is correct per our compilation contract.
@@ -229,10 +233,7 @@ impl JitEffectMachine {
     /// that don't use an `Eff` wrapper.
     pub fn run_pure(&mut self) -> Result<Value, JitError> {
         // Install registries
-        crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
-        crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
-        crate::host_fns::set_gc_state(self.nursery.start() as *mut u8, self.nursery.size());
-        let _guard = RegistryGuard;
+        let _guard = self.install_registries();
 
         // SAFETY: get_function_ptr returns a finalized JIT code pointer. Transmuting to the
         // expected calling convention (vmctx -> result) is correct per our compilation contract.
