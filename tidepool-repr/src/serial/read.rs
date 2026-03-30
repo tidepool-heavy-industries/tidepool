@@ -42,10 +42,10 @@ pub fn read_cbor(bytes: &[u8]) -> Result<RecursiveTree<CoreFrame<usize>>, ReadEr
         )));
     }
 
-    let mut nodes = Vec::with_capacity(nodes_array.len());
-    for node_val in nodes_array {
-        nodes.push(decode_frame(node_val)?);
-    }
+    let nodes = nodes_array
+        .iter()
+        .map(decode_frame)
+        .collect::<Result<Vec<_>, _>>()?;
 
     validate_indices(&nodes)?;
 
@@ -139,24 +139,26 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
                 ))
             }
         };
-        let mut bangs = Vec::with_capacity(bangs_arr.len());
-        for b in bangs_arr {
-            let bang_str = match b {
-                Value::Text(t) => t.as_str(),
-                _ => return Err(ReadError::InvalidStructure("Bang must be text".to_string())),
-            };
-            bangs.push(match bang_str {
-                "SrcBang" => SrcBang::SrcBang,
-                "SrcUnpack" => SrcBang::SrcUnpack,
-                "NoSrcBang" => SrcBang::NoSrcBang,
-                _ => {
-                    return Err(ReadError::InvalidStructure(format!(
-                        "Unknown bang: {}",
-                        bang_str
-                    )))
-                }
-            });
-        }
+        let bangs = bangs_arr
+            .iter()
+            .map(|b| {
+                let bang_str = match b {
+                    Value::Text(t) => t.as_str(),
+                    _ => return Err(ReadError::InvalidStructure("Bang must be text".to_string())),
+                };
+                Ok(match bang_str {
+                    "SrcBang" => SrcBang::SrcBang,
+                    "SrcUnpack" => SrcBang::SrcUnpack,
+                    "NoSrcBang" => SrcBang::NoSrcBang,
+                    _ => {
+                        return Err(ReadError::InvalidStructure(format!(
+                            "Unknown bang: {}",
+                            bang_str
+                        )))
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, ReadError>>()?;
 
         // 6th element (optional): module-qualified name
         let qualified_name = if arr.len() >= 6 {
@@ -335,11 +337,13 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
         "LetRec" => {
             expect_array_len(val, 3)?;
             let bindings_arr = expect_array(&arr[1])?;
-            let mut bindings = Vec::with_capacity(bindings_arr.len());
-            for b_val in bindings_arr {
-                let b_arr = expect_array_len(b_val, 2)?;
-                bindings.push((VarId(as_u64(&b_arr[0])?), as_usize(&b_arr[1])?));
-            }
+            let bindings = bindings_arr
+                .iter()
+                .map(|b_val| {
+                    let b_arr = expect_array_len(b_val, 2)?;
+                    Ok((VarId(as_u64(&b_arr[0])?), as_usize(&b_arr[1])?))
+                })
+                .collect::<Result<Vec<_>, ReadError>>()?;
             Ok(CoreFrame::LetRec {
                 bindings,
                 body: as_usize(&arr[2])?,
@@ -348,10 +352,10 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
         "Case" => {
             expect_array_len(val, 4)?;
             let alts_arr = expect_array(&arr[3])?;
-            let mut alts = Vec::with_capacity(alts_arr.len());
-            for alt_val in alts_arr {
-                alts.push(decode_alt(alt_val)?);
-            }
+            let alts = alts_arr
+                .iter()
+                .map(decode_alt)
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(CoreFrame::Case {
                 scrutinee: as_usize(&arr[1])?,
                 binder: VarId(as_u64(&arr[2])?),
@@ -361,10 +365,10 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
         "Con" => {
             expect_array_len(val, 3)?;
             let fields_arr = expect_array(&arr[2])?;
-            let mut fields = Vec::with_capacity(fields_arr.len());
-            for f_val in fields_arr {
-                fields.push(as_usize(f_val)?);
-            }
+            let fields = fields_arr
+                .iter()
+                .map(as_usize)
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(CoreFrame::Con {
                 tag: DataConId(as_u64(&arr[1])?),
                 fields,
@@ -373,10 +377,10 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
         "Join" => {
             expect_array_len(val, 5)?;
             let params_arr = expect_array(&arr[2])?;
-            let mut params = Vec::with_capacity(params_arr.len());
-            for p_val in params_arr {
-                params.push(VarId(as_u64(p_val)?));
-            }
+            let params = params_arr
+                .iter()
+                .map(|p| Ok(VarId(as_u64(p)?)))
+                .collect::<Result<Vec<_>, ReadError>>()?;
             Ok(CoreFrame::Join {
                 label: JoinId(as_u64(&arr[1])?),
                 params,
@@ -387,10 +391,10 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
         "Jump" => {
             expect_array_len(val, 3)?;
             let args_arr = expect_array(&arr[2])?;
-            let mut args = Vec::with_capacity(args_arr.len());
-            for a_val in args_arr {
-                args.push(as_usize(a_val)?);
-            }
+            let args = args_arr
+                .iter()
+                .map(as_usize)
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(CoreFrame::Jump {
                 label: JoinId(as_u64(&arr[1])?),
                 args,
@@ -401,10 +405,10 @@ fn decode_frame(val: &Value) -> Result<CoreFrame<usize>, ReadError> {
             let op_name = expect_text(&arr[1])?;
             let op = decode_primop(op_name)?;
             let args_arr = expect_array(&arr[2])?;
-            let mut args = Vec::with_capacity(args_arr.len());
-            for a_val in args_arr {
-                args.push(as_usize(a_val)?);
-            }
+            let args = args_arr
+                .iter()
+                .map(as_usize)
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(CoreFrame::PrimOp { op, args })
         }
         _ => Err(ReadError::InvalidTag(tag.to_string())),
@@ -439,10 +443,10 @@ fn decode_alt(val: &Value) -> Result<Alt<usize>, ReadError> {
     let arr = expect_array_len(val, 3)?;
     let con = decode_alt_con(&arr[0])?;
     let binders_arr = expect_array(&arr[1])?;
-    let mut binders = Vec::with_capacity(binders_arr.len());
-    for b_val in binders_arr {
-        binders.push(VarId(as_u64(b_val)?));
-    }
+    let binders = binders_arr
+        .iter()
+        .map(|b| Ok(VarId(as_u64(b)?)))
+        .collect::<Result<Vec<_>, ReadError>>()?;
     let body = as_usize(&arr[2])?;
     Ok(Alt { con, binders, body })
 }
