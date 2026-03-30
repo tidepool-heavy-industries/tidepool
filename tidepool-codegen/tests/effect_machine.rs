@@ -235,16 +235,14 @@ fn test_yield_done_val() {
     );
     let result = machine.step();
 
-    match result {
-        Yield::Done(val_ptr) => {
-            // val_ptr should point to the Lit(42) object
-            let tag = unsafe { *val_ptr };
-            assert_eq!(tag, TAG_LIT);
-            let val = unsafe { *(val_ptr.add(16) as *const i64) };
-            assert_eq!(val, 42);
-        }
-        _ => panic!("Expected Yield::Done, got {:?}", result),
-    }
+    let Yield::Done(val_ptr) = result else {
+        panic!("Expected Yield::Done, got {:?}", result);
+    };
+    // val_ptr should point to the Lit(42) object
+    let tag = unsafe { *val_ptr };
+    assert_eq!(tag, TAG_LIT);
+    let val = unsafe { *(val_ptr.add(16) as *const i64) };
+    assert_eq!(val, 42);
 }
 
 /// Test 2: Yield::Request from E result.
@@ -290,25 +288,24 @@ fn test_yield_request_e() {
     );
     let result = machine.step();
 
-    match result {
-        Yield::Request {
-            tag,
-            request,
-            continuation,
-        } => {
-            assert_eq!(tag, 7);
+    let Yield::Request {
+        tag,
+        request,
+        continuation,
+    } = result
+    else {
+        panic!("Expected Yield::Request, got {:?}", result);
+    };
+    assert_eq!(tag, 7);
 
-            // Verify request is Lit(99)
-            let req_tag = unsafe { *request };
-            assert_eq!(req_tag, TAG_LIT);
-            let req_val = unsafe { *(request.add(16) as *const i64) };
-            assert_eq!(req_val, 99);
+    // Verify request is Lit(99)
+    let req_tag = unsafe { *request };
+    assert_eq!(req_tag, TAG_LIT);
+    let req_val = unsafe { *(request.add(16) as *const i64) };
+    assert_eq!(req_val, 99);
 
-            // Verify continuation is there
-            assert!(!continuation.is_null());
-        }
-        _ => panic!("Expected Yield::Request, got {:?}", result),
-    }
+    // Verify continuation is there
+    assert!(!continuation.is_null());
 }
 
 /// Test 3: CompiledEffectMachine is Send.
@@ -613,17 +610,14 @@ fn test_resume_leaf_identity() {
 
     let result = unsafe { machine.resume(leaf_ptr, lit_ptr) };
 
-    match result {
-        Yield::Done(res_ptr) => {
-            assert_eq!(res_ptr, lit_ptr);
+    let Yield::Done(res_ptr) = result else {
+        panic!("Expected Yield::Done, got {:?}", result);
+    };
+    assert_eq!(res_ptr, lit_ptr);
 
-            let val = unsafe { *(res_ptr.add(16) as *const i64) };
+    let val = unsafe { *(res_ptr.add(16) as *const i64) };
 
-            assert_eq!(val, 42);
-        }
-
-        _ => panic!("Expected Yield::Done, got {:?}", result),
-    }
+    assert_eq!(val, 42);
 }
 
 /// Test 10: resume(Node(Leaf(f), Leaf(g)), x) -> g(f(x))
@@ -697,17 +691,14 @@ fn test_resume_node_identity() {
 
     let result = unsafe { machine.resume(node_ptr, lit_ptr) };
 
-    match result {
-        Yield::Done(res_ptr) => {
-            assert_eq!(res_ptr, lit_ptr);
+    let Yield::Done(res_ptr) = result else {
+        panic!("Expected Yield::Done, got {:?}", result);
+    };
+    assert_eq!(res_ptr, lit_ptr);
 
-            let val = unsafe { *(res_ptr.add(16) as *const i64) };
+    let val = unsafe { *(res_ptr.add(16) as *const i64) };
 
-            assert_eq!(val, 100);
-        }
-
-        _ => panic!("Expected Yield::Done, got {:?}", result),
-    }
+    assert_eq!(val, 100);
 }
 
 /// Test 11: resume(null, x) -> Error(NullPointer)
@@ -881,37 +872,33 @@ fn test_resume_node_with_effect_result() {
 
     let result = unsafe { machine.resume(node_ptr, lit_ptr) };
 
-    match result {
-        Yield::Request {
-            tag,
-            request,
-            continuation,
-        } => {
-            assert_eq!(tag, 7);
+    let Yield::Request {
+        tag,
+        request,
+        continuation,
+    } = result
+    else {
+        panic!("Expected Yield::Request, got {:?}", result);
+    };
+    assert_eq!(tag, 7);
 
-            assert_eq!(request, lit_ptr);
+    assert_eq!(request, lit_ptr);
 
-            // continuation should be Node(k_prime, leaf_g)
+    // continuation should be Node(k_prime, leaf_g)
 
-            let tag = unsafe { *continuation };
+    let tag = unsafe { *continuation };
 
-            assert_eq!(tag, layout::TAG_CON);
+    assert_eq!(tag, layout::TAG_CON);
 
-            let con_tag = unsafe { *(continuation.add(layout::CON_TAG_OFFSET) as *const u64) };
+    let con_tag = unsafe { *(continuation.add(layout::CON_TAG_OFFSET) as *const u64) };
 
-            assert_eq!(con_tag, NODE_CON_TAG);
+    assert_eq!(con_tag, NODE_CON_TAG);
 
-            let k_prime =
-                unsafe { *(continuation.add(layout::CON_FIELDS_OFFSET) as *const *mut u8) };
+    let k_prime = unsafe { *(continuation.add(layout::CON_FIELDS_OFFSET) as *const *mut u8) };
 
-            let k2 =
-                unsafe { *(continuation.add(layout::CON_FIELDS_OFFSET + 8) as *const *mut u8) };
+    let k2 = unsafe { *(continuation.add(layout::CON_FIELDS_OFFSET + 8) as *const *mut u8) };
 
-            assert_eq!(k2, leaf_g);
+    assert_eq!(k2, leaf_g);
 
-            assert!(!k_prime.is_null());
-        }
-
-        _ => panic!("Expected Yield::Request, got {:?}", result),
-    }
+    assert!(!k_prime.is_null());
 }

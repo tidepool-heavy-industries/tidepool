@@ -55,8 +55,10 @@ pub struct ConTags {
     pub node: u64,
 }
 
-impl ConTags {
-    pub fn from_table(table: &tidepool_repr::DataConTable) -> Result<Self, EffContKind> {
+impl TryFrom<&tidepool_repr::DataConTable> for ConTags {
+    type Error = EffContKind;
+
+    fn try_from(table: &tidepool_repr::DataConTable) -> Result<Self, Self::Error> {
         let resolve = |kind: EffContKind| -> Result<u64, EffContKind> {
             table.get_by_name(kind.name()).map(|t| t.0).ok_or(kind)
         };
@@ -67,6 +69,12 @@ impl ConTags {
             leaf: resolve(EffContKind::Leaf)?,
             node: resolve(EffContKind::Node)?,
         })
+    }
+}
+
+impl ConTags {
+    pub fn from_table(table: &tidepool_repr::DataConTable) -> Result<Self, EffContKind> {
+        Self::try_from(table)
     }
 }
 

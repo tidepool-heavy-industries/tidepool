@@ -149,11 +149,12 @@ unsafe fn heap_to_value_inner(
                     if len > MAX_DATA_SIZE {
                         return Err(BridgeError::DataTooLarge { len });
                     }
-                    let mut elems = Vec::with_capacity(len);
-                    for i in 0..len {
-                        let elem_ptr = *(arr_ptr.add(8 + 8 * i) as *const *const u8);
-                        elems.push(heap_to_value_inner(elem_ptr, depth + 1, vmctx)?);
-                    }
+                    let elems: Vec<_> = (0..len)
+                        .map(|i| {
+                            let elem_ptr = *(arr_ptr.add(8 + 8 * i) as *const *const u8);
+                            heap_to_value_inner(elem_ptr, depth + 1, vmctx)
+                        })
+                        .collect::<Result<_, _>>()?;
                     // Return as a generic Con with fields — the renderer will
                     // see the constructor names from the wrapping Con objects
                     // (e.g., Vector's Array constructor wraps this)
@@ -169,12 +170,13 @@ unsafe fn heap_to_value_inner(
             if num_fields > MAX_FIELDS {
                 return Err(BridgeError::TooManyFields { count: num_fields });
             }
-            let mut fields = Vec::with_capacity(num_fields);
-            for i in 0..num_fields {
-                let field_ptr =
-                    *(ptr.add(layout::CON_FIELDS_OFFSET as usize + 8 * i) as *const *const u8);
-                fields.push(heap_to_value_inner(field_ptr, depth + 1, vmctx)?);
-            }
+            let fields: Vec<_> = (0..num_fields)
+                .map(|i| {
+                    let field_ptr =
+                        *(ptr.add(layout::CON_FIELDS_OFFSET as usize + 8 * i) as *const *const u8);
+                    heap_to_value_inner(field_ptr, depth + 1, vmctx)
+                })
+                .collect::<Result<_, _>>()?;
             Ok(Value::Con(DataConId(con_tag), fields))
         }
         t if t == layout::TAG_THUNK => {
@@ -371,11 +373,10 @@ mod tests {
         unsafe {
             let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
             let back = heap_to_value(ptr).expect("heap_to_value failed");
-            if let Value::Lit(Literal::LitInt(n)) = back {
-                assert_eq!(n, 42);
-            } else {
+            let Value::Lit(Literal::LitInt(n)) = back else {
                 panic!("Expected LitInt, got {:?}", back);
-            }
+            };
+            assert_eq!(n, 42);
         }
     }
 
@@ -386,11 +387,10 @@ mod tests {
         unsafe {
             let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
             let back = heap_to_value(ptr).expect("heap_to_value failed");
-            if let Value::Lit(Literal::LitWord(n)) = back {
-                assert_eq!(n, 123);
-            } else {
+            let Value::Lit(Literal::LitWord(n)) = back else {
                 panic!("Expected LitWord, got {:?}", back);
-            }
+            };
+            assert_eq!(n, 123);
         }
     }
 
@@ -401,11 +401,10 @@ mod tests {
         unsafe {
             let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
             let back = heap_to_value(ptr).expect("heap_to_value failed");
-            if let Value::Lit(Literal::LitChar(c)) = back {
-                assert_eq!(c, 'λ');
-            } else {
+            let Value::Lit(Literal::LitChar(c)) = back else {
                 panic!("Expected LitChar, got {:?}", back);
-            }
+            };
+            assert_eq!(c, 'λ');
         }
     }
 
@@ -416,11 +415,10 @@ mod tests {
         unsafe {
             let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
             let back = heap_to_value(ptr).expect("heap_to_value failed");
-            if let Value::Lit(Literal::LitDouble(bits)) = back {
-                assert_eq!(f64::from_bits(bits), 1.2345678);
-            } else {
+            let Value::Lit(Literal::LitDouble(bits)) = back else {
                 panic!("Expected LitDouble, got {:?}", back);
-            }
+            };
+            assert_eq!(f64::from_bits(bits), 1.2345678);
         }
     }
 
@@ -432,11 +430,10 @@ mod tests {
         unsafe {
             let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
             let back = heap_to_value(ptr).expect("heap_to_value failed");
-            if let Value::Lit(Literal::LitString(b)) = back {
-                assert_eq!(b, bytes);
-            } else {
+            let Value::Lit(Literal::LitString(b)) = back else {
                 panic!("Expected LitString, got {:?}", back);
-            }
+            };
+            assert_eq!(b, bytes);
         }
     }
 
@@ -447,12 +444,11 @@ mod tests {
         unsafe {
             let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
             let back = heap_to_value(ptr).expect("heap_to_value failed");
-            if let Value::Con(id, fields) = back {
-                assert_eq!(id.0, 42);
-                assert!(fields.is_empty());
-            } else {
+            let Value::Con(id, fields) = back else {
                 panic!("Expected Con, got {:?}", back);
-            }
+            };
+            assert_eq!(id.0, 42);
+            assert!(fields.is_empty());
         }
     }
 
@@ -469,15 +465,14 @@ mod tests {
         unsafe {
             let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
             let back = heap_to_value(ptr).expect("heap_to_value failed");
-            if let Value::Con(id, fields) = back {
-                assert_eq!(id.0, 1);
-                assert_eq!(fields.len(), 2);
-                match (&fields[0], &fields[1]) {
-                    (Value::Lit(Literal::LitInt(10)), Value::Lit(Literal::LitChar('a'))) => (),
-                    _ => panic!("Expected [LitInt(10), LitChar('a')], got {:?}", fields),
-                }
-            } else {
+            let Value::Con(id, fields) = back else {
                 panic!("Expected Con, got {:?}", back);
+            };
+            assert_eq!(id.0, 1);
+            assert_eq!(fields.len(), 2);
+            match (&fields[0], &fields[1]) {
+                (Value::Lit(Literal::LitInt(10)), Value::Lit(Literal::LitChar('a'))) => (),
+                _ => panic!("Expected [LitInt(10), LitChar('a')], got {:?}", fields),
             }
         }
     }
@@ -492,23 +487,20 @@ mod tests {
             let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
             let back = heap_to_value(ptr).expect("heap_to_value failed");
 
-            if let Value::Con(id, fields) = back {
-                assert_eq!(id.0, 1);
-                assert_eq!(fields.len(), 1);
-                if let Value::Con(id2, fields2) = &fields[0] {
-                    assert_eq!(id2.0, 2);
-                    assert_eq!(fields2.len(), 1);
-                    if let Value::Lit(Literal::LitInt(n)) = &fields2[0] {
-                        assert_eq!(*n, 42);
-                    } else {
-                        panic!("Expected LitInt");
-                    }
-                } else {
-                    panic!("Expected nested Con");
-                }
-            } else {
+            let Value::Con(id, fields) = back else {
                 panic!("Expected Con");
-            }
+            };
+            assert_eq!(id.0, 1);
+            assert_eq!(fields.len(), 1);
+            let Value::Con(id2, fields2) = &fields[0] else {
+                panic!("Expected nested Con");
+            };
+            assert_eq!(id2.0, 2);
+            assert_eq!(fields2.len(), 1);
+            let Value::Lit(Literal::LitInt(n)) = &fields2[0] else {
+                panic!("Expected LitInt");
+            };
+            assert_eq!(*n, 42);
         }
     }
 
@@ -520,11 +512,10 @@ mod tests {
         unsafe {
             let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
             let back = heap_to_value(ptr).expect("heap_to_value failed");
-            if let Value::ByteArray(ba) = back {
-                assert_eq!(*ba.lock().unwrap(), data);
-            } else {
+            let Value::ByteArray(ba) = back else {
                 panic!("Expected ByteArray, got {:?}", back);
-            }
+            };
+            assert_eq!(*ba.lock().unwrap(), data);
         }
     }
 
@@ -561,11 +552,10 @@ mod tests {
         unsafe {
             let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
             let back = heap_to_value(ptr).expect("heap_to_value failed");
-            if let Value::Lit(Literal::LitFloat(b)) = back {
-                assert_eq!(b, bits);
-            } else {
+            let Value::Lit(Literal::LitFloat(b)) = back else {
                 panic!("Expected LitFloat, got {:?}", back);
-            }
+            };
+            assert_eq!(b, bits);
         }
     }
 
