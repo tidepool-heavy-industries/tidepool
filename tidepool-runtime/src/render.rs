@@ -21,7 +21,7 @@ impl EvalResult {
 
     /// Render the result as structured JSON.
     pub fn to_json(&self) -> serde_json::Value {
-        value_to_json(&self.value, &self.table, 0)
+        self.into()
     }
 
     /// Pretty-print the JSON representation.
@@ -57,6 +57,18 @@ impl EvalResult {
     /// Borrow the DataConTable.
     pub fn table(&self) -> &DataConTable {
         &self.table
+    }
+}
+
+impl From<&EvalResult> for serde_json::Value {
+    fn from(result: &EvalResult) -> Self {
+        value_to_json(&result.value, &result.table, 0)
+    }
+}
+
+impl From<EvalResult> for serde_json::Value {
+    fn from(result: EvalResult) -> Self {
+        (&result).into()
     }
 }
 
