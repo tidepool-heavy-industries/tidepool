@@ -16,11 +16,10 @@ fn test_heap_to_value_lit_int() {
         *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = 42;
 
         let res = heap_to_value(ptr).expect("heap_to_value failed");
-        if let Value::Lit(Literal::LitInt(n)) = res {
-            assert_eq!(n, 42);
-        } else {
+        let Value::Lit(Literal::LitInt(n)) = res else {
             panic!("Expected LitInt, got {:?}", res);
-        }
+        };
+        assert_eq!(n, 42);
     }
 }
 
@@ -50,14 +49,13 @@ fn test_heap_to_value_con_pair() {
         *(con.add(layout::CON_FIELDS_OFFSET + 8) as *mut *const u8) = lit2;
 
         let res = heap_to_value(con).expect("heap_to_value failed");
-        if let Value::Con(DataConId(1), fields) = res {
-            assert_eq!(fields.len(), 2);
-            match (&fields[0], &fields[1]) {
-                (Value::Lit(Literal::LitInt(10)), Value::Lit(Literal::LitInt(20))) => (),
-                _ => panic!("Expected [LitInt(10), LitInt(20)], got {:?}", fields),
-            }
-        } else {
+        let Value::Con(DataConId(1), fields) = res else {
             panic!("Expected Con, got {:?}", res);
+        };
+        assert_eq!(fields.len(), 2);
+        match (&fields[0], &fields[1]) {
+            (Value::Lit(Literal::LitInt(10)), Value::Lit(Literal::LitInt(20))) => (),
+            _ => panic!("Expected [LitInt(10), LitInt(20)], got {:?}", fields),
         }
     }
 }
@@ -100,10 +98,8 @@ fn test_heap_to_value_deeply_nested_cons() {
             v = fields[0].clone();
         }
         assert_eq!(depth, 100);
-        if let Value::Lit(Literal::LitInt(0)) = v {
-            // OK
-        } else {
+        let Value::Lit(Literal::LitInt(0)) = v else {
             panic!("Expected terminal LitInt(0), got {:?}", v);
-        }
+        };
     }
 }

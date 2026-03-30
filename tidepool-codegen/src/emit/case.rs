@@ -27,17 +27,15 @@ pub fn emit_case(
     let old_case_binder = ctx.env.insert(*binder, scrut);
 
     // 3. Classify alts
-    let mut data_alts = Vec::new();
-    let mut lit_alts = Vec::new();
-    let mut default_alt = None;
-
-    for alt in alts {
-        match &alt.con {
-            AltCon::DataAlt(_) => data_alts.push(alt),
-            AltCon::LitAlt(_) => lit_alts.push(alt),
-            AltCon::Default => default_alt = Some(alt),
-        }
-    }
+    let data_alts: Vec<_> = alts
+        .iter()
+        .filter(|alt| matches!(alt.con, AltCon::DataAlt(_)))
+        .collect();
+    let lit_alts: Vec<_> = alts
+        .iter()
+        .filter(|alt| matches!(alt.con, AltCon::LitAlt(_)))
+        .collect();
+    let default_alt = alts.iter().find(|alt| matches!(alt.con, AltCon::Default));
 
     // 4. Create merge block
     let merge_block = builder.create_block();
@@ -165,63 +163,63 @@ fn emit_data_dispatch(
     // Use comparison chain instead of jump table because DataConIds are large
     // GHC Uniques (arbitrary u64 values), not small sequential integers.
     for &alt in data_alts {
-        if let AltCon::DataAlt(tag) = &alt.con {
-            let alt_block = builder.create_block();
-            let next_check_block = builder.create_block();
+        let AltCon::DataAlt(tag) = &alt.con else {
+            continue;
+        };
 
-            let tag_val = builder.ins().iconst(types::I64, tag.0 as i64);
-            let eq = builder.ins().icmp(IntCC::Equal, con_tag, tag_val);
-            builder
+        let alt_block = builder.create_block();
+        let next_check_block = builder.create_block();
+
+        let tag_val = builder.ins().iconst(types::I64, tag.0 as i64);
+        let eq = builder.ins().icmp(IntCC::Equal, con_tag, tag_val);
+        builder
+            .ins()
+            .brif(eq, alt_block, &[], next_check_block, &[]);
+
+        // Emit alt body
+        builder.switch_to_block(alt_block);
+        builder.seal_block(alt_block);
+        ctx.declare_env(builder);
+
+        // Bind pattern variables — do NOT force thunked fields.
+        // In Haskell, case alt binders are lazy. Thunked Con fields
+        // remain as thunks until used in a strict context (case scrutiny,
+        // primop args, etc.). Forcing here causes infinite loops for
+        // self-referencing structures like `xs = 1 : map (+1) xs`.
+        //
+        // INVARIANT: All strict consumers must force thunked values before
+        // reading heap layout. The forcing points are:
+        //   - emit_lit_dispatch: force_thunk_ssaval on scrutinee
+        //   - emit_data_dispatch: tag < 2 check → heap_force on scrutinee
+        //   - PrimOp collapse: force_thunk_ssaval on all args
+        //   - App collapse: tag check → heap_force on fun position
+        //   - unbox_int/unbox_double/unbox_float: defensive trap on TAG_THUNK
+        // See force_thunk_ssaval in expr.rs.
+        let mut scope = EnvScope::new();
+        // NOTE: EnvGuard cannot be used here because it would borrow ctx.env
+        // mutably, preventing the use of ctx in emit_node.
+        for (i, &binder) in alt.binders.iter().enumerate() {
+            let offset = CON_FIELDS_OFFSET + (8 * i as i32);
+            let field_val = builder
                 .ins()
-                .brif(eq, alt_block, &[], next_check_block, &[]);
-
-            // Emit alt body
-            builder.switch_to_block(alt_block);
-            builder.seal_block(alt_block);
-            ctx.declare_env(builder);
-
-            // Bind pattern variables — do NOT force thunked fields.
-            // In Haskell, case alt binders are lazy. Thunked Con fields
-            // remain as thunks until used in a strict context (case scrutiny,
-            // primop args, etc.). Forcing here causes infinite loops for
-            // self-referencing structures like `xs = 1 : map (+1) xs`.
-            //
-            // INVARIANT: All strict consumers must force thunked values before
-            // reading heap layout. The forcing points are:
-            //   - emit_lit_dispatch: force_thunk_ssaval on scrutinee
-            //   - emit_data_dispatch: tag < 2 check → heap_force on scrutinee
-            //   - PrimOp collapse: force_thunk_ssaval on all args
-            //   - App collapse: tag check → heap_force on fun position
-            //   - unbox_int/unbox_double/unbox_float: defensive trap on TAG_THUNK
-            // See force_thunk_ssaval in expr.rs.
-            let mut scope = EnvScope::new();
-            // NOTE: EnvGuard cannot be used here because it would borrow ctx.env
-            // mutably, preventing the use of ctx in emit_node.
-            for (i, &binder) in alt.binders.iter().enumerate() {
-                let offset = CON_FIELDS_OFFSET + (8 * i as i32);
-                let field_val =
-                    builder
-                        .ins()
-                        .load(types::I64, MemFlags::trusted(), scrut_ptr, offset);
-                builder.declare_value_needs_stack_map(field_val);
-                ctx.env
-                    .insert_scoped(&mut scope, binder, SsaVal::HeapPtr(field_val));
-            }
-
-            let result = ctx.emit_node(sess, builder, alt.body, tail)?;
-            let result_ptr =
-                ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
-            builder
-                .ins()
-                .jump(merge_block, &[BlockArg::Value(result_ptr)]);
-
-            // Restore pattern variable bindings
-            ctx.env.restore_scope(scope);
-
-            // Continue to next check
-            builder.switch_to_block(next_check_block);
-            builder.seal_block(next_check_block);
+                .load(types::I64, MemFlags::trusted(), scrut_ptr, offset);
+            builder.declare_value_needs_stack_map(field_val);
+            ctx.env
+                .insert_scoped(&mut scope, binder, SsaVal::HeapPtr(field_val));
         }
+
+        let result = ctx.emit_node(sess, builder, alt.body, tail)?;
+        let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
+        builder
+            .ins()
+            .jump(merge_block, &[BlockArg::Value(result_ptr)]);
+
+        // Restore pattern variable bindings
+        ctx.env.restore_scope(scope);
+
+        // Continue to next check
+        builder.switch_to_block(next_check_block);
+        builder.seal_block(next_check_block);
     }
 
     // Default or trap

@@ -44,6 +44,18 @@ impl TreeBuilder {
         offset
     }
 
+    /// Add multiple nodes, return the index of the last added node (or 0 if empty).
+    pub fn extend<I>(&mut self, iter: I) -> usize
+    where
+        I: IntoIterator<Item = CoreFrame<usize>>,
+    {
+        let mut last_idx = self.nodes.len().saturating_sub(1);
+        for frame in iter {
+            last_idx = self.push(frame);
+        }
+        last_idx
+    }
+
     /// Finish building, return the tree.
     pub fn build(self) -> RecursiveTree<CoreFrame<usize>> {
         RecursiveTree { nodes: self.nodes }

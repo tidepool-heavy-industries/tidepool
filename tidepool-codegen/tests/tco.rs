@@ -12,10 +12,10 @@ use tidepool_repr::types::*;
 use tidepool_repr::{CoreExpr, Literal, TreeBuilder};
 
 fn assert_lit_int(val: &Value, expected: i64) {
-    match val {
-        Value::Lit(Literal::LitInt(n)) => assert_eq!(*n, expected),
-        other => panic!("expected Lit(Int({})), got {:?}", expected, other),
-    }
+    let Value::Lit(Literal::LitInt(n)) = val else {
+        panic!("expected Lit(Int({})), got {:?}", expected, val);
+    };
+    assert_eq!(*n, expected);
 }
 
 fn empty_table() -> DataConTable {
