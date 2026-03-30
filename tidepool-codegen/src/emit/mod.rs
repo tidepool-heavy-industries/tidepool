@@ -128,39 +128,6 @@ impl Default for EnvScope {
     }
 }
 
-/// RAII guard that automatically restores environment bindings when dropped.
-///
-/// Note: Due to borrow checker constraints, this cannot be used where the
-/// parent `EmitContext` needs to be used (e.g., in `emit_node` calls) since it
-/// mutably borrows `ctx.env`. It is primarily for use in future refactorings
-/// that split `EmitContext` or in simple leaf functions.
-#[allow(dead_code)]
-pub(crate) struct EnvGuard<'a> {
-    env: &'a mut ScopedEnv,
-    scope: EnvScope,
-}
-
-#[allow(dead_code)]
-impl<'a> EnvGuard<'a> {
-    pub fn new(env: &'a mut ScopedEnv) -> Self {
-        Self {
-            env,
-            scope: EnvScope::new(),
-        }
-    }
-
-    pub fn insert(&mut self, var: VarId, val: SsaVal) {
-        self.env.insert_scoped(&mut self.scope, var, val);
-    }
-}
-
-impl<'a> Drop for EnvGuard<'a> {
-    fn drop(&mut self) {
-        let scope = std::mem::take(&mut self.scope);
-        self.env.restore_scope(scope);
-    }
-}
-
 /// Emission context — bundles state during IR generation for one function.
 pub struct EmitContext {
     pub env: ScopedEnv,
