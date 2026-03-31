@@ -87,19 +87,15 @@ fn partial_eval_at(
                 tag: *tag,
                 fields: fi,
             });
-            let known_fields = fv
-                .into_iter()
-                .map(|v| match v {
-                    PartialValue::Known(k) => Some(k),
-                    _ => None,
-                })
-                .collect::<Option<Vec<_>>>();
-
-            if let Some(kf) = known_fields {
-                (ni, PartialValue::Known(KnownValue::Con(*tag, kf)))
-            } else {
-                (ni, PartialValue::Unknown)
+            let mut known_fields = Vec::new();
+            for v in fv {
+                if let PartialValue::Known(k) = v {
+                    known_fields.push(k);
+                } else {
+                    return (ni, PartialValue::Unknown);
+                }
             }
+            (ni, PartialValue::Known(KnownValue::Con(*tag, known_fields)))
         }
         CoreFrame::LetNonRec { binder, rhs, body } => {
             let (rhs_i, rhs_v) = partial_eval_at(expr, *rhs, env, new_nodes);

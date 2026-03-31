@@ -15,16 +15,7 @@ pub enum Occ {
 }
 
 impl Occ {
-    /// Combine two occurrence counts using saturated addition.
-    ///
-    /// This is a domain-specific, capped addition for occurrence analysis:
-    /// - `Dead` is the identity element (`Dead + x = x`).
-    /// - `Once + Once = Many`.
-    /// - `Many` is the saturation point (`x + Many = Many` and `Many + x = Many`).
-    ///
-    /// We suppress `clippy::should_implement_trait` because this is a
-    /// domain-specific saturated addition for occurrence analysis, not
-    /// general-purpose numeric addition.
+    /// Add two occurrence counts.
     #[allow(clippy::should_implement_trait)]
     pub fn add(self, other: Occ) -> Occ {
         match (self, other) {

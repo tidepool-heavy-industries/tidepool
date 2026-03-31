@@ -40,10 +40,9 @@ impl TreeBuilder {
     /// Returns the offset of the first added node.
     pub fn push_tree(&mut self, other: TreeBuilder) -> usize {
         let offset = self.nodes.len();
-        self.nodes
-            .extend(other.nodes.into_iter().map(|node| {
-                node.map_layer(|idx| idx + offset)
-            }));
+        for node in other.nodes {
+            self.nodes.push(node.map_layer(|idx| idx + offset));
+        }
         offset
     }
 

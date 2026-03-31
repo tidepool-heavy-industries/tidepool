@@ -67,9 +67,11 @@ impl DataConTable {
     /// since the result would be ambiguous. Use `get_by_qualified_name`,
     /// `get_by_name_arity`, or `get_companion` instead.
     pub fn get_by_name(&self, name: &str) -> Option<DataConId> {
-        self.by_name
-            .get(name)
-            .and_then(|vec| (vec.len() == 1).then(|| vec[0]))
+        match self.by_name.get(name) {
+            Some(vec) if vec.len() > 1 => None,
+            Some(vec) => vec.last().copied(),
+            None => None,
+        }
     }
 
     /// Look up by name AND expected arity, scanning all entries with this name.

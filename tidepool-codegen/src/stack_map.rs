@@ -10,18 +10,8 @@ pub struct StackMapInfo {
     pub offsets: Vec<u32>,
 }
 
-#[derive(Debug, Clone)]
-pub struct RawStackMapEntry {
-    pub ty: cranelift_codegen::ir::types::Type,
-    pub offset: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct RawStackMap {
-    pub code_offset: u32,
-    pub frame_size: u32,
-    pub entries: Vec<RawStackMapEntry>,
-}
+pub type RawStackMapEntry = (cranelift_codegen::ir::types::Type, u32);
+pub type RawStackMap = (u32, u32, Vec<RawStackMapEntry>);
 
 /// Maps absolute return addresses to stack map info.
 ///
@@ -54,13 +44,13 @@ impl StackMapRegistry {
     pub fn register(&mut self, base_ptr: usize, size: u32, raw_entries: &[RawStackMap]) {
         self.ranges.push((base_ptr, base_ptr + size as usize));
 
-        for entry in raw_entries {
-            let return_addr = base_ptr + entry.code_offset as usize;
-            let offsets: Vec<u32> = entry.entries.iter().map(|e| e.offset).collect();
+        for (code_offset, frame_size, slot_entries) in raw_entries {
+            let return_addr = base_ptr + *code_offset as usize;
+            let offsets: Vec<u32> = slot_entries.iter().map(|(_, offset)| *offset).collect();
             self.entries.insert(
                 return_addr,
                 StackMapInfo {
-                    frame_size: entry.frame_size,
+                    frame_size: *frame_size,
                     offsets,
                 },
             );

@@ -8,17 +8,17 @@
 //! represented as balanced binary trees of (Key, Value) pairs.
 
 use crate::error::BridgeError;
-use crate::traits::{sealed::ToCoreSealed, ToCore};
+use crate::traits::ToCore;
 use tidepool_eval::Value;
 use tidepool_repr::{DataConTable, Literal};
+
+impl crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for serde_json::Value {}
 
 /// Convert a `serde_json::Value` to a Tidepool Core `Value` matching the
 /// vendored `Tidepool.Aeson.Value` Haskell type.
 ///
 /// The resulting Core value can be passed to Haskell code that expects
 /// `Value` (the aeson-compatible type) and accessed via lens combinators.
-impl ToCoreSealed for serde_json::Value {}
-
 impl ToCore for serde_json::Value {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         // Use get_by_name_arity to disambiguate aeson Value constructors from
