@@ -39,7 +39,7 @@ pub enum RuntimeError {
     #[error("thunk has invalid evaluation state: {0}")]
     BadThunkState(u8),
     #[error("Haskell error: {0}")]
-    UserErrorMsg(String), // NEW: error with preserved message
+    UserErrorMsg(String),
 }
 
 thread_local! {

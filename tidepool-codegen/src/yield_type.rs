@@ -107,6 +107,9 @@ fn format_yield_signal(sig: i32) -> String {
             libc::SIGSEGV => "SIGSEGV (segmentation fault — likely invalid memory access)",
             libc::SIGBUS => "SIGBUS (bus error)",
             libc::SIGTRAP => "SIGTRAP (trap — likely Cranelift trap instruction)",
+            libc::SIGFPE => {
+                "SIGFPE (arithmetic exception — likely division by zero or overflow)"
+            }
             _ => {
                 if !ctx.is_empty() {
                     return format!("JIT signal: signal {} (unknown, context: {})", sig, ctx);
