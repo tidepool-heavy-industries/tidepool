@@ -44,34 +44,30 @@ struct SubstCtx<'a> {
 }
 
 fn find_max_var_id(tree: &CoreExpr) -> VarId {
-    let mut max = VarId(0);
-    for node in &tree.nodes {
-        match node {
-            CoreFrame::Var(v) => max = VarId(max.0.max(v.0)),
-            CoreFrame::Lam { binder, .. } => max = VarId(max.0.max(binder.0)),
-            CoreFrame::LetNonRec { binder, .. } => max = VarId(max.0.max(binder.0)),
-            CoreFrame::LetRec { bindings, .. } => {
-                for (v, _) in bindings {
-                    max = VarId(max.0.max(v.0));
-                }
-            }
+    tree.nodes
+        .iter()
+        .map(|node| match node {
+            CoreFrame::Var(v) => *v,
+            CoreFrame::Lam { binder, .. } => *binder,
+            CoreFrame::LetNonRec { binder, .. } => *binder,
+            CoreFrame::LetRec { bindings, .. } => bindings
+                .iter()
+                .map(|(v, _)| *v)
+                .max()
+                .unwrap_or(VarId(0)),
             CoreFrame::Case { binder, alts, .. } => {
-                max = VarId(max.0.max(binder.0));
-                for alt in alts {
-                    for b in &alt.binders {
-                        max = VarId(max.0.max(b.0));
-                    }
-                }
+                let max_alt = alts
+                    .iter()
+                    .flat_map(|alt| alt.binders.iter().copied())
+                    .max()
+                    .unwrap_or(VarId(0));
+                (*binder).max(max_alt)
             }
-            CoreFrame::Join { params, .. } => {
-                for p in params {
-                    max = VarId(max.0.max(p.0));
-                }
-            }
-            _ => {}
-        }
-    }
-    max
+            CoreFrame::Join { params, .. } => params.iter().copied().max().unwrap_or(VarId(0)),
+            _ => VarId(0),
+        })
+        .max()
+        .unwrap_or(VarId(0))
 }
 
 /// Recursive helper for substitution.
@@ -160,19 +156,15 @@ fn subst_at(tree: &CoreExpr, idx: usize, ctx: &mut SubstCtx, env: &HashMap<VarId
         }
         CoreFrame::LetRec { bindings, body } => {
             let mut binders: Vec<VarId> = bindings.iter().map(|(v, _)| *v).collect();
-            let mut shadow = false;
-            let mut needs_rename = false;
             let mut new_env = env.clone();
 
-            for b in &binders {
+            let (shadow, needs_rename) = binders.iter().fold((false, false), |(s, r), b| {
                 let actual_b = env.get(b).copied().unwrap_or(*b);
-                if actual_b == ctx.target {
-                    shadow = true;
-                }
-                if ctx.fvs_replacement.contains(&actual_b) {
-                    needs_rename = true;
-                }
-            }
+                (
+                    s || actual_b == ctx.target,
+                    r || ctx.fvs_replacement.contains(&actual_b),
+                )
+            });
 
             if shadow {
                 // Just copy the whole LetRec with environment renaming
@@ -188,11 +180,11 @@ fn subst_at(tree: &CoreExpr, idx: usize, ctx: &mut SubstCtx, env: &HashMap<VarId
                         *b = actual_b;
                     }
                 }
-                let mut new_bindings = Vec::new();
-                for (i, (_, rhs)) in bindings.iter().enumerate() {
-                    let new_rhs = subst_at(tree, *rhs, ctx, &new_env);
-                    new_bindings.push((binders[i], new_rhs));
-                }
+                let new_bindings = bindings
+                    .iter()
+                    .zip(binders.iter())
+                    .map(|((_, rhs), &new_b)| (new_b, subst_at(tree, *rhs, ctx, &new_env)))
+                    .collect();
                 let new_body = subst_at(tree, *body, ctx, &new_env);
                 let new_idx = ctx.new_nodes.len();
                 ctx.new_nodes.push(CoreFrame::LetRec {
@@ -201,11 +193,10 @@ fn subst_at(tree: &CoreExpr, idx: usize, ctx: &mut SubstCtx, env: &HashMap<VarId
                 });
                 new_idx
             } else {
-                let mut new_bindings = Vec::new();
-                for (v, rhs) in bindings {
-                    let new_rhs = subst_at(tree, *rhs, ctx, env);
-                    new_bindings.push((*v, new_rhs));
-                }
+                let new_bindings = bindings
+                    .iter()
+                    .map(|(v, rhs)| (*v, subst_at(tree, *rhs, ctx, env)))
+                    .collect();
                 let new_body = subst_at(tree, *body, ctx, env);
                 let new_idx = ctx.new_nodes.len();
                 ctx.new_nodes.push(CoreFrame::LetRec {
@@ -230,35 +221,41 @@ fn subst_at(tree: &CoreExpr, idx: usize, ctx: &mut SubstCtx, env: &HashMap<VarId
                 case_env.insert(*binder, final_case_binder);
             }
 
-            let mut final_alts = Vec::new();
-            for alt in alts {
-                let mut alt_shadow = actual_binder == ctx.target;
-                let mut alt_env = case_env.clone();
-                let mut new_pattern_binders = Vec::new();
-                for b in &alt.binders {
-                    let actual_b = case_env.get(b).copied().unwrap_or(*b);
-                    if actual_b == ctx.target {
-                        alt_shadow = true;
-                    }
-                    if ctx.fvs_replacement.contains(&actual_b) {
-                        let fresh = (ctx.next_id)();
-                        alt_env.insert(*b, fresh);
-                        new_pattern_binders.push(fresh);
+            let final_alts = alts
+                .iter()
+                .map(|alt| {
+                    let mut alt_shadow = actual_binder == ctx.target;
+                    let mut alt_env = case_env.clone();
+                    let new_pattern_binders = alt
+                        .binders
+                        .iter()
+                        .map(|b| {
+                            let actual_b = case_env.get(b).copied().unwrap_or(*b);
+                            if actual_b == ctx.target {
+                                alt_shadow = true;
+                            }
+                            if ctx.fvs_replacement.contains(&actual_b) {
+                                let fresh = (ctx.next_id)();
+                                alt_env.insert(*b, fresh);
+                                fresh
+                            } else {
+                                actual_b
+                            }
+                        })
+                        .collect::<Vec<_>>();
+
+                    let new_body = if alt_shadow {
+                        copy_with_env(tree, alt.body, ctx.new_nodes, &alt_env)
                     } else {
-                        new_pattern_binders.push(actual_b);
+                        subst_at(tree, alt.body, ctx, &alt_env)
+                    };
+                    crate::types::Alt {
+                        con: alt.con.clone(),
+                        binders: new_pattern_binders,
+                        body: new_body,
                     }
-                }
-                let new_body = if alt_shadow {
-                    copy_with_env(tree, alt.body, ctx.new_nodes, &alt_env)
-                } else {
-                    subst_at(tree, alt.body, ctx, &alt_env)
-                };
-                final_alts.push(crate::types::Alt {
-                    con: alt.con.clone(),
-                    binders: new_pattern_binders,
-                    body: new_body,
-                });
-            }
+                })
+                .collect();
 
             let new_idx = ctx.new_nodes.len();
             ctx.new_nodes.push(CoreFrame::Case {
@@ -372,12 +369,15 @@ fn copy_with_env(
             new_idx
         }
         CoreFrame::LetRec { bindings, body } => {
-            let mut new_bindings = Vec::new();
-            for (v, rhs) in bindings {
-                let actual_v = env.get(v).copied().unwrap_or(*v);
-                let new_rhs = copy_with_env(tree, *rhs, new_nodes, env);
-                new_bindings.push((actual_v, new_rhs));
-            }
+            let new_bindings = bindings
+                .iter()
+                .map(|(v, rhs)| {
+                    (
+                        env.get(v).copied().unwrap_or(*v),
+                        copy_with_env(tree, *rhs, new_nodes, env),
+                    )
+                })
+                .collect();
             let new_body = copy_with_env(tree, *body, new_nodes, env);
             let new_idx = new_nodes.len();
             new_nodes.push(CoreFrame::LetRec {
@@ -393,19 +393,18 @@ fn copy_with_env(
         } => {
             let actual_binder = env.get(binder).copied().unwrap_or(*binder);
             let new_scrutinee = copy_with_env(tree, *scrutinee, new_nodes, env);
-            let mut new_alts = Vec::new();
-            for alt in alts {
-                let mut new_pattern_binders = Vec::new();
-                for b in &alt.binders {
-                    new_pattern_binders.push(env.get(b).copied().unwrap_or(*b));
-                }
-                let new_body = copy_with_env(tree, alt.body, new_nodes, env);
-                new_alts.push(crate::types::Alt {
+            let new_alts = alts
+                .iter()
+                .map(|alt| crate::types::Alt {
                     con: alt.con.clone(),
-                    binders: new_pattern_binders,
-                    body: new_body,
-                });
-            }
+                    binders: alt
+                        .binders
+                        .iter()
+                        .map(|b| env.get(b).copied().unwrap_or(*b))
+                        .collect(),
+                    body: copy_with_env(tree, alt.body, new_nodes, env),
+                })
+                .collect();
             let new_idx = new_nodes.len();
             new_nodes.push(CoreFrame::Case {
                 scrutinee: new_scrutinee,
@@ -420,10 +419,10 @@ fn copy_with_env(
             rhs,
             body,
         } => {
-            let mut new_params = Vec::new();
-            for p in params {
-                new_params.push(env.get(p).copied().unwrap_or(*p));
-            }
+            let new_params = params
+                .iter()
+                .map(|p| env.get(p).copied().unwrap_or(*p))
+                .collect();
             let new_rhs = copy_with_env(tree, *rhs, new_nodes, env);
             let new_body = copy_with_env(tree, *body, new_nodes, env);
             let new_idx = new_nodes.len();

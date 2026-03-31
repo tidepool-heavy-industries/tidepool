@@ -4,15 +4,15 @@
 pub const ERROR_SENTINEL_TAG: u8 = 0x45;
 
 /// Variable identifier. Wraps a numeric ID.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VarId(pub u64);
 
 /// Join point label.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct JoinId(pub u64);
 
 /// Data constructor identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DataConId(pub u64);
 
 /// Literal values. Matches GHC's post-O2 literal types.

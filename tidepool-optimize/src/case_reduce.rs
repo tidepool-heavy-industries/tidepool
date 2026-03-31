@@ -60,10 +60,14 @@ fn try_case_reduce_at(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
                     let mut body = expr.extract_subtree(alt.body);
                     // Bind fields to alt binders
                     if let AltCon::DataAlt(_) = &alt.con {
-                        for (alt_binder, field_idx) in alt.binders.iter().zip(fields.iter()) {
-                            let field_tree = expr.extract_subtree(*field_idx);
-                            body = tidepool_repr::subst::subst(&body, *alt_binder, &field_tree);
-                        }
+                        body = alt
+                            .binders
+                            .iter()
+                            .zip(fields.iter())
+                            .fold(body, |acc, (alt_binder, field_idx)| {
+                                let field_tree = expr.extract_subtree(*field_idx);
+                                tidepool_repr::subst::subst(&acc, *alt_binder, &field_tree)
+                            });
                     }
                     // Substitute case binder with scrutinee
                     let scrut_tree = expr.extract_subtree(*scrutinee);

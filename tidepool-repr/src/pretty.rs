@@ -56,36 +56,33 @@ fn pp_at(expr: &CoreExpr, idx: usize) -> String {
             format!("let {} = {}\nin {}", format_var(binder), rhs_str, body_str)
         }
         CoreFrame::LetRec { bindings, body } => {
-            let mut s = String::from("let rec\n");
-            for (binder, rhs) in bindings {
-                s.push_str(&format!(
-                    "  {} = {}\n",
-                    format_var(binder),
-                    pp_at(expr, *rhs)
-                ));
-            }
-            s.push_str(&format!("in {}", pp_at(expr, *body)));
-            s
+            let bindings_str = bindings
+                .iter()
+                .map(|(binder, rhs)| format!("  {} = {}\n", format_var(binder), pp_at(expr, *rhs)))
+                .collect::<String>();
+            format!("let rec\n{}in {}", bindings_str, pp_at(expr, *body))
         }
         CoreFrame::Case {
             scrutinee,
             binder,
             alts,
         } => {
-            let mut s = format!(
-                "case {} of {} {{\n",
+            let alts_str = alts
+                .iter()
+                .map(|alt| {
+                    format!(
+                        "  {} -> {}\n",
+                        format_alt_con(&alt.con, &alt.binders),
+                        pp_at(expr, alt.body)
+                    )
+                })
+                .collect::<String>();
+            format!(
+                "case {} of {} {{\n{}}}",
                 pp_at(expr, *scrutinee),
-                format_var(binder)
-            );
-            for alt in alts {
-                s.push_str(&format!(
-                    "  {} -> {}\n",
-                    format_alt_con(&alt.con, &alt.binders),
-                    pp_at(expr, alt.body)
-                ));
-            }
-            s.push('}');
-            s
+                format_var(binder),
+                alts_str
+            )
         }
         CoreFrame::Con { tag, fields } => {
             let fields_str = fields
@@ -152,35 +149,26 @@ fn format_alt_con(con: &AltCon, binders: &[VarId]) -> String {
 }
 
 fn needs_parens_in_app_fun(frame: &CoreFrame<usize>) -> bool {
-    match frame {
-        CoreFrame::Var(_)
-        | CoreFrame::Lit(_)
-        | CoreFrame::App { .. }
-        | CoreFrame::Con { .. }
-        | CoreFrame::Jump { .. }
-        | CoreFrame::PrimOp { .. } => false,
+    matches!(
+        frame,
         CoreFrame::Lam { .. }
-        | CoreFrame::LetNonRec { .. }
-        | CoreFrame::LetRec { .. }
-        | CoreFrame::Case { .. }
-        | CoreFrame::Join { .. } => true,
-    }
+            | CoreFrame::LetNonRec { .. }
+            | CoreFrame::LetRec { .. }
+            | CoreFrame::Case { .. }
+            | CoreFrame::Join { .. }
+    )
 }
 
 fn needs_parens_in_app_arg(frame: &CoreFrame<usize>) -> bool {
-    match frame {
-        CoreFrame::Var(_)
-        | CoreFrame::Lit(_)
-        | CoreFrame::Con { .. }
-        | CoreFrame::Jump { .. }
-        | CoreFrame::PrimOp { .. } => false,
+    matches!(
+        frame,
         CoreFrame::App { .. }
-        | CoreFrame::Lam { .. }
-        | CoreFrame::LetNonRec { .. }
-        | CoreFrame::LetRec { .. }
-        | CoreFrame::Case { .. }
-        | CoreFrame::Join { .. } => true,
-    }
+            | CoreFrame::Lam { .. }
+            | CoreFrame::LetNonRec { .. }
+            | CoreFrame::LetRec { .. }
+            | CoreFrame::Case { .. }
+            | CoreFrame::Join { .. }
+    )
 }
 
 #[cfg(test)]

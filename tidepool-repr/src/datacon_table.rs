@@ -124,23 +124,21 @@ impl DataConTable {
             if let CoreFrame::Case { alts, .. } = node {
                 let data_con_ids: Vec<DataConId> = alts
                     .iter()
-                    .filter_map(|alt| {
-                        if let AltCon::DataAlt(id) = alt.con {
-                            Some(id)
-                        } else {
-                            None
-                        }
+                    .filter_map(|alt| match alt.con {
+                        AltCon::DataAlt(id) => Some(id),
+                        _ => None,
                     })
                     .collect();
 
                 if data_con_ids.len() >= 2 {
                     for &id in &data_con_ids {
                         let sibs = self.siblings.entry(id).or_default();
-                        for &other in &data_con_ids {
-                            if other != id && !sibs.contains(&other) {
-                                sibs.push(other);
-                            }
-                        }
+                        let new_sibs: Vec<DataConId> = data_con_ids
+                            .iter()
+                            .filter(|&&other| other != id && !sibs.contains(&other))
+                            .copied()
+                            .collect();
+                        sibs.extend(new_sibs);
                     }
                 }
             }
