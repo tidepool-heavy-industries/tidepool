@@ -3,7 +3,6 @@ use crate::gc::frame_walker::{self, StackRoot};
 use crate::layout;
 use crate::stack_map::StackMapRegistry;
 use std::cell::{Cell, RefCell};
-use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tidepool_heap::layout as heap_layout;
 
@@ -13,51 +12,34 @@ type GcHook = fn(&[StackRoot]);
 const MIN_VALID_ADDR: u64 = 0x1000;
 
 /// Runtime errors raised by JIT code via host functions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum RuntimeError {
+    #[error("division by zero")]
     DivisionByZero,
+    #[error("arithmetic overflow")]
     Overflow,
+    #[error("Haskell error called")]
     UserError,
+    #[error("Haskell undefined forced")]
     Undefined,
+    #[error("forced type metadata (should be dead code)")]
     TypeMetadata,
+    #[error("unresolved variable VarId({0:#x}) [tag='{tag}', key={key}]", tag=(*.0 >> 56) as u8 as char, key=(*.0 & ((1u64 << 56) - 1)))]
     UnresolvedVar(u64),
+    #[error("application of null function pointer")]
     NullFunPtr,
+    #[error("application of non-closure (tag={0})")]
     BadFunPtrTag(u8),
+    #[error("heap overflow (nursery exhausted after GC)")]
     HeapOverflow,
+    #[error("stack overflow (likely infinite list or unbounded recursion — use zipWithIndex/imap/enumFromTo instead of [0..])")]
     StackOverflow,
+    #[error("blackhole detected (infinite loop: thunk forced itself)")]
     BlackHole,
+    #[error("thunk has invalid evaluation state: {0}")]
     BadThunkState(u8),
+    #[error("Haskell error: {0}")]
     UserErrorMsg(String), // NEW: error with preserved message
-}
-
-impl std::fmt::Display for RuntimeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RuntimeError::DivisionByZero => write!(f, "division by zero"),
-            RuntimeError::Overflow => write!(f, "arithmetic overflow"),
-            RuntimeError::UserError => write!(f, "Haskell error called"),
-            RuntimeError::UserErrorMsg(msg) => write!(f, "Haskell error: {}", msg),
-            RuntimeError::Undefined => write!(f, "Haskell undefined forced"),
-            RuntimeError::TypeMetadata => write!(f, "forced type metadata (should be dead code)"),
-            RuntimeError::UnresolvedVar(id) => {
-                let tag_char = (*id >> 56) as u8 as char;
-                let key = *id & ((1u64 << 56) - 1);
-                write!(
-                    f,
-                    "unresolved variable VarId({:#x}) [tag='{}', key={}]",
-                    id, tag_char, key
-                )
-            }
-            RuntimeError::NullFunPtr => write!(f, "application of null function pointer"),
-            RuntimeError::BadFunPtrTag(tag) => {
-                write!(f, "application of non-closure (tag={})", tag)
-            }
-            RuntimeError::HeapOverflow => write!(f, "heap overflow (nursery exhausted after GC)"),
-            RuntimeError::StackOverflow => write!(f, "stack overflow (likely infinite list or unbounded recursion — use zipWithIndex/imap/enumFromTo instead of [0..])"),
-            RuntimeError::BlackHole => write!(f, "blackhole detected (infinite loop: thunk forced itself)"),
-            RuntimeError::BadThunkState(state) => write!(f, "thunk has invalid evaluation state: {}", state),
-        }
-    }
 }
 
 thread_local! {

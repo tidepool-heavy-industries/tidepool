@@ -10,33 +10,24 @@ use crate::debug::LambdaRegistry;
 use crate::stack_map::{RawStackMap, StackMapRegistry};
 
 /// Errors from the Cranelift compilation pipeline.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
     /// Pipeline initialization failed (ISA detection, memory reservation).
+    #[error("pipeline init failed: {0}")]
     Init(String),
     /// Function declaration failed.
+    #[error("function declaration failed: {0}")]
     Declaration(String),
     /// First-pass compilation failed (stack map extraction).
+    #[error("compilation failed: {0}")]
     Compilation(String),
     /// Module define_function failed.
+    #[error("define_function failed: {0}")]
     Definition(String),
     /// Module finalize_definitions failed.
+    #[error("finalize_definitions failed: {0}")]
     Finalization(String),
 }
-
-impl std::fmt::Display for PipelineError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PipelineError::Init(e) => write!(f, "pipeline init failed: {}", e),
-            PipelineError::Declaration(e) => write!(f, "function declaration failed: {}", e),
-            PipelineError::Compilation(e) => write!(f, "compilation failed: {}", e),
-            PipelineError::Definition(e) => write!(f, "define_function failed: {}", e),
-            PipelineError::Finalization(e) => write!(f, "finalize_definitions failed: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for PipelineError {}
 
 /// Cranelift JIT compilation pipeline.
 ///

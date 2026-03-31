@@ -20,6 +20,7 @@ tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
 tidepool-heap = { version = "0.1.0", path = "../tidepool-heap" }
 tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
 tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
+thiserror = "2"
 recursion = "0.5.4"
 
 [target.'cfg(unix)'.dependencies]

@@ -11,55 +11,24 @@ use crate::pipeline::CodegenPipeline;
 use crate::yield_type::Yield;
 
 /// Error type for JIT compilation/execution failures.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum JitError {
-    Compilation(crate::emit::EmitError),
-    Pipeline(crate::pipeline::PipelineError),
+    #[error("JIT compilation error: {0}")]
+    Compilation(#[from] crate::emit::EmitError),
+    #[error("pipeline error: {0}")]
+    Pipeline(#[from] crate::pipeline::PipelineError),
+    #[error("missing freer-simple constructor '{0}' in DataConTable")]
     MissingConTags(&'static str),
-    Effect(EffectError),
-    Yield(crate::yield_type::YieldError),
-    HeapBridge(crate::heap_bridge::BridgeError),
-    Signal(crate::signal_safety::SignalError),
+    #[error("effect dispatch error: {0}")]
+    Effect(#[from] EffectError),
+    #[error("yield error: {0}")]
+    Yield(#[from] crate::yield_type::YieldError),
+    #[error("heap bridge error: {0}")]
+    HeapBridge(#[from] crate::heap_bridge::BridgeError),
+    #[error("JIT signal during heap bridge: {0}")]
+    Signal(#[from] crate::signal_safety::SignalError),
+    #[error("Effect handler response too large ({nodes} value nodes, max {limit}). Narrow your query to return fewer results.")]
     EffectResponseTooLarge { nodes: usize, limit: usize },
-}
-
-impl std::fmt::Display for JitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            JitError::Compilation(e) => write!(f, "JIT compilation error: {}", e),
-            JitError::Pipeline(e) => write!(f, "pipeline error: {}", e),
-            JitError::MissingConTags(name) => {
-                write!(
-                    f,
-                    "missing freer-simple constructor '{}' in DataConTable",
-                    name
-                )
-            }
-            JitError::Effect(e) => write!(f, "effect dispatch error: {}", e),
-            JitError::Yield(e) => write!(f, "yield error: {}", e),
-            JitError::HeapBridge(e) => write!(f, "heap bridge error: {}", e),
-            JitError::Signal(e) => write!(f, "JIT signal during heap bridge: {}", e),
-            JitError::EffectResponseTooLarge { nodes, limit } => write!(
-                f,
-                "Effect handler response too large ({nodes} value nodes, max {limit}). \
-                 Narrow your query to return fewer results."
-            ),
-        }
-    }
-}
-
-impl std::error::Error for JitError {}
-
-impl From<EffectError> for JitError {
-    fn from(e: EffectError) -> Self {
-        JitError::Effect(e)
-    }
-}
-
-impl From<crate::pipeline::PipelineError> for JitError {
-    fn from(e: crate::pipeline::PipelineError) -> Self {
-        JitError::Pipeline(e)
-    }
 }
 
 /// High-level JIT effect machine.

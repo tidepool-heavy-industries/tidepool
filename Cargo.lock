@@ -3449,6 +3449,7 @@ dependencies = [
  "recursion",
  "serial_test",
  "target-lexicon",
+ "thiserror 2.0.18",
  "tidepool-effect",
  "tidepool-eval",
  "tidepool-heap",

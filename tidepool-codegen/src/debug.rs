@@ -167,52 +167,34 @@ pub unsafe fn heap_describe(ptr: *const u8) -> String {
 // ── Heap Object Validation ───────────────────────────────────
 
 /// Validation errors for heap objects.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum HeapError {
+    #[error("null pointer")]
     NullPointer,
+    #[error("invalid heap tag: {0}")]
     InvalidTag(u8),
+    #[error("zero size")]
     ZeroSize,
     /// Closure has null code pointer
+    #[error("null code pointer in closure")]
     NullCodePtr,
     /// Size field doesn't match expected size for the object type
+    #[error("size mismatch: expected >= {expected_min}, got {actual}")]
     SizeMismatch {
         expected_min: u16,
         actual: u16,
     },
     /// A field pointer is null
+    #[error("null pointer in field {index}")]
     NullField {
         index: usize,
     },
     /// A field pointer has an invalid heap tag
+    #[error("field {index} has invalid tag: {tag}")]
     InvalidFieldTag {
         index: usize,
         tag: u8,
     },
-}
-
-impl std::fmt::Display for HeapError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            HeapError::NullPointer => write!(f, "null pointer"),
-            HeapError::InvalidTag(t) => write!(f, "invalid heap tag: {}", t),
-            HeapError::ZeroSize => write!(f, "zero size"),
-            HeapError::NullCodePtr => write!(f, "null code pointer in closure"),
-            HeapError::SizeMismatch {
-                expected_min,
-                actual,
-            } => {
-                write!(
-                    f,
-                    "size mismatch: expected >= {}, got {}",
-                    expected_min, actual
-                )
-            }
-            HeapError::NullField { index } => write!(f, "null pointer in field {}", index),
-            HeapError::InvalidFieldTag { index, tag } => {
-                write!(f, "field {} has invalid tag: {}", index, tag)
-            }
-        }
-    }
 }
 
 /// Validate a heap object's structural integrity.
