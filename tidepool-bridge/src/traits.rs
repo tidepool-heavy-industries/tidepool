@@ -2,18 +2,24 @@ use crate::error::BridgeError;
 use tidepool_eval::Value;
 use tidepool_repr::DataConTable;
 
-/// Implementation detail for sealing traits.
+/// Private module for internal traits. Implementation of these traits is only
+/// supported via the provided derive macros.
 #[doc(hidden)]
-pub mod sealed {
-    pub trait FromCoreSealed {}
-    pub trait ToCoreSealed {}
+pub mod __private {
+    pub trait SealedInternal<T: ?Sized> {}
+    pub struct FromCoreMarker;
+    pub struct ToCoreMarker;
 }
 
 /// Convert a Core Value (from evaluation) to a Rust type.
 ///
 /// This trait is used to extract native Rust values from evaluated Core expressions.
-/// Implementations should handle potential type mismatches and arity errors.
-pub trait FromCore: Sized + sealed::FromCoreSealed {
+///
+/// # Implementation
+///
+/// This trait is intended to be implemented via `#[derive(FromCore)]`.
+/// Manual implementations are discouraged.
+pub trait FromCore: Sized + __private::SealedInternal<__private::FromCoreMarker> {
     /// Convert a Value to this type using the provided DataConTable for lookups.
     ///
     /// # Errors
@@ -28,7 +34,12 @@ pub trait FromCore: Sized + sealed::FromCoreSealed {
 /// Convert a Rust type to a Core Value (for interpolation into CoreExpr or evaluation).
 ///
 /// This trait is used to inject Rust values into the Core evaluator.
-pub trait ToCore: sealed::ToCoreSealed {
+///
+/// # Implementation
+///
+/// This trait is intended to be implemented via `#[derive(ToCore)]`.
+/// Manual implementations are discouraged.
+pub trait ToCore: __private::SealedInternal<__private::ToCoreMarker> {
     /// Convert this type to a Value using the provided DataConTable for lookups.
     ///
     /// # Errors

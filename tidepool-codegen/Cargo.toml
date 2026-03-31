@@ -23,6 +23,9 @@ tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
 thiserror = "2"
 recursion = "0.5.4"
 
+[features]
+test-utils = []
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

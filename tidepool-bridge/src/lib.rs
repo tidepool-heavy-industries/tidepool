@@ -9,4 +9,4 @@ pub mod json;
 pub mod traits;
 
 pub use error::*;
-pub use traits::*;
+pub use traits::{__private, FromCore, ToCore};
