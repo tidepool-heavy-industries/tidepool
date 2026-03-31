@@ -138,6 +138,14 @@ pub struct EmitContext {
     pub(crate) letrec_states: Vec<crate::emit::expr::LetRecDeferredState>,
 }
 
+/// Bundles the three most common parameters for emission functions to reduce
+/// argument count and satisfy clippy::too_many_arguments.
+pub struct EmitArgs<'a, 'b, 'c> {
+    pub ctx: &'a mut EmitContext,
+    pub sess: &'a mut EmitSession<'b>,
+    pub builder: &'a mut cranelift_frontend::FunctionBuilder<'c>,
+}
+
 pub(crate) struct JoinPointRegistry {
     blocks: HashMap<JoinId, JoinInfo>,
 }
