@@ -1,3 +1,5 @@
+//! Serialization and deserialization for Tidepool IR using CBOR.
+
 pub mod read;
 pub mod write;
 
@@ -6,13 +8,20 @@ pub use read::{read_metadata, MetaWarnings};
 pub use write::write_cbor;
 pub use write::write_metadata;
 
+/// Errors that can occur during CBOR deserialization of Tidepool IR.
 #[derive(Debug)]
 pub enum ReadError {
+    /// An error occurred in the underlying CBOR parser.
     Cbor(String),
+    /// An unexpected or unknown tag was encountered.
     InvalidTag(String),
+    /// A literal value could not be decoded.
     InvalidLiteral(String),
+    /// A primitive operation name was not recognized.
     InvalidPrimOp(String),
+    /// A case alternative constructor was invalid.
     InvalidAltCon(String),
+    /// The structural layout of the CBOR data does not match Tidepool IR.
     InvalidStructure(String),
 }
 
@@ -31,8 +40,10 @@ impl std::fmt::Display for ReadError {
 
 impl std::error::Error for ReadError {}
 
+/// Errors that can occur during CBOR serialization of Tidepool IR.
 #[derive(Debug)]
 pub enum WriteError {
+    /// An error occurred in the underlying CBOR serializer.
     Cbor(String),
 }
 

@@ -1,3 +1,5 @@
+//! Pretty-printing for Tidepool IR.
+
 use crate::{types::*, AltCon, CoreExpr, CoreFrame};
 
 /// Pretty-print a CoreExpr to a human-readable string.

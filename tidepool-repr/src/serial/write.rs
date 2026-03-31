@@ -1,3 +1,5 @@
+//! Serialization of Tidepool IR to CBOR.
+
 use super::WriteError;
 use crate::frame::CoreFrame;
 use crate::tree::RecursiveTree;

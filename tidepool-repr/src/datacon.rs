@@ -1,3 +1,5 @@
+//! Data constructor metadata for Tidepool IR.
+
 use crate::types::DataConId;
 
 /// Strictness annotation for a data constructor field.
