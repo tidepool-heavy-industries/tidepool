@@ -1,3 +1,5 @@
+//! Serialization and deserialization for Tidepool IR using CBOR.
+
 pub mod read;
 pub mod write;
 
@@ -6,24 +8,33 @@ pub use read::{read_metadata, MetaWarnings};
 pub use write::write_cbor;
 pub use write::write_metadata;
 
+/// Errors that can occur during CBOR deserialization of Tidepool IR.
 #[derive(Debug, thiserror::Error)]
 pub enum ReadError {
+    /// An error occurred in the underlying CBOR parser.
     #[error("CBOR error: {0}")]
     Cbor(String),
+    /// An unexpected or unknown tag was encountered.
     #[error("Invalid tag: {0}")]
     InvalidTag(String),
+    /// A literal value could not be decoded.
     #[error("Invalid literal: {0}")]
     InvalidLiteral(String),
+    /// A primitive operation name was not recognized.
     #[error("Invalid primop: {0}")]
     InvalidPrimOp(String),
+    /// A case alternative constructor was invalid.
     #[error("Invalid alt con: {0}")]
     InvalidAltCon(String),
+    /// The structural layout of the CBOR data does not match Tidepool IR.
     #[error("Invalid structure: {0}")]
     InvalidStructure(String),
 }
 
+/// Errors that can occur during CBOR serialization of Tidepool IR.
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
+    /// An error occurred in the underlying CBOR serializer.
     #[error("CBOR error: {0}")]
     Cbor(String),
 }

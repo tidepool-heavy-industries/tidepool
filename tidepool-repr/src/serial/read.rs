@@ -1,3 +1,5 @@
+//! Deserialization of Tidepool IR from CBOR.
+
 use super::ReadError;
 use crate::frame::CoreFrame;
 use crate::tree::RecursiveTree;
@@ -55,6 +57,7 @@ pub fn read_cbor(bytes: &[u8]) -> Result<RecursiveTree<CoreFrame<usize>>, ReadEr
 /// Structured warnings from the Haskell extractor, encoded in meta.cbor.
 #[derive(Debug, Default, Clone)]
 pub struct MetaWarnings {
+    /// Whether the extracted code contains IO operations.
     pub has_io: bool,
 }
 

@@ -1,3 +1,5 @@
+//! Helper for constructing Tidepool IR trees.
+
 use crate::frame::CoreFrame;
 use crate::tree::{MapLayer, RecursiveTree};
 

@@ -1,3 +1,5 @@
+//! Flat-vector representation of expression trees.
+
 use crate::frame::CoreFrame;
 use crate::types::Alt;
 use std::collections::HashMap;
@@ -5,6 +7,7 @@ use std::collections::HashMap;
 /// A tree stored as a flat vector of frames. Children are `usize` indices into `nodes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecursiveTree<F> {
+    /// The nodes of the tree. The root is typically the last node.
     pub nodes: Vec<F>,
 }
 
@@ -142,7 +145,9 @@ fn rebuild(
 
 /// Functor map over the recursive positions of a frame.
 pub trait MapLayer<A, B> {
+    /// The resulting type after mapping.
     type Output;
+    /// Apply `f` to each child index in the frame.
     fn map_layer(self, f: impl FnMut(A) -> B) -> Self::Output;
 }
 

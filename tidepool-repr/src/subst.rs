@@ -1,3 +1,5 @@
+//! Capture-avoiding substitution for Tidepool IR.
+
 use crate::free_vars::free_vars;
 use crate::tree::MapLayer;
 use crate::{CoreExpr, CoreFrame, RecursiveTree, VarId};

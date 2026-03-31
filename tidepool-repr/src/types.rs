@@ -1,3 +1,5 @@
+//! Core type definitions for Tidepool IR identifiers and literals.
+
 /// Tag byte stored in high bits of VarId to mark error-sentinel bindings.
 pub const ERROR_SENTINEL_TAG: u8 = 0x45;
 
@@ -16,12 +18,18 @@ pub struct DataConId(pub u64);
 /// Literal values. Matches GHC's post-O2 literal types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Literal {
+    /// 64-bit signed integer.
     LitInt(i64),
+    /// 64-bit unsigned integer.
     LitWord(u64),
+    /// Unicode character.
     LitChar(char),
+    /// UTF-8 or raw byte string.
     LitString(Vec<u8>),
-    LitFloat(u64),  // IEEE 754 bits
-    LitDouble(u64), // IEEE 754 bits
+    /// 32-bit floating point (stored as IEEE 754 bits).
+    LitFloat(u64),
+    /// 64-bit floating point (stored as IEEE 754 bits).
+    LitDouble(u64),
 }
 
 macro_rules! define_primops {
@@ -283,16 +291,22 @@ define_primops! {
 /// Case alternative constructor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AltCon {
+    /// A data constructor pattern.
     DataAlt(DataConId),
+    /// A literal pattern.
     LitAlt(Literal),
+    /// The default case (_).
     Default,
 }
 
 /// A case alternative: constructor pattern + bound variables + body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Alt<A> {
+    /// The pattern constructor.
     pub con: AltCon,
+    /// Variables bound by this pattern.
     pub binders: Vec<VarId>,
+    /// The body of the alternative.
     pub body: A,
 }
 
