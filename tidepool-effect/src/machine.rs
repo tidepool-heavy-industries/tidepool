@@ -360,6 +360,7 @@ mod tests {
         use tidepool_bridge::FromCore;
 
         struct TestReq(i64);
+        impl tidepool_bridge::sealed::FromCoreSealed for TestReq {}
         impl FromCore for TestReq {
             fn from_value(
                 value: &Value,
@@ -432,6 +433,7 @@ mod tests {
         use tidepool_bridge::FromCore;
 
         struct TestReq(i64);
+        impl tidepool_bridge::sealed::FromCoreSealed for TestReq {}
         impl FromCore for TestReq {
             fn from_value(
                 value: &Value,

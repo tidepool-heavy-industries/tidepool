@@ -3555,6 +3555,7 @@ dependencies = [
  "ciborium",
  "proptest",
  "serial_test",
+ "thiserror 2.0.18",
  "tidepool-testing",
 ]
 
@@ -3605,7 +3606,7 @@ dependencies = [
  "pest",
  "pest_derive",
  "rustyline",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-codegen",
