@@ -1,3 +1,5 @@
+//! Dispatch logic for algebraic effects.
+
 use crate::error::EffectError;
 use frunk::{HCons, HNil};
 use tidepool_bridge::{FromCore, ToCore};

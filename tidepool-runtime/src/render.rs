@@ -1,3 +1,5 @@
+//! Rendering logic for evaluated results.
+
 use serde_json::json;
 use tidepool_eval::value::Value;
 use tidepool_repr::datacon_table::DataConTable;
