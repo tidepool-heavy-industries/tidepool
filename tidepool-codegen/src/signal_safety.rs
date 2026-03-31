@@ -212,6 +212,8 @@ mod inner {
         }
     }
 
+    impl std::error::Error for SignalError {}
+
     // Thread-local jump buffer pointer. Synchronous signals (SIGILL, SIGSEGV,
     // SIGBUS) are delivered to the faulting thread, so per-thread storage is
     // correct. The `const` initializer avoids any lazy-init allocation, making
@@ -432,6 +434,8 @@ mod inner {
             write!(f, "JIT signal: {}", self.0)
         }
     }
+
+    impl std::error::Error for SignalError {}
 
     pub unsafe fn with_signal_protection<F, R>(f: F) -> Result<R, SignalError>
     where

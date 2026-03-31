@@ -171,47 +171,24 @@ pub struct JoinInfo {
 }
 
 /// Errors during IR emission.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum EmitError {
+    #[error("unbound variable: {0:?}")]
     UnboundVariable(VarId),
+    #[error("not yet implemented: {0}")]
     NotYetImplemented(String),
+    #[error("cranelift error: {0}")]
     CraneliftError(String),
-    Pipeline(crate::pipeline::PipelineError),
+    #[error("pipeline error: {0}")]
+    Pipeline(#[from] crate::pipeline::PipelineError),
+    #[error("invalid arity for {0:?}: expected {1}, got {2}")]
     InvalidArity(PrimOpKind, usize, usize),
     /// A variable needed for closure capture was not found in the environment.
+    #[error("missing capture variable VarId({id:#x}): {ctx}", id = .0.0, ctx = .1)]
     MissingCaptureVar(VarId, String),
     /// Internal invariant violation (should never happen).
+    #[error("internal error: {0}")]
     InternalError(String),
-}
-
-impl std::fmt::Display for EmitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EmitError::UnboundVariable(v) => write!(f, "unbound variable: {:?}", v),
-            EmitError::NotYetImplemented(s) => write!(f, "not yet implemented: {}", s),
-            EmitError::CraneliftError(s) => write!(f, "cranelift error: {}", s),
-            EmitError::Pipeline(e) => write!(f, "pipeline error: {}", e),
-            EmitError::InvalidArity(op, expected, got) => {
-                write!(
-                    f,
-                    "invalid arity for {:?}: expected {}, got {}",
-                    op, expected, got
-                )
-            }
-            EmitError::MissingCaptureVar(v, ctx) => {
-                write!(f, "missing capture variable VarId({:#x}): {}", v.0, ctx)
-            }
-            EmitError::InternalError(msg) => write!(f, "internal error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for EmitError {}
-
-impl From<crate::pipeline::PipelineError> for EmitError {
-    fn from(e: crate::pipeline::PipelineError) -> Self {
-        EmitError::Pipeline(e)
-    }
 }
 
 impl EmitContext {
