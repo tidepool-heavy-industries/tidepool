@@ -4,9 +4,9 @@
       "args": [
         "mcp-stdio",
         "--role",
-        "root",
+        "tl",
         "--name",
-        "root"
+        "doc-pass-claude"
       ],
       "command": "exomonad",
       "type": "stdio"
