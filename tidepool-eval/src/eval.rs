@@ -1,3 +1,5 @@
+//! Tree-walking interpreter for Core expressions.
+
 use crate::env::Env;
 use crate::error::EvalError;
 use crate::heap::{Heap, ThunkState};

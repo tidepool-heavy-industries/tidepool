@@ -1,3 +1,5 @@
+//! Thunk storage and lazy evaluation state.
+
 use crate::env::Env;
 use crate::value::{ThunkId, Value};
 use tidepool_repr::CoreExpr;
@@ -5,27 +7,26 @@ use tidepool_repr::CoreExpr;
 /// State of a thunk in the thunk store.
 #[derive(Debug, Clone)]
 pub enum ThunkState {
-    /// Not yet evaluated: captured env + expression
+    /// Initial state: captured environment and expression.
     Unevaluated(Env, CoreExpr),
-    /// Currently being forced (cycle detection)
+    /// Under evaluation: used for infinite loop (cycle) detection.
     BlackHole,
-    /// Already evaluated to a value
+    /// Final state: successfully evaluated to WHNF.
     Evaluated(Value),
 }
 
-/// Heap trait: thunk allocation and forcing.
-/// The interpreter uses VecHeap. Codegen uses ArenaHeap (from core-heap).
+/// Heap trait: abstraction for thunk storage.
 pub trait Heap {
-    /// Allocate a new thunk. Returns its id.
+    /// Reserve an ID and store an unevaluated expression.
     fn alloc(&mut self, env: Env, expr: CoreExpr) -> ThunkId;
 
-    /// Read the current state of a thunk.
+    /// Retrieve the current state of a thunk.
     fn read(&self, id: ThunkId) -> &ThunkState;
 
-    /// Write a new state to a thunk (for force protocol and LetRec back-patching).
+    /// Update a thunk's state (Unevaluated -> BlackHole -> Evaluated).
     fn write(&mut self, id: ThunkId, state: ThunkState);
 
-    /// Return all ThunkIds directly referenced by this thunk.
+    /// Get all thunks transitively reachable from this thunk.
     fn children_of(&self, id: ThunkId) -> Vec<ThunkId>;
 }
 
@@ -36,6 +37,7 @@ pub struct VecHeap {
 }
 
 impl VecHeap {
+    /// Create a new, empty thunk store.
     pub fn new() -> Self {
         Self { thunks: Vec::new() }
     }
