@@ -18,6 +18,14 @@ pub struct EmitSession<'a> {
     pub tree: &'a CoreExpr,
 }
 
+/// Bundled emission state to reduce argument count.
+pub struct EmitState<'a, 'b, 'c> {
+    pub ctx: &'a mut EmitContext,
+    pub sess: &'a mut EmitSession<'b>,
+    pub builder: &'a mut cranelift_frontend::FunctionBuilder<'c>,
+    pub tail: TailCtx,
+}
+
 /// SSA value with boxed/unboxed tracking.
 #[derive(Debug, Clone, Copy)]
 pub enum SsaVal {

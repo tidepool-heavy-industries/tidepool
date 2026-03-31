@@ -1,4 +1,4 @@
-use crate::emit::expr::{ensure_heap_ptr, force_thunk_ssaval};
+use crate::emit::expr::{emit_node, ensure_heap_ptr, force_thunk_ssaval};
 use crate::emit::*;
 use cranelift_codegen::ir::{
     self, condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlags, Signature, Value,
@@ -8,15 +8,11 @@ use cranelift_module::{Linkage, Module};
 use tidepool_repr::{Alt, AltCon, Literal, VarId};
 
 /// Emit Case dispatch. The scrutinee has already been evaluated (stack-safe).
-#[allow(clippy::too_many_arguments)]
 pub fn emit_case(
-    ctx: &mut EmitContext,
-    sess: &mut EmitSession,
-    builder: &mut FunctionBuilder,
+    state: &mut EmitState,
     scrut: SsaVal,
     binder: &VarId,
     alts: &[Alt<usize>],
-    tail: TailCtx,
 ) -> Result<SsaVal, EmitError> {
     // 1. Scrutinee already evaluated
     let scrut_ptr = scrut.value();
@@ -24,7 +20,7 @@ pub fn emit_case(
     // 2. Bind case binder (save old value for restore)
     // NOTE: EnvGuard cannot be used here because it would borrow ctx.env mutably,
     // preventing the use of ctx in subsequent emit_* calls.
-    let old_case_binder = ctx.env.insert(*binder, scrut);
+    let old_case_binder = state.ctx.env.insert(*binder, scrut);
 
     // 3. Classify alts
     let data_alts: Vec<_> = alts
@@ -38,81 +34,71 @@ pub fn emit_case(
     let default_alt = alts.iter().find(|alt| matches!(alt.con, AltCon::Default));
 
     // 4. Create merge block
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I64);
+    let merge_block = state.builder.create_block();
+    state.builder.append_block_param(merge_block, types::I64);
 
     // 5. Dispatch
     if !data_alts.is_empty() {
         emit_data_dispatch(
-            ctx,
-            sess,
-            builder,
+            state,
             scrut_ptr,
             &data_alts,
             default_alt,
             merge_block,
-            tail,
         )?;
     } else if !lit_alts.is_empty() {
         emit_lit_dispatch(
-            ctx,
-            sess,
-            builder,
+            state,
             scrut,
             &lit_alts,
             default_alt,
             merge_block,
-            tail,
         )?;
     } else if let Some(alt) = default_alt {
         // Default only
-        let result = ctx.emit_node(sess, builder, alt.body, tail)?;
-        let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
-        builder
+        let result = emit_node(state, alt.body)?;
+        let result_ptr = ensure_heap_ptr(state.builder, state.sess.vmctx, state.sess.gc_sig, state.sess.oom_func, result);
+        state.builder
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
         // No alts? Call runtime_case_trap to handle pending errors gracefully.
-        emit_case_trap(sess, builder, scrut_ptr, &[], merge_block)?;
+        emit_case_trap(state.sess, state.builder, scrut_ptr, &[], merge_block)?;
     }
 
     // Seal merge block
-    builder.seal_block(merge_block);
+    state.builder.seal_block(merge_block);
 
     // Switch to merge block
-    builder.switch_to_block(merge_block);
-    let result = builder.block_params(merge_block)[0];
-    builder.declare_value_needs_stack_map(result);
-    ctx.declare_env(builder);
+    state.builder.switch_to_block(merge_block);
+    let result = state.builder.block_params(merge_block)[0];
+    state.builder.declare_value_needs_stack_map(result);
+    state.ctx.declare_env(state.builder);
 
     // 6. Restore case binder
-    ctx.env.restore(*binder, old_case_binder);
+    state.ctx.env.restore(*binder, old_case_binder);
 
     Ok(SsaVal::HeapPtr(result))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_data_dispatch(
-    ctx: &mut EmitContext,
-    sess: &mut EmitSession,
-    builder: &mut FunctionBuilder,
+    state: &mut EmitState,
     initial_scrut_ptr: Value,
     data_alts: &[&Alt<usize>],
     default_alt: Option<&Alt<usize>>,
     merge_block: ir::Block,
-    tail: TailCtx,
 ) -> Result<(), EmitError> {
     // 1. Force if needed (tag < 2: Closure or Thunk)
-    let tag = builder
+    let tag = state.builder
         .ins()
         .load(types::I8, MemFlags::trusted(), initial_scrut_ptr, 0);
-    let needs_force = builder.ins().icmp_imm(IntCC::UnsignedLessThan, tag, 2);
+    let needs_force = state.builder.ins().icmp_imm(IntCC::UnsignedLessThan, tag, 2);
 
-    let force_block = builder.create_block();
-    let dispatch_block = builder.create_block();
-    builder.append_block_param(dispatch_block, types::I64);
+    let force_block = state.builder.create_block();
+    let dispatch_block = state.builder.create_block();
+    state.builder.append_block_param(dispatch_block, types::I64);
 
-    builder.ins().brif(
+    state.builder.ins().brif(
         needs_force,
         force_block,
         &[],
@@ -121,42 +107,42 @@ fn emit_data_dispatch(
     );
 
     // Force block: call host_fns::heap_force
-    builder.switch_to_block(force_block);
-    builder.seal_block(force_block);
+    state.builder.switch_to_block(force_block);
+    state.builder.seal_block(force_block);
 
-    let force_fn = sess
+    let force_fn = state.sess
         .pipeline
         .module
         .declare_function("heap_force", Linkage::Import, &{
-            let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
+            let mut sig = Signature::new(state.sess.pipeline.isa.default_call_conv());
             sig.params.push(AbiParam::new(types::I64)); // vmctx
             sig.params.push(AbiParam::new(types::I64)); // thunk
             sig.returns.push(AbiParam::new(types::I64)); // result
             sig
         })
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-    let force_ref = sess
+    let force_ref = state.sess
         .pipeline
         .module
-        .declare_func_in_func(force_fn, builder.func);
+        .declare_func_in_func(force_fn, state.builder.func);
 
-    let call = builder
+    let call = state.builder
         .ins()
-        .call(force_ref, &[sess.vmctx, initial_scrut_ptr]);
-    let force_result = builder.inst_results(call)[0];
-    builder.declare_value_needs_stack_map(force_result);
-    builder
+        .call(force_ref, &[state.sess.vmctx, initial_scrut_ptr]);
+    let force_result = state.builder.inst_results(call)[0];
+    state.builder.declare_value_needs_stack_map(force_result);
+    state.builder
         .ins()
         .jump(dispatch_block, &[BlockArg::Value(force_result)]);
 
     // Dispatch block: actual pattern matching starts here
-    builder.switch_to_block(dispatch_block);
-    builder.seal_block(dispatch_block);
-    let scrut_ptr = builder.block_params(dispatch_block)[0];
-    builder.declare_value_needs_stack_map(scrut_ptr);
+    state.builder.switch_to_block(dispatch_block);
+    state.builder.seal_block(dispatch_block);
+    let scrut_ptr = state.builder.block_params(dispatch_block)[0];
+    state.builder.declare_value_needs_stack_map(scrut_ptr);
 
     // Load con_tag as u64 from offset 8
-    let con_tag = builder
+    let con_tag = state.builder
         .ins()
         .load(types::I64, MemFlags::trusted(), scrut_ptr, CON_TAG_OFFSET);
 
@@ -167,19 +153,19 @@ fn emit_data_dispatch(
             continue;
         };
 
-        let alt_block = builder.create_block();
-        let next_check_block = builder.create_block();
+        let alt_block = state.builder.create_block();
+        let next_check_block = state.builder.create_block();
 
-        let tag_val = builder.ins().iconst(types::I64, tag.0 as i64);
-        let eq = builder.ins().icmp(IntCC::Equal, con_tag, tag_val);
-        builder
+        let tag_val = state.builder.ins().iconst(types::I64, tag.0 as i64);
+        let eq = state.builder.ins().icmp(IntCC::Equal, con_tag, tag_val);
+        state.builder
             .ins()
             .brif(eq, alt_block, &[], next_check_block, &[]);
 
         // Emit alt body
-        builder.switch_to_block(alt_block);
-        builder.seal_block(alt_block);
-        ctx.declare_env(builder);
+        state.builder.switch_to_block(alt_block);
+        state.builder.seal_block(alt_block);
+        state.ctx.declare_env(state.builder);
 
         // Bind pattern variables — do NOT force thunked fields.
         // In Haskell, case alt binders are lazy. Thunked Con fields
@@ -200,38 +186,38 @@ fn emit_data_dispatch(
         // mutably, preventing the use of ctx in emit_node.
         for (i, &binder) in alt.binders.iter().enumerate() {
             let offset = CON_FIELDS_OFFSET + (8 * i as i32);
-            let field_val = builder
+            let field_val = state.builder
                 .ins()
                 .load(types::I64, MemFlags::trusted(), scrut_ptr, offset);
-            builder.declare_value_needs_stack_map(field_val);
-            ctx.env
+            state.builder.declare_value_needs_stack_map(field_val);
+            state.ctx.env
                 .insert_scoped(&mut scope, binder, SsaVal::HeapPtr(field_val));
         }
 
-        let result = ctx.emit_node(sess, builder, alt.body, tail)?;
-        let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
-        builder
+        let result = emit_node(state, alt.body)?;
+        let result_ptr = ensure_heap_ptr(state.builder, state.sess.vmctx, state.sess.gc_sig, state.sess.oom_func, result);
+        state.builder
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
 
         // Restore pattern variable bindings
-        ctx.env.restore_scope(scope);
+        state.ctx.env.restore_scope(scope);
 
         // Continue to next check
-        builder.switch_to_block(next_check_block);
-        builder.seal_block(next_check_block);
+        state.builder.switch_to_block(next_check_block);
+        state.builder.seal_block(next_check_block);
     }
 
     // Default or trap
     if let Some(alt) = default_alt {
-        ctx.declare_env(builder);
-        let result = ctx.emit_node(sess, builder, alt.body, tail)?;
-        let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
-        builder
+        state.ctx.declare_env(state.builder);
+        let result = emit_node(state, alt.body)?;
+        let result_ptr = ensure_heap_ptr(state.builder, state.sess.vmctx, state.sess.gc_sig, state.sess.oom_func, result);
+        state.builder
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
-        emit_case_trap(sess, builder, scrut_ptr, data_alts, merge_block)?;
+        emit_case_trap(state.sess, state.builder, scrut_ptr, data_alts, merge_block)?;
     }
 
     Ok(())
@@ -296,83 +282,79 @@ fn emit_case_trap(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_lit_dispatch(
-    ctx: &mut EmitContext,
-    sess: &mut EmitSession,
-    builder: &mut FunctionBuilder,
+    state: &mut EmitState,
     scrut: SsaVal,
     lit_alts: &[&Alt<usize>],
     default_alt: Option<&Alt<usize>>,
     merge_block: ir::Block,
-    tail: TailCtx,
 ) -> Result<(), EmitError> {
     // Force thunked scrutinees: literal case dispatch is strict —
     // ThunkCon fields extracted by data alt matching may still be thunks.
-    let scrut = force_thunk_ssaval(sess.pipeline, builder, sess.vmctx, scrut)?;
+    let scrut = force_thunk_ssaval(state.sess.pipeline, state.builder, state.sess.vmctx, scrut)?;
 
     // Unbox scrutinee: Raw values are already unboxed, HeapPtr needs LIT_VALUE_OFFSET load
     let scrut_value = match scrut {
         SsaVal::Raw(v, _) => v,
         SsaVal::HeapPtr(ptr) => {
-            builder
+            state.builder
                 .ins()
                 .load(types::I64, MemFlags::trusted(), ptr, LIT_VALUE_OFFSET)
         }
     };
 
     for &alt in lit_alts {
-        let alt_block = builder.create_block();
-        let next_check_block = builder.create_block();
+        let alt_block = state.builder.create_block();
+        let next_check_block = state.builder.create_block();
 
         if let AltCon::LitAlt(lit) = &alt.con {
             match lit {
                 Literal::LitInt(n) => {
-                    let lit_val = builder.ins().iconst(types::I64, *n);
-                    let eq = builder.ins().icmp(IntCC::Equal, scrut_value, lit_val);
-                    builder
+                    let lit_val = state.builder.ins().iconst(types::I64, *n);
+                    let eq = state.builder.ins().icmp(IntCC::Equal, scrut_value, lit_val);
+                    state.builder
                         .ins()
                         .brif(eq, alt_block, &[], next_check_block, &[]);
                 }
                 Literal::LitWord(n) => {
-                    let lit_val = builder.ins().iconst(types::I64, *n as i64);
-                    let eq = builder.ins().icmp(IntCC::Equal, scrut_value, lit_val);
-                    builder
+                    let lit_val = state.builder.ins().iconst(types::I64, *n as i64);
+                    let eq = state.builder.ins().icmp(IntCC::Equal, scrut_value, lit_val);
+                    state.builder
                         .ins()
                         .brif(eq, alt_block, &[], next_check_block, &[]);
                 }
                 Literal::LitChar(c) => {
-                    let lit_val = builder.ins().iconst(types::I64, *c as i64);
-                    let eq = builder.ins().icmp(IntCC::Equal, scrut_value, lit_val);
-                    builder
+                    let lit_val = state.builder.ins().iconst(types::I64, *c as i64);
+                    let eq = state.builder.ins().icmp(IntCC::Equal, scrut_value, lit_val);
+                    state.builder
                         .ins()
                         .brif(eq, alt_block, &[], next_check_block, &[]);
                 }
                 Literal::LitFloat(bits) => {
-                    let scrut_f64 = builder.ins().bitcast(
+                    let scrut_f64 = state.builder.ins().bitcast(
                         types::F64,
                         MemFlags::new().with_endianness(ir::Endianness::Little),
                         scrut_value,
                     );
-                    let lit_val = builder.ins().f64const(f64::from_bits(*bits));
-                    let eq = builder
+                    let lit_val = state.builder.ins().f64const(f64::from_bits(*bits));
+                    let eq = state.builder
                         .ins()
                         .fcmp(ir::condcodes::FloatCC::Equal, scrut_f64, lit_val);
-                    builder
+                    state.builder
                         .ins()
                         .brif(eq, alt_block, &[], next_check_block, &[]);
                 }
                 Literal::LitDouble(bits) => {
-                    let scrut_f64 = builder.ins().bitcast(
+                    let scrut_f64 = state.builder.ins().bitcast(
                         types::F64,
                         MemFlags::new().with_endianness(ir::Endianness::Little),
                         scrut_value,
                     );
-                    let lit_val = builder.ins().f64const(f64::from_bits(*bits));
-                    let eq = builder
+                    let lit_val = state.builder.ins().f64const(f64::from_bits(*bits));
+                    let eq = state.builder
                         .ins()
                         .fcmp(ir::condcodes::FloatCC::Equal, scrut_f64, lit_val);
-                    builder
+                    state.builder
                         .ins()
                         .brif(eq, alt_block, &[], next_check_block, &[]);
                 }
@@ -383,32 +365,32 @@ fn emit_lit_dispatch(
         }
 
         // Emit alt body
-        builder.switch_to_block(alt_block);
-        builder.seal_block(alt_block);
-        ctx.declare_env(builder);
-        let result = ctx.emit_node(sess, builder, alt.body, tail)?;
-        let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
-        builder
+        state.builder.switch_to_block(alt_block);
+        state.builder.seal_block(alt_block);
+        state.ctx.declare_env(state.builder);
+        let result = emit_node(state, alt.body)?;
+        let result_ptr = ensure_heap_ptr(state.builder, state.sess.vmctx, state.sess.gc_sig, state.sess.oom_func, result);
+        state.builder
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
 
         // Continue to next check
-        builder.switch_to_block(next_check_block);
-        builder.seal_block(next_check_block);
+        state.builder.switch_to_block(next_check_block);
+        state.builder.seal_block(next_check_block);
     }
 
     // Default or trap
     if let Some(alt) = default_alt {
-        ctx.declare_env(builder);
-        let result = ctx.emit_node(sess, builder, alt.body, tail)?;
-        let result_ptr = ensure_heap_ptr(builder, sess.vmctx, sess.gc_sig, sess.oom_func, result);
-        builder
+        state.ctx.declare_env(state.builder);
+        let result = emit_node(state, alt.body)?;
+        let result_ptr = ensure_heap_ptr(state.builder, state.sess.vmctx, state.sess.gc_sig, state.sess.oom_func, result);
+        state.builder
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
         // No alts matched.
         // We pass empty data_alts since these are lit alts.
-        emit_case_trap(sess, builder, scrut_value, &[], merge_block)?;
+        emit_case_trap(state.sess, state.builder, scrut_value, &[], merge_block)?;
     }
 
     Ok(())
