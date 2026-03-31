@@ -1,3 +1,5 @@
+//! Optimization passes for Core expressions.
+
 use tidepool_repr::CoreExpr;
 
 /// Whether a pass changed the expression.
