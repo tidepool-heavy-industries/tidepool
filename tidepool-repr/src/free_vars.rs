@@ -38,14 +38,13 @@ fn free_vars_at(tree: &CoreExpr, idx: usize) -> HashSet<VarId> {
         }
         CoreFrame::LetRec { bindings, body } => {
             let bound: HashSet<VarId> = bindings.iter().map(|(v, _)| *v).collect();
-            let mut s: HashSet<VarId> = bindings
+            bindings
                 .iter()
-                .flat_map(|(_, rhs)| free_vars_at(tree, *rhs))
+                .map(|(_, rhs)| *rhs)
+                .chain(std::iter::once(*body))
+                .flat_map(|idx| free_vars_at(tree, idx))
                 .filter(|v| !bound.contains(v))
-                .collect();
-            let body_fvs = free_vars_at(tree, *body);
-            s.extend(body_fvs.difference(&bound));
-            s
+                .collect()
         }
         CoreFrame::Case {
             scrutinee,
@@ -53,14 +52,15 @@ fn free_vars_at(tree: &CoreExpr, idx: usize) -> HashSet<VarId> {
             alts,
         } => {
             let mut s = free_vars_at(tree, *scrutinee);
-            for alt in alts {
-                let mut alt_fvs = free_vars_at(tree, alt.body);
-                alt_fvs.remove(binder); // case binder
+            let alt_fvs = alts.iter().flat_map(|alt| {
+                let mut fvs = free_vars_at(tree, alt.body);
+                fvs.remove(binder);
                 for b in &alt.binders {
-                    alt_fvs.remove(b); // pattern binders
+                    fvs.remove(b);
                 }
-                s.extend(alt_fvs);
-            }
+                fvs
+            });
+            s.extend(alt_fvs);
             s
         }
         CoreFrame::Con { fields, .. } => {
