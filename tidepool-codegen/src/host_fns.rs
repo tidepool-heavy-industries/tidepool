@@ -1161,7 +1161,7 @@ pub(crate) extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64)
         }
     };
 
-    // Before the pointer arithmetic, validate Wood offsets against source
+    // Before the pointer arithmetic, validate offsets against source
     let src_n = unsafe { *(src as *const u64) } as usize;
     if off < 0 || (off as usize).saturating_add(n) > src_n {
         return error_poison_ptr() as i64; // silently return
@@ -1208,7 +1208,7 @@ pub(crate) extern "C" fn runtime_copy_boxed_array(
         return; // out of bounds
     }
 
-    // SAFETY: src and dest are valid boxed array pointers from JIT code. Wood offsetting
+    // SAFETY: src and dest are valid boxed array pointers from JIT code. Offsetting
     // past the 8-byte length prefix by the slot-sized offsets. Uses copy (not
     // copy_nonoverlapping) because src and dest may be the same array.
     let src_ptr = unsafe { (src as *const u8).add(8 + 8 * src_off) };
