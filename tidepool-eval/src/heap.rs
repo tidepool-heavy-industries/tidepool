@@ -23,10 +23,13 @@ pub trait Heap {
     /// Retrieve the current state of a thunk.
     fn read(&self, id: ThunkId) -> &ThunkState;
 
-    /// Update a thunk's state (Unevaluated -> BlackHole -> Evaluated).
+    /// Update a thunk's state. Typically used to move through the lifecycle
+    /// `Unevaluated -> BlackHole -> Evaluated`, but other transitions (such as
+    /// restoring `Unevaluated(env, expr)` after an evaluation failure) are also allowed.
     fn write(&mut self, id: ThunkId, state: ThunkState);
 
-    /// Get all thunks transitively reachable from this thunk.
+    /// Get all thunks directly referenced from this thunk's current state.
+    /// Callers (e.g., GC) are responsible for performing any transitive traversal.
     fn children_of(&self, id: ThunkId) -> Vec<ThunkId>;
 }
 

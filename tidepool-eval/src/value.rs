@@ -13,7 +13,7 @@ pub type SharedByteArray = Arc<Mutex<Vec<u8>>>;
 /// Runtime value for the tree-walking interpreter.
 #[derive(Debug, Clone)]
 pub enum Value {
-    /// Literal value (Int#, Word#, Char#, Addr#).
+    /// Primitive literal value (Int#, Word#, Char#, String#, Float#, Double#).
     Lit(Literal),
     /// Fully-applied data constructor (GHC DataCon).
     Con(DataConId, Vec<Value>),
@@ -23,7 +23,9 @@ pub enum Value {
     ThunkRef(ThunkId),
     /// Join point continuation (GHC Join Point).
     JoinCont(Vec<VarId>, CoreExpr, Env),
-    /// Partially-applied data constructor (GHC Worker/Wrapper).
+    /// Partially-applied data constructor function: carries the constructor id,
+    /// its total arity, and the arguments applied so far. When the number of
+    /// arguments reaches the arity, this is reduced to a `Con` value.
     ConFun(DataConId, usize, Vec<Value>),
     /// Mutable/immutable byte array (ByteArray# / MutableByteArray#).
     ByteArray(SharedByteArray),
