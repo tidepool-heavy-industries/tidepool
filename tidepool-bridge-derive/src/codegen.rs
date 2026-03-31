@@ -116,6 +116,8 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
     }
 
     quote! {
+        impl #impl_generics tidepool_bridge::FromCoreSealed for #name #ty_generics #where_clause {}
+
         impl #impl_generics tidepool_bridge::FromCore for #name #ty_generics #where_clause {
             fn from_value(value: &tidepool_eval::Value, table: &tidepool_repr::DataConTable) -> Result<Self, tidepool_bridge::BridgeError> {
                 match value {
@@ -185,6 +187,8 @@ pub fn generate_to_core(info: &EnumInfo) -> TokenStream {
     }
 
     quote! {
+        impl #impl_generics tidepool_bridge::ToCoreSealed for #name #ty_generics #where_clause {}
+
         impl #impl_generics tidepool_bridge::ToCore for #name #ty_generics #where_clause {
             fn to_value(&self, table: &tidepool_repr::DataConTable) -> Result<tidepool_eval::Value, tidepool_bridge::BridgeError> {
                 match self {
@@ -228,6 +232,8 @@ pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
     };
 
     quote! {
+        impl #impl_generics tidepool_bridge::FromCoreSealed for #name #ty_generics #where_clause {}
+
         impl #impl_generics tidepool_bridge::FromCore for #name #ty_generics #where_clause {
             fn from_value(value: &tidepool_eval::Value, table: &tidepool_repr::DataConTable) -> Result<Self, tidepool_bridge::BridgeError> {
                 match value {
@@ -296,6 +302,8 @@ pub fn generate_struct_to_core(info: &StructInfo) -> TokenStream {
     };
 
     quote! {
+        impl #impl_generics tidepool_bridge::ToCoreSealed for #name #ty_generics #where_clause {}
+
         impl #impl_generics tidepool_bridge::ToCore for #name #ty_generics #where_clause {
             fn to_value(&self, table: &tidepool_repr::DataConTable) -> Result<tidepool_eval::Value, tidepool_bridge::BridgeError> {
                 let #destructure = self;
