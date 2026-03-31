@@ -1066,7 +1066,7 @@ pub extern "C" fn runtime_compare_byte_arrays(
 // ---------------------------------------------------------------------------
 
 /// Allocate a new boxed array of `len` pointer slots, each initialized to `init`.
-/// Layout: [u64 length][ptr0][ptr1]...[ptrN-1]
+/// Layout: `[u64 length][ptr0][ptr1]...[ptrN-1]`
 /// Each slot is 8 bytes (a heap pointer).
 pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
     if len < 0 {
@@ -1231,7 +1231,7 @@ pub extern "C" fn runtime_shrink_boxed_array(arr: i64, new_len: i64) {
     }
 }
 
-/// CAS on a boxed array slot: compare-and-swap arr[idx].
+/// CAS on a boxed array slot: compare-and-swap `arr[idx]`.
 /// Returns the old value. If old == expected, writes new.
 pub extern "C" fn runtime_cas_boxed_array(arr: i64, idx: i64, expected: i64, new: i64) -> i64 {
     if (arr as u64) < MIN_VALID_ADDR || idx < 0 {
