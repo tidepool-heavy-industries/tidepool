@@ -38,11 +38,12 @@ fn free_vars_at(tree: &CoreExpr, idx: usize) -> HashSet<VarId> {
         }
         CoreFrame::LetRec { bindings, body } => {
             let bound: HashSet<VarId> = bindings.iter().map(|(v, _)| *v).collect();
-            let mut s = HashSet::new();
-            for (_, rhs) in bindings {
-                let rhs_fvs = free_vars_at(tree, *rhs);
-                s.extend(rhs_fvs.difference(&bound));
-            }
+            let mut s: HashSet<VarId> = bindings
+                .iter()
+                .flat_map(|(_, rhs)| free_vars_at(tree, *rhs))
+                .filter(|v| !bound.contains(v))
+                .collect();
+
             let body_fvs = free_vars_at(tree, *body);
             s.extend(body_fvs.difference(&bound));
             s
@@ -64,11 +65,7 @@ fn free_vars_at(tree: &CoreExpr, idx: usize) -> HashSet<VarId> {
             s
         }
         CoreFrame::Con { fields, .. } => {
-            let mut s = HashSet::new();
-            for f in fields {
-                s.extend(free_vars_at(tree, *f));
-            }
-            s
+            fields.iter().flat_map(|f| free_vars_at(tree, *f)).collect()
         }
         CoreFrame::Join {
             label: _,
@@ -88,18 +85,10 @@ fn free_vars_at(tree: &CoreExpr, idx: usize) -> HashSet<VarId> {
             s
         }
         CoreFrame::Jump { args, .. } => {
-            let mut s = HashSet::new();
-            for a in args {
-                s.extend(free_vars_at(tree, *a));
-            }
-            s
+            args.iter().flat_map(|a| free_vars_at(tree, *a)).collect()
         }
         CoreFrame::PrimOp { args, .. } => {
-            let mut s = HashSet::new();
-            for a in args {
-                s.extend(free_vars_at(tree, *a));
-            }
-            s
+            args.iter().flat_map(|a| free_vars_at(tree, *a)).collect()
         }
     }
 }

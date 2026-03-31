@@ -16,6 +16,14 @@ pub enum Occ {
 
 impl Occ {
     /// Add two occurrence counts.
+    ///
+    /// This is a lattice join operation where:
+    /// - `Dead` is the identity element.
+    /// - `Once + Once = Many`.
+    /// - `Many` is the top element (anything + `Many` = `Many`).
+    ///
+    /// We suppress `clippy::should_implement_trait` because this is a specific
+    /// lattice join operation for occurrence analysis, not general-purpose addition.
     #[allow(clippy::should_implement_trait)]
     pub fn add(self, other: Occ) -> Occ {
         match (self, other) {
