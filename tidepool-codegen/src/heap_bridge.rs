@@ -3,45 +3,35 @@ use crate::layout::{
     self, LIT_TAG_ADDR, LIT_TAG_ARRAY, LIT_TAG_BYTEARRAY, LIT_TAG_CHAR, LIT_TAG_DOUBLE,
     LIT_TAG_FLOAT, LIT_TAG_INT, LIT_TAG_SMALLARRAY, LIT_TAG_STRING, LIT_TAG_WORD,
 };
-use std::fmt;
 use tidepool_eval::value::Value;
 use tidepool_heap::layout as heap_layout;
 use tidepool_repr::{DataConId, Literal};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
+    #[error("unexpected heap tag: {0}")]
     UnexpectedHeapTag(u8),
+    #[error("unexpected lit tag: {0}")]
     UnexpectedLitTag(u8),
+    #[error("null pointer")]
     NullPointer,
+    #[error("nursery exhausted")]
     NurseryExhausted,
+    #[error("too many Con fields: {count}")]
     TooManyFields { count: usize },
+    #[error("data too large: {len} bytes")]
     DataTooLarge { len: usize },
+    #[error("heap structure too deep (>10000 levels)")]
     TooDeep,
+    #[error("unevaluated thunk")]
     UnevaluatedThunk,
+    #[error("blackhole (thunk forcing itself)")]
     BlackHole,
+    #[error("unknown thunk state: {0}")]
     UnknownThunkState(u8),
+    #[error("internal error: {0}")]
     InternalError(String),
 }
-
-impl fmt::Display for BridgeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BridgeError::UnexpectedHeapTag(t) => write!(f, "unexpected heap tag: {}", t),
-            BridgeError::UnexpectedLitTag(t) => write!(f, "unexpected lit tag: {}", t),
-            BridgeError::NullPointer => write!(f, "null pointer"),
-            BridgeError::NurseryExhausted => write!(f, "nursery exhausted"),
-            BridgeError::TooManyFields { count } => write!(f, "too many Con fields: {}", count),
-            BridgeError::DataTooLarge { len } => write!(f, "data too large: {} bytes", len),
-            BridgeError::TooDeep => write!(f, "heap structure too deep (>10000 levels)"),
-            BridgeError::UnevaluatedThunk => write!(f, "unevaluated thunk"),
-            BridgeError::BlackHole => write!(f, "blackhole (thunk forcing itself)"),
-            BridgeError::UnknownThunkState(state) => write!(f, "unknown thunk state: {}", state),
-            BridgeError::InternalError(msg) => write!(f, "internal error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for BridgeError {}
 
 /// Convert a heap-allocated object to a Value.
 ///

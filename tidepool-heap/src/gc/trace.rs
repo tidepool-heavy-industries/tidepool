@@ -1,28 +1,13 @@
 use std::collections::VecDeque;
-use std::error::Error;
-use std::fmt;
 use tidepool_eval::heap::Heap;
 use tidepool_eval::value::ThunkId;
 
 /// Error during garbage collection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GcError {
+    #[error("ThunkId {:?} not in forwarding table (not reachable during trace)", .0)]
     ThunkNotReachable(ThunkId),
 }
-
-impl fmt::Display for GcError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            GcError::ThunkNotReachable(id) => write!(
-                f,
-                "ThunkId {:?} not in forwarding table (not reachable during trace)",
-                id
-            ),
-        }
-    }
-}
-
-impl Error for GcError {}
 
 /// Maps old ThunkIds to new ThunkIds.
 pub struct ForwardingTable {

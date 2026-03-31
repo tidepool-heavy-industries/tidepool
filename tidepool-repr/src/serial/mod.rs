@@ -6,45 +6,27 @@ pub use read::{read_metadata, MetaWarnings};
 pub use write::write_cbor;
 pub use write::write_metadata;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ReadError {
+    #[error("CBOR error: {0}")]
     Cbor(String),
+    #[error("Invalid tag: {0}")]
     InvalidTag(String),
+    #[error("Invalid literal: {0}")]
     InvalidLiteral(String),
+    #[error("Invalid primop: {0}")]
     InvalidPrimOp(String),
+    #[error("Invalid alt con: {0}")]
     InvalidAltCon(String),
+    #[error("Invalid structure: {0}")]
     InvalidStructure(String),
 }
 
-impl std::fmt::Display for ReadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ReadError::Cbor(e) => write!(f, "CBOR error: {}", e),
-            ReadError::InvalidTag(s) => write!(f, "Invalid tag: {}", s),
-            ReadError::InvalidLiteral(s) => write!(f, "Invalid literal: {}", s),
-            ReadError::InvalidPrimOp(s) => write!(f, "Invalid primop: {}", s),
-            ReadError::InvalidAltCon(s) => write!(f, "Invalid alt con: {}", s),
-            ReadError::InvalidStructure(s) => write!(f, "Invalid structure: {}", s),
-        }
-    }
-}
-
-impl std::error::Error for ReadError {}
-
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum WriteError {
+    #[error("CBOR error: {0}")]
     Cbor(String),
 }
-
-impl std::fmt::Display for WriteError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WriteError::Cbor(e) => write!(f, "CBOR error: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for WriteError {}
 
 #[cfg(test)]
 mod tests {

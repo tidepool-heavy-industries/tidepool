@@ -3416,6 +3416,7 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "serde_json",
+ "thiserror 2.0.18",
  "tidepool-eval",
  "tidepool-repr",
 ]
@@ -3448,6 +3449,7 @@ dependencies = [
  "recursion",
  "serial_test",
  "target-lexicon",
+ "thiserror 2.0.18",
  "tidepool-effect",
  "tidepool-eval",
  "tidepool-heap",
@@ -3461,6 +3463,7 @@ version = "0.1.0"
 dependencies = [
  "frunk",
  "proptest",
+ "thiserror 2.0.18",
  "tidepool-bridge",
  "tidepool-eval",
  "tidepool-repr",
@@ -3471,6 +3474,7 @@ name = "tidepool-eval"
 version = "0.1.0"
 dependencies = [
  "im",
+ "thiserror 2.0.18",
  "tidepool-repr",
 ]
 
@@ -3495,7 +3499,7 @@ version = "0.1.0"
 dependencies = [
  "bumpalo",
  "proptest",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tidepool-eval",
  "tidepool-repr",
 ]
@@ -3564,6 +3568,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "tempfile",
+ "thiserror 2.0.18",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-codegen",

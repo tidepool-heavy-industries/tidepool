@@ -3,11 +3,11 @@
 //! Provides `compile_haskell` (source to Core) and `compile_and_run` (source to
 //! evaluated result), with filesystem caching of compiled CBOR artifacts.
 
-use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
+use thiserror::Error;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
 use tidepool_codegen::jit_machine::JitEffectMachine;
 pub use tidepool_codegen::jit_machine::JitError;
@@ -25,93 +25,32 @@ pub use render::{value_to_json, EvalResult};
 pub type CompileResult = (CoreExpr, DataConTable, MetaWarnings);
 
 /// Errors that can occur during Haskell compilation.
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CompileError {
     /// I/O error during file operations or process execution.
-    Io(io::Error),
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
     /// The `tidepool-extract` process failed (e.g., GHC parse/type error).
+    #[error("Haskell compilation failed:\n{0}")]
     ExtractFailed(String),
     /// Failed to deserialize the CBOR output from `tidepool-extract`.
-    ReadError(ReadError),
+    #[error("CBOR deserialization error: {0}")]
+    ReadError(#[from] ReadError),
     /// A required output file (.cbor or meta.cbor) was not produced by the extractor.
+    #[error("Missing output file from extractor: {}", .0.display())]
     MissingOutput(PathBuf),
     /// The target binding has IO type, which is not supported.
+    #[error("IO type detected in result binding. IO operations (unsafePerformIO, etc.) are not supported in the Tidepool sandbox.")]
     IOTypeDetected,
 }
 
-impl fmt::Display for CompileError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CompileError::Io(e) => write!(f, "I/O error: {}", e),
-            CompileError::ExtractFailed(msg) => write!(f, "Haskell compilation failed:\n{}", msg),
-            CompileError::ReadError(e) => write!(f, "CBOR deserialization error: {}", e),
-            CompileError::MissingOutput(path) => {
-                write!(f, "Missing output file from extractor: {}", path.display())
-            }
-            CompileError::IOTypeDetected => {
-                write!(f, "IO type detected in result binding. IO operations (unsafePerformIO, etc.) are not supported in the Tidepool sandbox.")
-            }
-        }
-    }
-}
-
-impl std::error::Error for CompileError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            CompileError::Io(e) => Some(e),
-            CompileError::ReadError(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<io::Error> for CompileError {
-    fn from(e: io::Error) -> Self {
-        CompileError::Io(e)
-    }
-}
-
-impl From<ReadError> for CompileError {
-    fn from(e: ReadError) -> Self {
-        CompileError::ReadError(e)
-    }
-}
-
 /// Unified error type for compile + run pipeline.
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum RuntimeError {
-    Compile(CompileError),
-    Jit(JitError),
-}
-
-impl fmt::Display for RuntimeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RuntimeError::Compile(e) => write!(f, "{}", e),
-            RuntimeError::Jit(e) => write!(f, "{}", e),
-        }
-    }
-}
-
-impl std::error::Error for RuntimeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            RuntimeError::Compile(e) => Some(e),
-            RuntimeError::Jit(e) => Some(e),
-        }
-    }
-}
-
-impl From<CompileError> for RuntimeError {
-    fn from(e: CompileError) -> Self {
-        Self::Compile(e)
-    }
-}
-
-impl From<JitError> for RuntimeError {
-    fn from(e: JitError) -> Self {
-        Self::Jit(e)
-    }
+    #[error(transparent)]
+    Compile(#[from] CompileError),
+    #[error(transparent)]
+    Jit(#[from] JitError),
 }
 
 /// Extract module name from Haskell source (e.g. "module Expr where" -> "Expr").
