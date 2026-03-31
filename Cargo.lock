@@ -3416,6 +3416,7 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "serde_json",
+ "thiserror 2.0.18",
  "tidepool-eval",
  "tidepool-repr",
 ]
@@ -3566,6 +3567,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "tempfile",
+ "thiserror 2.0.18",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-codegen",
