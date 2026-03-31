@@ -1,3 +1,5 @@
+//! Runtime values for the tree-walking interpreter.
+
 use crate::env::Env;
 use std::sync::{Arc, Mutex};
 use tidepool_repr::{CoreExpr, DataConId, Literal, VarId};
@@ -11,26 +13,30 @@ pub type SharedByteArray = Arc<Mutex<Vec<u8>>>;
 /// Runtime value for the tree-walking interpreter.
 #[derive(Debug, Clone)]
 pub enum Value {
-    /// Literal value (Int, Word, Char, String, Float, Double)
+    /// Primitive literal value (Int#, Word#, Char#, String#, Float#, Double#).
     Lit(Literal),
-    /// Fully-applied data constructor
+    /// Fully-applied data constructor (GHC DataCon).
     Con(DataConId, Vec<Value>),
-    /// Closure: captured env + binder + body
+    /// Function closure: captured env + binder + body (GHC PAP/FUN).
     Closure(Env, VarId, CoreExpr),
-    /// Reference to a heap-allocated thunk
+    /// Reference to a heap-allocated thunk (GHC Thunk).
     ThunkRef(ThunkId),
-    /// Join point continuation (lives in Env only, never heap-allocated)
+    /// Join point continuation (GHC Join Point).
     JoinCont(Vec<VarId>, CoreExpr, Env),
-    /// Partially-applied data constructor: (tag, arity, accumulated args)
-    /// When all args are supplied, collapses to Con.
+    /// Partially-applied data constructor function: carries the constructor id,
+    /// its total arity, and the arguments applied so far. When the number of
+    /// arguments reaches the arity, this is reduced to a `Con` value.
     ConFun(DataConId, usize, Vec<Value>),
-    /// Mutable/immutable byte array (ByteArray# / MutableByteArray#)
+    /// Mutable/immutable byte array (ByteArray# / MutableByteArray#).
     ByteArray(SharedByteArray),
 }
 
 /// Thunk identifier — index into the thunk store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ThunkId(pub u32);
+pub struct ThunkId(
+    /// Raw index into the heap's thunk vector.
+    pub u32,
+);
 
 impl std::fmt::Display for ThunkId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

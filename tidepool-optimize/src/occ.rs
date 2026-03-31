@@ -1,11 +1,16 @@
+//! Occurrence analysis for Core expressions.
+
 use std::collections::HashMap;
 use tidepool_repr::{CoreExpr, CoreFrame, VarId};
 
 /// Occurrence count for a variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Occ {
+    /// Variable is not used.
     Dead,
+    /// Variable is used exactly once.
     Once,
+    /// Variable is used more than once.
     Many,
 }
 

@@ -1,12 +1,18 @@
+//! Evaluation errors and value type descriptions.
+
 use crate::value::ThunkId;
 use tidepool_repr::{JoinId, PrimOpKind, VarId};
 
 /// Describes the kind of a Value for error reporting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueKind {
+    /// Primitive literal value
     Literal(&'static str), // "Int#", "Word#", "Double#", "Char#", "String"
+    /// Saturated data constructor
     Constructor,
+    /// Function closure
     Closure,
+    /// Lazy thunk
     Thunk,
     /// Fallback for complex values — stores Debug output
     Other(String),

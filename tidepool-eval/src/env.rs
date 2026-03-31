@@ -1,3 +1,5 @@
+//! Evaluation environment and variable bindings.
+
 use crate::value::Value;
 use im::HashMap;
 use tidepool_repr::VarId;

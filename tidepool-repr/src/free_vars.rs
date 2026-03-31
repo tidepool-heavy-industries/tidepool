@@ -1,3 +1,5 @@
+//! Analysis to identify free variables in Tidepool IR expressions.
+
 use crate::{CoreExpr, CoreFrame, VarId};
 use std::collections::HashSet;
 

@@ -1,3 +1,5 @@
+//! Case reduction pass for Core expressions.
+
 use tidepool_eval::{Changed, Pass};
 use tidepool_repr::{get_children, replace_subtree, AltCon, CoreExpr, CoreFrame};
 

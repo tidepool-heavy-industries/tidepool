@@ -44,11 +44,13 @@ pub enum CompileError {
     IOTypeDetected,
 }
 
-/// Unified error type for compile + run pipeline.
+/// Unified error type for the compile-and-run pipeline.
 #[derive(Error, Debug)]
 pub enum RuntimeError {
+    /// Error during Haskell compilation.
     #[error(transparent)]
     Compile(#[from] CompileError),
+    /// Error during JIT execution.
     #[error(transparent)]
     Jit(#[from] JitError),
 }

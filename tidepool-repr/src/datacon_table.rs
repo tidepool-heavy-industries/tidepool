@@ -1,3 +1,5 @@
+//! A lookup table for data constructor metadata.
+
 use crate::datacon::DataCon;
 use crate::types::{AltCon, DataConId};
 use std::collections::HashMap;
@@ -6,8 +8,11 @@ use std::collections::HashMap;
 /// Populated during deserialization from the CBOR metadata section.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DataConTable {
+    /// Mapping from unique DataConId to its metadata.
     by_id: HashMap<DataConId, DataCon>,
+    /// Mapping from unqualified name to all DataConIds sharing that name.
     by_name: HashMap<String, Vec<DataConId>>,
+    /// Mapping from module-qualified name to its DataConId.
     by_qualified_name: HashMap<String, DataConId>,
     /// Type-sibling groups: DataConIds that appear together in case branches.
     /// If Bin and Tip appear as alternatives in the same Case, they're siblings.
