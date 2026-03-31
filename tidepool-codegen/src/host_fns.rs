@@ -240,6 +240,7 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
 }
 
 /// Set a hook to be called during gc_trigger with the collected roots.
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn set_gc_test_hook(hook: GcHook) {
     HOOK.with(|hook_cell| {
         *hook_cell.borrow_mut() = Some(hook);
@@ -247,6 +248,7 @@ pub(crate) fn set_gc_test_hook(hook: GcHook) {
 }
 
 /// Clear the GC test hook.
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn clear_gc_test_hook() {
     HOOK.with(|hook_cell| {
         *hook_cell.borrow_mut() = None;
@@ -272,6 +274,7 @@ pub fn clear_stack_map_registry() {
 }
 
 /// Get collected roots from the last gc_trigger call.
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn last_gc_roots() -> Vec<StackRoot> {
     LAST_ROOTS.with(|roots_cell| roots_cell.borrow().clone())
 }

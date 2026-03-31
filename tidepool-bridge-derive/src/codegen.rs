@@ -116,7 +116,7 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
     }
 
     quote! {
-        impl #impl_generics tidepool_bridge::sealed::FromCoreSealed for #name #ty_generics #where_clause {}
+        impl #impl_generics tidepool_bridge::__private::SealedInternal<tidepool_bridge::__private::FromCoreMarker> for #name #ty_generics #where_clause {}
 
         impl #impl_generics tidepool_bridge::FromCore for #name #ty_generics #where_clause {
             fn from_value(value: &tidepool_eval::Value, table: &tidepool_repr::DataConTable) -> Result<Self, tidepool_bridge::BridgeError> {
@@ -187,7 +187,7 @@ pub fn generate_to_core(info: &EnumInfo) -> TokenStream {
     }
 
     quote! {
-        impl #impl_generics tidepool_bridge::sealed::ToCoreSealed for #name #ty_generics #where_clause {}
+        impl #impl_generics tidepool_bridge::__private::SealedInternal<tidepool_bridge::__private::ToCoreMarker> for #name #ty_generics #where_clause {}
 
         impl #impl_generics tidepool_bridge::ToCore for #name #ty_generics #where_clause {
             fn to_value(&self, table: &tidepool_repr::DataConTable) -> Result<tidepool_eval::Value, tidepool_bridge::BridgeError> {
@@ -232,7 +232,7 @@ pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
     };
 
     quote! {
-        impl #impl_generics tidepool_bridge::sealed::FromCoreSealed for #name #ty_generics #where_clause {}
+        impl #impl_generics tidepool_bridge::__private::SealedInternal<tidepool_bridge::__private::FromCoreMarker> for #name #ty_generics #where_clause {}
 
         impl #impl_generics tidepool_bridge::FromCore for #name #ty_generics #where_clause {
             fn from_value(value: &tidepool_eval::Value, table: &tidepool_repr::DataConTable) -> Result<Self, tidepool_bridge::BridgeError> {
@@ -302,7 +302,7 @@ pub fn generate_struct_to_core(info: &StructInfo) -> TokenStream {
     };
 
     quote! {
-        impl #impl_generics tidepool_bridge::sealed::ToCoreSealed for #name #ty_generics #where_clause {}
+        impl #impl_generics tidepool_bridge::__private::SealedInternal<tidepool_bridge::__private::ToCoreMarker> for #name #ty_generics #where_clause {}
 
         impl #impl_generics tidepool_bridge::ToCore for #name #ty_generics #where_clause {
             fn to_value(&self, table: &tidepool_repr::DataConTable) -> Result<tidepool_eval::Value, tidepool_bridge::BridgeError> {
