@@ -1,15 +1,17 @@
-use std::error::Error;
-use std::fmt;
 use tidepool_repr::DataConId;
+use thiserror::Error;
 
 /// Errors that can occur when bridging between Rust types and Core Values.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum BridgeError {
     /// The `DataConId` was not found in the `DataConTable`.
+    #[error("Unknown DataConId: {0:?}")]
     UnknownDataCon(DataConId),
     /// The `DataConId` was found, but it has an unexpected name.
+    #[error("Unknown DataCon name: {0}")]
     UnknownDataConName(String),
     /// The number of fields in a constructor does not match the expected arity.
+    #[error("Arity mismatch for DataCon {con:?}: expected {expected}, got {got}")]
     ArityMismatch {
         /// The constructor identifier.
         con: DataConId,
@@ -19,6 +21,7 @@ pub enum BridgeError {
         got: usize,
     },
     /// The value has an unexpected type (e.g., expected a Literal, got a Con).
+    #[error("Type mismatch: expected {expected}, got {got}")]
     TypeMismatch {
         /// A description of the expected type.
         expected: String,
@@ -26,30 +29,9 @@ pub enum BridgeError {
         got: String,
     },
     /// The type is not supported by the bridge.
+    #[error("Unsupported type: {0}")]
     UnsupportedType(String),
     /// Internal invariant violation (should never happen).
+    #[error("Internal error: {0}")]
     InternalError(String),
 }
-
-impl fmt::Display for BridgeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BridgeError::UnknownDataCon(id) => write!(f, "Unknown DataConId: {:?}", id),
-            BridgeError::UnknownDataConName(name) => write!(f, "Unknown DataCon name: {}", name),
-            BridgeError::ArityMismatch { con, expected, got } => {
-                write!(
-                    f,
-                    "Arity mismatch for DataCon {:?}: expected {}, got {}",
-                    con, expected, got
-                )
-            }
-            BridgeError::TypeMismatch { expected, got } => {
-                write!(f, "Type mismatch: expected {}, got {}", expected, got)
-            }
-            BridgeError::UnsupportedType(ty) => write!(f, "Unsupported type: {}", ty),
-            BridgeError::InternalError(msg) => write!(f, "Internal error: {}", msg),
-        }
-    }
-}
-
-impl Error for BridgeError {}
