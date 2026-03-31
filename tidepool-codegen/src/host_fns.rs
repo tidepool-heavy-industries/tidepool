@@ -72,7 +72,7 @@ thread_local! {
 
 /// Set the current execution context for JIT code.
 /// This is used to provide more info when a signal (SIGSEGV/SIGILL) occurs.
-pub fn set_exec_context(ctx: &str) {
+pub(crate) fn set_exec_context(ctx: &str) {
     EXEC_CONTEXT.with(|c| {
         let mut s = c.borrow_mut();
         s.clear();
@@ -88,7 +88,7 @@ pub fn set_exec_context(ctx: &str) {
 }
 
 /// Get the current execution context.
-pub fn get_exec_context() -> String {
+pub(crate) fn get_exec_context() -> String {
     EXEC_CONTEXT.with(|c| c.borrow().clone())
 }
 
@@ -240,14 +240,16 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
 }
 
 /// Set a hook to be called during gc_trigger with the collected roots.
-pub fn set_gc_test_hook(hook: GcHook) {
+#[allow(dead_code)]
+pub(crate) fn set_gc_test_hook(hook: GcHook) {
     HOOK.with(|hook_cell| {
         *hook_cell.borrow_mut() = Some(hook);
     });
 }
 
 /// Clear the GC test hook.
-pub fn clear_gc_test_hook() {
+#[allow(dead_code)]
+pub(crate) fn clear_gc_test_hook() {
     HOOK.with(|hook_cell| {
         *hook_cell.borrow_mut() = None;
     });
@@ -272,7 +274,8 @@ pub fn clear_stack_map_registry() {
 }
 
 /// Get collected roots from the last gc_trigger call.
-pub fn last_gc_roots() -> Vec<StackRoot> {
+#[allow(dead_code)]
+pub(crate) fn last_gc_roots() -> Vec<StackRoot> {
     LAST_ROOTS.with(|roots_cell| roots_cell.borrow().clone())
 }
 
@@ -362,7 +365,7 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
 /// Loop: read tail_callee+tail_arg from VMContext, clear them, call the closure,
 /// check if result is null (another tail call) or a real value.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn trampoline_resolve(vmctx: *mut VMContext) -> *mut u8 {
+pub(crate) extern "C" fn trampoline_resolve(vmctx: *mut VMContext) -> *mut u8 {
     // SAFETY: vmctx is a valid pointer from JIT code. tail_callee/tail_arg are valid
     // heap pointers set by JIT tail-call sites. Code pointers in closures were set
     // during compilation and point to finalized JIT functions.
@@ -434,7 +437,7 @@ pub fn gc_trigger_last_vmctx() -> usize {
 /// Called by JIT code when an unresolved external variable is forced.
 /// Returns null to allow execution to continue (will likely segfault later).
 /// In debug mode (TIDEPOOL_TRACE), logs and returns null.
-pub extern "C" fn unresolved_var_trap(var_id: u64) -> *mut u8 {
+pub(crate) extern "C" fn unresolved_var_trap(var_id: u64) -> *mut u8 {
     let tag_char = (var_id >> 56) as u8 as char;
     let key = var_id & ((1u64 << 56) - 1);
     let msg = format!(
@@ -525,7 +528,7 @@ pub extern "C" fn runtime_error_with_msg(kind: u64, msg_ptr: *const u8, msg_len:
     error_poison_ptr()
 }
 
-pub extern "C" fn runtime_oom() -> *mut u8 {
+pub(crate) extern "C" fn runtime_oom() -> *mut u8 {
     RUNTIME_ERROR.with(|cell| {
         *cell.borrow_mut() = Some(RuntimeError::HeapOverflow);
     });
@@ -533,7 +536,7 @@ pub extern "C" fn runtime_oom() -> *mut u8 {
 }
 
 /// Called by JIT code when a BlackHole is encountered (thunk forcing itself).
-pub extern "C" fn runtime_blackhole_trap(_vmctx: *mut VMContext) -> *mut u8 {
+pub(crate) extern "C" fn runtime_blackhole_trap(_vmctx: *mut VMContext) -> *mut u8 {
     let msg = "[JIT] BlackHole detected: infinite loop (thunk forcing itself)".to_string();
     eprintln!("{}", msg);
     push_diagnostic(msg);
@@ -544,7 +547,7 @@ pub extern "C" fn runtime_blackhole_trap(_vmctx: *mut VMContext) -> *mut u8 {
 }
 
 /// Called by JIT code when a Thunk has an invalid state.
-pub extern "C" fn runtime_bad_thunk_state_trap(_vmctx: *mut VMContext, state: u8) -> *mut u8 {
+pub(crate) extern "C" fn runtime_bad_thunk_state_trap(_vmctx: *mut VMContext, state: u8) -> *mut u8 {
     let msg = format!("[JIT] Invalid thunk state: {}", state);
     eprintln!("{}", msg);
     push_diagnostic(msg);
@@ -677,7 +680,7 @@ unsafe extern "C" fn poison_trampoline_lazy(
 }
 
 /// Create a pre-allocated "lazy poison" Closure for a given error kind and message.
-pub fn error_poison_ptr_lazy_msg(kind: u64, msg: &[u8]) -> *mut u8 {
+pub(crate) fn error_poison_ptr_lazy_msg(kind: u64, msg: &[u8]) -> *mut u8 {
     // Leak the message bytes so they live forever
     let msg_bytes = msg.to_vec().into_boxed_slice();
     let msg_ptr = msg_bytes.as_ptr();
@@ -768,7 +771,7 @@ const MAX_CALL_DEPTH: u32 = 20_000;
 ///
 /// # Safety
 /// fun_ptr must point to a valid HeapObject or be null.
-pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) -> *mut u8 {
+pub(crate) unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) -> *mut u8 {
     // If a runtime error is already pending, don't abort on tag mismatches —
     // we're in error-propagation mode and the effect machine will handle it.
     let has_error = RUNTIME_ERROR.with(|cell| cell.borrow().is_some());
@@ -847,7 +850,7 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) -> *mut u8 {
 /// Allocate a new mutable byte array of `size` bytes, zeroed.
 /// Layout: [u64 length][u8 bytes...]
 /// Returns a raw pointer to the allocation (caller stores in Lit value slot).
-pub extern "C" fn runtime_new_byte_array(size: i64) -> i64 {
+pub(crate) extern "C" fn runtime_new_byte_array(size: i64) -> i64 {
     if size < 0 {
         RUNTIME_ERROR.with(|cell| {
             *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
@@ -872,7 +875,7 @@ pub extern "C" fn runtime_new_byte_array(size: i64) -> i64 {
 }
 
 /// Copy `len` bytes from `src` (Addr#) to `dest_ba` (ByteArray ptr) at `dest_off`.
-pub extern "C" fn runtime_copy_addr_to_byte_array(src: i64, dest_ba: i64, dest_off: i64, len: i64) {
+pub(crate) extern "C" fn runtime_copy_addr_to_byte_array(src: i64, dest_ba: i64, dest_off: i64, len: i64) {
     if check_ptr_invalid(src as *const u8, "runtime_copy_addr_to_byte_array")
         || check_ptr_invalid(dest_ba as *const u8, "runtime_copy_addr_to_byte_array")
     {
@@ -898,7 +901,7 @@ pub extern "C" fn runtime_copy_addr_to_byte_array(src: i64, dest_ba: i64, dest_o
 }
 
 /// Set `len` bytes in `ba` starting at `off` to `val`.
-pub extern "C" fn runtime_set_byte_array(ba: i64, off: i64, len: i64, val: i64) {
+pub(crate) extern "C" fn runtime_set_byte_array(ba: i64, off: i64, len: i64, val: i64) {
     if check_ptr_invalid(ba as *const u8, "runtime_set_byte_array") {
         return;
     }
@@ -918,7 +921,7 @@ pub extern "C" fn runtime_set_byte_array(ba: i64, off: i64, len: i64, val: i64) 
 }
 
 /// Shrink a mutable byte array to `new_size` bytes (just updates the length prefix).
-pub extern "C" fn runtime_shrink_byte_array(ba: i64, new_size: i64) {
+pub(crate) extern "C" fn runtime_shrink_byte_array(ba: i64, new_size: i64) {
     if new_size < 0 || (ba as u64) < MIN_VALID_ADDR {
         return;
     }
@@ -935,7 +938,7 @@ pub extern "C" fn runtime_shrink_byte_array(ba: i64, new_size: i64) {
 
 /// Resize a mutable byte array. Allocates a new buffer, copies existing data,
 /// zeroes any new bytes, and frees the old buffer. Returns the new pointer.
-pub extern "C" fn runtime_resize_byte_array(ba: i64, new_size: i64) -> i64 {
+pub(crate) extern "C" fn runtime_resize_byte_array(ba: i64, new_size: i64) -> i64 {
     if new_size < 0 {
         RUNTIME_ERROR.with(|cell| {
             *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
@@ -988,7 +991,7 @@ pub extern "C" fn runtime_resize_byte_array(ba: i64, new_size: i64) -> i64 {
 
 /// Copy `len` bytes between byte arrays: src[src_off..] -> dest[dest_off..].
 /// Used by both copyByteArray# and copyMutableByteArray#.
-pub extern "C" fn runtime_copy_byte_array(
+pub(crate) extern "C" fn runtime_copy_byte_array(
     src: i64,
     src_off: i64,
     dest: i64,
@@ -1068,7 +1071,7 @@ pub extern "C" fn runtime_compare_byte_arrays(
 /// Allocate a new boxed array of `len` pointer slots, each initialized to `init`.
 /// Layout: `[u64 length][ptr0][ptr1]...[ptrN-1]`
 /// Each slot is 8 bytes (a heap pointer).
-pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
+pub(crate) extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
     if len < 0 {
         RUNTIME_ERROR.with(|cell| {
             *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
@@ -1122,7 +1125,7 @@ pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
 }
 
 /// Clone a sub-range of a boxed array: src[off..off+len].
-pub extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64) -> i64 {
+pub(crate) extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64) -> i64 {
     if (src as u64) < MIN_VALID_ADDR {
         return error_poison_ptr() as i64;
     }
@@ -1158,7 +1161,7 @@ pub extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64) -> i64
         }
     };
 
-    // Before the pointer arithmetic, validate offsets against source
+    // Before the pointer arithmetic, validate Wood offsets against source
     let src_n = unsafe { *(src as *const u64) } as usize;
     if off < 0 || (off as usize).saturating_add(n) > src_n {
         return error_poison_ptr() as i64; // silently return
@@ -1183,7 +1186,7 @@ pub extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64) -> i64
 }
 
 /// Copy `len` pointer slots from src[src_off..] to dest[dest_off..].
-pub extern "C" fn runtime_copy_boxed_array(
+pub(crate) extern "C" fn runtime_copy_boxed_array(
     src: i64,
     src_off: i64,
     dest: i64,
@@ -1205,7 +1208,7 @@ pub extern "C" fn runtime_copy_boxed_array(
         return; // out of bounds
     }
 
-    // SAFETY: src and dest are valid boxed array pointers from JIT code. Offsetting
+    // SAFETY: src and dest are valid boxed array pointers from JIT code. Wood offsetting
     // past the 8-byte length prefix by the slot-sized offsets. Uses copy (not
     // copy_nonoverlapping) because src and dest may be the same array.
     let src_ptr = unsafe { (src as *const u8).add(8 + 8 * src_off) };
@@ -1216,7 +1219,7 @@ pub extern "C" fn runtime_copy_boxed_array(
 }
 
 /// Shrink a boxed array (just update the length field).
-pub extern "C" fn runtime_shrink_boxed_array(arr: i64, new_len: i64) {
+pub(crate) extern "C" fn runtime_shrink_boxed_array(arr: i64, new_len: i64) {
     if new_len < 0 || (arr as u64) < MIN_VALID_ADDR {
         return;
     }
@@ -1233,7 +1236,7 @@ pub extern "C" fn runtime_shrink_boxed_array(arr: i64, new_len: i64) {
 
 /// CAS on a boxed array slot: compare-and-swap `arr[idx]`.
 /// Returns the old value. If old == expected, writes new.
-pub extern "C" fn runtime_cas_boxed_array(arr: i64, idx: i64, expected: i64, new: i64) -> i64 {
+pub(crate) extern "C" fn runtime_cas_boxed_array(arr: i64, idx: i64, expected: i64, new: i64) -> i64 {
     if (arr as u64) < MIN_VALID_ADDR || idx < 0 {
         return error_poison_ptr() as i64;
     }
@@ -1253,13 +1256,13 @@ pub extern "C" fn runtime_cas_boxed_array(arr: i64, idx: i64, expected: i64, new
 
 /// Decode a Double into its Int64 mantissa (significand).
 /// GHC's `decodeDouble_Int64#` returns (# mantissa, exponent #).
-pub extern "C" fn runtime_decode_double_mantissa(bits: i64) -> i64 {
+pub(crate) extern "C" fn runtime_decode_double_mantissa(bits: i64) -> i64 {
     let (man, _) = decode_double_int64(f64::from_bits(bits as u64));
     man
 }
 
 /// Decode a Double into its Int exponent.
-pub extern "C" fn runtime_decode_double_exponent(bits: i64) -> i64 {
+pub(crate) extern "C" fn runtime_decode_double_exponent(bits: i64) -> i64 {
     let (_, exp) = decode_double_int64(f64::from_bits(bits as u64));
     exp
 }
@@ -1295,7 +1298,7 @@ fn decode_double_int64(d: f64) -> (i64, i64) {
 }
 
 /// strlen: count bytes until null terminator.
-pub extern "C" fn runtime_strlen(addr: i64) -> i64 {
+pub(crate) extern "C" fn runtime_strlen(addr: i64) -> i64 {
     if check_ptr_invalid(addr as *const u8, "runtime_strlen") {
         return 0;
     }
@@ -1419,7 +1422,7 @@ pub extern "C" fn runtime_text_reverse(dest: i64, src: i64, off: i64, len: i64) 
 
 /// Format a Double as a null-terminated C string and return its address.
 /// The CString is leaked (small bounded strings, acceptable).
-pub extern "C" fn runtime_show_double_addr(bits: i64) -> i64 {
+pub(crate) extern "C" fn runtime_show_double_addr(bits: i64) -> i64 {
     let d = f64::from_bits(bits as u64);
     let s = haskell_show_double(d);
     let c_str = match std::ffi::CString::new(s) {
@@ -1466,7 +1469,7 @@ fn haskell_show_double(d: f64) -> String {
 // All take f64-as-i64-bits and return f64-as-i64-bits.
 macro_rules! double_math_unary {
     ($name:ident, $op:ident) => {
-        pub extern "C" fn $name(bits: i64) -> i64 {
+        pub(crate) extern "C" fn $name(bits: i64) -> i64 {
             let d = f64::from_bits(bits as u64);
             f64::$op(d).to_bits() as i64
         }
@@ -1490,7 +1493,7 @@ double_math_unary!(runtime_double_asinh, asinh);
 double_math_unary!(runtime_double_acosh, acosh);
 double_math_unary!(runtime_double_atanh, atanh);
 
-pub extern "C" fn runtime_double_power(bits_a: i64, bits_b: i64) -> i64 {
+pub(crate) extern "C" fn runtime_double_power(bits_a: i64, bits_b: i64) -> i64 {
     let a = f64::from_bits(bits_a as u64);
     let b = f64::from_bits(bits_b as u64);
     a.powf(b).to_bits() as i64
@@ -2218,7 +2221,7 @@ mod tests {
 /// `scrut_ptr` is the heap pointer to the scrutinee.
 /// `num_alts` is the number of data alt tags expected.
 /// `alt_tags` is a pointer to an array of expected tag u64 values.
-pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64) -> *mut u8 {
+pub(crate) extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64) -> *mut u8 {
     // If a runtime error is already pending (e.g. DivisionByZero), the poison
     // value cascaded into a case expression. Return poison again instead of
     // aborting — the error flag will be detected when with_signal_protection

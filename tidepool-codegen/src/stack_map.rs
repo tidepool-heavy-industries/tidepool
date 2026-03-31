@@ -1,18 +1,33 @@
 use std::collections::BTreeMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CodeOffset(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FrameSize(pub u32);
+
 /// Information about GC roots at a single safepoint.
 #[derive(Debug, Clone)]
 pub struct StackMapInfo {
     /// Size of the frame in bytes (span from user_stack_maps tuple).
-    pub frame_size: u32,
+    pub frame_size: FrameSize,
     /// SP-relative offsets of heap pointer slots.
     /// root_addr = SP + offset at the safepoint.
     pub offsets: Vec<u32>,
 }
 
-pub type RawStackMapEntry = (cranelift_codegen::ir::types::Type, u32);
-pub type RawStackMap = (u32, u32, Vec<RawStackMapEntry>);
+#[derive(Debug, Clone)]
+pub struct RawStackMapEntry {
+    pub ty: cranelift_codegen::ir::types::Type,
+    pub offset: u32,
+}
 
+#[derive(Debug, Clone)]
+pub struct RawStackMap {
+    pub code_offset: CodeOffset,
+    pub frame_size: FrameSize,
+    pub entries: Vec<RawStackMapEntry>,
+}
 /// Maps absolute return addresses to stack map info.
 ///
 /// Key = function_base_ptr + code_offset
@@ -44,13 +59,13 @@ impl StackMapRegistry {
     pub fn register(&mut self, base_ptr: usize, size: u32, raw_entries: &[RawStackMap]) {
         self.ranges.push((base_ptr, base_ptr + size as usize));
 
-        for (code_offset, frame_size, slot_entries) in raw_entries {
-            let return_addr = base_ptr + *code_offset as usize;
-            let offsets: Vec<u32> = slot_entries.iter().map(|(_, offset)| *offset).collect();
+        for entry in raw_entries {
+            let return_addr = base_ptr + entry.code_offset.0 as usize;
+            let offsets: Vec<u32> = entry.entries.iter().map(|e| e.offset).collect();
             self.entries.insert(
                 return_addr,
                 StackMapInfo {
-                    frame_size: *frame_size,
+                    frame_size: entry.frame_size,
                     offsets,
                 },
             );
