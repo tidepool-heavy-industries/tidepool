@@ -8,11 +8,11 @@
 //! represented as balanced binary trees of (Key, Value) pairs.
 
 use crate::error::BridgeError;
-use crate::traits::{ToCore, ToCoreSealed};
+use crate::traits::ToCore;
 use tidepool_eval::Value;
 use tidepool_repr::{DataConTable, Literal};
 
-impl ToCoreSealed for serde_json::Value {}
+impl crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for serde_json::Value {}
 
 /// Convert a `serde_json::Value` to a Tidepool Core `Value` matching the
 /// vendored `Tidepool.Aeson.Value` Haskell type.

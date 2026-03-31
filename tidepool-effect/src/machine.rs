@@ -357,31 +357,13 @@ mod tests {
 
         // Simple handler: receives any value, returns Lit(100)
         use crate::dispatch::{EffectContext, EffectHandler};
-        use tidepool_bridge::FromCore;
-
-        struct TestReq(i64);
-        impl tidepool_bridge::FromCoreSealed for TestReq {}
-        impl FromCore for TestReq {
-            fn from_value(
-                value: &Value,
-                _table: &DataConTable,
-            ) -> Result<Self, tidepool_bridge::BridgeError> {
-                match value {
-                    Value::Lit(Literal::LitInt(n)) => Ok(TestReq(*n)),
-                    _ => Err(tidepool_bridge::BridgeError::TypeMismatch {
-                        expected: "LitInt".into(),
-                        got: format!("{:?}", value),
-                    }),
-                }
-            }
-        }
 
         struct TestHandler;
         impl EffectHandler for TestHandler {
-            type Request = TestReq;
-            fn handle(&mut self, req: TestReq, _cx: &EffectContext) -> Result<Value, EffectError> {
+            type Request = i64;
+            fn handle(&mut self, req: i64, _cx: &EffectContext) -> Result<Value, EffectError> {
                 // Echo back the request + 1
-                Ok(Value::Lit(Literal::LitInt(req.0 + 1)))
+                Ok(Value::Lit(Literal::LitInt(req + 1)))
             }
         }
 
@@ -430,24 +412,6 @@ mod tests {
         };
 
         use crate::dispatch::{EffectContext, EffectHandler};
-        use tidepool_bridge::FromCore;
-
-        struct TestReq(i64);
-        impl tidepool_bridge::FromCoreSealed for TestReq {}
-        impl FromCore for TestReq {
-            fn from_value(
-                value: &Value,
-                _table: &DataConTable,
-            ) -> Result<Self, tidepool_bridge::BridgeError> {
-                match value {
-                    Value::Lit(Literal::LitInt(n)) => Ok(TestReq(*n)),
-                    _ => Err(tidepool_bridge::BridgeError::TypeMismatch {
-                        expected: "LitInt".into(),
-                        got: format!("{:?}", value),
-                    }),
-                }
-            }
-        }
 
         struct UserData {
             multiplier: i64,
@@ -455,13 +419,13 @@ mod tests {
 
         struct UserHandler;
         impl EffectHandler<UserData> for UserHandler {
-            type Request = TestReq;
+            type Request = i64;
             fn handle(
                 &mut self,
-                req: TestReq,
+                req: i64,
                 cx: &EffectContext<'_, UserData>,
             ) -> Result<Value, EffectError> {
-                Ok(Value::Lit(Literal::LitInt(req.0 * cx.user().multiplier)))
+                Ok(Value::Lit(Literal::LitInt(req * cx.user().multiplier)))
             }
         }
 

@@ -29,8 +29,8 @@ fn type_mismatch(expected: &str, got: &Value) -> BridgeError {
     }
 }
 
-impl<T> crate::traits::FromCoreSealed for std::marker::PhantomData<T> {}
-impl<T> crate::traits::ToCoreSealed for std::marker::PhantomData<T> {}
+impl<T> crate::traits::__private::Sealed<crate::traits::FromCoreMarker> for std::marker::PhantomData<T> {}
+impl<T> crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for std::marker::PhantomData<T> {}
 
 impl<T> FromCore for std::marker::PhantomData<T> {
     fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
@@ -63,8 +63,8 @@ impl<T> ToCore for std::marker::PhantomData<T> {
 
 // Box
 
-impl crate::traits::FromCoreSealed for Value {}
-impl crate::traits::ToCoreSealed for Value {}
+impl crate::traits::__private::Sealed<crate::traits::FromCoreMarker> for Value {}
+impl crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for Value {}
 
 // Value identity — pass through without conversion.
 impl ToCore for Value {
@@ -79,8 +79,8 @@ impl FromCore for Value {
     }
 }
 
-impl<T> crate::traits::FromCoreSealed for Box<T> {}
-impl<T> crate::traits::ToCoreSealed for Box<T> {}
+impl<T> crate::traits::__private::Sealed<crate::traits::FromCoreMarker> for Box<T> {}
+impl<T> crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for Box<T> {}
 
 impl<T: FromCore> FromCore for Box<T> {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
@@ -96,8 +96,8 @@ impl<T: ToCore> ToCore for Box<T> {
 
 // Unit
 
-impl crate::traits::FromCoreSealed for () {}
-impl crate::traits::ToCoreSealed for () {}
+impl crate::traits::__private::Sealed<crate::traits::FromCoreMarker> for () {}
+impl crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for () {}
 
 impl ToCore for () {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
@@ -119,8 +119,8 @@ impl FromCore for () {
 
 // Primitives
 
-impl crate::traits::FromCoreSealed for i64 {}
-impl crate::traits::ToCoreSealed for i64 {}
+impl crate::traits::__private::Sealed<crate::traits::FromCoreMarker> for i64 {}
+impl crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for i64 {}
 
 /// Bridges Rust `i64` to Haskell `Int#` literal.
 /// Also transparently unwraps `I#(n)` (boxed Int).
@@ -149,8 +149,8 @@ impl ToCore for i64 {
     }
 }
 
-impl crate::traits::FromCoreSealed for u64 {}
-impl crate::traits::ToCoreSealed for u64 {}
+impl crate::traits::__private::Sealed<crate::traits::FromCoreMarker> for u64 {}
+impl crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for u64 {}
 
 /// Bridges Rust `u64` to Haskell `Word#` literal.
 /// Also transparently unwraps `W#(n)` (boxed Word).
@@ -179,8 +179,8 @@ impl ToCore for u64 {
     }
 }
 
-impl crate::traits::FromCoreSealed for f64 {}
-impl crate::traits::ToCoreSealed for f64 {}
+impl crate::traits::__private::Sealed<crate::traits::FromCoreMarker> for f64 {}
+impl crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for f64 {}
 
 /// Bridges Rust `f64` to Haskell `Double#` literal.
 /// Also transparently unwraps `D#(n)` (boxed Double).
@@ -212,8 +212,8 @@ impl ToCore for f64 {
     }
 }
 
-impl crate::traits::FromCoreSealed for i32 {}
-impl crate::traits::ToCoreSealed for i32 {}
+impl crate::traits::__private::Sealed<crate::traits::FromCoreMarker> for i32 {}
+impl crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for i32 {}
 
 /// Bridges Rust `i32` to Haskell `Int#` literal.
 /// Returns error on overflow/underflow.
@@ -236,8 +236,8 @@ impl ToCore for i32 {
     }
 }
 
-impl crate::traits::FromCoreSealed for bool {}
-impl crate::traits::ToCoreSealed for bool {}
+impl crate::traits::__private::Sealed<crate::traits::FromCoreMarker> for bool {}
+impl crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for bool {}
 
 /// Bridges Rust `bool` to Haskell `Bool` (True/False constructors).
 impl FromCore for bool {
@@ -290,8 +290,8 @@ impl ToCore for bool {
     }
 }
 
-impl crate::traits::FromCoreSealed for char {}
-impl crate::traits::ToCoreSealed for char {}
+impl crate::traits::__private::Sealed<crate::traits::FromCoreMarker> for char {}
+impl crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for char {}
 
 /// Also transparently unwraps `C#(c)` (boxed Char).
 impl FromCore for char {
@@ -319,8 +319,8 @@ impl ToCore for char {
     }
 }
 
-impl crate::traits::FromCoreSealed for String {}
-impl crate::traits::ToCoreSealed for String {}
+impl crate::traits::__private::Sealed<crate::traits::FromCoreMarker> for String {}
+impl crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for String {}
 
 impl FromCore for String {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
@@ -438,8 +438,8 @@ impl ToCore for String {
 
 // Containers
 
-impl<T> crate::traits::FromCoreSealed for Option<T> {}
-impl<T> crate::traits::ToCoreSealed for Option<T> {}
+impl<T> crate::traits::__private::Sealed<crate::traits::FromCoreMarker> for Option<T> {}
+impl<T> crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for Option<T> {}
 
 impl<T: FromCore> FromCore for Option<T> {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
@@ -500,8 +500,8 @@ impl<T: ToCore> ToCore for Option<T> {
     }
 }
 
-impl<T> crate::traits::FromCoreSealed for Vec<T> {}
-impl<T> crate::traits::ToCoreSealed for Vec<T> {}
+impl<T> crate::traits::__private::Sealed<crate::traits::FromCoreMarker> for Vec<T> {}
+impl<T> crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for Vec<T> {}
 
 impl<T: FromCore> FromCore for Vec<T> {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
@@ -568,8 +568,8 @@ impl<T: ToCore> ToCore for Vec<T> {
     }
 }
 
-impl<T, E> crate::traits::FromCoreSealed for Result<T, E> {}
-impl<T, E> crate::traits::ToCoreSealed for Result<T, E> {}
+impl<T, E> crate::traits::__private::Sealed<crate::traits::FromCoreMarker> for Result<T, E> {}
+impl<T, E> crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for Result<T, E> {}
 
 impl<T: FromCore, E: FromCore> FromCore for Result<T, E> {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
@@ -636,8 +636,8 @@ impl<T: ToCore, E: ToCore> ToCore for Result<T, E> {
 
 // Tuples
 
-impl<A, B> crate::traits::FromCoreSealed for (A, B) {}
-impl<A, B> crate::traits::ToCoreSealed for (A, B) {}
+impl<A, B> crate::traits::__private::Sealed<crate::traits::FromCoreMarker> for (A, B) {}
+impl<A, B> crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for (A, B) {}
 
 impl<A: FromCore, B: FromCore> FromCore for (A, B) {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
@@ -680,8 +680,8 @@ impl<A: ToCore, B: ToCore> ToCore for (A, B) {
     }
 }
 
-impl<A, B, C> crate::traits::FromCoreSealed for (A, B, C) {}
-impl<A, B, C> crate::traits::ToCoreSealed for (A, B, C) {}
+impl<A, B, C> crate::traits::__private::Sealed<crate::traits::FromCoreMarker> for (A, B, C) {}
+impl<A, B, C> crate::traits::__private::Sealed<crate::traits::ToCoreMarker> for (A, B, C) {}
 
 impl<A: FromCore, B: FromCore, C: FromCore> FromCore for (A, B, C) {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
