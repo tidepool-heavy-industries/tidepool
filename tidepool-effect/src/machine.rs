@@ -1,9 +1,12 @@
+//! Effect machine for executing effectful Core expressions.
+
 use crate::dispatch::{DispatchEffect, EffectContext};
 use crate::error::EffectError;
 use tidepool_eval::heap::Heap;
 use tidepool_eval::value::Value;
 use tidepool_repr::{CoreExpr, DataConId, DataConTable};
 
+/// An evaluator for Core expressions with support for algebraic effects.
 pub struct EffectMachine<'a> {
     table: &'a DataConTable,
     heap: &'a mut dyn Heap,
@@ -15,6 +18,7 @@ pub struct EffectMachine<'a> {
 }
 
 impl<'a> EffectMachine<'a> {
+    /// Create a new effect machine.
     pub fn new(table: &'a DataConTable, heap: &'a mut dyn Heap) -> Result<Self, EffectError> {
         let val_id = table
             .get_by_name("Val")

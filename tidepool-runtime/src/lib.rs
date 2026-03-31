@@ -77,10 +77,12 @@ impl From<ReadError> for CompileError {
     }
 }
 
-/// Unified error type for compile + run pipeline.
+/// Unified error type for the compile-and-run pipeline.
 #[derive(Debug)]
 pub enum RuntimeError {
+    /// Error during Haskell compilation.
     Compile(CompileError),
+    /// Error during JIT execution.
     Jit(JitError),
 }
 

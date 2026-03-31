@@ -1,3 +1,5 @@
+//! Optimization pipeline orchestration for Core expressions.
+
 use crate::beta::BetaReduce;
 use crate::case_reduce::CaseReduce;
 use crate::dce::Dce;

@@ -1,3 +1,5 @@
+//! Filesystem caching for compiled artifacts.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

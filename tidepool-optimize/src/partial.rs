@@ -1,3 +1,5 @@
+//! Partial evaluation pass for Core expressions.
+
 use std::collections::HashMap;
 use tidepool_eval::{Changed, Pass};
 use tidepool_repr::{Alt, AltCon, CoreExpr, CoreFrame, DataConId, Literal, PrimOpKind, VarId};

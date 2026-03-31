@@ -1,26 +1,39 @@
+//! Error types for effect handling.
+
 use tidepool_bridge::BridgeError;
 use tidepool_eval::error::EvalError;
 
+/// Errors that can occur during effect handling.
 #[derive(Debug)]
 pub enum EffectError {
+    /// Evaluation error from the core-eval machine.
     Eval(EvalError),
+    /// Bridge error during value conversion.
     Bridge(BridgeError),
+    /// No handler was found for an effect tag.
     UnhandledEffect {
+        /// The unhandled effect tag.
         tag: u64,
     },
     /// A required constructor was not found in the DataConTable.
     MissingConstructor {
+        /// Name of the missing constructor.
         name: &'static str,
     },
     /// A constructor had the wrong number of fields.
     FieldCountMismatch {
+        /// Name of the constructor.
         constructor: &'static str,
+        /// Expected field count.
         expected: usize,
+        /// Actual field count.
         got: usize,
     },
     /// Encountered an unexpected value shape during dispatch.
     UnexpectedValue {
+        /// Context describing the expected value.
         context: &'static str,
+        /// Actual value encountered.
         got: String,
     },
     /// An effect handler encountered a runtime error.
