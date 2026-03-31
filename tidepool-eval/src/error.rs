@@ -25,76 +25,55 @@ impl std::fmt::Display for ValueKind {
 }
 
 /// Evaluation error.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum EvalError {
     /// Variable not found in environment
+    #[error("unbound variable: v_{}", .0 .0)]
     UnboundVar(VarId),
     /// Arity mismatch (wrong number of arguments or fields)
+    #[error("arity mismatch: expected {expected} {context}, got {got}")]
     ArityMismatch {
         context: &'static str, // "arguments", "fields", "case binders"
         expected: usize,
         got: usize,
     },
     /// Type mismatch during evaluation
+    #[error("type mismatch: expected {expected}, got {got}")]
     TypeMismatch {
         expected: &'static str,
         got: ValueKind,
     },
     /// No matching alternative in case expression
+    #[error("no matching case alternative")]
     NoMatchingAlt,
     /// Infinite loop detected (thunk forced itself)
+    #[error("infinite loop: thunk {} forced itself", .0 .0)]
     InfiniteLoop(ThunkId),
     /// Unsupported primop
+    #[error("unsupported primop: {0:?}")]
     UnsupportedPrimOp(PrimOpKind),
     /// Heap exhausted
+    #[error("heap exhausted")]
     HeapExhausted,
     /// Application of non-function value
+    #[error("application of non-function value")]
     NotAFunction,
     /// Jump to unknown join point
+    #[error("jump to unbound join point: j_{}", .0 .0)]
     UnboundJoin(JoinId),
     /// Haskell `error "..."` called
+    #[error("Haskell error called")]
     UserError,
     /// Haskell `undefined` forced
+    #[error("Haskell undefined forced")]
     Undefined,
     /// Recursion depth limit exceeded during deep_force
+    #[error("recursion depth limit exceeded")]
     DepthLimit,
     /// Internal invariant violation (should never happen)
+    #[error("internal error: {0}")]
     InternalError(String),
 }
-
-impl std::fmt::Display for EvalError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EvalError::UnboundVar(v) => write!(f, "unbound variable: v_{}", v.0),
-            EvalError::ArityMismatch {
-                context,
-                expected,
-                got,
-            } => {
-                write!(
-                    f,
-                    "arity mismatch: expected {} {}, got {}",
-                    expected, context, got
-                )
-            }
-            EvalError::TypeMismatch { expected, got } => {
-                write!(f, "type mismatch: expected {}, got {}", expected, got)
-            }
-            EvalError::NoMatchingAlt => write!(f, "no matching case alternative"),
-            EvalError::InfiniteLoop(id) => write!(f, "infinite loop: thunk {} forced itself", id.0),
-            EvalError::UnsupportedPrimOp(op) => write!(f, "unsupported primop: {:?}", op),
-            EvalError::HeapExhausted => write!(f, "heap exhausted"),
-            EvalError::NotAFunction => write!(f, "application of non-function value"),
-            EvalError::UnboundJoin(id) => write!(f, "jump to unbound join point: j_{}", id.0),
-            EvalError::UserError => write!(f, "Haskell error called"),
-            EvalError::Undefined => write!(f, "Haskell undefined forced"),
-            EvalError::DepthLimit => write!(f, "recursion depth limit exceeded"),
-            EvalError::InternalError(msg) => write!(f, "internal error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for EvalError {}
 
 #[cfg(test)]
 mod tests {

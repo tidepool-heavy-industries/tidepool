@@ -1,70 +1,28 @@
 use tidepool_bridge::BridgeError;
 use tidepool_eval::error::EvalError;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum EffectError {
-    Eval(EvalError),
-    Bridge(BridgeError),
-    UnhandledEffect {
-        tag: u64,
-    },
+    #[error("Eval error: {0}")]
+    Eval(#[from] EvalError),
+    #[error("Bridge error: {0}")]
+    Bridge(#[from] BridgeError),
+    #[error("Unhandled effect at tag {tag}")]
+    UnhandledEffect { tag: u64 },
     /// A required constructor was not found in the DataConTable.
-    MissingConstructor {
-        name: &'static str,
-    },
+    #[error("{name} constructor not found in DataConTable")]
+    MissingConstructor { name: &'static str },
     /// A constructor had the wrong number of fields.
+    #[error("{constructor} expects {expected} fields, got {got}")]
     FieldCountMismatch {
         constructor: &'static str,
         expected: usize,
         got: usize,
     },
     /// Encountered an unexpected value shape during dispatch.
-    UnexpectedValue {
-        context: &'static str,
-        got: String,
-    },
+    #[error("expected {context}, got {got}")]
+    UnexpectedValue { context: &'static str, got: String },
     /// An effect handler encountered a runtime error.
+    #[error("handler error: {0}")]
     Handler(String),
 }
-
-impl From<EvalError> for EffectError {
-    fn from(e: EvalError) -> Self {
-        EffectError::Eval(e)
-    }
-}
-
-impl From<BridgeError> for EffectError {
-    fn from(e: BridgeError) -> Self {
-        EffectError::Bridge(e)
-    }
-}
-
-impl std::fmt::Display for EffectError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EffectError::Eval(e) => write!(f, "Eval error: {}", e),
-            EffectError::Bridge(e) => write!(f, "Bridge error: {}", e),
-            EffectError::UnhandledEffect { tag } => write!(f, "Unhandled effect at tag {}", tag),
-            EffectError::MissingConstructor { name } => {
-                write!(f, "{} constructor not found in DataConTable", name)
-            }
-            EffectError::FieldCountMismatch {
-                constructor,
-                expected,
-                got,
-            } => {
-                write!(
-                    f,
-                    "{} expects {} fields, got {}",
-                    constructor, expected, got
-                )
-            }
-            EffectError::UnexpectedValue { context, got } => {
-                write!(f, "expected {}, got {}", context, got)
-            }
-            EffectError::Handler(msg) => write!(f, "handler error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for EffectError {}
