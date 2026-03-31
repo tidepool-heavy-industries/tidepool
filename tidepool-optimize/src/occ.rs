@@ -16,6 +16,9 @@ pub enum Occ {
 
 impl Occ {
     /// Add two occurrence counts.
+    ///
+    /// This is a lattice join where Dead is the identity element,
+    /// and any combination of non-Dead values results in Many.
     #[allow(clippy::should_implement_trait)]
     pub fn add(self, other: Occ) -> Occ {
         match (self, other) {
