@@ -7,7 +7,7 @@ use cranelift_module::{FuncId, Linkage, Module};
 use std::sync::Arc;
 
 use crate::debug::LambdaRegistry;
-use crate::stack_map::{RawStackMap, StackMapRegistry};
+use crate::stack_map::{CodeOffset, FrameSize, RawStackMap, StackMapRegistry};
 
 /// Errors from the Cranelift compilation pipeline.
 #[derive(Debug, thiserror::Error)]
@@ -151,8 +151,15 @@ impl CodegenPipeline {
             .user_stack_maps()
             .iter()
             .map(|(offset, span, usm)| {
-                let entries: Vec<_> = usm.entries().collect();
-                (*offset, *span, entries)
+                let entries: Vec<crate::stack_map::RawStackMapEntry> = usm
+                    .entries()
+                    .map(|(ty, offset)| crate::stack_map::RawStackMapEntry { ty, offset })
+                    .collect();
+                RawStackMap {
+                    code_offset: CodeOffset(*offset),
+                    frame_size: FrameSize(*span),
+                    entries,
+                }
             })
             .collect();
 

@@ -56,7 +56,7 @@ pub unsafe fn walk_frames(start_fp: usize, stack_maps: &StackMapRegistry) -> Vec
             let caller_fp = *(fp as *const usize);
             // SP at the safepoint = caller's FP - caller's active frame size.
             // Cranelift's frame_size is active_size(): the distance from FP down to SP.
-            let sp_at_safepoint = caller_fp - info.frame_size as usize;
+            let sp_at_safepoint = caller_fp - info.frame_size.0 as usize;
 
             for &offset in &info.offsets {
                 let root_addr = (sp_at_safepoint + offset as usize) as *mut u64;
