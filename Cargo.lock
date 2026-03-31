@@ -3461,6 +3461,7 @@ version = "0.1.0"
 dependencies = [
  "frunk",
  "proptest",
+ "thiserror 2.0.18",
  "tidepool-bridge",
  "tidepool-eval",
  "tidepool-repr",
@@ -3471,6 +3472,7 @@ name = "tidepool-eval"
 version = "0.1.0"
 dependencies = [
  "im",
+ "thiserror 2.0.18",
  "tidepool-repr",
 ]
 
@@ -3495,7 +3497,7 @@ version = "0.1.0"
 dependencies = [
  "bumpalo",
  "proptest",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tidepool-eval",
  "tidepool-repr",
 ]
