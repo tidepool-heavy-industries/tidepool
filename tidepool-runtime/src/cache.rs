@@ -38,12 +38,10 @@ pub(crate) fn cache_key(source: &str, target: &str, include: &[&Path]) -> String
 
 /// Fingerprints the compiler binary to ensure cache invalidation on upgrades.
 fn extract_binary_fingerprint(hasher: &mut blake3::Hasher) {
-    let extract_bin = std::env::var("TIDEPOOL_EXTRACT")
-        .map(PathBuf::from)
-        .or_else(|_| which::which("tidepool-extract"))
-        .ok();
+    let bin_name = std::env::var("TIDEPOOL_EXTRACT")
+        .unwrap_or_else(|_| "tidepool-extract".to_string());
 
-    if let Some(path) = extract_bin {
+    if let Ok(path) = which::which(bin_name) {
         if let Ok(meta) = fs::metadata(path) {
             hasher.update(&meta.len().to_le_bytes());
             if let Ok(mtime) = meta.modified() {
