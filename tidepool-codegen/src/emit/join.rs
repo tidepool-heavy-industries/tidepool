@@ -42,7 +42,7 @@ pub fn emit_join(
             ctx: args.ctx,
             sess: args.sess,
             builder: args.builder,
-            tail: TailCtx::NonTail, // join points are always inside larger expressions
+            tail: args.tail,
         },
         body_idx,
     )?;
@@ -79,7 +79,7 @@ pub fn emit_join(
             ctx: args.ctx,
             sess: args.sess,
             builder: args.builder,
-            tail: TailCtx::NonTail, // join points are always inside larger expressions
+            tail: args.tail,
         },
         rhs_idx,
     )?;

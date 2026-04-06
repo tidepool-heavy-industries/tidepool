@@ -682,7 +682,7 @@ fn collapse_frame(
                 ctx: args.ctx,
                 sess: args.sess,
                 builder: args.builder,
-                tail: TailCtx::NonTail,
+                tail,
             },
             &label,
             &params,
@@ -2440,7 +2440,8 @@ impl EmitContext {
                                 sess: args.sess,
                                 builder: args.builder,
                                 tail: TailCtx::NonTail,
-                            },                            f_idx,
+                            },
+                            f_idx,
                         )?;
                         ensure_heap_ptr(args.builder, args.sess.vmctx, args.sess.gc_sig, args.sess.oom_func, val)
                     } else {
@@ -2450,7 +2451,8 @@ impl EmitContext {
                                 sess: args.sess,
                                 builder: args.builder,
                                 tail: TailCtx::NonTail,
-                            },                            f_idx,
+                            },
+                            f_idx,
                         )?;
                         thunk_val.value()
                     };
@@ -2502,7 +2504,8 @@ impl EmitContext {
                             sess: args.sess,
                             builder: args.builder,
                             tail: TailCtx::NonTail,
-                        },                        f_idx,
+                        },
+                        f_idx,
                     )?;
                     ensure_heap_ptr(args.builder, args.sess.vmctx, args.sess.gc_sig, args.sess.oom_func, val)
                 } else {
@@ -2512,7 +2515,8 @@ impl EmitContext {
                             sess: args.sess,
                             builder: args.builder,
                             tail: TailCtx::NonTail,
-                        },                        f_idx,
+                        },
+                        f_idx,
                     )?;
                     thunk_val.value()
                 };
