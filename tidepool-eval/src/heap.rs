@@ -46,15 +46,20 @@ impl VecHeap {
     }
 
     fn collect_thunk_refs(val: &Value) -> Vec<ThunkId> {
-        match val {
-            Value::ThunkRef(id) => vec![*id],
-            Value::Con(_, fields) => fields.iter().flat_map(Self::collect_thunk_refs).collect(),
-            Value::ConFun(_, _, args) => args.iter().flat_map(Self::collect_thunk_refs).collect(),
-            Value::Closure(env, _, _) => env.values().flat_map(Self::collect_thunk_refs).collect(),
-            Value::JoinCont(_, _, env) => env.values().flat_map(Self::collect_thunk_refs).collect(),
-            Value::Lit(_) => vec![],
-            Value::ByteArray(_) => vec![],
+        let mut refs = Vec::new();
+        let mut stack = vec![val];
+        while let Some(v) = stack.pop() {
+            match v {
+                Value::ThunkRef(id) => refs.push(*id),
+                Value::Con(_, fields) => stack.extend(fields.iter().rev()),
+                Value::ConFun(_, _, args) => stack.extend(args.iter().rev()),
+                Value::Closure(env, _, _) => stack.extend(env.values()),
+                Value::JoinCont(_, _, env) => stack.extend(env.values()),
+                Value::Lit(_) => {}
+                Value::ByteArray(_) => {}
+            }
         }
+        refs
     }
 }
 

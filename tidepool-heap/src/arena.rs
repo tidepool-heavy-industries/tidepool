@@ -124,7 +124,7 @@ impl ArenaHeap {
         let (new_heap, table) = crate::gc::collect(roots, self);
 
         // Replace thunk store with compacted thunks via Heap trait
-        let reachable_count = table.mapping.iter().flatten().count();
+        let reachable_count = table.reachable_count;
         self.thunks.clear();
         for i in 0..reachable_count {
             self.thunks.push(new_heap.read(ThunkId(i as u32)).clone());
@@ -151,15 +151,20 @@ impl ArenaHeap {
     }
 
     fn collect_thunk_refs(val: &Value) -> Vec<ThunkId> {
-        match val {
-            Value::ThunkRef(id) => vec![*id],
-            Value::Con(_, fields) => fields.iter().flat_map(Self::collect_thunk_refs).collect(),
-            Value::ConFun(_, _, args) => args.iter().flat_map(Self::collect_thunk_refs).collect(),
-            Value::Closure(env, _, _) => env.values().flat_map(Self::collect_thunk_refs).collect(),
-            Value::JoinCont(_, _, env) => env.values().flat_map(Self::collect_thunk_refs).collect(),
-            Value::Lit(_) => vec![],
-            Value::ByteArray(_) => vec![],
+        let mut refs = Vec::new();
+        let mut stack = vec![val];
+        while let Some(v) = stack.pop() {
+            match v {
+                Value::ThunkRef(id) => refs.push(*id),
+                Value::Con(_, fields) => stack.extend(fields.iter().rev()),
+                Value::ConFun(_, _, args) => stack.extend(args.iter().rev()),
+                Value::Closure(env, _, _) => stack.extend(env.values()),
+                Value::JoinCont(_, _, env) => stack.extend(env.values()),
+                Value::Lit(_) => {}
+                Value::ByteArray(_) => {}
+            }
         }
+        refs
     }
 }
 

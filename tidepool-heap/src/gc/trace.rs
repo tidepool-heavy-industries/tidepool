@@ -12,6 +12,7 @@ pub enum GcError {
 /// Maps old ThunkIds to new ThunkIds.
 pub struct ForwardingTable {
     pub(crate) mapping: Vec<Option<ThunkId>>,
+    pub(crate) reachable_count: usize,
 }
 
 impl ForwardingTable {
@@ -30,11 +31,21 @@ impl ForwardingTable {
         let idx = old_id.0 as usize;
         idx < self.mapping.len() && self.mapping[idx].is_some()
     }
+
+    /// Get the number of reachable thunks.
+    pub fn reachable_count(&self) -> usize {
+        self.reachable_count
+    }
 }
 
 /// Trace reachable thunks starting from roots.
 pub fn trace(roots: &[ThunkId], heap: &dyn Heap) -> ForwardingTable {
-    let mut mapping: Vec<Option<ThunkId>> = Vec::new();
+    let mut mapping: Vec<Option<ThunkId>> = if roots.is_empty() {
+        Vec::new()
+    } else {
+        let max_root = roots.iter().map(|id| id.0).max().unwrap_or(0) as usize;
+        vec![None; max_root.saturating_add(1)]
+    };
     let mut queue = VecDeque::new();
     let mut next_new_id = 0;
 
@@ -61,7 +72,10 @@ pub fn trace(roots: &[ThunkId], heap: &dyn Heap) -> ForwardingTable {
         }
     }
 
-    ForwardingTable { mapping }
+    ForwardingTable {
+        mapping,
+        reachable_count: next_new_id as usize,
+    }
 }
 
 #[cfg(test)]
@@ -126,8 +140,7 @@ mod tests {
         assert_eq!(table.lookup(id_shared).unwrap(), ThunkId(2));
 
         // Ensure no other IDs are in the table (max 3 reachable)
-        let reachable_count = table.mapping.iter().flatten().count();
-        assert_eq!(reachable_count, 3);
+        assert_eq!(table.reachable_count, 3);
     }
 
     #[test]
