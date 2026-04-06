@@ -13,7 +13,6 @@ pub fn emit_case(
     scrut: SsaVal,
     binder: &VarId,
     alts: &[Alt<usize>],
-    tail: TailCtx,
 ) -> Result<SsaVal, EmitError> {
     // 1. Scrutinee already evaluated
     let scrut_ptr = scrut.value();
@@ -45,12 +44,12 @@ pub fn emit_case(
                 ctx: args.ctx,
                 sess: args.sess,
                 builder: args.builder,
+                tail: args.tail,
             },
             scrut_ptr,
             &data_alts,
             default_alt,
             merge_block,
-            tail,
         )?;
     } else if !lit_alts.is_empty() {
         emit_lit_dispatch(
@@ -58,12 +57,12 @@ pub fn emit_case(
                 ctx: args.ctx,
                 sess: args.sess,
                 builder: args.builder,
+                tail: args.tail,
             },
             scrut,
             &lit_alts,
             default_alt,
             merge_block,
-            tail,
         )?;
     } else if let Some(alt) = default_alt {
         // Default only
@@ -72,9 +71,9 @@ pub fn emit_case(
                 ctx: args.ctx,
                 sess: args.sess,
                 builder: args.builder,
+                tail: args.tail,
             },
             alt.body,
-            tail,
         )?;
         let result_ptr = ensure_heap_ptr(
             args.builder,
@@ -112,7 +111,6 @@ fn emit_data_dispatch(
     data_alts: &[&Alt<usize>],
     default_alt: Option<&Alt<usize>>,
     merge_block: ir::Block,
-    tail: TailCtx,
 ) -> Result<(), EmitError> {
     // 1. Force if needed (tag < 2: Closure or Thunk)
     let tag = args
@@ -235,9 +233,9 @@ fn emit_data_dispatch(
                 ctx: args.ctx,
                 sess: args.sess,
                 builder: args.builder,
+                tail: args.tail,
             },
             alt.body,
-            tail,
         )?;
         let result_ptr = ensure_heap_ptr(
             args.builder,
@@ -266,9 +264,9 @@ fn emit_data_dispatch(
                 ctx: args.ctx,
                 sess: args.sess,
                 builder: args.builder,
+                tail: args.tail,
             },
             alt.body,
-            tail,
         )?;
         let result_ptr = ensure_heap_ptr(
             args.builder,
@@ -352,7 +350,6 @@ fn emit_lit_dispatch(
     lit_alts: &[&Alt<usize>],
     default_alt: Option<&Alt<usize>>,
     merge_block: ir::Block,
-    tail: TailCtx,
 ) -> Result<(), EmitError> {
     // Force thunked scrutinees: literal case dispatch is strict \u2014
     // ThunkCon fields extracted by data alt matching may still be thunks.
@@ -439,9 +436,9 @@ fn emit_lit_dispatch(
                 ctx: args.ctx,
                 sess: args.sess,
                 builder: args.builder,
+                tail: args.tail,
             },
             alt.body,
-            tail,
         )?;
         let result_ptr = ensure_heap_ptr(
             args.builder,
@@ -467,9 +464,9 @@ fn emit_lit_dispatch(
                 ctx: args.ctx,
                 sess: args.sess,
                 builder: args.builder,
+                tail: args.tail,
             },
             alt.body,
-            tail,
         )?;
         let result_ptr = ensure_heap_ptr(
             args.builder,

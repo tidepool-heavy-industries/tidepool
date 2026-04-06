@@ -149,6 +149,7 @@ pub struct EmitArgs<'a, 'b, 'c> {
     pub ctx: &'a mut EmitContext,
     pub sess: &'a mut EmitSession<'b>,
     pub builder: &'a mut cranelift_frontend::FunctionBuilder<'c>,
+    pub tail: TailCtx,
 }
 
 pub(crate) struct JoinPointRegistry {

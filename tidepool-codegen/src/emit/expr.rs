@@ -201,8 +201,8 @@ fn expand_node(tree: &CoreExpr, idx: usize) -> Result<EmitFrame<usize>, EmitErro
 fn collapse_frame(
     args: EmitArgs,
     frame: EmitFrame<SsaVal>,
-    tail: TailCtx,
 ) -> Result<SsaVal, EmitError> {
+    let tail = args.tail;
     match frame {
         EmitFrame::LitString(ref bytes) => emit_lit_string(
             args.sess.pipeline,
@@ -365,9 +365,9 @@ fn collapse_frame(
                             ctx: args.ctx,
                             sess: args.sess,
                             builder: args.builder,
+                            tail: TailCtx::NonTail,
                         },
                         f_idx,
-                        TailCtx::NonTail,
                     )?;
                     ensure_heap_ptr(
                         args.builder,
@@ -383,6 +383,7 @@ fn collapse_frame(
                             ctx: args.ctx,
                             sess: args.sess,
                             builder: args.builder,
+                            tail: TailCtx::NonTail,
                         },
                         f_idx,
                     )?;
@@ -651,6 +652,7 @@ fn collapse_frame(
                 ctx: args.ctx,
                 sess: args.sess,
                 builder: args.builder,
+                tail: TailCtx::NonTail,
             },
             binder,
             body_idx,
@@ -664,11 +666,11 @@ fn collapse_frame(
                 ctx: args.ctx,
                 sess: args.sess,
                 builder: args.builder,
+                tail,
             },
             scrutinee,
             &binder,
             &alts,
-            tail,
         ),
         EmitFrame::Join {
             label,
@@ -680,6 +682,7 @@ fn collapse_frame(
                 ctx: args.ctx,
                 sess: args.sess,
                 builder: args.builder,
+                tail: TailCtx::NonTail,
             },
             &label,
             &params,
@@ -724,24 +727,24 @@ fn collapse_frame(
                     ctx: args.ctx,
                     sess: args.sess,
                     builder: args.builder,
+                    tail: TailCtx::NonTail,
                 },
                 idx,
-                TailCtx::NonTail,
             )
         }
     }
 }
 
 /// Stack-safe emission of a non-Let expression subtree via hylomorphism.
-fn emit_subtree(args: EmitArgs, idx: usize) -> Result<SsaVal, EmitError> {
-    emit_subtree_with_tail(args, idx, TailCtx::NonTail)
+fn emit_subtree(mut args: EmitArgs, idx: usize) -> Result<SsaVal, EmitError> {
+    args.tail = TailCtx::NonTail;
+    emit_subtree_with_tail(args, idx)
 }
 
 /// Stack-safe emission with explicit tail context. Case alt bodies inherit `tail`.
 fn emit_subtree_with_tail(
     args: EmitArgs,
     idx: usize,
-    tail: TailCtx,
 ) -> Result<SsaVal, EmitError> {
     try_expand_and_collapse::<EmitFrameToken, _, _, _>(
         idx,
@@ -752,9 +755,9 @@ fn emit_subtree_with_tail(
                     ctx: args.ctx,
                     sess: args.sess,
                     builder: args.builder,
+                    tail: args.tail,
                 },
                 frame,
-                tail,
             )
         },
     )
@@ -931,9 +934,9 @@ fn emit_lam(
             ctx: &mut inner_emit,
             sess: &mut inner_sess,
             builder: &mut inner_builder,
+            tail: TailCtx::Tail,
         },
         body_root,
-        TailCtx::Tail,
     )?;
     let ret_val = ensure_heap_ptr(
         &mut inner_builder,
@@ -1145,9 +1148,9 @@ fn emit_thunk(
             ctx: &mut inner_emit,
             sess: &mut inner_sess,
             builder: &mut inner_builder,
+            tail: TailCtx::NonTail,
         },
         body_root,
-        TailCtx::NonTail,
     )?;
     let ret_val = ensure_heap_ptr(
         &mut inner_builder,
@@ -1322,9 +1325,9 @@ pub fn compile_expr(
             ctx: &mut emit_ctx,
             sess: &mut sess,
             builder: &mut builder,
+            tail: TailCtx::NonTail,
         },
         tree.nodes.len() - 1,
-        TailCtx::NonTail,
     )?;
     let ret = ensure_heap_ptr(&mut builder, vmctx, gc_sig_ref, oom_func, result);
 
@@ -1407,9 +1410,8 @@ impl EmitContext {
     pub fn emit_node(
         args: EmitArgs,
         root_idx: usize,
-        tail: TailCtx,
     ) -> Result<SsaVal, EmitError> {
-        let mut work: Vec<EmitWork> = vec![EmitWork::Eval(root_idx, tail)];
+        let mut work: Vec<EmitWork> = vec![EmitWork::Eval(root_idx, args.tail)];
         let mut vals: Vec<SsaVal> = Vec::new();
 
         while let Some(item) = work.pop() {
@@ -1477,11 +1479,11 @@ impl EmitContext {
                                         ctx: args.ctx,
                                         sess: args.sess,
                                         builder: args.builder,
+                                        tail: tail_ctx,
                                     },
                                     &bindings,
                                     body,
                                     &mut work,
-                                    tail_ctx,
                                 )?;
                                 break; // exit inner loop
                             }
@@ -1495,6 +1497,7 @@ impl EmitContext {
                                             ctx: args.ctx,
                                             sess: args.sess,
                                             builder: args.builder,
+                                            tail: tail_ctx,
                                         },
                                         idx,
                                     )?;
@@ -1506,9 +1509,9 @@ impl EmitContext {
                                                 ctx: args.ctx,
                                                 sess: args.sess,
                                                 builder: args.builder,
+                                                tail: tail_ctx,
                                             },
                                             idx,
-                                            tail_ctx,
                                         )?;
                                     vals.push(result);
                                 }
@@ -1539,6 +1542,7 @@ impl EmitContext {
                             ctx: args.ctx,
                             sess: args.sess,
                             builder: args.builder,
+                            tail: TailCtx::NonTail,
                         },
                         &binder,
                         state_idx,
@@ -1554,6 +1558,7 @@ impl EmitContext {
                             ctx: args.ctx,
                             sess: args.sess,
                             builder: args.builder,
+                            tail: TailCtx::NonTail,
                         },
                         state_idx,
                     )?;
@@ -1594,6 +1599,7 @@ impl EmitContext {
                 ctx: args.ctx,
                 sess: args.sess,
                 builder: args.builder,
+                tail: TailCtx::NonTail,
             },
             fun_idx,
         )?;
@@ -1602,6 +1608,7 @@ impl EmitContext {
                 ctx: args.ctx,
                 sess: args.sess,
                 builder: args.builder,
+                tail: TailCtx::NonTail,
             },
             arg_idx,
         )?;
@@ -1746,8 +1753,8 @@ impl EmitContext {
         bindings: &[(VarId, usize)],
         body: usize,
         work: &mut Vec<EmitWork>,
-        tail: TailCtx,
     ) -> Result<(), EmitError> {
+        let tail = args.tail;
         // Split bindings: Lam/Con need 3-phase pre-allocation (recursive),
         // everything else is evaluated eagerly as simple bindings first.
         let (rec_bindings, simple_bindings): (Vec<_>, Vec<_>) =
@@ -1965,6 +1972,7 @@ impl EmitContext {
                         ctx: args.ctx,
                         sess: args.sess,
                         builder: args.builder,
+                        tail: TailCtx::NonTail,
                     },
                     *rhs_idx,
                 )?;
@@ -2085,9 +2093,9 @@ impl EmitContext {
                     ctx: &mut inner_emit,
                     sess: &mut inner_sess,
                     builder: &mut inner_builder,
+                    tail: TailCtx::Tail,
                 },
                 body_root,
-                TailCtx::Tail,
             )?;
             let ret_val = ensure_heap_ptr(
                 &mut inner_builder,
@@ -2179,6 +2187,7 @@ impl EmitContext {
                                     ctx: args.ctx,
                                     sess: args.sess,
                                     builder: args.builder,
+                                    tail: TailCtx::NonTail,
                                 },
                                 f_idx,
                             )?;
@@ -2195,6 +2204,7 @@ impl EmitContext {
                                     ctx: args.ctx,
                                     sess: args.sess,
                                     builder: args.builder,
+                                    tail: TailCtx::NonTail,
                                 },
                                 f_idx,
                             )?;
@@ -2323,6 +2333,7 @@ impl EmitContext {
                         ctx: args.ctx,
                         sess: args.sess,
                         builder: args.builder,
+                        tail: TailCtx::NonTail,
                     },
                     binder,
                     state_idx,
@@ -2355,6 +2366,7 @@ impl EmitContext {
                             ctx: args.ctx,
                             sess: args.sess,
                             builder: args.builder,
+                            tail: TailCtx::NonTail,
                         },
                         *rhs_idx,
                     )?;
@@ -2367,6 +2379,7 @@ impl EmitContext {
                             ctx: args.ctx,
                             sess: args.sess,
                             builder: args.builder,
+                            tail: TailCtx::NonTail,
                         },
                         binder,
                         state_idx,
@@ -2426,8 +2439,8 @@ impl EmitContext {
                                 ctx: args.ctx,
                                 sess: args.sess,
                                 builder: args.builder,
-                            },
-                            f_idx,
+                                tail: TailCtx::NonTail,
+                            },                            f_idx,
                         )?;
                         ensure_heap_ptr(args.builder, args.sess.vmctx, args.sess.gc_sig, args.sess.oom_func, val)
                     } else {
@@ -2436,8 +2449,8 @@ impl EmitContext {
                                 ctx: args.ctx,
                                 sess: args.sess,
                                 builder: args.builder,
-                            },
-                            f_idx,
+                                tail: TailCtx::NonTail,
+                            },                            f_idx,
                         )?;
                         thunk_val.value()
                     };
@@ -2488,8 +2501,8 @@ impl EmitContext {
                             ctx: args.ctx,
                             sess: args.sess,
                             builder: args.builder,
-                        },
-                        f_idx,
+                            tail: TailCtx::NonTail,
+                        },                        f_idx,
                     )?;
                     ensure_heap_ptr(args.builder, args.sess.vmctx, args.sess.gc_sig, args.sess.oom_func, val)
                 } else {
@@ -2498,8 +2511,8 @@ impl EmitContext {
                             ctx: args.ctx,
                             sess: args.sess,
                             builder: args.builder,
-                        },
-                        f_idx,
+                            tail: TailCtx::NonTail,
+                        },                        f_idx,
                     )?;
                     thunk_val.value()
                 };

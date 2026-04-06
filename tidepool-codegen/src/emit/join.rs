@@ -42,9 +42,9 @@ pub fn emit_join(
             ctx: args.ctx,
             sess: args.sess,
             builder: args.builder,
+            tail: TailCtx::NonTail, // join points are always inside larger expressions
         },
         body_idx,
-        TailCtx::NonTail,
     )?;
     let body_val = ensure_heap_ptr(
         args.builder,
@@ -79,9 +79,9 @@ pub fn emit_join(
             ctx: args.ctx,
             sess: args.sess,
             builder: args.builder,
+            tail: TailCtx::NonTail, // join points are always inside larger expressions
         },
         rhs_idx,
-        TailCtx::NonTail,
     )?;
     let rhs_val = ensure_heap_ptr(
         args.builder,
@@ -135,9 +135,9 @@ pub fn emit_jump(
                 ctx: args.ctx,
                 sess: args.sess,
                 builder: args.builder,
+                tail: TailCtx::NonTail,
             },
             arg_idx,
-            TailCtx::NonTail,
         )?;
         // 3. Ensure all args are HeapPtr
         arg_values.push(BlockArg::Value(ensure_heap_ptr(
