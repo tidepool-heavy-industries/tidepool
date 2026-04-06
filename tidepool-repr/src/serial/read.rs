@@ -10,15 +10,16 @@ use ciborium::value::Value;
 /// For backward compatibility, if the first 4 bytes are NOT the magic, assume
 /// legacy headerless format and return the entire slice.
 fn strip_header(bytes: &[u8]) -> Result<&[u8], ReadError> {
-    if bytes.len() >= super::HEADER_LEN && bytes[..4] == super::HEADER_MAGIC {
+    if bytes.len() >= 4 && bytes[..4] == super::HEADER_MAGIC {
+        if bytes.len() < super::HEADER_LEN {
+            return Err(ReadError::TruncatedHeader);
+        }
         let major = u16::from_be_bytes([bytes[4], bytes[5]]);
         let minor = u16::from_be_bytes([bytes[6], bytes[7]]);
-        if major != super::VERSION_MAJOR {
+        if major != super::VERSION_MAJOR || minor > super::VERSION_MINOR {
             return Err(ReadError::UnsupportedVersion(major, minor));
         }
         Ok(&bytes[super::HEADER_LEN..])
-    } else if bytes.len() >= 4 && bytes[..4] == super::HEADER_MAGIC {
-        Err(ReadError::InvalidMagic)
     } else {
         // Legacy headerless CBOR — pass through
         Ok(bytes)
@@ -561,5 +562,60 @@ fn expect_text(val: &Value) -> Result<&str, ReadError> {
     match val {
         Value::Text(t) => Ok(t.as_str()),
         _ => Err(ReadError::InvalidStructure("expected text".to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_header_valid() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&super::super::HEADER_MAGIC);
+        bytes.extend_from_slice(&super::super::VERSION_MAJOR.to_be_bytes());
+        bytes.extend_from_slice(&super::super::VERSION_MINOR.to_be_bytes());
+        bytes.push(0x80); // empty array in CBOR
+        let stripped = strip_header(&bytes).expect("should succeed");
+        assert_eq!(stripped, &[0x80]);
+    }
+
+    #[test]
+    fn test_strip_header_legacy() {
+        let bytes = [0x80];
+        let stripped = strip_header(&bytes).expect("should succeed");
+        assert_eq!(stripped, &[0x80]);
+    }
+
+    #[test]
+    fn test_strip_header_truncated() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&super::super::HEADER_MAGIC);
+        bytes.push(0x00);
+        let err = strip_header(&bytes).expect_err("should fail");
+        assert!(matches!(err, ReadError::TruncatedHeader));
+    }
+
+    #[test]
+    fn test_strip_header_unsupported_major() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&super::super::HEADER_MAGIC);
+        bytes.extend_from_slice(&2u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        let err = strip_header(&bytes).expect_err("should fail");
+        assert!(matches!(err, ReadError::UnsupportedVersion(2, 0)));
+    }
+
+    #[test]
+    fn test_strip_header_unsupported_minor() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&super::super::HEADER_MAGIC);
+        bytes.extend_from_slice(&super::super::VERSION_MAJOR.to_be_bytes());
+        bytes.extend_from_slice(&(super::super::VERSION_MINOR + 1).to_be_bytes());
+        let err = strip_header(&bytes).expect_err("should fail");
+        assert!(matches!(
+            err,
+            ReadError::UnsupportedVersion(super::super::VERSION_MAJOR, m) if m == super::super::VERSION_MINOR + 1
+        ));
     }
 }

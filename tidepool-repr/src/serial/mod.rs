@@ -32,6 +32,9 @@ pub enum ReadError {
     /// Not a Tidepool CBOR file (bad magic bytes).
     #[error("Not a Tidepool CBOR file (bad magic bytes)")]
     InvalidMagic,
+    /// Truncated or incomplete Tidepool CBOR header.
+    #[error("Truncated or incomplete Tidepool CBOR header")]
+    TruncatedHeader,
     /// Unsupported CBOR version.
     #[error("Unsupported CBOR version {0}.{1}")]
     UnsupportedVersion(u16, u16),

@@ -6,6 +6,16 @@ use crate::tree::RecursiveTree;
 use crate::types::{Alt, AltCon, Literal, PrimOpKind};
 use ciborium::value::Value;
 
+/// Prepend the 8-byte version header to a CBOR payload.
+fn prepend_header(bytes: Vec<u8>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(super::HEADER_LEN + bytes.len());
+    out.extend_from_slice(&super::HEADER_MAGIC);
+    out.extend_from_slice(&super::VERSION_MAJOR.to_be_bytes());
+    out.extend_from_slice(&super::VERSION_MINOR.to_be_bytes());
+    out.extend_from_slice(&bytes);
+    out
+}
+
 /// Writes a CoreExpr to a CBOR-encoded byte vector.
 pub fn write_cbor(expr: &RecursiveTree<CoreFrame<usize>>) -> Result<Vec<u8>, WriteError> {
     if expr.nodes.is_empty() {
@@ -30,12 +40,7 @@ pub fn write_cbor(expr: &RecursiveTree<CoreFrame<usize>>) -> Result<Vec<u8>, Wri
     ciborium::ser::into_writer(&tree_val, &mut bytes)
         .map_err(|e| WriteError::Cbor(e.to_string()))?;
 
-    let mut out = Vec::with_capacity(super::HEADER_LEN + bytes.len());
-    out.extend_from_slice(&super::HEADER_MAGIC);
-    out.extend_from_slice(&super::VERSION_MAJOR.to_be_bytes());
-    out.extend_from_slice(&super::VERSION_MINOR.to_be_bytes());
-    out.extend_from_slice(&bytes);
-    Ok(out)
+    Ok(prepend_header(bytes))
 }
 
 /// Writes a DataConTable to CBOR-encoded metadata bytes (new format with warnings).
@@ -88,12 +93,7 @@ pub fn write_metadata(table: &crate::datacon_table::DataConTable) -> Result<Vec<
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&root, &mut bytes).map_err(|e| WriteError::Cbor(e.to_string()))?;
 
-    let mut out = Vec::with_capacity(super::HEADER_LEN + bytes.len());
-    out.extend_from_slice(&super::HEADER_MAGIC);
-    out.extend_from_slice(&super::VERSION_MAJOR.to_be_bytes());
-    out.extend_from_slice(&super::VERSION_MINOR.to_be_bytes());
-    out.extend_from_slice(&bytes);
-    Ok(out)
+    Ok(prepend_header(bytes))
 }
 
 fn encode_frame(frame: &CoreFrame<usize>) -> Value {
