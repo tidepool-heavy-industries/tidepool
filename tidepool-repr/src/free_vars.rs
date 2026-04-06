@@ -9,7 +9,9 @@ pub fn free_vars(tree: &CoreExpr) -> Vec<VarId> {
     if tree.nodes.is_empty() {
         return Vec::new();
     }
-    let mut fvs: Vec<VarId> = free_vars_at(tree, tree.nodes.len() - 1).into_iter().collect();
+    let mut fvs: Vec<VarId> = free_vars_at(tree, tree.nodes.len() - 1)
+        .into_iter()
+        .collect();
     fvs.sort_unstable();
     fvs
 }
@@ -87,9 +89,7 @@ fn free_vars_at(tree: &CoreExpr, idx: usize) -> FxHashSet<VarId> {
             s.extend(body_fvs);
             s
         }
-        CoreFrame::Jump { args, .. } => {
-            args.iter().flat_map(|a| free_vars_at(tree, *a)).collect()
-        }
+        CoreFrame::Jump { args, .. } => args.iter().flat_map(|a| free_vars_at(tree, *a)).collect(),
         CoreFrame::PrimOp { args, .. } => {
             args.iter().flat_map(|a| free_vars_at(tree, *a)).collect()
         }
@@ -274,7 +274,10 @@ mod tests {
         let fvs = free_vars(&tree_expr);
         assert!(fvs.binary_search(&y).is_ok(), "y should be free");
         assert!(fvs.binary_search(&z).is_ok(), "z should be free");
-        assert!(fvs.binary_search(&x).is_err(), "x should be bound by join param");
+        assert!(
+            fvs.binary_search(&x).is_err(),
+            "x should be bound by join param"
+        );
     }
 
     #[test]
