@@ -6,7 +6,7 @@ use tidepool_repr::{CoreFrame, RecursiveTree, VarId};
 
 /// Compact the heap by moving reachable thunks to a new VecHeap.
 pub fn compact(table: &ForwardingTable, old_heap: &dyn Heap) -> VecHeap {
-    let mut inverse = vec![ThunkId(0); table.reachable_count];
+    let mut inverse = vec![ThunkId(0); table.reachable_count()];
 
     for (old_idx, maybe_new_id) in table.mapping.iter().enumerate() {
         if let Some(new_id) = maybe_new_id {

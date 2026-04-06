@@ -12,7 +12,7 @@ pub enum GcError {
 /// Maps old ThunkIds to new ThunkIds.
 pub struct ForwardingTable {
     pub(crate) mapping: Vec<Option<ThunkId>>,
-    pub(crate) reachable_count: usize,
+    reachable_count: usize,
 }
 
 impl ForwardingTable {
@@ -140,7 +140,7 @@ mod tests {
         assert_eq!(table.lookup(id_shared).unwrap(), ThunkId(2));
 
         // Ensure no other IDs are in the table (max 3 reachable)
-        assert_eq!(table.reachable_count, 3);
+        assert_eq!(table.reachable_count(), 3);
     }
 
     #[test]

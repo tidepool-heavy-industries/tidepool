@@ -124,7 +124,7 @@ impl ArenaHeap {
         let (new_heap, table) = crate::gc::collect(roots, self);
 
         // Replace thunk store with compacted thunks via Heap trait
-        let reachable_count = table.reachable_count;
+        let reachable_count = table.reachable_count();
         self.thunks.clear();
         for i in 0..reachable_count {
             self.thunks.push(new_heap.read(ThunkId(i as u32)).clone());
