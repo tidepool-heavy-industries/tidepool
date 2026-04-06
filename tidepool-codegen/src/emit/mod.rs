@@ -49,52 +49,57 @@ impl TailCtx {
 
 /// A scoped environment mapping variables to SSA values.
 pub struct ScopedEnv {
-    map: FxHashMap<VarId, SsaVal>,
+    inner: FxHashMap<VarId, SsaVal>,
 }
 
 #[allow(clippy::new_without_default)]
 impl ScopedEnv {
     pub fn new() -> Self {
         Self {
-            map: FxHashMap::default(),
+            inner: FxHashMap::default(),
         }
     }
 
     pub fn get(&self, var: &VarId) -> Option<&SsaVal> {
-        self.map.get(var)
+        self.inner.get(var)
     }
 
     pub fn contains_key(&self, var: &VarId) -> bool {
-        self.map.contains_key(var)
+        self.inner.contains_key(var)
     }
 
+    /// Insert a binding, returning the old value (if any) for later restore.
     pub fn insert(&mut self, var: VarId, val: SsaVal) -> Option<SsaVal> {
-        self.map.insert(var, val)
+        self.inner.insert(var, val)
     }
 
-    /// Restores a variable to its previous state.
+    /// Undo a binding: restore the old value, or remove if there was none.
     pub fn restore(&mut self, var: VarId, old: Option<SsaVal>) {
-        if let Some(val) = old {
-            self.map.insert(var, val);
-        } else {
-            self.map.remove(&var);
+        match old {
+            Some(v) => {
+                self.inner.insert(var, v);
+            }
+            None => {
+                self.inner.remove(&var);
+            }
         }
     }
 
-    pub fn iter(&self) -> std::collections::hash_map::Iter<'_, VarId, SsaVal> {
-        self.map.iter()
+    /// Iterate over all entries (for declare_env, compute_captures, etc.)
+    pub fn iter(&self) -> impl Iterator<Item = (&VarId, &SsaVal)> {
+        self.inner.iter()
     }
 
-    pub fn keys(&self) -> std::collections::hash_map::Keys<'_, VarId, SsaVal> {
-        self.map.keys()
+    pub fn keys(&self) -> impl Iterator<Item = &VarId> {
+        self.inner.keys()
     }
 
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.inner.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.inner.is_empty()
     }
 
     /// Inserts a variable into the environment and records the old value in the scope.
