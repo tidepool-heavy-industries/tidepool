@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use tidepool_eval::pass::Pass;
 use tidepool_optimize::beta::BetaReduce;
 use tidepool_optimize::case_reduce::CaseReduce;
@@ -6,7 +6,7 @@ use tidepool_optimize::dce::Dce;
 use tidepool_optimize::inline::Inline;
 use tidepool_optimize::pipeline::{default_passes, run_pipeline};
 use tidepool_repr::{
-    Alt, AltCon, CoreExpr, CoreFrame, DataConId, Literal, PrimOpKind, RecursiveTree, VarId,
+    Alt, AltCon, CoreExpr, CoreFrame, DataConId, Literal, PrimOpKind, RecursiveTree, TreeBuilder, VarId,
 };
 
 /// Builds a reducible expression (~30 nodes).
@@ -76,8 +76,34 @@ fn reducible_expr() -> CoreExpr {
     RecursiveTree { nodes }
 }
 
+/// Builds an expression that requires multiple optimization passes.
+/// Result = (\xN -> ... (\x1 -> x1 + 1) x2 ... ) (41 + 1)
+fn convergence_expr(depth: usize) -> CoreExpr {
+    let mut b = TreeBuilder::new();
+    
+    let one = b.push(CoreFrame::Lit(Literal::LitInt(1)));
+    let var1 = b.push(CoreFrame::Var(VarId(1)));
+    let mut current = b.push(CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![var1, one] });
+    
+    for i in 1..depth {
+        let binder = VarId(i as u64);
+        let lam = b.push(CoreFrame::Lam { binder, body: current });
+        let arg_var = b.push(CoreFrame::Var(VarId(i as u64 + 1)));
+        current = b.push(CoreFrame::App { fun: lam, arg: arg_var });
+    }
+    
+    let lit41 = b.push(CoreFrame::Lit(Literal::LitInt(41)));
+    let reducible_arg = b.push(CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![lit41, one] });
+    
+    let final_lam = b.push(CoreFrame::Lam { binder: VarId(depth as u64), body: current });
+    let _root = b.push(CoreFrame::App { fun: final_lam, arg: reducible_arg });
+    
+    b.build()
+}
+
 fn bench_optimize(c: &mut Criterion) {
     let expr = reducible_expr();
+    let passes = default_passes();
 
     c.bench_function("opt_beta_reduce", |b| {
         b.iter(|| {
@@ -110,21 +136,32 @@ fn bench_optimize(c: &mut Criterion) {
     c.bench_function("opt_full_pipeline", |b| {
         b.iter(|| {
             let mut e = expr.clone();
-            let passes = default_passes();
-            black_box(run_pipeline(&passes, &mut e))
+            black_box(run_pipeline(&passes, &mut e).expect("Optimization pipeline failed"))
         })
     });
 
     // Pipeline on already optimized expr
     let mut optimized = expr.clone();
-    run_pipeline(&default_passes(), &mut optimized);
+    run_pipeline(&passes, &mut optimized).expect("Optimization pipeline failed");
     c.bench_function("opt_pipeline_already_optimized", |b| {
         b.iter(|| {
             let mut e = optimized.clone();
-            let passes = default_passes();
-            black_box(run_pipeline(&passes, &mut e))
+            black_box(run_pipeline(&passes, &mut e).expect("Optimization pipeline failed"))
         })
     });
+
+    // Pipeline convergence
+    let mut group = c.benchmark_group("opt_pipeline_convergence");
+    for &depth in &[10, 50, 100] {
+        let e = convergence_expr(depth);
+        group.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, _| {
+            b.iter(|| {
+                let mut e = e.clone();
+                black_box(run_pipeline(&passes, &mut e).expect("Optimization pipeline failed"))
+            })
+        });
+    }
+    group.finish();
 }
 
 criterion_group!(benches, bench_optimize);
