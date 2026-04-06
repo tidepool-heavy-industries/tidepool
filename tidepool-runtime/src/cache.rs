@@ -31,7 +31,28 @@ pub(crate) fn cache_key(source: &str, target: &str, include: &[&Path]) -> String
         fingerprint_dir(root, &mut hasher);
     }
 
+    extract_binary_fingerprint(&mut hasher);
+
     hasher.finalize().to_hex().to_string()
+}
+
+/// Fingerprints the compiler binary to ensure cache invalidation on upgrades.
+fn extract_binary_fingerprint(hasher: &mut blake3::Hasher) {
+    let extract_bin = std::env::var("TIDEPOOL_EXTRACT")
+        .map(PathBuf::from)
+        .or_else(|_| which::which("tidepool-extract"))
+        .ok();
+
+    if let Some(path) = extract_bin {
+        if let Ok(meta) = fs::metadata(path) {
+            hasher.update(&meta.len().to_le_bytes());
+            if let Ok(mtime) = meta.modified() {
+                if let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH) {
+                    hasher.update(&dur.as_nanos().to_le_bytes());
+                }
+            }
+        }
+    }
 }
 
 /// Recursively walks a directory to fingerprint its contents.
