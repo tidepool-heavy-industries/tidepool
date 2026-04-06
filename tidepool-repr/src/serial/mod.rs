@@ -29,9 +29,6 @@ pub enum ReadError {
     /// The structural layout of the CBOR data does not match Tidepool IR.
     #[error("Invalid structure: {0}")]
     InvalidStructure(String),
-    /// Not a Tidepool CBOR file (bad magic bytes).
-    #[error("Not a Tidepool CBOR file (bad magic bytes)")]
-    InvalidMagic,
     /// Truncated or incomplete Tidepool CBOR header.
     #[error("Truncated or incomplete Tidepool CBOR header")]
     TruncatedHeader,
