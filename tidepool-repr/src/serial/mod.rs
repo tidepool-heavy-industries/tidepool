@@ -29,7 +29,20 @@ pub enum ReadError {
     /// The structural layout of the CBOR data does not match Tidepool IR.
     #[error("Invalid structure: {0}")]
     InvalidStructure(String),
+    /// Not a Tidepool CBOR file (bad magic bytes).
+    #[error("Not a Tidepool CBOR file (bad magic bytes)")]
+    InvalidMagic,
+    /// Unsupported CBOR version.
+    #[error("Unsupported CBOR version {0}.{1}")]
+    UnsupportedVersion(u16, u16),
 }
+
+/// 4-byte magic: ASCII 'TPLR'
+pub const HEADER_MAGIC: [u8; 4] = [0x54, 0x50, 0x4C, 0x52];
+pub const VERSION_MAJOR: u16 = 1;
+pub const VERSION_MINOR: u16 = 0;
+/// Total header length in bytes.
+pub const HEADER_LEN: usize = 8;
 
 /// Errors that can occur during CBOR serialization of Tidepool IR.
 #[derive(Debug, thiserror::Error)]

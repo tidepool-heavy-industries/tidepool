@@ -6,8 +6,28 @@ use crate::tree::RecursiveTree;
 use crate::types::{Alt, AltCon, DataConId, JoinId, Literal, PrimOpKind, VarId};
 use ciborium::value::Value;
 
+/// Strip and validate the 8-byte version header. Returns the CBOR payload slice.
+/// For backward compatibility, if the first 4 bytes are NOT the magic, assume
+/// legacy headerless format and return the entire slice.
+fn strip_header(bytes: &[u8]) -> Result<&[u8], ReadError> {
+    if bytes.len() >= super::HEADER_LEN && bytes[..4] == super::HEADER_MAGIC {
+        let major = u16::from_be_bytes([bytes[4], bytes[5]]);
+        let minor = u16::from_be_bytes([bytes[6], bytes[7]]);
+        if major != super::VERSION_MAJOR {
+            return Err(ReadError::UnsupportedVersion(major, minor));
+        }
+        Ok(&bytes[super::HEADER_LEN..])
+    } else if bytes.len() >= 4 && bytes[..4] == super::HEADER_MAGIC {
+        Err(ReadError::InvalidMagic)
+    } else {
+        // Legacy headerless CBOR — pass through
+        Ok(bytes)
+    }
+}
+
 /// Reads a CoreExpr from a CBOR-encoded byte slice.
 pub fn read_cbor(bytes: &[u8]) -> Result<RecursiveTree<CoreFrame<usize>>, ReadError> {
+    let bytes = strip_header(bytes)?;
     let tree_val: Value =
         ciborium::de::from_reader(bytes).map_err(|e| ReadError::Cbor(e.to_string()))?;
 
@@ -70,6 +90,7 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
     use crate::datacon_table::DataConTable;
     use crate::types::DataConId;
 
+    let bytes = strip_header(bytes)?;
     let val: Value =
         ciborium::de::from_reader(bytes).map_err(|e| ReadError::Cbor(e.to_string()))?;
 
