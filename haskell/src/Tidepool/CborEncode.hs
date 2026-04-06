@@ -14,6 +14,7 @@ import Tidepool.Translate
 tplrHeader :: ByteString
 tplrHeader = BS.pack [0x54, 0x50, 0x4C, 0x52, 0x00, 0x01, 0x00, 0x00]
 
+-- | Encodes the flattened node tree into a CBOR payload prepended with the TPLR version header.
 encodeTree :: Seq FlatNode -> ByteString
 encodeTree nodes = tplrHeader <> toStrictByteString (
   encodeListLen 2
