@@ -9,6 +9,7 @@ use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{DataDescription, FuncId, Linkage, Module};
 use recursion::{try_expand_and_collapse, MappableFrame};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tidepool_heap::layout;
 use tidepool_repr::*;
 
@@ -235,11 +236,13 @@ fn collapse_frame(
                     return Ok(SsaVal::HeapPtr(poison_val));
                 }
 
-                args.ctx.trace_scope(&format!(
-                    "MISS var {:?} (env has {} entries)",
-                    vid,
-                    args.ctx.env.len()
-                ));
+                if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+                    args.ctx.trace_scope(&format!(
+                        "MISS var {:?} (env has {} entries)",
+                        vid,
+                        args.ctx.env.len()
+                    ));
+                }
                 let trap_fn = args
                     .sess
                     .pipeline
@@ -797,7 +800,7 @@ fn compute_captures(
         .filter(|v| !ctx.env.contains_key(v))
         .copied()
         .collect();
-    if !dropped.is_empty() {
+    if !dropped.is_empty() && crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
         ctx.trace_scope(&format!(
             "{} capture: dropped {} free vars not in scope: {:?}",
             label,
@@ -894,7 +897,9 @@ fn emit_lam(
     let mut inner_emit = EmitContext::new(args.ctx.prefix.clone());
     inner_emit.lambda_counter = args.ctx.lambda_counter;
 
-    inner_emit.trace_scope(&format!("insert lam binder {:?}", binder));
+    if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+        inner_emit.trace_scope(&format!("insert lam binder {:?}", binder));
+    }
     inner_emit.env.insert(binder, SsaVal::HeapPtr(arg_param));
 
     for (i, (var_id, _)) in captures.iter().enumerate() {
@@ -903,7 +908,9 @@ fn emit_lam(
             .ins()
             .load(types::I64, MemFlags::trusted(), closure_self, offset);
         inner_builder.declare_value_needs_stack_map(val);
-        inner_emit.trace_scope(&format!("insert lam capture {:?}", var_id));
+        if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+            inner_emit.trace_scope(&format!("insert lam capture {:?}", var_id));
+        }
         inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
     }
 
@@ -1114,7 +1121,9 @@ fn emit_thunk(
             .ins()
             .load(types::I64, MemFlags::trusted(), thunk_self, offset);
         inner_builder.declare_value_needs_stack_map(val);
-        inner_emit.trace_scope(&format!("insert thunk capture {:?}", var_id));
+        if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+            inner_emit.trace_scope(&format!("insert thunk capture {:?}", var_id));
+        }
         inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
     }
 
@@ -1420,10 +1429,12 @@ impl EmitContext {
                                         let poison_addr = args.ctx.emit_error_poison(args.sess.tree, rhs);
                                         let poison_val =
                                             args.builder.ins().iconst(types::I64, poison_addr);
-                                        args.ctx.trace_scope(&format!(
-                                            "defer error LetNonRec {:?}",
-                                            binder
-                                        ));
+                                        if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+                                            args.ctx.trace_scope(&format!(
+                                                "defer error LetNonRec {:?}",
+                                                binder
+                                            ));
+                                        }
                                         let old_val =
                                             args.ctx.env.insert(binder, SsaVal::HeapPtr(poison_val));
                                         // No RHS eval needed, just push cleanup and continue to body
@@ -1442,7 +1453,7 @@ impl EmitContext {
                                         work.push(EmitWork::Eval(rhs, TailCtx::NonTail));
                                         break; // exit inner loop, process work stack
                                     }
-                                } else {
+                                } else if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
                                     args.ctx.trace_scope(&format!("DCE skip LetNonRec {:?}", binder));
                                 }
                                 idx = body;
@@ -1506,14 +1517,18 @@ impl EmitContext {
                     let val = vals.pop().ok_or_else(|| {
                         EmitError::InternalError("Bind: empty value stack".into())
                     })?;
-                    args.ctx.trace_scope(&format!("insert LetNonRec {:?}", binder));
+                    if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+                        args.ctx.trace_scope(&format!("insert LetNonRec {:?}", binder));
+                    }
                     args.ctx.env.insert(binder, val);
                 }
                 EmitWork::LetRecPostSimple { binder, state_idx } => {
                     let val = vals.pop().ok_or_else(|| {
                         EmitError::InternalError("LetRecPostSimple: empty value stack".into())
                     })?;
-                    args.ctx.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
+                    if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+                        args.ctx.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
+                    }
                     args.ctx.env.insert(binder, val);
                     Self::letrec_post_simple_step(
                         EmitArgs {
@@ -1543,7 +1558,9 @@ impl EmitContext {
                 }
                 EmitWork::LetCleanupMark(cleanup) => match cleanup {
                     LetCleanup::Single(var, old_val) => {
-                        args.ctx.trace_scope(&format!("restore LetCleanup {:?}", var));
+                        if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+                            args.ctx.trace_scope(&format!("restore LetCleanup {:?}", var));
+                        }
                         args.ctx.env.restore(var, old_val);
                     }
                     LetCleanup::Rec(scope) => {
@@ -1741,7 +1758,7 @@ impl EmitContext {
         if rec_bindings.is_empty() {
             // Store empty deferred state for post-simple steps
             let state_idx = args.ctx.push_letrec_state(LetRecDeferredState {
-                pending_capture_updates: std::collections::HashMap::new(),
+                pending_capture_updates: FxHashMap::default(),
                 deferred_con_deps: Vec::new(),
             });
 
@@ -1755,7 +1772,9 @@ impl EmitContext {
                 if EmitContext::rhs_is_error_call(args.sess.tree, *rhs_idx) {
                     let poison_addr = args.ctx.emit_error_poison(args.sess.tree, *rhs_idx);
                     let poison_val = args.builder.ins().iconst(types::I64, poison_addr);
-                    args.ctx.trace_scope(&format!("defer error LetRec(simple) {:?}", binder));
+                    if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+                        args.ctx.trace_scope(&format!("defer error LetRec(simple) {:?}", binder));
+                    }
                     args.ctx.env.insert(*binder, SsaVal::HeapPtr(poison_val));
                 } else {
                     work.push(EmitWork::LetRecPostSimple {
@@ -1802,7 +1821,7 @@ impl EmitContext {
                         })
                         .copied()
                         .collect();
-                    if !dropped_fvs.is_empty() {
+                    if !dropped_fvs.is_empty() && crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
                         args.ctx.trace_scope(&format!(
                             "LetRec lam {:?}: dropped FVs {:?}",
                             binder, dropped_fvs
@@ -1915,7 +1934,9 @@ impl EmitContext {
                 PreAlloc::Lam { binder, ptr, .. } => (*binder, *ptr),
                 PreAlloc::Con { binder, ptr, .. } => (*binder, *ptr),
             };
-            args.ctx.trace_scope(&format!("insert LetRec(rec) {:?}", binder));
+            if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+                args.ctx.trace_scope(&format!("insert LetRec(rec) {:?}", binder));
+            }
             args.ctx.env.insert(binder, SsaVal::HeapPtr(ptr));
         }
 
@@ -1927,7 +1948,9 @@ impl EmitContext {
             if EmitContext::rhs_is_error_call(args.sess.tree, *rhs_idx) {
                 let poison_addr = args.ctx.emit_error_poison(args.sess.tree, *rhs_idx);
                 let poison_val = args.builder.ins().iconst(types::I64, poison_addr);
-                args.ctx.trace_scope(&format!("defer error LetRec(trivial) {:?}", binder));
+                if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+                    args.ctx.trace_scope(&format!("defer error LetRec(trivial) {:?}", binder));
+                }
                 args.ctx.env.insert(*binder, SsaVal::HeapPtr(poison_val));
             } else if matches!(&args.sess.tree.nodes[*rhs_idx], CoreFrame::Var(_)) {
                 // Var aliases are trivial \u2014 just an env lookup via emit_subtree
@@ -1939,7 +1962,9 @@ impl EmitContext {
                     },
                     *rhs_idx,
                 )?;
-                args.ctx.trace_scope(&format!("insert LetRec(trivial) {:?}", binder));
+                if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+                    args.ctx.trace_scope(&format!("insert LetRec(trivial) {:?}", binder));
+                }
                 args.ctx.env.insert(*binder, rhs_val);
             } else {
                 deferred_simple.push((*binder, *rhs_idx));
@@ -1949,8 +1974,8 @@ impl EmitContext {
         // Phase 3a: Compile Lam bodies and set code pointers.
         // Capture VALUES are NOT filled here \u2014 some captures reference
         // deferred simple bindings (Phase 3c) that aren't in env yet.
-        let mut pending_capture_updates: std::collections::HashMap<VarId, Vec<ClosureCaptureSlot>> =
-            std::collections::HashMap::with_capacity(rec_bindings.len());
+        let mut pending_capture_updates: FxHashMap<VarId, Vec<ClosureCaptureSlot>> =
+            FxHashMap::with_capacity_and_hasher(rec_bindings.len(), Default::default());
 
         for pa in &pre_allocs {
             let (closure_ptr, sorted_fvs, rhs_idx) = match pa {
@@ -2124,7 +2149,7 @@ impl EmitContext {
         }
 
         // Phase 3b: Fill Con fields that DON'T reference deferred simple bindings.
-        let simple_binder_set: std::collections::HashSet<VarId> =
+        let simple_binder_set: FxHashSet<VarId> =
             deferred_simple.iter().map(|(b, _)| *b).collect();
         let mut deferred_cons: Vec<(VarId, cranelift_codegen::ir::Value, Vec<usize>)> =
             Vec::with_capacity(rec_bindings.len());
@@ -2182,25 +2207,25 @@ impl EmitContext {
 
         // Topological sort for deferred simple bindings
         let deferred_simple = {
-            let deferred_set: std::collections::HashSet<VarId> =
+            let deferred_set: FxHashSet<VarId> =
                 deferred_simple.iter().map(|(b, _)| *b).collect();
 
-            let mut direct_deps: std::collections::HashMap<VarId, Vec<VarId>> =
-                std::collections::HashMap::with_capacity(bindings.len());
+            let mut direct_deps: FxHashMap<VarId, Vec<VarId>> =
+                FxHashMap::with_capacity_and_hasher(bindings.len(), Default::default());
             for (binder, rhs_idx) in bindings {
                 let fvs =
                     tidepool_repr::free_vars::free_vars(&args.sess.tree.extract_subtree(*rhs_idx));
                 direct_deps.insert(*binder, fvs.into_iter().collect());
             }
 
-            let mut reachable_deferred: std::collections::HashMap<
+            let mut reachable_deferred: FxHashMap<
                 VarId,
-                std::collections::HashSet<VarId>,
-            > = std::collections::HashMap::with_capacity(deferred_simple.len());
+                FxHashSet<VarId>,
+            > = FxHashMap::with_capacity_and_hasher(deferred_simple.len(), Default::default());
             for &(start_node, _) in &deferred_simple {
-                let mut visited = std::collections::HashSet::new();
+                let mut visited = FxHashSet::default();
                 let mut stack = vec![start_node];
-                let mut reached = std::collections::HashSet::new();
+                let mut reached = FxHashSet::default();
 
                 while let Some(node) = stack.pop() {
                     if !visited.insert(node) {
@@ -2244,7 +2269,7 @@ impl EmitContext {
         // Build deferred Con deps tracking
         let mut deferred_con_deps: Vec<DeferredConDep> = Vec::with_capacity(deferred_cons.len());
         for (_, ptr, field_indices) in &deferred_cons {
-            let deps: std::collections::HashSet<VarId> = field_indices
+            let deps: FxHashSet<VarId> = field_indices
                 .iter()
                 .filter_map(|&f_idx| {
                     if let CoreFrame::Var(v) = &args.sess.tree.nodes[f_idx] {
@@ -2279,7 +2304,9 @@ impl EmitContext {
             if EmitContext::rhs_is_error_call(args.sess.tree, *rhs_idx) {
                 let poison_addr = args.ctx.emit_error_poison(args.sess.tree, *rhs_idx);
                 let poison_val = args.builder.ins().iconst(types::I64, poison_addr);
-                args.ctx.trace_scope(&format!("defer error LetRec(deferred) {:?}", binder));
+                if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+                    args.ctx.trace_scope(&format!("defer error LetRec(deferred) {:?}", binder));
+                }
                 args.ctx.env.insert(*binder, SsaVal::HeapPtr(poison_val));
                 // Run post-step inline: closures may capture error-poisoned
                 // bindings, and deferred Cons may depend on them. Without this,
@@ -2325,7 +2352,9 @@ impl EmitContext {
                         },
                         *rhs_idx,
                     )?;
-                    args.ctx.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
+                    if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+                        args.ctx.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
+                    }
                     args.ctx.env.insert(*binder, thunk_val);
                     Self::letrec_post_simple_step(
                         EmitArgs {
@@ -2523,7 +2552,7 @@ enum EmitWork {
 /// Deferred state for LetRec phases 3c/3a'/3d, stored in EmitContext
 /// so work items can reference it by index.
 pub(crate) struct LetRecDeferredState {
-    pending_capture_updates: std::collections::HashMap<VarId, Vec<ClosureCaptureSlot>>,
+    pending_capture_updates: FxHashMap<VarId, Vec<ClosureCaptureSlot>>,
     deferred_con_deps: Vec<DeferredConDep>,
 }
 
@@ -2539,7 +2568,7 @@ struct DeferredConDep {
     /// Field indices to fill. Emptied once filled (sentinel for "done").
     field_indices: Vec<usize>,
     /// Simple bindings this Con depends on. Entries removed as deps are satisfied.
-    remaining_deps: std::collections::HashSet<VarId>,
+    remaining_deps: FxHashSet<VarId>,
 }
 
 enum LetCleanup {

@@ -1,6 +1,6 @@
 //! Partial evaluation pass for Core expressions.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use tidepool_eval::{Changed, Pass};
 use tidepool_repr::{Alt, AltCon, CoreExpr, CoreFrame, DataConId, Literal, PrimOpKind, VarId};
 
@@ -23,7 +23,7 @@ enum KnownValue {
 }
 
 /// Environment mapping variables to their partial values.
-type PartialEnv = HashMap<VarId, PartialValue>;
+type PartialEnv = FxHashMap<VarId, PartialValue>;
 
 /// First-order partial evaluation pass.
 pub struct PartialEval;
@@ -37,7 +37,7 @@ impl Pass for PartialEval {
         let (root_idx, _) = partial_eval_at(
             expr,
             expr.nodes.len() - 1,
-            &PartialEnv::new(),
+            &PartialEnv::default(),
             &mut new_nodes,
         );
         let new_expr = CoreExpr { nodes: new_nodes }.extract_subtree(root_idx);

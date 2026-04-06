@@ -1,6 +1,6 @@
 //! Occurrence analysis for Core expressions.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use tidepool_repr::{CoreExpr, CoreFrame, VarId};
 
 /// Occurrence count for a variable.
@@ -35,13 +35,13 @@ impl Occ {
 }
 
 /// Map from variable to occurrence count.
-pub type OccMap = HashMap<VarId, Occ>;
+pub type OccMap = FxHashMap<VarId, Occ>;
 
 /// Count occurrences of all variables in the expression.
 /// Binding sites (in Lam, Let, Case, Join) are NOT counted as occurrences.
 /// Only Var(v) nodes (variable use sites) are counted.
 pub fn occ_analysis(expr: &CoreExpr) -> OccMap {
-    let mut map = OccMap::new();
+    let mut map = OccMap::default();
     for node in &expr.nodes {
         if let CoreFrame::Var(v) = node {
             let entry = map.entry(*v).or_insert(Occ::Dead);

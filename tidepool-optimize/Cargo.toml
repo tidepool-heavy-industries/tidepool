@@ -12,6 +12,7 @@ readme = "../README.md"
 [dependencies]
 tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
 tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
+rustc-hash = "2.1.0"
 
 [dev-dependencies]
 tidepool-testing = { path = "../tidepool-testing" }

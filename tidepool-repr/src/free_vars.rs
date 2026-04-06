@@ -1,24 +1,24 @@
 //! Analysis to identify free variables in Tidepool IR expressions.
 
 use crate::{CoreExpr, CoreFrame, VarId};
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 /// Collect all free variables in the expression rooted at the given node.
-pub fn free_vars(tree: &CoreExpr) -> HashSet<VarId> {
+pub fn free_vars(tree: &CoreExpr) -> FxHashSet<VarId> {
     if tree.nodes.is_empty() {
-        return HashSet::new();
+        return FxHashSet::default();
     }
     free_vars_at(tree, tree.nodes.len() - 1)
 }
 
-fn free_vars_at(tree: &CoreExpr, idx: usize) -> HashSet<VarId> {
+fn free_vars_at(tree: &CoreExpr, idx: usize) -> FxHashSet<VarId> {
     match &tree.nodes[idx] {
         CoreFrame::Var(v) => {
-            let mut s = HashSet::new();
+            let mut s = FxHashSet::default();
             s.insert(*v);
             s
         }
-        CoreFrame::Lit(_) => HashSet::new(),
+        CoreFrame::Lit(_) => FxHashSet::default(),
         CoreFrame::App { fun, arg } => {
             let mut s = free_vars_at(tree, *fun);
             s.extend(free_vars_at(tree, *arg));
@@ -37,8 +37,8 @@ fn free_vars_at(tree: &CoreExpr, idx: usize) -> HashSet<VarId> {
             s
         }
         CoreFrame::LetRec { bindings, body } => {
-            let bound: HashSet<VarId> = bindings.iter().map(|(v, _)| *v).collect();
-            let mut s: HashSet<VarId> = bindings
+            let bound: FxHashSet<VarId> = bindings.iter().map(|(v, _)| *v).collect();
+            let mut s: FxHashSet<VarId> = bindings
                 .iter()
                 .flat_map(|(_, rhs)| free_vars_at(tree, *rhs))
                 .filter(|v| !bound.contains(v))
@@ -73,7 +73,7 @@ fn free_vars_at(tree: &CoreExpr, idx: usize) -> HashSet<VarId> {
             rhs,
             body,
         } => {
-            let param_set: HashSet<VarId> = params.iter().copied().collect();
+            let param_set: FxHashSet<VarId> = params.iter().copied().collect();
             let mut rhs_fvs = free_vars_at(tree, *rhs);
             for p in &param_set {
                 rhs_fvs.remove(p);
@@ -113,7 +113,7 @@ mod tests {
     fn test_free_vars_var() {
         let x = VarId(1);
         let expr = leaf(CoreFrame::Var(x));
-        let mut expected = HashSet::new();
+        let mut expected = FxHashSet::default();
         expected.insert(x);
         assert_eq!(free_vars(&expr), expected);
     }
@@ -125,7 +125,7 @@ mod tests {
             CoreFrame::Var(x),                     // 0
             CoreFrame::Lam { binder: x, body: 0 }, // 1
         ]);
-        assert_eq!(free_vars(&expr), HashSet::new());
+        assert_eq!(free_vars(&expr), FxHashSet::default());
     }
 
     #[test]
@@ -136,7 +136,7 @@ mod tests {
             CoreFrame::Var(y),                     // 0
             CoreFrame::Lam { binder: x, body: 0 }, // 1
         ]);
-        let mut expected = HashSet::new();
+        let mut expected = FxHashSet::default();
         expected.insert(y);
         assert_eq!(free_vars(&expr), expected);
     }
@@ -154,7 +154,7 @@ mod tests {
                 body: 1,
             }, // 2
         ]);
-        let mut expected = HashSet::new();
+        let mut expected = FxHashSet::default();
         expected.insert(y);
         assert_eq!(free_vars(&expr), expected);
     }
@@ -169,7 +169,7 @@ mod tests {
                 body: 0,
             }, // 1
         ]);
-        assert_eq!(free_vars(&expr), HashSet::new());
+        assert_eq!(free_vars(&expr), FxHashSet::default());
     }
 
     #[test]
@@ -189,7 +189,7 @@ mod tests {
                 }],
             }, // 2
         ]);
-        let mut expected = HashSet::new();
+        let mut expected = FxHashSet::default();
         expected.insert(a);
         assert_eq!(free_vars(&expr), expected);
     }
@@ -206,7 +206,7 @@ mod tests {
                 fields: vec![0, 1],
             },
         ]);
-        let mut expected = HashSet::new();
+        let mut expected = FxHashSet::default();
         expected.insert(x);
         expected.insert(y);
         assert_eq!(free_vars(&expr), expected);
@@ -231,7 +231,7 @@ mod tests {
             }, // 3
         ]);
         // x is bound in rhs by Join params, but NOT in body. y is free in rhs.
-        let mut expected = HashSet::new();
+        let mut expected = FxHashSet::default();
         expected.insert(y);
         expected.insert(x);
         assert_eq!(free_vars(&expr), expected);
@@ -248,7 +248,7 @@ mod tests {
                 args: vec![0, 1],
             },
         ]);
-        let mut expected = HashSet::new();
+        let mut expected = FxHashSet::default();
         expected.insert(x);
         assert_eq!(free_vars(&expr), expected);
     }

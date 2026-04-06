@@ -4,7 +4,7 @@ pub mod join;
 pub mod primop;
 
 use cranelift_codegen::ir::{FuncRef, SigRef, Value};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use tidepool_repr::{CoreExpr, JoinId, PrimOpKind, VarId};
 
 pub use crate::layout::*;
@@ -49,14 +49,14 @@ impl TailCtx {
 
 /// A scoped environment mapping variables to SSA values.
 pub struct ScopedEnv {
-    inner: HashMap<VarId, SsaVal>,
+    inner: FxHashMap<VarId, SsaVal>,
 }
 
 #[allow(clippy::new_without_default)]
 impl ScopedEnv {
     pub fn new() -> Self {
         Self {
-            inner: HashMap::new(),
+            inner: FxHashMap::default(),
         }
     }
 
@@ -147,13 +147,13 @@ pub struct EmitArgs<'a, 'b, 'c> {
 }
 
 pub(crate) struct JoinPointRegistry {
-    blocks: HashMap<JoinId, JoinInfo>,
+    blocks: FxHashMap<JoinId, JoinInfo>,
 }
 
 impl JoinPointRegistry {
     pub(crate) fn new() -> Self {
         Self {
-            blocks: HashMap::new(),
+            blocks: FxHashMap::default(),
         }
     }
 

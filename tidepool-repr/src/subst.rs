@@ -3,7 +3,7 @@
 use crate::free_vars::free_vars;
 use crate::tree::MapLayer;
 use crate::{CoreExpr, CoreFrame, RecursiveTree, VarId};
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Substitute `replacement` for `target` in `tree`. Returns a new tree.
 /// Capture-avoiding: renames binders that would capture free vars in the replacement.
@@ -30,7 +30,7 @@ pub fn subst(tree: &CoreExpr, target: VarId, replacement: &CoreExpr) -> CoreExpr
         new_nodes: &mut new_nodes,
     };
 
-    subst_at(tree, tree.nodes.len() - 1, &mut ctx, &HashMap::new());
+    subst_at(tree, tree.nodes.len() - 1, &mut ctx, &FxHashMap::default());
 
     RecursiveTree { nodes: new_nodes }
 }
@@ -38,7 +38,7 @@ pub fn subst(tree: &CoreExpr, target: VarId, replacement: &CoreExpr) -> CoreExpr
 struct SubstCtx<'a> {
     target: VarId,
     replacement: &'a CoreExpr,
-    fvs_replacement: &'a HashSet<VarId>,
+    fvs_replacement: &'a FxHashSet<VarId>,
     next_id: &'a mut dyn FnMut() -> VarId,
     new_nodes: &'a mut Vec<CoreFrame<usize>>,
 }
@@ -76,7 +76,7 @@ fn find_max_var_id(tree: &CoreExpr) -> VarId {
 
 /// Recursive helper for substitution.
 /// `env` maps binders that have been renamed (due to capture avoidance) to their new IDs.
-fn subst_at(tree: &CoreExpr, idx: usize, ctx: &mut SubstCtx, env: &HashMap<VarId, VarId>) -> usize {
+fn subst_at(tree: &CoreExpr, idx: usize, ctx: &mut SubstCtx, env: &FxHashMap<VarId, VarId>) -> usize {
     match &tree.nodes[idx] {
         CoreFrame::Var(v) => {
             let actual_v = env.get(v).copied().unwrap_or(*v);
@@ -340,7 +340,7 @@ fn copy_with_env(
     tree: &CoreExpr,
     idx: usize,
     new_nodes: &mut Vec<CoreFrame<usize>>,
-    env: &HashMap<VarId, VarId>,
+    env: &FxHashMap<VarId, VarId>,
 ) -> usize {
     match &tree.nodes[idx] {
         CoreFrame::Var(v) => {
