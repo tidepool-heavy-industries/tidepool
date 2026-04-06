@@ -3,17 +3,22 @@ module Tidepool.CborEncode (encodeTree, encodeMetadata) where
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import Data.Text (Text)
 import Data.Word
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Tidepool.Translate
 
+-- | 8-byte version header: magic 'TPLR' + version 1.0
+tplrHeader :: ByteString
+tplrHeader = BS.pack [0x54, 0x50, 0x4C, 0x52, 0x00, 0x01, 0x00, 0x00]
+
 encodeTree :: Seq FlatNode -> ByteString
-encodeTree nodes = toStrictByteString $
+encodeTree nodes = tplrHeader <> toStrictByteString (
   encodeListLen 2
   <> encodeNodesArray nodes
-  <> encodeWord (fromIntegral (Seq.length nodes - 1))  -- root index
+  <> encodeWord (fromIntegral (Seq.length nodes - 1)))  -- root index
 
 encodeNodesArray :: Seq FlatNode -> Encoding
 encodeNodesArray nodes =
@@ -84,10 +89,10 @@ encodeFlatAltCon = \case
   FDefault      -> encodeListLen 1 <> encodeString "Default"
 
 encodeMetadata :: [(Word64, Text, Int, Int, [Text], Text)] -> Bool -> ByteString
-encodeMetadata entries hasIO = toStrictByteString $
+encodeMetadata entries hasIO = tplrHeader <> toStrictByteString (
   encodeListLen 2
   <> (encodeListLen (fromIntegral (length entries)) <> foldMap encodeMetaEntry entries)
-  <> encodeMapLen 1 <> encodeString "has_io" <> encodeBool hasIO
+  <> encodeMapLen 1 <> encodeString "has_io" <> encodeBool hasIO)
 
 encodeMetaEntry :: (Word64, Text, Int, Int, [Text], Text) -> Encoding
 encodeMetaEntry (dcid, name, tag, arity, bangs, qualName) =
