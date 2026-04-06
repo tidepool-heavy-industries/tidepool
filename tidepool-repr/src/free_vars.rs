@@ -4,11 +4,14 @@ use crate::{CoreExpr, CoreFrame, VarId};
 use rustc_hash::FxHashSet;
 
 /// Collect all free variables in the expression rooted at the given node.
-pub fn free_vars(tree: &CoreExpr) -> FxHashSet<VarId> {
+/// Returns a sorted, deduplicated Vec<VarId> for efficient access and minimal allocation.
+pub fn free_vars(tree: &CoreExpr) -> Vec<VarId> {
     if tree.nodes.is_empty() {
-        return FxHashSet::default();
+        return Vec::new();
     }
-    free_vars_at(tree, tree.nodes.len() - 1)
+    let mut fvs: Vec<VarId> = free_vars_at(tree, tree.nodes.len() - 1).into_iter().collect();
+    fvs.sort_unstable();
+    fvs
 }
 
 fn free_vars_at(tree: &CoreExpr, idx: usize) -> FxHashSet<VarId> {
@@ -113,9 +116,7 @@ mod tests {
     fn test_free_vars_var() {
         let x = VarId(1);
         let expr = leaf(CoreFrame::Var(x));
-        let mut expected = FxHashSet::default();
-        expected.insert(x);
-        assert_eq!(free_vars(&expr), expected);
+        assert_eq!(free_vars(&expr), vec![x]);
     }
 
     #[test]
@@ -125,7 +126,7 @@ mod tests {
             CoreFrame::Var(x),                     // 0
             CoreFrame::Lam { binder: x, body: 0 }, // 1
         ]);
-        assert_eq!(free_vars(&expr), FxHashSet::default());
+        assert_eq!(free_vars(&expr), Vec::<VarId>::new());
     }
 
     #[test]
@@ -136,9 +137,7 @@ mod tests {
             CoreFrame::Var(y),                     // 0
             CoreFrame::Lam { binder: x, body: 0 }, // 1
         ]);
-        let mut expected = FxHashSet::default();
-        expected.insert(y);
-        assert_eq!(free_vars(&expr), expected);
+        assert_eq!(free_vars(&expr), vec![y]);
     }
 
     #[test]
@@ -154,9 +153,7 @@ mod tests {
                 body: 1,
             }, // 2
         ]);
-        let mut expected = FxHashSet::default();
-        expected.insert(y);
-        assert_eq!(free_vars(&expr), expected);
+        assert_eq!(free_vars(&expr), vec![y]);
     }
 
     #[test]
@@ -169,7 +166,7 @@ mod tests {
                 body: 0,
             }, // 1
         ]);
-        assert_eq!(free_vars(&expr), FxHashSet::default());
+        assert_eq!(free_vars(&expr), Vec::<VarId>::new());
     }
 
     #[test]
@@ -189,9 +186,7 @@ mod tests {
                 }],
             }, // 2
         ]);
-        let mut expected = FxHashSet::default();
-        expected.insert(a);
-        assert_eq!(free_vars(&expr), expected);
+        assert_eq!(free_vars(&expr), vec![a]);
     }
 
     #[test]
@@ -206,9 +201,8 @@ mod tests {
                 fields: vec![0, 1],
             },
         ]);
-        let mut expected = FxHashSet::default();
-        expected.insert(x);
-        expected.insert(y);
+        let mut expected = vec![x, y];
+        expected.sort();
         assert_eq!(free_vars(&expr), expected);
     }
 
@@ -231,9 +225,8 @@ mod tests {
             }, // 3
         ]);
         // x is bound in rhs by Join params, but NOT in body. y is free in rhs.
-        let mut expected = FxHashSet::default();
-        expected.insert(y);
-        expected.insert(x);
+        let mut expected = vec![x, y];
+        expected.sort();
         assert_eq!(free_vars(&expr), expected);
     }
 
@@ -248,9 +241,7 @@ mod tests {
                 args: vec![0, 1],
             },
         ]);
-        let mut expected = FxHashSet::default();
-        expected.insert(x);
-        assert_eq!(free_vars(&expr), expected);
+        assert_eq!(free_vars(&expr), vec![x]);
     }
 
     #[test]
@@ -281,9 +272,9 @@ mod tests {
             }, // 5: root
         ]);
         let fvs = free_vars(&tree_expr);
-        assert!(fvs.contains(&y), "y should be free");
-        assert!(fvs.contains(&z), "z should be free");
-        assert!(!fvs.contains(&x), "x should be bound by join param");
+        assert!(fvs.binary_search(&y).is_ok(), "y should be free");
+        assert!(fvs.binary_search(&z).is_ok(), "z should be free");
+        assert!(fvs.binary_search(&x).is_err(), "x should be bound by join param");
     }
 
     #[test]
@@ -300,8 +291,8 @@ mod tests {
             },
         ]);
         let fvs = free_vars(&tree_expr);
-        assert!(fvs.contains(&x));
-        assert!(fvs.contains(&y));
+        assert!(fvs.binary_search(&x).is_ok());
+        assert!(fvs.binary_search(&y).is_ok());
         assert_eq!(fvs.len(), 2);
     }
 
@@ -319,7 +310,7 @@ mod tests {
             },
         ]);
         let fvs = free_vars(&tree_expr);
-        assert!(fvs.contains(&x));
-        assert!(fvs.contains(&y));
+        assert!(fvs.binary_search(&x).is_ok());
+        assert!(fvs.binary_search(&y).is_ok());
     }
 }

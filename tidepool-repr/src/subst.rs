@@ -3,7 +3,7 @@
 use crate::free_vars::free_vars;
 use crate::tree::MapLayer;
 use crate::{CoreExpr, CoreFrame, RecursiveTree, VarId};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 /// Substitute `replacement` for `target` in `tree`. Returns a new tree.
 /// Capture-avoiding: renames binders that would capture free vars in the replacement.
@@ -38,7 +38,7 @@ pub fn subst(tree: &CoreExpr, target: VarId, replacement: &CoreExpr) -> CoreExpr
 struct SubstCtx<'a> {
     target: VarId,
     replacement: &'a CoreExpr,
-    fvs_replacement: &'a FxHashSet<VarId>,
+    fvs_replacement: &'a [VarId],
     next_id: &'a mut dyn FnMut() -> VarId,
     new_nodes: &'a mut Vec<CoreFrame<usize>>,
 }
@@ -99,7 +99,7 @@ fn subst_at(tree: &CoreExpr, idx: usize, ctx: &mut SubstCtx, env: &FxHashMap<Var
             if actual_binder == ctx.target {
                 // target is shadowed, just copy the subtree with renamed binders (if any)
                 copy_with_env(tree, idx, ctx.new_nodes, env)
-            } else if ctx.fvs_replacement.contains(&actual_binder) {
+            } else if ctx.fvs_replacement.binary_search(&actual_binder).is_ok() {
                 // Capture would occur, rename binder
                 let fresh = (ctx.next_id)();
                 let mut new_env = env.clone();
@@ -135,7 +135,7 @@ fn subst_at(tree: &CoreExpr, idx: usize, ctx: &mut SubstCtx, env: &FxHashMap<Var
                     body: new_body,
                 });
                 new_idx
-            } else if ctx.fvs_replacement.contains(&actual_binder) {
+            } else if ctx.fvs_replacement.binary_search(&actual_binder).is_ok() {
                 let fresh = (ctx.next_id)();
                 let mut new_env = env.clone();
                 new_env.insert(*binder, fresh);
@@ -169,7 +169,7 @@ fn subst_at(tree: &CoreExpr, idx: usize, ctx: &mut SubstCtx, env: &FxHashMap<Var
                 if actual_b == ctx.target {
                     shadow = true;
                 }
-                if ctx.fvs_replacement.contains(&actual_b) {
+                if ctx.fvs_replacement.binary_search(&actual_b).is_ok() {
                     needs_rename = true;
                 }
             }
@@ -180,7 +180,7 @@ fn subst_at(tree: &CoreExpr, idx: usize, ctx: &mut SubstCtx, env: &FxHashMap<Var
             } else if needs_rename {
                 for b in &mut binders {
                     let actual_b = env.get(b).copied().unwrap_or(*b);
-                    if ctx.fvs_replacement.contains(&actual_b) {
+                    if ctx.fvs_replacement.binary_search(&actual_b).is_ok() {
                         let fresh = (ctx.next_id)();
                         new_env.insert(*b, fresh);
                         *b = fresh;
@@ -225,7 +225,7 @@ fn subst_at(tree: &CoreExpr, idx: usize, ctx: &mut SubstCtx, env: &FxHashMap<Var
 
             let mut case_env = env.clone();
             let mut final_case_binder = actual_binder;
-            if ctx.fvs_replacement.contains(&actual_binder) {
+            if ctx.fvs_replacement.binary_search(&actual_binder).is_ok() {
                 final_case_binder = (ctx.next_id)();
                 case_env.insert(*binder, final_case_binder);
             }
@@ -240,7 +240,7 @@ fn subst_at(tree: &CoreExpr, idx: usize, ctx: &mut SubstCtx, env: &FxHashMap<Var
                     if actual_b == ctx.target {
                         alt_shadow = true;
                     }
-                    if ctx.fvs_replacement.contains(&actual_b) {
+                    if ctx.fvs_replacement.binary_search(&actual_b).is_ok() {
                         let fresh = (ctx.next_id)();
                         alt_env.insert(*b, fresh);
                         new_pattern_binders.push(fresh);

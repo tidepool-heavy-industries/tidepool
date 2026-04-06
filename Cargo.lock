@@ -3447,6 +3447,7 @@ dependencies = [
  "libc",
  "proptest",
  "recursion",
+ "rustc-hash",
  "serial_test",
  "target-lexicon",
  "thiserror 2.0.18",
@@ -3542,6 +3543,7 @@ name = "tidepool-optimize"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "rustc-hash",
  "serial_test",
  "tidepool-eval",
  "tidepool-repr",
@@ -3554,6 +3556,7 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "proptest",
+ "rustc-hash",
  "serial_test",
  "thiserror 2.0.18",
  "tidepool-testing",

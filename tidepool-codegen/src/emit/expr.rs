@@ -791,10 +791,8 @@ fn compute_captures(
     label: &str,
 ) -> (CoreExpr, Vec<VarId>) {
     let body_tree = tree.extract_subtree(body_idx);
-    let mut fvs = tidepool_repr::free_vars::free_vars(&body_tree);
-    if let Some(binder) = exclude {
-        fvs.remove(&binder);
-    }
+    let fvs = tidepool_repr::free_vars::free_vars(&body_tree);
+
     let dropped: Vec<VarId> = fvs
         .iter()
         .filter(|v| !ctx.env.contains_key(v))
@@ -812,9 +810,15 @@ fn compute_captures(
         .into_iter()
         .filter(|v| ctx.env.contains_key(v))
         .collect();
-    sorted_fvs.sort_by_key(|v| v.0);
+
+    if let Some(binder) = exclude {
+        if let Ok(idx) = sorted_fvs.binary_search(&binder) {
+            sorted_fvs.remove(idx);
+        }
+    }
     (body_tree, sorted_fvs)
 }
+
 
 fn emit_lam(
     args: EmitArgs,
@@ -1423,7 +1427,7 @@ impl EmitContext {
                                 let body_fvs = tidepool_repr::free_vars::free_vars(
                                     &args.sess.tree.extract_subtree(body),
                                 );
-                                if body_fvs.contains(&binder) {
+                                if body_fvs.binary_search(&binder).is_ok() {
                                     if Self::rhs_is_error_call(args.sess.tree, rhs) {
                                         // Bind to lazy poison closure \u2014 error only triggers on call.
                                         let poison_addr = args.ctx.emit_error_poison(args.sess.tree, rhs);
@@ -1811,7 +1815,9 @@ impl EmitContext {
                 } => {
                     let lam_body_tree = args.sess.tree.extract_subtree(*lam_body);
                     let mut fvs = tidepool_repr::free_vars::free_vars(&lam_body_tree);
-                    fvs.remove(lam_binder);
+                    if let Ok(idx) = fvs.binary_search(lam_binder) {
+                        fvs.remove(idx);
+                    }
                     let dropped_fvs: Vec<VarId> = fvs
                         .iter()
                         .filter(|v| {

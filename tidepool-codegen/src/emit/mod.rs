@@ -49,52 +49,52 @@ impl TailCtx {
 
 /// A scoped environment mapping variables to SSA values.
 pub struct ScopedEnv {
-    inner: FxHashMap<VarId, SsaVal>,
+    map: FxHashMap<VarId, SsaVal>,
 }
 
 #[allow(clippy::new_without_default)]
 impl ScopedEnv {
     pub fn new() -> Self {
         Self {
-            inner: FxHashMap::default(),
+            map: FxHashMap::default(),
         }
     }
 
     pub fn get(&self, var: &VarId) -> Option<&SsaVal> {
-        self.inner.get(var)
+        self.map.get(var)
     }
 
     pub fn contains_key(&self, var: &VarId) -> bool {
-        self.inner.contains_key(var)
+        self.map.contains_key(var)
     }
 
     pub fn insert(&mut self, var: VarId, val: SsaVal) -> Option<SsaVal> {
-        self.inner.insert(var, val)
+        self.map.insert(var, val)
     }
 
     /// Restores a variable to its previous state.
     pub fn restore(&mut self, var: VarId, old: Option<SsaVal>) {
         if let Some(val) = old {
-            self.inner.insert(var, val);
+            self.map.insert(var, val);
         } else {
-            self.inner.remove(&var);
+            self.map.remove(&var);
         }
     }
 
     pub fn iter(&self) -> std::collections::hash_map::Iter<'_, VarId, SsaVal> {
-        self.inner.iter()
+        self.map.iter()
     }
 
     pub fn keys(&self) -> std::collections::hash_map::Keys<'_, VarId, SsaVal> {
-        self.inner.keys()
+        self.map.keys()
     }
 
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.map.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        self.map.is_empty()
     }
 
     /// Inserts a variable into the environment and records the old value in the scope.
@@ -147,28 +147,28 @@ pub struct EmitArgs<'a, 'b, 'c> {
 }
 
 pub(crate) struct JoinPointRegistry {
-    blocks: FxHashMap<JoinId, JoinInfo>,
+    map: FxHashMap<JoinId, JoinInfo>,
 }
 
 impl JoinPointRegistry {
     pub(crate) fn new() -> Self {
         Self {
-            blocks: FxHashMap::default(),
+            map: FxHashMap::default(),
         }
     }
 
     pub(crate) fn register(&mut self, label: JoinId, info: JoinInfo) {
-        self.blocks.insert(label, info);
+        self.map.insert(label, info);
     }
 
     pub(crate) fn get(&self, label: &JoinId) -> Result<&JoinInfo, EmitError> {
-        self.blocks.get(label).ok_or_else(|| {
+        self.map.get(label).ok_or_else(|| {
             EmitError::NotYetImplemented(format!("Jump to unregistered join {:?}", label))
         })
     }
 
     pub(crate) fn remove(&mut self, label: &JoinId) -> Option<JoinInfo> {
-        self.blocks.remove(label)
+        self.map.remove(label)
     }
 }
 
