@@ -103,6 +103,7 @@ fn convergence_expr(depth: usize) -> CoreExpr {
 
 fn bench_optimize(c: &mut Criterion) {
     let expr = reducible_expr();
+    let passes = default_passes();
 
     c.bench_function("opt_beta_reduce", |b| {
         b.iter(|| {
@@ -135,19 +136,17 @@ fn bench_optimize(c: &mut Criterion) {
     c.bench_function("opt_full_pipeline", |b| {
         b.iter(|| {
             let mut e = expr.clone();
-            let passes = default_passes();
-            black_box(run_pipeline(&passes, &mut e).unwrap())
+            black_box(run_pipeline(&passes, &mut e).expect("Optimization pipeline failed"))
         })
     });
 
     // Pipeline on already optimized expr
     let mut optimized = expr.clone();
-    run_pipeline(&default_passes(), &mut optimized).unwrap();
+    run_pipeline(&passes, &mut optimized).expect("Optimization pipeline failed");
     c.bench_function("opt_pipeline_already_optimized", |b| {
         b.iter(|| {
             let mut e = optimized.clone();
-            let passes = default_passes();
-            black_box(run_pipeline(&passes, &mut e).unwrap())
+            black_box(run_pipeline(&passes, &mut e).expect("Optimization pipeline failed"))
         })
     });
 
@@ -158,8 +157,7 @@ fn bench_optimize(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, _| {
             b.iter(|| {
                 let mut e = e.clone();
-                let passes = default_passes();
-                black_box(run_pipeline(&passes, &mut e).unwrap())
+                black_box(run_pipeline(&passes, &mut e).expect("Optimization pipeline failed"))
             })
         });
     }

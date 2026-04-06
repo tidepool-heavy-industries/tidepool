@@ -5,9 +5,10 @@ use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, Literal, PrimOpKind, Tree
 /// Builds a simple arithmetic expression tree of given size.
 /// result = (((1 + 0) + 1) + 2) + ...
 fn build_expr(size: usize) -> CoreExpr {
+    assert!(size > 0, "size must be > 0");
     let mut b = TreeBuilder::new();
     let mut current = b.push(CoreFrame::Lit(Literal::LitInt(1)));
-    for i in 0..((size - 1) / 2) {
+    for i in 0..((size.saturating_sub(1)) / 2) {
         let next = b.push(CoreFrame::Lit(Literal::LitInt(i as i64)));
         current = b.push(CoreFrame::PrimOp {
             op: PrimOpKind::IntAdd,
@@ -21,8 +22,9 @@ fn build_expr(size: usize) -> CoreExpr {
 /// Builds a tree with many let-bindings.
 fn build_let_expr(size: usize) -> CoreExpr {
     let mut b = TreeBuilder::new();
-    let mut current_body = b.push(CoreFrame::Var(VarId(0)));
-    for i in 1..size {
+    // Start with a literal to avoid unbound variables
+    let mut current_body = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    for i in 1..=size {
         let binder = VarId(i as u64);
         let rhs = b.push(CoreFrame::Lit(Literal::LitInt(i as i64)));
         current_body = b.push(CoreFrame::LetNonRec {

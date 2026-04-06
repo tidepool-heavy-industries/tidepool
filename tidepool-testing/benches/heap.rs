@@ -97,7 +97,8 @@ fn bench_heap(c: &mut Criterion) {
                         let mut heap = ArenaHeap::with_capacity(depth * 256);
                         let mut last_id = heap.alloc(env.clone(), expr.clone());
 
-                        for _ in 0..depth {
+                        // Loop depth-1 times to produce exactly depth total thunks
+                        for _ in 0..depth.saturating_sub(1) {
                             let mut next_env = Env::new();
                             next_env.insert(VarId(0), tidepool_eval::value::Value::ThunkRef(last_id));
                             last_id = heap.alloc(next_env, expr.clone());
