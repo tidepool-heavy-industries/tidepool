@@ -264,6 +264,7 @@ pub fn compile_and_run<U, H: DispatchEffect<U>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     /// Set up TIDEPOOL_EXTRACT env var and check GHC availability.
     /// Returns false if GHC is not available (test should skip).
@@ -289,6 +290,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_compile_identity() {
         if !ensure_extract_available() {
             eprintln!("Skipping: GHC not available (run inside `nix develop`)");
@@ -303,6 +305,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_compile_error() {
         if !ensure_extract_available() {
             eprintln!("Skipping: GHC not available (run inside `nix develop`)");

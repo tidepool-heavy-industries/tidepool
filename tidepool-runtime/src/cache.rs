@@ -137,9 +137,35 @@ pub(crate) fn cache_store(key: &str, expr_bytes: &[u8], meta_bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use tempfile::TempDir;
 
+    /// RAII guard to safely set and restore environment variables in tests.
+    struct EnvGuard {
+        key: &'static str,
+        old_value: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn new(key: &'static str, new_value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let old_value = std::env::var_os(key);
+            std::env::set_var(key, new_value);
+            Self { key, old_value }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(ref old) = self.old_value {
+                std::env::set_var(self.key, old);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     #[test]
+    #[serial]
     fn test_cache_key_determinism() {
         let source = "main = print 42";
         let target = "main";
@@ -152,9 +178,10 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_cache_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
-        std::env::set_var("XDG_CACHE_HOME", temp_dir.path());
+        let _guard = EnvGuard::new("XDG_CACHE_HOME", temp_dir.path());
 
         let key = "test-key";
         let expr = b"expr-data";
@@ -167,6 +194,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_cache_key_include_fingerprint() {
         let include_dir = TempDir::new().unwrap();
         let hs_file = include_dir.path().join("Lib.hs");
@@ -187,5 +215,56 @@ mod tests {
             k1, k2,
             "Cache key should change when dependency file changes"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn test_cache_key_binary_fingerprint_mtime() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let bin_path = temp_dir.path().join("fake-extract");
+        fs::write(&bin_path, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Point directly to the binary to avoid PATH mutation
+        let _guard = EnvGuard::new("TIDEPOOL_EXTRACT", &bin_path);
+
+        let k1 = cache_key("source", "target", &[]);
+
+        // Change mtime
+        let past = filetime::FileTime::from_unix_time(100, 0);
+        filetime::set_file_mtime(&bin_path, past).unwrap();
+
+        let k2 = cache_key("source", "target", &[]);
+        assert_ne!(k1, k2, "Cache key should change when binary mtime changes");
+    }
+
+    #[test]
+    #[serial]
+    fn test_cache_key_binary_fingerprint_size() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
+
+        let temp_dir = TempDir::new().unwrap();
+        let bin_path = temp_dir.path().join("fake-extract-size");
+        fs::write(&bin_path, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Point directly to the binary to avoid PATH mutation
+        let _guard = EnvGuard::new("TIDEPOOL_EXTRACT", &bin_path);
+
+        let k1 = cache_key("source", "target", &[]);
+
+        // Change size
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&bin_path)
+            .unwrap();
+        file.write_all(b"extra").unwrap();
+        drop(file);
+
+        let k2 = cache_key("source", "target", &[]);
+        assert_ne!(k1, k2, "Cache key should change when binary size changes");
     }
 }
