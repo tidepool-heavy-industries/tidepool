@@ -42,7 +42,9 @@ fn extract_binary_fingerprint(hasher: &mut blake3::Hasher) {
         .unwrap_or_else(|_| "tidepool-extract".to_string());
 
     if let Ok(path) = which::which(bin_name) {
-        if let Ok(meta) = fs::metadata(path) {
+        hasher.update(path.as_os_str().as_encoded_bytes());
+        hasher.update(b"\0");
+        if let Ok(meta) = fs::metadata(&path) {
             hasher.update(&meta.len().to_le_bytes());
             if let Ok(mtime) = meta.modified() {
                 if let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH) {
@@ -217,6 +219,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     #[serial]
     fn test_cache_key_binary_fingerprint_mtime() {
@@ -240,6 +243,7 @@ mod tests {
         assert_ne!(k1, k2, "Cache key should change when binary mtime changes");
     }
 
+    #[cfg(unix)]
     #[test]
     #[serial]
     fn test_cache_key_binary_fingerprint_size() {
