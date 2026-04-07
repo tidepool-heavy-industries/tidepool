@@ -140,6 +140,30 @@ mod tests {
     use serial_test::serial;
     use tempfile::TempDir;
 
+    /// RAII guard to safely set and restore environment variables in tests.
+    struct EnvGuard {
+        key: &'static str,
+        old_value: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn new(key: &'static str, new_value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let old_value = std::env::var_os(key);
+            std::env::set_var(key, new_value);
+            Self { key, old_value }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(ref old) = self.old_value {
+                std::env::set_var(self.key, old);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     #[test]
     #[serial]
     fn test_cache_key_determinism() {
@@ -157,7 +181,7 @@ mod tests {
     #[serial]
     fn test_cache_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
-        std::env::set_var("XDG_CACHE_HOME", temp_dir.path());
+        let _guard = EnvGuard::new("XDG_CACHE_HOME", temp_dir.path());
 
         let key = "test-key";
         let expr = b"expr-data";
@@ -203,15 +227,8 @@ mod tests {
         fs::write(&bin_path, b"#!/bin/sh\n").unwrap();
         fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut paths = std::env::split_paths(&old_path).collect::<Vec<_>>();
-        paths.insert(0, temp_dir.path().to_path_buf());
-        let new_path_os = std::env::join_paths(paths).unwrap();
-
-        let old_extract = std::env::var_os("TIDEPOOL_EXTRACT");
-
-        std::env::set_var("PATH", new_path_os);
-        std::env::set_var("TIDEPOOL_EXTRACT", "fake-extract");
+        // Point directly to the binary to avoid PATH mutation
+        let _guard = EnvGuard::new("TIDEPOOL_EXTRACT", &bin_path);
 
         let k1 = cache_key("source", "target", &[]);
 
@@ -221,14 +238,6 @@ mod tests {
 
         let k2 = cache_key("source", "target", &[]);
         assert_ne!(k1, k2, "Cache key should change when binary mtime changes");
-
-        // Restore env
-        std::env::set_var("PATH", old_path);
-        if let Some(val) = old_extract {
-            std::env::set_var("TIDEPOOL_EXTRACT", val);
-        } else {
-            std::env::remove_var("TIDEPOOL_EXTRACT");
-        }
     }
 
     #[test]
@@ -242,15 +251,8 @@ mod tests {
         fs::write(&bin_path, b"#!/bin/sh\n").unwrap();
         fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut paths = std::env::split_paths(&old_path).collect::<Vec<_>>();
-        paths.insert(0, temp_dir.path().to_path_buf());
-        let new_path_os = std::env::join_paths(paths).unwrap();
-
-        let old_extract = std::env::var_os("TIDEPOOL_EXTRACT");
-
-        std::env::set_var("PATH", new_path_os);
-        std::env::set_var("TIDEPOOL_EXTRACT", "fake-extract-size");
+        // Point directly to the binary to avoid PATH mutation
+        let _guard = EnvGuard::new("TIDEPOOL_EXTRACT", &bin_path);
 
         let k1 = cache_key("source", "target", &[]);
 
@@ -264,13 +266,5 @@ mod tests {
 
         let k2 = cache_key("source", "target", &[]);
         assert_ne!(k1, k2, "Cache key should change when binary size changes");
-
-        // Restore env
-        std::env::set_var("PATH", old_path);
-        if let Some(val) = old_extract {
-            std::env::set_var("TIDEPOOL_EXTRACT", val);
-        } else {
-            std::env::remove_var("TIDEPOOL_EXTRACT");
-        }
     }
 }
