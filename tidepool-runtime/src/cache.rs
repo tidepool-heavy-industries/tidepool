@@ -137,9 +137,11 @@ pub(crate) fn cache_store(key: &str, expr_bytes: &[u8], meta_bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use tempfile::TempDir;
 
     #[test]
+    #[serial]
     fn test_cache_key_determinism() {
         let source = "main = print 42";
         let target = "main";
@@ -152,6 +154,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_cache_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
         std::env::set_var("XDG_CACHE_HOME", temp_dir.path());
@@ -167,6 +170,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_cache_key_include_fingerprint() {
         let include_dir = TempDir::new().unwrap();
         let hs_file = include_dir.path().join("Lib.hs");
@@ -187,5 +191,86 @@ mod tests {
             k1, k2,
             "Cache key should change when dependency file changes"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn test_cache_key_binary_fingerprint_mtime() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let bin_path = temp_dir.path().join("fake-extract");
+        fs::write(&bin_path, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = std::env::split_paths(&old_path).collect::<Vec<_>>();
+        paths.insert(0, temp_dir.path().to_path_buf());
+        let new_path_os = std::env::join_paths(paths).unwrap();
+
+        let old_extract = std::env::var_os("TIDEPOOL_EXTRACT");
+
+        std::env::set_var("PATH", new_path_os);
+        std::env::set_var("TIDEPOOL_EXTRACT", "fake-extract");
+
+        let k1 = cache_key("source", "target", &[]);
+
+        // Change mtime
+        let past = filetime::FileTime::from_unix_time(100, 0);
+        filetime::set_file_mtime(&bin_path, past).unwrap();
+
+        let k2 = cache_key("source", "target", &[]);
+        assert_ne!(k1, k2, "Cache key should change when binary mtime changes");
+
+        // Restore env
+        std::env::set_var("PATH", old_path);
+        if let Some(val) = old_extract {
+            std::env::set_var("TIDEPOOL_EXTRACT", val);
+        } else {
+            std::env::remove_var("TIDEPOOL_EXTRACT");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_cache_key_binary_fingerprint_size() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
+
+        let temp_dir = TempDir::new().unwrap();
+        let bin_path = temp_dir.path().join("fake-extract-size");
+        fs::write(&bin_path, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = std::env::split_paths(&old_path).collect::<Vec<_>>();
+        paths.insert(0, temp_dir.path().to_path_buf());
+        let new_path_os = std::env::join_paths(paths).unwrap();
+
+        let old_extract = std::env::var_os("TIDEPOOL_EXTRACT");
+
+        std::env::set_var("PATH", new_path_os);
+        std::env::set_var("TIDEPOOL_EXTRACT", "fake-extract-size");
+
+        let k1 = cache_key("source", "target", &[]);
+
+        // Change size
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&bin_path)
+            .unwrap();
+        file.write_all(b"extra").unwrap();
+        drop(file);
+
+        let k2 = cache_key("source", "target", &[]);
+        assert_ne!(k1, k2, "Cache key should change when binary size changes");
+
+        // Restore env
+        std::env::set_var("PATH", old_path);
+        if let Some(val) = old_extract {
+            std::env::set_var("TIDEPOOL_EXTRACT", val);
+        } else {
+            std::env::remove_var("TIDEPOOL_EXTRACT");
+        }
     }
 }
