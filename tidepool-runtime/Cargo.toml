@@ -18,6 +18,7 @@ tidepool-codegen = { version = "0.1.0", path = "../tidepool-codegen" }
 serde_json = "1"
 tempfile = "3"
 blake3 = "1"
+which = "7"
 
 [dev-dependencies]
 proptest = "1"
@@ -31,3 +32,4 @@ tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
 tidepool-mcp = { path = "../tidepool-mcp" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 serial_test = "3"
+filetime = "0.2"
