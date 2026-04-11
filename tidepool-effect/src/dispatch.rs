@@ -104,3 +104,136 @@ impl<U, H: EffectHandler<U>, T: DispatchEffect<U>> DispatchEffect<U> for HCons<H
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frunk::hlist;
+    use tidepool_repr::types::Literal;
+
+    /// Handler that adds 1 to a LitInt request.
+    struct AddOneHandler;
+    impl EffectHandler for AddOneHandler {
+        type Request = Value;
+        fn handle(&mut self, req: Value, _cx: &EffectContext) -> Result<Value, EffectError> {
+            match req {
+                Value::Lit(Literal::LitInt(n)) => Ok(Value::Lit(Literal::LitInt(n + 1))),
+                other => Err(EffectError::UnexpectedValue {
+                    context: "LitInt",
+                    got: format!("{other:?}"),
+                }),
+            }
+        }
+    }
+
+    /// Handler that doubles a LitInt request.
+    struct DoubleHandler;
+    impl EffectHandler for DoubleHandler {
+        type Request = Value;
+        fn handle(&mut self, req: Value, _cx: &EffectContext) -> Result<Value, EffectError> {
+            match req {
+                Value::Lit(Literal::LitInt(n)) => Ok(Value::Lit(Literal::LitInt(n * 2))),
+                other => Err(EffectError::UnexpectedValue {
+                    context: "LitInt",
+                    got: format!("{other:?}"),
+                }),
+            }
+        }
+    }
+
+    fn empty_table() -> DataConTable {
+        DataConTable::new()
+    }
+
+    fn make_cx(table: &DataConTable) -> EffectContext<'_> {
+        EffectContext::with_user(table, &())
+    }
+
+    fn lit_int(n: i64) -> Value {
+        Value::Lit(Literal::LitInt(n))
+    }
+
+    #[test]
+    fn hnil_rejects_all_tags() {
+        let table = empty_table();
+        let cx = make_cx(&table);
+        let result = HNil.dispatch(0, &lit_int(5), &cx);
+        match result {
+            Err(EffectError::UnhandledEffect { tag: 0 }) => {}
+            other => panic!("expected UnhandledEffect {{ tag: 0 }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_handler_routes_tag_0() {
+        let table = empty_table();
+        let cx = make_cx(&table);
+        let mut handlers = hlist![AddOneHandler];
+        let result = handlers.dispatch(0, &lit_int(10), &cx).unwrap();
+        match result {
+            Value::Lit(Literal::LitInt(11)) => {}
+            other => panic!("expected LitInt(11), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_handler_rejects_tag_1() {
+        let table = empty_table();
+        let cx = make_cx(&table);
+        let mut handlers = hlist![AddOneHandler];
+        let result = handlers.dispatch(1, &lit_int(10), &cx);
+        match result {
+            Err(EffectError::UnhandledEffect { tag: 0 }) => {}
+            // tag is decremented per HCons layer, so HNil sees 0
+            other => panic!("expected UnhandledEffect {{ tag: 0 }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_handlers_route_tag_0_to_head() {
+        let table = empty_table();
+        let cx = make_cx(&table);
+        let mut handlers = hlist![AddOneHandler, DoubleHandler];
+        let result = handlers.dispatch(0, &lit_int(5), &cx).unwrap();
+        match result {
+            Value::Lit(Literal::LitInt(6)) => {} // 5 + 1
+            other => panic!("expected LitInt(6), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_handlers_route_tag_1_to_tail() {
+        let table = empty_table();
+        let cx = make_cx(&table);
+        let mut handlers = hlist![AddOneHandler, DoubleHandler];
+        let result = handlers.dispatch(1, &lit_int(5), &cx).unwrap();
+        match result {
+            Value::Lit(Literal::LitInt(10)) => {} // 5 * 2
+            other => panic!("expected LitInt(10), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_handlers_reject_tag_2() {
+        let table = empty_table();
+        let cx = make_cx(&table);
+        let mut handlers = hlist![AddOneHandler, DoubleHandler];
+        let result = handlers.dispatch(2, &lit_int(5), &cx);
+        match result {
+            Err(EffectError::UnhandledEffect { tag: 0 }) => {}
+            // tag decremented by 2 (one per HCons), so HNil sees 0
+            other => panic!("expected UnhandledEffect {{ tag: 0 }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_context_respond_round_trips_value() {
+        let table = empty_table();
+        let cx = make_cx(&table);
+        let result = cx.respond(lit_int(42)).unwrap();
+        match result {
+            Value::Lit(Literal::LitInt(42)) => {}
+            other => panic!("expected LitInt(42), got {other:?}"),
+        }
+    }
+}
