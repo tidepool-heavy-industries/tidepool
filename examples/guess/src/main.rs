@@ -5,6 +5,7 @@
 //! and driven by Rust-side effect handlers for console IO and random number generation.
 
 use rand::Rng;
+use std::io::Write;
 use tidepool_bridge_derive::FromCore;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
@@ -15,6 +16,8 @@ use tidepool_macro::haskell_inline;
 enum ConsoleReq {
     #[core(name = "Emit")]
     Emit(String),
+    #[core(name = "Prompt")]
+    Prompt(String),
     #[core(name = "AwaitInt")]
     AwaitInt,
 }
@@ -30,12 +33,27 @@ impl EffectHandler for ConsoleHandler {
                 println!("{}", s);
                 cx.respond(())
             }
-            ConsoleReq::AwaitInt => {
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input).unwrap();
-                let n: i64 = input.trim().parse().unwrap_or(0);
-                cx.respond(n)
+            ConsoleReq::Prompt(s) => {
+                print!("{}", s);
+                std::io::stdout().flush().ok();
+                cx.respond(())
             }
+            ConsoleReq::AwaitInt => loop {
+                let mut input = String::new();
+                let bytes = std::io::stdin()
+                    .read_line(&mut input)
+                    .map_err(|e| EffectError::Handler(format!("stdin read failed: {e}")))?;
+                if bytes == 0 {
+                    return Err(EffectError::Handler("stdin closed (EOF)".into()));
+                }
+                let trimmed = input.trim();
+                match trimmed.parse::<i64>() {
+                    Ok(n) => return cx.respond(n),
+                    Err(_) => {
+                        println!("'{trimmed}' isn't a number — try again.");
+                    }
+                }
+            },
         }
     }
 }
@@ -74,7 +92,7 @@ game = do
 
 guessLoop :: Int -> Eff '[Console, Rng] ()
 guessLoop target = do
-  emit "Your guess? "
+  prompt "Your guess? "
   guess <- awaitInt
   if guess == target
     then emit "Correct!"
@@ -90,6 +108,13 @@ guessLoop target = do
 
     match vm.run(&table, &mut handlers, &()) {
         Ok(_) => println!("Game finished!"),
-        Err(e) => eprintln!("Error: {}", e),
+        Err(e) => {
+            // Clean exit when the user closed stdin (ctrl-D / piped EOF).
+            if format!("{e}").contains("stdin closed") {
+                println!("Goodbye!");
+            } else {
+                eprintln!("Error: {e}");
+            }
+        }
     }
 }

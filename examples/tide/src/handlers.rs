@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use thiserror::Error;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 use url::Url;
 
 use tidepool_bridge::ToCore;
@@ -195,7 +195,6 @@ impl EffectHandler for ReplHandler {
                 cx.respond(result)
             }
             ReplReq::Display(s) => {
-                info!("Tide: {}", s);
                 println!("{}", s);
                 cx.respond(())
             }
@@ -219,7 +218,6 @@ impl EffectHandler for ConsoleHandler {
     fn handle(&mut self, req: ConsoleReq, cx: &EffectContext) -> Result<Value, EffectError> {
         match req {
             ConsoleReq::Print(s) => {
-                info!("Console: {}", s);
                 println!("{}", s);
                 cx.respond(())
             }
@@ -303,7 +301,7 @@ impl EffectHandler for NetHandler {
         match req {
             NetReq::HttpGet(raw) => {
                 let url = parse_url(&raw)?;
-                info!("GET {}", url);
+                debug!("GET {}", url);
                 let body = ureq::get(url.as_str())
                     .call()
                     .map_err(|e| TideError::Http(e.to_string()))?
@@ -351,13 +349,13 @@ impl EffectHandler for FsHandler {
         match req {
             FsReq::FsRead(path) => {
                 let path = self.resolve(&path);
-                info!("Reading file: {}", path.display());
+                debug!("Reading file: {}", path.display());
                 let contents = std::fs::read_to_string(&path).map_err(TideError::from)?;
                 cx.respond(contents)
             }
             FsReq::FsWrite(path, contents) => {
                 let path = self.resolve(&path);
-                info!("Writing file: {}", path.display());
+                debug!("Writing file: {}", path.display());
                 std::fs::write(&path, &contents).map_err(TideError::from)?;
                 cx.respond(())
             }

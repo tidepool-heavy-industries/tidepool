@@ -1,3 +1,32 @@
-# Basic arithmetic
-1 + 2
-10 * 5
+# Literals and arithmetic
+1 + 2 * 3
+(10 - 4) / 2
+
+# String concatenation
+"hello, " ++ "world"
+
+# Let binding (local scope via `;`)
+let x = 10; x * x
+
+# Persistent binding
+let pi = 3
+pi + 1
+
+# Lambda and application
+let square = \n -> n * n
+square(7)
+
+# Higher-order: curried compose
+let compose = \f -> \g -> \x -> f(g(x))
+let inc = \n -> n + 1
+let double = \n -> n * 2
+compose(inc)(double)(10)
+
+# Conditionals
+if 5 > 3 then "yes" else "no"
+
+# Print has an effect — note this line's side-effect output comes first
+print("printing from inside the JIT")
+
+# Effects + values: str converts, len counts, ++ concatenates
+"length of \"tidepool\" is " ++ str(len("tidepool"))

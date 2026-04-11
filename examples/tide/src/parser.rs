@@ -211,8 +211,8 @@ fn parse_atom(pair: Pair<Rule>) -> Result<TExpr, String> {
             inner.as_str().parse::<i64>().map_err(|e| e.to_string())?,
         )),
         Rule::string_lit => {
-            let s = inner.into_inner().next().map(|p| p.as_str()).unwrap_or("");
-            Ok(TExpr::TStr(s.to_string()))
+            let raw = inner.into_inner().next().map(|p| p.as_str()).unwrap_or("");
+            Ok(TExpr::TStr(unescape_string(raw)))
         }
         Rule::bool_lit => Ok(TExpr::TBool(inner.as_str() == "true")),
         Rule::ident => Ok(TExpr::TVar(inner.as_str().to_string())),
@@ -227,6 +227,36 @@ fn parse_atom(pair: Pair<Rule>) -> Result<TExpr, String> {
         Rule::expr => parse_expr(inner),
         _ => Err(format!("Unexpected atom rule: {:?}", inner.as_rule())),
     }
+}
+
+/// Process standard C-style escape sequences inside a string literal.
+/// The pest grammar permits `\` followed by any char; this resolves the
+/// escapes to their real characters (`\n`, `\t`, `\\`, `\"`, etc.).
+fn unescape_string(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some('\'') => out.push('\''),
+                Some('0') => out.push('\0'),
+                Some(other) => {
+                    // Unknown escape: preserve both chars verbatim.
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn map_builtin(name: &str) -> Option<BuiltinId> {
@@ -435,9 +465,18 @@ mod tests {
 
     #[test]
     fn test_parse_string_with_escape() {
+        // Standard C-style escapes are resolved at parse time.
         assert_eq!(
             parse(r#""hello\nworld""#).unwrap(),
-            TExpr::TStr("hello\\nworld".into())
+            TExpr::TStr("hello\nworld".into())
+        );
+        assert_eq!(
+            parse(r#""say \"hi\"""#).unwrap(),
+            TExpr::TStr("say \"hi\"".into())
+        );
+        assert_eq!(
+            parse(r#""tab\there""#).unwrap(),
+            TExpr::TStr("tab\there".into())
         );
     }
 
