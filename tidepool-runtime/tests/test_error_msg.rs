@@ -1,5 +1,4 @@
 use std::path::Path;
-use tidepool_codegen::yield_type::YieldError;
 
 fn prelude_path() -> std::path::PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -21,7 +20,7 @@ result = f 0
 "#;
     let pp = prelude_path();
     let include = [pp.as_path()];
-    let res = tidepool_runtime::compile_and_run_pure(&src, "result", &include);
+    let res = tidepool_runtime::compile_and_run_pure(src, "result", &include);
 
     match res {
         Err(e) => {
@@ -51,7 +50,7 @@ result = f 1
 "#;
     let pp = prelude_path();
     let include = [pp.as_path()];
-    let res = tidepool_runtime::compile_and_run_pure(&src, "result", &include);
+    let res = tidepool_runtime::compile_and_run_pure(src, "result", &include);
 
     match res {
         Err(e) => {

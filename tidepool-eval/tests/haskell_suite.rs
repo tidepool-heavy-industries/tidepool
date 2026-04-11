@@ -6,6 +6,10 @@
 //! GHC at -O2 wraps all values in boxing constructors (I# for Int, C# for Char,
 //! D# for Double). The `unbox` helper strips these automatically.
 
+// Suite.hs has a literal `lit_double_pi = 3.14159` that tests a specific float
+// literal flows through the pipeline correctly. Not a math constant mistake.
+#![allow(clippy::approx_constant)]
+
 use tidepool_eval::{deep_force, env_from_datacon_table, eval, Value, VecHeap};
 use tidepool_repr::serial::read::{read_cbor, read_metadata};
 use tidepool_repr::{DataConTable, Literal};

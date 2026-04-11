@@ -1,5 +1,8 @@
 use crate::error::BridgeError;
-use crate::traits::{sealed::{FromCoreSealed, ToCoreSealed}, FromCore, ToCore};
+use crate::traits::{
+    sealed::{FromCoreSealed, ToCoreSealed},
+    FromCore, ToCore,
+};
 use std::sync::{Arc, Mutex};
 use tidepool_eval::Value;
 use tidepool_repr::{DataConId, DataConTable, Literal};
@@ -730,6 +733,7 @@ impl<A: ToCore, B: ToCore, C: ToCore> ToCore for (A, B, C) {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)] // tests use 3.14159 as a float round-trip literal
 mod tests {
     use super::*;
     use tidepool_repr::{DataCon, DataConId};

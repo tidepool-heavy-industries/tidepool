@@ -4,12 +4,16 @@
 //! The bug only manifests through `compile_and_run` (effect dispatch loop), not
 //! through `compile_and_run_pure` (direct heap read).
 
+// Effect request enums hold payload fields used only via pattern matching in handler
+// bodies — clippy sees the payload as "never read" because we destructure by position.
+// Variant names (KvGet/KvSet/...) intentionally mirror Haskell GADT constructors.
+#![allow(dead_code, clippy::enum_variant_names)]
+
 mod common;
 
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::value::Value;
-use tidepool_repr::DataConId;
 use tidepool_runtime::compile_and_run;
 
 fn prelude_path() -> std::path::PathBuf {

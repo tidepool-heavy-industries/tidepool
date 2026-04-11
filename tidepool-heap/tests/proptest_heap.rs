@@ -151,11 +151,11 @@ proptest! {
 
         let table = heap.collect_garbage(roots);
 
-        for i in 0..mid {
-            assert!(table.is_reachable(ids[i]));
+        for &id in &ids[0..mid] {
+            assert!(table.is_reachable(id));
         }
-        for i in mid..num_thunks {
-            assert!(!table.is_reachable(ids[i]));
+        for &id in &ids[mid..num_thunks] {
+            assert!(!table.is_reachable(id));
         }
     }
 

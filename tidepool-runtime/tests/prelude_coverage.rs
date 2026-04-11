@@ -1,3 +1,6 @@
+// Tests use 3.14 as a round-trip literal for parseDouble, not a math constant.
+#![allow(clippy::approx_constant)]
+
 use serde_json::json;
 use std::path::Path;
 

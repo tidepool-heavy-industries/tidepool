@@ -1,5 +1,5 @@
-use tidepool_repr::DataConId;
 use thiserror::Error;
+use tidepool_repr::DataConId;
 
 /// Errors that can occur when bridging between Rust types and Core Values.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]

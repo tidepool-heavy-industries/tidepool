@@ -1,3 +1,6 @@
+// Bench fixture builders use explicit .push() per line for readability.
+#![allow(clippy::vec_init_then_push)]
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use tidepool_eval::pass::Pass;
 use tidepool_optimize::beta::BetaReduce;
@@ -6,7 +9,8 @@ use tidepool_optimize::dce::Dce;
 use tidepool_optimize::inline::Inline;
 use tidepool_optimize::pipeline::{default_passes, run_pipeline};
 use tidepool_repr::{
-    Alt, AltCon, CoreExpr, CoreFrame, DataConId, Literal, PrimOpKind, RecursiveTree, TreeBuilder, VarId,
+    Alt, AltCon, CoreExpr, CoreFrame, DataConId, Literal, PrimOpKind, RecursiveTree, TreeBuilder,
+    VarId,
 };
 
 /// Builds a reducible expression (~30 nodes).
@@ -80,24 +84,42 @@ fn reducible_expr() -> CoreExpr {
 /// Result = (\xN -> ... (\x1 -> x1 + 1) x2 ... ) (41 + 1)
 fn convergence_expr(depth: usize) -> CoreExpr {
     let mut b = TreeBuilder::new();
-    
+
     let one = b.push(CoreFrame::Lit(Literal::LitInt(1)));
     let var1 = b.push(CoreFrame::Var(VarId(1)));
-    let mut current = b.push(CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![var1, one] });
-    
+    let mut current = b.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntAdd,
+        args: vec![var1, one],
+    });
+
     for i in 1..depth {
         let binder = VarId(i as u64);
-        let lam = b.push(CoreFrame::Lam { binder, body: current });
+        let lam = b.push(CoreFrame::Lam {
+            binder,
+            body: current,
+        });
         let arg_var = b.push(CoreFrame::Var(VarId(i as u64 + 1)));
-        current = b.push(CoreFrame::App { fun: lam, arg: arg_var });
+        current = b.push(CoreFrame::App {
+            fun: lam,
+            arg: arg_var,
+        });
     }
-    
+
     let lit41 = b.push(CoreFrame::Lit(Literal::LitInt(41)));
-    let reducible_arg = b.push(CoreFrame::PrimOp { op: PrimOpKind::IntAdd, args: vec![lit41, one] });
-    
-    let final_lam = b.push(CoreFrame::Lam { binder: VarId(depth as u64), body: current });
-    let _root = b.push(CoreFrame::App { fun: final_lam, arg: reducible_arg });
-    
+    let reducible_arg = b.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntAdd,
+        args: vec![lit41, one],
+    });
+
+    let final_lam = b.push(CoreFrame::Lam {
+        binder: VarId(depth as u64),
+        body: current,
+    });
+    let _root = b.push(CoreFrame::App {
+        fun: final_lam,
+        arg: reducible_arg,
+    });
+
     b.build()
 }
 

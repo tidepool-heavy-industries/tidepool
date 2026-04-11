@@ -391,6 +391,7 @@ impl From<Vec<u8>> for Literal {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)] // tests use 3.14 as a round-trip float literal
 mod tests {
     use super::*;
     use crate::builder::TreeBuilder;

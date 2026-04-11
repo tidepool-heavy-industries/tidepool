@@ -1,6 +1,6 @@
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
-use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
+use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_eval::{env_from_datacon_table, eval, Value, VecHeap};
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
@@ -70,23 +70,20 @@ fn check_jit_vs_eval(expr: CoreExpr, nursery_size: usize) -> Result<(), TestCase
     let env_eval = env_from_datacon_table(&table);
     let res_eval = eval(&expr, &env_eval, &mut heap_eval);
     let res_jit = match JitEffectMachine::compile(&expr, &table, nursery_size) {
-        Ok(mut machine) => machine.run_pure().map_err(JitError::from),
+        Ok(mut machine) => machine.run_pure(),
         Err(e) => Err(e),
     };
-    match (res_eval, res_jit) {
-        (Ok(v1), Ok(v2)) => {
-            prop_assert!(
-                values_equal(&v1, &v2),
-                "JIT and Eval results differ.
-Eval: {:?}
-JIT:  {:?}
-Expr: {:#?}",
-                v1,
-                v2,
-                expr
-            );
-        }
-        _ => {}
+    if let (Ok(v1), Ok(v2)) = (res_eval, res_jit) {
+        prop_assert!(
+            values_equal(&v1, &v2),
+            "JIT and Eval results differ.
+    Eval: {:?}
+    JIT:  {:?}
+    Expr: {:#?}",
+            v1,
+            v2,
+            expr
+        );
     }
     Ok(())
 }

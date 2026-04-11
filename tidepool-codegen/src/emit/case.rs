@@ -117,10 +117,7 @@ fn emit_data_dispatch(
         .builder
         .ins()
         .load(types::I8, MemFlags::trusted(), initial_scrut_ptr, 0);
-    let needs_force = args
-        .builder
-        .ins()
-        .icmp_imm(IntCC::UnsignedLessThan, tag, 2);
+    let needs_force = args.builder.ins().icmp_imm(IntCC::UnsignedLessThan, tag, 2);
 
     let force_block = args.builder.create_block();
     let dispatch_block = args.builder.create_block();
@@ -173,10 +170,10 @@ fn emit_data_dispatch(
     args.builder.declare_value_needs_stack_map(scrut_ptr);
 
     // Load con_tag as u64 from offset 8
-    let con_tag = args
-        .builder
-        .ins()
-        .load(types::I64, MemFlags::trusted(), scrut_ptr, CON_TAG_OFFSET);
+    let con_tag =
+        args.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), scrut_ptr, CON_TAG_OFFSET);
 
     // Use comparison chain instead of jump table because DataConIds are large
     // GHC Uniques (arbitrary u64 values), not small sequential integers.
@@ -218,10 +215,10 @@ fn emit_data_dispatch(
         // mutably, preventing the use of ctx in emit_node.
         for (i, &binder) in alt.binders.iter().enumerate() {
             let offset = CON_FIELDS_OFFSET + (8 * i as i32);
-            let field_val = args
-                .builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), scrut_ptr, offset);
+            let field_val =
+                args.builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), scrut_ptr, offset);
             args.builder.declare_value_needs_stack_map(field_val);
             args.ctx
                 .env
@@ -358,10 +355,11 @@ fn emit_lit_dispatch(
     // Unbox scrutinee: Raw values are already unboxed, HeapPtr needs LIT_VALUE_OFFSET load
     let scrut_value = match scrut {
         SsaVal::Raw(v, _) => v,
-        SsaVal::HeapPtr(ptr) => args
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), ptr, LIT_VALUE_OFFSET),
+        SsaVal::HeapPtr(ptr) => {
+            args.builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), ptr, LIT_VALUE_OFFSET)
+        }
     };
 
     for &alt in lit_alts {
@@ -398,10 +396,10 @@ fn emit_lit_dispatch(
                         scrut_value,
                     );
                     let lit_val = args.builder.ins().f64const(f64::from_bits(*bits));
-                    let eq = args
-                        .builder
-                        .ins()
-                        .fcmp(ir::condcodes::FloatCC::Equal, scrut_f64, lit_val);
+                    let eq =
+                        args.builder
+                            .ins()
+                            .fcmp(ir::condcodes::FloatCC::Equal, scrut_f64, lit_val);
                     args.builder
                         .ins()
                         .brif(eq, alt_block, &[], next_check_block, &[]);
@@ -413,10 +411,10 @@ fn emit_lit_dispatch(
                         scrut_value,
                     );
                     let lit_val = args.builder.ins().f64const(f64::from_bits(*bits));
-                    let eq = args
-                        .builder
-                        .ins()
-                        .fcmp(ir::condcodes::FloatCC::Equal, scrut_f64, lit_val);
+                    let eq =
+                        args.builder
+                            .ins()
+                            .fcmp(ir::condcodes::FloatCC::Equal, scrut_f64, lit_val);
                     args.builder
                         .ins()
                         .brif(eq, alt_block, &[], next_check_block, &[]);

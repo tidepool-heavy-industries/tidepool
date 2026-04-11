@@ -1,12 +1,10 @@
 use crate::context::VMContext;
-use crate::gc::frame_walker::{self, StackRoot};
+use crate::gc::frame_walker;
 use crate::layout;
 use crate::stack_map::StackMapRegistry;
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tidepool_heap::layout as heap_layout;
-
-type GcHook = fn(&[StackRoot]);
 
 /// Addresses below this are considered invalid (null page guard).
 const MIN_VALID_ADDR: u64 = 0x1000;
@@ -46,12 +44,6 @@ thread_local! {
     /// Registry of stack maps for JIT functions.
     /// This is set before calling into JIT code so gc_trigger can access it.
     static STACK_MAP_REGISTRY: RefCell<Option<*const StackMapRegistry>> = const { RefCell::new(None) };
-
-    /// Collected roots from the last gc_trigger call.
-    /// Used for test inspection.
-    static LAST_ROOTS: RefCell<Vec<StackRoot>> = const { RefCell::new(Vec::new()) };
-
-    static HOOK: RefCell<Option<GcHook>> = const { RefCell::new(None) };
 
     /// Runtime error from JIT code. Checked after JIT returns.
     static RUNTIME_ERROR: RefCell<Option<RuntimeError>> = const { RefCell::new(None) };
@@ -224,32 +216,8 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                 }
             });
             // ── End GC ─────────────────────────────────────────
-
-            // Call test hook if present
-            HOOK.with(|hook_cell| {
-                if let Some(hook) = *hook_cell.borrow() {
-                    hook(&roots);
-                }
-            });
-
-            LAST_ROOTS.with(|roots_cell| {
-                *roots_cell.borrow_mut() = roots;
-            });
+            let _ = roots; // roots consumed by cheney_copy; explicit drop for clarity
         }
-    });
-}
-
-/// Set a hook to be called during gc_trigger with the collected roots.
-pub(crate) fn set_gc_test_hook(hook: GcHook) {
-    HOOK.with(|hook_cell| {
-        *hook_cell.borrow_mut() = Some(hook);
-    });
-}
-
-/// Clear the GC test hook.
-pub(crate) fn clear_gc_test_hook() {
-    HOOK.with(|hook_cell| {
-        *hook_cell.borrow_mut() = None;
     });
 }
 
@@ -269,11 +237,6 @@ pub fn clear_stack_map_registry() {
     STACK_MAP_REGISTRY.with(|reg_cell| {
         *reg_cell.borrow_mut() = None;
     });
-}
-
-/// Get collected roots from the last gc_trigger call.
-pub(crate) fn last_gc_roots() -> Vec<StackRoot> {
-    LAST_ROOTS.with(|roots_cell| roots_cell.borrow().clone())
 }
 
 /// Force a thunk to WHNF. Loops to handle chains (thunk returning thunk).
@@ -416,9 +379,6 @@ static GC_TRIGGER_LAST_VMCTX: AtomicUsize = AtomicUsize::new(0);
 pub fn reset_test_counters() {
     GC_TRIGGER_CALL_COUNT.store(0, Ordering::SeqCst);
     GC_TRIGGER_LAST_VMCTX.store(0, Ordering::SeqCst);
-    LAST_ROOTS.with(|roots_cell| {
-        roots_cell.borrow_mut().clear();
-    });
 }
 
 /// Get gc_trigger call count. Only call from tests.
@@ -1606,7 +1566,125 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
     ]
 }
 
+/// Debug: called instead of `trap user2` when TIDEPOOL_DEBUG_CASE is set.
+/// Prints diagnostic info about the scrutinee that failed case matching.
+/// `scrut_ptr` is the heap pointer to the scrutinee.
+/// `num_alts` is the number of data alt tags expected.
+/// `alt_tags` is a pointer to an array of expected tag u64 values.
+pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64) -> *mut u8 {
+    // If a runtime error is already pending (e.g. DivisionByZero), the poison
+    // value cascaded into a case expression. Return poison again instead of
+    // aborting — the error flag will be detected when with_signal_protection
+    // returns.
+    let has_error = RUNTIME_ERROR.with(|cell| cell.borrow().is_some());
+    if has_error {
+        return error_poison_ptr();
+    }
+
+    let ptr = scrut_ptr as *const u8;
+
+    // Check if the scrutinee is a lazy poison closure. If so, trigger it to set the error flag.
+    if !ptr.is_null()
+        // SAFETY: ptr is non-null (checked above). Reading the tag byte at offset 0.
+        && unsafe { tidepool_heap::layout::read_tag(ptr) } == tidepool_heap::layout::TAG_CLOSURE
+    {
+        // SAFETY: ptr is a Closure (tag confirmed above). Reading code_ptr at the known offset.
+        let code_ptr =
+            unsafe { *(ptr.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *const usize) };
+        if code_ptr == poison_trampoline_lazy as *const () as usize
+            || code_ptr == poison_trampoline_lazy_msg as *const () as usize
+        {
+            // SAFETY: code_ptr is the poison trampoline function pointer. Calling it
+            // with null vmctx and arg triggers the lazy error flag without side effects
+            // beyond setting RUNTIME_ERROR.
+            unsafe {
+                let func: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
+                    std::mem::transmute(code_ptr);
+                func(std::ptr::null_mut(), ptr as *mut u8, std::ptr::null_mut());
+            }
+            return error_poison_ptr();
+        }
+    }
+
+    use std::io::Write;
+    if check_ptr_invalid(scrut_ptr as *const u8, "runtime_case_trap") {
+        return error_poison_ptr();
+    }
+    // SAFETY: ptr passed the null/low-address guard above. Reading the tag byte at offset 0.
+    let tag_byte = unsafe { *ptr };
+    let tag_name = match tag_byte {
+        0 => "Closure",
+        1 => "Thunk",
+        2 => "Con",
+        3 => "Lit",
+        0xFF => "Forwarded(GC bug!)",
+        _ => "UNKNOWN",
+    };
+
+    // Read expected alt tags
+    // SAFETY: alt_tags points to a JIT data section array of num_alts u64 tag values.
+    let expected: Vec<u64> = if num_alts > 0 && alt_tags != 0 {
+        (0..num_alts as usize)
+            .map(|i| unsafe { *((alt_tags as *const u64).add(i)) })
+            .collect()
+    } else {
+        vec![]
+    };
+
+    // Dump raw bytes for any object type
+    // SAFETY: ptr points to a heap object. Reading 32 bytes for diagnostic dump.
+    // Heap objects are always at least this size (minimum header is 8 bytes + fields).
+    let raw_bytes: Vec<u8> = (0..32).map(|i| unsafe { *ptr.add(i) }).collect();
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "[CASE TRAP] raw bytes: {:02x?}", raw_bytes);
+
+    if tag_byte == layout::TAG_CON {
+        // SAFETY: tag_byte == TAG_CON confirms Con; reading con_tag and num_fields at known offsets.
+        let con_tag = unsafe { *(ptr.add(layout::CON_TAG_OFFSET as usize) as *const u64) };
+        let num_fields =
+            unsafe { *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
+        let _ = writeln!(
+            stderr,
+            "[CASE TRAP] Con: con_tag={:#x}, num_fields={}, expected_tags={:?}",
+            con_tag, num_fields, expected
+        );
+    } else if tag_byte == layout::TAG_LIT {
+        // SAFETY: tag_byte == TAG_LIT confirms Lit; reading lit_tag and value at known offsets.
+        let lit_tag = unsafe { *(ptr.add(layout::LIT_TAG_OFFSET as usize) as *const u64) };
+        let value = unsafe { *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) };
+        let _ = writeln!(
+            stderr,
+            "[CASE TRAP] Lit: lit_tag={:#x}, value={:#x}, expected_tags={:?}",
+            lit_tag, value, expected
+        );
+    } else if tag_byte == layout::TAG_CLOSURE {
+        // SAFETY: tag_byte == TAG_CLOSURE confirms Closure; reading code_ptr and num_captured at known offsets.
+        let code_ptr =
+            unsafe { *(ptr.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const u64) };
+        let num_captured =
+            unsafe { *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16) };
+        let _ = writeln!(
+            stderr,
+            "[CASE TRAP] Closure: code_ptr={:#x}, num_captured={}, expected_tags={:?}",
+            code_ptr, num_captured, expected
+        );
+    } else {
+        let _ = writeln!(
+            stderr,
+            "[CASE TRAP] tag_byte={} ({}), expected_tags={:?}",
+            tag_byte, tag_name, expected
+        );
+    }
+    let _ = stderr.flush();
+    drop(stderr);
+    RUNTIME_ERROR.with(|cell| {
+        *cell.borrow_mut() = Some(RuntimeError::Undefined);
+    });
+    error_poison_ptr()
+}
+
 #[cfg(test)]
+#[allow(clippy::approx_constant)] // tests use 3.14 literal floats as round-trip data
 mod tests {
     // SAFETY: All unsafe blocks in tests operate on allocations created within
     // the test via runtime_new_byte_array or stack-allocated buffers with known
@@ -2211,121 +2289,4 @@ mod tests {
             assert!(matches!(err, RuntimeError::BadThunkState(255)));
         }
     }
-}
-
-/// Debug: called instead of `trap user2` when TIDEPOOL_DEBUG_CASE is set.
-/// Prints diagnostic info about the scrutinee that failed case matching.
-/// `scrut_ptr` is the heap pointer to the scrutinee.
-/// `num_alts` is the number of data alt tags expected.
-/// `alt_tags` is a pointer to an array of expected tag u64 values.
-pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64) -> *mut u8 {
-    // If a runtime error is already pending (e.g. DivisionByZero), the poison
-    // value cascaded into a case expression. Return poison again instead of
-    // aborting — the error flag will be detected when with_signal_protection
-    // returns.
-    let has_error = RUNTIME_ERROR.with(|cell| cell.borrow().is_some());
-    if has_error {
-        return error_poison_ptr();
-    }
-
-    let ptr = scrut_ptr as *const u8;
-
-    // Check if the scrutinee is a lazy poison closure. If so, trigger it to set the error flag.
-    if !ptr.is_null()
-        // SAFETY: ptr is non-null (checked above). Reading the tag byte at offset 0.
-        && unsafe { tidepool_heap::layout::read_tag(ptr) } == tidepool_heap::layout::TAG_CLOSURE
-    {
-        // SAFETY: ptr is a Closure (tag confirmed above). Reading code_ptr at the known offset.
-        let code_ptr =
-            unsafe { *(ptr.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *const usize) };
-        if code_ptr == poison_trampoline_lazy as *const () as usize
-            || code_ptr == poison_trampoline_lazy_msg as *const () as usize
-        {
-            // SAFETY: code_ptr is the poison trampoline function pointer. Calling it
-            // with null vmctx and arg triggers the lazy error flag without side effects
-            // beyond setting RUNTIME_ERROR.
-            unsafe {
-                let func: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
-                    std::mem::transmute(code_ptr);
-                func(std::ptr::null_mut(), ptr as *mut u8, std::ptr::null_mut());
-            }
-            return error_poison_ptr();
-        }
-    }
-
-    use std::io::Write;
-    if check_ptr_invalid(scrut_ptr as *const u8, "runtime_case_trap") {
-        return error_poison_ptr();
-    }
-    // SAFETY: ptr passed the null/low-address guard above. Reading the tag byte at offset 0.
-    let tag_byte = unsafe { *ptr };
-    let tag_name = match tag_byte {
-        0 => "Closure",
-        1 => "Thunk",
-        2 => "Con",
-        3 => "Lit",
-        0xFF => "Forwarded(GC bug!)",
-        _ => "UNKNOWN",
-    };
-
-    // Read expected alt tags
-    // SAFETY: alt_tags points to a JIT data section array of num_alts u64 tag values.
-    let expected: Vec<u64> = if num_alts > 0 && alt_tags != 0 {
-        (0..num_alts as usize)
-            .map(|i| unsafe { *((alt_tags as *const u64).add(i)) })
-            .collect()
-    } else {
-        vec![]
-    };
-
-    // Dump raw bytes for any object type
-    // SAFETY: ptr points to a heap object. Reading 32 bytes for diagnostic dump.
-    // Heap objects are always at least this size (minimum header is 8 bytes + fields).
-    let raw_bytes: Vec<u8> = (0..32).map(|i| unsafe { *ptr.add(i) }).collect();
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "[CASE TRAP] raw bytes: {:02x?}", raw_bytes);
-
-    if tag_byte == layout::TAG_CON {
-        // SAFETY: tag_byte == TAG_CON confirms Con; reading con_tag and num_fields at known offsets.
-        let con_tag = unsafe { *(ptr.add(layout::CON_TAG_OFFSET as usize) as *const u64) };
-        let num_fields =
-            unsafe { *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
-        let _ = writeln!(
-            stderr,
-            "[CASE TRAP] Con: con_tag={:#x}, num_fields={}, expected_tags={:?}",
-            con_tag, num_fields, expected
-        );
-    } else if tag_byte == layout::TAG_LIT {
-        // SAFETY: tag_byte == TAG_LIT confirms Lit; reading lit_tag and value at known offsets.
-        let lit_tag = unsafe { *(ptr.add(layout::LIT_TAG_OFFSET as usize) as *const u64) };
-        let value = unsafe { *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) };
-        let _ = writeln!(
-            stderr,
-            "[CASE TRAP] Lit: lit_tag={:#x}, value={:#x}, expected_tags={:?}",
-            lit_tag, value, expected
-        );
-    } else if tag_byte == layout::TAG_CLOSURE {
-        // SAFETY: tag_byte == TAG_CLOSURE confirms Closure; reading code_ptr and num_captured at known offsets.
-        let code_ptr =
-            unsafe { *(ptr.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const u64) };
-        let num_captured =
-            unsafe { *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16) };
-        let _ = writeln!(
-            stderr,
-            "[CASE TRAP] Closure: code_ptr={:#x}, num_captured={}, expected_tags={:?}",
-            code_ptr, num_captured, expected
-        );
-    } else {
-        let _ = writeln!(
-            stderr,
-            "[CASE TRAP] tag_byte={} ({}), expected_tags={:?}",
-            tag_byte, tag_name, expected
-        );
-    }
-    let _ = stderr.flush();
-    drop(stderr);
-    RUNTIME_ERROR.with(|cell| {
-        *cell.borrow_mut() = Some(RuntimeError::Undefined);
-    });
-    error_poison_ptr()
 }

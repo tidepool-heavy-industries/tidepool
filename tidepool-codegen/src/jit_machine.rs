@@ -37,10 +37,14 @@ pub enum JitError {
 /// and runs it as a coroutine: the machine yields effect requests, the caller
 /// dispatches them through an HList of [`EffectHandler`]s, and resumes with responses.
 ///
-/// ```ignore
-/// let (expr, table) = haskell_inline! { target = "main", include = "haskell", r#"..."# };
+/// ```no_run
+/// # use tidepool_codegen::jit_machine::JitEffectMachine;
+/// # use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, RecursiveTree, Literal};
+/// # let expr: CoreExpr = RecursiveTree { nodes: vec![CoreFrame::Lit(Literal::LitInt(42))] };
+/// # let table = DataConTable::new();
 /// let mut vm = JitEffectMachine::compile(&expr, &table, 1 << 20)?;
-/// vm.run(&table, &mut frunk::hlist![MyHandler], &())?;
+/// let result = vm.run_pure()?;
+/// # Ok::<(), tidepool_codegen::jit_machine::JitError>(())
 /// ```
 ///
 /// Owns the compiled code, nursery (GC heap), and freer-simple constructor tags.

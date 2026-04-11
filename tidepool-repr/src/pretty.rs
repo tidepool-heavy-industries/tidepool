@@ -184,6 +184,7 @@ fn needs_parens_in_app_arg(frame: &CoreFrame<usize>) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)] // tests use 3.14 as a round-trip float literal
 mod tests {
     use super::*;
     use crate::frame::CoreFrame;
@@ -367,7 +368,7 @@ mod tests {
 
     #[test]
     fn test_literals() {
-        let nodes = vec![
+        let nodes = [
             CoreFrame::Lit(Literal::LitWord(42)),
             CoreFrame::Lit(Literal::LitChar('x')),
             CoreFrame::Lit(Literal::LitString(b"hello".to_vec())),

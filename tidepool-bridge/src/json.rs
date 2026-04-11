@@ -149,6 +149,7 @@ fn keymap_to_value(
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)] // tests use 3.14 as a JSON number literal
 mod tests {
     use super::*;
     use tidepool_repr::{DataCon, DataConId};

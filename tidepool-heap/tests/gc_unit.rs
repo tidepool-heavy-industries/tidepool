@@ -55,10 +55,10 @@ fn test_layout_constant_sanity() {
 
 #[test]
 fn test_offset_calculations() {
-    assert!(CON_FIELDS_OFFSET > CON_NUM_FIELDS_OFFSET);
-    assert!(CON_NUM_FIELDS_OFFSET > CON_TAG_OFFSET);
-    assert!(CLOSURE_CAPTURED_OFFSET > CLOSURE_NUM_CAPTURED_OFFSET);
-    assert!(CLOSURE_NUM_CAPTURED_OFFSET > CLOSURE_CODE_PTR_OFFSET);
+    const _: () = assert!(CON_FIELDS_OFFSET > CON_NUM_FIELDS_OFFSET);
+    const _: () = assert!(CON_NUM_FIELDS_OFFSET > CON_TAG_OFFSET);
+    const _: () = assert!(CLOSURE_CAPTURED_OFFSET > CLOSURE_NUM_CAPTURED_OFFSET);
+    const _: () = assert!(CLOSURE_NUM_CAPTURED_OFFSET > CLOSURE_CODE_PTR_OFFSET);
 }
 
 #[test]

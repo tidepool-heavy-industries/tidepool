@@ -1,3 +1,7 @@
+// Tests use 3.14 / 3.14159 as round-trip float literals for primop codegen,
+// not as math constants.
+#![allow(clippy::approx_constant)]
+
 use tidepool_codegen::context::VMContext;
 use tidepool_codegen::emit::expr::compile_expr;
 use tidepool_codegen::host_fns;
@@ -333,7 +337,7 @@ fn test_emit_primop_double_2_float() {
     let result = compile_and_run(&tree);
     unsafe {
         let val = read_lit_float(result.result_ptr);
-        assert!((val - 3.1415926535f32).abs() < 1e-6);
+        assert!((val - 3.141_592_7_f32).abs() < 1e-6);
     }
 }
 

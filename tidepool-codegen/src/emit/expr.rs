@@ -198,10 +198,7 @@ fn expand_node(tree: &CoreExpr, idx: usize) -> Result<EmitFrame<usize>, EmitErro
 }
 
 /// Collapse: assemble Cranelift IR from child results.
-fn collapse_frame(
-    args: EmitArgs,
-    frame: EmitFrame<SsaVal>,
-) -> Result<SsaVal, EmitError> {
+fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, EmitError> {
     let tail = args.tail;
     match frame {
         EmitFrame::LitString(ref bytes) => emit_lit_string(
@@ -400,7 +397,10 @@ fn collapse_frame(
             args.builder.declare_value_needs_stack_map(ptr);
             Ok(SsaVal::HeapPtr(ptr))
         }
-        EmitFrame::PrimOp { ref op, args: ref prim_args } => {
+        EmitFrame::PrimOp {
+            ref op,
+            args: ref prim_args,
+        } => {
             if matches!(op, tidepool_repr::PrimOpKind::Raise) {
                 // raise# is GHC's exception primitive \u2014 used for impossible branches
                 // and `error` calls. Emit a call to runtime_error(2) which sets a
@@ -689,7 +689,10 @@ fn collapse_frame(
             rhs_idx,
             body_idx,
         ),
-        EmitFrame::Jump { label, args: jump_args } => {
+        EmitFrame::Jump {
+            label,
+            args: jump_args,
+        } => {
             let join_block = args.ctx.join_blocks.get(&label)?.block;
 
             let arg_values: Vec<BlockArg> = jump_args
@@ -742,10 +745,7 @@ fn emit_subtree(mut args: EmitArgs, idx: usize) -> Result<SsaVal, EmitError> {
 }
 
 /// Stack-safe emission with explicit tail context. Case alt bodies inherit `tail`.
-fn emit_subtree_with_tail(
-    args: EmitArgs,
-    idx: usize,
-) -> Result<SsaVal, EmitError> {
+fn emit_subtree_with_tail(args: EmitArgs, idx: usize) -> Result<SsaVal, EmitError> {
     try_expand_and_collapse::<EmitFrameToken, _, _, _>(
         idx,
         |idx| expand_node(args.sess.tree, idx),
@@ -822,12 +822,7 @@ fn compute_captures(
     (body_tree, sorted_fvs)
 }
 
-
-fn emit_lam(
-    args: EmitArgs,
-    binder: VarId,
-    body_idx: usize,
-) -> Result<SsaVal, EmitError> {
+fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, EmitError> {
     let (body_tree, sorted_fvs) =
         compute_captures(args.ctx, args.sess.tree, body_idx, Some(binder), "lam");
 
@@ -1041,10 +1036,7 @@ fn emit_lam(
 ///
 /// The thunk entry function is a pure computation \u2014 `heap_force` handles the
 /// state machine (blackhole, call entry, write indirection, set evaluated).
-fn emit_thunk(
-    args: EmitArgs,
-    body_idx: usize,
-) -> Result<SsaVal, EmitError> {
+fn emit_thunk(args: EmitArgs, body_idx: usize) -> Result<SsaVal, EmitError> {
     // Extract the sub-expression and compute free variables
     let (body_tree, sorted_fvs) =
         compute_captures(args.ctx, args.sess.tree, body_idx, None, "thunk");
@@ -1203,7 +1195,10 @@ fn emit_thunk(
     );
 
     // Header: tag + size
-    let tag_val = args.builder.ins().iconst(types::I8, layout::TAG_THUNK as i64);
+    let tag_val = args
+        .builder
+        .ins()
+        .iconst(types::I8, layout::TAG_THUNK as i64);
     args.builder
         .ins()
         .store(MemFlags::trusted(), tag_val, thunk_ptr, 0);
@@ -1407,10 +1402,7 @@ impl EmitContext {
     /// - emit_lam/emit_thunk: create new EmitContext, bounded by lambda nesting
     /// - emit_case/emit_join: called from hylomorphism collapse, bounded by case nesting
     /// - Trivial Con field eval: constant stack depth (Var/Lit)
-    pub fn emit_node(
-        args: EmitArgs,
-        root_idx: usize,
-    ) -> Result<SsaVal, EmitError> {
+    pub fn emit_node(args: EmitArgs, root_idx: usize) -> Result<SsaVal, EmitError> {
         let mut work: Vec<EmitWork> = vec![EmitWork::Eval(root_idx, args.tail)];
         let mut vals: Vec<SsaVal> = Vec::new();
 
@@ -1432,17 +1424,22 @@ impl EmitContext {
                                 if body_fvs.binary_search(&binder).is_ok() {
                                     if Self::rhs_is_error_call(args.sess.tree, rhs) {
                                         // Bind to lazy poison closure \u2014 error only triggers on call.
-                                        let poison_addr = args.ctx.emit_error_poison(args.sess.tree, rhs);
+                                        let poison_addr =
+                                            args.ctx.emit_error_poison(args.sess.tree, rhs);
                                         let poison_val =
                                             args.builder.ins().iconst(types::I64, poison_addr);
-                                        if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+                                        if crate::debug::trace_level()
+                                            >= crate::debug::TraceLevel::Scope
+                                        {
                                             args.ctx.trace_scope(&format!(
                                                 "defer error LetNonRec {:?}",
                                                 binder
                                             ));
                                         }
-                                        let old_val =
-                                            args.ctx.env.insert(binder, SsaVal::HeapPtr(poison_val));
+                                        let old_val = args
+                                            .ctx
+                                            .env
+                                            .insert(binder, SsaVal::HeapPtr(poison_val));
                                         // No RHS eval needed, just push cleanup and continue to body
                                         work.push(EmitWork::LetCleanupMark(LetCleanup::Single(
                                             binder, old_val,
@@ -1459,8 +1456,11 @@ impl EmitContext {
                                         work.push(EmitWork::Eval(rhs, TailCtx::NonTail));
                                         break; // exit inner loop, process work stack
                                     }
-                                } else if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                                    args.ctx.trace_scope(&format!("DCE skip LetNonRec {:?}", binder));
+                                } else if crate::debug::trace_level()
+                                    >= crate::debug::TraceLevel::Scope
+                                {
+                                    args.ctx
+                                        .trace_scope(&format!("DCE skip LetNonRec {:?}", binder));
                                 }
                                 idx = body;
                                 continue;
@@ -1503,16 +1503,15 @@ impl EmitContext {
                                     )?;
                                     vals.push(result);
                                 } else {
-                                    let result =
-                                        emit_subtree_with_tail(
-                                            EmitArgs {
-                                                ctx: args.ctx,
-                                                sess: args.sess,
-                                                builder: args.builder,
-                                                tail: tail_ctx,
-                                            },
-                                            idx,
-                                        )?;
+                                    let result = emit_subtree_with_tail(
+                                        EmitArgs {
+                                            ctx: args.ctx,
+                                            sess: args.sess,
+                                            builder: args.builder,
+                                            tail: tail_ctx,
+                                        },
+                                        idx,
+                                    )?;
                                     vals.push(result);
                                 }
                                 break;
@@ -1525,7 +1524,8 @@ impl EmitContext {
                         EmitError::InternalError("Bind: empty value stack".into())
                     })?;
                     if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                        args.ctx.trace_scope(&format!("insert LetNonRec {:?}", binder));
+                        args.ctx
+                            .trace_scope(&format!("insert LetNonRec {:?}", binder));
                     }
                     args.ctx.env.insert(binder, val);
                 }
@@ -1534,7 +1534,8 @@ impl EmitContext {
                         EmitError::InternalError("LetRecPostSimple: empty value stack".into())
                     })?;
                     if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                        args.ctx.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
+                        args.ctx
+                            .trace_scope(&format!("insert LetRec(simple) {:?}", binder));
                     }
                     args.ctx.env.insert(binder, val);
                     Self::letrec_post_simple_step(
@@ -1568,7 +1569,8 @@ impl EmitContext {
                 EmitWork::LetCleanupMark(cleanup) => match cleanup {
                     LetCleanup::Single(var, old_val) => {
                         if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                            args.ctx.trace_scope(&format!("restore LetCleanup {:?}", var));
+                            args.ctx
+                                .trace_scope(&format!("restore LetCleanup {:?}", var));
                         }
                         args.ctx.env.restore(var, old_val);
                     }
@@ -1584,10 +1586,7 @@ impl EmitContext {
             .ok_or_else(|| EmitError::InternalError("emit_node: empty value stack".into()))
     }
 
-    fn emit_tail_app(
-        args: EmitArgs,
-        idx: usize,
-    ) -> Result<SsaVal, EmitError> {
+    fn emit_tail_app(args: EmitArgs, idx: usize) -> Result<SsaVal, EmitError> {
         let (fun_idx, arg_idx) = match &args.sess.tree.nodes[idx] {
             CoreFrame::App { fun, arg } => (*fun, *arg),
             _ => unreachable!(),
@@ -1784,7 +1783,8 @@ impl EmitContext {
                     let poison_addr = args.ctx.emit_error_poison(args.sess.tree, *rhs_idx);
                     let poison_val = args.builder.ins().iconst(types::I64, poison_addr);
                     if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                        args.ctx.trace_scope(&format!("defer error LetRec(simple) {:?}", binder));
+                        args.ctx
+                            .trace_scope(&format!("defer error LetRec(simple) {:?}", binder));
                     }
                     args.ctx.env.insert(*binder, SsaVal::HeapPtr(poison_val));
                 } else {
@@ -1834,7 +1834,9 @@ impl EmitContext {
                         })
                         .copied()
                         .collect();
-                    if !dropped_fvs.is_empty() && crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+                    if !dropped_fvs.is_empty()
+                        && crate::debug::trace_level() >= crate::debug::TraceLevel::Scope
+                    {
                         args.ctx.trace_scope(&format!(
                             "LetRec lam {:?}: dropped FVs {:?}",
                             binder, dropped_fvs
@@ -1860,7 +1862,10 @@ impl EmitContext {
                         args.sess.oom_func,
                     );
 
-                    let tag_val = args.builder.ins().iconst(types::I8, layout::TAG_CLOSURE as i64);
+                    let tag_val = args
+                        .builder
+                        .ins()
+                        .iconst(types::I8, layout::TAG_CLOSURE as i64);
                     args.builder
                         .ins()
                         .store(MemFlags::trusted(), tag_val, closure_ptr, 0);
@@ -1948,7 +1953,8 @@ impl EmitContext {
                 PreAlloc::Con { binder, ptr, .. } => (*binder, *ptr),
             };
             if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                args.ctx.trace_scope(&format!("insert LetRec(rec) {:?}", binder));
+                args.ctx
+                    .trace_scope(&format!("insert LetRec(rec) {:?}", binder));
             }
             args.ctx.env.insert(binder, SsaVal::HeapPtr(ptr));
         }
@@ -1962,7 +1968,8 @@ impl EmitContext {
                 let poison_addr = args.ctx.emit_error_poison(args.sess.tree, *rhs_idx);
                 let poison_val = args.builder.ins().iconst(types::I64, poison_addr);
                 if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                    args.ctx.trace_scope(&format!("defer error LetRec(trivial) {:?}", binder));
+                    args.ctx
+                        .trace_scope(&format!("defer error LetRec(trivial) {:?}", binder));
                 }
                 args.ctx.env.insert(*binder, SsaVal::HeapPtr(poison_val));
             } else if matches!(&args.sess.tree.nodes[*rhs_idx], CoreFrame::Var(_)) {
@@ -1977,7 +1984,8 @@ impl EmitContext {
                     *rhs_idx,
                 )?;
                 if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                    args.ctx.trace_scope(&format!("insert LetRec(trivial) {:?}", binder));
+                    args.ctx
+                        .trace_scope(&format!("insert LetRec(trivial) {:?}", binder));
                 }
                 args.ctx.env.insert(*binder, rhs_val);
             } else {
@@ -2163,8 +2171,7 @@ impl EmitContext {
         }
 
         // Phase 3b: Fill Con fields that DON'T reference deferred simple bindings.
-        let simple_binder_set: FxHashSet<VarId> =
-            deferred_simple.iter().map(|(b, _)| *b).collect();
+        let simple_binder_set: FxHashSet<VarId> = deferred_simple.iter().map(|(b, _)| *b).collect();
         let mut deferred_cons: Vec<(VarId, cranelift_codegen::ir::Value, Vec<usize>)> =
             Vec::with_capacity(rec_bindings.len());
         for pa in &pre_allocs {
@@ -2223,8 +2230,7 @@ impl EmitContext {
 
         // Topological sort for deferred simple bindings
         let deferred_simple = {
-            let deferred_set: FxHashSet<VarId> =
-                deferred_simple.iter().map(|(b, _)| *b).collect();
+            let deferred_set: FxHashSet<VarId> = deferred_simple.iter().map(|(b, _)| *b).collect();
 
             let mut direct_deps: FxHashMap<VarId, Vec<VarId>> =
                 FxHashMap::with_capacity_and_hasher(bindings.len(), Default::default());
@@ -2234,10 +2240,8 @@ impl EmitContext {
                 direct_deps.insert(*binder, fvs.into_iter().collect());
             }
 
-            let mut reachable_deferred: FxHashMap<
-                VarId,
-                FxHashSet<VarId>,
-            > = FxHashMap::with_capacity_and_hasher(deferred_simple.len(), Default::default());
+            let mut reachable_deferred: FxHashMap<VarId, FxHashSet<VarId>> =
+                FxHashMap::with_capacity_and_hasher(deferred_simple.len(), Default::default());
             for &(start_node, _) in &deferred_simple {
                 let mut visited = FxHashSet::default();
                 let mut stack = vec![start_node];
@@ -2321,7 +2325,8 @@ impl EmitContext {
                 let poison_addr = args.ctx.emit_error_poison(args.sess.tree, *rhs_idx);
                 let poison_val = args.builder.ins().iconst(types::I64, poison_addr);
                 if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                    args.ctx.trace_scope(&format!("defer error LetRec(deferred) {:?}", binder));
+                    args.ctx
+                        .trace_scope(&format!("defer error LetRec(deferred) {:?}", binder));
                 }
                 args.ctx.env.insert(*binder, SsaVal::HeapPtr(poison_val));
                 // Run post-step inline: closures may capture error-poisoned
@@ -2339,8 +2344,13 @@ impl EmitContext {
                     state_idx,
                 )?;
             } else {
-                let refs_deferred_con = !args.ctx.letrec_state(state_idx).deferred_con_deps.is_empty()
-                    && args.ctx
+                let refs_deferred_con = !args
+                    .ctx
+                    .letrec_state(state_idx)
+                    .deferred_con_deps
+                    .is_empty()
+                    && args
+                        .ctx
                         .letrec_state(state_idx)
                         .deferred_con_deps
                         .iter()
@@ -2371,7 +2381,8 @@ impl EmitContext {
                         *rhs_idx,
                     )?;
                     if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                        args.ctx.trace_scope(&format!("insert LetRec(simple) {:?}", binder));
+                        args.ctx
+                            .trace_scope(&format!("insert LetRec(simple) {:?}", binder));
                     }
                     args.ctx.env.insert(*binder, thunk_val);
                     Self::letrec_post_simple_step(
@@ -2406,14 +2417,20 @@ impl EmitContext {
         state_idx: LetRecStateId,
     ) -> Result<(), EmitError> {
         // Fill pending captures \u2014 take updates out to avoid borrowing self
-        let updates = args.ctx
+        let updates = args
+            .ctx
             .letrec_state_mut(state_idx)
             .pending_capture_updates
             .remove(binder);
         if let Some(updates) = updates {
             if let Some(ssaval) = args.ctx.env.get(binder) {
-                let cap_val =
-                    ensure_heap_ptr(args.builder, args.sess.vmctx, args.sess.gc_sig, args.sess.oom_func, *ssaval);
+                let cap_val = ensure_heap_ptr(
+                    args.builder,
+                    args.sess.vmctx,
+                    args.sess.gc_sig,
+                    args.sess.oom_func,
+                    *ssaval,
+                );
                 for slot in updates {
                     args.builder.ins().store(
                         MemFlags::trusted(),
@@ -2428,7 +2445,8 @@ impl EmitContext {
         // Incrementally fill deferred Cons whose deps are all satisfied.
         // Take out deferred_con_deps to avoid double-borrowing self
         // (emit_subtree/emit_thunk need &mut self).
-        let mut con_deps = std::mem::take(&mut args.ctx.letrec_state_mut(state_idx).deferred_con_deps);
+        let mut con_deps =
+            std::mem::take(&mut args.ctx.letrec_state_mut(state_idx).deferred_con_deps);
         for dep in con_deps.iter_mut() {
             dep.remaining_deps.remove(binder);
             if dep.remaining_deps.is_empty() && !dep.field_indices.is_empty() {
@@ -2443,7 +2461,13 @@ impl EmitContext {
                             },
                             f_idx,
                         )?;
-                        ensure_heap_ptr(args.builder, args.sess.vmctx, args.sess.gc_sig, args.sess.oom_func, val)
+                        ensure_heap_ptr(
+                            args.builder,
+                            args.sess.vmctx,
+                            args.sess.gc_sig,
+                            args.sess.oom_func,
+                            val,
+                        )
                     } else {
                         let thunk_val = emit_thunk(
                             EmitArgs {
@@ -2472,12 +2496,10 @@ impl EmitContext {
     }
 
     /// LetRec phases 3a' and 3d: fill remaining captures and Con fields.
-    fn letrec_finish_phases(
-        args: EmitArgs,
-        state_idx: LetRecStateId,
-    ) -> Result<(), EmitError> {
+    fn letrec_finish_phases(args: EmitArgs, state_idx: LetRecStateId) -> Result<(), EmitError> {
         // Phase 3a': Fill any remaining closure capture slots.
-        let pending = std::mem::take(&mut args.ctx.letrec_state_mut(state_idx).pending_capture_updates);
+        let pending =
+            std::mem::take(&mut args.ctx.letrec_state_mut(state_idx).pending_capture_updates);
         for (var_id, updates) in pending {
             let ssaval = args.ctx.env.get(&var_id).ok_or_else(|| {
                 EmitError::MissingCaptureVar(
@@ -2485,11 +2507,20 @@ impl EmitContext {
                     "LetRec Phase 3a' capture fill: not in env after Phase 3c".into(),
                 )
             })?;
-            let cap_val = ensure_heap_ptr(args.builder, args.sess.vmctx, args.sess.gc_sig, args.sess.oom_func, *ssaval);
+            let cap_val = ensure_heap_ptr(
+                args.builder,
+                args.sess.vmctx,
+                args.sess.gc_sig,
+                args.sess.oom_func,
+                *ssaval,
+            );
             for slot in updates {
-                args.builder
-                    .ins()
-                    .store(MemFlags::trusted(), cap_val, slot.closure_ptr, slot.offset);
+                args.builder.ins().store(
+                    MemFlags::trusted(),
+                    cap_val,
+                    slot.closure_ptr,
+                    slot.offset,
+                );
             }
         }
 
@@ -2507,7 +2538,13 @@ impl EmitContext {
                         },
                         f_idx,
                     )?;
-                    ensure_heap_ptr(args.builder, args.sess.vmctx, args.sess.gc_sig, args.sess.oom_func, val)
+                    ensure_heap_ptr(
+                        args.builder,
+                        args.sess.vmctx,
+                        args.sess.gc_sig,
+                        args.sess.oom_func,
+                        val,
+                    )
                 } else {
                     let thunk_val = emit_thunk(
                         EmitArgs {

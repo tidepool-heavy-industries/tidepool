@@ -6,6 +6,10 @@
 //! used by Con emission don't match the tags expected by case alternatives, we get
 //! SIGILL (exhausted case branch → Cranelift trap).
 
+// Test Value-shaped enums hold payload fields used only via pattern destructuring.
+// Variant names intentionally mirror Haskell GADT constructors.
+#![allow(dead_code, clippy::enum_variant_names)]
+
 mod common;
 
 use tidepool_repr::Literal;
@@ -990,14 +994,11 @@ result =
   in show stubInfo
 "#;
     let val = run(src, "result");
-    match &val {
-        Value::Con(_, fields) => {
-            assert!(
-                !fields.is_empty(),
-                "show stubInfo should produce non-empty Text"
-            );
-        }
-        _ => {}
+    if let Value::Con(_, fields) = &val {
+        assert!(
+            !fields.is_empty(),
+            "show stubInfo should produce non-empty Text"
+        );
     }
 }
 

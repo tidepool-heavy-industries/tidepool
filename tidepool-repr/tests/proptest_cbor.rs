@@ -133,7 +133,7 @@ fn arb_data_con_table() -> impl Strategy<Value = DataConTable> {
     })
 }
 
-/// Round-trip property for DataConTable
+// Round-trip property for DataConTable
 proptest! {
     #[test]
     #[serial]
@@ -156,7 +156,7 @@ fn arb_literal() -> impl Strategy<Value = Literal> {
     ]
 }
 
-/// Literal individual round-trip
+// Literal individual round-trip
 proptest! {
     #[test]
     #[serial]
@@ -170,11 +170,10 @@ proptest! {
     }
 }
 
-/// Deeply nested expressions round-trip correctly.
-/// arb_core_expr already supports depth, but let's try to force some depth if possible.
-/// Actually, arb_core_expr has a depth limit of 3 in tidepool-testing.
-/// We'll define a simpler generator for deep nesting of just App or Lam.
-
+// Deeply nested expressions round-trip correctly.
+// arb_core_expr already supports depth, but let's try to force some depth if possible.
+// Actually, arb_core_expr has a depth limit of 3 in tidepool-testing.
+// We'll define a simpler generator for deep nesting of just App or Lam.
 fn gen_deep_expr(depth: usize) -> RecursiveTree<CoreFrame<usize>> {
     let mut builder = TreeBuilder::new();
     let mut current = builder.push(CoreFrame::Var(VarId(0)));

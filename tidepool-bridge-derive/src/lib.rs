@@ -9,7 +9,9 @@
 //! Each Rust variant maps to a Haskell data constructor by name. Use
 //! `#[core(name = "...")]` when the Rust and Haskell names differ:
 //!
-//! ```ignore
+//! ```no_run
+//! use tidepool_bridge_derive::FromCore;
+//!
 //! // Haskell:  data Console a where  Emit :: String -> Console ()
 //! #[derive(FromCore)]
 //! enum ConsoleReq {
@@ -24,10 +26,12 @@
 //!
 //! Single-constructor types can use a struct instead of an enum:
 //!
-//! ```ignore
+//! ```no_run
+//! use tidepool_bridge_derive::ToCore;
+//!
 //! #[derive(ToCore)]
 //! #[core(name = "MyRecord")]
-//! struct MyRecord { field1: String, field2: Int }
+//! struct MyRecord { field1: String, field2: i64 }
 //! ```
 
 extern crate proc_macro;

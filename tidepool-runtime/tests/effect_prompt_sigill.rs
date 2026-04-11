@@ -311,9 +311,8 @@ fn test_classify_then_conditional_say_with_derived_prompt() {
 /// Same as above but trigger the fallback branch (effect C fires after effect B).
 #[test]
 fn test_classify_then_fallback_say_with_derived_prompt() {
-    let src = format!(
-        r#"{{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds,
-             TypeOperators, GADTs, FlexibleContexts, PartialTypeSignatures #-}}
+    let src = r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds,
+             TypeOperators, GADTs, FlexibleContexts, PartialTypeSignatures #-}
 module Test where
 import Tidepool.Prelude hiding (error)
 import Control.Monad.Freer hiding (run)
@@ -348,7 +347,7 @@ result = do
   -- Then use prompt AGAIN in a third context
   pure (prompt <> " => " <> r)
 "#
-    );
+    .to_string();
     let pp = prelude_path();
     let result = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
@@ -387,9 +386,8 @@ impl EffectHandler for MockClassifierCustom {
 /// This attempts to force GC during the continuation application.
 #[test]
 fn test_extreme_nursery_pressure() {
-    let src = format!(
-        r#"{{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds,
-             TypeOperators, GADTs, FlexibleContexts, PartialTypeSignatures #-}}
+    let src = r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds,
+             TypeOperators, GADTs, FlexibleContexts, PartialTypeSignatures #-}
 module Test where
 import Tidepool.Prelude hiding (error)
 import Control.Monad.Freer hiding (run)
@@ -427,7 +425,7 @@ result = do
   let summary = prompt <> " | " <> r1 <> " | " <> r2 <> " | head=" <> head items
   pure summary
 "#
-    );
+    .to_string();
     let pp = prelude_path();
     let result = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)

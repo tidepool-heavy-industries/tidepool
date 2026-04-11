@@ -1,3 +1,7 @@
+// Tests use 3.14 / 3.14159 as round-trip float literals for expression codegen,
+// not as math constants.
+#![allow(clippy::approx_constant)]
+
 use tidepool_codegen::context::VMContext;
 use tidepool_codegen::emit::expr::compile_expr;
 use tidepool_codegen::host_fns;

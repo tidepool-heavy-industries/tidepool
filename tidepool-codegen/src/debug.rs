@@ -180,21 +180,13 @@ pub enum HeapError {
     NullCodePtr,
     /// Size field doesn't match expected size for the object type
     #[error("size mismatch: expected >= {expected_min}, got {actual}")]
-    SizeMismatch {
-        expected_min: u16,
-        actual: u16,
-    },
+    SizeMismatch { expected_min: u16, actual: u16 },
     /// A field pointer is null
     #[error("null pointer in field {index}")]
-    NullField {
-        index: usize,
-    },
+    NullField { index: usize },
     /// A field pointer has an invalid heap tag
     #[error("field {index} has invalid tag: {tag}")]
-    InvalidFieldTag {
-        index: usize,
-        tag: u8,
-    },
+    InvalidFieldTag { index: usize, tag: u8 },
 }
 
 /// Validate a heap object's structural integrity.

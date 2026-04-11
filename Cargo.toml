@@ -26,4 +26,4 @@ repository = "https://github.com/tidepool-heavy-industries/tidepool"
 homepage = "https://github.com/tidepool-heavy-industries/tidepool"
 documentation = "https://docs.rs/tidepool"
 authors = ["Inanna Malick <inanna@recursion.wtf>"]
-rust-version = "1.83"
+rust-version = "1.89"

@@ -337,9 +337,7 @@ mod tests {
             .module
             .declare_function("my_host_fn", Linkage::Import, &sig)
             .unwrap();
-        let local_callee = pipeline
-            .module
-            .declare_func_in_func(callee, &mut builder.func);
+        let local_callee = pipeline.module.declare_func_in_func(callee, builder.func);
 
         let call = builder.ins().call(local_callee, &[]);
         let res = builder.inst_results(call)[0];

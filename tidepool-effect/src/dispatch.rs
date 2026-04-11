@@ -40,15 +40,18 @@ impl<'a, U> EffectContext<'a, U> {
 /// Handler for a single effect type.
 ///
 /// Implement this trait for each Rust struct that handles one Haskell effect.
-/// `Request` is the `#[derive(FromCore)]` enum mirroring the Haskell GADT.
+/// `Request` is typically a `#[derive(FromCore)]` enum mirroring the Haskell GADT.
 ///
-/// ```ignore
-/// impl EffectHandler for ConsoleHandler {
-///     type Request = ConsoleReq;
-///     fn handle(&mut self, req: ConsoleReq, cx: &EffectContext) -> Result<Value, EffectError> {
-///         match req {
-///             ConsoleReq::Print(msg) => { println!("{msg}"); cx.respond(()) }
-///         }
+/// ```no_run
+/// use tidepool_effect::{EffectHandler, EffectContext, EffectError};
+/// use tidepool_eval::Value;
+///
+/// struct UnitHandler;
+///
+/// impl EffectHandler for UnitHandler {
+///     type Request = ();
+///     fn handle(&mut self, _req: (), cx: &EffectContext) -> Result<Value, EffectError> {
+///         cx.respond(())
 ///     }
 /// }
 /// ```

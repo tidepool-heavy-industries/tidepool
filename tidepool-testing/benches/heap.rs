@@ -88,29 +88,25 @@ fn bench_heap(c: &mut Criterion) {
     // 5. GC deep nested structure
     let mut group = c.benchmark_group("gc_deep_nested");
     for &depth in &[1000, 5000, 10000] {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(depth),
-            &depth,
-            |b, &depth| {
-                b.iter_with_setup(
-                    || {
-                        let mut heap = ArenaHeap::with_capacity(depth * 256);
-                        let mut last_id = heap.alloc(env.clone(), expr.clone());
+        group.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &depth| {
+            b.iter_with_setup(
+                || {
+                    let mut heap = ArenaHeap::with_capacity(depth * 256);
+                    let mut last_id = heap.alloc(env.clone(), expr.clone());
 
-                        // Loop depth-1 times to produce exactly depth total thunks
-                        for _ in 0..depth.saturating_sub(1) {
-                            let mut next_env = Env::new();
-                            next_env.insert(VarId(0), tidepool_eval::value::Value::ThunkRef(last_id));
-                            last_id = heap.alloc(next_env, expr.clone());
-                        }
-                        (heap, vec![last_id])
-                    },
-                    |(mut heap, roots)| {
-                        black_box(heap.collect_garbage(&roots));
-                    },
-                );
-            },
-        );
+                    // Loop depth-1 times to produce exactly depth total thunks
+                    for _ in 0..depth.saturating_sub(1) {
+                        let mut next_env = Env::new();
+                        next_env.insert(VarId(0), tidepool_eval::value::Value::ThunkRef(last_id));
+                        last_id = heap.alloc(next_env, expr.clone());
+                    }
+                    (heap, vec![last_id])
+                },
+                |(mut heap, roots)| {
+                    black_box(heap.collect_garbage(&roots));
+                },
+            );
+        });
     }
     group.finish();
 }

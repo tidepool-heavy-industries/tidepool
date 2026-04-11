@@ -192,7 +192,7 @@ result = mySplit (const False) "abc"
 
     let include = [pp.as_path()];
 
-    let val = tidepool_runtime::compile_and_run_pure(&src, "result", &include)
+    let val = tidepool_runtime::compile_and_run_pure(src, "result", &include)
         .expect("compile_and_run_pure failed");
 
     assert_eq!(val.to_json(), serde_json::json!(["abc"]));

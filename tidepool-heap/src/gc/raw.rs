@@ -183,7 +183,7 @@ mod tests {
         for (i, &f) in fields.iter().enumerate() {
             *(ptr.add(CON_FIELDS_OFFSET + i * FIELD_STRIDE) as *mut *mut u8) = f;
         }
-        offset + aligned as usize
+        offset + aligned
     }
 
     unsafe fn write_closure(
@@ -206,7 +206,7 @@ mod tests {
         for (i, &c) in captures.iter().enumerate() {
             *(ptr.add(CLOSURE_CAPTURED_OFFSET + i * FIELD_STRIDE) as *mut *mut u8) = c;
         }
-        offset + aligned as usize
+        offset + aligned
     }
 
     // 1. test_copy_single_lit

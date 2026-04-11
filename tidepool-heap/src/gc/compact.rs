@@ -107,9 +107,8 @@ mod tests {
         let new_heap = compact(&table, &heap);
 
         // Only one thunk in new heap
-        match new_heap.read(ThunkId(0)) {
-            ThunkState::BlackHole => panic!("Expected something other than BlackHole"),
-            _ => (),
+        if let ThunkState::BlackHole = new_heap.read(ThunkId(0)) {
+            panic!("Expected something other than BlackHole")
         }
     }
 

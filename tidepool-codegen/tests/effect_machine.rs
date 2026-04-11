@@ -61,9 +61,7 @@ where
                 .module
                 .declare_function("runtime_oom", cranelift_module::Linkage::Import, &sig)
                 .unwrap();
-            pipeline
-                .module
-                .declare_func_in_func(func_id, &mut builder.func)
+            pipeline.module.declare_func_in_func(func_id, builder.func)
         };
 
         build_body(&mut builder, vmctx, gc_sig_ref, oom_func);

@@ -93,6 +93,7 @@ impl Value {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)] // tests literal float formatting, not math constants
 mod tests {
     use super::*;
     use tidepool_repr::{CoreFrame, RecursiveTree};

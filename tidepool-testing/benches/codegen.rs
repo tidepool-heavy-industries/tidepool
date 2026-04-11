@@ -38,7 +38,7 @@ fn build_let_expr(size: usize) -> CoreExpr {
 
 fn bench_codegen(c: &mut Criterion) {
     let table = DataConTable::new();
-    
+
     // 1. Compilation latency (Arithmetic tree)
     let mut group = c.benchmark_group("codegen_compile_arith");
     for &size in &[50, 200, 500] {

@@ -50,7 +50,7 @@ proptest! {
         let res = runtime_text_measure_off(buf.as_ptr() as i64, 0, buf.len() as i64, n as i64);
 
         let expected_str: String = s.chars().take(n).collect();
-        let expected_bytes = expected_str.as_bytes().len() as i64;
+        let expected_bytes = expected_str.len() as i64;
 
         prop_assert_eq!(res, expected_bytes);
     }
@@ -146,8 +146,8 @@ proptest! {
     fn memchr_finds_first_occurrence(buf in any::<Vec<u8>>(), byte in any::<u8>()) {
         let res = runtime_text_memchr(buf.as_ptr() as i64, 0, buf.len() as i64, byte as i64);
         if res >= 0 {
-            for i in 0..(res as usize) {
-                prop_assert_ne!(buf[i], byte);
+            for &b in &buf[..res as usize] {
+                prop_assert_ne!(b, byte);
             }
         }
     }

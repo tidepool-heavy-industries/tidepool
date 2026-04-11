@@ -1,3 +1,6 @@
+// Test fixture builders use explicit .push() per line for readability.
+#![allow(clippy::vec_init_then_push)]
+
 /*
 GC Audit (2026-02-18):
 - Audited codegen/src/emit/expr.rs:

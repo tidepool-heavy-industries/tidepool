@@ -125,7 +125,7 @@ fn test_stack_map_registry_populates() {
         "Stack map registry should have entries"
     );
     assert!(
-        pipeline.stack_maps.len() >= 1,
+        !pipeline.stack_maps.is_empty(),
         "Should have at least one safepoint"
     );
 }
@@ -233,9 +233,7 @@ fn test_alloc_fast_path() {
                 .module
                 .declare_function("runtime_oom", cranelift_module::Linkage::Import, &sig)
                 .unwrap();
-            pipeline
-                .module
-                .declare_func_in_func(func_id, &mut builder.func)
+            pipeline.module.declare_func_in_func(func_id, builder.func)
         };
 
         // Allocate 24 bytes (will be aligned to 24)
@@ -329,7 +327,7 @@ fn test_stack_map_end_to_end() {
     // This verifies that both ptr1 and ptr2 are tracked at the safepoint.
     // Note: We don't have a public iterator for entries, but we know there's one.
     // In Wave 2 we will verify the exact pointer values via frame walking.
-    assert!(pipeline.stack_maps.len() >= 1);
+    assert!(!pipeline.stack_maps.is_empty());
 
     // Actually call the function to verify ptrs survive
     host_fns::reset_test_counters();
@@ -347,5 +345,5 @@ fn test_stack_map_end_to_end() {
     // gc_trigger was called
     assert_eq!(host_fns::gc_trigger_call_count(), 1);
     // Stack maps should have at least 1 entry
-    assert!(pipeline.stack_maps.len() >= 1);
+    assert!(!pipeline.stack_maps.is_empty());
 }

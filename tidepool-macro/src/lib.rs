@@ -45,16 +45,16 @@ mod expand;
 ///
 /// # Examples
 ///
-/// ```ignore
-/// // Pre-compiled CBOR
-/// let val = haskell_eval!("../../haskell/test/Identity_cbor/identity.cbor").unwrap();
+/// ```no_run
+/// use tidepool_macro::haskell_eval;
 ///
-/// // Haskell source (single binding)
-/// let val = haskell_eval!("../../haskell/test/SingleBinding.hs").unwrap();
-///
-/// // Haskell source with binding selector
-/// let val = haskell_eval!("../../haskell/test/Identity.hs::identity").unwrap();
+/// // Pre-compiled CBOR path (resolved relative to the calling source file)
+/// let val = haskell_eval!("../../haskell/test/suite_cbor/lit_42.cbor").unwrap();
 /// ```
+///
+/// `.hs` paths are also accepted (compiled on-demand via
+/// `nix run .#tidepool-extract`), with optional `::binding` selector — see the
+/// crate README for examples.
 #[proc_macro]
 pub fn haskell_eval(input: TokenStream) -> TokenStream {
     expand::expand(input.into()).into()
@@ -77,11 +77,15 @@ pub fn haskell_eval(input: TokenStream) -> TokenStream {
 ///
 /// # Examples
 ///
-/// ```ignore
-/// let (expr, table) = haskell_expr!("../Guess.hs::game");
-/// let mut heap = tidepool_eval::heap::VecHeap::new();
-/// let mut machine = tidepool_effect::EffectMachine::new(&table, &mut heap).unwrap();
+/// ```no_run
+/// use tidepool_macro::haskell_expr;
+///
+/// // Pre-compiled CBOR path with sibling meta.cbor
+/// let (expr, table) = haskell_expr!("../../haskell/test/suite_cbor/lit_42.cbor");
 /// ```
+///
+/// `.hs` paths are also accepted (compiled on-demand via
+/// `nix run .#tidepool-extract`) — see the crate README.
 #[proc_macro]
 pub fn haskell_expr(input: TokenStream) -> TokenStream {
     expand::expand_expr(input.into()).into()
@@ -99,6 +103,10 @@ pub fn haskell_expr(input: TokenStream) -> TokenStream {
 /// Returns `(tidepool_repr::CoreExpr, tidepool_repr::DataConTable)`.
 ///
 /// # Examples
+///
+/// This example is intentionally `ignore`'d: the macro runs `nix run
+/// .#tidepool-extract` at proc-macro expansion time, which cannot execute in a
+/// doctest sandbox. See `examples/guess` for a worked use.
 ///
 /// ```ignore
 /// let (expr, table) = haskell_inline! {
