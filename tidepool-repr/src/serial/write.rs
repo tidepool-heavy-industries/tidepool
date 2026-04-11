@@ -6,6 +6,13 @@ use crate::tree::RecursiveTree;
 use crate::types::{Alt, AltCon, Literal, PrimOpKind};
 use ciborium::value::Value;
 
+/// Write the 8-byte version header into a buffer.
+fn write_header(buf: &mut Vec<u8>) {
+    buf.extend_from_slice(&super::HEADER_MAGIC);
+    buf.extend_from_slice(&super::VERSION_MAJOR.to_be_bytes());
+    buf.extend_from_slice(&super::VERSION_MINOR.to_be_bytes());
+}
+
 /// Writes a CoreExpr to a CBOR-encoded byte vector.
 pub fn write_cbor(expr: &RecursiveTree<CoreFrame<usize>>) -> Result<Vec<u8>, WriteError> {
     if expr.nodes.is_empty() {
@@ -27,8 +34,10 @@ pub fn write_cbor(expr: &RecursiveTree<CoreFrame<usize>>) -> Result<Vec<u8>, Wri
     ]);
 
     let mut bytes = Vec::new();
+    write_header(&mut bytes);
     ciborium::ser::into_writer(&tree_val, &mut bytes)
         .map_err(|e| WriteError::Cbor(e.to_string()))?;
+
     Ok(bytes)
 }
 
@@ -80,7 +89,9 @@ pub fn write_metadata(table: &crate::datacon_table::DataConTable) -> Result<Vec<
     let root = Value::Array(vec![Value::Array(entries), warnings_map]);
 
     let mut bytes = Vec::new();
+    write_header(&mut bytes);
     ciborium::ser::into_writer(&root, &mut bytes).map_err(|e| WriteError::Cbor(e.to_string()))?;
+
     Ok(bytes)
 }
 

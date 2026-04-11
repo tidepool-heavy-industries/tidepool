@@ -76,7 +76,12 @@ fn find_max_var_id(tree: &CoreExpr) -> VarId {
 
 /// Recursive helper for substitution.
 /// `env` maps binders that have been renamed (due to capture avoidance) to their new IDs.
-fn subst_at(tree: &CoreExpr, idx: usize, ctx: &mut SubstCtx, env: &FxHashMap<VarId, VarId>) -> usize {
+fn subst_at(
+    tree: &CoreExpr,
+    idx: usize,
+    ctx: &mut SubstCtx,
+    env: &FxHashMap<VarId, VarId>,
+) -> usize {
     match &tree.nodes[idx] {
         CoreFrame::Var(v) => {
             let actual_v = env.get(v).copied().unwrap_or(*v);
