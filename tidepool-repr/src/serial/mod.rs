@@ -460,4 +460,142 @@ mod tests {
         // Nothing had no qualified name — should not be in the index
         assert_eq!(recovered.get(DataConId(2)).unwrap().qualified_name, None);
     }
+
+    // --- Negative tests: malformed CBOR → ReadError, not panic ---
+
+    fn cbor_bytes(val: ciborium::value::Value) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&val, &mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn test_read_empty_bytes() {
+        assert!(matches!(read_cbor(&[]), Err(ReadError::Cbor(_))));
+    }
+
+    #[test]
+    fn test_read_not_cbor() {
+        assert!(matches!(
+            read_cbor(&[0xFF, 0xFE, 0x00, 0xAB, 0xCD]),
+            Err(ReadError::Cbor(_))
+        ));
+    }
+
+    #[test]
+    fn test_read_wrong_root_type() {
+        let bytes = cbor_bytes(ciborium::value::Value::Integer(42.into()));
+        assert!(matches!(
+            read_cbor(&bytes),
+            Err(ReadError::InvalidStructure(_))
+        ));
+    }
+
+    #[test]
+    fn test_read_root_wrong_length() {
+        let root = ciborium::value::Value::Array(vec![ciborium::value::Value::Array(vec![])]);
+        let bytes = cbor_bytes(root);
+        assert!(matches!(
+            read_cbor(&bytes),
+            Err(ReadError::InvalidStructure(_))
+        ));
+    }
+
+    #[test]
+    fn test_read_empty_nodes() {
+        let root = ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Array(vec![]),
+            ciborium::value::Value::Integer(0.into()),
+        ]);
+        let bytes = cbor_bytes(root);
+        assert!(matches!(
+            read_cbor(&bytes),
+            Err(ReadError::InvalidStructure(_))
+        ));
+    }
+
+    #[test]
+    fn test_read_bad_frame_tag() {
+        let node = ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Text("Bogus".to_string()),
+        ]);
+        let nodes = ciborium::value::Value::Array(vec![node]);
+        let root = ciborium::value::Value::Array(vec![
+            nodes,
+            ciborium::value::Value::Integer(0.into()),
+        ]);
+        let bytes = cbor_bytes(root);
+        assert!(matches!(
+            read_cbor(&bytes),
+            Err(ReadError::InvalidTag(_))
+        ));
+    }
+
+    #[test]
+    fn test_read_bad_primop() {
+        let node = ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Text("PrimOp".to_string()),
+            ciborium::value::Value::Text("NotARealOp".to_string()),
+            ciborium::value::Value::Array(vec![]),
+        ]);
+        let nodes = ciborium::value::Value::Array(vec![node]);
+        let root = ciborium::value::Value::Array(vec![
+            nodes,
+            ciborium::value::Value::Integer(0.into()),
+        ]);
+        let bytes = cbor_bytes(root);
+        assert!(matches!(
+            read_cbor(&bytes),
+            Err(ReadError::InvalidPrimOp(_))
+        ));
+    }
+
+    #[test]
+    fn test_read_index_out_of_bounds() {
+        // App referencing index 5 in a 2-node array
+        let nodes = ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Array(vec![
+                ciborium::value::Value::Text("Var".to_string()),
+                ciborium::value::Value::Integer(1.into()),
+            ]),
+            ciborium::value::Value::Array(vec![
+                ciborium::value::Value::Text("App".to_string()),
+                ciborium::value::Value::Integer(0.into()),
+                ciborium::value::Value::Integer(5.into()), // out of bounds
+            ]),
+        ]);
+        let root = ciborium::value::Value::Array(vec![
+            nodes,
+            ciborium::value::Value::Integer(1.into()),
+        ]);
+        let bytes = cbor_bytes(root);
+        assert!(matches!(
+            read_cbor(&bytes),
+            Err(ReadError::InvalidStructure(_))
+        ));
+    }
+
+    #[test]
+    fn test_read_metadata_not_array() {
+        let bytes = cbor_bytes(ciborium::value::Value::Integer(99.into()));
+        assert!(matches!(
+            read_metadata(&bytes),
+            Err(ReadError::InvalidStructure(_))
+        ));
+    }
+
+    #[test]
+    fn test_read_metadata_bad_entry() {
+        // Entry with only 2 fields instead of 5
+        let bad_entry = ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Integer(1.into()),
+            ciborium::value::Value::Text("Bad".to_string()),
+        ]);
+        let root = ciborium::value::Value::Array(vec![bad_entry]);
+        let bytes = cbor_bytes(root);
+        assert!(matches!(
+            read_metadata(&bytes),
+            Err(ReadError::InvalidStructure(_))
+        ));
+    }
 }

@@ -318,6 +318,14 @@ cargo check --workspace  # Type check
 cargo test --workspace   # Run all tests
 ```
 
+## Known Limitations
+
+- **Stack overflow at ~50+ recursion depth (eval):** The tree-walking interpreter (`tidepool-eval`) uses Rust's call stack for recursion. Deeply recursive Haskell functions (>~50 frames) may overflow. The JIT backend (`tidepool-codegen`) supports TCO and handles deep recursion.
+- **`nub` crashes at ~31 elements with complex `Text`:** O(n²) equality comparisons on `Text` values can trigger "application of non-closure (tag=255)" around 31 elements. Use `nubBy` with simpler comparisons or shorter lists.
+- **`Text`, not `String`:** The JIT evaluates eagerly, making `String` (`[Char]`) expensive. The Prelude standardizes on `Text` — use it everywhere. `show` returns `Text`, `pack` is polymorphic, `error` takes `Text`.
+- **SIGILL = case trap, not missing primop:** All primop variants are implemented. `SIGILL` crashes come from Cranelift `trap` instructions on exhausted case branches (constructor tag mismatch, unexpected value shape). Check constructor tags and case coverage.
+- **No JSON parsing in Haskell:** `encode`/`decode` are removed. Use the `httpGet` effect (parsed on the Rust side via serde_json) or `run` with external tools.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0)
