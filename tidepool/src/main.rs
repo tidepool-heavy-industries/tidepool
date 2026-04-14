@@ -1316,7 +1316,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         decls.insert(decls.len() - 2, tidepool_mcp::meta_decl()); // before Llm, Ask
         let effect_names: Vec<String> = decls.iter().map(|d| d.type_name.to_string()).collect();
         let mut helper_sigs: Vec<String> = Vec::new();
-        helper_sigs.push("say :: Text -> M ()".into());
+        helper_sigs.push("putStrLn :: Text -> M ()".into());
         helper_sigs.push("showI :: Int -> Text".into());
         for decl in &decls {
             for h in decl.helpers {

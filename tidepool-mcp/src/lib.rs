@@ -146,12 +146,15 @@ pub fn fs_decl() -> EffectDecl {
         ],
         type_defs: &[],
         helpers: &[
-            "fsRead :: Text -> M Text\nfsRead = send . FsRead",
-            "fsWrite :: Text -> Text -> M ()\nfsWrite f c = send (FsWrite f c)",
-            "fsListDir :: Text -> M [Text]\nfsListDir = send . FsListDir",
-            "fsGlob :: Text -> M [Text]\nfsGlob = send . FsGlob",
-            "fsExists :: Text -> M Bool\nfsExists = send . FsExists",
-            "fsMetadata :: Text -> M (Int, Bool, Bool)\nfsMetadata = send . FsMetadata",
+            "readFile :: Text -> M Text\nreadFile = send . FsRead",
+            "writeFile :: Text -> Text -> M ()\nwriteFile f c = send (FsWrite f c)",
+            "appendFile :: Text -> Text -> M ()\nappendFile p t = readFile p >>= \\old -> writeFile p (old <> t)",
+            "listDirectory :: Text -> M [Text]\nlistDirectory = send . FsListDir",
+            "doesFileExist :: Text -> M Bool\ndoesFileExist = send . FsExists",
+            "doesDirectoryExist :: Text -> M Bool\ndoesDirectoryExist p = do { (_, _, d) <- send (FsMetadata p); pure d }",
+            "getFileSize :: Text -> M Int\ngetFileSize p = do { (s, _, _) <- send (FsMetadata p); pure s }",
+            "getCurrentDirectory :: M Text\ngetCurrentDirectory = do { (_, d, _) <- run \"pwd\"; pure (T.strip d) }",
+            "glob :: Text -> M [Text]\nglob = send . FsGlob",
         ],
     }
 }
@@ -231,6 +234,8 @@ pub fn exec_decl() -> EffectDecl {
         ],
         type_defs: &[],
         helpers: &[
+            "callCommand :: Text -> M ()\ncallCommand cmd = do { (ec, _, err) <- send (Run cmd); when (ec /= 0) (error (\"command failed (\" <> show ec <> \"): \" <> err)) }",
+            "readProcess :: Text -> M Text\nreadProcess cmd = do { (ec, out, err) <- send (Run cmd); if ec == 0 then pure out else error (\"command failed (\" <> show ec <> \"): \" <> err) }",
             "run :: Text -> M (Int, Text, Text)\nrun = send . Run",
             "runIn :: Text -> Text -> M (Int, Text, Text)\nrunIn dir cmd = send (RunIn dir cmd)",
         ],
@@ -274,6 +279,7 @@ pub fn ask_decl() -> EffectDecl {
         type_defs: &[],
         helpers: &[
             "ask :: Text -> M Value\nask = send . Ask",
+            "getLine :: Text -> M Text\ngetLine prompt = do { v <- ask prompt; case v of { String s -> pure s; _ -> pure (show v) } }",
         ],
     }
 }
@@ -428,18 +434,21 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
 
         out.push_str("-- Pagination\n");
         out.push_str(concat!("showI :: Int -> Text\n", "showI n = show n\n",));
-        // say: normal Print effect + char counter in KV (when available)
+        // putStrLn: Print effect + char counter in KV (when available)
         if has_console && has_kv {
             out.push_str(concat!(
-                "say :: Text -> M ()\n",
-                "say t = do\n",
+                "putStrLn :: Text -> M ()\n",
+                "putStrLn t = do\n",
                 "  send (Print t)\n",
                 "  v <- kvGet \"__sayChars\"\n",
                 "  let cur = case v of { Just b -> case b ^? _Number of { Just n -> round n; _ -> 0 }; Nothing -> 0 }\n",
                 "  kvSet \"__sayChars\" (toJSON (cur + T.length t))\n",
             ));
         } else if has_console {
-            out.push_str(concat!("say :: Text -> M ()\n", "say = send . Print\n",));
+            out.push_str(concat!(
+                "putStrLn :: Text -> M ()\n",
+                "putStrLn = send . Print\n",
+            ));
         }
 
         out.push_str(concat!(
@@ -628,10 +637,10 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
         out.push_str(concat!(
             "supervised :: Text -> M Value -> (Value -> Maybe a) -> M a\n",
             "supervised label body check = do\n",
-            "  say (\"[\" <> label <> \"] running...\")\n",
+            "  putStrLn (\"[\" <> label <> \"] running...\")\n",
             "  v <- body\n",
             "  case check v of\n",
-            "    Just a  -> say (\"[\" <> label <> \"] done\") >> pure a\n",
+            "    Just a  -> putStrLn (\"[\" <> label <> \"] done\") >> pure a\n",
             "    Nothing -> do\n",
             "      correction <- ask (\"[\" <> label <> \"] result: \" <> show v <> \"\\nHow should I adjust?\")\n",
             "      supervised label body check\n",
@@ -647,9 +656,9 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
         out.push_str(concat!(
             "mapFiles :: [Text] -> (Text -> Text -> M Text) -> M [Text]\n",
             "mapFiles paths transform = mapM (\\p -> do\n",
-            "  content <- fsRead p\n",
+            "  content <- readFile p\n",
             "  result <- transform p content\n",
-            "  fsWrite p result\n",
+            "  writeFile p result\n",
             "  pure p) paths\n",
         ));
         out.push_str(concat!(
@@ -660,39 +669,33 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
         ));
         out.push_str(concat!(
             "readGlob :: Text -> M [(Text, Text)]\n",
-            "readGlob pat = fsGlob pat >>= mapM (\\p -> (,) p <$> fsRead p)\n",
+            "readGlob pat = glob pat >>= mapM (\\p -> (,) p <$> readFile p)\n",
         ));
-        out.push_str(concat!(
-            "runChecked :: Text -> M Text\n",
-            "runChecked cmd = do\n",
-            "  (ec, out, err) <- run cmd\n",
-            "  if ec == 0 then pure out\n",
-            "  else error (\"command failed: \" <> cmd <> \"\\n\" <> err)\n",
-        ));
+        out.push_str("runChecked :: Text -> M Text\nrunChecked = readProcess\n");
         out.push_str(concat!(
             "mapFile :: Text -> (Text -> Text) -> M ()\n",
-            "mapFile path f = fsRead path >>= \\c -> fsWrite path (f c)\n",
+            "mapFile path f = readFile path >>= \\c -> writeFile path (f c)\n",
         ));
         out.push_str(concat!(
             "mapFileM :: Text -> (Text -> M Text) -> M ()\n",
-            "mapFileM path f = fsRead path >>= f >>= fsWrite path\n",
+            "mapFileM path f = readFile path >>= f >>= writeFile path\n",
         ));
         out.push_str(concat!(
             "searchFiles :: Text -> Text -> M [(Text, Int, Text)]\n",
             "searchFiles pat needle = do\n",
-            "  files <- fsGlob pat\n",
+            "  files <- glob pat\n",
             "  fmap concat $ forM files $ \\path -> do\n",
-            "    content <- fsRead path\n",
+            "    content <- readFile path\n",
             "    let ls = zip [(1::Int)..] (T.lines content)\n",
             "    pure [(path, n, l) | (n, l) <- ls, T.isInfixOf needle l]\n",
         ));
         out.push_str(concat!(
             "lineCount :: Text -> M Int\n",
-            "lineCount path = length . T.lines <$> fsRead path\n",
+            "lineCount path = length . T.lines <$> readFile path\n",
         ));
         out.push_str(concat!(
             "fileContains :: Text -> Text -> M Bool\n",
-            "fileContains path needle = T.isInfixOf needle <$> fsRead path\n",
+            "fileContains path needle = T.isInfixOf needle <$> readFile path\n",
         ));
         out.push_str(concat!(
             "kvAll :: M [(Text, Value)]\n",
@@ -875,7 +878,7 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         if has_helpers {
             desc.push_str("\nBuilt-in helpers (always available, no need to define):\n");
             if has_console {
-                desc.push_str("  say :: Text -> M ()\n");
+                desc.push_str("  putStrLn :: Text -> M ()\n");
             }
             effects.iter().flat_map(|e| e.helpers).for_each(|h| {
                 // Extract just the type signature line
@@ -884,7 +887,7 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
                 }
             });
             desc.push_str(
-                "\nPrefer helpers over raw `send`: `say \"hi\"` not `send (Print \"hi\")`.\n",
+                "\nPrefer helpers over raw `send`: `putStrLn \"hi\"` not `send (Print \"hi\")`.\n",
             );
             desc.push_str("Use `>>=` chains and `<$>`/`<*>` for dense composition. Named bindings as escape hatch.\n");
             desc.push('\n');
@@ -1982,12 +1985,12 @@ mod tests {
             description: "Print to console",
             constructors: &["Print :: Text -> Console ()"],
             type_defs: &[],
-            helpers: &["say :: Text -> M ()\nsay = send . Print"],
+            helpers: &["putStrLn :: Text -> M ()\nputStrLn = send . Print"],
         }];
         let desc = build_eval_tool_description(&effects);
         assert!(desc.contains("Console: Print to console"));
         // Constructors not shown separately (helpers section covers them)
-        assert!(desc.contains("say :: Text -> M ()"));
+        assert!(desc.contains("putStrLn :: Text -> M ()"));
         assert!(desc.contains("Built-in helpers"));
     }
 
@@ -1995,11 +1998,25 @@ mod tests {
     fn test_preamble_includes_helpers() {
         let decls = standard_decls();
         let preamble = build_preamble(&decls, false);
-        assert!(preamble.contains("say :: Text -> M ()\nsay t"));
+        // Standard Haskell names as primary
+        assert!(preamble.contains("putStrLn :: Text -> M ()"));
+        assert!(preamble.contains("readFile :: Text -> M Text\nreadFile = send . FsRead"));
+        assert!(preamble.contains("writeFile :: Text -> Text -> M ()"));
+        assert!(preamble.contains("appendFile :: Text -> Text -> M ()"));
+        assert!(preamble.contains("listDirectory :: Text -> M [Text]"));
+        assert!(preamble.contains("doesFileExist :: Text -> M Bool"));
+        assert!(preamble.contains("getFileSize :: Text -> M Int"));
+        assert!(preamble.contains("glob :: Text -> M [Text]"));
+        assert!(preamble.contains("callCommand :: Text -> M ()"));
+        assert!(preamble.contains("readProcess :: Text -> M Text"));
+        assert!(preamble.contains("getLine :: Text -> M Text"));
+        // No old aliases
+        assert!(!preamble.contains("fsRead"));
+        assert!(!preamble.contains("fsWrite"));
+        assert!(!preamble.contains("\nsay "));
+        // Other helpers unchanged
         assert!(preamble.contains("kvGet :: Text -> M (Maybe Value)\nkvGet = send . KvGet"));
-        assert!(preamble.contains("fsRead :: Text -> M Text\nfsRead = send . FsRead"));
         assert!(preamble.contains("httpGet :: Text -> M Value\nhttpGet = send . HttpGet"));
-        // Meta helpers not in default preamble (Meta behind --debug)
         assert!(preamble.contains("ask :: Text -> M Value\nask = send . Ask"));
     }
 
@@ -2123,9 +2140,8 @@ mod tests {
     fn test_preamble_orchestration_helpers() {
         let decls = standard_decls();
         let preamble = build_preamble(&decls, true);
-        // runChecked uses our Text error, not String error
-        assert!(preamble.contains("runChecked :: Text -> M Text"));
-        assert!(preamble.contains("else error (\"command failed: \""));
+        // runChecked is now an alias for readProcess
+        assert!(preamble.contains("runChecked :: Text -> M Text\nrunChecked = readProcess"));
         // File manipulation helpers
         assert!(preamble.contains("mapFile :: Text -> (Text -> Text) -> M ()"));
         assert!(preamble.contains("mapFileM :: Text -> (Text -> M Text) -> M ()"));
