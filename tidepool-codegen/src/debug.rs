@@ -11,13 +11,15 @@
 //! - `TIDEPOOL_TRACE=heap` — also validate heap objects before use
 
 use crate::layout;
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use tidepool_heap::layout as heap_layout;
 
 // ── Lambda Registry ──────────────────────────────────────────
 
-static LAMBDA_REGISTRY: Mutex<Option<LambdaRegistry>> = Mutex::new(None);
+thread_local! {
+    static LAMBDA_REGISTRY: RefCell<Option<LambdaRegistry>> = const { RefCell::new(None) };
+}
 
 /// Maps JIT code pointers to human-readable lambda names.
 ///
@@ -72,36 +74,34 @@ impl LambdaRegistry {
     }
 }
 
-/// Install a registry as the global singleton. Returns the old one if any.
+/// Install a registry as the thread-local singleton. Returns the old one if any.
 pub fn set_lambda_registry(registry: LambdaRegistry) -> Option<LambdaRegistry> {
-    let mut guard = LAMBDA_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-    guard.replace(registry)
+    LAMBDA_REGISTRY.with(|cell| cell.borrow_mut().replace(registry))
 }
 
-/// Clear the global registry.
+/// Clear the thread-local registry.
 pub fn clear_lambda_registry() -> Option<LambdaRegistry> {
-    LAMBDA_REGISTRY
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
+    LAMBDA_REGISTRY.with(|cell| cell.borrow_mut().take())
 }
 
-/// Look up a code pointer in the global registry.
+/// Look up a code pointer in the thread-local registry.
 pub fn lookup_lambda(code_ptr: usize) -> Option<String> {
-    let guard = LAMBDA_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-    guard
-        .as_ref()
-        .and_then(|r| r.lookup(code_ptr))
-        .map(|s| s.to_string())
+    LAMBDA_REGISTRY.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|r| r.lookup(code_ptr))
+            .map(|s| s.to_string())
+    })
 }
 
-/// Look up a lambda name by an address within its body in the global registry.
+/// Look up a lambda name by an address within its body in the thread-local registry.
 pub fn lookup_lambda_by_address(addr: usize) -> Option<String> {
-    let guard = LAMBDA_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-    guard
-        .as_ref()
-        .and_then(|r| r.lookup_by_address(addr))
-        .map(|s| s.to_string())
+    LAMBDA_REGISTRY.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|r| r.lookup_by_address(addr))
+            .map(|s| s.to_string())
+    })
 }
 
 // ── Heap Object Inspection ───────────────────────────────────

@@ -66,6 +66,11 @@ impl Drop for RegistryGuard {
         crate::host_fns::clear_gc_state();
         crate::host_fns::clear_stack_map_registry();
         crate::debug::clear_lambda_registry();
+        // Clean up remaining thread-local state for same-thread reuse
+        let _ = crate::host_fns::take_runtime_error();
+        let _ = crate::host_fns::drain_diagnostics();
+        crate::host_fns::reset_call_depth();
+        crate::host_fns::set_exec_context("");
     }
 }
 
