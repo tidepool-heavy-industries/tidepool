@@ -129,6 +129,8 @@ module Tidepool.Prelude
   , Map.singleton, Map.empty
   , Map.findWithDefault, Map.adjust
   , Map.unionWith, Map.intersectionWith
+    -- * Map insertWith (local impl — avoids GHC's internal unfolding timeout)
+  , insertWith
     -- * Set type (use qualified Set.xxx via preamble's `import qualified Data.Set as Set`)
   ) where
 
@@ -832,4 +834,19 @@ nubBy eq xs = go [] xs
 -- | Tail-recursive nub (uses nubBy).
 nub :: (Eq a) => [a] -> [a]
 nub = nubBy (==)
+
+-- ---------------------------------------------------------------------------
+-- Map insertWith (local impl — avoids GHC's internal unfolding)
+-- ---------------------------------------------------------------------------
+
+-- | @insertWith f key new m@ — if @key@ exists with value @old@, store @f new old@;
+-- otherwise insert @new@. Monomorphic on Text keys to avoid pulling in GHC's
+-- internal Data.Map.Strict.insertWith which causes timeout under the JIT
+-- (complex balance/rotation unfoldings + Ord dictionary re-evaluation).
+-- Uses Map.lookup + Map.insert which are known working.
+insertWith :: (a -> a -> a) -> Text -> a -> Map Text a -> Map Text a
+insertWith f k v m = case Map.lookup k m of
+  Just old -> let !combined = f v old in Map.insert k combined m
+  Nothing  -> Map.insert k v m
+{-# INLINE insertWith #-}
 
