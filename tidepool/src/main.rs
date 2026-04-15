@@ -1874,7 +1874,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_jit_console_roundtrip() {
-        let result = jit_eval(&["say \"hello from JIT\"", "pure (toJSON True)"]);
+        let result = jit_eval(&["putStrLn \"hello from JIT\"", "pure (toJSON True)"]);
         assert_eq!(result, serde_json::json!(true));
     }
 
@@ -1890,14 +1890,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_jit_fs_exists_roundtrip() {
-        let result = jit_eval(&["b <- fsExists \"Cargo.toml\"", "pure (toJSON b)"]);
+        let result = jit_eval(&["b <- doesFileExist \"Cargo.toml\"", "pure (toJSON b)"]);
         assert_eq!(result, serde_json::json!(true));
     }
 
     #[tokio::test]
     async fn test_jit_fs_listdir_roundtrip() {
         let result = jit_eval(&[
-            "entries <- fsListDir \".\"",
+            "entries <- listDirectory \".\"",
             "pure (toJSON (length entries > 0))",
         ]);
         assert_eq!(result, serde_json::json!(true));
