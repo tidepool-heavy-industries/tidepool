@@ -129,9 +129,9 @@ module Tidepool.Prelude
   , Map.singleton, Map.empty
   , Map.findWithDefault, Map.adjust
   , Map.unionWith, Map.intersectionWith
-    -- * Map insertWith (local impl — avoids GHC's internal unfolding timeout)
-  , insertWith
     -- * Set type (use qualified Set.xxx via preamble's `import qualified Data.Set as Set`)
+    -- * Map helpers (local impls — unqualified, unlike Map.* re-exports above)
+  , insertWith
   ) where
 
 import Prelude
