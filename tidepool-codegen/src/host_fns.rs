@@ -60,6 +60,24 @@ thread_local! {
     static EXEC_CONTEXT: RefCell<String> = const { RefCell::new(String::new()) };
     pub(crate) static SIGNAL_SAFE_CTX: Cell<[u8; 128]> = const { Cell::new([0u8; 128]) };
     pub(crate) static SIGNAL_SAFE_CTX_LEN: Cell<usize> = const { Cell::new(0) };
+
+    /// Heap pointer slots registered by Rust code (e.g., apply_cont_heap's k2_stack)
+    /// so GC can update them in-place when objects move during collection.
+    static RUST_ROOTS: RefCell<Vec<*mut *mut u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Register a Rust stack/heap slot containing a heap pointer as a GC root.
+/// GC will update the slot's value in-place if the pointed-to object moves.
+///
+/// # Safety
+/// The slot must remain valid and dereferenceable until `clear_rust_roots` is called.
+pub unsafe fn register_rust_root(slot: *mut *mut u8) {
+    RUST_ROOTS.with(|r| r.borrow_mut().push(slot));
+}
+
+/// Remove all registered Rust roots. Call after the GC-unsafe region ends.
+pub fn clear_rust_roots() {
+    RUST_ROOTS.with(|r| r.borrow_mut().clear());
 }
 
 /// Set the current execution context for JIT code.
@@ -120,6 +138,7 @@ pub fn clear_gc_state() {
     GC_STATE.with(|cell| {
         cell.borrow_mut().take();
     });
+    clear_rust_roots();
 }
 
 /// GC trigger: called by JIT code when alloc_ptr exceeds alloc_limit.
@@ -184,10 +203,28 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                     let mut tospace = vec![0u8; from_size];
 
                     // Convert StackRoot to raw slot pointers
-                    let root_slots: Vec<*mut *mut u8> = roots
+                    let mut root_slots: Vec<*mut *mut u8> = roots
                         .iter()
                         .map(|r| r.stack_slot_addr as *mut *mut u8)
                         .collect();
+
+                    // Append Rust-registered roots (from apply_cont_heap k2_stack, etc.)
+                    RUST_ROOTS.with(|r| {
+                        root_slots.extend(r.borrow().iter().copied());
+                    });
+
+                    // Defense-in-depth: trace VMContext tail_callee/tail_arg
+                    // SAFETY: vmctx is valid and these fields are heap pointers.
+                    unsafe {
+                        let tc = &mut (*vmctx).tail_callee as *mut *mut u8;
+                        let ta = &mut (*vmctx).tail_arg as *mut *mut u8;
+                        if !(*tc).is_null() {
+                            root_slots.push(tc);
+                        }
+                        if !(*ta).is_null() {
+                            root_slots.push(ta);
+                        }
+                    }
 
                     // SAFETY: root_slots point to valid stack locations from walk_frames.
                     // from_start..from_end is the active nursery region. tospace is freshly
