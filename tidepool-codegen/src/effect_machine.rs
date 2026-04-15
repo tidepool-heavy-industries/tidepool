@@ -289,102 +289,133 @@ impl CompiledEffectMachine {
     /// - Node(k1, k2): apply k1(arg), if Val(y) → k2(y), if E(union, k') → E(union, Node(k', k2))
     /// - Closure: direct call_closure (degenerate continuation fallback)
     ///
+    /// Uses an iterative work-stack instead of recursion. Heap pointers held across
+    /// `call_closure` (which can trigger GC) are stored in a `Vec` on the Rust heap
+    /// and registered as GC roots so the collector can update them in-place.
+    ///
     /// # Safety
     ///
     /// `k` and `arg` must be valid heap pointers.
     unsafe fn apply_cont_heap(&mut self, k: *mut u8, arg: *mut u8) -> *mut u8 {
         // SAFETY: k and arg are valid heap pointers (or null, handled below).
-        // All field reads use known layout offsets. Recursive calls maintain the invariant.
+        // All field reads use known layout offsets.
         if k.is_null() {
             return std::ptr::null_mut();
         }
 
-        // Force k and arg in case they are thunks (lazy Con fields)
-        let k = self.force_ptr(k);
+        let mut k = self.force_ptr(k);
         if k.is_null() {
             return std::ptr::null_mut();
         }
-        let arg = self.force_ptr(arg);
+        let mut arg = self.force_ptr(arg);
 
-        let tag = *k;
-        match tag {
-            t if t == layout::TAG_CON => {
-                let con_tag = unsafe { Self::read_con_tag(k) };
+        // Stack of pending k2 continuations from Node decomposition.
+        // Lives on the Rust heap, not the GC nursery. Entries are heap pointers
+        // that must be registered as GC roots before any call_closure.
+        let mut k2_stack: Vec<*mut u8> = Vec::new();
 
-                if con_tag == self.tags.leaf {
-                    // Leaf(f) — extract closure f at field[0], call f(arg)
-                    let f = self.force_ptr(unsafe { Self::read_con_field(k, 0) });
-                    self.call_closure(f, arg)
-                } else if con_tag == self.tags.node {
-                    // Node(k1, k2) — apply k1 to arg, then compose with k2
-                    let k1 = self.force_ptr(unsafe { Self::read_con_field(k, 0) });
-                    let k2 = self.force_ptr(unsafe { Self::read_con_field(k, 1) });
+        loop {
+            if k.is_null() {
+                return std::ptr::null_mut();
+            }
 
-                    let result = self.apply_cont_heap(k1, arg);
-                    if result.is_null() {
-                        return std::ptr::null_mut();
-                    }
+            let tag = *k;
+            let result = match tag {
+                t if t == layout::TAG_CON => {
+                    let con_tag = Self::read_con_tag(k);
 
-                    // Force result in case it's a thunk
-                    let result = self.force_ptr(result);
-                    if result.is_null() {
-                        return std::ptr::null_mut();
-                    }
-
-                    // Check if result is Val or E
-                    let result_tag = unsafe { *result };
-                    if result_tag != layout::TAG_CON {
-                        crate::host_fns::push_diagnostic(format!(
-                            "apply_cont_heap: Node(k1,k2) result has unexpected tag {} (expected TAG_CON)",
-                            result_tag
-                        ));
-                        return std::ptr::null_mut();
-                    }
-
-                    let result_con_tag = unsafe { Self::read_con_tag(result) };
-
-                    if result_con_tag == self.tags.val {
-                        // Val(y) — extract y, apply k2(y)
-                        let y = self.force_ptr(unsafe { Self::read_con_field(result, 0) });
-                        self.apply_cont_heap(k2, y)
-                    } else if result_con_tag == self.tags.e {
-                        // E(union, k') — compose: E(union, Node(k', k2))
-                        let union_val = self.force_ptr(unsafe { Self::read_con_field(result, 0) });
-                        let k_prime = self.force_ptr(unsafe { Self::read_con_field(result, 1) });
-
-                        // Allocate Node(k', k2)
-                        let new_node = self.alloc_con(self.tags.node, &[k_prime, k2]);
-                        if new_node.is_null() {
-                            return std::ptr::null_mut();
+                    if con_tag == self.tags.leaf {
+                        // Leaf(f): call f(arg) — terminal for this continuation
+                        let f = self.force_ptr(Self::read_con_field(k, 0));
+                        // Register k2_stack entries as GC roots before call_closure,
+                        // which runs JIT code that can trigger GC.
+                        for slot in k2_stack.iter_mut() {
+                            crate::host_fns::register_rust_root(slot as *mut *mut u8);
                         }
-                        // Allocate E(union, new_node)
-                        self.alloc_con(self.tags.e, &[union_val, new_node])
+                        let res = self.call_closure(f, arg);
+                        crate::host_fns::clear_rust_roots();
+                        res
+                    } else if con_tag == self.tags.node {
+                        // Node(k1, k2): push k2 for later, loop on k1
+                        let k1 = self.force_ptr(Self::read_con_field(k, 0));
+                        let k2 = self.force_ptr(Self::read_con_field(k, 1));
+                        k2_stack.push(k2);
+                        k = k1;
+                        continue;
                     } else {
                         crate::host_fns::push_diagnostic(format!(
-                            "apply_cont_heap: Node result con_tag {} is neither Val nor E",
-                            result_con_tag
+                            "apply_cont_heap: unexpected continuation con_tag {} (expected Leaf or Node)",
+                            con_tag
                         ));
-                        std::ptr::null_mut()
+                        return std::ptr::null_mut();
                     }
-                } else {
-                    // Unknown Con tag in continuation position — error
-                    crate::host_fns::push_diagnostic(format!(
-                        "apply_cont_heap: unexpected continuation con_tag {} (expected Leaf or Node)",
-                        con_tag
-                    ));
-                    std::ptr::null_mut()
                 }
+                t if t == layout::TAG_CLOSURE => {
+                    // Raw closure (degenerate continuation fallback)
+                    for slot in k2_stack.iter_mut() {
+                        crate::host_fns::register_rust_root(slot as *mut *mut u8);
+                    }
+                    let res = self.call_closure(k, arg);
+                    crate::host_fns::clear_rust_roots();
+                    res
+                }
+                _ => {
+                    crate::host_fns::push_diagnostic(format!(
+                        "apply_cont_heap: unexpected heap tag {} in continuation position",
+                        tag
+                    ));
+                    return std::ptr::null_mut();
+                }
+            };
+
+            // We have a result from call_closure. Compose with pending k2s.
+            if result.is_null() {
+                return std::ptr::null_mut();
             }
-            t if t == layout::TAG_CLOSURE => {
-                // Raw closure (degenerate continuation fallback)
-                self.call_closure(k, arg)
+            let result = self.force_ptr(result);
+            if result.is_null() {
+                return std::ptr::null_mut();
             }
-            _ => {
+
+            let result_tag = *result;
+            if result_tag != layout::TAG_CON {
                 crate::host_fns::push_diagnostic(format!(
-                    "apply_cont_heap: unexpected heap tag {} in continuation position",
-                    tag
+                    "apply_cont_heap: result has unexpected tag {} (expected TAG_CON)",
+                    result_tag
                 ));
-                std::ptr::null_mut()
+                return std::ptr::null_mut();
+            }
+
+            let result_con_tag = Self::read_con_tag(result);
+
+            if result_con_tag == self.tags.val {
+                // Val(y): if k2_stack is empty, we're done; otherwise apply next k2
+                let y = self.force_ptr(Self::read_con_field(result, 0));
+                if let Some(k2) = k2_stack.pop() {
+                    k = k2;
+                    arg = y;
+                    continue;
+                } else {
+                    return result;
+                }
+            } else if result_con_tag == self.tags.e {
+                // E(union, k'): compose ALL remaining k2s into k'
+                let union_val = self.force_ptr(Self::read_con_field(result, 0));
+                let mut k_prime = self.force_ptr(Self::read_con_field(result, 1));
+
+                while let Some(k2) = k2_stack.pop() {
+                    k_prime = self.alloc_con(self.tags.node, &[k_prime, k2]);
+                    if k_prime.is_null() {
+                        return std::ptr::null_mut();
+                    }
+                }
+                return self.alloc_con(self.tags.e, &[union_val, k_prime]);
+            } else {
+                crate::host_fns::push_diagnostic(format!(
+                    "apply_cont_heap: result con_tag {} is neither Val nor E",
+                    result_con_tag
+                ));
+                return std::ptr::null_mut();
             }
         }
     }
