@@ -37,21 +37,60 @@ pub(crate) fn cache_key(source: &str, target: &str, include: &[&Path]) -> String
 }
 
 /// Fingerprints the compiler binary to ensure cache invalidation on upgrades.
+/// If the resolved path is a shell wrapper script (e.g. ~/.cargo/bin/tidepool-extract),
+/// also fingerprints the target binary it delegates to (e.g. ~/.local/bin/tidepool-extract-bin).
 fn extract_binary_fingerprint(hasher: &mut blake3::Hasher) {
     let bin_name = std::env::var("TIDEPOOL_EXTRACT")
         .unwrap_or_else(|_| "tidepool-extract".to_string());
 
-    if let Ok(path) = which::which(bin_name) {
-        hasher.update(path.as_os_str().as_encoded_bytes());
-        hasher.update(b"\0");
-        if let Ok(meta) = fs::metadata(&path) {
-            hasher.update(&meta.len().to_le_bytes());
-            if let Ok(mtime) = meta.modified() {
-                if let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH) {
-                    hasher.update(&dur.as_nanos().to_le_bytes());
+    if let Ok(path) = which::which(&bin_name) {
+        fingerprint_single_binary(hasher, &path);
+
+        // If this looks like a shell wrapper script, also fingerprint the target binary.
+        if let Ok(contents) = fs::read_to_string(&path) {
+            if contents.len() < 4096 && (contents.starts_with("#!") || contents.contains("exec "))
+            {
+                for line in contents.lines() {
+                    if let Some(target) = extract_exec_target(line.trim()) {
+                        let target_path = PathBuf::from(target);
+                        if target_path.exists() {
+                            if let Ok(resolved) = fs::canonicalize(&target_path) {
+                                fingerprint_single_binary(hasher, &resolved);
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+/// Fingerprints a single binary by path, size, and mtime.
+fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
+    hasher.update(path.as_os_str().as_encoded_bytes());
+    hasher.update(b"\0");
+    if let Ok(meta) = fs::metadata(path) {
+        hasher.update(&meta.len().to_le_bytes());
+        if let Ok(mtime) = meta.modified() {
+            if let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH) {
+                hasher.update(&dur.as_nanos().to_le_bytes());
+            }
+        }
+    }
+}
+
+/// Extracts an absolute path from a shell exec line.
+/// Handles patterns like `exec /path/to/bin "$@"` or bare `/path/to/bin "$@"`.
+fn extract_exec_target(line: &str) -> Option<&str> {
+    let line = line.strip_prefix("exec ").unwrap_or(line);
+    if line.is_empty() || line.starts_with('#') || line.contains('=') {
+        return None;
+    }
+    let token = line.split_whitespace().next()?;
+    if token.starts_with('/') {
+        Some(token)
+    } else {
+        None
     }
 }
 
@@ -91,8 +130,14 @@ fn fingerprint_dir(dir: &Path, hasher: &mut blake3::Hasher) {
 
 /// Attempts to load the Core expression and metadata from the cache.
 /// Returns `Some((expr_bytes, meta_bytes))` on success.
+/// Only returns data if the sentinel file exists, indicating a complete store.
 pub(crate) fn cache_load(key: &str) -> Option<(Vec<u8>, Vec<u8>)> {
     let dir = cache_dir()?;
+    let sentinel = dir.join(format!("{}.ok", key));
+    if !sentinel.exists() {
+        return None;
+    }
+
     let expr_path = dir.join(format!("{}.cbor", key));
     let meta_path = dir.join(format!("{}.meta.cbor", key));
 
@@ -103,7 +148,8 @@ pub(crate) fn cache_load(key: &str) -> Option<(Vec<u8>, Vec<u8>)> {
 }
 
 /// Stores the compilation results in the cache. Each file is replaced atomically
-/// via rename, but the two-file update as a whole is not atomic.
+/// via rename. A sentinel file `{key}.ok` is written last to mark the entry as
+/// complete — `cache_load` checks for this before reading.
 pub(crate) fn cache_store(key: &str, expr_bytes: &[u8], meta_bytes: &[u8]) {
     let Some(dir) = cache_dir() else { return };
     if fs::create_dir_all(&dir).is_err() {
@@ -112,7 +158,6 @@ pub(crate) fn cache_store(key: &str, expr_bytes: &[u8], meta_bytes: &[u8]) {
 
     use std::io::Write;
 
-    // Use NamedTempFile to get random names and automatic cleanup if we return early.
     let Ok(mut tmp_expr) = tempfile::NamedTempFile::new_in(&dir) else {
         return;
     };
@@ -127,13 +172,22 @@ pub(crate) fn cache_store(key: &str, expr_bytes: &[u8], meta_bytes: &[u8]) {
         return;
     }
 
-    // Atomic renames via persist
     let final_expr = dir.join(format!("{}.cbor", key));
     let final_meta = dir.join(format!("{}.meta.cbor", key));
+    let sentinel = dir.join(format!("{}.ok", key));
 
-    if tmp_expr.persist(&final_expr).is_ok() {
-        let _ = tmp_meta.persist(&final_meta);
+    // Remove sentinel first — marks the entry as incomplete during update.
+    let _ = fs::remove_file(&sentinel);
+
+    if tmp_expr.persist(&final_expr).is_err() {
+        return;
     }
+    if tmp_meta.persist(&final_meta).is_err() {
+        return;
+    }
+
+    // Sentinel written last — entry is only valid when this exists.
+    let _ = fs::write(&sentinel, b"");
 }
 
 #[cfg(test)]
@@ -189,10 +243,38 @@ mod tests {
         let expr = b"expr-data";
         let meta = b"meta-data";
 
+        // Before store, load should miss.
+        assert!(cache_load(key).is_none());
+
         cache_store(key, expr, meta);
+
+        // Sentinel must exist after store.
+        let sentinel = temp_dir.path().join("tidepool").join(format!("{}.ok", key));
+        assert!(sentinel.exists(), "sentinel file should exist after store");
+
         let loaded = cache_load(key).expect("cache should load after store");
         assert_eq!(loaded.0, expr);
         assert_eq!(loaded.1, meta);
+    }
+
+    #[test]
+    #[serial]
+    fn test_cache_load_fails_without_sentinel() {
+        let temp_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::new("XDG_CACHE_HOME", temp_dir.path());
+
+        let key = "no-sentinel";
+        let dir = temp_dir.path().join("tidepool");
+        fs::create_dir_all(&dir).unwrap();
+
+        // Write cbor files but no sentinel — simulates a crash mid-store.
+        fs::write(dir.join(format!("{}.cbor", key)), b"expr").unwrap();
+        fs::write(dir.join(format!("{}.meta.cbor", key)), b"meta").unwrap();
+
+        assert!(
+            cache_load(key).is_none(),
+            "cache_load should return None without sentinel"
+        );
     }
 
     #[test]
@@ -241,6 +323,58 @@ mod tests {
 
         let k2 = cache_key("source", "target", &[]);
         assert_ne!(k1, k2, "Cache key should change when binary mtime changes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_cache_key_wrapper_script_fingerprints_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create the "real" binary.
+        let real_bin = temp_dir.path().join("tidepool-extract-bin");
+        fs::write(&real_bin, b"real-binary-v1").unwrap();
+        fs::set_permissions(&real_bin, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Create a wrapper script that execs the real binary.
+        let wrapper = temp_dir.path().join("tidepool-extract");
+        fs::write(
+            &wrapper,
+            format!("#!/bin/sh\nexec {} \"$@\"\n", real_bin.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let _guard = EnvGuard::new("TIDEPOOL_EXTRACT", &wrapper);
+
+        let k1 = cache_key("source", "target", &[]);
+
+        // Change the real binary (wrapper unchanged) — key must change.
+        fs::write(&real_bin, b"real-binary-v2-longer").unwrap();
+        let k2 = cache_key("source", "target", &[]);
+
+        assert_ne!(
+            k1, k2,
+            "Cache key should change when the target binary behind a wrapper changes"
+        );
+    }
+
+    #[test]
+    fn test_extract_exec_target() {
+        assert_eq!(
+            extract_exec_target("exec /usr/local/bin/foo \"$@\""),
+            Some("/usr/local/bin/foo")
+        );
+        assert_eq!(
+            extract_exec_target("/usr/local/bin/foo \"$@\""),
+            Some("/usr/local/bin/foo")
+        );
+        assert_eq!(extract_exec_target("#!/bin/sh"), None);
+        assert_eq!(extract_exec_target("FOO=bar"), None);
+        assert_eq!(extract_exec_target(""), None);
+        assert_eq!(extract_exec_target("relative-path arg"), None);
     }
 
     #[cfg(unix)]
