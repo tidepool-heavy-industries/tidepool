@@ -7,7 +7,7 @@ import GHC.Core.Ppr (pprCoreBindings)
 import GHC.Driver.Session (updOptLevel, gopt_set, gopt_unset)
 import GHC.Unit.Module.ModGuts (ModGuts(..))
 import GHC.Core (CoreBind)
-import GHC.Platform (genericPlatform, Platform(..))
+import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext)
 import System.Process (readProcess)
 import System.Environment (lookupEnv)
@@ -30,9 +30,10 @@ runPipeline path includes = do
     -- Force x86_64-linux target platform regardless of host architecture.
     -- The Cranelift JIT has a single backend; we need deterministic Core IR
     -- with x86_64 primops on all hosts (including ARM/macOS).
-    -- Preserve platform_constants from the real platform (same for all 64-bit).
+    -- Use genericPlatform verbatim — mixing in host platform_constants causes
+    -- GHC's specializer to produce Core with mismatched constructor tags on
+    -- aarch64, leading to case-exhaustion SIGILL in the JIT.
     let spoofedPlatform = genericPlatform
-          { platform_constants = platform_constants (targetPlatform dflags) }
     -- FullLaziness conflicts with eager eval; CprAnal unboxes return values
     -- in ways the codegen can't handle (CASE TRAP on constructor tags).
     let dflags' = gopt_set (gopt_set (gopt_unset (gopt_unset (updOptLevel 2 $ dflags
