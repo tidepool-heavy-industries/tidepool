@@ -673,3 +673,112 @@ fn thunk_blackhole() {
         other => panic!("expected InfiniteLoop, got {other:?}"),
     }
 }
+
+// =============================================================================
+// Text takeWhileT / dropWhileT PAP regression tests
+// =============================================================================
+
+/// Extract a Haskell Text value to a Rust String.
+/// Text = Con("Text", [ByteArray#, I#(offset), I#(len)])
+fn collect_text(val: &Value, table: &DataConTable) -> String {
+    if let Value::Con(id, fields) = val {
+        let name = table.name_of(*id).unwrap();
+        assert_eq!(name, "Text", "expected Text constructor, got {name}");
+        assert_eq!(fields.len(), 3, "Text should have 3 fields");
+        let bytes = match &fields[0] {
+            Value::ByteArray(ba) => ba.lock().unwrap().clone(),
+            other => panic!("expected ByteArray for Text field 0, got {other:?}"),
+        };
+        let offset = match unbox(&fields[1], table) {
+            Value::Lit(Literal::LitInt(n)) => n as usize,
+            other => panic!("expected Int for Text offset, got {other:?}"),
+        };
+        let len = match unbox(&fields[2], table) {
+            Value::Lit(Literal::LitInt(n)) => n as usize,
+            other => panic!("expected Int for Text len, got {other:?}"),
+        };
+        String::from_utf8(bytes[offset..offset + len].to_vec()).unwrap()
+    } else {
+        panic!("expected Text Con, got {val:?}");
+    }
+}
+
+/// Collect a Haskell [Text] to a Vec<String>.
+fn collect_text_list(val: &Value, table: &DataConTable) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut cur = val;
+    loop {
+        match cur {
+            Value::Con(id, fields) => {
+                let name = table.name_of(*id).unwrap();
+                if name == "[]" {
+                    break;
+                } else if name == ":" {
+                    assert_eq!(fields.len(), 2);
+                    result.push(collect_text(&fields[0], table));
+                    cur = &fields[1];
+                } else {
+                    panic!("expected [] or (:), got {name}");
+                }
+            }
+            other => panic!("expected list cons, got {other:?}"),
+        }
+    }
+    result
+}
+
+#[test]
+fn text_takewhilet_direct() {
+    static CBOR: &[u8] =
+        include_bytes!("../../haskell/test/suite_cbor/text_takeWhileT_direct.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let s = collect_text(&val, &table);
+    assert_eq!(s, "hello");
+}
+
+#[test]
+fn text_takewhilet_map() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/text_takeWhileT_map.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let result = collect_text_list(&val, &table);
+    assert_eq!(result, vec!["hello", "foo", "noSlash"]);
+}
+
+#[test]
+fn text_takewhilet_eta() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/text_takeWhileT_eta.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let result = collect_text_list(&val, &table);
+    assert_eq!(result, vec!["hello", "foo", "noSlash"]);
+}
+
+#[test]
+fn text_dropwhilet_direct() {
+    static CBOR: &[u8] =
+        include_bytes!("../../haskell/test/suite_cbor/text_dropWhileT_direct.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let s = collect_text(&val, &table);
+    assert_eq!(s, "/world");
+}
+
+#[test]
+fn text_dropwhilet_map() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/text_dropWhileT_map.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let result = collect_text_list(&val, &table);
+    assert_eq!(result, vec!["/world", "/bar", ""]);
+}
+
+#[test]
+fn text_dropwhilet_eta() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/text_dropWhileT_eta.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let result = collect_text_list(&val, &table);
+    assert_eq!(result, vec!["/world", "/bar", ""]);
+}

@@ -615,3 +615,48 @@ thunk_blackhole = let x = x in x
 -- LetRec knot-tying still works
 thunk_letrec_knot :: [Int]
 thunk_letrec_knot = let xs = 1 : xs in take 5 xs
+
+-- ============================================================
+-- Text takeWhile/dropWhile PAP regression tests
+-- ============================================================
+
+-- Pure reimplementations (same as Tidepool.Prelude.takeWhileT/dropWhileT)
+myTakeWhileT :: (Char -> Bool) -> T.Text -> T.Text
+myTakeWhileT p t = T.pack (go (T.unpack t))
+  where
+    go [] = []
+    go (c:cs)
+      | p c       = c : go cs
+      | otherwise = []
+
+myDropWhileT :: (Char -> Bool) -> T.Text -> T.Text
+myDropWhileT p t = T.pack (go (T.unpack t))
+  where
+    go [] = []
+    go s@(c:cs)
+      | p c       = go cs
+      | otherwise = s
+
+-- Direct application (should work regardless)
+text_takeWhileT_direct :: T.Text
+text_takeWhileT_direct = myTakeWhileT (/= '/') (T.pack "hello/world")
+
+-- Point-free via map (this is the PAP bug trigger pattern)
+text_takeWhileT_map :: [T.Text]
+text_takeWhileT_map = map (myTakeWhileT (/= '/')) [T.pack "hello/world", T.pack "foo/bar", T.pack "noSlash"]
+
+-- Eta-expanded via map (reference — should produce same result as above)
+text_takeWhileT_eta :: [T.Text]
+text_takeWhileT_eta = map (\p -> myTakeWhileT (/= '/') p) [T.pack "hello/world", T.pack "foo/bar", T.pack "noSlash"]
+
+-- Direct application
+text_dropWhileT_direct :: T.Text
+text_dropWhileT_direct = myDropWhileT (/= '/') (T.pack "hello/world")
+
+-- Point-free via map
+text_dropWhileT_map :: [T.Text]
+text_dropWhileT_map = map (myDropWhileT (/= '/')) [T.pack "hello/world", T.pack "foo/bar", T.pack "noSlash"]
+
+-- Eta-expanded via map (reference)
+text_dropWhileT_eta :: [T.Text]
+text_dropWhileT_eta = map (\p -> myDropWhileT (/= '/') p) [T.pack "hello/world", T.pack "foo/bar", T.pack "noSlash"]

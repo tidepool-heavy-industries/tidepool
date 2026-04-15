@@ -63,6 +63,9 @@ module Tidepool.Prelude
   , intercalate
   , joinText
   , tReverse
+    -- * Text takeWhile/dropWhile (shadows T.takeWhile/T.dropWhile to avoid PAP bug)
+  , takeWhileT
+  , dropWhileT
     -- * Polymorphic typeclasses (work on both Text and [a])
   , Len(..), Null(..), Slice(..)
     -- * Additional list combinators
@@ -413,6 +416,30 @@ joinText = T.intercalate
 tReverse :: Text -> Text
 tReverse = T.reverse
 {-# INLINE tReverse #-}
+
+-- | Text takeWhile: take the longest prefix of characters satisfying a predicate.
+-- Pure reimplementation — avoids fat-interface PAP bug with @T.takeWhile@.
+-- Use this instead of @T.takeWhile@ in point-free / higher-order contexts.
+takeWhileT :: (Char -> Bool) -> Text -> Text
+takeWhileT p t = T.pack (go (T.unpack t))
+  where
+    go [] = []
+    go (c:cs)
+      | p c       = c : go cs
+      | otherwise = []
+{-# INLINE takeWhileT #-}
+
+-- | Text dropWhile: drop the longest prefix of characters satisfying a predicate.
+-- Pure reimplementation — avoids fat-interface PAP bug with @T.dropWhile@.
+-- Use this instead of @T.dropWhile@ in point-free / higher-order contexts.
+dropWhileT :: (Char -> Bool) -> Text -> Text
+dropWhileT p t = T.pack (go (T.unpack t))
+  where
+    go [] = []
+    go s@(c:cs)
+      | p c       = go cs
+      | otherwise = s
+{-# INLINE dropWhileT #-}
 
 -- ---------------------------------------------------------------------------
 -- Polymorphic typeclasses (work on both Text and [a])
