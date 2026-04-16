@@ -24,6 +24,7 @@ use tokio::time::{timeout, Duration};
 
 const EVAL_TIMEOUT_SECS: u64 = 120;
 const MAX_CONCURRENT_EVALS: usize = 4;
+const MAX_ORPHANED_EVALS: usize = 10;
 
 // ---------------------------------------------------------------------------
 // Effect metadata — lives next to the handler, discovered via trait
@@ -1443,11 +1444,13 @@ impl TidepoolMcpServerImpl {
             Err(_elapsed) => {
                 tracing::error!("{} timed out after {}s", op, EVAL_TIMEOUT_SECS);
 
-                // Orphan thread cleanup: move handle to a background task that sleeps a grace period then joins
+                // Orphan thread cleanup: move handle to a background task that sleeps a grace period then joins.
+                // Use std::thread instead of tokio::task::spawn_blocking to avoid starving the runtime's
+                // blocking pool if the eval thread is in a tight infinite loop.
                 if let Some(h) = handle.take() {
                     let orphan_count = Arc::clone(&self.orphaned_threads);
-                    tokio::task::spawn_blocking(move || {
-                        orphan_count.fetch_add(1, Ordering::Relaxed);
+                    orphan_count.fetch_add(1, Ordering::Relaxed);
+                    std::thread::spawn(move || {
                         // Grace period for the thread to hopefully hit an Ask or return naturally
                         std::thread::sleep(Duration::from_secs(2));
                         let _ = h.join();
@@ -1471,7 +1474,7 @@ impl TidepoolMcpServerImpl {
     async fn eval(&self, req: EvalRequest) -> Result<CallToolResult, McpError> {
         tracing::info!(len = req.code.len(), "eval request");
 
-        if self.orphaned_threads.load(Ordering::Relaxed) >= 10 {
+        if self.orphaned_threads.load(Ordering::Relaxed) >= MAX_ORPHANED_EVALS {
             return Ok(CallToolResult::error(vec![Content::text(
                 "Server overloaded: too many timed-out evaluations still running. Please wait.",
             )]));
@@ -2532,6 +2535,32 @@ mod tests {
         };
         assert!(text.contains("## Timeout"));
         assert!(text.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn test_eval_orphaned_overload() {
+        let server = create_mock_server();
+        // Manually saturate the orphan count
+        server
+            .orphaned_threads
+            .store(MAX_ORPHANED_EVALS, Ordering::SeqCst);
+
+        let req = EvalRequest {
+            code: "pure 42".into(),
+            imports: String::new(),
+            helpers: String::new(),
+            input: None,
+            max_len: None,
+        };
+
+        let res = server.eval(req).await.unwrap();
+        assert_eq!(res.is_error, Some(true));
+        let text = match &res.content[0].raw {
+            RawContent::Text(t) => &t.text,
+            _ => panic!("Expected text content"),
+        };
+        assert!(text.contains("Server overloaded"));
+        assert!(text.contains("too many timed-out evaluations"));
     }
 
     fn create_mock_server() -> TidepoolMcpServerImpl {
