@@ -1,7 +1,9 @@
 //! Core representation types for Tidepool's GHC Core IR.
 //!
-//! Defines `CoreExpr` (a recursive tree of `CoreFrame` nodes), `DataConTable`,
-//! literals, variables, and CBOR serialization.
+//! Provides the primary intermediate representation (IR) used by Tidepool.
+//! The IR is a recursive tree of [`CoreFrame`] nodes, typically manipulated
+//! as a [`CoreExpr`]. It also defines identifiers, literals, and a
+//! [`DataConTable`] for constructor metadata.
 
 pub mod builder;
 pub mod datacon;
@@ -21,5 +23,9 @@ pub use frame::*;
 pub use tree::*;
 pub use types::*;
 
-/// A complete Core expression, stored as a flat recursive tree.
+/// Core IR expression: a recursion scheme over [`CoreFrame`] nodes.
+///
+/// This is the primary interchange format between the Haskell frontend
+/// (which translates GHC Core into this tree) and the Rust backend
+/// (which optimizes it or compiles it into machine code).
 pub type CoreExpr = RecursiveTree<CoreFrame<usize>>;

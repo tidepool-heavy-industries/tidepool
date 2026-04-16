@@ -1,7 +1,8 @@
 //! Tree-walking interpreter for Tidepool Core expressions.
 //!
-//! Provides `Value`, environment management, thunk allocation, and a lazy
-//! evaluator that reduces `CoreExpr` to `Value`.
+//! Provides a lazy, big-step evaluator for [`tidepool_repr::CoreExpr`].
+//! Includes runtime representations ([`Value`]), environment management ([`Env`]),
+//! and thunk storage ([`Heap`]).
 
 pub mod env;
 pub mod error;

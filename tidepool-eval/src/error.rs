@@ -30,7 +30,9 @@ impl std::fmt::Display for ValueKind {
     }
 }
 
-/// Evaluation error.
+/// Errors that can occur during interpretation.
+///
+/// Includes runtime type errors, unbound variables, and arity mismatches.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum EvalError {
     /// Variable not found in environment

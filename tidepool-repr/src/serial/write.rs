@@ -13,7 +13,10 @@ fn write_header(buf: &mut Vec<u8>) {
     buf.extend_from_slice(&super::VERSION_MINOR.to_be_bytes());
 }
 
-/// Writes a CoreExpr to a CBOR-encoded byte vector.
+/// Writes a [`crate::CoreExpr`] to a CBOR-encoded byte vector.
+///
+/// Encodes a Core expression into the binary format, including the
+/// `TPLR` magic header and current version information.
 pub fn write_cbor(expr: &RecursiveTree<CoreFrame<usize>>) -> Result<Vec<u8>, WriteError> {
     if expr.nodes.is_empty() {
         return Err(WriteError::Cbor(

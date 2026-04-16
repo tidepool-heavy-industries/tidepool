@@ -3,8 +3,10 @@
 use tidepool_eval::{Changed, Pass};
 use tidepool_repr::{replace_subtree, CoreExpr, CoreFrame};
 
-/// Beta reduction pass: find `App { fun, arg }` where `fun` is a `Lam { binder, body }`.
-/// Replaces it with `subst(body, binder, arg)`.
+/// Optimization pass: beta reduction.
+///
+/// Replaces function applications `(\x -> body) arg` with the body where
+/// `x` is substituted for `arg`.
 pub struct BetaReduce;
 
 impl Pass for BetaReduce {

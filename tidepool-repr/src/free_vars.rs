@@ -4,7 +4,7 @@ use crate::{CoreExpr, CoreFrame, VarId};
 use rustc_hash::FxHashSet;
 
 /// Collect all free variables in the expression rooted at the given node.
-/// Returns a sorted, deduplicated Vec<VarId> for efficient access and minimal allocation.
+/// Returns a sorted, deduplicated `Vec<VarId>` for efficient access and minimal allocation.
 pub fn free_vars(tree: &CoreExpr) -> Vec<VarId> {
     if tree.nodes.is_empty() {
         return Vec::new();

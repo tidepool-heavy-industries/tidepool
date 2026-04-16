@@ -4,7 +4,11 @@ use crate::frame::CoreFrame;
 use crate::types::Alt;
 use std::collections::HashMap;
 
-/// A tree stored as a flat vector of frames. Children are `usize` indices into `nodes`.
+/// A tree stored as a flat vector of frames.
+///
+/// Children are stored as `usize` indices into the `nodes` vector.
+/// This flat layout improves cache locality and allows for efficient
+/// serialization without pointer-based traversal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecursiveTree<F> {
     /// The nodes of the tree. The root is typically the last node.

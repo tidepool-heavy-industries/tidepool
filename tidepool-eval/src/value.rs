@@ -11,6 +11,10 @@ use tidepool_repr::{CoreExpr, DataConId, Literal, VarId};
 pub type SharedByteArray = Arc<Mutex<Vec<u8>>>;
 
 /// Runtime value for the tree-walking interpreter.
+///
+/// Represents an object in Weak Head Normal Form (WHNF). This includes
+/// fully-applied constructors, closures, literals, and references to
+/// lazy thunks.
 #[derive(Debug, Clone)]
 pub enum Value {
     /// Primitive literal value (Int#, Word#, Char#, String#, Float#, Double#).

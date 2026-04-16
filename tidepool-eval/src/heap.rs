@@ -4,18 +4,24 @@ use crate::env::Env;
 use crate::value::{ThunkId, Value};
 use tidepool_repr::CoreExpr;
 
-/// State of a thunk in the thunk store.
+/// The evaluation state of a lazy thunk.
+///
+/// Follows the standard GHC lifecycle: `Unevaluated` -> `BlackHole` -> `Evaluated`.
 #[derive(Debug, Clone)]
 pub enum ThunkState {
-    /// Initial state: captured environment and expression.
+    /// Initial state: captured environment and expression to be evaluated.
     Unevaluated(Env, CoreExpr),
-    /// Under evaluation: used for infinite loop (cycle) detection.
+    /// Under evaluation: used to detect infinite loops (circular dependencies).
     BlackHole,
-    /// Final state: successfully evaluated to WHNF.
+    /// Final state: has been successfully evaluated to WHNF.
     Evaluated(Value),
 }
 
-/// Heap trait: abstraction for thunk storage.
+/// Abstract storage for thunks.
+///
+/// Decouples the interpreter from the concrete memory management strategy,
+/// allowing for simple vector-backed heaps or more complex garbage-collected
+/// arenas.
 pub trait Heap {
     /// Reserve an ID and store an unevaluated expression.
     fn alloc(&mut self, env: Env, expr: CoreExpr) -> ThunkId;

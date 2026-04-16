@@ -4,8 +4,10 @@ use crate::value::Value;
 use im::HashMap;
 use tidepool_repr::VarId;
 
-/// Evaluation environment: variable bindings.
-/// Uses im::HashMap for O(1) clone (structural sharing).
+/// Evaluation environment: mapping from [`VarId`] to [`Value`].
+///
+/// Uses an `im::HashMap` for efficient structural sharing, allowing
+/// closures to capture their environment with minimal overhead.
 pub type Env = HashMap<VarId, Value>;
 
 #[cfg(test)]

@@ -1,4 +1,8 @@
-//! Serialization and deserialization for Tidepool IR using CBOR.
+//! CBOR serialization and deserialization for Tidepool IR.
+//!
+//! Provides the binary format for transferring IR from the Haskell frontend
+//! to the Rust runtime. Includes serialization for both expressions and
+//! constructor metadata tables.
 
 pub mod read;
 pub mod write;
@@ -9,6 +13,8 @@ pub use write::write_cbor;
 pub use write::write_metadata;
 
 /// Errors that can occur during CBOR deserialization of Tidepool IR.
+///
+/// Wraps underlying `ciborium` errors and adds structural context.
 #[derive(Debug, thiserror::Error)]
 pub enum ReadError {
     /// An error occurred in the underlying CBOR parser.
@@ -529,19 +535,13 @@ mod tests {
 
     #[test]
     fn test_read_bad_frame_tag() {
-        let node = ciborium::value::Value::Array(vec![
-            ciborium::value::Value::Text("Bogus".to_string()),
-        ]);
+        let node =
+            ciborium::value::Value::Array(vec![ciborium::value::Value::Text("Bogus".to_string())]);
         let nodes = ciborium::value::Value::Array(vec![node]);
-        let root = ciborium::value::Value::Array(vec![
-            nodes,
-            ciborium::value::Value::Integer(0.into()),
-        ]);
+        let root =
+            ciborium::value::Value::Array(vec![nodes, ciborium::value::Value::Integer(0.into())]);
         let bytes = cbor_bytes(root);
-        assert!(matches!(
-            read_cbor(&bytes),
-            Err(ReadError::InvalidTag(_))
-        ));
+        assert!(matches!(read_cbor(&bytes), Err(ReadError::InvalidTag(_))));
     }
 
     #[test]
@@ -552,10 +552,8 @@ mod tests {
             ciborium::value::Value::Array(vec![]),
         ]);
         let nodes = ciborium::value::Value::Array(vec![node]);
-        let root = ciborium::value::Value::Array(vec![
-            nodes,
-            ciborium::value::Value::Integer(0.into()),
-        ]);
+        let root =
+            ciborium::value::Value::Array(vec![nodes, ciborium::value::Value::Integer(0.into())]);
         let bytes = cbor_bytes(root);
         assert!(matches!(
             read_cbor(&bytes),
@@ -577,10 +575,8 @@ mod tests {
                 ciborium::value::Value::Integer(5.into()), // out of bounds
             ]),
         ]);
-        let root = ciborium::value::Value::Array(vec![
-            nodes,
-            ciborium::value::Value::Integer(1.into()),
-        ]);
+        let root =
+            ciborium::value::Value::Array(vec![nodes, ciborium::value::Value::Integer(1.into())]);
         let bytes = cbor_bytes(root);
         assert!(matches!(
             read_cbor(&bytes),
