@@ -12,8 +12,11 @@ pub use write::write_metadata;
 #[derive(Debug, thiserror::Error)]
 pub enum ReadError {
     /// An error occurred in the underlying CBOR parser.
-    #[error("CBOR error: {0}")]
-    Cbor(String),
+    #[error("CBOR decode error: {0}")]
+    Cbor(#[from] ciborium::de::Error<std::io::Error>),
+    /// An I/O error occurred.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
     /// An unexpected or unknown tag was encountered.
     #[error("Invalid tag: {0}")]
     InvalidTag(String),
@@ -48,8 +51,11 @@ pub const HEADER_LEN: usize = 8;
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
     /// An error occurred in the underlying CBOR serializer.
-    #[error("CBOR error: {0}")]
-    Cbor(String),
+    #[error("CBOR encode error: {0}")]
+    Cbor(#[from] ciborium::ser::Error<std::io::Error>),
+    /// An I/O error occurred.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 #[cfg(test)]
@@ -529,19 +535,13 @@ mod tests {
 
     #[test]
     fn test_read_bad_frame_tag() {
-        let node = ciborium::value::Value::Array(vec![
-            ciborium::value::Value::Text("Bogus".to_string()),
-        ]);
+        let node =
+            ciborium::value::Value::Array(vec![ciborium::value::Value::Text("Bogus".to_string())]);
         let nodes = ciborium::value::Value::Array(vec![node]);
-        let root = ciborium::value::Value::Array(vec![
-            nodes,
-            ciborium::value::Value::Integer(0.into()),
-        ]);
+        let root =
+            ciborium::value::Value::Array(vec![nodes, ciborium::value::Value::Integer(0.into())]);
         let bytes = cbor_bytes(root);
-        assert!(matches!(
-            read_cbor(&bytes),
-            Err(ReadError::InvalidTag(_))
-        ));
+        assert!(matches!(read_cbor(&bytes), Err(ReadError::InvalidTag(_))));
     }
 
     #[test]
@@ -552,10 +552,8 @@ mod tests {
             ciborium::value::Value::Array(vec![]),
         ]);
         let nodes = ciborium::value::Value::Array(vec![node]);
-        let root = ciborium::value::Value::Array(vec![
-            nodes,
-            ciborium::value::Value::Integer(0.into()),
-        ]);
+        let root =
+            ciborium::value::Value::Array(vec![nodes, ciborium::value::Value::Integer(0.into())]);
         let bytes = cbor_bytes(root);
         assert!(matches!(
             read_cbor(&bytes),
@@ -577,10 +575,8 @@ mod tests {
                 ciborium::value::Value::Integer(5.into()), // out of bounds
             ]),
         ]);
-        let root = ciborium::value::Value::Array(vec![
-            nodes,
-            ciborium::value::Value::Integer(1.into()),
-        ]);
+        let root =
+            ciborium::value::Value::Array(vec![nodes, ciborium::value::Value::Integer(1.into())]);
         let bytes = cbor_bytes(root);
         assert!(matches!(
             read_cbor(&bytes),

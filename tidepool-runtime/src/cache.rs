@@ -40,16 +40,15 @@ pub(crate) fn cache_key(source: &str, target: &str, include: &[&Path]) -> String
 /// If the resolved path is a shell wrapper script (e.g. ~/.cargo/bin/tidepool-extract),
 /// also fingerprints the target binary it delegates to (e.g. ~/.local/bin/tidepool-extract-bin).
 fn extract_binary_fingerprint(hasher: &mut blake3::Hasher) {
-    let bin_name = std::env::var("TIDEPOOL_EXTRACT")
-        .unwrap_or_else(|_| "tidepool-extract".to_string());
+    let bin_name =
+        std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".to_string());
 
     if let Ok(path) = which::which(&bin_name) {
         fingerprint_single_binary(hasher, &path);
 
         // If this looks like a shell wrapper script, also fingerprint the target binary.
         if let Ok(contents) = fs::read_to_string(&path) {
-            if contents.len() < 4096 && (contents.starts_with("#!") || contents.contains("exec "))
-            {
+            if contents.len() < 4096 && (contents.starts_with("#!") || contents.contains("exec ")) {
                 for line in contents.lines() {
                     if let Some(target) = extract_exec_target(line.trim()) {
                         let target_path = PathBuf::from(target);
@@ -381,8 +380,8 @@ mod tests {
     #[test]
     #[serial]
     fn test_cache_key_binary_fingerprint_size() {
-        use std::os::unix::fs::PermissionsExt;
         use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
 
         let temp_dir = TempDir::new().unwrap();
         let bin_path = temp_dir.path().join("fake-extract-size");
@@ -395,10 +394,7 @@ mod tests {
         let k1 = cache_key("source", "target", &[]);
 
         // Change size
-        let mut file = fs::OpenOptions::new()
-            .append(true)
-            .open(&bin_path)
-            .unwrap();
+        let mut file = fs::OpenOptions::new().append(true).open(&bin_path).unwrap();
         file.write_all(b"extra").unwrap();
         drop(file);
 

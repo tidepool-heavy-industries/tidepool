@@ -16,9 +16,9 @@ fn write_header(buf: &mut Vec<u8>) {
 /// Writes a CoreExpr to a CBOR-encoded byte vector.
 pub fn write_cbor(expr: &RecursiveTree<CoreFrame<usize>>) -> Result<Vec<u8>, WriteError> {
     if expr.nodes.is_empty() {
-        return Err(WriteError::Cbor(
+        return Err(WriteError::Cbor(ciborium::ser::Error::Value(
             "attempted to write an empty RecursiveTree as a CoreExpr".to_string(),
-        ));
+        )));
     }
 
     let mut nodes_val = Vec::with_capacity(expr.nodes.len());
@@ -35,8 +35,7 @@ pub fn write_cbor(expr: &RecursiveTree<CoreFrame<usize>>) -> Result<Vec<u8>, Wri
 
     let mut bytes = Vec::new();
     write_header(&mut bytes);
-    ciborium::ser::into_writer(&tree_val, &mut bytes)
-        .map_err(|e| WriteError::Cbor(e.to_string()))?;
+    ciborium::ser::into_writer(&tree_val, &mut bytes)?;
 
     Ok(bytes)
 }
@@ -90,7 +89,7 @@ pub fn write_metadata(table: &crate::datacon_table::DataConTable) -> Result<Vec<
 
     let mut bytes = Vec::new();
     write_header(&mut bytes);
-    ciborium::ser::into_writer(&root, &mut bytes).map_err(|e| WriteError::Cbor(e.to_string()))?;
+    ciborium::ser::into_writer(&root, &mut bytes)?;
 
     Ok(bytes)
 }

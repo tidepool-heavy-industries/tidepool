@@ -10,7 +10,7 @@ description = "Runtime support for Tidepool applications"
 readme = "../README.md"
 
 [dependencies]
-thiserror = "2"
+thiserror = "1"
 tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
 tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
 tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }

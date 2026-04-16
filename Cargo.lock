@@ -3445,7 +3445,7 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "serde_json",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
  "tidepool-eval",
  "tidepool-repr",
 ]
@@ -3479,7 +3479,7 @@ dependencies = [
  "rustc-hash",
  "serial_test",
  "target-lexicon",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
  "tidepool-effect",
  "tidepool-eval",
  "tidepool-heap",
@@ -3493,7 +3493,7 @@ version = "0.1.0"
 dependencies = [
  "frunk",
  "proptest",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
  "tidepool-bridge",
  "tidepool-eval",
  "tidepool-repr",
@@ -3504,7 +3504,7 @@ name = "tidepool-eval"
 version = "0.1.0"
 dependencies = [
  "im",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
  "tidepool-repr",
 ]
 
@@ -3529,7 +3529,7 @@ version = "0.1.0"
 dependencies = [
  "bumpalo",
  "proptest",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
  "tidepool-eval",
  "tidepool-repr",
 ]
@@ -3587,7 +3587,7 @@ dependencies = [
  "proptest",
  "rustc-hash",
  "serial_test",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
  "tidepool-testing",
 ]
 
@@ -3603,7 +3603,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-codegen",
