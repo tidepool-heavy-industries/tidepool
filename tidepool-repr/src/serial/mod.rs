@@ -14,9 +14,6 @@ pub enum ReadError {
     /// An error occurred in the underlying CBOR parser.
     #[error("CBOR decode error: {0}")]
     Cbor(#[from] ciborium::de::Error<std::io::Error>),
-    /// An I/O error occurred.
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
     /// An unexpected or unknown tag was encountered.
     #[error("Invalid tag: {0}")]
     InvalidTag(String),
@@ -53,9 +50,9 @@ pub enum WriteError {
     /// An error occurred in the underlying CBOR serializer.
     #[error("CBOR encode error: {0}")]
     Cbor(#[from] ciborium::ser::Error<std::io::Error>),
-    /// An I/O error occurred.
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    /// Attempted to write an empty tree.
+    #[error("attempted to write an empty RecursiveTree as a CoreExpr")]
+    EmptyTree,
 }
 
 #[cfg(test)]
