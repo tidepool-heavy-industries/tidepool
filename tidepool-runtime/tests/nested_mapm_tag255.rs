@@ -99,7 +99,11 @@ impl RealFs {
     }
     fn resolve(&self, p: &str) -> PathBuf {
         let path = PathBuf::from(p);
-        if path.is_absolute() { path } else { self.root.join(path) }
+        if path.is_absolute() {
+            path
+        } else {
+            self.root.join(path)
+        }
     }
 }
 impl EffectHandler for RealFs {
@@ -113,8 +117,11 @@ impl EffectHandler for RealFs {
             FsReq::FsWrite(_, _) => cx.respond(()),
             FsReq::FsListDir(path) => {
                 let entries: Vec<String> = std::fs::read_dir(self.resolve(&path))
-                    .map(|rd| rd.filter_map(|e| e.ok())
-                        .map(|e| e.file_name().to_string_lossy().to_string()).collect())
+                    .map(|rd| {
+                        rd.filter_map(|e| e.ok())
+                            .map(|e| e.file_name().to_string_lossy().to_string())
+                            .collect()
+                    })
                     .unwrap_or_default();
                 cx.respond(entries)
             }
@@ -122,11 +129,16 @@ impl EffectHandler for RealFs {
                 let full = self.root.join(pattern.as_str());
                 let root = self.root.clone();
                 let entries: Vec<String> = glob::glob(full.to_str().unwrap_or(""))
-                    .map(|paths| paths
-                        .filter_map(|p: Result<PathBuf, _>| p.ok())
-                        .filter_map(move |p: PathBuf| p.strip_prefix(&root).ok()
-                            .map(|rel: &Path| rel.to_string_lossy().to_string()))
-                        .collect())
+                    .map(|paths| {
+                        paths
+                            .filter_map(|p: Result<PathBuf, _>| p.ok())
+                            .filter_map(move |p: PathBuf| {
+                                p.strip_prefix(&root)
+                                    .ok()
+                                    .map(|rel: &Path| rel.to_string_lossy().to_string())
+                            })
+                            .collect()
+                    })
                     .unwrap_or_default();
                 cx.respond(entries)
             }
@@ -242,12 +254,14 @@ stats <- mapM (\crate -> do
 pure stats
 "#;
 
-    let full_module = tidepool_mcp::template_haskell(
-        &preamble, &stack, user_code, "", "", None, Some(4096),
-    );
+    let full_module =
+        tidepool_mcp::template_haskell(&preamble, &stack, user_code, "", "", None, Some(4096));
 
     // Dump the generated module for debugging
-    eprintln!("=== Generated module ({} lines) ===", full_module.lines().count());
+    eprintln!(
+        "=== Generated module ({} lines) ===",
+        full_module.lines().count()
+    );
 
     let pp = prelude_path();
     let result = std::thread::Builder::new()

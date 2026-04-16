@@ -33,8 +33,7 @@ fn strip_header(bytes: &[u8]) -> Result<&[u8], ReadError> {
 /// legacy headerless CBOR is also accepted.
 pub fn read_cbor(bytes: &[u8]) -> Result<RecursiveTree<CoreFrame<usize>>, ReadError> {
     let bytes = strip_header(bytes)?;
-    let tree_val: Value =
-        ciborium::de::from_reader(bytes).map_err(|e| ReadError::Cbor(e.to_string()))?;
+    let tree_val: Value = ciborium::de::from_reader(bytes)?;
 
     let root_array = match tree_val {
         Value::Array(a) if a.len() == 2 => a,
@@ -96,8 +95,7 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
     use crate::types::DataConId;
 
     let bytes = strip_header(bytes)?;
-    let val: Value =
-        ciborium::de::from_reader(bytes).map_err(|e| ReadError::Cbor(e.to_string()))?;
+    let val: Value = ciborium::de::from_reader(bytes)?;
 
     let root = match val {
         Value::Array(a) => a,

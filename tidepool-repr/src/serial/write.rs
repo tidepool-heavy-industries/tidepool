@@ -19,9 +19,7 @@ fn write_header(buf: &mut Vec<u8>) {
 /// `TPLR` magic header and current version information.
 pub fn write_cbor(expr: &RecursiveTree<CoreFrame<usize>>) -> Result<Vec<u8>, WriteError> {
     if expr.nodes.is_empty() {
-        return Err(WriteError::Cbor(
-            "attempted to write an empty RecursiveTree as a CoreExpr".to_string(),
-        ));
+        return Err(WriteError::EmptyTree);
     }
 
     let mut nodes_val = Vec::with_capacity(expr.nodes.len());
@@ -38,8 +36,7 @@ pub fn write_cbor(expr: &RecursiveTree<CoreFrame<usize>>) -> Result<Vec<u8>, Wri
 
     let mut bytes = Vec::new();
     write_header(&mut bytes);
-    ciborium::ser::into_writer(&tree_val, &mut bytes)
-        .map_err(|e| WriteError::Cbor(e.to_string()))?;
+    ciborium::ser::into_writer(&tree_val, &mut bytes)?;
 
     Ok(bytes)
 }
@@ -93,7 +90,7 @@ pub fn write_metadata(table: &crate::datacon_table::DataConTable) -> Result<Vec<
 
     let mut bytes = Vec::new();
     write_header(&mut bytes);
-    ciborium::ser::into_writer(&root, &mut bytes).map_err(|e| WriteError::Cbor(e.to_string()))?;
+    ciborium::ser::into_writer(&root, &mut bytes)?;
 
     Ok(bytes)
 }
