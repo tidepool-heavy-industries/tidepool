@@ -5,6 +5,7 @@
 //! via `TidepoolMcpServer<H>`.
 
 use dyn_clone::{clone_trait_object, DynClone};
+use parking_lot::Mutex;
 use rmcp::{
     model::*, service::RequestContext, ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
 };
@@ -13,8 +14,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use tidepool_bridge::{FromCore, ToCore};
 use tidepool_runtime::DispatchEffect;
 use tokio::io::{stdin, stdout};
@@ -22,6 +24,7 @@ use tokio::time::{timeout, Duration};
 
 const EVAL_TIMEOUT_SECS: u64 = 120;
 const MAX_CONCURRENT_EVALS: usize = 4;
+const MAX_ORPHANED_EVALS: usize = 10;
 
 // ---------------------------------------------------------------------------
 // Effect metadata — lives next to the handler, discovered via trait
@@ -1286,9 +1289,10 @@ pub struct TidepoolMcpServerImpl {
     ask_tag: u64,
     // Effect names for error annotation (indexed by tag)
     effect_names: Vec<String>,
-    continuations: Arc<std::sync::Mutex<HashMap<String, EvalSession>>>,
+    continuations: Arc<Mutex<HashMap<String, EvalSession>>>,
     next_cont_id: Arc<AtomicU64>,
     eval_semaphore: Arc<tokio::sync::Semaphore>,
+    orphaned_threads: Arc<AtomicUsize>,
 }
 
 impl TidepoolMcpServerImpl {
@@ -1301,7 +1305,7 @@ impl TidepoolMcpServerImpl {
     /// Dropping `EvalSession` drops `response_tx` → blocked eval thread's
     /// `response_rx.recv()` returns Err → thread exits → permit freed.
     fn evict_oldest_continuation(&self) {
-        let mut conts = self.continuations.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conts = self.continuations.lock();
         if let Some(oldest_key) = conts
             .iter()
             .min_by_key(|(_, s)| s.created_at)
@@ -1319,6 +1323,7 @@ impl TidepoolMcpServerImpl {
         source: Arc<str>,
         response_tx: std::sync::mpsc::Sender<String>,
         captured_output: CapturedOutput,
+        mut handle: Option<JoinHandle<()>>,
     ) -> Result<CallToolResult, McpError> {
         let eval_timeout = Duration::from_secs(EVAL_TIMEOUT_SECS);
         match timeout(eval_timeout, session_rx.recv()).await {
@@ -1358,22 +1363,16 @@ impl TidepoolMcpServerImpl {
                                 obj.insert("output".into(), serde_json::Value::from(output));
                             }
                         }
-                        self.continuations
-                            .lock()
-                            .unwrap_or_else(|e| {
-                                tracing::warn!("continuation store mutex was poisoned, recovering");
-                                e.into_inner()
-                            })
-                            .insert(
-                                cont_id.clone(),
-                                EvalSession {
-                                    response_tx,
-                                    session_rx,
-                                    source: Arc::clone(&source),
-                                    created_at: std::time::Instant::now(),
-                                    captured_output,
-                                },
-                            );
+                        self.continuations.lock().insert(
+                            cont_id.clone(),
+                            EvalSession {
+                                response_tx,
+                                session_rx,
+                                source: Arc::clone(&source),
+                                created_at: std::time::Instant::now(),
+                                captured_output,
+                            },
+                        );
                         Ok(CallToolResult::success(vec![Content::text(
                             json_obj.to_string(),
                         )]))
@@ -1395,6 +1394,15 @@ impl TidepoolMcpServerImpl {
             Ok(None) => {
                 tracing::error!("{} thread crashed", op);
                 let mut crash_info = String::new();
+
+                // If we have the handle, joining it gives us the panic payload
+                if let Some(h) = handle.take() {
+                    if let Err(e) = h.join() {
+                        crash_info.push_str("\n\n## Thread Panic\n");
+                        crash_info.push_str(&format_panic_payload(e));
+                    }
+                }
+
                 let crash_log = async {
                     use tokio::io::{AsyncReadExt, AsyncSeekExt};
                     let mut file = tokio::fs::File::open(".tidepool/crash.log").await.ok()?;
@@ -1435,6 +1443,21 @@ impl TidepoolMcpServerImpl {
             }
             Err(_elapsed) => {
                 tracing::error!("{} timed out after {}s", op, EVAL_TIMEOUT_SECS);
+
+                // Orphan thread cleanup: move handle to a background task that sleeps a grace period then joins.
+                // Use std::thread instead of tokio::task::spawn_blocking to avoid starving the runtime's
+                // blocking pool if the eval thread is in a tight infinite loop.
+                if let Some(h) = handle.take() {
+                    let orphan_count = Arc::clone(&self.orphaned_threads);
+                    orphan_count.fetch_add(1, Ordering::Relaxed);
+                    std::thread::spawn(move || {
+                        // Grace period for the thread to hopefully hit an Ask or return naturally
+                        std::thread::sleep(Duration::from_secs(2));
+                        let _ = h.join();
+                        orphan_count.fetch_sub(1, Ordering::Relaxed);
+                    });
+                }
+
                 let error_msg = format_error_with_source(
                     "Timeout",
                     &format!(
@@ -1450,6 +1473,12 @@ impl TidepoolMcpServerImpl {
 
     async fn eval(&self, req: EvalRequest) -> Result<CallToolResult, McpError> {
         tracing::info!(len = req.code.len(), "eval request");
+
+        if self.orphaned_threads.load(Ordering::Relaxed) >= MAX_ORPHANED_EVALS {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Server overloaded: too many timed-out evaluations still running. Please wait.",
+            )]));
+        }
 
         // Reject unsafe/IO imports before compilation
         for imp in req
@@ -1510,9 +1539,9 @@ impl TidepoolMcpServerImpl {
             }
         };
 
-        // Spawn eval thread — does NOT join; communicates via channels
+        // Spawn eval thread — communicates via channels; joined on timeout or completion
         let thread_session_tx = session_tx;
-        let _handle = std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("tidepool-eval".into())
             .stack_size(256 * 1024 * 1024)
             .spawn(move || {
@@ -1598,18 +1627,22 @@ impl TidepoolMcpServerImpl {
             .map_err(|e| McpError::internal_error(format!("thread spawn error: {}", e), None))?;
 
         // Await first message from the eval thread
-        self.handle_session_result("eval", session_rx, source, response_tx, captured)
-            .await
+        self.handle_session_result(
+            "eval",
+            session_rx,
+            source,
+            response_tx,
+            captured,
+            Some(handle),
+        )
+        .await
     }
 
     async fn resume(&self, req: ResumeRequest) -> Result<CallToolResult, McpError> {
         tracing::info!(continuation_id = %req.continuation_id, "resume request");
 
         let session = {
-            let mut conts = self.continuations.lock().unwrap_or_else(|e| {
-                tracing::warn!("continuation store mutex was poisoned, recovering");
-                e.into_inner()
-            });
+            let mut conts = self.continuations.lock();
             conts.remove(&req.continuation_id).ok_or_else(|| {
                 McpError::invalid_params(
                     format!(
@@ -1632,8 +1665,15 @@ impl TidepoolMcpServerImpl {
         let captured = session.captured_output.clone();
 
         // Await the next message from the eval thread
-        self.handle_session_result("resume", session.session_rx, source, response_tx, captured)
-            .await
+        self.handle_session_result(
+            "resume",
+            session.session_rx,
+            source,
+            response_tx,
+            captured,
+            None,
+        )
+        .await
     }
 }
 
@@ -1757,9 +1797,10 @@ where
                 has_user_library: false,
                 ask_tag,
                 effect_names,
-                continuations: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                continuations: Arc::new(Mutex::new(HashMap::new())),
                 next_cont_id: Arc::new(AtomicU64::new(1)),
                 eval_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_EVALS)),
+                orphaned_threads: Arc::new(AtomicUsize::new(0)),
             },
             _phantom: PhantomData,
         }
@@ -2369,7 +2410,7 @@ mod tests {
         .unwrap();
 
         let res = server
-            .handle_session_result("eval", rx, source, resp_tx, captured)
+            .handle_session_result("eval", rx, source, resp_tx, captured, None)
             .await
             .unwrap();
         assert_eq!(res.is_error, Some(false));
@@ -2395,7 +2436,7 @@ mod tests {
         .unwrap();
 
         let res = server
-            .handle_session_result("eval", rx, source, resp_tx, captured)
+            .handle_session_result("eval", rx, source, resp_tx, captured, None)
             .await
             .unwrap();
         assert_eq!(res.is_error, Some(false));
@@ -2413,7 +2454,7 @@ mod tests {
 
         // Check if it's in the continuations map
         let cont_id = json["continuation_id"].as_str().unwrap();
-        let conts = server.continuations.lock().unwrap();
+        let conts = server.continuations.lock();
         assert!(conts.contains_key(cont_id));
     }
 
@@ -2431,7 +2472,7 @@ mod tests {
         .unwrap();
 
         let res = server
-            .handle_session_result("eval", rx, source, resp_tx, captured)
+            .handle_session_result("eval", rx, source, resp_tx, captured, None)
             .await
             .unwrap();
         assert_eq!(res.is_error, Some(true));
@@ -2455,7 +2496,7 @@ mod tests {
         drop(tx);
 
         let res = server
-            .handle_session_result("eval", rx, source, resp_tx, captured)
+            .handle_session_result("eval", rx, source, resp_tx, captured, None)
             .await
             .unwrap();
         assert_eq!(res.is_error, Some(true));
@@ -2479,7 +2520,7 @@ mod tests {
 
         let handle = tokio::spawn(async move {
             server
-                .handle_session_result("eval", rx, source, resp_tx, captured)
+                .handle_session_result("eval", rx, source, resp_tx, captured, None)
                 .await
         });
 
@@ -2494,6 +2535,32 @@ mod tests {
         };
         assert!(text.contains("## Timeout"));
         assert!(text.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn test_eval_orphaned_overload() {
+        let server = create_mock_server();
+        // Manually saturate the orphan count
+        server
+            .orphaned_threads
+            .store(MAX_ORPHANED_EVALS, Ordering::SeqCst);
+
+        let req = EvalRequest {
+            code: "pure 42".into(),
+            imports: String::new(),
+            helpers: String::new(),
+            input: None,
+            max_len: None,
+        };
+
+        let res = server.eval(req).await.unwrap();
+        assert_eq!(res.is_error, Some(true));
+        let text = match &res.content[0].raw {
+            RawContent::Text(t) => &t.text,
+            _ => panic!("Expected text content"),
+        };
+        assert!(text.contains("Server overloaded"));
+        assert!(text.contains("too many timed-out evaluations"));
     }
 
     fn create_mock_server() -> TidepoolMcpServerImpl {
@@ -2522,9 +2589,10 @@ mod tests {
             has_user_library: false,
             ask_tag: 0,
             effect_names: Vec::new(),
-            continuations: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            continuations: Arc::new(Mutex::new(HashMap::new())),
             next_cont_id: Arc::new(AtomicU64::new(1)),
             eval_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_EVALS)),
+            orphaned_threads: Arc::new(AtomicUsize::new(0)),
         }
     }
 
