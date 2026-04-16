@@ -1,8 +1,9 @@
 # Plans
 
-Active plans for codegen emit safety refactors. Each plan is one worktree.
+Queued cleanup work. Each plan is one worktree.
 
-| Plan | Branch suffix | Depends on |
-|------|---------------|------------|
-| [scoped-env](scoped-env.md) | `scoped-env` | — |
-| [tail-ctx](tail-ctx.md) | `tail-ctx` | scoped-env (touches same files, merge first) |
+| Plan | Focus |
+|------|-------|
+| [doc-pass](doc-pass.md) | Doc comments on `pub` items across library crates |
+| [error-consolidation](error-consolidation.md) | `thiserror` derives + cut 72 `.expect()` calls |
+| [mcp-hardening](mcp-hardening.md) | Orphan eval thread cleanup + residual `.lock().unwrap()` |
