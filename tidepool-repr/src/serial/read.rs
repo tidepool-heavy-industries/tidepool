@@ -28,8 +28,9 @@ fn strip_header(bytes: &[u8]) -> Result<&[u8], ReadError> {
 
 /// Reads a [`crate::CoreExpr`] from a CBOR-encoded byte slice.
 ///
-/// Decodes the binary representation of a Core expression tree, which
-/// is expected to be preceded by the `TPLR` magic header.
+/// Decodes the binary representation of a Core expression tree. The input may
+/// be preceded by the `TPLR` magic/version header; for backward compatibility,
+/// legacy headerless CBOR is also accepted.
 pub fn read_cbor(bytes: &[u8]) -> Result<RecursiveTree<CoreFrame<usize>>, ReadError> {
     let bytes = strip_header(bytes)?;
     let tree_val: Value =

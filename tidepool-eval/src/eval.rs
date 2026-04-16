@@ -75,11 +75,13 @@ pub fn force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
     }
 }
 
-/// Iteratively evaluate a value to full normal form.
+/// Iteratively evaluate a value through constructor structure.
 ///
 /// Unlike [`force`], which stops at the outermost constructor (WHNF),
-/// `deep_force` traverses the entire value tree and evaluates all nested
-/// thunks. Returns a tree where no thunk references remain.
+/// `deep_force` recursively traverses constructor fields and `ConFun`
+/// accumulated arguments, forcing any nested thunks found there.
+/// Other value forms (such as captured environments inside closures or
+/// continuations) are treated as opaque and returned unchanged.
 ///
 /// Uses an explicit work stack instead of recursion to handle deep
 /// structures (e.g., long lists) without overflowing the Rust stack.
