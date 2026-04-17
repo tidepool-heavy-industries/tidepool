@@ -520,6 +520,16 @@ impl CompiledEffectMachine {
         // SAFETY: tail_callee and tail_arg are valid heap pointers set by JIT tail-call
         // sites. Code pointers in closures point to finalized JIT functions.
         while result.is_null() && !self.vmctx.tail_callee.is_null() {
+            // External cancellation safepoint — an infinite tail-recursive
+            // loop must be interruptible. See `host_fns::trampoline_resolve`
+            // for the rationale.
+            if crate::host_fns::check_cancel_and_set_error() {
+                self.vmctx.tail_callee = std::ptr::null_mut();
+                self.vmctx.tail_arg = std::ptr::null_mut();
+                *result = crate::host_fns::error_poison_ptr();
+                return;
+            }
+
             let callee = self.vmctx.tail_callee;
             let arg = self.vmctx.tail_arg;
             self.vmctx.tail_callee = std::ptr::null_mut();

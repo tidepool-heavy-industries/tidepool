@@ -96,6 +96,10 @@ pub enum YieldError {
     /// Thunk encountered with an invalid evaluation state.
     #[error("thunk has invalid evaluation state: {0}")]
     BadThunkState(u8),
+    /// External cancellation observed at a GC safepoint. Raised when a holder
+    /// of `CancelHandle` flips the flag while the JIT is executing.
+    #[error("execution cancelled by external request")]
+    Cancelled,
 }
 
 fn format_yield_signal(sig: i32) -> String {
@@ -147,6 +151,7 @@ impl From<crate::host_fns::RuntimeError> for YieldError {
             RuntimeError::StackOverflow => YieldError::StackOverflow,
             RuntimeError::BlackHole => YieldError::BlackHole,
             RuntimeError::BadThunkState(state) => YieldError::BadThunkState(state),
+            RuntimeError::Cancelled => YieldError::Cancelled,
         }
     }
 }

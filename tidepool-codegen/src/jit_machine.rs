@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use cranelift_module::FuncId;
 use tidepool_effect::{DispatchEffect, EffectContext, EffectError};
 use tidepool_eval::value::Value;
@@ -56,6 +59,48 @@ pub struct JitEffectMachine {
     nursery: Nursery,
     tags: Result<ConTags, &'static str>,
     func_id: FuncId,
+    /// External cancellation flag. The JIT installs a thread-local clone of this
+    /// `Arc` via `set_cancel_flag` before entering compiled code; the next
+    /// GC safepoint observes the flag and aborts execution with
+    /// `YieldError::Cancelled` if it has been set. See [`Self::cancel_handle`].
+    cancel_flag: Arc<AtomicBool>,
+}
+
+/// External handle for cancelling a running `JitEffectMachine`.
+///
+/// `CancelHandle` is `Send + Sync + Clone`, so callers can hand clones to
+/// watchdog threads. Cancellation is observed at the next GC safepoint
+/// (heap check), which fires on essentially every non-trivial allocation in
+/// Haskell code. The running program unwinds via the normal error path with
+/// `JitError::Yield(YieldError::Cancelled)`.
+///
+/// The flag is per-`JitEffectMachine`, not per-run: call [`Self::reset`]
+/// between runs if you intend to reuse the machine after a cancellation.
+#[derive(Clone, Debug)]
+pub struct CancelHandle(Arc<AtomicBool>);
+
+impl CancelHandle {
+    /// Request cancellation of the associated `JitEffectMachine`. The running
+    /// program (if any) will abort at its next GC safepoint with
+    /// `YieldError::Cancelled`.
+    pub fn cancel(&self) {
+        // SeqCst is overkill for correctness here (the JIT thread's relaxed
+        // load will observe the store eventually), but this is not a hot path
+        // — it is called once from a watchdog — so we prefer the stronger
+        // ordering for debuggability.
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Returns `true` if cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// Clear a previous cancellation request. Call this between runs if the
+    /// same `JitEffectMachine` is reused after a cancelled run.
+    pub fn reset(&self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Ensures thread-local JIT registries are cleaned up even on early error return.
@@ -65,6 +110,7 @@ impl Drop for RegistryGuard {
     fn drop(&mut self) {
         crate::host_fns::clear_gc_state();
         crate::host_fns::clear_stack_map_registry();
+        crate::host_fns::clear_cancel_flag();
         crate::debug::clear_lambda_registry();
         // Clean up remaining thread-local state for same-thread reuse
         let _ = crate::host_fns::take_runtime_error();
@@ -95,13 +141,22 @@ impl JitEffectMachine {
             nursery,
             tags,
             func_id,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Obtain a clone-able, thread-safe handle for requesting cancellation of
+    /// this machine's next (or in-flight) run. The handle remains valid for
+    /// the lifetime of the machine; multiple handles may be held concurrently.
+    pub fn cancel_handle(&self) -> CancelHandle {
+        CancelHandle(self.cancel_flag.clone())
     }
 
     fn install_registries(&mut self) -> RegistryGuard {
         crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
         crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
         crate::host_fns::set_gc_state(self.nursery.start() as *mut u8, self.nursery.size());
+        crate::host_fns::set_cancel_flag(self.cancel_flag.clone());
         RegistryGuard
     }
 
@@ -267,6 +322,17 @@ unsafe fn resolve_tail_calls_protected(
 ) -> Result<*mut u8, JitError> {
     let mut ptr = result;
     while ptr.is_null() && !vmctx.tail_callee.is_null() {
+        // External cancellation safepoint — see the rationale in
+        // `host_fns::trampoline_resolve`. Without this check, an infinite
+        // tail-recursive loop never yields control back to the caller even
+        // when cancellation has been requested.
+        if crate::host_fns::check_cancel_and_set_error() {
+            vmctx.tail_callee = std::ptr::null_mut();
+            vmctx.tail_arg = std::ptr::null_mut();
+            ptr = crate::host_fns::error_poison_ptr();
+            break;
+        }
+
         let callee = vmctx.tail_callee;
         let arg = vmctx.tail_arg;
         vmctx.tail_callee = std::ptr::null_mut();

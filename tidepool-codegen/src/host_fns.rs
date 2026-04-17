@@ -3,7 +3,8 @@ use crate::gc::frame_walker;
 use crate::layout;
 use crate::stack_map::StackMapRegistry;
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use tidepool_heap::layout as heap_layout;
 
 /// Addresses below this are considered invalid (null page guard).
@@ -38,6 +39,10 @@ pub enum RuntimeError {
     BadThunkState(u8),
     #[error("Haskell error: {0}")]
     UserErrorMsg(String),
+    /// External cancellation requested via a `CancelHandle`.
+    /// Observed at the next GC safepoint (heap check).
+    #[error("execution cancelled by external request")]
+    Cancelled,
 }
 
 thread_local! {
@@ -64,6 +69,14 @@ thread_local! {
     /// Heap pointer slots registered by Rust code (e.g., apply_cont_heap's k2_stack)
     /// so GC can update them in-place when objects move during collection.
     static RUST_ROOTS: RefCell<Vec<*mut *mut u8>> = const { RefCell::new(Vec::new()) };
+
+    /// External cancellation flag. When set, the next GC safepoint will abort the
+    /// running program with `RuntimeError::Cancelled`. Cloned from the
+    /// `Arc<AtomicBool>` owned by the `JitEffectMachine` before entering JIT code.
+    ///
+    /// Installed by `set_cancel_flag` (called from `JitEffectMachine::install_registries`)
+    /// and cleared by `clear_cancel_flag` (called from `RegistryGuard::drop`).
+    static CANCEL_FLAG: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
 }
 
 /// Register a Rust stack/heap slot containing a heap pointer as a GC root.
@@ -141,6 +154,57 @@ pub fn clear_gc_state() {
     clear_rust_roots();
 }
 
+/// Install an external cancellation flag for the current thread. The next
+/// GC safepoint (heap check) will observe the flag and abort the program with
+/// `RuntimeError::Cancelled` if it has been set to `true`.
+///
+/// Called from `JitEffectMachine::install_registries` before entering JIT code.
+pub(crate) fn set_cancel_flag(flag: Arc<AtomicBool>) {
+    CANCEL_FLAG.with(|cell| {
+        *cell.borrow_mut() = Some(flag);
+    });
+}
+
+/// Remove the installed cancellation flag for the current thread. Called from
+/// `RegistryGuard::drop` so the Arc is released even on an early error return.
+pub(crate) fn clear_cancel_flag() {
+    CANCEL_FLAG.with(|cell| {
+        cell.borrow_mut().take();
+    });
+}
+
+/// Fast check for an external cancel request. Uses a relaxed load — the cost
+/// of a single extra relaxed atomic load per heap check is negligible, and
+/// cancellation is best-effort (observed at the next safepoint) so stronger
+/// ordering is not required.
+#[inline]
+fn cancel_requested() -> bool {
+    CANCEL_FLAG.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+    })
+}
+
+/// If cancellation has been requested, record `RuntimeError::Cancelled`
+/// (unless another error is already pending) and return `true`. Callers
+/// should then unwind by returning a poison pointer from their loop so the
+/// outer run loop can surface the error.
+#[inline]
+pub(crate) fn check_cancel_and_set_error() -> bool {
+    if cancel_requested() {
+        RUNTIME_ERROR.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(RuntimeError::Cancelled);
+            }
+        });
+        true
+    } else {
+        false
+    }
+}
+
 /// GC trigger: called by JIT code when alloc_ptr exceeds alloc_limit.
 ///
 /// This function MUST be compiled with frame pointers preserved
@@ -157,6 +221,24 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
 
     GC_TRIGGER_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
     GC_TRIGGER_LAST_VMCTX.store(vmctx as usize, Ordering::SeqCst);
+
+    // External cancellation safepoint. We record `RuntimeError::Cancelled`
+    // here but still perform a normal GC so the caller's allocation can
+    // succeed cleanly — routing through `runtime_oom` is unsafe for Con
+    // allocations larger than the 24-byte poison closure, which would be
+    // written past. The cancellation is actually observed at the next
+    // trampoline loop iteration (see `check_cancel_and_set_error` in the
+    // trampolines), which returns the poison pointer in a context where it
+    // will not be written to.
+    if cancel_requested() {
+        RUNTIME_ERROR.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(RuntimeError::Cancelled);
+            }
+        });
+        // Fall through to `perform_gc` so the allocation succeeds.
+    }
 
     #[cfg(target_arch = "x86_64")]
     {
@@ -368,6 +450,19 @@ pub extern "C" fn trampoline_resolve(vmctx: *mut VMContext) -> *mut u8 {
     // during compilation and point to finalized JIT functions.
     unsafe {
         loop {
+            // External cancellation safepoint. Tail-recursive loops never
+            // return to the top-level JIT call on their own, so we must check
+            // here — otherwise a runaway loop observes the cancel in
+            // `gc_trigger`, receives a poison pointer from `runtime_oom`, and
+            // immediately re-enters the trampoline forever. Returning the
+            // poison here unwinds up to `JitEffectMachine::run_pure`, which
+            // then surfaces `RuntimeError::Cancelled`.
+            if check_cancel_and_set_error() {
+                (*vmctx).tail_callee = std::ptr::null_mut();
+                (*vmctx).tail_arg = std::ptr::null_mut();
+                return error_poison_ptr();
+            }
+
             let callee = (*vmctx).tail_callee;
             let arg = (*vmctx).tail_arg;
 
@@ -523,8 +618,15 @@ pub extern "C" fn runtime_error_with_msg(kind: u64, msg_ptr: *const u8, msg_len:
 }
 
 pub extern "C" fn runtime_oom() -> *mut u8 {
+    // Preserve a pre-existing runtime error if one is already set. The
+    // external-cancellation path (see `gc_trigger`) sets `RuntimeError::Cancelled`
+    // and then forces `runtime_oom` to fire; without this guard, `HeapOverflow`
+    // would overwrite the more specific cancellation cause.
     RUNTIME_ERROR.with(|cell| {
-        *cell.borrow_mut() = Some(RuntimeError::HeapOverflow);
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(RuntimeError::HeapOverflow);
+        }
     });
     error_poison_ptr()
 }
