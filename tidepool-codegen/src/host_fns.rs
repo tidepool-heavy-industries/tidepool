@@ -653,32 +653,63 @@ pub extern "C" fn runtime_bad_thunk_state_trap(_vmctx: *mut VMContext, state: u8
     error_poison_ptr()
 }
 
+/// Size of the poison buffer.
+///
+/// The JIT's `emit_alloc_fast_path` slow-fail edge calls `runtime_oom`, takes
+/// the returned pointer as if it were a freshly-allocated heap object, and
+/// then unconditionally writes the full header + payload into it (tag byte,
+/// size halfword, Con/Closure/Thunk fields, capture slots, …). If the poison
+/// is smaller than the attempted allocation, those post-OOM stores spill past
+/// the poison into adjacent heap — we've observed glibc "corrupted size vs.
+/// prev_size" aborts as a direct consequence.
+///
+/// The JIT never clamps allocation size at emit time. The effective upper
+/// bound is `CON_FIELDS_OFFSET + MAX_FIELDS * 8` (i.e. the largest Con the
+/// read-side `heap_bridge` is willing to decode; see `MAX_FIELDS = 1024`
+/// there). Closures and thunks are bounded by the same field/capture count
+/// in practice. We size the poison to comfortably absorb that worst case so
+/// any OOM path can complete its field writes harmlessly.
+///
+/// 16 KiB: `24 + 8 * 1024 = 8216` bytes for a max-arity Con, doubled for
+/// headroom. Stays well under the `u16` header `size` encoding limit.
+pub(crate) const POISON_BUF_SIZE: usize = 16 * 1024;
+
 /// Return a pointer to a pre-allocated "poison" Closure heap object.
 /// When JIT code tries to call this as a function, it returns itself,
 /// preventing cascading crashes. The runtime error flag is already set,
 /// so the effect machine will catch it before the poison reaches user code.
+///
+/// The backing allocation is oversized (`POISON_BUF_SIZE`) so that OOM
+/// paths which treat the poison as freshly-allocated scratch (via
+/// `runtime_oom`) can complete their field writes without corrupting
+/// adjacent heap. See `POISON_BUF_SIZE` for rationale.
 pub fn error_poison_ptr() -> *mut u8 {
     use std::sync::OnceLock;
     // Layout: Closure with code_ptr pointing to `poison_trampoline`,
     // num_captured = 0. When called, returns the poison closure itself.
     static POISON: OnceLock<usize> = OnceLock::new();
     let addr = *POISON.get_or_init(|| {
-        // Closure size: header(8) + code_ptr(8) + num_captured(8) = 24
-        let size = 24usize;
-        let layout =
-            std::alloc::Layout::from_size_align(size, 8).unwrap_or_else(|_| std::process::abort());
+        // Backing buffer is oversized to absorb post-OOM scratch writes
+        // from the JIT (see POISON_BUF_SIZE docs). The Closure header
+        // describes only the logical 24-byte Closure layout — the tail
+        // bytes are zero-initialized padding that the JIT may clobber
+        // after a `runtime_oom` return.
+        let logical_size = 24u16;
+        let layout = std::alloc::Layout::from_size_align(POISON_BUF_SIZE, 8)
+            .unwrap_or_else(|_| std::process::abort());
         // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
-        // SAFETY: ptr is a fresh allocation of 24 bytes. Writing the closure header,
-        // code pointer, and capture count at known offsets within that allocation.
+        // SAFETY: ptr is a fresh allocation of POISON_BUF_SIZE bytes
+        // (>= 24). Writing the closure header, code pointer, and capture
+        // count at known offsets within the first 24 bytes.
         unsafe {
             tidepool_heap::layout::write_header(
                 ptr,
                 tidepool_heap::layout::TAG_CLOSURE,
-                size as u16,
+                logical_size,
             );
             // code_ptr = poison_trampoline
             *(ptr.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *mut usize) =
@@ -2427,5 +2458,72 @@ mod tests {
             let err = take_runtime_error().expect("Should have flagged error");
             assert!(matches!(err, RuntimeError::BadThunkState(255)));
         }
+    }
+
+    /// Regression test for the poison-buffer undersize bug.
+    ///
+    /// Prior to the fix, `runtime_oom` returned a 24-byte poison buffer that
+    /// the JIT's slow-fail alloc path then treated as freshly-allocated
+    /// scratch. For any Con with `>= 1` field (size `>= 32`) the post-OOM
+    /// field write spilled past the 24-byte allocation into adjacent heap,
+    /// manifesting as glibc "corrupted size vs. prev_size" aborts.
+    ///
+    /// The fix enlarges the poison buffer to absorb the maximum Con/Closure
+    /// footprint the JIT can emit. This test simulates the JIT's write
+    /// sequence directly: allocate a worst-case Con (24 + 1024*8 = 8216
+    /// bytes) into the poison and verify no OOB writes occur.
+    ///
+    /// Under Miri / ASan this would fail before the fix; under glibc the
+    /// corruption is non-deterministic, but the write itself is unsound
+    /// and the buffer-size assertion below guards against regression.
+    #[test]
+    fn poison_buf_absorbs_max_con_write() {
+        // Mirror of the read-side guard in heap_bridge.rs. If that constant
+        // grows, POISON_BUF_SIZE must grow to match.
+        const MAX_FIELDS: usize = 1024;
+        let worst_case_con = layout::CON_FIELDS_OFFSET as usize + MAX_FIELDS * 8;
+        assert!(
+            POISON_BUF_SIZE >= worst_case_con,
+            "poison buffer ({} B) must cover worst-case Con footprint ({} B)",
+            POISON_BUF_SIZE,
+            worst_case_con,
+        );
+
+        // Simulate the JIT's post-OOM write sequence exactly as
+        // `emit_alloc_fast_path` + the Con emitter do: tag at 0, size
+        // halfword at 1, CON_TAG at 8, num_fields at 16, fields from 24.
+        let ptr = runtime_oom();
+        assert!(!ptr.is_null());
+
+        // SAFETY: `ptr` is the poison buffer (POISON_BUF_SIZE >= worst_case_con).
+        // Writing a TAG_CON header and MAX_FIELDS u64 field slots into it
+        // stays entirely within the allocation after the fix.
+        // JIT stores use `MemFlags::trusted()` which permits unaligned
+        // access; mirror that with `write_unaligned` so the test also works
+        // on targets where a naked deref would trap on misalignment (the
+        // size halfword lands at offset 1).
+        unsafe {
+            ptr.write(layout::TAG_CON);
+            (ptr.add(1) as *mut u16).write_unaligned(worst_case_con as u16);
+            (ptr.add(layout::CON_TAG_OFFSET as usize) as *mut u64).write_unaligned(7);
+            (ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16)
+                .write_unaligned(MAX_FIELDS as u16);
+            for i in 0..MAX_FIELDS {
+                let off = layout::CON_FIELDS_OFFSET as usize + 8 * i;
+                (ptr.add(off) as *mut u64).write_unaligned(0xDEAD_BEEF_0000_0000 | (i as u64));
+            }
+            // Read back a sentinel to ensure the writes landed (and weren't
+            // silently dropped) — also defeats the optimizer.
+            let last_off = layout::CON_FIELDS_OFFSET as usize + 8 * (MAX_FIELDS - 1);
+            assert_eq!(
+                (ptr.add(last_off) as *const u64).read_unaligned(),
+                0xDEAD_BEEF_0000_0000 | (MAX_FIELDS as u64 - 1),
+            );
+        }
+
+        // `runtime_oom` sets `RuntimeError::HeapOverflow` — clear it so
+        // we don't leak state to other tests sharing this thread.
+        let err = take_runtime_error().expect("runtime_oom must flag an error");
+        assert!(matches!(err, RuntimeError::HeapOverflow));
     }
 }
