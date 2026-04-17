@@ -20,6 +20,18 @@ pub enum BridgeError {
         /// The expected representation arity.
         arity: usize,
     },
+    /// Lookup by module-qualified name failed. Emitted by derived
+    /// `FromCore`/`ToCore` impls when a variant carries a
+    /// `#[core(module = "...", name = "...")]` attribute and the computed
+    /// `<module>.<name>` is absent from the `DataConTable`. Used to
+    /// disambiguate constructors that share both unqualified name and arity
+    /// across source modules (e.g. `Pattern.Memory.Read` vs
+    /// `Pattern.File.Read`).
+    #[error("Unknown DataCon qualified name: {qualified_name}")]
+    UnknownDataConQualified {
+        /// The fully-qualified constructor name (`Module.Constructor`).
+        qualified_name: String,
+    },
     /// The number of fields in a constructor does not match the expected arity.
     #[error("Arity mismatch for DataCon {con:?}: expected {expected}, got {got}")]
     ArityMismatch {
