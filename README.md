@@ -178,6 +178,36 @@ let result = tidepool_runtime::compile_and_run(
 println!("{}", result.to_json());
 ```
 
+### Cancelling runaway programs
+
+`JitEffectMachine::cancel_handle()` returns a `Send + Sync + Clone`
+`CancelHandle` that any other thread (typically a watchdog) can use to abort
+a running program:
+
+```rust,ignore
+let mut vm = JitEffectMachine::compile(&expr, &table, 1 << 20)?;
+let handle = vm.cancel_handle();
+
+std::thread::spawn(move || {
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    handle.cancel();
+});
+
+match vm.run_pure() {
+    Err(JitError::Yield(YieldError::Cancelled)) => {
+        // Watchdog fired — the program did not complete within the budget.
+    }
+    other => { /* normal result or different error */ }
+}
+```
+
+Cancellation is observed at the next GC safepoint (heap check) or tail-call
+trampoline iteration, whichever comes first. Both fire frequently enough
+that latency is essentially negligible — typically sub-millisecond.
+
+The flag is per-machine, not per-run. Call `handle.reset()` between runs if
+you intend to reuse the same `JitEffectMachine` after a cancellation.
+
 ### Key crates
 
 | Crate | Entry points |

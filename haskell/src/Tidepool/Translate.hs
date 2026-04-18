@@ -1035,6 +1035,18 @@ translateHead = \case
             -- Multi-element: must be a heap box, use FDataAlt to bind fields.
             recordDC dc
             emitNode $ NCase scrutIdx (varId b) [FlatAlt (FDataAlt (varId (dataConWorkId dc))) (map varId vBinders) bodyIdx]
+  -- unsafeEqualityProof: elide the case entirely.
+  -- GHC emits `case unsafeEqualityProof of UnsafeRefl -> body` for GADT evidence
+  -- (e.g. freer-simple's Member constraint). After cross-module inlining via
+  -- resolveExternals, these cases survive because GHC's optimizer ran before
+  -- the bindings were merged. The UnsafeRefl constructor always matches, so we
+  -- emit the body directly. Without this, the translator emits Con_unit for
+  -- unsafeEqualityProof but the case alt expects Con_UnsafeRefl, causing a
+  -- tag mismatch (CASE TRAP) at runtime.
+  Case scrut _b _alts_ty [Alt (DataAlt _dc) binders body]
+    | isUnsafeEqualityCase scrut -> do
+        let _typeEvidence = filter isTyVar binders
+        translate body
   Case scrut b _alts_ty alts -> do
     scrutIdx <- translate scrut
     altData <- mapM translateAlt alts
@@ -1479,6 +1491,15 @@ isRuntimeErrorVar v =
 isUnsafeEqualityProofVar :: Id -> Bool
 isUnsafeEqualityProofVar v =
   occNameString (nameOccName (idName v)) == "unsafeEqualityProof"
+
+-- | Check if a scrutinee expression is unsafeEqualityProof (possibly applied
+-- to type arguments and wrapped in ticks/casts). Used to elide
+-- case-on-UnsafeRefl at the Case level.
+isUnsafeEqualityCase :: CoreExpr -> Bool
+isUnsafeEqualityCase expr =
+  case fst (collectArgs (stripTicksAndCasts expr)) of
+    Var v -> isUnsafeEqualityProofVar v
+    _     -> False
 
 isRunRWVar :: Id -> Bool
 isRunRWVar v = occNameString (nameOccName (idName v)) == "runRW#"

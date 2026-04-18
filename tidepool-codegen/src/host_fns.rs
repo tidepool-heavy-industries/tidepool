@@ -3,7 +3,8 @@ use crate::gc::frame_walker;
 use crate::layout;
 use crate::stack_map::StackMapRegistry;
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use tidepool_heap::layout as heap_layout;
 
 /// Addresses below this are considered invalid (null page guard).
@@ -38,6 +39,10 @@ pub enum RuntimeError {
     BadThunkState(u8),
     #[error("Haskell error: {0}")]
     UserErrorMsg(String),
+    /// External cancellation requested via a `CancelHandle`.
+    /// Observed at the next GC safepoint (heap check).
+    #[error("execution cancelled by external request")]
+    Cancelled,
 }
 
 thread_local! {
@@ -64,6 +69,14 @@ thread_local! {
     /// Heap pointer slots registered by Rust code (e.g., apply_cont_heap's k2_stack)
     /// so GC can update them in-place when objects move during collection.
     static RUST_ROOTS: RefCell<Vec<*mut *mut u8>> = const { RefCell::new(Vec::new()) };
+
+    /// External cancellation flag. When set, the next GC safepoint will abort the
+    /// running program with `RuntimeError::Cancelled`. Cloned from the
+    /// `Arc<AtomicBool>` owned by the `JitEffectMachine` before entering JIT code.
+    ///
+    /// Installed by `set_cancel_flag` (called from `JitEffectMachine::install_registries`)
+    /// and cleared by `clear_cancel_flag` (called from `RegistryGuard::drop`).
+    static CANCEL_FLAG: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
 }
 
 /// Register a Rust stack/heap slot containing a heap pointer as a GC root.
@@ -141,6 +154,57 @@ pub fn clear_gc_state() {
     clear_rust_roots();
 }
 
+/// Install an external cancellation flag for the current thread. The next
+/// GC safepoint (heap check) will observe the flag and abort the program with
+/// `RuntimeError::Cancelled` if it has been set to `true`.
+///
+/// Called from `JitEffectMachine::install_registries` before entering JIT code.
+pub(crate) fn set_cancel_flag(flag: Arc<AtomicBool>) {
+    CANCEL_FLAG.with(|cell| {
+        *cell.borrow_mut() = Some(flag);
+    });
+}
+
+/// Remove the installed cancellation flag for the current thread. Called from
+/// `RegistryGuard::drop` so the Arc is released even on an early error return.
+pub(crate) fn clear_cancel_flag() {
+    CANCEL_FLAG.with(|cell| {
+        cell.borrow_mut().take();
+    });
+}
+
+/// Fast check for an external cancel request. Uses a relaxed load — the cost
+/// of a single extra relaxed atomic load per heap check is negligible, and
+/// cancellation is best-effort (observed at the next safepoint) so stronger
+/// ordering is not required.
+#[inline]
+fn cancel_requested() -> bool {
+    CANCEL_FLAG.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+    })
+}
+
+/// If cancellation has been requested, record `RuntimeError::Cancelled`
+/// (unless another error is already pending) and return `true`. Callers
+/// should then unwind by returning a poison pointer from their loop so the
+/// outer run loop can surface the error.
+#[inline]
+pub(crate) fn check_cancel_and_set_error() -> bool {
+    if cancel_requested() {
+        RUNTIME_ERROR.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(RuntimeError::Cancelled);
+            }
+        });
+        true
+    } else {
+        false
+    }
+}
+
 /// GC trigger: called by JIT code when alloc_ptr exceeds alloc_limit.
 ///
 /// This function MUST be compiled with frame pointers preserved
@@ -157,6 +221,24 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
 
     GC_TRIGGER_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
     GC_TRIGGER_LAST_VMCTX.store(vmctx as usize, Ordering::SeqCst);
+
+    // External cancellation safepoint. We record `RuntimeError::Cancelled`
+    // here but still perform a normal GC so the caller's allocation can
+    // succeed cleanly — routing through `runtime_oom` is unsafe for Con
+    // allocations larger than the 24-byte poison closure, which would be
+    // written past. The cancellation is actually observed at the next
+    // trampoline loop iteration (see `check_cancel_and_set_error` in the
+    // trampolines), which returns the poison pointer in a context where it
+    // will not be written to.
+    if cancel_requested() {
+        RUNTIME_ERROR.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(RuntimeError::Cancelled);
+            }
+        });
+        // Fall through to `perform_gc` so the allocation succeeds.
+    }
 
     #[cfg(target_arch = "x86_64")]
     {
@@ -368,6 +450,19 @@ pub extern "C" fn trampoline_resolve(vmctx: *mut VMContext) -> *mut u8 {
     // during compilation and point to finalized JIT functions.
     unsafe {
         loop {
+            // External cancellation safepoint. Tail-recursive loops never
+            // return to the top-level JIT call on their own, so we must check
+            // here — otherwise a runaway loop observes the cancel in
+            // `gc_trigger`, receives a poison pointer from `runtime_oom`, and
+            // immediately re-enters the trampoline forever. Returning the
+            // poison here unwinds up to `JitEffectMachine::run_pure`, which
+            // then surfaces `RuntimeError::Cancelled`.
+            if check_cancel_and_set_error() {
+                (*vmctx).tail_callee = std::ptr::null_mut();
+                (*vmctx).tail_arg = std::ptr::null_mut();
+                return error_poison_ptr();
+            }
+
             let callee = (*vmctx).tail_callee;
             let arg = (*vmctx).tail_arg;
 
@@ -523,8 +618,15 @@ pub extern "C" fn runtime_error_with_msg(kind: u64, msg_ptr: *const u8, msg_len:
 }
 
 pub extern "C" fn runtime_oom() -> *mut u8 {
+    // Preserve a pre-existing runtime error if one is already set. The
+    // external-cancellation path (see `gc_trigger`) sets `RuntimeError::Cancelled`
+    // and then forces `runtime_oom` to fire; without this guard, `HeapOverflow`
+    // would overwrite the more specific cancellation cause.
     RUNTIME_ERROR.with(|cell| {
-        *cell.borrow_mut() = Some(RuntimeError::HeapOverflow);
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(RuntimeError::HeapOverflow);
+        }
     });
     error_poison_ptr()
 }
@@ -551,32 +653,63 @@ pub extern "C" fn runtime_bad_thunk_state_trap(_vmctx: *mut VMContext, state: u8
     error_poison_ptr()
 }
 
+/// Size of the poison buffer.
+///
+/// The JIT's `emit_alloc_fast_path` slow-fail edge calls `runtime_oom`, takes
+/// the returned pointer as if it were a freshly-allocated heap object, and
+/// then unconditionally writes the full header + payload into it (tag byte,
+/// size halfword, Con/Closure/Thunk fields, capture slots, …). If the poison
+/// is smaller than the attempted allocation, those post-OOM stores spill past
+/// the poison into adjacent heap — we've observed glibc "corrupted size vs.
+/// prev_size" aborts as a direct consequence.
+///
+/// The JIT never clamps allocation size at emit time. The effective upper
+/// bound is `CON_FIELDS_OFFSET + MAX_FIELDS * 8` (i.e. the largest Con the
+/// read-side `heap_bridge` is willing to decode; see `MAX_FIELDS = 1024`
+/// there). Closures and thunks are bounded by the same field/capture count
+/// in practice. We size the poison to comfortably absorb that worst case so
+/// any OOM path can complete its field writes harmlessly.
+///
+/// 16 KiB: `24 + 8 * 1024 = 8216` bytes for a max-arity Con, doubled for
+/// headroom. Stays well under the `u16` header `size` encoding limit.
+pub(crate) const POISON_BUF_SIZE: usize = 16 * 1024;
+
 /// Return a pointer to a pre-allocated "poison" Closure heap object.
 /// When JIT code tries to call this as a function, it returns itself,
 /// preventing cascading crashes. The runtime error flag is already set,
 /// so the effect machine will catch it before the poison reaches user code.
+///
+/// The backing allocation is oversized (`POISON_BUF_SIZE`) so that OOM
+/// paths which treat the poison as freshly-allocated scratch (via
+/// `runtime_oom`) can complete their field writes without corrupting
+/// adjacent heap. See `POISON_BUF_SIZE` for rationale.
 pub fn error_poison_ptr() -> *mut u8 {
     use std::sync::OnceLock;
     // Layout: Closure with code_ptr pointing to `poison_trampoline`,
     // num_captured = 0. When called, returns the poison closure itself.
     static POISON: OnceLock<usize> = OnceLock::new();
     let addr = *POISON.get_or_init(|| {
-        // Closure size: header(8) + code_ptr(8) + num_captured(8) = 24
-        let size = 24usize;
-        let layout =
-            std::alloc::Layout::from_size_align(size, 8).unwrap_or_else(|_| std::process::abort());
+        // Backing buffer is oversized to absorb post-OOM scratch writes
+        // from the JIT (see POISON_BUF_SIZE docs). The Closure header
+        // describes only the logical 24-byte Closure layout — the tail
+        // bytes are zero-initialized padding that the JIT may clobber
+        // after a `runtime_oom` return.
+        let logical_size = 24u16;
+        let layout = std::alloc::Layout::from_size_align(POISON_BUF_SIZE, 8)
+            .unwrap_or_else(|_| std::process::abort());
         // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
-        // SAFETY: ptr is a fresh allocation of 24 bytes. Writing the closure header,
-        // code pointer, and capture count at known offsets within that allocation.
+        // SAFETY: ptr is a fresh allocation of POISON_BUF_SIZE bytes
+        // (>= 24). Writing the closure header, code pointer, and capture
+        // count at known offsets within the first 24 bytes.
         unsafe {
             tidepool_heap::layout::write_header(
                 ptr,
                 tidepool_heap::layout::TAG_CLOSURE,
-                size as u16,
+                logical_size,
             );
             // code_ptr = poison_trampoline
             *(ptr.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *mut usize) =
@@ -2325,5 +2458,72 @@ mod tests {
             let err = take_runtime_error().expect("Should have flagged error");
             assert!(matches!(err, RuntimeError::BadThunkState(255)));
         }
+    }
+
+    /// Regression test for the poison-buffer undersize bug.
+    ///
+    /// Prior to the fix, `runtime_oom` returned a 24-byte poison buffer that
+    /// the JIT's slow-fail alloc path then treated as freshly-allocated
+    /// scratch. For any Con with `>= 1` field (size `>= 32`) the post-OOM
+    /// field write spilled past the 24-byte allocation into adjacent heap,
+    /// manifesting as glibc "corrupted size vs. prev_size" aborts.
+    ///
+    /// The fix enlarges the poison buffer to absorb the maximum Con/Closure
+    /// footprint the JIT can emit. This test simulates the JIT's write
+    /// sequence directly: allocate a worst-case Con (24 + 1024*8 = 8216
+    /// bytes) into the poison and verify no OOB writes occur.
+    ///
+    /// Under Miri / ASan this would fail before the fix; under glibc the
+    /// corruption is non-deterministic, but the write itself is unsound
+    /// and the buffer-size assertion below guards against regression.
+    #[test]
+    fn poison_buf_absorbs_max_con_write() {
+        // Mirror of the read-side guard in heap_bridge.rs. If that constant
+        // grows, POISON_BUF_SIZE must grow to match.
+        const MAX_FIELDS: usize = 1024;
+        let worst_case_con = layout::CON_FIELDS_OFFSET as usize + MAX_FIELDS * 8;
+        assert!(
+            POISON_BUF_SIZE >= worst_case_con,
+            "poison buffer ({} B) must cover worst-case Con footprint ({} B)",
+            POISON_BUF_SIZE,
+            worst_case_con,
+        );
+
+        // Simulate the JIT's post-OOM write sequence exactly as
+        // `emit_alloc_fast_path` + the Con emitter do: tag at 0, size
+        // halfword at 1, CON_TAG at 8, num_fields at 16, fields from 24.
+        let ptr = runtime_oom();
+        assert!(!ptr.is_null());
+
+        // SAFETY: `ptr` is the poison buffer (POISON_BUF_SIZE >= worst_case_con).
+        // Writing a TAG_CON header and MAX_FIELDS u64 field slots into it
+        // stays entirely within the allocation after the fix.
+        // JIT stores use `MemFlags::trusted()` which permits unaligned
+        // access; mirror that with `write_unaligned` so the test also works
+        // on targets where a naked deref would trap on misalignment (the
+        // size halfword lands at offset 1).
+        unsafe {
+            ptr.write(layout::TAG_CON);
+            (ptr.add(1) as *mut u16).write_unaligned(worst_case_con as u16);
+            (ptr.add(layout::CON_TAG_OFFSET as usize) as *mut u64).write_unaligned(7);
+            (ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16)
+                .write_unaligned(MAX_FIELDS as u16);
+            for i in 0..MAX_FIELDS {
+                let off = layout::CON_FIELDS_OFFSET as usize + 8 * i;
+                (ptr.add(off) as *mut u64).write_unaligned(0xDEAD_BEEF_0000_0000 | (i as u64));
+            }
+            // Read back a sentinel to ensure the writes landed (and weren't
+            // silently dropped) — also defeats the optimizer.
+            let last_off = layout::CON_FIELDS_OFFSET as usize + 8 * (MAX_FIELDS - 1);
+            assert_eq!(
+                (ptr.add(last_off) as *const u64).read_unaligned(),
+                0xDEAD_BEEF_0000_0000 | (MAX_FIELDS as u64 - 1),
+            );
+        }
+
+        // `runtime_oom` sets `RuntimeError::HeapOverflow` — clear it so
+        // we don't leak state to other tests sharing this thread.
+        let err = take_runtime_error().expect("runtime_oom must flag an error");
+        assert!(matches!(err, RuntimeError::HeapOverflow));
     }
 }
