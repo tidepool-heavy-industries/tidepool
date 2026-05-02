@@ -219,9 +219,10 @@ The pathological case is a non-tail-call, non-effectful loop that allocates
 without bound — for example, `length [1..]` style programs. Such loops
 observe the cancel at the heap check but have no prompt safepoint to
 unwind through, so cancellation may surface only as an eventual
-heap-overflow error rather than `Cancelled`. This is tracked as a
-follow-up; in practice the handler-driven and tail-recursive shapes
-cover the realistic uses.
+heap-overflow error rather than `Cancelled`. Tracked in
+[#273](https://github.com/tidepool-heavy-industries/tidepool/issues/273);
+in practice the handler-driven and tail-recursive shapes cover the
+realistic uses.
 
 The flag is per-machine, not per-run. Call `handle.reset()` between runs if
 you intend to reuse the same `JitEffectMachine` after a cancellation.

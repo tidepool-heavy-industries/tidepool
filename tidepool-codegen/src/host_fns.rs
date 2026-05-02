@@ -236,8 +236,9 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
     // effect-dispatch boundary in `JitEffectMachine::run`. A pure
     // non-tail-call loop that only allocates would observe the cancel
     // here but never reach those safepoints — it surfaces eventually
-    // as some other error (typically `HeapOverflow`). Tracked as a
-    // follow-up; pure-allocator-only programs are not the realistic case.
+    // as some other error (typically `HeapOverflow`). Tracked in
+    // <https://github.com/tidepool-heavy-industries/tidepool/issues/273>;
+    // pure-allocator-only programs are not the realistic case.
     if cancel_requested() {
         RUNTIME_ERROR.with(|cell| {
             let mut slot = cell.borrow_mut();
