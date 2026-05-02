@@ -59,7 +59,11 @@ pub unsafe fn heap_to_value_forcing(
 }
 
 const MAX_DEPTH: usize = 10_000;
-const MAX_FIELDS: usize = 1024;
+/// Maximum number of fields the read-side decoder will accept on a single
+/// `Con` heap object. The poison buffer in `host_fns` must be large enough
+/// to absorb a worst-case Con write at this arity (see
+/// `host_fns::POISON_BUF_SIZE` and the compile-time assertion there).
+pub(crate) const MAX_FIELDS: usize = 1024;
 const MAX_DATA_SIZE: usize = 64 * 1024 * 1024; // 64MB
 
 unsafe fn heap_to_value_inner(

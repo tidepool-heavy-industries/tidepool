@@ -674,6 +674,26 @@ pub extern "C" fn runtime_bad_thunk_state_trap(_vmctx: *mut VMContext, state: u8
 /// headroom. Stays well under the `u16` header `size` encoding limit.
 pub(crate) const POISON_BUF_SIZE: usize = 16 * 1024;
 
+/// Compile-time guard: the poison buffer must be large enough to absorb a
+/// post-OOM write of a worst-case Con at the read-side decoder's
+/// `MAX_FIELDS` ceiling. If `MAX_FIELDS` is bumped without updating
+/// `POISON_BUF_SIZE`, this assertion fails to compile rather than
+/// regressing into the runtime heap-corruption symptom that PR #272
+/// originally diagnosed (glibc "corrupted size vs. prev_size" aborts on
+/// OOM paths writing past the old 24-byte poison). The matching runtime
+/// regression test lives in the module's `tests` block under
+/// `poison_buf_absorbs_max_con_write`.
+const _: () = {
+    let worst_case_con =
+        layout::CON_FIELDS_OFFSET as usize + crate::heap_bridge::MAX_FIELDS * 8;
+    assert!(
+        POISON_BUF_SIZE >= worst_case_con,
+        "POISON_BUF_SIZE must absorb worst-case Con write \
+         (CON_FIELDS_OFFSET + MAX_FIELDS * 8); bump POISON_BUF_SIZE \
+         when MAX_FIELDS grows",
+    );
+};
+
 /// Return a pointer to a pre-allocated "poison" Closure heap object.
 /// When JIT code tries to call this as a function, it returns itself,
 /// preventing cascading crashes. The runtime error flag is already set,
@@ -2478,9 +2498,11 @@ mod tests {
     /// and the buffer-size assertion below guards against regression.
     #[test]
     fn poison_buf_absorbs_max_con_write() {
-        // Mirror of the read-side guard in heap_bridge.rs. If that constant
-        // grows, POISON_BUF_SIZE must grow to match.
-        const MAX_FIELDS: usize = 1024;
+        // The read-side decoder cap; the compile-time assertion above
+        // guarantees POISON_BUF_SIZE absorbs this. The runtime check here
+        // additionally exercises the full write sequence to surface any
+        // overflow under Miri / ASan, not just the size relationship.
+        use crate::heap_bridge::MAX_FIELDS;
         let worst_case_con = layout::CON_FIELDS_OFFSET as usize + MAX_FIELDS * 8;
         assert!(
             POISON_BUF_SIZE >= worst_case_con,
