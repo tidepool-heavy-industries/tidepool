@@ -55,47 +55,57 @@ agent = R.sendFoo
     (effect_dir, main_src.to_string())
 }
 
-/// Inspect the expression tree for tag mismatches.
+/// Every `DataAlt` and `Con` referenced by the compiled expression tree must
+/// resolve to an entry in the produced `DataConTable`. The original
+/// multi-module bug manifested as a `Case` alt referencing a `DataConId`
+/// (the "mystery tag" 0xfe39c1e45ffaa2ad) that no `DataCon` row carried —
+/// the runtime then CASE-trapped at the unmatchable id. Verifying table
+/// closure catches that class of regression structurally, without depending
+/// on JIT execution.
 #[test]
-fn test_cross_module_inspect_tags() {
+fn test_cross_module_datacon_table_consistency() {
     let (effect_dir, main_src) = setup_multi_module_test();
     let pp = prelude_path();
     let include: Vec<&Path> = vec![pp.as_path(), effect_dir.path()];
 
-    let (expr, _table, _warnings) =
+    let (expr, table, _warnings) =
         compile_haskell(&main_src, "agent", &include).expect("compilation failed");
-
-    // Pretty print the expression tree
-    eprintln!("Expression tree ({} nodes):", expr.nodes.len());
-    let pp_expr = tidepool_repr::pretty::pretty_print(&expr);
-    eprintln!("{}", pp_expr);
-
-    // Check for the mystery tag
-    let target_tag = 0xfe39c1e45ffaa2ad_u64;
-    eprintln!("\nSearching for mystery tag {:#018x}:", target_tag);
 
     use tidepool_repr::frame::CoreFrame;
     use tidepool_repr::types::AltCon;
+
+    let mut unresolved_alts = Vec::new();
+    let mut unresolved_cons = Vec::new();
     for (i, node) in expr.nodes.iter().enumerate() {
         match node {
             CoreFrame::Case { alts, .. } => {
                 for alt in alts {
                     if let AltCon::DataAlt(id) = alt.con {
-                        if id.0 == target_tag {
-                            eprintln!("  FOUND at node {} in case alt", i);
+                        if table.get(id).is_none() {
+                            unresolved_alts.push((i, id));
                         }
                     }
                 }
             }
-            CoreFrame::Con { tag, .. } if tag.0 == target_tag => {
-                eprintln!("  FOUND at node {} as Con", i);
-            }
-            CoreFrame::Var(vid) if vid.0 == target_tag => {
-                eprintln!("  FOUND at node {} as Var", i);
+            CoreFrame::Con { tag, .. } => {
+                if table.get(*tag).is_none() {
+                    unresolved_cons.push((i, *tag));
+                }
             }
             _ => {}
         }
     }
+
+    assert!(
+        unresolved_alts.is_empty() && unresolved_cons.is_empty(),
+        "cross-module DataCon tag mismatch regression: \
+         unresolved DataAlt ids in Case nodes {:?}; \
+         unresolved Con tags {:?}; \
+         table contains {} entries",
+        unresolved_alts,
+        unresolved_cons,
+        table.len(),
+    );
 }
 
 /// Test that cross-module effect actually runs without CASE TRAP.
