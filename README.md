@@ -201,9 +201,27 @@ match vm.run_pure() {
 }
 ```
 
-Cancellation is observed at the next GC safepoint (heap check) or tail-call
-trampoline iteration, whichever comes first. Both fire frequently enough
-that latency is essentially negligible — typically sub-millisecond.
+Cancellation is observed at three safepoints, in priority order:
+
+1. **Tail-call trampoline iteration** — every iteration of a `letrec`-style
+   tail loop. Fires constantly in tail-recursive Haskell. Promptly unwinds
+   with `YieldError::Cancelled`.
+2. **Effect-dispatch boundary** — checked in `JitEffectMachine::run` after
+   each handler invocation, before resuming the JIT. Promptly unwinds for
+   freer-simple effect loops, including handler-driven cancellation
+   (a watchdog handler that flips its own machine's `CancelHandle`).
+3. **GC heap-check safepoint** — fires on every non-trivial allocation.
+   Best-effort: it records the cancellation but does not unwind, so the
+   actual surface latency depends on the program reaching one of the
+   prompt safepoints above.
+
+The pathological case is a non-tail-call, non-effectful loop that allocates
+without bound — for example, `length [1..]` style programs. Such loops
+observe the cancel at the heap check but have no prompt safepoint to
+unwind through, so cancellation may surface only as an eventual
+heap-overflow error rather than `Cancelled`. This is tracked as a
+follow-up; in practice the handler-driven and tail-recursive shapes
+cover the realistic uses.
 
 The flag is per-machine, not per-run. Call `handle.reset()` between runs if
 you intend to reuse the same `JitEffectMachine` after a cancellation.

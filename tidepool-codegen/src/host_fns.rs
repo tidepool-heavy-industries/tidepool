@@ -222,14 +222,22 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
     GC_TRIGGER_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
     GC_TRIGGER_LAST_VMCTX.store(vmctx as usize, Ordering::SeqCst);
 
-    // External cancellation safepoint. We record `RuntimeError::Cancelled`
-    // here but still perform a normal GC so the caller's allocation can
-    // succeed cleanly — routing through `runtime_oom` is unsafe for Con
-    // allocations larger than the 24-byte poison closure, which would be
-    // written past. The cancellation is actually observed at the next
-    // trampoline loop iteration (see `check_cancel_and_set_error` in the
-    // trampolines), which returns the poison pointer in a context where it
-    // will not be written to.
+    // External cancellation safepoint (best-effort). We record
+    // `RuntimeError::Cancelled` here but do NOT unwind: the GC must still
+    // run so the caller's allocation succeeds. Routing through
+    // `runtime_oom` here would hand back the poison pointer to a JIT site
+    // that's about to write a full Con/Closure header into it, which the
+    // emitter assumes is fresh nursery space; the now-larger
+    // `POISON_BUF_SIZE` makes that survivable but it would still bypass
+    // the prompt-cancel paths above (which give better error semantics).
+    //
+    // Prompt unwind happens at the trampoline loop
+    // (`check_cancel_and_set_error` in trampoline_resolve) and at the
+    // effect-dispatch boundary in `JitEffectMachine::run`. A pure
+    // non-tail-call loop that only allocates would observe the cancel
+    // here but never reach those safepoints — it surfaces eventually
+    // as some other error (typically `HeapOverflow`). Tracked as a
+    // follow-up; pure-allocator-only programs are not the realistic case.
     if cancel_requested() {
         RUNTIME_ERROR.with(|cell| {
             let mut slot = cell.borrow_mut();
