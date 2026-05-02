@@ -223,6 +223,24 @@ impl JitEffectMachine {
                     }
                     let cx = EffectContext::with_user(table, user);
                     let resp_val = handlers.dispatch(tag, &req_val, &cx)?;
+
+                    // External cancellation safepoint at the effect-dispatch
+                    // boundary. The handler we just called may itself have
+                    // flipped the cancel flag (a watchdog handler is the
+                    // canonical case); the JIT-internal safepoints
+                    // (gc_trigger, trampoline_resolve) only fire on
+                    // tail-recursive or heavy-allocating Haskell, so
+                    // freer-simple effect loops would otherwise observe
+                    // the cancel only as an eventual unrelated error.
+                    // Checking here gives prompt unwind for the realistic
+                    // handler-driven scenario without depending on the
+                    // shape of the compiled program.
+                    if self.cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        break Err(JitError::Yield(
+                            crate::yield_type::YieldError::Cancelled,
+                        ));
+                    }
+
                     const MAX_EFFECT_RESPONSE_NODES: usize = 10_000;
                     let nodes = resp_val.node_count();
                     if nodes > MAX_EFFECT_RESPONSE_NODES {
