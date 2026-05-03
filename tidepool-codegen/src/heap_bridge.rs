@@ -130,7 +130,7 @@ unsafe fn heap_to_value_inner(
                     let ba_ptr = raw_value as *const u8;
                     if ba_ptr.is_null() {
                         // ByteArray# legitimately can be empty/null in some Haskell programs;
-                        // returning empty is correct. See core-shapes.md §1.
+                        // returning empty is correct. See docs/core-shapes/audit-heap-bridge.md#littagbytearray.
                         return Ok(Value::ByteArray(std::sync::Arc::new(
                             std::sync::Mutex::new(vec![]),
                         )));
@@ -164,7 +164,7 @@ unsafe fn heap_to_value_inner(
                     // SmallArray#/Array# carry no per-array DataConId. The wrapping Con (e.g.
                     // Vector's Array constructor) supplies type context to downstream consumers.
                     // DataConId(0) here is a deliberate sentinel meaning "raw boxed-pointer array".
-                    // This is the contract documented in core-shapes.md §1.
+                    // This is the contract documented in docs/core-shapes/audit-heap-bridge.md#littagarray--littagsmallarray.
                     Ok(Value::Con(DataConId(0), elems))
                 }
                 other => Err(BridgeError::UnexpectedLitTag(other as u8)),

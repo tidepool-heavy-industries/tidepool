@@ -1,13 +1,11 @@
 use tidepool_codegen::heap_bridge::{heap_to_value, BridgeError};
+use tidepool_codegen::layout::{LIT_TAG_ARRAY, LIT_TAG_SMALLARRAY};
 use tidepool_eval::value::Value;
 use tidepool_heap::layout;
 use tidepool_repr::*;
 
 #[repr(align(8))]
 struct AlignedBuf<const N: usize>([u8; N]);
-
-const LIT_TAG_SMALLARRAY: u8 = 8;
-const LIT_TAG_ARRAY: u8 = 9;
 
 #[test]
 fn test_heap_to_value_lit_int() {
@@ -113,7 +111,7 @@ fn test_heap_to_value_lit_smallarray_null() {
     let ptr = buf_data.0.as_mut_ptr();
     unsafe {
         layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-        *(ptr.add(layout::LIT_TAG_OFFSET)) = LIT_TAG_SMALLARRAY;
+        *(ptr.add(layout::LIT_TAG_OFFSET)) = LIT_TAG_SMALLARRAY as u8;
         // Null pointer for the array data
         *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut *const u8) = std::ptr::null();
 
@@ -132,7 +130,7 @@ fn test_heap_to_value_lit_array_null() {
     let ptr = buf_data.0.as_mut_ptr();
     unsafe {
         layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
-        *(ptr.add(layout::LIT_TAG_OFFSET)) = LIT_TAG_ARRAY;
+        *(ptr.add(layout::LIT_TAG_OFFSET)) = LIT_TAG_ARRAY as u8;
         // Null pointer for the array data
         *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut *const u8) = std::ptr::null();
 
