@@ -89,9 +89,16 @@ unsafe fn heap_to_value_inner(
             match lit_tag {
                 x if x == LIT_TAG_INT => Ok(Value::Lit(Literal::LitInt(raw_value))),
                 x if x == LIT_TAG_WORD => Ok(Value::Lit(Literal::LitWord(raw_value as u64))),
-                x if x == LIT_TAG_CHAR => Ok(Value::Lit(Literal::LitChar(
-                    char::from_u32(raw_value as u32).unwrap_or('\0'),
-                ))),
+                x if x == LIT_TAG_CHAR => {
+                    // core-shapes.md §1: Char lit must hold valid Unicode codepoint
+                    debug_assert!(
+                        char::from_u32(raw_value as u32).is_some(),
+                        "core-shapes.md §1: Char lit must hold valid Unicode codepoint"
+                    );
+                    Ok(Value::Lit(Literal::LitChar(
+                        char::from_u32(raw_value as u32).unwrap_or('\0'),
+                    )))
+                }
                 x if x == LIT_TAG_FLOAT => Ok(Value::Lit(Literal::LitFloat(raw_value as u64))),
                 x if x == LIT_TAG_DOUBLE => Ok(Value::Lit(Literal::LitDouble(raw_value as u64))),
                 x if x == LIT_TAG_STRING => {
@@ -110,8 +117,13 @@ unsafe fn heap_to_value_inner(
                     Ok(Value::Lit(Literal::LitString(bytes)))
                 }
                 x if x == LIT_TAG_ADDR => {
-                    // Addr# — intermediate value, shouldn't normally be a final result.
-                    // Wrap as empty LitString as graceful fallback.
+                    // Addr# is a legitimate intermediate runtime value: primops like
+                    // PlusAddr / ShowDoubleAddr (see emit/primop.rs) emit
+                    // SsaVal::Raw(_, LIT_TAG_ADDR), and any program that returns the
+                    // raw address through the bridge surfaces here. We can't decode
+                    // it back to a typed Haskell value (it's a raw pointer with no
+                    // length), so we render an empty LitString as the safe fallback.
+                    // See core-shapes.md §1.
                     Ok(Value::Lit(Literal::LitString(vec![])))
                 }
                 x if x == LIT_TAG_BYTEARRAY => {
