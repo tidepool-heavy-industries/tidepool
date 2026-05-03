@@ -17,6 +17,8 @@ Each section describes a Core construct or shape concern, defining what the JIT 
 - [9. Heap-layout invariants](#9-heap-layout-invariants)
 - [10. Cross-module compilation: known divergence points](#10-cross-module-compilation-known-divergence-points)
 - [11. Cancellation safepoints](#11-cancellation-safepoints)
+- [12. Normalization pipeline](#12-normalization-pipeline)
+- [13. Cross-mode test infrastructure](#13-cross-mode-test-infrastructure)
 - [Coverage Gaps](#coverage-gaps)
 - [Cross-references and source audits](#cross-references-and-source-audits)
 
@@ -155,6 +157,43 @@ The JIT includes safepoints where long-running or infinite computations can be i
 
 **Special cases**:
 - Tail-call safepoint — the effect machine checks for external cancellation before resolving each tail call. Mode: always-on. [audit-effect-machine § resolve_tail_calls: Cancellation safepoint](core-shapes/audit-effect-machine.md#resolve_tail_calls-cancellation-safepoint).
+- Effect-dispatch safepoint — `JitEffectMachine::run` checks the cancel flag at the top of every iteration of the effect-dispatch loop, after `handlers.dispatch` returns and before re-entering JIT via `resume`. Gives prompt unwind for handler-driven cancel (the watchdog-handler scenario). Mode: always-on. (PR #274)
+- GC heap-check safepoint — `gc_trigger` records `RuntimeError::Cancelled` but does not unwind; observed via downstream paths. Best-effort. Mode: always-on.
+- Pure non-tail-call allocator-only loops are not promptly interruptible — tracked in [#273](https://github.com/tidepool-heavy-industries/tidepool/issues/273).
+
+## 12. Normalization pipeline
+
+`tidepool-repr::normalize(expr, table)` runs `CoreExpr → CoreExpr` between translation and codegen, canonicalizing shape divergence that arises from cross-module compilation. Three rules, fixpoint-bounded at 100 iterations, idempotent and semantics-preserving.
+
+**Pipeline placement**: `tidepool_repr::normalize → wrap_with_datacon_env → emit::compile_expr` (in `JitEffectMachine::compile`).
+
+**Rules**:
+- **Rule 1 (flatten_box)**: `Con(BOX, [Con(BOX, [inner])])` → `Con(BOX, [inner])` where `BOX ∈ {I#, W#, C#, F#, D#}`. [audit-normalize § Rule 1](core-shapes/audit-normalize.md#rule-1-flatten_box).
+- **Rule 2 (canonicalize_effect_tag)**: `Con(Union, [W#(x_or_var), payload])` → `Con(Union, [Lit(LitWord, n), payload])` when `x_or_var` resolves to a `LitWord`. Pairs with the runtime fallback in [audit-effect-machine § Boxed Union tag](core-shapes/audit-effect-machine.md#boxed-union-tag-runtime-fallback). [audit-normalize § Rule 2](core-shapes/audit-normalize.md#rule-2-canonicalize_effect_tag).
+- **Rule 3 (unbox_prim_args)**: `PrimOp { args: [Con(BOX, [Lit])..] }` → `PrimOp { args: [Lit..] }` (all-or-nothing). [audit-normalize § Rule 3](core-shapes/audit-normalize.md#rule-3-unbox_prim_args).
+
+**Properties** (all proptest-verified):
+- Idempotent (`prop_idempotence` in `normalize.rs`).
+- Semantics-preserving (`prop_normalize_preserves_semantics` in `tidepool-testing/tests/normalize_semantics.rs`, PR #294).
+- Bounded fixpoint (`prop_bounded_iteration`).
+
+**Known limitation**: Rule 2 effectiveness on real cross-mode programs is unverified — see [Coverage Gaps](#coverage-gaps).
+
+## 13. Cross-mode test infrastructure
+
+`tidepool-runtime/tests/cross_mode_harness/` provides a structural-equivalence harness for asserting that single-module and split-module compilations of the same Haskell source produce semantically equivalent JIT outputs. The harness is the regression specification for the cross-module divergence patterns documented above.
+
+**Harness API**:
+- `CrossModeFixture { single, split, target }` — describes a Haskell program in two equivalent shapes.
+- `assert_cross_mode_structurally_equivalent(fixture)` — alpha-equivalent CoreExpr comparison.
+- `assert_cross_mode_pure_equivalent(fixture)` — runtime value comparison for pure programs.
+- `assert_cross_mode_runtime_equivalent(fixture, ...)` — runtime value comparison with effect handlers.
+
+**Coverage**: 21 fixtures across 5 divergence dimensions (GADT effect dispatch, name collisions, primitive boxing, mutual recursion, typeclass dispatch). See `tidepool-runtime/tests/cross_mode_existing.rs` (breadth) and `cross_mode_targeted.rs` (depth).
+
+**Structural comparator**: alpha-equivalence via `var_map` / `join_map` HashMaps; tiered DataCon matching (qualified name → name+arity); opaque types (`Closure`, `ThunkRef`, `JoinCont`) skipped during comparison. See [audit-heap-bridge § Cross-mode harness](core-shapes/audit-heap-bridge.md#cross-mode-harness-structural-equivalence).
+
+**Notes**: The harness is asymmetric (walks single → split). Tree-size mismatch is panic'd before per-node walk begins. Provides diagnostic naming the divergent node index, variant kinds, and DataCon names on failure.
 
 ## Coverage Gaps
 
@@ -176,22 +215,29 @@ The JIT includes safepoints where long-running or infinite computations can be i
 - `audit-effect-machine § apply_cont_heap` — now surfaces `YieldError::UserErrorMsg` via `runtime_error_with_msg` on shape mismatch instead of returning `null_mut` silently (Hardened).
 - `audit-heap-bridge § TAG_CLOSURE opaque representation` — now returns `BridgeError::UnexpectedHeapTag(TAG_CLOSURE)` instead of a dummy opaque `Closure` (Hardened).
 
-### Cross-module collision risk: High
-- `audit-bridge § String (Text)` — uses multiple unqualified `get_by_name` lookups for `Text`, `ByteArray`, and `[]`; highly susceptible to arity or name collisions.
+### Silent fallbacks (still wrong-but-valid Value on shape mismatch)
+- `audit-heap-bridge § SmallArray# / Array# coercion` — silently coerces to `Value::Con(DataConId(0), [..])`; type info erased. Hardening candidate; tracked under code-hardening-wave2.
 
-### Cross-module collision risk: Medium
-- `audit-bridge § is_boxing_con` — unqualified lookup for `I#`, `W#`, etc.
+### Cross-module collision risk: Medium (post-#293 hardening)
+- `audit-bridge § String (Text)` — was `high`; reduced to `medium` after `get_resilient` migration. Remaining mitigation: migrate to `get_by_qualified_name` for `Text` constructor.
+- `audit-bridge § is_boxing_con` — was `medium`; reduced to `low` after `get_resilient` adopted arity-aware lookup.
 - `audit-bridge § Result<T, E> (Either)` — uses fallback names (Right/Ok) which may collide with user types.
 
 ### Defensive code with no observed triggering source
 - `audit-translate § Coercion placeholder` — provides safety if coercions survive inlining into expression position.
 - `audit-translate § isRealWorldVar` — part of the state-token erasure pipeline; rarely appears as a standalone variable.
+- `audit-translate § Unresolved external Id → kind-4 error node` — runtime poison for missing unfoldings.
+- `audit-translate § FFI primop support` — defensive against GHC wrapping primops with FFI bookkeeping.
+
+### Verification gap
+- Rule 2 (`canonicalize_effect_tag`) effectiveness on real cross-mode programs is unverified — the runtime fallback in `effect_machine.rs:~245` may be doing all the work. Adding a debug-only counter would surface this. See `audit-normalize.md` Coverage gaps.
 
 ## Cross-references and source audits
 
-- **[audit-translate.md](core-shapes/audit-translate.md)**: 30 entries covering `Translate.hs` special-case branches and desugaring.
-- **[audit-effect-machine.md](core-shapes/audit-effect-machine.md)**: 19 entries covering `effect_machine.rs` heap interpretation and composition.
-- **[audit-heap-bridge.md](core-shapes/audit-heap-bridge.md)**: 17 entries covering low-level heap-to-value decoding in `heap_bridge.rs`.
-- **[audit-bridge.md](core-shapes/audit-bridge.md)**: 16 entries covering high-level primitive implementations in `tidepool-bridge`.
+- **[audit-translate.md](core-shapes/audit-translate.md)**: 36 entries covering `Translate.hs` special-case branches and desugaring (30 original + 6 added from PR #295's source-coverage audit).
+- **[audit-effect-machine.md](core-shapes/audit-effect-machine.md)**: 26 entries covering `effect_machine.rs` heap interpretation, composition, and post-#289 hardening (19 original + 7 added).
+- **[audit-heap-bridge.md](core-shapes/audit-heap-bridge.md)**: 22 entries covering low-level heap-to-value decoding and the cross-mode test harness (17 original + 5 added).
+- **[audit-bridge.md](core-shapes/audit-bridge.md)**: 17 entries covering high-level primitive implementations in `tidepool-bridge` (16 original + 1 `get_resilient` helper added; line citations refreshed).
+- **[audit-normalize.md](core-shapes/audit-normalize.md)**: NEW — covers `tidepool-repr/src/normalize.rs` (3 rules, fuel limit, fixpoint bound, and proptest properties).
 
-For more information, see [PR #272](https://github.com/exo-monad/tidepool/pull/272) (cross-module fixes) and [Issue #273](https://github.com/exo-monad/tidepool/issues/273) (deferred hardening).
+For historical context, see [PR #272](https://github.com/tidepool-heavy-industries/tidepool/pull/272) (cross-module fixes), [PR #285](https://github.com/tidepool-heavy-industries/tidepool/pull/285) (cross-mode test harness), [PR #289](https://github.com/tidepool-heavy-industries/tidepool/pull/289) (normalization pass), [PR #291](https://github.com/tidepool-heavy-industries/tidepool/pull/291) (initial dossier), [PR #293](https://github.com/tidepool-heavy-industries/tidepool/pull/293) (over-strict assert softening), [PR #294](https://github.com/tidepool-heavy-industries/tidepool/pull/294) (semantics proptest), [PR #295](https://github.com/tidepool-heavy-industries/tidepool/pull/295) (silent-fallback hardening), and [Issue #273](https://github.com/tidepool-heavy-industries/tidepool/issues/273) (deferred prompt-cancel for pure allocator loops), [Issue #296](https://github.com/tidepool-heavy-industries/tidepool/issues/296) (spliton_repro test rewrite).

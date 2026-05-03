@@ -203,3 +203,63 @@
 - **Mode:** `always-on`
 - **Test coverage:** `tidepool-codegen/src/heap_bridge.rs:563` (`test_invalid_heap_tag`)
 - **Notes:** Catch-all for memory corruption or unsynchronized `tidepool-heap` / `tidepool-codegen` layout constants.
+
+## MAX_FIELDS bound
+
+- **Location:** `tidepool-codegen/src/heap_bridge.rs:65` (`MAX_FIELDS = 1024`)
+- **Reads:** `num_fields` halfword at `CON_NUM_FIELDS_OFFSET`
+- **Expected shape:** `num_fields <= MAX_FIELDS`
+- **Decoded into:** N/A (bound check)
+- **Failure mode on shape mismatch:** `BridgeError::TooManyFields { count }`
+- **Bound checks:** Yes (this is the bound)
+- **Mode:** `always-on`
+- **Test coverage:** `tidepool-codegen/src/host_fns.rs::tests::poison_buf_absorbs_max_con_write`
+- **Notes:** Linked at compile time to `host_fns::POISON_BUF_SIZE` via `const _: () = assert!(...)` (PR #274) so future MAX_FIELDS bumps fail to build rather than regressing into OOM-path heap corruption.
+
+## read_unaligned for heap data sections
+
+- **Location:** `tidepool-codegen/src/heap_bridge.rs:99` (LitString), `:121` (ByteArray), `:138` (SmallArray/Array)
+- **Reads:** `u64` length prefix at heap data section start
+- **Expected shape:** `[len: u64][bytes...]` or `[len: u64][ptr0][ptr1]...`
+- **Decoded into:** Value byte slice or `Value::Con(DataConId(0), [elems])`
+- **Failure mode on shape mismatch:** `BridgeError::DataTooLarge` or `NullPointer`; UB if alignment was wrongly assumed
+- **Bound checks:** Yes (`MAX_DATA_SIZE = 64 MiB`)
+- **Mode:** `always-on`
+- **Test coverage:** Indirect (any `Text`/string-returning Haskell program)
+- **Notes:** Uses `std::ptr::read_unaligned` because JIT-emitted data sections aren't guaranteed to be 8-byte aligned. Native loads would trap on architectures with strict alignment.
+
+## SmallArray# / Array# coercion to generic Con
+
+- **Location:** `tidepool-codegen/src/heap_bridge.rs:131` (`heap_to_value_inner`, LIT_TAG_SMALLARRAY/ARRAY arm)
+- **Reads:** `[len: u64][ptr0..ptrN-1]` from raw value pointer
+- **Expected shape:** Boxed pointer array
+- **Decoded into:** `Value::Con(DataConId(0), [elem0..])` — synthetic Con with sentinel ID
+- **Failure mode on shape mismatch:** `silent fallback: produces synthetic Con`. Callers infer element semantics from the wrapping `Vector`/`Array` constructor name on the parent `Con`.
+- **Bound checks:** `MAX_DATA_SIZE`
+- **Mode:** `always-on`
+- **Test coverage:** `uncovered`
+- **Notes:** Type-erased decoding. Identified as a silent fallback in dossier Coverage Gaps; PR #295 didn't touch this path. Hardening candidate (tracked under code-hardening-wave2).
+
+## Cross-mode harness: structural equivalence
+
+- **Location:** `tidepool-runtime/tests/cross_mode_harness/structural_eq.rs:46` (`assert_equivalent`)
+- **Reads:** Two `CoreExpr`s (single-module + split-module compilations of the same Haskell source)
+- **Expected shape:** Same root structure modulo alpha-renaming. `VarId` / `JoinId` may differ; structural shape, literal values, and DataCon names+arities must match.
+- **Decoded into:** `var_map: HashMap<VarId, VarId>` and `join_map: HashMap<JoinId, JoinId>` track binding pairs as the walk descends.
+- **Failure mode on shape mismatch:** `panic!` in test with diagnostic naming the divergent node index, variant kinds, and DataCon names.
+- **Bound checks:** Tree size must match exactly (`single.len() == split.len()`).
+- **Mode:** test-only
+- **Test coverage:** `tidepool-runtime/tests/cross_mode_tests.rs::harness_detects_obvious_divergence`
+- **Notes:** Asymmetric walk (single → split). `Closure`, `ThunkRef`, `JoinCont` treated as opaque (skipped during comparison).
+
+## Cross-mode harness: tiered DataCon match
+
+- **Location:** `tidepool-runtime/tests/cross_mode_harness/structural_eq.rs:341` (`assert_table_compatible`)
+- **Reads:** `DataCon` rows from both single and split tables
+- **Expected shape:** Match by `qualified_name` first; fallback to `(name, rep_arity)` as stable cross-mode key when qualified names differ.
+- **Decoded into:** Boolean equivalence per pair.
+- **Failure mode on shape mismatch:** Comparator returns false; outer assertion panics with "DataCon name+arity mismatch".
+- **Bound checks:** `field_bangs` must be identical (same strictness annotations expected across modes).
+- **Mode:** test-only
+- **Test coverage:** All `tidepool-runtime/tests/cross_mode_*` tests
+- **Notes:** Mirrors the resilient lookup tier in `tidepool-bridge::get_resilient`. If a future cross-mode bug surfaces from `field_bangs` divergence, this guard will fire.

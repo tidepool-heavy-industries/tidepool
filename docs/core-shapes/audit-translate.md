@@ -299,3 +299,63 @@
 - **Motivation:** GADT constructors include equality evidence in `dataConRepArity`, but Core passes these as `Coercion` args which are erased; this adjustment aligns the JIT arity with the Core application.
 - **Test coverage:** Memory note #8.
 - **Notes:** Prevents arity mismatch on GADT constructors in `freer-simple`.
+
+## DataCon wrapper canonicalization
+
+- **Location:** `haskell/src/Tidepool/Translate.hs:743` (DataCon wrapper handling in `translateHead`)
+- **Trigger shape:** Reference to a DataCon wrapper Id (GHC generates wrappers for constructors that need boxing or evidence-passing)
+- **Normalized output:** Canonicalized to the worker DataCon Id via `dataConWrapId_maybe → dataConWorkId`
+- **Mode:** `always-on`
+- **Motivation:** Wrapper Ids and worker Ids share the same heap layout once the wrapper's boxing is inlined; canonicalizing to worker means all `varId` lookups land on the same row in `DataConTable`.
+- **Test coverage:** Memory note #15.
+- **Notes:** Pairs with the cross-mode harness's tiered DataCon match (`audit-heap-bridge.md`) which compares by name+arity, not raw Id.
+
+## Unresolved external Id → kind-4 error node
+
+- **Location:** `haskell/src/Tidepool/Translate.hs:841` (unresolved-Id branch in `translate`)
+- **Trigger shape:** External `Var` with no resolvable unfolding (missing from inlined modules and not a wired-in primop)
+- **Normalized output:** `NError 4` (kind-4 sentinel, encoded as `0x45...04` runtime poison)
+- **Mode:** `always-on`
+- **Motivation:** Allows the program to compile even when some external definition is missing; the error materializes only when the missing binding is actually evaluated, giving a clear runtime diagnostic instead of a compile-time abort.
+- **Test coverage:** `uncovered`
+- **Notes:** Cross-module hardening target — could be elevated to a translation-time error with a flag if strict mode is desired.
+
+## joinrec → LetRec promotion
+
+- **Location:** `haskell/src/Tidepool/Translate.hs:883` (recursive join point handling)
+- **Trigger shape:** GHC `Rec` group containing join-point binders (recognized via `joinIdToRec` / `joinrec` pattern)
+- **Normalized output:** Strip join arity, translate body as a regular lambda, register the binder Id in `tsRecJoinIds` so call sites emit `NApp` (function call) instead of `NJump` (join jump).
+- **Mode:** `always-on` (under `-O2` GHC may emit `joinrec` frequently)
+- **Motivation:** The JIT's join-point machinery is single-use (no recursion); cross-module inlining can lift recursive joins out of their original scope. Treating them as regular lambdas avoids the JIT's join-recursion limitation.
+- **Test coverage:** Memory note #1; many `Tidepool.Prelude` functions exercise this path.
+- **Notes:** The `tsRecJoinIds` registration is critical — a join binder treated as a regular Var would emit `NJump` and stack-trap.
+
+## FFI primop support
+
+- **Location:** `haskell/src/Tidepool/Translate.hs:960` (`translatePrimOp` FFI branch)
+- **Trigger shape:** `isFCallId` guard on the primop Id
+- **Normalized output:** Routed through the FFI desugar path (which then matches against the supported primop set)
+- **Mode:** `always-on`
+- **Motivation:** GHC sometimes wraps a stateful primop with `IO` machinery that includes FFI bookkeeping; without this branch the stateful-primop translator refuses the input.
+- **Test coverage:** `uncovered` (transitively covered by any `Tidepool.Prelude` function that uses ByteArray operations)
+- **Notes:** Defensive code; rarely fires in user programs but mandatory for prelude completeness.
+
+## State# token argument drop
+
+- **Location:** `haskell/src/Tidepool/Translate.hs:960` (stateful-primop arg processing)
+- **Trigger shape:** Stateful primop where the first result binder has type `State# RealWorld`
+- **Normalized output:** Drop the `State#` token argument from both the call and the result destructuring
+- **Mode:** triggered (only when `State#` token is present)
+- **Motivation:** `RealWorld` state tokens are erased by the JIT (see `isRealWorldVar` above); they exist only at the type level. Forcing them through the runtime would route through the unevaluable `realWorld#` primop.
+- **Test coverage:** Memory note #6.
+- **Notes:** Pairs with `realWorld#` erasure earlier in this file.
+
+## Multi-element unboxed tuples
+
+- **Location:** `haskell/src/Tidepool/Translate.hs:1034` (multi-element `(# … #)` handling in `translateHead`)
+- **Trigger shape:** `Con` application of an unboxed-tuple `DataCon` with arity > 1
+- **Normalized output:** Translated as a heap-allocated `Con` with `FDataAlt`-keyed deconstruction (instead of the single-element passthrough)
+- **Mode:** `always-on`
+- **Motivation:** GHC may use unboxed tuples as a transparent grouping for stateful primop results; the JIT lowers them to standard heap cons rather than implementing register-pair semantics.
+- **Test coverage:** Indirectly via `tidepool-codegen/tests/emit_letrec_con.rs` and stateful primop tests.
+- **Notes:** Single-element unboxed tuples have a separate (degenerate) passthrough path; multi-element is the heap-alloc case.

@@ -1,20 +1,32 @@
 # Audit: tidepool-bridge primitive impls
 
+## `get_resilient` helper
+
+- **Location:** `tidepool-bridge/src/impls.rs:14` (`fn get_resilient`)
+- **Constructor names looked up:** variable `name` (caller-provided)
+- **Lookup strategy:** `get_by_name_arity` first, fallback to `matches.first()` if the table contains the name at any other arity
+- **Assumed arity:** caller-supplied
+- **Failure mode on shape mismatch:** Returns `Some(first_match)` even when ambiguous; emits `eprintln!` diagnostic in `cfg(debug_assertions)` builds when multiple same-name+same-arity entries exist.
+- **Cross-module collision risk:** `medium` (silent fallback when arity mismatches)
+- **Mode:** `always-on`
+- **Test coverage:** `tidepool-bridge/tests/ambiguity_assert.rs`
+- **Notes:** Added in PR #293 to replace direct `get_by_name` calls in primitive `FromCore`/`ToCore` impls. Provides arity-aware lookup with diagnostic recovery rather than panicking on ambiguity. All hand-written impls below now route through this helper.
+
 ## `is_boxing_con` helper
 
-- **Location:** `tidepool-bridge/src/impls.rs:11` (`fn is_boxing_con`)
+- **Location:** `tidepool-bridge/src/impls.rs:43` (`fn is_boxing_con`)
 - **Constructor names looked up:** variable `name` (caller passes `"I#"`, `"W#"`, `"D#"`, `"C#"`)
-- **Lookup strategy:** `get_by_name`
-- **Assumed arity:** N/A (predicate only)
+- **Lookup strategy:** `get_resilient(table, name, 1)`
+- **Assumed arity:** `1`
 - **Failure mode on shape mismatch:** Returns `false`.
-- **Cross-module collision risk:** `medium`
+- **Cross-module collision risk:** `low` (post-#293 hardening; was `medium` pre-hardening)
 - **Mode:** `always-on`
-- **Test coverage:** `tidepool-bridge/tests/roundtrip.rs`
-- **Notes:** Used by numeric and Char `FromCore` impls to unwrap GHC boxing constructors. Diverges from derive by using unqualified `get_by_name`.
+- **Test coverage:** `tidepool-bridge/tests/roundtrip.rs`, `tidepool-bridge/tests/ambiguity_assert.rs`
+- **Notes:** Used by numeric and Char `FromCore` impls to unwrap GHC boxing constructors. Now arity-aware via `get_resilient`; collision risk reduced from `medium` to `low` since multi-arity ghosts of `I#`/`W#`/etc. are filtered.
 
 ## `PhantomData<T>`
 
-- **Location:** `tidepool-bridge/src/impls.rs:38` (`impl FromCore for std::marker::PhantomData<T>`)
+- **Location:** `tidepool-bridge/src/impls.rs:70` (`impl FromCore for std::marker::PhantomData<T>`); `:84` (`impl ToCore`)
 - **Constructor names looked up:** `"()"`
 - **Lookup strategy:** `get_by_name` (ToCore), `iter().find(|dc| dc.rep_arity == 0)` fallback
 - **Assumed arity:** `0`
@@ -26,7 +38,7 @@
 
 ## `()` (Unit)
 
-- **Location:** `tidepool-bridge/src/impls.rs:105` (`impl ToCore for ()` / `impl FromCore for ()`)
+- **Location:** `tidepool-bridge/src/impls.rs:133` (`impl ToCore for ()` / `impl FromCore for ()`)
 - **Constructor names looked up:** `"()"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `0`
@@ -38,7 +50,7 @@
 
 ## `i64` (Int)
 
-- **Location:** `tidepool-bridge/src/impls.rs:130` (`impl FromCore for i64` / `impl ToCore for i64`)
+- **Location:** `tidepool-bridge/src/impls.rs:157` (`impl FromCore for i64` / `impl ToCore for i64`)
 - **Constructor names looked up:** `"I#"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `1`
@@ -50,7 +62,7 @@
 
 ## `u64` (Word)
 
-- **Location:** `tidepool-bridge/src/impls.rs:160` (`impl FromCore for u64` / `impl ToCore for u64`)
+- **Location:** `tidepool-bridge/src/impls.rs:186` (`impl FromCore for u64` / `impl ToCore for u64`)
 - **Constructor names looked up:** `"W#"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `1`
@@ -62,7 +74,7 @@
 
 ## `f64` (Double)
 
-- **Location:** `tidepool-bridge/src/impls.rs:190` (`impl FromCore for f64` / `impl ToCore for f64`)
+- **Location:** `tidepool-bridge/src/impls.rs:215` (`impl FromCore for f64` / `impl ToCore for f64`)
 - **Constructor names looked up:** `"D#"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `1`
@@ -74,7 +86,7 @@
 
 ## `bool`
 
-- **Location:** `tidepool-bridge/src/impls.rs:246` (`impl FromCore for bool` / `impl ToCore for bool`)
+- **Location:** `tidepool-bridge/src/impls.rs:270` (`impl FromCore for bool` / `impl ToCore for bool`)
 - **Constructor names looked up:** `"True"`, `"False"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `0`
@@ -86,7 +98,7 @@
 
 ## `char`
 
-- **Location:** `tidepool-bridge/src/impls.rs:300` (`impl FromCore for char` / `impl ToCore for char`)
+- **Location:** `tidepool-bridge/src/impls.rs:321` (`impl FromCore for char` / `impl ToCore for char`)
 - **Constructor names looked up:** `"C#"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `1`
@@ -98,19 +110,19 @@
 
 ## `String` (Text)
 
-- **Location:** `tidepool-bridge/src/impls.rs:328` (`impl FromCore for String` / `impl ToCore for String`)
+- **Location:** `tidepool-bridge/src/impls.rs:348` (`impl FromCore for String`); `:436` (`impl ToCore for String`)
 - **Constructor names looked up:** `"Text"`, `"ByteArray"`, `"[]"`, `":"`, `"C#"`
-- **Lookup strategy:** `get_by_name`
+- **Lookup strategy:** `get_resilient` (post-#293; was `get_by_name`)
 - **Assumed arity:** `3 for Text`, `1 for ByteArray`, `0 for []`, `2 for :`, `1 for C#`
 - **Failure mode on shape mismatch:** `TypeMismatch`, `UnknownDataConName`, `InternalError` (mutex poisoned)
-- **Cross-module collision risk:** `high`
+- **Cross-module collision risk:** `medium` (post-#293; was `high` pre-hardening)
 - **Mode:** `always-on`
 - **Test coverage:** `tidepool-bridge/tests/roundtrip.rs`, `tidepool-bridge/tests/proptest_text.rs`
-- **Notes:** Complex impl handling both unboxed `Text` worker format and cons-cell `[Char]` list format. Uses multiple `get_by_name` lookups. Should migrate to `get_by_name_arity` for all lookups.
+- **Notes:** Complex impl handling both unboxed `Text` worker format (`Con("Text", [ByteArray#, Int#, Int#])`, GHC -O2 representation) and cons-cell `[Char]` list format. `FromCore` (line 348) handles lifted `ByteArray` wrappers and accepts both raw `LitChar` and boxed `C#` in cons-cells (line ~411). `ToCore` (line 436) emits the GHC worker representation for `Text` (unboxed `ByteArray#` and `Int#` fields). All lookups now route through `get_resilient` for arity-aware disambiguation. Remaining migration target: `get_by_qualified_name` for `Text` would close the residual collision risk entirely.
 
 ## `Option<T>`
 
-- **Location:** `tidepool-bridge/src/impls.rs:447` (`impl FromCore for Option<T>` / `impl ToCore for Option<T>`)
+- **Location:** `tidepool-bridge/src/impls.rs:461` (`impl FromCore for Option<T>` / `impl ToCore for Option<T>`)
 - **Constructor names looked up:** `"Nothing"`, `"Just"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `0 for Nothing`, `1 for Just`
@@ -122,7 +134,7 @@
 
 ## `Vec<T>` (List)
 
-- **Location:** `tidepool-bridge/src/impls.rs:509` (`impl FromCore for Vec<T>` / `impl ToCore for Vec<T>`)
+- **Location:** `tidepool-bridge/src/impls.rs:517` (`impl FromCore for Vec<T>` / `impl ToCore for Vec<T>`)
 - **Constructor names looked up:** `"[]"`, `":"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `0 for []`, `2 for :`
@@ -134,7 +146,7 @@
 
 ## `Result<T, E>` (Either)
 
-- **Location:** `tidepool-bridge/src/impls.rs:577` (`impl FromCore for Result<T, E>` / `impl ToCore for Result<T, E>`)
+- **Location:** `tidepool-bridge/src/impls.rs:581` (`impl FromCore for Result<T, E>` / `impl ToCore for Result<T, E>`)
 - **Constructor names looked up:** `"Right"`, `"Ok"`, `"Left"`, `"Err"`
 - **Lookup strategy:** `get_by_name` (with `or_else` fallback between Haskell/Rust naming)
 - **Assumed arity:** `1`
@@ -146,7 +158,7 @@
 
 ## `(A, B)` (Pair)
 
-- **Location:** `tidepool-bridge/src/impls.rs:645` (`impl FromCore for (A, B)` / `impl ToCore for (A, B)`)
+- **Location:** `tidepool-bridge/src/impls.rs:641` (`impl FromCore for (A, B)` / `impl ToCore for (A, B)`)
 - **Constructor names looked up:** `"(,)"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `2`
@@ -158,7 +170,7 @@
 
 ## `(A, B, C)` (Triple)
 
-- **Location:** `tidepool-bridge/src/impls.rs:689` (`impl FromCore for (A, B, C)` / `impl ToCore for (A, B, C)`)
+- **Location:** `tidepool-bridge/src/impls.rs:678` (`impl FromCore for (A, B, C)` / `impl ToCore for (A, B, C)`)
 - **Constructor names looked up:** `"(,,)"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `3`
