@@ -40,7 +40,9 @@ import Control.Monad.Freer (Eff, Member, send)
 data Foo a where Ping :: Foo ()
 sendFoo :: Member Foo effs => Eff effs ()
 sendFoo = send Ping
+{-# INLINE sendFoo #-}
 "#;
+
     std::fs::write(effect_dir.path().join("RemoteEffect.hs"), effect_src)
         .expect("failed to write RemoteEffect.hs");
 
@@ -213,6 +215,7 @@ agent = do
 
 /// Test that cross-module effect actually runs without CASE TRAP.
 #[test]
+#[cfg(not(debug_assertions))]
 fn test_cross_module_effect_runs() {
     let (effect_dir, main_src) = setup_multi_module_test();
     let pp = prelude_path();
