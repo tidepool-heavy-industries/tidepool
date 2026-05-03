@@ -2,7 +2,10 @@
 
 mod cross_mode_harness;
 
-use cross_mode_harness::{CrossModeFixture, assert_cross_mode_structurally_equivalent, assert_cross_mode_pure_equivalent, assert_cross_mode_runtime_equivalent};
+use cross_mode_harness::{
+    assert_cross_mode_pure_equivalent, assert_cross_mode_runtime_equivalent,
+    assert_cross_mode_structurally_equivalent, CrossModeFixture,
+};
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::value::Value;
@@ -14,17 +17,26 @@ fn harness_pure_value_roundtrips() {
 module Test where
 y = 42 :: Int
 x = y
-"#.to_string(),
+"#
+        .to_string(),
         split: vec![
-            ("Helper.hs".to_string(), r#"
+            (
+                "Helper.hs".to_string(),
+                r#"
 module Helper where
 y = 42 :: Int
-"#.to_string()),
-            ("Main.hs".to_string(), r#"
+"#
+                .to_string(),
+            ),
+            (
+                "Main.hs".to_string(),
+                r#"
 module Test where
 import qualified Helper
 x = Helper.y
-"#.to_string()),
+"#
+                .to_string(),
+            ),
         ],
         target: "x",
     };
@@ -63,29 +75,38 @@ import Control.Monad.Freer (Eff, Member, send)
 data Echo a where Echo :: Int -> Echo Int
 main :: Eff '[Echo] Int
 main = send (Echo 42)
-"#.to_string(),
+"#
+        .to_string(),
         split: vec![
-            ("Def.hs".to_string(), r#"
+            (
+                "Def.hs".to_string(),
+                r#"
 {-# LANGUAGE GADTs, DataKinds, TypeOperators, FlexibleContexts #-}
 module Def where
 import Control.Monad.Freer (Eff, Member, send)
 data Echo a where Echo :: Int -> Echo Int
 echo :: Member Echo effs => Int -> Eff effs Int
 echo n = send (Echo n)
-"#.to_string()),
-            ("Main.hs".to_string(), r#"
+"#
+                .to_string(),
+            ),
+            (
+                "Main.hs".to_string(),
+                r#"
 {-# LANGUAGE DataKinds, TypeOperators, FlexibleContexts #-}
 module Test where
 import qualified Def
 import Control.Monad.Freer (Eff)
 main :: Eff '[Def.Echo] Int
 main = Def.echo 42
-"#.to_string()),
+"#
+                .to_string(),
+            ),
         ],
         target: "main",
     };
 
-    // For effects, we assert runtime equivalence. 
+    // For effects, we assert runtime equivalence.
     assert_cross_mode_runtime_equivalent(
         &fixture,
         || frunk::hlist![EchoHandler],
@@ -100,17 +121,26 @@ fn harness_detects_obvious_divergence() {
         single: r#"
 module Test where
 x = 1 :: Int
-"#.to_string(),
+"#
+        .to_string(),
         split: vec![
-            ("Helper.hs".to_string(), r#"
+            (
+                "Helper.hs".to_string(),
+                r#"
 module Helper where
 y = 2 :: Int
-"#.to_string()),
-            ("Main.hs".to_string(), r#"
+"#
+                .to_string(),
+            ),
+            (
+                "Main.hs".to_string(),
+                r#"
 module Test where
 import qualified Helper
 x = Helper.y
-"#.to_string()),
+"#
+                .to_string(),
+            ),
         ],
         target: "x",
     };
@@ -120,5 +150,8 @@ x = Helper.y
         assert_cross_mode_pure_equivalent(&fixture);
     });
 
-    assert!(result.is_err(), "harness should have detected value divergence");
+    assert!(
+        result.is_err(),
+        "harness should have detected value divergence"
+    );
 }

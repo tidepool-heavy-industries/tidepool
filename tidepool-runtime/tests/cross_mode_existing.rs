@@ -70,9 +70,12 @@ partition' p (x:xs)
     where (ts, fs) = partition' p xs
 
 result = partition' even' [1, 2, 3, 4, 5 :: Int]
-"#.to_string(),
+"#
+        .to_string(),
         split: vec![
-            ("Helper.hs".to_string(), r#"
+            (
+                "Helper.hs".to_string(),
+                r#"
 module Helper where
 import Tidepool.Prelude
 even' :: Int -> Bool
@@ -86,14 +89,20 @@ partition' p (x:xs)
     | p x       = (x:ts, fs)
     | otherwise = (ts, x:fs)
     where (ts, fs) = partition' p xs
-"#.to_string()),
-            ("Test.hs".to_string(), r#"
+"#
+                .to_string(),
+            ),
+            (
+                "Test.hs".to_string(),
+                r#"
 {-# LANGUAGE OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 import qualified Helper
 result = Helper.partition' Helper.even' [1, 2, 3, 4, 5 :: Int]
-"#.to_string()),
+"#
+                .to_string(),
+            ),
         ],
         target: "result",
     };
@@ -115,23 +124,32 @@ sum' [] = 0
 sum' (x:xs) = x + sum' xs
 
 result = sum' [1, 2, 3, 4 :: Int]
-"#.to_string(),
+"#
+        .to_string(),
         split: vec![
-            ("Math.hs".to_string(), r#"
+            (
+                "Math.hs".to_string(),
+                r#"
 module Math where
 import Tidepool.Prelude
 sum' :: [Int] -> Int
 {-# NOINLINE sum' #-}
 sum' [] = 0
 sum' (x:xs) = x + sum' xs
-"#.to_string()),
-            ("Test.hs".to_string(), r#"
+"#
+                .to_string(),
+            ),
+            (
+                "Test.hs".to_string(),
+                r#"
 {-# LANGUAGE OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 import qualified Math
 result = Math.sum' [1, 2, 3, 4 :: Int]
-"#.to_string()),
+"#
+                .to_string(),
+            ),
         ],
         target: "result",
     };
@@ -153,23 +171,32 @@ maybe' d _ Nothing = d
 maybe' _ f (Just x) = f x
 
 result = maybe' (0 :: Int) (+1) (Just 41)
-"#.to_string(),
+"#
+        .to_string(),
         split: vec![
-            ("Utils.hs".to_string(), r#"
+            (
+                "Utils.hs".to_string(),
+                r#"
 module Utils where
 import Tidepool.Prelude
 maybe' :: b -> (a -> b) -> Maybe a -> b
 {-# NOINLINE maybe' #-}
 maybe' d _ Nothing = d
 maybe' _ f (Just x) = f x
-"#.to_string()),
-            ("Test.hs".to_string(), r#"
+"#
+                .to_string(),
+            ),
+            (
+                "Test.hs".to_string(),
+                r#"
 {-# LANGUAGE OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 import qualified Utils
 result = Utils.maybe' (0 :: Int) (+1) (Just 41)
-"#.to_string()),
+"#
+                .to_string(),
+            ),
         ],
         target: "result",
     };
@@ -188,28 +215,37 @@ import Tidepool.Prelude
 import Tidepool.Text (camelToSnake)
 
 result = camelToSnake "helloWorld"
-"#.to_string(),
+"#
+        .to_string(),
         split: vec![
-            ("TextWrap.hs".to_string(), r#"
+            (
+                "TextWrap.hs".to_string(),
+                r#"
 module TextWrap where
 import Tidepool.Prelude
 import Tidepool.Text (camelToSnake)
 wrapCamel :: Text -> Text
 {-# NOINLINE wrapCamel #-}
 wrapCamel = camelToSnake
-"#.to_string()),
-            ("Test.hs".to_string(), r#"
+"#
+                .to_string(),
+            ),
+            (
+                "Test.hs".to_string(),
+                r#"
 {-# LANGUAGE OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 import qualified TextWrap
 result = TextWrap.wrapCamel "helloWorld"
-"#.to_string()),
+"#
+                .to_string(),
+            ),
         ],
         target: "result",
     };
 
-    // NOTE: Structural equivalence fails (796 vs 797 nodes) likely due to 
+    // NOTE: Structural equivalence fails (796 vs 797 nodes) likely due to
     // GHC's import representation in split mode.
     assert_cross_mode_pure_equivalent(&fixture);
 }
@@ -228,17 +264,24 @@ result = case compare (Array []) Null of
   LT -> 1 :: Int
   EQ -> 2 :: Int
   GT -> 3 :: Int
-"#.to_string(),
+"#
+        .to_string(),
         split: vec![
-            ("Compare.hs".to_string(), r#"
+            (
+                "Compare.hs".to_string(),
+                r#"
 module Compare where
 import Tidepool.Prelude
 import Tidepool.Aeson.Value
 cmpValue :: Value -> Value -> Ordering
 {-# NOINLINE cmpValue #-}
 cmpValue = compare
-"#.to_string()),
-            ("Test.hs".to_string(), r#"
+"#
+                .to_string(),
+            ),
+            (
+                "Test.hs".to_string(),
+                r#"
 {-# LANGUAGE OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
@@ -248,7 +291,9 @@ result = case Compare.cmpValue (Array []) Null of
   LT -> 1 :: Int
   EQ -> 2 :: Int
   GT -> 3 :: Int
-"#.to_string()),
+"#
+                .to_string(),
+            ),
         ],
         target: "result",
     };
@@ -271,22 +316,31 @@ calc :: Int -> Int -> Int -> Int
 calc a b c = (a + b) * c
 
 result = calc 1 2 3
-"#.to_string(),
+"#
+        .to_string(),
         split: vec![
-            ("Calc.hs".to_string(), r#"
+            (
+                "Calc.hs".to_string(),
+                r#"
 module Calc where
 import Tidepool.Prelude
 calc :: Int -> Int -> Int -> Int
 {-# NOINLINE calc #-}
 calc a b c = (a + b) * c
-"#.to_string()),
-            ("Test.hs".to_string(), r#"
+"#
+                .to_string(),
+            ),
+            (
+                "Test.hs".to_string(),
+                r#"
 {-# LANGUAGE OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 import qualified Calc
 result = Calc.calc 1 2 3
-"#.to_string()),
+"#
+                .to_string(),
+            ),
         ],
         target: "result",
     };
@@ -318,9 +372,12 @@ classify v = case v of
   _        -> 30
 
 result = classify (Array [Number 42.0])
-"#.to_string(),
+"#
+        .to_string(),
         split: vec![
-            ("Classify.hs".to_string(), r#"
+            (
+                "Classify.hs".to_string(),
+                r#"
 module Classify where
 import Tidepool.Prelude
 import Tidepool.Aeson.Value
@@ -335,15 +392,21 @@ classify v = case v of
       _        -> 13
   Object _ -> 20
   _        -> 30
-"#.to_string()),
-            ("Test.hs".to_string(), r#"
+"#
+                .to_string(),
+            ),
+            (
+                "Test.hs".to_string(),
+                r#"
 {-# LANGUAGE OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 import Tidepool.Aeson.Value
 import qualified Classify
 result = Classify.classify (Array [Number 42.0])
-"#.to_string()),
+"#
+                .to_string(),
+            ),
         ],
         target: "result",
     };
@@ -364,22 +427,31 @@ isLarge :: Word -> Bool
 isLarge w = w > 100
 
 result = isLarge 150
-"#.to_string(),
+"#
+        .to_string(),
         split: vec![
-            ("Check.hs".to_string(), r#"
+            (
+                "Check.hs".to_string(),
+                r#"
 module Check where
 import Tidepool.Prelude
 isLarge :: Word -> Bool
 {-# NOINLINE isLarge #-}
 isLarge w = w > 100
-"#.to_string()),
-            ("Test.hs".to_string(), r#"
+"#
+                .to_string(),
+            ),
+            (
+                "Test.hs".to_string(),
+                r#"
 {-# LANGUAGE OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
 import qualified Check
 result = Check.isLarge 150
-"#.to_string()),
+"#
+                .to_string(),
+            ),
         ],
         target: "result",
     };

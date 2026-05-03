@@ -6,8 +6,8 @@
 
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
-use tidepool_runtime::{compile_haskell, DispatchEffect};
 use tidepool_repr::{CoreExpr, DataConTable};
+use tidepool_runtime::{compile_haskell, DispatchEffect};
 
 pub mod structural_eq;
 
@@ -55,10 +55,10 @@ fn stage_split_fixture(fixture: &CrossModeFixture) -> (String, TempDir) {
             // Other entries are dependencies to be written to the temp dir
             let path = temp_dir.path().join(filename);
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).expect("failed to create parent directories for dependency");
+                std::fs::create_dir_all(parent)
+                    .expect("failed to create parent directories for dependency");
             }
-            std::fs::write(path, source)
-                .expect("failed to write dependency file to temp dir");
+            std::fs::write(path, source).expect("failed to write dependency file to temp dir");
         }
     }
 
@@ -109,8 +109,9 @@ pub fn assert_cross_mode_pure_equivalent(fixture: &CrossModeFixture) {
     let pp = prelude_path();
 
     // Run single
-    let res_single = tidepool_runtime::compile_and_run_pure(&fixture.single, fixture.target, &[&pp])
-        .expect("failed to run single-mode fixture");
+    let res_single =
+        tidepool_runtime::compile_and_run_pure(&fixture.single, fixture.target, &[&pp])
+            .expect("failed to run single-mode fixture");
 
     // Run split
     let (last_source, temp_dir) = stage_split_fixture(fixture);
@@ -130,7 +131,6 @@ pub fn assert_cross_mode_pure_equivalent(fixture: &CrossModeFixture) {
 /// Runs both modes through the JIT and compares the resulting `Value`s recursively.
 /// Constructor values are compared by name+arity.
 pub fn assert_cross_mode_runtime_equivalent<U, H1, H2>(
-
     fixture: &CrossModeFixture,
     mk_single_handlers: impl FnOnce() -> H1,
     mk_split_handlers: impl FnOnce() -> H2,
@@ -143,15 +143,17 @@ pub fn assert_cross_mode_runtime_equivalent<U, H1, H2>(
 
     // Run single
     let mut h1 = mk_single_handlers();
-    let res_single = tidepool_runtime::compile_and_run(&fixture.single, fixture.target, &[&pp], &mut h1, user)
-        .expect("failed to run single-mode fixture");
+    let res_single =
+        tidepool_runtime::compile_and_run(&fixture.single, fixture.target, &[&pp], &mut h1, user)
+            .expect("failed to run single-mode fixture");
 
     // Run split
     let (last_source, temp_dir) = stage_split_fixture(fixture);
     let include = [pp.as_path(), temp_dir.path()];
     let mut h2 = mk_split_handlers();
-    let res_split = tidepool_runtime::compile_and_run(&last_source, fixture.target, &include, &mut h2, user)
-        .expect("failed to run split-mode fixture");
+    let res_split =
+        tidepool_runtime::compile_and_run(&last_source, fixture.target, &include, &mut h2, user)
+            .expect("failed to run split-mode fixture");
 
     structural_eq::assert_value_equivalent(
         res_single.value(),

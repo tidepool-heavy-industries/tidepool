@@ -47,7 +47,9 @@ fn i_hash_ambiguity_no_longer_panics() {
     // The i64 ToCore impl looks up "I#" via get_resilient; it now issues
     // a diagnostic instead of panicking and falls back to a deterministic match.
     // get_by_name_arity returns the LAST inserted match (rev order).
-    let result = 42i64.to_value(&table).expect("unambiguous I# must encode cleanly");
+    let result = 42i64
+        .to_value(&table)
+        .expect("unambiguous I# must encode cleanly");
     if let tidepool_eval::Value::Con(id, _) = result {
         // Should return the last match in the table: DataConId(200)
         assert_eq!(id, DataConId(200));
@@ -70,7 +72,9 @@ fn unambiguous_i_hash_does_not_trip_assert() {
         field_bangs: vec![],
         qualified_name: Some("GHC.Internal.Types.I#".into()),
     });
-    let result = 42i64.to_value(&t).expect("unambiguous I# must encode cleanly");
+    let result = 42i64
+        .to_value(&t)
+        .expect("unambiguous I# must encode cleanly");
     if let tidepool_eval::Value::Con(id, _) = result {
         assert_eq!(id, DataConId(100));
     } else {

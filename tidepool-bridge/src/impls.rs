@@ -26,7 +26,7 @@ fn get_resilient(table: &DataConTable, name: &str, arity: u32) -> Option<DataCon
         // but we still warn if there are multiple same-name-same-arity entries.
         let same_arity_matches: Vec<_> = matches
             .iter()
-            .filter(|&&id| table.get(id).map_or(false, |dc| dc.rep_arity == arity))
+            .filter(|&&id| table.get(id).is_some_and(|dc| dc.rep_arity == arity))
             .collect();
         if same_arity_matches.len() > 1 {
             eprintln!(
@@ -232,7 +232,10 @@ impl ToCore for f64 {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let id = get_resilient(table, "D#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("D#".into()))?;
-        Ok(Value::Con(id, vec![Value::Lit(Literal::LitDouble(self.to_bits()))]))
+        Ok(Value::Con(
+            id,
+            vec![Value::Lit(Literal::LitDouble(self.to_bits()))],
+        ))
     }
 }
 
@@ -513,10 +516,10 @@ impl<T> ToCoreSealed for Vec<T> {}
 
 impl<T: FromCore> FromCore for Vec<T> {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
-        let nil_id = get_resilient(table, "[]", 0)
-            .ok_or(BridgeError::UnknownDataConName("[]".into()))?;
-        let cons_id = get_resilient(table, ":", 2)
-            .ok_or(BridgeError::UnknownDataConName(":".into()))?;
+        let nil_id =
+            get_resilient(table, "[]", 0).ok_or(BridgeError::UnknownDataConName("[]".into()))?;
+        let cons_id =
+            get_resilient(table, ":", 2).ok_or(BridgeError::UnknownDataConName(":".into()))?;
 
         let mut res = Vec::new();
         let mut curr = value;
