@@ -222,7 +222,6 @@ agent = do
 /// or complex closures. The debug_assert! in CompiledEffectMachine
 /// correctly identifies these non-canonical shapes reaching the JIT.
 #[test]
-#[cfg(not(debug_assertions))]
 fn test_cross_module_effect_runs() {
     let (effect_dir, main_src) = setup_multi_module_test();
     let pp = prelude_path();

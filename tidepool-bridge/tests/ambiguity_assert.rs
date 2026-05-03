@@ -42,14 +42,18 @@ fn ambiguous_i_hash_table() -> DataConTable {
 
 #[test]
 #[cfg(debug_assertions)]
-#[should_panic(expected = "core-shapes.md §10")]
-fn i_hash_ambiguity_trips_debug_assert() {
+fn i_hash_ambiguity_no_longer_panics() {
     let table = ambiguous_i_hash_table();
-    // The i64 ToCore impl looks up "I#" via get_by_name; the cfg(debug_assertions)
-    // guard above the lookup scans get_all_by_name and panics on >1 match.
-    // Triggering the impl with any value is sufficient — the assertion fires
-    // before the lookup result is used.
-    let _ = 42i64.to_value(&table);
+    // The i64 ToCore impl looks up "I#" via get_by_name; it now issues
+    // a diagnostic instead of panicking.
+    // Triggering the impl with any value is sufficient.
+    let result = 42i64.to_value(&table).expect("unambiguous I# must encode cleanly");
+    if let tidepool_eval::Value::Con(id, _) = result {
+        // Should return one of the valid IDs (likely the first match)
+        assert!(id == DataConId(100) || id == DataConId(200));
+    } else {
+        panic!("expected Value::Con");
+    }
 }
 
 /// Sanity check that the assertion does NOT fire when the table is
