@@ -5,7 +5,6 @@
 use std::path::Path;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
-use tidepool_repr::Literal;
 use tidepool_runtime::compile_and_run;
 
 fn prelude_dir() -> &'static Path {
@@ -29,11 +28,11 @@ struct MockDispatcher;
 impl DispatchEffect<()> for MockDispatcher {
     fn dispatch(
         &mut self,
-        _tag: u64,
+        tag: u64,
         _request: &Value,
         _cx: &tidepool_effect::EffectContext<'_, ()>,
     ) -> Result<Value, tidepool_effect::error::EffectError> {
-        Ok(Value::Lit(Literal::LitInt(0)))
+        Err(tidepool_effect::error::EffectError::UnhandledEffect { tag })
     }
 }
 
