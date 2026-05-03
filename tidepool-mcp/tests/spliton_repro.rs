@@ -48,10 +48,10 @@ fn repro_spliton_full_mcp() {
     let source = tidepool_mcp::template_haskell(&preamble, &stack, code, "", "", None, None);
 
     let ulp = user_lib_dir();
-    if !ulp.join("Library.hs").exists() {
-        eprintln!("Skipping: .tidepool/lib/Library.hs not found");
-        return;
-    }
+    assert!(
+        ulp.join("Library.hs").exists(),
+        "Required test fixture .tidepool/lib/Library.hs not found"
+    );
 
     let pp = prelude_dir();
     let include = [pp, ulp];
