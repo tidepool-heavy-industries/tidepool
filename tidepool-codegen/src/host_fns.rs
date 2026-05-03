@@ -693,8 +693,7 @@ pub(crate) const POISON_BUF_SIZE: usize = 16 * 1024;
 /// regression test lives in the module's `tests` block under
 /// `poison_buf_absorbs_max_con_write`.
 const _: () = {
-    let worst_case_con =
-        layout::CON_FIELDS_OFFSET as usize + crate::heap_bridge::MAX_FIELDS * 8;
+    let worst_case_con = layout::CON_FIELDS_OFFSET as usize + crate::heap_bridge::MAX_FIELDS * 8;
     assert!(
         POISON_BUF_SIZE >= worst_case_con,
         "POISON_BUF_SIZE must absorb worst-case Con write \

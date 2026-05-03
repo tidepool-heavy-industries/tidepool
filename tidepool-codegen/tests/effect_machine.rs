@@ -309,42 +309,89 @@ fn test_yield_request_e() {
 /// Yield::Request when the Union's position field is a *boxed* `W# n`
 /// (`Con(W#, [Lit(Word, n)])`) rather than the unboxed `Lit(Word, n)`.
 ///
-/// Single-module compilation lets GHC eliminate the box via case-of-known-
-/// constructor, but cross-module compilation can leave it intact. The
-/// effect_machine must therefore peel the box transparently. Without that
-/// branch, `*tag_ptr.add(LIT_VALUE_OFFSET)` reads the Con's `num_fields`
-/// halfword as a u64, returning garbage for the effect tag.
-///
-/// Constructing both shapes side-by-side here pins the contract independent
-/// of GHC's optimizer.
+/// In debug builds, this test panics because the debug_assert! in
+/// CompiledEffectMachine::step catches the non-canonical shape.
 #[test]
-fn test_yield_request_e_boxed_tag() {
-    let (_pipeline, func) = build_test_fn("test_e_boxed", |builder, vmctx, gc_sig, oom_func| {
-        let request_lit = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 99);
+#[cfg(debug_assertions)]
+#[should_panic(expected = "effect tag must be unboxed Lit after Core normalization")]
+fn test_yield_request_e_boxed_tag_debug_panics() {
+    let (_pipeline, func) =
+        build_test_fn("test_e_boxed_panic", |builder, vmctx, gc_sig, oom_func| {
+            let request_lit = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 99);
 
-        // Boxed Word: Con(W#_tag, [Lit(Word, 7)]). The W# Con tag id is
-        // arbitrary from the effect_machine's perspective — it only checks
-        // that the position field has TAG_CON, then reads field[0].
-        let inner_word = emit_alloc_lit_word(builder, vmctx, gc_sig, oom_func, 7);
-        const W_HASH_CON_TAG: u64 = 42; // arbitrary, not val/e/union/leaf/node
-        let boxed_tag =
-            emit_alloc_con1(builder, vmctx, gc_sig, oom_func, W_HASH_CON_TAG, inner_word);
+            // Boxed Word: Con(W#_tag, [Lit(Word, 7)]).
+            let inner_word = emit_alloc_lit_word(builder, vmctx, gc_sig, oom_func, 7);
+            const W_HASH_CON_TAG: u64 = 42;
+            let boxed_tag =
+                emit_alloc_con1(builder, vmctx, gc_sig, oom_func, W_HASH_CON_TAG, inner_word);
 
-        let union_ptr = emit_alloc_con2(
-            builder,
-            vmctx,
-            gc_sig,
-            oom_func,
-            UNION_CON_TAG,
-            boxed_tag,
-            request_lit,
-        );
-        let cont_ptr = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 0);
-        let e_ptr = emit_alloc_con2(
-            builder, vmctx, gc_sig, oom_func, E_CON_TAG, union_ptr, cont_ptr,
-        );
-        builder.ins().return_(&[e_ptr]);
-    });
+            let union_ptr = emit_alloc_con2(
+                builder,
+                vmctx,
+                gc_sig,
+                oom_func,
+                UNION_CON_TAG,
+                boxed_tag,
+                request_lit,
+            );
+            let cont_ptr = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 0);
+            let e_ptr = emit_alloc_con2(
+                builder, vmctx, gc_sig, oom_func, E_CON_TAG, union_ptr, cont_ptr,
+            );
+            builder.ins().return_(&[e_ptr]);
+        });
+
+    let mut nursery = vec![0u8; 4096];
+    let start = nursery.as_mut_ptr();
+    let end = unsafe { start.add(4096) };
+    let vmctx = VMContext::new(start, end, host_fns::gc_trigger);
+
+    let mut machine = CompiledEffectMachine::new(
+        func,
+        vmctx,
+        tidepool_codegen::effect_machine::ConTags {
+            val: VAL_CON_TAG,
+            e: E_CON_TAG,
+            union: UNION_CON_TAG,
+            leaf: LEAF_CON_TAG,
+            node: NODE_CON_TAG,
+        },
+    );
+    let _ = machine.step();
+}
+
+/// Yield::Request when the Union's position field is a *boxed* `W# n`
+/// (`Con(W#, [Lit(Word, n)])`) rather than the unboxed `Lit(Word, n)`.
+///
+/// In release builds, the production-path check returns an error.
+#[test]
+#[cfg(not(debug_assertions))]
+fn test_yield_request_e_boxed_tag_release_errors() {
+    let (_pipeline, func) =
+        build_test_fn("test_e_boxed_error", |builder, vmctx, gc_sig, oom_func| {
+            let request_lit = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 99);
+
+            // Boxed Word: Con(W#_tag, [Lit(Word, 7)]).
+            let inner_word = emit_alloc_lit_word(builder, vmctx, gc_sig, oom_func, 7);
+            const W_HASH_CON_TAG: u64 = 42;
+            let boxed_tag =
+                emit_alloc_con1(builder, vmctx, gc_sig, oom_func, W_HASH_CON_TAG, inner_word);
+
+            let union_ptr = emit_alloc_con2(
+                builder,
+                vmctx,
+                gc_sig,
+                oom_func,
+                UNION_CON_TAG,
+                boxed_tag,
+                request_lit,
+            );
+            let cont_ptr = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 0);
+            let e_ptr = emit_alloc_con2(
+                builder, vmctx, gc_sig, oom_func, E_CON_TAG, union_ptr, cont_ptr,
+            );
+            builder.ins().return_(&[e_ptr]);
+        });
 
     let mut nursery = vec![0u8; 4096];
     let start = nursery.as_mut_ptr();
@@ -364,23 +411,10 @@ fn test_yield_request_e_boxed_tag() {
     );
     let result = machine.step();
 
-    let Yield::Request {
-        tag,
-        request,
-        continuation,
-    } = result
-    else {
-        panic!("Expected Yield::Request from boxed-tag Union, got {:?}", result);
-    };
-
     assert_eq!(
-        tag, 7,
-        "boxed Union tag must be peeled and read as the inner Word value, \
-         not the Con's num_fields halfword"
+        result,
+        Yield::Error(YieldError::UnexpectedTag(layout::TAG_CON))
     );
-    assert_eq!(unsafe { *request }, TAG_LIT);
-    assert_eq!(unsafe { *(request.add(16) as *const i64) }, 99);
-    assert!(!continuation.is_null());
 }
 
 /// Test 3: CompiledEffectMachine is Send.

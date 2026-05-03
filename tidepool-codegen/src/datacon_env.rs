@@ -10,14 +10,15 @@ use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, TreeBuilder, VarId};
 ///
 /// The binding VarId matches `VarId(dc.id.0)`, which is what the GHC Core translator
 /// uses to reference data constructors as function values.
-pub fn wrap_with_datacon_env(expr: &CoreExpr, table: &DataConTable) -> CoreExpr {
+pub fn wrap_with_datacon_env(mut expr: CoreExpr, table: &DataConTable) -> CoreExpr {
+    if expr.nodes.is_empty() {
+        return expr;
+    }
     let mut b = TreeBuilder::new();
 
-    // First, push all nodes from the original expression
-    let mut src = TreeBuilder::new();
-    src.extend(expr.nodes.iter().cloned());
-    let base = b.push_tree(src);
-    let root = base + expr.nodes.len() - 1;
+    // First, push all nodes from the original expression.
+    // Since b is empty, we can move the nodes directly without index offsetting.
+    let root = b.extend(expr.nodes.drain(..));
 
     // Collect datacons sorted by id for deterministic output
     let mut datacons: Vec<_> = table.iter().collect();
