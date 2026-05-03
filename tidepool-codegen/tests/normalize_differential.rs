@@ -6,6 +6,7 @@ use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
 use tidepool_repr::types::*;
 use tidepool_repr::{CoreExpr, TreeBuilder};
+use tidepool_testing::compare::assert_values_eq;
 
 fn test_table() -> DataConTable {
     let mut table = DataConTable::new();
@@ -45,21 +46,6 @@ fn test_table() -> DataConTable {
     table
 }
 
-fn values_match(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Lit(la), Value::Lit(lb)) => la == lb,
-        (Value::Con(ida, fa), Value::Con(idb, fb)) => {
-            if ida != idb || fa.len() != fb.len() {
-                return false;
-            }
-            fa.iter()
-                .zip(fb.iter())
-                .all(|(va, vb)| values_match(va, vb))
-        }
-        _ => false,
-    }
-}
-
 fn run_pure_fixture(expr: &CoreExpr, table: &DataConTable) -> Value {
     let mut machine = JitEffectMachine::compile(expr, table, 1 << 20).expect("Compilation failed");
     machine.run_pure().expect("Run failed")
@@ -95,12 +81,7 @@ fn differential_flatten_nested_int_boxes() {
     let val_can = run_pure_fixture(&canonical, &table);
     let val_pre = run_pure_fixture(&pre_canonical, &table);
 
-    assert!(
-        values_match(&val_can, &val_pre),
-        "Values mismatch:\ncan: {:?}\npre: {:?}",
-        val_can,
-        val_pre
-    );
+    assert_values_eq(&val_can, &val_pre);
 }
 
 #[test]
@@ -139,14 +120,13 @@ fn differential_unbox_primop_args() {
     let val_can = run_pure_fixture(&canonical, &table);
     let val_pre = run_pure_fixture(&pre_canonical, &table);
 
-    // IntAdd returns LitInt
-    match (&val_can, &val_pre) {
-        (Value::Lit(Literal::LitInt(3)), Value::Lit(Literal::LitInt(3))) => (),
-        _ => panic!(
-            "Expected LitInt(3) for both, got {:?} and {:?}",
-            val_can, val_pre
-        ),
-    }
+    assert_values_eq(&val_can, &val_pre);
+    // Sanity check for the specific value
+    assert!(
+        matches!(val_can, Value::Lit(Literal::LitInt(3))),
+        "Expected LitInt(3), got {:?}",
+        val_can
+    );
 }
 
 #[test]
@@ -194,7 +174,7 @@ fn differential_canonicalize_effect_tags() {
     let val_can = run_pure_fixture(&canonical_run, &table);
     let val_pre = run_pure_fixture(&pre_canonical_run, &table);
 
-    assert!(values_match(&val_can, &val_pre));
+    assert_values_eq(&val_can, &val_pre);
 }
 
 #[test]
@@ -214,10 +194,13 @@ fn differential_normalize_idempotent_at_runtime() {
     let norm1 = tidepool_repr::normalize(&expr, &table);
     let norm2 = tidepool_repr::normalize(&norm1, &table);
 
+    // Assert IR-level idempotence (addresses Copilot comment)
+    assert_eq!(norm1, norm2, "normalize must be idempotent at the IR level");
+
     let val1 = run_pure_fixture(&norm1, &table);
     let val2 = run_pure_fixture(&norm2, &table);
 
-    assert!(values_match(&val1, &val2));
+    assert_values_eq(&val1, &val2);
 }
 
 #[test]
@@ -262,7 +245,7 @@ fn differential_var_set_preserved() {
     let val_pre = run_pure_fixture(&pre_canonical2, &table);
     let val_can = run_pure_fixture(&canonical2, &table);
 
-    assert!(values_match(&val_pre, &val_can));
+    assert_values_eq(&val_pre, &val_can);
 }
 
 proptest! {
@@ -295,6 +278,6 @@ proptest! {
         let val_can = run_pure_fixture(&canonical, &table);
         let val_pre = run_pure_fixture(&pre_canonical, &table);
 
-        prop_assert!(values_match(&val_can, &val_pre));
+        assert_values_eq(&val_can, &val_pre);
     }
 }
