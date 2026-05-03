@@ -10,7 +10,7 @@ use tidepool_repr::{DataConId, DataConTable, Literal};
 /// Check if a DataConId matches a known boxing constructor name (I#, W#, D#, C#).
 fn is_boxing_con(name: &str, id: DataConId, table: &DataConTable) -> bool {
     #[cfg(debug_assertions)]
-    if matches!(name, "I#" | "W#") {
+    if matches!(name, "I#" | "W#" | "D#" | "C#") {
         let matches = table.get_all_by_name(name);
         debug_assert!(
             matches.len() <= 1,
@@ -642,7 +642,7 @@ impl<T, E> ToCoreSealed for Result<T, E> {}
 impl<T: FromCore, E: FromCore> FromCore for Result<T, E> {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         #[cfg(debug_assertions)]
-        for name in ["Right", "Ok"] {
+        for name in ["Right", "Ok", "Left", "Err"] {
             let matches = table.get_all_by_name(name);
             debug_assert!(
                 matches.len() <= 1,
@@ -694,7 +694,7 @@ impl<T: FromCore, E: FromCore> FromCore for Result<T, E> {
 impl<T: ToCore, E: ToCore> ToCore for Result<T, E> {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         #[cfg(debug_assertions)]
-        for name in ["Right", "Ok"] {
+        for name in ["Right", "Ok", "Left", "Err"] {
             let matches = table.get_all_by_name(name);
             debug_assert!(
                 matches.len() <= 1,
