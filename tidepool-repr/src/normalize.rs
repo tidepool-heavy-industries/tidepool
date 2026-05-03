@@ -36,11 +36,11 @@ pub fn normalize(expr: &CoreExpr, table: &DataConTable) -> CoreExpr {
     }
     let mut current = expr.clone();
     for _ in 0..100 {
-        let next = apply_rules_once(&current, table);
+        let (next, root_idx) = apply_rules_once(&current, table);
         if next == current {
             // Final pass to ensure the tree is "clean" (no unreachable nodes)
             // and canonical.
-            return next.extract_subtree(next.nodes.len() - 1);
+            return next.extract_subtree(root_idx);
         }
         current = next;
     }
@@ -48,12 +48,16 @@ pub fn normalize(expr: &CoreExpr, table: &DataConTable) -> CoreExpr {
         false,
         "normalize did not reach fixpoint within 100 iterations"
     );
-    current.extract_subtree(current.nodes.len() - 1)
+    // In case of timeout, we still need to return a valid tree.
+    // We'll re-run apply_rules_once one last time to get the root_idx.
+    let (final_tree, root_idx) = apply_rules_once(&current, table);
+    final_tree.extract_subtree(root_idx)
 }
 
-fn apply_rules_once(expr: &CoreExpr, table: &DataConTable) -> CoreExpr {
+fn apply_rules_once(expr: &CoreExpr, table: &DataConTable) -> (CoreExpr, usize) {
     let mut out = Vec::with_capacity(expr.nodes.len());
     let mut old_to_new = HashMap::new();
+    let mut last_mapped_idx = 0;
 
     for (old_idx, frame) in expr.nodes.iter().enumerate() {
         let mut mapped = frame
@@ -72,8 +76,9 @@ fn apply_rules_once(expr: &CoreExpr, table: &DataConTable) -> CoreExpr {
             out.len() - 1
         };
         old_to_new.insert(old_idx, new_idx);
+        last_mapped_idx = new_idx;
     }
-    RecursiveTree { nodes: out }
+    (RecursiveTree { nodes: out }, last_mapped_idx)
 }
 
 const BOX_NAMES: &[&str] = &["I#", "W#", "C#", "F#", "D#"];
@@ -100,7 +105,9 @@ fn try_flatten_box(
             } = &out[field_idx]
             {
                 if inner_tag == tag && inner_fields.len() == 1 {
-                    return Some(inner_fields[0]);
+                    // Flattening `Con(tag, [Con(tag, [inner])])` to `Con(tag, [inner])`.
+                    // The inner `Con` already has the correct shape and is at `field_idx`.
+                    return Some(field_idx);
                 }
             }
         }
@@ -299,6 +306,44 @@ mod tests {
     }
 
     #[test]
+    fn flatten_nested_boxes_as_child() {
+        let table = setup_table();
+        let i_hash = table.get_by_name("I#").unwrap();
+        // App(f, I# (I# 5))
+        let expr = RecursiveTree {
+            nodes: vec![
+                CoreFrame::Lit(Literal::LitInt(5)), // 0
+                CoreFrame::Con {
+                    tag: i_hash,
+                    fields: vec![0],
+                }, // 1
+                CoreFrame::Con {
+                    tag: i_hash,
+                    fields: vec![1],
+                }, // 2
+                CoreFrame::Var(VarId(1)),           // 3
+                CoreFrame::App { fun: 3, arg: 2 },  // 4
+            ],
+        };
+        let normalized = normalize(&expr, &table);
+        // Should become App(f, I# 5)
+        let expected_raw = RecursiveTree {
+            nodes: vec![
+                CoreFrame::Lit(Literal::LitInt(5)), // 0
+                CoreFrame::Con {
+                    tag: i_hash,
+                    fields: vec![0],
+                }, // 1
+                CoreFrame::Var(VarId(1)),           // 2
+                CoreFrame::App { fun: 2, arg: 1 },  // 3
+            ],
+        };
+        // Canonicalize expected tree order by extracting from its root
+        let expected = expected_raw.extract_subtree(3);
+        assert_eq!(normalized, expected);
+    }
+
+    #[test]
     fn flatten_does_not_touch_different_boxes() {
         let table = setup_table();
         let i_hash = table.get_by_name("I#").unwrap();
@@ -351,7 +396,7 @@ mod tests {
         };
         let normalized = normalize(&expr, &table);
         // Should become Con(Union, [Lit(7), Var(request)])
-        let expected = RecursiveTree {
+        let expected_raw = RecursiveTree {
             nodes: vec![
                 CoreFrame::Lit(Literal::LitWord(7)),
                 CoreFrame::Var(VarId(10)),
@@ -361,6 +406,7 @@ mod tests {
                 },
             ],
         };
+        let expected = expected_raw.extract_subtree(2);
         assert_eq!(normalized, expected);
     }
 
@@ -408,7 +454,7 @@ mod tests {
         };
         let normalized = normalize(&expr, &table);
         // Should become PrimOp(IntAdd, [Lit(1), Lit(2)])
-        let expected = RecursiveTree {
+        let expected_raw = RecursiveTree {
             nodes: vec![
                 CoreFrame::Lit(Literal::LitInt(1)),
                 CoreFrame::Lit(Literal::LitInt(2)),
@@ -418,6 +464,7 @@ mod tests {
                 },
             ],
         };
+        let expected = expected_raw.extract_subtree(2);
         assert_eq!(normalized, expected);
     }
 
@@ -624,7 +671,7 @@ mod proptest_normalize {
             let mut current = expr;
             let mut count = 0;
             for _ in 0..100 {
-                let next = apply_rules_once(&current, &table);
+                let (next, _) = apply_rules_once(&current, &table);
                 if next == current {
                     break;
                 }
