@@ -21,6 +21,7 @@ use crate::frame::CoreFrame;
 use crate::tree::MapLayer;
 use crate::types::{DataConId, Literal};
 use crate::{CoreExpr, DataConTable, RecursiveTree};
+use std::collections::HashMap;
 
 /// Canonicalize a [`CoreExpr`] by applying all normalization rules to
 /// fixpoint.
@@ -56,21 +57,42 @@ pub fn normalize(expr: &CoreExpr, table: &DataConTable) -> CoreExpr {
 fn apply_rules_once(expr: &CoreExpr, table: &DataConTable) -> (CoreExpr, usize) {
     let mut out = Vec::with_capacity(expr.nodes.len());
     let mut old_to_new: Vec<usize> = Vec::with_capacity(expr.nodes.len());
+    let mut var_map = HashMap::new();
 
+    // Pre-pass: collect bindings from the original tree.
+    // In GHC Core, Let/Lam nodes usually point to their RHS/body nodes.
+    // Bottom-up traversal means usage is seen before binding, so we
+    // collect bindings here to enable look-through during the main pass.
     for frame in expr.nodes.iter() {
+        match frame {
+            CoreFrame::LetNonRec { binder, rhs, .. } => {
+                var_map.insert(*binder, *rhs);
+            }
+            CoreFrame::LetRec { bindings, .. } => {
+                for (binder, rhs) in bindings {
+                    var_map.insert(*binder, *rhs);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (old_idx, frame) in expr.nodes.iter().enumerate() {
         let mut mapped = frame.clone().map_layer(|child_old| old_to_new[child_old]);
 
         // Rules that transform the node in-place
-        transform_unbox_prim_args(&mut mapped, &out, table);
-        transform_canonicalize_effect_tag(&mut mapped, &out, table);
+        transform_unbox_prim_args(&mut mapped, &out, table, &var_map, &old_to_new);
+        transform_canonicalize_effect_tag(&mut mapped, &out, table, &var_map, &old_to_new);
 
         // Rules that collapse the node to an existing index
         let new_idx = if let Some(replacement_idx) = try_flatten_box(&mapped, &out, table) {
             replacement_idx
         } else {
-            out.push(mapped);
+            out.push(mapped.clone());
             out.len() - 1
         };
+
+        debug_assert_eq!(old_to_new.len(), old_idx);
         old_to_new.push(new_idx);
     }
     let last_mapped_idx = *old_to_new.last().expect("non-empty");
@@ -83,6 +105,31 @@ fn known_box_dataconid(table: &DataConTable, id: DataConId) -> bool {
     table
         .name_of(id)
         .is_some_and(|name| BOX_NAMES.contains(&name))
+}
+
+/// Resolves a Var node through its binding if possible.
+/// Returns the index in the `out` vector of the actual expression.
+fn resolve_var(
+    idx: usize,
+    out: &[CoreFrame<usize>],
+    var_map: &HashMap<crate::VarId, usize>,
+    old_to_new: &[usize],
+) -> usize {
+    let mut current_idx = idx;
+    let mut fuel = 10;
+    while fuel > 0 {
+        if let CoreFrame::Var(id) = &out[current_idx] {
+            if let Some(&rhs_old_idx) = var_map.get(id) {
+                if rhs_old_idx < old_to_new.len() {
+                    current_idx = old_to_new[rhs_old_idx];
+                    fuel -= 1;
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    current_idx
 }
 
 /// Rule 1: flattenBoxRecursion
@@ -115,13 +162,16 @@ fn transform_unbox_prim_args(
     frame: &mut CoreFrame<usize>,
     out: &[CoreFrame<usize>],
     table: &DataConTable,
+    var_map: &HashMap<crate::VarId, usize>,
+    old_to_new: &[usize],
 ) {
     if let CoreFrame::PrimOp { args, .. } = frame {
         let mut new_args = Vec::with_capacity(args.len());
         let mut all_boxed_lit = true;
 
         for &arg_idx in args.iter() {
-            if let CoreFrame::Con { tag, fields } = &out[arg_idx] {
+            let resolved_idx = resolve_var(arg_idx, out, var_map, old_to_new);
+            if let CoreFrame::Con { tag, fields } = &out[resolved_idx] {
                 if fields.len() == 1 && known_box_dataconid(table, *tag) {
                     let inner_idx = fields[0];
                     if let CoreFrame::Lit(_) = &out[inner_idx] {
@@ -144,6 +194,8 @@ fn transform_canonicalize_effect_tag(
     frame: &mut CoreFrame<usize>,
     out: &[CoreFrame<usize>],
     table: &DataConTable,
+    var_map: &HashMap<crate::VarId, usize>,
+    old_to_new: &[usize],
 ) {
     let union_id = match table.get_by_name_arity("Union", 2) {
         Some(id) => id,
@@ -156,11 +208,12 @@ fn transform_canonicalize_effect_tag(
 
     if let CoreFrame::Con { tag, fields } = frame {
         if *tag == union_id && fields.len() == 2 {
-            let tag_field_idx = fields[0];
+            let resolved_idx = resolve_var(fields[0], out, var_map, old_to_new);
+
             if let CoreFrame::Con {
                 tag: inner_tag,
                 fields: inner_fields,
-            } = &out[tag_field_idx]
+            } = &out[resolved_idx]
             {
                 if *inner_tag == w_hash_id && inner_fields.len() == 1 {
                     let lit_idx = inner_fields[0];
@@ -404,6 +457,51 @@ mod tests {
         };
         let expected = expected_raw.extract_subtree(2);
         assert_eq!(normalized, expected);
+    }
+
+    #[test]
+    fn effect_tag_canonicalized_through_var() {
+        let table = setup_table();
+        let union_id = table.get_by_name("Union").unwrap();
+        let w_hash = table.get_by_name("W#").unwrap();
+        // let x = W# 7 in Con(Union, [x, Var(request)])
+        let expr = RecursiveTree {
+            nodes: vec![
+                CoreFrame::Lit(Literal::LitWord(7)), // 0
+                CoreFrame::Con {
+                    tag: w_hash,
+                    fields: vec![0],
+                }, // 1
+                CoreFrame::Var(VarId(10)),           // 2: request
+                CoreFrame::Var(VarId(100)),          // 3: x
+                CoreFrame::Con {
+                    tag: union_id,
+                    fields: vec![3, 2],
+                }, // 4
+                CoreFrame::LetNonRec {
+                    binder: VarId(100),
+                    rhs: 1,
+                    body: 4,
+                }, // 5
+            ],
+        };
+        let normalized = normalize(&expr, &table);
+        // Should become let x = W# 7 in Con(Union, [Lit(7), Var(request)])
+        // But since LetNonRec might be cleaned up if x is unused...
+        // Actually Rule 2 doesn't remove the Let, just changes the Con fields.
+        let root_idx = normalized.nodes.len() - 1;
+        if let CoreFrame::LetNonRec { body, .. } = &normalized.nodes[root_idx] {
+            if let CoreFrame::Con { fields, .. } = &normalized.nodes[*body] {
+                assert_eq!(
+                    normalized.nodes[fields[0]],
+                    CoreFrame::Lit(Literal::LitWord(7))
+                );
+            } else {
+                panic!("Body should be Con");
+            }
+        } else {
+            panic!("Root should be LetNonRec");
+        }
     }
 
     #[test]
