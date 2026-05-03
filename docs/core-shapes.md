@@ -214,6 +214,7 @@ The JIT includes safepoints where long-running or infinite computations can be i
 - `audit-effect-machine § force_ptr: Thunk tag check` — returns poison pointer and sets `YieldError::UserErrorMsg` on unexpected tag (Hardened).
 - `audit-effect-machine § apply_cont_heap` — now surfaces `YieldError::UserErrorMsg` via `runtime_error_with_msg` on shape mismatch instead of returning `null_mut` silently (Hardened).
 - `audit-heap-bridge § TAG_CLOSURE opaque representation` — now returns `BridgeError::UnexpectedHeapTag(TAG_CLOSURE)` instead of a dummy opaque `Closure` (Hardened).
+- `audit-heap-bridge § LitTag::Array / LitTag::SmallArray` — now returns `BridgeError::NullPointer` on null pointer instead of a dummy empty array (Hardened).
 
 ### Silent fallbacks (still wrong-but-valid Value on shape mismatch)
 - `audit-heap-bridge § SmallArray# / Array# coercion` — silently coerces to `Value::Con(DataConId(0), [..])`; type info erased. Hardening candidate; tracked under code-hardening-wave2.
