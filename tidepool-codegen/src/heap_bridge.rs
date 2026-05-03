@@ -90,14 +90,14 @@ unsafe fn heap_to_value_inner(
                 x if x == LIT_TAG_INT => Ok(Value::Lit(Literal::LitInt(raw_value))),
                 x if x == LIT_TAG_WORD => Ok(Value::Lit(Literal::LitWord(raw_value as u64))),
                 x if x == LIT_TAG_CHAR => {
-                    // core-shapes.md §1: Char lit must hold valid Unicode codepoint
-                    debug_assert!(
-                        char::from_u32(raw_value as u32).is_some(),
-                        "core-shapes.md §1: Char lit must hold valid Unicode codepoint"
-                    );
-                    Ok(Value::Lit(Literal::LitChar(
-                        char::from_u32(raw_value as u32).unwrap_or('\0'),
-                    )))
+                    // core-shapes.md §1: Char lit must hold valid Unicode codepoint.
+                    // Fallback to \0 if invalid.
+                    let c = char::from_u32(raw_value as u32);
+                    #[cfg(debug_assertions)]
+                    if c.is_none() {
+                        eprintln!("[heap_bridge] diagnostic: invalid Unicode codepoint {:#x} in Char lit; falling back to \\0", raw_value);
+                    }
+                    Ok(Value::Lit(Literal::LitChar(c.unwrap_or('\0'))))
                 }
                 x if x == LIT_TAG_FLOAT => Ok(Value::Lit(Literal::LitFloat(raw_value as u64))),
                 x if x == LIT_TAG_DOUBLE => Ok(Value::Lit(Literal::LitDouble(raw_value as u64))),

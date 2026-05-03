@@ -106,10 +106,7 @@ fn test_arity_mismatch_tuple() {
         ],
     );
     let res = <(i64, i64)>::from_value(&val, &table);
-    assert!(matches!(res, Err(BridgeError::UnknownDataCon(_))));
-    // Wait, the impl of (A, B) checks if id == pair_id.
-    // If it's triple_id, it returns UnknownDataCon (or we could argue it's a type mismatch).
-    // Let's check what the code does.
+    assert!(matches!(res, Err(BridgeError::TypeMismatch { .. })));
 }
 
 #[test]

@@ -234,21 +234,40 @@ impl CompiledEffectMachine {
             }
             // Read the actual effect tag value. The Union's first field is the
             // position index (Word#). After Core normalization (Rule 2),
-            // this is guaranteed to be an unboxed Lit(Word, N). The JIT emits
-            // this directly into the heap as TAG_LIT. We no longer handle
-            // boxed W# fallback here.
+            // this is ideally an unboxed Lit(Word, N). However, we maintain
+            // a fallback for boxed W# to handle cross-module variables that
+            // normalization cannot safely unbox.
             let tag_ptr_tag = unsafe { *tag_ptr };
-            debug_assert_eq!(
-                tag_ptr_tag,
-                layout::TAG_LIT,
-                "effect tag must be unboxed Lit after Core normalization; got heap tag {}",
-                tag_ptr_tag,
-            );
-            if tag_ptr_tag != layout::TAG_LIT {
+            // core-shapes.md §7: effect tag should be unboxed Lit after normalization,
+            // but we must handle boxed W# for cross-module variables Rule 2 can't see.
+            if tag_ptr_tag != layout::TAG_LIT && tag_ptr_tag != layout::TAG_CON {
                 return Yield::Error(YieldError::UnexpectedTag(tag_ptr_tag));
             }
-            let effect_tag =
-                unsafe { *(tag_ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) };
+
+            let effect_tag = if tag_ptr_tag == layout::TAG_LIT {
+                unsafe { *(tag_ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) }
+            } else {
+                // Fallback for boxed W#: Read the LitWord from field 0.
+                // Harden: verify it's a TAG_CON and has at least one field.
+                if tag_ptr_tag != layout::TAG_CON {
+                    return Yield::Error(YieldError::UnexpectedTag(tag_ptr_tag));
+                }
+                let num_fields = unsafe { Self::read_con_num_fields(tag_ptr) };
+                if num_fields == 0 {
+                    return Yield::Error(YieldError::UnexpectedTag(tag_ptr_tag));
+                }
+
+                let lit_ptr = unsafe { Self::read_con_field(tag_ptr, 0) };
+                let lit_ptr = self.force_ptr(lit_ptr);
+                if lit_ptr.is_null() {
+                    return Yield::Error(YieldError::NullPointer);
+                }
+                let lit_ptr_tag = unsafe { *lit_ptr };
+                if lit_ptr_tag != layout::TAG_LIT {
+                    return Yield::Error(YieldError::UnexpectedTag(lit_ptr_tag));
+                }
+                unsafe { *(lit_ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) }
+            };
             let mut request = unsafe { Self::read_con_field(union_ptr, 1) };
             request = self.force_ptr(request);
 
