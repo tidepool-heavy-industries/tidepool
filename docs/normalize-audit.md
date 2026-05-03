@@ -14,9 +14,10 @@
   - *Current logic*: Recursive block-loop in Cranelift IR with a call to `heap_force`.
   - *Canonical form*: IR-level normalization can eliminate the `TAG_CON` peeling loop, but `TAG_THUNK` check must stay.
 
-- **tidepool-codegen/src/effect_machine.rs:241-255**: Ad-hoc peeling of effect tags. Handles both direct `Lit(Word, n)` and boxed `Con(W#, [Lit(Word, n)])`.
-  - *Current logic*: `if tag_ptr_tag == layout::TAG_LIT { ... } else if tag_ptr_tag == layout::TAG_CON { ... }`.
-  - *Canonical form*: Normalize all effect tags to unboxed `LitWord` at the IR level.
+- **tidepool-codegen/src/effect_machine.rs:241-255**: Peeling of effect tags.
+  - *Status*: **MIGRATED**. Now assumes unboxed `LitWord` post-normalization.
+  - *Current logic*: `debug_assert!(tag_ptr_tag == layout::TAG_LIT)` + production error return.
+  - *Canonical form*: Normalized all effect tags to unboxed `LitWord` at the IR level (Rule 2).
 
 ## 2. Shapes Translate.hs eliminates pre-IR
 

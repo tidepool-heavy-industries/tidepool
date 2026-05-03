@@ -233,10 +233,10 @@ impl CompiledEffectMachine {
                 return Yield::Error(YieldError::NullPointer);
             }
             // Read the actual effect tag value. The Union's first field is the
-            // position index (Word#). After GHC optimization in single-module
-            // compilation, this is an unboxed Lit(Word, N). In cross-module
-            // compilation, the boxing may survive as Con(W#, [Lit(Word, N)]).
-            // Handle both layouts to avoid reading garbage.
+            // position index (Word#). After Core normalization (Rule 2),
+            // this is guaranteed to be an unboxed Lit(Word, N). The JIT emits
+            // this directly into the heap as TAG_LIT. We no longer handle
+            // boxed W# fallback here.
             let tag_ptr_tag = unsafe { *tag_ptr };
             debug_assert_eq!(
                 tag_ptr_tag,
