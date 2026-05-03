@@ -370,7 +370,10 @@ fn test_yield_request_e_boxed_tag() {
         continuation,
     } = result
     else {
-        panic!("Expected Yield::Request from boxed-tag Union, got {:?}", result);
+        panic!(
+            "Expected Yield::Request from boxed-tag Union, got {:?}",
+            result
+        );
     };
 
     assert_eq!(
