@@ -1,10 +1,13 @@
-use tidepool_codegen::heap_bridge::heap_to_value;
+use tidepool_codegen::heap_bridge::{heap_to_value, BridgeError};
 use tidepool_eval::value::Value;
 use tidepool_heap::layout;
 use tidepool_repr::*;
 
 #[repr(align(8))]
 struct AlignedBuf<const N: usize>([u8; N]);
+
+const LIT_TAG_SMALLARRAY: u8 = 8;
+const LIT_TAG_ARRAY: u8 = 9;
 
 #[test]
 fn test_heap_to_value_lit_int() {
@@ -101,5 +104,43 @@ fn test_heap_to_value_deeply_nested_cons() {
         let Value::Lit(Literal::LitInt(0)) = v else {
             panic!("Expected terminal LitInt(0), got {:?}", v);
         };
+    }
+}
+
+#[test]
+fn test_heap_to_value_lit_smallarray_null() {
+    let mut buf_data = AlignedBuf::<{ layout::LIT_SIZE }>([0u8; layout::LIT_SIZE]);
+    let ptr = buf_data.0.as_mut_ptr();
+    unsafe {
+        layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
+        *(ptr.add(layout::LIT_TAG_OFFSET)) = LIT_TAG_SMALLARRAY;
+        // Null pointer for the array data
+        *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut *const u8) = std::ptr::null();
+
+        let res = heap_to_value(ptr);
+        assert!(
+            matches!(res, Err(BridgeError::NullPointer)),
+            "Expected NullPointer error, got {:?}",
+            res
+        );
+    }
+}
+
+#[test]
+fn test_heap_to_value_lit_array_null() {
+    let mut buf_data = AlignedBuf::<{ layout::LIT_SIZE }>([0u8; layout::LIT_SIZE]);
+    let ptr = buf_data.0.as_mut_ptr();
+    unsafe {
+        layout::write_header(ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
+        *(ptr.add(layout::LIT_TAG_OFFSET)) = LIT_TAG_ARRAY;
+        // Null pointer for the array data
+        *(ptr.add(layout::LIT_VALUE_OFFSET) as *mut *const u8) = std::ptr::null();
+
+        let res = heap_to_value(ptr);
+        assert!(
+            matches!(res, Err(BridgeError::NullPointer)),
+            "Expected NullPointer error, got {:?}",
+            res
+        );
     }
 }

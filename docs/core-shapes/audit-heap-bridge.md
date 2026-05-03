@@ -126,11 +126,11 @@
 - **Reads:** `raw_value` as `*const u8` pointer; length from `arr_ptr`; field pointers from `arr_ptr.add(8 + 8*i)`
 - **Expected shape:** `TAG_LIT` with `lit_tag = LIT_TAG_SMALLARRAY` (8) or `LIT_TAG_ARRAY` (9). Pointer targets: `[len: u64][ptr0][ptr1]...`
 - **Decoded into:** `Value::Con(DataConId(0), elems)`
-- **Failure mode on shape mismatch:** `silent fallback: Value::Con(DataConId(0), vec![])` if pointer is null | `BridgeError::DataTooLarge`
+- **Failure mode on shape mismatch:** `BridgeError::NullPointer` if pointer is null (Hardened) | `BridgeError::DataTooLarge`
 - **Bound checks:** `MAX_DATA_SIZE` (64MB), `MAX_DEPTH` (via recursion)
 - **Mode:** `always-on`
 - **Test coverage:** `uncovered`
-- **Notes:** Coerces boxed pointer arrays into a generic `Con(0, ...)` structure. Semantic meaning depends on the wrapping Haskell constructor.
+- **Notes:** Coerces boxed pointer arrays into a generic `Con(0, ...)` structure. Semantic meaning depends on the wrapping Haskell constructor. DataConId(0) is a deliberate sentinel meaning "raw boxed-pointer array".
 
 ## TAG_CON field decoding
 
