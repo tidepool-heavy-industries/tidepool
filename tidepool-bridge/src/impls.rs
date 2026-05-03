@@ -9,6 +9,16 @@ use tidepool_repr::{DataConId, DataConTable, Literal};
 
 /// Check if a DataConId matches a known boxing constructor name (I#, W#, D#, C#).
 fn is_boxing_con(name: &str, id: DataConId, table: &DataConTable) -> bool {
+    #[cfg(debug_assertions)]
+    if matches!(name, "I#" | "W#") {
+        let matches = table.get_all_by_name(name);
+        debug_assert!(
+            matches.len() <= 1,
+            "core-shapes.md §10: ambiguous unqualified DataCon name '{}' in cross-module compilation context; matches = {:?}. This impl should be migrated to get_by_name_arity or get_by_qualified_name.",
+            name,
+            matches
+        );
+    }
     table.get_by_name(name) == Some(id)
 }
 
@@ -145,6 +155,15 @@ impl FromCore for i64 {
 
 impl ToCore for i64 {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+        #[cfg(debug_assertions)]
+        {
+            let matches = table.get_all_by_name("I#");
+            debug_assert!(
+                matches.len() <= 1,
+                "core-shapes.md §10: ambiguous unqualified DataCon name 'I#' in cross-module compilation context; matches = {:?}. This impl should be migrated to get_by_name_arity or get_by_qualified_name.",
+                matches
+            );
+        }
         let id = table
             .get_by_name("I#")
             .ok_or_else(|| BridgeError::UnknownDataConName("I#".into()))?;
@@ -175,6 +194,15 @@ impl FromCore for u64 {
 
 impl ToCore for u64 {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+        #[cfg(debug_assertions)]
+        {
+            let matches = table.get_all_by_name("W#");
+            debug_assert!(
+                matches.len() <= 1,
+                "core-shapes.md §10: ambiguous unqualified DataCon name 'W#' in cross-module compilation context; matches = {:?}. This impl should be migrated to get_by_name_arity or get_by_qualified_name.",
+                matches
+            );
+        }
         let id = table
             .get_by_name("W#")
             .ok_or_else(|| BridgeError::UnknownDataConName("W#".into()))?;
@@ -327,6 +355,16 @@ impl ToCoreSealed for String {}
 
 impl FromCore for String {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+        #[cfg(debug_assertions)]
+        for name in ["Text", "ByteArray", "[]"] {
+            let matches = table.get_all_by_name(name);
+            debug_assert!(
+                matches.len() <= 1,
+                "core-shapes.md §10: ambiguous unqualified DataCon name '{}' in cross-module compilation context; matches = {:?}. This impl should be migrated to get_by_name_arity or get_by_qualified_name.",
+                name,
+                matches
+            );
+        }
         match value {
             // Text constructor: Text ByteArray# off len
             Value::Con(id, fields)
@@ -417,6 +455,15 @@ impl FromCore for String {
 
 impl ToCore for String {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+        #[cfg(debug_assertions)]
+        {
+            let matches = table.get_all_by_name("Text");
+            debug_assert!(
+                matches.len() <= 1,
+                "core-shapes.md §10: ambiguous unqualified DataCon name 'Text' in cross-module compilation context; matches = {:?}. This impl should be migrated to get_by_name_arity or get_by_qualified_name.",
+                matches
+            );
+        }
         let text_id = table
             .get_by_name("Text")
             .ok_or_else(|| BridgeError::UnknownDataConName("Text".into()))?;
@@ -508,6 +555,15 @@ impl<T> ToCoreSealed for Vec<T> {}
 
 impl<T: FromCore> FromCore for Vec<T> {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+        #[cfg(debug_assertions)]
+        {
+            let matches = table.get_all_by_name("[]");
+            debug_assert!(
+                matches.len() <= 1,
+                "core-shapes.md §10: ambiguous unqualified DataCon name '[]' in cross-module compilation context; matches = {:?}. This impl should be migrated to get_by_name_arity or get_by_qualified_name.",
+                matches
+            );
+        }
         let nil_id = table
             .get_by_name("[]")
             .ok_or(BridgeError::UnknownDataConName("[]".into()))?;
@@ -556,6 +612,15 @@ impl<T: FromCore> FromCore for Vec<T> {
 
 impl<T: ToCore> ToCore for Vec<T> {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+        #[cfg(debug_assertions)]
+        {
+            let matches = table.get_all_by_name("[]");
+            debug_assert!(
+                matches.len() <= 1,
+                "core-shapes.md §10: ambiguous unqualified DataCon name '[]' in cross-module compilation context; matches = {:?}. This impl should be migrated to get_by_name_arity or get_by_qualified_name.",
+                matches
+            );
+        }
         let nil_id = table
             .get_by_name("[]")
             .ok_or_else(|| BridgeError::UnknownDataConName("[]".into()))?;
@@ -576,6 +641,16 @@ impl<T, E> ToCoreSealed for Result<T, E> {}
 
 impl<T: FromCore, E: FromCore> FromCore for Result<T, E> {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+        #[cfg(debug_assertions)]
+        for name in ["Right", "Ok"] {
+            let matches = table.get_all_by_name(name);
+            debug_assert!(
+                matches.len() <= 1,
+                "core-shapes.md §10: ambiguous unqualified DataCon name '{}' in cross-module compilation context; matches = {:?}. This impl should be migrated to get_by_name_arity or get_by_qualified_name.",
+                name,
+                matches
+            );
+        }
         match value {
             Value::Con(id, fields) => {
                 let right_id = table
@@ -618,6 +693,16 @@ impl<T: FromCore, E: FromCore> FromCore for Result<T, E> {
 
 impl<T: ToCore, E: ToCore> ToCore for Result<T, E> {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+        #[cfg(debug_assertions)]
+        for name in ["Right", "Ok"] {
+            let matches = table.get_all_by_name(name);
+            debug_assert!(
+                matches.len() <= 1,
+                "core-shapes.md §10: ambiguous unqualified DataCon name '{}' in cross-module compilation context; matches = {:?}. This impl should be migrated to get_by_name_arity or get_by_qualified_name.",
+                name,
+                matches
+            );
+        }
         match self {
             Ok(x) => {
                 let id = table
