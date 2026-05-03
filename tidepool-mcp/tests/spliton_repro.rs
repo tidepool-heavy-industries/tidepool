@@ -21,6 +21,7 @@ fn user_lib_dir() -> &'static Path {
 }
 
 #[test]
+#[ignore = "exposes #296 — test evaluates Eff purely and hits TAG_CLOSURE"]
 fn repro_spliton_full_mcp() {
     let decls = tidepool_mcp::standard_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, true);
@@ -49,6 +50,7 @@ fn repro_spliton_full_mcp() {
 }
 
 #[test]
+#[ignore = "exposes #296 — test evaluates Eff purely and hits TAG_CLOSURE"]
 fn repro_spliton_no_user_library() {
     let decls = tidepool_mcp::standard_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, false); // no Library

@@ -577,7 +577,10 @@ pub extern "C" fn runtime_error(kind: u64) -> *mut u8 {
         _ => RuntimeError::UserError,
     };
     RUNTIME_ERROR.with(|cell| {
-        *cell.borrow_mut() = Some(err);
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(err);
+        }
     });
     // Return a poison object instead of null. This is a valid Lit(Int#, 0)
     // heap object, so JIT code won't segfault when reading its tag byte.
@@ -621,9 +624,17 @@ pub extern "C" fn runtime_error_with_msg(kind: u64, msg_ptr: *const u8, msg_len:
         _ => RuntimeError::UserError,
     };
     RUNTIME_ERROR.with(|cell| {
-        *cell.borrow_mut() = Some(err);
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(err);
+        }
     });
     error_poison_ptr()
+}
+
+/// Returns true if a runtime error has been set for the current thread.
+pub fn has_runtime_error() -> bool {
+    RUNTIME_ERROR.with(|cell| cell.borrow().is_some())
 }
 
 pub extern "C" fn runtime_oom() -> *mut u8 {

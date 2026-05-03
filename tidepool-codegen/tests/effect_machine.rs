@@ -818,7 +818,12 @@ fn test_resume_unknown_tag() {
 
     let result = unsafe { machine.resume(lit_ptr, std::ptr::null_mut()) };
 
-    assert_eq!(result, Yield::Error(YieldError::NullPointer));
+    assert_eq!(
+        result,
+        Yield::Error(YieldError::UserErrorMsg(
+            "apply_cont_heap: unexpected heap tag 3 in continuation position (expected TAG_CON or TAG_CLOSURE)".to_string()
+        ))
+    );
 }
 
 /// Test 13: Node(Leaf(f), Leaf(g)) where f(x) returns Request E
@@ -971,4 +976,62 @@ fn test_resume_node_with_effect_result() {
     assert_eq!(k2, leaf_g);
 
     assert!(!k_prime.is_null());
+}
+
+#[test]
+fn test_force_ptr_invalid_tag() {
+    let mut nursery = vec![0u8; 1024];
+    let vmctx = VMContext::new(
+        nursery.as_mut_ptr(),
+        unsafe { nursery.as_mut_ptr().add(1024) },
+        host_fns::gc_trigger,
+    );
+    let mut machine = create_machine(vmctx);
+
+    let bad_ptr = unsafe {
+        let size = 24;
+        let p = tidepool_codegen::heap_bridge::bump_alloc_from_vmctx(machine.vmctx_mut(), size);
+        layout::write_header(p, 0xFE, size as u16); // Invalid tag 0xFE
+        p
+    };
+
+    // resume will call parse_result which calls force_ptr
+    // Pass bad_ptr as k so it gets forced in apply_cont_heap or parse_result
+    let result = unsafe { machine.resume(bad_ptr, std::ptr::null_mut()) };
+
+    assert_eq!(
+        result,
+        Yield::Error(YieldError::UserErrorMsg(
+            "force_ptr: unexpected heap tag 254 (not a thunk, con, lit, or closure)".to_string()
+        ))
+    );
+}
+
+#[test]
+fn test_resume_unexpected_con_tag_harden() {
+    let mut nursery = vec![0u8; 1024];
+    let vmctx = VMContext::new(
+        nursery.as_mut_ptr(),
+        unsafe { nursery.as_mut_ptr().add(1024) },
+        host_fns::gc_trigger,
+    );
+    let mut machine = create_machine(vmctx);
+
+    let bad_con = unsafe {
+        let size = 24;
+        let p = tidepool_codegen::heap_bridge::bump_alloc_from_vmctx(machine.vmctx_mut(), size);
+        layout::write_header(p, layout::TAG_CON, size as u16);
+        *(p.add(layout::CON_TAG_OFFSET) as *mut u64) = 9999; // Invalid con_tag
+        p
+    };
+
+    let result = unsafe { machine.resume(bad_con, std::ptr::null_mut()) };
+
+    assert_eq!(
+        result,
+        Yield::Error(YieldError::UserErrorMsg(
+            "apply_cont_heap: unexpected continuation con_tag 9999 (expected Leaf or Node)"
+                .to_string()
+        ))
+    );
 }

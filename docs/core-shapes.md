@@ -169,12 +169,12 @@ The JIT includes safepoints where long-running or infinite computations can be i
 - `audit-heap-bridge § TAG_THUNK forcing` — triggering side-effects during bridge traversal.
 
 ### Silent fallbacks (return wrong-but-valid Value on shape mismatch)
-- `audit-effect-machine § force_ptr: Thunk tag check` — returns current pointer if not a thunk, potentially hiding logic errors.
-- `audit-effect-machine § apply_cont_heap` — multiple branches return `null_mut` on mismatch, causing downstream machine failure instead of immediate trap.
-- `audit-heap-bridge § LitTag::Char` — returns `\0` on invalid Unicode data.
-- `audit-heap-bridge § TAG_CLOSURE opaque representation` — produces a dummy opaque `Closure` instead of failing.
+- `audit-heap-bridge § LitTag::Char` — returns `\0` on invalid Unicode data. Intentional behavior per dossier §1.
 
-(`audit-heap-bridge § LitTag::Addr fallback` was originally listed here but is intentional behavior, not a silent failure — `Addr#` is a legitimate runtime value produced by primops; see §1 above.)
+### Hardened (recoverable error)
+- `audit-effect-machine § force_ptr: Thunk tag check` — returns poison pointer and sets `YieldError::UserErrorMsg` on unexpected tag (Hardened).
+- `audit-effect-machine § apply_cont_heap` — now surfaces `YieldError::UserErrorMsg` via `runtime_error_with_msg` on shape mismatch instead of returning `null_mut` silently (Hardened).
+- `audit-heap-bridge § TAG_CLOSURE opaque representation` — now returns `BridgeError::UnexpectedHeapTag(TAG_CLOSURE)` instead of a dummy opaque `Closure` (Hardened).
 
 ### Cross-module collision risk: High
 - `audit-bridge § String (Text)` — uses multiple unqualified `get_by_name` lookups for `Text`, `ByteArray`, and `[]`; highly susceptible to arity or name collisions.
