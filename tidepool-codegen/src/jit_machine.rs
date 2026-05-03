@@ -128,7 +128,7 @@ impl JitEffectMachine {
         nursery_size: usize,
     ) -> Result<Self, JitError> {
         let expr = tidepool_repr::normalize(expr, table);
-        let expr = crate::datacon_env::wrap_with_datacon_env(&expr, table);
+        let expr = crate::datacon_env::wrap_with_datacon_env(expr, table);
         let mut pipeline = CodegenPipeline::new(&crate::host_fns::host_fn_symbols())?;
         let func_id = crate::emit::expr::compile_expr(&mut pipeline, &expr, "main")
             .map_err(JitError::Compilation)?;

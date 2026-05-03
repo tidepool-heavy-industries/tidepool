@@ -453,7 +453,7 @@ fn compile_repl_cbor_inner() {
     let meta_data = std::fs::read(meta_path).unwrap();
     let (table, _) = tidepool_repr::serial::read::read_metadata(&meta_data).unwrap();
 
-    let expr = tidepool_codegen::datacon_env::wrap_with_datacon_env(&expr, &table);
+    let expr = tidepool_codegen::datacon_env::wrap_with_datacon_env(expr, &table);
 
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
     let result = compile_expr(&mut pipeline, &expr, "repl");
