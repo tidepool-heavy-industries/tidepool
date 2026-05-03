@@ -3553,6 +3553,7 @@ dependencies = [
  "axum",
  "dyn-clone",
  "frunk",
+ "parking_lot",
  "rmcp",
  "schemars 1.2.1",
  "serde",

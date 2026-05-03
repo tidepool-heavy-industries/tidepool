@@ -232,10 +232,27 @@ impl CompiledEffectMachine {
             if tag_ptr.is_null() {
                 return Yield::Error(YieldError::NullPointer);
             }
-            // Read the actual tag value from the Lit HeapObject (offset 16 = LIT_VALUE_OFFSET)
+            // Read the actual effect tag value. The Union's first field is the
+            // position index (Word#). After GHC optimization in single-module
+            // compilation, this is an unboxed Lit(Word, N). In cross-module
+            // compilation, the boxing may survive as Con(W#, [Lit(Word, N)]).
+            // Handle both layouts to avoid reading garbage.
             let tag_ptr_tag = unsafe { *tag_ptr };
-            let effect_tag =
-                unsafe { *(tag_ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) };
+            let effect_tag = if tag_ptr_tag == layout::TAG_LIT {
+                // Unboxed: read value directly from Lit.
+                unsafe { *(tag_ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) }
+            } else if tag_ptr_tag == layout::TAG_CON {
+                // Boxed (W# n): peel the box — read field[0] which is the Lit.
+                let inner = unsafe { Self::read_con_field(tag_ptr, 0) };
+                let inner = self.force_ptr(inner);
+                if inner.is_null() {
+                    return Yield::Error(YieldError::NullPointer);
+                }
+                unsafe { *(inner.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) }
+            } else {
+                // Unexpected heap tag for Union position.
+                return Yield::Error(YieldError::UnexpectedTag(tag_ptr_tag));
+            };
             let mut request = unsafe { Self::read_con_field(union_ptr, 1) };
             request = self.force_ptr(request);
 
@@ -503,6 +520,16 @@ impl CompiledEffectMachine {
         // SAFETY: tail_callee and tail_arg are valid heap pointers set by JIT tail-call
         // sites. Code pointers in closures point to finalized JIT functions.
         while result.is_null() && !self.vmctx.tail_callee.is_null() {
+            // External cancellation safepoint — an infinite tail-recursive
+            // loop must be interruptible. See `host_fns::trampoline_resolve`
+            // for the rationale.
+            if crate::host_fns::check_cancel_and_set_error() {
+                self.vmctx.tail_callee = std::ptr::null_mut();
+                self.vmctx.tail_arg = std::ptr::null_mut();
+                *result = crate::host_fns::error_poison_ptr();
+                return;
+            }
+
             let callee = self.vmctx.tail_callee;
             let arg = self.vmctx.tail_arg;
             self.vmctx.tail_callee = std::ptr::null_mut();
