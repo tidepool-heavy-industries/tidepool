@@ -127,7 +127,8 @@ impl JitEffectMachine {
         table: &DataConTable,
         nursery_size: usize,
     ) -> Result<Self, JitError> {
-        let expr = crate::datacon_env::wrap_with_datacon_env(expr, table);
+        let expr = tidepool_repr::normalize(expr, table);
+        let expr = crate::datacon_env::wrap_with_datacon_env(&expr, table);
         let mut pipeline = CodegenPipeline::new(&crate::host_fns::host_fn_symbols())?;
         let func_id = crate::emit::expr::compile_expr(&mut pipeline, &expr, "main")
             .map_err(JitError::Compilation)?;
@@ -236,9 +237,7 @@ impl JitEffectMachine {
                     // handler-driven scenario without depending on the
                     // shape of the compiled program.
                     if self.cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        break Err(JitError::Yield(
-                            crate::yield_type::YieldError::Cancelled,
-                        ));
+                        break Err(JitError::Yield(crate::yield_type::YieldError::Cancelled));
                     }
 
                     const MAX_EFFECT_RESPONSE_NODES: usize = 10_000;
