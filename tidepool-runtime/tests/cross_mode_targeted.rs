@@ -72,7 +72,7 @@ impl EffectHandler for E2Handler {
 #[test]
 fn dimension_a1_single_gadt_dispatch() {
     let fixture = CrossModeFixture {
-        single: r#"
+        single: r##"
 {-# LANGUAGE GADTs, DataKinds, TypeOperators, FlexibleContexts, NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
@@ -83,9 +83,9 @@ echo n = send (Echo n)
 {-# NOINLINE echo #-}
 main :: Eff '[Echo] Int
 main = echo 42
-"#.to_string(),
+"##.to_string(),
         split: vec![
-            ("Def.hs".to_string(), r#"
+            ("Def.hs".to_string(), r##"
 {-# LANGUAGE GADTs, DataKinds, TypeOperators, FlexibleContexts, NoImplicitPrelude #-}
 module Def where
 import Tidepool.Prelude
@@ -94,8 +94,8 @@ data Echo a where Echo :: Int -> Echo Int
 echo :: Member Echo effs => Int -> Eff effs Int
 echo n = send (Echo n)
 {-# NOINLINE echo #-}
-"#.to_string()),
-            ("Main.hs".to_string(), r#"
+"##.to_string()),
+            ("Main.hs".to_string(), r##"
 {-# LANGUAGE DataKinds, TypeOperators, FlexibleContexts, NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
@@ -103,7 +103,7 @@ import qualified Def
 import Control.Monad.Freer (Eff)
 main :: Eff '[Def.Echo] Int
 main = Def.echo 42
-"#.to_string()),
+"##.to_string()),
         ],
         target: "main",
     };
@@ -120,7 +120,7 @@ main = Def.echo 42
 #[test]
 fn dimension_a2_two_gadts_interleaved() {
     let fixture = CrossModeFixture {
-        single: r#"
+        single: r##"
 {-# LANGUAGE GADTs, DataKinds, TypeOperators, FlexibleContexts, NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
@@ -138,9 +138,9 @@ main = do
     x <- e1 20
     y <- e2 22
     return (x + y)
-"#.to_string(),
+"##.to_string(),
         split: vec![
-            ("Mod1.hs".to_string(), r#"
+            ("Mod1.hs".to_string(), r##"
 {-# LANGUAGE GADTs, DataKinds, TypeOperators, FlexibleContexts, NoImplicitPrelude #-}
 module Mod1 where
 import Tidepool.Prelude
@@ -149,8 +149,8 @@ data E1 a where E1 :: Int -> E1 Int
 e1 :: Member E1 effs => Int -> Eff effs Int
 e1 n = send (E1 n)
 {-# NOINLINE e1 #-}
-"#.to_string()),
-            ("Mod2.hs".to_string(), r#"
+"##.to_string()),
+            ("Mod2.hs".to_string(), r##"
 {-# LANGUAGE GADTs, DataKinds, TypeOperators, FlexibleContexts, NoImplicitPrelude #-}
 module Mod2 where
 import Tidepool.Prelude
@@ -159,8 +159,8 @@ data E2 a where E2 :: Int -> E2 Int
 e2 :: Member E2 effs => Int -> Eff effs Int
 e2 n = send (E2 n)
 {-# NOINLINE e2 #-}
-"#.to_string()),
-            ("Main.hs".to_string(), r#"
+"##.to_string()),
+            ("Main.hs".to_string(), r##"
 {-# LANGUAGE DataKinds, TypeOperators, FlexibleContexts, NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
@@ -172,7 +172,7 @@ main = do
     x <- Mod1.e1 20
     y <- Mod2.e2 22
     return (x + y)
-"#.to_string()),
+"##.to_string()),
         ],
         target: "main",
     };
@@ -192,7 +192,7 @@ main = do
 #[test]
 fn dimension_b1_name_collision_same_arity() {
     let fixture = CrossModeFixture {
-        single: r#"
+        single: r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
@@ -204,12 +204,12 @@ mk1 n = Mk n
 mk2 :: Int -> T2
 mk2 n = Mk' n
 {-# NOINLINE mk2 #-}
-main :: Int -> Int
-main n = let x = mk1 n in let y = mk2 (n + 1) in 
+main :: Int
+main = let x = mk1 5 in let y = mk2 6 in 
          (case x of Mk k -> k) + (case y of Mk' m -> m)
-"#.to_string(),
+"##.to_string(),
         split: vec![
-            ("Mod1.hs".to_string(), r#"
+            ("Mod1.hs".to_string(), r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Mod1 where
 import Tidepool.Prelude
@@ -217,8 +217,8 @@ data T = Mk Int
 mk1 :: Int -> T
 mk1 n = Mk n
 {-# NOINLINE mk1 #-}
-"#.to_string()),
-            ("Mod2.hs".to_string(), r#"
+"##.to_string()),
+            ("Mod2.hs".to_string(), r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Mod2 where
 import Tidepool.Prelude
@@ -226,17 +226,17 @@ data T = Mk Int
 mk2 :: Int -> T
 mk2 n = Mk n
 {-# NOINLINE mk2 #-}
-"#.to_string()),
-            ("Main.hs".to_string(), r#"
+"##.to_string()),
+            ("Main.hs".to_string(), r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
 import qualified Mod1
 import qualified Mod2
-main :: Int -> Int
-main n = let x = Mod1.mk1 n in let y = Mod2.mk2 (n + 1) in 
+main :: Int
+main = let x = Mod1.mk1 5 in let y = Mod2.mk2 6 in 
        (case x of Mod1.Mk k -> k) + (case y of Mod2.Mk m -> m)
-"#.to_string()),
+"##.to_string()),
         ],
         target: "main",
     };
@@ -249,7 +249,7 @@ main n = let x = Mod1.mk1 n in let y = Mod2.mk2 (n + 1) in
 #[test]
 fn dimension_b2_name_collision_different_arity() {
     let fixture = CrossModeFixture {
-        single: r#"
+        single: r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
@@ -261,12 +261,12 @@ mk1 n = Mk n
 mk2 :: Int -> Int -> T2
 mk2 n m = Mk' n m
 {-# NOINLINE mk2 #-}
-main :: Int -> Int
-main n = let x = mk1 n in let y = mk2 (n + 1) (n + 2) in 
+main :: Int
+main = let x = mk1 5 in let y = mk2 6 7 in 
          (case x of Mk k -> k) + (case y of Mk' m j -> m + j)
-"#.to_string(),
+"##.to_string(),
         split: vec![
-            ("Mod1.hs".to_string(), r#"
+            ("Mod1.hs".to_string(), r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Mod1 where
 import Tidepool.Prelude
@@ -274,8 +274,8 @@ data T = Mk Int
 mk1 :: Int -> T
 mk1 n = Mk n
 {-# NOINLINE mk1 #-}
-"#.to_string()),
-            ("Mod2.hs".to_string(), r#"
+"##.to_string()),
+            ("Mod2.hs".to_string(), r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Mod2 where
 import Tidepool.Prelude
@@ -283,17 +283,17 @@ data T = Mk Int Int
 mk2 :: Int -> Int -> T
 mk2 n m = Mk n m
 {-# NOINLINE mk2 #-}
-"#.to_string()),
-            ("Main.hs".to_string(), r#"
+"##.to_string()),
+            ("Main.hs".to_string(), r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
 import qualified Mod1
 import qualified Mod2
-main :: Int -> Int
-main n = let x = Mod1.mk1 n in let y = Mod2.mk2 (n + 1) (n + 2) in 
+main :: Int
+main = let x = Mod1.mk1 5 in let y = Mod2.mk2 6 7 in 
        (case x of Mod1.Mk k -> k) + (case y of Mod2.Mk m j -> m + j)
-"#.to_string()),
+"##.to_string()),
         ],
         target: "main",
     };
@@ -307,7 +307,7 @@ main n = let x = Mod1.mk1 n in let y = Mod2.mk2 (n + 1) (n + 2) in
 #[test]
 fn dimension_c1_word_boxing() {
     let fixture = CrossModeFixture {
-        single: r#"
+        single: r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
@@ -318,11 +318,11 @@ mkTag n = Tag n
 getTag :: Tag -> Word
 getTag (Tag n) = n
 {-# NOINLINE getTag #-}
-main :: Word -> Word
-main n = getTag (mkTag n)
-"#.to_string(),
+main :: Word
+main = getTag (mkTag 42)
+"##.to_string(),
         split: vec![
-            ("Mod1.hs".to_string(), r#"
+            ("Mod1.hs".to_string(), r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Mod1 where
 import Tidepool.Prelude
@@ -330,8 +330,8 @@ data Tag = Tag Word
 mkTag :: Word -> Tag
 mkTag n = Tag n
 {-# NOINLINE mkTag #-}
-"#.to_string()),
-            ("Main.hs".to_string(), r#"
+"##.to_string()),
+            ("Main.hs".to_string(), r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
@@ -339,9 +339,9 @@ import qualified Mod1
 getTag :: Mod1.Tag -> Word
 getTag (Mod1.Tag n) = n
 {-# NOINLINE getTag #-}
-main :: Word -> Word
-main n = getTag (Mod1.mkTag n)
-"#.to_string()),
+main :: Word
+main = getTag (Mod1.mkTag 42)
+"##.to_string()),
         ],
         target: "main",
     };
@@ -353,7 +353,7 @@ main n = getTag (Mod1.mkTag n)
 #[test]
 fn dimension_c2_int_hash_boxing() {
     let fixture = CrossModeFixture {
-        single: r#"
+        single: r##"
 {-# LANGUAGE MagicHash, NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
@@ -365,10 +365,10 @@ mkIBox n# = IBox n#
 getIBox :: IBox -> IBox
 getIBox (IBox n#) = IBox n#
 {-# NOINLINE getIBox #-}
-main n# = case getIBox (mkIBox n#) of IBox m# -> IBox m#
-"#.to_string(),
+main = case getIBox (mkIBox 42#) of IBox m# -> IBox m#
+"##.to_string(),
         split: vec![
-            ("Mod1.hs".to_string(), r#"
+            ("Mod1.hs".to_string(), r##"
 {-# LANGUAGE MagicHash, NoImplicitPrelude #-}
 module Mod1 where
 import Tidepool.Prelude
@@ -377,8 +377,8 @@ data IBox = IBox Int#
 mkIBox :: Int# -> IBox
 mkIBox n# = IBox n#
 {-# NOINLINE mkIBox #-}
-"#.to_string()),
-            ("Main.hs".to_string(), r#"
+"##.to_string()),
+            ("Main.hs".to_string(), r##"
 {-# LANGUAGE MagicHash, NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
@@ -387,8 +387,8 @@ import GHC.Exts (Int#)
 getIBox :: Mod1.IBox -> Mod1.IBox
 getIBox (Mod1.IBox n#) = Mod1.IBox n#
 {-# NOINLINE getIBox #-}
-main n# = case getIBox (Mod1.mkIBox n#) of Mod1.IBox m# -> Mod1.IBox m#
-"#.to_string()),
+main = case getIBox (Mod1.mkIBox 42#) of Mod1.IBox m# -> Mod1.IBox m#
+"##.to_string()),
         ],
         target: "main",
     };
@@ -397,12 +397,68 @@ main n# = case getIBox (Mod1.mkIBox n#) of Mod1.IBox m# -> Mod1.IBox m#
     assert_cross_mode_pure_equivalent(&fixture);
 }
 
+#[test]
+fn dimension_c3_bytearray_hash_boxing() {
+    let fixture = CrossModeFixture {
+        single: r##"
+{-# LANGUAGE MagicHash, NoImplicitPrelude, UnboxedTuples #-}
+module Test where
+import Tidepool.Prelude
+import GHC.Exts
+data BABox = BABox ByteArray#
+mkBABox :: ByteArray# -> BABox
+mkBABox ba# = BABox ba#
+{-# NOINLINE mkBABox #-}
+getBABox :: BABox -> BABox
+getBABox (BABox ba#) = BABox ba#
+{-# NOINLINE getBABox #-}
+main = case runRW# (\s -> 
+         case newByteArray# 8# s of 
+           (# s1, mba# #) -> case unsafeFreezeByteArray# mba# s1 of 
+             (# s2, ba# #) -> ba#
+       ) of ba# -> getBABox (mkBABox ba#)
+"##.to_string(),
+        split: vec![
+            ("Mod1.hs".to_string(), r##"
+{-# LANGUAGE MagicHash, NoImplicitPrelude #-}
+module Mod1 where
+import Tidepool.Prelude
+import GHC.Exts (ByteArray#)
+data BABox = BABox ByteArray#
+mkBABox :: ByteArray# -> BABox
+mkBABox ba# = BABox ba#
+{-# NOINLINE mkBABox #-}
+"##.to_string()),
+            ("Main.hs".to_string(), r##"
+{-# LANGUAGE MagicHash, NoImplicitPrelude, UnboxedTuples #-}
+module Test where
+import Tidepool.Prelude
+import qualified Mod1
+import GHC.Exts
+getBABox :: Mod1.BABox -> Mod1.BABox
+getBABox (Mod1.BABox ba#) = Mod1.BABox ba#
+{-# NOINLINE getBABox #-}
+main = case runRW# (\s -> 
+         case newByteArray# 8# s of 
+           (# s1, mba# #) -> case unsafeFreezeByteArray# mba# s1 of 
+             (# s2, ba# #) -> ba#
+       ) of ba# -> getBABox (Mod1.mkBABox ba#)
+"##.to_string()),
+        ],
+        target: "main",
+    };
+
+    // NOTE: Structural equivalence may fail due to runRW# / primop differences, 
+    // but we verify runtime value equivalence for the boxed ByteArray#.
+    assert_cross_mode_pure_equivalent(&fixture);
+}
+
 // === Dimension D: Mutual recursion across modules ===
 
 #[test]
 fn dimension_d1_mutual_recursion() {
     let fixture = CrossModeFixture {
-        single: r#"
+        single: r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
@@ -412,17 +468,17 @@ even' n = if n == 0 then True else odd' (n - 1)
 odd' :: Int -> Bool
 odd' n = if n == 0 then False else even' (n - 1)
 {-# NOINLINE odd' #-}
-main :: Int -> Bool
-main n = even' n
-"#.to_string(),
+main :: Bool
+main = even' 10
+"##.to_string(),
         split: vec![
-            ("Even.hs-boot".to_string(), r#"
+            ("Even.hs-boot".to_string(), r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Even where
 import Tidepool.Prelude
 even' :: Int -> Bool
-"#.to_string()),
-            ("Even.hs".to_string(), r#"
+"##.to_string()),
+            ("Even.hs".to_string(), r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Even where
 import Tidepool.Prelude
@@ -430,8 +486,8 @@ import qualified Odd
 even' :: Int -> Bool
 even' n = if n == 0 then True else Odd.odd' (n - 1)
 {-# NOINLINE even' #-}
-"#.to_string()),
-            ("Odd.hs".to_string(), r#"
+"##.to_string()),
+            ("Odd.hs".to_string(), r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Odd where
 import Tidepool.Prelude
@@ -439,15 +495,15 @@ import {-# SOURCE #-} qualified Even
 odd' :: Int -> Bool
 odd' n = if n == 0 then False else Even.even' (n - 1)
 {-# NOINLINE odd' #-}
-"#.to_string()),
-            ("Main.hs".to_string(), r#"
+"##.to_string()),
+            ("Main.hs".to_string(), r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
 import qualified Even
-main :: Int -> Bool
-main n = Even.even' n
-"#.to_string()),
+main :: Bool
+main = Even.even' 10
+"##.to_string()),
         ],
         target: "main",
     };
@@ -461,29 +517,29 @@ main n = Even.even' n
 #[test]
 fn dimension_e1_derived_show() {
     let fixture = CrossModeFixture {
-        single: r#"
+        single: r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
 data T = A | B Int deriving Show
-main :: Int -> Text
-main n = show (B n)
-"#.to_string(),
+main :: Text
+main = show (B 42)
+"##.to_string(),
         split: vec![
-            ("Mod1.hs".to_string(), r#"
+            ("Mod1.hs".to_string(), r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Mod1 where
 import Tidepool.Prelude
 data T = A | B Int deriving Show
-"#.to_string()),
-            ("Main.hs".to_string(), r#"
+"##.to_string()),
+            ("Main.hs".to_string(), r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
 import qualified Mod1
-main :: Int -> Text
-main n = show (Mod1.B n)
-"#.to_string()),
+main :: Text
+main = show (Mod1.B 42)
+"##.to_string()),
         ],
         target: "main",
     };
@@ -495,29 +551,29 @@ main n = show (Mod1.B n)
 #[test]
 fn dimension_e2_derived_eq() {
     let fixture = CrossModeFixture {
-        single: r#"
+        single: r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
 data T = A | B Int deriving Eq
-main :: Int -> Bool
-main n = (B n == B n) && (A == A) && (A /= B (n + 1))
-"#.to_string(),
+main :: Bool
+main = (B 42 == B 42) && (A == A) && (A /= B 43)
+"##.to_string(),
         split: vec![
-            ("Mod1.hs".to_string(), r#"
+            ("Mod1.hs".to_string(), r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Mod1 where
 import Tidepool.Prelude
 data T = A | B Int deriving Eq
-"#.to_string()),
-            ("Main.hs".to_string(), r#"
+"##.to_string()),
+            ("Main.hs".to_string(), r##"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Test where
 import Tidepool.Prelude
 import qualified Mod1
-main :: Int -> Bool
-main n = (Mod1.B n == Mod1.B n) && (Mod1.A == Mod1.A) && (Mod1.A /= Mod1.B (n + 1))
-"#.to_string()),
+main :: Bool
+main = (Mod1.B 42 == Mod1.B 42) && (Mod1.A == Mod1.A) && (Mod1.A /= Mod1.B 43)
+"##.to_string()),
         ],
         target: "main",
     };
