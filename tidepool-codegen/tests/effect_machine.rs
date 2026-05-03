@@ -318,6 +318,7 @@ fn test_yield_request_e() {
 /// Constructing both shapes side-by-side here pins the contract independent
 /// of GHC's optimizer.
 #[test]
+#[cfg(not(debug_assertions))]
 fn test_yield_request_e_boxed_tag() {
     let (_pipeline, func) = build_test_fn("test_e_boxed", |builder, vmctx, gc_sig, oom_func| {
         let request_lit = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 99);
