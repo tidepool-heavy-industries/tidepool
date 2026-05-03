@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use tidepool_repr::frame::CoreFrame;
-use tidepool_repr::types::{AltCon, DataConId};
+use tidepool_repr::types::{AltCon, DataConId, JoinId, VarId};
 use tidepool_repr::DataConTable;
 use tidepool_eval::value::Value;
 use super::CrossModeArtifacts;
@@ -19,101 +20,205 @@ pub fn assert_equivalent(art: &CrossModeArtifacts) {
 
     assert_table_compatible(&art.single_table, &art.split_table);
 
-    for (i, (s_node, p_node)) in single.iter().zip(split.iter()).enumerate() {
-        match (s_node, p_node) {
-            (CoreFrame::Var(_), CoreFrame::Var(_)) => {} // Tolerate any VarId
-            (CoreFrame::Lit(s_lit), CoreFrame::Lit(p_lit)) => {
-                if s_lit != p_lit {
-                    panic!("cross-mode divergence at node {}: literals differ (single={:?}, split={:?})", i, s_lit, p_lit);
+    // Alpha-equivalence tracking
+    let mut var_map: HashMap<VarId, VarId> = HashMap::new();
+    let mut join_map: HashMap<JoinId, JoinId> = HashMap::new();
+
+    // Start walk from the root (last node)
+    if !single.is_empty() {
+        check_node(
+            single.len() - 1,
+            single,
+            &art.single_table,
+            split,
+            &art.split_table,
+            &mut var_map,
+            &mut join_map,
+        );
+    }
+}
+
+fn check_node(
+    idx: usize,
+    single: &[CoreFrame<usize>],
+    s_table: &DataConTable,
+    split: &[CoreFrame<usize>],
+    p_table: &DataConTable,
+    var_map: &mut HashMap<VarId, VarId>,
+    join_map: &mut HashMap<JoinId, JoinId>,
+) {
+    let s_node = &single[idx];
+    let p_node = &split[idx];
+
+    match (s_node, p_node) {
+        (CoreFrame::Var(s_v), CoreFrame::Var(p_v)) => {
+            if let Some(&expected_p) = var_map.get(s_v) {
+                if expected_p != *p_v {
+                    panic!("node {}: Var mismatch (alpha-equivalence). Expected {:?}, got {:?}", idx, expected_p, p_v);
                 }
             }
-            (CoreFrame::App { fun: sf, arg: sa }, CoreFrame::App { fun: pf, arg: pa }) => {
-                if sf != pf || sa != pa {
-                    panic!("cross-mode divergence at node {}: App indices differ", i);
+        }
+        (CoreFrame::Lit(sl), CoreFrame::Lit(pl)) => {
+            if sl != pl {
+                panic!("node {}: literals differ ({:?} vs {:?})", idx, sl, pl);
+            }
+        }
+        (CoreFrame::App { fun: sf, arg: sa }, CoreFrame::App { fun: pf, arg: pa }) => {
+            if sf != pf { panic!("node {}: App fun index mismatch ({} vs {})", idx, sf, pf); }
+            if sa != pa { panic!("node {}: App arg index mismatch ({} vs {})", idx, sa, pa); }
+            check_node(*sf, single, s_table, split, p_table, var_map, join_map);
+            check_node(*sa, single, s_table, split, p_table, var_map, join_map);
+        }
+        (CoreFrame::Lam { binder: s_v, body: s_b }, CoreFrame::Lam { binder: p_v, body: p_b }) => {
+            if s_b != p_b { panic!("node {}: Lam body index mismatch ({} vs {})", idx, s_b, p_b); }
+            let old = var_map.insert(*s_v, *p_v);
+            check_node(*s_b, single, s_table, split, p_table, var_map, join_map);
+            if let Some(o) = old {
+                var_map.insert(*s_v, o);
+            } else {
+                var_map.remove(s_v);
+            }
+        }
+        (CoreFrame::LetNonRec { binder: s_v, rhs: s_r, body: s_b }, CoreFrame::LetNonRec { binder: p_v, rhs: p_r, body: p_b }) => {
+            if s_r != p_r { panic!("node {}: LetNonRec rhs index mismatch ({} vs {})", idx, s_r, p_r); }
+            if s_b != p_b { panic!("node {}: LetNonRec body index mismatch ({} vs {})", idx, s_b, p_b); }
+            check_node(*s_r, single, s_table, split, p_table, var_map, join_map);
+            let old = var_map.insert(*s_v, *p_v);
+            check_node(*s_b, single, s_table, split, p_table, var_map, join_map);
+            if let Some(o) = old {
+                var_map.insert(*s_v, o);
+            } else {
+                var_map.remove(s_v);
+            }
+        }
+        (CoreFrame::LetRec { bindings: s_binds, body: s_body }, CoreFrame::LetRec { bindings: p_binds, body: p_body }) => {
+            if s_binds.len() != p_binds.len() {
+                panic!("node {}: LetRec binding count mismatch", idx);
+            }
+            if s_body != p_body {
+                panic!("node {}: LetRec body index mismatch ({} vs {})", idx, s_body, p_body);
+            }
+            let mut olds = Vec::new();
+            for ((s_v, s_r), (p_v, p_r)) in s_binds.iter().zip(p_binds.iter()) {
+                if s_r != p_r { panic!("node {}: LetRec binding index mismatch ({} vs {})", idx, s_r, p_r); }
+                olds.push((*s_v, var_map.insert(*s_v, *p_v)));
+            }
+            for (_, s_r) in s_binds.iter() {
+                check_node(*s_r, single, s_table, split, p_table, var_map, join_map);
+            }
+            check_node(*s_body, single, s_table, split, p_table, var_map, join_map);
+            for (s_v, old) in olds {
+                if let Some(o) = old {
+                    var_map.insert(s_v, o);
+                } else {
+                    var_map.remove(&s_v);
                 }
             }
-            (CoreFrame::Lam { binder: _, body: sb }, CoreFrame::Lam { binder: _, body: pb }) => {
-                if sb != pb {
-                    panic!("cross-mode divergence at node {}: Lam body indices differ", i);
-                }
+        }
+        (CoreFrame::Case { scrutinee: ss, binder: s_v, alts: s_alts }, CoreFrame::Case { scrutinee: ps, binder: p_v, alts: p_alts }) => {
+            if ss != ps { panic!("node {}: Case scrutinee index mismatch ({} vs {})", idx, ss, ps); }
+            check_node(*ss, single, s_table, split, p_table, var_map, join_map);
+            if s_alts.len() != p_alts.len() {
+                panic!("node {}: Case alt count mismatch", idx);
             }
-            (CoreFrame::LetNonRec { binder: _, rhs: sr, body: sb }, CoreFrame::LetNonRec { binder: _, rhs: pr, body: pb }) => {
-                if sr != pr || sb != pb {
-                    panic!("cross-mode divergence at node {}: LetNonRec indices differ", i);
+            let old = var_map.insert(*s_v, *p_v);
+            for (j, (s_alt, p_alt)) in s_alts.iter().zip(p_alts.iter()).enumerate() {
+                if s_alt.body != p_alt.body { panic!("node {} alt {}: body index mismatch ({} vs {})", idx, j, s_alt.body, p_alt.body); }
+                compare_alt_con(idx, j, &s_alt.con, s_table, &p_alt.con, p_table);
+                if s_alt.binders.len() != p_alt.binders.len() {
+                    panic!("node {} alt {}: binder count mismatch", idx, j);
                 }
-            }
-            (CoreFrame::LetRec { bindings: sb, body: s_body }, CoreFrame::LetRec { bindings: pb, body: p_body }) => {
-                if sb.len() != pb.len() {
-                    panic!("cross-mode divergence at node {}: LetRec binding count mismatch", i);
+                let mut alt_olds = Vec::new();
+                for (&sv, &pv) in s_alt.binders.iter().zip(p_alt.binders.iter()) {
+                    alt_olds.push((sv, var_map.insert(sv, pv)));
                 }
-                for (j, ((_, sr), (_, pr))) in sb.iter().zip(pb.iter()).enumerate() {
-                    if sr != pr {
-                        panic!("cross-mode divergence at node {}: LetRec binding {} rhs index mismatch", i, j);
+                check_node(s_alt.body, single, s_table, split, p_table, var_map, join_map);
+                for (sv, a_old) in alt_olds {
+                    if let Some(o) = a_old {
+                        var_map.insert(sv, o);
+                    } else {
+                        var_map.remove(&sv);
                     }
                 }
-                if s_body != p_body {
-                    panic!("cross-mode divergence at node {}: LetRec body index mismatch", i);
+            }
+            if let Some(o) = old {
+                var_map.insert(*s_v, o);
+            } else {
+                var_map.remove(s_v);
+            }
+        }
+        (CoreFrame::Con { tag: st, fields: sf }, CoreFrame::Con { tag: pt, fields: pf }) => {
+            compare_datacon_ids(idx, *st, s_table, *pt, p_table);
+            if sf.len() != pf.len() {
+                panic!("node {}: Con field count mismatch", idx);
+            }
+            for (&si, &pi) in sf.iter().zip(pf.iter()) {
+                if si != pi { panic!("node {}: Con field index mismatch ({} vs {})", idx, si, pi); }
+                check_node(si, single, s_table, split, p_table, var_map, join_map);
+            }
+        }
+        (CoreFrame::Join { label: s_l, params: s_params, rhs: s_r, body: s_b }, CoreFrame::Join { label: p_l, params: p_params, rhs: p_r, body: p_b }) => {
+            if s_r != p_r { panic!("node {}: Join rhs index mismatch ({} vs {})", idx, s_r, p_r); }
+            if s_b != p_b { panic!("node {}: Join body index mismatch ({} vs {})", idx, s_b, p_b); }
+            if s_params.len() != p_params.len() {
+                panic!("node {}: Join param count mismatch", idx);
+            }
+            let l_old = join_map.insert(*s_l, *p_l);
+            
+            // Join RHS scope
+            let mut p_olds = Vec::new();
+            for (&sv, &pv) in s_params.iter().zip(p_params.iter()) {
+                p_olds.push((sv, var_map.insert(sv, pv)));
+            }
+            check_node(*s_r, single, s_table, split, p_table, var_map, join_map);
+            for (sv, p_old) in p_olds {
+                if let Some(o) = p_old {
+                    var_map.insert(sv, o);
+                } else {
+                    var_map.remove(&sv);
                 }
             }
-            (CoreFrame::Case { scrutinee: ss, binder: _, alts: sa }, CoreFrame::Case { scrutinee: ps, binder: _, alts: pa }) => {
-                if ss != ps {
-                    panic!("cross-mode divergence at node {}: Case scrutinee index mismatch", i);
-                }
-                if sa.len() != pa.len() {
-                    panic!("cross-mode divergence at node {}: Case alt count mismatch", i);
-                }
-                for (j, (s_alt, p_alt)) in sa.iter().zip(pa.iter()).enumerate() {
-                    compare_alt_con(i, j, &s_alt.con, &art.single_table, &p_alt.con, &art.split_table);
-                    if s_alt.binders.len() != p_alt.binders.len() {
-                        panic!("cross-mode divergence at node {} alt {}: binder count mismatch", i, j);
-                    }
-                    if s_alt.body != p_alt.body {
-                        panic!("cross-mode divergence at node {} alt {}: body index mismatch", i, j);
-                    }
+
+            // Join body scope
+            check_node(*s_b, single, s_table, split, p_table, var_map, join_map);
+
+            if let Some(o) = l_old {
+                join_map.insert(*s_l, o);
+            } else {
+                join_map.remove(s_l);
+            }
+        }
+        (CoreFrame::Jump { label: s_l, args: s_args }, CoreFrame::Jump { label: p_l, args: p_args }) => {
+            if let Some(&expected_p) = join_map.get(s_l) {
+                if expected_p != *p_l {
+                    panic!("node {}: Jump label mismatch. Expected {:?}, got {:?}", idx, expected_p, p_l);
                 }
             }
-            (CoreFrame::Con { tag: st, fields: sf }, CoreFrame::Con { tag: pt, fields: pf }) => {
-                compare_datacon_ids(i, *st, &art.single_table, *pt, &art.split_table);
-                if sf.len() != pf.len() {
-                    panic!("cross-mode divergence at node {}: Con field count mismatch", i);
-                }
-                if sf != pf {
-                    panic!("cross-mode divergence at node {}: Con field indices differ", i);
-                }
+            if s_args.len() != p_args.len() {
+                panic!("node {}: Jump arg count mismatch", idx);
             }
-            (CoreFrame::Join { label: _, params: sp, rhs: sr, body: sb }, CoreFrame::Join { label: _, params: pp, rhs: pr, body: pb }) => {
-                if sp.len() != pp.len() {
-                    panic!("cross-mode divergence at node {}: Join param count mismatch", i);
-                }
-                if sr != pr || sb != pb {
-                    panic!("cross-mode divergence at node {}: Join indices differ", i);
-                }
+            for (&sa, &pa) in s_args.iter().zip(p_args.iter()) {
+                if sa != pa { panic!("node {}: Jump arg index mismatch ({} vs {})", idx, sa, pa); }
+                check_node(sa, single, s_table, split, p_table, var_map, join_map);
             }
-            (CoreFrame::Jump { label: _, args: sa }, CoreFrame::Jump { label: _, args: pa }) => {
-                if sa.len() != pa.len() {
-                    panic!("cross-mode divergence at node {}: Jump arg count mismatch", i);
-                }
-                if sa != pa {
-                    panic!("cross-mode divergence at node {}: Jump arg indices differ", i);
-                }
+        }
+        (CoreFrame::PrimOp { op: so, args: sa }, CoreFrame::PrimOp { op: po, args: pa }) => {
+            if so != po {
+                panic!("node {}: PrimOp kind mismatch ({:?} vs {:?})", idx, so, po);
             }
-            (CoreFrame::PrimOp { op: so, args: sa }, CoreFrame::PrimOp { op: po, args: pa }) => {
-                if so != po {
-                    panic!("cross-mode divergence at node {}: PrimOp kind mismatch (single={:?}, split={:?})", i, so, po);
-                }
-                if sa.len() != pa.len() {
-                    panic!("cross-mode divergence at node {}: PrimOp arg count mismatch", i);
-                }
-                if sa != pa {
-                    panic!("cross-mode divergence at node {}: PrimOp arg indices differ", i);
-                }
+            if sa.len() != pa.len() {
+                panic!("node {}: PrimOp arg count mismatch", idx);
             }
-            (s, p) => {
-                panic!(
-                    "cross-mode divergence at node {}: variant mismatch (single={:?}, split={:?})",
-                    i, core_kind(s), core_kind(p)
-                );
+            for (&sai, &pai) in sa.iter().zip(pa.iter()) {
+                if sai != pai { panic!("node {}: PrimOp arg index mismatch ({} vs {})", idx, sai, pai); }
+                check_node(sai, single, s_table, split, p_table, var_map, join_map);
             }
+        }
+        (s, p) => {
+            panic!(
+                "node {}: variant mismatch (single={:?}, split={:?})",
+                idx, core_kind(s), core_kind(p)
+            );
         }
     }
 }
@@ -139,14 +244,14 @@ fn compare_alt_con(node_idx: usize, alt_idx: usize, s_con: &AltCon, s_table: &Da
         (AltCon::Default, AltCon::Default) => {}
         (AltCon::LitAlt(sl), AltCon::LitAlt(pl)) => {
             if sl != pl {
-                panic!("cross-mode divergence at node {} alt {}: literals differ ({:?} vs {:?})", node_idx, alt_idx, sl, pl);
+                panic!("node {} alt {}: literals differ ({:?} vs {:?})", node_idx, alt_idx, sl, pl);
             }
         }
         (AltCon::DataAlt(si), AltCon::DataAlt(pi)) => {
             compare_datacon_ids_detailed(format!("node {} alt {}", node_idx, alt_idx), *si, s_table, *pi, p_table);
         }
         (s, p) => {
-            panic!("cross-mode divergence at node {} alt {}: AltCon variant mismatch (single={:?}, split={:?})", node_idx, alt_idx, s, p);
+            panic!("node {} alt {}: AltCon variant mismatch (single={:?}, split={:?})", node_idx, alt_idx, s, p);
         }
     }
 }
@@ -176,13 +281,6 @@ pub fn assert_table_compatible(single_table: &DataConTable, split_table: &DataCo
         let p_dc = split_table.get(p_dc_id).unwrap();
         if s_dc.field_bangs != p_dc.field_bangs {
             panic!("DataCon '{}' has different field_bangs (single={:?}, split={:?})", s_dc.name, s_dc.field_bangs, p_dc.field_bangs);
-        }
-    }
-    // And vice versa
-    for p_dc in split_table.iter() {
-        if single_table.get_by_name_arity(&p_dc.name, p_dc.rep_arity).is_none() {
-             // It's technically okay if split has MORE datacons (e.g. from extra modules), 
-             // as long as the ones used in the expression tree match.
         }
     }
 }

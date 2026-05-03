@@ -40,15 +40,9 @@ pub fn prelude_path() -> PathBuf {
     manifest.parent().unwrap().join("haskell").join("lib")
 }
 
-/// Compiles the fixture in both single and split modes.
-pub fn compile_cross_mode(fixture: &CrossModeFixture) -> CrossModeArtifacts {
-    let pp = prelude_path();
-
-    // 1. Compile single mode
-    let (single_expr, single_table, _) = compile_haskell(&fixture.single, fixture.target, &[&pp])
-        .expect("failed to compile single-mode fixture");
-
-    // 2. Compile split mode
+/// Stages the split fixture into a temporary directory.
+/// Returns the main module source and the TempDir.
+fn stage_split_fixture(fixture: &CrossModeFixture) -> (String, TempDir) {
     let temp_dir = TempDir::new().expect("failed to create temp dir for split-mode");
     let mut split_entries = fixture.split.iter().peekable();
     let mut last_source = String::new();
@@ -59,7 +53,11 @@ pub fn compile_cross_mode(fixture: &CrossModeFixture) -> CrossModeArtifacts {
             last_source = source.clone();
         } else {
             // Other entries are dependencies to be written to the temp dir
-            std::fs::write(temp_dir.path().join(filename), source)
+            let path = temp_dir.path().join(filename);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("failed to create parent directories for dependency");
+            }
+            std::fs::write(path, source)
                 .expect("failed to write dependency file to temp dir");
         }
     }
@@ -68,6 +66,19 @@ pub fn compile_cross_mode(fixture: &CrossModeFixture) -> CrossModeArtifacts {
         panic!("fixture.split must contain at least one entry (the main module)");
     }
 
+    (last_source, temp_dir)
+}
+
+/// Compiles the fixture in both single and split modes.
+pub fn compile_cross_mode(fixture: &CrossModeFixture) -> CrossModeArtifacts {
+    let pp = prelude_path();
+
+    // 1. Compile single mode
+    let (single_expr, single_table, _) = compile_haskell(&fixture.single, fixture.target, &[&pp])
+        .expect("failed to compile single-mode fixture");
+
+    // 2. Compile split mode
+    let (last_source, temp_dir) = stage_split_fixture(fixture);
     let include = [pp.as_path(), temp_dir.path()];
     let (split_expr, split_table, _) = compile_haskell(&last_source, fixture.target, &include)
         .expect("failed to compile split-mode fixture");
@@ -87,7 +98,7 @@ pub fn compile_cross_mode(fixture: &CrossModeFixture) -> CrossModeArtifacts {
 /// - Same tree shape (lockstep iteration over CoreFrames).
 /// - Literals match exactly.
 /// - DataConIds match by name + rep_arity lookup in their respective tables.
-/// - VarIds are tolerated to differ (they are variants of hashed names).
+/// - VarIds and JoinIds match modulo alpha-renaming.
 pub fn assert_cross_mode_structurally_equivalent(fixture: &CrossModeFixture) {
     let artifacts = compile_cross_mode(fixture);
     structural_eq::assert_equivalent(&artifacts);
@@ -102,19 +113,7 @@ pub fn assert_cross_mode_pure_equivalent(fixture: &CrossModeFixture) {
         .expect("failed to run single-mode fixture");
 
     // Run split
-    let temp_dir = TempDir::new().expect("failed to create temp dir for split-mode");
-    let mut split_entries = fixture.split.iter().peekable();
-    let mut last_source = String::new();
-
-    while let Some((filename, source)) = split_entries.next() {
-        if split_entries.peek().is_none() {
-            last_source = source.clone();
-        } else {
-            std::fs::write(temp_dir.path().join(filename), source)
-                .expect("failed to write dependency file to temp dir");
-        }
-    }
-
+    let (last_source, temp_dir) = stage_split_fixture(fixture);
     let include = [pp.as_path(), temp_dir.path()];
     let res_split = tidepool_runtime::compile_and_run_pure(&last_source, fixture.target, &include)
         .expect("failed to run split-mode fixture");
@@ -126,13 +125,12 @@ pub fn assert_cross_mode_pure_equivalent(fixture: &CrossModeFixture) {
         res_split.table(),
     );
 }
-
 /// Asserts that the fixture's single and split modes produce equivalent runtime values.
 ///
 /// Runs both modes through the JIT and compares the resulting `Value`s recursively.
 /// Constructor values are compared by name+arity.
-#[allow(dead_code)]
 pub fn assert_cross_mode_runtime_equivalent<U, H1, H2>(
+
     fixture: &CrossModeFixture,
     mk_single_handlers: impl FnOnce() -> H1,
     mk_split_handlers: impl FnOnce() -> H2,
@@ -149,19 +147,7 @@ pub fn assert_cross_mode_runtime_equivalent<U, H1, H2>(
         .expect("failed to run single-mode fixture");
 
     // Run split
-    let temp_dir = TempDir::new().expect("failed to create temp dir for split-mode");
-    let mut split_entries = fixture.split.iter().peekable();
-    let mut last_source = String::new();
-
-    while let Some((filename, source)) = split_entries.next() {
-        if split_entries.peek().is_none() {
-            last_source = source.clone();
-        } else {
-            std::fs::write(temp_dir.path().join(filename), source)
-                .expect("failed to write dependency file to temp dir");
-        }
-    }
-
+    let (last_source, temp_dir) = stage_split_fixture(fixture);
     let include = [pp.as_path(), temp_dir.path()];
     let mut h2 = mk_split_handlers();
     let res_split = tidepool_runtime::compile_and_run(&last_source, fixture.target, &include, &mut h2, user)
