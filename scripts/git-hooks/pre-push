@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Pre-push hook: run cargo fmt --check + cargo clippy -D warnings.
+# Block push if either fails. Skip with `git push --no-verify` if you must.
+#
+# Install: scripts/install-hooks.sh
+# Bypass:  TIDEPOOL_SKIP_PRE_PUSH=1 git push   (or --no-verify)
+
+set -e
+
+if [[ "${TIDEPOOL_SKIP_PRE_PUSH:-}" == "1" ]]; then
+  echo "[pre-push] TIDEPOOL_SKIP_PRE_PUSH=1, skipping checks." >&2
+  exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+# Pick up nix-provided cargo if available; otherwise rely on PATH.
+if command -v nix >/dev/null 2>&1 && [[ -f flake.nix ]]; then
+  CARGO_CMD=(nix develop --command cargo)
+else
+  CARGO_CMD=(cargo)
+fi
+
+echo "[pre-push] cargo fmt --all -- --check" >&2
+if ! "${CARGO_CMD[@]}" fmt --all -- --check; then
+  echo "" >&2
+  echo "[pre-push] FAILED: formatting differences. Run \`cargo fmt --all\` and re-stage." >&2
+  exit 1
+fi
+
+echo "[pre-push] cargo clippy --workspace --all-targets -- -D warnings" >&2
+if ! "${CARGO_CMD[@]}" clippy --workspace --all-targets -- -D warnings; then
+  echo "" >&2
+  echo "[pre-push] FAILED: clippy warnings. Fix them, or bypass with TIDEPOOL_SKIP_PRE_PUSH=1." >&2
+  exit 1
+fi
+
+echo "[pre-push] OK" >&2
