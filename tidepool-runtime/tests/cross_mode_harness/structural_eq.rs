@@ -52,9 +52,25 @@ fn check_node(
 
     match (s_node, p_node) {
         (CoreFrame::Var(s_v), CoreFrame::Var(p_v)) => {
-            if let Some(&expected_p) = var_map.get(s_v) {
-                if expected_p != *p_v {
-                    panic!("node {}: Var mismatch (alpha-equivalence). Expected {:?}, got {:?}", idx, expected_p, p_v);
+            // Alpha-equivalence at Var reference sites. If the single-side
+            // VarId already has an established mapping, the split-side must
+            // match it. Otherwise this is a free reference (typically a
+            // top-level binder visible in both compilations) and we record
+            // the pairing so subsequent occurrences of `s_v` are checked
+            // for consistency. Without this insert, the original code
+            // accepted *any* `p_v` for a previously-unseen `s_v`, which
+            // would mask real divergences on free references.
+            match var_map.get(s_v) {
+                Some(&expected_p) => {
+                    if expected_p != *p_v {
+                        panic!(
+                            "node {}: Var mismatch (alpha-equivalence). Expected {:?}, got {:?}",
+                            idx, expected_p, p_v
+                        );
+                    }
+                }
+                None => {
+                    var_map.insert(*s_v, *p_v);
                 }
             }
         }
@@ -261,26 +277,77 @@ fn compare_datacon_ids(node_idx: usize, s_id: DataConId, s_table: &DataConTable,
 }
 
 fn compare_datacon_ids_detailed(loc: String, s_id: DataConId, s_table: &DataConTable, p_id: DataConId, p_table: &DataConTable) {
-    let s_info = s_table.get(s_id).map(|dc| (dc.name.as_str(), dc.rep_arity));
-    let p_info = p_table.get(p_id).map(|dc| (dc.name.as_str(), dc.rep_arity));
+    let s_dc = s_table.get(s_id);
+    let p_dc = p_table.get(p_id);
 
+    // Cross-mode DataCon equivalence is tiered:
+    //
+    // 1. If both sides expose a qualified_name AND they match exactly,
+    //    that's a strong match.
+    // 2. Otherwise compare unqualified (name, rep_arity). Cross-mode
+    //    fixtures legitimately define the same logical constructor in
+    //    different modules (e.g. `data Echo` in `Test` vs in `Def`), so
+    //    qualified-name *differences* are expected and not by themselves
+    //    a divergence — the stable cross-mode key is name+arity.
+    //
+    // This admits a known false-negative: two genuinely-different
+    // constructors that share name+arity across modules will compare
+    // equal at this site. That collision case is exercised end-to-end
+    // by the dimension_b1/b2 targeted-regression tests via runtime
+    // value comparison, not at the structural layer.
+    let s_qual = s_dc.and_then(|dc| dc.qualified_name.as_deref());
+    let p_qual = p_dc.and_then(|dc| dc.qualified_name.as_deref());
+    if let (Some(sq), Some(pq)) = (s_qual, p_qual) {
+        if sq == pq {
+            return;
+        }
+        // Fall through to name+arity comparison.
+    }
+
+    let s_info = s_dc.map(|dc| (dc.name.as_str(), dc.rep_arity));
+    let p_info = p_dc.map(|dc| (dc.name.as_str(), dc.rep_arity));
     if s_info != p_info {
         panic!(
             "cross-mode divergence at {}: DataCon mismatch. \
-             single={:?} (id={:?}), split={:?} (id={:?})",
-            loc, s_info, s_id, p_info, p_id
+             single={:?} (id={:?}, qual={:?}), split={:?} (id={:?}, qual={:?})",
+            loc, s_info, s_id, s_qual, p_info, p_id, p_qual
         );
     }
 }
 
-/// Asserts that all constructors in the single-mode table are present and compatible in the split-mode table.
+/// Asserts that every constructor in the single-mode table has a compatible
+/// counterpart in the split-mode table. Lookup prefers the module-qualified
+/// name when present (so name+arity collisions across modules don't
+/// silently match the wrong constructor); falls back to name+arity for
+/// legacy entries that lack a qualified name.
 pub fn assert_table_compatible(single_table: &DataConTable, split_table: &DataConTable) {
     for s_dc in single_table.iter() {
-        let p_dc_id = split_table.get_by_name_arity(&s_dc.name, s_dc.rep_arity)
-            .unwrap_or_else(|| panic!("split table missing DataCon '{}' with arity {}", s_dc.name, s_dc.rep_arity));
+        let p_dc_id = if let Some(qn) = s_dc.qualified_name.as_deref() {
+            split_table
+                .get_by_qualified_name(qn)
+                .or_else(|| split_table.get_by_name_arity(&s_dc.name, s_dc.rep_arity))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "split table missing DataCon '{}' (qualified='{}', arity {})",
+                        s_dc.name, qn, s_dc.rep_arity
+                    )
+                })
+        } else {
+            split_table
+                .get_by_name_arity(&s_dc.name, s_dc.rep_arity)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "split table missing DataCon '{}' with arity {}",
+                        s_dc.name, s_dc.rep_arity
+                    )
+                })
+        };
         let p_dc = split_table.get(p_dc_id).unwrap();
         if s_dc.field_bangs != p_dc.field_bangs {
-            panic!("DataCon '{}' has different field_bangs (single={:?}, split={:?})", s_dc.name, s_dc.field_bangs, p_dc.field_bangs);
+            panic!(
+                "DataCon '{}' has different field_bangs (single={:?}, split={:?})",
+                s_dc.name, s_dc.field_bangs, p_dc.field_bangs
+            );
         }
     }
 }
