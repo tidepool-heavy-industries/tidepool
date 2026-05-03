@@ -11,6 +11,9 @@ use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, TreeBuilder, VarId};
 /// The binding VarId matches `VarId(dc.id.0)`, which is what the GHC Core translator
 /// uses to reference data constructors as function values.
 pub fn wrap_with_datacon_env(mut expr: CoreExpr, table: &DataConTable) -> CoreExpr {
+    if expr.nodes.is_empty() {
+        return expr;
+    }
     let mut b = TreeBuilder::new();
 
     // First, push all nodes from the original expression.

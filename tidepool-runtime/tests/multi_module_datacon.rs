@@ -215,7 +215,6 @@ agent = do
 
 /// Test that cross-module effect actually runs without CASE TRAP.
 #[test]
-#[cfg(not(debug_assertions))]
 fn test_cross_module_effect_runs() {
     let (effect_dir, main_src) = setup_multi_module_test();
     let pp = prelude_path();

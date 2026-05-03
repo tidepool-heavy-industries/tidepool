@@ -21,7 +21,6 @@ use crate::frame::CoreFrame;
 use crate::tree::MapLayer;
 use crate::types::{DataConId, Literal};
 use crate::{CoreExpr, DataConTable, RecursiveTree};
-use std::collections::HashMap;
 
 /// Canonicalize a [`CoreExpr`] by applying all normalization rules to
 /// fixpoint.
@@ -56,13 +55,10 @@ pub fn normalize(expr: &CoreExpr, table: &DataConTable) -> CoreExpr {
 
 fn apply_rules_once(expr: &CoreExpr, table: &DataConTable) -> (CoreExpr, usize) {
     let mut out = Vec::with_capacity(expr.nodes.len());
-    let mut old_to_new = HashMap::new();
-    let mut last_mapped_idx = 0;
+    let mut old_to_new: Vec<usize> = Vec::with_capacity(expr.nodes.len());
 
-    for (old_idx, frame) in expr.nodes.iter().enumerate() {
-        let mut mapped = frame
-            .clone()
-            .map_layer(|child_old| *old_to_new.get(&child_old).expect("bottom-up order"));
+    for frame in expr.nodes.iter() {
+        let mut mapped = frame.clone().map_layer(|child_old| old_to_new[child_old]);
 
         // Rules that transform the node in-place
         transform_unbox_prim_args(&mut mapped, &out, table);
@@ -75,9 +71,9 @@ fn apply_rules_once(expr: &CoreExpr, table: &DataConTable) -> (CoreExpr, usize) 
             out.push(mapped);
             out.len() - 1
         };
-        old_to_new.insert(old_idx, new_idx);
-        last_mapped_idx = new_idx;
+        old_to_new.push(new_idx);
     }
+    let last_mapped_idx = *old_to_new.last().expect("non-empty");
     (RecursiveTree { nodes: out }, last_mapped_idx)
 }
 
@@ -149,11 +145,11 @@ fn transform_canonicalize_effect_tag(
     out: &[CoreFrame<usize>],
     table: &DataConTable,
 ) {
-    let union_id = match table.get_by_name("Union") {
+    let union_id = match table.get_by_name_arity("Union", 2) {
         Some(id) => id,
         None => return,
     };
-    let w_hash_id = match table.get_by_name("W#") {
+    let w_hash_id = match table.get_by_name_arity("W#", 1) {
         Some(id) => id,
         None => return,
     };
@@ -512,6 +508,19 @@ mod proptest_normalize {
     fn arb_core_frame(
         child_strategy: impl Strategy<Value = usize> + Clone,
     ) -> impl Strategy<Value = CoreFrame<usize>> {
+        let box_ids = prop_oneof![
+            Just(DataConId(100)), // I#
+            Just(DataConId(101)), // W#
+            Just(DataConId(102)), // C#
+            Just(DataConId(103)), // F#
+            Just(DataConId(104)), // D#
+            Just(DataConId(200)), // Union
+        ];
+        let arb_dataconid = prop_oneof![
+            7 => box_ids,
+            3 => any::<u64>().prop_map(DataConId),
+        ];
+
         prop_oneof![
             any::<u64>().prop_map(|id| CoreFrame::Var(VarId(id))),
             arb_literal().prop_map(CoreFrame::Lit),
@@ -529,13 +538,10 @@ mod proptest_normalize {
                 }
             ),
             (
-                any::<u64>(),
+                arb_dataconid,
                 prop::collection::vec(child_strategy.clone(), 1..3)
             )
-                .prop_map(|(tag, fields)| CoreFrame::Con {
-                    tag: DataConId(tag),
-                    fields
-                }),
+                .prop_map(|(tag, fields)| CoreFrame::Con { tag, fields }),
             (prop::collection::vec(child_strategy, 1..3)).prop_map(|args| CoreFrame::PrimOp {
                 op: PrimOpKind::IntAdd,
                 args
