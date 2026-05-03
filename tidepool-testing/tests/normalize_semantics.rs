@@ -1,25 +1,24 @@
 use proptest::prelude::*;
 use tidepool_eval::{deep_force, env_from_datacon_table, eval, VecHeap};
 use tidepool_repr::normalize;
-use tidepool_repr::DataConId;
 use tidepool_testing::compare::assert_values_eq;
-use tidepool_testing::gen::{arb_core_expr, standard_datacon_table};
+use tidepool_testing::gen::{arb_ground_expr, standard_datacon_table};
 
 /// Custom table that maps standard generator IDs to names that trigger normalization rules.
 fn normalization_test_table() -> tidepool_repr::DataConTable {
     let mut table = standard_datacon_table();
 
-    // ID 1 is "Just" (arity 1). Rename to "W#" to trigger Rule 1 (flatten_box)
+    // Look up "Just" (arity 1). Rename to "W#" to trigger Rule 1 (flatten_box)
     // and Rule 2 (canonicalize_effect_tag) when used inside Union.
-    if let Some(con) = table.get(DataConId(1)).cloned() {
-        let mut new_con = con;
+    if let Some(id) = table.get_by_name_arity("Just", 1) {
+        let mut new_con = table.get(id).unwrap().clone();
         new_con.name = "W#".to_string();
         table.insert(new_con);
     }
 
-    // ID 4 is "(,)" (arity 2). Rename to "Union" to trigger Rule 2.
-    if let Some(con) = table.get(DataConId(4)).cloned() {
-        let mut new_con = con;
+    // Look up "(,)" (arity 2). Rename to "Union" to trigger Rule 2.
+    if let Some(id) = table.get_by_name_arity("(,)", 2) {
+        let mut new_con = table.get(id).unwrap().clone();
         new_con.name = "Union".to_string();
         table.insert(new_con);
     }
@@ -31,7 +30,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
     #[test]
-    fn prop_normalize_preserves_semantics(expr in arb_core_expr()) {
+    fn prop_normalize_preserves_semantics(expr in arb_ground_expr()) {
         let table = normalization_test_table();
         let env = env_from_datacon_table(&table);
 
@@ -50,8 +49,10 @@ proptest! {
             (Ok(v1), Ok(v2)) => {
                 assert_values_eq(&v1, &v2);
             }
-            (Err(_e1), Err(_e2)) => {
-                // If both fail, it's generally fine.
+            (Err(e1), Err(e2)) => {
+                // If both fail, ensure they fail with the same error type.
+                // We compare debug representation for a reasonable approximation of equality.
+                prop_assert_eq!(format!("{:?}", e1), format!("{:?}", e2), "Evaluation failed with different errors after normalization");
             }
             (Ok(v1), Err(e2)) => {
                 prop_assert!(false, "Normalized eval failed but original succeeded.\nError: {:?}\nOriginal result: {:?}\nOriginal Expr: {:#?}\nNormalized Expr: {:#?}", e2, v1, expr, normalized_expr);
