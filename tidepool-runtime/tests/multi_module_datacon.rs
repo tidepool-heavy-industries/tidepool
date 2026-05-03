@@ -215,12 +215,11 @@ agent = do
 
 /// Test that cross-module effect actually runs without CASE TRAP.
 ///
-/// In debug builds, this test remains gated because the effect tag
-/// emerging from GHC Core can be a Var (evaluating to a boxed W#) rather
+/// GADT constructors from separate modules often arrive as a boxed `W#` rather
 /// than an unboxed LitWord. While normalization now resolves some of
 /// these bindings, it cannot evaluate arbitrary function applications
-/// or complex closures. The debug_assert! in CompiledEffectMachine
-/// correctly identifies these non-canonical shapes reaching the JIT.
+/// or complex closures. The CompiledEffectMachine handles these
+/// non-canonical shapes reaching the JIT via a runtime fallback.
 #[test]
 fn test_cross_module_effect_runs() {
     let (effect_dir, main_src) = setup_multi_module_test();

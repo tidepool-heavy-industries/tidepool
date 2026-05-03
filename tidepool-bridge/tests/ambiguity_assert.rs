@@ -44,13 +44,13 @@ fn ambiguous_i_hash_table() -> DataConTable {
 #[cfg(debug_assertions)]
 fn i_hash_ambiguity_no_longer_panics() {
     let table = ambiguous_i_hash_table();
-    // The i64 ToCore impl looks up "I#" via get_by_name; it now issues
-    // a diagnostic instead of panicking.
-    // Triggering the impl with any value is sufficient.
+    // The i64 ToCore impl looks up "I#" via get_resilient; it now issues
+    // a diagnostic instead of panicking and falls back to a deterministic match.
+    // get_by_name_arity returns the LAST inserted match (rev order).
     let result = 42i64.to_value(&table).expect("unambiguous I# must encode cleanly");
     if let tidepool_eval::Value::Con(id, _) = result {
-        // Should return one of the valid IDs (likely the first match)
-        assert!(id == DataConId(100) || id == DataConId(200));
+        // Should return the last match in the table: DataConId(200)
+        assert_eq!(id, DataConId(200));
     } else {
         panic!("expected Value::Con");
     }

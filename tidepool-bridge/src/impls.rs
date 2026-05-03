@@ -7,16 +7,41 @@ use std::sync::{Arc, Mutex};
 use tidepool_eval::Value;
 use tidepool_repr::{DataConId, DataConTable, Literal};
 
-/// Check if a DataConId matches a known boxing constructor name (I#, W#, D#, C#).
-fn is_boxing_con(name: &str, id: DataConId, table: &DataConTable) -> bool {
+/// Resilient lookup for hand-written bridge impls.
+///
+/// Look up a DataCon by name and arity. If ambiguous, issues a diagnostic
+/// and returns the first match (preserving best-effort recovery).
+fn get_resilient(table: &DataConTable, name: &str, arity: u32) -> Option<DataConId> {
+    let matches = table.get_all_by_name(name);
+    if matches.is_empty() {
+        return None;
+    }
+
+    // Try name + arity match
+    let by_arity = table.get_by_name_arity(name, arity);
+
     #[cfg(debug_assertions)]
-    if matches!(name, "I#" | "W#" | "D#" | "C#") {
-        let matches = table.get_all_by_name(name);
-        if matches.len() > 1 {
-            eprintln!("[bridge] diagnostic: ambiguous unqualified DataCon name '{}' in cross-module compilation context; matches = {:?}. This impl should eventually be migrated to get_by_name_arity or get_by_qualified_name.", name, matches);
+    if matches.len() > 1 {
+        // If arity disambiguated it perfectly, it's less of a diagnostic concern,
+        // but we still warn if there are multiple same-name-same-arity entries.
+        let same_arity_matches: Vec<_> = matches
+            .iter()
+            .filter(|&&id| table.get(id).map_or(false, |dc| dc.rep_arity == arity))
+            .collect();
+        if same_arity_matches.len() > 1 {
+            eprintln!(
+                "[bridge] diagnostic: ambiguous unqualified DataCon name '{}' with arity {} in cross-module compilation context; matches = {:?}. This impl should eventually be migrated to get_by_qualified_name.",
+                name, arity, same_arity_matches
+            );
         }
     }
-    table.get_by_name(name) == Some(id)
+
+    by_arity.or_else(|| matches.first().copied())
+}
+
+/// Check if a DataConId matches a known boxing constructor name (I#, W#, D#, C#).
+fn is_boxing_con(name: &str, id: DataConId, table: &DataConTable) -> bool {
+    get_resilient(table, name, 1) == Some(id)
 }
 
 // Helper for type mismatch errors
@@ -60,11 +85,7 @@ impl<T> ToCore for std::marker::PhantomData<T> {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         // We use a dummy id since PhantomData has no representation in Core
         // but we need some Con to represent it if it's a field.
-        // Actually, in Tidepool/Haskell, PhantomData fields shouldn't exist in Core.
-        // But for the bridge to work with derived enums, we need an impl.
-        // Let's use a unit tuple id if available, or just any unit-like.
-        let id = table
-            .get_by_name("()")
+        let id = get_resilient(table, "()", 0)
             .or_else(|| table.iter().find(|dc| dc.rep_arity == 0).map(|dc| dc.id))
             .ok_or_else(|| BridgeError::UnknownDataConName("()".into()))?;
         Ok(Value::Con(id, vec![]))
@@ -111,8 +132,7 @@ impl ToCoreSealed for () {}
 
 impl ToCore for () {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        let id = table
-            .get_by_name("()")
+        let id = get_resilient(table, "()", 0)
             .ok_or_else(|| BridgeError::UnknownDataConName("()".into()))?;
         Ok(Value::Con(id, vec![]))
     }
@@ -152,16 +172,7 @@ impl FromCore for i64 {
 
 impl ToCore for i64 {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        #[cfg(debug_assertions)]
-        {
-            let matches = table.get_all_by_name("I#");
-            if matches.len() > 1 {
-                eprintln!("[bridge] diagnostic: ambiguous unqualified DataCon name 'I#' in cross-module compilation context; matches = {:?}. This impl should eventually be migrated to get_by_name_arity or get_by_qualified_name.", matches);
-            }
-        }
-        let id = table
-            .get_by_name("I#")
-            .or_else(|| table.get_all_by_name("I#").first().copied())
+        let id = get_resilient(table, "I#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("I#".into()))?;
         Ok(Value::Con(id, vec![Value::Lit(Literal::LitInt(*self))]))
     }
@@ -190,16 +201,7 @@ impl FromCore for u64 {
 
 impl ToCore for u64 {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        #[cfg(debug_assertions)]
-        {
-            let matches = table.get_all_by_name("W#");
-            if matches.len() > 1 {
-                eprintln!("[bridge] diagnostic: ambiguous unqualified DataCon name 'W#' in cross-module compilation context; matches = {:?}. This impl should eventually be migrated to get_by_name_arity or get_by_qualified_name.", matches);
-            }
-        }
-        let id = table
-            .get_by_name("W#")
-            .or_else(|| table.get_all_by_name("W#").first().copied())
+        let id = get_resilient(table, "W#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("W#".into()))?;
         Ok(Value::Con(id, vec![Value::Lit(Literal::LitWord(*self))]))
     }
@@ -228,13 +230,9 @@ impl FromCore for f64 {
 
 impl ToCore for f64 {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        let id = table
-            .get_by_name("D#")
+        let id = get_resilient(table, "D#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("D#".into()))?;
-        Ok(Value::Con(
-            id,
-            vec![Value::Lit(Literal::LitDouble(self.to_bits()))],
-        ))
+        Ok(Value::Con(id, vec![Value::Lit(Literal::LitDouble(self.to_bits()))]))
     }
 }
 
@@ -270,11 +268,9 @@ impl FromCore for bool {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         match value {
             Value::Con(id, fields) => {
-                let true_id = table
-                    .get_by_name("True")
+                let true_id = get_resilient(table, "True", 0)
                     .ok_or(BridgeError::UnknownDataConName("True".into()))?;
-                let false_id = table
-                    .get_by_name("False")
+                let false_id = get_resilient(table, "False", 0)
                     .ok_or(BridgeError::UnknownDataConName("False".into()))?;
 
                 if *id == true_id {
@@ -309,8 +305,7 @@ impl FromCore for bool {
 impl ToCore for bool {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let name = if *self { "True" } else { "False" };
-        let id = table
-            .get_by_name(name)
+        let id = get_resilient(table, name, 0)
             .ok_or_else(|| BridgeError::UnknownDataConName(name.into()))?;
         Ok(Value::Con(id, vec![]))
     }
@@ -338,8 +333,7 @@ impl FromCore for char {
 
 impl ToCore for char {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        let id = table
-            .get_by_name("C#")
+        let id = get_resilient(table, "C#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("C#".into()))?;
         Ok(Value::Con(id, vec![Value::Lit(Literal::LitChar(*self))]))
     }
@@ -350,27 +344,22 @@ impl ToCoreSealed for String {}
 
 impl FromCore for String {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
-        #[cfg(debug_assertions)]
-        for name in ["Text", "ByteArray", "[]"] {
-            let matches = table.get_all_by_name(name);
-            if matches.len() > 1 {
-                eprintln!("[bridge] diagnostic: ambiguous unqualified DataCon name '{}' in cross-module compilation context; matches = {:?}. This impl should eventually be migrated to get_by_name_arity or get_by_qualified_name.", name, matches);
-            }
-        }
+        let text_id = get_resilient(table, "Text", 3);
+        let ba_id = get_resilient(table, "ByteArray", 1);
+        let nil_id = get_resilient(table, "[]", 0);
+        let cons_id = get_resilient(table, ":", 2);
+
         match value {
             // Text constructor: Text ByteArray# off len
-            Value::Con(id, fields)
-                if fields.len() == 3 && table.get_by_name("Text") == Some(*id) =>
-            {
+            Value::Con(id, fields) if fields.len() == 3 && text_id == Some(*id) => {
                 let ba = match &fields[0] {
                     Value::ByteArray(bs) => bs
                         .lock()
                         .map_err(|_| BridgeError::InternalError("mutex poisoned".into()))?
                         .clone(),
                     // Lifted ByteArray wrapper: Con("ByteArray", [Value::ByteArray(..)])
-                    Value::Con(ba_id, ba_fields)
-                        if ba_fields.len() == 1
-                            && table.get_by_name("ByteArray") == Some(*ba_id) =>
+                    Value::Con(inner_ba_id, ba_fields)
+                        if ba_fields.len() == 1 && ba_id == Some(*inner_ba_id) =>
                     {
                         match &ba_fields[0] {
                             Value::ByteArray(bs) => bs
@@ -411,20 +400,16 @@ impl FromCore for String {
                 let mut cur = value;
                 loop {
                     match cur {
-                        Value::Con(tag, fields)
-                            if table.get_by_name("[]") == Some(*tag) && fields.is_empty() =>
-                        {
+                        Value::Con(tag, fields) if nil_id == Some(*tag) && fields.is_empty() => {
                             break;
                         }
-                        Value::Con(tag, fields)
-                            if table.get_by_name(":") == Some(*tag) && fields.len() == 2 =>
-                        {
+                        Value::Con(tag, fields) if cons_id == Some(*tag) && fields.len() == 2 => {
                             match &fields[0] {
                                 Value::Lit(Literal::LitChar(c)) => chars.push(*c),
                                 // Boxing: C# wraps a Char
                                 Value::Con(box_tag, box_fields)
-                                    if table.get_by_name("C#") == Some(*box_tag)
-                                        && box_fields.len() == 1 =>
+                                    if box_fields.len() == 1
+                                        && get_resilient(table, "C#", 1) == Some(*box_tag) =>
                                 {
                                     match &box_fields[0] {
                                         Value::Lit(Literal::LitChar(c)) => chars.push(*c),
@@ -447,24 +432,12 @@ impl FromCore for String {
 
 impl ToCore for String {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        #[cfg(debug_assertions)]
-        {
-            let matches = table.get_all_by_name("Text");
-            if matches.len() > 1 {
-                eprintln!("[bridge] diagnostic: ambiguous unqualified DataCon name 'Text' in cross-module compilation context; matches = {:?}. This impl should eventually be migrated to get_by_name_arity or get_by_qualified_name.", matches);
-            }
-        }
-        let text_id = table
-            .get_by_name("Text")
-            .or_else(|| table.get_all_by_name("Text").first().copied())
+        let text_id = get_resilient(table, "Text", 3)
             .ok_or_else(|| BridgeError::UnknownDataConName("Text".into()))?;
         let bytes = self.as_bytes().to_vec();
         let len = bytes.len() as i64;
         // GHC Core at -O2 uses the worker representation of Text with
         // unboxed fields: Text ByteArray# Int# Int#
-        // (not the source-level Text !ByteArray !Int !Int with boxed wrappers).
-        // The JIT compiles GHC Core directly, so values injected from Rust
-        // must match the worker representation.
         let ba_raw = Value::ByteArray(Arc::new(Mutex::new(bytes)));
         Ok(Value::Con(
             text_id,
@@ -484,16 +457,12 @@ impl<T> ToCoreSealed for Option<T> {}
 
 impl<T: FromCore> FromCore for Option<T> {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+        let nothing_id = get_resilient(table, "Nothing", 0);
+        let just_id = get_resilient(table, "Just", 1);
+
         match value {
             Value::Con(id, fields) => {
-                let nothing_id = table
-                    .get_by_name("Nothing")
-                    .ok_or(BridgeError::UnknownDataConName("Nothing".into()))?;
-                let just_id = table
-                    .get_by_name("Just")
-                    .ok_or(BridgeError::UnknownDataConName("Just".into()))?;
-
-                if *id == nothing_id {
+                if nothing_id == Some(*id) {
                     if fields.is_empty() {
                         Ok(None)
                     } else {
@@ -503,7 +472,7 @@ impl<T: FromCore> FromCore for Option<T> {
                             got: fields.len(),
                         })
                     }
-                } else if *id == just_id {
+                } else if just_id == Some(*id) {
                     if fields.len() == 1 {
                         Ok(Some(T::from_value(&fields[0], table)?))
                     } else {
@@ -526,14 +495,12 @@ impl<T: ToCore> ToCore for Option<T> {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         match self {
             None => {
-                let id = table
-                    .get_by_name("Nothing")
+                let id = get_resilient(table, "Nothing", 0)
                     .ok_or_else(|| BridgeError::UnknownDataConName("Nothing".into()))?;
                 Ok(Value::Con(id, vec![]))
             }
             Some(x) => {
-                let id = table
-                    .get_by_name("Just")
+                let id = get_resilient(table, "Just", 1)
                     .ok_or_else(|| BridgeError::UnknownDataConName("Just".into()))?;
                 Ok(Value::Con(id, vec![x.to_value(table)?]))
             }
@@ -546,18 +513,9 @@ impl<T> ToCoreSealed for Vec<T> {}
 
 impl<T: FromCore> FromCore for Vec<T> {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
-        #[cfg(debug_assertions)]
-        {
-            let matches = table.get_all_by_name("[]");
-            if matches.len() > 1 {
-                eprintln!("[bridge] diagnostic: ambiguous unqualified DataCon name '[]' in cross-module compilation context; matches = {:?}. This impl should eventually be migrated to get_by_name_arity or get_by_qualified_name.", matches);
-            }
-        }
-        let nil_id = table
-            .get_by_name("[]")
+        let nil_id = get_resilient(table, "[]", 0)
             .ok_or(BridgeError::UnknownDataConName("[]".into()))?;
-        let cons_id = table
-            .get_by_name(":")
+        let cons_id = get_resilient(table, ":", 2)
             .ok_or(BridgeError::UnknownDataConName(":".into()))?;
 
         let mut res = Vec::new();
@@ -601,18 +559,9 @@ impl<T: FromCore> FromCore for Vec<T> {
 
 impl<T: ToCore> ToCore for Vec<T> {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        #[cfg(debug_assertions)]
-        {
-            let matches = table.get_all_by_name("[]");
-            if matches.len() > 1 {
-                eprintln!("[bridge] diagnostic: ambiguous unqualified DataCon name '[]' in cross-module compilation context; matches = {:?}. This impl should eventually be migrated to get_by_name_arity or get_by_qualified_name.", matches);
-            }
-        }
-        let nil_id = table
-            .get_by_name("[]")
+        let nil_id = get_resilient(table, "[]", 0)
             .ok_or_else(|| BridgeError::UnknownDataConName("[]".into()))?;
-        let cons_id = table
-            .get_by_name(":")
+        let cons_id = get_resilient(table, ":", 2)
             .ok_or_else(|| BridgeError::UnknownDataConName(":".into()))?;
 
         let mut res = Value::Con(nil_id, vec![]);
@@ -628,25 +577,12 @@ impl<T, E> ToCoreSealed for Result<T, E> {}
 
 impl<T: FromCore, E: FromCore> FromCore for Result<T, E> {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
-        #[cfg(debug_assertions)]
-        for name in ["Right", "Ok", "Left", "Err"] {
-            let matches = table.get_all_by_name(name);
-            if matches.len() > 1 {
-                eprintln!("[bridge] diagnostic: ambiguous unqualified DataCon name '{}' in cross-module compilation context; matches = {:?}. This impl should eventually be migrated to get_by_name_arity or get_by_qualified_name.", name, matches);
-            }
-        }
+        let right_id = get_resilient(table, "Right", 1).or_else(|| get_resilient(table, "Ok", 1));
+        let left_id = get_resilient(table, "Left", 1).or_else(|| get_resilient(table, "Err", 1));
+
         match value {
             Value::Con(id, fields) => {
-                let right_id = table
-                    .get_by_name("Right")
-                    .or_else(|| table.get_by_name("Ok"))
-                    .ok_or(BridgeError::UnknownDataConName("Right/Ok".into()))?;
-                let left_id = table
-                    .get_by_name("Left")
-                    .or_else(|| table.get_by_name("Err"))
-                    .ok_or(BridgeError::UnknownDataConName("Left/Err".into()))?;
-
-                if *id == right_id {
+                if right_id == Some(*id) {
                     if fields.len() == 1 {
                         Ok(Ok(T::from_value(&fields[0], table)?))
                     } else {
@@ -656,7 +592,7 @@ impl<T: FromCore, E: FromCore> FromCore for Result<T, E> {
                             got: fields.len(),
                         })
                     }
-                } else if *id == left_id {
+                } else if left_id == Some(*id) {
                     if fields.len() == 1 {
                         Ok(Err(E::from_value(&fields[0], table)?))
                     } else {
@@ -677,25 +613,16 @@ impl<T: FromCore, E: FromCore> FromCore for Result<T, E> {
 
 impl<T: ToCore, E: ToCore> ToCore for Result<T, E> {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        #[cfg(debug_assertions)]
-        for name in ["Right", "Ok", "Left", "Err"] {
-            let matches = table.get_all_by_name(name);
-            if matches.len() > 1 {
-                eprintln!("[bridge] diagnostic: ambiguous unqualified DataCon name '{}' in cross-module compilation context; matches = {:?}. This impl should eventually be migrated to get_by_name_arity or get_by_qualified_name.", name, matches);
-            }
-        }
         match self {
             Ok(x) => {
-                let id = table
-                    .get_by_name("Right")
-                    .or_else(|| table.get_by_name("Ok"))
+                let id = get_resilient(table, "Right", 1)
+                    .or_else(|| get_resilient(table, "Ok", 1))
                     .ok_or_else(|| BridgeError::UnknownDataConName("Right/Ok".into()))?;
                 Ok(Value::Con(id, vec![x.to_value(table)?]))
             }
             Err(e) => {
-                let id = table
-                    .get_by_name("Left")
-                    .or_else(|| table.get_by_name("Err"))
+                let id = get_resilient(table, "Left", 1)
+                    .or_else(|| get_resilient(table, "Err", 1))
                     .ok_or_else(|| BridgeError::UnknownDataConName("Left/Err".into()))?;
                 Ok(Value::Con(id, vec![e.to_value(table)?]))
             }
@@ -710,37 +637,30 @@ impl<A, B> ToCoreSealed for (A, B) {}
 
 impl<A: FromCore, B: FromCore> FromCore for (A, B) {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+        let pair_id = get_resilient(table, "(,)", 2);
         match value {
-            Value::Con(id, fields) => {
-                let pair_id = table
-                    .get_by_name("(,)")
-                    .ok_or(BridgeError::UnknownDataConName("(,)".into()))?;
-                if *id == pair_id {
-                    if fields.len() == 2 {
-                        Ok((
-                            A::from_value(&fields[0], table)?,
-                            B::from_value(&fields[1], table)?,
-                        ))
-                    } else {
-                        Err(BridgeError::ArityMismatch {
-                            con: *id,
-                            expected: 2,
-                            got: fields.len(),
-                        })
-                    }
+            Value::Con(id, fields) if pair_id == Some(*id) => {
+                if fields.len() == 2 {
+                    Ok((
+                        A::from_value(&fields[0], table)?,
+                        B::from_value(&fields[1], table)?,
+                    ))
                 } else {
-                    Err(BridgeError::UnknownDataCon(*id))
+                    Err(BridgeError::ArityMismatch {
+                        con: *id,
+                        expected: 2,
+                        got: fields.len(),
+                    })
                 }
             }
-            _ => Err(type_mismatch("Con", value)),
+            _ => Err(type_mismatch("(,)", value)),
         }
     }
 }
 
 impl<A: ToCore, B: ToCore> ToCore for (A, B) {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        let pair_id = table
-            .get_by_name("(,)")
+        let pair_id = get_resilient(table, "(,)", 2)
             .ok_or_else(|| BridgeError::UnknownDataConName("(,)".into()))?;
         Ok(Value::Con(
             pair_id,
@@ -754,38 +674,31 @@ impl<A, B, C> ToCoreSealed for (A, B, C) {}
 
 impl<A: FromCore, B: FromCore, C: FromCore> FromCore for (A, B, C) {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+        let triple_id = get_resilient(table, "(,,)", 3);
         match value {
-            Value::Con(id, fields) => {
-                let triple_id = table
-                    .get_by_name("(,,)")
-                    .ok_or(BridgeError::UnknownDataConName("(,,)".into()))?;
-                if *id == triple_id {
-                    if fields.len() == 3 {
-                        Ok((
-                            A::from_value(&fields[0], table)?,
-                            B::from_value(&fields[1], table)?,
-                            C::from_value(&fields[2], table)?,
-                        ))
-                    } else {
-                        Err(BridgeError::ArityMismatch {
-                            con: *id,
-                            expected: 3,
-                            got: fields.len(),
-                        })
-                    }
+            Value::Con(id, fields) if triple_id == Some(*id) => {
+                if fields.len() == 3 {
+                    Ok((
+                        A::from_value(&fields[0], table)?,
+                        B::from_value(&fields[1], table)?,
+                        C::from_value(&fields[2], table)?,
+                    ))
                 } else {
-                    Err(BridgeError::UnknownDataCon(*id))
+                    Err(BridgeError::ArityMismatch {
+                        con: *id,
+                        expected: 3,
+                        got: fields.len(),
+                    })
                 }
             }
-            _ => Err(type_mismatch("Con", value)),
+            _ => Err(type_mismatch("(,,)", value)),
         }
     }
 }
 
 impl<A: ToCore, B: ToCore, C: ToCore> ToCore for (A, B, C) {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        let triple_id = table
-            .get_by_name("(,,)")
+        let triple_id = get_resilient(table, "(,,)", 3)
             .ok_or_else(|| BridgeError::UnknownDataConName("(,,)".into()))?;
         Ok(Value::Con(
             triple_id,

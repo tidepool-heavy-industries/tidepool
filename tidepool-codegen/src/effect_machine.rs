@@ -248,6 +248,15 @@ impl CompiledEffectMachine {
                 unsafe { *(tag_ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) }
             } else {
                 // Fallback for boxed W#: Read the LitWord from field 0.
+                // Harden: verify it's a TAG_CON and has at least one field.
+                if tag_ptr_tag != layout::TAG_CON {
+                    return Yield::Error(YieldError::UnexpectedTag(tag_ptr_tag));
+                }
+                let num_fields = unsafe { Self::read_con_num_fields(tag_ptr) };
+                if num_fields == 0 {
+                    return Yield::Error(YieldError::UnexpectedTag(tag_ptr_tag));
+                }
+
                 let lit_ptr = unsafe { Self::read_con_field(tag_ptr, 0) };
                 let lit_ptr = self.force_ptr(lit_ptr);
                 if lit_ptr.is_null() {
