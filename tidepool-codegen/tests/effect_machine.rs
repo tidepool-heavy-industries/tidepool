@@ -1002,8 +1002,7 @@ fn test_force_ptr_invalid_tag() {
     assert_eq!(
         result,
         Yield::Error(YieldError::UserErrorMsg(
-            "apply_cont_heap: result has unexpected tag 0 (expected TAG_CON for Eff result)"
-                .to_string()
+            "force_ptr: unexpected heap tag 254 (not a thunk, con, lit, or closure)".to_string()
         ))
     );
 }

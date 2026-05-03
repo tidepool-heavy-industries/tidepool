@@ -344,10 +344,13 @@ impl CompiledEffectMachine {
         }
 
         let mut k = self.force_ptr(k);
-        if k.is_null() {
+        if k.is_null() || crate::host_fns::has_runtime_error() {
             return std::ptr::null_mut();
         }
         let mut arg = self.force_ptr(arg);
+        if crate::host_fns::has_runtime_error() {
+            return std::ptr::null_mut();
+        }
 
         // Stack of pending k2 continuations from Node decomposition.
         // Lives on the Rust heap, not the GC nursery. Entries are heap pointers
@@ -367,6 +370,9 @@ impl CompiledEffectMachine {
                     if con_tag == self.tags.leaf {
                         // Leaf(f): call f(arg) — terminal for this continuation
                         let f = self.force_ptr(Self::read_con_field(k, 0));
+                        if crate::host_fns::has_runtime_error() {
+                            return std::ptr::null_mut();
+                        }
                         // Register k2_stack entries as GC roots before call_closure,
                         // which runs JIT code that can trigger GC.
                         for slot in k2_stack.iter_mut() {
@@ -379,6 +385,9 @@ impl CompiledEffectMachine {
                         // Node(k1, k2): push k2 for later, loop on k1
                         let k1 = self.force_ptr(Self::read_con_field(k, 0));
                         let k2 = self.force_ptr(Self::read_con_field(k, 1));
+                        if crate::host_fns::has_runtime_error() {
+                            return std::ptr::null_mut();
+                        }
                         k2_stack.push(k2);
                         k = k1;
                         continue;
@@ -423,11 +432,14 @@ impl CompiledEffectMachine {
                 return std::ptr::null_mut();
             }
             let result = self.force_ptr(result);
-            if result.is_null() {
-                // core-shapes.md §7: forced result must be non-null
-                let msg = "apply_cont_heap: forced result is null (expected Eff result)";
-                crate::host_fns::push_diagnostic(msg.to_string());
-                crate::host_fns::runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64); // 2 = UserError
+            if result.is_null() || crate::host_fns::has_runtime_error() {
+                // core-shapes.md §7: forced result must be non-null (unless error set)
+                if !crate::host_fns::has_runtime_error() {
+                    let msg = "apply_cont_heap: forced result is null (expected Eff result)";
+                    crate::host_fns::push_diagnostic(msg.to_string());
+                    crate::host_fns::runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+                    // 2 = UserError
+                }
                 return std::ptr::null_mut();
             }
 
@@ -448,6 +460,9 @@ impl CompiledEffectMachine {
             if result_con_tag == self.tags.val {
                 // Val(y): if k2_stack is empty, we're done; otherwise apply next k2
                 let y = self.force_ptr(Self::read_con_field(result, 0));
+                if crate::host_fns::has_runtime_error() {
+                    return std::ptr::null_mut();
+                }
                 if let Some(k2) = k2_stack.pop() {
                     k = k2;
                     arg = y;
@@ -459,6 +474,9 @@ impl CompiledEffectMachine {
                 // E(union, k'): compose ALL remaining k2s into k'
                 let union_val = self.force_ptr(Self::read_con_field(result, 0));
                 let mut k_prime = self.force_ptr(Self::read_con_field(result, 1));
+                if crate::host_fns::has_runtime_error() {
+                    return std::ptr::null_mut();
+                }
 
                 while let Some(k2) = k2_stack.pop() {
                     k_prime = self.alloc_con(self.tags.node, &[k_prime, k2]);
@@ -470,7 +488,13 @@ impl CompiledEffectMachine {
                         return std::ptr::null_mut();
                     }
                 }
-                return self.alloc_con(self.tags.e, &[union_val, k_prime]);
+                let res = self.alloc_con(self.tags.e, &[union_val, k_prime]);
+                if res.is_null() {
+                    let msg = "apply_cont_heap: failed to allocate E result during continuation composition";
+                    crate::host_fns::push_diagnostic(msg.to_string());
+                    crate::host_fns::runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+                }
+                return res;
             } else {
                 // core-shapes.md §7: Eff result must be Val or E
                 let msg = format!(

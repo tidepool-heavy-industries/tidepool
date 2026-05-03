@@ -105,7 +105,7 @@ unsafe fn heap_to_value_inner(
                     // LitString# — raw pointer to [len: u64][bytes...]
                     let str_ptr = raw_value as *const u8;
                     if str_ptr.is_null() {
-                        return Ok(Value::Lit(Literal::LitString(vec![])));
+                        return Err(BridgeError::NullPointer);
                     }
                     let len = std::ptr::read_unaligned(str_ptr as *const u64) as usize;
                     if len > MAX_DATA_SIZE {
@@ -243,7 +243,8 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
                 }
                 Literal::LitChar(c) => {
                     *ptr.add(layout::LIT_TAG_OFFSET as usize) = LIT_TAG_CHAR as u8;
-                    *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut u32) = *c as u32;
+                    // Ensure the full 8-byte slot is written to avoid reading UB junk later
+                    *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut u64) = *c as u32 as u64;
                 }
                 Literal::LitFloat(bits) => {
                     *ptr.add(layout::LIT_TAG_OFFSET as usize) = LIT_TAG_FLOAT as u8;
@@ -255,13 +256,12 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
                 }
                 Literal::LitString(bytes) => {
                     // LitString stored as Lit with tag=5, value = ptr to [len: u64][bytes...]
-                    // We must allocate the byte buffer on the heap too? No, it's a raw pointer.
-                    // But if it's on the Rust heap, it might be moved?
-                    // JIT-compiled code expects a stable pointer.
-                    // For now, we leaked it or use a stable allocation.
+                    // We allocate via the stable runtime allocator to avoid nursery movement.
                     let data_ptr =
-                        Box::into_raw(vec![0u8; 8 + bytes.len()].into_boxed_slice()) as *mut u8;
-                    *(data_ptr as *mut u64) = bytes.len() as u64;
+                        crate::host_fns::runtime_new_byte_array(bytes.len() as i64) as *mut u8;
+                    if data_ptr.is_null() {
+                        return Err(BridgeError::NurseryExhausted);
+                    }
                     std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr.add(8), bytes.len());
 
                     *ptr.add(layout::LIT_TAG_OFFSET as usize) = LIT_TAG_STRING as u8;
@@ -380,6 +380,88 @@ mod tests {
                 panic!("Expected LitWord, got {:?}", back);
             };
             assert_eq!(n, 123);
+        }
+    }
+
+    #[test]
+    fn test_lit_char_roundtrip() {
+        let (_nursery, mut vmctx) = setup_vmctx(1024);
+        let val = Value::Lit(Literal::LitChar('λ'));
+        unsafe {
+            let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
+            let back = heap_to_value(ptr).expect("heap_to_value failed");
+            let Value::Lit(Literal::LitChar(c)) = back else {
+                panic!("Expected LitChar, got {:?}", back);
+            };
+            assert_eq!(c, 'λ');
+        }
+    }
+
+    #[test]
+    fn test_lit_float_roundtrip() {
+        let (_nursery, mut vmctx) = setup_vmctx(1024);
+        let bits = 1.234f32.to_bits() as u64;
+        let val = Value::Lit(Literal::LitFloat(bits));
+        unsafe {
+            let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
+            let back = heap_to_value(ptr).expect("heap_to_value failed");
+            let Value::Lit(Literal::LitFloat(b)) = back else {
+                panic!("Expected LitFloat, got {:?}", back);
+            };
+            assert_eq!(b, bits);
+        }
+    }
+
+    #[test]
+    fn test_lit_double_roundtrip() {
+        let (_nursery, mut vmctx) = setup_vmctx(1024);
+        let bits = 5.678f64.to_bits();
+        let val = Value::Lit(Literal::LitDouble(bits));
+        unsafe {
+            let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
+            let back = heap_to_value(ptr).expect("heap_to_value failed");
+            let Value::Lit(Literal::LitDouble(b)) = back else {
+                panic!("Expected LitDouble, got {:?}", back);
+            };
+            assert_eq!(b, bits);
+        }
+    }
+
+    #[test]
+    fn test_lit_string_roundtrip() {
+        let (_nursery, mut vmctx) = setup_vmctx(1024);
+        let bytes = b"hello world".to_vec();
+        let val = Value::Lit(Literal::LitString(bytes.clone()));
+        unsafe {
+            let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
+            let back = heap_to_value(ptr).expect("heap_to_value failed");
+            let Value::Lit(Literal::LitString(b)) = back else {
+                panic!("Expected LitString, got {:?}", back);
+            };
+            assert_eq!(b, bytes);
+        }
+    }
+
+    #[test]
+    fn test_con_roundtrip() {
+        let (_nursery, mut vmctx) = setup_vmctx(2048);
+        let val = Value::Con(
+            DataConId(42),
+            vec![
+                Value::Lit(Literal::LitInt(1)),
+                Value::Lit(Literal::LitInt(2)),
+            ],
+        );
+        unsafe {
+            let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
+            let back = heap_to_value(ptr).expect("heap_to_value failed");
+            let Value::Con(id, fields) = back else {
+                panic!("Expected Con, got {:?}", back);
+            };
+            assert_eq!(id.0, 42);
+            assert_eq!(fields.len(), 2);
+            assert!(matches!(fields[0], Value::Lit(Literal::LitInt(1))));
+            assert!(matches!(fields[1], Value::Lit(Literal::LitInt(2))));
         }
     }
 

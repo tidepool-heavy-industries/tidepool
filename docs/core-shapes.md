@@ -172,9 +172,9 @@ The JIT includes safepoints where long-running or infinite computations can be i
 - `audit-heap-bridge § LitTag::Char` — returns `\0` on invalid Unicode data. Intentional behavior per dossier §1.
 
 ### Hardened (recoverable error)
-- `audit-effect-machine § force_ptr: Thunk tag check` — returns poison pointer and sets `YieldError::UserErrorMsg` on unexpected tag (Hardened in PR #harden-silent-fallbacks).
-- `audit-effect-machine § apply_cont_heap` — now surfaces `YieldError::UserErrorMsg` via `runtime_error_with_msg` on shape mismatch instead of returning `null_mut` silently (Hardened in PR #harden-silent-fallbacks).
-- `audit-heap-bridge § TAG_CLOSURE opaque representation` — now returns `BridgeError::UnexpectedHeapTag(TAG_CLOSURE)` instead of a dummy opaque `Closure` (Hardened in PR #harden-silent-fallbacks).
+- `audit-effect-machine § force_ptr: Thunk tag check` — returns poison pointer and sets `YieldError::UserErrorMsg` on unexpected tag (Hardened).
+- `audit-effect-machine § apply_cont_heap` — now surfaces `YieldError::UserErrorMsg` via `runtime_error_with_msg` on shape mismatch instead of returning `null_mut` silently (Hardened).
+- `audit-heap-bridge § TAG_CLOSURE opaque representation` — now returns `BridgeError::UnexpectedHeapTag(TAG_CLOSURE)` instead of a dummy opaque `Closure` (Hardened).
 
 ### Cross-module collision risk: High
 - `audit-bridge § String (Text)` — uses multiple unqualified `get_by_name` lookups for `Text`, `ByteArray`, and `[]`; highly susceptible to arity or name collisions.
