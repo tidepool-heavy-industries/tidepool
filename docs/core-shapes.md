@@ -33,7 +33,7 @@ Translation produces `NLit` nodes containing the primitive value. The `TAG_LIT` 
 - `Typeable` metadata erasure — metadata variables are replaced with error nodes. Mode: always-on. [audit-translate § isTypeMetadataVar](core-shapes/audit-translate.md#istypemetadatavar).
 
 **Known fragility**:
-- `Addr#` fallback: raw `Addr#` values reaching the bridge return an empty string rather than risking raw pointer access. [audit-heap-bridge § LitTag::Addr fallback](core-shapes/audit-heap-bridge.md#littagaddr-fallback).
+- `Addr#` fallback: a top-level `Addr#` result (legitimately produced by `PlusAddr` / `ShowDoubleAddr` primops in `emit/primop.rs`) returns an empty `LitString` because the bridge cannot decode a raw pointer back to a typed Haskell value. Intentional behavior, not a translator-bug guard — programs that compose `Addr#` with `unpackCString#` etc. evaluate to a real string before reaching the bridge. [audit-heap-bridge § LitTag::Addr fallback](core-shapes/audit-heap-bridge.md#littagaddr-fallback).
 - Character literals: the bridge performs a silent fallback to `\0` if the heap contains invalid Unicode data. [audit-heap-bridge § LitTag::Char](core-shapes/audit-heap-bridge.md#littagchar).
 
 ## 2. Constructors (`Con`)
@@ -172,8 +172,9 @@ The JIT includes safepoints where long-running or infinite computations can be i
 - `audit-effect-machine § force_ptr: Thunk tag check` — returns current pointer if not a thunk, potentially hiding logic errors.
 - `audit-effect-machine § apply_cont_heap` — multiple branches return `null_mut` on mismatch, causing downstream machine failure instead of immediate trap.
 - `audit-heap-bridge § LitTag::Char` — returns `\0` on invalid Unicode data.
-- `audit-heap-bridge § LitTag::Addr fallback` — returns empty `LitString` for raw machine addresses.
 - `audit-heap-bridge § TAG_CLOSURE opaque representation` — produces a dummy opaque `Closure` instead of failing.
+
+(`audit-heap-bridge § LitTag::Addr fallback` was originally listed here but is intentional behavior, not a silent failure — `Addr#` is a legitimate runtime value produced by primops; see §1 above.)
 
 ### Cross-module collision risk: High
 - `audit-bridge § String (Text)` — uses multiple unqualified `get_by_name` lookups for `Text`, `ByteArray`, and `[]`; highly susceptible to arity or name collisions.

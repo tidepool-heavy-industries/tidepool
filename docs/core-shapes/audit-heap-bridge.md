@@ -102,11 +102,11 @@
 - **Reads:** Tag only
 - **Expected shape:** `TAG_LIT` with `lit_tag = LIT_TAG_ADDR` (6)
 - **Decoded into:** `Value::Lit(Literal::LitString(vec![]))`
-- **Failure mode on shape mismatch:** `silent fallback: produces empty LitString`
+- **Failure mode on shape mismatch:** `intentional fallback: produces empty LitString`
 - **Bound checks:** None
-- **Mode:** `always-on`
+- **Mode:** `always-on` — `Addr#` is a legitimate intermediate runtime value emitted by primops (`PlusAddr`, `ShowDoubleAddr`; see `tidepool-codegen/src/emit/primop.rs` for `SsaVal::Raw(_, LIT_TAG_ADDR)` sites).
 - **Test coverage:** `uncovered`
-- **Notes:** `Addr#` is a raw machine address. The bridge suppresses it for safety, returning an empty string instead of risking UB from an opaque pointer.
+- **Notes:** Not a defensive guard against translator bugs. The bridge can't decode a raw pointer back to a typed Haskell value (no length, no type tag), so empty `LitString` is the safe display fallback when an `Addr#` is the top-level result. Programs that compose `Addr#` with `unpackCString#` etc. don't hit this path because they evaluate to a real string before reaching the bridge.
 
 ## LitTag::ByteArray
 

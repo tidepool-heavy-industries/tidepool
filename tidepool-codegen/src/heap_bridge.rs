@@ -117,13 +117,13 @@ unsafe fn heap_to_value_inner(
                     Ok(Value::Lit(Literal::LitString(bytes)))
                 }
                 x if x == LIT_TAG_ADDR => {
-                    // core-shapes.md §1: LIT_TAG_ADDR should not survive translation
-                    debug_assert!(
-                        false,
-                        "core-shapes.md §1: LIT_TAG_ADDR should not survive translation; got at heap_bridge.rs"
-                    );
-                    // Addr# — intermediate value, shouldn't normally be a final result.
-                    // Wrap as empty LitString as graceful fallback.
+                    // Addr# is a legitimate intermediate runtime value: primops like
+                    // PlusAddr / ShowDoubleAddr (see emit/primop.rs) emit
+                    // SsaVal::Raw(_, LIT_TAG_ADDR), and any program that returns the
+                    // raw address through the bridge surfaces here. We can't decode
+                    // it back to a typed Haskell value (it's a raw pointer with no
+                    // length), so we render an empty LitString as the safe fallback.
+                    // See core-shapes.md §1.
                     Ok(Value::Lit(Literal::LitString(vec![])))
                 }
                 x if x == LIT_TAG_BYTEARRAY => {
