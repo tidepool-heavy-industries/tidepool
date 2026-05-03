@@ -222,14 +222,23 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
     GC_TRIGGER_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
     GC_TRIGGER_LAST_VMCTX.store(vmctx as usize, Ordering::SeqCst);
 
-    // External cancellation safepoint. We record `RuntimeError::Cancelled`
-    // here but still perform a normal GC so the caller's allocation can
-    // succeed cleanly — routing through `runtime_oom` is unsafe for Con
-    // allocations larger than the 24-byte poison closure, which would be
-    // written past. The cancellation is actually observed at the next
-    // trampoline loop iteration (see `check_cancel_and_set_error` in the
-    // trampolines), which returns the poison pointer in a context where it
-    // will not be written to.
+    // External cancellation safepoint (best-effort). We record
+    // `RuntimeError::Cancelled` here but do NOT unwind: the GC must still
+    // run so the caller's allocation succeeds. Routing through
+    // `runtime_oom` here would hand back the poison pointer to a JIT site
+    // that's about to write a full Con/Closure header into it, which the
+    // emitter assumes is fresh nursery space; the now-larger
+    // `POISON_BUF_SIZE` makes that survivable but it would still bypass
+    // the prompt-cancel paths above (which give better error semantics).
+    //
+    // Prompt unwind happens at the trampoline loop
+    // (`check_cancel_and_set_error` in trampoline_resolve) and at the
+    // effect-dispatch boundary in `JitEffectMachine::run`. A pure
+    // non-tail-call loop that only allocates would observe the cancel
+    // here but never reach those safepoints — it surfaces eventually
+    // as some other error (typically `HeapOverflow`). Tracked in
+    // <https://github.com/tidepool-heavy-industries/tidepool/issues/273>;
+    // pure-allocator-only programs are not the realistic case.
     if cancel_requested() {
         RUNTIME_ERROR.with(|cell| {
             let mut slot = cell.borrow_mut();
@@ -673,6 +682,26 @@ pub extern "C" fn runtime_bad_thunk_state_trap(_vmctx: *mut VMContext, state: u8
 /// 16 KiB: `24 + 8 * 1024 = 8216` bytes for a max-arity Con, doubled for
 /// headroom. Stays well under the `u16` header `size` encoding limit.
 pub(crate) const POISON_BUF_SIZE: usize = 16 * 1024;
+
+/// Compile-time guard: the poison buffer must be large enough to absorb a
+/// post-OOM write of a worst-case Con at the read-side decoder's
+/// `MAX_FIELDS` ceiling. If `MAX_FIELDS` is bumped without updating
+/// `POISON_BUF_SIZE`, this assertion fails to compile rather than
+/// regressing into the runtime heap-corruption symptom that PR #272
+/// originally diagnosed (glibc "corrupted size vs. prev_size" aborts on
+/// OOM paths writing past the old 24-byte poison). The matching runtime
+/// regression test lives in the module's `tests` block under
+/// `poison_buf_absorbs_max_con_write`.
+const _: () = {
+    let worst_case_con =
+        layout::CON_FIELDS_OFFSET as usize + crate::heap_bridge::MAX_FIELDS * 8;
+    assert!(
+        POISON_BUF_SIZE >= worst_case_con,
+        "POISON_BUF_SIZE must absorb worst-case Con write \
+         (CON_FIELDS_OFFSET + MAX_FIELDS * 8); bump POISON_BUF_SIZE \
+         when MAX_FIELDS grows",
+    );
+};
 
 /// Return a pointer to a pre-allocated "poison" Closure heap object.
 /// When JIT code tries to call this as a function, it returns itself,
@@ -2478,9 +2507,11 @@ mod tests {
     /// and the buffer-size assertion below guards against regression.
     #[test]
     fn poison_buf_absorbs_max_con_write() {
-        // Mirror of the read-side guard in heap_bridge.rs. If that constant
-        // grows, POISON_BUF_SIZE must grow to match.
-        const MAX_FIELDS: usize = 1024;
+        // The read-side decoder cap; the compile-time assertion above
+        // guarantees POISON_BUF_SIZE absorbs this. The runtime check here
+        // additionally exercises the full write sequence to surface any
+        // overflow under Miri / ASan, not just the size relationship.
+        use crate::heap_bridge::MAX_FIELDS;
         let worst_case_con = layout::CON_FIELDS_OFFSET as usize + MAX_FIELDS * 8;
         assert!(
             POISON_BUF_SIZE >= worst_case_con,

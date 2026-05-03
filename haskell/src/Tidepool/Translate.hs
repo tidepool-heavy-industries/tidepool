@@ -1043,9 +1043,8 @@ translateHead = \case
   -- emit the body directly. Without this, the translator emits Con_unit for
   -- unsafeEqualityProof but the case alt expects Con_UnsafeRefl, causing a
   -- tag mismatch (CASE TRAP) at runtime.
-  Case scrut _b _alts_ty [Alt (DataAlt _dc) binders body]
-    | isUnsafeEqualityCase scrut -> do
-        let _typeEvidence = filter isTyVar binders
+  Case scrut _b _alts_ty [Alt (DataAlt _dc) _binders body]
+    | isUnsafeEqualityCase scrut ->
         translate body
   Case scrut b _alts_ty alts -> do
     scrutIdx <- translate scrut
