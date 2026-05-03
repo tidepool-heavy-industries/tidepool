@@ -24,7 +24,7 @@ Each section describes a Core construct or shape concern, defining what the JIT 
 
 The JIT must accept literal values arriving as `LEInt`, `LEWord`, `LEChar`, `LEFloat`, `LEDouble`, and `LEString`. During translation, certain GHC-specific literals (like `Addr#` and `RealWorld#`) are erased or canonicalized. Static string literals are desugared from `Addr#` pointers into uniform cons-lists of characters to maintain compatibility with list-processing functions.
 
-After translation, literals are represented as `TAG_LIT` objects in the heap, with a specific `LitTag` identifying the primitive type.
+Translation produces `NLit` nodes containing the primitive value. The `TAG_LIT` heap layout, including the specific `LitTag` identifying the primitive type, is only materialized during codegen or allocation.
 
 **Special cases**:
 - `unpackCString# "lit"#` desugar — converts static `Addr#` to `(:)` chain. Mode: always-on. [audit-translate § isUnpackCStringVar static desugar](core-shapes/audit-translate.md#isunpackcstringvar-static-desugar).
@@ -33,14 +33,14 @@ After translation, literals are represented as `TAG_LIT` objects in the heap, wi
 - `Typeable` metadata erasure — metadata variables are replaced with error nodes. Mode: always-on. [audit-translate § isTypeMetadataVar](core-shapes/audit-translate.md#istypemetadatavar).
 
 **Known fragility**:
-- `Addr#` fallback: non-static `Addr#` values return an empty string in the bridge rather than risking raw pointer access. [audit-heap-bridge § LitTag::Addr fallback](core-shapes/audit-heap-bridge.md#littagaddr-fallback).
+- `Addr#` fallback: raw `Addr#` values reaching the bridge return an empty string rather than risking raw pointer access. [audit-heap-bridge § LitTag::Addr fallback](core-shapes/audit-heap-bridge.md#littagaddr-fallback).
 - Character literals: the bridge performs a silent fallback to `\0` if the heap contains invalid Unicode data. [audit-heap-bridge § LitTag::Char](core-shapes/audit-heap-bridge.md#littagchar).
 
 ## 2. Constructors (`Con`)
 
 Constructors are the primary means of heap allocation. The JIT must handle both standard `DataCon` applications and unboxed tuples. Arity must be adjusted for GADTs where equality evidence (`EqSpec`) is present in the Core but erased in the JIT.
 
-After translation, all constructors are represented as `TAG_CON` objects. The `con_tag` (DataConId) and field pointers are stored at fixed offsets.
+Translation produces `NCon` nodes. All constructors are materialized as `TAG_CON` objects on the heap during codegen or dynamic allocation. The runtime heap layout, where `con_tag` (DataConId) and field pointers are stored at fixed offsets, only applies once the constructor has been materialized.
 
 **Special cases**:
 - Unboxed tuples — translated to standard `NCase` dispatch or single-element fallthrough. Mode: always-on. [audit-translate § isUnboxedTupleDataCon (general)](core-shapes/audit-translate.md#isunboxedtupledatacon-general).
@@ -175,8 +175,10 @@ The JIT includes safepoints where long-running or infinite computations can be i
 - `audit-heap-bridge § LitTag::Addr fallback` — returns empty `LitString` for raw machine addresses.
 - `audit-heap-bridge § TAG_CLOSURE opaque representation` — produces a dummy opaque `Closure` instead of failing.
 
-### Cross-module collision risk: high
-- `audit-bridge § String (Text)` — uses unqualified `get_by_name` for `Text`, `ByteArray`, and `[]`; highly susceptible to arity or name collisions.
+### Cross-module collision risk: High
+- `audit-bridge § String (Text)` — uses multiple unqualified `get_by_name` lookups for `Text`, `ByteArray`, and `[]`; highly susceptible to arity or name collisions.
+
+### Cross-module collision risk: Medium
 - `audit-bridge § is_boxing_con` — unqualified lookup for `I#`, `W#`, etc.
 - `audit-bridge § Result<T, E> (Either)` — uses fallback names (Right/Ok) which may collide with user types.
 
