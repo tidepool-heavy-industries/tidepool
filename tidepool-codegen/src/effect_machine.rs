@@ -290,6 +290,15 @@ impl CompiledEffectMachine {
             }
             // SAFETY: current is non-null (checked above) and points to a valid heap object.
             let tag = unsafe { *current };
+            // core-shapes.md §9: pointer must have a valid heap tag before forcing or returning
+            debug_assert!(
+                matches!(
+                    tag,
+                    layout::TAG_THUNK | layout::TAG_CON | layout::TAG_LIT | layout::TAG_CLOSURE
+                ),
+                "core-shapes.md §9: unexpected heap tag {} in force_ptr",
+                tag
+            );
             if tag == layout::TAG_THUNK {
                 let vmctx = &mut self.vmctx as *mut VMContext;
                 current = crate::host_fns::heap_force(vmctx, current);
@@ -360,6 +369,12 @@ impl CompiledEffectMachine {
                         k = k1;
                         continue;
                     } else {
+                        // core-shapes.md §7: continuation must be Leaf or Node
+                        debug_assert!(
+                            false,
+                            "core-shapes.md §7: apply_cont_heap unexpected continuation con_tag {}",
+                            con_tag
+                        );
                         crate::host_fns::push_diagnostic(format!(
                             "apply_cont_heap: unexpected continuation con_tag {} (expected Leaf or Node)",
                             con_tag
@@ -387,15 +402,31 @@ impl CompiledEffectMachine {
 
             // We have a result from call_closure. Compose with pending k2s.
             if result.is_null() {
+                // core-shapes.md §7: closure application must return a valid result
+                debug_assert!(
+                    false,
+                    "core-shapes.md §7: apply_cont_heap closure returned null"
+                );
                 return std::ptr::null_mut();
             }
             let result = self.force_ptr(result);
             if result.is_null() {
+                // core-shapes.md §7: forced result must be non-null
+                debug_assert!(
+                    false,
+                    "core-shapes.md §7: apply_cont_heap forced result is null"
+                );
                 return std::ptr::null_mut();
             }
 
             let result_tag = *result;
             if result_tag != layout::TAG_CON {
+                // core-shapes.md §7: Eff result must be TAG_CON
+                debug_assert!(
+                    result_tag == layout::TAG_CON,
+                    "core-shapes.md §7: apply_cont_heap result has unexpected tag {}",
+                    result_tag
+                );
                 crate::host_fns::push_diagnostic(format!(
                     "apply_cont_heap: result has unexpected tag {} (expected TAG_CON)",
                     result_tag
@@ -428,6 +459,12 @@ impl CompiledEffectMachine {
                 }
                 return self.alloc_con(self.tags.e, &[union_val, k_prime]);
             } else {
+                // core-shapes.md §7: Eff result must be Val or E
+                debug_assert!(
+                    result_con_tag == self.tags.val || result_con_tag == self.tags.e,
+                    "core-shapes.md §7: apply_cont_heap result con_tag {} is neither Val nor E",
+                    result_con_tag
+                );
                 crate::host_fns::push_diagnostic(format!(
                     "apply_cont_heap: result con_tag {} is neither Val nor E",
                     result_con_tag
