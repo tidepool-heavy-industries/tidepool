@@ -129,7 +129,7 @@
 - **Failure mode on shape mismatch:** `BridgeError::NullPointer` if pointer is null (Hardened) | `BridgeError::DataTooLarge`
 - **Bound checks:** `MAX_DATA_SIZE` (64MB), `MAX_DEPTH` (via recursion)
 - **Mode:** `always-on`
-- **Test coverage:** `tidepool-codegen/tests/heap_bridge_tests.rs:111` (`test_heap_to_value_lit_smallarray_null`), `130` (`test_heap_to_value_lit_array_null`)
+- **Test coverage:** `tidepool-codegen/tests/heap_bridge_tests.rs::test_heap_to_value_lit_smallarray_null`, `tidepool-codegen/tests/heap_bridge_tests.rs::test_heap_to_value_lit_array_null`
 - **Notes:** Coerces boxed pointer arrays into a generic `Con(0, ...)` structure. Semantic meaning depends on the wrapping Haskell constructor. DataConId(0) is a deliberate sentinel meaning "raw boxed-pointer array".
 
 ## TAG_CON field decoding
@@ -180,17 +180,17 @@
 - **Test coverage:** `uncovered`
 - **Notes:** `BlackHole` indicates a thunk that depends on its own result (infinite loop).
 
-## TAG_CLOSURE opaque representation
+## TAG_CLOSURE rejected as top-level bridge result (Hardened)
 
-- **Location:** `tidepool-codegen/src/heap_bridge.rs:200` (`heap_to_value_inner`)
+- **Location:** `tidepool-codegen/src/heap_bridge.rs` (match arm `TAG_CLOSURE` in `heap_to_value_inner`)
 - **Reads:** Tag only
 - **Expected shape:** `TAG_CLOSURE` header
-- **Decoded into:** `Value::Closure(Env::new(), VarId(0), dummy_expr)`
-- **Failure mode on shape mismatch:** `silent fallback: produces dummy opaque Closure`
+- **Decoded into:** N/A — surfaced as error
+- **Failure mode on shape mismatch:** `BridgeError::UnexpectedHeapTag(TAG_CLOSURE)` (Hardened by PR #295)
 - **Bound checks:** None
 - **Mode:** `always-on`
-- **Test coverage:** `uncovered`
-- **Notes:** Closures are opaque to the bridge. They are represented as a dummy `Closure` to avoid failing the entire bridge traversal, allowing partially-evaluated structures (like `Array#` containing closures) to be inspected.
+- **Test coverage:** `tidepool-codegen/src/heap_bridge.rs::tests::test_unexpected_heap_tag` (covers the surfaced-error path; prior dummy-closure fallback removed)
+- **Notes:** Closures are opaque to the bridge and must not appear as a top-level decode result. A `TAG_CLOSURE` reaching this site indicates an unforced thunk leaked through to the bridge, which is a JIT bug. Previously masked by a dummy `Value::Closure(_, _, _)` fallback; now surfaces immediately. See `core-shapes.md §8`.
 
 ## Unexpected heap tag
 
