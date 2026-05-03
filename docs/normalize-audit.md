@@ -20,23 +20,23 @@
 
 ## 2. Shapes Translate.hs eliminates pre-IR
 
-- **haskell/src/Tidepool/Translate.hs:1038-1045 (`isUnsafeEqualityCase`)**: Elides `case unsafeEqualityProof of UnsafeRefl -> body`.
+- **haskell/src/Tidepool/Translate.hs (`isUnsafeEqualityCase`)**: Elides `case unsafeEqualityProof of UnsafeRefl -> body`.
   - *Shape*: `Case (Var unsafeEqualityProof) _ _ [Alt (DataAlt UnsafeRefl) _ body]`.
   - *Why it stays*: Requires GHC-side Name/Id knowledge to identify `unsafeEqualityProof` and `UnsafeRefl`.
 
-- **haskell/src/Tidepool/Translate.hs:524-541**: Desugars `unpackCString# "addr"#` into a static chain of `Con` (cons-cells).
+- **haskell/src/Tidepool/Translate.hs (`isUnpackCStringVar`)**: Desugars `unpackCString# "addr"#` into a static chain of `Con` (cons-cells).
   - *Shape*: `App (Var unpackCString#) (Lit (LitString bs))`.
   - *Why it stays*: Core representation of strings as `Addr#` is a GHC-specific optimization that we want to unify early.
 
-- **haskell/src/Tidepool/Translate.hs:760-775**: Desugars `runRW# f` to `f ()`.
+- **haskell/src/Tidepool/Translate.hs (`isRunRWVar`)**: Desugars `runRW# f` to `f ()`.
   - *Shape*: `App (Var runRW#) f`.
   - *Why it stays*: Erases the state token which has no runtime representation in Tidepool.
 
-- **haskell/src/Tidepool/Translate.hs:786-801**: Desugars `tagToEnum#` into a `Case` expression matching on an `Int#` literal.
+- **haskell/src/Tidepool/Translate.hs (`TagToEnumOp`)**: Desugars `tagToEnum#` into a `Case` expression matching on an `Int#` literal.
   - *Shape*: `App (Var tagToEnum#) arg`.
   - *Why it stays*: Requires access to the `TyCon` and its `DataCons` to generate the case alternatives, which is erased in the IR.
 
-- **haskell/src/Tidepool/Translate.hs:492-520**: Intercepts `showDouble` and specializes it using `ShowDoubleAddr` primop.
+- **haskell/src/Tidepool/Translate.hs (`isShowDoubleVar`)**: Intercepts `showDouble` and specializes it using `ShowDoubleAddr` primop.
   - *Shape*: `App (Var showDouble) d`.
   - *Why it stays*: Avoids pulling in complex floating-point formatting libraries from GHC's `base`.
 
@@ -56,8 +56,9 @@
 
 ## 4. Shape-related error paths (precondition candidates)
 
-- **tidepool-codegen/src/effect_machine.rs:186**: `YieldError::UnexpectedTag(tag)` - Raised when a non-Con is matched as a Freer continuation.
-- **tidepool-codegen/src/effect_machine.rs:279**: `YieldError::UnexpectedConTag(con_tag)` - Raised when an unknown effect tag is encountered.
+- **tidepool-codegen/src/effect_machine.rs:186**: `YieldError::UnexpectedTag(tag)` - Raised when the top-level result of an effectful evaluation isn't a `TAG_CON`.
+- **tidepool-codegen/src/effect_machine.rs:222**: `YieldError::UnexpectedTag(union_tag)` - Raised when the `Union` field of an `E` node isn't a `TAG_CON`.
+- **tidepool-codegen/src/effect_machine.rs:279**: `YieldError::UnexpectedConTag(con_tag)` - Raised when the top-level result tag doesn't match `Val` or `E`.
 - **tidepool-codegen/src/effect_machine.rs:205**: `YieldError::BadEFields(num_fields)` - Raised when an `E` node has the wrong number of fields.
 - **tidepool-codegen/src/heap_bridge.rs:165**: `BridgeError::TooManyFields` - Raised during unmarshaling if a Con exceeds `MAX_FIELDS`.
 
@@ -77,9 +78,9 @@
    - *Risk*: Low, as long as `BoxId` is a known primitive box (I#, W#, etc.).
 
 2. **Rule: `canonicalizeEffectTags`**:
-   - *Transforms*: `Con(W#, [LitWord n])` -> `LitWord n` in the second field of an `E` continuation.
+   - *Transforms*: `Con(W#, [LitWord n])` -> `LitWord n` in the `Union` field (`fields[0]`) of an `E` continuation.
    - *Reduction*: Deletes ad-hoc branching in `effect_machine.rs:241-255`.
-   - *Risk*: Requires identifying "effect tag" positions in the IR.
+   - *Risk*: Requires identifying `Union` constructor fields in the IR.
 
 3. **Rule: `unboxPrimArgs`**:
    - *Transforms*: `PrimOp { op, args: [Con(BoxId, [Lit x]), ...] }` -> `PrimOp { op, args: [Lit x, ...] }`.
