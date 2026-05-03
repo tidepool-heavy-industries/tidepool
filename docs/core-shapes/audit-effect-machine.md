@@ -2,7 +2,7 @@
 
 ## Basic Con Accessors
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:103` (`read_con_tag`, `read_con_num_fields`, `read_con_field`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`read_con_tag`, `read_con_num_fields`, `read_con_field`)
 - **Reads:** `u64` at `CON_TAG_OFFSET` (8), `u16` at `CON_NUM_FIELDS_OFFSET` (16), `*mut u8` at `CON_FIELDS_OFFSET + 8*i` (24+)
 - **Expected shape:** `TAG_CON` header at offset 0.
 - **Tag-check coverage:** no — note as a fragility (callers must verify `TAG_CON` before calling these low-level accessors)
@@ -13,7 +13,7 @@
 
 ## parse_result: Result tag check
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:181` (`parse_result`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`parse_result`)
 - **Reads:** byte at `*result`
 - **Expected shape:** Any valid `HeapObject`.
 - **Tag-check coverage:** yes — verifies `tag == layout::TAG_CON`
@@ -24,10 +24,10 @@
 
 ## parse_result: Val shape extraction
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:187` (`parse_result`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`parse_result` dispatch)
 - **Reads:** `con_tag` (8), `num_fields` (16), `fields[0]` (24)
 - **Expected shape:** `TAG_CON` with `con_tag == self.tags.val` and `num_fields >= 1`.
-- **Tag-check coverage:** yes — `read_con_tag` check at line 187 follows the `TAG_CON` check.
+- **Tag-check coverage:** yes — `read_con_tag` check follows the `TAG_CON` check.
 - **Failure mode on shape mismatch:** `YieldError variant returned` (`YieldError::BadValFields` if `num_fields < 1`)
 - **Mode:** `always-on`
 - **Test coverage:** `tidepool-codegen/tests/effect_machine.rs:test_yield_done_val`
@@ -35,7 +35,7 @@
 
 ## parse_result: E shape extraction
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:196` (`parse_result`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`parse_result` dispatch)
 - **Reads:** `num_fields` (16), `fields[0]` (24), `fields[1]` (32)
 - **Expected shape:** `TAG_CON` with `con_tag == self.tags.e` and `num_fields == 2`.
 - **Tag-check coverage:** yes — part of the `con_tag` dispatch.
@@ -46,7 +46,7 @@
 
 ## parse_result: Union object header/field checks
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:214` (`parse_result`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`parse_result` union extraction)
 - **Reads:** byte at `*union_ptr` (0), `num_fields` (16)
 - **Expected shape:** `TAG_CON` with `num_fields == 2`.
 - **Tag-check coverage:** yes — verifies `union_tag == layout::TAG_CON` and `union_num_fields == 2`.
@@ -57,7 +57,7 @@
 
 ## parse_result: Union position-tag boxing branch
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:231` (`parse_result`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`parse_result` union tag read)
 - **Reads:** byte at `*tag_ptr` (0), then either `LIT_VALUE_OFFSET` (16) or `field[0]` (24) of boxed `Con`.
 - **Expected shape:** Either `TAG_LIT` (unboxed `Word#`) or `TAG_CON` (boxed `W# n`).
 - **Tag-check coverage:** yes — branch on `tag_ptr_tag == layout::TAG_LIT` vs `layout::TAG_CON`.
@@ -68,10 +68,10 @@
 
 ## parse_result: Union request extraction
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:249` (`parse_result`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`parse_result` union request extraction)
 - **Reads:** `fields[1]` (32) of Union object.
 - **Expected shape:** `TAG_CON` (Union) with at least 2 fields.
-- **Tag-check coverage:** yes — depends on the `union_num_fields == 2` check at line 219.
+- **Tag-check coverage:** yes — depends on the `union_num_fields == 2` check.
 - **Failure mode on shape mismatch:** `UB` (if `union_num_fields` check were bypassed)
 - **Mode:** `always-on`
 - **Test coverage:** `tidepool-codegen/tests/effect_machine.rs:test_yield_request_e`
@@ -79,7 +79,7 @@
 
 ## force_ptr: Thunk tag check
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:273` (`force_ptr`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`force_ptr`)
 - **Reads:** byte at `*current` (0)
 - **Expected shape:** Any valid `HeapObject`.
 - **Tag-check coverage:** yes — verifies `tag == layout::TAG_THUNK`.
@@ -90,7 +90,7 @@
 
 ## apply_cont_heap: Continuation tag check
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:301` (`apply_cont_heap`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`apply_cont_heap`)
 - **Reads:** byte at `*k` (0)
 - **Expected shape:** `TAG_CON` (Leaf/Node) or `TAG_CLOSURE`.
 - **Tag-check coverage:** yes — `match tag` covers `TAG_CON` and `TAG_CLOSURE`.
@@ -101,29 +101,29 @@
 
 ## apply_cont_heap: Leaf/Node con_tag dispatch
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:304` (`apply_cont_heap`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`apply_cont_heap` loop)
 - **Reads:** `con_tag` (8), then `field[0]` (24) for Leaf, or `field[0], field[1]` for Node.
 - **Expected shape:** `TAG_CON` with `con_tag` being `leaf` (arity 1) or `node` (arity 2).
 - **Tag-check coverage:** yes — follows `tag == layout::TAG_CON` check.
 - **Failure mode on shape mismatch:** `silent fallback: returns null_mut` (diagnostic)
 - **Mode:** `always-on`
 - **Test coverage:** `tidepool-codegen/tests/effect_machine.rs:test_resume_node_identity`
-- **Notes:** Recursive tree walking. `Leaf` contains a closure; `Node` contains two continuations.
+- **Notes:** Iterative work-stack tree walking. `Leaf` contains a closure; `Node` contains two continuations.
 
 ## apply_cont_heap: Closure tag check
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:331` (`apply_cont_heap`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`apply_cont_heap` closure arm)
 - **Reads:** none (already read `tag`)
 - **Expected shape:** `TAG_CLOSURE`.
 - **Tag-check coverage:** yes — part of the `match tag` dispatch.
 - **Failure mode on shape mismatch:** `silent fallback: returns null_mut` (diagnostic)
 - **Mode:** `always-on`
-- **Test coverage:** `tidepool-codegen/tests/effect_machine.rs` (fallback path)
+- **Test coverage:** `uncovered`
 - **Notes:** Degenerate case where a raw closure is used as a continuation.
 
 ## apply_cont_heap: Result tag/con_tag check
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:352` (`apply_cont_heap`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`apply_cont_heap` result check)
 - **Reads:** byte at `*result` (0), `con_tag` (8)
 - **Expected shape:** `TAG_CON` with `con_tag == val` or `e`.
 - **Tag-check coverage:** yes — verifies `result_tag == layout::TAG_CON`.
@@ -134,7 +134,7 @@
 
 ## apply_cont_heap: Val(y) composition
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:364` (`apply_cont_heap`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`apply_cont_heap` Val arm)
 - **Reads:** `field[0]` (24) of `Val` result.
 - **Expected shape:** `TAG_CON` with `con_tag == val`.
 - **Tag-check coverage:** yes — dispatch on `result_con_tag == self.tags.val`.
@@ -145,7 +145,7 @@
 
 ## apply_cont_heap: E(union, k') composition
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:372` (`apply_cont_heap`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`apply_cont_heap` E arm)
 - **Reads:** `field[0]` (24) and `field[1]` (32) of `E` result.
 - **Expected shape:** `TAG_CON` with `con_tag == e`.
 - **Tag-check coverage:** yes — dispatch on `result_con_tag == self.tags.e`.
@@ -156,7 +156,7 @@
 
 ## call_closure: Code pointer read
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:395` (`call_closure`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`call_closure`)
 - **Reads:** `usize` at `CLOSURE_CODE_PTR_OFFSET` (8)
 - **Expected shape:** `TAG_CLOSURE` header.
 - **Tag-check coverage:** no — fragility (callers must ensure `closure` is a `TAG_CLOSURE`).
@@ -167,7 +167,7 @@
 
 ## call_closure: Captured fields read
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:416` (`call_closure`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`call_closure` tracing)
 - **Reads:** `u16` at `CLOSURE_NUM_CAPTURED_OFFSET` (16), `*const u8` at `CLOSURE_CAPTURED_OFFSET + 8*i` (24+)
 - **Expected shape:** `TAG_CLOSURE` with `num_captured` correctly set.
 - **Tag-check coverage:** no — fragility.
@@ -178,7 +178,7 @@
 
 ## resolve_tail_calls: Cancellation safepoint
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:447` (`resolve_tail_calls`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`resolve_tail_calls`)
 - **Reads:** `VMContext.tail_callee` (24), `VMContext.tail_arg` (32)
 - **Expected shape:** Non-null `tail_callee` implies a pending tail call.
 - **Tag-check coverage:** no — fragility (assumes JIT set valid heap pointers).
@@ -189,7 +189,7 @@
 
 ## resolve_tail_calls: Code pointer read
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:465` (`resolve_tail_calls`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`resolve_tail_calls` loop)
 - **Reads:** `usize` at `CLOSURE_CODE_PTR_OFFSET` (8) of `callee`.
 - **Expected shape:** `TAG_CLOSURE` header on `callee`.
 - **Tag-check coverage:** no — fragility.
@@ -200,7 +200,7 @@
 
 ## alloc_con: Heap layout write
 
-- **Location:** `tidepool-codegen/src/effect_machine.rs:478` (`alloc_con`)
+- **Location:** `tidepool-codegen/src/effect_machine.rs` (`alloc_con`)
 - **Reads:** none (write site)
 - **Expected shape:** `TAG_CON` header, `con_tag`, `num_fields`, and `fields`.
 - **Tag-check coverage:** n/a (it's the writer)
