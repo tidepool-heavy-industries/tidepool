@@ -2,7 +2,7 @@
 
 ## `is_boxing_con` helper
 
-- **Location:** `tidepool-bridge/src/impls.rs:10` (`fn is_boxing_con`)
+- **Location:** `tidepool-bridge/src/impls.rs:11` (`fn is_boxing_con`)
 - **Constructor names looked up:** variable `name` (caller passes `"I#"`, `"W#"`, `"D#"`, `"C#"`)
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** N/A (predicate only)
@@ -14,7 +14,7 @@
 
 ## `PhantomData<T>`
 
-- **Location:** `tidepool-bridge/src/impls.rs:37` (`impl FromCore for std::marker::PhantomData<T>`)
+- **Location:** `tidepool-bridge/src/impls.rs:38` (`impl FromCore for std::marker::PhantomData<T>`)
 - **Constructor names looked up:** `"()"`
 - **Lookup strategy:** `get_by_name` (ToCore), `iter().find(|dc| dc.rep_arity == 0)` fallback
 - **Assumed arity:** `0`
@@ -26,7 +26,7 @@
 
 ## `()` (Unit)
 
-- **Location:** `tidepool-bridge/src/impls.rs:91` (`impl ToCore for ()` / `impl FromCore for ()`)
+- **Location:** `tidepool-bridge/src/impls.rs:105` (`impl ToCore for ()` / `impl FromCore for ()`)
 - **Constructor names looked up:** `"()"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `0`
@@ -38,7 +38,7 @@
 
 ## `i64` (Int)
 
-- **Location:** `tidepool-bridge/src/impls.rs:110` (`impl FromCore for i64` / `impl ToCore for i64`)
+- **Location:** `tidepool-bridge/src/impls.rs:130` (`impl FromCore for i64` / `impl ToCore for i64`)
 - **Constructor names looked up:** `"I#"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `1`
@@ -50,7 +50,7 @@
 
 ## `u64` (Word)
 
-- **Location:** `tidepool-bridge/src/impls.rs:135` (`impl FromCore for u64` / `impl ToCore for u64`)
+- **Location:** `tidepool-bridge/src/impls.rs:160` (`impl FromCore for u64` / `impl ToCore for u64`)
 - **Constructor names looked up:** `"W#"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `1`
@@ -62,7 +62,7 @@
 
 ## `f64` (Double)
 
-- **Location:** `tidepool-bridge/src/impls.rs:160` (`impl FromCore for f64` / `impl ToCore for f64`)
+- **Location:** `tidepool-bridge/src/impls.rs:190` (`impl FromCore for f64` / `impl ToCore for f64`)
 - **Constructor names looked up:** `"D#"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `1`
@@ -74,11 +74,11 @@
 
 ## `bool`
 
-- **Location:** `tidepool-bridge/src/impls.rs:210` (`impl FromCore for bool` / `impl ToCore for bool`)
+- **Location:** `tidepool-bridge/src/impls.rs:246` (`impl FromCore for bool` / `impl ToCore for bool`)
 - **Constructor names looked up:** `"True"`, `"False"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `0`
-- **Failure mode on shape mismatch:** `UnknownDataConName`, `ArityMismatch`, `UnknownDataCon` (if tag found but name doesn't match True/False), `TypeMismatch`
+- **Failure mode on shape mismatch:** `UnknownDataConName`, `ArityMismatch`, `UnknownDataCon` (if `DataConId` doesn't match `True` or `False` lookup), `TypeMismatch`
 - **Cross-module collision risk:** `low`
 - **Mode:** `always-on`
 - **Test coverage:** `tidepool-bridge/tests/roundtrip.rs`
@@ -86,7 +86,7 @@
 
 ## `char`
 
-- **Location:** `tidepool-bridge/src/impls.rs:263` (`impl FromCore for char` / `impl ToCore for char`)
+- **Location:** `tidepool-bridge/src/impls.rs:300` (`impl FromCore for char` / `impl ToCore for char`)
 - **Constructor names looked up:** `"C#"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `1`
@@ -98,7 +98,7 @@
 
 ## `String` (Text)
 
-- **Location:** `tidepool-bridge/src/impls.rs:289` (`impl FromCore for String` / `impl ToCore for String`)
+- **Location:** `tidepool-bridge/src/impls.rs:328` (`impl FromCore for String` / `impl ToCore for String`)
 - **Constructor names looked up:** `"Text"`, `"ByteArray"`, `"[]"`, `":"`, `"C#"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `3 for Text`, `1 for ByteArray`, `0 for []`, `2 for :`, `1 for C#`
@@ -110,7 +110,7 @@
 
 ## `Option<T>`
 
-- **Location:** `tidepool-bridge/src/impls.rs:384` (`impl FromCore for Option<T>` / `impl ToCore for Option<T>`)
+- **Location:** `tidepool-bridge/src/impls.rs:447` (`impl FromCore for Option<T>` / `impl ToCore for Option<T>`)
 - **Constructor names looked up:** `"Nothing"`, `"Just"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `0 for Nothing`, `1 for Just`
@@ -122,7 +122,7 @@
 
 ## `Vec<T>` (List)
 
-- **Location:** `tidepool-bridge/src/impls.rs:446` (`impl FromCore for Vec<T>` / `impl ToCore for Vec<T>`)
+- **Location:** `tidepool-bridge/src/impls.rs:509` (`impl FromCore for Vec<T>` / `impl ToCore for Vec<T>`)
 - **Constructor names looked up:** `"[]"`, `":"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `0 for []`, `2 for :`
@@ -134,7 +134,7 @@
 
 ## `Result<T, E>` (Either)
 
-- **Location:** `tidepool-bridge/src/impls.rs:513` (`impl FromCore for Result<T, E>` / `impl ToCore for Result<T, E>`)
+- **Location:** `tidepool-bridge/src/impls.rs:577` (`impl FromCore for Result<T, E>` / `impl ToCore for Result<T, E>`)
 - **Constructor names looked up:** `"Right"`, `"Ok"`, `"Left"`, `"Err"`
 - **Lookup strategy:** `get_by_name` (with `or_else` fallback between Haskell/Rust naming)
 - **Assumed arity:** `1`
@@ -146,7 +146,7 @@
 
 ## `(A, B)` (Pair)
 
-- **Location:** `tidepool-bridge/src/impls.rs:583` (`impl FromCore for (A, B)` / `impl ToCore for (A, B)`)
+- **Location:** `tidepool-bridge/src/impls.rs:645` (`impl FromCore for (A, B)` / `impl ToCore for (A, B)`)
 - **Constructor names looked up:** `"(,)"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `2`
@@ -158,7 +158,7 @@
 
 ## `(A, B, C)` (Triple)
 
-- **Location:** `tidepool-bridge/src/impls.rs:627` (`impl FromCore for (A, B, C)` / `impl ToCore for (A, B, C)`)
+- **Location:** `tidepool-bridge/src/impls.rs:689` (`impl FromCore for (A, B, C)` / `impl ToCore for (A, B, C)`)
 - **Constructor names looked up:** `"(,,)"`
 - **Lookup strategy:** `get_by_name`
 - **Assumed arity:** `3`
@@ -170,7 +170,7 @@
 
 ## `serde_json::Value`
 
-- **Location:** `tidepool-bridge/src/json.rs:17` (`impl ToCore for serde_json::Value`)
+- **Location:** `tidepool-bridge/src/json.rs:22` (`impl ToCore for serde_json::Value`)
 - **Constructor names looked up:** `"Null"`, `"Bool"`, `"Number"`, `"String"`, `"Array"`, `"Object"`
 - **Lookup strategy:** `get_by_name_arity`
 - **Assumed arity:** `0 for Null`, `1 for Bool/Number/String/Array/Object`
@@ -182,7 +182,7 @@
 
 ## `keymap_to_value` helper
 
-- **Location:** `tidepool-bridge/src/json.rs:75` (`fn keymap_to_value`)
+- **Location:** `tidepool-bridge/src/json.rs:93` (`fn keymap_to_value`)
 - **Constructor names looked up:** `"Data.Map.Bin"`, `"Data.Map.Tip"`, `"Bin"`, `"Tip"`, `"I#"`
 - **Lookup strategy:** `get_by_qualified_name` | `get_by_name_arity` | `get_companion`
 - **Assumed arity:** `5 for Bin`, `0 for Tip`, `1 for I#`
