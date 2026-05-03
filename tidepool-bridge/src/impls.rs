@@ -84,7 +84,8 @@ impl<T> FromCore for std::marker::PhantomData<T> {
 impl<T> ToCore for std::marker::PhantomData<T> {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         // PhantomData has no Core representation; we still need an arity-0 Con as a placeholder when it appears as a derived field. We require "()" specifically rather than picking any arity-0 constructor, since a wrong choice (e.g. False, Nothing) silently corrupts downstream decode.
-        let id = table.get_by_name_arity("()", 0)
+        let id = table
+            .get_by_name_arity("()", 0)
             .ok_or_else(|| BridgeError::UnknownDataConName("()".into()))?;
         Ok(Value::Con(id, vec![]))
     }
