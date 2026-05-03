@@ -182,3 +182,46 @@ fn test_edge_empty_vec() {
     let back = Vec::<i64>::from_value(&value, &table).unwrap();
     assert_eq!(val, back);
 }
+
+#[test]
+fn test_phantom_data_missing_unit() {
+    use std::marker::PhantomData;
+    let table = get_table(); // has False, True, but no "()"
+    let val: PhantomData<()> = PhantomData;
+    let res = val.to_value(&table);
+    if !matches!(res, Err(BridgeError::UnknownDataConName(ref s)) if s == "()") {
+        panic!("Expected UnknownDataConName(\"()\"), got {:?}", res);
+    }
+}
+
+#[test]
+fn test_text_decode_wrong_shape() {
+    let mut table = get_table();
+    let text_id = DataConId(14);
+    table.insert(DataCon {
+        id: text_id,
+        name: "Text".to_string(),
+        tag: 1,
+        rep_arity: 3,
+        field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
+        qualified_name: None,
+    });
+
+    let false_id = table.get_by_name("False").unwrap();
+    let val = Value::Con(
+        text_id,
+        vec![
+            Value::Con(false_id, vec![]), // the wrong shape
+            Value::Lit(Literal::LitInt(0)),
+            Value::Lit(Literal::LitInt(0)),
+        ],
+    );
+    let res = String::from_value(&val, &table);
+    match res {
+        Err(BridgeError::TypeMismatch { expected, got }) => {
+            assert!(expected.contains("ByteArray"));
+            assert_eq!(got, "Con(False)");
+        }
+        _ => panic!("Expected TypeMismatch with Con(False), got {:?}", res),
+    }
+}

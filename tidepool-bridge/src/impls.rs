@@ -83,10 +83,8 @@ impl<T> FromCore for std::marker::PhantomData<T> {
 
 impl<T> ToCore for std::marker::PhantomData<T> {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        // We use a dummy id since PhantomData has no representation in Core
-        // but we need some Con to represent it if it's a field.
+        // PhantomData has no Core representation; we still need an arity-0 Con as a placeholder when it appears as a derived field. We require "()" specifically rather than picking any arity-0 constructor, since a wrong choice (e.g. False, Nothing) silently corrupts downstream decode.
         let id = get_resilient(table, "()", 0)
-            .or_else(|| table.iter().find(|dc| dc.rep_arity == 0).map(|dc| dc.id))
             .ok_or_else(|| BridgeError::UnknownDataConName("()".into()))?;
         Ok(Value::Con(id, vec![]))
     }
@@ -373,6 +371,13 @@ impl FromCore for String {
                                 return Err(type_mismatch("ByteArray# in ByteArray", &ba_fields[0]))
                             }
                         }
+                    }
+                    Value::Con(other_id, _) => {
+                        let name = table.name_of(*other_id).unwrap_or("<unknown>");
+                        return Err(BridgeError::TypeMismatch {
+                            expected: "ByteArray or ByteArray# in Text".to_string(),
+                            got: format!("Con({})", name),
+                        });
                     }
                     _ => return Err(type_mismatch("ByteArray or ByteArray# in Text", &fields[0])),
                 };
