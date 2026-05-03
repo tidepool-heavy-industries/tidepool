@@ -213,6 +213,7 @@ unsafe fn heap_to_value_inner(
             // If we hit one, it indicates an unforced thunk leaked through or an invalid shape.
             Err(BridgeError::UnexpectedHeapTag(layout::TAG_CLOSURE))
         }
+
         other => Err(BridgeError::UnexpectedHeapTag(other)),
     }
 }
