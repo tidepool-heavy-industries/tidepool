@@ -129,6 +129,8 @@ unsafe fn heap_to_value_inner(
                     // ByteArray# — raw pointer to [len: u64][bytes...]
                     let ba_ptr = raw_value as *const u8;
                     if ba_ptr.is_null() {
+                        // ByteArray# legitimately can be empty/null in some Haskell programs;
+                        // returning empty is correct. See docs/core-shapes/audit-heap-bridge.md#littagbytearray.
                         return Ok(Value::ByteArray(std::sync::Arc::new(
                             std::sync::Mutex::new(vec![]),
                         )));
@@ -148,7 +150,7 @@ unsafe fn heap_to_value_inner(
                     // Layout: [u64 length][ptr0][ptr1]...[ptrN-1]
                     let arr_ptr = raw_value as *const u8;
                     if arr_ptr.is_null() {
-                        return Ok(Value::Con(DataConId(0), vec![]));
+                        return Err(BridgeError::NullPointer);
                     }
                     let len = std::ptr::read_unaligned(arr_ptr as *const u64) as usize;
                     if len > MAX_DATA_SIZE {
@@ -159,9 +161,10 @@ unsafe fn heap_to_value_inner(
                         let elem_ptr = *(arr_ptr.add(8 + 8 * i) as *const *const u8);
                         elems.push(heap_to_value_inner(elem_ptr, depth + 1, vmctx)?);
                     }
-                    // Return as a generic Con with fields — the renderer will
-                    // see the constructor names from the wrapping Con objects
-                    // (e.g., Vector's Array constructor wraps this)
+                    // SmallArray#/Array# carry no per-array DataConId. The wrapping Con (e.g.
+                    // Vector's Array constructor) supplies type context to downstream consumers.
+                    // DataConId(0) here is a deliberate sentinel meaning "raw boxed-pointer array".
+                    // This is the contract documented in docs/core-shapes/audit-heap-bridge.md#littagarray--littagsmallarray.
                     Ok(Value::Con(DataConId(0), elems))
                 }
                 other => Err(BridgeError::UnexpectedLitTag(other as u8)),

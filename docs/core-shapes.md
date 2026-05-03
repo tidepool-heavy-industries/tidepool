@@ -175,6 +175,7 @@ The JIT includes safepoints where long-running or infinite computations can be i
 - `audit-effect-machine § force_ptr: Thunk tag check` — returns poison pointer and sets `YieldError::UserErrorMsg` on unexpected tag (Hardened).
 - `audit-effect-machine § apply_cont_heap` — now surfaces `YieldError::UserErrorMsg` via `runtime_error_with_msg` on shape mismatch instead of returning `null_mut` silently (Hardened).
 - `audit-heap-bridge § TAG_CLOSURE opaque representation` — now returns `BridgeError::UnexpectedHeapTag(TAG_CLOSURE)` instead of a dummy opaque `Closure` (Hardened).
+- `audit-heap-bridge § LitTag::Array / LitTag::SmallArray` — now returns `BridgeError::NullPointer` on null pointer instead of a dummy empty array (Hardened).
 
 ### Cross-module collision risk: High
 - `audit-bridge § String (Text)` — uses multiple unqualified `get_by_name` lookups for `Text`, `ByteArray`, and `[]`; highly susceptible to arity or name collisions.
