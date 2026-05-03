@@ -189,9 +189,7 @@ fn test_phantom_data_missing_unit() {
     let table = get_table(); // has False, True, but no "()"
     let val: PhantomData<()> = PhantomData;
     let res = val.to_value(&table);
-    if !matches!(res, Err(BridgeError::UnknownDataConName(ref s)) if s == "()") {
-        panic!("Expected UnknownDataConName(\"()\"), got {:?}", res);
-    }
+    assert!(matches!(res, Err(BridgeError::UnknownDataConName(ref s)) if s == "()"));
 }
 
 #[test]
