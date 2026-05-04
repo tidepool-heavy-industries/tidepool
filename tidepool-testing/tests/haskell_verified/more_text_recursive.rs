@@ -140,43 +140,43 @@ fn gen_recursive_lifta2() -> impl Strategy<Value = (String, serde_json::Value)> 
 }
 
 #[test]
-#[ignore = "Tidepool bug: T.words panics on empty string with Jit(Yield(Undefined)) - tracking issue #108"]
+#[ignore = "Tidepool bug: T.words panics on empty string with Jit(Yield(Undefined)) - exposes #308"]
 fn test_text_words() {
     run_template(50, gen_text_words());
 }
 
 #[test]
-#[ignore = "Tidepool bug: T.lines panics on empty string with Jit(Yield(Undefined)) - tracking issue #108"]
+#[ignore = "Tidepool bug: T.lines panics on empty string with Jit(Yield(Undefined)) - exposes #308"]
 fn test_text_lines() {
     run_template(50, gen_text_lines());
 }
 
 #[test]
-#[ignore = "Tidepool bug: T.unwords returns empty array instead of empty string - tracking issue #108"]
+#[ignore = "Tidepool bug: T.unwords returns empty array instead of empty string - exposes #308"]
 fn test_text_unwords() {
     run_template(50, gen_text_unwords());
 }
 
 #[test]
-#[ignore = "Tidepool bug: T.unlines returns empty array instead of empty string - tracking issue #108"]
+#[ignore = "Tidepool bug: T.unlines returns empty array instead of empty string - exposes #308"]
 fn test_text_unlines() {
     run_template(50, gen_text_unlines());
 }
 
 #[test]
-#[ignore = "Tidepool bug: tReverse panics on empty string with Jit(Yield(Undefined)) - tracking issue #108"]
+#[ignore = "Tidepool bug: tReverse panics on empty string with Jit(Yield(Undefined)) - exposes #308"]
 fn test_text_reverse() {
     run_template(50, gen_text_reverse());
 }
 
 #[test]
-#[ignore = "Tidepool bug: T.concat returns empty array instead of empty string - tracking issue #108"]
+#[ignore = "Tidepool bug: T.concat returns empty array instead of empty string - exposes #308"]
 fn test_text_concat() {
     run_template(50, gen_text_concat());
 }
 
 #[test]
-#[ignore = "Tidepool bug: T.pack panics on empty string with Jit(Yield(Undefined)) - tracking issue #108"]
+#[ignore = "Tidepool bug: T.pack panics on empty string with Jit(Yield(Undefined)) - exposes #308"]
 fn test_text_pack_unpack() {
     run_template(50, gen_text_pack_unpack());
 }
