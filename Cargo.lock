@@ -3624,11 +3624,13 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "proptest",
+ "serde_json",
  "tidepool-codegen",
  "tidepool-eval",
  "tidepool-heap",
  "tidepool-optimize",
  "tidepool-repr",
+ "tidepool-runtime",
 ]
 
 [[package]]
