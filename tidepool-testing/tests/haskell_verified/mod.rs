@@ -65,16 +65,21 @@ fn canonicalize_empty_text_308(v: &serde_json::Value) -> serde_json::Value {
     use serde_json::Value;
     match v {
         Value::Object(map) => {
-            if let (Some(Value::String(c)), Some(Value::Array(fields))) =
-                (map.get("constructor"), map.get("fields"))
-            {
-                if c == "Text"
-                    && fields.len() == 3
-                    && matches!(&fields[0], Value::String(s) if s.is_empty())
-                    && matches!(&fields[1], Value::Number(n) if n.as_i64() == Some(0))
-                    && matches!(&fields[2], Value::Number(n) if n.as_i64() == Some(0))
+            // Strict shape match: exactly the keys {constructor, fields},
+            // no extras. Any object with additional keys would not be the
+            // worker-shape empty-Text rendering and must NOT be canonicalized.
+            if map.len() == 2 {
+                if let (Some(Value::String(c)), Some(Value::Array(fields))) =
+                    (map.get("constructor"), map.get("fields"))
                 {
-                    return Value::String(String::new());
+                    if c == "Text"
+                        && fields.len() == 3
+                        && matches!(&fields[0], Value::String(s) if s.is_empty())
+                        && matches!(&fields[1], Value::Number(n) if n.as_i64() == Some(0))
+                        && matches!(&fields[2], Value::Number(n) if n.as_i64() == Some(0))
+                    {
+                        return Value::String(String::new());
+                    }
                 }
             }
             Value::Object(
@@ -91,10 +96,19 @@ fn canonicalize_empty_text_308(v: &serde_json::Value) -> serde_json::Value {
 pub fn compare_json(jit_value: &serde_json::Value, expected_value: &serde_json::Value, src: &str) {
     let normalized = canonicalize_empty_text_308(jit_value);
     if &normalized != expected_value {
-        panic!(
-            "Mismatch!\nSource:\n{}\nExpected:\n{}\nActual:\n{}\n",
-            src, expected_value, jit_value
-        );
+        // Show both raw and normalized JIT outputs so a #308-related shape
+        // diff is visible alongside what the comparator actually saw.
+        if &normalized != jit_value {
+            panic!(
+                "Mismatch!\nSource:\n{}\nExpected:\n{}\nActual (raw):\n{}\nActual (after #308 canonicalization):\n{}\n",
+                src, expected_value, jit_value, normalized
+            );
+        } else {
+            panic!(
+                "Mismatch!\nSource:\n{}\nExpected:\n{}\nActual:\n{}\n",
+                src, expected_value, jit_value
+            );
+        }
     }
 }
 

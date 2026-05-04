@@ -12,16 +12,20 @@ use crate::{arb_int, arb_text, run_template};
 use proptest::prelude::*;
 use serde_json::json;
 
-fn arb_text_with_newlines() -> impl Strategy<Value = String> {
-    proptest::string::string_regex(r"[a-zA-Z0-9 \.,!\n]{0,30}").unwrap()
-}
-
 fn arb_text_no_spaces() -> impl Strategy<Value = String> {
     proptest::string::string_regex(r"[a-zA-Z0-9\.,!]{1,10}").unwrap()
 }
 
+/// Non-empty variant of `arb_text_with_newlines`. T.words / T.lines /
+/// T.pack / tReverse panic on empty input via #308's UnresolvedVar shape;
+/// filter empties so the rest of the input space gets exercised. Targeted
+/// empty-input regression tests live below with `#[ignore]` on #308.
+fn arb_text_with_newlines_nonempty() -> impl Strategy<Value = String> {
+    proptest::string::string_regex(r"[a-zA-Z0-9 \.,!\n]{1,30}").unwrap()
+}
+
 fn gen_text_words() -> impl Strategy<Value = (String, serde_json::Value)> {
-    arb_text_with_newlines().prop_map(|text| {
+    arb_text_with_newlines_nonempty().prop_map(|text| {
         let haskell_src = format!("T.words {:?} :: [Text]", text);
         let expected = text
             .split_whitespace()
@@ -32,7 +36,7 @@ fn gen_text_words() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 fn gen_text_lines() -> impl Strategy<Value = (String, serde_json::Value)> {
-    arb_text_with_newlines().prop_map(|text| {
+    arb_text_with_newlines_nonempty().prop_map(|text| {
         let haskell_src = format!("T.lines {:?} :: [Text]", text);
         let expected = text.lines().map(String::from).collect::<Vec<_>>();
         (haskell_src, json!(expected))
@@ -40,7 +44,10 @@ fn gen_text_lines() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 fn gen_text_unwords() -> impl Strategy<Value = (String, serde_json::Value)> {
-    proptest::collection::vec(arb_text_no_spaces(), 0..5).prop_map(|words| {
+    // T.unwords on a non-empty list of non-empty words. Empty list produces
+    // empty-Text result; the comparator's #308 canonicalization handles that
+    // shape but the dedicated empty-input regression below is more explicit.
+    proptest::collection::vec(arb_text_no_spaces(), 1..5).prop_map(|words| {
         let haskell_src = format!("T.unwords {:?} :: Text", words);
         let expected = words.join(" ");
         (haskell_src, json!(expected))
@@ -48,19 +55,15 @@ fn gen_text_unwords() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 fn gen_text_unlines() -> impl Strategy<Value = (String, serde_json::Value)> {
-    proptest::collection::vec(arb_text_no_spaces(), 0..5).prop_map(|lines| {
+    proptest::collection::vec(arb_text_no_spaces(), 1..5).prop_map(|lines| {
         let haskell_src = format!("T.unlines {:?} :: Text", lines);
-        let expected = if lines.is_empty() {
-            String::new()
-        } else {
-            lines.iter().map(|l| format!("{}\n", l)).collect::<String>()
-        };
+        let expected = lines.iter().map(|l| format!("{}\n", l)).collect::<String>();
         (haskell_src, json!(expected))
     })
 }
 
 fn gen_text_reverse() -> impl Strategy<Value = (String, serde_json::Value)> {
-    arb_text_with_newlines().prop_map(|text| {
+    arb_text_with_newlines_nonempty().prop_map(|text| {
         let haskell_src = format!("tReverse {:?} :: Text", text);
         let expected = text.chars().rev().collect::<String>();
         (haskell_src, json!(expected))
@@ -68,7 +71,9 @@ fn gen_text_reverse() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 fn gen_text_concat() -> impl Strategy<Value = (String, serde_json::Value)> {
-    proptest::collection::vec(arb_text(), 0..5).prop_map(|chunks| {
+    // Non-empty list of non-empty chunks. Empty input is the targeted
+    // regression below.
+    proptest::collection::vec(arb_text_no_spaces(), 1..5).prop_map(|chunks| {
         let haskell_src = format!("T.concat {:?} :: Text", chunks);
         let expected = chunks.join("");
         (haskell_src, json!(expected))
@@ -76,7 +81,7 @@ fn gen_text_concat() -> impl Strategy<Value = (String, serde_json::Value)> {
 }
 
 fn gen_text_pack_unpack() -> impl Strategy<Value = (String, serde_json::Value)> {
-    arb_text_with_newlines().prop_map(|text| {
+    arb_text_with_newlines_nonempty().prop_map(|text| {
         let haskell_src = format!("T.pack (T.unpack {:?}) :: Text", text);
         let expected = text.clone();
         (haskell_src, json!(expected))
@@ -139,46 +144,94 @@ fn gen_recursive_lifta2() -> impl Strategy<Value = (String, serde_json::Value)> 
         })
 }
 
+// Active templates: filter empty input (or non-empty list inputs) so #308's
+// crash-on-empty path is avoided; the comparator's #308 canonicalization
+// handles empty-Text *results*.
 #[test]
-#[ignore = "Tidepool bug: T.words panics on empty string with Jit(Yield(Undefined)) - exposes #308"]
 fn test_text_words() {
     run_template(50, gen_text_words());
 }
 
 #[test]
-#[ignore = "Tidepool bug: T.lines panics on empty string with Jit(Yield(Undefined)) - exposes #308"]
 fn test_text_lines() {
     run_template(50, gen_text_lines());
 }
 
 #[test]
-#[ignore = "Tidepool bug: T.unwords returns empty array instead of empty string - exposes #308"]
 fn test_text_unwords() {
     run_template(50, gen_text_unwords());
 }
 
 #[test]
-#[ignore = "Tidepool bug: T.unlines returns empty array instead of empty string - exposes #308"]
 fn test_text_unlines() {
     run_template(50, gen_text_unlines());
 }
 
 #[test]
-#[ignore = "Tidepool bug: tReverse panics on empty string with Jit(Yield(Undefined)) - exposes #308"]
 fn test_text_reverse() {
     run_template(50, gen_text_reverse());
 }
 
 #[test]
-#[ignore = "Tidepool bug: T.concat returns empty array instead of empty string - exposes #308"]
 fn test_text_concat() {
     run_template(50, gen_text_concat());
 }
 
 #[test]
-#[ignore = "Tidepool bug: T.pack panics on empty string with Jit(Yield(Undefined)) - exposes #308"]
 fn test_text_pack_unpack() {
     run_template(50, gen_text_pack_unpack());
+}
+
+// Targeted empty-input regression tests (#308). Re-enable when the bug is
+// fixed; until then the active templates above filter empty input/list and
+// the comparator masks empty-Text rendering.
+#[test]
+#[ignore = "exposes #308 — T.words \"\" panics with Jit(Yield(Undefined))"]
+fn test_text_words_empty_regression() {
+    let actual = crate::compile_run_pure(r#"T.words "" :: [Text]"#);
+    assert_eq!(actual, json!(Vec::<String>::new()));
+}
+
+#[test]
+#[ignore = "exposes #308 — T.lines \"\" panics with Jit(Yield(Undefined))"]
+fn test_text_lines_empty_regression() {
+    let actual = crate::compile_run_pure(r#"T.lines "" :: [Text]"#);
+    assert_eq!(actual, json!(Vec::<String>::new()));
+}
+
+#[test]
+#[ignore = "exposes #308 — T.unwords [] mis-renders empty Text"]
+fn test_text_unwords_empty_regression() {
+    let actual = crate::compile_run_pure(r#"T.unwords [] :: Text"#);
+    assert_eq!(actual, json!(""));
+}
+
+#[test]
+#[ignore = "exposes #308 — T.unlines [] mis-renders empty Text"]
+fn test_text_unlines_empty_regression() {
+    let actual = crate::compile_run_pure(r#"T.unlines [] :: Text"#);
+    assert_eq!(actual, json!(""));
+}
+
+#[test]
+#[ignore = "exposes #308 — tReverse \"\" panics with Jit(Yield(Undefined))"]
+fn test_text_reverse_empty_regression() {
+    let actual = crate::compile_run_pure(r#"tReverse "" :: Text"#);
+    assert_eq!(actual, json!(""));
+}
+
+#[test]
+#[ignore = "exposes #308 — T.concat [] mis-renders empty Text"]
+fn test_text_concat_empty_regression() {
+    let actual = crate::compile_run_pure(r#"T.concat [] :: Text"#);
+    assert_eq!(actual, json!(""));
+}
+
+#[test]
+#[ignore = "exposes #308 — T.pack \"\" panics with Jit(Yield(Undefined))"]
+fn test_text_pack_unpack_empty_regression() {
+    let actual = crate::compile_run_pure(r#"T.pack (T.unpack "") :: Text"#);
+    assert_eq!(actual, json!(""));
 }
 
 #[test]
