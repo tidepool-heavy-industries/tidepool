@@ -4,9 +4,9 @@
       "args": [
         "mcp-stdio",
         "--role",
-        "root",
+        "tl",
         "--name",
-        "root"
+        "expand-verified-coverage-claude"
       ],
       "command": "exomonad",
       "type": "stdio"

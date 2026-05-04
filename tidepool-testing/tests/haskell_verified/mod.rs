@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 
 pub mod cousins;
 pub mod fmap;
+pub mod list_ops;
+pub mod map_set;
+pub mod more_text_recursive;
+pub mod numeric;
 pub mod text;
 
 fn prelude_path() -> PathBuf {
