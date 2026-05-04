@@ -116,7 +116,6 @@ fn test_text_case() {
 /// Targeted regression for #302 — T.toUpper/T.toLower on empty Text yields
 /// UnresolvedVar. Re-enable (and assert success) when #302 lands.
 #[test]
-#[ignore = "exposes #302 — T.toUpper/T.toLower on empty Text yields UnresolvedVar"]
 fn test_text_case_empty_string_regression() {
     let upper = crate::compile_run_pure(r#"(T.toUpper "")"#);
     assert_eq!(upper, json!(""));

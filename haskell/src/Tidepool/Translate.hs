@@ -520,6 +520,22 @@ translate expr =
             -- Partial application / eta-reduced: emit full lambda wrapper
             emitShowDoubleSpecBody v
 
+    -- Intercept Data.Text.empty
+    -- We construct the Text constructor directly: Text ByteArray# 0 0.
+    -- We use a LitString for the ByteArray# field; tidepool-bridge supports this
+    -- fallback in its FromCore implementation.
+    Var v | isDataTextEmptyVar v -> do
+        case splitTyConApp_maybe (idType v) of
+          Just (tc, _) -> case tyConDataCons tc of
+            (dc:_) -> do
+              recordDC dc
+              let textId = varId (dataConWorkId dc)
+              baLit <- emitNode $ NLit (LEString BS.empty)
+              int0  <- emitNode $ NLit (LEInt 0)
+              emitNode $ NCon textId [baLit, int0, int0]
+            [] -> error "Data.Text.empty has TyCon with no DataCons"
+          Nothing -> error "Data.Text.empty type is not a TyConApp"
+
     -- Desugar unpackCString#/unpackCStringUtf8# to cons-cell chain:
     -- GHC represents string literals as (unpackCString# "addr"#) in Core.
     -- We expand to (:) 'c1' ((:) 'c2' ... []) so strings are uniform [Char]
@@ -1511,6 +1527,14 @@ isTypeMetadataVar :: Id -> Bool
 isTypeMetadataVar v =
   let name = occNameString (nameOccName (idName v))
   in any (`isPrefixOf` name) ["$trModule", "$krep", "$tc", "krep$", "tr$Module"]
+
+isDataTextEmptyVar :: Id -> Bool
+isDataTextEmptyVar v =
+  let occ = occNameString (nameOccName (idName v))
+      modStr = case nameModule_maybe (idName v) of
+                 Just m  -> moduleNameString (moduleName m)
+                 Nothing -> ""
+  in occ == "empty" && (modStr == "Data.Text" || modStr == "Data.Text.Internal")
 
 isUnpackCStringVar :: Id -> Bool
 isUnpackCStringVar v =

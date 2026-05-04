@@ -122,6 +122,11 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                         loop {
                             match cur {
                                 Value::ByteArray(bs) => break Some(bs.clone()),
+                                Value::Lit(Literal::LitString(bytes)) => {
+                                    break Some(std::sync::Arc::new(std::sync::Mutex::new(
+                                        bytes.clone(),
+                                    )))
+                                }
                                 Value::Con(id, fields)
                                     if con_name(*id, table) == "ByteArray" && fields.len() == 1 =>
                                 {
@@ -338,6 +343,9 @@ fn extract_char_inner(val: &Value, table: &DataConTable) -> Option<char> {
                 loop {
                     match cur {
                         Value::ByteArray(bs) => break Some(bs.clone()),
+                        Value::Lit(Literal::LitString(bytes)) => {
+                            break Some(std::sync::Arc::new(std::sync::Mutex::new(bytes.clone())))
+                        }
                         Value::Con(cid, cfields)
                             if con_name(*cid, table) == "ByteArray" && cfields.len() == 1 =>
                         {

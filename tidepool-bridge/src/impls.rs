@@ -359,6 +359,7 @@ impl FromCore for String {
                         .lock()
                         .map_err(|_| BridgeError::InternalError("mutex poisoned".into()))?
                         .clone(),
+                    Value::Lit(Literal::LitString(bytes)) => bytes.clone(),
                     // Lifted ByteArray wrapper: Con("ByteArray", [Value::ByteArray(..)])
                     Value::Con(inner_ba_id, ba_fields)
                         if ba_fields.len() == 1 && ba_id == Some(*inner_ba_id) =>
