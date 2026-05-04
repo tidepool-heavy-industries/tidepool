@@ -1014,6 +1014,23 @@ mod tests {
     }
 
     #[test]
+    fn test_string_from_litstring_text() {
+        let table = test_table();
+        let text_id = table.get_by_name("Text").unwrap();
+        // Construct Text where the first field is LitString instead of ByteArray
+        let val = Value::Con(
+            text_id,
+            vec![
+                Value::Lit(Literal::LitString(b"litstring_test".to_vec())),
+                Value::Lit(Literal::LitInt(0)),
+                Value::Lit(Literal::LitInt(14)),
+            ],
+        );
+        let s = String::from_value(&val, &table).expect("FromValue failed");
+        assert_eq!(s, "litstring_test");
+    }
+
+    #[test]
     fn test_unit_roundtrip() {
         let table = test_table();
         roundtrip((), &table);

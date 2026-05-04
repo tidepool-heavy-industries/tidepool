@@ -594,6 +594,21 @@ mod tests {
     }
 
     #[test]
+    fn test_render_text_litstring() {
+        let table = test_table();
+        let text_id = table.get_by_name("Text").unwrap();
+        let val = Value::Con(
+            text_id,
+            vec![
+                Value::Lit(Literal::LitString(b"hello litstring".to_vec())),
+                Value::Lit(Literal::LitInt(0)),
+                Value::Lit(Literal::LitInt(15)),
+            ],
+        );
+        assert_eq!(value_to_json(&val, &table, 0), json!("hello litstring"));
+    }
+
+    #[test]
     fn test_render_list_string() {
         let table = test_table();
         let nil_id = table.get_by_name("[]").unwrap();

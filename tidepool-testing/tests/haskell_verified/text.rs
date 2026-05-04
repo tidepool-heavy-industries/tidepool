@@ -85,42 +85,22 @@ fn test_text_pred() {
 }
 
 // Template 8 (text-case)
-//
-// The empty-string fast path triggers #302 (T.toUpper/T.toLower on "" yield
-// UnresolvedVar). We filter empty inputs from the active template to preserve
-// non-empty coverage and keep a separate, explicit regression test below for
-// the empty-string case. When #302 is fixed, drop the filter and remove the
-// regression test (or convert it to assert success).
 fn gen_text_case() -> impl Strategy<Value = (String, serde_json::Value)> {
     prop_oneof![
-        arb_text()
-            .prop_filter("non-empty (#302)", |s| !s.is_empty())
-            .prop_map(|s: String| {
-                let src = format!("(T.toUpper {:?})", s);
-                (src, json!(s.to_ascii_uppercase()))
-            }),
-        arb_text()
-            .prop_filter("non-empty (#302)", |s| !s.is_empty())
-            .prop_map(|s: String| {
-                let src = format!("(T.toLower {:?})", s);
-                (src, json!(s.to_ascii_lowercase()))
-            })
+        arb_text().prop_map(|s: String| {
+            let src = format!("(T.toUpper {:?})", s);
+            (src, json!(s.to_ascii_uppercase()))
+        }),
+        arb_text().prop_map(|s: String| {
+            let src = format!("(T.toLower {:?})", s);
+            (src, json!(s.to_ascii_lowercase()))
+        })
     ]
 }
 
 #[test]
 fn test_text_case() {
     run_template(50, gen_text_case());
-}
-
-/// Targeted regression for #302 — T.toUpper/T.toLower on empty Text yields
-/// UnresolvedVar. Re-enable (and assert success) when #302 lands.
-#[test]
-fn test_text_case_empty_string_regression() {
-    let upper = crate::compile_run_pure(r#"(T.toUpper "")"#);
-    assert_eq!(upper, json!(""));
-    let lower = crate::compile_run_pure(r#"(T.toLower "")"#);
-    assert_eq!(lower, json!(""));
 }
 
 // Template 9 (text-split-join)
