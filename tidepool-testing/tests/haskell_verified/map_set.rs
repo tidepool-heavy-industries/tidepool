@@ -6,19 +6,17 @@
 //! `fmap.rs` / `text.rs` / `cousins.rs`. ASCII-only, Int-only, pinned types,
 //! `ProptestConfig::with_cases(50)` per template.
 
-#![allow(unused_imports)]
-
-use crate::{arb_int, run_template, run_template_with_imports};
+use crate::{arb_int, run_template_with_imports};
 use proptest::prelude::*;
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
-fn arb_map_kvs() -> impl Strategy<Value = HashMap<i64, i64>> {
-    proptest::collection::hash_map(arb_int(), arb_int(), 0..=8)
+fn arb_map_kvs() -> impl Strategy<Value = BTreeMap<i64, i64>> {
+    proptest::collection::btree_map(arb_int(), arb_int(), 0..=8)
 }
 
-fn arb_set_ks() -> impl Strategy<Value = HashSet<i64>> {
-    proptest::collection::hash_set(arb_int(), 0..=8)
+fn arb_set_ks() -> impl Strategy<Value = BTreeSet<i64>> {
+    proptest::collection::btree_set(arb_int(), 0..=8)
 }
 
 #[test]

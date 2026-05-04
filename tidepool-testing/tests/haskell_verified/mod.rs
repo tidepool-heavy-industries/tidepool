@@ -16,14 +16,13 @@ fn prelude_path() -> PathBuf {
 }
 
 pub fn compile_run_pure(src: &str) -> serde_json::Value {
-    compile_run_pure_with_imports(src, &[])
+    compile_run_pure_with_imports(src, "")
 }
 
-pub fn compile_run_pure_with_imports(src: &str, extra_imports: &[&str]) -> serde_json::Value {
+pub fn compile_run_pure_with_imports(src: &str, extra_imports: &str) -> serde_json::Value {
     let pp = prelude_path();
     let include = [pp.as_path()];
 
-    let imports = extra_imports.join("\n");
     let full_src = format!(
         r#"{{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, PartialTypeSignatures #-}}
 module Test where
@@ -34,7 +33,7 @@ import qualified Data.Text as T
 result :: _
 result = {}
 "#,
-        imports, src
+        extra_imports, src
     );
 
     let val =
@@ -65,9 +64,10 @@ pub fn run_template_with_imports<S: Strategy<Value = (String, serde_json::Value)
     strategy: S,
     extra_imports: &[&str],
 ) {
+    let imports_str = extra_imports.join("\n");
     let mut runner = TestRunner::new(Config::with_cases(cases));
     let res = runner.run(&strategy, |(src, expected)| {
-        let actual = compile_run_pure_with_imports(&src, extra_imports);
+        let actual = compile_run_pure_with_imports(&src, &imports_str);
         compare_json(&actual, &expected, &src);
         Ok(())
     });
