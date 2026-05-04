@@ -16,20 +16,24 @@ fn prelude_path() -> PathBuf {
 }
 
 pub fn compile_run_pure(src: &str) -> serde_json::Value {
+    compile_run_pure_with_imports(src, "")
+}
+
+pub fn compile_run_pure_with_imports(src: &str, extra_imports: &str) -> serde_json::Value {
     let pp = prelude_path();
     let include = [pp.as_path()];
 
-    // We wrap the src in a basic module template
     let full_src = format!(
         r#"{{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, PartialTypeSignatures #-}}
 module Test where
 import Tidepool.Prelude
 import qualified Data.Text as T
+{}
 
 result :: _
 result = {}
 "#,
-        src
+        extra_imports, src
     );
 
     let val =
@@ -52,9 +56,18 @@ pub fn compare_json(jit_value: &serde_json::Value, expected_value: &serde_json::
 }
 
 pub fn run_template<S: Strategy<Value = (String, serde_json::Value)>>(cases: u32, strategy: S) {
+    run_template_with_imports(cases, strategy, &[])
+}
+
+pub fn run_template_with_imports<S: Strategy<Value = (String, serde_json::Value)>>(
+    cases: u32,
+    strategy: S,
+    extra_imports: &[&str],
+) {
+    let imports_str = extra_imports.join("\n");
     let mut runner = TestRunner::new(Config::with_cases(cases));
     let res = runner.run(&strategy, |(src, expected)| {
-        let actual = compile_run_pure(&src);
+        let actual = compile_run_pure_with_imports(&src, &imports_str);
         compare_json(&actual, &expected, &src);
         Ok(())
     });
