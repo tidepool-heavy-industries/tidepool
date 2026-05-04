@@ -359,6 +359,7 @@ impl FromCore for String {
                         .lock()
                         .map_err(|_| BridgeError::InternalError("mutex poisoned".into()))?
                         .clone(),
+                    Value::Lit(Literal::LitString(bytes)) => bytes.clone(),
                     // Lifted ByteArray wrapper: Con("ByteArray", [Value::ByteArray(..)])
                     Value::Con(inner_ba_id, ba_fields)
                         if ba_fields.len() == 1 && ba_id == Some(*inner_ba_id) =>
@@ -1010,6 +1011,23 @@ mod tests {
         } else {
             panic!("Expected Con, got {:?}", value);
         }
+    }
+
+    #[test]
+    fn test_string_from_litstring_text() {
+        let table = test_table();
+        let text_id = table.get_by_name("Text").unwrap();
+        // Construct Text where the first field is LitString instead of ByteArray
+        let val = Value::Con(
+            text_id,
+            vec![
+                Value::Lit(Literal::LitString(b"litstring_test".to_vec())),
+                Value::Lit(Literal::LitInt(0)),
+                Value::Lit(Literal::LitInt(14)),
+            ],
+        );
+        let s = String::from_value(&val, &table).expect("FromValue failed");
+        assert_eq!(s, "litstring_test");
     }
 
     #[test]

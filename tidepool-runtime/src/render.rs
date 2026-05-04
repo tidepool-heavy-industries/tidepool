@@ -122,6 +122,11 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                         loop {
                             match cur {
                                 Value::ByteArray(bs) => break Some(bs.clone()),
+                                Value::Lit(Literal::LitString(bytes)) => {
+                                    break Some(std::sync::Arc::new(std::sync::Mutex::new(
+                                        bytes.clone(),
+                                    )))
+                                }
                                 Value::Con(id, fields)
                                     if con_name(*id, table) == "ByteArray" && fields.len() == 1 =>
                                 {
@@ -338,6 +343,9 @@ fn extract_char_inner(val: &Value, table: &DataConTable) -> Option<char> {
                 loop {
                     match cur {
                         Value::ByteArray(bs) => break Some(bs.clone()),
+                        Value::Lit(Literal::LitString(bytes)) => {
+                            break Some(std::sync::Arc::new(std::sync::Mutex::new(bytes.clone())))
+                        }
                         Value::Con(cid, cfields)
                             if con_name(*cid, table) == "ByteArray" && cfields.len() == 1 =>
                         {
@@ -583,6 +591,21 @@ mod tests {
             ],
         );
         assert_eq!(value_to_json(&val, &table, 0), json!("hello"));
+    }
+
+    #[test]
+    fn test_render_text_litstring() {
+        let table = test_table();
+        let text_id = table.get_by_name("Text").unwrap();
+        let val = Value::Con(
+            text_id,
+            vec![
+                Value::Lit(Literal::LitString(b"hello litstring".to_vec())),
+                Value::Lit(Literal::LitInt(0)),
+                Value::Lit(Literal::LitInt(15)),
+            ],
+        );
+        assert_eq!(value_to_json(&val, &table, 0), json!("hello litstring"));
     }
 
     #[test]
