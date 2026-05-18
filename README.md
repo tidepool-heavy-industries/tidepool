@@ -7,9 +7,9 @@ Compile Haskell effect stacks into Cranelift-backed state machines drivable from
 
 ## What is Tidepool?
 
-Tidepool compiles [freer-simple](https://hackage.haskell.org/package/freer-simple) effect stacks from Haskell into native code via Cranelift JIT, producing effect machines that can be driven step-by-step from Rust. Write your business logic as a pure Haskell effect program, compile it once, then run it with Rust-side effect handlers that provide IO, state, networking, or anything else.
+Tidepool compiles [freer-simple](https://hackage.haskell.org/package/freer-simple) effect stacks from Haskell into native code via Cranelift JIT, producing effect machines that can be driven step-by-step from Rust. Write your business logic as a pure Haskell effect program, compile it once, then run it with Rust-side effect handlers.
 
-Haskell expands (describes what to do). Rust collapses (does it). The language boundary is the hylo boundary.
+Haskell describes what to do. Rust does it.
 
 ## Getting Started
 
