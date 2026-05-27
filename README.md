@@ -201,28 +201,20 @@ match vm.run_pure() {
 }
 ```
 
-Cancellation is observed at three safepoints, in priority order:
+Cancellation is observed at three safepoints, all of which promptly unwind
+with `YieldError::Cancelled`:
 
 1. **Tail-call trampoline iteration** — every iteration of a `letrec`-style
-   tail loop. Fires constantly in tail-recursive Haskell. Promptly unwinds
-   with `YieldError::Cancelled`.
+   tail loop. Fires constantly in tail-recursive Haskell.
 2. **Effect-dispatch boundary** — checked in `JitEffectMachine::run` after
-   each handler invocation, before resuming the JIT. Promptly unwinds for
-   freer-simple effect loops, including handler-driven cancellation
-   (a watchdog handler that flips its own machine's `CancelHandle`).
-3. **GC heap-check safepoint** — fires on every non-trivial allocation.
-   Best-effort: it records the cancellation but does not unwind, so the
-   actual surface latency depends on the program reaching one of the
-   prompt safepoints above.
-
-The pathological case is a non-tail-call, non-effectful loop that allocates
-without bound — for example, `length [1..]` style programs. Such loops
-observe the cancel at the heap check but have no prompt safepoint to
-unwind through, so cancellation may surface only as an eventual
-heap-overflow error rather than `Cancelled`. Tracked in
-[#273](https://github.com/tidepool-heavy-industries/tidepool/issues/273);
-in practice the handler-driven and tail-recursive shapes cover the
-realistic uses.
+   each handler invocation, before resuming the JIT. Covers freer-simple
+   effect loops, including handler-driven cancellation (a watchdog handler
+   that flips its own machine's `CancelHandle`).
+3. **GC heap-check safepoint** — fires on every non-trivial allocation. On
+   cancel observation, `gc_trigger` skips GC and routes the failing
+   allocation through `runtime_oom`'s poison path. Covers pure non-tail-call
+   allocator loops (e.g. lazy `length [1..]`-style programs) where neither
+   of the above safepoints is reachable.
 
 The flag is per-machine, not per-run. Call `handle.reset()` between runs if
 you intend to reuse the same `JitEffectMachine` after a cancellation.

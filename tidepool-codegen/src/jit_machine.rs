@@ -195,14 +195,20 @@ impl JitEffectMachine {
                 Yield::Done(ptr) => {
                     // SAFETY: ptr is a valid heap pointer returned by the JIT. vmctx_ptr is
                     // valid for forcing thunks. Signal protection guards against crashes.
-                    let val = unsafe {
+                    let bridge_res = unsafe {
                         let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
                         crate::signal_safety::with_signal_protection(|| {
                             heap_bridge::heap_to_value_forcing(ptr, vmctx_ptr)
                         })
                     }
-                    .map_err(JitError::Signal)?
-                    .map_err(JitError::HeapBridge)?;
+                    .map_err(JitError::Signal)?;
+                    // Forcing may have triggered a `gc_trigger` cancel
+                    // observation; prefer that over a symptomatic bridge
+                    // error (see the corresponding comment in `run_pure`).
+                    if let Some(err) = crate::host_fns::take_runtime_error() {
+                        break Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                    }
+                    let val = bridge_res.map_err(JitError::HeapBridge)?;
                     break Ok(val);
                 }
                 Yield::Request {
@@ -211,14 +217,17 @@ impl JitEffectMachine {
                     continuation,
                 } => {
                     // SAFETY: request is a valid heap pointer from the JIT effect dispatch.
-                    let req_val = unsafe {
+                    let bridge_res = unsafe {
                         let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
                         crate::signal_safety::with_signal_protection(|| {
                             heap_bridge::heap_to_value_forcing(request, vmctx_ptr)
                         })
                     }
-                    .map_err(JitError::Signal)?
-                    .map_err(JitError::HeapBridge)?;
+                    .map_err(JitError::Signal)?;
+                    if let Some(err) = crate::host_fns::take_runtime_error() {
+                        break Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                    }
+                    let req_val = bridge_res.map_err(JitError::HeapBridge)?;
                     if std::env::var("TIDEPOOL_TRACE_EFFECTS").is_ok() {
                         eprintln!("[jit_machine] effect tag={} request={:?}", tag, req_val);
                     }
@@ -311,21 +320,32 @@ impl JitEffectMachine {
         // Check for runtime error FIRST — runtime_error now returns a poison
         // object instead of null, so we can't rely on null-check alone.
         if let Some(err) = crate::host_fns::take_runtime_error() {
-            Err(JitError::Yield(crate::yield_type::YieldError::from(err)))
-        } else if result_ptr.is_null() {
-            Err(JitError::Yield(crate::yield_type::YieldError::NullPointer))
-        } else {
-            // SAFETY: result_ptr is a valid heap pointer returned by the JIT.
-            // vmctx_ptr is valid for forcing thunks during value conversion.
-            unsafe {
-                let vmctx_ptr = &mut vmctx as *mut VMContext;
-                crate::signal_safety::with_signal_protection(|| {
-                    heap_bridge::heap_to_value_forcing(result_ptr, vmctx_ptr)
-                })
-            }
-            .map_err(JitError::Signal)?
-            .map_err(JitError::HeapBridge)
+            return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
         }
+        if result_ptr.is_null() {
+            return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
+        }
+
+        // SAFETY: result_ptr is a valid heap pointer returned by the JIT.
+        // vmctx_ptr is valid for forcing thunks during value conversion.
+        let bridge_result = unsafe {
+            let vmctx_ptr = &mut vmctx as *mut VMContext;
+            crate::signal_safety::with_signal_protection(|| {
+                heap_bridge::heap_to_value_forcing(result_ptr, vmctx_ptr)
+            })
+        }
+        .map_err(JitError::Signal)?;
+
+        // Re-check for runtime errors recorded during thunk forcing. The
+        // bridge calls back into JIT via `heap_force`, which can trigger
+        // `gc_trigger` — and an external cancel observed there sets
+        // `RuntimeError::Cancelled` but surfaces only as a bridge-level
+        // `UnevaluatedThunk` failure (the forced thunk never completed).
+        // Prefer the cancellation cause over the symptomatic bridge error.
+        if let Some(err) = crate::host_fns::take_runtime_error() {
+            return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+        }
+        bridge_result.map_err(JitError::HeapBridge)
     }
 }
 

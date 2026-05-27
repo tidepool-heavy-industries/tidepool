@@ -222,23 +222,23 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
     GC_TRIGGER_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
     GC_TRIGGER_LAST_VMCTX.store(vmctx as usize, Ordering::SeqCst);
 
-    // External cancellation safepoint (best-effort). We record
-    // `RuntimeError::Cancelled` here but do NOT unwind: the GC must still
-    // run so the caller's allocation succeeds. Routing through
-    // `runtime_oom` here would hand back the poison pointer to a JIT site
-    // that's about to write a full Con/Closure header into it, which the
-    // emitter assumes is fresh nursery space; the now-larger
-    // `POISON_BUF_SIZE` makes that survivable but it would still bypass
-    // the prompt-cancel paths above (which give better error semantics).
+    // External cancellation safepoint. Record `RuntimeError::Cancelled`
+    // and skip `perform_gc`: the JIT's slow-path post-GC re-check will
+    // fail (alloc_ptr/alloc_limit are unchanged), routing the next
+    // allocation through `runtime_oom`'s poison path. `runtime_oom`'s
+    // `if slot.is_none()` guard preserves the `Cancelled` cause so the
+    // unwind surfaces correctly via `JitEffectMachine::run_pure`'s
+    // `take_runtime_error()` check, not as `HeapOverflow`.
     //
-    // Prompt unwind happens at the trampoline loop
-    // (`check_cancel_and_set_error` in trampoline_resolve) and at the
-    // effect-dispatch boundary in `JitEffectMachine::run`. A pure
-    // non-tail-call loop that only allocates would observe the cancel
-    // here but never reach those safepoints — it surfaces eventually
-    // as some other error (typically `HeapOverflow`). Tracked in
-    // <https://github.com/tidepool-heavy-industries/tidepool/issues/273>;
-    // pure-allocator-only programs are not the realistic case.
+    // Post-OOM stores into the poison are bounded by `POISON_BUF_SIZE`
+    // (16 KiB, sized for worst-case Con writes — see PR #272).
+    //
+    // The other two cancel safepoints — the trampoline loop
+    // (`check_cancel_and_set_error` in trampoline_resolve) and the
+    // effect-dispatch boundary in `JitEffectMachine::run` — already
+    // give prompt unwind for tail-recursive and effect-driven programs;
+    // this path closes the gap for pure non-tail-call allocator loops
+    // that never reach either (#273).
     if cancel_requested() {
         RUNTIME_ERROR.with(|cell| {
             let mut slot = cell.borrow_mut();
@@ -246,7 +246,7 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
                 *slot = Some(RuntimeError::Cancelled);
             }
         });
-        // Fall through to `perform_gc` so the allocation succeeds.
+        return;
     }
 
     #[cfg(target_arch = "x86_64")]

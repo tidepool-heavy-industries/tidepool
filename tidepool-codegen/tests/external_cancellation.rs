@@ -238,6 +238,120 @@ fn no_cancel_means_normal_completion() {
     assert!(!handle.is_cancelled());
 }
 
+/// `letrec go = \n -> case n ==# 0# of { 1# -> Lit 42; _ -> Wrap (go (n -# 1#)) } in go N`
+///
+/// A non-tail-call recursive function: the recursive call is the argument to
+/// `Wrap`, not in tail position, so the JIT does not trampoline it. Each
+/// frame allocates a `Wrap` Con. With a small nursery, `gc_trigger` fires
+/// frequently — and is the only cancel safepoint reachable from this
+/// program shape (no effects, no trampoline). See #273.
+fn build_alloc_recursive_loop(n: i64, wrap_id: DataConId) -> CoreExpr {
+    let go = VarId(1);
+    let param_n = VarId(2);
+    let case_binder = VarId(3);
+
+    let mut bld = TreeBuilder::new();
+
+    let var_n = bld.push(CoreFrame::Var(param_n));
+    let lit_0 = bld.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let cmp = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntEq,
+        args: vec![var_n, lit_0],
+    });
+
+    let lit_result = bld.push(CoreFrame::Lit(Literal::LitInt(42)));
+
+    let var_n2 = bld.push(CoreFrame::Var(param_n));
+    let lit_1 = bld.push(CoreFrame::Lit(Literal::LitInt(1)));
+    let sub = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntSub,
+        args: vec![var_n2, lit_1],
+    });
+    let var_go = bld.push(CoreFrame::Var(go));
+    let recursive_call = bld.push(CoreFrame::App {
+        fun: var_go,
+        arg: sub,
+    });
+    let wrap_con = bld.push(CoreFrame::Con {
+        tag: wrap_id,
+        fields: vec![recursive_call],
+    });
+
+    let case_node = bld.push(CoreFrame::Case {
+        scrutinee: cmp,
+        binder: case_binder,
+        alts: vec![
+            Alt {
+                con: AltCon::LitAlt(Literal::LitInt(1)),
+                binders: vec![],
+                body: lit_result,
+            },
+            Alt {
+                con: AltCon::Default,
+                binders: vec![],
+                body: wrap_con,
+            },
+        ],
+    });
+
+    let lam = bld.push(CoreFrame::Lam {
+        binder: param_n,
+        body: case_node,
+    });
+
+    let lit_n = bld.push(CoreFrame::Lit(Literal::LitInt(n)));
+    let var_go_call = bld.push(CoreFrame::Var(go));
+    let app = bld.push(CoreFrame::App {
+        fun: var_go_call,
+        arg: lit_n,
+    });
+
+    bld.push(CoreFrame::LetRec {
+        bindings: vec![(go, lam)],
+        body: app,
+    });
+
+    bld.build()
+}
+
+/// External cancellation surfaces for a pure non-tail-call allocator loop
+/// (#273). The fixture has no effects and no tail-call trampoline, so the
+/// only reachable cancel safepoint is `gc_trigger`. Today, `gc_trigger`
+/// skips `perform_gc` after observing a cancel and routes through
+/// `runtime_oom`'s poison path; the unwind surfaces as
+/// `YieldError::Cancelled` within a bounded time, not as `HeapOverflow`.
+#[test]
+fn cancel_pure_non_tail_call_allocator_loop() {
+    let table = test_table();
+    let wrap_id = table.get_by_name("Wrap").unwrap();
+    // Recursion depth 5000 with a 16 KiB nursery is enough to force
+    // `gc_trigger` to fire many times during `heap_to_value_forcing`
+    // (which drives lazy recursive evaluation by calling back into JIT).
+    let expr = build_alloc_recursive_loop(5000, wrap_id);
+    let mut machine = JitEffectMachine::compile(&expr, &table, 1 << 14).unwrap();
+    let handle = machine.cancel_handle();
+
+    // Pre-cancel so the first gc_trigger observes it. The fix routes
+    // through `runtime_oom`'s poison path; the post-bridge runtime-error
+    // re-check in `run_pure` surfaces it as `Cancelled` rather than the
+    // symptomatic `HeapBridge(UnevaluatedThunk)` from a stalled forcing.
+    handle.cancel();
+
+    let start = Instant::now();
+    let err = machine.run_pure().unwrap_err();
+    let elapsed = start.elapsed();
+
+    match err {
+        JitError::Yield(YieldError::Cancelled) => {}
+        other => panic!("expected YieldError::Cancelled, got {:?}", other),
+    }
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "cancel observation took {:?}, expected < 2s",
+        elapsed
+    );
+}
+
 /// The cancel flag is per-machine (not per-run). After cancellation unwinds,
 /// `reset()` lets the same machine be reused for a fresh run.
 #[test]
