@@ -78,6 +78,13 @@ enum EmitFrame<A> {
 
     // Let: delegate to emit_node's iterative loop
     LetBoundary(usize),
+
+    /// Direct error call (PrimOp Raise or sentinel Var App).
+    Raise {
+        kind: u64,
+        msg: Option<Vec<u8>>,
+        arg: Option<A>,
+    },
 }
 
 impl MappableFrame for EmitFrameToken {
@@ -129,6 +136,11 @@ impl MappableFrame for EmitFrameToken {
                 EmitFrame::ThunkCon { tag, field_indices }
             }
             EmitFrame::LetBoundary(idx) => EmitFrame::LetBoundary(idx),
+            EmitFrame::Raise { kind, msg, arg } => EmitFrame::Raise {
+                kind,
+                msg,
+                arg: arg.map(f),
+            },
         }
     }
 }
@@ -157,14 +169,45 @@ fn expand_node(tree: &CoreExpr, idx: usize) -> Result<EmitFrame<usize>, EmitErro
                 })
             }
         }
-        CoreFrame::App { fun, arg } => Ok(EmitFrame::App {
-            fun: *fun,
-            arg: *arg,
-        }),
-        CoreFrame::PrimOp { op, args } => Ok(EmitFrame::PrimOp {
-            op: *op,
-            args: args.clone(),
-        }),
+        CoreFrame::App { fun, arg } => {
+            if EmitContext::rhs_is_error_call(tree, idx) {
+                let kind = EmitContext::extract_error_kind(tree, idx);
+                let msg = EmitContext::extract_error_message(tree, idx);
+                // Extract the first argument of the App chain as the dynamic arg
+                let mut current = idx;
+                let mut last_arg = None;
+                while let CoreFrame::App { fun, arg } = &tree.nodes[current] {
+                    last_arg = Some(*arg);
+                    current = *fun;
+                }
+                Ok(EmitFrame::Raise { kind, msg, arg: last_arg })
+            } else {
+                Ok(EmitFrame::App {
+                    fun: *fun,
+                    arg: *arg,
+                })
+            }
+        }
+        CoreFrame::PrimOp { op, args } => {
+            if matches!(op, PrimOpKind::Raise) {
+                let msg = if !args.is_empty() {
+                    if let CoreFrame::Lit(Literal::LitString(bytes)) = &tree.nodes[args[0]] {
+                        Some(bytes.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let arg = if !args.is_empty() { Some(args[0]) } else { None };
+                Ok(EmitFrame::Raise { kind: 2, msg, arg })
+            } else {
+                Ok(EmitFrame::PrimOp {
+                    op: *op,
+                    args: args.clone(),
+                })
+            }
+        }
         CoreFrame::Jump { label, args } => Ok(EmitFrame::Jump {
             label: *label,
             args: args.clone(),
@@ -401,33 +444,6 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             ref op,
             args: ref prim_args,
         } => {
-            if matches!(op, tidepool_repr::PrimOpKind::Raise) {
-                // raise# is GHC's exception primitive \u2014 used for impossible branches
-                // and `error` calls. Emit a call to runtime_error(2) which sets a
-                // thread-local error flag and returns null. The JIT machine converts
-                // null results to Result::Err(JitError::Yield(UserError)).
-                let err_fn = args
-                    .sess
-                    .pipeline
-                    .module
-                    .declare_function("runtime_error", Linkage::Import, &{
-                        let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-                        sig.params.push(AbiParam::new(types::I64));
-                        sig.returns.push(AbiParam::new(types::I64));
-                        sig
-                    })
-                    .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-                let err_ref = args
-                    .sess
-                    .pipeline
-                    .module
-                    .declare_func_in_func(err_fn, args.builder.func);
-                let kind_val = args.builder.ins().iconst(types::I64, 2); // UserError
-                let inst = args.builder.ins().call(err_ref, &[kind_val]);
-                let result = args.builder.inst_results(inst)[0];
-                args.builder.declare_value_needs_stack_map(result);
-                return Ok(SsaVal::HeapPtr(result));
-            }
             // Force thunked args: PrimOps are strict in all arguments.
             // Case alt binders can be thunks (lazy Con fields), so force
             // them before passing to primop unboxing.
@@ -721,7 +737,7 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
         }
         EmitFrame::LetBoundary(idx) => {
             // A LetBoundary appearing as a mapped child of a frame (e.g.,
-            // Case scrutinee, App argument) is NEVER in tail position \u2014
+            // Case scrutinee, App argument) is NEVER in tail position —
             // the parent frame still has work to do after this sub-expression.
             // Without this, a LetRec body App inside a Case scrutinee gets
             // compiled as a tail call, bypassing the Case dispatch entirely.
@@ -734,6 +750,201 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                 },
                 idx,
             )
+        }
+        EmitFrame::Raise { kind, msg, arg } => {
+            if let Some(bytes) = msg {
+                let msg_val = emit_lit_string(
+                    args.sess.pipeline,
+                    args.builder,
+                    args.sess.vmctx,
+                    args.sess.gc_sig,
+                    args.sess.oom_func,
+                    &bytes,
+                    &mut args.ctx.lambda_counter,
+                )?;
+                let msg_ptr = msg_val.value();
+
+                // Extract data_ptr and len from LitString heap object
+                let raw_ptr = args.builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    msg_ptr,
+                    LIT_VALUE_OFFSET,
+                );
+                let len =
+                    args.builder
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), raw_ptr, 0);
+                let bytes_ptr = args.builder.ins().iadd_imm(raw_ptr, 8);
+
+                let err_fn = args
+                    .sess
+                    .pipeline
+                    .module
+                    .declare_function("runtime_error_with_msg", Linkage::Import, &{
+                        let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
+                        sig.params.push(AbiParam::new(types::I64)); // kind
+                        sig.params.push(AbiParam::new(types::I64)); // msg_ptr
+                        sig.params.push(AbiParam::new(types::I64)); // msg_len
+                        sig.returns.push(AbiParam::new(types::I64));
+                        sig
+                    })
+                    .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+                let err_ref = args
+                    .sess
+                    .pipeline
+                    .module
+                    .declare_func_in_func(err_fn, args.builder.func);
+
+                let kind_val = args.builder.ins().iconst(types::I64, kind as i64);
+                let inst = args.builder.ins().call(err_ref, &[kind_val, bytes_ptr, len]);
+                let result = args.builder.inst_results(inst)[0];
+                args.builder.declare_value_needs_stack_map(result);
+                Ok(SsaVal::HeapPtr(result))
+            } else if let Some(arg_val) = arg {
+                let arg_ptr = ensure_heap_ptr(
+                    args.builder,
+                    args.sess.vmctx,
+                    args.sess.gc_sig,
+                    args.sess.oom_func,
+                    arg_val,
+                );
+
+                // Emit runtime check for LitString (TAG_LIT=3, LIT_TAG_STRING=5)
+                let is_null = args.builder.ins().icmp_imm(IntCC::Equal, arg_ptr, 0);
+                let fallback_block = args.builder.create_block();
+                let check_tag_block = args.builder.create_block();
+                args.builder
+                    .ins()
+                    .brif(is_null, fallback_block, &[], check_tag_block, &[]);
+
+                args.builder.switch_to_block(check_tag_block);
+                args.builder.seal_block(check_tag_block);
+                let tag = args
+                    .builder
+                    .ins()
+                    .load(types::I8, MemFlags::trusted(), arg_ptr, 0);
+                let is_lit = args
+                    .builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, tag, crate::layout::TAG_LIT as i64);
+                let lit_check_block = args.builder.create_block();
+                args.builder
+                    .ins()
+                    .brif(is_lit, lit_check_block, &[], fallback_block, &[]);
+
+                args.builder.switch_to_block(lit_check_block);
+                args.builder.seal_block(lit_check_block);
+                let lit_tag = args.builder.ins().load(
+                    types::I8,
+                    MemFlags::trusted(),
+                    arg_ptr,
+                    crate::layout::LIT_TAG_OFFSET,
+                );
+                let is_string =
+                    args.builder
+                        .ins()
+                        .icmp_imm(IntCC::Equal, lit_tag, crate::layout::LIT_TAG_STRING);
+                let msg_block = args.builder.create_block();
+                args.builder
+                    .ins()
+                    .brif(is_string, msg_block, &[], fallback_block, &[]);
+
+                args.builder.switch_to_block(msg_block);
+                args.builder.seal_block(msg_block);
+                let raw_ptr = args.builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    arg_ptr,
+                    crate::layout::LIT_VALUE_OFFSET,
+                );
+                let is_raw_null = args.builder.ins().icmp_imm(IntCC::Equal, raw_ptr, 0);
+                let call_msg_block = args.builder.create_block();
+                args.builder
+                    .ins()
+                    .brif(is_raw_null, fallback_block, &[], call_msg_block, &[]);
+
+                args.builder.switch_to_block(call_msg_block);
+                args.builder.seal_block(call_msg_block);
+                let len = args
+                    .builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), raw_ptr, 0);
+                let bytes_ptr = args.builder.ins().iadd_imm(raw_ptr, 8);
+
+                let err_fn = args
+                    .sess
+                    .pipeline
+                    .module
+                    .declare_function("runtime_error_with_msg", Linkage::Import, &{
+                        let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
+                        sig.params.push(AbiParam::new(types::I64)); // kind
+                        sig.params.push(AbiParam::new(types::I64)); // msg_ptr
+                        sig.params.push(AbiParam::new(types::I64)); // msg_len
+                        sig.returns.push(AbiParam::new(types::I64));
+                        sig
+                    })
+                    .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+                let err_ref = args
+                    .sess
+                    .pipeline
+                    .module
+                    .declare_func_in_func(err_fn, args.builder.func);
+
+                let kind_val = args.builder.ins().iconst(types::I64, kind as i64);
+                let inst = args.builder.ins().call(err_ref, &[kind_val, bytes_ptr, len]);
+                let result = args.builder.inst_results(inst)[0];
+                args.builder.declare_value_needs_stack_map(result);
+                args.builder
+                    .ins()
+                    .trap(cranelift_codegen::ir::TrapCode::user(2).unwrap());
+
+                args.builder.switch_to_block(fallback_block);
+                args.builder.seal_block(fallback_block);
+                let err_fn = args
+                    .sess
+                    .pipeline
+                    .module
+                    .declare_function("runtime_error", Linkage::Import, &{
+                        let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
+                        sig.params.push(AbiParam::new(types::I64));
+                        sig.returns.push(AbiParam::new(types::I64));
+                        sig
+                    })
+                    .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+                let err_ref = args
+                    .sess
+                    .pipeline
+                    .module
+                    .declare_func_in_func(err_fn, args.builder.func);
+                let kind_val = args.builder.ins().iconst(types::I64, kind as i64);
+                let inst = args.builder.ins().call(err_ref, &[kind_val]);
+                let result = args.builder.inst_results(inst)[0];
+                args.builder.declare_value_needs_stack_map(result);
+                Ok(SsaVal::HeapPtr(result))
+            } else {
+                let err_fn = args
+                    .sess
+                    .pipeline
+                    .module
+                    .declare_function("runtime_error", Linkage::Import, &{
+                        let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
+                        sig.params.push(AbiParam::new(types::I64));
+                        sig.returns.push(AbiParam::new(types::I64));
+                        sig
+                    })
+                    .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+                let err_ref = args
+                    .sess
+                    .pipeline
+                    .module
+                    .declare_func_in_func(err_fn, args.builder.func);
+                let kind_val = args.builder.ins().iconst(types::I64, kind as i64);
+                let inst = args.builder.ins().call(err_ref, &[kind_val]);
+                let result = args.builder.inst_results(inst)[0];
+                args.builder.declare_value_needs_stack_map(result);
+                Ok(SsaVal::HeapPtr(result))
+            }
         }
     }
 }
