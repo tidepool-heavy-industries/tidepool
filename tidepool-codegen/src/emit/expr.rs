@@ -999,6 +999,9 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
     args.sess
         .pipeline
         .register_lambda(lambda_func_id, lambda_name.clone());
+    if crate::debug::trace_level() >= crate::debug::TraceLevel::Calls {
+        eprintln!("[emit] {} binder={:#x}", lambda_name, binder.0);
+    }
 
     let mut inner_ctx = Context::new();
     inner_ctx.func.signature = closure_sig;
@@ -1039,6 +1042,7 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
 
     let mut inner_emit = EmitContext::new(args.ctx.prefix.clone());
     inner_emit.lambda_counter = args.ctx.lambda_counter;
+    inner_emit.current_fn = lambda_name.clone();
 
     if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
         inner_emit.trace_scope(&format!("insert lam binder {:?}", binder));
@@ -1253,6 +1257,7 @@ fn emit_thunk(args: EmitArgs, body_idx: usize) -> Result<SsaVal, EmitError> {
 
     let mut inner_emit = EmitContext::new(args.ctx.prefix.clone());
     inner_emit.lambda_counter = args.ctx.lambda_counter;
+    inner_emit.current_fn = thunk_name.clone();
 
     // Load captures from thunk object: thunk_ptr + THUNK_CAPTURED_OFFSET + 8*i
     for (i, (var_id, _)) in captures.iter().enumerate() {
@@ -2337,6 +2342,13 @@ impl EmitContext {
 
             let mut inner_emit = EmitContext::new(args.ctx.prefix.clone());
             inner_emit.lambda_counter = args.ctx.lambda_counter;
+            inner_emit.current_fn = lambda_name.clone();
+            if crate::debug::trace_level() >= crate::debug::TraceLevel::Calls {
+                eprintln!(
+                    "[emit-letrec] {} lam_binder={:#x}",
+                    lambda_name, lam_binder.0
+                );
+            }
             inner_emit
                 .env
                 .insert(lam_binder, SsaVal::HeapPtr(inner_arg));

@@ -139,6 +139,9 @@ pub struct EmitContext {
     pub(crate) join_blocks: JoinPointRegistry,
     pub lambda_counter: u32,
     pub prefix: String,
+    /// Name of the function currently being emitted (diagnostics: lets
+    /// runtime traps identify their enclosing compiled function).
+    pub current_fn: String,
     /// Storage for LetRec deferred state, indexed by work items.
     pub(crate) letrec_states: Vec<crate::emit::expr::LetRecDeferredState>,
 }
@@ -211,6 +214,7 @@ impl EmitContext {
             env: ScopedEnv::new(),
             join_blocks: JoinPointRegistry::new(),
             lambda_counter: 0,
+            current_fn: prefix.clone(),
             prefix,
             letrec_states: Vec::new(),
         }

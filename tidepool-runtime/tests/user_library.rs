@@ -34,7 +34,10 @@ result :: Value
 result = toJSON ({expr})
 "#
     );
-    let include = [prelude_dir(), user_lib_dir()];
+    let effects_dir = tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls())
+        .expect("write effects module")
+        .leak() as &std::path::Path;
+    let include = [prelude_dir(), user_lib_dir(), effects_dir];
     let result =
         compile_and_run_pure(&source, "result", &include).expect("compile_and_run_pure failed");
     result.to_json()

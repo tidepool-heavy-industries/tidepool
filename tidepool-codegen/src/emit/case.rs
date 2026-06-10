@@ -87,7 +87,7 @@ pub fn emit_case(
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
         // No alts? Call runtime_case_trap to handle pending errors gracefully.
-        emit_case_trap(args.sess, args.builder, scrut_ptr, &[], merge_block)?;
+        emit_case_trap(args.sess, args.builder, &args.ctx.current_fn, scrut_ptr, &[], merge_block)?;
     }
 
     // Seal merge block
@@ -276,7 +276,7 @@ fn emit_data_dispatch(
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
-        emit_case_trap(args.sess, args.builder, scrut_ptr, data_alts, merge_block)?;
+        emit_case_trap(args.sess, args.builder, &args.ctx.current_fn, scrut_ptr, data_alts, merge_block)?;
     }
 
     Ok(())
@@ -287,10 +287,18 @@ fn emit_data_dispatch(
 fn emit_case_trap(
     sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
+    fn_name: &str,
     scrut_ptr: Value,
     data_alts: &[&Alt<usize>],
     merge_block: ir::Block,
 ) -> Result<(), EmitError> {
+    // Leak the enclosing-function name for the diagnostic (bounded by the
+    // number of case sites per compile; diagnostics-only).
+    let name_static: &'static str = Box::leak(fn_name.to_string().into_boxed_str());
+    let name_ptr = builder
+        .ins()
+        .iconst(types::I64, name_static.as_ptr() as i64);
+    let name_len = builder.ins().iconst(types::I64, name_static.len() as i64);
     // Collect expected tags
     let tags: Vec<u64> = data_alts
         .iter()
@@ -324,6 +332,8 @@ fn emit_case_trap(
             sig.params.push(AbiParam::new(types::I64)); // scrut_ptr
             sig.params.push(AbiParam::new(types::I64)); // num_alts
             sig.params.push(AbiParam::new(types::I64)); // alt_tags
+            sig.params.push(AbiParam::new(types::I64)); // fn name ptr
+            sig.params.push(AbiParam::new(types::I64)); // fn name len
             sig.returns.push(AbiParam::new(types::I64)); // returns poison ptr
             sig
         })
@@ -333,9 +343,10 @@ fn emit_case_trap(
         .module
         .declare_func_in_func(trap_fn, builder.func);
     let num_alts_val = builder.ins().iconst(types::I64, num_alts as i64);
-    let call = builder
-        .ins()
-        .call(trap_ref, &[scrut_ptr, num_alts_val, tags_addr]);
+    let call = builder.ins().call(
+        trap_ref,
+        &[scrut_ptr, num_alts_val, tags_addr, name_ptr, name_len],
+    );
     let result = builder.inst_results(call)[0];
     builder.ins().jump(merge_block, &[BlockArg::Value(result)]);
     Ok(())
@@ -479,7 +490,7 @@ fn emit_lit_dispatch(
     } else {
         // No alts matched.
         // We pass empty data_alts since these are lit alts.
-        emit_case_trap(args.sess, args.builder, scrut_value, &[], merge_block)?;
+        emit_case_trap(args.sess, args.builder, &args.ctx.current_fn, scrut_value, &[], merge_block)?;
     }
 
     Ok(())

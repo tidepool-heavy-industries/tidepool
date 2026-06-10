@@ -1006,7 +1006,12 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
 fn normalize_input(v: &serde_json::Value) -> serde_json::Value {
     if let serde_json::Value::String(s) = v {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
-            if parsed.is_object() || parsed.is_array() {
+            // MCP clients stringify the input param. Unwrap one level for
+            // composite values AND strings (#315: a stringified bare-string
+            // payload otherwise reaches Haskell with its quotes/escapes as
+            // literal characters). Numbers/bools stay as-is: "42" is more
+            // plausibly the literal text than a stringified number.
+            if parsed.is_object() || parsed.is_array() || parsed.is_string() {
                 return parsed;
             }
         }
@@ -2837,6 +2842,22 @@ mod ergonomics_tests {
         assert!(preamble.contains("default (Int, Double, Text)"));
         assert!(preamble.contains("renderJson :: Value -> Text"));
         assert!(preamble.contains("| Reply with a stub id (e.g. stub_0) to fetch that chunk"));
+    }
+
+    #[test]
+    fn test_normalize_input_string_unwrapping() {
+        // #315: stringified bare-string payloads unwrap one level.
+        let stringified = serde_json::Value::String("\"line1\\nline2\"".to_string());
+        assert_eq!(
+            normalize_input(&stringified),
+            serde_json::Value::String("line1\nline2".to_string())
+        );
+        // A plain non-JSON string stays untouched.
+        let plain = serde_json::Value::String("not json".to_string());
+        assert_eq!(normalize_input(&plain), plain);
+        // Numbers-as-strings stay strings.
+        let num = serde_json::Value::String("42".to_string());
+        assert_eq!(normalize_input(&num), num);
     }
 
     #[test]

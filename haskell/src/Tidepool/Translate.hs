@@ -19,6 +19,8 @@ module Tidepool.Translate
 
 import GHC
 import GHC.Core
+import qualified Debug.Trace
+import Numeric (showHex)
 import GHC.Types.Id
 import GHC.Types.Var (isTyVar, varUnique, varName)
 import GHC.Types.Unique (getKey)
@@ -911,6 +913,9 @@ translateHead = \case
       rhs' <- case isJoinId_maybe b of
         Just arity -> do
           let (params, joinBody) = collectValueBinders arity rhs
+          Debug.Trace.traceM ("[313-joinrec] " ++ occNameString (nameOccName (idName b))
+            ++ " varId=" ++ showHex' (varId b)
+            ++ " params=" ++ show (map (showHex' . varId) params))
           joinBodyIdx <- translate joinBody
           -- Build nested NLam chain: \p1 -> \p2 -> ... -> joinBody
           foldM (\inner p -> emitNode $ NLam (varId p) inner)
@@ -1649,6 +1654,26 @@ isJoinId_maybe v = case idJoinPointHood v of
 -- | Check if a jump to a given VarId occurs under a Lam in the expression.
 -- When this is true, compiling the join point as a Cranelift block won't work
 -- because the lambda gets compiled as a separate function with its own context.
+--
+-- CRUCIALLY (#313), "lambda" must include CONVERSION-INDUCED lambdas, not
+-- just source-level ones: Rec joinrecs are ALWAYS translated as LetRec
+-- lambdas (separate Cranelift functions), and a NonRec join that itself
+-- converts becomes a lambda too. A jump to an outer join from inside any
+-- such body crosses a function boundary that did not exist in the source
+-- Core. Without this closure, the outer join compiles as a block in one
+-- function while its jump sites live in another — the observed result was
+-- a converted-join closure occupying an Eff continuation slot (case trap:
+-- expected I#, got Text). Conversion is always SAFE (a lambda+NApp is
+-- semantically a superset of a block+jump), so the predicate may be
+-- conservative.
+showHex' :: Word64 -> String
+showHex' w = "0x" ++ showHex w ""
+
+-- #313: "lambda" must include CONVERSION-INDUCED lambdas, not just
+-- source-level ones — Rec joinrecs always become LetRec lambdas (separate
+-- Cranelift functions), and a NonRec join that itself converts becomes a
+-- lambda too. A jump to an outer join from inside any such body crosses a
+-- function boundary that did not exist in source Core.
 jumpCrossesLam :: Word64 -> CoreExpr -> Bool
 jumpCrossesLam vid = go False
   where
@@ -1657,13 +1682,21 @@ jumpCrossesLam vid = go False
     go _        (Lam b e)
       | isTyVar b         = go False e  -- type lambdas don't create new functions
       | otherwise          = go True e
-    go underLam (Let b e) = goBind underLam b || go underLam e
+    go underLam (Let (NonRec b rhs) e)
+      | isJoinId b =
+          -- An inner join that itself converts (same strengthened check
+          -- against ITS body; nesting is a tree, so this terminates)
+          -- becomes a lambda: jumps to OUR vid inside its RHS cross.
+          let rhsUnderLam = underLam || jumpCrossesLam (varId b) e
+          in go rhsUnderLam rhs || go underLam e
+      | otherwise = go underLam rhs || go underLam e
+    go underLam (Let (Rec pairs) e)
+      | any (isJoinId . fst) pairs = any (go True . snd) pairs || go underLam e
+      | otherwise = any (go underLam . snd) pairs || go underLam e
     go underLam (Case e _ _ alts) = go underLam e || any (goAlt underLam) alts
     go underLam (Cast e _) = go underLam e
     go underLam (Tick _ e) = go underLam e
     go _ (Lit _)          = False
     go _ (Type _)         = False
     go _ (Coercion _)     = False
-    goBind underLam (NonRec _ rhs)  = go underLam rhs
-    goBind underLam (Rec pairs)     = any (go underLam . snd) pairs
     goAlt underLam (Alt _ _ e)      = go underLam e

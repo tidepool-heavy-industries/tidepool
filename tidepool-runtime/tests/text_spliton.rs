@@ -93,7 +93,10 @@ result = {body}
 "#
     );
     let pp = common::prelude_path();
-    let include = [pp.as_path(), ulp];
+    let eff = tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls())
+        .expect("write effects module")
+        .leak() as &Path;
+    let include = [pp.as_path(), ulp, eff];
     let val = tidepool_runtime::compile_and_run_pure(&src, "result", &include)
         .expect("compile_and_run_pure (mcp) failed");
     val.to_json()
@@ -218,7 +221,10 @@ result = {body}
 "#
     );
     let pp = common::prelude_path();
-    let include = [pp.as_path(), ulp];
+    let eff = tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls())
+        .expect("write effects module")
+        .leak() as &Path;
+    let include = [pp.as_path(), ulp, eff];
     let val = tidepool_runtime::compile_and_run_pure(&src, "result", &include)
         .expect("compile_and_run_pure (mcp+helpers) failed");
     val.to_json()
@@ -252,7 +258,10 @@ result = toJSON ({body})
 "#
     );
     let pp = common::prelude_path();
-    let include = [pp.as_path(), ulp];
+    let eff = tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls())
+        .expect("write effects module")
+        .leak() as &Path;
+    let include = [pp.as_path(), ulp, eff];
     let val = tidepool_runtime::compile_and_run_pure(&src, "result", &include)
         .expect("compile_and_run_pure (eff) failed");
     val.to_json()
@@ -339,7 +348,10 @@ result = do
 "#
     );
     let pp = common::prelude_path();
-    let include = [pp.as_path(), ulp];
+    let eff = tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls())
+        .expect("write effects module")
+        .leak() as &Path;
+    let include = [pp.as_path(), ulp, eff];
     let val = tidepool_runtime::compile_and_run_pure(&src, "result", &include)
         .expect("compile_and_run_pure (full_mcp) failed");
     val.to_json()

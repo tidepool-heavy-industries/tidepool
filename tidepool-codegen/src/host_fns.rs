@@ -2576,7 +2576,24 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
 /// `scrut_ptr` is the heap pointer to the scrutinee.
 /// `num_alts` is the number of data alt tags expected.
 /// `alt_tags` is a pointer to an array of expected tag u64 values.
-pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64) -> *mut u8 {
+pub extern "C" fn runtime_case_trap(
+    scrut_ptr: i64,
+    num_alts: i64,
+    alt_tags: i64,
+    fn_name_ptr: i64,
+    fn_name_len: i64,
+) -> *mut u8 {
+    // Identify the enclosing compiled function (emit threads its name in).
+    if fn_name_ptr != 0 && fn_name_len > 0 && fn_name_len < 4096 {
+        // SAFETY: emit leaks a 'static str and passes its exact ptr/len.
+        let name = unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                fn_name_ptr as *const u8,
+                fn_name_len as usize,
+            ))
+        };
+        eprintln!("[CASE TRAP] in compiled fn: {}", name);
+    }
     // If a runtime error is already pending (e.g. DivisionByZero), the poison
     // value cascaded into a case expression. Return poison again instead of
     // aborting — the error flag will be detected when with_signal_protection

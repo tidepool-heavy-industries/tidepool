@@ -22,8 +22,11 @@ fn repro_313() {
     let decls = tidepool_mcp::standard_decls();
     let pre = tidepool_mcp::build_preamble(&decls, true);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
-    let src =
-        tidepool_mcp::template_haskell(&pre, &stack, "x <- t11\npure x", "Probe", "", None, None);
+    // NONCE busts the cache so each run is a FRESH compile — probing
+    // whether the miscompile is deterministic for identical source.
+    let nonce = std::env::var("NONCE").unwrap_or_default();
+    let code = format!("x <- t11\n-- nonce {nonce}\npure x");
+    let src = tidepool_mcp::template_haskell(&pre, &stack, &code, "Probe", "", None, None);
     let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
         .expect("write effects module")
         .leak() as &Path;
