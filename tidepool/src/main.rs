@@ -165,6 +165,8 @@ enum FsReq {
     ListDir(String),
     #[core(name = "FsGlob")]
     Glob(String),
+    #[core(name = "FsGrep")]
+    Grep(String, String),
     #[core(name = "FsExists")]
     Exists(String),
     #[core(name = "FsMetadata")]
@@ -185,6 +187,53 @@ struct FsHandler {
 impl FsHandler {
     fn new(root: PathBuf) -> Self {
         Self { root }
+    }
+
+    fn expand_glob(&self, pattern: &str) -> Result<Vec<PathBuf>, EffectError> {
+        if pattern.contains("..") {
+            return Ok(Vec::new());
+        }
+        if pattern.starts_with('/') || pattern.starts_with('\\') {
+            return Err(EffectError::Handler(
+                "absolute glob patterns not allowed".to_string(),
+            ));
+        }
+        let full_pattern = self.root.join(pattern).to_string_lossy().to_string();
+        let canonical_root = self
+            .root
+            .canonicalize()
+            .map_err(|e| EffectError::Handler(e.to_string()))?;
+
+        let ignored_but_mentioned: Vec<&str> = DEFAULT_IGNORE_DIRS
+            .iter()
+            .filter(|&&dir| pattern_mentions(pattern, dir))
+            .copied()
+            .collect();
+
+        let paths: Vec<PathBuf> = glob::glob(&full_pattern)
+            .map_err(|e| EffectError::Handler(format!("invalid glob: {}", e)))?
+            .filter_map(|e| e.ok())
+            .filter(|p| {
+                p.canonicalize()
+                    .map(|cp| cp.starts_with(&canonical_root))
+                    .unwrap_or(false)
+            })
+            .filter(|p| {
+                let rel_path = p.strip_prefix(&self.root).unwrap_or(p);
+                for component in rel_path.components() {
+                    if let std::path::Component::Normal(name) = component {
+                        let name_str = name.to_string_lossy();
+                        if DEFAULT_IGNORE_DIRS.contains(&name_str.as_ref())
+                            && !ignored_but_mentioned.contains(&name_str.as_ref())
+                        {
+                            return false;
+                        }
+                    }
+                }
+                true
+            })
+            .collect();
+        Ok(paths)
     }
 
     fn resolve(&self, path: &str) -> Result<PathBuf, EffectError> {
@@ -257,55 +306,67 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                 cx.respond(entries)
             }
             FsReq::Glob(pattern) => {
-                if pattern.contains("..") {
-                    return cx.respond(Vec::<String>::new());
-                }
-                if pattern.starts_with('/') || pattern.starts_with('\\') {
-                    return Err(EffectError::Handler(
-                        "absolute glob patterns not allowed".to_string(),
-                    ));
-                }
-                let full_pattern = self.root.join(&pattern).to_string_lossy().to_string();
-                let canonical_root = self
-                    .root
-                    .canonicalize()
-                    .map_err(|e| EffectError::Handler(e.to_string()))?;
-
-                let ignored_but_mentioned: Vec<&str> = DEFAULT_IGNORE_DIRS
-                    .iter()
-                    .filter(|&&dir| pattern_mentions(&pattern, dir))
-                    .copied()
-                    .collect();
-
-                let paths: Vec<String> = glob::glob(&full_pattern)
-                    .map_err(|e| EffectError::Handler(format!("invalid glob: {}", e)))?
-                    .filter_map(|e| e.ok())
-                    .filter(|p| {
-                        p.canonicalize()
-                            .map(|cp| cp.starts_with(&canonical_root))
-                            .unwrap_or(false)
-                    })
+                let paths = self.expand_glob(&pattern)?;
+                let rel_paths: Vec<String> = paths
+                    .into_iter()
                     .filter_map(|p| {
                         p.strip_prefix(&self.root)
                             .ok()
                             .map(|r| r.to_string_lossy().to_string())
                     })
-                    .filter(|rel_path_str| {
-                        let rel_path = std::path::Path::new(rel_path_str);
-                        for component in rel_path.components() {
-                            if let std::path::Component::Normal(name) = component {
-                                let name_str = name.to_string_lossy();
-                                if DEFAULT_IGNORE_DIRS.contains(&name_str.as_ref())
-                                    && !ignored_but_mentioned.contains(&name_str.as_ref())
-                                {
-                                    return false;
-                                }
-                            }
-                        }
-                        true
-                    })
                     .collect();
-                cx.respond(paths)
+                cx.respond(rel_paths)
+            }
+            FsReq::Grep(regex_str, pattern) => {
+                let re = regex::Regex::new(&regex_str)
+                    .map_err(|e| EffectError::Handler(format!("invalid regex: {}", e)))?;
+                let paths = self.expand_glob(&pattern)?;
+                let mut results: Vec<(String, i64, String)> = Vec::new();
+                let mut more_matches = 0;
+                let cap = 2000;
+
+                for path in paths {
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let content = match std::fs::read(&path) {
+                        Ok(b) => b,
+                        Err(_) => continue,
+                    };
+                    if content.contains(&0) {
+                        continue;
+                    }
+                    let text = match String::from_utf8(content) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+
+                    let rel_path = path
+                        .strip_prefix(&self.root)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .to_string();
+
+                    for (i, line) in text.lines().enumerate() {
+                        if re.is_match(line) {
+                            if results.len() >= cap {
+                                more_matches += 1;
+                                continue;
+                            }
+                            results.push((rel_path.clone(), (i + 1) as i64, line.to_string()));
+                        }
+                    }
+                }
+
+                if more_matches > 0 {
+                    results.push((
+                        "...".to_string(),
+                        0,
+                        format!("truncated: {} more matches", more_matches),
+                    ));
+                }
+
+                cx.respond(results)
             }
             FsReq::Exists(path) => {
                 let resolved = self.resolve(&path)?;
@@ -1397,6 +1458,79 @@ mod tests {
         assert!(pattern_mentions("target/**/*.rs", "target"));
         assert!(pattern_mentions("foo/target/bar", "target"));
         assert!(!pattern_mentions("retarget/foo", "target"));
+    }
+
+    #[test]
+    fn test_grep_handler() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let file_path = root.join("test.txt");
+        std::fs::write(&file_path, "hello world\nrust is great\nhello rust").unwrap();
+
+        // Binary file to skip
+        let bin_path = root.join("test.bin");
+        std::fs::write(&bin_path, vec![0, 1, 2, 3]).unwrap();
+
+        // Ignored dir
+        let target_dir = root.join("target");
+        std::fs::create_dir(&target_dir).unwrap();
+        std::fs::write(target_dir.join("ignored.txt"), "hello").unwrap();
+
+        let mut handler = FsHandler::new(root.clone());
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+
+        // Test normal grep
+        let req = FsReq::Grep("hello".to_string(), "**/*.txt".to_string());
+        let res = handler.handle(req, &cx).unwrap();
+        use tidepool_bridge::FromCore;
+        let results: Vec<(String, i64, String)> = FromCore::from_value(&res, &table).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0],
+            ("test.txt".to_string(), 1, "hello world".to_string())
+        );
+        assert_eq!(
+            results[1],
+            ("test.txt".to_string(), 3, "hello rust".to_string())
+        );
+
+        // Test skip binary and ignored
+        let req = FsReq::Grep("hello".to_string(), "**/*".to_string());
+        let res = handler.handle(req, &cx).unwrap();
+        let results: Vec<(String, i64, String)> = FromCore::from_value(&res, &table).unwrap();
+        // Should only find test.txt matches, skipping target/ignored.txt and test.bin
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_grep_truncation() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let file_path = root.join("large.txt");
+        let mut content = String::new();
+        for _ in 0..2005 {
+            content.push_str("match\n");
+        }
+        std::fs::write(&file_path, content).unwrap();
+
+        let mut handler = FsHandler::new(root.clone());
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+
+        let req = FsReq::Grep("match".to_string(), "large.txt".to_string());
+        let res = handler.handle(req, &cx).unwrap();
+        use tidepool_bridge::FromCore;
+        let results: Vec<(String, i64, String)> = FromCore::from_value(&res, &table).unwrap();
+
+        assert_eq!(results.len(), 2001); // 2000 matches + 1 sentinel
+        assert_eq!(results[2000].0, "...");
+        assert_eq!(results[2000].1, 0);
+        assert_eq!(results[2000].2, "truncated: 5 more matches");
     }
 
     #[test]

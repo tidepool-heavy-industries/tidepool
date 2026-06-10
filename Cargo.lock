@@ -3416,6 +3416,7 @@ dependencies = [
  "frunk",
  "genai",
  "glob",
+ "regex",
  "rmcp",
  "serde_json",
  "tempfile",

@@ -144,6 +144,7 @@ pub fn fs_decl() -> EffectDecl {
             "FsWrite :: Text -> Text -> Fs ()",
             "FsListDir :: Text -> Fs [Text]",
             "FsGlob :: Text -> Fs [Text]",
+            "FsGrep :: Text -> Text -> Fs [(Text, Int, Text)]",
             "FsExists :: Text -> Fs Bool",
             "FsMetadata :: Text -> Fs (Int, Bool, Bool)",
         ],
@@ -158,6 +159,7 @@ pub fn fs_decl() -> EffectDecl {
             "getFileSize :: Text -> M Int\ngetFileSize p = do { (s, _, _) <- send (FsMetadata p); pure s }",
             "getCurrentDirectory :: M Text\ngetCurrentDirectory = do { (_, d, _) <- run \"pwd\"; pure (T.strip d) }",
             "glob :: Text -> M [Text]\nglob = send . FsGlob",
+            "-- | Search for a regex pattern in files matching a glob.\ngrepGlob :: Text -> Text -> M [(Text, Int, Text)]\ngrepGlob pat g = send (FsGrep pat g)",
         ],
     }
 }
@@ -169,14 +171,16 @@ pub fn sg_decl() -> EffectDecl {
         description: concat!(
             "Structural code search via ast-grep. ",
             "Use patterns with $VAR for single-node captures and $$$VAR for multi-node. ",
-            "Paths are relative to server working directory.",
+            "Supported: Rust | Python | TypeScript | JavaScript | Go | Java | C | Cpp | Haskell | Nix | Html | Css | Json | Yaml | Toml. ",
+            "Example: hsDef \"filter\" [\"haskell/lib\"] returns the definition of filter with file/line. ",
+            "Use grepGlob for structured text-level search with regex and filename globbing.",
         ),
         type_defs: &[
             "data Lang = Rust | Python | TypeScript | JavaScript | Go | Java | C | Cpp | Haskell | Nix | Html | Css | Json | Yaml | Toml",
-            "data Match = Match { mText :: Text, mFile :: Text, mLine :: Int, mVars :: [(Text, Text)], mReplacement :: Text }",
+            "data Match = Match { matchText :: Text, matchFile :: Text, matchLine :: Int, matchVars :: [(Text, Text)], matchReplacement :: Text }",
             "instance ToJSON Match where\n  toJSON (Match t f l vs r) = object ([\"text\" .= t, \"file\" .= f, \"line\" .= l] ++ (if null vs then [] else [\"vars\" .= toJSON (Map.fromList vs)]) ++ (if T.null r then [] else [\"replacement\" .= r]))",
             "var :: Match -> Text -> Text",
-            "var (Match _ _ _ vs _) k = case [v | (k', v) <- vs, k' == k] of { (x:_) -> x; _ -> \"\" }",
+            "var m k = case [v | (k', v) <- matchVars m, k' == k] of { (x:_) -> x; _ -> \"\" }",
         ],
         constructors: &[
             "SgFind    :: Lang -> Text -> [Text] -> SG [Match]",
@@ -188,8 +192,10 @@ pub fn sg_decl() -> EffectDecl {
             "rPat :: Text -> Value\nrPat p = object [\"pattern\" .= p]",
             "rKind :: Text -> Value\nrKind k = object [\"kind\" .= k]",
             "rRegex :: Text -> Value\nrRegex r = object [\"regex\" .= r]",
-            "rHas :: Value -> Value\nrHas r = object [\"has\" .= r]",
-            "rInside :: Value -> Value\nrInside r = object [\"inside\" .= r]",
+            "rHas :: Value -> Value\nrHas r = object [\"has\" .= (r .+. object [\"stopBy\" .= (\"end\" :: Text)])]",
+            "rHasChild :: Value -> Value\nrHasChild r = object [\"has\" .= r]",
+            "rInside :: Value -> Value\nrInside r = object [\"inside\" .= (r .+. object [\"stopBy\" .= (\"end\" :: Text)])]",
+            "rInsideParent :: Value -> Value\nrInsideParent r = object [\"inside\" .= r]",
             "rFollows :: Value -> Value\nrFollows r = object [\"follows\" .= r]",
             "rPrecedes :: Value -> Value\nrPrecedes r = object [\"precedes\" .= r]",
             "rAll :: [Value] -> Value\nrAll rs = object [\"all\" .= rs]",
@@ -205,6 +211,10 @@ pub fn sg_decl() -> EffectDecl {
             "infixl 7 <?\n(<?) :: Value -> Value -> Value\nchild <? ancestor = child .+. rInside ancestor",
             // Extra field helpers
             "rField :: Text -> Value\nrField name = object [\"field\" .= name]",
+            // Recipes
+            "-- | Find a Haskell function definition by name.\nhsDef :: Text -> [Text] -> M [Match]\nhsDef name paths = sgRuleFind Haskell (rAll [rKind \"function\", rHas (rField \"name\" .+. rRegex (\"^\" <> name <> \"$\"))]) paths",
+            "-- | Find a Haskell function signature by name.\nhsSig :: Text -> [Text] -> M [Match]\nhsSig name paths = sgRuleFind Haskell (rAll [rKind \"signature\", rHas (rField \"name\" .+. rRegex (\"^\" <> name <> \"$\"))]) paths",
+            "-- | Find a Rust function definition by name.\nrsFn :: Text -> [Text] -> M [Match]\nrsFn name paths = sgRuleFind Rust (rAll [rKind \"function_item\", rHas (rField \"name\" .+. rRegex (\"^\" <> name <> \"$\"))]) paths",
         ],
     }
 }
@@ -1945,6 +1955,35 @@ mod tests {
         let json = serde_json::json!({"code": "pure 42", "imports": "Data.List (sort)\nData.Char"});
         let req: EvalRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.imports, "Data.List (sort)\nData.Char");
+    }
+
+    #[test]
+    fn test_preamble_structural_search_updates() {
+        let effects = vec![sg_decl(), fs_decl()];
+        let preamble = build_preamble(&effects, false);
+
+        // Verify rHas includes stopBy: end (note: Haskell string escape)
+        assert!(preamble.contains(
+            "rHas r = object [\"has\" .= (r .+. object [\"stopBy\" .= (\"end\" :: Text)])]"
+        ));
+
+        // Verify rHasChild exists and lacks stopBy
+        assert!(
+            preamble.contains("rHasChild :: Value -> Value\nrHasChild r = object [\"has\" .= r]")
+        );
+
+        // Verify hsDef and rsFn recipes exist
+        assert!(preamble.contains("hsDef :: Text -> [Text] -> M [Match]"));
+        assert!(preamble.contains("rsFn :: Text -> [Text] -> M [Match]"));
+
+        // Verify grepGlob exists in Fs section
+        assert!(preamble.contains("grepGlob :: Text -> Text -> M [(Text, Int, Text)]"));
+
+        // Verify Match record syntax
+        assert!(preamble.contains("data Match = Match { matchText :: Text, matchFile :: Text, matchLine :: Int, matchVars :: [(Text, Text)], matchReplacement :: Text }"));
+        assert!(preamble.contains(
+            "var m k = case [v | (k', v) <- matchVars m, k' == k] of { (x:_) -> x; _ -> \"\" }"
+        ));
     }
 
     #[test]
