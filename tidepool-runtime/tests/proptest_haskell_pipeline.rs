@@ -1508,15 +1508,23 @@ fn run_effect_worker(case: &EffectCase, lazy: bool) -> WorkerResult {
     if let Some(sig) = output.status.signal() {
         return WorkerResult::Signal(sig);
     }
+    // NOTE: libtest with --nocapture prints "test <name> ... " WITHOUT a
+    // trailing newline before running, so our marker can land mid-line
+    // (e.g. "test pipeline_effect_worker ... __EFFECT_JSON__5"). Search for the
+    // marker as a SUBSTRING, not a line prefix, and take the rest of that line
+    // (the JSON, which serde renders single-line). A trailing "ok" appears on
+    // the next line and is ignored.
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
-        if let Some(rest) = line.strip_prefix("__EFFECT_JSON__") {
+        if let Some(idx) = line.find("__EFFECT_JSON__") {
+            let rest = &line[idx + "__EFFECT_JSON__".len()..];
             return match serde_json::from_str(rest) {
                 Ok(v) => WorkerResult::Ok(v),
                 Err(e) => WorkerResult::Fail(format!("bad json: {e}: {rest}")),
             };
         }
-        if let Some(rest) = line.strip_prefix("__EFFECT_ERR__") {
+        if let Some(idx) = line.find("__EFFECT_ERR__") {
+            let rest = &line[idx + "__EFFECT_ERR__".len()..];
             return WorkerResult::Fail(rest.to_string());
         }
     }
@@ -1578,8 +1586,10 @@ fn pipeline_effect_worker() {
     }
 
     let mut d = BigList { n };
+    // Leading newline so the marker starts its own line even under libtest's
+    // newline-less "test <name> ... " preamble (parser also substring-matches).
     match tidepool_runtime::compile_and_run(&source, "result", &include, &mut d, &()) {
-        Ok(r) => println!("__EFFECT_JSON__{}", r.to_json()),
-        Err(e) => println!("__EFFECT_ERR__{e}"),
+        Ok(r) => println!("\n__EFFECT_JSON__{}", r.to_json()),
+        Err(e) => println!("\n__EFFECT_ERR__{e}"),
     }
 }
