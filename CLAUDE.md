@@ -275,6 +275,12 @@ if shouldProceed answer
 
 **Census pattern**: One eval replaces N tool calls. `fsGlob` + `mapM fsMetadata` + filtering gives a codebase overview in a single round-trip.
 
+### Structural Search (MCP)
+
+- `hsDef`/`hsSig`/`rsFn` recipes find function/signature definitions by name.
+- `rHas`/`rInside` are deep by default (`stopBy: end`). Use `rHasChild`/`rInsideParent` for direct children.
+- `grepGlob :: Text -> Text -> M [(Text, Int, Text)]` provides structured text-level search with regex and filename globbing.
+
 ### Adding new Prelude functions
 
 Polymorphic base functions going through typeclass dictionaries often crash — the JIT eagerly evaluates error branches in dictionary records. Shadow with monomorphic versions using primops directly (e.g., `rem` instead of `Integral` dict).
