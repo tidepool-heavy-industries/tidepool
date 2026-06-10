@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 1453ec98d8a92d0e3bef0ec1e601eb77c0f789f33513b74d6bf97ec6dde426f4 # shrinks to Con(DataConId(11), [ByteArray(Mutex { data: [], poisoned: false, .. }), Lit(LitInt(1)), Lit(LitInt(0))])
