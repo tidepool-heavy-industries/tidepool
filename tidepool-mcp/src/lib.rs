@@ -185,9 +185,13 @@ pub fn sg_decl() -> EffectDecl {
         constructors: &[
             "SgFind    :: Lang -> Text -> [Text] -> SG [Match]",
             "SgRuleFind    :: Lang -> Value -> [Text] -> SG [Match]",
+            "SgPlan    :: Lang -> Text -> Text -> [Text] -> SG [Match]",
+            "SgApply    :: Lang -> Text -> Text -> [Text] -> SG Int",
         ],
         helpers: &[
             "sgFind :: Lang -> Text -> [Text] -> M [Match]\nsgFind l p fs = send (SgFind l p fs)",
+            "-- | Dry-run structural rewrite: matches with replacements, NO writes.\nplanRw :: Lang -> Text -> Text -> [Text] -> M [Match]\nplanRw l p r fs = send (SgPlan l p r fs)",
+            "-- | Apply a structural rewrite in place. Prefer the gated `rewrite` verb.\napplyRw :: Lang -> Text -> Text -> [Text] -> M Int\napplyRw l p r fs = send (SgApply l p r fs)",
             "sgRuleFind :: Lang -> Value -> [Text] -> M [Match]\nsgRuleFind l r fs = send (SgRuleFind l r fs)",
             "rPat :: Text -> Value\nrPat p = object [\"pattern\" .= p]",
             "rKind :: Text -> Value\nrKind k = object [\"kind\" .= k]",

@@ -99,3 +99,25 @@ triageAuto auto render xs = do
 -- suspensions one at a time.
 escalations :: (a -> Maybe Bool) -> [a] -> [a]
 escalations auto = filter (\x -> case auto x of { Nothing -> True; Just _ -> False })
+
+-- | Structural rewrite, gated — the DEFAULT way to rewrite code:
+-- plan (ast-grep dry-run), suspend with the full diff, apply only on
+-- approval. Pattern-based, so the apply re-matches structurally rather
+-- than by byte offset.
+rewrite :: Lang -> Text -> Text -> [Text] -> M Value
+rewrite lang pat fix paths = do
+  plan <- planRw lang pat fix paths
+  if isNull plan
+    then pure (String "no matches")
+    else do
+      let clip t = stake 120 (strip t)
+      let render (Match t f l _ r) =
+            f <> ":" <> pack (show l) <> "\n    - " <> clip t <> "\n    + " <> clip r
+      ok <- approve
+        ("apply " <> pack (show (len plan)) <> " structural rewrite(s)?\n"
+          <> intercalate "\n" (map render plan))
+      if ok
+        then do
+          n <- applyRw lang pat fix paths
+          pure (object ["applied" .= n])
+        else pure (String "declined")

@@ -450,6 +450,10 @@ enum SgReq {
     Find(Lang, String, Vec<String>),
     #[core(name = "SgRuleFind")]
     RuleFind(Lang, Value, Vec<String>),
+    #[core(name = "SgPlan")]
+    Plan(Lang, String, String, Vec<String>),
+    #[core(name = "SgApply")]
+    Apply(Lang, String, String, Vec<String>),
 }
 
 /// Rust-side Match value returned to Haskell.
@@ -582,6 +586,46 @@ impl SgHandler {
         Ok(results)
     }
 
+    /// Apply a pattern rewrite in place across matching files; returns the
+    /// number of edits. The library-level `rewrite` verb gates this behind
+    /// a continuation approval carrying the SgPlan diff — prefer that flow.
+    fn run_replace(
+        &self,
+        lang: Lang,
+        pattern: &str,
+        rewrite: &str,
+        paths: &[String],
+    ) -> Result<i64, EffectError> {
+        let sl = lang.to_support_lang()?;
+        let files = self.collect_files(sl, paths)?;
+        let mut total = 0i64;
+
+        for file_path in files {
+            let source = std::fs::read_to_string(&file_path)
+                .map_err(|e| EffectError::Handler(e.to_string()))?;
+            let mut grep = sl.ast_grep(&source);
+            let mut file_count = 0i64;
+
+            loop {
+                let pat = Pattern::try_new(pattern, sl)
+                    .map_err(|e| EffectError::Handler(format!("invalid pattern: {}", e)))?;
+                match grep.replace(pat, rewrite) {
+                    Ok(true) => file_count += 1,
+                    Ok(false) => break,
+                    Err(e) => return Err(EffectError::Handler(e)),
+                }
+            }
+
+            if file_count > 0 {
+                let modified = grep.generate();
+                std::fs::write(&file_path, &modified)
+                    .map_err(|e| EffectError::Handler(e.to_string()))?;
+                total += file_count;
+            }
+        }
+        Ok(total)
+    }
+
     fn deserialize_rule(
         &self,
         lang: Lang,
@@ -669,6 +713,15 @@ impl EffectHandler<CapturedOutput> for SgHandler {
             SgReq::RuleFind(lang, rule_json, paths) => {
                 let matches = self.run_rule_find(lang, &rule_json, &paths, None, cx.table())?;
                 cx.respond_list(matches)
+            }
+            SgReq::Plan(lang, pattern, rewrite, paths) => {
+                // Dry run: matches with the replacement field filled, no writes.
+                let matches = self.run_find(lang, &pattern, &paths, Some(&rewrite))?;
+                cx.respond_list(matches)
+            }
+            SgReq::Apply(lang, pattern, rewrite, paths) => {
+                let n = self.run_replace(lang, &pattern, &rewrite, &paths)?;
+                cx.respond(n)
             }
         }
     }
@@ -1519,6 +1572,55 @@ mod tests {
         // Hidden FILE (not just dir) also skipped unless mentioned.
         assert!(!component_filter("**/*", Path::new("src/.hidden")));
         assert!(component_filter(".gitignore", Path::new(".gitignore")));
+    }
+
+    #[test]
+    fn test_sg_plan_apply() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let f = root.join("t.rs");
+        std::fs::write(&f, "fn main() { foo(1); foo(2); }\n").unwrap();
+
+        let mut handler = SgHandler::new(root.clone());
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+
+        // Plan: replacements computed, NOTHING written.
+        let req = SgReq::Plan(
+            Lang::Rust,
+            "foo($A)".into(),
+            "bar($A)".into(),
+            vec!["t.rs".into()],
+        );
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
+        let _ = res; // plan returns Matches with replacements; key check below:
+        assert!(
+            std::fs::read_to_string(&f).unwrap().contains("foo(1)"),
+            "plan must not write"
+        );
+
+        // Apply: both call sites rewritten.
+        let req = SgReq::Apply(
+            Lang::Rust,
+            "foo($A)".into(),
+            "bar($A)".into(),
+            vec!["t.rs".into()],
+        );
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
+        // Int responds as the boxed worker repr: Con(I#, [LitInt n]).
+        let n = match &res {
+            tidepool_eval::value::Value::Con(_, fields) => match fields.as_slice() {
+                [tidepool_eval::value::Value::Lit(tidepool_repr::Literal::LitInt(n))] => *n,
+                other => panic!("expected boxed Int, got {:?}", other),
+            },
+            tidepool_eval::value::Value::Lit(tidepool_repr::Literal::LitInt(n)) => *n,
+            other => panic!("expected Int count, got {:?}", other),
+        };
+        assert_eq!(n, 2);
+        let after = std::fs::read_to_string(&f).unwrap();
+        assert!(after.contains("bar(1)") && after.contains("bar(2)"));
     }
 
     #[test]
