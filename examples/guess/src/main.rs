@@ -9,7 +9,6 @@ use std::io::Write;
 use tidepool_bridge_derive::FromCore;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_eval::value::Value;
 use tidepool_macro::haskell_inline;
 
 #[derive(FromCore)]

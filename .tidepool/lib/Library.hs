@@ -1,6 +1,16 @@
-module Library where
+-- Re-exports: the verb modules ride along with the auto-imported Library,
+-- so every eval sees census/refs/defWithContext/sh/slice/... bare.
+module Library
+  ( module Library
+  , module Explore
+  , module Dev
+  , module Tables
+  ) where
 
 import Data.Maybe (mapMaybe)
+import Explore
+import Dev
+import Tables
 
 -- ===========================================================================
 -- § Recursion Schemes

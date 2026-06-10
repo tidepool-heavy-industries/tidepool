@@ -4,7 +4,7 @@
 -- plumbing stays at the call site; these shape the answers.
 module Explore where
 
-import Tidepool.Prelude
+import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
 
 -- | Histogram of file extensions from a path listing.
