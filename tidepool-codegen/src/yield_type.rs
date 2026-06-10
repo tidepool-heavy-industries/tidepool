@@ -69,6 +69,10 @@ pub enum YieldError {
     /// Haskell `undefined` forced in JIT code.
     #[error("Haskell undefined forced")]
     Undefined,
+    #[error("case trap: scrutinee constructor not among case alternatives (tag mismatch; diagnostics on server stderr)")]
+    CaseTrap,
+    #[error("bad pointer in JIT runtime (diagnostics on server stderr)")]
+    BadPointer,
     /// GHC type metadata forced (should be dead code).
     #[error("forced type metadata (should be dead code)")]
     TypeMetadata,
@@ -143,6 +147,8 @@ impl From<crate::host_fns::RuntimeError> for YieldError {
             RuntimeError::UserError => YieldError::UserError,
             RuntimeError::UserErrorMsg(msg) => YieldError::UserErrorMsg(msg),
             RuntimeError::Undefined => YieldError::Undefined,
+            RuntimeError::CaseTrap => YieldError::CaseTrap,
+            RuntimeError::BadPointer => YieldError::BadPointer,
             RuntimeError::TypeMetadata => YieldError::TypeMetadata,
             RuntimeError::UnresolvedVar(id) => YieldError::UnresolvedVar(id),
             RuntimeError::NullFunPtr => YieldError::NullFunPtr,

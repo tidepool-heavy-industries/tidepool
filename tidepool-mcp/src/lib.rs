@@ -1079,6 +1079,26 @@ pub fn template_haskell(
     out
 }
 
+/// Escape a string for inclusion in a generated Haskell string literal.
+/// Control characters matter: an unescaped newline in the payload is a
+/// LEXICAL ERROR in the generated module (bit the eval `input` channel
+/// for every multi-line payload).
+fn escape_haskell_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:x};", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Render a serde_json::Value as a Haskell aeson literal expression.
 fn json_to_haskell(val: &serde_json::Value) -> String {
     match val {
@@ -1090,8 +1110,7 @@ fn json_to_haskell(val: &serde_json::Value) -> String {
             format!("Aeson.Number (fromIntegral ({} :: Int))", n)
         }
         serde_json::Value::String(s) => {
-            let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-            format!("Aeson.String \"{}\"", escaped)
+            format!("Aeson.String \"{}\"", escape_haskell_string(s))
         }
         serde_json::Value::Array(arr) => {
             let elems: Vec<String> = arr.iter().map(json_to_haskell).collect();
@@ -1101,8 +1120,7 @@ fn json_to_haskell(val: &serde_json::Value) -> String {
             let pairs: Vec<String> = map
                 .iter()
                 .map(|(k, v)| {
-                    let escaped_k = k.replace('\\', "\\\\").replace('"', "\\\"");
-                    format!("\"{}\" .= {}", escaped_k, json_to_haskell(v))
+                    format!("\"{}\" .= {}", escape_haskell_string(k), json_to_haskell(v))
                 })
                 .collect();
             format!("object [{}]", pairs.join(", "))
@@ -2456,6 +2474,15 @@ mod tests {
         // Without budget (defaults to 4096)
         let result = template_haskell(&preamble, &stack, source, "", "", None, None);
         assert!(result.contains("paginateResult 4096 (toJSON _r)"));
+    }
+
+    #[test]
+    fn test_json_to_haskell_escapes_control_chars() {
+        let v = serde_json::json!({"multi\nline\tkey": "line1\nline2\twith\rcontrols"});
+        let rendered = json_to_haskell(&v);
+        assert!(!rendered.contains('\n'), "raw newline leaked: {rendered}");
+        assert!(rendered.contains("\\n"), "{rendered}");
+        assert!(rendered.contains("\\t"), "{rendered}");
     }
 
     #[test]

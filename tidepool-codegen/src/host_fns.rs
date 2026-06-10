@@ -21,6 +21,10 @@ pub enum RuntimeError {
     UserError,
     #[error("Haskell undefined forced")]
     Undefined,
+    #[error("case trap: scrutinee constructor not among case alternatives (tag mismatch; diagnostics on server stderr)")]
+    CaseTrap,
+    #[error("bad pointer in JIT runtime (diagnostics on server stderr)")]
+    BadPointer,
     #[error("forced type metadata (should be dead code)")]
     TypeMetadata,
     #[error("unresolved variable VarId({0:#x}) [tag='{tag}', key={key}]", tag=(*.0 >> 56) as u8 as char, key=(*.0 & ((1u64 << 56) - 1)))]
@@ -1189,7 +1193,7 @@ fn check_ptr_invalid(ptr: *const u8, fn_name: &str) -> bool {
         eprintln!("{}", msg);
         push_diagnostic(msg);
         RUNTIME_ERROR.with(|cell| {
-            *cell.borrow_mut() = Some(RuntimeError::Undefined);
+            *cell.borrow_mut() = Some(RuntimeError::BadPointer);
         });
         true
     } else {
@@ -2679,7 +2683,7 @@ pub extern "C" fn runtime_case_trap(scrut_ptr: i64, num_alts: i64, alt_tags: i64
     let _ = stderr.flush();
     drop(stderr);
     RUNTIME_ERROR.with(|cell| {
-        *cell.borrow_mut() = Some(RuntimeError::Undefined);
+        *cell.borrow_mut() = Some(RuntimeError::CaseTrap);
     });
     error_poison_ptr()
 }

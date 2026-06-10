@@ -3,6 +3,7 @@ module Probe where
 
 import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
+import qualified Data.Text as T
 
 t1 :: M [Text]
 t1 = do
@@ -41,3 +42,27 @@ t8 :: M [Text]
 t8 = do
   _ <- run "true"
   pure (filter (\l -> len l > 1) ["hi", "a"])
+
+t9 :: M Int
+t9 = do
+  src <- readFile ".tidepool/lib/Tables.hs"
+  let (_, b) = T.breakOn "countTable" src
+  pure (if isNull b then 0 else 1)
+
+t10 :: M Int
+t10 = do
+  src <- readFile ".tidepool/lib/Tables.hs"
+  pure (len (sdrop 3 src))
+
+occ2 :: Text -> Text -> Int
+occ2 needle hay =
+  let (_, rest) = T.breakOn needle hay
+  in if isNull rest
+       then 0
+       else let (_, rest2) = T.breakOn needle (sdrop (len needle) rest)
+            in if isNull rest2 then 1 else 2
+
+t11 :: M Int
+t11 = do
+  src <- readFile ".tidepool/lib/Tables.hs"
+  pure (occ2 "countTable" src)

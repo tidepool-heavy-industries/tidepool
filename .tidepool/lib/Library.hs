@@ -7,6 +7,7 @@ module Library
   , module Tables
   , module Asks
   , module Flow
+  , module Patch
   ) where
 
 import Data.Maybe (mapMaybe)
@@ -15,6 +16,7 @@ import Dev
 import Tables
 import Asks
 import Flow
+import Patch
 
 -- ===========================================================================
 -- § Recursion Schemes
