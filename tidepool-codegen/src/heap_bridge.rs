@@ -547,8 +547,7 @@ mod tests {
                 // Spot-check the top two levels.
                 unsafe {
                     assert_eq!(*ptr, layout::TAG_CON);
-                    let inner =
-                        *(ptr.add(layout::CON_FIELDS_OFFSET as usize) as *const *const u8);
+                    let inner = *(ptr.add(layout::CON_FIELDS_OFFSET as usize) as *const *const u8);
                     assert_eq!(*inner, layout::TAG_CON);
                 }
             })

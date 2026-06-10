@@ -70,7 +70,10 @@ fn run_variant_typed(
     }
 
     std::env::set_var("TIDEPOOL_LAZY_RESULTS", "1");
-    let include = [prelude_dir(), user_lib_dir()];
+    let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
+        .expect("write effects module")
+        .leak() as &Path;
+    let include = [prelude_dir(), user_lib_dir(), effects_dir];
     let mut dispatcher = BigListDispatcher { n };
     compile_and_run(&source, "result", &include, &mut dispatcher, &())
         .map(|v| v.to_json())

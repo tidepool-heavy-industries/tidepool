@@ -54,7 +54,10 @@ fn repro_spliton_full_mcp() {
     );
 
     let pp = prelude_dir();
-    let include = [pp, ulp];
+    let eff = tidepool_mcp::ensure_effects_module(&decls)
+        .expect("write effects module")
+        .leak() as &std::path::Path;
+    let include = [pp, ulp, eff];
 
     let mut dispatcher = MockDispatcher;
     let result = compile_and_run(&source, "result", &include, &mut dispatcher, &());
@@ -84,7 +87,10 @@ fn repro_spliton_no_user_library() {
     let source = tidepool_mcp::template_haskell(&preamble, &stack, code, "", "", None, None);
 
     let pp = prelude_dir();
-    let include = [pp];
+    let eff = tidepool_mcp::ensure_effects_module(&decls)
+        .expect("write effects module")
+        .leak() as &std::path::Path;
+    let include = [pp, eff];
 
     let mut dispatcher = MockDispatcher;
     let result = compile_and_run(&source, "result", &include, &mut dispatcher, &());

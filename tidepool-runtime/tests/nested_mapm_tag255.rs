@@ -303,11 +303,14 @@ pure stats
             // pp = <workspace>/haskell/lib; workspace root = pp's grandparent
             let workspace = pp.parent().unwrap().parent().unwrap();
             let lib_dir = workspace.join(".tidepool/lib");
-            let include: Vec<&Path> = if lib_dir.exists() {
+            let effects_dir = tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls())
+                .expect("write effects module");
+            let mut include: Vec<&Path> = if lib_dir.exists() {
                 vec![pp.as_path(), lib_dir.as_path()]
             } else {
                 vec![pp.as_path()]
             };
+            include.push(effects_dir.as_path());
             let mut handlers = frunk::hlist![
                 StubConsole,
                 StubKv,

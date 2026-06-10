@@ -57,7 +57,10 @@ fn run_mcp(code: &str) -> serde_json::Value {
         ulp.join("Library.hs").exists(),
         ".tidepool/lib/Library.hs not found"
     );
-    let include = [pp, ulp];
+    let eff = tidepool_mcp::ensure_effects_module(&decls)
+        .expect("write effects module")
+        .leak() as &std::path::Path;
+    let include = [pp, ulp, eff];
 
     let mut dispatcher = MockDispatcher;
     compile_and_run(&source, "result", &include, &mut dispatcher, &())

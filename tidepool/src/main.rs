@@ -1675,7 +1675,9 @@ mod tests {
     fn jit_eval(code: &[&str]) -> serde_json::Value {
         let source = jit_test_source(code);
         let include = prelude_include();
-        let include_paths: Vec<&std::path::Path> = vec![include.as_path()];
+        let effects_dir =
+            tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls()).unwrap();
+        let include_paths: Vec<&std::path::Path> = vec![include.as_path(), effects_dir.as_path()];
         let kv_path = std::env::temp_dir().join("tidepool_jit_test_kv.json");
         let cwd = repo_root();
         let captured = CapturedOutput::new();
@@ -2223,7 +2225,9 @@ mod tests {
     ) -> serde_json::Value {
         let source = jit_test_source(code);
         let include = prelude_include();
-        let include_paths: Vec<&std::path::Path> = vec![include.as_path()];
+        let effects_dir =
+            tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls()).unwrap();
+        let include_paths: Vec<&std::path::Path> = vec![include.as_path(), effects_dir.as_path()];
         let kv_path = std::env::temp_dir().join("tidepool_mock_llm_kv.json");
         let cwd = repo_root();
         let captured = CapturedOutput::new();

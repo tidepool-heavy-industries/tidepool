@@ -53,7 +53,10 @@ fn run_eager(code: &str, n: usize) -> Result<serde_json::Value, String> {
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let source = tidepool_mcp::template_haskell(&preamble, &stack, code, "", "", None, None);
 
-    let include = [prelude_dir(), user_lib_dir()];
+    let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
+        .expect("write effects module")
+        .leak() as &Path;
+    let include = [prelude_dir(), user_lib_dir(), effects_dir];
     let mut dispatcher = BigListDispatcher { n };
     compile_and_run(&source, "result", &include, &mut dispatcher, &())
         .map(|v| v.to_json())
@@ -110,7 +113,10 @@ fn run_eager_stream(code: &str, n: Option<usize>) -> Result<serde_json::Value, S
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let source = tidepool_mcp::template_haskell(&preamble, &stack, code, "", "", None, None);
 
-    let include = [prelude_dir(), user_lib_dir()];
+    let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
+        .expect("write effects module")
+        .leak() as &Path;
+    let include = [prelude_dir(), user_lib_dir(), effects_dir];
     let mut dispatcher = StreamDispatcher { n };
     compile_and_run(&source, "result", &include, &mut dispatcher, &())
         .map(|v| v.to_json())
