@@ -1479,6 +1479,17 @@ impl TidepoolMcpServerImpl {
                 tracing::error!("{} thread crashed", op);
                 let mut crash_info = String::new();
 
+                // The program's last words are the cheapest forensics there
+                // are — surface anything it printed before the signal.
+                let output = captured_output.snapshot();
+                if !output.is_empty() {
+                    crash_info.push_str("\n\n## Output Before Crash\n");
+                    for line in &output {
+                        crash_info.push_str(line);
+                        crash_info.push('\n');
+                    }
+                }
+
                 // If we have the handle, joining it gives us the panic payload
                 if let Some(h) = handle.take() {
                     if let Err(e) = h.join() {
@@ -1542,14 +1553,22 @@ impl TidepoolMcpServerImpl {
                     });
                 }
 
-                let error_msg = format_error_with_source(
-                    "Timeout",
-                    &format!(
-                        "{} timed out after {}s. This usually means an infinite loop or unbounded recursion.",
-                        op, EVAL_TIMEOUT_SECS
-                    ),
-                    &source,
+                // Output printed before the deadline answers "which step was
+                // it on?" — the question a timeout always raises. snapshot()
+                // (not drain) because the orphaned thread may still write.
+                let output = captured_output.snapshot();
+                let mut detail = format!(
+                    "{} timed out after {}s. This usually means an infinite loop or unbounded recursion.",
+                    op, EVAL_TIMEOUT_SECS
                 );
+                if !output.is_empty() {
+                    detail.push_str("\n\n## Output Before Timeout\n");
+                    for line in &output {
+                        detail.push_str(line);
+                        detail.push('\n');
+                    }
+                }
+                let error_msg = format_error_with_source("Timeout", &detail, &source);
                 Ok(CallToolResult::error(vec![Content::text(error_msg)]))
             }
         }
