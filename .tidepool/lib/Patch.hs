@@ -9,14 +9,11 @@ import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
 import qualified Data.Text as T
 
--- | 0, 1, or "more than one" (2) — two breakOn probes, no list build.
-occurrences :: Text -> Text -> Int
-occurrences needle hay =
-  let (_, rest) = T.breakOn needle hay
-  in if isNull rest
-       then 0
-       else let (_, rest2) = T.breakOn needle (sdrop (len needle) rest)
-            in if isNull rest2 then 1 else 2
+-- | #313 LANDMINE (removed from use): a pure module-level Text helper of
+-- this shape miscompiles via the join-wiring bug — calls case-trap at
+-- runtime. Kept commented as a reminder until #313's emit fix lands;
+-- the checks live inlined in patchFile instead.
+-- occurrences :: Text -> Text -> Int  — see git history
 
 -- | Replace a needle EXACTLY ONCE: errors loudly if absent or ambiguous
 -- (ambiguity is how string surgery corrupts files silently).
