@@ -7,9 +7,11 @@ source), **total and ground by construction**, compared JIT-vs-eval.
 
 - Test file: `tidepool-codegen/tests/proptest_ghc_idioms.rs`
 - Seeds: `tidepool-codegen/tests/proptest_ghc_idioms.proptest-regressions`
-- Run: `cargo test -p tidepool-codegen --test proptest_ghc_idioms -- --test-threads=1`
-  (single-threaded is required: the B3 oracle `fork()`s per case, and forking a
-  multithreaded test runner risks a malloc-lock deadlock in the child.)
+- Run: `cargo test -p tidepool-codegen --test proptest_ghc_idioms` (the bare
+  command is safe: the 5 properties + `zzz_reach_floor` are `#[serial]`, so the
+  B3 `fork()`-per-case oracle never runs concurrently with another heavy JIT
+  thread — which would otherwise risk a malloc-lock deadlock in the forked child.
+  `RUST_MIN_STACK=8388608` recommended for the deep-recursion JoinRec cases.)
 
 ## Method
 
