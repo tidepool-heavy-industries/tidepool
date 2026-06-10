@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b2d5850a54a189ebdbb5ba9ed858774516944b55d49badbfe1ce4ea478ce73a9 # shrinks to spec = JoinCrossSpec { n_lead: 0, rhs_hole: Lit(0), arg: 0, arg2: 0, a: 0, b: 0, branchy: false, nested: false }

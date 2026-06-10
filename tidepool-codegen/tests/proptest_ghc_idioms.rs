@@ -1209,7 +1209,7 @@ proptest! {
 /// component: join-point compilation (`tidepool-codegen/src/emit/join.rs`)
 /// skeleton:  JoinCrossLambda, fully shrunk
 ///            (n_lead=0, branchy=false, nested=false, all holes/args = 0)
-/// seed:      tidepool-codegen/tests/proptest_ghc_idioms.txt.proptest-regressions
+/// seed:      tidepool-codegen/tests/proptest_ghc_idioms.proptest-regressions
 ///            cc b2d5850a54a189ebdbb5ba9ed858774516944b55d49badbfe1ce4ea478ce73a9
 ///
 /// 11 nodes. Shape:

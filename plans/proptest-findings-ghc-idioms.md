@@ -6,7 +6,7 @@ boxing). Programs are hand-built `RecursiveTree<CoreFrame>` IR (no Haskell
 source), **total and ground by construction**, compared JIT-vs-eval.
 
 - Test file: `tidepool-codegen/tests/proptest_ghc_idioms.rs`
-- Seeds: `tidepool-codegen/tests/proptest_ghc_idioms.txt.proptest-regressions`
+- Seeds: `tidepool-codegen/tests/proptest_ghc_idioms.proptest-regressions`
 - Run: `cargo test -p tidepool-codegen --test proptest_ghc_idioms -- --test-threads=1`
   (single-threaded is required: the B3 oracle `fork()`s per case, and forking a
   multithreaded test runner risks a malloc-lock deadlock in the child.)
