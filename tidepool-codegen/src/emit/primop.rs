@@ -656,6 +656,14 @@ pub fn emit_primop(
             let a = unbox_double(sess.pipeline, builder, sess.vmctx, args[0]);
             Ok(SsaVal::Raw(builder.ins().fabs(a), LIT_TAG_DOUBLE))
         }
+        PrimOpKind::FfiRintDouble => {
+            // ghc-internal:rintDouble (C rint): round to nearest, ties to even.
+            // Cranelift's `nearest` has exactly these semantics — pure codegen,
+            // no host call. Unblocks GHC's specialized round @Double @Int.
+            check_arity(op, 1, args.len())?;
+            let a = unbox_double(sess.pipeline, builder, sess.vmctx, args[0]);
+            Ok(SsaVal::Raw(builder.ins().nearest(a), LIT_TAG_DOUBLE))
+        }
         // Double math unary: sqrt, exp, log, trig, etc. All via libm runtime calls.
         PrimOpKind::DoubleSqrt => {
             check_arity(op, 1, args.len())?;

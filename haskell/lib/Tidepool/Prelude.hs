@@ -162,7 +162,7 @@ import Prelude
   , fromEnum
   , mapM, mapM_, sequence, sequence_
   )
-import qualified Prelude as P (show, drop, length, null, dropWhile)
+import qualified Prelude as P (show, drop, length, null, dropWhile, round)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Char (ord, chr)
@@ -532,19 +532,12 @@ last []     = error "last: empty list"
 -- #155: Monomorphic even/odd shadows removed — GHC specialization
 -- (re-enabled) eliminates Integral dictionary passing at compile time.
 
--- Monomorphic round :: Double -> Int.
--- GHC specializes round @Double @Int but the specialized version calls
--- rintDouble (FFI to C's rint()), which we don't support. This shadow
--- avoids the FFI call entirely.
+-- Monomorphic round :: Double -> Int (keeps defaulting simple).
+-- The JIT now supports rintDouble (FfiRintDouble -> Cranelift `nearest`,
+-- round-to-nearest-ties-even), so this delegates to base's specialized
+-- round instead of a manual banker's-rounding reimplementation.
 round :: Double -> Int
-round d =
-  let n = truncate d :: Int
-      f = d - fromIntegral n  -- fractional part
-      af = if f < 0.0 then negate f else f
-  in if af < 0.5 then n
-     else if af > 0.5 then (if f > 0.0 then n + 1 else n - 1)
-     else if even n then n  -- banker's rounding: round to even on .5
-          else (if f > 0.0 then n + 1 else n - 1)
+round = P.round
 {-# INLINE round #-}
 
 -- | Zip three lists with a function.

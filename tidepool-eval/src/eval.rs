@@ -1683,6 +1683,20 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         }
 
         // --- FFI intrinsics ---
+        PrimOpKind::FfiRintDouble => {
+            // ghc-internal:rintDouble (C rint): round to nearest, ties to even.
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_double(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble(
+                a.round_ties_even().to_bits(),
+            )))
+        }
         PrimOpKind::FfiStrlen => {
             // strlen(Addr#) -> Int#: count bytes until null terminator
             let bytes = match &args[0] {

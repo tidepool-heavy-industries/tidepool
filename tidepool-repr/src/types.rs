@@ -247,6 +247,7 @@ define_primops! {
     QuotRemWordVal => "QuotRemWordVal", "quotRemWord#_val";
     QuotRemWordRem => "QuotRemWordRem", "quotRemWord#_rem";
     FfiStrlen => "FfiStrlen", "ffi_strlen";
+    FfiRintDouble => "FfiRintDouble", "ffi_rint_double";
     FfiTextMeasureOff => "FfiTextMeasureOff", "ffi_text_measure_off";
     FfiTextMemchr => "FfiTextMemchr", "ffi_text_memchr";
     FfiTextReverse => "FfiTextReverse", "ffi_text_reverse";

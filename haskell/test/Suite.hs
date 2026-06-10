@@ -761,3 +761,17 @@ concatmap_empty_segments =
       myLen [] = 0 :: Int
       myLen (_:xs) = (1 :: Int) + myLen xs
   in myLen (myconcatMap evenOnly (take (10 :: Int) naturals))
+
+-- FfiRintDouble (rintDouble FFI -> Cranelift nearest / round_ties_even):
+-- base's specialized round @Double @Int now works; Prelude round delegates.
+round_banker_half :: Int
+round_banker_half = round (2.5 :: Double)
+
+round_banker_threehalf :: Int
+round_banker_threehalf = round (3.5 :: Double)
+
+round_simple_up :: Int
+round_simple_up = round (3.7 :: Double)
+
+round_negative_half :: Int
+round_negative_half = round (-2.5 :: Double)

@@ -529,6 +529,10 @@ suite_bool!(prelude_eq_string_false, false);
 // Lazy filter and nubBy regression tests
 // =============================================================================
 
+suite_int!(round_banker_half, 2);
+suite_int!(round_banker_threehalf, 4);
+suite_int!(round_simple_up, 4);
+suite_int!(round_negative_half, -2);
 suite_int!(lazy_filter_infinite, 20);
 suite_int!(lazy_nubby_infinite, 5);
 suite_int!(nubby_dedup_finite, 4);

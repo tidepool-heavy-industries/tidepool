@@ -1493,6 +1493,7 @@ isRealWorldVar v = occNameString (nameOccName (idName v)) == "realWorld#"
 mapFfiCall :: String -> Text
 mapFfiCall pprName
   | "strlen" `isInfixOf` pprName                = T.pack "FfiStrlen"
+  | "rintDouble" `isInfixOf` pprName            = T.pack "FfiRintDouble"
   | "_hs_text_measure_off" `isInfixOf` pprName  = T.pack "FfiTextMeasureOff"
   | "_hs_text_memchr" `isInfixOf` pprName       = T.pack "FfiTextMemchr"
   | "_hs_text_reverse" `isInfixOf` pprName      = T.pack "FfiTextReverse"

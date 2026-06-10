@@ -129,3 +129,16 @@ result = if (3 :: Int) > 2 then terror sharedMsg else 0
     let err = r.expect_err("error call must fail");
     assert!(err.contains("floated-message-77"), "message dropped: {err}");
 }
+
+#[test]
+fn round_banker_via_jit() {
+    // FfiRintDouble: GHC's specialized round @Double @Int routes through
+    // rintDouble, now emitted as Cranelift `nearest` (ties to even).
+    let r = run_capture(
+        r#"
+result :: [Int]
+result = [round (2.5 :: Double), round (3.5 :: Double), round (3.7 :: Double), round (-2.5 :: Double)]
+"#,
+    );
+    assert_eq!(r.ok(), Some(serde_json::json!([2, 4, 4, -2])));
+}
