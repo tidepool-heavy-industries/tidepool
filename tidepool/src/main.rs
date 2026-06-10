@@ -305,7 +305,7 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                     .map(|e| e.file_name().to_string_lossy().to_string())
                     .collect();
                 entries.sort();
-                cx.respond_stream(entries)
+                cx.respond_list(entries)
             }
             FsReq::Glob(pattern) => {
                 let paths = self.expand_glob(&pattern)?;
@@ -317,7 +317,7 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                             .map(|r| r.to_string_lossy().to_string())
                     })
                     .collect();
-                cx.respond_stream(rel_paths)
+                cx.respond_list(rel_paths)
             }
             FsReq::Grep(regex_str, pattern) => {
                 let re = regex::Regex::new(&regex_str)
@@ -368,7 +368,7 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                     ));
                 }
 
-                cx.respond_stream(results)
+                cx.respond_list(results)
             }
             FsReq::Exists(path) => {
                 let resolved = self.resolve(&path)?;
@@ -664,11 +664,11 @@ impl EffectHandler<CapturedOutput> for SgHandler {
         match req {
             SgReq::Find(lang, pattern, paths) => {
                 let matches = self.run_find(lang, &pattern, &paths, None)?;
-                cx.respond_stream(matches)
+                cx.respond_list(matches)
             }
             SgReq::RuleFind(lang, rule_json, paths) => {
                 let matches = self.run_rule_find(lang, &rule_json, &paths, None, cx.table())?;
-                cx.respond_stream(matches)
+                cx.respond_list(matches)
             }
         }
     }

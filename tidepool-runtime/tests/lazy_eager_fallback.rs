@@ -42,7 +42,7 @@ impl DispatchEffect<()> for BigListDispatcher {
         cx: &tidepool_effect::EffectContext<'_, ()>,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         let items: Vec<String> = (0..self.n).map(|i| format!("item-{i}")).collect();
-        cx.respond(items)
+        cx.respond_list(items)
     }
 }
 

@@ -10,14 +10,48 @@ mod common;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use tidepool_bridge::{BridgeError, ToCore};
 use tidepool_bridge_derive::FromCore;
-use tidepool_effect::{EffectContext, EffectError, EffectHandler, Response};
+use tidepool_effect::{
+    EffectContext, EffectError, EffectHandler, Response, ValueSource, ValueStream,
+};
+use tidepool_eval::value::Value;
+use tidepool_repr::DataConTable;
 use tidepool_runtime::compile_and_run;
 
 #[derive(FromCore)]
 enum ListingReq {
     #[core(name = "GetList")]
     GetList,
+}
+
+/// An indexed source whose element CONVERSIONS are observable — the
+/// stage-3a probe. (ToCore is sealed, so counting happens at the
+/// ValueSource layer, through the `from_source` escape hatch.)
+struct CountingSource {
+    items: Vec<String>,
+    pos: usize,
+    conversions: Arc<AtomicUsize>,
+}
+
+impl ValueSource for CountingSource {
+    fn next_value(&mut self, table: &DataConTable) -> Option<Result<Value, BridgeError>> {
+        let item = self.items.get(self.pos)?;
+        self.pos += 1;
+        self.conversions.fetch_add(1, Ordering::Relaxed);
+        Some(item.to_value(table))
+    }
+
+    fn len(&self) -> Option<usize> {
+        Some(self.items.len())
+    }
+
+    fn get(&self, idx: usize, table: &DataConTable) -> Option<Result<Value, BridgeError>> {
+        self.items.get(idx).map(|x| {
+            self.conversions.fetch_add(1, Ordering::Relaxed);
+            x.to_value(table)
+        })
+    }
 }
 
 /// What the handler streams, per test scenario.
@@ -28,6 +62,11 @@ enum Source {
     Infinite,
     /// Panics when element `at` is pulled.
     PanicsAt { at: usize },
+    /// respond_list (indexed; element-thunk heads), counting CONVERSIONS.
+    IndexedList {
+        n: usize,
+        conversions: Arc<AtomicUsize>,
+    },
 }
 
 struct StreamListing {
@@ -54,6 +93,22 @@ impl EffectHandler for StreamListing {
                         assert!(i != at, "producer exploded at element {at}");
                         format!("item-{i}")
                     }))
+                }
+                Source::IndexedList { n, conversions } => {
+                    let items: Vec<String> = (0..*n).map(|i| format!("item-{i}")).collect();
+                    let cons =
+                        tidepool_bridge::get_resilient(cx.table(), ":", 2).expect("cons in table");
+                    let nil =
+                        tidepool_bridge::get_resilient(cx.table(), "[]", 0).expect("nil in table");
+                    Ok(Response::Stream(ValueStream::from_source(
+                        Box::new(CountingSource {
+                            items,
+                            pos: 0,
+                            conversions: conversions.clone(),
+                        }),
+                        cons,
+                        nil,
+                    )))
                 }
             },
         }
@@ -174,6 +229,79 @@ fn producer_panic_is_clean_error() {
         err.contains("panicked") || err.contains("exploded"),
         "expected producer panic surfaced, got: {err}"
     );
+}
+
+// ===== stage 3a: element-level laziness (respond_list / indexed sources) ==
+
+#[test]
+fn list_take_converts_exactly_three() {
+    // Element thunks: take 3 of 12k forces three HEADS — three conversions,
+    // not a 256-element chunk, not 12,000.
+    let conversions = Arc::new(AtomicUsize::new(0));
+    let r = run_stream(
+        "  xs <- send GetList\n  pure (take 3 xs)",
+        Source::IndexedList {
+            n: 12_000,
+            conversions: conversions.clone(),
+        },
+    );
+    assert_eq!(
+        r.ok(),
+        Some(serde_json::json!(["item-0", "item-1", "item-2"]))
+    );
+    assert_eq!(conversions.load(Ordering::Relaxed), 3);
+}
+
+#[test]
+fn list_length_converts_nothing() {
+    // length walks the spine without ever forcing a head: ZERO element
+    // conversions for a 12k listing.
+    let conversions = Arc::new(AtomicUsize::new(0));
+    let r = run_stream(
+        "  xs <- send GetList\n  pure (length xs)",
+        Source::IndexedList {
+            n: 12_000,
+            conversions: conversions.clone(),
+        },
+    );
+    assert_eq!(r.ok(), Some(serde_json::json!(12_000)));
+    assert_eq!(conversions.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn list_filter_forces_all() {
+    // Contrast: a filter inspects every head — all elements convert.
+    let conversions = Arc::new(AtomicUsize::new(0));
+    let r = run_stream(
+        "  xs <- send GetList\n  pure (length (filter (\\x -> \"item-1\" `isPrefixOf` x) xs))",
+        Source::IndexedList {
+            n: 1_000,
+            conversions: conversions.clone(),
+        },
+    );
+    // decimal-starts-with-1 in 0..1000: 1+10+100
+    assert_eq!(r.ok(), Some(serde_json::json!(111)));
+    assert_eq!(conversions.load(Ordering::Relaxed), 1_000);
+}
+
+#[test]
+fn list_whole_result_round_trips() {
+    // The whole indexed list as the program result: every element thunk is
+    // forced by the result bridge; renderer truncates at 10k + "...".
+    let conversions = Arc::new(AtomicUsize::new(0));
+    let r = run_stream(
+        "  xs <- send GetList\n  pure xs",
+        Source::IndexedList {
+            n: 12_000,
+            conversions: conversions.clone(),
+        },
+    );
+    let arr = r.expect("whole-list result must succeed");
+    let arr = arr.as_array().expect("expected JSON array");
+    assert_eq!(arr.len(), 10_001);
+    assert_eq!(arr[0], serde_json::json!("item-0"));
+    assert_eq!(arr[10_000], serde_json::json!("..."));
+    assert_eq!(conversions.load(Ordering::Relaxed), 12_000);
 }
 
 #[test]

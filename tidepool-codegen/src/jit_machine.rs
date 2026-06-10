@@ -349,9 +349,7 @@ impl JitEffectMachine {
                                     // chunk materializer for both channels.
                                     let items = dismantle_list_spine(resp_val, len);
                                     Plan::Park(crate::host_fns::ParkedStream {
-                                        source: Box::new(crate::host_fns::ReadySource(
-                                            items.into_iter(),
-                                        )),
+                                        source: Box::new(crate::host_fns::ReadySource::new(items)),
                                         cons_tag,
                                         nil_tag,
                                         // Pre-converted: table never consulted.
@@ -402,6 +400,7 @@ impl JitEffectMachine {
                                     crate::host_fns::alloc_stream_tail_thunk(
                                         machine.vmctx_mut(),
                                         id,
+                                        0,
                                     )
                                 })
                             }

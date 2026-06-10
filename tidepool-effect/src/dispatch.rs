@@ -61,13 +61,32 @@ impl std::fmt::Debug for ValueStream {
 /// The [`DataConTable`] is an *argument* to production rather than captured
 /// state, so sources need no `'static` table access and the machine
 /// provides its own table at chunk-materialization time.
+///
+/// Sources come in two strengths. Every source supports sequential
+/// `next_value`. A source that additionally reports `Some(len)` from
+/// [`ValueSource::len`] promises random access via [`ValueSource::get`] —
+/// which lets the machine defer per-ELEMENT conversion behind element
+/// thunks: forcing one list head converts one element, and a `length`
+/// fold that never inspects heads converts nothing at all.
 pub trait ValueSource {
     /// Produce the next element, or `None` when exhausted.
     fn next_value(&mut self, table: &DataConTable) -> Option<Result<Value, BridgeError>>;
+
+    /// Total element count, if this source supports random access.
+    /// `Some(len)` obliges `get(idx)` to return `Some` for all `idx < len`.
+    fn len(&self) -> Option<usize> {
+        None
+    }
+
+    /// Convert the element at `idx` (random-access sources only).
+    fn get(&self, idx: usize, table: &DataConTable) -> Option<Result<Value, BridgeError>> {
+        let _ = (idx, table);
+        None
+    }
 }
 
 /// Adapts any iterator of `ToCore` items into a [`ValueSource`]: elements
-/// convert one at a time, at pull time.
+/// convert one at a time, at pull time. Sequential-only.
 struct IterSource<I>(I);
 
 impl<I> ValueSource for IterSource<I>
@@ -77,6 +96,30 @@ where
 {
     fn next_value(&mut self, table: &DataConTable) -> Option<Result<Value, BridgeError>> {
         self.0.next().map(|x| x.to_value(table))
+    }
+}
+
+/// Random-access source over an owned `Vec`: the machine defers element
+/// conversion behind per-element thunks. The cursor serves the sequential
+/// (kill-switch drain) path.
+struct VecSource<T> {
+    items: Vec<T>,
+    pos: usize,
+}
+
+impl<T: ToCore> ValueSource for VecSource<T> {
+    fn next_value(&mut self, table: &DataConTable) -> Option<Result<Value, BridgeError>> {
+        let item = self.items.get(self.pos)?;
+        self.pos += 1;
+        Some(item.to_value(table))
+    }
+
+    fn len(&self) -> Option<usize> {
+        Some(self.items.len())
+    }
+
+    fn get(&self, idx: usize, table: &DataConTable) -> Option<Result<Value, BridgeError>> {
+        self.items.get(idx).map(|x| x.to_value(table))
     }
 }
 
@@ -121,19 +164,35 @@ impl<'a, U> EffectContext<'a, U> {
     /// chunk-by-chunk as the Haskell program demands them. `take k` of a huge
     /// listing only ever converts ~one chunk; an infinite iterator is a
     /// legitimate infinite list. See [`ValueStream`] for the semantics note
-    /// on live-IO iterators.
+    /// on live-IO iterators. If you hold a `Vec`, prefer [`Self::respond_list`]
+    /// — it additionally defers per-ELEMENT conversion.
     pub fn respond_stream<I>(&self, items: I) -> Result<Response, EffectError>
     where
         I: IntoIterator,
         I::IntoIter: 'static,
         I::Item: ToCore,
     {
+        self.stream_response(Box::new(IterSource(items.into_iter())))
+    }
+
+    /// Respond with an owned `Vec`, lazily at ELEMENT granularity: list
+    /// cells materialize in chunks, but each cell's head is a thunk that
+    /// converts its element only when forced (memoized). `take 3` converts
+    /// 3 elements; `length` converts none.
+    pub fn respond_list<T>(&self, items: Vec<T>) -> Result<Response, EffectError>
+    where
+        T: ToCore + 'static,
+    {
+        self.stream_response(Box::new(VecSource { items, pos: 0 }))
+    }
+
+    fn stream_response(&self, source: Box<dyn ValueSource>) -> Result<Response, EffectError> {
         let cons_id = tidepool_bridge::get_resilient(self.table, ":", 2)
             .ok_or_else(|| EffectError::Bridge(BridgeError::UnknownDataConName(":".into())))?;
         let nil_id = tidepool_bridge::get_resilient(self.table, "[]", 0)
             .ok_or_else(|| EffectError::Bridge(BridgeError::UnknownDataConName("[]".into())))?;
         Ok(Response::Stream(ValueStream {
-            source: Box::new(IterSource(items.into_iter())),
+            source,
             cons_id,
             nil_id,
         }))
