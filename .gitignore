@@ -69,3 +69,4 @@ viz/index.html
 !.exo/roles/
 !.exo/lib/
 !.exo/rules/
+.claude/
