@@ -547,6 +547,44 @@ impl SgHandler {
         Ok(())
     }
 
+    /// Build a pattern, rejecting ones that parse with syntax errors —
+    /// those "succeed" and then silently match nothing (the classic
+    /// `pub fn $NAME($$ARGS)` footgun: a signature without a body is not
+    /// a valid parse).
+    fn checked_pattern(pattern: &str, sl: SupportLang) -> Result<Pattern, EffectError> {
+        let pat = Pattern::try_new(pattern, sl)
+            .map_err(|e| EffectError::Handler(format!("invalid pattern: {}", e)))?;
+        if pat.has_error() {
+            return Err(EffectError::Handler(format!(
+                "pattern `{}` parses with syntax errors as {:?} and would likely match \
+                 nothing. Patterns must be valid code fragments — e.g. a bare fn \
+                 signature needs a body (`{} {{ $$$BODY }}`). For definition lookup, \
+                 the rsFn/hsDef recipes (kind + name regex) are the robust path.",
+                pattern, sl, pattern
+            )));
+        }
+        // The OTHER footgun parses cleanly: a bare Rust fn signature is a
+        // valid `function_signature_item` (trait/extern item) — which never
+        // occurs in normal code, so the pattern silently matches nothing.
+        if matches!(sl, SupportLang::Rust) {
+            use ast_grep_core::Matcher as _;
+            let sig_kind = sl.kind_to_id("function_signature_item");
+            if sig_kind != 0 {
+                if let Some(kinds) = pat.potential_kinds() {
+                    if kinds.contains(sig_kind as usize) {
+                        return Err(EffectError::Handler(format!(
+                            "pattern `{}` parses as a fn SIGNATURE (trait/extern item) and \
+                             will not match function definitions. Append a body — \
+                             `{} {{ $$$BODY }}` — or use the rsFn recipe.",
+                            pattern, pattern
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(pat)
+    }
+
     fn run_find(
         &self,
         lang: Lang,
@@ -555,8 +593,7 @@ impl SgHandler {
         rewrite: Option<&str>,
     ) -> Result<Vec<SgMatch>, EffectError> {
         let sl = lang.to_support_lang()?;
-        let pat = Pattern::try_new(pattern, sl)
-            .map_err(|e| EffectError::Handler(format!("invalid pattern: {}", e)))?;
+        let pat = Self::checked_pattern(pattern, sl)?;
         let files = self.collect_files(sl, paths)?;
         let mut results = Vec::new();
 
@@ -617,8 +654,8 @@ impl SgHandler {
             let mut file_count = 0i64;
 
             loop {
-                let pat = Pattern::try_new(pattern, sl)
-                    .map_err(|e| EffectError::Handler(format!("invalid pattern: {}", e)))?;
+                // Rebuilt per iteration: `replace` consumes the pattern.
+                let pat = Self::checked_pattern(pattern, sl)?;
                 match grep.replace(pat, rewrite) {
                     Ok(true) => file_count += 1,
                     Ok(false) => break,
@@ -1603,6 +1640,41 @@ mod tests {
             .collect();
         assert!(names.iter().any(|n| n.ends_with("top.txt")), "{names:?}");
         assert!(names.iter().any(|n| n.ends_with("deep.txt")), "{names:?}");
+    }
+
+    #[test]
+    fn test_sg_bare_signature_pattern_rejected() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("t.rs"), "pub fn run_find(x: i64) -> i64 { x }\n").unwrap();
+
+        let mut handler = SgHandler::new(root);
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+
+        // The classic footgun: a fn signature without a body. Previously
+        // "succeeded" with zero matches; now a guided error.
+        let req = SgReq::Find(
+            Lang::Rust,
+            "pub fn $NAME($$ARGS)".into(),
+            vec!["t.rs".into()],
+        );
+        let err = handler.handle(req, &cx).expect_err("bare signature must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("SIGNATURE"), "{msg}");
+        assert!(msg.contains("rsFn"), "{msg}");
+
+        // With a body the same intent WORKS.
+        let req = SgReq::Find(
+            Lang::Rust,
+            "pub fn $NAME($$ARGS) -> $RET { $$$BODY }".into(),
+            vec!["t.rs".into()],
+        );
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
+        let n = res.node_count();
+        assert!(n > 1, "expected a match, got {res:?}");
     }
 
     #[test]
