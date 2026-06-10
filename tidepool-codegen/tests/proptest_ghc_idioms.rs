@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use proptest::prelude::*;
 use proptest::test_runner::Config;
+use serial_test::serial;
 
 use tidepool_repr::types::{Alt, AltCon, DataConId, JoinId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
@@ -1146,6 +1147,7 @@ proptest! {
     #![proptest_config(cfg())]
 
     #[test]
+    #[serial]
     fn prop_letrec_siblings(spec in arb_letrec()) {
         let expr = build_letrec(&spec);
         prop_assert!(expr.nodes.len() <= 400);
@@ -1157,6 +1159,7 @@ proptest! {
     #![proptest_config(cfg())]
 
     #[test]
+    #[serial]
     fn prop_case_of_case(spec in arb_case_of_case()) {
         let expr = build_case_of_case(&spec);
         run_oracles(expr)?;
@@ -1167,6 +1170,7 @@ proptest! {
     #![proptest_config(cfg())]
 
     #[test]
+    #[serial]
     fn prop_joinrec(spec in arb_joinrec()) {
         let expr = build_joinrec(&spec);
         run_oracles(expr)?;
@@ -1177,6 +1181,7 @@ proptest! {
     #![proptest_config(cfg())]
 
     #[test]
+    #[serial]
     fn prop_boxchain(spec in arb_boxchain()) {
         let expr = build_boxchain(&spec);
         run_oracles(expr)?;
@@ -1187,6 +1192,7 @@ proptest! {
     #![proptest_config(cfg())]
 
     #[test]
+    #[serial]
     fn prop_joincross(spec in arb_joincross()) {
         let expr = build_joincross(&spec);
         run_oracles(expr)?;
@@ -1291,6 +1297,7 @@ fn bug1_join_crosses_lambda() {
 /// must have reached value comparison. Run this LAST (proptest test order within
 /// a file is alphabetical, so the `zzz_` prefix orders it after the others).
 #[test]
+#[serial]
 fn zzz_reach_floor() {
     let total = TOTAL.load(Ordering::Relaxed);
     let reached = REACHED.load(Ordering::Relaxed);
