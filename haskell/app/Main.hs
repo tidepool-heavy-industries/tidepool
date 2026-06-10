@@ -6,12 +6,13 @@ import System.Directory (createDirectoryIfMissing)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
-import Control.Exception (evaluate, try, SomeException)
+import Control.Exception (evaluate, try, SomeException, fromException)
 import Data.List (isPrefixOf)
 import Control.Monad (foldM)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
 
+import GHC.Types.SourceError (SourceError)
 import GHC.Core (CoreBind, Bind(..))
 import GHC.Core.DataCon (DataCon)
 import GHC.Types.Name (nameOccName, isExternalName)
@@ -202,7 +203,9 @@ processFile args path = do
 
   case res of
     Left (e :: SomeException) -> do
-      hPutStrLn stderr $ "Error: " ++ show e
+      case fromException e of
+        Just (_ :: SourceError) -> hPutStrLn stderr "Compilation failed."
+        Nothing -> hPutStrLn stderr $ "Error: " ++ show e
       exitFailure
     Right () -> return ()
 
