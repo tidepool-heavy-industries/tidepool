@@ -882,6 +882,172 @@ pub fn error_poison_ptr_lazy(kind: u64) -> *mut u8 {
     ptrs[kind.min(4) as usize] as *mut u8
 }
 
+/// Raise a runtime error whose message is materialized from a live heap value.
+/// Called by JIT Raise sites whose message wasn't statically extractable
+/// (floated bindings, thunk-subtree captures, dynamically built messages).
+/// Handles String literals, Text constructors, and String cons-lists; falls
+/// back to a message-less error on any other shape.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn runtime_error_dynamic(vmctx: *mut VMContext, kind: u64, arg: *mut u8) -> *mut u8 {
+    // SAFETY: vmctx and arg come from JIT code; arg may be null.
+    let msg = unsafe { materialize_message(vmctx, arg) };
+    match msg {
+        Some(bytes) if !bytes.is_empty() => {
+            // runtime_error_with_msg copies the bytes into an owned String.
+            runtime_error_with_msg(kind, bytes.as_ptr(), bytes.len() as u64)
+        }
+        _ => runtime_error(kind),
+    }
+}
+
+/// Best-effort conversion of a heap value into UTF-8 message bytes.
+/// Forces thunks as needed; all locals held across forces are registered as
+/// GC roots (forcing can collect, and host frames are invisible to the
+/// frame walker).
+///
+/// # Safety
+/// `vmctx` must be valid; `arg` must be null or a valid heap object.
+unsafe fn materialize_message(vmctx: *mut VMContext, arg: *mut u8) -> Option<Vec<u8>> {
+    const MAX_MSG_BYTES: usize = 4096;
+    if vmctx.is_null() || arg.is_null() {
+        return None;
+    }
+
+    let mark = rust_roots_mark();
+    let mut cur: *mut u8 = arg;
+    let mut tmp: *mut u8 = std::ptr::null_mut();
+    register_rust_root(&mut cur as *mut *mut u8);
+    register_rust_root(&mut tmp as *mut *mut u8);
+
+    // Reads an Int/Char payload, looking through an I#/C# box.
+    // Does not force; callers force into `tmp` first.
+    let read_small_int = |p: *mut u8| -> Option<i64> {
+        match heap_layout::read_tag(p) {
+            t if t == tidepool_heap::layout::TAG_LIT => {
+                Some(*(p.add(tidepool_heap::layout::LIT_VALUE_OFFSET) as *const i64))
+            }
+            t if t == tidepool_heap::layout::TAG_CON => {
+                let nf = *(p.add(tidepool_heap::layout::CON_NUM_FIELDS_OFFSET) as *const u16);
+                if nf == 1 {
+                    let f0 = *(p.add(tidepool_heap::layout::CON_FIELDS_OFFSET) as *const *mut u8);
+                    if !f0.is_null() && heap_layout::read_tag(f0) == tidepool_heap::layout::TAG_LIT
+                    {
+                        return Some(
+                            *(f0.add(tidepool_heap::layout::LIT_VALUE_OFFSET) as *const i64),
+                        );
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    };
+
+    let read_lit_string = |p: *mut u8| -> Option<Vec<u8>> {
+        if heap_layout::read_tag(p) != tidepool_heap::layout::TAG_LIT {
+            return None;
+        }
+        let lit_tag = *p.add(tidepool_heap::layout::LIT_TAG_OFFSET);
+        if lit_tag != 5 {
+            // LIT_TAG_STRING
+            return None;
+        }
+        let raw = *(p.add(tidepool_heap::layout::LIT_VALUE_OFFSET) as *const *const u8);
+        if raw.is_null() {
+            return None;
+        }
+        let len = (*(raw as *const u64) as usize).min(MAX_MSG_BYTES);
+        Some(std::slice::from_raw_parts(raw.add(8), len).to_vec())
+    };
+
+    let result = (|| -> Option<Vec<u8>> {
+        if is_lazy_poison(cur) {
+            return None;
+        }
+        cur = heap_force(vmctx, cur);
+        if has_runtime_error() {
+            return None;
+        }
+
+        // Bare string literal.
+        if let Some(bytes) = read_lit_string(cur) {
+            return Some(bytes);
+        }
+
+        if heap_layout::read_tag(cur) != tidepool_heap::layout::TAG_CON {
+            return None;
+        }
+        let nf = *(cur.add(tidepool_heap::layout::CON_NUM_FIELDS_OFFSET) as *const u16);
+
+        // Text bytes offset len — field 0 holds the byte buffer.
+        if nf == 3 {
+            tmp = *(cur.add(tidepool_heap::layout::CON_FIELDS_OFFSET) as *const *mut u8);
+            if tmp.is_null() {
+                return None;
+            }
+            tmp = heap_force(vmctx, tmp);
+            let bytes = read_lit_string(tmp)?;
+            // Re-read offset/len AFTER the force above (cur may have moved).
+            let f1 = *(cur.add(tidepool_heap::layout::CON_FIELDS_OFFSET + 8) as *const *mut u8);
+            let f2 = *(cur.add(tidepool_heap::layout::CON_FIELDS_OFFSET + 16) as *const *mut u8);
+            let off = read_small_int(f1)? as usize;
+            let len = read_small_int(f2)? as usize;
+            if off <= bytes.len() {
+                let end = (off + len).min(bytes.len());
+                return Some(bytes[off..end].to_vec());
+            }
+            return None;
+        }
+
+        // String cons-list of Chars.
+        let mut out: Vec<u8> = Vec::new();
+        loop {
+            let tag = heap_layout::read_tag(cur);
+            if tag != tidepool_heap::layout::TAG_CON {
+                break;
+            }
+            let nf = *(cur.add(tidepool_heap::layout::CON_NUM_FIELDS_OFFSET) as *const u16);
+            if nf != 2 {
+                break; // nil (0 fields) or not a list shape
+            }
+            tmp = *(cur.add(tidepool_heap::layout::CON_FIELDS_OFFSET) as *const *mut u8);
+            if tmp.is_null() {
+                break;
+            }
+            tmp = heap_force(vmctx, tmp);
+            if has_runtime_error() {
+                break;
+            }
+            let Some(c) = read_small_int(tmp) else { break };
+            let Some(ch) = char::from_u32(c as u32) else {
+                break;
+            };
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            if out.len() >= MAX_MSG_BYTES {
+                break;
+            }
+            // Re-read the tail AFTER forcing the head (cur may have moved).
+            let next = *(cur.add(tidepool_heap::layout::CON_FIELDS_OFFSET + 8) as *const *mut u8);
+            if next.is_null() {
+                break;
+            }
+            cur = heap_force(vmctx, next);
+            if has_runtime_error() {
+                break;
+            }
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    })();
+
+    truncate_rust_roots(mark);
+    result
+}
+
 /// Check whether a heap object is a lazy poison closure (⊥ with a deferred
 /// error). Used by the heap bridge: converting ⊥ to a `Value` is a genuine
 /// demand, so the bridge invokes the trampoline to raise the deferred error
@@ -1781,6 +1947,7 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
             "runtime_error_with_msg",
             runtime_error_with_msg as *const u8,
         ),
+        ("runtime_error_dynamic", runtime_error_dynamic as *const u8),
         ("debug_app_check", debug_app_check as *const u8),
         ("trampoline_resolve", trampoline_resolve as *const u8),
         (
