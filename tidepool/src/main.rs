@@ -179,6 +179,24 @@ fn pattern_mentions(pattern: &str, dir: &str) -> bool {
     pattern.split(['/', '\\']).any(|c| c == dir)
 }
 
+/// Ripgrep-style default exclusions: skip paths containing a default-ignored
+/// directory (build artifacts) or any HIDDEN component (dot-prefixed — VCS
+/// stores, tool worktrees, caches), unless the glob pattern explicitly names
+/// that component (e.g. `.tidepool/lib/*.hs` still traverses `.tidepool`).
+fn component_filter(pattern: &str, rel_path: &std::path::Path) -> bool {
+    for component in rel_path.components() {
+        if let std::path::Component::Normal(name) = component {
+            let name_str = name.to_string_lossy();
+            let excluded =
+                DEFAULT_IGNORE_DIRS.contains(&name_str.as_ref()) || name_str.starts_with('.');
+            if excluded && !pattern_mentions(pattern, &name_str) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[derive(Clone)]
 struct FsHandler {
     root: PathBuf,
@@ -204,12 +222,6 @@ impl FsHandler {
             .canonicalize()
             .map_err(|e| EffectError::Handler(e.to_string()))?;
 
-        let ignored_but_mentioned: Vec<&str> = DEFAULT_IGNORE_DIRS
-            .iter()
-            .filter(|&&dir| pattern_mentions(pattern, dir))
-            .copied()
-            .collect();
-
         let paths: Vec<PathBuf> = glob::glob(&full_pattern)
             .map_err(|e| EffectError::Handler(format!("invalid glob: {}", e)))?
             .filter_map(|e| e.ok())
@@ -220,17 +232,7 @@ impl FsHandler {
             })
             .filter(|p| {
                 let rel_path = p.strip_prefix(&self.root).unwrap_or(p);
-                for component in rel_path.components() {
-                    if let std::path::Component::Normal(name) = component {
-                        let name_str = name.to_string_lossy();
-                        if DEFAULT_IGNORE_DIRS.contains(&name_str.as_ref())
-                            && !ignored_but_mentioned.contains(&name_str.as_ref())
-                        {
-                            return false;
-                        }
-                    }
-                }
-                true
+                component_filter(pattern, rel_path)
             })
             .collect();
         Ok(paths)
@@ -1458,6 +1460,41 @@ mod tests {
         assert!(pattern_mentions("target/**/*.rs", "target"));
         assert!(pattern_mentions("foo/target/bar", "target"));
         assert!(!pattern_mentions("retarget/foo", "target"));
+    }
+
+    #[test]
+    fn test_component_filter_hidden_dirs() {
+        use std::path::Path;
+        // Hidden dirs skipped by default (worktrees, VCS stores, caches).
+        assert!(!component_filter(
+            "**/*.rs",
+            Path::new(".exo/w1/src/lib.rs")
+        ));
+        assert!(!component_filter("**/*.rs", Path::new(".jj/store/x.rs")));
+        assert!(!component_filter("**/*.rs", Path::new("a/.cache/x.rs")));
+        // Explicit mention re-enables traversal.
+        assert!(component_filter(
+            ".tidepool/lib/*.hs",
+            Path::new(".tidepool/lib/Std.hs")
+        ));
+        assert!(component_filter(
+            ".exo/**/*.rs",
+            Path::new(".exo/w1/src/lib.rs")
+        ));
+        // Default ignore dirs still excluded; mention escapes.
+        assert!(!component_filter("**/*.rs", Path::new("target/debug/x.rs")));
+        assert!(component_filter(
+            "target/**/*.rs",
+            Path::new("target/debug/x.rs")
+        ));
+        // Plain paths pass.
+        assert!(component_filter(
+            "**/*.rs",
+            Path::new("tidepool-repr/src/lib.rs")
+        ));
+        // Hidden FILE (not just dir) also skipped unless mentioned.
+        assert!(!component_filter("**/*", Path::new("src/.hidden")));
+        assert!(component_filter(".gitignore", Path::new(".gitignore")));
     }
 
     #[test]
