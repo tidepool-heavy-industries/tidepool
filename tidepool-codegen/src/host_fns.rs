@@ -1944,6 +1944,182 @@ pub extern "C" fn runtime_double_power(bits_a: i64, bits_b: i64) -> i64 {
     a.powf(b).to_bits() as i64
 }
 
+// ---------------------------------------------------------------------------
+// Lazy effect-result materialization
+//
+// Large list-shaped effect responses are not converted to heap cells eagerly.
+// Instead the dispatcher parks the flattened elements in a thread-local
+// registry and responds with a single thunk whose code pointer is the HOST
+// function `lazy_list_chunk` (precedent: poison trampolines — `heap_force`
+// calls thunk entries through a transmute and cannot tell host from JIT).
+// Forcing the tail materializes the next CHUNK elements and a fresh tail
+// thunk. `take k` over a huge glob materializes one chunk ever; full folds
+// stream chunks through the (growing) heap while consumed cells become
+// garbage. The captures are raw ints — GC's evacuation range-check skips
+// non-pointer words, same as the vmctx tail fields.
+// ---------------------------------------------------------------------------
+
+pub(crate) struct LazyList {
+    pub cons_tag: u64,
+    pub nil_tag: u64,
+    pub items: Vec<tidepool_eval::value::Value>,
+}
+
+thread_local! {
+    static LAZY_RESULTS: RefCell<std::collections::HashMap<u64, LazyList>> =
+        RefCell::new(std::collections::HashMap::new());
+    static LAZY_NEXT_ID: Cell<u64> = const { Cell::new(1) };
+}
+
+/// Park a flattened list response; returns the registry id for the tail thunk.
+pub(crate) fn register_lazy_list(list: LazyList) -> u64 {
+    let id = LAZY_NEXT_ID.with(|c| {
+        let v = c.get();
+        c.set(v + 1);
+        v
+    });
+    LAZY_RESULTS.with(|r| r.borrow_mut().insert(id, list));
+    id
+}
+
+/// Drop all parked lazy results (machine teardown).
+pub(crate) fn clear_lazy_results() {
+    LAZY_RESULTS.with(|r| r.borrow_mut().clear());
+}
+
+/// Nursery allocation from host code with one GC-and-retry. Any heap
+/// pointers the CALLER holds across this call must be RUST_ROOTS-registered.
+///
+/// # Safety
+/// `vmctx` must be valid with a live nursery and GC state installed.
+unsafe fn host_alloc_gc(vmctx: *mut VMContext, size: usize) -> *mut u8 {
+    let p = crate::heap_bridge::bump_alloc_from_vmctx(&mut *vmctx, size);
+    if !p.is_null() {
+        return p;
+    }
+    gc_trigger(vmctx);
+    crate::heap_bridge::bump_alloc_from_vmctx(&mut *vmctx, size)
+}
+
+/// Allocate a lazy-tail thunk carrying (registry id, offset) as raw captures.
+/// Returns null on OOM (caller converts to poison via runtime_oom).
+///
+/// # Safety
+/// `vmctx` must be valid with a live nursery and GC state installed.
+pub(crate) unsafe fn alloc_lazy_tail_thunk(vmctx: *mut VMContext, id: u64, offset: u64) -> *mut u8 {
+    let size = tidepool_heap::layout::THUNK_CAPTURED_OFFSET + 16;
+    let p = host_alloc_gc(vmctx, size);
+    if p.is_null() {
+        return std::ptr::null_mut();
+    }
+    tidepool_heap::layout::write_header(p, tidepool_heap::layout::TAG_THUNK, size as u16);
+    *p.add(tidepool_heap::layout::THUNK_STATE_OFFSET) = tidepool_heap::layout::THUNK_UNEVALUATED;
+    *(p.add(tidepool_heap::layout::THUNK_CODE_PTR_OFFSET) as *mut usize) =
+        lazy_list_chunk as *const () as usize;
+    *(p.add(tidepool_heap::layout::THUNK_CAPTURED_OFFSET) as *mut u64) = id;
+    *(p.add(tidepool_heap::layout::THUNK_CAPTURED_OFFSET + 8) as *mut u64) = offset;
+    p
+}
+
+/// Thunk entry for lazy list tails: materialize the next chunk of elements
+/// as cons cells, terminated by nil or a fresh tail thunk.
+///
+/// # Safety
+/// Called by `heap_force` with a valid vmctx and a thunk allocated by
+/// `alloc_lazy_tail_thunk`.
+unsafe extern "C" fn lazy_list_chunk(vmctx: *mut VMContext, thunk: *mut u8) -> *mut u8 {
+    const CHUNK: usize = 256;
+    // Read captures before any allocation (the thunk may move on GC; its
+    // registered slot lives in heap_force's frame, not ours).
+    let id = *(thunk.add(tidepool_heap::layout::THUNK_CAPTURED_OFFSET) as *const u64);
+    let offset =
+        *(thunk.add(tidepool_heap::layout::THUNK_CAPTURED_OFFSET + 8) as *const u64) as usize;
+
+    let pulled = LAZY_RESULTS.with(|r| {
+        let map = r.borrow();
+        map.get(&id).map(|ll| {
+            let end = (offset + CHUNK).min(ll.items.len());
+            (
+                ll.cons_tag,
+                ll.nil_tag,
+                ll.items[offset..end].to_vec(),
+                end,
+                end >= ll.items.len(),
+            )
+        })
+    });
+    let Some((cons_tag, nil_tag, items, end, exhausted)) = pulled else {
+        let msg = b"lazy effect result: registry entry missing (stale continuation?)";
+        return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+    };
+    if exhausted {
+        LAZY_RESULTS.with(|r| {
+            r.borrow_mut().remove(&id);
+        });
+    }
+
+    let mark = rust_roots_mark();
+    // Terminal: nil constructor or the next tail thunk.
+    let mut tail: *mut u8 = if exhausted {
+        let size = tidepool_heap::layout::CON_FIELDS_OFFSET;
+        let p = host_alloc_gc(vmctx, size);
+        if p.is_null() {
+            truncate_rust_roots(mark);
+            return runtime_oom();
+        }
+        tidepool_heap::layout::write_header(p, tidepool_heap::layout::TAG_CON, size as u16);
+        *(p.add(tidepool_heap::layout::CON_TAG_OFFSET) as *mut u64) = nil_tag;
+        *(p.add(tidepool_heap::layout::CON_NUM_FIELDS_OFFSET) as *mut u16) = 0;
+        p
+    } else {
+        let p = alloc_lazy_tail_thunk(vmctx, id, end as u64);
+        if p.is_null() {
+            truncate_rust_roots(mark);
+            return runtime_oom();
+        }
+        p
+    };
+    register_rust_root(&mut tail as *mut *mut u8);
+
+    // Build cells back-to-front so each cons links the already-built tail.
+    let mut elem: *mut u8 = std::ptr::null_mut();
+    register_rust_root(&mut elem as *mut *mut u8);
+    for v in items.iter().rev() {
+        elem = match crate::heap_bridge::value_to_heap(v, &mut *vmctx) {
+            Ok(p) => p,
+            Err(crate::heap_bridge::BridgeError::NurseryExhausted) => {
+                gc_trigger(vmctx);
+                match crate::heap_bridge::value_to_heap(v, &mut *vmctx) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        truncate_rust_roots(mark);
+                        return runtime_oom();
+                    }
+                }
+            }
+            Err(_) => {
+                truncate_rust_roots(mark);
+                let msg = b"lazy effect result: element conversion failed";
+                return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+            }
+        };
+        let size = tidepool_heap::layout::CON_FIELDS_OFFSET + 16;
+        let cell = host_alloc_gc(vmctx, size);
+        if cell.is_null() {
+            truncate_rust_roots(mark);
+            return runtime_oom();
+        }
+        tidepool_heap::layout::write_header(cell, tidepool_heap::layout::TAG_CON, size as u16);
+        *(cell.add(tidepool_heap::layout::CON_TAG_OFFSET) as *mut u64) = cons_tag;
+        *(cell.add(tidepool_heap::layout::CON_NUM_FIELDS_OFFSET) as *mut u16) = 2;
+        *(cell.add(tidepool_heap::layout::CON_FIELDS_OFFSET) as *mut *mut u8) = elem;
+        *(cell.add(tidepool_heap::layout::CON_FIELDS_OFFSET + 8) as *mut *mut u8) = tail;
+        tail = cell;
+    }
+    truncate_rust_roots(mark);
+    tail
+}
+
 pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
     vec![
         ("gc_trigger", gc_trigger as *const u8),

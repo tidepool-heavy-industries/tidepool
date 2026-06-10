@@ -111,6 +111,7 @@ impl Drop for RegistryGuard {
         crate::host_fns::clear_gc_state();
         crate::host_fns::clear_stack_map_registry();
         crate::host_fns::clear_cancel_flag();
+        crate::host_fns::clear_lazy_results();
         crate::debug::clear_lambda_registry();
         // Clean up remaining thread-local state for same-thread reuse
         let _ = crate::host_fns::take_runtime_error();
@@ -255,19 +256,71 @@ impl JitEffectMachine {
                         break Err(JitError::Yield(crate::yield_type::YieldError::Cancelled));
                     }
 
-                    const MAX_EFFECT_RESPONSE_NODES: usize = 10_000;
-                    let nodes = resp_val.node_count();
-                    if nodes > MAX_EFFECT_RESPONSE_NODES {
-                        break Err(JitError::EffectResponseTooLarge {
-                            nodes,
-                            limit: MAX_EFFECT_RESPONSE_NODES,
-                        });
+                    // Large list-shaped responses materialize LAZILY: park the
+                    // elements host-side and respond with a tail thunk (see
+                    // host_fns lazy-list section). Programs that fold a huge
+                    // result down stream it chunk-by-chunk; `take k` never
+                    // materializes the rest. The node cap remains as a backstop
+                    // for large NON-list responses only.
+                    const LAZY_SPINE_THRESHOLD_NODES: usize = 2_000;
+                    const MAX_EFFECT_RESPONSE_NODES: usize = 100_000;
+                    // Cheap iterative probe: is this a long cons-spine? Avoids
+                    // node_count entirely for the lazy path.
+                    let spine_len = {
+                        let mut n = 0usize;
+                        let mut cur = &resp_val;
+                        loop {
+                            match cur {
+                                tidepool_eval::value::Value::Con(_, fs) if fs.len() == 2 => {
+                                    n += 1;
+                                    if n > LAZY_SPINE_THRESHOLD_NODES {
+                                        break;
+                                    }
+                                    cur = &fs[1];
+                                }
+                                _ => break,
+                            }
+                        }
+                        n
+                    };
+                    let lazy_enabled = std::env::var("TIDEPOOL_LAZY_RESULTS").is_ok();
+                    let lazy_id = if lazy_enabled && spine_len > LAZY_SPINE_THRESHOLD_NODES {
+                        flatten_list_spine(&resp_val).map(|(cons_tag, nil_tag, items)| {
+                            crate::host_fns::register_lazy_list(crate::host_fns::LazyList {
+                                cons_tag,
+                                nil_tag,
+                                items,
+                            })
+                        })
+                    } else {
+                        None
+                    };
+                    if lazy_id.is_none() {
+                        let nodes = resp_val.node_count();
+                        if nodes > MAX_EFFECT_RESPONSE_NODES {
+                            break Err(JitError::EffectResponseTooLarge {
+                                nodes,
+                                limit: MAX_EFFECT_RESPONSE_NODES,
+                            });
+                        }
                     }
                     // SAFETY: Converting a Value back to a heap object in the nursery.
                     // vmctx has sufficient nursery space (GC may have reclaimed).
                     let resp_ptr = unsafe {
-                        crate::signal_safety::with_signal_protection(|| {
-                            heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut())
+                        crate::signal_safety::with_signal_protection(|| match lazy_id {
+                            Some(id) => {
+                                let p = crate::host_fns::alloc_lazy_tail_thunk(
+                                    machine.vmctx_mut(),
+                                    id,
+                                    0,
+                                );
+                                if p.is_null() {
+                                    Err(heap_bridge::BridgeError::NurseryExhausted)
+                                } else {
+                                    Ok(p)
+                                }
+                            }
+                            None => heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut()),
                         })
                     }
                     .map_err(JitError::Signal)?
@@ -423,6 +476,35 @@ fn runtime_error_or_signal(sig: i32) -> crate::yield_type::YieldError {
 }
 
 /// Convert a signal error into a Yield, preferring any pending RuntimeError.
+/// Detect a cons-list spine: a chain of 2-field Cons sharing one DataConId,
+/// terminated by a 0-field Con. Returns (cons_tag, nil_tag, elements).
+/// Tags are read from the spine itself — no DataConTable lookup needed.
+fn flatten_list_spine(
+    val: &tidepool_eval::value::Value,
+) -> Option<(u64, u64, Vec<tidepool_eval::value::Value>)> {
+    use tidepool_eval::value::Value;
+    let mut items = Vec::new();
+    let mut cons_tag: Option<u64> = None;
+    let mut cur = val;
+    loop {
+        match cur {
+            Value::Con(id, fields) if fields.len() == 2 => {
+                match cons_tag {
+                    None => cons_tag = Some(id.0),
+                    Some(t) if t == id.0 => {}
+                    Some(_) => return None, // mixed 2-field constructors: not a list
+                }
+                items.push(fields[0].clone());
+                cur = &fields[1];
+            }
+            Value::Con(id, fields) if fields.is_empty() => {
+                return cons_tag.map(|c| (c, id.0, items));
+            }
+            _ => return None,
+        }
+    }
+}
+
 fn signal_error_to_yield(e: crate::signal_safety::SignalError) -> Yield {
     Yield::Error(runtime_error_or_signal(e.0))
 }
