@@ -3,16 +3,37 @@
 //! For every generated expression, both backends should produce structurally
 //! equal results (or both should error).
 
-use proptest::test_runner::{Config, TestRunner};
+use proptest::test_runner::{Config, TestCaseError, TestRunner};
 use std::cell::Cell;
 use tidepool_codegen::context::VMContext;
 use tidepool_codegen::emit::expr::compile_expr;
 use tidepool_codegen::host_fns;
+use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_eval::{env::Env, eval::eval, heap::VecHeap};
 use tidepool_repr::*;
 use tidepool_testing::compare;
 use tidepool_testing::gen::arb_ground_expr;
+
+/// JIT-only runtime errors that are *expected* divergences from the
+/// tree-walking interpreter on synthetic IR, and therefore NOT bugs:
+///
+/// - `UnresolvedVar`: synthetic `LetRec` with simple inter-referencing RHS —
+///   the interpreter thunks them, the JIT evaluates sequentially. GHC Core
+///   never emits this shape.
+/// - `HeapOverflow`: nursery exhausted after GC; a capacity limit, not a
+///   semantic divergence.
+/// - `StackOverflow`: the JIT evaluates eagerly, so it can overflow where the
+///   lazy interpreter terminates (documented eager-evaluation gap).
+///
+/// Any *other* runtime error raised while the interpreter succeeded is a
+/// reportable B2 divergence and fails the test.
+fn is_whitelisted_jit_error(err: &RuntimeError) -> bool {
+    matches!(
+        err,
+        RuntimeError::UnresolvedVar(_) | RuntimeError::HeapOverflow | RuntimeError::StackOverflow
+    )
+}
 
 /// Compile and run an expression through the JIT, returning the result pointer.
 /// Panics on compilation failure — the generator produces well-typed expressions
@@ -90,8 +111,22 @@ fn interpreter_matches_jit() {
                         (Err(_), None) => {
                             eval_only_error.set(eval_only_error.get() + 1);
                         }
-                        (Ok(_), Some(_)) => {
-                            jit_only_error.set(jit_only_error.get() + 1);
+                        (Ok(eval_val), Some(err)) => {
+                            if is_whitelisted_jit_error(err) {
+                                jit_only_error.set(jit_only_error.get() + 1);
+                            } else {
+                                // B2: the JIT raised a non-whitelisted runtime
+                                // error where the interpreter produced a value.
+                                let forced =
+                                    tidepool_eval::eval::deep_force(eval_val.clone(), &mut heap);
+                                return Err(TestCaseError::fail(format!(
+                                    "B2 JIT-only error outside whitelist.\n\
+                                     Eval Ok: {:?}\nJIT error: {:?}\nExpr: {:#?}",
+                                    forced.ok(),
+                                    err,
+                                    expr
+                                )));
+                            }
                         }
                     }
                     Ok(())
@@ -108,9 +143,15 @@ fn interpreter_matches_jit() {
                  eval_only_error={eval_only_error}, jit_only_error={jit_only_error}, \
                  deep_force_fail={deep_force_fail}"
             );
+            // Measured reach at depth-3 ground (200 cases): compared≈169,
+            // jit_only_error≈31 (all UnresolvedVar / synthetic-LetRec), with
+            // both_error / eval_only_error / deep_force_fail ≈ 0. The floor is
+            // set to 120 — well below the observed ~169 to tolerate per-seed
+            // variance, yet far above the old 50 so a coverage regression
+            // (e.g. most cases silently routed to the error counters) fails.
             assert!(
-                compared >= 50,
-                "Only {compared} of 200 cases reached value comparison"
+                compared >= 120,
+                "Only {compared} of 200 cases reached value comparison (expected ~169)"
             );
         })
         .unwrap();
