@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ee1877d81ac74ed1ac32a5e78a7a6edfce8e078b344c9b118f53130d084337f0 # shrinks to (expr, script) = (RecursiveTree { nodes: [Var(VarId(100)), Lit(LitInt(7)), PrimOp { op: IntAdd, args: [0, 1] }, Con { tag: DataConId(1), fields: [2] }, Lam { binder: VarId(100), body: 3 }, Con { tag: DataConId(3), fields: [4] }, Lit(LitInt(0)), Lit(LitWord(0)), Con { tag: DataConId(5), fields: [7, 6] }, Con { tag: DataConId(2), fields: [8, 5] }] }, [Str("")])
