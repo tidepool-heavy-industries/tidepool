@@ -3474,6 +3474,7 @@ dependencies = [
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
+ "frunk",
  "libc",
  "proptest",
  "recursion",

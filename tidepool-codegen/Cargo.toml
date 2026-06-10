@@ -35,3 +35,9 @@ cc = "1"
 proptest = "1"
 serial_test = "3"
 tidepool-testing = { path = "../tidepool-testing" }
+# Test-only: the real `DispatchEffect` impls live exclusively on frunk's
+# HCons/HNil. proptest_jit_dispatch.rs must drive BOTH the JIT machine and the
+# eval EffectMachine through genuine handler HLists to differentially test the
+# dispatch loop and tag routing; there is no reachable re-export. Dev-dep only —
+# production crate graph is unchanged. See plans/proptest-findings-dispatch.md.
+frunk = "0.4"
