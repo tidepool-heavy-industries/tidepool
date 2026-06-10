@@ -343,12 +343,25 @@ impl CompiledEffectMachine {
             return std::ptr::null_mut();
         }
 
-        let mut k = self.force_ptr(k);
-        if k.is_null() || crate::host_fns::has_runtime_error() {
-            return std::ptr::null_mut();
+        // Entry forces can trigger GC (e.g. a lazy effect-result tail thunk
+        // materializing its first chunk). `k` and `arg` live in this host
+        // frame, invisible to the frame walker — register them as roots or
+        // the continuation tree is collected out from under the loop below.
+        let mut k = k;
+        let mut arg = arg;
+        let entry_mark = crate::host_fns::rust_roots_mark();
+        // SAFETY: slots remain valid until the truncate below.
+        unsafe {
+            crate::host_fns::register_rust_root(&mut k as *mut *mut u8);
+            crate::host_fns::register_rust_root(&mut arg as *mut *mut u8);
         }
-        let mut arg = self.force_ptr(arg);
-        if crate::host_fns::has_runtime_error() {
+        k = self.force_ptr(k);
+        let entry_err = k.is_null() || crate::host_fns::has_runtime_error();
+        if !entry_err {
+            arg = self.force_ptr(arg);
+        }
+        crate::host_fns::truncate_rust_roots(entry_mark);
+        if entry_err || crate::host_fns::has_runtime_error() {
             return std::ptr::null_mut();
         }
 

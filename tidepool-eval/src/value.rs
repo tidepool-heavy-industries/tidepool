@@ -89,10 +89,17 @@ impl std::fmt::Display for Value {
 impl Value {
     /// Count total nodes in a Value tree. O(n) walk used for size checks.
     pub fn node_count(&self) -> usize {
-        match self {
-            Value::Con(_, fields) => 1 + fields.iter().map(|f| f.node_count()).sum::<usize>(),
-            _ => 1,
+        // Iterative: responses can be cons-spines tens of thousands deep;
+        // per-cell recursion overflows small (test/tokio) thread stacks.
+        let mut count = 0usize;
+        let mut stack: Vec<&Value> = vec![self];
+        while let Some(v) = stack.pop() {
+            count += 1;
+            if let Value::Con(_, fields) = v {
+                stack.extend(fields.iter());
+            }
         }
+        count
     }
 }
 
