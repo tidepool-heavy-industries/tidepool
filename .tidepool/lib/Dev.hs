@@ -41,3 +41,17 @@ cargoCheck = do
 -- | git status --short, as lines.
 gitS :: M [Text]
 gitS = shLines "git status --short"
+
+-- | The library's own vocabulary: top-level signatures from every
+-- .tidepool/lib module. Discoverability for future sessions.
+vocab :: M [Text]
+vocab = do
+  mods <- glob ".tidepool/lib/*.hs"
+  sigLists <- mapM sigsOf mods
+  pure (concat sigLists)
+  where
+    sigsOf m = do
+      src <- readFile m
+      let name = replace ".hs" "" (last (splitOn "/" m))
+      let topSig l = " :: " `isInfixOf` l && not (" " `isPrefixOf` l) && not ("--" `isPrefixOf` l)
+      pure (map (\s -> name <> "." <> s) (filter topSig (lines src)))
