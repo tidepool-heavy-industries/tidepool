@@ -384,22 +384,25 @@ impl CompiledEffectMachine {
                         // Leaf(f): call f(arg) — terminal for this continuation
                         // Forcing and calling run JIT code that can GC; `arg` and
                         // the k2_stack slots live in host frames the frame walker
-                        // skips, so they must be registered as explicit roots.
+                        // skips, so they must be registered as explicit roots
+                        // BEFORE the first force — a GC during `force f` would
+                        // otherwise leave every pending k2 dangling.
                         let mark = crate::host_fns::rust_roots_mark();
-                        // SAFETY: slots remain valid until truncate below.
+                        // SAFETY: slots remain valid until truncate below;
+                        // k2_stack is not pushed/popped while registered.
                         unsafe {
                             crate::host_fns::register_rust_root(&mut arg as *mut *mut u8);
+                        }
+                        for slot in k2_stack.iter_mut() {
+                            // SAFETY: as above.
+                            unsafe {
+                                crate::host_fns::register_rust_root(slot as *mut *mut u8);
+                            }
                         }
                         let f = self.force_ptr(Self::read_con_field(k, 0));
                         if crate::host_fns::has_runtime_error() {
                             crate::host_fns::truncate_rust_roots(mark);
                             return std::ptr::null_mut();
-                        }
-                        for slot in k2_stack.iter_mut() {
-                            // SAFETY: k2_stack is not pushed/popped during call_closure.
-                            unsafe {
-                                crate::host_fns::register_rust_root(slot as *mut *mut u8);
-                            }
                         }
                         let res = self.call_closure(f, arg);
                         crate::host_fns::truncate_rust_roots(mark);
@@ -407,12 +410,20 @@ impl CompiledEffectMachine {
                     } else if con_tag == self.tags.node {
                         // Node(k1, k2): push k2 for later, loop on k1.
                         // The first force can GC and move `k`/`arg`; the second can
-                        // move `k1`. Register all three across the forces.
+                        // move `k1`. Register all three — and every pending k2 —
+                        // across the forces.
                         let mark = crate::host_fns::rust_roots_mark();
-                        // SAFETY: slots remain valid until truncate below.
+                        // SAFETY: slots remain valid until truncate below;
+                        // k2_stack is not pushed/popped while registered.
                         unsafe {
                             crate::host_fns::register_rust_root(&mut k as *mut *mut u8);
                             crate::host_fns::register_rust_root(&mut arg as *mut *mut u8);
+                        }
+                        for slot in k2_stack.iter_mut() {
+                            // SAFETY: as above.
+                            unsafe {
+                                crate::host_fns::register_rust_root(slot as *mut *mut u8);
+                            }
                         }
                         let mut k1 = self.force_ptr(Self::read_con_field(k, 0));
                         // SAFETY: as above.
@@ -471,7 +482,20 @@ impl CompiledEffectMachine {
                 crate::host_fns::runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64); // 2 = UserError
                 return std::ptr::null_mut();
             }
-            let result = self.force_ptr(result);
+            // Forcing the Eff result can GC: protect the pending k2s.
+            let mut result = {
+                let mark = crate::host_fns::rust_roots_mark();
+                for slot in k2_stack.iter_mut() {
+                    // SAFETY: slots remain valid until truncate below;
+                    // k2_stack is not pushed/popped while registered.
+                    unsafe {
+                        crate::host_fns::register_rust_root(slot as *mut *mut u8);
+                    }
+                }
+                let r = self.force_ptr(result);
+                crate::host_fns::truncate_rust_roots(mark);
+                r
+            };
             if result.is_null() || crate::host_fns::has_runtime_error() {
                 // core-shapes.md §7: forced result must be non-null (unless error set)
                 if !crate::host_fns::has_runtime_error() {
@@ -498,8 +522,24 @@ impl CompiledEffectMachine {
             let result_con_tag = Self::read_con_tag(result);
 
             if result_con_tag == self.tags.val {
-                // Val(y): if k2_stack is empty, we're done; otherwise apply next k2
+                // Val(y): if k2_stack is empty, we're done; otherwise apply next k2.
+                // Forcing y can GC (e.g. it is a lazy effect-result tail thunk
+                // materializing a chunk): protect `result` (returned below) and
+                // the pending k2s.
+                let mark = crate::host_fns::rust_roots_mark();
+                // SAFETY: slots remain valid until truncate below;
+                // k2_stack is not pushed/popped while registered.
+                unsafe {
+                    crate::host_fns::register_rust_root(&mut result as *mut *mut u8);
+                }
+                for slot in k2_stack.iter_mut() {
+                    // SAFETY: as above.
+                    unsafe {
+                        crate::host_fns::register_rust_root(slot as *mut *mut u8);
+                    }
+                }
                 let y = self.force_ptr(Self::read_con_field(result, 0));
+                crate::host_fns::truncate_rust_roots(mark);
                 if crate::host_fns::has_runtime_error() {
                     return std::ptr::null_mut();
                 }
@@ -511,9 +551,30 @@ impl CompiledEffectMachine {
                     return result;
                 }
             } else if result_con_tag == self.tags.e {
-                // E(union, k'): compose ALL remaining k2s into k'
-                let union_val = self.force_ptr(Self::read_con_field(result, 0));
+                // E(union, k'): compose ALL remaining k2s into k'.
+                // Both forces can GC: protect `result` (field 1 is read after
+                // the first force), `union_val` across the second force, and
+                // the pending k2s. The alloc_con composition below is bump-only
+                // (null on exhaustion), so no protection is needed past here.
+                let mark = crate::host_fns::rust_roots_mark();
+                // SAFETY: slots remain valid until truncate below;
+                // k2_stack is not pushed/popped while registered.
+                unsafe {
+                    crate::host_fns::register_rust_root(&mut result as *mut *mut u8);
+                }
+                for slot in k2_stack.iter_mut() {
+                    // SAFETY: as above.
+                    unsafe {
+                        crate::host_fns::register_rust_root(slot as *mut *mut u8);
+                    }
+                }
+                let mut union_val = self.force_ptr(Self::read_con_field(result, 0));
+                // SAFETY: as above.
+                unsafe {
+                    crate::host_fns::register_rust_root(&mut union_val as *mut *mut u8);
+                }
                 let mut k_prime = self.force_ptr(Self::read_con_field(result, 1));
+                crate::host_fns::truncate_rust_roots(mark);
                 if crate::host_fns::has_runtime_error() {
                     return std::ptr::null_mut();
                 }
