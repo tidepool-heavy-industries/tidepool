@@ -216,6 +216,16 @@ impl FsHandler {
                 "absolute glob patterns not allowed".to_string(),
             ));
         }
+        // The glob crate's `**` matches DIRECTORIES only, so a bare trailing
+        // `/**` silently returns dirs and no files — never what the caller
+        // meant. Normalize to `/**/*` (everything, any depth).
+        let normalized;
+        let pattern = if pattern == "**" || pattern.ends_with("/**") {
+            normalized = format!("{}/*", pattern);
+            normalized.as_str()
+        } else {
+            pattern
+        };
         let full_pattern = self.root.join(pattern).to_string_lossy().to_string();
         let canonical_root = self
             .root
@@ -1572,6 +1582,27 @@ mod tests {
         // Hidden FILE (not just dir) also skipped unless mentioned.
         assert!(!component_filter("**/*", Path::new("src/.hidden")));
         assert!(component_filter(".gitignore", Path::new(".gitignore")));
+    }
+
+    #[test]
+    fn test_glob_trailing_doublestar_finds_files() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        std::fs::write(root.join("a/top.txt"), "x").unwrap();
+        std::fs::write(root.join("a/b/deep.txt"), "y").unwrap();
+
+        let handler = FsHandler::new(root.clone());
+        // Bare trailing /**: the raw glob crate would return dirs only.
+        let paths = handler.expand_glob("a/**").unwrap();
+        let names: Vec<String> = paths
+            .iter()
+            .filter_map(|p| p.strip_prefix(&root).ok())
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert!(names.iter().any(|n| n.ends_with("top.txt")), "{names:?}");
+        assert!(names.iter().any(|n| n.ends_with("deep.txt")), "{names:?}");
     }
 
     #[test]
