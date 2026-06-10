@@ -152,8 +152,8 @@ cargo fmt --all -- --check               # Format check
 After changing `haskell/` code (Translate.hs, GhcPipeline.hs, Prelude, etc.):
 
 ```bash
-cd haskell && cabal build tidepool-extract   # Build the Haskell compiler
-cp $(cabal list-bin tidepool-extract) ~/.local/bin/tidepool-extract-bin  # Install
+cd haskell && cabal build tidepool-extract-bin # Build the Haskell compiler
+cp $(cabal list-bin tidepool-extract-bin) ~/.local/bin/tidepool-extract-bin  # Install
 rm -rf ~/.cache/tidepool/                    # Clear cached CBOR (stale after binary changes)
 ```
 
@@ -164,7 +164,7 @@ The system PATH binary at `~/.local/bin/tidepool-extract-bin` is called by `~/.c
 The Haskell integration tests use pre-compiled CBOR fixtures in `haskell/test/suite_cbor/`. After changing the Haskell serializer or adding test bindings to `haskell/test/Suite.hs`:
 
 ```bash
-cd haskell && cabal run tidepool-extract -- test/Suite.hs --all-closed
+cd haskell && cabal run tidepool-extract-bin -- test/Suite.hs --all-closed
 # Copies .cbor files into haskell/test/suite_cbor/
 ```
 

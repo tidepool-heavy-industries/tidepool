@@ -13,9 +13,9 @@ echo "(1/4) Installing Tidepool MCP server..."
 cargo install --path tidepool
 
 if [ "$SKIP_HASKELL" = false ]; then
-  echo "(2/4) Rebuilding and installing Haskell toolchain..."
-  (cd haskell && cabal build tidepool-extract)
-  cp "$(cd haskell && cabal list-bin tidepool-extract)" ~/.local/bin/tidepool-extract-bin
+  echo "(2/4) Rebuilding and installing Haskell toolchain (via nix develop)..."
+  nix develop -c bash -c 'cd haskell && cabal build tidepool-extract-bin'
+  cp "$(nix develop -c bash -c 'cd haskell && cabal list-bin tidepool-extract-bin')" ~/.local/bin/tidepool-extract-bin
 else
   echo "(2/4) Skipping Haskell toolchain rebuild (--skip-haskell)."
 fi
