@@ -268,9 +268,15 @@ impl JitEffectMachine {
                     // chunk through tail thunks; otherwise they materialize
                     // eagerly but iteratively. The node cap remains as a
                     // backstop for large non-list responses.
+                    //
+                    // Lazy is the DEFAULT; TIDEPOOL_LAZY_RESULTS=0 opts out
+                    // (then long spines materialize eagerly-iteratively up
+                    // to the node cap).
                     const LAZY_SPINE_THRESHOLD_NODES: usize = 2_000;
                     const MAX_EFFECT_RESPONSE_NODES: usize = 100_000;
-                    let lazy_enabled = std::env::var("TIDEPOOL_LAZY_RESULTS").is_ok();
+                    let lazy_enabled = std::env::var("TIDEPOOL_LAZY_RESULTS")
+                        .map(|v| v != "0")
+                        .unwrap_or(true);
                     let spine = probe_list_spine(&resp_val)
                         .filter(|&(_, _, len)| len > LAZY_SPINE_THRESHOLD_NODES);
                     let resp_ptr = match spine {

@@ -1,10 +1,11 @@
-//! Eager (gate-off) coverage for long list-shaped effect responses.
+//! Eager (opt-out) coverage for long list-shaped effect responses.
 //!
-//! With TIDEPOOL_LAZY_RESULTS unset, long spines are still flattened by
-//! value and materialized ITERATIVELY (host_fns::materialize_cons_list) —
-//! never recursively converted or recursively dropped. Pre-fix, a 12k
-//! response either died on the old 10k node cap or, post-cap-raise,
-//! silently killed the eval thread in `Value`'s recursive destructor.
+//! With TIDEPOOL_LAZY_RESULTS=0 (lazy is default-on), long spines are still
+//! flattened by value and materialized ITERATIVELY
+//! (host_fns::materialize_cons_list) — never recursively converted or
+//! recursively dropped. Pre-fix, a 12k response either died on the old 10k
+//! node cap or, post-cap-raise, silently killed the eval thread in
+//! `Value`'s recursive destructor.
 //!
 //! Own file = own process: the lazy tests set the env var process-globally.
 
@@ -46,7 +47,7 @@ impl DispatchEffect<()> for BigListDispatcher {
 }
 
 fn run_eager(code: &str, n: usize) -> Result<serde_json::Value, String> {
-    std::env::remove_var("TIDEPOOL_LAZY_RESULTS");
+    std::env::set_var("TIDEPOOL_LAZY_RESULTS", "0");
     let decls = tidepool_mcp::standard_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, true);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);

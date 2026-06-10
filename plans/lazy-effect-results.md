@@ -45,7 +45,7 @@ Consequences: `take 5` of a huge glob materializes one chunk ever; `length`
 walks chunks while consumed cells become garbage (heap growth + GC handle
 it); the cap stops killing legitimate programs.
 
-## Status (2026-06-10 late: BLOCKER SOLVED — feature working, still gated)
+## Status (2026-06-10 late: BLOCKER SOLVED — DEFAULT-ON, opt out via TIDEPOOL_LAZY_RESULTS=0)
 
 - [x] Design validated against layout/GC/heap_force code
 - [x] Registry + lazy_list_chunk in host_fns.rs (compiles; GC-rooted)
@@ -82,8 +82,9 @@ it); the cap stops killing legitimate programs.
         breadcrumb before the silent thread exit. (4) apply_cont_heap
         k2_stack/result/union_val GC-rooting holes closed (latent, found en
         route: pending continuations were unregistered across forces).
-- [ ] Decide default-on: with the blocker root-caused, the gate could flip
-      (TIDEPOOL_LAZY_RESULTS=0 to opt out) after a dogfood gauntlet.
+- [x] Default-on (author-approved after live MCP gauntlet: 6.3k-entry glob
+      responses, sieve, error surfacing, rsFn all green on the eager path).
+      TIDEPOOL_LAZY_RESULTS=0 opts out to eager-iterative materialization.
 - [ ] Stage 2 (zero-copy direction, user-endorsed): handlers park their
       Vec WITHOUT building a Value spine (`respond_lazy`) — kills ToCore
       conversion + flatten clones entirely.
