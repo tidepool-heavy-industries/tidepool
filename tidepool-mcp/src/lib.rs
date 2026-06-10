@@ -380,7 +380,7 @@ pub struct ResumeRequest {
 /// emits the heuristic combinator definitions (`Q`, `??`, `pick`, `yn`, etc.).
 pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
     let mut out = String::new();
-    out.push_str("{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables #-}\n");
+    out.push_str("{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules #-}\n");
     out.push_str("module Expr where\n");
     out.push_str("import Tidepool.Prelude hiding (error)\n");
     out.push_str("import qualified Data.Text as T\n");
@@ -395,7 +395,7 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
         out.push_str("import Library\n");
     }
     out.push_str("import qualified Prelude as P\n");
-    out.push_str("default (Int, Text)\n");
+    out.push_str("default (Int, Double, Text)\n");
     out.push_str("error :: Text -> a\nerror = P.error . T.unpack\n");
     out.push('\n');
 
@@ -526,6 +526,17 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
             "lookupStub sid ((k,v):rest) = if sid == k then Just v else lookupStub sid rest\n",
         ));
 
+        out.push_str(concat!(
+            "renderJson :: Value -> Text\n",
+            "renderJson v = case v of\n",
+            "  Object m -> \"{\" <> T.intercalate \",\" (map (\\(k,v') -> \"\\\"\" <> KM.toText k <> \"\\\":\" <> renderJson v') (KM.toList m)) <> \"}\"\n",
+            "  Array xs -> \"[\" <> T.intercalate \",\" (map renderJson xs) <> \"]\"\n",
+            "  String t -> \"\\\"\" <> T.concatMap (\\c -> case c of { '\\\\' -> \"\\\\\\\\\"; '\"' -> \"\\\\\\\"\"; '\\n' -> \"\\\\n\"; '\\t' -> \"\\\\t\"; '\\r' -> \"\\\\r\"; _ -> T.singleton c }) t <> \"\\\"\"\n",
+            "  Number n -> show n\n",
+            "  Bool b -> if b then \"true\" else \"false\"\n",
+            "  Null -> \"null\"\n",
+        ));
+
         if has_ask {
             out.push_str(concat!(
                 "paginateResult :: Int -> Value -> M Value\n",
@@ -537,7 +548,7 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
                 "        [] -> pure truncated\n",
                 "        _ -> do\n",
                 "          let stubInfo = Array (map (\\(sid, sv) -> object [\"id\" .= (\"stub_\" <> showI sid), \"size\" .= toJSON (valSize sv)]) stubs)\n",
-                "          resp <- ask (\"[Pagination] truncated: \" <> show truncated <> \" stubs: \" <> show stubInfo)\n",
+                "          resp <- ask (\"[Pagination] truncated: \" <> renderJson truncated <> \" stubs: \" <> renderJson stubInfo <> \" | Reply with a stub id (e.g. stub_0) to fetch that chunk; any other reply ends pagination and returns the current chunk.\")\n",
                 "          case resp ^? _String of\n",
                 "            Just s -> case parseIntM (T.drop 5 s) of\n",
                 "              Just sid -> case lookupStub sid stubs of\n",
@@ -928,6 +939,18 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
     }
 
     desc
+}
+
+/// Unwrap double-encoded JSON strings if they contain an object or array.
+fn normalize_input(v: &serde_json::Value) -> serde_json::Value {
+    if let serde_json::Value::String(s) = v {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
+            if parsed.is_object() || parsed.is_array() {
+                return parsed;
+            }
+        }
+    }
+    v.clone()
 }
 
 pub fn template_haskell(
@@ -1497,13 +1520,14 @@ impl TidepoolMcpServerImpl {
 
         let mut all_imports = aeson_imports();
         all_imports.push_str(&req.imports);
+        let normalized_input = req.input.as_ref().map(normalize_input);
         let source: Arc<str> = template_haskell(
             &self.haskell_preamble,
             &self.effect_stack_type,
             &req.code,
             &all_imports,
             &req.helpers,
-            req.input.as_ref(),
+            normalized_input.as_ref(),
             Some(req.max_len.unwrap_or(4096)),
         )
         .into();
@@ -2643,5 +2667,44 @@ mod tests {
 
         let empty = output.drain();
         assert!(empty.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ergonomics_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_preamble_ergonomics() {
+        let decls = standard_decls();
+        let preamble = build_preamble(&decls, false);
+        assert!(preamble.contains("ExtendedDefaultRules"));
+        assert!(preamble.contains("default (Int, Double, Text)"));
+        assert!(preamble.contains("renderJson :: Value -> Text"));
+        assert!(preamble.contains("| Reply with a stub id (e.g. stub_0) to fetch that chunk"));
+    }
+
+    #[test]
+    fn test_normalize_input_unwrapping() {
+        // Stringified object (unwrapped)
+        let v1 = json!("{\"a\": 1}");
+        assert_eq!(normalize_input(&v1), json!({"a": 1}));
+
+        // Stringified array (unwrapped)
+        let v2 = json!("[1, 2, 3]");
+        assert_eq!(normalize_input(&v2), json!([1, 2, 3]));
+
+        // Plain string "hello" (unchanged)
+        let v3 = json!("hello");
+        assert_eq!(normalize_input(&v3), v3);
+
+        // Plain string "123" (unchanged — only Object/Array unwrap)
+        let v4 = json!("123");
+        assert_eq!(normalize_input(&v4), v4);
+
+        // Real object (unchanged)
+        let v5 = json!({"a": 1});
+        assert_eq!(normalize_input(&v5), v5);
     }
 }
