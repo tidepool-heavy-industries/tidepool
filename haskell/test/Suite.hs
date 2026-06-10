@@ -660,3 +660,66 @@ text_dropWhileT_map = map (myDropWhileT (/= '/')) [T.pack "hello/world", T.pack 
 -- Eta-expanded via map (reference)
 text_dropWhileT_eta :: [T.Text]
 text_dropWhileT_eta = map (\p -> myDropWhileT (/= '/') p) [T.pack "hello/world", T.pack "foo/bar", T.pack "noSlash"]
+
+-- ============================================================
+-- Lazy filter and nubBy regression tests
+-- ============================================================
+
+lazy_filter_infinite :: Int
+lazy_filter_infinite =
+  let myfilter _ [] = []
+      myfilter p (x:xs)
+        | p x       = x : myfilter p xs
+        | otherwise = myfilter p xs
+      naturals = go (0 :: Int) where go n = n : go (n + (1 :: Int))
+      isEven (n :: Int) = (n `rem` (2 :: Int)) == (0 :: Int)
+      mySum [] = 0 :: Int
+      mySum (x:xs) = x + mySum xs
+  in mySum (take (5 :: Int) (myfilter isEven naturals))
+
+lazy_nubby_infinite :: Int
+lazy_nubby_infinite =
+  let mynubBy eq = go []
+        where
+          go _ [] = []
+          go seen (x:rest)
+            | elemBy x seen = go seen rest
+            | otherwise     = x : go (x : seen) rest
+          elemBy _ []     = False
+          elemBy x (y:ys)
+            | eq x y    = True
+            | otherwise = elemBy x ys
+      naturals = go (0 :: Int) where go n = n : go (n + (1 :: Int))
+      myEq (a :: Int) (b :: Int) = a == b
+      myLen [] = 0 :: Int
+      myLen (_:xs) = (1 :: Int) + myLen xs
+  in myLen (take (5 :: Int) (mynubBy myEq naturals))
+
+nubby_dedup_finite :: Int
+nubby_dedup_finite =
+  let mynubBy eq = go []
+        where
+          go _ [] = []
+          go seen (x:rest)
+            | elemBy x seen = go seen rest
+            | otherwise     = x : go (x : seen) rest
+          elemBy _ []     = False
+          elemBy x (y:ys)
+            | eq x y    = True
+            | otherwise = elemBy x ys
+      myEq (a :: Int) (b :: Int) = a == b
+      myLen [] = 0 :: Int
+      myLen (_:xs) = (1 :: Int) + myLen xs
+  in myLen (mynubBy myEq [1 :: Int, 2, 1, 3, 2, 4])
+
+filter_order_preserved :: Int
+filter_order_preserved =
+  let myfilter _ [] = []
+      myfilter p (x:xs)
+        | p x       = x : myfilter p xs
+        | otherwise = myfilter p xs
+      naturals = go (0 :: Int) where go n = n : go (n + (1 :: Int))
+      isOdd (n :: Int) = (n `rem` (2 :: Int)) /= (0 :: Int)
+      toCode (f0:f1:f2:_) = f0 * (100 :: Int) + f1 * (10 :: Int) + f2
+      toCode _ = 0 :: Int
+  in toCode (myfilter isOdd naturals)
