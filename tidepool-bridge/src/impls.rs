@@ -11,7 +11,9 @@ use tidepool_repr::{DataConId, DataConTable, Literal};
 ///
 /// Look up a DataCon by name and arity. If ambiguous, issues a diagnostic
 /// and returns the first match (preserving best-effort recovery).
-fn get_resilient(table: &DataConTable, name: &str, arity: u32) -> Option<DataConId> {
+/// Resolve a constructor by name with qualified-name fallback (shared by
+/// ToCore impls and effect-response stream setup).
+pub fn get_resilient(table: &DataConTable, name: &str, arity: u32) -> Option<DataConId> {
     let matches = table.get_all_by_name(name);
     if matches.is_empty() {
         return None;

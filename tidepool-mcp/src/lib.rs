@@ -1215,7 +1215,7 @@ impl DispatchEffect<CapturedOutput> for AskDispatcher {
         tag: u64,
         request: &tidepool_eval::value::Value,
         cx: &tidepool_effect::dispatch::EffectContext<'_, CapturedOutput>,
-    ) -> Result<tidepool_eval::value::Value, tidepool_effect::error::EffectError> {
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         if tag == self.ask_tag {
             // Extract prompt from Ask constructor: Con(Ask, [prompt_val])
             let prompt = extract_ask_prompt(request, cx.table())
@@ -1237,7 +1237,7 @@ impl DispatchEffect<CapturedOutput> for AskDispatcher {
             let core_val = json_val
                 .to_value(cx.table())
                 .map_err(tidepool_effect::error::EffectError::Bridge)?;
-            Ok(core_val)
+            Ok(core_val.into())
         } else {
             self.inner.dispatch(tag, request, cx)
         }
@@ -2635,11 +2635,9 @@ mod tests {
                 _tag: u64,
                 _request: &tidepool_eval::value::Value,
                 _cx: &tidepool_effect::EffectContext<'_, CapturedOutput>,
-            ) -> Result<tidepool_eval::value::Value, tidepool_effect::error::EffectError>
+            ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError>
             {
-                Ok(tidepool_eval::value::Value::Lit(
-                    tidepool_repr::Literal::LitInt(0),
-                ))
+                Ok(tidepool_eval::value::Value::Lit(tidepool_repr::Literal::LitInt(0)).into())
             }
         }
 

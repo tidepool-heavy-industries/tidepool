@@ -40,7 +40,11 @@ struct CancellingHandler {
 
 impl EffectHandler for CancellingHandler {
     type Request = TickReq;
-    fn handle(&mut self, req: TickReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: TickReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         let n = self.count.fetch_add(1, Ordering::SeqCst) + 1;
         if n == self.cancel_at {
             self.handle.cancel();

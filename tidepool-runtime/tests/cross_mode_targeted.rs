@@ -13,7 +13,7 @@ use cross_mode_harness::{
     assert_cross_mode_structurally_equivalent, CrossModeFixture,
 };
 use tidepool_bridge_derive::FromCore;
-use tidepool_effect::{EffectContext, EffectError, EffectHandler};
+use tidepool_effect::{EffectContext, EffectError, EffectHandler, Response};
 use tidepool_eval::value::Value;
 
 #[derive(FromCore)]
@@ -26,7 +26,7 @@ struct EchoHandler;
 
 impl EffectHandler for EchoHandler {
     type Request = EchoReq;
-    fn handle(&mut self, req: EchoReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: EchoReq, cx: &EffectContext) -> Result<Response, EffectError> {
         match req {
             EchoReq::Echo(n) => cx.respond(n),
         }
@@ -43,7 +43,7 @@ struct E1Handler;
 
 impl EffectHandler for E1Handler {
     type Request = E1Req;
-    fn handle(&mut self, req: E1Req, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: E1Req, cx: &EffectContext) -> Result<Response, EffectError> {
         match req {
             E1Req::E1(n) => cx.respond(n),
         }
@@ -60,7 +60,7 @@ struct E2Handler;
 
 impl EffectHandler for E2Handler {
     type Request = E2Req;
-    fn handle(&mut self, req: E2Req, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: E2Req, cx: &EffectContext) -> Result<Response, EffectError> {
         match req {
             E2Req::E2(n) => cx.respond(n),
         }

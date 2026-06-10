@@ -1959,32 +1959,53 @@ pub extern "C" fn runtime_double_power(bits_a: i64, bits_b: i64) -> i64 {
 // non-pointer words, same as the vmctx tail fields.
 // ---------------------------------------------------------------------------
 
-pub(crate) struct LazyList {
+/// A parked effect-response stream: the element producer (the iterator IS
+/// the cursor — no offset bookkeeping), the list constructor tags, and an
+/// owned `DataConTable` for pull-time element conversion. Sequential,
+/// exactly-once consumption is guaranteed structurally: tail thunk N is
+/// unreachable until tail N−1 was forced, and `heap_force` memoizes.
+pub(crate) struct ParkedStream {
+    pub source: Box<dyn tidepool_effect::ValueSource>,
     pub cons_tag: u64,
     pub nil_tag: u64,
-    pub items: Vec<tidepool_eval::value::Value>,
+    /// Conversion table for pull-time `ToCore`. Pre-converted sources
+    /// (dismantled spines) ignore it — park an empty table for those.
+    pub table: tidepool_repr::DataConTable,
 }
 
 thread_local! {
-    static LAZY_RESULTS: RefCell<std::collections::HashMap<u64, LazyList>> =
+    static PARKED_STREAMS: RefCell<std::collections::HashMap<u64, ParkedStream>> =
         RefCell::new(std::collections::HashMap::new());
-    static LAZY_NEXT_ID: Cell<u64> = const { Cell::new(1) };
+    static STREAM_NEXT_ID: Cell<u64> = const { Cell::new(1) };
 }
 
-/// Park a flattened list response; returns the registry id for the tail thunk.
-pub(crate) fn register_lazy_list(list: LazyList) -> u64 {
-    let id = LAZY_NEXT_ID.with(|c| {
+/// Source over pre-converted Values (a dismantled `Response::Complete`
+/// spine). The table argument is unused.
+pub(crate) struct ReadySource(pub std::vec::IntoIter<tidepool_eval::value::Value>);
+
+impl tidepool_effect::ValueSource for ReadySource {
+    fn next_value(
+        &mut self,
+        _table: &tidepool_repr::DataConTable,
+    ) -> Option<Result<tidepool_eval::value::Value, tidepool_bridge::BridgeError>> {
+        self.0.next().map(Ok)
+    }
+}
+
+/// Park a response stream; returns the registry id carried by tail thunks.
+pub(crate) fn park_stream(stream: ParkedStream) -> u64 {
+    let id = STREAM_NEXT_ID.with(|c| {
         let v = c.get();
         c.set(v + 1);
         v
     });
-    LAZY_RESULTS.with(|r| r.borrow_mut().insert(id, list));
+    PARKED_STREAMS.with(|r| r.borrow_mut().insert(id, stream));
     id
 }
 
-/// Drop all parked lazy results (machine teardown).
-pub(crate) fn clear_lazy_results() {
-    LAZY_RESULTS.with(|r| r.borrow_mut().clear());
+/// Drop all parked streams (machine teardown).
+pub(crate) fn clear_parked_streams() {
+    PARKED_STREAMS.with(|r| r.borrow_mut().clear());
 }
 
 /// Nursery allocation from host code with one GC-and-retry. Any heap
@@ -2001,13 +2022,14 @@ unsafe fn host_alloc_gc(vmctx: *mut VMContext, size: usize) -> *mut u8 {
     crate::heap_bridge::bump_alloc_from_vmctx(&mut *vmctx, size)
 }
 
-/// Allocate a lazy-tail thunk carrying (registry id, offset) as raw captures.
+/// Allocate a stream-tail thunk carrying the registry id as its single raw
+/// capture (the parked iterator is the cursor — no offset needed).
 /// Returns null on OOM (caller converts to poison via runtime_oom).
 ///
 /// # Safety
 /// `vmctx` must be valid with a live nursery and GC state installed.
-pub(crate) unsafe fn alloc_lazy_tail_thunk(vmctx: *mut VMContext, id: u64, offset: u64) -> *mut u8 {
-    let size = tidepool_heap::layout::THUNK_CAPTURED_OFFSET + 16;
+pub(crate) unsafe fn alloc_stream_tail_thunk(vmctx: *mut VMContext, id: u64) -> *mut u8 {
+    let size = tidepool_heap::layout::THUNK_CAPTURED_OFFSET + 8;
     let p = host_alloc_gc(vmctx, size);
     if p.is_null() {
         return std::ptr::null_mut();
@@ -2015,9 +2037,8 @@ pub(crate) unsafe fn alloc_lazy_tail_thunk(vmctx: *mut VMContext, id: u64, offse
     tidepool_heap::layout::write_header(p, tidepool_heap::layout::TAG_THUNK, size as u16);
     *p.add(tidepool_heap::layout::THUNK_STATE_OFFSET) = tidepool_heap::layout::THUNK_UNEVALUATED;
     *(p.add(tidepool_heap::layout::THUNK_CODE_PTR_OFFSET) as *mut usize) =
-        lazy_list_chunk as *const () as usize;
+        stream_chunk as *const () as usize;
     *(p.add(tidepool_heap::layout::THUNK_CAPTURED_OFFSET) as *mut u64) = id;
-    *(p.add(tidepool_heap::layout::THUNK_CAPTURED_OFFSET + 8) as *mut u64) = offset;
     p
 }
 
@@ -2116,39 +2137,104 @@ pub(crate) unsafe fn materialize_cons_list(
     build_cons_cells(vmctx, cons_tag, items, nil)
 }
 
-/// Thunk entry for lazy list tails: materialize the next chunk of elements
-/// as cons cells, terminated by nil or a fresh tail thunk.
+/// Outcome of pulling one chunk from a parked stream (separated from the
+/// heap work so the registry borrow is released before any allocation).
+enum ChunkPull {
+    Missing,
+    Cancelled,
+    Failed(String),
+    Chunk {
+        cons_tag: u64,
+        nil_tag: u64,
+        items: Vec<tidepool_eval::value::Value>,
+        exhausted: bool,
+    },
+}
+
+/// Thunk entry for stream tails: pull the next chunk of elements from the
+/// parked source, materialize them as cons cells, terminated by nil or a
+/// fresh tail thunk.
 ///
 /// # Safety
 /// Called by `heap_force` with a valid vmctx and a thunk allocated by
-/// `alloc_lazy_tail_thunk`.
-unsafe extern "C" fn lazy_list_chunk(vmctx: *mut VMContext, thunk: *mut u8) -> *mut u8 {
+/// `alloc_stream_tail_thunk`.
+unsafe extern "C" fn stream_chunk(vmctx: *mut VMContext, thunk: *mut u8) -> *mut u8 {
     const CHUNK: usize = 256;
-    // Read captures before any allocation (the thunk may move on GC; its
+    // Read the capture before any allocation (the thunk may move on GC; its
     // registered slot lives in heap_force's frame, not ours).
     let id = *(thunk.add(tidepool_heap::layout::THUNK_CAPTURED_OFFSET) as *const u64);
-    let offset =
-        *(thunk.add(tidepool_heap::layout::THUNK_CAPTURED_OFFSET + 8) as *const u64) as usize;
 
-    let pulled = LAZY_RESULTS.with(|r| {
-        let map = r.borrow();
-        map.get(&id).map(|ll| {
-            let end = (offset + CHUNK).min(ll.items.len());
-            (
-                ll.cons_tag,
-                ll.nil_tag,
-                ll.items[offset..end].to_vec(),
-                end,
-                end >= ll.items.len(),
-            )
+    // Pull phase: runs arbitrary producer Rust. Two containments:
+    // - catch_unwind: a producer panic must not unwind across the JIT
+    //   frames below us (UB) — convert to a runtime error instead.
+    // - cancel safepoint per pull: a slow (e.g. IO-backed) producer must
+    //   be interruptible like any other long-running evaluation.
+    // No heap operations happen while the registry borrow is held.
+    let pulled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PARKED_STREAMS.with(|r| {
+            let mut map = r.borrow_mut();
+            let Some(ps) = map.get_mut(&id) else {
+                return ChunkPull::Missing;
+            };
+            let mut items = Vec::with_capacity(CHUNK);
+            let mut exhausted = false;
+            while items.len() < CHUNK {
+                if check_cancel_and_set_error() {
+                    return ChunkPull::Cancelled;
+                }
+                match ps.source.next_value(&ps.table) {
+                    Some(Ok(v)) => items.push(v),
+                    Some(Err(e)) => {
+                        return ChunkPull::Failed(format!("stream element conversion failed: {e}"))
+                    }
+                    None => {
+                        exhausted = true;
+                        break;
+                    }
+                }
+            }
+            ChunkPull::Chunk {
+                cons_tag: ps.cons_tag,
+                nil_tag: ps.nil_tag,
+                items,
+                exhausted,
+            }
         })
-    });
-    let Some((cons_tag, nil_tag, items, end, exhausted)) = pulled else {
-        let msg = b"lazy effect result: registry entry missing (stale continuation?)";
-        return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+    }));
+
+    let (cons_tag, nil_tag, items, exhausted) = match pulled {
+        Ok(ChunkPull::Chunk {
+            cons_tag,
+            nil_tag,
+            items,
+            exhausted,
+        }) => (cons_tag, nil_tag, items, exhausted),
+        Ok(ChunkPull::Missing) => {
+            let msg = b"effect result stream: registry entry missing (stale continuation?)";
+            return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+        }
+        Ok(ChunkPull::Cancelled) => {
+            // check_cancel_and_set_error already set the runtime error.
+            return error_poison_ptr();
+        }
+        Ok(ChunkPull::Failed(msg)) => {
+            push_diagnostic(msg.clone());
+            return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+        }
+        Err(panic) => {
+            let what = panic
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("<non-string panic>");
+            let msg = format!("effect result stream: producer panicked: {what}");
+            push_diagnostic(msg.clone());
+            return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+        }
     };
+
     if exhausted {
-        LAZY_RESULTS.with(|r| {
+        PARKED_STREAMS.with(|r| {
             r.borrow_mut().remove(&id);
         });
     }
@@ -2161,7 +2247,7 @@ unsafe extern "C" fn lazy_list_chunk(vmctx: *mut VMContext, thunk: *mut u8) -> *
         }
         p
     } else {
-        let p = alloc_lazy_tail_thunk(vmctx, id, end as u64);
+        let p = alloc_stream_tail_thunk(vmctx, id);
         if p.is_null() {
             return runtime_oom();
         }

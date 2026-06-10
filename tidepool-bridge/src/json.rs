@@ -198,9 +198,9 @@ mod tests {
         let table = json_test_table();
         let json = serde_json::Value::Null;
         let val = json.to_value(&table).unwrap();
-        match val {
+        match &val {
             Value::Con(id, fields) => {
-                assert_eq!(table.name_of(id), Some("Null"));
+                assert_eq!(table.name_of(*id), Some("Null"));
                 assert!(fields.is_empty());
             }
             _ => panic!("Expected Con(Null)"),

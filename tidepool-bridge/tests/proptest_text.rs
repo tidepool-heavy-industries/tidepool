@@ -83,7 +83,7 @@ proptest! {
     fn length_preserved(s in any::<String>()) {
         let table = get_table();
         let value = s.to_value(table).expect("ToCore failed");
-        if let Value::Con(_, fields) = value {
+        if let Value::Con(_, ref fields) = value {
             assert_eq!(fields.len(), 3);
             if let Value::Lit(Literal::LitInt(len)) = fields[2] {
                 assert_eq!(len as usize, s.len());

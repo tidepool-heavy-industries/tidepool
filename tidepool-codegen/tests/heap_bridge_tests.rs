@@ -50,7 +50,7 @@ fn test_heap_to_value_con_pair() {
         *(con.add(layout::CON_FIELDS_OFFSET + 8) as *mut *const u8) = lit2;
 
         let res = heap_to_value(con).expect("heap_to_value failed");
-        let Value::Con(DataConId(1), fields) = res else {
+        let Value::Con(DataConId(1), ref fields) = res else {
             panic!("Expected Con, got {:?}", res);
         };
         assert_eq!(fields.len(), 2);
@@ -94,9 +94,10 @@ fn test_heap_to_value_deeply_nested_cons() {
         // Verify depth
         let mut depth = 0;
         let mut v = res;
-        while let Value::Con(_, fields) = v {
+        while let Value::Con(_, ref fields) = v {
             depth += 1;
-            v = fields[0].clone();
+            let inner = fields[0].clone();
+            v = inner;
         }
         assert_eq!(depth, 100);
         let Value::Lit(Literal::LitInt(0)) = v else {

@@ -36,7 +36,7 @@ impl DispatchEffect<()> for BigListDispatcher {
         _tag: u64,
         _request: &Value,
         cx: &tidepool_effect::EffectContext<'_, ()>,
-    ) -> Result<Value, tidepool_effect::error::EffectError> {
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         let items: Vec<String> = (0..self.n).map(|i| format!("item-{i}")).collect();
         cx.respond(items)
     }
@@ -97,4 +97,25 @@ fn filtered_fold_over_huge_response() {
 fn take_then_length_bisect() {
     let r = run_with_big_list("xs <- glob \"**\"\npure (length (take 3 xs))", 12_000);
     assert_eq!(r.ok(), Some(serde_json::json!(3)));
+}
+
+#[test]
+fn whole_lazy_list_result_is_paginated() {
+    // Under the MCP template, `pure xs` of a 12k lazy list flows through
+    // toJSON + paginateResult: the JIT forces every chunk in-Haskell and the
+    // paginator truncates the rendered array to the character budget. The
+    // exact element count is budget-dependent; what matters is that the
+    // full pipeline survives (no silent thread death) and yields a
+    // truncated-but-well-formed prefix. The RAW bridge path (no paginator)
+    // is covered by lazy_bisect::variant_d_whole_list_result.
+    let r = run_with_big_list("xs <- glob \"**\"\npure xs", 12_000);
+    let arr = r.expect("whole-list result must succeed");
+    let arr = arr.as_array().expect("expected JSON array");
+    assert!(
+        arr.len() > 100,
+        "expected a substantial paginated prefix, got {}",
+        arr.len()
+    );
+    assert_eq!(arr[0], serde_json::json!("item-0"));
+    assert_eq!(arr[1], serde_json::json!("item-1"));
 }

@@ -58,7 +58,11 @@ struct EchoHandler;
 
 impl EffectHandler for EchoHandler {
     type Request = EchoReq;
-    fn handle(&mut self, req: EchoReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: EchoReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             EchoReq::Echo(n) => cx.respond(n),
         }

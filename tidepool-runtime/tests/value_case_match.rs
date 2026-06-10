@@ -1019,7 +1019,11 @@ fn show_double_effectful_paginate() {
     struct MockConsole;
     impl EffectHandler for MockConsole {
         type Request = ConsoleReq;
-        fn handle(&mut self, req: ConsoleReq, cx: &EffectContext) -> Result<Value, EffectError> {
+        fn handle(
+            &mut self,
+            req: ConsoleReq,
+            cx: &EffectContext,
+        ) -> Result<tidepool_effect::Response, EffectError> {
             match req {
                 ConsoleReq::Print(_) => cx.respond(()),
             }
@@ -1041,17 +1045,21 @@ fn show_double_effectful_paginate() {
     struct MockKv;
     impl EffectHandler for MockKv {
         type Request = KvReq;
-        fn handle(&mut self, req: KvReq, cx: &EffectContext) -> Result<Value, EffectError> {
+        fn handle(
+            &mut self,
+            req: KvReq,
+            cx: &EffectContext,
+        ) -> Result<tidepool_effect::Response, EffectError> {
             match req {
                 KvReq::KvGet(_) => {
                     // Return Nothing (tag 0 with no fields)
-                    Ok(Value::Con(tidepool_repr::DataConId(0), vec![]))
+                    Ok(Value::Con(tidepool_repr::DataConId(0), vec![]).into())
                 }
                 KvReq::KvSet(_, _) => cx.respond(()),
                 KvReq::KvDelete(_) => cx.respond(()),
                 KvReq::KvKeys => {
                     // Return empty list
-                    Ok(Value::Con(tidepool_repr::DataConId(0), vec![]))
+                    Ok(Value::Con(tidepool_repr::DataConId(0), vec![]).into())
                 }
             }
         }

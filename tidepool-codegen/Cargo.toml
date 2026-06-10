@@ -19,6 +19,7 @@ target-lexicon = "0.13"
 tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
 tidepool-heap = { version = "0.1.0", path = "../tidepool-heap" }
 tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
+tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
 tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
 thiserror = "1"
 recursion = "0.5.4"

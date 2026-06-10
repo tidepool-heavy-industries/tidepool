@@ -9,4 +9,5 @@ pub mod json;
 pub mod traits;
 
 pub use error::*;
+pub use impls::get_resilient;
 pub use traits::*;

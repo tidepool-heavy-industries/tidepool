@@ -40,7 +40,7 @@ impl DispatchEffect<()> for MockDispatcher {
         tag: u64,
         _request: &Value,
         _cx: &tidepool_effect::EffectContext<'_, ()>,
-    ) -> Result<Value, tidepool_effect::error::EffectError> {
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         Err(tidepool_effect::error::EffectError::UnhandledEffect { tag })
     }
 }

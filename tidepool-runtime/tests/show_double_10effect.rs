@@ -33,7 +33,11 @@ enum ConsoleReq {
 struct MockConsole;
 impl EffectHandler for MockConsole {
     type Request = ConsoleReq;
-    fn handle(&mut self, req: ConsoleReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: ConsoleReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             ConsoleReq::Print(msg) => {
                 eprintln!("[Console] Print: {}", msg);
@@ -74,7 +78,11 @@ impl MockKv {
 }
 impl EffectHandler for MockKv {
     type Request = KvReq;
-    fn handle(&mut self, req: KvReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: KvReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             KvReq::KvGet(key) => {
                 // Real MCP stores serde_json::Value, returns Option<serde_json::Value>
@@ -118,7 +126,11 @@ enum FsReq {
 struct MockFs;
 impl EffectHandler for MockFs {
     type Request = FsReq;
-    fn handle(&mut self, req: FsReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: FsReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             FsReq::FsRead(_) => cx.respond(String::new()),
             FsReq::FsWrite(_, _) => cx.respond(()),
@@ -149,7 +161,11 @@ enum SgReq {
 struct MockSg;
 impl EffectHandler for MockSg {
     type Request = SgReq;
-    fn handle(&mut self, req: SgReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: SgReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             SgReq::SgFind(_, _, _, _)
             | SgReq::SgPreview(_, _, _, _)
@@ -175,7 +191,11 @@ enum HttpReq {
 struct MockHttp;
 impl EffectHandler for MockHttp {
     type Request = HttpReq;
-    fn handle(&mut self, _req: HttpReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        _req: HttpReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         // Return Null
         cx.respond(())
     }
@@ -194,7 +214,11 @@ enum ExecReq {
 struct MockExec;
 impl EffectHandler for MockExec {
     type Request = ExecReq;
-    fn handle(&mut self, req: ExecReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: ExecReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             ExecReq::Run(_) | ExecReq::RunIn(_, _) => {
                 cx.respond((0i64, String::new(), String::new()))
@@ -225,7 +249,11 @@ enum MetaReq {
 struct MockMeta;
 impl EffectHandler for MockMeta {
     type Request = MetaReq;
-    fn handle(&mut self, req: MetaReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: MetaReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             MetaReq::MetaConstructors => {
                 let empty: Vec<(String, i64)> = vec![];
@@ -266,7 +294,11 @@ enum GitReq {
 struct MockGit;
 impl EffectHandler for MockGit {
     type Request = GitReq;
-    fn handle(&mut self, req: GitReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: GitReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             GitReq::GitLog(_, _)
             | GitReq::GitDiff(_)
@@ -292,7 +324,11 @@ enum LlmReq {
 struct MockLlm;
 impl EffectHandler for MockLlm {
     type Request = LlmReq;
-    fn handle(&mut self, req: LlmReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: LlmReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             LlmReq::LlmChat(_) => cx.respond(String::from("mock")),
             LlmReq::LlmStructured(_, _) => cx.respond(()),
@@ -309,7 +345,11 @@ enum AskReq {
 struct MockAsk;
 impl EffectHandler for MockAsk {
     type Request = AskReq;
-    fn handle(&mut self, _req: AskReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        _req: AskReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         // Return a string response
         cx.respond(String::from("stub_response"))
     }

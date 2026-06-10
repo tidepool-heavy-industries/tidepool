@@ -3481,6 +3481,7 @@ dependencies = [
  "serial_test",
  "target-lexicon",
  "thiserror 1.0.69",
+ "tidepool-bridge",
  "tidepool-effect",
  "tidepool-eval",
  "tidepool-heap",

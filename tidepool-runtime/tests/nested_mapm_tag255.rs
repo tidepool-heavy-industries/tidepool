@@ -37,7 +37,11 @@ enum ConsoleReq {
 struct StubConsole;
 impl EffectHandler for StubConsole {
     type Request = ConsoleReq;
-    fn handle(&mut self, _req: ConsoleReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        _req: ConsoleReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         cx.respond(())
     }
 }
@@ -56,7 +60,11 @@ enum KvReq {
 struct StubKv;
 impl EffectHandler for StubKv {
     type Request = KvReq;
-    fn handle(&mut self, req: KvReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: KvReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             KvReq::KvGet(_) => {
                 let nothing: Option<serde_json::Value> = None;
@@ -108,7 +116,11 @@ impl RealFs {
 }
 impl EffectHandler for RealFs {
     type Request = FsReq;
-    fn handle(&mut self, req: FsReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: FsReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             FsReq::FsRead(path) => {
                 let content = std::fs::read_to_string(self.resolve(&path)).unwrap_or_default();
@@ -165,7 +177,11 @@ enum SgReq {
 struct StubSg;
 impl EffectHandler for StubSg {
     type Request = SgReq;
-    fn handle(&mut self, _req: SgReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        _req: SgReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         let empty: Vec<Value> = vec![];
         cx.respond(empty)
     }
@@ -181,7 +197,11 @@ enum HttpReq {
 struct StubHttp;
 impl EffectHandler for StubHttp {
     type Request = HttpReq;
-    fn handle(&mut self, _req: HttpReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        _req: HttpReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         cx.respond(())
     }
 }
@@ -196,7 +216,11 @@ enum ExecReq {
 struct StubExec;
 impl EffectHandler for StubExec {
     type Request = ExecReq;
-    fn handle(&mut self, _req: ExecReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        _req: ExecReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         cx.respond((0i64, String::new(), String::new()))
     }
 }
@@ -211,7 +235,11 @@ enum LlmReq {
 struct StubLlm;
 impl EffectHandler for StubLlm {
     type Request = LlmReq;
-    fn handle(&mut self, _req: LlmReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        _req: LlmReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         cx.respond(String::from("stub"))
     }
 }
@@ -224,7 +252,11 @@ enum AskReq {
 struct StubAsk;
 impl EffectHandler for StubAsk {
     type Request = AskReq;
-    fn handle(&mut self, _req: AskReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        _req: AskReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         cx.respond(String::from("stub"))
     }
 }

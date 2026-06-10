@@ -27,7 +27,11 @@ struct MockConsole {
 
 impl EffectHandler for MockConsole {
     type Request = ConsoleReq;
-    fn handle(&mut self, req: ConsoleReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: ConsoleReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             ConsoleReq::Print(s) => {
                 self.prints.push(s);

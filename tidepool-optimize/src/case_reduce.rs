@@ -174,11 +174,11 @@ mod tests {
         let mut heap2 = VecHeap::new();
         let val_after = tidepool_eval::eval(&expr, &Env::new(), &mut heap2).unwrap();
 
-        let (Value::Lit(l1), Value::Lit(l2)) = (val_before, val_after) else {
+        let (Value::Lit(ref l1), Value::Lit(ref l2)) = (val_before, val_after) else {
             panic!("Value mismatch or not Lit");
         };
         assert_eq!(l1, l2);
-        let Literal::LitInt(3) = l1 else {
+        let Literal::LitInt(3) = *l1 else {
             panic!("Expected 3, got {:?}", l1);
         };
     }
@@ -361,7 +361,7 @@ mod tests {
         let mut heap2 = VecHeap::new();
         let val_after = tidepool_eval::eval(&expr, &Env::new(), &mut heap2).unwrap();
 
-        match (val_before, val_after) {
+        match (&val_before, &val_after) {
             (Value::Lit(l1), Value::Lit(l2)) => assert_eq!(l1, l2),
             (Value::Con(t1, f1), Value::Con(t2, f2)) => {
                 assert_eq!(t1, t2);

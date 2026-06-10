@@ -227,7 +227,7 @@ mod tests {
 
         let val_dce = eval(&dce_expr, &env, &mut heap).expect("DCE eval failed");
 
-        match (val_orig, val_dce) {
+        match (&val_orig, &val_dce) {
             (tidepool_eval::Value::Lit(l1), tidepool_eval::Value::Lit(l2)) => assert_eq!(l1, l2),
             _ => panic!("Expected literals"),
         }

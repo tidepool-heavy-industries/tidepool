@@ -85,9 +85,22 @@ it); the cap stops killing legitimate programs.
 - [x] Default-on (author-approved after live MCP gauntlet: 6.3k-entry glob
       responses, sieve, error surfacing, rsFn all green on the eager path).
       TIDEPOOL_LAZY_RESULTS=0 opts out to eager-iterative materialization.
-- [ ] Stage 2 (zero-copy direction, user-endorsed): handlers park their
-      Vec WITHOUT building a Value spine (`respond_lazy`) — kills ToCore
-      conversion + flatten clones entirely.
+- [x] Stage 2 SHIPPED (2026-06-10): `Response::{Complete, Stream}` typed
+      channel (breaking trait change, absorbed by `cx.respond`);
+      `cx.respond_stream(impl IntoIterator)` parks the ITERATOR — the
+      iterator is the cursor, thunk memoization the linearizer; no Value
+      spine, no flatten, no offset bookkeeping. Elements convert per-pull
+      at chunk time (take 3 of 12k ⇒ ≤256 conversions, pull-counter
+      verified). Registry unified: ParkedStream + ReadySource (dismantled
+      Complete spines ride the same chunk materializer); tail thunks carry
+      id only. Producer panics catch_unwind'd at the JIT boundary; cancel
+      safepoint per pull; infinite iterators are legitimate infinite
+      Haskell lists (kill-switch mode drains them to a clean TooLarge).
+      MCP handlers flipped: glob, grep, sgFind, sgRuleFind, listDirectory.
+      Result-side twin bugs closed in the same wave: Value gets an
+      ITERATIVE Drop (E0509 fallout ~15 mechanical sites), heap_to_value
+      walks spines iteratively with per-frame GC rooting (stale-parent
+      hole fixed), Array payloads re-derived per element.
 - [ ] Stage 3: element-level COW views — tail = (registry id, offset)
       view cell; head converts ONE element on demand, memoized by thunk
       indirection. A Haskell [Text] over a Rust Vec<String> becomes an

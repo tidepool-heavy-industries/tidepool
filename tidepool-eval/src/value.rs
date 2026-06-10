@@ -103,6 +103,36 @@ impl Value {
     }
 }
 
+/// Iterative destructor: the auto-derived recursive drop costs ~3 stack
+/// frames per nested `Con` level, and effect responses / results can be
+/// cons-spines tens of thousands deep — overflowing the host thread's stack
+/// (a SIGSEGV outside JIT signal protection, which presents as a silent
+/// thread death). Children are detached into a flat worklist before they
+/// drop, so the compiler-generated field drop only ever sees empty Vecs.
+///
+/// Leaf variants take the no-op arm; `Closure`/`JoinCont` envs drop through
+/// their own (interpreter-plane, bounded-depth) structure unchanged.
+impl Drop for Value {
+    fn drop(&mut self) {
+        match self {
+            Value::Con(_, fields) | Value::ConFun(_, _, fields) if !fields.is_empty() => {
+                let mut work = std::mem::take(fields);
+                let mut i = 0;
+                while i < work.len() {
+                    if let Value::Con(_, fs) | Value::ConFun(_, _, fs) = &mut work[i] {
+                        let mut inner = std::mem::take(fs);
+                        work.append(&mut inner);
+                    }
+                    i += 1;
+                }
+                // `work` drops here: every entry's fields are empty, so each
+                // element drop is shallow.
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::approx_constant)] // tests literal float formatting, not math constants
 mod tests {

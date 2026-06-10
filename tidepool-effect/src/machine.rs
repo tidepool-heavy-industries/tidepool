@@ -123,7 +123,25 @@ impl<'a> EffectMachine<'a> {
 
                     // Dispatch to handler
                     let cx = EffectContext::with_user(self.table, user);
-                    let response = handlers.dispatch(tag, &request, &cx)?;
+                    let response = match handlers.dispatch(tag, &request, &cx)? {
+                        crate::dispatch::Response::Complete(v) => v,
+                        // The interpreter machine has no chunked-thunk
+                        // machinery: drain streams eagerly into a list
+                        // Value, built back-to-front (iteratively — deep
+                        // spines must never hit recursive construction).
+                        crate::dispatch::Response::Stream(s) => {
+                            let (mut source, cons_id, nil_id) = s.into_parts();
+                            let mut items = Vec::new();
+                            while let Some(item) = source.next_value(self.table) {
+                                items.push(item.map_err(EffectError::Bridge)?);
+                            }
+                            let mut acc = Value::Con(nil_id, vec![]);
+                            for item in items.into_iter().rev() {
+                                acc = Value::Con(cons_id, vec![item, acc]);
+                            }
+                            acc
+                        }
+                    };
 
                     // Apply continuation
                     current = self.apply_cont(k, response)?;
@@ -209,13 +227,18 @@ impl<'a> EffectMachine<'a> {
     }
 
     /// Apply a single closure to a value.
-    fn apply_closure(&mut self, closure: Value, arg: Value) -> Result<Value, EffectError> {
+    fn apply_closure(&mut self, mut closure: Value, arg: Value) -> Result<Value, EffectError> {
+        // `ref mut` + replace/take: Value implements Drop (iterative spine
+        // dismantle), so fields cannot be moved out by pattern.
         match closure {
-            Value::Closure(env, binder, body) => {
+            Value::Closure(ref mut env, binder, ref mut body) => {
+                let env = std::mem::replace(env, tidepool_eval::env::Env::new());
+                let body = std::mem::replace(body, tidepool_repr::RecursiveTree { nodes: vec![] });
                 let new_env = env.update(binder, arg);
                 Ok(tidepool_eval::eval::eval(&body, &new_env, self.heap)?)
             }
-            Value::ConFun(tag, arity, mut args) => {
+            Value::ConFun(tag, arity, ref mut args) => {
+                let mut args = std::mem::take(args);
                 args.push(arg);
                 if args.len() == arity {
                     Ok(Value::Con(tag, args))
@@ -234,6 +257,7 @@ impl<'a> EffectMachine<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatch::Response;
     use tidepool_eval::heap::VecHeap;
     use tidepool_repr::datacon::DataCon;
     use tidepool_repr::datacon_table::DataConTable;
@@ -379,9 +403,13 @@ mod tests {
         struct TestHandler;
         impl EffectHandler for TestHandler {
             type Request = TestReq;
-            fn handle(&mut self, req: TestReq, _cx: &EffectContext) -> Result<Value, EffectError> {
+            fn handle(
+                &mut self,
+                req: TestReq,
+                _cx: &EffectContext,
+            ) -> Result<Response, EffectError> {
                 // Echo back the request + 1
-                Ok(Value::Lit(Literal::LitInt(req.0 + 1)))
+                Ok(Value::Lit(Literal::LitInt(req.0 + 1)).into())
             }
         }
 
@@ -460,8 +488,8 @@ mod tests {
                 &mut self,
                 req: TestReq,
                 cx: &EffectContext<'_, UserData>,
-            ) -> Result<Value, EffectError> {
-                Ok(Value::Lit(Literal::LitInt(req.0 * cx.user().multiplier)))
+            ) -> Result<Response, EffectError> {
+                Ok(Value::Lit(Literal::LitInt(req.0 * cx.user().multiplier)).into())
             }
         }
 

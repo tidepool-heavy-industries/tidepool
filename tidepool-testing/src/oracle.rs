@@ -594,7 +594,7 @@ mod tests {
             fields: vec![],
         }];
         let res = eval_expr(nodes).unwrap();
-        if let Value::Con(tag, fields) = res {
+        if let Value::Con(tag, ref fields) = res {
             assert_eq!(tag.0, 100);
             assert_eq!(fields.len(), 0);
         } else {
@@ -614,7 +614,7 @@ mod tests {
             },
         ];
         let res = eval_expr(nodes).unwrap();
-        if let Value::Con(tag, fields) = res {
+        if let Value::Con(tag, ref fields) = res {
             assert_eq!(tag.0, 1);
             assert_eq!(fields.len(), 3);
             assert!(matches!(fields[0], Value::Lit(Literal::LitInt(1))));
@@ -639,7 +639,7 @@ mod tests {
             },
         ];
         let res = eval_expr(nodes).unwrap();
-        if let Value::Con(tag2, fields2) = res {
+        if let Value::Con(tag2, ref fields2) = res {
             assert_eq!(tag2.0, 2);
             if let Value::Con(tag1, fields1) = &fields2[0] {
                 assert_eq!(tag1.0, 1);

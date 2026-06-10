@@ -111,7 +111,7 @@ impl Drop for RegistryGuard {
         crate::host_fns::clear_gc_state();
         crate::host_fns::clear_stack_map_registry();
         crate::host_fns::clear_cancel_flag();
-        crate::host_fns::clear_lazy_results();
+        crate::host_fns::clear_parked_streams();
         crate::debug::clear_lambda_registry();
         // Clean up remaining thread-local state for same-thread reuse
         let _ = crate::host_fns::take_runtime_error();
@@ -239,7 +239,7 @@ impl JitEffectMachine {
                         eprintln!("[jit_machine] effect tag={} request={:?}", tag, req_val);
                     }
                     let cx = EffectContext::with_user(table, user);
-                    let resp_val = handlers.dispatch(tag, &req_val, &cx)?;
+                    let response = handlers.dispatch(tag, &req_val, &cx)?;
 
                     // External cancellation safepoint at the effect-dispatch
                     // boundary. The handler we just called may itself have
@@ -256,79 +256,156 @@ impl JitEffectMachine {
                         break Err(JitError::Yield(crate::yield_type::YieldError::Cancelled));
                     }
 
-                    // Long list-shaped responses are flattened BY VALUE and the
-                    // spine dismantled iteratively — in ALL configurations. A
-                    // deep spine must never reach `resp_val`'s recursive Drop
-                    // or a recursive `value_to_heap`: ~3 stack frames per cons
-                    // cell overflow the eval thread's stack, the fault lands
-                    // outside signal protection, and the handler silently
-                    // exits the thread (the caller observes a hang; see
-                    // .tidepool/crash.log). With TIDEPOOL_LAZY_RESULTS=1 the
-                    // elements are parked host-side and materialize chunk-by-
-                    // chunk through tail thunks; otherwise they materialize
-                    // eagerly but iteratively. The node cap remains as a
-                    // backstop for large non-list responses.
+                    // Response materialization. Two channels:
                     //
-                    // Lazy is the DEFAULT; TIDEPOOL_LAZY_RESULTS=0 opts out
-                    // (then long spines materialize eagerly-iteratively up
-                    // to the node cap).
+                    // Stream: the handler parked nothing and built nothing —
+                    // elements convert per-pull, chunk-by-chunk, as Haskell
+                    // forces tails (`take k` of a huge listing converts ~one
+                    // chunk; an infinite producer is a legitimate infinite
+                    // list). With the TIDEPOOL_LAZY_RESULTS=0 kill-switch the
+                    // stream drains eagerly through the node cap instead.
+                    //
+                    // Complete: classic Value. Long list spines are flattened
+                    // BY VALUE (iterative dismantle) and re-parked as a
+                    // pre-converted stream — a deep spine must never reach a
+                    // recursive Drop or recursive value_to_heap (~3 stack
+                    // frames per cell overflow the eval thread; the fault
+                    // lands outside signal protection and silently kills the
+                    // thread — see .tidepool/crash.log). The node cap remains
+                    // as a backstop for large non-list responses.
                     const LAZY_SPINE_THRESHOLD_NODES: usize = 2_000;
                     const MAX_EFFECT_RESPONSE_NODES: usize = 100_000;
                     let lazy_enabled = std::env::var("TIDEPOOL_LAZY_RESULTS")
                         .map(|v| v != "0")
                         .unwrap_or(true);
-                    let spine = probe_list_spine(&resp_val)
-                        .filter(|&(_, _, len)| len > LAZY_SPINE_THRESHOLD_NODES);
-                    let resp_ptr = match spine {
-                        Some((cons_tag, nil_tag, len)) => {
-                            let items = dismantle_list_spine(resp_val, len);
-                            if !lazy_enabled {
-                                // Eager iterative materialization still bounds
-                                // total response size. Element node counts are
-                                // computed iteratively; `items` drops flat.
-                                let nodes = 3 * len
-                                    + items.iter().map(|v| v.node_count()).sum::<usize>();
-                                if nodes > MAX_EFFECT_RESPONSE_NODES {
+
+                    // Normalize both channels to one of: a stream to park, a
+                    // Value to convert eagerly, or an already-materialized
+                    // heap pointer (kill-switch drains).
+                    enum Plan {
+                        Park(crate::host_fns::ParkedStream),
+                        Eager(tidepool_eval::value::Value),
+                        Ready(*mut u8),
+                    }
+                    let plan = match response {
+                        tidepool_effect::Response::Stream(s) => {
+                            let (mut source, cons_id, nil_id) = s.into_parts();
+                            if lazy_enabled {
+                                Plan::Park(crate::host_fns::ParkedStream {
+                                    source,
+                                    cons_tag: cons_id.0,
+                                    nil_tag: nil_id.0,
+                                    table: table.clone(),
+                                })
+                            } else {
+                                // Kill-switch: drain through the node cap.
+                                // (This makes infinite producers a clean
+                                // TooLarge error instead of divergence.)
+                                let mut items = Vec::new();
+                                let mut nodes = 0usize;
+                                let mut too_large = false;
+                                while let Some(r) = source.next_value(table) {
+                                    let v =
+                                        r.map_err(|e| JitError::from(EffectError::Bridge(e)))?;
+                                    nodes += 3 + v.node_count();
+                                    items.push(v);
+                                    if nodes > MAX_EFFECT_RESPONSE_NODES {
+                                        too_large = true;
+                                        break;
+                                    }
+                                }
+                                if too_large {
                                     break Err(JitError::EffectResponseTooLarge {
                                         nodes,
                                         limit: MAX_EFFECT_RESPONSE_NODES,
                                     });
                                 }
-                            }
-                            // SAFETY: vmctx is valid with installed GC state;
-                            // both helpers are GC-safe and return a poison
-                            // pointer with a runtime error set on failure.
-                            let p = unsafe {
-                                crate::signal_safety::with_signal_protection(|| {
-                                    if lazy_enabled {
-                                        let id = crate::host_fns::register_lazy_list(
-                                            crate::host_fns::LazyList {
-                                                cons_tag,
-                                                nil_tag,
-                                                items,
-                                            },
-                                        );
-                                        crate::host_fns::alloc_lazy_tail_thunk(
-                                            machine.vmctx_mut(),
-                                            id,
-                                            0,
-                                        )
-                                    } else {
+                                let p = unsafe {
+                                    crate::signal_safety::with_signal_protection(|| {
                                         crate::host_fns::materialize_cons_list(
                                             machine.vmctx_mut(),
-                                            cons_tag,
-                                            nil_tag,
+                                            cons_id.0,
+                                            nil_id.0,
                                             &items,
                                         )
+                                    })
+                                }
+                                .map_err(JitError::Signal)?;
+                                if let Some(err) = crate::host_fns::take_runtime_error() {
+                                    break Err(JitError::Yield(
+                                        crate::yield_type::YieldError::from(err),
+                                    ));
+                                }
+                                Plan::Ready(p)
+                            }
+                        }
+                        tidepool_effect::Response::Complete(resp_val) => {
+                            let spine = probe_list_spine(&resp_val)
+                                .filter(|&(_, _, len)| len > LAZY_SPINE_THRESHOLD_NODES);
+                            match spine {
+                                Some((cons_tag, nil_tag, len)) if lazy_enabled => {
+                                    // Re-park the dismantled spine as a
+                                    // pre-converted stream: one registry, one
+                                    // chunk materializer for both channels.
+                                    let items = dismantle_list_spine(resp_val, len);
+                                    Plan::Park(crate::host_fns::ParkedStream {
+                                        source: Box::new(crate::host_fns::ReadySource(
+                                            items.into_iter(),
+                                        )),
+                                        cons_tag,
+                                        nil_tag,
+                                        // Pre-converted: table never consulted.
+                                        table: tidepool_repr::DataConTable::new(),
+                                    })
+                                }
+                                Some((cons_tag, nil_tag, len)) => {
+                                    // Kill-switch: eager iterative
+                                    // materialization, cap still applies.
+                                    let items = dismantle_list_spine(resp_val, len);
+                                    let nodes = 3 * len
+                                        + items.iter().map(|v| v.node_count()).sum::<usize>();
+                                    if nodes > MAX_EFFECT_RESPONSE_NODES {
+                                        break Err(JitError::EffectResponseTooLarge {
+                                            nodes,
+                                            limit: MAX_EFFECT_RESPONSE_NODES,
+                                        });
                                     }
+                                    let p = unsafe {
+                                        crate::signal_safety::with_signal_protection(|| {
+                                            crate::host_fns::materialize_cons_list(
+                                                machine.vmctx_mut(),
+                                                cons_tag,
+                                                nil_tag,
+                                                &items,
+                                            )
+                                        })
+                                    }
+                                    .map_err(JitError::Signal)?;
+                                    if let Some(err) = crate::host_fns::take_runtime_error() {
+                                        break Err(JitError::Yield(
+                                            crate::yield_type::YieldError::from(err),
+                                        ));
+                                    }
+                                    Plan::Ready(p)
+                                }
+                                None => Plan::Eager(resp_val),
+                            }
+                        }
+                    };
+                    let resp_ptr = match plan {
+                        Plan::Ready(p) => p,
+                        Plan::Park(stream) => {
+                            let id = crate::host_fns::park_stream(stream);
+                            // SAFETY: vmctx is valid with installed GC state.
+                            let p = unsafe {
+                                crate::signal_safety::with_signal_protection(|| {
+                                    crate::host_fns::alloc_stream_tail_thunk(
+                                        machine.vmctx_mut(),
+                                        id,
+                                    )
                                 })
                             }
                             .map_err(JitError::Signal)?;
-                            if let Some(err) = crate::host_fns::take_runtime_error() {
-                                break Err(JitError::Yield(
-                                    crate::yield_type::YieldError::from(err),
-                                ));
-                            }
                             if p.is_null() {
                                 return Err(JitError::HeapBridge(
                                     heap_bridge::BridgeError::NurseryExhausted,
@@ -336,7 +413,7 @@ impl JitEffectMachine {
                             }
                             p
                         }
-                        None => {
+                        Plan::Eager(resp_val) => {
                             let nodes = resp_val.node_count();
                             if nodes > MAX_EFFECT_RESPONSE_NODES {
                                 break Err(JitError::EffectResponseTooLarge {
@@ -548,8 +625,12 @@ fn dismantle_list_spine(
     let mut items = Vec::with_capacity(len);
     let mut cur = val;
     loop {
+        // `ref mut` + pop: Value implements Drop, so fields can't move out
+        // by pattern. (Value's Drop is itself iterative, so even handing a
+        // deep spine to the destructor is safe now — this dismantle just
+        // avoids building the worklist twice.)
         match cur {
-            Value::Con(_, mut fields) if fields.len() == 2 => {
+            Value::Con(_, ref mut fields) if fields.len() == 2 => {
                 let tail = fields.pop().expect("len checked");
                 let head = fields.pop().expect("len checked");
                 items.push(head);

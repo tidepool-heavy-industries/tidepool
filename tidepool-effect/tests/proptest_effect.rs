@@ -1,6 +1,6 @@
 use frunk::hlist;
 use proptest::prelude::*;
-use tidepool_effect::dispatch::{DispatchEffect, EffectContext, EffectHandler};
+use tidepool_effect::dispatch::{DispatchEffect, EffectContext, EffectHandler, Response};
 use tidepool_effect::error::EffectError;
 use tidepool_eval::value::Value;
 use tidepool_repr::datacon_table::DataConTable;
@@ -17,8 +17,8 @@ impl EffectHandler<()> for MockHandler {
         &mut self,
         _req: Self::Request,
         _cx: &EffectContext<'_, ()>,
-    ) -> Result<Value, EffectError> {
-        Ok(Value::Lit(Literal::LitInt(self.id as i64)))
+    ) -> Result<Response, EffectError> {
+        Ok(Value::Lit(Literal::LitInt(self.id as i64)).into())
     }
 }
 
@@ -42,7 +42,7 @@ proptest! {
         let req = Value::Lit(Literal::LitInt(42));
 
         let res = h3.dispatch(tag, &req, &cx).unwrap();
-        if let Value::Lit(Literal::LitInt(id)) = res {
+        if let Response::Complete(Value::Lit(Literal::LitInt(id))) = res {
             prop_assert_eq!(id, tag as i64);
         } else {
             panic!("Unexpected response: {:?}", res);
@@ -80,8 +80,8 @@ proptest! {
         struct EchoHandler;
         impl EffectHandler<()> for EchoHandler {
             type Request = Value;
-            fn handle(&mut self, req: Self::Request, _cx: &EffectContext<'_, ()>) -> Result<Value, EffectError> {
-                Ok(req)
+            fn handle(&mut self, req: Self::Request, _cx: &EffectContext<'_, ()>) -> Result<Response, EffectError> {
+                Ok(req.into())
             }
         }
 
@@ -92,7 +92,10 @@ proptest! {
 
         let res = handlers.dispatch(0, &req, &cx).unwrap();
         // Compare using Debug representation as Value doesn't implement PartialEq
-        prop_assert_eq!(format!("{:?}", res), format!("{:?}", req));
+        let Response::Complete(res_val) = res else {
+            panic!("expected complete response");
+        };
+        prop_assert_eq!(format!("{:?}", res_val), format!("{:?}", req));
     }
 
     /// Test that dispatch routing is consistent even if we change handler order and tags.

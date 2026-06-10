@@ -40,7 +40,7 @@ impl DispatchEffect<()> for BigListDispatcher {
         _tag: u64,
         _request: &Value,
         cx: &tidepool_effect::EffectContext<'_, ()>,
-    ) -> Result<Value, tidepool_effect::error::EffectError> {
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         let items: Vec<String> = (0..self.n).map(|i| format!("item-{i}")).collect();
         cx.respond(items)
     }
@@ -76,6 +76,57 @@ fn eager_oversize_list_errors_cleanly() {
     // drop of the rejected response.
     let r = run_eager("xs <- glob \"**\"\npure (length xs)", 200_000);
     let err = r.expect_err("oversize eager response must error");
+    assert!(
+        err.contains("too large") || err.contains("TooLarge") || err.contains("100000"),
+        "expected response-size error, got: {err}"
+    );
+}
+
+/// respond_stream under the kill-switch: streams drain eagerly through the
+/// node cap (and infinite producers become a clean TooLarge error instead
+/// of divergence — a documented semantic change of the diagnostic mode).
+struct StreamDispatcher {
+    n: Option<usize>,
+}
+
+impl DispatchEffect<()> for StreamDispatcher {
+    fn dispatch(
+        &mut self,
+        _tag: u64,
+        _request: &Value,
+        cx: &tidepool_effect::EffectContext<'_, ()>,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        match self.n {
+            Some(n) => cx.respond_stream((0..n).map(|i| format!("item-{i}"))),
+            None => cx.respond_stream((0..).map(|i| format!("item-{i}"))),
+        }
+    }
+}
+
+fn run_eager_stream(code: &str, n: Option<usize>) -> Result<serde_json::Value, String> {
+    std::env::set_var("TIDEPOOL_LAZY_RESULTS", "0");
+    let decls = tidepool_mcp::standard_decls();
+    let preamble = tidepool_mcp::build_preamble(&decls, true);
+    let stack = tidepool_mcp::build_effect_stack_type(&decls);
+    let source = tidepool_mcp::template_haskell(&preamble, &stack, code, "", "", None, None);
+
+    let include = [prelude_dir(), user_lib_dir()];
+    let mut dispatcher = StreamDispatcher { n };
+    compile_and_run(&source, "result", &include, &mut dispatcher, &())
+        .map(|v| v.to_json())
+        .map_err(|e| format!("{e}"))
+}
+
+#[test]
+fn eager_stream_drains_fully() {
+    let r = run_eager_stream("xs <- glob \"**\"\npure (length xs)", Some(12_000));
+    assert_eq!(r.ok(), Some(serde_json::json!(12_000)));
+}
+
+#[test]
+fn eager_infinite_stream_errors_cleanly() {
+    let r = run_eager_stream("xs <- glob \"**\"\npure (length xs)", None);
+    let err = r.expect_err("infinite stream under kill-switch must error");
     assert!(
         err.contains("too large") || err.contains("TooLarge") || err.contains("100000"),
         "expected response-size error, got: {err}"

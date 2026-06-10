@@ -24,7 +24,11 @@ struct FooHandler;
 
 impl EffectHandler for FooHandler {
     type Request = FooReq;
-    fn handle(&mut self, req: FooReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: FooReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             FooReq::Ping => cx.respond(()),
         }

@@ -36,7 +36,7 @@ impl EffectHandler<CapturedOutput> for ConsoleHandler {
         &mut self,
         req: ConsoleReq,
         cx: &EffectContext<'_, CapturedOutput>,
-    ) -> Result<Value, EffectError> {
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             ConsoleReq::Print(s) => {
                 cx.user().push(s);
@@ -124,7 +124,7 @@ impl EffectHandler<CapturedOutput> for KvHandler {
         &mut self,
         req: KvReq,
         cx: &EffectContext<'_, CapturedOutput>,
-    ) -> Result<Value, EffectError> {
+    ) -> Result<tidepool_effect::Response, EffectError> {
         let mut store = self
             .store
             .lock()
@@ -283,7 +283,7 @@ impl EffectHandler<CapturedOutput> for FsHandler {
         &mut self,
         req: FsReq,
         cx: &EffectContext<'_, CapturedOutput>,
-    ) -> Result<Value, EffectError> {
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             FsReq::Read(path) => {
                 let resolved = self.resolve(&path)?;
@@ -305,7 +305,7 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                     .map(|e| e.file_name().to_string_lossy().to_string())
                     .collect();
                 entries.sort();
-                cx.respond(entries)
+                cx.respond_stream(entries)
             }
             FsReq::Glob(pattern) => {
                 let paths = self.expand_glob(&pattern)?;
@@ -317,7 +317,7 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                             .map(|r| r.to_string_lossy().to_string())
                     })
                     .collect();
-                cx.respond(rel_paths)
+                cx.respond_stream(rel_paths)
             }
             FsReq::Grep(regex_str, pattern) => {
                 let re = regex::Regex::new(&regex_str)
@@ -368,7 +368,7 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                     ));
                 }
 
-                cx.respond(results)
+                cx.respond_stream(results)
             }
             FsReq::Exists(path) => {
                 let resolved = self.resolve(&path)?;
@@ -660,15 +660,15 @@ impl EffectHandler<CapturedOutput> for SgHandler {
         &mut self,
         req: SgReq,
         cx: &EffectContext<'_, CapturedOutput>,
-    ) -> Result<Value, EffectError> {
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             SgReq::Find(lang, pattern, paths) => {
                 let matches = self.run_find(lang, &pattern, &paths, None)?;
-                cx.respond(matches)
+                cx.respond_stream(matches)
             }
             SgReq::RuleFind(lang, rule_json, paths) => {
                 let matches = self.run_rule_find(lang, &rule_json, &paths, None, cx.table())?;
-                cx.respond(matches)
+                cx.respond_stream(matches)
             }
         }
     }
@@ -750,7 +750,7 @@ impl EffectHandler<CapturedOutput> for HttpHandler {
         &mut self,
         req: HttpReq,
         cx: &EffectContext<'_, CapturedOutput>,
-    ) -> Result<Value, EffectError> {
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             HttpReq::Get(url_str) => {
                 let url = Self::validate_url(&url_str)?;
@@ -876,7 +876,7 @@ impl EffectHandler<CapturedOutput> for ExecHandler {
         &mut self,
         req: ExecReq,
         cx: &EffectContext<'_, CapturedOutput>,
-    ) -> Result<Value, EffectError> {
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             ExecReq::Run(cmd) => {
                 let (code, stdout, stderr) = self.run_command(&cmd, &self.root)?;
@@ -950,7 +950,7 @@ impl EffectHandler<CapturedOutput> for LlmHandler {
         &mut self,
         req: LlmReq,
         cx: &EffectContext<'_, CapturedOutput>,
-    ) -> Result<Value, EffectError> {
+    ) -> Result<tidepool_effect::Response, EffectError> {
         self.check_rate_limit()?;
         match req {
             LlmReq::Chat(prompt) => {
@@ -1033,7 +1033,7 @@ impl EffectHandler<CapturedOutput> for MetaHandler {
         &mut self,
         req: MetaReq,
         cx: &EffectContext<'_, CapturedOutput>,
-    ) -> Result<Value, EffectError> {
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             MetaReq::Constructors => {
                 let mut pairs: Vec<(String, i64)> = cx
@@ -1454,6 +1454,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
+    /// Unwrap a handler Response for inspection: Complete passes through;
+    /// Stream drains into the equivalent cons-list Value (iteratively).
+    fn response_value(
+        r: tidepool_effect::Response,
+        table: &tidepool_repr::DataConTable,
+    ) -> tidepool_eval::value::Value {
+        use tidepool_eval::value::Value;
+        match r {
+            tidepool_effect::Response::Complete(v) => v,
+            tidepool_effect::Response::Stream(s) => {
+                let (mut source, cons_id, nil_id) = s.into_parts();
+                let mut items = Vec::new();
+                while let Some(i) = source.next_value(table) {
+                    items.push(i.expect("stream element conversion"));
+                }
+                let mut acc = Value::Con(nil_id, vec![]);
+                for i in items.into_iter().rev() {
+                    acc = Value::Con(cons_id, vec![i, acc]);
+                }
+                acc
+            }
+        }
+    }
+
     #[test]
     fn test_pattern_mentions() {
         assert!(!pattern_mentions("**/*.rs", "target"));
@@ -1521,7 +1545,7 @@ mod tests {
 
         // Test normal grep
         let req = FsReq::Grep("hello".to_string(), "**/*.txt".to_string());
-        let res = handler.handle(req, &cx).unwrap();
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         use tidepool_bridge::FromCore;
         let results: Vec<(String, i64, String)> = FromCore::from_value(&res, &table).unwrap();
         assert_eq!(results.len(), 2);
@@ -1536,7 +1560,7 @@ mod tests {
 
         // Test skip binary and ignored
         let req = FsReq::Grep("hello".to_string(), "**/*".to_string());
-        let res = handler.handle(req, &cx).unwrap();
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let results: Vec<(String, i64, String)> = FromCore::from_value(&res, &table).unwrap();
         // Should only find test.txt matches, skipping target/ignored.txt and test.bin
         assert_eq!(results.len(), 2);
@@ -1560,7 +1584,7 @@ mod tests {
         let cx = EffectContext::with_user(&table, &captured);
 
         let req = FsReq::Grep("match".to_string(), "large.txt".to_string());
-        let res = handler.handle(req, &cx).unwrap();
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         use tidepool_bridge::FromCore;
         let results: Vec<(String, i64, String)> = FromCore::from_value(&res, &table).unwrap();
 
@@ -1921,7 +1945,7 @@ mod tests {
         let mut handlers = frunk::hlist![KvHandler::new(tmp)];
         let con_id = table.get_by_name("KvKeys").unwrap();
         let request = Value::Con(con_id, vec![]);
-        let result = handlers.dispatch(0, &request, &cx).unwrap();
+        let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
         assert_is_haskell_list(&result, &table);
     }
 
@@ -1946,7 +1970,7 @@ mod tests {
         let con_id = table.get_by_name("FsExists").unwrap();
         let path = "Cargo.toml".to_string().to_value(&table).unwrap();
         let request = Value::Con(con_id, vec![path]);
-        let result = handlers.dispatch(0, &request, &cx).unwrap();
+        let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
         // Should return True constructor
         match &result {
             Value::Con(id, _) => {
@@ -1966,7 +1990,7 @@ mod tests {
         let con_id = table.get_by_name("FsListDir").unwrap();
         let path = ".".to_string().to_value(&table).unwrap();
         let request = Value::Con(con_id, vec![path]);
-        let result = handlers.dispatch(0, &request, &cx).unwrap();
+        let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
         // Returns [Text] — a cons-list of Text values
         assert_is_cons_list(&result, &table);
     }
@@ -2085,7 +2109,7 @@ mod tests {
         let mut handlers = frunk::hlist![MetaHandler::new(vec![], vec![])];
         let con_id = table.get_by_name("MetaVersion").unwrap();
         let request = Value::Con(con_id, vec![]);
-        let result = handlers.dispatch(0, &request, &cx).unwrap();
+        let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
         // MetaVersion returns a Text value
         match &result {
             Value::Con(id, _) => {
@@ -2104,7 +2128,7 @@ mod tests {
         let mut handlers = frunk::hlist![MetaHandler::new(vec![], vec![])];
         let con_id = table.get_by_name("MetaPrimOps").unwrap();
         let request = Value::Con(con_id, vec![]);
-        let result = handlers.dispatch(0, &request, &cx).unwrap();
+        let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
         // Returns [Text] — list of strings (each string is a cons-list of chars)
         assert_is_cons_list(&result, &table);
     }
@@ -2185,7 +2209,7 @@ mod tests {
             &mut self,
             req: LlmReq,
             cx: &EffectContext<'_, CapturedOutput>,
-        ) -> Result<Value, EffectError> {
+        ) -> Result<tidepool_effect::Response, EffectError> {
             match req {
                 LlmReq::Chat(_) => cx.respond("mock response".to_string()),
                 LlmReq::Structured(_, _) => cx.respond(self.response.clone()),

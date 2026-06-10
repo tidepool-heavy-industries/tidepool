@@ -150,7 +150,7 @@ fn test_gc_preserves_values() {
             let mut machine = JitEffectMachine::compile(&expr, &table, 2048).unwrap();
             let result = machine.run_pure().unwrap();
 
-            let Value::Con(tag, fields) = result else {
+            let Value::Con(tag, ref fields) = result else {
                 panic!("Expected Con, got {:?}", result);
             };
             assert_eq!(tag, DataConId(1));

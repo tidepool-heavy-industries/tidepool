@@ -66,6 +66,52 @@ const MAX_DEPTH: usize = 10_000;
 pub(crate) const MAX_FIELDS: usize = 1024;
 const MAX_DATA_SIZE: usize = 64 * 1024 * 1024; // 64MB
 
+/// RAII guard for scoped RUST_ROOTS registration: truncates the shadow-root
+/// registry back to its construction mark on drop, covering early returns.
+struct RootScope(usize);
+impl RootScope {
+    fn new() -> Self {
+        Self(crate::host_fns::rust_roots_mark())
+    }
+}
+impl Drop for RootScope {
+    fn drop(&mut self) {
+        crate::host_fns::truncate_rust_roots(self.0);
+    }
+}
+
+/// Resolve a heap pointer to WHNF: follow thunk indirections and (when a
+/// vmctx is available) force unevaluated thunks. Mirrors the TAG_THUNK
+/// branch of `heap_to_value_inner`; used by the iterative spine walk to
+/// step through lazy effect-result tails. `heap_force` roots its own
+/// argument, so the returned pointer is valid post-GC.
+unsafe fn resolve_whnf(mut p: *const u8, vmctx: *mut VMContext) -> Result<*const u8, BridgeError> {
+    loop {
+        if p.is_null() {
+            return Err(BridgeError::NullPointer);
+        }
+        if *p != layout::TAG_THUNK {
+            return Ok(p);
+        }
+        let state = *p.add(layout::THUNK_STATE_OFFSET as usize);
+        match state {
+            layout::THUNK_EVALUATED => {
+                p = *(p.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *const *const u8);
+            }
+            _ if !vmctx.is_null() => {
+                let forced = crate::host_fns::heap_force(vmctx, p as *mut u8);
+                if forced.is_null() || std::ptr::eq(forced, p) {
+                    return Err(BridgeError::UnevaluatedThunk);
+                }
+                p = forced;
+            }
+            layout::THUNK_UNEVALUATED => return Err(BridgeError::UnevaluatedThunk),
+            layout::THUNK_BLACKHOLE => return Err(BridgeError::BlackHole),
+            other => return Err(BridgeError::UnknownThunkState(other)),
+        }
+    }
+}
+
 unsafe fn heap_to_value_inner(
     ptr: *const u8,
     depth: usize,
@@ -78,6 +124,20 @@ unsafe fn heap_to_value_inner(
     }
     if depth > MAX_DEPTH {
         return Err(BridgeError::TooDeep);
+    }
+
+    // GC safety: converting children can FORCE thunks (a lazy effect-result
+    // tail materializes a whole chunk), which can collect — moving this
+    // frame's object out from under its raw pointer. Every frame roots its
+    // own `ptr`, so the entire ancestor chain stays valid across any force,
+    // and per-field pointers are re-read from the (updated) parent after
+    // each child conversion. For non-heap pointers (tests use stack
+    // buffers) the collector's from-space range check skips the slot.
+    let mut ptr = ptr;
+    let _roots = RootScope::new();
+    // SAFETY: the slot lives until _roots drops at function exit.
+    unsafe {
+        crate::host_fns::register_rust_root(&mut ptr as *mut *const u8 as *mut *mut u8);
     }
 
     // Converting ⊥ (a lazy poison closure) is a genuine demand: raise its
@@ -168,7 +228,12 @@ unsafe fn heap_to_value_inner(
                     }
                     let mut elems = Vec::with_capacity(len);
                     for i in 0..len {
-                        let elem_ptr = *(arr_ptr.add(8 + 8 * i) as *const *const u8);
+                        // Re-derive the buffer pointer from the ROOTED Lit
+                        // each iteration: converting an element can force
+                        // (and collect), moving the payload buffer.
+                        let arr_now = (*(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const i64))
+                            as *const u8;
+                        let elem_ptr = *(arr_now.add(8 + 8 * i) as *const *const u8);
                         elems.push(heap_to_value_inner(elem_ptr, depth + 1, vmctx)?);
                     }
                     // SmallArray#/Array# carry no per-array DataConId. The wrapping Con (e.g.
@@ -181,15 +246,65 @@ unsafe fn heap_to_value_inner(
             }
         }
         t if t == layout::TAG_CON => {
-            let con_tag = unsafe { *(ptr.add(layout::CON_TAG_OFFSET as usize) as *const u64) };
             let num_fields =
                 unsafe { *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) }
                     as usize;
             if num_fields > MAX_FIELDS {
                 return Err(BridgeError::TooManyFields { count: num_fields });
             }
+
+            if num_fields == 2 {
+                // Iterative spine conversion: 2-field Con chains (cons
+                // lists) walk in a loop instead of per-cell recursion —
+                // recursion costs ~2 stack frames per element and the depth
+                // cap would reject long lists outright, while lazy effect
+                // results make 10k+-element lists routine. Any 2-field
+                // chain (nested pairs included) rebuilds structure-
+                // identically, so no list semantics are assumed. Forcing a
+                // lazy tail materializes a chunk and can GC: `cur` is
+                // rooted, and head/tail pointers are re-read from the
+                // (updated) cell after each child conversion.
+                let mut elems: Vec<(u64, Value)> = Vec::new();
+                let mut cur = ptr;
+                let _spine_roots = RootScope::new();
+                // SAFETY: the slot lives until _spine_roots drops.
+                unsafe {
+                    crate::host_fns::register_rust_root(&mut cur as *mut *const u8 as *mut *mut u8);
+                }
+                loop {
+                    if *cur != layout::TAG_CON {
+                        break;
+                    }
+                    let nf =
+                        *(cur.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) as usize;
+                    if nf != 2 {
+                        break;
+                    }
+                    let cell_tag = *(cur.add(layout::CON_TAG_OFFSET as usize) as *const u64);
+                    let head = *(cur.add(layout::CON_FIELDS_OFFSET as usize) as *const *const u8);
+                    let hv = heap_to_value_inner(head, depth + 1, vmctx)?;
+                    elems.push((cell_tag, hv));
+                    // Re-read the tail AFTER the head conversion (which may
+                    // have collected and moved this cell).
+                    let tail =
+                        *(cur.add(layout::CON_FIELDS_OFFSET as usize + 8) as *const *const u8);
+                    cur = resolve_whnf(tail, vmctx)?;
+                }
+                // `cur` is the terminator: nil, a non-pair Con, a literal —
+                // or a shape the recursion will reject with the right error.
+                let mut acc = heap_to_value_inner(cur, depth + 1, vmctx)?;
+                while let Some((cell_tag, hv)) = elems.pop() {
+                    acc = Value::Con(DataConId(cell_tag), vec![hv, acc]);
+                }
+                return Ok(acc);
+            }
+
+            let con_tag = unsafe { *(ptr.add(layout::CON_TAG_OFFSET as usize) as *const u64) };
             let fields: Vec<_> = (0..num_fields)
                 .map(|i| {
+                    // Field pointers are read from the ROOTED parent per
+                    // iteration: an earlier field's conversion may have
+                    // forced (and collected), moving this Con.
                     let field_ptr =
                         *(ptr.add(layout::CON_FIELDS_OFFSET as usize + 8 * i) as *const *const u8);
                     heap_to_value_inner(field_ptr, depth + 1, vmctx)
@@ -449,10 +564,10 @@ mod tests {
         unsafe {
             let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
             let back = heap_to_value(ptr).expect("heap_to_value failed");
-            let Value::Lit(Literal::LitString(b)) = back else {
+            let Value::Lit(Literal::LitString(ref b)) = back else {
                 panic!("Expected LitString, got {:?}", back);
             };
-            assert_eq!(b, bytes);
+            assert_eq!(*b, bytes);
         }
     }
 
@@ -469,7 +584,7 @@ mod tests {
         unsafe {
             let ptr = value_to_heap(&val, &mut vmctx).expect("value_to_heap failed");
             let back = heap_to_value(ptr).expect("heap_to_value failed");
-            let Value::Con(id, fields) = back else {
+            let Value::Con(id, ref fields) = back else {
                 panic!("Expected Con, got {:?}", back);
             };
             assert_eq!(id.0, 42);

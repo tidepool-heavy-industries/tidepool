@@ -1,6 +1,6 @@
 use frunk::{hlist, HNil};
 use proptest::prelude::*;
-use tidepool_effect::dispatch::{EffectContext, EffectHandler};
+use tidepool_effect::dispatch::{EffectContext, EffectHandler, Response};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::machine::EffectMachine;
 use tidepool_eval::heap::VecHeap;
@@ -75,11 +75,11 @@ impl EffectHandler<()> for CountingHandler {
         &mut self,
         _req: Self::Request,
         _cx: &EffectContext<'_, ()>,
-    ) -> Result<Value, EffectError> {
+    ) -> Result<Response, EffectError> {
         let idx = self.count as usize;
         self.count += 1;
         let resp = self.responses.get(idx).copied().unwrap_or(0);
-        Ok(Value::Lit(Literal::LitInt(resp)))
+        Ok(Value::Lit(Literal::LitInt(resp)).into())
     }
 }
 
@@ -121,8 +121,8 @@ impl EffectHandler<()> for TaggedHandler {
         &mut self,
         _req: Self::Request,
         _cx: &EffectContext<'_, ()>,
-    ) -> Result<Value, EffectError> {
-        Ok(Value::Lit(Literal::LitInt(self.0)))
+    ) -> Result<Response, EffectError> {
+        Ok(Value::Lit(Literal::LitInt(self.0)).into())
     }
 }
 

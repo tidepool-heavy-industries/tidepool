@@ -17,7 +17,6 @@ mod common;
 
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run_with_nursery_size;
 
 fn prelude_path() -> std::path::PathBuf {
@@ -36,7 +35,11 @@ struct MockDataSource;
 
 impl EffectHandler for MockDataSource {
     type Request = DataSourceReq;
-    fn handle(&mut self, req: DataSourceReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: DataSourceReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             DataSourceReq::GetItems => {
                 // Return a list of 50 strings to fill nursery
@@ -67,7 +70,11 @@ struct MockClassifier;
 
 impl EffectHandler for MockClassifier {
     type Request = ClassifierReq;
-    fn handle(&mut self, req: ClassifierReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: ClassifierReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             ClassifierReq::Classify(_prompt) => cx.respond("ok".to_string()),
         }
@@ -86,7 +93,11 @@ struct MockConsole;
 
 impl EffectHandler for MockConsole {
     type Request = ConsoleReq;
-    fn handle(&mut self, req: ConsoleReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: ConsoleReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             ConsoleReq::Print(_s) => cx.respond(()),
         }
@@ -375,7 +386,11 @@ struct MockClassifierCustom(String);
 
 impl EffectHandler for MockClassifierCustom {
     type Request = ClassifierReq;
-    fn handle(&mut self, req: ClassifierReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: ClassifierReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             ClassifierReq::Classify(_) => cx.respond(self.0.clone()),
         }

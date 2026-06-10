@@ -10,7 +10,6 @@ mod common;
 
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
 
 #[derive(FromCore)]
@@ -25,7 +24,11 @@ struct BigListing {
 
 impl EffectHandler for BigListing {
     type Request = ListingReq;
-    fn handle(&mut self, req: ListingReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: ListingReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             ListingReq::GetList => {
                 let items: Vec<String> = (0..self.n).map(|i| format!("item-{i}")).collect();

@@ -27,7 +27,11 @@ struct ConsoleHandler;
 impl EffectHandler for ConsoleHandler {
     type Request = ConsoleReq;
 
-    fn handle(&mut self, req: ConsoleReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: ConsoleReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             ConsoleReq::Emit(s) => {
                 println!("{}", s);
@@ -69,7 +73,11 @@ struct RngHandler(rand::rngs::ThreadRng);
 impl EffectHandler for RngHandler {
     type Request = RngReq;
 
-    fn handle(&mut self, req: RngReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: RngReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             RngReq::RandInt(lo, hi) => {
                 let n = self.0.gen_range(lo..=hi);

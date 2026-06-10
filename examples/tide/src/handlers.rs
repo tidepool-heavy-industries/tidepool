@@ -181,7 +181,11 @@ fn read_file_line(
 impl EffectHandler for ReplHandler {
     type Request = ReplReq;
 
-    fn handle(&mut self, req: ReplReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: ReplReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             ReplReq::ReadLine => {
                 if !self.greeted {
@@ -215,7 +219,11 @@ pub struct ConsoleHandler;
 impl EffectHandler for ConsoleHandler {
     type Request = ConsoleReq;
 
-    fn handle(&mut self, req: ConsoleReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: ConsoleReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             ConsoleReq::Print(s) => {
                 println!("{}", s);
@@ -254,7 +262,11 @@ impl EnvHandler {
 impl EffectHandler for EnvHandler {
     type Request = EnvReq;
 
-    fn handle(&mut self, req: EnvReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: EnvReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             EnvReq::EnvLookup(key) => {
                 debug!("Lookup: {}", key);
@@ -297,7 +309,11 @@ pub struct NetHandler;
 impl EffectHandler for NetHandler {
     type Request = NetReq;
 
-    fn handle(&mut self, req: NetReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: NetReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             NetReq::HttpGet(raw) => {
                 let url = parse_url(&raw)?;
@@ -345,7 +361,11 @@ impl FsHandler {
 impl EffectHandler for FsHandler {
     type Request = FsReq;
 
-    fn handle(&mut self, req: FsReq, cx: &EffectContext) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: FsReq,
+        cx: &EffectContext,
+    ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             FsReq::FsRead(path) => {
                 let path = self.resolve(&path);

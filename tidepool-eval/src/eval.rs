@@ -104,12 +104,15 @@ pub fn deep_force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
             return Err(EvalError::DepthLimit);
         }
         match work {
-            Work::Force(v) => match v {
+            Work::Force(mut v) => match v {
                 Value::ThunkRef(id) => {
                     let forced = force(Value::ThunkRef(id), heap)?;
                     stack.push(Work::Force(forced));
                 }
-                Value::Con(tag, fields) => {
+                // `ref mut` + take: Value implements Drop (iterative spine
+                // dismantle), so fields cannot be moved out by pattern.
+                Value::Con(tag, ref mut fields) => {
+                    let fields = std::mem::take(fields);
                     let n = fields.len();
                     stack.push(Work::BuildCon(tag, n));
                     // Push fields in reverse so they're processed in order
@@ -117,7 +120,8 @@ pub fn deep_force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
                         stack.push(Work::Force(f));
                     }
                 }
-                Value::ConFun(tag, arity, args) => {
+                Value::ConFun(tag, arity, ref mut args) => {
+                    let args = std::mem::take(args);
                     let n = args.len();
                     stack.push(Work::BuildConFun(tag, arity, n));
                     for a in args.into_iter().rev() {
@@ -176,15 +180,21 @@ fn eval_at(
         }
         CoreFrame::Lit(lit) => Ok(Value::Lit(lit.clone())),
         CoreFrame::App { fun, arg } => {
-            let fun_val = force(eval_at(expr, *fun, env, heap)?, heap)?;
+            let mut fun_val = force(eval_at(expr, *fun, env, heap)?, heap)?;
             let arg_val = eval_at(expr, *arg, env, heap)?;
+            // `ref mut` + replace/take: Value implements Drop (iterative
+            // spine dismantle), so fields cannot be moved out by pattern.
+            // The swaps are pointer-sized — no clones on this hot path.
             match fun_val {
-                Value::Closure(clos_env, binder, body) => {
-                    let mut new_env = clos_env;
+                Value::Closure(ref mut clos_env, binder, ref mut body) => {
+                    let mut new_env = std::mem::replace(clos_env, Env::new());
+                    let body =
+                        std::mem::replace(body, tidepool_repr::RecursiveTree { nodes: vec![] });
                     new_env.insert(binder, arg_val);
                     eval(&body, &new_env, heap)
                 }
-                Value::ConFun(tag, arity, mut args) => {
+                Value::ConFun(tag, arity, ref mut args) => {
+                    let mut args = std::mem::take(args);
                     args.push(arg_val);
                     if args.len() == arity {
                         // Don't force fields — leave thunks intact for lazy evaluation.
@@ -2270,7 +2280,8 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        let Value::Con(tag, fields) = res else {
+        // `ref` binding: Value implements Drop, so fields can't move out.
+        let Value::Con(tag, ref fields) = res else {
             panic!("Expected Con, got {:?}", res);
         };
         assert_eq!(tag.0, 1);
@@ -2961,7 +2972,8 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        let Value::Con(tag, fields) = res else {
+        // `ref` binding: Value implements Drop, so fields can't move out.
+        let Value::Con(tag, ref fields) = res else {
             panic!("Expected outer Con, got {:?}", res);
         };
         assert_eq!(tag.0, 2);
@@ -3011,7 +3023,7 @@ mod tests {
         let expr = CoreExpr { nodes };
         let mut heap = crate::heap::VecHeap::new();
         let res = eval(&expr, &Env::new(), &mut heap).unwrap();
-        let Value::Con(tag, fields) = res else {
+        let Value::Con(tag, ref fields) = res else {
             panic!("Expected empty Con, got {:?}", res);
         };
         assert_eq!(tag.0, 1);

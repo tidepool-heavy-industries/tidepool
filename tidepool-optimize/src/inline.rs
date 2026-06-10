@@ -228,7 +228,7 @@ mod tests {
         let env = Env::new();
         let v1 = eval(&expr_once, &env, &mut heap).unwrap();
         let v2 = eval(&expr_once_reduced, &env, &mut heap).unwrap();
-        match (v1, v2) {
+        match (&v1, &v2) {
             (tidepool_eval::Value::Lit(l1), tidepool_eval::Value::Lit(l2)) => assert_eq!(l1, l2),
             _ => panic!("Expected literals"),
         }
