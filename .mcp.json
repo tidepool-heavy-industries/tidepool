@@ -2,13 +2,11 @@
   "mcpServers": {
     "exomonad": {
       "args": [
-        "mcp-stdio",
-        "--role",
-        "root",
-        "--name",
-        "root"
+        "node",
+        "--papers",
+        "/home/inanna/dev/tidepool/.exo/node/10476e6e-4f91-4cf7-a0bc-8293a97f912b/root.json"
       ],
-      "command": "exomonad",
+      "command": "exo",
       "type": "stdio"
     }
   }
