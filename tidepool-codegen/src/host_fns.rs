@@ -1898,7 +1898,7 @@ fn haskell_show_double(d: f64) -> String {
     }
     let abs = d.abs();
     if (0.1..1.0e7).contains(&abs) {
-        let s = format!("{}", d);
+        let s = d.to_string();
         if s.contains('.') {
             s
         } else {

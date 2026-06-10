@@ -172,7 +172,7 @@ impl CodegenPipeline {
     pub fn finalize(&mut self) -> Result<(), PipelineError> {
         self.module
             .finalize_definitions()
-            .map_err(|e| PipelineError::Finalization(format!("{}", e)))?;
+            .map_err(|e| PipelineError::Finalization(e.to_string()))?;
 
         // Now register stack maps with actual base pointers
         let pending = std::mem::take(&mut self.pending_stack_maps);

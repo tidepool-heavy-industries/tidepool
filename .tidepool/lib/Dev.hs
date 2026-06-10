@@ -32,11 +32,12 @@ slice f lo hi = do
   pure (take (hi - lo + 1) (drop (lo - 1) numbered))
 
 -- | cargo check, returning only diagnostic header lines (errors/warnings).
--- Exit code intentionally ignored: diagnostics ARE the result.
+-- Filtering happens SHELL-SIDE: Haskell-side filter/map over lines of a
+-- partially-consumed effect tuple miscompiles in lib modules ("undefined
+-- forced" — open JIT bug; minimal repro preserved in Probe.hs t1-t8,
+-- inline equivalents work). shLines consumes all fields, like gitS.
 cargoCheck :: M [Text]
-cargoCheck = do
-  (_, _, err) <- run "cargo check --workspace"
-  pure (filter (\l -> "error" `isPrefixOf` l || "warning" `isPrefixOf` l) (lines err))
+cargoCheck = shLines "cargo check --workspace 2>&1 | grep -E '^(error|warning)' || true"
 
 -- | git status --short, as lines.
 gitS :: M [Text]
