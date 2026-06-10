@@ -696,7 +696,8 @@ fn collect_text(val: &Value, table: &DataConTable) -> String {
         assert_eq!(fields.len(), 3, "Text should have 3 fields");
         let bytes = match &fields[0] {
             Value::ByteArray(ba) => ba.lock().unwrap().clone(),
-            other => panic!("expected ByteArray for Text field 0, got {other:?}"),
+            Value::Lit(Literal::LitString(bs)) => bs.clone(),
+            other => panic!("expected ByteArray or LitString for Text field 0, got {other:?}"),
         };
         let offset = match unbox(&fields[1], table) {
             Value::Lit(Literal::LitInt(n)) => n as usize,
