@@ -171,26 +171,27 @@ fn expand_node(tree: &CoreExpr, idx: usize) -> Result<EmitFrame<usize>, EmitErro
         }
         CoreFrame::App { fun, arg } => {
             if EmitContext::rhs_is_error_call(tree, idx) {
-                let kind = EmitContext::extract_error_kind(tree, idx);
-                let msg = EmitContext::extract_error_message(tree, idx);
-                // Extract the first argument of the App chain as the dynamic arg
-                let mut current = idx;
-                let mut last_arg = None;
-                while let CoreFrame::App { fun, arg } = &tree.nodes[current] {
-                    last_arg = Some(*arg);
-                    current = *fun;
+                if let Some(msg) = EmitContext::extract_error_message(tree, idx) {
+                    // Static fast path: the message is known at compile time.
+                    let kind = EmitContext::extract_error_kind(tree, idx);
+                    return Ok(EmitFrame::Raise {
+                        kind,
+                        msg: Some(msg),
+                        arg: None,
+                    });
                 }
-                Ok(EmitFrame::Raise {
-                    kind,
-                    msg,
-                    arg: last_arg,
-                })
-            } else {
-                Ok(EmitFrame::App {
-                    fun: *fun,
-                    arg: *arg,
-                })
+                // No static message: compile as a NORMAL application. The
+                // sentinel Var emits a lazy poison closure; applying it routes
+                // through poison_trampoline_lazy, which swallows non-string
+                // arguments (CallStack dicts in partial applications like
+                // `error cs`) by returning itself and raises with the
+                // materialized message once a string-ish argument arrives.
+                // Eagerly raising here is wrong for partial applications.
             }
+            Ok(EmitFrame::App {
+                fun: *fun,
+                arg: *arg,
+            })
         }
         CoreFrame::PrimOp { op, args } => {
             if matches!(op, PrimOpKind::Raise) {
@@ -1386,6 +1387,46 @@ fn emit_thunk(args: EmitArgs, body_idx: usize) -> Result<SsaVal, EmitError> {
     Ok(SsaVal::HeapPtr(thunk_ptr))
 }
 
+/// Bind an error-call RHS without evaluating it. Preference order:
+/// 1. Message statically extractable -> message-carrying lazy poison.
+/// 2. Otherwise -> a real thunk: forcing it executes the Raise, which
+///    materializes the message from the live argument at runtime
+///    (`runtime_error_dynamic`).
+/// 3. Thunk captures unavailable in this context (subtree-severed sibling
+///    deps) -> message-less lazy poison, the old behavior.
+fn emit_error_binding(args: EmitArgs, rhs_idx: usize) -> Result<SsaVal, EmitError> {
+    let kind = EmitContext::extract_error_kind(args.sess.tree, rhs_idx);
+    if let Some(msg) = EmitContext::extract_error_message(args.sess.tree, rhs_idx) {
+        let addr = crate::host_fns::error_poison_ptr_lazy_msg(kind, &msg) as i64;
+        let v = args.builder.ins().iconst(types::I64, addr);
+        return Ok(SsaVal::HeapPtr(v));
+    }
+    // Bare sentinel Var: no message expression exists anywhere — the poison
+    // value is exact (and self-swallows non-string args if applied later).
+    if matches!(&args.sess.tree.nodes[rhs_idx], CoreFrame::Var(_)) {
+        let addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
+        let v = args.builder.ins().iconst(types::I64, addr);
+        return Ok(SsaVal::HeapPtr(v));
+    }
+    match emit_thunk(
+        EmitArgs {
+            ctx: args.ctx,
+            sess: args.sess,
+            builder: args.builder,
+            tail: TailCtx::NonTail,
+        },
+        rhs_idx,
+    ) {
+        Ok(v) => Ok(v),
+        Err(EmitError::MissingCaptureVar(_, _)) => {
+            let addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
+            let v = args.builder.ins().iconst(types::I64, addr);
+            Ok(SsaVal::HeapPtr(v))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -1601,14 +1642,6 @@ impl EmitContext {
         None
     }
 
-    fn emit_error_poison(&self, tree: &CoreExpr, rhs_idx: usize) -> i64 {
-        let kind = Self::extract_error_kind(tree, rhs_idx);
-        match Self::extract_error_message(tree, rhs_idx) {
-            Some(msg) => crate::host_fns::error_poison_ptr_lazy_msg(kind, &msg) as i64,
-            None => crate::host_fns::error_poison_ptr_lazy(kind) as i64,
-        }
-    }
-
     /// Trampoline-based emit_node: converts recursive Let-chain evaluation to
     /// an explicit work stack. This prevents Rust stack overflow during JIT
     /// compilation of deeply nested GHC Core ASTs.
@@ -1638,11 +1671,16 @@ impl EmitContext {
                                 );
                                 if body_fvs.binary_search(&binder).is_ok() {
                                     if Self::rhs_is_error_call(args.sess.tree, rhs) {
-                                        // Bind to lazy poison closure \u2014 error only triggers on call.
-                                        let poison_addr =
-                                            args.ctx.emit_error_poison(args.sess.tree, rhs);
-                                        let poison_val =
-                                            args.builder.ins().iconst(types::I64, poison_addr);
+                                        // Bind lazily: error only triggers on force/call.
+                                        let poison_sv = emit_error_binding(
+                                            EmitArgs {
+                                                ctx: args.ctx,
+                                                sess: args.sess,
+                                                builder: args.builder,
+                                                tail: TailCtx::NonTail,
+                                            },
+                                            rhs,
+                                        )?;
                                         if crate::debug::trace_level()
                                             >= crate::debug::TraceLevel::Scope
                                         {
@@ -1651,10 +1689,7 @@ impl EmitContext {
                                                 binder
                                             ));
                                         }
-                                        let old_val = args
-                                            .ctx
-                                            .env
-                                            .insert(binder, SsaVal::HeapPtr(poison_val));
+                                        let old_val = args.ctx.env.insert(binder, poison_sv);
                                         // No RHS eval needed, just push cleanup and continue to body
                                         work.push(EmitWork::LetCleanupMark(LetCleanup::Single(
                                             binder, old_val,
@@ -1995,13 +2030,20 @@ impl EmitContext {
             });
             for (binder, rhs_idx) in simple_bindings.iter().rev() {
                 if EmitContext::rhs_is_error_call(args.sess.tree, *rhs_idx) {
-                    let poison_addr = args.ctx.emit_error_poison(args.sess.tree, *rhs_idx);
-                    let poison_val = args.builder.ins().iconst(types::I64, poison_addr);
+                    let poison_sv = emit_error_binding(
+                        EmitArgs {
+                            ctx: args.ctx,
+                            sess: args.sess,
+                            builder: args.builder,
+                            tail: TailCtx::NonTail,
+                        },
+                        *rhs_idx,
+                    )?;
                     if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
                         args.ctx
                             .trace_scope(&format!("defer error LetRec(simple) {:?}", binder));
                     }
-                    args.ctx.env.insert(*binder, SsaVal::HeapPtr(poison_val));
+                    args.ctx.env.insert(*binder, poison_sv);
                 } else {
                     work.push(EmitWork::LetRecPostSimple {
                         binder: *binder,
@@ -2180,13 +2222,20 @@ impl EmitContext {
         let mut deferred_simple = Vec::with_capacity(simple_bindings.len());
         for (binder, rhs_idx) in &simple_bindings {
             if EmitContext::rhs_is_error_call(args.sess.tree, *rhs_idx) {
-                let poison_addr = args.ctx.emit_error_poison(args.sess.tree, *rhs_idx);
-                let poison_val = args.builder.ins().iconst(types::I64, poison_addr);
+                let poison_sv = emit_error_binding(
+                    EmitArgs {
+                        ctx: args.ctx,
+                        sess: args.sess,
+                        builder: args.builder,
+                        tail: TailCtx::NonTail,
+                    },
+                    *rhs_idx,
+                )?;
                 if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
                     args.ctx
                         .trace_scope(&format!("defer error LetRec(trivial) {:?}", binder));
                 }
-                args.ctx.env.insert(*binder, SsaVal::HeapPtr(poison_val));
+                args.ctx.env.insert(*binder, poison_sv);
             } else if matches!(&args.sess.tree.nodes[*rhs_idx], CoreFrame::Var(_)) {
                 // Var aliases are trivial \u2014 just an env lookup via emit_subtree
                 let rhs_val = emit_subtree(
@@ -2537,13 +2586,20 @@ impl EmitContext {
 
         for (binder, rhs_idx) in deferred_simple.iter().rev() {
             if EmitContext::rhs_is_error_call(args.sess.tree, *rhs_idx) {
-                let poison_addr = args.ctx.emit_error_poison(args.sess.tree, *rhs_idx);
-                let poison_val = args.builder.ins().iconst(types::I64, poison_addr);
+                let poison_sv = emit_error_binding(
+                    EmitArgs {
+                        ctx: args.ctx,
+                        sess: args.sess,
+                        builder: args.builder,
+                        tail: TailCtx::NonTail,
+                    },
+                    *rhs_idx,
+                )?;
                 if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
                     args.ctx
                         .trace_scope(&format!("defer error LetRec(deferred) {:?}", binder));
                 }
-                args.ctx.env.insert(*binder, SsaVal::HeapPtr(poison_val));
+                args.ctx.env.insert(*binder, poison_sv);
                 // Run post-step inline: closures may capture error-poisoned
                 // bindings, and deferred Cons may depend on them. Without this,
                 // capture slots stay zero-initialized \u2192 SIGSEGV instead of

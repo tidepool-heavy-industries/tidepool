@@ -947,9 +947,11 @@ unsafe fn materialize_message(vmctx: *mut VMContext, arg: *mut u8) -> Option<Vec
         if heap_layout::read_tag(p) != tidepool_heap::layout::TAG_LIT {
             return None;
         }
+        // LitString and ByteArray# share the [len: u64][bytes...] payload
+        // layout; Text's first field is a ByteArray#.
         let lit_tag = *p.add(tidepool_heap::layout::LIT_TAG_OFFSET);
-        if lit_tag != 5 {
-            // LIT_TAG_STRING
+        if lit_tag != 5 && lit_tag != crate::layout::LIT_TAG_BYTEARRAY as u8 {
+            // 5 = LIT_TAG_STRING
             return None;
         }
         let raw = *(p.add(tidepool_heap::layout::LIT_VALUE_OFFSET) as *const *const u8);
@@ -979,13 +981,23 @@ unsafe fn materialize_message(vmctx: *mut VMContext, arg: *mut u8) -> Option<Vec
         }
         let nf = *(cur.add(tidepool_heap::layout::CON_NUM_FIELDS_OFFSET) as *const u16);
 
-        // Text bytes offset len — field 0 holds the byte buffer.
+        // Text bytes offset len — field 0 holds the byte buffer, possibly
+        // behind single-field box constructors (ByteArray ba#).
         if nf == 3 {
             tmp = *(cur.add(tidepool_heap::layout::CON_FIELDS_OFFSET) as *const *mut u8);
             if tmp.is_null() {
                 return None;
             }
             tmp = heap_force(vmctx, tmp);
+            while heap_layout::read_tag(tmp) == tidepool_heap::layout::TAG_CON
+                && *(tmp.add(tidepool_heap::layout::CON_NUM_FIELDS_OFFSET) as *const u16) == 1
+            {
+                let inner = *(tmp.add(tidepool_heap::layout::CON_FIELDS_OFFSET) as *const *mut u8);
+                if inner.is_null() {
+                    return None;
+                }
+                tmp = heap_force(vmctx, inner);
+            }
             let bytes = read_lit_string(tmp)?;
             // Re-read offset/len AFTER the force above (cur may have moved).
             let f1 = *(cur.add(tidepool_heap::layout::CON_FIELDS_OFFSET + 8) as *const *mut u8);
@@ -1080,29 +1092,33 @@ pub unsafe fn raise_lazy_poison(vmctx: *mut VMContext, ptr: *mut u8) -> *mut u8 
 }
 
 /// Trampoline for lazy poison closures. Reads the error kind from captured[0]
-/// and calls `runtime_error(kind)` — setting the error flag only now, when the
-/// closure is actually invoked.
+/// and raises — setting the error flag only now, when the closure is actually
+/// invoked. The argument is the error's message expression whenever the
+/// sentinel was applied (including first-class uses like the point-free
+/// `error . unpack` shadow, where the poison closure receives the already
+/// computed String at call time): materialize it into the message.
 // SAFETY: closure points to a lazy poison closure allocated by error_poison_ptr_lazy
 // with captured[0] = error kind. arg may be null or a valid heap object.
 unsafe extern "C" fn poison_trampoline_lazy(
-    _vmctx: *mut VMContext,
+    vmctx: *mut VMContext,
     closure: *mut u8,
     arg: *mut u8,
 ) -> *mut u8 {
     let kind = *(closure.add(tidepool_heap::layout::CLOSURE_CAPTURED_OFFSET) as *const u64);
 
-    // If the argument is a LitString, use it as the error message.
-    if !arg.is_null() && tidepool_heap::layout::read_tag(arg) == tidepool_heap::layout::TAG_LIT {
-        let lit_tag = *arg.add(tidepool_heap::layout::LIT_TAG_OFFSET);
-        if lit_tag == 5 {
-            // LIT_TAG_STRING
-            let raw_ptr = *(arg.add(tidepool_heap::layout::LIT_VALUE_OFFSET) as *const *const u8);
-            if !raw_ptr.is_null() {
-                let len = *(raw_ptr as *const u64);
-                let bytes_ptr = raw_ptr.add(8);
-                return runtime_error_with_msg(kind, bytes_ptr, len);
-            }
+    if let Some(bytes) = materialize_message(vmctx, arg) {
+        if !bytes.is_empty() {
+            return runtime_error_with_msg(kind, bytes.as_ptr(), bytes.len() as u64);
         }
+    }
+
+    // Non-string argument (e.g. the CallStack dict in a partial application
+    // like `error cs`): swallow it and return self, so the eventual
+    // application to the actual message raises with that message. A poison
+    // that is forced as a value (never applied) reaches the bridge, which
+    // raises message-less via raise_lazy_poison(null).
+    if !arg.is_null() {
+        return closure;
     }
 
     runtime_error(kind)

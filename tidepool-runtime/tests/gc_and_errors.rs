@@ -111,7 +111,6 @@ result = if (3 :: Int) > 2 then error "test-message-123" else 0
 }
 
 #[test]
-#[ignore = "known gap: when GHC floats the message and the error call compiles inside an extracted thunk subtree, the let-bound poison path discards the message expression at compile time. Fix: bind extraction-failed error RHSes to a regular thunk (forcing raises through runtime_error_dynamic) instead of a message-less poison."]
 fn error_message_surfaces_via_floated_binding() {
     // In larger modules GHC floats message literals to outer bindings, so the
     // error argument is a Var reference. Extraction must resolve through it.

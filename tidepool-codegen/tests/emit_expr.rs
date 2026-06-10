@@ -2216,7 +2216,16 @@ fn test_error_sentinel_detection_in_complex_rhs() {
         ],
     };
     let result = compile_and_run(&tree);
-    assert_eq!(result.result_ptr, host_fns::error_poison_ptr_lazy(2));
+    // The RHS has no statically extractable message, so it is bound to a
+    // deferred thunk (forcing it applies the poison, which raises). The
+    // essential contract: binding is deferred and no error fires eagerly.
+    unsafe {
+        let tag = *result.result_ptr;
+        assert!(
+            tag == tidepool_heap::layout::TAG_THUNK || tag == tidepool_heap::layout::TAG_CLOSURE,
+            "expected deferred binding (thunk/poison), got tag {tag}"
+        );
+    }
     assert!(host_fns::take_runtime_error().is_none());
 }
 
