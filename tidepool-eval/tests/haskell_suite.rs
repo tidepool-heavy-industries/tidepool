@@ -533,6 +533,9 @@ suite_int!(lazy_filter_infinite, 20);
 suite_int!(lazy_nubby_infinite, 5);
 suite_int!(nubby_dedup_finite, 4);
 suite_int!(filter_order_preserved, 135);
+suite_int!(lazy_concatmap_infinite, 6);
+suite_int!(concatmap_finite, 12);
+suite_int!(concatmap_empty_segments, 5);
 
 // =============================================================================
 // Show (7)

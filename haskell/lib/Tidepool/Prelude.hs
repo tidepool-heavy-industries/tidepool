@@ -353,8 +353,11 @@ init (x:xs) = x : init xs
 
 -- | Map a function over a list and concatenate results.
 concatMap :: (a -> [b]) -> [a] -> [b]
-concatMap _ []     = []
-concatMap f (x:xs) = f x `append` concatMap f xs
+concatMap _ [] = []
+concatMap f (x:xs) = go (f x)
+  where
+    go []     = concatMap f xs
+    go (y:ys) = y : go ys
 {-# INLINE concatMap #-}
 
 -- | Monadic concatMap: map an effectful function over a list and concatenate results.
