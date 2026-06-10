@@ -526,6 +526,15 @@ suite_bool!(prelude_eq_string_true, true);
 suite_bool!(prelude_eq_string_false, false);
 
 // =============================================================================
+// Lazy filter and nubBy regression tests
+// =============================================================================
+
+suite_int!(lazy_filter_infinite, 20);
+suite_int!(lazy_nubby_infinite, 5);
+suite_int!(nubby_dedup_finite, 4);
+suite_int!(filter_order_preserved, 135);
+
+// =============================================================================
 // Show (7)
 // =============================================================================
 
@@ -687,7 +696,8 @@ fn collect_text(val: &Value, table: &DataConTable) -> String {
         assert_eq!(fields.len(), 3, "Text should have 3 fields");
         let bytes = match &fields[0] {
             Value::ByteArray(ba) => ba.lock().unwrap().clone(),
-            other => panic!("expected ByteArray for Text field 0, got {other:?}"),
+            Value::Lit(Literal::LitString(bs)) => bs.clone(),
+            other => panic!("expected ByteArray or LitString for Text field 0, got {other:?}"),
         };
         let offset = match unbox(&fields[1], table) {
             Value::Lit(Literal::LitInt(n)) => n as usize,

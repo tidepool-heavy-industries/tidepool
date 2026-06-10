@@ -834,29 +834,27 @@ unzip3 [] = ([], [], [])
 unzip3 ((a,b,c):rest) = let (as, bs, cs) = unzip3 rest in (a:as, b:bs, c:cs)
 {-# INLINE unzip3 #-}
 
--- | Tail-recursive filter (accumulator-based, avoids (:) in non-tail position).
+-- | Lazy filter (guarded corecursion).
 filter :: (a -> Bool) -> [a] -> [a]
-filter p = go []
-  where
-    go acc []     = reverse acc
-    go acc (x:xs)
-      | p x       = go (x : acc) xs
-      | otherwise  = go acc xs
+filter _ [] = []
+filter p (x:xs)
+  | p x = x : filter p xs
+  | otherwise = filter p xs
 {-# INLINE filter #-}
 
--- | Tail-recursive nubBy (foldl'-style accumulator + linear scan).
+-- | Lazy nubBy (emits matches immediately, keeps seen-accumulator).
 nubBy :: (a -> a -> Bool) -> [a] -> [a]
-nubBy _ [] = []
-nubBy eq xs = go [] xs
+nubBy eq = go []
   where
-    go acc []     = reverse acc
-    go acc (x:rest)
-      | elemBy x acc = go acc rest
-      | otherwise    = go (x : acc) rest
+    go _ [] = []
+    go seen (x:rest)
+      | elemBy x seen = go seen rest
+      | otherwise     = x : go (x : seen) rest
     elemBy _ []     = False
     elemBy x (y:ys)
-      | eq x y      = True
-      | otherwise    = elemBy x ys
+      | eq x y    = True
+      | otherwise = elemBy x ys
+{-# INLINE nubBy #-}
 
 -- | Tail-recursive nub (uses nubBy).
 nub :: (Eq a) => [a] -> [a]
