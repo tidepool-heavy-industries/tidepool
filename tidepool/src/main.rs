@@ -171,6 +171,12 @@ enum FsReq {
     Metadata(String),
 }
 
+const DEFAULT_IGNORE_DIRS: &[&str] = &["target", ".git", "node_modules", "dist-newstyle"];
+
+fn pattern_mentions(pattern: &str, dir: &str) -> bool {
+    pattern.split(['/', '\\']).any(|c| c == dir)
+}
+
 #[derive(Clone)]
 struct FsHandler {
     root: PathBuf,
@@ -264,6 +270,13 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                     .root
                     .canonicalize()
                     .map_err(|e| EffectError::Handler(e.to_string()))?;
+
+                let ignored_but_mentioned: Vec<&str> = DEFAULT_IGNORE_DIRS
+                    .iter()
+                    .filter(|&&dir| pattern_mentions(&pattern, dir))
+                    .copied()
+                    .collect();
+
                 let paths: Vec<String> = glob::glob(&full_pattern)
                     .map_err(|e| EffectError::Handler(format!("invalid glob: {}", e)))?
                     .filter_map(|e| e.ok())
@@ -276,6 +289,20 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                         p.strip_prefix(&self.root)
                             .ok()
                             .map(|r| r.to_string_lossy().to_string())
+                    })
+                    .filter(|rel_path_str| {
+                        let rel_path = std::path::Path::new(rel_path_str);
+                        for component in rel_path.components() {
+                            if let std::path::Component::Normal(name) = component {
+                                let name_str = name.to_string_lossy();
+                                if DEFAULT_IGNORE_DIRS.contains(&name_str.as_ref())
+                                    && !ignored_but_mentioned.contains(&name_str.as_ref())
+                                {
+                                    return false;
+                                }
+                            }
+                        }
+                        true
                     })
                     .collect();
                 cx.respond(paths)
@@ -1363,6 +1390,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pattern_mentions() {
+        assert!(!pattern_mentions("**/*.rs", "target"));
+        assert!(pattern_mentions("target/**/*.rs", "target"));
+        assert!(pattern_mentions("foo/target/bar", "target"));
+        assert!(!pattern_mentions("retarget/foo", "target"));
+    }
+
+    #[test]
+    fn test_glob_ignore_filter() {
+        let pattern = "**/*.rs";
+        let ignored_but_mentioned: Vec<&str> = DEFAULT_IGNORE_DIRS
+            .iter()
+            .filter(|&&dir| pattern_mentions(pattern, dir))
+            .copied()
+            .collect();
+
+        let filter = |path_str: &str| {
+            let rel_path = std::path::Path::new(path_str);
+            for component in rel_path.components() {
+                if let std::path::Component::Normal(name) = component {
+                    let name_str = name.to_string_lossy();
+                    if DEFAULT_IGNORE_DIRS.contains(&name_str.as_ref())
+                        && !ignored_but_mentioned.contains(&name_str.as_ref())
+                    {
+                        return false;
+                    }
+                }
+            }
+            true
+        };
+
+        assert!(!filter("target/debug/foo.rs"));
+        assert!(!filter(".git/config"));
+        assert!(filter("src/lib.rs"));
+        assert!(filter("retarget/foo.rs"));
+        assert!(filter("src/target_file.rs"));
+
+        let pattern2 = "target/**/*.rs";
+        let ignored_but_mentioned2: Vec<&str> = DEFAULT_IGNORE_DIRS
+            .iter()
+            .filter(|&&dir| pattern_mentions(pattern2, dir))
+            .copied()
+            .collect();
+
+        let filter2 = |path_str: &str| {
+            let rel_path = std::path::Path::new(path_str);
+            for component in rel_path.components() {
+                if let std::path::Component::Normal(name) = component {
+                    let name_str = name.to_string_lossy();
+                    if DEFAULT_IGNORE_DIRS.contains(&name_str.as_ref())
+                        && !ignored_but_mentioned2.contains(&name_str.as_ref())
+                    {
+                        return false;
+                    }
+                }
+            }
+            true
+        };
+
+        assert!(filter2("target/debug/foo.rs"));
+    }
+
     use tidepool_bridge::{FromCore, ToCore};
     use tidepool_effect::dispatch::DispatchEffect;
     use tidepool_repr::{DataCon, DataConId, DataConTable};
