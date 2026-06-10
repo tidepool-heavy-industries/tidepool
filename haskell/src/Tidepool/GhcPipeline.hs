@@ -34,8 +34,14 @@ runPipeline path includes = do
     -- GHC's specializer to produce Core with mismatched constructor tags on
     -- aarch64, leading to case-exhaustion SIGILL in the JIT.
     let spoofedPlatform = genericPlatform
-    -- FullLaziness conflicts with eager eval; CprAnal unboxes return values
-    -- in ways the codegen can't handle (CASE TRAP on constructor tags).
+    -- FullLaziness conflicts with eager eval.
+    -- WARNING (2026-06-10, #313 forensics): Opt_CprAnal is a NO-OP in GHC
+    -- 9.12 — `-fno-cpr-anal` changes nothing (Cpr=1 signatures appear
+    -- regardless; verified empirically). The unset is kept for
+    -- documentation, but the protection it was believed to provide does
+    -- not exist. Disabling Opt_WorkerWrapper was tried and did NOT fix
+    -- #313 (the bug is join-closure wiring in translation, not w/w), so
+    -- it stays enabled.
     let dflags' = gopt_set (gopt_set (gopt_unset (gopt_unset (updOptLevel 2 $ dflags
           { backend = noBackend
           , ghcLink = NoLink

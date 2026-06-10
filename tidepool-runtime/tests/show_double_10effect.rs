@@ -1071,10 +1071,14 @@ result = do
 "#;
     let pp = prelude_path();
     let src_owned = src.to_owned();
+    // .tidepool/lib modules import the generated Tidepool.Effects module.
+    let effects_dir = tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls())
+        .expect("write effects module");
     let result = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let include: Vec<&std::path::Path> = vec![pp.as_path(), user_lib.as_path()];
+            let include: Vec<&std::path::Path> =
+                vec![pp.as_path(), user_lib.as_path(), effects_dir.as_path()];
             let mut handlers = frunk::hlist![
                 MockConsole,
                 MockKv::new(),

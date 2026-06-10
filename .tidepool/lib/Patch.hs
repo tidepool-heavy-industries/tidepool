@@ -20,17 +20,22 @@ occurrences needle hay =
 
 -- | Replace a needle EXACTLY ONCE: errors loudly if absent or ambiguous
 -- (ambiguity is how string surgery corrupts files silently).
+-- NOTE: occurrence checks are inlined in the do-block rather than via the
+-- pure `occurrences` helper — #313 case-traps cross-module PURE Text fns
+-- (Probe.occ2 is the minimal repro) while M-action-inline code is fine.
 patchFile :: Text -> Text -> Text -> M Text
 patchFile path old new = do
   src <- readFile path
-  let n = occurrences old src
-  if n == 0
+  let (_, r1) = T.breakOn old src
+  if isNull r1
     then error ("patchFile: needle not found in " <> path)
-    else if n > 1
-      then error ("patchFile: needle ambiguous (" <> pack (show n) <> " occurrences) in " <> path)
-      else do
-        writeFile path (replace old new src)
-        pure ("patched " <> path)
+    else do
+      let (_, r2) = T.breakOn old (sdrop (len old) r1)
+      if not (isNull r2)
+        then error ("patchFile: needle ambiguous in " <> path)
+        else do
+          writeFile path (replace old new src)
+          pure ("patched " <> path)
 
 -- | JSON-driven patch: expects {file, old, new} — pass via eval input.
 patchJ :: Value -> M Text

@@ -64,6 +64,9 @@ import Numeric (showHex)
 
 import GHC.Driver.Env (HscEnv)
 import Tidepool.Resolve (resolveExternals, UnresolvedVar(..))
+import qualified System.Environment
+import qualified Data.List
+import qualified Tidepool.GhcPipeline
 
 data FlatNode
   = NVar !Word64
@@ -371,6 +374,17 @@ translateModule allBinds targetName unresolvedIds =
 translateModuleClosed :: HscEnv -> [CoreBind] -> String -> IO (Seq FlatNode, Map.Map Word64 DataCon, [UnresolvedVar], [CoreBind])
 translateModuleClosed hscEnv allBinds targetName = do
   (closedBinds, unresolved) <- resolveExternals hscEnv allBinds
+  -- TIDEPOOL_DUMP_CLOSED=<needle>: dump resolved bindings whose binder
+  -- name contains the needle (post-resolveExternals Core — what the JIT
+  -- actually compiles; can differ from --dump-core's module view).
+  dumpNeedle <- System.Environment.lookupEnv "TIDEPOOL_DUMP_CLOSED"
+  case dumpNeedle of
+    Just needle -> mapM_ (\cb ->
+      let names = map (occNameString . nameOccName . idName) (bindersOfBinds [cb])
+      in if any (needle `Data.List.isInfixOf`) names
+           then putStrLn ("=== CLOSED BIND " ++ show names ++ "\n" ++ Tidepool.GhcPipeline.dumpCore [cb])
+           else pure ()) closedBinds
+    Nothing -> pure ()
   let unresolvedIds = Set.fromList (map uvKey unresolved)
       (nodes, usedDCs) = translateModule closedBinds targetName unresolvedIds
   let referencedIds = foldl' (\acc n -> case n of { NVar v -> Set.insert v acc; _ -> acc }) Set.empty nodes
