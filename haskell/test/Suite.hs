@@ -723,3 +723,41 @@ filter_order_preserved =
       toCode (f0:f1:f2:_) = f0 * (100 :: Int) + f1 * (10 :: Int) + f2
       toCode _ = 0 :: Int
   in toCode (myfilter isOdd naturals)
+
+lazy_concatmap_infinite :: Int
+lazy_concatmap_infinite =
+  let myconcatMap _ [] = []
+      myconcatMap f (x:xs) = go (f x)
+        where
+          go []     = myconcatMap f xs
+          go (y:ys) = y : go ys
+      naturals = go (0 :: Int) where go n = n : go (n + (1 :: Int))
+      dup (x :: Int) = [x, x]
+      mySum [] = 0 :: Int
+      mySum (x:xs) = x + mySum xs
+  in mySum (take (6 :: Int) (myconcatMap dup naturals))
+
+concatmap_finite :: Int
+concatmap_finite =
+  let myconcatMap _ [] = []
+      myconcatMap f (x:xs) = go (f x)
+        where
+          go []     = myconcatMap f xs
+          go (y:ys) = y : go ys
+      triple (x :: Int) = [x, x, x]
+      myLen [] = 0 :: Int
+      myLen (_:xs) = (1 :: Int) + myLen xs
+  in myLen (myconcatMap triple [1 :: Int, 2, 3, 4])
+
+concatmap_empty_segments :: Int
+concatmap_empty_segments =
+  let myconcatMap _ [] = []
+      myconcatMap f (x:xs) = go (f x)
+        where
+          go []     = myconcatMap f xs
+          go (y:ys) = y : go ys
+      naturals = go (0 :: Int) where go n = n : go (n + (1 :: Int))
+      evenOnly (n :: Int) = if (n `rem` (2 :: Int)) == (0 :: Int) then [n] else []
+      myLen [] = 0 :: Int
+      myLen (_:xs) = (1 :: Int) + myLen xs
+  in myLen (myconcatMap evenOnly (take (10 :: Int) naturals))
