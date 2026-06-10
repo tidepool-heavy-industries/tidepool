@@ -50,14 +50,57 @@ so a coverage regression fails while seed variance does not.
 - **B4** divergence under a semantics-preserving knob (nursery size, optimize-vs-not).
 - **B5** roundtrip non-identity.
 
-## Confirmed bugs
+## Outcome: no confirmed eval/JIT bugs at depth 5/7
 
-<!-- one row per distinct bug; dedup = repros differ only in literals/arity -->
+The deep differential hunt (multiple passes, fresh seeds, up to 200 cases/property
+at depth 5 and 7) surfaced **no confirmed tidepool eval/JIT bug**. Every divergence
+observed traced to a known synthetic-IR class that GHC never emits and that the
+backends are not contracted to agree on. Reporting any of them as a tidepool bug
+would be incorrect. What the hunt *did* produce:
 
-| ID | Class | Component | Shrunk repro (#[ignore]) | Seed | Observed / Expected |
-|----|-------|-----------|--------------------------|------|---------------------|
-| _(hunt in progress)_ | | | | | |
+### Divergence classes found (all non-bugs, all characterized + filtered)
+
+| ID | Class | Trigger | Resolution | Seed | `#[ignore]`d characterization |
+|----|-------|---------|------------|------|-------------------------------|
+| D1 | HeapBridge `UnexpectedHeapTag` | depth-5 synthetic expr → JIT result is an unreduced garbage heap object (tag 0); eval yields a ground `Pair` | production `run_pure`/`heap_bridge` rejects it → whitelisted `HeapBridge`; worker uses `run_pure` as oracle | `tests/deep_differential_seeds/heapbridge_unexpected_tag_d5.hex` | `diag_heapbridge_unexpected_tag` |
+| D2 | Synthetic-LetRec value divergence | depth-7 `LetRec` with bare-`Var` rec RHS (`let rec a = a`); both backends succeed with ground values that differ (`Con(0,[])` vs `Con(4,[Int,Word])`) | documented `UnresolvedVar` class manifesting as a value diff; filtered via `has_synthetic_letrec` | `tests/deep_differential_seeds/synthetic_letrec_d7.hex` | `repro_synthetic_letrec_divergence` |
+
+Dedup note: D1 is an *error*-class divergence (JIT can't produce a value), D2 is a
+*value*-class divergence (both produce values that differ). Distinct repros, distinct
+mechanisms.
+
+### Harness robustness fix (found while triaging D1)
+
+This crate's raw `compare::heap_to_value` silently mis-decodes an unexpected tag-0
+heap object as a `Closure` (because `TAG_CLOSURE == 0`), turning a synthetic-IR
+non-result into a bogus `Pair != Closure` B1. The production `heap_bridge` instead
+rejects tag-0 as `UnexpectedHeapTag`. Fix: the deep-diff worker uses the production
+`JitEffectMachine::run_pure` path as its JIT oracle (correct reconstruction under GC,
+correct synthetic-IR rejection), and skips closure-valued results. `heap_to_value`
+itself is unchanged in behavior (still used by `proptest_differential` on clean
+depth-3 ground results) — only made stack-safe.
 
 ## Hunt log
 
-<!-- filled from hunt runs: cases run per property, outcomes -->
+Final validation pass (200 cases/property, all GREEN, no host stack overflow,
+no timeout, no infra error):
+
+| Property | depth | knob | compared | skipped |
+|----------|-------|------|----------|---------|
+| `deep_diff_ground_depth5` | 5 ground | 64KB | 148 | 52 |
+| `deep_diff_ground_depth5_optimized` | 5 ground | optimize | 143 | 57 |
+| `deep_diff_ground_depth5_small_nursery` | 5 ground | 4KB | 145 | 55 |
+| `deep_diff_join_letrec_heavy_depth7` | 7 weighted | 64KB | 22 | 178 |
+
+Skips are dominated by the known-divergence filter (synthetic-LetRec, HeapBridge,
+eval-side laziness gaps, closure-valued results). Depth-7's high skip rate reflects
+the prevalence of synthetic-LetRec at `letrec_w=4`; its primary role per the done
+criteria is validating stack-safety + crash-freedom at depth 7, which it does.
+
+### Earlier passes
+
+- depth-5 ground (plain + optimized, 64KB): clean across 80 + 120 cases each.
+- depth-5/4KB first pass: B1 — later proven a harness false positive (D1 above).
+- depth-7 first pass: B1 — later proven the synthetic-LetRec class (D2 above).
+- `proptest_differential` tightening: green at depth-3; the 31/200 `jit_only_error`
+  cases are all whitelisted `UnresolvedVar`.
