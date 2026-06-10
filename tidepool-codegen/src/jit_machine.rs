@@ -170,6 +170,12 @@ impl JitEffectMachine {
     ) -> Result<Value, JitError> {
         let tags = self.tags.map_err(JitError::MissingConTags)?;
 
+        // Ensure signal handlers + this thread's alternate stack are installed:
+        // library embedders (compile_and_run*) don't call install() themselves,
+        // and without it a JIT fault kills the whole process instead of
+        // surfacing a clean YieldError. Idempotent per thread.
+        crate::signal_safety::install();
+
         // Install registries
         let _guard = self.install_registries();
 
@@ -295,6 +301,9 @@ impl JitEffectMachine {
     /// and converts the raw heap result directly to a Value. Use this for programs
     /// that don't use an `Eff` wrapper.
     pub fn run_pure(&mut self) -> Result<Value, JitError> {
+        // Per-thread signal handler + altstack; see `run`. Idempotent.
+        crate::signal_safety::install();
+
         // Install registries
         let _guard = self.install_registries();
 

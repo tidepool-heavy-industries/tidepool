@@ -83,9 +83,23 @@ thread_local! {
 /// GC will update the slot's value in-place if the pointed-to object moves.
 ///
 /// # Safety
-/// The slot must remain valid and dereferenceable until `clear_rust_roots` is called.
+/// The slot must remain valid and dereferenceable until the matching
+/// `truncate_rust_roots` (or `clear_rust_roots`) call.
 pub unsafe fn register_rust_root(slot: *mut *mut u8) {
     RUST_ROOTS.with(|r| r.borrow_mut().push(slot));
+}
+
+/// Current depth of the Rust-root stack. Pair with `truncate_rust_roots` to
+/// scope registrations: host fns that call back into JIT code can nest (e.g.
+/// `heap_force` → thunk code → `heap_force`), so unscoped clearing would drop
+/// an outer frame's registrations.
+pub fn rust_roots_mark() -> usize {
+    RUST_ROOTS.with(|r| r.borrow().len())
+}
+
+/// Drop roots registered after `mark`, preserving outer registrations.
+pub fn truncate_rust_roots(mark: usize) {
+    RUST_ROOTS.with(|r| r.borrow_mut().truncate(mark));
 }
 
 /// Remove all registered Rust roots. Call after the GC-unsafe region ends.
@@ -273,6 +287,20 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
 
 /// Shared GC body: walk frames, run Cheney copy, call hooks.
 #[inline(never)]
+/// Heap growth ceiling. Defaults to 1 GiB; override with `TIDEPOOL_MAX_HEAP`
+/// (bytes). Reaching the cap with a full live set ends in a clean
+/// `HeapOverflow` via the post-GC allocation re-check, never a signal.
+fn max_heap_bytes() -> usize {
+    use std::sync::OnceLock;
+    static CAP: OnceLock<usize> = OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("TIDEPOOL_MAX_HEAP")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1 << 30)
+    })
+}
+
 fn perform_gc(fp: usize, vmctx: *mut VMContext) {
     STACK_MAP_REGISTRY.with(|reg_cell| {
         if let Some(registry_ptr) = *reg_cell.borrow() {
@@ -319,7 +347,8 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
 
                     // SAFETY: root_slots point to valid stack locations from walk_frames.
                     // from_start..from_end is the active nursery region. tospace is freshly
-                    // allocated with the same size.
+                    // allocated with the same size, which always suffices: live data is a
+                    // subset of from-space and objects are copied at identical sizes.
                     let result = unsafe {
                         tidepool_heap::gc::raw::cheney_copy(
                             &root_slots,
@@ -329,17 +358,44 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                         )
                     };
 
-                    // Update GcState: swap to tospace
-                    let to_start = tospace.as_mut_ptr();
+                    // Heap growth: a fixed-size heap turns large live sets into
+                    // premature OOM after GC thrash. When utilization is high,
+                    // immediately re-evacuate into a doubled space. The root slot
+                    // ADDRESSES collected above remain valid; their values now
+                    // point into `tospace`, so a second Cheney pass with
+                    // from = tospace relocates everything and re-updates them.
+                    let max_heap = max_heap_bytes();
+                    let mut active = tospace;
+                    let mut live_bytes = result.bytes_copied;
+                    let mut new_size = from_size;
+                    if live_bytes * 4 > from_size * 3 && from_size < max_heap {
+                        new_size = (from_size * 2).min(max_heap);
+                        let mut bigger = vec![0u8; new_size];
+                        // SAFETY: same contract as above; from-space is the live
+                        // prefix of `active`, disjoint from `bigger`.
+                        let second = unsafe {
+                            tidepool_heap::gc::raw::cheney_copy(
+                                &root_slots,
+                                active.as_ptr(),
+                                active.as_ptr().add(live_bytes),
+                                &mut bigger,
+                            )
+                        };
+                        live_bytes = second.bytes_copied;
+                        active = bigger; // drops the intermediate tospace
+                    }
+
+                    // Update GcState: swap to the surviving space
+                    let to_start = active.as_mut_ptr();
                     state.active_start = to_start;
-                    // active_size stays the same
-                    state.active_buffer = Some(tospace); // drops old buffer if any
+                    state.active_size = new_size;
+                    state.active_buffer = Some(active); // drops old buffer if any
 
                     // SAFETY: vmctx is a valid pointer passed from JIT code. to_start points
-                    // to the new tospace buffer which is now the active nursery.
+                    // to the new active buffer which is now the nursery.
                     unsafe {
-                        (*vmctx).alloc_ptr = to_start.add(result.bytes_copied);
-                        (*vmctx).alloc_limit = to_start.add(from_size) as *const u8;
+                        (*vmctx).alloc_ptr = to_start.add(live_bytes);
+                        (*vmctx).alloc_limit = to_start.add(new_size) as *const u8;
                     }
                 }
             });
@@ -403,15 +459,25 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
 
                         // 3. Call thunk entry function
                         // Signature: fn(vmctx, thunk_ptr) -> whnf_ptr
+                        //
+                        // The thunk code can allocate and trigger GC. `current` lives
+                        // in this host frame, which the JIT frame walker deliberately
+                        // skips, so it must be registered as an explicit Rust root:
+                        // the copying GC frees from-space at the end of every
+                        // collection, so a stale `current` would dangle into freed
+                        // memory (post-call forwarding checks are unsound).
                         let f: extern "C" fn(*mut VMContext, *mut u8) -> *mut u8 =
                             std::mem::transmute(code_ptr);
+                        let mark = rust_roots_mark();
+                        register_rust_root(&mut current as *mut *mut u8);
                         let result = f(vmctx, current);
+                        truncate_rust_roots(mark);
 
-                        // If GC ran during the call, current may have been forwarded.
-                        // Check for forwarding pointer and follow it.
-                        if heap_layout::read_tag(current) == layout::TAG_FORWARDED {
-                            current = *(current.add(8) as *const *mut u8);
-                        }
+                        debug_assert_ne!(
+                            heap_layout::read_tag(current),
+                            layout::TAG_FORWARDED,
+                            "heap_force: registered root left forwarded"
+                        );
 
                         // 4. Write indirection (offset 16, overwriting code_ptr)
                         *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *mut *mut u8) =
@@ -814,6 +880,37 @@ pub fn error_poison_ptr_lazy(kind: u64) -> *mut u8 {
         arr
     });
     ptrs[kind.min(4) as usize] as *mut u8
+}
+
+/// Check whether a heap object is a lazy poison closure (⊥ with a deferred
+/// error). Used by the heap bridge: converting ⊥ to a `Value` is a genuine
+/// demand, so the bridge invokes the trampoline to raise the deferred error
+/// (with its captured message) instead of misreading the closure as data.
+/// Deliberately NOT consulted by `heap_force`: dictionaries carry poison in
+/// never-selected method slots, and effect plumbing forces bound values it
+/// must not observe.
+///
+/// # Safety
+/// `ptr` must be a valid heap object pointer.
+pub unsafe fn is_lazy_poison(ptr: *const u8) -> bool {
+    if heap_layout::read_tag(ptr as *mut u8) != tidepool_heap::layout::TAG_CLOSURE {
+        return false;
+    }
+    let code_ptr = *(ptr.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
+    code_ptr == poison_trampoline_lazy as *const () as usize
+        || code_ptr == poison_trampoline_lazy_msg as *const () as usize
+}
+
+/// Invoke a lazy poison closure's trampoline, setting the runtime error flag
+/// (including any captured message) and returning the eager poison pointer.
+///
+/// # Safety
+/// `ptr` must satisfy `is_lazy_poison`.
+pub unsafe fn raise_lazy_poison(vmctx: *mut VMContext, ptr: *mut u8) -> *mut u8 {
+    let code_ptr = *(ptr.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *const usize);
+    let f: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
+        std::mem::transmute(code_ptr);
+    f(vmctx, ptr, std::ptr::null_mut())
 }
 
 /// Trampoline for lazy poison closures. Reads the error kind from captured[0]

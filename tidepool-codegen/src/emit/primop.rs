@@ -1366,43 +1366,77 @@ pub fn emit_primop(
                 let is_null = builder.ins().icmp_imm(IntCC::Equal, arg_ptr, 0);
                 let fallback_block = builder.create_block();
                 let check_tag_block = builder.create_block();
-                builder.ins().brif(is_null, fallback_block, &[], check_tag_block, &[]);
+                builder
+                    .ins()
+                    .brif(is_null, fallback_block, &[], check_tag_block, &[]);
 
                 builder.switch_to_block(check_tag_block);
                 builder.seal_block(check_tag_block);
-                let tag = builder.ins().load(types::I8, MemFlags::trusted(), arg_ptr, 0);
-                let is_lit = builder.ins().icmp_imm(IntCC::Equal, tag, crate::layout::TAG_LIT as i64);
+                let tag = builder
+                    .ins()
+                    .load(types::I8, MemFlags::trusted(), arg_ptr, 0);
+                let is_lit =
+                    builder
+                        .ins()
+                        .icmp_imm(IntCC::Equal, tag, crate::layout::TAG_LIT as i64);
                 let lit_check_block = builder.create_block();
-                builder.ins().brif(is_lit, lit_check_block, &[], fallback_block, &[]);
+                builder
+                    .ins()
+                    .brif(is_lit, lit_check_block, &[], fallback_block, &[]);
 
                 builder.switch_to_block(lit_check_block);
                 builder.seal_block(lit_check_block);
-                let lit_tag = builder.ins().load(types::I8, MemFlags::trusted(), arg_ptr, crate::layout::LIT_TAG_OFFSET);
-                let is_string = builder.ins().icmp_imm(IntCC::Equal, lit_tag, crate::layout::LIT_TAG_STRING);
+                let lit_tag = builder.ins().load(
+                    types::I8,
+                    MemFlags::trusted(),
+                    arg_ptr,
+                    crate::layout::LIT_TAG_OFFSET,
+                );
+                let is_string =
+                    builder
+                        .ins()
+                        .icmp_imm(IntCC::Equal, lit_tag, crate::layout::LIT_TAG_STRING);
                 let msg_block = builder.create_block();
-                builder.ins().brif(is_string, msg_block, &[], fallback_block, &[]);
+                builder
+                    .ins()
+                    .brif(is_string, msg_block, &[], fallback_block, &[]);
 
                 builder.switch_to_block(msg_block);
                 builder.seal_block(msg_block);
-                let raw_ptr = builder.ins().load(types::I64, MemFlags::trusted(), arg_ptr, crate::layout::LIT_VALUE_OFFSET);
+                let raw_ptr = builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    arg_ptr,
+                    crate::layout::LIT_VALUE_OFFSET,
+                );
                 let is_raw_null = builder.ins().icmp_imm(IntCC::Equal, raw_ptr, 0);
                 let call_msg_block = builder.create_block();
-                builder.ins().brif(is_raw_null, fallback_block, &[], call_msg_block, &[]);
+                builder
+                    .ins()
+                    .brif(is_raw_null, fallback_block, &[], call_msg_block, &[]);
 
                 builder.switch_to_block(call_msg_block);
                 builder.seal_block(call_msg_block);
-                let len = builder.ins().load(types::I64, MemFlags::trusted(), raw_ptr, 0);
+                let len = builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), raw_ptr, 0);
                 let bytes_ptr = builder.ins().iadd_imm(raw_ptr, 8);
-                
+
                 let _ = emit_runtime_call(
                     sess.pipeline,
                     builder,
                     "runtime_error_with_msg",
-                    &[AbiParam::new(types::I64), AbiParam::new(types::I64), AbiParam::new(types::I64)],
+                    &[
+                        AbiParam::new(types::I64),
+                        AbiParam::new(types::I64),
+                        AbiParam::new(types::I64),
+                    ],
                     &[AbiParam::new(types::I64)],
                     &[kind_val, bytes_ptr, len],
                 )?;
-                builder.ins().trap(cranelift_codegen::ir::TrapCode::user(2).unwrap()); // unreachable after runtime_error
+                builder
+                    .ins()
+                    .trap(cranelift_codegen::ir::TrapCode::user(2).unwrap()); // unreachable after runtime_error
 
                 builder.switch_to_block(fallback_block);
                 builder.seal_block(fallback_block);

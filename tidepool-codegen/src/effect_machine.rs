@@ -369,22 +369,45 @@ impl CompiledEffectMachine {
 
                     if con_tag == self.tags.leaf {
                         // Leaf(f): call f(arg) — terminal for this continuation
+                        // Forcing and calling run JIT code that can GC; `arg` and
+                        // the k2_stack slots live in host frames the frame walker
+                        // skips, so they must be registered as explicit roots.
+                        let mark = crate::host_fns::rust_roots_mark();
+                        // SAFETY: slots remain valid until truncate below.
+                        unsafe {
+                            crate::host_fns::register_rust_root(&mut arg as *mut *mut u8);
+                        }
                         let f = self.force_ptr(Self::read_con_field(k, 0));
                         if crate::host_fns::has_runtime_error() {
+                            crate::host_fns::truncate_rust_roots(mark);
                             return std::ptr::null_mut();
                         }
-                        // Register k2_stack entries as GC roots before call_closure,
-                        // which runs JIT code that can trigger GC.
                         for slot in k2_stack.iter_mut() {
-                            crate::host_fns::register_rust_root(slot as *mut *mut u8);
+                            // SAFETY: k2_stack is not pushed/popped during call_closure.
+                            unsafe {
+                                crate::host_fns::register_rust_root(slot as *mut *mut u8);
+                            }
                         }
                         let res = self.call_closure(f, arg);
-                        crate::host_fns::clear_rust_roots();
+                        crate::host_fns::truncate_rust_roots(mark);
                         res
                     } else if con_tag == self.tags.node {
-                        // Node(k1, k2): push k2 for later, loop on k1
-                        let k1 = self.force_ptr(Self::read_con_field(k, 0));
+                        // Node(k1, k2): push k2 for later, loop on k1.
+                        // The first force can GC and move `k`/`arg`; the second can
+                        // move `k1`. Register all three across the forces.
+                        let mark = crate::host_fns::rust_roots_mark();
+                        // SAFETY: slots remain valid until truncate below.
+                        unsafe {
+                            crate::host_fns::register_rust_root(&mut k as *mut *mut u8);
+                            crate::host_fns::register_rust_root(&mut arg as *mut *mut u8);
+                        }
+                        let mut k1 = self.force_ptr(Self::read_con_field(k, 0));
+                        // SAFETY: as above.
+                        unsafe {
+                            crate::host_fns::register_rust_root(&mut k1 as *mut *mut u8);
+                        }
                         let k2 = self.force_ptr(Self::read_con_field(k, 1));
+                        crate::host_fns::truncate_rust_roots(mark);
                         if crate::host_fns::has_runtime_error() {
                             return std::ptr::null_mut();
                         }
@@ -404,11 +427,15 @@ impl CompiledEffectMachine {
                 }
                 t if t == layout::TAG_CLOSURE => {
                     // Raw closure (degenerate continuation fallback)
+                    let mark = crate::host_fns::rust_roots_mark();
                     for slot in k2_stack.iter_mut() {
-                        crate::host_fns::register_rust_root(slot as *mut *mut u8);
+                        // SAFETY: k2_stack is not pushed/popped during call_closure.
+                        unsafe {
+                            crate::host_fns::register_rust_root(slot as *mut *mut u8);
+                        }
                     }
                     let res = self.call_closure(k, arg);
-                    crate::host_fns::clear_rust_roots();
+                    crate::host_fns::truncate_rust_roots(mark);
                     res
                 }
                 _ => {

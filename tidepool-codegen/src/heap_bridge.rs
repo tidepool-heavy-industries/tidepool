@@ -80,6 +80,16 @@ unsafe fn heap_to_value_inner(
         return Err(BridgeError::TooDeep);
     }
 
+    // Converting ⊥ (a lazy poison closure) is a genuine demand: raise its
+    // deferred error (with captured message) so the caller surfaces
+    // UserErrorMsg instead of misreading the closure as data. The runtime
+    // error flag set here is picked up by the post-bridge take_runtime_error
+    // checks in jit_machine.
+    if !vmctx.is_null() && crate::host_fns::is_lazy_poison(ptr) {
+        crate::host_fns::raise_lazy_poison(vmctx, ptr as *mut u8);
+        return Err(BridgeError::UnevaluatedThunk);
+    }
+
     let tag = *ptr;
     match tag {
         t if t == layout::TAG_LIT => {

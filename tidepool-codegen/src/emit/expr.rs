@@ -180,7 +180,11 @@ fn expand_node(tree: &CoreExpr, idx: usize) -> Result<EmitFrame<usize>, EmitErro
                     last_arg = Some(*arg);
                     current = *fun;
                 }
-                Ok(EmitFrame::Raise { kind, msg, arg: last_arg })
+                Ok(EmitFrame::Raise {
+                    kind,
+                    msg,
+                    arg: last_arg,
+                })
             } else {
                 Ok(EmitFrame::App {
                     fun: *fun,
@@ -199,7 +203,11 @@ fn expand_node(tree: &CoreExpr, idx: usize) -> Result<EmitFrame<usize>, EmitErro
                 } else {
                     None
                 };
-                let arg = if !args.is_empty() { Some(args[0]) } else { None };
+                let arg = if !args.is_empty() {
+                    Some(args[0])
+                } else {
+                    None
+                };
                 Ok(EmitFrame::Raise { kind: 2, msg, arg })
             } else {
                 Ok(EmitFrame::PrimOp {
@@ -771,10 +779,10 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                     msg_ptr,
                     LIT_VALUE_OFFSET,
                 );
-                let len =
-                    args.builder
-                        .ins()
-                        .load(types::I64, MemFlags::trusted(), raw_ptr, 0);
+                let len = args
+                    .builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), raw_ptr, 0);
                 let bytes_ptr = args.builder.ins().iadd_imm(raw_ptr, 8);
 
                 let err_fn = args
@@ -797,7 +805,10 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                     .declare_func_in_func(err_fn, args.builder.func);
 
                 let kind_val = args.builder.ins().iconst(types::I64, kind as i64);
-                let inst = args.builder.ins().call(err_ref, &[kind_val, bytes_ptr, len]);
+                let inst = args
+                    .builder
+                    .ins()
+                    .call(err_ref, &[kind_val, bytes_ptr, len]);
                 let result = args.builder.inst_results(inst)[0];
                 args.builder.declare_value_needs_stack_map(result);
                 Ok(SsaVal::HeapPtr(result))
@@ -824,10 +835,10 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                     .builder
                     .ins()
                     .load(types::I8, MemFlags::trusted(), arg_ptr, 0);
-                let is_lit = args
-                    .builder
-                    .ins()
-                    .icmp_imm(IntCC::Equal, tag, crate::layout::TAG_LIT as i64);
+                let is_lit =
+                    args.builder
+                        .ins()
+                        .icmp_imm(IntCC::Equal, tag, crate::layout::TAG_LIT as i64);
                 let lit_check_block = args.builder.create_block();
                 args.builder
                     .ins()
@@ -841,10 +852,11 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                     arg_ptr,
                     crate::layout::LIT_TAG_OFFSET,
                 );
-                let is_string =
-                    args.builder
-                        .ins()
-                        .icmp_imm(IntCC::Equal, lit_tag, crate::layout::LIT_TAG_STRING);
+                let is_string = args.builder.ins().icmp_imm(
+                    IntCC::Equal,
+                    lit_tag,
+                    crate::layout::LIT_TAG_STRING,
+                );
                 let msg_block = args.builder.create_block();
                 args.builder
                     .ins()
@@ -892,7 +904,10 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                     .declare_func_in_func(err_fn, args.builder.func);
 
                 let kind_val = args.builder.ins().iconst(types::I64, kind as i64);
-                let inst = args.builder.ins().call(err_ref, &[kind_val, bytes_ptr, len]);
+                let inst = args
+                    .builder
+                    .ins()
+                    .call(err_ref, &[kind_val, bytes_ptr, len]);
                 let result = args.builder.inst_results(inst)[0];
                 args.builder.declare_value_needs_stack_map(result);
                 args.builder
@@ -1586,15 +1601,65 @@ impl EmitContext {
         loop {
             match &tree.nodes[idx] {
                 CoreFrame::App { fun, arg } => {
-                    // Check if arg is a LitString (the message)
-                    if let CoreFrame::Lit(Literal::LitString(bytes)) = &tree.nodes[*arg] {
-                        return Some(bytes.clone());
+                    // The message is rarely a bare LitString: the Text-typed
+                    // `error` shadow produces shapes like `error (unpack "msg")`
+                    // and OverloadedStrings literals arrive via pack/unpackCString#
+                    // wrappers. Scan the argument subtree for the first string
+                    // literal instead of requiring an exact shape.
+                    if let Some(bytes) = Self::find_first_lit_string(tree, *arg) {
+                        return Some(bytes);
                     }
                     idx = *fun; // continue walking the App chain
                 }
                 _ => return None,
             }
         }
+    }
+
+    /// Bounded DFS over a subtree for the first `LitString`. Error-call
+    /// arguments are tiny; the node budget only guards against scanning a
+    /// large unrelated expression that happens to sit in argument position.
+    fn find_first_lit_string(tree: &CoreExpr, root: usize) -> Option<Vec<u8>> {
+        const NODE_BUDGET: usize = 64;
+        let mut stack = vec![root];
+        let mut visited = 0usize;
+        while let Some(i) = stack.pop() {
+            visited += 1;
+            if visited > NODE_BUDGET {
+                return None;
+            }
+            match &tree.nodes[i] {
+                CoreFrame::Lit(Literal::LitString(bytes)) => return Some(bytes.clone()),
+                CoreFrame::Lit(_) | CoreFrame::Var(_) => {}
+                CoreFrame::App { fun, arg } => {
+                    stack.push(*fun);
+                    stack.push(*arg);
+                }
+                CoreFrame::Lam { body, .. } => stack.push(*body),
+                CoreFrame::LetNonRec { rhs, body, .. } => {
+                    stack.push(*rhs);
+                    stack.push(*body);
+                }
+                CoreFrame::LetRec { bindings, body } => {
+                    stack.extend(bindings.iter().map(|(_, r)| *r));
+                    stack.push(*body);
+                }
+                CoreFrame::Case {
+                    scrutinee, alts, ..
+                } => {
+                    stack.push(*scrutinee);
+                    stack.extend(alts.iter().map(|a| a.body));
+                }
+                CoreFrame::Con { fields, .. } => stack.extend(fields.iter().copied()),
+                CoreFrame::Join { rhs, body, .. } => {
+                    stack.push(*rhs);
+                    stack.push(*body);
+                }
+                CoreFrame::Jump { args, .. } => stack.extend(args.iter().copied()),
+                CoreFrame::PrimOp { args, .. } => stack.extend(args.iter().copied()),
+            }
+        }
+        None
     }
 
     fn emit_error_poison(&self, tree: &CoreExpr, rhs_idx: usize) -> i64 {
