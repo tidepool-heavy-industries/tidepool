@@ -346,13 +346,77 @@ unsafe fn heap_to_value_inner(
     }
 }
 
+/// One-layer projection of a `Value` for the stack-safe conversion hylo:
+/// leaves carry a pointer back to the original node (allocated directly at
+/// collapse time); `Con` carries the recursive position.
+enum ValueFrame<X> {
+    /// Lit / ByteArray — no children. Raw pointer rather than a reference
+    /// because `MappableFrame::Frame` is a lifetime-free GAT; the pointee is
+    /// a node of the root `&Value`, which outlives the traversal.
+    Leaf(*const Value),
+    Con(DataConId, Vec<X>),
+}
+
+impl recursion::MappableFrame for ValueFrame<recursion::PartiallyApplied> {
+    type Frame<X> = ValueFrame<X>;
+    fn map_frame<A, B>(input: Self::Frame<A>, f: impl FnMut(A) -> B) -> Self::Frame<B> {
+        match input {
+            ValueFrame::Leaf(p) => ValueFrame::Leaf(p),
+            ValueFrame::Con(id, xs) => ValueFrame::Con(id, xs.into_iter().map(f).collect()),
+        }
+    }
+}
+
 /// Convert a Value to a heap-allocated object via VMContext bump allocation.
+///
+/// Stack-safe: runs as a fallible hylomorphism (`recursion` crate) over
+/// [`ValueFrame`] — arbitrarily deep bushy structures (nested JSON, tuple
+/// towers) convert without consuming call stack. Children allocate before
+/// parents; sibling allocation ORDER differs from the old recursive
+/// version (right-to-left), which nothing observes.
 ///
 /// # Safety
 ///
 /// `vmctx` must point to a valid VMContext with sufficient nursery space.
 pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u8, BridgeError> {
-    // SAFETY: Caller guarantees vmctx has a live nursery with sufficient space.
+    let vmctx_ptr: *mut VMContext = vmctx;
+    recursion::try_expand_and_collapse::<ValueFrame<recursion::PartiallyApplied>, _, _, _>(
+        val,
+        |v: &Value| match v {
+            Value::Con(id, fields) => Ok(ValueFrame::Con(*id, fields.iter().collect())),
+            Value::Lit(_) | Value::ByteArray(_) => Ok(ValueFrame::Leaf(v as *const Value)),
+            _ => Err(BridgeError::UnexpectedHeapTag(255)),
+        },
+        |frame: ValueFrame<*mut u8>| match frame {
+            // SAFETY: leaf pointers reference nodes of `val`, alive for the
+            // whole traversal; vmctx_ptr is the caller's exclusive borrow.
+            ValueFrame::Leaf(p) => unsafe { leaf_to_heap(&*p, &mut *vmctx_ptr) },
+            ValueFrame::Con(id, field_ptrs) => unsafe {
+                let size = 24 + 8 * field_ptrs.len();
+                let ptr = bump_alloc_from_vmctx(&mut *vmctx_ptr, size);
+                if ptr.is_null() {
+                    return Err(BridgeError::NurseryExhausted);
+                }
+                heap_layout::write_header(ptr, layout::TAG_CON, size as u16);
+                *(ptr.add(layout::CON_TAG_OFFSET as usize) as *mut u64) = id.0;
+                *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) =
+                    field_ptrs.len() as u16;
+                for (i, fp) in field_ptrs.into_iter().enumerate() {
+                    *(ptr.add(layout::CON_FIELDS_OFFSET as usize + 8 * i) as *mut *mut u8) = fp;
+                }
+                Ok(ptr)
+            },
+        },
+    )
+}
+
+/// Allocate a childless `Value` (Lit / ByteArray) as a heap object.
+///
+/// # Safety
+///
+/// `vmctx` must point to a valid VMContext with a live nursery; `val` must
+/// be a `Lit` or `ByteArray` variant.
+unsafe fn leaf_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u8, BridgeError> {
     match val {
         Value::Lit(lit) => {
             let ptr = bump_alloc_from_vmctx(vmctx, layout::LIT_TOTAL_SIZE as usize);
@@ -396,27 +460,6 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
                     *ptr.add(layout::LIT_TAG_OFFSET as usize) = LIT_TAG_STRING as u8;
                     *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = data_ptr as i64;
                 }
-            }
-            Ok(ptr)
-        }
-        Value::Con(id, fields) => {
-            let mut field_ptrs = Vec::with_capacity(fields.len());
-            for f in fields {
-                field_ptrs.push(value_to_heap(f, vmctx)?);
-            }
-
-            let size = 24 + 8 * fields.len();
-            let ptr = bump_alloc_from_vmctx(vmctx, size);
-            if ptr.is_null() {
-                return Err(BridgeError::NurseryExhausted);
-            }
-            heap_layout::write_header(ptr, layout::TAG_CON, size as u16);
-
-            *(ptr.add(layout::CON_TAG_OFFSET as usize) as *mut u64) = id.0;
-            *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) = fields.len() as u16;
-
-            for (i, fp) in field_ptrs.into_iter().enumerate() {
-                *(ptr.add(layout::CON_FIELDS_OFFSET as usize + 8 * i) as *mut *mut u8) = fp;
             }
             Ok(ptr)
         }
@@ -482,6 +525,36 @@ mod tests {
         let mut nursery = Nursery::new(size);
         let vmctx = nursery.make_vmctx(mock_gc_trigger);
         (nursery, vmctx)
+    }
+
+    #[test]
+    fn value_to_heap_deep_tower_is_stack_safe() {
+        // 50k-deep single-field Con tower converted on a 64 KiB thread:
+        // the hylo-based conversion must not consume call stack per level
+        // (the old recursive version overflowed), and the Value's drop is
+        // iterative. Build the tower iteratively too, obviously.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(|| {
+                let mut v = Value::Lit(Literal::LitInt(7));
+                for _ in 0..50_000 {
+                    v = Value::Con(DataConId(3), vec![v]);
+                }
+                // 50k cells × 32 bytes + leaf ≈ 1.6 MB
+                let (_nursery, mut vmctx) = setup_vmctx(4 * 1024 * 1024);
+                let ptr = unsafe { value_to_heap(&v, &mut vmctx) }.expect("conversion failed");
+                assert!(!ptr.is_null());
+                // Spot-check the top two levels.
+                unsafe {
+                    assert_eq!(*ptr, layout::TAG_CON);
+                    let inner =
+                        *(ptr.add(layout::CON_FIELDS_OFFSET as usize) as *const *const u8);
+                    assert_eq!(*inner, layout::TAG_CON);
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

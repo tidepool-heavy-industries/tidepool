@@ -101,13 +101,31 @@ it); the cap stops killing legitimate programs.
       ITERATIVE Drop (E0509 fallout ~15 mechanical sites), heap_to_value
       walks spines iteratively with per-frame GC rooting (stale-parent
       hole fixed), Array payloads re-derived per element.
-- [ ] Stage 3: element-level COW views — tail = (registry id, offset)
-      view cell; head converts ONE element on demand, memoized by thunk
-      indirection. A Haskell [Text] over a Rust Vec<String> becomes an
-      honest copy-on-read slice.
-- [ ] Adopt the `recursion` crate for host-side traversals over deep
-      heap/Value trees (node_count was hand-rolled; heap_to_value_inner
-      still recurses with a MAX_DEPTH band-aid).
+- [x] Stage 3a SHIPPED (2026-06-10): element-level copy-on-read.
+      ValueSource gains an optional random-access facet (len()/get(idx));
+      indexed sources (cx.respond_list(Vec<T>), dismantled Complete
+      spines via ReadySource, custom from_source impls) build chunks
+      whose cons-cell HEADS are (id, idx) host thunks — forcing one head
+      converts ONE element, memoized by thunk indirection. Measured:
+      take 3 of 12k ⇒ exactly 3 conversions; length of 12k ⇒ ZERO
+      conversions (also proves JIT case-dispatch forces cells, not
+      fields); filter ⇒ all (correct contrast). Sequential iterators
+      keep stage-2 chunked conversion. Indexed registry entries live to
+      machine teardown (outstanding element thunks reference them).
+      Element conversion panic-guarded at the JIT boundary.
+      MCP handlers use respond_list (glob/grep/sg/listDirectory).
+- [x] `recursion` crate adopted where it FITS (2026-06-10):
+      value_to_heap is now a fallible hylomorphism
+      (try_expand_and_collapse over ValueFrame) — arbitrarily deep bushy
+      Values convert on a 64 KiB thread (regression test). The forcing
+      heap_to_value walker stays custom: per-frame GC rooting is
+      inherently effectful and does not belong in a generic fold (the
+      spine loop + RootScope discipline covers it). Remaining recursion:
+      heap_to_value bushy paths (depth-capped at 10k, acceptable),
+      render/json walks (depth-capped, list-iterative).
+- [ ] Stage 3b (only if profiling demands): true zero-copy — heap Text
+      payloads pointing into parked Rust data; needs foreign-pointer GC
+      support (pinning/keepalive design doc first).
 
 Key layout facts: THUNK_STATE_OFFSET=8, THUNK_CODE_PTR_OFFSET=16,
 THUNK_INDIRECTION_OFFSET=16, THUNK_CAPTURED_OFFSET=24; thunk size
