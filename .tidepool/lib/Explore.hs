@@ -5,6 +5,7 @@
 module Explore where
 
 import Tidepool.Prelude
+import Tidepool.Effects
 
 -- | Histogram of file extensions from a path listing.
 extHisto :: [Text] -> [(Text, Int)]
@@ -50,3 +51,26 @@ defMod name body =
       , body
       ]
   )
+
+-- ===== Effectful verbs (Tidepool.Effects is importable now) =====
+
+-- | Find a Rust function and show it with surrounding context. One call.
+defWithContext :: Text -> [Text] -> M [Text]
+defWithContext name roots = do
+  ms <- rsFn name roots
+  case ms of
+    (Match _ f l _ _ : _) -> do
+      content <- readFile f
+      pure ((f <> ":" <> pack (show l)) : aroundLine l 4 content)
+    [] -> pure []
+
+-- | Per-file reference counts for a regex, densest first.
+refs :: Text -> Text -> M [(Text, Int)]
+refs pat g = hitsByFile <$> grepGlob pat g
+
+-- | One-call codebase overview for a glob: count, extensions, heaviest.
+census :: Text -> M Value
+census pat = do
+  ps <- glob pat
+  sized <- mapM (\p -> do { s <- getFileSize p; pure (p, s) }) ps
+  pure (object ["files" .= len ps, "exts" .= take 5 (extHisto ps), "heaviest" .= sizeRank 5 sized])
