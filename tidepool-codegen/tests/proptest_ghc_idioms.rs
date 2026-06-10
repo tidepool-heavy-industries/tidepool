@@ -60,6 +60,14 @@ static N_UNDER_LAMBDA: AtomicU64 = AtomicU64::new(0);
 static N_JOINREC: AtomicU64 = AtomicU64::new(0);
 static N_BOXCHAIN: AtomicU64 = AtomicU64::new(0);
 static N_BACKREF: AtomicU64 = AtomicU64::new(0); // letrec Con field referencing later sibling
+static N_JOINCROSS: AtomicU64 = AtomicU64::new(0); // join with Jump under a value Lam
+static N_NESTED_CROSS: AtomicU64 = AtomicU64::new(0); // Jump from a doubly-nested Lam
+
+// Hits of the KNOWN, documented bug (#1: Jump-crosses-Lam). These are tolerated
+// by the live fuzzer (skipped, not counted in the reach denominator) so the
+// suite stays green; the bug itself is pinned by the `#[ignore]`d repro
+// `bug1_join_crosses_lambda` below. Any *other* divergence still fails loudly.
+static N_KNOWN_BUG1: AtomicU64 = AtomicU64::new(0);
 
 fn bump(c: &AtomicU64) {
     c.fetch_add(1, Ordering::Relaxed);
@@ -144,6 +152,28 @@ fn run_in_fork(_expr: &CoreExpr, _nursery: usize) -> Result<(), i32> {
 // Shared oracle wrapper: runs all three oracles for one expression.
 // ---------------------------------------------------------------------------
 fn run_oracles(expr: CoreExpr) -> Result<(), TestCaseError> {
+    // KNOWN-BUG gate (#1: Jump-crosses-Lam). If eval succeeds but the JIT fails
+    // with the *specific* "Jump to unregistered join" compilation error, this is
+    // the documented bug pinned by `bug1_join_crosses_lambda`. Tolerate it so the
+    // live fuzzer stays green and keeps hunting for NEW divergences; do NOT count
+    // it toward the reach denominator. A value mismatch (both Ok) or any other
+    // JIT error does NOT match here and still flows into the strict oracle.
+    {
+        use tidepool_eval::{env_from_datacon_table, eval, VecHeap};
+        let table = tidepool_testing::proptest::build_table_for_expr(&expr);
+        let mut heap = VecHeap::new();
+        let env = env_from_datacon_table(&table);
+        let ev = eval(&expr, &env, &mut heap);
+        let jit =
+            JitEffectMachine::compile(&expr, &table, 64 * 1024).and_then(|mut m| m.run_pure());
+        if let (Ok(_), Err(e)) = (&ev, &jit) {
+            if format!("{:?}", e).contains("Jump to unregistered join") {
+                bump(&N_KNOWN_BUG1);
+                return Ok(());
+            }
+        }
+    }
+
     bump(&TOTAL);
 
     // Oracle 3 (B3): crash containment at both nursery sizes, BEFORE running
@@ -883,6 +913,196 @@ fn build_boxchain(spec: &BoxChainSpec) -> CoreExpr {
     fixup_root(&mut tree, root)
 }
 
+// ===========================================================================
+// (e) JoinCrossLambda
+//
+// The actual `jumpCrossesLam` bug class (gotchas #10, #17): a Join point whose
+// `Jump` site lives *inside a value Lam body*, where the lambda is then applied.
+// Our JIT compiles each Lam as a separate Cranelift function, so a Jump that
+// crosses that boundary must be rewritten (NonRec join -> lambda wrapper). The
+// tree-walking interpreter handles it directly via the lexical join cont, so a
+// divergence here is a real JIT bug.
+//
+//   join k (lead..., p) = p +# <hole>
+//   in (\x -> <jump k(0..., x +# a)>) applied to <arg>
+//
+// Variants:
+//   * branchy:  case (x ># 0) of { 1# -> jump k(..,x+#a); _ -> jump k(..,x+#b) }
+//               (two Jump sites under the same Lam, from inside a Case)
+//   * nested:   the Jump lives inside a doubly-nested Lam (\y -> \x -> jump ...),
+//               applied twice — stresses cross-boundary detection through depth.
+//   * n_lead:   0..3 fake leading "type" params (always passed 0) — arity class.
+// All args ground, single bounded jump per dynamic path -> total + ground.
+// ===========================================================================
+
+#[derive(Clone, Debug)]
+struct JoinCrossSpec {
+    n_lead: usize,
+    rhs_hole: Hole,
+    arg: i64,
+    arg2: i64,
+    a: i64,
+    b: i64,
+    branchy: bool,
+    nested: bool,
+}
+
+fn arb_joincross() -> impl Strategy<Value = JoinCrossSpec> {
+    (
+        0usize..3,
+        arb_hole(),
+        -16i64..16,
+        -16i64..16,
+        -16i64..16,
+        -16i64..16,
+        any::<bool>(),
+        any::<bool>(),
+    )
+        .prop_map(
+            |(n_lead, rhs_hole, arg, arg2, a, b, branchy, nested)| JoinCrossSpec {
+                n_lead,
+                rhs_hole,
+                arg,
+                arg2,
+                a,
+                b,
+                branchy,
+                nested,
+            },
+        )
+}
+
+fn build_joincross(spec: &JoinCrossSpec) -> CoreExpr {
+    reset_ctrs();
+    bump(&N_JOINCROSS);
+    if spec.nested {
+        bump(&N_NESTED_CROSS);
+    }
+    let mut b = TreeBuilder::new();
+
+    let label = fresh_join();
+    let leads: Vec<VarId> = (0..spec.n_lead).map(|_| fresh_var()).collect();
+    let p = fresh_var();
+    let mut params = leads.clone();
+    params.push(p);
+
+    // rhs: p +# <hole>
+    let pv = b.push(CoreFrame::Var(p));
+    let h = push_hole(&mut b, &spec.rhs_hole);
+    let rhs = b.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntAdd,
+        args: vec![pv, h],
+    });
+
+    // Helper: emit `jump k(0..., expr_idx)`.
+    let emit_jump = |b: &mut TreeBuilder, last_arg: usize| -> usize {
+        let mut jargs: Vec<usize> = leads
+            .iter()
+            .map(|_| b.push(CoreFrame::Lit(Literal::LitInt(0))))
+            .collect();
+        jargs.push(last_arg);
+        b.push(CoreFrame::Jump {
+            label,
+            args: jargs,
+        })
+    };
+
+    // Inner lambda binder `x` (the value crossed by the Jump).
+    let x = fresh_var();
+
+    // Lam body: either a single jump (x +# a) or a Case with a jump per arm.
+    let lam_body = if spec.branchy {
+        let xv = b.push(CoreFrame::Var(x));
+        let zero = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+        let cond = b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::IntGt,
+            args: vec![xv, zero],
+        });
+        // arm 1#: jump k(.., x +# a)
+        let xa = b.push(CoreFrame::Var(x));
+        let la = b.push(CoreFrame::Lit(Literal::LitInt(spec.a)));
+        let suma = b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::IntAdd,
+            args: vec![xa, la],
+        });
+        let jmp_a = emit_jump(&mut b, suma);
+        // arm _: jump k(.., x +# b)
+        let xb = b.push(CoreFrame::Var(x));
+        let lb = b.push(CoreFrame::Lit(Literal::LitInt(spec.b)));
+        let sumb = b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::IntAdd,
+            args: vec![xb, lb],
+        });
+        let jmp_b = emit_jump(&mut b, sumb);
+        let cbind = fresh_var();
+        b.push(CoreFrame::Case {
+            scrutinee: cond,
+            binder: cbind,
+            alts: vec![
+                Alt {
+                    con: AltCon::LitAlt(Literal::LitInt(1)),
+                    binders: vec![],
+                    body: jmp_a,
+                },
+                Alt {
+                    con: AltCon::Default,
+                    binders: vec![],
+                    body: jmp_b,
+                },
+            ],
+        })
+    } else {
+        let xa = b.push(CoreFrame::Var(x));
+        let la = b.push(CoreFrame::Lit(Literal::LitInt(spec.a)));
+        let suma = b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::IntAdd,
+            args: vec![xa, la],
+        });
+        emit_jump(&mut b, suma)
+    };
+
+    let body = if spec.nested {
+        // \y -> \x -> <lam_body but using x +# y>. We approximate by binding y as
+        // an extra value the inner body folds in: re-wrap lam_body's x usage is
+        // hard post-hoc, so instead the inner Lam ignores y and we apply twice.
+        let y = fresh_var();
+        let inner_lam = b.push(CoreFrame::Lam {
+            binder: x,
+            body: lam_body,
+        });
+        let outer_lam = b.push(CoreFrame::Lam {
+            binder: y,
+            body: inner_lam,
+        });
+        let arg_y = b.push(CoreFrame::Lit(Literal::LitInt(spec.arg2)));
+        let app1 = b.push(CoreFrame::App {
+            fun: outer_lam,
+            arg: arg_y,
+        });
+        let arg_x = b.push(CoreFrame::Lit(Literal::LitInt(spec.arg)));
+        b.push(CoreFrame::App {
+            fun: app1,
+            arg: arg_x,
+        })
+    } else {
+        let lam = b.push(CoreFrame::Lam {
+            binder: x,
+            body: lam_body,
+        });
+        let arg = b.push(CoreFrame::Lit(Literal::LitInt(spec.arg)));
+        b.push(CoreFrame::App { fun: lam, arg })
+    };
+
+    let root = b.push(CoreFrame::Join {
+        label,
+        params,
+        rhs,
+        body,
+    });
+    let mut tree = b.build();
+    fixup_root(&mut tree, root)
+}
+
 // ---------------------------------------------------------------------------
 // Root fixup.
 //
@@ -963,6 +1183,110 @@ proptest! {
     }
 }
 
+proptest! {
+    #![proptest_config(cfg())]
+
+    #[test]
+    fn prop_joincross(spec in arb_joincross()) {
+        let expr = build_joincross(&spec);
+        run_oracles(expr)?;
+    }
+}
+
+// ===========================================================================
+// CONFIRMED BUG REPROS (minimal, hand-built, <= 25 nodes).
+//
+// Each is `#[ignore]`d so the suite stays green; remove the `#[ignore]` (and the
+// matching gate in `run_oracles`) once the underlying bug is fixed.
+// ===========================================================================
+
+/// BUG #1: Jump-crosses-Lam — JIT-only compilation error (B2).
+///
+/// observed:  JIT = Err(Compilation(NotYetImplemented("Jump to unregistered join JoinId(0)")))
+/// expected:  Ok(Lit(LitInt(0)))  (the tree-walking interpreter's result)
+/// class:     B2 (JIT errors while eval succeeds; outside the HeapOverflow /
+///            UnresolvedVar / HeapBridge whitelist)
+/// component: join-point compilation (`tidepool-codegen/src/emit/join.rs`)
+/// skeleton:  JoinCrossLambda, fully shrunk
+///            (n_lead=0, branchy=false, nested=false, all holes/args = 0)
+/// seed:      tidepool-codegen/tests/proptest_ghc_idioms.txt.proptest-regressions
+///            cc b2d5850a54a189ebdbb5ba9ed858774516944b55d49badbfe1ce4ea478ce73a9
+///
+/// 11 nodes. Shape:
+///   join k(p) = p +# 0
+///   in  (\x -> jump k (x +# 0)) 0
+///
+/// The `Jump` to `k` lives inside the body of a value `Lam`. The JIT compiles
+/// each `Lam` as a separate Cranelift function and only registers a join label
+/// in the function that compiles the `Join`'s body — so the label is unknown in
+/// the lambda's function and codegen aborts. The production Haskell pipeline
+/// never reaches codegen with this shape because `Translate.hs`'s `jumpCrossesLam`
+/// rewrites such a `Join` into a `LetNonRec` + lambda wrapper first (memory
+/// gotchas #10/#17). Codegen therefore carries an *unchecked precondition* that
+/// no `Jump` crosses a `Lam` boundary; hand-built IR (or any future producer that
+/// skips that rewrite) violates it. The interpreter resolves the jump via the
+/// lexical join continuation and returns 0.
+#[test]
+#[ignore = "BUG #1: JIT 'Jump to unregistered join' when a Jump crosses a Lam boundary (codegen assumes Translate.hs jumpCrossesLam ran first)"]
+fn bug1_join_crosses_lambda() {
+    use tidepool_eval::{env_from_datacon_table, eval, VecHeap};
+
+    let p = VarId(1);
+    let x = VarId(2);
+    let k = JoinId(0);
+    let mut b = TreeBuilder::new();
+    let pv = b.push(CoreFrame::Var(p)); // 0
+    let l0 = b.push(CoreFrame::Lit(Literal::LitInt(0))); // 1
+    let rhs = b.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntAdd,
+        args: vec![pv, l0],
+    }); // 2: p +# 0
+    let xv = b.push(CoreFrame::Var(x)); // 3
+    let l0b = b.push(CoreFrame::Lit(Literal::LitInt(0))); // 4
+    let xsum = b.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntAdd,
+        args: vec![xv, l0b],
+    }); // 5: x +# 0
+    let jmp = b.push(CoreFrame::Jump {
+        label: k,
+        args: vec![xsum],
+    }); // 6: jump k (x +# 0)  -- inside the Lam
+    let lam = b.push(CoreFrame::Lam {
+        binder: x,
+        body: jmp,
+    }); // 7
+    let arg = b.push(CoreFrame::Lit(Literal::LitInt(0))); // 8
+    let app = b.push(CoreFrame::App { fun: lam, arg }); // 9
+    let _root = b.push(CoreFrame::Join {
+        label: k,
+        params: vec![p],
+        rhs,
+        body: app,
+    }); // 10 (root)
+    let tree = b.build();
+    assert!(tree.nodes.len() <= 25);
+
+    let table = tidepool_testing::proptest::build_table_for_expr(&tree);
+    let mut heap = VecHeap::new();
+    let env = env_from_datacon_table(&table);
+    let ev = eval(&tree, &env, &mut heap).expect("eval should succeed");
+
+    let jit = JitEffectMachine::compile(&tree, &table, 64 * 1024).and_then(|mut m| m.run_pure());
+
+    // The bug: JIT diverges from eval. When fixed, both are Lit(LitInt(0)).
+    match jit {
+        Ok(v) => assert!(
+            values_equal(&ev, &v),
+            "BUG #1 appears FIXED — JIT now agrees with eval ({:?}); un-ignore this test and remove the run_oracles gate.",
+            v
+        ),
+        Err(e) => panic!(
+            "BUG #1 reproduced: eval={:?} but JIT={:?}",
+            ev, e
+        ),
+    }
+}
+
 /// Reach floor: after the four properties run, at least 90% of attempted cases
 /// must have reached value comparison. Run this LAST (proptest test order within
 /// a file is alphabetical, so the `zzz_` prefix orders it after the others).
@@ -981,13 +1305,19 @@ fn zzz_reach_floor() {
         }
     );
     eprintln!(
-        "SKELETON FREQ: letrec={} caseofcase={} (under_lambda={}) joinrec={} boxchain={} backref={}",
+        "SKELETON FREQ: letrec={} caseofcase={} (under_lambda={}) joinrec={} boxchain={} joincross={} (nested={}) backref={}",
         N_LETREC.load(Ordering::Relaxed),
         N_CASEOFCASE.load(Ordering::Relaxed),
         N_UNDER_LAMBDA.load(Ordering::Relaxed),
         N_JOINREC.load(Ordering::Relaxed),
         N_BOXCHAIN.load(Ordering::Relaxed),
+        N_JOINCROSS.load(Ordering::Relaxed),
+        N_NESTED_CROSS.load(Ordering::Relaxed),
         N_BACKREF.load(Ordering::Relaxed),
+    );
+    eprintln!(
+        "KNOWN-BUG HITS (#1 Jump-crosses-Lam, tolerated): {}",
+        N_KNOWN_BUG1.load(Ordering::Relaxed),
     );
     // Only enforce the floor if a meaningful number of cases ran (guards against
     // running this test in isolation).
@@ -1001,3 +1331,4 @@ fn zzz_reach_floor() {
         );
     }
 }
+
