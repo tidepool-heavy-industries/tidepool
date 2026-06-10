@@ -57,7 +57,6 @@ fn run_with_big_list(code: &str, n: usize) -> Result<serde_json::Value, String> 
 }
 
 #[test]
-#[ignore = "WIP: pure-JIT spin after partial consumption of lazy tails under the MCP wrapper; full-traversal verified to 118/118 chunks. Ledger in plans/lazy-effect-results.md"]
 fn length_of_huge_response_streams() {
     // 12k elements (~36k value nodes): far over the old 10k hard cap.
     // length folds the lazy chunks; consumed cells become garbage.
@@ -66,7 +65,6 @@ fn length_of_huge_response_streams() {
 }
 
 #[test]
-#[ignore = "WIP: pure-JIT spin after partial consumption of lazy tails under the MCP wrapper; full-traversal verified to 118/118 chunks. Ledger in plans/lazy-effect-results.md"]
 fn take_prefix_of_huge_response() {
     // take only forces the first chunk; the rest is never materialized.
     let r = run_with_big_list("xs <- glob \"**\"\npure (take 3 xs)", 12_000);
@@ -84,7 +82,6 @@ fn small_responses_stay_eager() {
 }
 
 #[test]
-#[ignore = "WIP: pure-JIT spin after partial consumption of lazy tails under the MCP wrapper; full-traversal verified to 118/118 chunks. Ledger in plans/lazy-effect-results.md"]
 fn filtered_fold_over_huge_response() {
     // A realistic shape: census-style filter+length over a huge listing,
     // exercising chunk boundaries mid-stream.
@@ -92,12 +89,11 @@ fn filtered_fold_over_huge_response() {
         "xs <- glob \"**\"\npure (length (filter (\\x -> \"item-1\" `isPrefixOf` x) xs))",
         30_000,
     );
-    // decimal-starts-with-1 counts in 0..12000: 1+10+100+1000+2000
-    assert_eq!(r.ok(), Some(serde_json::json!(3_111)));
+    // decimal-starts-with-1 counts in 0..30000: 1+10+100+1000+10000
+    assert_eq!(r.ok(), Some(serde_json::json!(11_111)));
 }
 
 #[test]
-#[ignore = "WIP: pure-JIT spin after partial consumption of lazy tails under the MCP wrapper; full-traversal verified to 118/118 chunks. Ledger in plans/lazy-effect-results.md"]
 fn take_then_length_bisect() {
     let r = run_with_big_list("xs <- glob \"**\"\npure (length (take 3 xs))", 12_000);
     assert_eq!(r.ok(), Some(serde_json::json!(3)));

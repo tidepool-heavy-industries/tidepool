@@ -45,39 +45,45 @@ Consequences: `take 5` of a huge glob materializes one chunk ever; `length`
 walks chunks while consumed cells become garbage (heap growth + GC handle
 it); the cap stops killing legitimate programs.
 
-## Status (2026-06-10, parked WIP — gated behind TIDEPOOL_LAZY_RESULTS=1)
+## Status (2026-06-10 late: BLOCKER SOLVED — feature working, still gated)
 
 - [x] Design validated against layout/GC/heap_force code
 - [x] Registry + lazy_list_chunk in host_fns.rs (compiles; GC-rooted)
 - [x] Spine probe (iterative) + flatten + dispatch in jit_machine.rs
 - [x] Registry clear in RegistryGuard teardown
-- [x] Cap raised 10k → 100k for eager shapes (ungated; strict improvement)
-- [x] Tests written (tidepool-runtime/tests/lazy_effect_results.rs);
-      small_responses_stay_eager live; lazy tests #[ignore]d as WIP
-- [ ] **BLOCKER**: pure-JIT spin after PARTIAL consumption of a lazy list
-      under the MCP wrapper. Debugging ledger:
-      * Full traversal WORKS: filtered_fold streamed 118/118 chunks
-        (offsets 0..29952 at n=30k) — materializer, GC interplay, chunk
-        boundaries, and exhaustion/nil are all sound.
-      * `take 3` / `length (take 3 xs)` hang: chunk 1 materializes once,
-        then a loop that makes NO host calls (trampoline + heap_force spin
-        counters silent; TIDEPOOL_TRACE=calls shows 3 closure calls
-        consuming cons cells, a clean Val(…) return, then silence).
-      * TIDEPOOL_TRACE=heap validation passes on all touched objects.
-      * Con layout verified identical across tidepool-heap and
-        tidepool-codegen layout modules (8/16/24).
-      * Incidental fixes landed separately (commit 8deee87): iterative
-        node_count; GC-rooted apply_cont ENTRY forces (forcing a response
-        thunk from the all-host resume chain collected the continuation).
-      * Hypothesis space remaining: interaction between the lazy tail
-        thunk and the effect machine's parse_result / Val unwrapping when
-        the tail is NEVER forced (take leaves the chunk-1 tail thunk live
-        inside the retained list; something in the wrapper may walk it via
-        a path that mishandles host-code thunks — e.g. an emitted
-        force-loop that expects thunk code to be JIT code with vmctx
-        conventions?). Next session: reproduce OUTSIDE the MCP wrapper
-        with a minimal effect stack; ptrace needs enabling
-        (kernel.yama.ptrace_scope) for a direct backtrace; consider rr.
+- [x] Cap raised 10k → 100k for eager shapes
+- [x] Tests live (lazy_effect_results.rs all un-ignored, lazy_bisect.rs,
+      lazy_minimal_repro.rs, lazy_eager_fallback.rs)
+- [x] **BLOCKER SOLVED**. The "pure-JIT spin" was neither JIT nor a spin:
+      `resp_val` — the 12k-element response spine — hit `Value`'s RECURSIVE
+      destructor at the end of the jit_machine effect arm (~3 stack frames
+      per cons cell ≈ 36k frames) → stack-overflow SIGSEGV *outside*
+      with_signal_protection → signal handler's no-jmpbuf path exits the
+      THREAD silently → the caller waits forever. Every observation is
+      explained: spin counters silent (no execution at all), trace silence
+      after the clean Val return (the drop runs after), heap validation
+      passing (heap was fine), and the minimal repro "passing" (it ran on a
+      hand-spawned 8 MiB thread that absorbed the deep drop).
+      * Found via: minimal-stack bisect (passed) → MCP-shape variants A/B/C
+        (variant A — response never even consumed — still hung, exonerating
+        consumption) → watchdog-abort + `gdb -batch -ex run -ex 'thread
+        apply all bt'` (gdb may LAUNCH a child under yama ptrace_scope=1;
+        only attach is blocked) → 34,620 frames of drop_in_place<Value>.
+      * The evidence had been in .tidepool/crash.log the whole time:
+        `sig=SIGSEGV addr=...fff8 jmpbuf=null ctx=resuming after effect`.
+        Guard-page address, no active protection. ALWAYS check crash.log.
+      * Fixes: (1) probe_list_spine (by-ref validate) + dismantle_list_spine
+        (by-value iterative move-out — also kills the element clones) in
+        jit_machine; long spines never reach a recursive Drop or recursive
+        value_to_heap in ANY configuration. (2) Eager gate-off path
+        materializes flattened lists iteratively via shared
+        host_fns::build_cons_cells (extracted from lazy_list_chunk; GC-safe,
+        gc-retry). (3) Signal handler now writes an async-signal-safe stderr
+        breadcrumb before the silent thread exit. (4) apply_cont_heap
+        k2_stack/result/union_val GC-rooting holes closed (latent, found en
+        route: pending continuations were unregistered across forces).
+- [ ] Decide default-on: with the blocker root-caused, the gate could flip
+      (TIDEPOOL_LAZY_RESULTS=0 to opt out) after a dogfood gauntlet.
 - [ ] Stage 2 (zero-copy direction, user-endorsed): handlers park their
       Vec WITHOUT building a Value spine (`respond_lazy`) — kills ToCore
       conversion + flatten clones entirely.

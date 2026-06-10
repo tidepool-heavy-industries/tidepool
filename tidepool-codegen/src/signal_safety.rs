@@ -315,8 +315,14 @@ mod inner {
         }
         // SAFETY: Not in JIT context — writing crash dump with async-signal-safe calls,
         // then terminating this thread only (not the process) to avoid killing the MCP server.
+        // The stderr breadcrumb is load-bearing: a silent thread exit presents to the
+        // embedder as a HANG (the eval caller never returns), which cost a full
+        // debugging session before the crash.log was discovered. write(2) is
+        // async-signal-safe.
         unsafe {
             write_crash_dump(sig, _info);
+            let msg = b"[tidepool] fatal signal outside JIT protection; eval thread terminated; see .tidepool/crash.log\n";
+            libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
             #[cfg(target_os = "linux")]
             libc::syscall(libc::SYS_exit, 0);
             #[cfg(not(target_os = "linux"))]
