@@ -116,12 +116,27 @@ Reported by the `zzz_reach_floor` test (`--nocapture`). The DONE criterion is
 ≥90% of attempted cases reaching value comparison.
 
 ```
-GHC-IDIOMS REACH: <reached>/<total> (<pct>%)   [target >= 90%]
-SKELETON FREQ: letrec=<> caseofcase=<> (under_lambda=<>) joinrec=<> boxchain=<> joincross=<> (nested=<>) backref=<>
-KNOWN-BUG HITS (#1 Jump-crosses-Lam, tolerated): <>
+GHC-IDIOMS REACH: 1204/1204 cases reached value comparison (100.0%)   [target >= 90%]
+SKELETON FREQ: letrec=301 caseofcase=301 (under_lambda=156) joinrec=301 boxchain=301 joincross=301 (nested=140) backref=204
+KNOWN-BUG HITS (#1 Jump-crosses-Lam, tolerated): 301
 ```
 
-_(filled from the final run below.)_
+Final run: `test result: ok. 6 passed; 0 failed; 1 ignored` in 268s (300
+cases/property × 5 properties + reach test; `--test-threads=1`).
+
+Reading the numbers:
+
+- **100% reach** on the four non-buggy skeletons (1204/1204) — the ground/total
+  construction works: nothing is skipped as an eval-error. The denominator
+  excludes joincross because every one of its cases hits Bug #1 (see below).
+- **joincross = 301, known-bug hits = 301**: *every* Jump-crosses-Lam shape we
+  generated fails codegen identically. The bug is total for this skeleton, not
+  intermittent — which is why it shrank cleanly to the 11-node minimum and why the
+  `branchy`/`nested` variants (under_lambda-style depth, 140 nested) add no new
+  failure mode.
+- **backref = 204**: LetRec Con/Pair fields referencing a *later* sibling (the
+  deferred-Con-fill stressor) fired on ~2/3 of letrec cases — well-exercised, no
+  divergence.
 
 ## Coverage limits / honest caveats
 
