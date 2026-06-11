@@ -1647,7 +1647,15 @@ fn pipeline_effect_worker() {
     let decls = tidepool_mcp::standard_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, true);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
-    let source = tidepool_mcp::template_haskell(&preamble, &stack, &code, "", "", None, None);
+    let source = tidepool_mcp::template_haskell(
+        &preamble,
+        &stack,
+        &tidepool_mcp::wrap_do(&code),
+        "",
+        "",
+        None,
+        None,
+    );
     let effects_dir = match tidepool_mcp::ensure_effects_module(&decls) {
         Ok(p) => p,
         Err(e) => {

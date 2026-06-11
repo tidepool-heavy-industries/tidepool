@@ -286,8 +286,15 @@ stats <- mapM (\crate -> do
 pure stats
 "#;
 
-    let full_module =
-        tidepool_mcp::template_haskell(&preamble, &stack, user_code, "", "", None, Some(4096));
+    let full_module = tidepool_mcp::template_haskell(
+        &preamble,
+        &stack,
+        &tidepool_mcp::wrap_do(user_code),
+        "",
+        "",
+        None,
+        Some(4096),
+    );
 
     // Dump the generated module for debugging
     eprintln!(

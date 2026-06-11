@@ -1141,6 +1141,21 @@ fn normalize_input(v: &serde_json::Value) -> serde_json::Value {
     v.clone()
 }
 
+/// Wrap a bare statement sequence as an explicit do-block. The
+/// expression-first contract (template_haskell emits `code` as a real
+/// top-level binding) means multi-statement payloads must be do-blocks;
+/// this is the mechanical migration for test fixtures written in the
+/// old lines-into-a-do dialect.
+pub fn wrap_do(code: &str) -> String {
+    format!(
+        "do\n{}",
+        code.lines()
+            .map(|l| format!("  {l}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
 pub fn template_haskell(
     preamble: &str,
     effect_stack: &str,

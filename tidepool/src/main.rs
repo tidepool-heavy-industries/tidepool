@@ -1931,7 +1931,9 @@ mod tests {
         let decls = tidepool_mcp::standard_decls();
         let preamble = tidepool_mcp::build_preamble(&decls, false);
         let stack = tidepool_mcp::build_effect_stack_type(&decls);
-        let code_str = code.join("\n");
+        // Tests pass statement sequences; the expression-first contract
+        // requires an explicit do-block for sequencing.
+        let code_str = tidepool_mcp::wrap_do(&code.join("\n"));
         tidepool_mcp::template_haskell(&preamble, &stack, &code_str, "", "", None, None)
     }
 

@@ -26,7 +26,15 @@ fn repro_313() {
     // whether the miscompile is deterministic for identical source.
     let nonce = std::env::var("NONCE").unwrap_or_default();
     let code = format!("x <- t11\n-- nonce {nonce}\npure x");
-    let src = tidepool_mcp::template_haskell(&pre, &stack, &code, "Probe", "", None, None);
+    let src = tidepool_mcp::template_haskell(
+        &pre,
+        &stack,
+        &tidepool_mcp::wrap_do(&code),
+        "Probe",
+        "",
+        None,
+        None,
+    );
     let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
         .expect("write effects module")
         .leak() as &Path;
