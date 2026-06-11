@@ -1299,6 +1299,22 @@ pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) -> *mut u8 {
 /// Allocate a new mutable byte array of `size` bytes, zeroed.
 /// Layout: [u64 length][u8 bytes...]
 /// Returns a raw pointer to the allocation (caller stores in Lit value slot).
+/// Mutable byte arrays are malloc'd with a hidden capacity word BELOW the
+/// returned pointer:
+///
+/// ```text
+///   base: [u64 total alloc size][u64 logical len][data ...]
+///                                ^returned ba     ^ba + 8
+/// ```
+///
+/// The JIT ABI (logical length at `ba`, data at `ba + 8`) is unchanged.
+/// `runtime_shrink_byte_array` rewrites only the LOGICAL length, so the
+/// capacity word is the only sound source for the dealloc `Layout` in
+/// `runtime_resize_byte_array` — deriving it from the (possibly shrunk)
+/// logical prefix deallocated with the wrong layout, which is UB.
+/// (proptest_host_arrays BUG-2)
+const BYTE_ARRAY_BASE_OFFSET: usize = 8;
+
 pub extern "C" fn runtime_new_byte_array(size: i64) -> i64 {
     if size < 0 {
         RUNTIME_ERROR.with(|cell| {
@@ -1308,19 +1324,22 @@ pub extern "C" fn runtime_new_byte_array(size: i64) -> i64 {
         });
         return error_poison_ptr() as i64;
     }
-    let total = 8usize.saturating_add(size as usize);
+    let total = (2 * BYTE_ARRAY_BASE_OFFSET).saturating_add(size as usize);
     let layout =
         std::alloc::Layout::from_size_align(total, 8).unwrap_or_else(|_| std::process::abort());
     // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
-    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
-    if ptr.is_null() {
+    let base = unsafe { std::alloc::alloc_zeroed(layout) };
+    if base.is_null() {
         std::alloc::handle_alloc_error(layout);
     }
-    // SAFETY: ptr is a valid fresh allocation; writing the u64 length prefix at offset 0.
+    // SAFETY: base is a valid fresh allocation; capacity word at offset 0,
+    // logical length prefix at offset 8 (= the returned ba's offset 0).
     unsafe {
-        *(ptr as *mut u64) = size as u64;
+        *(base as *mut u64) = total as u64;
+        let ba = base.add(BYTE_ARRAY_BASE_OFFSET);
+        *(ba as *mut u64) = size as u64;
+        ba as i64
     }
-    ptr as i64
 }
 
 /// Copy `len` bytes from `src` (Addr#) to `dest_ba` (ByteArray ptr) at `dest_off`.
@@ -1400,39 +1419,49 @@ pub extern "C" fn runtime_resize_byte_array(ba: i64, new_size: i64) -> i64 {
         return error_poison_ptr() as i64;
     }
     let old_ptr = ba as *mut u8;
-    // SAFETY: old_ptr passed the validity check above and has a u64 length prefix at offset 0.
+    // SAFETY: old_ptr passed the validity check above; logical length prefix at
+    // offset 0, hidden capacity word at offset -8 (see runtime_new_byte_array).
     let old_size = unsafe { *(old_ptr as *const u64) } as usize;
+    let old_base = unsafe { old_ptr.sub(BYTE_ARRAY_BASE_OFFSET) };
+    // The TRUE allocation size — independent of any logical shrink since
+    // allocation. Deriving the dealloc layout from the logical prefix after a
+    // shrink(M) deallocated with size 8+M instead of the allocated size: UB.
+    // (proptest_host_arrays BUG-2)
+    let old_total = unsafe { *(old_base as *const u64) } as usize;
     let new_size = new_size as usize;
 
-    let new_total = 8usize.saturating_add(new_size);
+    let new_total = (2 * BYTE_ARRAY_BASE_OFFSET).saturating_add(new_size);
     let new_layout =
         std::alloc::Layout::from_size_align(new_total, 8).unwrap_or_else(|_| std::process::abort());
     // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
-    let new_ptr = unsafe { std::alloc::alloc_zeroed(new_layout) };
-    if new_ptr.is_null() {
+    let new_base = unsafe { std::alloc::alloc_zeroed(new_layout) };
+    if new_base.is_null() {
         std::alloc::handle_alloc_error(new_layout);
     }
+    let new_ptr = unsafe { new_base.add(BYTE_ARRAY_BASE_OFFSET) };
 
-    // Copy existing data (up to min of old/new size)
+    // Copy existing data (up to min of old/new logical size)
     let copy_len = old_size.min(new_size);
-    // SAFETY: Both old and new buffers have data starting at offset 8.
-    // copy_len <= min(old_size, new_size) so both reads and writes are in bounds.
+    // SAFETY: Both old and new buffers have data starting at offset 8 past the
+    // logical prefix. copy_len <= min(old_size, new_size) so reads/writes are in
+    // bounds (logical size never exceeds backing capacity).
     unsafe {
         std::ptr::copy_nonoverlapping(old_ptr.add(8), new_ptr.add(8), copy_len);
     }
 
-    // SAFETY: new_ptr is a valid fresh allocation; writing the u64 length prefix.
+    // SAFETY: fresh allocation; capacity word at base, logical prefix at ba.
     unsafe {
+        *(new_base as *mut u64) = new_total as u64;
         *(new_ptr as *mut u64) = new_size as u64;
     }
 
-    // Free old buffer
-    let old_total = 8 + old_size;
+    // Free old buffer with its RECORDED allocation layout.
     let old_layout =
         std::alloc::Layout::from_size_align(old_total, 8).unwrap_or_else(|_| std::process::abort());
-    // SAFETY: old_ptr was allocated with this exact layout by a previous runtime_new/resize call.
+    // SAFETY: old_base/old_total are exactly the pointer and layout produced by
+    // the runtime_new/resize call that allocated this array.
     unsafe {
-        std::alloc::dealloc(old_ptr, old_layout);
+        std::alloc::dealloc(old_base, old_layout);
     }
 
     new_ptr as i64
@@ -1909,8 +1938,17 @@ fn haskell_show_double(d: f64) -> String {
             format!("{}.0", s)
         }
     } else {
-        // Scientific notation: Haskell uses e.g. "3.14e10"
-        format!("{:e}", d)
+        // Scientific notation. Haskell's `show` mantissa always carries a
+        // decimal point ("1.0e10", "5.0e-324"); Rust's {:e} omits it for
+        // integral mantissas ("1e10"). Insert ".0" before the exponent when
+        // missing. (proptest_host_arrays BUG-1)
+        let s = format!("{:e}", d);
+        match s.find('e') {
+            Some(epos) if !s[..epos].contains('.') => {
+                format!("{}.0{}", &s[..epos], &s[epos..])
+            }
+            _ => s,
+        }
     }
 }
 
@@ -2716,10 +2754,12 @@ mod tests {
 
     // SAFETY: ptr was allocated by runtime_new_byte_array with layout [8 + size, align 8].
     unsafe fn free_byte_array(ptr: i64) {
-        let old_ptr = ptr as *mut u8;
-        let size = *(old_ptr as *const u64) as usize;
-        let layout = Layout::from_size_align(8 + size, 8).unwrap();
-        dealloc(old_ptr, layout);
+        // Mirror the capacity-word-below-pointer scheme: the TRUE allocation
+        // size lives at ba - 8 and is immune to logical shrinks.
+        let base = (ptr as *mut u8).sub(BYTE_ARRAY_BASE_OFFSET);
+        let total = *(base as *const u64) as usize;
+        let layout = Layout::from_size_align(total, 8).unwrap();
+        dealloc(base, layout);
     }
 
     #[test]
@@ -2771,10 +2811,34 @@ mod tests {
             let ba = runtime_new_byte_array(10);
             runtime_shrink_byte_array(ba, 5);
             assert_eq!(*(ba as *const u64), 5);
-            // Memory is still there, we just update the logical length prefix.
-            // Note: we still need to free the original 10-byte allocation.
-            let layout = Layout::from_size_align(8 + 10, 8).unwrap();
-            dealloc(ba as *mut u8, layout);
+            // Logical shrink only: the capacity word below the pointer still
+            // records the original allocation, so free_byte_array (and
+            // runtime_resize_byte_array) dealloc with the true layout.
+            free_byte_array(ba);
+        }
+    }
+
+    /// BUG-2 regression (proptest_host_arrays): shrink-then-resize must
+    /// dealloc the old buffer with its TRUE allocation layout (capacity
+    /// word), not one derived from the shrunken logical prefix.
+    #[test]
+    fn test_shrink_then_resize_uses_true_layout() {
+        unsafe {
+            let ba = runtime_new_byte_array(64);
+            for i in 0..64u8 {
+                runtime_set_byte_array(ba, i as i64, 1, i as i64);
+            }
+            runtime_shrink_byte_array(ba, 5);
+            // Old code derived the dealloc layout from the logical prefix (5)
+            // here — UB. With the capacity word this deallocs 16+64 correctly.
+            let resized = runtime_resize_byte_array(ba, 128);
+            assert_eq!(*(resized as *const u64), 128);
+            // Logical content (first 5 bytes) preserved; grown tail zeroed.
+            for i in 0..5u8 {
+                assert_eq!(*((resized as *const u8).add(8 + i as usize)), i);
+            }
+            assert_eq!(*((resized as *const u8).add(8 + 127)), 0);
+            free_byte_array(resized);
         }
     }
 

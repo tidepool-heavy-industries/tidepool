@@ -341,10 +341,17 @@ unsafe fn ba_bytes(ptr: i64) -> Vec<u8> {
 }
 
 fn free_ba(b: RealBa) {
-    // SAFETY: allocated by runtime_new/resize with layout (8 + backing, align 8).
+    // BUG-2 FIXED 2026-06-10: runtime_new/resize now allocate with a hidden
+    // capacity word at ptr - 8 recording the TRUE allocation size, so the
+    // dealloc layout comes from the allocation itself (immune to logical
+    // shrinks). `b.backing` is kept for model assertions only.
+    // SAFETY: ptr was produced by runtime_new/resize_byte_array; the
+    // allocation base and total size live one word below it.
     unsafe {
-        let layout = Layout::from_size_align(8 + b.backing, 8).unwrap();
-        dealloc(b.ptr as *mut u8, layout);
+        let base = (b.ptr as *mut u8).sub(8);
+        let total = *(base as *const u64) as usize;
+        let layout = Layout::from_size_align(total, 8).unwrap();
+        dealloc(base, layout);
     }
 }
 
@@ -1147,9 +1154,11 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig { cases: 500, ..ProptestConfig::default() })]
 
+    // BUG-1 FIXED 2026-06-10: haskell_show_double now inserts ".0" before the
+    // exponent when {:e} omits the mantissa decimal point. Active regression
+    // property (500 cases, fork-contained).
     #[test]
     #[serial]
-    #[ignore = "BUG-1: haskell_show_double emits scientific mantissa without a decimal point (e.g. \"1e10\" vs Haskell \"1.0e10\")"]
     fn bug1_show_double_scientific_decimal(bits in double_bits_strategy()) {
         let outcome = run_forked(move || match sci_mantissa_violation(bits) {
             Some(s) => Err(format!(
@@ -1166,9 +1175,9 @@ proptest! {
 /// smallest positive subnormal, 5e-324) is the shrunk proptest witness; 1e10 is
 /// the human-readable witness. Host renders "5e-324" / "1e10"; Haskell `show`
 /// renders "5.0e-324" / "1.0e10" — the mantissa always carries a decimal point.
+// BUG-1 FIXED 2026-06-10 — active regression test.
 #[test]
 #[serial]
-#[ignore = "BUG-1: scientific-notation Double show omits mantissa decimal point"]
 fn bug1_repro_minimal() {
     // Minimal shrunk witness from the committed regression seed.
     let got_min = host_show_double(1u64);
