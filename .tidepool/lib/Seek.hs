@@ -56,6 +56,7 @@ module Seek where
 
 import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
+import Control.Monad.Freer (send)
 import Schemes (loopM)
 import Asks (oracle)
 import Explore (hitsByFile, aroundLine)
@@ -79,9 +80,24 @@ dispatch vocab a s
         ((_, _, run) : _) -> Right <$> run a s
         []                -> pure (Right s)
 
--- | Split a verb argument on " :: " into parts (each stripped).
+-- | Strip one layer of surrounding quotes (LLM drivers emit
+-- shell-style 'quoted' regexes; grepGlob would match the quotes
+-- literally — observed as a silent all-zero-hits run).
+--
+-- Implemented via splitOn, NOT stake/sdrop slicing: a sliced Text
+-- crossing the effect boundary trips a JIT bridge trap ("expected
+-- ByteArray# in ByteArray, got Con(...)") — #313 family, minimal
+-- repro: grepGlob (sdrop 1 (stake (len s - 1) s)) g. splitOn output
+-- crosses fine (arg2 proves it).
+unquote :: Text -> Text
+unquote t = un "'" (un "\"" (strip t))
+  where un q u = case splitOn q u of
+          ["", mid, ""] -> mid
+          _             -> u
+
+-- | Split a verb argument on " :: " into parts (stripped, unquoted).
 argN :: Text -> [Text]
-argN = map strip . splitOn " :: "
+argN = map (unquote . strip) . splitOn " :: "
 
 -- | Split a verb argument on " :: " into (head, tail-or-empty).
 arg2 :: Text -> (Text, Text)
@@ -172,28 +188,43 @@ renderTrail ev = intercalate "\n---\n" (reverse (imap render1 ev))
 -- is one final conclude-only round, so the last probe's evidence is
 -- never wasted.
 seekDriveR :: ([Text] -> Text) -> (Text -> M Text) -> Vocab [Text] -> Text -> Int -> M Text
-seekDriveR render driver vocab goal fuel = loopM round (fuel, [])
+seekDriveR render driver vocab goal fuel = loopM round (fuel, [], [])
   where
     verbs = intercalate " | " (map (\(_, usage, _) -> "'" <> usage <> "'") vocab)
     header ev = "[seek] GOAL (fixed): " <> goal
           <> "\n\nEvidence so far:\n"
           <> (if null ev then "(none yet)" else render ev)
-    round (0, ev) = do
+    round (0, ev, _) = do
       a <- driver (header ev
             <> "\n\nFINAL ROUND — probes exhausted. Reply 'DONE <answer>'; anything else returns the trail unanswered.")
       pure (Left (if "DONE" `isPrefixOf` strip a
         then "ANSWER: " <> strip (sdrop 4 (strip a))
              <> "\n\n(" <> pack (show fuel) <> " probes + conclude)"
         else "NO ANSWER. Trail:\n" <> render ev))
-    round (k, ev) = do
+    round (k, ev, mvs) = do
       a <- driver (header ev
             <> "\n\nReplies: " <> verbs
             <> " | 'DONE <answer>'. Unprefixed reply = first verb. Probes left: " <> pack (show k))
-      e <- dispatch vocab (strip a) ev
-      pure (case e of
-        Left ans  -> Left ("ANSWER: " <> ans <> "\n\n("
-                           <> pack (show (fuel - k + 1)) <> " suspensions used)")
-        Right ev' -> Right (k - 1, ev'))
+      -- Driver-agnostic guards (field findings, 2026-06-11):
+      -- 1. Conclusions require evidence — a DONE against an empty trail
+      --    is a prior, not an answer (tier-1 pattern-matched an instant
+      --    DONE from the question alone).
+      -- 2. No duplicate moves — a stateless driver can loop (4x
+      --    identical 'ls' observed); reject mechanically, surface the
+      --    rejection in the trail so the driver sees it.
+      let a' = strip a
+      if "DONE" `isPrefixOf` a' && null ev
+        then pure (Right (k - 1,
+          ["REJECTED: DONE with an empty evidence trail — that is a guess, not a finding. Probe first; the answer must cite gathered evidence."], mvs))
+        else if a' `elem` mvs
+          then pure (Right (k - 1,
+            ("REJECTED duplicate move: " <> a' <> " — already probed; pick a DIFFERENT probe or DONE.") : ev, mvs))
+          else do
+            e <- dispatch vocab a' ev
+            pure (case e of
+              Left ans  -> Left ("ANSWER: " <> ans <> "\n\n("
+                                 <> pack (show (fuel - k + 1)) <> " rounds)")
+              Right ev' -> Right (k - 1, ev', a' : mvs))
 
 -- | Full chronological trail, nothing compacted — for stateless
 -- drivers whose only memory is the trail itself.
@@ -233,10 +264,11 @@ miniDriver p = do
         <> "\n\nReply ONLY with the literal move string in the 'move' field"
         <> " (e.g. 'grep <regex> :: <glob>', 'view <file> :: <line> :: <radius>',"
         <> " 'def <name>', 'ls <glob>', or 'DONE <answer>')."
-        <> " If the evidence above already answers the goal, reply DONE with the"
-        <> " answer NOW — do not probe further. Never repeat a probe already in"
-        <> " the evidence.")
-  putStrLn ("[move] " <> stake 150 m)
+        <> " When the evidence lines above answer the goal, reply DONE with the"
+        <> " answer CITING file:line from that evidence — do not probe further."
+        <> " Never repeat a probe already in the evidence; never DONE without"
+        <> " evidence.")
+  send (Print ("[move] " <> stake 150 m))
   pure m
 
 -- | Zero-touch goal-directed search: tier-1 drives every round, the
