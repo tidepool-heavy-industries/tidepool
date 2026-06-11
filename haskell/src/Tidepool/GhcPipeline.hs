@@ -8,7 +8,9 @@ import GHC.Types.Error (mkUnknownDiagnostic)
 import GHC.Unit.Module.Graph (mapMG)
 import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Core.Ppr (pprCoreBindings)
-import GHC.Driver.Session (updOptLevel, gopt_set, gopt_unset)
+import GHC.Driver.Session
+  ( updOptLevel, gopt_set, gopt_unset
+  , packageFlags, PackageFlag(..), PackageArg(..), ModRenaming(..) )
 import GHC.Unit.Module.ModGuts (ModGuts(..))
 import GHC.Core (CoreBind, Bind(..), Expr(..), Alt(..))
 import GHC.Platform (genericPlatform)
@@ -49,8 +51,17 @@ runPipeline path includes = do
     -- so re-pinning bare genericPlatform later strips them
     -- ("Platform constants not available!" panic). Backend/opt pinning lives
     -- in canonicalizeDFlags and is also re-applied per-module below.
+    -- Expose the (otherwise hidden) `ghc` package to the session so lib
+    -- modules on the --include path can import the GHC API. The [fmt|]
+    -- quasi-quoter's hole parser is the vendored Tidepool.QQ.HsMeta.*, which
+    -- runs GHC's own expression parser inside the splice; those modules import
+    -- GHC.Parser.* / GHC.Types.* etc. Without this, compiling Tidepool.QQ
+    -- fails with "member of the hidden package ghc-9.12.2".
     let dflags' = canonicalizeDFlags dflags
           { importPaths = importPaths dflags ++ includes
+          , packageFlags = packageFlags dflags
+              ++ [ExposePackage "-package ghc" (PackageArg "ghc")
+                                (ModRenaming True [])]
           , targetPlatform = genericPlatform
           , sseVersion = Nothing
           , bmiVersion = Nothing
