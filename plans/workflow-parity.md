@@ -80,14 +80,17 @@ fiction — one bad probe kills an hour of work.
 genai routes by name already). Q gains `via :: Text -> Q a -> Q a`. Then
 cascades become: deterministic → mini → gpt-4o/claude → caller. Cheap.
 
-### 5. Spawn — child evals (true `agent()` analog)
-`Spawn :: Text -> Spawn Value`: run a child computation (code as text) on its
-own permit/thread/budget, Ask-less stack (children complete or fail — same
-contract as workflow agents), join as Value. Orchestrator eval + N children =
-workflows' fan-out shape with tidepool semantics. The hard part is plumbing
-compile+run reentrantly; no continuation interaction (children can't ask) v1.
-With Exec already present, the stopgap exists today: `run "tidepool-eval ..."`
-or even `run "claude -p ..."` — full Claude agents as effects, if ever needed.
+### 5. ~~Spawn~~ → CUT (user steer 2026-06-11): parallel-eval only
+No in-computation child agents — background sessions introduce eviction/
+observability/abort question-clusters we don't want. Parallelism is the
+CALLER's: fire N evals in one message (measured working), KV as blackboard.
+SHIPPED instead (97c6108): **timeout-as-yield** — the pause gate. An eval
+only computes during an MCP call; at window expiry it parks at its next
+effect boundary and returns {"paused", continuation_id, output}; resume runs
+another window; abort kills cleanly. Long computations stop having a 120s
+cliff, which also makes caller-chunked parallel batches viable (each chunk
+pauses instead of dying). Pure-compute runaways: grace-then-detach (old
+behavior, reserved for exactly that case).
 
 ### 6. Telemetry & live progress
 - genai returns usage; accumulate per-eval tokens; expose `llmSpent :: M Int`
