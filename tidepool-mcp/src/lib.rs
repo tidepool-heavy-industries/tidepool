@@ -917,7 +917,6 @@ pub fn uses_qq(src: &str) -> bool {
     src.contains("[fmt|") || src.contains("[j|")
 }
 
-
 pub fn build_effect_stack_type(effects: &[EffectDecl]) -> String {
     if effects.is_empty() {
         "'[]".to_string()
