@@ -109,6 +109,8 @@ module Tidepool.Prelude
   , zipWithIndex, imap, enumFromTo
     -- * Monomorphic numeric helpers
   , abs', signum', min', max'
+    -- * Kleisli profunctor squad (monadic Arrow-style plumbing)
+  , (&&&), (***), (|||), firstK, secondK
     -- * Additional list combinators (P2)
   , elemIndex, findIndex
   , zip3, unzip3
@@ -746,6 +748,52 @@ min' a b = if a <= b then a else b
 -- | Monomorphic max for Int.
 max' :: Int -> Int -> Int
 max' a b = if a >= b then a else b
+
+-- ---------------------------------------------------------------------------
+-- Kleisli profunctor squad (probe-verified under the JIT 2026-06-11):
+-- Arrow-style plumbing for monadic pipelines, monomorphic in shape but
+-- polymorphic over the monad (single-constraint Monad dictionaries are
+-- JIT-safe — same class as mapM/foldM). Fixities match Control.Arrow.
+--
+-- >>> (\x -> pure (x + 1)) &&& (\x -> pure (x * 2)) $ 10   -- pure (11, 20)
+-- >>> readFile *** fsMetadata $ ("a.txt", "b.txt")          -- pair of effects
+-- >>> (handleLeft ||| handleRight) someEither
+-- ---------------------------------------------------------------------------
+
+infixr 3 &&&
+infixr 3 ***
+infixr 2 |||
+
+-- | Fan-out: run two Kleisli arrows on the same input, pair the results.
+(&&&) :: Monad m => (a -> m b) -> (a -> m c) -> a -> m (b, c)
+(f &&& g) x = do
+  b <- f x
+  c <- g x
+  pure (b, c)
+
+-- | Split: run one arrow on each component of a pair.
+(***) :: Monad m => (a -> m b) -> (c -> m d) -> (a, c) -> m (b, d)
+(f *** g) (a, c) = do
+  b <- f a
+  d <- g c
+  pure (b, d)
+
+-- | Fan-in: route an Either to one of two Kleisli arrows.
+(|||) :: Monad m => (a -> m c) -> (b -> m c) -> Either a b -> m c
+(f ||| _) (Left a)  = f a
+(_ ||| g) (Right b) = g b
+
+-- | Apply a Kleisli arrow to the first component of a pair.
+firstK :: Monad m => (a -> m b) -> (a, c) -> m (b, c)
+firstK f (a, c) = do
+  b <- f a
+  pure (b, c)
+
+-- | Apply a Kleisli arrow to the second component of a pair.
+secondK :: Monad m => (a -> m b) -> (c, a) -> m (c, b)
+secondK f (c, a) = do
+  b <- f a
+  pure (c, b)
 {-# INLINE max' #-}
 
 -- ---------------------------------------------------------------------------
