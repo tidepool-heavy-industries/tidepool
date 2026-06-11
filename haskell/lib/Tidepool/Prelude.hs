@@ -11,6 +11,7 @@ module Tidepool.Prelude
     -- * Text type (re-exported from Data.Text)
   , Text
   , Pack(..), unpack
+  , Render(render)
   , toUpper, toLower
   , strip
   , splitOn
@@ -185,6 +186,7 @@ import Control.Monad
   , (=<<), (>=>), (<=<)
   , foldM, foldM_
   )
+import Tidepool.Render (Render(..))
 import Tidepool.Aeson (Value(..), Key, object, (.=), toJSON, ToJSON, fromText)
 import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double, members, values, _Null)
 import Control.Lens (preview, toListOf, (^?), (^..), (&), (<&>), (.~), (%~), to, _Just, traverse)
