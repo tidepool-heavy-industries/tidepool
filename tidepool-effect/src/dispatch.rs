@@ -68,6 +68,10 @@ impl std::fmt::Debug for ValueStream {
 /// which lets the machine defer per-ELEMENT conversion behind element
 /// thunks: forcing one list head converts one element, and a `length`
 /// fold that never inspects heads converts nothing at all.
+// `len` returns Option<usize> as a CAPABILITY signal (Some = random access
+// supported), not a plain size — an `is_empty` would conflate "empty" with
+// "sequential-only", so clippy's pairing suggestion does not apply.
+#[allow(clippy::len_without_is_empty)]
 pub trait ValueSource {
     /// Produce the next element, or `None` when exhausted.
     fn next_value(&mut self, table: &DataConTable) -> Option<Result<Value, BridgeError>>;

@@ -401,11 +401,9 @@ impl FromCore for String {
                     .checked_add(len)
                     .filter(|&e| e <= ba.len())
                     .ok_or_else(bad_slice)?;
-                String::from_utf8(ba[off..end].to_vec()).map_err(|e| {
-                    BridgeError::TypeMismatch {
-                        expected: "UTF-8 Text".to_string(),
-                        got: format!("Invalid UTF-8: {}", e),
-                    }
+                String::from_utf8(ba[off..end].to_vec()).map_err(|e| BridgeError::TypeMismatch {
+                    expected: "UTF-8 Text".to_string(),
+                    got: format!("Invalid UTF-8: {}", e),
                 })
             }
             Value::Lit(Literal::LitString(bytes)) => {

@@ -326,6 +326,10 @@ fn arrop_strategy() -> impl Strategy<Value = ArrOp> {
 #[derive(Clone, Copy)]
 struct RealBa {
     ptr: i64,
+    /// True backing size at allocation. No longer needed for dealloc (the
+    /// capacity word below `ptr` is authoritative since the BUG-2 fix);
+    /// retained to document the model's view of the allocation.
+    #[allow(dead_code)]
     backing: usize,
 }
 

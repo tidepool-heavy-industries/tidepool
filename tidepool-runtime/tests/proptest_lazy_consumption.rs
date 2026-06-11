@@ -305,7 +305,11 @@ fn reference(case: &Case) -> serde_json::Value {
         }
         Consumer::PrefixThenEffect(k) => json!(k.min(n) + n),
         Consumer::MapFilterPrefix(k) => {
-            let v: Vec<String> = (0..n).filter(|&i| matches_item1(i)).map(at).take(k).collect();
+            let v: Vec<String> = (0..n)
+                .filter(|&i| matches_item1(i))
+                .map(at)
+                .take(k)
+                .collect();
             json!(v)
         }
         Consumer::ZipInterleave(k) => {
@@ -665,7 +669,13 @@ fn worker_lib_probe() {
 }
 
 /// Run one lib-function probe (lazy on or off). Returns the outcome.
-fn spawn_lib_probe(fn_name: &str, ty: &str, producer: Producer, n: usize, lazy: bool) -> WorkerOutcome {
+fn spawn_lib_probe(
+    fn_name: &str,
+    ty: &str,
+    producer: Producer,
+    n: usize,
+    lazy: bool,
+) -> WorkerOutcome {
     spawn_named(
         "worker_lib_probe",
         &[
@@ -697,7 +707,11 @@ static BUGS: Mutex<Vec<Bug>> = Mutex::new(Vec::new());
 static COVERAGE: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
 
 fn record_cell(cell: &str) {
-    *COVERAGE.lock().unwrap().entry(cell.to_string()).or_insert(0) += 1;
+    *COVERAGE
+        .lock()
+        .unwrap()
+        .entry(cell.to_string())
+        .or_insert(0) += 1;
 }
 
 fn record_bug(class: &'static str, case: &Case, detail: String) {
@@ -727,11 +741,19 @@ fn check_case(case: &Case) -> bool {
 
     // B3: fatal signals first (most severe).
     if let WorkerOutcome::Signal(sig, ref bc) = lazy_on {
-        record_bug("B3", case, format!("lazy-ON fatal signal {sig}\n{}", tail(bc)));
+        record_bug(
+            "B3",
+            case,
+            format!("lazy-ON fatal signal {sig}\n{}", tail(bc)),
+        );
         ok = false;
     }
     if let WorkerOutcome::Signal(sig, ref bc) = lazy_off {
-        record_bug("B3", case, format!("lazy-OFF fatal signal {sig}\n{}", tail(bc)));
+        record_bug(
+            "B3",
+            case,
+            format!("lazy-OFF fatal signal {sig}\n{}", tail(bc)),
+        );
         ok = false;
     }
 
@@ -744,11 +766,7 @@ fn check_case(case: &Case) -> bool {
     // OTHER).
     if let (Some(a), Some(b)) = (lon, loff) {
         if a != b {
-            record_bug(
-                "B4",
-                case,
-                format!("lazy-ON ({a}) != lazy-OFF ({b})"),
-            );
+            record_bug("B4", case, format!("lazy-ON ({a}) != lazy-OFF ({b})"));
             ok = false;
         }
     }
@@ -814,7 +832,7 @@ fn tail(s: &str) -> String {
         out.push('\n');
     }
     let last: Vec<&str> = s.lines().rev().take(4).collect();
-    out.push_str("…");
+    out.push('…');
     out.push_str(&last.into_iter().rev().collect::<Vec<_>>().join("\n"));
     out
 }
@@ -867,7 +885,11 @@ fn all_pairs(k: usize) -> Vec<(Producer, Consumer)> {
     }
     for m in [Method::Complete, Method::Stream, Method::IndexedList] {
         let p = Producer::TwoList(m);
-        for c in [Consumer::Full, Consumer::ZipInterleave(k), Consumer::Prefix(k)] {
+        for c in [
+            Consumer::Full,
+            Consumer::ZipInterleave(k),
+            Consumer::Prefix(k),
+        ] {
             v.push((p, c));
         }
     }
@@ -920,9 +942,19 @@ fn phase1_cases() -> Vec<Case> {
         .collect();
     // Empty / singleton edges (the classic "empty stream at chunk boundary 0").
     cases.push(mk(Producer::List(Method::Stream), Consumer::Full, 0, false));
-    cases.push(mk(Producer::List(Method::Stream), Consumer::BranchOnly, 0, false));
+    cases.push(mk(
+        Producer::List(Method::Stream),
+        Consumer::BranchOnly,
+        0,
+        false,
+    ));
     cases.push(mk(Producer::StringLines, Consumer::BranchOnly, 0, false));
-    cases.push(mk(Producer::List(Method::IndexedList), Consumer::Full, 1, false));
+    cases.push(mk(
+        Producer::List(Method::IndexedList),
+        Consumer::Full,
+        1,
+        false,
+    ));
     cases.truncate(60);
     cases
 }
@@ -938,28 +970,68 @@ fn phase2_cases() -> Vec<Case> {
 
     // Priority 1: #313 — Tuple × {MapFilterPrefix, LinesOfPartial} over sizes.
     for &k in &[255usize, 256, 257] {
-        cases.push(mk(Producer::TupleStringList, Consumer::MapFilterPrefix(k), k, false));
-        cases.push(mk(Producer::TupleStringList, Consumer::LinesOfPartial(k), k, false));
+        cases.push(mk(
+            Producer::TupleStringList,
+            Consumer::MapFilterPrefix(k),
+            k,
+            false,
+        ));
+        cases.push(mk(
+            Producer::TupleStringList,
+            Consumer::LinesOfPartial(k),
+            k,
+            false,
+        ));
     }
     // Priority 2: stream × Prefix(256±1).
     for &k in &[255usize, 256, 257] {
-        cases.push(mk(Producer::List(Method::Stream), Consumer::Prefix(k), 256, false));
+        cases.push(mk(
+            Producer::List(Method::Stream),
+            Consumer::Prefix(k),
+            256,
+            false,
+        ));
     }
     // Priority 3: any × PrefixThenEffect (re-enter registry).
     for m in [Method::Complete, Method::Stream, Method::IndexedList] {
-        cases.push(mk(Producer::List(m), Consumer::PrefixThenEffect(256), 256, false));
+        cases.push(mk(
+            Producer::List(m),
+            Consumer::PrefixThenEffect(256),
+            256,
+            false,
+        ));
     }
     // Priority 4: TwoList × ZipInterleave (two live parked streams).
     for m in [Method::Complete, Method::Stream, Method::IndexedList] {
-        cases.push(mk(Producer::TwoList(m), Consumer::ZipInterleave(256), 257, false));
+        cases.push(mk(
+            Producer::TwoList(m),
+            Consumer::ZipInterleave(256),
+            257,
+            false,
+        ));
     }
     // Priority 5: Complete × Full at the spine fencepost.
     for &n in &[1999usize, 2000, 2001] {
-        cases.push(mk(Producer::List(Method::Complete), Consumer::Full, n, false));
+        cases.push(mk(
+            Producer::List(Method::Complete),
+            Consumer::Full,
+            n,
+            false,
+        ));
     }
     // Priority 7: lazy producer × ForceTwice.
-    cases.push(mk(Producer::List(Method::Stream), Consumer::ForceTwice(256), 256, false));
-    cases.push(mk(Producer::List(Method::IndexedList), Consumer::ForceTwice(256), 256, false));
+    cases.push(mk(
+        Producer::List(Method::Stream),
+        Consumer::ForceTwice(256),
+        256,
+        false,
+    ));
+    cases.push(mk(
+        Producer::List(Method::IndexedList),
+        Consumer::ForceTwice(256),
+        256,
+        false,
+    ));
     // Priority 8: StringLines × BranchOnly (laziness leak into unforced branch).
     for &n in &[0usize, 1, 256] {
         cases.push(mk(Producer::StringLines, Consumer::BranchOnly, n, false));
@@ -990,9 +1062,24 @@ fn phase3_cases() -> Vec<Case> {
         .map(|(p, c)| mk(p, c, tiny_size_for(p), true))
         .collect();
     // Extra chunk-boundary stress (GC fires while building the 2nd chunk).
-    cases.push(mk(Producer::TupleStringList, Consumer::LinesOfPartial(255), 300, true));
-    cases.push(mk(Producer::List(Method::Stream), Consumer::Prefix(257), 300, true));
-    cases.push(mk(Producer::TwoList(Method::Stream), Consumer::ZipInterleave(256), 300, true));
+    cases.push(mk(
+        Producer::TupleStringList,
+        Consumer::LinesOfPartial(255),
+        300,
+        true,
+    ));
+    cases.push(mk(
+        Producer::List(Method::Stream),
+        Consumer::Prefix(257),
+        300,
+        true,
+    ));
+    cases.push(mk(
+        Producer::TwoList(Method::Stream),
+        Consumer::ZipInterleave(256),
+        300,
+        true,
+    ));
     cases.truncate(40);
     cases
 }
@@ -1129,7 +1216,12 @@ fn lazy_consumption_property_suite() {
         for (cell, list) in &by_cell {
             eprintln!("  [{cell}] {} bug(s)", list.len());
             for b in list {
-                eprintln!("    {} case={} :: {}", b.class, b.case, first_line(&b.detail));
+                eprintln!(
+                    "    {} case={} :: {}",
+                    b.class,
+                    b.case,
+                    first_line(&b.detail)
+                );
             }
         }
     }
@@ -1162,7 +1254,12 @@ fn repro_313_boundary() {
     // MapFilterPrefix over lines (Tuple only template).
     for &k in &[1usize, 255, 256] {
         for &n in &[20usize, 256, 600] {
-            trials.push(mk(Producer::TupleStringList, Consumer::MapFilterPrefix(k), n, false));
+            trials.push(mk(
+                Producer::TupleStringList,
+                Consumer::MapFilterPrefix(k),
+                n,
+                false,
+            ));
         }
     }
     // Full over lines (force the whole derived list).
@@ -1235,16 +1332,19 @@ fn repro_313_boundary() {
     eprintln!("\n--- #313 t7 INLINE bisection (which ingredient traps?) ---");
     let bisect = [
         (Consumer::TupleShowCode, "[pack (show c)] only (1st field)"),
-        (Consumer::TupleAppendStdout, "lines e <> [o] (2nd field append)"),
-        (Consumer::TupleAllFields, "EXACT inline t7 (all 3 fields + show + <>)"),
+        (
+            Consumer::TupleAppendStdout,
+            "lines e <> [o] (2nd field append)",
+        ),
+        (
+            Consumer::TupleAllFields,
+            "EXACT inline t7 (all 3 fields + show + <>)",
+        ),
     ];
     for (consumer, desc) in bisect {
         let case = mk(Producer::TupleStringList, consumer, 4, false);
         let ok = check_case(&case);
-        eprintln!(
-            "  {desc}: {}",
-            if ok { "clean" } else { "DIVERGED <<<" }
-        );
+        eprintln!("  {desc}: {}", if ok { "clean" } else { "DIVERGED <<<" });
     }
     // Characterization only — do NOT fail. The suite documents the boundary.
 }
@@ -1261,8 +1361,18 @@ fn repro_313_boundary() {
 fn cap_boundary_clean_error() {
     // Each "item-N" Text contributes ~3 nodes + 3 spine nodes ≈ 6/elem. The
     // 100_000-node cap is crossed near ~16.6k elements; bracket generously.
-    let under = mk(Producer::List(Method::Complete), Consumer::Full, 10_000, false);
-    let over = mk(Producer::List(Method::Complete), Consumer::Full, 40_000, false);
+    let under = mk(
+        Producer::List(Method::Complete),
+        Consumer::Full,
+        10_000,
+        false,
+    );
+    let over = mk(
+        Producer::List(Method::Complete),
+        Consumer::Full,
+        40_000,
+        false,
+    );
 
     // Under the cap: both modes succeed and equal the reference.
     let on = spawn_worker(&under, true);
@@ -1284,7 +1394,11 @@ fn cap_boundary_clean_error() {
     match on {
         WorkerOutcome::Ok(ref v) if *v == reference(&over) => {}
         WorkerOutcome::Signal(sig, ref bc) => {
-            record_bug("B3", &over, format!("over-cap lazy-ON fatal signal {sig}\n{}", tail(bc)));
+            record_bug(
+                "B3",
+                &over,
+                format!("over-cap lazy-ON fatal signal {sig}\n{}", tail(bc)),
+            );
             panic!("over-cap lazy-ON crashed with signal {sig}");
         }
         other => panic!("over-cap lazy-ON expected reference, got {other:?}"),
@@ -1296,7 +1410,10 @@ fn cap_boundary_clean_error() {
             record_bug(
                 "B3",
                 &over,
-                format!("over-cap lazy-OFF fatal signal {sig} (should be clean TooLarge)\n{}", tail(bc)),
+                format!(
+                    "over-cap lazy-OFF fatal signal {sig} (should be clean TooLarge)\n{}",
+                    tail(bc)
+                ),
             );
             panic!("over-cap lazy-OFF crashed with signal {sig} instead of clean error");
         }
@@ -1345,7 +1462,12 @@ fn regression_313_lib_t7() {
 /// lazy-results channel and the t7 shape itself.
 #[test]
 fn repro_313_inline_t7_is_clean() {
-    let case = mk(Producer::TupleStringList, Consumer::TupleAllFields, 4, false);
+    let case = mk(
+        Producer::TupleStringList,
+        Consumer::TupleAllFields,
+        4,
+        false,
+    );
     let want = reference(&case);
     for lazy in [true, false] {
         match spawn_worker(&case, lazy) {

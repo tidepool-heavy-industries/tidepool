@@ -18,7 +18,6 @@ use tidepool_bridge_derive::FromCore;
 use tidepool_codegen::jit_machine::{CancelHandle, JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_eval::value::Value;
 use tidepool_runtime::compile_haskell;
 
 #[derive(FromCore)]

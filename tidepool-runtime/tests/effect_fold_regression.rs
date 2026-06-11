@@ -8,7 +8,6 @@ mod common;
 
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
 
 fn prelude_path() -> std::path::PathBuf {

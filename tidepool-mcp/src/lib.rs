@@ -1124,9 +1124,7 @@ fn json_to_haskell(val: &serde_json::Value) -> String {
         serde_json::Value::Object(map) => {
             let pairs: Vec<String> = map
                 .iter()
-                .map(|(k, v)| {
-                    format!("\"{}\" .= {}", escape_haskell_string(k), json_to_haskell(v))
-                })
+                .map(|(k, v)| format!("\"{}\" .= {}", escape_haskell_string(k), json_to_haskell(v)))
                 .collect();
             format!("object [{}]", pairs.join(", "))
         }

@@ -87,7 +87,14 @@ pub fn emit_case(
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
         // No alts? Call runtime_case_trap to handle pending errors gracefully.
-        emit_case_trap(args.sess, args.builder, &args.ctx.current_fn, scrut_ptr, &[], merge_block)?;
+        emit_case_trap(
+            args.sess,
+            args.builder,
+            &args.ctx.current_fn,
+            scrut_ptr,
+            &[],
+            merge_block,
+        )?;
     }
 
     // Seal merge block
@@ -276,7 +283,14 @@ fn emit_data_dispatch(
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
-        emit_case_trap(args.sess, args.builder, &args.ctx.current_fn, scrut_ptr, data_alts, merge_block)?;
+        emit_case_trap(
+            args.sess,
+            args.builder,
+            &args.ctx.current_fn,
+            scrut_ptr,
+            data_alts,
+            merge_block,
+        )?;
     }
 
     Ok(())
@@ -490,7 +504,14 @@ fn emit_lit_dispatch(
     } else {
         // No alts matched.
         // We pass empty data_alts since these are lit alts.
-        emit_case_trap(args.sess, args.builder, &args.ctx.current_fn, scrut_value, &[], merge_block)?;
+        emit_case_trap(
+            args.sess,
+            args.builder,
+            &args.ctx.current_fn,
+            scrut_value,
+            &[],
+            merge_block,
+        )?;
     }
 
     Ok(())

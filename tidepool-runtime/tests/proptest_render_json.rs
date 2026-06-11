@@ -571,7 +571,11 @@ fn pin_empty_string_erasure_semantics() {
     let litstr = Value::Lit(Literal::LitString(Vec::new()));
     assert_eq!(render(&text, &t), serde_json::json!(""), "Text \"\"");
     assert_eq!(render(&litstr, &t), serde_json::json!(""), "LitString \"\"");
-    assert_eq!(render(&clist, &t), serde_json::json!([]), "empty list (incl. [Char])");
+    assert_eq!(
+        render(&clist, &t),
+        serde_json::json!([]),
+        "empty list (incl. [Char])"
+    );
 }
 
 /// B5: a proper list of EXACTLY `MAX_LIST_LEN` elements is falsely truncated.

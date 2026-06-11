@@ -14,7 +14,6 @@ use cross_mode_harness::{
 };
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler, Response};
-use tidepool_eval::value::Value;
 
 #[derive(FromCore)]
 enum EchoReq {

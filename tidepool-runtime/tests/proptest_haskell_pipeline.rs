@@ -74,6 +74,10 @@ enum Ty {
     Int,
     Text,
     ListInt,
+    /// Reserved for a future generator extension (text-list HOF chains);
+    /// the current generator only reaches [Text] through `words`/`lines`
+    /// which it types as ListInt-shaped folds.
+    #[allow(dead_code)]
     ListText,
     Pair, // (Int, Text)
 }
@@ -1183,7 +1187,10 @@ fn run_pure(source: &str) -> Result<serde_json::Value, String> {
 enum Outcome {
     Match,
     Mismatch {
+        // Carried for the Debug rendering in failure messages.
+        #[allow(dead_code)]
         expected: serde_json::Value,
+        #[allow(dead_code)]
         got: serde_json::Value,
     },
     Error(String),
@@ -1555,7 +1562,8 @@ impl EffectCase {
 enum WorkerResult {
     Ok(serde_json::Value),
     /// Process died from a fatal signal (SIGILL=4, SIGSEGV=11, etc).
-    Signal(i32),
+    /// The number is carried for the Debug rendering in failure messages.
+    Signal(#[allow(dead_code)] i32),
     /// Non-signal failure (panic / compile error / bad output).
     Fail(String),
 }

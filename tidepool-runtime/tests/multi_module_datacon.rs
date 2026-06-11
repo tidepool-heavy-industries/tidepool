@@ -4,7 +4,6 @@ mod common;
 
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_eval::value::Value;
 use tidepool_runtime::{compile_and_run, compile_haskell};
 
 use std::path::{Path, PathBuf};

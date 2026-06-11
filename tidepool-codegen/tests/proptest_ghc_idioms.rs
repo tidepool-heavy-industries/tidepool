@@ -40,6 +40,7 @@ use tidepool_codegen::jit_machine::JitEffectMachine;
 // ---------------------------------------------------------------------------
 // Standard DataCon tags (must match `standard_datacon_table` in tidepool-testing).
 // ---------------------------------------------------------------------------
+#[allow(dead_code)] // documents the full standard-table layout alongside its siblings
 const NOTHING: DataConId = DataConId(0);
 const JUST: DataConId = DataConId(1);
 const PAIR: DataConId = DataConId(4);
@@ -418,7 +419,10 @@ fn build_letrec(spec: &LetRecSpec) -> CoreExpr {
             RhsKind::Lam(h) => {
                 let x = fresh_var();
                 let hr = push_hole(&mut b, h);
-                b.push(CoreFrame::Lam { binder: x, body: hr })
+                b.push(CoreFrame::Lam {
+                    binder: x,
+                    body: hr,
+                })
             }
             RhsKind::ConRef(target) => {
                 let t = *target % spec.n;
@@ -455,13 +459,13 @@ fn build_letrec(spec: &LetRecSpec) -> CoreExpr {
     // not Simple, or not forced, are ignored numerically (keeps result ground).
     // Always include at least a literal seed so the body is non-empty & Int.
     let mut acc = b.push(CoreFrame::Lit(Literal::LitInt(0)));
-    for i in 0..spec.n {
+    for (i, &binder) in binders.iter().enumerate().take(spec.n) {
         if !spec.force_mask.get(i).copied().unwrap_or(false) {
             continue;
         }
         match &spec.rhss[i] {
             RhsKind::Simple(_) => {
-                let vr = b.push(CoreFrame::Var(binders[i]));
+                let vr = b.push(CoreFrame::Var(binder));
                 acc = b.push(CoreFrame::PrimOp {
                     op: PrimOpKind::IntAdd,
                     args: vec![acc, vr],
@@ -765,10 +769,7 @@ fn build_joinrec(spec: &JoinRecSpec) -> CoreExpr {
     let mut jargs: Vec<usize> = leads.iter().map(|v| b.push(CoreFrame::Var(*v))).collect();
     jargs.push(new_acc);
     jargs.push(new_i);
-    let recur = b.push(CoreFrame::Jump {
-        label,
-        args: jargs,
-    });
+    let recur = b.push(CoreFrame::Jump { label, args: jargs });
     let cbind = fresh_var();
     let rhs = b.push(CoreFrame::Case {
         scrutinee: cond,
@@ -1002,10 +1003,7 @@ fn build_joincross(spec: &JoinCrossSpec) -> CoreExpr {
             .map(|_| b.push(CoreFrame::Lit(Literal::LitInt(0))))
             .collect();
         jargs.push(last_arg);
-        b.push(CoreFrame::Jump {
-            label,
-            args: jargs,
-        })
+        b.push(CoreFrame::Jump { label, args: jargs })
     };
 
     // Inner lambda binder `x` (the value crossed by the Jump).
@@ -1338,4 +1336,3 @@ fn zzz_reach_floor() {
         );
     }
 }
-

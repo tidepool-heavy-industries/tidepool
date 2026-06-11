@@ -8,7 +8,6 @@ use cross_mode_harness::{
 };
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_eval::value::Value;
 
 #[test]
 fn harness_pure_value_roundtrips() {

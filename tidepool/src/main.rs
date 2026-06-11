@@ -1661,7 +1661,9 @@ mod tests {
             "pub fn $NAME($$ARGS)".into(),
             vec!["t.rs".into()],
         );
-        let err = handler.handle(req, &cx).expect_err("bare signature must be rejected");
+        let err = handler
+            .handle(req, &cx)
+            .expect_err("bare signature must be rejected");
         let msg = format!("{err}");
         assert!(msg.contains("SIGNATURE"), "{msg}");
         assert!(msg.contains("rsFn"), "{msg}");

@@ -703,7 +703,7 @@ fn fork_case(expr: &CoreExpr, script: Vec<Spec>) -> Outcome {
 
     if data.is_empty() || data[0] != MARKER {
         Outcome::JitFault
-    } else if data.len() >= 1 + REC_LEN {
+    } else if data.len() > REC_LEN {
         Outcome::Rec(Verdict::from_bytes(&data[1..1 + REC_LEN]))
     } else {
         Outcome::EvalFault
@@ -1015,7 +1015,7 @@ fn bug_shape_mismatch_jit_reads_string_as_int() {
     match run_case(expr, script) {
         Outcome::Rec(v) => {
             assert!(
-                v.eval_ok == false,
+                !v.eval_ok,
                 "oracle precondition: eval must reject string-into-Int#"
             );
             // FIXED: the JIT must reject it just like eval (clean error, not
