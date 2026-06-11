@@ -21,18 +21,9 @@ module Seek where
 
 import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
+import Schemes (loopM)
 import Asks (oracle)
 import Explore (hitsByFile, aroundLine)
-
--- | Effectful loop: run the body until it returns Left (the result);
--- Right is the next seed. Generic core of steered searches that
--- terminate WITH an answer — the shape oracleAna can't express (its
--- termination is bare Nothing, the final reply is lost). Lives here
--- rather than Library.hs because verb modules can't import Library
--- (re-export cycle); re-exported bare via Library.
-loopM :: Monad m => (a -> m (Either r a)) -> a -> m r
-loopM f = go
-  where go a = f a >>= either pure go
 
 -- | A reply language: named verbs over the state. A verb's action
 -- receives the reply with the verb name stripped.

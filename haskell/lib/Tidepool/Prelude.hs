@@ -87,7 +87,7 @@ module Tidepool.Prelude
   , mapM, mapM_, sequence, sequence_
   , when, unless, void, join, guard
   , forM, forM_
-  , (=<<), (>=>), (<=<)
+  , (=<<), (>=>), (<=<), (<&>)
   , foldM, foldM_
   , filterM, replicateM, zipWithM
     -- * Maybe/Either utilities
@@ -178,7 +178,7 @@ import Control.Monad
   )
 import Tidepool.Aeson (Value(..), Key, object, (.=), toJSON, ToJSON, fromText)
 import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double, members, values, _Null)
-import Control.Lens (preview, toListOf, (^?), (^..), (&), (.~), (%~), to, _Just, traverse)
+import Control.Lens (preview, toListOf, (^?), (^..), (&), (<&>), (.~), (%~), to, _Just, traverse)
 import qualified Data.Map.Strict as Map
 
 -- Permanent binding-level interception in Translate.hs.
