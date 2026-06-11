@@ -50,6 +50,12 @@ pub struct CodegenPipeline {
     pending_stack_maps: Vec<(FuncId, u32, Vec<RawStackMap>)>,
     /// Lambda name registry: (func_id, name). Populated during define_function.
     lambda_names: Vec<(FuncId, String)>,
+    /// Boxed-literal wrapper constructor ids (I#/W#/C#/F#/D#) for this compile,
+    /// set by the JIT entry point from the DataConTable. Transported here so
+    /// `compile_expr` can stamp it onto every `EmitSession` without threading
+    /// the table through its signature. Defaults to empty (no wrapper
+    /// tolerance), which preserves behavior for direct test callers.
+    pub lit_wrappers: crate::emit::LitWrapperIds,
 }
 
 impl CodegenPipeline {
@@ -103,6 +109,7 @@ impl CodegenPipeline {
             stack_maps: StackMapRegistry::new(),
             pending_stack_maps: Vec::new(),
             lambda_names: Vec::new(),
+            lit_wrappers: crate::emit::LitWrapperIds::default(),
         })
     }
 

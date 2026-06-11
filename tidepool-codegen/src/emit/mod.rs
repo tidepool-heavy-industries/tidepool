@@ -5,9 +5,51 @@ pub mod primop;
 
 use cranelift_codegen::ir::{FuncRef, SigRef, Value};
 use rustc_hash::FxHashMap;
-use tidepool_repr::{CoreExpr, JoinId, PrimOpKind, VarId};
+use tidepool_repr::{CoreExpr, DataConId, DataConTable, JoinId, PrimOpKind, VarId};
 
 pub use crate::layout::*;
+
+/// DataConIds of GHC's boxed-literal wrapper constructors (`I#`, `W#`, `C#`,
+/// `F#`, `D#`), resolved once per compile from the [`DataConTable`].
+///
+/// Used by `emit_data_dispatch` to give data cases runtime tolerance for *bare*
+/// Lit scrutinees: a literal materialized on the Rust side (e.g. the vendored
+/// aeson `Number`'s raw `LitDouble` field, see `tidepool-bridge/src/json.rs`)
+/// reaches `case x of { D# ds -> .. }` as a Lit heap object, not a boxed `D#`
+/// Con. Such a Lit has no constructor tag, so the con-tag comparison chain
+/// would fall through to the trap.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LitWrapperIds {
+    int: Option<DataConId>,
+    word: Option<DataConId>,
+    char: Option<DataConId>,
+    float: Option<DataConId>,
+    double: Option<DataConId>,
+}
+
+impl LitWrapperIds {
+    /// Resolve the five wrapper constructors from the table (each is arity 1).
+    pub fn from_table(table: &DataConTable) -> Self {
+        Self {
+            int: table.get_by_name_arity("I#", 1),
+            word: table.get_by_name_arity("W#", 1),
+            char: table.get_by_name_arity("C#", 1),
+            float: table.get_by_name_arity("F#", 1),
+            double: table.get_by_name_arity("D#", 1),
+        }
+    }
+
+    /// True if `id` is one of the boxed-literal wrapper constructors. A
+    /// well-typed data case has at most one such alt, since `I#`/`W#`/`C#`/`F#`/
+    /// `D#` each belong to a distinct primitive type.
+    pub fn is_wrapper(&self, id: DataConId) -> bool {
+        Some(id) == self.int
+            || Some(id) == self.word
+            || Some(id) == self.char
+            || Some(id) == self.float
+            || Some(id) == self.double
+    }
+}
 
 /// Per-function compilation context bundling common parameters.
 pub struct EmitSession<'a> {
@@ -16,6 +58,9 @@ pub struct EmitSession<'a> {
     pub gc_sig: SigRef,
     pub oom_func: FuncRef,
     pub tree: &'a CoreExpr,
+    /// Boxed-literal wrapper constructor ids for runtime Lit-tolerance in
+    /// data-case dispatch. Copied verbatim into every nested session.
+    pub lit_wrappers: LitWrapperIds,
 }
 
 /// SSA value with boxed/unboxed tracking.
