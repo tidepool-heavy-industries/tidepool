@@ -4,7 +4,7 @@
       "args": [
         "node",
         "--papers",
-        "/home/inanna/dev/tidepool/.exo/node/5403fc33-56af-49ed-af3e-d6e1d7eb679e/root.json"
+        "/home/inanna/dev/tidepool/.exo/worktrees/sub-varid-defense/.exo/node.json"
       ],
       "command": "exo",
       "type": "stdio"
