@@ -71,10 +71,16 @@ impl<'a> EffectMachine<'a> {
             match forced {
                 Value::Con(id, ref fields) if id == self.val_id => {
                     // Val x — pure result, done. Deep force to eliminate any ThunkRefs.
-                    let result = fields
-                        .first()
-                        .cloned()
-                        .unwrap_or(Value::Lit(tidepool_repr::Literal::LitInt(0)));
+                    // Strict arity (S2-F1): a zero-field Val previously became a
+                    // fabricated LitInt(0) — silent garbage instead of an error.
+                    if fields.len() != 1 {
+                        return Err(EffectError::FieldCountMismatch {
+                            constructor: "Val",
+                            expected: 1,
+                            got: fields.len(),
+                        });
+                    }
+                    let result = fields[0].clone();
                     return Ok(tidepool_eval::eval::deep_force(result, self.heap)?);
                 }
                 Value::Con(id, ref fields) if id == self.e_id => {
@@ -157,72 +163,111 @@ impl<'a> EffectMachine<'a> {
     }
 
     /// Apply a Leaf/Node continuation tree to a value.
+    /// Apply a continuation tree to a value.
+    ///
+    /// ITERATIVE (S2-B3): the old version recursed both down `Node`'s left
+    /// spine and through the `Val` tail call, so a ~800-deep queue overflowed
+    /// the host stack (and the eval ORACLE with it). This is the same
+    /// computation as a zipper: descend the left spine pushing each pending
+    /// `k2` onto an explicit stack; on `Val(y)` pop the next `k2` and loop;
+    /// on `E(union, k')` fold ALL pending continuations into the
+    /// right-nested composition the recursive version built one frame at a
+    /// time. Heap depth is the only remaining recursion (inside
+    /// `eval::force`, bounded by indirection chains, not queue length).
     fn apply_cont(&mut self, k: Value, arg: Value) -> Result<Value, EffectError> {
-        let k = tidepool_eval::eval::force(k, self.heap)?;
-        match k {
-            Value::Con(id, ref fields) if id == self.leaf_id => {
-                // Leaf(f) — apply f to arg
-                if fields.len() != 1 {
-                    return Err(EffectError::FieldCountMismatch {
-                        constructor: "Leaf",
-                        expected: 1,
-                        got: fields.len(),
-                    });
-                }
-                let f = tidepool_eval::eval::force(fields[0].clone(), self.heap)?;
-                Ok(self.apply_closure(f, arg)?)
-            }
-            Value::Con(id, ref fields) if id == self.node_id => {
-                // Node(k1, k2) — apply k1, then compose with k2
-                if fields.len() != 2 {
-                    return Err(EffectError::FieldCountMismatch {
-                        constructor: "Node",
-                        expected: 2,
-                        got: fields.len(),
-                    });
-                }
-                let k1 = fields[0].clone();
-                let k2 = fields[1].clone();
-                let result = self.apply_cont(k1, arg)?;
-                let forced = tidepool_eval::eval::force(result, self.heap)?;
-
-                match forced {
-                    Value::Con(vid, ref vfields) if vid == self.val_id => {
-                        // k1 returned Val(y) — feed y to k2
-                        let y = vfields
-                            .first()
-                            .cloned()
-                            .unwrap_or(Value::Lit(tidepool_repr::Literal::LitInt(0)));
-                        self.apply_cont(k2, y)
-                    }
-                    Value::Con(eid, ref efields) if eid == self.e_id => {
-                        // k1 yielded E(union, k') — compose: E(union, Node(k', k2))
-                        if efields.len() != 2 {
+        // Pending right-continuations, outermost first (pop order = innermost).
+        let mut pending: Vec<Value> = Vec::new();
+        let mut k = k;
+        let mut arg = arg;
+        loop {
+            // ── descend to a leaf, accumulating pending k2's ──────────────
+            let result = loop {
+                let kf = tidepool_eval::eval::force(k, self.heap)?;
+                match kf {
+                    Value::Con(id, ref fields) if id == self.leaf_id => {
+                        // Leaf(f) — apply f to arg
+                        if fields.len() != 1 {
                             return Err(EffectError::FieldCountMismatch {
-                                constructor: "E (continuation)",
-                                expected: 2,
-                                got: efields.len(),
+                                constructor: "Leaf",
+                                expected: 1,
+                                got: fields.len(),
                             });
                         }
-                        let union_val = efields[0].clone();
-                        let k_prime = efields[1].clone();
-                        let new_k = Value::Con(self.node_id, vec![k_prime, k2]);
-                        Ok(Value::Con(self.e_id, vec![union_val, new_k]))
+                        let f = tidepool_eval::eval::force(fields[0].clone(), self.heap)?;
+                        break self.apply_closure(f, arg)?;
                     }
-                    other => Err(EffectError::UnexpectedValue {
+                    Value::Con(id, ref fields) if id == self.node_id => {
+                        // Node(k1, k2) — descend into k1, park k2
+                        if fields.len() != 2 {
+                            return Err(EffectError::FieldCountMismatch {
+                                constructor: "Node",
+                                expected: 2,
+                                got: fields.len(),
+                            });
+                        }
+                        pending.push(fields[1].clone());
+                        k = fields[0].clone();
+                    }
+                    Value::Closure(..) => {
+                        // Raw closure (degenerate continuation)
+                        break self.apply_closure(kf, arg)?;
+                    }
+                    other => {
+                        return Err(EffectError::UnexpectedValue {
+                            context: "Leaf or Node continuation",
+                            got: format!("{:?}", other),
+                        })
+                    }
+                }
+            };
+
+            // ── unwind: nothing pending means the caller gets the raw result
+            // (matches the recursive version, which returned the leaf
+            // application unforced when no Node wrapped it) ─────────────────
+            if pending.is_empty() {
+                return Ok(result);
+            }
+            let forced = tidepool_eval::eval::force(result, self.heap)?;
+            match forced {
+                Value::Con(vid, ref vfields) if vid == self.val_id => {
+                    // Val(y) — feed y to the innermost pending continuation.
+                    // Strict arity (S2-F1): no fabricated LitInt(0) for a
+                    // malformed zero-field Val.
+                    if vfields.len() != 1 {
+                        return Err(EffectError::FieldCountMismatch {
+                            constructor: "Val",
+                            expected: 1,
+                            got: vfields.len(),
+                        });
+                    }
+                    arg = vfields[0].clone();
+                    k = pending.pop().expect("pending non-empty");
+                }
+                Value::Con(eid, ref efields) if eid == self.e_id => {
+                    // E(union, k') — suspend: compose k' with every pending
+                    // continuation, innermost-first, exactly as the recursive
+                    // unwind built Node(.., k2) at each level.
+                    if efields.len() != 2 {
+                        return Err(EffectError::FieldCountMismatch {
+                            constructor: "E (continuation)",
+                            expected: 2,
+                            got: efields.len(),
+                        });
+                    }
+                    let union_val = efields[0].clone();
+                    let mut composed = efields[1].clone();
+                    while let Some(k2) = pending.pop() {
+                        composed = Value::Con(self.node_id, vec![composed, k2]);
+                    }
+                    return Ok(Value::Con(self.e_id, vec![union_val, composed]));
+                }
+                other => {
+                    return Err(EffectError::UnexpectedValue {
                         context: "Val or E after applying k1",
                         got: format!("{:?}", other),
-                    }),
+                    })
                 }
             }
-            Value::Closure(..) => {
-                // Raw closure (degenerate continuation)
-                Ok(self.apply_closure(k, arg)?)
-            }
-            other => Err(EffectError::UnexpectedValue {
-                context: "Leaf or Node continuation",
-                got: format!("{:?}", other),
-            }),
         }
     }
 

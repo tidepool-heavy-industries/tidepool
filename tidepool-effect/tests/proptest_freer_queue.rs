@@ -595,8 +595,15 @@ fn small_stack_depth_64_green() {
 /// expected: result == model (queue walk must be iterative)
 /// class: B3 stack overflow | component: tidepool-effect/src/machine.rs apply_cont
 /// seed: deterministic (no proptest seed — fixed-depth repro)
+// B3 PARTIALLY FIXED 2026-06-11: apply_cont's queue walk is now iterative
+// (explicit pending stack) — RUNTIME queue depth (e.g. mapM over a long
+// effect list, where the expression stays small) no longer consumes host
+// stack. This repro however builds a 1200-deep EXPRESSION, and post-fix
+// probing shows the abort here is dominated by eval_at's expression
+// recursion (gotcha #5: ~600 OK / 700 ABORT at 8MB dev) — a different
+// walker, planned as its own slice. Activate when the eval slice lands.
 #[test]
-#[ignore = "BUG B3: recursive apply_cont overflows an 8MB stack at queue depth ~800 (left-biased; process abort)"]
+#[ignore = "blocked on eval_at expression recursion (gotcha #5): repro depth is expression depth, not queue depth; apply_cont itself is iterative since 2026-06-11"]
 fn bug_b3_left_biased_depth_1200_8mb_stack() {
     run_in_thread(8 * 1024 * 1024, || {
         let n = 1_200;
@@ -617,8 +624,10 @@ fn bug_b3_left_biased_depth_1200_8mb_stack() {
 /// expected: result == model
 /// class: B3 stack overflow | component: tidepool-effect/src/machine.rs apply_cont
 /// seed: deterministic (fixed-depth repro)
+// Same status and caveat as the left-biased twin: queue walk iterative,
+// repro blocked on eval_at expression recursion.
 #[test]
-#[ignore = "BUG B3: non-guaranteed tail call in apply_cont overflows an 8MB stack at queue depth ~800 (right-biased; process abort)"]
+#[ignore = "blocked on eval_at expression recursion (gotcha #5): repro depth is expression depth, not queue depth; apply_cont itself is iterative since 2026-06-11"]
 fn bug_b3_right_biased_depth_1200_8mb_stack() {
     run_in_thread(8 * 1024 * 1024, || {
         let n = 1_200;
@@ -675,20 +684,20 @@ fn raw_closure_continuation_equals_leaf_wrapped() {
 /// trees produced by codegen bugs — exactly what the machine's role as
 /// differential oracle is supposed to surface.
 ///
-/// This test pins the CURRENT behavior so a future strictness fix shows up
-/// as a deliberate change here.
+/// F1 FIXED 2026-06-11: both Val arms now enforce arity 1 and report
+/// FieldCountMismatch instead of fabricating LitInt(0). This is the active
+/// regression test for the strict contract.
 #[test]
 fn finding_f1_zero_field_val_silently_becomes_zero() {
-    // Top level: program is `Val` with no fields.
+    // Top level: program is `Val` with no fields -> clean error.
     let mut b = Builder::new();
     b.con(VAL, vec![]);
     let prog = RecursiveTree { nodes: b.nodes };
-    let (r, t) = run_program(&prog, vec![]).unwrap();
-    assert_eq!(
-        r, 0,
-        "zero-field Val leniently defaults to 0 (documented finding F1)"
+    let err = run_program(&prog, vec![]).expect_err("zero-field Val must be rejected");
+    assert!(
+        format!("{err:?}").contains("Val"),
+        "error should name the Val constructor: {err:?}"
     );
-    assert!(t.is_empty());
 
     // Node arm: a leaf returning zero-field Val feeds k2 a synthesized 0.
     let mut b = Builder::new();
@@ -704,9 +713,9 @@ fn finding_f1_zero_field_val_silently_becomes_zero() {
     let init = b.lit_int(1);
     b.effect(init, tree);
     let prog = RecursiveTree { nodes: b.nodes };
-    let (r, _) = run_program(&prog, vec![100]).unwrap();
-    assert_eq!(
-        r, 5,
-        "Node arm also synthesizes 0 for zero-field Val (finding F1)"
+    let err = run_program(&prog, vec![100]).expect_err("Node arm must reject zero-field Val");
+    assert!(
+        format!("{err:?}").contains("Val"),
+        "error should name the Val constructor: {err:?}"
     );
 }
