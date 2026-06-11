@@ -15,8 +15,10 @@
 --     expiry (lib.rs:1412) — 4 probes.
 --   * resume is one-shot: conts.remove consumes the entry
 --     (lib.rs:1921); the response String crosses the boundary via the
---     session channel (lib.rs:1935) and lands as Value::String — so a
---     continuation dies by eviction OR by its own resume; no replay.
+--     session channel (lib.rs:1935) — so a continuation dies by
+--     eviction OR by its own resume; no replay. The response is
+--     JSON-parsed with String fallback (lib.rs:1457) before
+--     re-entering the JIT: a JSON-shaped reply arrives STRUCTURED.
 --   * the 30s timeout never kills the eval thread: Err(_elapsed)
 --     orphans it to a reaper (2s grace + join, lib.rs:1719) with
 --     orphaned_threads accounting; eval() refuses admission at
@@ -25,6 +27,13 @@
 --     (tidepool/src/main.rs:253 resolve, :276 root check; siblings
 --     at :512 and :923) — found via seek v3, def+ls unused but grep
 --     usage syntax + compaction carried a 5-probe run cleanly.
+--   * ask end-to-end (seek v4 stress, 6 hops in 5 probes + conclude):
+--     send (Ask p) -> Union(tag, req), ask_tag = decls.len()
+--     (lib.rs:2062); machine destructures Union + continuation
+--     (machine.rs:99-128), HList peels tags (dispatch.rs:281) to
+--     AskDispatcher (lib.rs:1441); extract_ask_prompt crosses the
+--     heap->Rust boundary; Suspended sent at lib.rs:1447; eval
+--     thread blocks on response_rx.recv() (lib.rs:1450).
 --
 -- v2 (affordance fixes from dogfooding v1):
 --   * verbs carry usage syntax, rendered verbatim in the prompt — the
