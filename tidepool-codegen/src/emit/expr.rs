@@ -1541,6 +1541,51 @@ impl EmitContext {
         }
     }
 
+    /// Group-aware variant of `rhs_is_error_call`: additionally follows the
+    /// App-spine head through SIBLING binders of the same binding group.
+    ///
+    /// GHC .hi unfoldings float error CAFs in two steps, e.g. for the
+    /// Foldable [] instance of foldl1:
+    ///   lvl  = \cs -> error (pushCallStack ... cs) "foldl1"   -- lambda: safe
+    ///   lvl2 = lvl callStackValue                             -- App CAF: bottom!
+    /// The plain check sees `lvl2`'s head var is not a sentinel and lets the
+    /// eager Let spine evaluate it at setup — raising "foldl1" before any case
+    /// dispatch ever runs. Following the head into `lvl`'s RHS (stripping its
+    /// lambda binders, since reaching it via an App spine means they get
+    /// applied) finds the sentinel and defers the binding instead.
+    ///
+    /// A `Lam` RHS at the top level is still NOT an error call (binding a
+    /// lambda value is always safe); lambdas are only stripped after entering
+    /// a sibling via its use in head position. Cycle-guarded via `visited`.
+    fn rhs_is_error_call_in_group(
+        tree: &CoreExpr,
+        rhs_idx: usize,
+        group: &FxHashMap<VarId, usize>,
+    ) -> bool {
+        let mut visited: FxHashSet<VarId> = FxHashSet::default();
+        let mut idx = rhs_idx;
+        loop {
+            match &tree.nodes[idx] {
+                CoreFrame::Var(v) => {
+                    if (v.0 >> 56) as u8 == tidepool_repr::ERROR_SENTINEL_TAG {
+                        return true;
+                    }
+                    match group.get(v) {
+                        Some(&sib_rhs) if visited.insert(*v) => {
+                            idx = sib_rhs;
+                            while let CoreFrame::Lam { body, .. } = &tree.nodes[idx] {
+                                idx = *body;
+                            }
+                        }
+                        _ => return false,
+                    }
+                }
+                CoreFrame::App { fun, .. } => idx = *fun,
+                _ => return false,
+            }
+        }
+    }
+
     /// Extract the error kind from an error call (walks App chain to find head Var).
     fn extract_error_kind(tree: &CoreExpr, rhs_idx: usize) -> u64 {
         let mut idx = rhs_idx;
@@ -2009,6 +2054,10 @@ impl EmitContext {
         work: &mut Vec<EmitWork>,
     ) -> Result<(), EmitError> {
         let tail = args.tail;
+        // Binder → RHS map for the group-aware error-CAF check (see
+        // rhs_is_error_call_in_group): floated error bindings can reference
+        // the sentinel only through a sibling lambda.
+        let group: FxHashMap<VarId, usize> = bindings.iter().copied().collect();
         // Split bindings: Lam/Con need 3-phase pre-allocation (recursive),
         // everything else is evaluated eagerly as simple bindings first.
         let (rec_bindings, simple_bindings): (Vec<_>, Vec<_>) =
@@ -2034,7 +2083,7 @@ impl EmitContext {
                 tail,
             });
             for (binder, rhs_idx) in simple_bindings.iter().rev() {
-                if EmitContext::rhs_is_error_call(args.sess.tree, *rhs_idx) {
+                if EmitContext::rhs_is_error_call_in_group(args.sess.tree, *rhs_idx, &group) {
                     let poison_sv = emit_error_binding(
                         EmitArgs {
                             ctx: args.ctx,
@@ -2226,7 +2275,7 @@ impl EmitContext {
         // on closure code pointers.
         let mut deferred_simple = Vec::with_capacity(simple_bindings.len());
         for (binder, rhs_idx) in &simple_bindings {
-            if EmitContext::rhs_is_error_call(args.sess.tree, *rhs_idx) {
+            if EmitContext::rhs_is_error_call_in_group(args.sess.tree, *rhs_idx, &group) {
                 let poison_sv = emit_error_binding(
                     EmitArgs {
                         ctx: args.ctx,
@@ -2597,7 +2646,7 @@ impl EmitContext {
         });
 
         for (binder, rhs_idx) in deferred_simple.iter().rev() {
-            if EmitContext::rhs_is_error_call(args.sess.tree, *rhs_idx) {
+            if EmitContext::rhs_is_error_call_in_group(args.sess.tree, *rhs_idx, &group) {
                 let poison_sv = emit_error_binding(
                     EmitArgs {
                         ctx: args.ctx,
