@@ -32,6 +32,14 @@ pub enum JitError {
     Signal(#[from] crate::signal_safety::SignalError),
     #[error("Effect handler response too large ({nodes} value nodes, max {limit}). Narrow your query to return fewer results.")]
     EffectResponseTooLarge { nodes: usize, limit: usize },
+    #[error("VarId collision at load: {0}. This indicates a Haskell-side VarId-scheme regression; set TIDEPOOL_VARID_CHECK=0 only to bypass for bisection.")]
+    VarIdCollision(#[from] tidepool_repr::VarIdCollision),
+}
+
+/// Kill-switch for the load-time duplicate-VarId check (#313 defense).
+/// Default ON; `TIDEPOOL_VARID_CHECK=0` disables it (bisection escape hatch).
+fn varid_check_enabled() -> bool {
+    std::env::var("TIDEPOOL_VARID_CHECK").map_or(true, |v| v != "0")
 }
 
 /// High-level JIT effect machine.
@@ -128,6 +136,13 @@ impl JitEffectMachine {
         table: &DataConTable,
         nursery_size: usize,
     ) -> Result<Self, JitError> {
+        // #313 defense: a duplicate VarId on the top-level Let spine means two
+        // distinct top-level bindings silently shadow each other — fail loudly
+        // at load instead. Runs on the raw deserialized tree (the wrapAllBinds
+        // Let-nest), before normalize/datacon wrapping reshape it.
+        if varid_check_enabled() {
+            tidepool_repr::check_toplevel_varids(expr)?;
+        }
         let expr = tidepool_repr::normalize(expr, table);
         let expr = crate::datacon_env::wrap_with_datacon_env(expr, table);
         let mut pipeline = CodegenPipeline::new(&crate::host_fns::host_fn_symbols())?;
