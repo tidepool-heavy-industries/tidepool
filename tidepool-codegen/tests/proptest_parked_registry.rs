@@ -1149,10 +1149,10 @@ fn p2_laziness_quantification() {
             }
         ];
         let res = run_prog(build_sum_chain(3, 0), handlers, 4 << 20).expect("P2a failed");
-        assert!(values_equal(
-            &res,
-            &Value::Con(VAL, vec![Value::Lit(Literal::LitInt(3))])
-        ));
+        assert!(
+            values_equal(&res, &Value::Lit(Literal::LitInt(3))),
+            "DIAG res = {res:?}"
+        );
         assert_eq!(
             stats.borrow().next_calls,
             256,
@@ -1179,10 +1179,7 @@ fn p2_laziness_quantification() {
             }
         ];
         let res = run_prog(build_sum_chain(3, 0), handlers, 4 << 20).expect("P2b failed");
-        assert!(values_equal(
-            &res,
-            &Value::Con(VAL, vec![Value::Lit(Literal::LitInt(3))])
-        ));
+        assert!(values_equal(&res, &Value::Lit(Literal::LitInt(3))));
         assert_eq!(
             stats.borrow().get_calls,
             3,
@@ -1209,10 +1206,7 @@ fn p2_laziness_quantification() {
             }
         ];
         let res = run_prog(build_spine_walk(280, 0), handlers, 4 << 20).expect("P2c failed");
-        assert!(values_equal(
-            &res,
-            &Value::Con(VAL, vec![Value::Lit(Literal::LitInt(280))])
-        ));
+        assert!(values_equal(&res, &Value::Lit(Literal::LitInt(280))));
         assert_eq!(
             stats.borrow().get_calls,
             0,
@@ -1269,7 +1263,7 @@ fn p2_laziness_quantification() {
         let expected_sum: i64 = (0..k as i64).sum();
         assert!(values_equal(
             &res,
-            &Value::Con(VAL, vec![Value::Lit(Literal::LitInt(expected_sum))])
+            &Value::Lit(Literal::LitInt(expected_sum))
         ));
         assert!(
             stats.borrow().next_calls <= 512,
@@ -1315,10 +1309,7 @@ fn p3_registry_isolation() {
     ];
 
     let res = run_prog(build_two_streams(), handlers, 4 << 20).expect("P3 failed");
-    assert!(values_equal(
-        &res,
-        &Value::Con(VAL, vec![Value::Lit(Literal::LitInt(13))])
-    ));
+    assert!(values_equal(&res, &Value::Lit(Literal::LitInt(13))));
 
     assert!(stats_a.borrow().dropped);
     assert!(stats_b.borrow().dropped);
@@ -1356,10 +1347,7 @@ fn p4_abandon_reenter() {
     let res1 = machine
         .run(&table, &mut handlers1, &())
         .expect("Run 1 failed");
-    assert!(values_equal(
-        &res1,
-        &Value::Con(VAL, vec![Value::Lit(Literal::LitInt(300))])
-    ));
+    assert!(values_equal(&res1, &Value::Lit(Literal::LitInt(300))));
     assert!(
         stats1.borrow().dropped,
         "Source 1 should be dropped after Run 1"
@@ -1464,7 +1452,7 @@ proptest! {
             ];
 
             let res = run_prog(build_two_streams(), handlers, 4<<20).expect("P6b failed");
-            assert!(values_equal(&res, &Value::Con(VAL, vec![Value::Lit(Literal::LitInt(3))])));
+            assert!(values_equal(&res, &Value::Lit(Literal::LitInt(3))));
             assert!(stats_a.borrow().dropped);
             assert!(stats_b.borrow().dropped);
         }
@@ -1567,7 +1555,7 @@ fn p8_stream_element_panic_containment() {
             .expect("Spine walk should be immune to element panic");
         assert!(values_equal(
             &res,
-            &Value::Con(VAL, vec![Value::Lit(Literal::LitInt(data.len() as i64))])
+            &Value::Lit(Literal::LitInt(data.len() as i64))
         ));
         assert_eq!(
             stats.borrow().get_calls,
@@ -1947,10 +1935,7 @@ fn t_g4_complete_spine_repark_fenceposts() {
             ];
             let res2 =
                 run_prog(build_sum_chain(3, 0), handlers2, 4 << 20).expect("G4 sum_chain failed");
-            assert!(values_equal(
-                &res2,
-                &Value::Con(VAL, vec![Value::Lit(Literal::LitInt(3))])
-            ));
+            assert!(values_equal(&res2, &Value::Lit(Literal::LitInt(3))));
         }
     }
 }
@@ -1981,10 +1966,7 @@ fn t_g5_lying_len_spine_walk_immune() {
     ];
     // build_spine_walk(10) → Ok(Val(10)) and get_calls == 0
     let res = run_prog(build_spine_walk(10, 0), handlers, 4 << 20).expect("G5 failed");
-    assert!(values_equal(
-        &res,
-        &Value::Con(VAL, vec![Value::Lit(Literal::LitInt(10))])
-    ));
+    assert!(values_equal(&res, &Value::Lit(Literal::LitInt(10))));
     assert_eq!(
         stats.borrow().get_calls,
         0,
