@@ -161,26 +161,32 @@ renderTrail ev = intercalate "\n---\n" (reverse (imap render1 ev))
       (h : _) -> h <> "  [compacted]"
       [] -> e
 
--- | Goal-directed search with a custom vocabulary: loopM over
--- (fuel, trail), one suspension per round. Fuel buys probes; when it
--- runs out there is one final conclude-only round, so the last
--- probe's evidence is never wasted.
-seekWith :: Vocab [Text] -> Text -> Int -> M Text
-seekWith vocab goal fuel = loopM round (fuel, [])
+-- | Goal-directed search, generic over the DRIVER (the thing that
+-- reads the evidence and picks the next move) and the TRAIL RENDERER.
+-- Trail policy depends on the driver's memory: the calling LLM keeps
+-- full probe results in its own context, so 'renderTrail' compaction
+-- is right for it; a stateless tier-1 driver's ONLY memory is the
+-- trail, so it needs 'fullTrail' (field finding 2026-06-11: compaction
+-- amputated mini's memory of grep hits and it correctly re-probed).
+-- loopM over (fuel, trail). Fuel buys probes; when it runs out there
+-- is one final conclude-only round, so the last probe's evidence is
+-- never wasted.
+seekDriveR :: ([Text] -> Text) -> (Text -> M Text) -> Vocab [Text] -> Text -> Int -> M Text
+seekDriveR render driver vocab goal fuel = loopM round (fuel, [])
   where
     verbs = intercalate " | " (map (\(_, usage, _) -> "'" <> usage <> "'") vocab)
     header ev = "[seek] GOAL (fixed): " <> goal
           <> "\n\nEvidence so far:\n"
-          <> (if null ev then "(none yet)" else renderTrail ev)
+          <> (if null ev then "(none yet)" else render ev)
     round (0, ev) = do
-      a <- oracle (header ev
+      a <- driver (header ev
             <> "\n\nFINAL ROUND — probes exhausted. Reply 'DONE <answer>'; anything else returns the trail unanswered.")
       pure (Left (if "DONE" `isPrefixOf` strip a
         then "ANSWER: " <> strip (sdrop 4 (strip a))
              <> "\n\n(" <> pack (show fuel) <> " probes + conclude)"
-        else "NO ANSWER. Trail:\n" <> renderTrail ev))
+        else "NO ANSWER. Trail:\n" <> render ev))
     round (k, ev) = do
-      a <- oracle (header ev
+      a <- driver (header ev
             <> "\n\nReplies: " <> verbs
             <> " | 'DONE <answer>'. Unprefixed reply = first verb. Probes left: " <> pack (show k))
       e <- dispatch vocab (strip a) ev
@@ -189,9 +195,57 @@ seekWith vocab goal fuel = loopM round (fuel, [])
                            <> pack (show (fuel - k + 1)) <> " suspensions used)")
         Right ev' -> Right (k - 1, ev'))
 
+-- | Full chronological trail, nothing compacted — for stateless
+-- drivers whose only memory is the trail itself.
+fullTrail :: [Text] -> Text
+fullTrail ev = intercalate "\n---\n" (reverse ev)
+
+-- | Custom-driver search with the compacting renderer (right for
+-- caller-LLM drivers, which keep full results in their own context).
+seekDrive :: (Text -> M Text) -> Vocab [Text] -> Text -> Int -> M Text
+seekDrive = seekDriveR renderTrail
+
+-- | Caller-driven search with a custom vocabulary (one suspension
+-- per round).
+seekWith :: Vocab [Text] -> Text -> Int -> M Text
+seekWith = seekDrive oracle
+
 -- | The standard instance: grep (default) + view + def + ls.
 seek :: Text -> Int -> M Text
 seek = seekWith [grepVerb, viewVerb, defVerb, lsVerb]
+
+-- | The standard vocabulary, exported for custom drivers.
+stdVocab :: Vocab [Text]
+stdVocab = [grepVerb, viewVerb, defVerb, lsVerb]
+
+-- | Tier-1 move-selector. Field-calibrated (2026-06-11, 2 live runs):
+-- mini's MOVES are good (openers, follow-ups, recovery from lost
+-- evidence — 7/9 drafts blessable verbatim) but its self-assessed
+-- confidence on move-selection is structurally pessimistic (0.0-0.33
+-- when the trail is thin: "is this THE right move" is unanswerable
+-- cold, and any sensible probe is fine). So: bar 0.0 — never escalate
+-- mid-search; fuel bounds the damage and the move log is the audit
+-- trail. Conclusion-readiness is mini's weakest skill, hence the
+-- explicit DONE nudge.
+miniDriver :: Text -> M Text
+miniDriver p = do
+  m <- bar 0.0 (txt "move") ?? (p
+        <> "\n\nReply ONLY with the literal move string in the 'move' field"
+        <> " (e.g. 'grep <regex> :: <glob>', 'view <file> :: <line> :: <radius>',"
+        <> " 'def <name>', 'ls <glob>', or 'DONE <answer>')."
+        <> " If the evidence above already answers the goal, reply DONE with the"
+        <> " answer NOW — do not probe further. Never repeat a probe already in"
+        <> " the evidence.")
+  putStrLn ("[move] " <> stake 150 m)
+  pure m
+
+-- | Zero-touch goal-directed search: tier-1 drives every round, the
+-- caller never suspends. The [move] log rides back in the output for
+-- post-hoc audit; if the ANSWER smells wrong, re-run with `seek`
+-- (caller-driven). Uses the full (uncompacted) trail — the driver has
+-- no other memory.
+seekAuto :: Text -> Int -> M Text
+seekAuto = seekDriveR fullTrail miniDriver stdVocab
 
 -- | Typed conclude-round verdict (v5): Q lives in Tidepool.Effects
 -- now, so lib modules can define schema'd verbs. The conclude round

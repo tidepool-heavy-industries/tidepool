@@ -341,6 +341,33 @@ pub fn llm_decl() -> EffectDecl {
             "llm :: Text -> M Text\nllm = send . LlmChat",
             // schemaToValue lives in ask_decl (Ask is always present).
             "llmJson :: Text -> Schema -> M Value\nllmJson prompt schema = send (LlmStructured prompt (schemaToValue schema))",
+            // --- Tier-1 cascade: model-first, escalate-to-caller. Lives
+            // here (not the preamble) so .tidepool/lib modules can define
+            // tier-1-driven verbs. Ask is always in the stack, so the
+            // askWith escalation path is always available.
+            // Internal: augment schema with self-assessment rubric,
+            // extract confidence, strip rubric.
+            "h_aug :: Schema -> Schema\nh_aug (SObj fs) = SObj (fs ++ [(\"_understood\", SBool), (\"_confident\", SBool), (\"_unambiguous\", SBool)])\nh_aug s = SObj [(\"value\", s), (\"_understood\", SBool), (\"_confident\", SBool), (\"_unambiguous\", SBool)]",
+            "h_conf :: Value -> Double\nh_conf v =\n  let b k = case v ^? key k . _Bool of { Just True -> 1.0; _ -> 0.0 }\n  in (b \"_understood\" + b \"_confident\" + b \"_unambiguous\") / 3.0",
+            "h_strip :: Value -> Value\nh_strip (Object kvs) = Object (KM.delete (KM.fromText \"_unambiguous\") (KM.delete (KM.fromText \"_confident\") (KM.delete (KM.fromText \"_understood\") kvs)))\nh_strip v = v",
+            // Escalation rewrap: the validator enforces the BARE schema on
+            // escalated replies, but tier-1 parsers for non-SObj schemas
+            // expect h_aug's {"value": ...} wrapping — re-wrap so both
+            // tiers hand `parse` the same shape.
+            "h_wrap :: Schema -> Value -> Value\nh_wrap (SObj _) v = v\nh_wrap _ v = object [\"value\" .= v]",
+            // ?? : ask the model, auto-escalate on low confidence. The
+            // escalation carries the schema STRUCTURALLY (suspension JSON
+            // "schema" field; resume validated server-side); the tier-1
+            // draft rides in the prompt as a proposed default.
+            "infixl 1 ??\n(??) :: Q a -> Text -> M a\n(Q schema parse threshold) ?? prompt = do\n  r <- llmJson prompt (h_aug schema)\n  let c = h_conf r\n  v <- if c >= threshold then pure (h_strip r)\n       else h_wrap schema <$> askWith (object [\"schema\" .= schemaToValue schema]) (prompt <> \"\\n[draft \" <> pack (showDouble c) <> \"]: \" <> show (h_strip r))\n  pure (parse v)",
+            // ?! : like ?? but preserves the confidence verdict.
+            "infixl 1 ?!\n(?!) :: Q a -> Text -> M (Judged a)\n(Q schema parse threshold) ?! prompt = do\n  r <- llmJson prompt (h_aug schema)\n  let c = h_conf r\n  if c >= threshold\n    then pure (Sure (parse (h_strip r)))\n    else do\n      v <- askWith (object [\"schema\" .= schemaToValue schema]) (prompt <> \"\\n[draft \" <> pack (showDouble c) <> \"]: \" <> show (h_strip r))\n      pure (Unsure c (parse (h_wrap schema v)))",
+            // Batch judgment helpers.
+            "triage :: Q b -> (a -> Text) -> [a] -> M [(a, b)]\ntriage q render = mapM (\\x -> (,) x <$> (q ?? render x))",
+            "findTally :: Eq a => a -> [(a, Int)] -> Maybe [(a, Int)]\nfindTally _ [] = Nothing\nfindTally x ((k, n):rest) = if x == k then Just ((k, n + 1) : rest) else case findTally x rest of { Just rest' -> Just ((k, n) : rest'); Nothing -> Nothing }",
+            "tallyList :: Eq a => [a] -> [(a, Int)]\ntallyList = foldl' (\\acc x -> case findTally x acc of { Just acc' -> acc'; Nothing -> acc ++ [(x, 1)] }) []",
+            "survey :: Eq b => Q b -> (a -> Text) -> [a] -> M [(b, Int)]\nsurvey q render xs = do\n  bs <- mapM (\\x -> q ?? render x) xs\n  pure (tallyList bs)",
+            "sift :: Q Bool -> (a -> Text) -> [a] -> M ([a], [a])\nsift q render xs = do\n  tagged <- mapM (\\x -> (,) x <$> (q ?? render x)) xs\n  pure (map fst (filter snd tagged), map fst (filter (not . snd) tagged))",
         ],
     }
 }
@@ -838,99 +865,10 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
             "runAll = mapM run\n",
         ));
 
-        // --- Heuristic combinators: Q a (Haiku-first, Ask-on-uncertainty) ---
-
-        let has_llm = effects.iter().any(|e| e.type_name == "Llm");
-        let has_ask_eff = effects.iter().any(|e| e.type_name == "Ask");
-        if has_llm && has_ask_eff {
-            // Q itself (data Q, Schema, pick/yn/obj/txt/num/bar, askQ) lives
-            // in the generated Tidepool.Effects module (ask_decl) so
-            // .tidepool/lib modules can use it. Only the tier-1 cascade —
-            // Haiku-first, escalate-to-caller — lives here, because it
-            // needs llmJson.
-            out.push_str(
-                "-- Heuristic combinators: tier-1 cascade (Haiku-first, Ask-on-uncertainty)\n",
-            );
-            // Internal helpers: augment schema with rubric, extract confidence, strip rubric
-            out.push_str(concat!(
-                "h_aug :: Schema -> Schema\n",
-                "h_aug (SObj fs) = SObj (fs ++ [(\"_understood\", SBool), (\"_confident\", SBool), (\"_unambiguous\", SBool)])\n",
-                "h_aug s = SObj [(\"value\", s), (\"_understood\", SBool), (\"_confident\", SBool), (\"_unambiguous\", SBool)]\n",
-            ));
-            out.push_str(concat!(
-                "h_conf :: Value -> Double\n",
-                "h_conf v =\n",
-                "  let b k = case v ^? key k . _Bool of { Just True -> 1.0; _ -> 0.0 }\n",
-                "  in (b \"_understood\" + b \"_confident\" + b \"_unambiguous\") / 3.0\n",
-            ));
-            out.push_str(concat!(
-                "h_strip :: Value -> Value\n",
-                "h_strip (Object kvs) = Object (KM.delete (KM.fromText \"_unambiguous\") (KM.delete (KM.fromText \"_confident\") (KM.delete (KM.fromText \"_understood\") kvs)))\n",
-                "h_strip v = v\n",
-            ));
-            // Escalation rewrap: the validator enforces the BARE schema on
-            // escalated replies, but tier-1 parsers for non-SObj schemas
-            // expect h_aug's {"value": ...} wrapping — re-wrap so both
-            // tiers hand `parse` the same shape.
-            out.push_str(concat!(
-                "h_wrap :: Schema -> Value -> Value\n",
-                "h_wrap (SObj _) v = v\n",
-                "h_wrap _ v = object [\"value\" .= v]\n",
-            ));
-            // ?? operator: ask Haiku, auto-escalate on low confidence.
-            // Escalation carries the schema STRUCTURALLY (suspension JSON
-            // "schema" field; resume validated server-side); the tier-1
-            // draft rides in the prompt as a proposed default.
-            out.push_str(concat!(
-                "infixl 1 ??\n",
-                "(??) :: Q a -> Text -> M a\n",
-                "(Q schema parse threshold) ?? prompt = do\n",
-                "  r <- llmJson prompt (h_aug schema)\n",
-                "  let c = h_conf r\n",
-                "  v <- if c >= threshold then pure (h_strip r)\n",
-                "       else h_wrap schema <$> askWith (object [\"schema\" .= schemaToValue schema]) (prompt <> \"\\n[draft \" <> pack (showDouble c) <> \"]: \" <> show (h_strip r))\n",
-                "  pure (parse v)\n",
-            ));
-            // ?! operator: ask with evidence, returns Judged
-            out.push_str(concat!(
-                "infixl 1 ?!\n",
-                "(?!) :: Q a -> Text -> M (Judged a)\n",
-                "(Q schema parse threshold) ?! prompt = do\n",
-                "  r <- llmJson prompt (h_aug schema)\n",
-                "  let c = h_conf r\n",
-                "  if c >= threshold\n",
-                "    then pure (Sure (parse (h_strip r)))\n",
-                "    else do\n",
-                "      v <- askWith (object [\"schema\" .= schemaToValue schema]) (prompt <> \"\\n[draft \" <> pack (showDouble c) <> \"]: \" <> show (h_strip r))\n",
-                "      pure (Unsure c (parse (h_wrap schema v)))\n",
-            ));
-            // Batch helpers
-            out.push_str(concat!(
-                "triage :: Q b -> (a -> Text) -> [a] -> M [(a, b)]\n",
-                "triage q render = mapM (\\x -> (,) x <$> (q ?? render x))\n",
-            ));
-            out.push_str(concat!(
-                "findTally :: Eq a => a -> [(a, Int)] -> Maybe [(a, Int)]\n",
-                "findTally _ [] = Nothing\n",
-                "findTally x ((k, n):rest) = if x == k then Just ((k, n + 1) : rest) else case findTally x rest of { Just rest' -> Just ((k, n) : rest'); Nothing -> Nothing }\n",
-            ));
-            out.push_str(concat!(
-                "tallyList :: Eq a => [a] -> [(a, Int)]\n",
-                "tallyList = foldl' (\\acc x -> case findTally x acc of { Just acc' -> acc'; Nothing -> acc ++ [(x, 1)] }) []\n",
-            ));
-            out.push_str(concat!(
-                "survey :: Eq b => Q b -> (a -> Text) -> [a] -> M [(b, Int)]\n",
-                "survey q render xs = do\n",
-                "  bs <- mapM (\\x -> q ?? render x) xs\n",
-                "  pure (tallyList bs)\n",
-            ));
-            out.push_str(concat!(
-                "sift :: Q Bool -> (a -> Text) -> [a] -> M ([a], [a])\n",
-                "sift q render xs = do\n",
-                "  tagged <- mapM (\\x -> (,) x <$> (q ?? render x)) xs\n",
-                "  pure (map fst (filter snd tagged), map fst (filter (not . snd) tagged))\n",
-            ));
-        }
+        // The tier-1 cascade (??, ?!, triage/survey/sift) lives in the
+        // generated Tidepool.Effects module as llm_decl helpers — emitted
+        // exactly when the Llm effect is in the stack — so .tidepool/lib
+        // modules can define tier-1-driven verbs (seekAuto, grepSift, ...).
 
         out.push('\n');
     }
@@ -2848,17 +2786,9 @@ data Console a where
         assert!(preamble.contains("kvAll :: M [(Text, Value)]"));
         assert!(preamble.contains("kvClear :: M ()"));
         assert!(preamble.contains("runAll :: [Text] -> M [(Int, Text, Text)]"));
-        // Tier-1 cascade operators (preamble, gated on Llm + Ask)
-        assert!(preamble.contains("(??) :: Q a -> Text -> M a"));
-        assert!(preamble.contains("(?!) :: Q a -> Text -> M (Judged a)"));
-        assert!(preamble.contains("triage :: Q b -> (a -> Text) -> [a] -> M [(a, b)]"));
-        assert!(preamble.contains("survey :: Eq b => Q b -> (a -> Text) -> [a] -> M [(b, Int)]"));
-        assert!(preamble.contains("sift :: Q Bool -> (a -> Text) -> [a] -> M ([a], [a])"));
-        // Escalation carries the schema structurally via askWith
-        assert!(preamble.contains("askWith (object [\"schema\" .= schemaToValue schema])"));
-        assert!(!preamble.contains("[haiku"));
-        // Q itself lives in the generated Tidepool.Effects module so
-        // .tidepool/lib modules can import it
+        // The entire Q layer + tier-1 cascade lives in the generated
+        // Tidepool.Effects module so .tidepool/lib modules can define
+        // tier-1-driven verbs (seekAuto, grepSift, ...)
         let effects_mod = effects_module_source(&decls);
         assert!(effects_mod.contains("data Q a = Q Schema (Value -> a) Double"));
         assert!(effects_mod.contains("data Judged a = Sure a | Unsure Double a"));
@@ -2869,9 +2799,26 @@ data Console a where
         assert!(effects_mod.contains("num :: Text -> Q Double"));
         assert!(effects_mod.contains("bar :: Double -> Q a -> Q a"));
         assert!(effects_mod.contains("askQ :: Q a -> Text -> M a"));
+        assert!(effects_mod.contains("(??) :: Q a -> Text -> M a"));
+        assert!(effects_mod.contains("(?!) :: Q a -> Text -> M (Judged a)"));
+        assert!(effects_mod.contains("triage :: Q b -> (a -> Text) -> [a] -> M [(a, b)]"));
+        assert!(effects_mod.contains("survey :: Eq b => Q b -> (a -> Text) -> [a] -> M [(b, Int)]"));
+        assert!(effects_mod.contains("sift :: Q Bool -> (a -> Text) -> [a] -> M ([a], [a])"));
+        // Escalation carries the schema structurally via askWith
+        assert!(effects_mod.contains("askWith (object [\"schema\" .= schemaToValue schema])"));
+        assert!(!effects_mod.contains("[haiku"));
         // and NOT duplicated in the preamble (one definition site)
         assert!(!preamble.contains("data Q a"));
         assert!(!preamble.contains("pick :: [Text] -> Q Text"));
+        assert!(!preamble.contains("(??) :: Q a -> Text -> M a"));
+        // cascade ops gated on the Llm effect: absent from an Llm-less stack
+        let no_llm: Vec<EffectDecl> = standard_decls()
+            .into_iter()
+            .filter(|d| d.type_name != "Llm")
+            .collect();
+        let no_llm_mod = effects_module_source(&no_llm);
+        assert!(!no_llm_mod.contains("(??)"));
+        assert!(no_llm_mod.contains("askQ :: Q a -> Text -> M a"));
     }
 
     #[test]

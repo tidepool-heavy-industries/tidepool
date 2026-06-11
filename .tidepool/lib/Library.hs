@@ -19,6 +19,7 @@ module Library
   , module Patch
   , module Seek
   , module Optics
+  , module Glue
   ) where
 
 import Schemes
@@ -30,3 +31,4 @@ import Flow
 import Patch
 import Seek
 import Optics
+import Glue
