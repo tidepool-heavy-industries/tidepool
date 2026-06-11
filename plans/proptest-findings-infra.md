@@ -52,23 +52,31 @@ reconstruction of the *same* heap object. Suites comparing such values via
 
 Repro: `bug2_compare_bytearray_not_reflexive` (`#[ignore]`).
 
-### BUG-3 — `arb_core_expr_depth(d)` exceeds its depth cap (INVARIANT violation)
+### BUG-3 — `arb_core_expr_depth(d)` exceeds its depth cap by ~d (INVARIANT violation)
 
 `gen/strategy.rs`: `gen_leaf`'s fallback for `Fun`/`Pair` types expands at
-depth 0 into `Lam`/`Con` nodes *with children*, adding up to type-nesting-depth
-extra levels (`arb_simple_type` nests ~3 deep; `gen_case`'s Pair scrutinee
-composes two). Measured with an independent edge-counting walker:
+depth 0 into `Lam`/`Con` nodes *with children*. Crucially the overage is not a
+constant: an `App` spine stacks function types `Fun(aₖ, Fun(aₖ₋₁, … ty))` —
+one level per App — and when the fun position reaches the depth-0 frontier, the
+whole accumulated stack collapses into a Lam chain at once. Worst case is
+roughly **2d + type-nesting (~4)**, not d. Measured with an independent
+edge-counting walker (300 samples each):
 
-| d | samples | max measured depth | overage |
-|---|---------|--------------------|---------|
-| 3 | 300     | (measured)         | (…)     |
-| 5 | 300     | (measured)         | (…)     |
-| 7 | 300     | (measured)         | (…)     |
+| d | max measured depth | overage |
+|---|--------------------|---------|
+| 3 | 8                  | +5      |
+| 5 | 11                 | +6      |
+| 7 | 14                 | +7      |
 
-W1's reach statistics ("depth 5", "depth 7") are therefore systematically labeled
-low — actual trees are deeper than the parameter claims.
+The maxima track ~2d exactly. The shrunk counterexamples confirm the mechanism
+visually: `App { fun: <Lam→Lam→Lam chain>, … }` — collapsed Fun stacks.
 
-Repro: `bug3_depth_cap_exceeded` (`#[ignore]`, seed persisted).
+W1's reach statistics ("depth 5", "depth 7") are therefore systematically
+*under*-labeled — real trees run up to ~2× deeper than the parameter claims.
+
+Repro: `bug3_generator_depth_violation` (`#[ignore]`, seed committed in
+`tests/proptest_infra_selftest.proptest-regressions`). The live
+`g4_generator_contracts` guards the characterized true bound (`≤ 2d + 8`).
 
 ### BUG-4 — `cbor_roundtrip_preserves_eval` misclassifies `(Err, Ok)` divergence
 
@@ -100,10 +108,27 @@ in-src `#[cfg(test)]` code, so documented here rather than repro'd externally.
   offsets exact; all indices in bounds.
 - Generated exprs (`arb_core_expr_depth(5)`): child indices strictly backward,
   root == len-1, no orphan nodes (full reachability from root).
-- `arb_ground_expr_depth(3/5)`: where eval+deep_force succeed, results are never
-  closure-valued (claim holds).
+- `arb_ground_expr_depth(3)` (300 cases, ≥25 reaching comparison): where
+  eval+deep_force succeed, results are never closure-valued (claim holds).
 - CBOR roundtrip identity at depth 5 and weighted depth 7 (the old test capped
   at 3).
+
+## Hygiene notes (proptest persistence footguns, found while seeding)
+
+- `FileFailurePersistence::SourceParallel` (the default) **fails silently for
+  integration tests** — it walks up looking for `lib.rs`/`main.rs`, which
+  `tests/` files lack. Seeds were never being written. The selftest uses
+  `WithSource("proptest-regressions")` (the convention the repo's committed
+  `tidepool-codegen/tests/*.proptest-regressions` files already follow). Other
+  suites constructing `TestRunner` directly may be silently non-persisting too.
+- A stale seed in the shared per-file regressions file is replayed *first* by
+  **every** runner in that file; if the replayed case fails, `run()` returns
+  before reaching the new-failure persistence branch — so a stale entry can
+  permanently mask seed persistence for later-failing properties.
+- `*.proptest-regressions` is in `.gitignore` (line 27) — every committed seed
+  in this repo required `git add -f`. Worth revisiting: the ignore rule
+  contradicts both proptest's recommendation and the repo's own committed seed
+  files.
 
 ## Trust verdict
 
@@ -118,8 +143,9 @@ verdicts that *fired* are trustworthy; prior *green* runs are weaker than
 advertised. BUG-2 biases in the safe direction (false alarms, not missed bugs) —
 and W1 routed the deep differential through `run_pure` precisely to avoid
 `heap_to_value`, so its depth-5/7 results are unaffected. BUG-3 mislabels W1's
-reach statistics conservatively (real trees are deeper than claimed), so coverage
-claims survive. Recommended fixes, in order: replace `proptest::values_equal`'s
+reach statistics conservatively (real trees run up to ~2× deeper than claimed —
+measured max 14 at d=7), so coverage claims survive and were in fact stronger
+than advertised. Recommended fixes, in order: replace `proptest::values_equal`'s
 catch-all with explicit non-comparable arms + `_ => return false`; make
 `(ByteArray, ByteArray)` skip (equal) in `compare::values_equal` per its doc; fix
 the `(Err, Ok)` arm in `cbor_roundtrip_preserves_eval`.

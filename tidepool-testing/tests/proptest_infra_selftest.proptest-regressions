@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc af95eb9bacd8ed56ba38bcc983464a8a76dc1044b2860bf956a89984a65248c0 # shrinks to RecursiveTree { nodes: [Lit(LitWord(1114009406)), Lit(LitFloat(2155667014)), Lit(LitFloat(3028584613)), Con { tag: DataConId(4), fields: [1, 2] }, Con { tag: DataConId(4), fields: [0, 3] }, Lam { binder: VarId(9), body: 4 }, Con { tag: DataConId(0), fields: [] }, Lam { binder: VarId(20), body: 6 }, Lit(LitFloat(1206216879)), Lit(LitFloat(2147483648)), Con { tag: DataConId(4), fields: [8, 9] }, App { fun: 7, arg: 10 }, Con { tag: DataConId(0), fields: [] }, Lit(LitChar('Y')), LetNonRec { binder: VarId(21), rhs: 12, body: 13 }, Con { tag: DataConId(0), fields: [] }, Lam { binder: VarId(23), body: 15 }, Lit(LitChar('&')), Lam { binder: VarId(24), body: 17 }, LetNonRec { binder: VarId(22), rhs: 16, body: 18 }, Jump { label: JoinId(0), args: [11, 14, 19] }, Join { label: JoinId(0), params: [VarId(4), VarId(5), VarId(6)], rhs: 5, body: 20 }, Con { tag: DataConId(0), fields: [] }, App { fun: 21, arg: 22 }] }
