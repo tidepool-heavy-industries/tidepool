@@ -223,23 +223,18 @@ toLower = T.toLower
 strip :: Text -> Text
 strip = T.strip
 
--- Pure reimplementation for Prelude export (avoids text-package dependency chain).
+-- Delegates to T.splitOn, which compiles and runs cleanly under today's JIT.
+-- HISTORY (2026-06-11): this was a "pure reimplementation" that round-tripped
+-- the ENTIRE text through T.unpack and char-matched over [Char] — measured
+-- ~83x slower than T.splitOn at 2KB and super-linear beyond (333ms vs 4ms;
+-- a 70KB file-surgery eval timed out at 120s). The String detour predates the
+-- specialization/lazy-closure/GC fixes that made the real text-package path
+-- viable. Empty separator keeps the singleton-explosion semantics (T.splitOn
+-- errors on "").
 splitOn :: Text -> Text -> [Text]
 splitOn sep t
   | T.null sep = map (\c -> T.pack [c]) (T.unpack t)
-  | otherwise  = go (T.unpack t) (T.unpack sep)
-  where
-    go [] _     = [T.pack ""]
-    go s  sepCs = case matchAt [] s sepCs of
-      Nothing          -> [T.pack s]
-      Just (pre, rest) -> T.pack pre : go rest sepCs
-    matchAt _   [] _ = Nothing
-    matchAt acc s@(c:cs) sepCs
-      | startsWith s sepCs = Just (reverse acc, P.drop (P.length sepCs) s)
-      | otherwise          = matchAt (c:acc) cs sepCs
-    startsWith _ []     = True
-    startsWith [] _     = False
-    startsWith (c:cs) (p:ps) = c == p && startsWith cs ps
+  | otherwise  = T.splitOn sep t
 
 replace :: Text -> Text -> Text -> Text
 replace = T.replace
