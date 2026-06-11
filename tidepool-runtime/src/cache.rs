@@ -115,19 +115,55 @@ fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
     let content_hash = match cached {
         Some(h) => h,
         None => {
-            let h: [u8; 32] = match fs::read(path) {
-                Ok(bytes) => *blake3::hash(&bytes).as_bytes(),
-                // Unreadable: degrade to the metadata-only fingerprint rather
-                // than poisoning the key entirely.
-                Err(_) => {
-                    let mut mh = blake3::Hasher::new();
-                    mh.update(&meta.len().to_le_bytes());
-                    if let Ok(mtime) = meta.modified() {
-                        if let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH) {
-                            mh.update(&dur.as_nanos().to_le_bytes());
+            // Cross-PROCESS memo: subprocess-per-case test suites spawn
+            // hundreds of short-lived processes, and re-hashing a ~79MB
+            // GHC-linked binary per process is ~30-50ms each. Persist the
+            // content hash in a sidecar keyed by the stat identity (the same
+            // tamper-evident (dev, ino, ctime) key as the in-process memo),
+            // so the whole machine hashes each binary version exactly once.
+            let stat_tag = {
+                let mut kh = blake3::Hasher::new();
+                kh.update(path.as_os_str().as_encoded_bytes());
+                kh.update(&meta.len().to_le_bytes());
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    kh.update(&meta.dev().to_le_bytes());
+                    kh.update(&meta.ino().to_le_bytes());
+                    kh.update(&meta.ctime().to_le_bytes());
+                    kh.update(&meta.ctime_nsec().to_le_bytes());
+                }
+                kh.finalize().to_hex().to_string()
+            };
+            let sidecar = cache_dir().map(|d| d.join(format!("binfp-{stat_tag}")));
+            let from_disk = sidecar.as_ref().and_then(|p| {
+                let bytes = fs::read(p).ok()?;
+                <[u8; 32]>::try_from(bytes.as_slice()).ok()
+            });
+            let h: [u8; 32] = match from_disk {
+                Some(h) => h,
+                None => {
+                    let h: [u8; 32] = match fs::read(path) {
+                        Ok(bytes) => *blake3::hash(&bytes).as_bytes(),
+                        // Unreadable: degrade to the metadata-only fingerprint
+                        // rather than poisoning the key entirely.
+                        Err(_) => {
+                            let mut mh = blake3::Hasher::new();
+                            mh.update(&meta.len().to_le_bytes());
+                            if let Ok(mtime) = meta.modified() {
+                                if let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH) {
+                                    mh.update(&dur.as_nanos().to_le_bytes());
+                                }
+                            }
+                            *mh.finalize().as_bytes()
                         }
+                    };
+                    if let Some(p) = &sidecar {
+                        if let Some(parent) = p.parent() {
+                            let _ = fs::create_dir_all(parent);
+                        }
+                        let _ = fs::write(p, h);
                     }
-                    *mh.finalize().as_bytes()
+                    h
                 }
             };
             memo.lock()

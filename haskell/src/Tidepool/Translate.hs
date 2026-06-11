@@ -1497,6 +1497,18 @@ isErrorVar v =
   in name == "error" || name == "errorWithoutStackTrace"
      || name == "patError" || name == "noMethodBindingError"
      || name == "recSelError" || name == "recConError"
+     -- Base-library error workers (2026-06-11). These reach us through .hi
+     -- unfoldings as floated bindings like `maximum14 = errorEmptyList
+     -- "maximum"`; without the sentinel tag the eager Let spine evaluates the
+     -- error RHS at SETUP, so e.g. `maximum (enumFromTo 1 10)` died with
+     -- "empty list" before its case ever ran (literal lists worked only
+     -- because GHC constant-folds them away). errorEmptyList covers the whole
+     -- GHC.List family: maximum/minimum/foldr1/foldl1/last/init/cycle.
+     || name == "errorEmptyList"
+     || name == "irrefutPatError" || name == "nonExhaustiveGuardsError"
+     || name == "assertError" || name == "absentError"
+     || name == "divZeroError" || name == "overflowError"
+     || name == "underflowError" || name == "ratioZeroDenominatorError"
 
 isUndefinedVar :: Id -> Bool
 isUndefinedVar v = occNameString (nameOccName (idName v)) == "undefined"
