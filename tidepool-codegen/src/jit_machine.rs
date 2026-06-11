@@ -692,4 +692,49 @@ mod tests {
         let err = runtime_error_or_signal(libc::SIGILL);
         assert_eq!(err, YieldError::Signal(libc::SIGILL));
     }
+
+    #[test]
+    fn test_varid_check_kill_switch() {
+        use tidepool_repr::tree::RecursiveTree;
+        use tidepool_repr::types::Literal;
+        use tidepool_repr::{CoreFrame, VarId};
+
+        // let v1 = 1 in let v1 = 2 in v1
+        let expr = RecursiveTree {
+            nodes: vec![
+                CoreFrame::Lit(Literal::LitInt(1)), // 0
+                CoreFrame::Lit(Literal::LitInt(2)), // 1
+                CoreFrame::Var(VarId(1)),           // 2
+                CoreFrame::LetNonRec {
+                    binder: VarId(1),
+                    rhs: 1,
+                    body: 2,
+                }, // 3
+                CoreFrame::LetNonRec {
+                    binder: VarId(1),
+                    rhs: 0,
+                    body: 3,
+                }, // 4 (root)
+            ],
+        };
+        let table = DataConTable::new();
+
+        // 1. Default ON: must fail
+        let res = JitEffectMachine::compile(&expr, &table, 1 << 20);
+        assert!(
+            matches!(res, Err(JitError::VarIdCollision(_))),
+            "Expected VarIdCollision, got success"
+        );
+
+        // 2. Kill-switch: must pass
+        std::env::set_var("TIDEPOOL_VARID_CHECK", "0");
+        let res_disabled = JitEffectMachine::compile(&expr, &table, 1 << 20);
+        std::env::remove_var("TIDEPOOL_VARID_CHECK");
+
+        assert!(
+            res_disabled.is_ok(),
+            "Kill-switch failed to bypass VarId collision: {:?}",
+            res_disabled.err()
+        );
+    }
 }

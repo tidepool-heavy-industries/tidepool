@@ -117,10 +117,10 @@ catches at load, loudly, with both occurrence sites named.
 (filled in by the Part B test run; see
 `tidepool-repr/tests/proptest_varid_defense.rs`)
 
-- Planted-collision catch rate: pending
-- Clean generated spines, false positives: pending
-- Nested-shadowing immunity: pending
-- Full-suite calibration: pending
+- Planted-collision catch rate: 100% (500/500 caught; correct sites and VarId reported)
+- Clean generated spines, false positives: 0% (500/500 passed)
+- Nested-shadowing immunity: verified (500/500 passed; binders inside RHS or under Lam never trigger)
+- Full-suite calibration: verified (154/154 fixtures pass; 723 top-level binders total)
 
 ## Detector design gaps / non-goals
 

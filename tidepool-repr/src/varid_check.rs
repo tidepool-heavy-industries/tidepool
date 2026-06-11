@@ -185,8 +185,20 @@ mod tests {
         }
         let err = check_toplevel_varids(&expr).unwrap_err();
         assert_eq!(err.var_id, VarId(1));
-        assert_eq!(err.first, BindingSite { node: 4, position: 0 });
-        assert_eq!(err.second, BindingSite { node: 3, position: 0 });
+        assert_eq!(
+            err.first,
+            BindingSite {
+                node: 4,
+                position: 0
+            }
+        );
+        assert_eq!(
+            err.second,
+            BindingSite {
+                node: 3,
+                position: 0
+            }
+        );
     }
 
     #[test]
@@ -204,8 +216,20 @@ mod tests {
         };
         let err = check_toplevel_varids(&expr).unwrap_err();
         assert_eq!(err.var_id, VarId(5));
-        assert_eq!(err.first, BindingSite { node: 3, position: 0 });
-        assert_eq!(err.second, BindingSite { node: 3, position: 1 });
+        assert_eq!(
+            err.first,
+            BindingSite {
+                node: 3,
+                position: 0
+            }
+        );
+        assert_eq!(
+            err.second,
+            BindingSite {
+                node: 3,
+                position: 1
+            }
+        );
     }
 
     #[test]
@@ -228,8 +252,20 @@ mod tests {
         };
         let err = check_toplevel_varids(&expr).unwrap_err();
         assert_eq!(err.var_id, VarId(9));
-        assert_eq!(err.first, BindingSite { node: 4, position: 0 });
-        assert_eq!(err.second, BindingSite { node: 3, position: 0 });
+        assert_eq!(
+            err.first,
+            BindingSite {
+                node: 4,
+                position: 0
+            }
+        );
+        assert_eq!(
+            err.second,
+            BindingSite {
+                node: 3,
+                position: 0
+            }
+        );
     }
 
     #[test]
