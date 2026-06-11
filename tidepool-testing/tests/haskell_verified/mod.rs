@@ -3,6 +3,7 @@ use proptest::test_runner::{Config, TestRunner};
 use std::path::{Path, PathBuf};
 
 pub mod cousins;
+pub mod error_family;
 pub mod fmap;
 pub mod list_ops;
 pub mod map_set;
