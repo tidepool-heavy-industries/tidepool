@@ -2,6 +2,10 @@ module Tidepool.GhcPipeline (runPipeline, PipelineResult(..), dumpCore) where
 
 import GHC
 import GHC.Driver.Main (hscDesugar)
+import GHC.Driver.Env (hscUpdateFlags, hsc_unit_env)
+import GHC.Unit.Env (ue_eps)
+import GHC.Unit.External (euc_eps, initExternalPackageState)
+import Data.IORef (writeIORef)
 import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Core.Ppr (pprCoreBindings)
 import GHC.Driver.Session (updOptLevel, gopt_set, gopt_unset)
@@ -40,20 +44,14 @@ runPipeline path includes = do
     -- Use genericPlatform verbatim — mixing in host platform_constants causes
     -- GHC's specializer to produce Core with mismatched constructor tags on
     -- aarch64, leading to case-exhaustion SIGILL in the JIT.
-    let spoofedPlatform = genericPlatform
-    -- FullLaziness conflicts with eager eval.
-    -- WARNING (2026-06-10, #313 forensics): Opt_CprAnal is a NO-OP in GHC
-    -- 9.12 — `-fno-cpr-anal` changes nothing (Cpr=1 signatures appear
-    -- regardless; verified empirically). The unset is kept for
-    -- documentation, but the protection it was believed to provide does
-    -- not exist. Disabling Opt_WorkerWrapper was tried and did NOT fix
-    -- #313 (the bug is join-closure wiring in translation, not w/w), so
-    -- it stays enabled.
-    let dflags' = gopt_set (gopt_set (gopt_unset (gopt_unset (updOptLevel 2 $ dflags
-          { backend = noBackend
-          , ghcLink = NoLink
-          , importPaths = importPaths dflags ++ includes
-          , targetPlatform = spoofedPlatform
+    -- Platform spoofing happens HERE ONLY (session setup, before 'load'):
+    -- GHC populates platform constants during session/unit initialization,
+    -- so re-pinning bare genericPlatform later strips them
+    -- ("Platform constants not available!" panic). Backend/opt pinning lives
+    -- in canonicalizeDFlags and is also re-applied per-module below.
+    let dflags' = canonicalizeDFlags dflags
+          { importPaths = importPaths dflags ++ includes
+          , targetPlatform = genericPlatform
           , sseVersion = Nothing
           , bmiVersion = Nothing
           , avx = False
@@ -62,8 +60,7 @@ runPipeline path includes = do
           , avx512er = False
           , avx512f = False
           , avx512pf = False
-          }) Opt_FullLaziness) Opt_CprAnal)
-          Opt_ExposeAllUnfoldings) Opt_ExposeOverloadedUnfoldings
+          }
     setSessionDynFlags dflags'
     target <- guessTarget path Nothing Nothing
     setTargets [target]
@@ -72,11 +69,30 @@ runPipeline path includes = do
     let summaries = mgModSummaries modGraph
     when (null summaries) $
       liftIO $ ioError (userError "runPipeline: empty module graph")
-    -- Process all modules: parse, typecheck, desugar, optimize each
-    results <- forM summaries $ \modSum -> do
+    -- EPS unpoisoning (QQ/TH support — see canonicalizeDFlags haddock).
+    -- When 'load' provisions code for splices, the downgraded (-O0,
+    -- Opt_IgnoreInterfacePragmas) modules compile FIRST, so every external
+    -- interface they demand is cached in the session-global External
+    -- Package State WITHOUT unfoldings. The -O2 extraction loop below then
+    -- cannot fire class-op rules (e.g. @negate $fNumDouble@ never reduces,
+    -- chasing Integer machinery → "Unsupported primop: clz#") — for EVERY
+    -- module in the graph, pinned dflags notwithstanding. Reset the cache
+    -- so extraction re-reads interfaces with pragmas honored. Conditional
+    -- on actual poisoning: non-TH runs keep their warm, healthy cache.
+    let epsPoisoned = any (gopt Opt_IgnoreInterfacePragmas . ms_hspp_opts) summaries
+    when epsPoisoned $ do
+      hscEnvL <- getSession
+      liftIO $ writeIORef (euc_eps (ue_eps (hsc_unit_env hscEnvL)))
+                          initExternalPackageState
+    -- Process all modules: parse, typecheck, desugar, optimize each.
+    -- Re-canonicalize each module's DynFlags first (see canonicalizeDFlags):
+    -- the load phase may have downgraded them for TH/QQ bytecode provisioning.
+    results <- forM summaries $ \modSum0 -> do
+      let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
       parsed <- parseModule modSum
       typechecked <- typecheckModule parsed
-      hscEnv <- getSession
+      hscEnv0 <- getSession
+      let hscEnv = hscUpdateFlags canonicalizeDFlags hscEnv0
       let tcGblEnv = fst (tm_internals_ typechecked)
       desugared <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
       simplified <- liftIO $ core2core hscEnv desugared
@@ -101,6 +117,44 @@ runPipeline path includes = do
 capitalize :: String -> String
 capitalize [] = []
 capitalize (c:cs) = toUpper c : cs
+
+-- | The canonical extraction DynFlags transformation, applied to the session
+-- flags at startup AND re-applied per-module before extraction.
+--
+-- Why re-applied: GHC 9.12's @enableCodeGenForTH@ downgrades the DynFlags of
+-- home modules whose code is needed for splices (QuasiQuotes/TH) so 'load'
+-- can provision bytecode — interpreter backend, -O0. That downgrade is
+-- correct for the load phase (splices run against dep bytecode), but it
+-- persists in each ModSummary's @ms_hspp_opts@, which the extraction loop
+-- re-uses. Without re-canonicalizing, extraction of any module in a
+-- quasi-quote dependency graph emits UNOPTIMIZED Core — e.g.
+-- @negate \@Double $fNumDouble (D# 2.5##)@ instead of a folded @D# -2.5##@,
+-- which then chases Integer machinery and dies with
+-- "Unsupported primop: clz#". See plans/qq-spike.md (repro matrix M1-M8 in
+-- scratch/qq-spike/).
+--
+-- Surgical: backend/opt-level/gopt only — exactly the fields the TH
+-- downgrade touches. Per-module LANGUAGE pragmas already merged into
+-- @ms_hspp_opts@ are preserved. Platform spoofing and @importPaths@ are
+-- session-setup-only (see runPipeline): re-pinning bare genericPlatform
+-- here would strip the platform constants populated at session init.
+--
+-- Flag notes (history, do not weaken):
+--   * FullLaziness conflicts with eager eval.
+--   * WARNING (2026-06-10, #313 forensics): Opt_CprAnal is a NO-OP in GHC
+--     9.12 — `-fno-cpr-anal` changes nothing (Cpr=1 signatures appear
+--     regardless; verified empirically). The unset is kept for
+--     documentation, but the protection it was believed to provide does
+--     not exist. Disabling Opt_WorkerWrapper was tried and did NOT fix
+--     #313 (the bug is join-closure wiring in translation, not w/w), so
+--     it stays enabled.
+canonicalizeDFlags :: DynFlags -> DynFlags
+canonicalizeDFlags dflags =
+  gopt_set (gopt_set (gopt_unset (gopt_unset (updOptLevel 2 $ dflags
+        { backend = noBackend
+        , ghcLink = NoLink
+        }) Opt_FullLaziness) Opt_CprAnal)
+        Opt_ExposeAllUnfoldings) Opt_ExposeOverloadedUnfoldings
 
 -- | #313 fix: disambiguate top-level simplifier floats across modules.
 --

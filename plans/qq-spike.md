@@ -2,7 +2,12 @@
 
 Date: 2026-06-11. Branch: `root.qq-suite`. Env: GHC 9.12.2, x86_64-linux,
 nix dev shell, extract binary built via `cabal build tidepool-extract-bin`,
-pipeline at `-O2` with `backend = noBackend` (GhcPipeline.hs unchanged).
+pipeline at `-O2` with `backend = noBackend`.
+
+> **Update (same day):** basic splice operation needed zero pipeline
+> changes, but extraction QUALITY in QQ graphs was silently degraded by
+> the driver's TH code-provisioning — root-caused and fixed in
+> GhcPipeline.hs. See "The deoptimization bug" below.
 
 ## The question
 
@@ -10,7 +15,7 @@ pipeline at `-O2` with `backend = noBackend` (GhcPipeline.hs unchanged).
 splices need an evaluator. Does GHC 9.12's API auto-provision bytecode for
 splice-needing modules under `noBackend`, and at what latency cost?
 
-## Answer: works AS-IS. Zero pipeline changes needed.
+## Answer: splices run AS-IS; extraction quality needed one fix (below).
 
 GHC 9.12's driver (`enableCodeGenForTH` in `GHC.Driver.Make`) detects that a
 home module enables `QuasiQuotes`/`TemplateHaskell` and automatically
@@ -94,6 +99,77 @@ Reading:
    bloat + crash risk. An additive Main.hs flag restricts fixture emission
    to the target module's binders. Regen command becomes:
    `cabal run tidepool-extract-bin -- test/Suite.hs --all-closed --include lib --target-module-only`.
+
+## The deoptimization bug (found post-verdict, FIXED)
+
+**Symptom:** with the QuasiQuotes pragma + a quoter home-module import,
+even a bare `litd = -2.5 :: Double` in the TARGET module extracted as
+`negate @Double $fNumDouble (D# 2.5##)` instead of folded `D# -2.5##` —
+dictionary-method Core that chases Integer machinery and dies with
+"Unsupported primop: clz#". Affected `--all-closed` (Double/round Suite
+fixtures silently SKIPPED) and eval-mode alike, and silently degraded
+even "working" splice modules into the JIT's eager-dictionary-error-branch
+crash class. Repro matrix M1–M8 in `scratch/qq-spike/` (committed past
+the scratch gitignore as evidence).
+
+**Mechanism (two layers, both empirically confirmed via flag probes):**
+
+1. `enableCodeGenForTH` downgrades the splice-needed home modules'
+   `ms_hspp_opts` to **-O0 + `Opt_IgnoreInterfacePragmas`** (and picks a
+   real backend — NCG on this host — for code provisioning). The
+   extraction loop in `runPipeline` re-uses each summary's
+   `ms_hspp_opts` → the quoter module extracts unoptimized.
+2. **EPS poisoning (the load-bearing layer):** the downgraded modules
+   compile FIRST during `load`, so every external interface they demand
+   (GHC.Num, GHC.Float, …) is cached in the session-global External
+   Package State **without unfoldings** (`Opt_IgnoreInterfacePragmas`
+   governs iface loading, and the EPS is load-once per session). The
+   later -O2 compile of the target module — and the extraction loop, no
+   matter what its dflags say — can then never fire class-op rules:
+   `$fNumDouble` has no unfolding anywhere in the session.
+
+**Fix (GhcPipeline.hs, both halves needed):**
+
+- `canonicalizeDFlags` — the backend/opt/gopt pinning factored out of
+  session setup and re-applied to each `ms_hspp_opts` (+ the loop's
+  `HscEnv` via `hscUpdateFlags`) before extraction. Platform spoofing
+  stays session-setup-only: re-pinning bare `genericPlatform` later
+  strips the platform constants populated at session init ("Platform
+  constants not available!" panic).
+- **Conditional EPS flush** after `load`: if any summary shows the
+  downgrade (`gopt Opt_IgnoreInterfacePragmas`), reset the EPS IORef to
+  `initExternalPackageState` so extraction re-reads interfaces with
+  pragmas honored. Conditional ⇒ non-TH runs keep their warm, healthy
+  cache — the no-QQ path is byte-identical, zero latency impact.
+
+**Verification (all green):** PlainD control folds; SpikeUse folds
+(`litd = D# -2.5##`, `addd = D# 3.75##`) with the splice intact
+(`spike_upper = "HELLO"#`); M5 TH-quotes hygiene intact; M6 eval-mode
+emits cleanly; full Suite regen (`--all-closed --include lib
+--target-module-only`): **186 fixtures, zero skips**, all
+`arith_double_*`/`round_*`/`lit_double_*` present; A/B of fixture
+name-sets with vs without the QQ import: identical modulo the
+pre-existing `_u<uniquekey>` churn (below).
+
+## Out-of-scope issues documented for root (TODOs)
+
+- **aarch64 hosts + QQ:** the driver provisioned splice code via the
+  NATIVE code generator on this host. Under the spoofed
+  `genericPlatform` (x86_64) that works only because host == x86_64.
+  On ARM hosts, QQ evals may need `-fprefer-byte-code` or equivalent.
+  Untested; flag if/when an ARM host shows up. Pre-existing property of
+  the TH path, not introduced by this branch.
+- **suite_cbor staleness (pre-existing, NOT QQ-related):** the
+  checked-in `haskell/test/suite_cbor/` predates the #313 externalize
+  fix; any full regen renames internal-float fixtures
+  (`showIntNeg_1.cbor` → `showIntNeg_u<key>.cbor`) and the `_u<key>`
+  suffixes churn on every regen variation. `tidepool-eval`'s
+  `haskell_suite.rs` does `include_bytes!` on exact names, so any full
+  regen breaks `cargo test -p tidepool-eval`. This branch dodges by
+  regenerating ADDITIVELY (copy only new `qq_*` fixtures + merged
+  meta). Someone with tidepool-eval write access should own a true
+  reconcile (likely: make the include_bytes! names churn-proof, then
+  regen wholesale).
 
 ## Locked-decision clarification (for reviewers)
 
