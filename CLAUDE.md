@@ -197,7 +197,7 @@ Critical architectural decisions for daily work:
 
 ## Haskell Standard Library (`haskell/lib/Tidepool/`)
 
-MCP users get `import Tidepool.Prelude hiding (error)` auto-imported. Additional modules available via the `imports` field.
+MCP users get `import Tidepool.Prelude hiding (error)` auto-imported. Additional modules available via the `imports` field. Inline data declarations in `helpers` are fully supported and right for eval-local types; promote types to a `.tidepool/lib/` module when they need to be REUSED across evals. (Verified 2026-06-11: ADT + deriving Show + custom typeclass instances in helpers compile and run.)
 
 ### Tidepool.Prelude (auto-imported)
 
@@ -211,18 +211,39 @@ Everything MCP users need in one import.
 - **List ops**: map, filter, foldl/foldr/foldl', sort/sortBy, nub/nubBy, groupBy, partition, transpose, intersperse, zip/zip3/unzip/unzip3, elemIndex/findIndex, find, span/break/takeWhile/dropWhile, tails, unfoldr, mapAccumL, concatMap, reverse, splitAt, replicate, head/tail/last/init, zipWithIndex, imap, enumFromTo, length, take, drop, null (list-only versions still available)
 - **Char**: isDigit, isAlpha, isAlphaNum, isSpace, isUpper, isLower, digitToInt, toLowerChar, toUpperChar, ord, chr
 - **Numeric**: even/odd, abs'/signum'/min'/max' (monomorphic Int), round (Double→Int), parseIntM/parseInt, parseDoubleM/parseDouble
-- **JSON**: Value(..), toJSON, (.=), object, lenses (key/nth/_String/_Number/_Bool/_Array/_Object, ^?/^../preview/toListOf), helpers (?./lookupKey/asText/asInt). **No JSON parsing in Haskell** — `encode`/`decode` removed; use `runJson`/`httpGet` (parsed on Rust side)
+- **JSON**: Value(..), toJSON, (.=), object, lenses (`key`/`members`/`nth`/`values` / `_String`/`_Number`/`_Bool`/`_Array`/`_Object`/`_Int`/`_Double`/`_Null`, `^?`/`^..`/`preview`/`toListOf`), helpers (`?.`/`lookupKey`/`asText`/`asInt`). **No JSON parsing in Haskell** — `encode`/`decode` removed; use `runJson`/`httpGet` (parsed on Rust side)
 - **Map**: fromList/toList, insert/delete/adjust, union/intersection/difference/unionWith/intersectionWith, singleton/empty, findWithDefault, foldlWithKey'/foldrWithKey, mapKeys/mapWithKey/filterWithKey
 - **Monadic**: mapM/forM/foldM, when/unless/void/join/guard, (>=>)/(<=<), filterM, replicateM, zipWithM, concatMapM
 - **Kleisli profunctor**: (&&&)/(***)/(|||) for `a -> M b` (fanout / pair-wise / Either-merge), firstK/secondK
 
-### Tidepool.Text (import explicitly)
+### Tidepool.Text (in scope as TT., or import explicitly)
 
-`camelToSnake`, `snakeToCamel`, `capitalize`, `titleCase`, `center`, `padLeft`, `padRight`, `indent`, `dedent`, `wrap`, `slugify`, `truncateText`
+- `camelToSnake :: Text -> Text`
+- `snakeToCamel :: Text -> Text`
+- `capitalize :: Text -> Text`
+- `titleCase :: Text -> Text`
+- `padLeft :: Int -> Text -> Text`
+- `padRight :: Int -> Text -> Text`
+- `padLeftWith :: Int -> Char -> Text -> Text`
+- `padRightWith :: Int -> Char -> Text -> Text`
+- `center :: Int -> Text -> Text`
+- `centerWith :: Int -> Char -> Text -> Text`
+- `indent :: Int -> Text -> Text`
+- `dedent :: Text -> Text`
+- `wrap :: Int -> Text -> Text`
+- `slugify :: Text -> Text`
+- `truncateText :: Int -> Text -> Text`
 
-### Tidepool.Table (import explicitly)
+### Tidepool.Table (in scope as Tab., or import explicitly)
 
-`parseCsv`, `parseTsv`, `parseDelimited`, `renderTable`, `renderTableWith`, `column`, `sortByColumn`, `filterByColumn`
+- `parseCsv :: Text -> [[Text]]`
+- `parseTsv :: Text -> [[Text]]`
+- `parseDelimited :: Char -> Text -> [[Text]]`
+- `renderTable :: [[Text]] -> Text`
+- `renderTableWith :: Char -> Char -> [[Text]] -> Text`
+- `column :: Int -> [[Text]] -> [Text]`
+- `sortByColumn :: Int -> [[Text]] -> [[Text]]`
+- `filterByColumn :: Int -> (Text -> Bool) -> [[Text]] -> [[Text]]`
 
 ### Heuristic Combinators — `Q a` (in preamble, auto-available)
 

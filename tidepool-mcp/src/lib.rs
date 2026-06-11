@@ -408,9 +408,10 @@ pub struct EvalRequest {
     pub imports: String,
     /// Top-level definitions (functions, operators, type signatures) —
     /// where your program's real structure lives; `code` is often one
-    /// call into these. Define `data` types in a `.tidepool/lib/<Mod>.hs`
-    /// module instead (scaffold with `Explore.defMod`) and pull them in
-    /// via `imports` — domain types belong in the library.
+    /// call into these. Inline data declarations in `helpers` are fully
+    /// supported and right for eval-local types; promote types to a
+    /// `.tidepool/lib/<Mod>.hs` module (scaffold with `Explore.defMod`)
+    /// when they need to be REUSED across evals.
     #[serde(default)]
     pub helpers: String,
     /// Optional JSON input injected as `input :: Aeson.Value` binding.
@@ -910,6 +911,11 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         "lines do NOT parse. ",
         "Use `send (Constructor args)` to invoke effects. ",
         "First call is slow (~2s). Subsequent calls are cached.\n",
+        "Qualified namespaces always in scope: T. (Data.Text), L. (Data.List), ",
+        "Map. (Data.Map.Strict), Set. (Data.Set), KM. (Tidepool.Aeson.KeyMap), ",
+        "TT. (Tidepool.Text), Tab. (Tidepool.Table), P. (Prelude) \u{2014} ",
+        "prefer the unqualified Prelude shadows where they exist (they are ",
+        "the JIT-safe versions).\n",
         "Return values are automatically rendered to JSON by the Rust runtime \u{2014} ",
         "Int becomes a number, [Char] becomes a string, Bool becomes true/false, ",
         "lists become arrays, etc. Prefer `pure x` over `send (Print (show x))` ",
