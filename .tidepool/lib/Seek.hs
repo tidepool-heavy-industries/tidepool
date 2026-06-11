@@ -17,6 +17,14 @@
 --     (lib.rs:1921); the response String crosses the boundary via the
 --     session channel (lib.rs:1935) and lands as Value::String — so a
 --     continuation dies by eviction OR by its own resume; no replay.
+--   * the 30s timeout never kills the eval thread: Err(_elapsed)
+--     orphans it to a reaper (2s grace + join, lib.rs:1719) with
+--     orphaned_threads accounting; eval() refuses admission at
+--     MAX_ORPHANED_EVALS (lib.rs:1751). Leaked-with-accounting.
+--   * Fs sandbox = canonicalize-then-prefix-check per handler
+--     (tidepool/src/main.rs:253 resolve, :276 root check; siblings
+--     at :512 and :923) — found via seek v3, def+ls unused but grep
+--     usage syntax + compaction carried a 5-probe run cleanly.
 --
 -- v2 (affordance fixes from dogfooding v1):
 --   * verbs carry usage syntax, rendered verbatim in the prompt — the
@@ -25,6 +33,15 @@
 --     +/-10 cut a handler mid-body and cost a probe).
 --   * older evidence compacts to headers (latest 2 entries full) —
 --     the prompt stops growing linearly with probe count.
+--
+-- v3: structural verbs — def (rsFn + hsDef definition lookup) and
+-- ls (glob), so the move-selector can navigate structure, not just
+-- content.
+--
+-- v4: fuel buys PROBES; exhaustion grants one conclude-only round.
+-- (v3 run burned its last probe on the decisive grep, then the loop
+-- dumped the trail with no chance to answer — the evidence arrived
+-- and was wasted.)
 module Seek where
 
 import Tidepool.Prelude hiding (error)
@@ -98,6 +115,29 @@ viewVerb = ("view", "view <file> :: <line> [:: <radius (default 20)>]", \arg ev 
   pure (("VIEW " <> f <> ":" <> pack (show ln)
          <> "\n  " <> intercalate "\n  " (aroundLine ln r content)) : ev))
 
+-- | def — structural definition lookup by name: rsFn (Rust) + hsDef
+-- (Haskell), both rooted at the optional path. Shows file:line and
+-- the definition head for up to 6 matches.
+defVerb :: Verb [Text]
+defVerb = ("def", "def <fn-name> [:: <root dir (default .)>]", \arg ev -> do
+  let (name, p) = arg2 arg
+      roots = if isNull p then ["."] else [p]
+  rs <- rsFn name roots
+  hs <- hsDef name roots
+  let ms = rs ++ hs
+      headLine t = case lines t of { (h : _) -> h; _ -> "" }
+      render (Match t f l _ _) = f <> ":" <> pack (show l) <> "  " <> stake 90 (strip (headLine t))
+  pure (("DEF " <> name <> " (" <> pack (show (length ms)) <> " defs)"
+         <> (if null ms then "" else "\n  " <> intercalate "\n  " (map render (take 6 ms)))) : ev))
+
+-- | ls — files matching a glob (first 25).
+lsVerb :: Verb [Text]
+lsVerb = ("ls", "ls <glob>", \arg ev -> do
+  fs <- glob (strip arg)
+  pure (("LS " <> arg <> " (" <> pack (show (length fs)) <> " files)"
+         <> (if null fs then "" else "\n  " <> intercalate "\n  " (take 25 fs))
+         <> (if length fs > 25 then "\n  ..." else "")) : ev))
+
 -- | Render the trail chronologically: the most recent 2 entries in
 -- full, older entries compacted to their header line (plus the hit
 -- summary for probes). The full text already steered past probes;
@@ -112,16 +152,25 @@ renderTrail ev = intercalate "\n---\n" (reverse (imap render1 ev))
       [] -> e
 
 -- | Goal-directed search with a custom vocabulary: loopM over
--- (fuel, trail), one suspension per round.
+-- (fuel, trail), one suspension per round. Fuel buys probes; when it
+-- runs out there is one final conclude-only round, so the last
+-- probe's evidence is never wasted.
 seekWith :: Vocab [Text] -> Text -> Int -> M Text
 seekWith vocab goal fuel = loopM round (fuel, [])
   where
     verbs = intercalate " | " (map (\(_, usage, _) -> "'" <> usage <> "'") vocab)
-    round (0, ev) = pure (Left ("FUEL EXHAUSTED. Trail:\n" <> renderTrail ev))
+    header ev = "[seek] GOAL (fixed): " <> goal
+          <> "\n\nEvidence so far:\n"
+          <> (if null ev then "(none yet)" else renderTrail ev)
+    round (0, ev) = do
+      a <- oracle (header ev
+            <> "\n\nFINAL ROUND — probes exhausted. Reply 'DONE <answer>'; anything else returns the trail unanswered.")
+      pure (Left (if "DONE" `isPrefixOf` strip a
+        then "ANSWER: " <> strip (sdrop 4 (strip a))
+             <> "\n\n(" <> pack (show fuel) <> " probes + conclude)"
+        else "NO ANSWER. Trail:\n" <> renderTrail ev))
     round (k, ev) = do
-      a <- oracle ("[seek] GOAL (fixed): " <> goal
-            <> "\n\nEvidence so far:\n"
-            <> (if null ev then "(none yet)" else renderTrail ev)
+      a <- oracle (header ev
             <> "\n\nReplies: " <> verbs
             <> " | 'DONE <answer>'. Unprefixed reply = first verb. Probes left: " <> pack (show k))
       e <- dispatch vocab (strip a) ev
@@ -130,6 +179,6 @@ seekWith vocab goal fuel = loopM round (fuel, [])
                            <> pack (show (fuel - k + 1)) <> " suspensions used)")
         Right ev' -> Right (k - 1, ev'))
 
--- | The standard instance: grep (default) + view.
+-- | The standard instance: grep (default) + view + def + ls.
 seek :: Text -> Int -> M Text
-seek = seekWith [grepVerb, viewVerb]
+seek = seekWith [grepVerb, viewVerb, defVerb, lsVerb]
