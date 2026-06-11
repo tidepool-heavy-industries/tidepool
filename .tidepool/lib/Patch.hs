@@ -9,17 +9,14 @@ import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
 import qualified Data.Text as T
 
--- | #313 LANDMINE (removed from use): a pure module-level Text helper of
--- this shape miscompiles via the join-wiring bug — calls case-trap at
--- runtime. Kept commented as a reminder until #313's emit fix lands;
--- the checks live inlined in patchFile instead.
--- occurrences :: Text -> Text -> Int  — see git history
+-- | #313 RESOLVED (TailCtx fix, commit 0317fe5): the pure module-level
+-- `occurrences` helper and cross-module M fns of this shape compile
+-- correctly now — repro_313_patch_class in tidepool-runtime guards this
+-- module's success path. The occurrence checks stay inlined below only
+-- because un-inlining is churn, not because they have to be.
 
 -- | Replace a needle EXACTLY ONCE: errors loudly if absent or ambiguous
 -- (ambiguity is how string surgery corrupts files silently).
--- NOTE: occurrence checks are inlined in the do-block rather than via the
--- pure `occurrences` helper — #313 case-traps cross-module PURE Text fns
--- (Probe.occ2 is the minimal repro) while M-action-inline code is fine.
 patchFile :: Text -> Text -> Text -> M Text
 patchFile path old new = do
   src <- readFile path

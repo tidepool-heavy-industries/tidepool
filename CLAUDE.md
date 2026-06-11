@@ -307,8 +307,8 @@ SIGSEGV. The short, true standing list:
   never use the `T.` versions point-free/partially applied.
 - **`cycle`**: unresolved external (clean yield error, verified post-sentinel-fix);
   use manual recursion.
-- **Double `T.breakOn` in a cross-module fn** (#313 t11): case-trap; inline
-  the shape in your do-block instead (fix in flight).
+- ~~Double `T.breakOn` in a cross-module fn~~ (#313 t11): FIXED (TailCtx
+  leak in the emit hylo, commit 0317fe5; guarded by repro313 tests).
 - **Non-tail recursion** overflows ~10-20K frames with a clean yield error;
   tail recursion is unbounded (TCO).
 
