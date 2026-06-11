@@ -348,7 +348,9 @@ pub fn standard_decls() -> Vec<EffectDecl> {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EvalRequest {
     /// Haskell do-notation code. Each line is indented into a do-block.
-    /// Use `pure x` as the last line to return a value.
+    /// The last line is any expression of type `M a` — its result is the
+    /// eval's return value. Use `pure x` only to wrap a pure value;
+    /// never `r <- f` followed by `pure r`.
     /// Use `send (Constructor args)` to invoke effects.
     pub code: String,
     /// Additional Haskell imports, one per line (e.g. "Data.List (sort)").
@@ -932,7 +934,9 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
     let mut desc = String::from(concat!(
         "Write Haskell do-notation in `code`. The server wraps it in a module ",
         "with the effect stack, pragmas, and imports. ",
-        "Use `pure x` as the last line to return a value. ",
+        "The last line is any expression of type `M a` — its result is the ",
+        "eval's return value (`pure x` only to wrap a pure value; never ",
+        "`r <- f` then `pure r`). ",
         "Use `send (Constructor args)` to invoke effects. ",
         "First call is slow (~2s). Subsequent calls are cached.\n",
         "Return values are automatically rendered to JSON by the Rust runtime \u{2014} ",
@@ -967,8 +971,6 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
             desc.push_str("Use `>>=` chains and `<$>`/`<*>` for dense composition. Named bindings as escape hatch.\n");
             desc.push('\n');
             desc.push_str(concat!(
-                "User library: `Library` is auto-imported from `.tidepool/lib/Library.hs`. ",
-                "Other modules in `.tidepool/lib/` can be imported explicitly via the `imports` field.\n\n",
                 "Prelude polymorphic ops: `len` for length of Text or [a], ",
                 "`isNull` for emptiness of Text or [a], ",
                 "`stake`/`sdrop` for take/drop on both Text and [a]. ",
@@ -1000,6 +1002,107 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
     }
 
     desc
+}
+
+/// True if `line` opens a top-level type signature (`name ::` or
+/// `(op) ::` at column 0) — comment lines and indented code never match.
+fn sig_start(line: &str) -> bool {
+    if line.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let Some((head, _)) = line.split_once("::") else {
+        return false;
+    };
+    let h = head.trim_end();
+    if h.is_empty() || h.contains(' ') {
+        return false;
+    }
+    (h.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+        && h.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\''))
+        || (h.starts_with('(') && h.ends_with(')'))
+}
+
+/// Extract top-level type signatures (joining indented continuation
+/// lines) plus `data`/`type` heads from Haskell source.
+fn extract_sigs(src: &str) -> Vec<String> {
+    let mut sigs: Vec<String> = Vec::new();
+    let mut cur: Option<String> = None;
+    for line in src.lines() {
+        if sig_start(line) {
+            if let Some(s) = cur.take() {
+                sigs.push(s);
+            }
+            cur = Some(line.to_string());
+        } else if let Some(s) = cur.as_mut() {
+            let t = line.trim();
+            // Indented continuation of a multi-line signature.
+            if line.starts_with(char::is_whitespace) && !t.is_empty() && !t.starts_with("--") {
+                s.push(' ');
+                s.push_str(t);
+            } else {
+                sigs.push(cur.take().unwrap());
+            }
+        } else if (line.starts_with("data ") || line.starts_with("type "))
+            && !line.contains("where")
+        {
+            sigs.push(line.to_string());
+        }
+    }
+    if let Some(s) = cur.take() {
+        sigs.push(s);
+    }
+    sigs
+}
+
+/// Scan a user-library directory for top-level type signatures (plus
+/// `data`/`type` heads) and render a per-module vocabulary digest for
+/// the eval tool description. This is the affordance that keeps eval
+/// code shape-first: the combinators a user would otherwise re-invent
+/// are visible at every call site instead of requiring a read of the
+/// lib sources. Snapshot at server start; restart to refresh.
+fn library_vocab(dir: &std::path::Path) -> String {
+    // Diagnostic modules, not vocabulary.
+    const SKIP: &[&str] = &["Probe", "SelfTest"];
+    const SIG_MAX: usize = 120;
+    const TOTAL_MAX: usize = 8000;
+
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|x| x == "hs"))
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+
+    let mut out = String::new();
+    'files: for path in files {
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if SKIP.contains(&stem) {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let sigs = extract_sigs(&src);
+        if sigs.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("  {stem}:\n"));
+        for s in sigs {
+            let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+            let s: String = s.chars().take(SIG_MAX).collect();
+            out.push_str(&format!("    {s}\n"));
+            if out.len() > TOTAL_MAX {
+                out.push_str("  …(truncated)\n");
+                break 'files;
+            }
+        }
+    }
+    out
 }
 
 /// Unwrap double-encoded JSON strings if they contain an object or array.
@@ -1966,17 +2069,22 @@ where
         let user_lib = PathBuf::from(".tidepool/lib");
         if user_lib.is_dir() {
             self.inner.has_user_library = user_lib.join("Library.hs").exists();
-            self.inner.include.push(user_lib);
+            self.inner.include.push(user_lib.clone());
             if self.inner.has_user_library {
                 // Rebuild preamble with user library import
                 let mut decls = H::collect_decls();
                 decls.push(ask_decl());
                 self.inner.haskell_preamble = build_preamble(&decls, true);
-                // Append note to tool description
+                // Append note + vocabulary digest to tool description
                 self.inner.eval_tool_description.push_str(
-                    "\n\nUser library: `Library` is auto-imported from `.tidepool/lib/Library.hs`. \
-                     Other modules in `.tidepool/lib/` can be imported explicitly via the `imports` field."
+                    "\n\nUser library: `Library` is auto-imported from `.tidepool/lib/Library.hs` \
+                     and re-exports every module below — all names are in scope bare. \
+                     Check this vocabulary for an existing combinator with the right shape \
+                     (fold/unfold/loop/batch) BEFORE hand-rolling a recursive helper:\n",
                 );
+                self.inner
+                    .eval_tool_description
+                    .push_str(&library_vocab(&user_lib));
             }
         }
 
@@ -2207,6 +2315,53 @@ mod tests {
         // Constructors not shown separately (helpers section covers them)
         assert!(desc.contains("putStrLn :: Text -> M ()"));
         assert!(desc.contains("Built-in helpers"));
+    }
+
+    #[test]
+    fn test_extract_sigs() {
+        let src = "\
+{-# LANGUAGE NoImplicitPrelude #-}
+-- | A comment with a fake sig :: not real
+module Lib where
+
+import Tidepool.Prelude
+
+-- | Single-line.
+oracle :: Text -> M Text
+oracle q = do
+  a <- ask q
+  pure (vshow a)
+
+-- | Multi-line: continuations join.
+steerM :: Monad m
+       => (Int -> Int -> a -> m r)
+       -> b -> [a] -> m b
+steerM suspend step = go 0
+  where
+    go _ acc [] = pure acc
+
+type Vocab s = [(Text, Text -> s -> M s)]
+data Rose a = Rose a [Rose a]
+data Console a where
+  Print :: Text -> Console ()
+
+(??) :: Q a -> Text -> M a
+(Q s p t) ?? prompt = undefined
+";
+        let sigs = extract_sigs(src);
+        assert!(sigs.contains(&"oracle :: Text -> M Text".to_string()));
+        assert!(sigs.contains(
+            &"steerM :: Monad m => (Int -> Int -> a -> m r) -> b -> [a] -> m b".to_string()
+        ));
+        assert!(sigs.contains(&"type Vocab s = [(Text, Text -> s -> M s)]".to_string()));
+        assert!(sigs.contains(&"data Rose a = Rose a [Rose a]".to_string()));
+        assert!(sigs.contains(&"(??) :: Q a -> Text -> M a".to_string()));
+        // GADT `where` heads and indented constructor sigs are excluded;
+        // comment-embedded `::` never matches.
+        assert!(!sigs.iter().any(|s| s.contains("Console")));
+        assert!(!sigs.iter().any(|s| s.contains("fake sig")));
+        // Function bodies never leak into signatures.
+        assert!(!sigs.iter().any(|s| s.contains("go 0")));
     }
 
     #[test]
