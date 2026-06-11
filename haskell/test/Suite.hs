@@ -6,7 +6,11 @@ import qualified Data.Text as T
 -- qq-suite: regen now needs `--include lib --target-module-only`
 -- (see CLAUDE.md / plans/qq-spike.md)
 import Tidepool.QQ (fmt, j)
-import Tidepool.Aeson (Value (..))
+-- Value module directly, NOT the Tidepool.Aeson facade: the facade
+-- re-exports Tidepool.Aeson.Lens -> Control.Lens, which the extract GHC
+-- session cannot see (lens is not a boot package), so the facade kills
+-- --all-closed regen at compile time.
+import Tidepool.Aeson.Value (Value (..))
 
 -- ============================================================
 -- Int literals (5)
