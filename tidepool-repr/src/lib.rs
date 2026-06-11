@@ -16,6 +16,7 @@ pub mod serial;
 pub mod subst;
 pub mod tree;
 pub mod types;
+pub mod varid_check;
 
 pub use builder::TreeBuilder;
 pub use datacon::*;
@@ -24,6 +25,7 @@ pub use frame::*;
 pub use normalize::normalize;
 pub use tree::*;
 pub use types::*;
+pub use varid_check::{check_toplevel_varids, toplevel_binders, BindingSite, VarIdCollision};
 
 /// Core IR expression: a recursion scheme over [`CoreFrame`] nodes.
 ///
