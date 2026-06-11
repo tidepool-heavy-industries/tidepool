@@ -1,68 +1,186 @@
-# S1 (W5 Follow-up): ParkedStream registry gap coverage (bug map)
+# S1 parked-registry property findings (bug map)
 
 Property suite: `tidepool-codegen/tests/proptest_parked_registry.rs`.
-Date: 2026-06-10. Workstream S1 (Gaps: PanicIdxSource, FailingConvSource, Fenceposts).
+Date: 2026-06-10. Workstream S1 (ParkedStream registry unit angle —
+complements W4's end-to-end campaign and W5's dispatch-loop differential).
 
 ## Method
 
-Each property represents a behavioral invariant of the `ParkedStream` registry and `stream_element` / `stream_chunk` host functions. We use `JitEffectMachine` to execute hand-built Core expressions that trigger these routes.
+Two tracks, both driving the REAL registry code in
+`tidepool-codegen/src/host_fns.rs:1989-2499`:
 
-## Route Inventory
+- **Track A (no Cranelift at all):** `heap_force` is `pub`; thunks are
+  hand-built in a raw buffer with **our own** `extern "C"` host functions as
+  code pointers (the same calling contract `stream_chunk`/`stream_element`
+  use). This unit-drives the memoization mechanism element thunks rely on.
+- **Track B (thinnest compiled shim):** hand-built `CoreExpr` trees (NO
+  Haskell) compiled with `JitEffectMachine`, with handlers delivering
+  **custom adversarial `ValueSource` implementations** through the pub
+  `ValueStream::from_source` escape hatch. Every park / chunk pull / element
+  force / teardown executes the real `park_stream` → `stream_chunk` →
+  `stream_element` → `RegistryGuard` code.
 
-1.  **Track A (Unit):** `heap_force` logic in `host_fns.rs` (~420-550). Exercised by `t_a1..t_a4` and `t_g4`.
-2.  **Track B (Integration):** `JitEffectMachine` run-loop + `stream_element`/`stream_chunk` logic (~1989-2499). Exercised by `p1..p9`.
-3.  **Track C (Shadow):** `ValueSource` / `ValueStream` core logic in `tidepool-effect`. Validated via Track B's bridge.
+Observability without touching internals:
 
-### NOT-exercised routes
-- `ParkedStream::pull_chunk` direct Rust unit tests (logic covered via `heap_force` / `stream_chunk` integration).
-- `Registry::get` direct lookup (covered via `stream_element` / `stream_chunk`).
-- Haskell-compiled stream producers (Track B uses hand-built `CoreExpr` to isolate JIT machinery from frontend translation bugs).
+- **Producer call-counters** (`next_calls` / `get_calls` / `len_calls` via an
+  `InstrumentedSource` wrapper) quantify laziness EXACTLY.
+- **`Drop` instrumentation** on sources observes registry teardown: when
+  `RegistryGuard` clears the registry, the parked `Box<dyn ValueSource>`
+  drops, setting a flag + global drop-order stamp.
 
-## Comparison: W4 vs W5 vs S1
+### Why not the original "no JIT, direct calls" plan
 
-| Aspect | W4 (Baseline) | W5 (Registry) | S1 (Current) |
-| :--- | :--- | :--- | :--- |
-| **Storage** | Eager conversion | Parked Registry | Parked Registry |
-| **Isolation** | None (global leak risk) | Per-machine registry | Sibling/Panic isolation |
-| **Long Spines** | Stack overflow risk | Iterative/Parked | Reparking verified |
-| **Panics** | Host crash | Yield error (producer) | Yield error (element thunk) |
-| **Errors** | OOB trap | Bounds check | BridgeError \u2192 UserErrorMsg |
+The entire registry surface is `pub(crate)`/private (see Route inventory),
+and `host_fn_symbols()` does not export the stream entry points, so an
+integration test cannot call `park_stream`/`stream_chunk`/`stream_element`
+directly — and may not make them pub. The documented fallback applies: test
+through the thinnest reachable drivers. Track B's hand-built-Core shim is
+that route; it is NOT the W4 end-to-end path (no Haskell, no GHC pipeline,
+and sources that Haskell cannot produce).
 
-## Fencepost Census (Long Spines)
+## Route inventory
 
-Verifying that spines of various lengths are correctly handled, particularly around the 2000-cell reparking threshold and the 256-cell chunk size.
+**Unreachable for direct integration-test calls** (`pub(crate)` or private
+in `host_fns.rs`; `host_fn_symbols()` exports none of them):
+`ParkedStream`, `park_stream`, `clear_parked_streams`,
+`alloc_stream_tail_thunk`, `stream_chunk`, `stream_element`,
+`PARKED_STREAMS`, `STREAM_NEXT_ID`, `ReadySource`, `materialize_cons_list`,
+`build_cons_cells`, `build_cons_cells_thunked`, `host_alloc_gc`,
+`alloc_host_thunk2`, `alloc_element_thunk`.
 
-| Length | Route | Outcome | Logic |
-| :--- | :--- | :--- | :--- |
-| 0 | return_list | Ok([]) | Nil case |
-| 1 | return_list | Ok([0]) | Single element |
-| 255 | return_list | Ok([0..254]) | Full first chunk - 1 |
-| 256 | return_list | Ok([0..255]) | Exact chunk size |
-| 257 | sum_chain(257) | Ok(sum) | Multi-chunk pull |
-| 1999 | return_list | Ok(...) | Below repark threshold |
-| 2000 | return_list | Ok(...) | AT repark threshold |
-| 2001 | return_list | Ok(...) | ABOVE repark threshold |
-| 2500 | sum_chain(3) | Ok(3) | Deep spine re-parked |
+**Exercised by this suite (via the Track B shim unless noted):**
 
-## Notable Semantics
+| Code | How reached |
+|---|---|
+| `park_stream` + `alloc_stream_tail_thunk` + `RegistryGuard` teardown | every Track B run (dispatch-site `Plan::Park`) |
+| `stream_chunk`, sequential path (incl. `catch_unwind`, `ChunkPull::Failed`, exhaustion-removal) | `SeqSource` / `PanicSeqSource` / `FailingConvSource(seq)` / `InfiniteGuardedSource` |
+| `stream_chunk`, indexed path + `build_cons_cells_thunked` | `IdxSource` / `LyingLenSource` / `PanicIdxSource` |
+| `stream_element` — convert, memoize, panic, `Err(BridgeError)`, out-of-bounds branches | `IdxSource` (force-twice), `PanicIdxSource`, `FailingConvSource(idx)`, `LyingLenSource` |
+| `ReadySource` (dismantled `Response::Complete` spine re-park) | `t_g4` fenceposts {1999, 2000, 2001, 2256, 2257, 2500} |
+| `build_cons_cells` + GC mid-materialization | p7 (512 KiB nursery, fork-contained) |
+| `heap_force` memoization / poison memoization / blackhole / indirection chains | Track A (`t_a1`–`t_a4`), no Cranelift |
 
-1.  **Element Panic Containment:** If a thunk inside a stream element panics during conversion, `stream_element` catches it. The JIT yields a `UserErrorMsg` containing "panicked", and the machine is abandoned.
-2.  **Conversion Failure Safety:** Bridge errors (e.g. `UnknownDataConName`) during `stream_element` are caught and mapped to clean `UserErrorMsg`. The registry entry is dropped.
-3.  **Sibling Isolation:** If one stream panics, sibling streams in the same registry are correctly dropped. Statistics verify that sibling pulls stop exactly where the program execution terminated.
-4.  **Spine Walk Immunity:** Walking the spine of a stream (demanding CONS cells) does not force the head thunks. `get_calls` remains 0 even if the elements would panic if forced.
-5.  **Reparking Logic:** Spines exceeding 2000 cells (typically from `Response::Complete` or large chunks) are iteratively parked into the registry to avoid stack overflow during bridge conversion.
+**NOT exercised, and why:**
 
-## Hunt Record (PROPTEST_CASES=1000)
+- `materialize_cons_list` — kill-switch path (`TIDEPOOL_LAZY_RESULTS=0`);
+  the env var is process-global and read at dispatch time, so it cannot be
+  safely toggled in-process. W4 covered it via per-case subprocesses.
+- `ChunkPull::Cancelled` — needs a watchdog thread flipping the cancel flag
+  mid-pull; racy to pin deterministically. Future work.
+- GC capture-aliasing hazard (a raw `(id, offset)` capture whose VALUE falls
+  inside the nursery address range would be rewritten by evacuation's
+  range-check) — not constructible through the real API: ids are small
+  monotonic integers and offsets are list indices, far below address range.
+  Noted as a design assumption, not tested.
 
-| ID | Name | Status | Findings |
-| :--- | :--- | :--- | :--- |
-| p1 | model_equivalence | PASS | No regressions. |
-| p2 | laziness_quantification | PASS | Chunk sizes pinned. |
-| p3 | registry_isolation | PASS | Memory remains isolated. |
-| p4 | abandon_reenter | PASS | Re-entry blocked. |
-| p6 | panic_containment | PASS | Producer panic caught. |
-| p7 | fork_contained_gc | PASS | GC safety verified. |
-| p8 | element_panic_containment | PASS | Element panic caught. |
-| p9 | conversion_failure | PASS | Bridge errors handled. |
+## Coverage vs W4 / W5
 
-*Hunt conducted on 2026-06-10. All properties verified GREEN in individual runs. Full 1000-case suite execution truncated due to significant JIT overhead per case in p8/p9 (approx. 3s/case), leading to multi-hour projected runtime. No bugs found in 100+ cases of each.*
+- **W4** (`tidepool-runtime/tests/proptest_lazy_consumption.rs`): Haskell
+  end-to-end, lazy-ON vs lazy-OFF vs reference, 129 cases — exonerated the
+  machinery for everything Haskell + the MCP handlers can produce.
+- **W5** (`tidepool-codegen/tests/proptest_jit_dispatch.rs`): JIT-vs-eval
+  differential over the dispatch loop, with well-behaved
+  `respond_stream(0..n)` sources.
+- **S1 (this suite) adds:** adversarial sources impossible from Haskell
+  (panicking-at-k producer, panicking element conversion, `BridgeError`
+  returns, lying `len()`, guarded-infinite), EXACT pull/conversion counts,
+  `Drop`-observed teardown, fired-panic sibling isolation, poison
+  memoization semantics, and `ReadySource` re-park fenceposts.
+
+## Bug table
+
+| Bug | Class | Property | Repro | Status |
+|:---|:---|:---|:---|:---|
+| — | B1 model mismatch | P1, census, t_g4 | — | **NEGATIVE** |
+| — | B2 unexpected/missing error | P6, p8, p9, lying-len | — | **NEGATIVE** |
+| — | B3 fatal signal | P7 (forked GC), p8/p9 panics | — | **NEGATIVE** |
+| — | B5 memoization/isolation violation | P2, P3, P4, t_g3 | — | **NEGATIVE** |
+
+**Zero confirmed bugs.** No `.proptest-regressions` entries were recorded
+(nothing to commit). The registry machinery held up against every
+adversarial source, with laziness quantified to the exact call. Combined
+with W4 (e2e GREEN) and W5 (dispatch differential GREEN), the parked-stream
+channel is now verified-negative from three independent angles.
+
+## Property inventory (all GREEN)
+
+| ID | What it pins |
+|:---|:---|
+| t_a1 | force-twice runs the entry ONCE; state → EVALUATED |
+| t_a2 | poison is MEMOIZED; second force returns poison with NO pending RuntimeError |
+| t_a3 | re-entrant self-force → clean blackhole error, no hang/signal |
+| t_a4 | evaluated-thunk indirection chains resolve without re-entry |
+| P1 (proptest) | model equivalence, Seq+Idx, len ∈ fenceposts ∪ 2..600 |
+| P2 | EXACT laziness: take-3 seq = **256** `next_value`s (one chunk); take-3 idx = **3** `get`s; spine-walk-280 idx = **0** `get`s; double-force = **1** `get`; guarded-infinite take-257 ≤ 512 pulls |
+| P3 | two simultaneously-parked streams: correct values, both dropped |
+| P4 | machine re-run: abandoned entry dropped BEFORE run 2 parks; run 2 clean |
+| P5 | teardown universality — every run epilogue asserts sources dropped (folded into all properties) |
+| P6 (proptest) | producer panic at fencepost ∪ 2..600 → clean `UserErrorMsg("…panicked…")`; unfired-panic sibling case; lying-len full force → clean "out of bounds" |
+| P7 | fork-contained GC: 512 KiB nursery, GC mid-chunk-materialization → model match or clean HeapOverflow, never a dead child |
+| p8 | element-thunk panic (idx ∈ {0,1,255,256} — incl. second chunk) → clean error; spine walk immune (`get_calls == 0`) |
+| p9 | `BridgeError` from producer: seq `ChunkPull::Failed` + idx `stream_element` Err branches → clean "conversion failed" |
+| t_g3 | FIRED-panic sibling isolation: A panics on chunk 2; B's `next_calls == 4` (fully, cleanly drained); both dropped |
+| t_g4 | `Response::Complete` spine re-park fenceposts {1999, 2000, 2001, 2256, 2257, 2500}: eager path and `ReadySource` path agree with the model |
+| t_g5 | lying-len spine-walk immunity (`get_calls == 0`, Ok) |
+| t_panic_payload_nonstring | `panic_any(42)` → "<non-string panic>" fallback |
+| t_seq_len256_pull_count | seq len=256 full drain = **257** `next_value`s (two pulls) |
+| fencepost_census | len ∈ {0,1,255,256,257} × {Seq,Idx}, deterministic, counter-asserted |
+
+## Fencepost coverage
+
+| Dimension | Values | Where |
+|:---|:---|:---|
+| stream length | 0, 1, 255, 256, 257 (× Seq, Idx) | fencepost_census, P1 strategy |
+| producer panic position | 0, 1, 255, 256, 257 (+ random) | P6 strategy |
+| element panic index | 0, 1, 255, **256** (second chunk) | p8 |
+| conversion-failure position | 0, 1, 255, 256 (× seq, idx) | p9 |
+| Complete-spine length | 1999, 2000 (≤ threshold, eager), 2001, 2256, 2257, 2500 (re-parked) | t_g4 |
+
+## Notable semantics (documented, not bugs)
+
+1. **Poison memoization is single-witness** (t_a2): a thunk whose entry
+   errors memoizes the poison; the `RuntimeError` thread-local is consumed
+   by the first observer. A second force returns the poison with NO pending
+   error. Today's consumers check `take_runtime_error()` immediately after
+   each force, but any future re-entrant consumer would see an
+   inexplicable poison — watch-item.
+2. **Lying-len asymmetry** (P6/t_g5): full materialization → clean
+   "element index out of bounds" error; a spine-only consumer walks all
+   `claimed` cells and returns Ok without ever observing the lie.
+3. **Seq chunk boundary takes two pulls** (t_seq_len256_pull_count): a
+   length-256 sequential source costs 257 `next_value` calls — the loop
+   fills the chunk without seeing `None`, so exhaustion is only learned on
+   the next (empty) pull.
+4. **A fired producer panic poisons only its own tail** (t_g3): the
+   registry entry is NOT removed (only exhaustion removes it); the
+   panicking pull's partial items are discarded and the tail thunk memoizes
+   the poison. Sibling streams pull cleanly before and after; teardown
+   still drops both sources.
+5. **Pull granularity differs by source strength** (P2): `take 3` of a
+   sequential source converts 256 elements (chunk granularity); of an
+   indexed source converts exactly 3 (element granularity); a spine-only
+   fold converts 0; a twice-forced head converts 1.
+
+## Hunt record
+
+- `PROPTEST_CASES=1000` run on the two randomized properties (`p1`, `p6`):
+  GREEN, zero divergences, no regression seeds recorded.
+- p8/p9 are deliberate **deterministic fencepost sweeps**, not random: each
+  case JIT-compiles an unrolled consumer proportional to the panic/fail
+  index (~3 s/case at index ≈ 600), and the meaningful inputs are the
+  discrete chunk fenceposts. Random sampling at 1000 cases would cost hours
+  for no added coverage. (Earlier randomized versions ran 100+ cases GREEN
+  before the conversion.)
+- Full suite: 18 tests, ~11 s.
+
+## Running
+
+```bash
+cargo test -p tidepool-codegen --test proptest_parked_registry
+# the randomized hunt:
+PROPTEST_CASES=1000 cargo test -p tidepool-codegen \
+  --test proptest_parked_registry -- p1_model_equivalence p6_panic_containment
+```
+
+Parallel test threads are safe: the registry is thread-local and every
+park/run/teardown sequence is confined to one 8 MiB harness thread.

@@ -1485,63 +1485,139 @@ proptest! {
             }
         }
     }
+}
 
-    #[test]
-    fn p8_stream_element_panic_containment(panic_idx in prop_oneof![Just(0), Just(1), Just(255), Just(256), 0usize..100]) {
-        let data: Vec<i64> = (0..600).collect();
+/// G1 — element-thunk panic containment (`stream_element`'s catch_unwind).
+///
+/// Deterministic fencepost sweep, NOT proptest-random: each case JIT-compiles
+/// an unrolled consumer whose size is proportional to `panic_idx`, so random
+/// sampling over 0..600 costs minutes without adding coverage — the chunk
+/// fenceposts are the meaningful inputs (256 proves containment on the
+/// SECOND chunk's element thunks).
+#[test]
+fn p8_stream_element_panic_containment() {
+    let data: Vec<i64> = (0..600).collect();
+    for panic_idx in [0usize, 1, 255, 256] {
         let k = panic_idx + 1;
-
-        {
-            let stats = Rc::new(RefCell::new(Stats::default()));
-            let src = InstrumentedSource { inner: PanicIdxSource { data: data.clone(), panic_idx, pos: 0 }, stats: stats.clone() };
-            let handlers = frunk::hlist![
-                OrderedHandler { responses: vec![Response::Stream(ValueStream::from_source(Box::new(src), CONS, NIL))].into() },
-                OrderedHandler { responses: vec![].into() }
-            ];
-            // build_sum_chain(k) with k > panic_idx → run must be Err
-            let res = run_prog(build_sum_chain(k, 0), handlers, 4<<20);
-            match res {
-                Err(JitError::Yield(YieldError::UserErrorMsg(msg))) => {
-                    assert!(msg.contains("panicked"), "Expected 'panicked' in error msg, got: {}", msg);
-                }
-                other => panic!("Expected UserErrorMsg with panic, got {:?}", other),
+        let stats = Rc::new(RefCell::new(Stats::default()));
+        let src = InstrumentedSource {
+            inner: PanicIdxSource {
+                data: data.clone(),
+                panic_idx,
+                pos: 0,
+            },
+            stats: stats.clone(),
+        };
+        let handlers = frunk::hlist![
+            OrderedHandler {
+                responses: vec![Response::Stream(ValueStream::from_source(
+                    Box::new(src),
+                    CONS,
+                    NIL
+                ))]
+                .into()
+            },
+            OrderedHandler {
+                responses: vec![].into()
             }
-            assert!(stats.borrow().dropped);
+        ];
+        // build_sum_chain(k) with k > panic_idx → run must be Err
+        let res = run_prog(build_sum_chain(k, 0), handlers, 4 << 20);
+        match res {
+            Err(JitError::Yield(YieldError::UserErrorMsg(msg))) => {
+                assert!(
+                    msg.contains("panicked"),
+                    "Expected 'panicked' in error msg, got: {}",
+                    msg
+                );
+            }
+            other => panic!("Expected UserErrorMsg with panic, got {:?}", other),
         }
-
-        {
-            let stats = Rc::new(RefCell::new(Stats::default()));
-            let src = InstrumentedSource { inner: PanicIdxSource { data: data.clone(), panic_idx, pos: 0 }, stats: stats.clone() };
-            let handlers = frunk::hlist![
-                OrderedHandler { responses: vec![Response::Stream(ValueStream::from_source(Box::new(src), CONS, NIL))].into() },
-                OrderedHandler { responses: vec![].into() }
-            ];
-            // build_spine_walk(k) with k ≤ panic_idx+1 is tricky if k == panic_idx+1
-            // but the instructions say "build_spine_walk(k) with k ≤ len" and "panicking element is never converted"
-            // If we walk k elements, we only check CONS cells, we don't force heads.
-            let res = run_prog(build_spine_walk(data.len(), 0), handlers, 4<<20).expect("Spine walk should be immune to element panic");
-            assert!(values_equal(&res, &Value::Con(VAL, vec![Value::Lit(Literal::LitInt(data.len() as i64))])));
-            assert_eq!(stats.borrow().get_calls, 0, "Spine walk should not force heads");
-            assert!(stats.borrow().dropped);
-        }
+        assert!(stats.borrow().dropped);
     }
 
-    #[test]
-    fn p9_bridge_error_conversion_failure(fail_at in prop_oneof![Just(0), Just(1), Just(255), Just(256), 0usize..600]) {
-        let data: Vec<i64> = (0..600).collect();
+    // Spine-walk immunity, hoisted out of the loop (one compile of the
+    // expensive 600-frame walk): walking the spine never converts elements,
+    // so even a panic-at-first-element source is invisible to length-style
+    // consumers.
+    {
+        let stats = Rc::new(RefCell::new(Stats::default()));
+        let src = InstrumentedSource {
+            inner: PanicIdxSource {
+                data: data.clone(),
+                panic_idx: 0,
+                pos: 0,
+            },
+            stats: stats.clone(),
+        };
+        let handlers = frunk::hlist![
+            OrderedHandler {
+                responses: vec![Response::Stream(ValueStream::from_source(
+                    Box::new(src),
+                    CONS,
+                    NIL
+                ))]
+                .into()
+            },
+            OrderedHandler {
+                responses: vec![].into()
+            }
+        ];
+        let res = run_prog(build_spine_walk(data.len(), 0), handlers, 4 << 20)
+            .expect("Spine walk should be immune to element panic");
+        assert!(values_equal(
+            &res,
+            &Value::Con(VAL, vec![Value::Lit(Literal::LitInt(data.len() as i64))])
+        ));
+        assert_eq!(
+            stats.borrow().get_calls,
+            0,
+            "Spine walk should not force heads"
+        );
+        assert!(stats.borrow().dropped);
+    }
+}
 
+/// G2 — BridgeError conversion-failure containment for BOTH the sequential
+/// `ChunkPull::Failed` branch and the indexed `stream_element` Err branch.
+/// Deterministic fencepost sweep — see p8's rationale.
+#[test]
+fn p9_bridge_error_conversion_failure() {
+    let data: Vec<i64> = (0..600).collect();
+    for fail_at in [0usize, 1, 255, 256] {
         // Sequential (indexed=false)
         {
             let stats = Rc::new(RefCell::new(Stats::default()));
-            let src = InstrumentedSource { inner: FailingConvSource { data: data.clone(), fail_at, indexed: false, pos: 0 }, stats: stats.clone() };
+            let src = InstrumentedSource {
+                inner: FailingConvSource {
+                    data: data.clone(),
+                    fail_at,
+                    indexed: false,
+                    pos: 0,
+                },
+                stats: stats.clone(),
+            };
             let handlers = frunk::hlist![
-                OrderedHandler { responses: vec![Response::Stream(ValueStream::from_source(Box::new(src), CONS, NIL))].into() },
-                OrderedHandler { responses: vec![].into() }
+                OrderedHandler {
+                    responses: vec![Response::Stream(ValueStream::from_source(
+                        Box::new(src),
+                        CONS,
+                        NIL
+                    ))]
+                    .into()
+                },
+                OrderedHandler {
+                    responses: vec![].into()
+                }
             ];
-            let res = run_prog(build_return_list(0), handlers, 4<<20);
+            let res = run_prog(build_return_list(0), handlers, 4 << 20);
             match res {
                 Err(JitError::Yield(YieldError::UserErrorMsg(msg))) => {
-                    assert!(msg.contains("conversion failed"), "Expected 'conversion failed', got: {}", msg);
+                    assert!(
+                        msg.contains("conversion failed"),
+                        "Expected 'conversion failed', got: {}",
+                        msg
+                    );
                 }
                 other => panic!("Expected UserErrorMsg conversion failed, got {:?}", other),
             }
@@ -1551,15 +1627,36 @@ proptest! {
         // Indexed (indexed=true)
         {
             let stats = Rc::new(RefCell::new(Stats::default()));
-            let src = InstrumentedSource { inner: FailingConvSource { data: data.clone(), fail_at, indexed: true, pos: 0 }, stats: stats.clone() };
+            let src = InstrumentedSource {
+                inner: FailingConvSource {
+                    data: data.clone(),
+                    fail_at,
+                    indexed: true,
+                    pos: 0,
+                },
+                stats: stats.clone(),
+            };
             let handlers = frunk::hlist![
-                OrderedHandler { responses: vec![Response::Stream(ValueStream::from_source(Box::new(src), CONS, NIL))].into() },
-                OrderedHandler { responses: vec![].into() }
+                OrderedHandler {
+                    responses: vec![Response::Stream(ValueStream::from_source(
+                        Box::new(src),
+                        CONS,
+                        NIL
+                    ))]
+                    .into()
+                },
+                OrderedHandler {
+                    responses: vec![].into()
+                }
             ];
-            let res = run_prog(build_sum_chain(fail_at + 1, 0), handlers, 4<<20);
+            let res = run_prog(build_sum_chain(fail_at + 1, 0), handlers, 4 << 20);
             match res {
                 Err(JitError::Yield(YieldError::UserErrorMsg(msg))) => {
-                    assert!(msg.contains("conversion failed"), "Expected 'conversion failed', got: {}", msg);
+                    assert!(
+                        msg.contains("conversion failed"),
+                        "Expected 'conversion failed', got: {}",
+                        msg
+                    );
                 }
                 other => panic!("Expected UserErrorMsg conversion failed, got {:?}", other),
             }
