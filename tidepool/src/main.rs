@@ -1049,10 +1049,43 @@ impl LlmHandler {
         coerced
     }
 
+    /// Legacy single-colon provider prefixes ("ollama:llama3.2") predate
+    /// the genai consolidation and were passed to providers VERBATIM
+    /// (ollama 404s on a model literally named "ollama:llama3.2", found
+    /// live 2026-06-11). genai's namespace syntax is `ns::model` — the
+    /// namespace is stripped before the request — so rewrite a single
+    /// colon to a double one, but ONLY for known provider prefixes:
+    /// ollama's own tag syntax uses a bare colon ("qwen2.5:7b") and must
+    /// pass through untouched.
+    fn normalize_model(model: String) -> String {
+        const PROVIDERS: &[&str] = &[
+            "ollama",
+            "openai",
+            "anthropic",
+            "gemini",
+            "groq",
+            "cohere",
+            "deepseek",
+            "xai",
+            "fireworks",
+            "together",
+        ];
+        if let Some(idx) = model.find(':') {
+            let is_legacy_prefix =
+                model.as_bytes().get(idx + 1) != Some(&b':') && PROVIDERS.contains(&&model[..idx]);
+            if is_legacy_prefix {
+                let fixed = format!("{}::{}", &model[..idx], &model[idx + 1..]);
+                tracing::info!("normalized legacy model name {model:?} -> {fixed:?}");
+                return fixed;
+            }
+        }
+        model
+    }
+
     fn new(model: String) -> Self {
         Self {
             client: genai::Client::default(),
-            model: Self::effective_model(model),
+            model: Self::normalize_model(Self::effective_model(model)),
             rt: tokio::runtime::Handle::current(),
             call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
@@ -1548,7 +1581,7 @@ struct Args {
     /// → Gemini, unknown names → Ollama; `ns::model` forces a namespace.
     /// API keys come from the standard env vars (OPENAI_API_KEY, ...) or
     /// from `.tidepool/secrets/<ENV_VAR_NAME>` files.
-    #[arg(long, env = "TIDEPOOL_LLM_MODEL", default_value = "ollama:llama3.2")]
+    #[arg(long, env = "TIDEPOOL_LLM_MODEL", default_value = "ollama::llama3.2")]
     llm: String,
 }
 
@@ -2745,6 +2778,37 @@ mod tests {
             DEFAULT_OPENAI_MODEL
         );
         std::env::remove_var("TIDEPOOL_LLM_PROVIDER");
+    }
+
+    #[test]
+    fn test_normalize_model() {
+        // legacy single-colon prefix -> genai double-colon namespace
+        assert_eq!(
+            LlmHandler::normalize_model("ollama:llama3.2".into()),
+            "ollama::llama3.2"
+        );
+        assert_eq!(
+            LlmHandler::normalize_model("anthropic:claude-haiku-4-5".into()),
+            "anthropic::claude-haiku-4-5"
+        );
+        // already-correct forms untouched
+        assert_eq!(
+            LlmHandler::normalize_model("ollama::llama3.2".into()),
+            "ollama::llama3.2"
+        );
+        assert_eq!(
+            LlmHandler::normalize_model("gpt-4o-mini".into()),
+            "gpt-4o-mini"
+        );
+        // ollama's native model:tag syntax is NOT a provider prefix
+        assert_eq!(
+            LlmHandler::normalize_model("qwen2.5:7b".into()),
+            "qwen2.5:7b"
+        );
+        assert_eq!(
+            LlmHandler::normalize_model("tinyllama:latest".into()),
+            "tinyllama:latest"
+        );
     }
 
     #[test]
