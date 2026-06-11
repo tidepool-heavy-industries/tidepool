@@ -13,6 +13,8 @@ use tidepool_effect::error::EffectError;
 use tidepool_eval::value::Value;
 use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl, TidepoolMcpServer};
 
+mod openai;
+
 // === Tag 0: Console ===
 
 #[derive(FromCore)]
@@ -993,7 +995,7 @@ impl EffectHandler<CapturedOutput> for ExecHandler {
 
 // (GitHandler removed — use `run "git ..."` instead)
 
-// === Tag 8: Llm (LLM calls via Anthropic API) ===
+// === Tag 8: Llm (LLM calls — genai by default, OpenAI when TIDEPOOL_LLM_PROVIDER=openai) ===
 
 #[derive(FromCore)]
 enum LlmReq {
@@ -1003,23 +1005,67 @@ enum LlmReq {
     Structured(String, Value), // Value is the Schema ADT, decoded in handler
 }
 
+/// LLM backend selected at startup from TIDEPOOL_LLM_PROVIDER. The genai
+/// variant is the historical default and is byte-identical to prior behavior.
+#[derive(Clone)]
+enum LlmBackend {
+    Genai {
+        client: genai::Client,
+        model: String,
+        rt: tokio::runtime::Handle,
+    },
+    OpenAi(openai::OpenAiClient),
+}
+
+impl LlmBackend {
+    fn backend_kind(&self) -> &'static str {
+        match self {
+            LlmBackend::Genai { .. } => "genai",
+            LlmBackend::OpenAi(_) => "openai",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct LlmHandler {
-    client: genai::Client,
-    model: String,
+    backend: LlmBackend,
     call_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
-    rt: tokio::runtime::Handle,
 }
 
 const LLM_MAX_CALLS: u32 = 200;
 
 impl LlmHandler {
-    fn new(model: String) -> Self {
-        Self {
+    fn genai_backend(model: String) -> LlmBackend {
+        LlmBackend::Genai {
             client: genai::Client::default(),
             model,
-            call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             rt: tokio::runtime::Handle::current(),
+        }
+    }
+
+    /// Select the LLM backend from TIDEPOOL_LLM_PROVIDER (default: genai path).
+    /// If `openai` is requested but init fails (e.g. OPENAI_API_KEY unset), log
+    /// a warning and fall back to the default backend so the server still runs.
+    fn new(model: String) -> Self {
+        let provider = std::env::var("TIDEPOOL_LLM_PROVIDER").unwrap_or_default();
+        let backend = if provider.eq_ignore_ascii_case("openai") {
+            match openai::OpenAiClient::from_env(openai::resolve_model(&model)) {
+                Ok(c) => LlmBackend::OpenAi(c),
+                Err(e) => {
+                    tracing::warn!(
+                        "TIDEPOOL_LLM_PROVIDER=openai but OpenAI init failed ({}); \
+                         falling back to default LLM backend",
+                        e
+                    );
+                    Self::genai_backend(model)
+                }
+            }
+        } else {
+            Self::genai_backend(model)
+        };
+        Self {
+            backend,
+            call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -1052,36 +1098,47 @@ impl EffectHandler<CapturedOutput> for LlmHandler {
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, EffectError> {
         self.check_rate_limit()?;
-        match req {
-            LlmReq::Chat(prompt) => {
-                let req = genai::chat::ChatRequest::from_user(prompt);
-                let resp = self
-                    .rt
-                    .block_on(self.client.exec_chat(&self.model, req, None))
-                    .map_err(|e| EffectError::Handler(format!("LLM call failed: {}", e)))?;
-                let text = resp.first_text().unwrap_or("").to_string();
-                cx.respond(text)
-            }
-            LlmReq::Structured(prompt, schema_val) => {
-                let schema_json = tidepool_runtime::value_to_json(&schema_val, cx.table(), 0);
-                let json_spec = genai::chat::JsonSpec::new("structured_output", schema_json);
-                let opts = genai::chat::ChatOptions::default()
-                    .with_response_format(genai::chat::ChatResponseFormat::JsonSpec(json_spec));
-                let req = genai::chat::ChatRequest::from_user(format!(
-                    "{}\n\nRespond with ONLY valid JSON matching the provided schema. No markdown, no explanation.",
-                    prompt
-                ));
-                let resp = self
-                    .rt
-                    .block_on(self.client.exec_chat(&self.model, req, Some(&opts)))
-                    .map_err(|e| {
-                        EffectError::Handler(format!("LLM structured call failed: {}", e))
-                    })?;
-                let text = resp.first_text().unwrap_or("null");
-                let parsed: serde_json::Value =
-                    serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
-                cx.respond(parsed)
-            }
+        match &self.backend {
+            LlmBackend::Genai { client, model, rt } => match req {
+                LlmReq::Chat(prompt) => {
+                    let req = genai::chat::ChatRequest::from_user(prompt);
+                    let resp = rt
+                        .block_on(client.exec_chat(model, req, None))
+                        .map_err(|e| EffectError::Handler(format!("LLM call failed: {}", e)))?;
+                    let text = resp.first_text().unwrap_or("").to_string();
+                    cx.respond(text)
+                }
+                LlmReq::Structured(prompt, schema_val) => {
+                    let schema_json = tidepool_runtime::value_to_json(&schema_val, cx.table(), 0);
+                    let json_spec = genai::chat::JsonSpec::new("structured_output", schema_json);
+                    let opts = genai::chat::ChatOptions::default()
+                        .with_response_format(genai::chat::ChatResponseFormat::JsonSpec(json_spec));
+                    let req = genai::chat::ChatRequest::from_user(format!(
+                        "{}\n\nRespond with ONLY valid JSON matching the provided schema. No markdown, no explanation.",
+                        prompt
+                    ));
+                    let resp = rt
+                        .block_on(client.exec_chat(model, req, Some(&opts)))
+                        .map_err(|e| {
+                            EffectError::Handler(format!("LLM structured call failed: {}", e))
+                        })?;
+                    let text = resp.first_text().unwrap_or("null");
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
+                    cx.respond(parsed)
+                }
+            },
+            LlmBackend::OpenAi(client) => match req {
+                LlmReq::Chat(prompt) => {
+                    let text = client.chat(&prompt)?;
+                    cx.respond(text)
+                }
+                LlmReq::Structured(prompt, schema_val) => {
+                    let schema_json = tidepool_runtime::value_to_json(&schema_val, cx.table(), 0);
+                    let parsed = client.structured(&prompt, schema_json)?;
+                    cx.respond(parsed)
+                }
+            },
         }
     }
 }
@@ -1998,7 +2055,6 @@ mod tests {
         }
         t
     }
-
     /// Walk a Value and assert it's a valid Haskell cons-list ([] or : _ _).
     fn assert_is_haskell_list(val: &Value, table: &DataConTable) {
         match val {
@@ -2567,5 +2623,27 @@ mod tests {
         assert_eq!(result["name"], "test");
         assert_eq!(result["count"], 42);
         assert_eq!(result["active"], true);
+    }
+
+    #[tokio::test]
+    async fn test_llm_handler_backend_selection() {
+        // 1. Default (unset) -> genai
+        std::env::remove_var("TIDEPOOL_LLM_PROVIDER");
+        let handler = LlmHandler::new("model".to_string());
+        assert_eq!(handler.backend.backend_kind(), "genai");
+
+        // 2. OpenAI requested + key set -> openai
+        std::env::set_var("TIDEPOOL_LLM_PROVIDER", "openai");
+        std::env::set_var("OPENAI_API_KEY", "sk-dummy");
+        let handler = LlmHandler::new("gpt-4o".to_string());
+        assert_eq!(handler.backend.backend_kind(), "openai");
+
+        // 3. OpenAI requested but NO key -> fallback to genai
+        std::env::remove_var("OPENAI_API_KEY");
+        let handler = LlmHandler::new("gpt-4o".to_string());
+        assert_eq!(handler.backend.backend_kind(), "genai");
+
+        // Cleanup
+        std::env::remove_var("TIDEPOOL_LLM_PROVIDER");
     }
 }
