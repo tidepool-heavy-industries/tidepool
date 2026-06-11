@@ -346,4 +346,21 @@ if shouldProceed answer
 
 ### Adding new Prelude functions
 
-Polymorphic base functions going through typeclass dictionaries often crash — the JIT eagerly evaluates error branches in dictionary records. Shadow with monomorphic versions using primops directly (e.g., `rem` instead of `Integral` dict).
+Typeclass-dictionary polymorphism WORKS on the JIT — do not reflexively monomorphize.
+(Verified live 2026-06-11: custom classes, multi-param classes, GADT construction +
+type-indexed dispatch + dictionary use at refined types all pass. GHC specialization
+is enabled; lazy poison closures defuse error-branch dictionary slots — the old
+"dictionaries crash" rule is retired history.)
+
+Shadow with a monomorphic version only for:
+1. **Genuinely unsupported FFI** — `showDouble` (floatToDigits/Integer), `round`
+   (rintDouble), GMP beyond the add/sub shims. The shadow works around the FFI gap,
+   not the dictionary.
+2. **Ergonomics** — Pack/Len/Null/Slice-style Text+list polymorphism by design.
+
+One known dictionary bug (open): a GADT case using a dictionary method at TWO
+different refined types in sibling alts SIGSEGVs. 8-line repro:
+`data K a where { KInt :: K Int; KPrec :: Int -> K Double }` with sibling alts
+`show n` / `show d` — crashes on the `KPrec` path; removing either `show` fixes it.
+The non-GADT `Either Int Double` equivalent is fine. If you hit this shape, restructure
+to per-constructor helper functions until the emit bug is fixed.
