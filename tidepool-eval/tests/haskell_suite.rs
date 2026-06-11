@@ -161,6 +161,30 @@ fn collect_string(val: &Value, table: &DataConTable) -> String {
     result
 }
 
+/// Collect a Haskell List into a Vec<Value>.
+fn collect_list(val: &Value, table: &DataConTable) -> Vec<Value> {
+    let mut result = Vec::new();
+    let mut cur = val;
+    loop {
+        match cur {
+            Value::Con(id, fields) => {
+                let name = table.name_of(*id).unwrap();
+                if name == "[]" {
+                    break;
+                } else if name == ":" {
+                    assert_eq!(fields.len(), 2);
+                    result.push(fields[0].clone());
+                    cur = &fields[1];
+                } else {
+                    panic!("expected [] or (:), got {name}");
+                }
+            }
+            other => panic!("expected list cons, got {other:?}"),
+        }
+    }
+    result
+}
+
 /// Collect a Haskell List of Int into a Vec<i64>.
 fn collect_int_list(val: &Value, table: &DataConTable) -> Vec<i64> {
     let mut result = Vec::new();
@@ -798,4 +822,95 @@ fn text_dropwhilet_eta() {
     let table = table();
     let result = collect_text_list(&val, &table);
     assert_eq!(result, vec!["/world", "/bar", ""]);
+}
+
+// =============================================================================
+// pragma-uplift: extension smoke tests
+// =============================================================================
+
+#[test]
+fn t_lambda_case() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_lambdaCase.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let result = collect_text_list(&val, &table);
+    assert_eq!(result, vec!["n", "z", "p"]);
+}
+
+#[test]
+fn t_tuple_sections() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_tupleSections.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let list = collect_list(&val, &table);
+    assert_eq!(list.len(), 3);
+    for (i, v) in list.iter().enumerate() {
+        let fields = unwrap_tuple(v);
+        assert_eq!(fields.len(), 2);
+        assert_int(&fields[0], (i + 1) as i64, &table);
+        assert_bool(&fields[1], true, &table);
+    }
+}
+
+#[test]
+fn t_multi_way_if() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_multiWayIf.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    assert_eq!(collect_text(&val, &table), "pos");
+}
+
+#[test]
+fn t_record_wild_cards() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_recordWildCards.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let fields = unwrap_tuple(&val);
+    assert_eq!(fields.len(), 2);
+    assert_int(&fields[0], 42, &table);
+    assert_eq!(collect_text(&fields[1], &table), "hello");
+}
+
+#[test]
+fn t_named_field_puns() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_namedFieldPuns.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    assert_int(&val, 10, &table);
+}
+
+#[test]
+fn t_view_patterns() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_viewPatterns.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    assert_eq!(collect_text(&val, &table), "HELLO");
+}
+
+suite_int!(t_bangPatterns, 55);
+suite_int!(t_typeApplications, 5);
+suite_int!(t_blockArguments, 3);
+suite_int!(t_numericUnderscores, 1000000);
+
+#[test]
+fn t_multiline_strings() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_multilineStrings.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    // multiline string: """\n  multi\n  line\n  """
+    // GHC 9.12 MultilineStrings strips common indentation.
+    // Result seems to be "multi\nline" (length 10)
+    assert_int(&val, 10, &table);
+}
+
+suite_int!(t_deriveFunctor, 42);
+suite_int!(t_deriveFoldable, 42);
+
+#[test]
+fn t_derive_traversable() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_deriveTraversable.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let inner = unwrap_maybe(&val, &table).expect("expected Just");
+    assert_int(&inner, 42, &table);
 }
