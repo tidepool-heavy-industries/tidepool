@@ -70,6 +70,8 @@ import qualified Data.List
 import qualified Data.Maybe
 import qualified Numeric
 import qualified Tidepool.GhcPipeline
+import qualified Debug.Trace
+import System.IO.Unsafe (unsafePerformIO)
 
 data FlatNode
   = NVar !Word64
@@ -1079,6 +1081,10 @@ translateHead = \case
       rhs' <- case isJoinId_maybe b of
         Just arity -> do
           let (params, joinBody) = collectValueBinders arity rhs
+          when joinrecDebugEnabled $
+            Debug.Trace.traceM ("[313-joinrec] " ++ occNameString (nameOccName (idName b))
+              ++ " varId=" ++ showHex' (varId b)
+              ++ " params=" ++ show (map (showHex' . varId) params))
           joinBodyIdx <- translate joinBody
           -- Build nested NLam chain: \p1 -> \p2 -> ... -> joinBody
           foldM (\inner p -> emitNode $ NLam (varId p) inner)
@@ -1833,6 +1839,16 @@ isJoinId_maybe :: Id -> Maybe Int
 isJoinId_maybe v = case idJoinPointHood v of
   JoinPoint n -> Just n
   NotJoinPoint -> Nothing
+
+-- | True when TIDEPOOL_JOINREC_DEBUG is set (to any value, matching the
+-- Rust knobs' is_ok() semantics). Checked once at startup via unsafePerformIO.
+{-# NOINLINE joinrecDebugEnabled #-}
+joinrecDebugEnabled :: Bool
+joinrecDebugEnabled = Data.Maybe.isJust $ unsafePerformIO $ System.Environment.lookupEnv "TIDEPOOL_JOINREC_DEBUG"
+
+-- | Hex-formatting helper for debug output (used by TIDEPOOL_JOINREC_DEBUG).
+showHex' :: Word64 -> String
+showHex' w = "0x" ++ Numeric.showHex w ""
 
 -- | Check if a jump to a given VarId occurs under a Lam in the expression.
 -- When this is true, compiling the join point as a Cranelift block won't work

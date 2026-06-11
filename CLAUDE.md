@@ -177,6 +177,26 @@ cargo install --path tidepool   # Install the binary
 tidepool                        # Run (expects MCP JSON-RPC on stdio)
 ```
 
+### Diagnostics
+
+All debug instrumentation is env-gated, OFF by default. Knob → what it shows → when to reach for it:
+
+| Knob | Layer | What it shows | Reach for it when |
+|------|-------|---------------|-------------------|
+| `TIDEPOOL_TRACE=calls` | JIT runtime | Every closure call: name, arg, result (`tidepool-codegen/src/debug.rs`) | Tracing which function received/returned a bad value (e.g. wrong type at a case dispatch) |
+| `TIDEPOOL_TRACE=heap` | JIT runtime | `calls` + heap-object validation before use | Suspected heap corruption / bad pointer breadcrumbs |
+| `TIDEPOOL_TRACE_EFFECTS=1` | Effect machine | Effect dispatch at the JIT↔Rust boundary | Effect results arriving wrong / lazy-result suspicion |
+| `TIDEPOOL_LAZY_RESULTS=0` | Effect machine | Kill-switch: disables lazy effect results (typed Stream/List channel) | Bisecting whether a bug is in the lazy-results path |
+| `TIDEPOOL_DUMP_CLOSED=<needle>` | Haskell extract | Dumps closed Core for bindings whose binder name matches needle | Inspecting what Core the JIT actually receives for a binding |
+| `TIDEPOOL_VARID_AUDIT=1` | Haskell extract | VarId collision report (distinct binders → same 64-bit id) | SIGILL/case-trap hunts; ruling out id collisions |
+| `TIDEPOOL_VARID_AUDIT=<hex>,<hex>` | Haskell extract | Resolves specific VarIds (e.g. `lam_binder` values from `TIDEPOOL_TRACE=calls`) to source names + enclosing top-level binder | Naming the function a JIT trace implicates |
+| `TIDEPOOL_JOINREC_DEBUG=1` | Haskell extract | joinrec-translation forensics (the `[313-joinrec]` spew from the #313 hunt) | Join-point conversion bugs (jumps compiled as calls, wrong continuation) |
+| `TIDEPOOL_IFACE_DEBUG=1` | Haskell extract | `[fat-iface]` interface-loading trace | Missing unfoldings / "unresolved external" mysteries |
+| `TIDEPOOL_FP_DEBUG=1` | Runtime cache | Binary-fingerprint memo keys + sidecar hit/miss (`tidepool-runtime/src/cache.rs`) | Stale-cache suspicion. Note: kernel ctime has ~3ms granularity — sub-tick writes legitimately memo-hit |
+| `NONCE=<x>` / `FORCE=1` | `repro313` test | Cache-busting fresh compile / forces Int result inside the user continuation | Re-running the #313 regression gate against a fresh compile |
+
+Always-on breadcrumbs (`[CASE TRAP]`, `[BUG]` bad-pointer lines on stderr) stay unconditional: they fire only on actual compiler bugs, which must be loud. If you see one, that's a reportable codegen bug, not user error.
+
 ---
 
 ## Key Decisions Reference

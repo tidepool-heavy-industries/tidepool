@@ -29,6 +29,7 @@ import Data.Foldable (foldl')
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
 import qualified Data.Map.Strict as Map
 import System.IO (hPutStrLn, stderr)
+import System.Environment (lookupEnv)
 
 -- | Cache of deserialized fat interface Core, keyed by Module.
 -- Each module's extra-decls are deserialized at most once.
@@ -74,12 +75,16 @@ loadModuleExtraDecls hscEnv modl = do
   case result of
     Right m -> return m
     Left (e :: SomeException) -> do
-      hPutStrLn stderr $
-        "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": exception: " ++ show e
+      ifaceDbg <- lookupEnv "TIDEPOOL_IFACE_DEBUG"
+      case ifaceDbg of
+        Just _ -> hPutStrLn stderr $
+          "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": exception: " ++ show e
+        Nothing -> pure ()
       return Map.empty
 
 loadModuleExtraDeclsUnsafe :: HscEnv -> Module -> IO (Map.Map Name CoreBind)
 loadModuleExtraDeclsUnsafe hscEnv modl = do
+  ifaceDbg <- lookupEnv "TIDEPOOL_IFACE_DEBUG"
   let doc = text "tidepool fat-iface lookup"
       -- findAndReadIface wants InstalledModule (GenModule UnitId)
       installedMod = mkModule (toUnitId (moduleUnit modl)) (moduleName modl)
@@ -87,22 +92,28 @@ loadModuleExtraDeclsUnsafe hscEnv modl = do
   readResult <- findAndReadIface hscEnv doc installedMod modl NotBoot
   case readResult of
     Failed _err -> do
-      hPutStrLn stderr $
-        "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": could not read .hi file"
+      case ifaceDbg of
+        Just _ -> hPutStrLn stderr $
+          "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": could not read .hi file"
+        Nothing -> pure ()
       return Map.empty
     Succeeded (iface, _loc) ->
       case mi_extra_decls iface of
         Nothing -> do
-          hPutStrLn stderr $
-            "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": no mi_extra_decls"
+          case ifaceDbg of
+            Just _ -> hPutStrLn stderr $
+              "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": no mi_extra_decls"
+            Nothing -> pure ()
           return Map.empty
         Just ifaceBinds -> do
           coreBinds <- initIfaceCheck doc hscEnv $ do
             typeEnvRef <- liftIO $ newIORef emptyTypeEnv
             initIfaceLcl modl doc NotBoot $
               tcTopIfaceBindings typeEnvRef ifaceBinds
-          hPutStrLn stderr $
-            "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": loaded " ++ show (length coreBinds) ++ " bindings"
+          case ifaceDbg of
+            Just _ -> hPutStrLn stderr $
+              "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": loaded " ++ show (length coreBinds) ++ " bindings"
+            Nothing -> pure ()
           return (bindingsToMap coreBinds)
 
 -- | Index CoreBinds into a Name→CoreBind map.
