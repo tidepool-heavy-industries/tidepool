@@ -914,3 +914,85 @@ fn t_derive_traversable() {
     let inner = unwrap_maybe(&val, &table).expect("expected Just");
     assert_int(&inner, 42, &table);
 }
+
+// =============================================================================
+// [fmt|...|] quasi-quoter: render-coerced holes (arbitrary expressions)
+//
+// Each hole's body is parsed by the vendored GHC parser and wrapped in
+// `render` (Tidepool.Render), so holes accept any Render-able type and
+// arbitrary expressions (operators, application). These assert the rendered
+// Text on the interpreter; haskell_suite_differential (tidepool-codegen)
+// re-runs the same fixtures on the JIT and checks interpreter ≡ JIT.
+// =============================================================================
+
+fn assert_fmt(cbor: &[u8], expected: &str) {
+    let val = eval_fixture(cbor);
+    let table = table();
+    assert_eq!(collect_text(&val, &table), expected);
+}
+
+#[test]
+fn qq_fmt_int() {
+    assert_fmt(
+        include_bytes!("../../haskell/test/suite_cbor/qq_fmt_int.cbor"),
+        "count: 3",
+    );
+}
+
+#[test]
+fn qq_fmt_op() {
+    assert_fmt(
+        include_bytes!("../../haskell/test/suite_cbor/qq_fmt_op.cbor"),
+        "next: 42",
+    );
+}
+
+#[test]
+fn qq_fmt_applied() {
+    assert_fmt(
+        include_bytes!("../../haskell/test/suite_cbor/qq_fmt_applied.cbor"),
+        "shout: HI!",
+    );
+}
+
+#[test]
+fn qq_fmt_double() {
+    assert_fmt(
+        include_bytes!("../../haskell/test/suite_cbor/qq_fmt_double.cbor"),
+        "val: 3.5",
+    );
+}
+
+#[test]
+fn qq_fmt_bool() {
+    assert_fmt(
+        include_bytes!("../../haskell/test/suite_cbor/qq_fmt_bool.cbor"),
+        "flag: True",
+    );
+}
+
+#[test]
+fn qq_fmt_char() {
+    assert_fmt(
+        include_bytes!("../../haskell/test/suite_cbor/qq_fmt_char.cbor"),
+        "ch: 'x'",
+    );
+}
+
+// Text-hole regression (render @Text = id).
+#[test]
+fn qq_fmt_basic() {
+    assert_fmt(
+        include_bytes!("../../haskell/test/suite_cbor/qq_fmt_basic.cbor"),
+        "user: alice",
+    );
+}
+
+// Escape regression: `\{` -> `{`, bare `}` literal.
+#[test]
+fn qq_fmt_escape() {
+    assert_fmt(
+        include_bytes!("../../haskell/test/suite_cbor/qq_fmt_escape.cbor"),
+        "use {braces} for holes and } is literal",
+    );
+}

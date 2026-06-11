@@ -7,6 +7,10 @@ import qualified Data.Text as T
 -- qq-suite: regen now needs `--include lib --target-module-only
 -- --output-dir test/suite_cbor` (see CLAUDE.md / plans/qq-spike.md)
 import Tidepool.QQ (fmt, j)
+-- render lives in lens-free Tidepool.Render (re-exported by Tidepool.Prelude);
+-- Suite.hs cannot import Tidepool.Prelude here (it pulls Control.Lens, which
+-- the --all-closed extract session cannot see), so import render directly.
+import Tidepool.Render (render)
 -- Value module directly, NOT the Tidepool.Aeson facade: the facade
 -- re-exports Tidepool.Aeson.Lens -> Control.Lens, which the extract GHC
 -- session cannot see (lens is not a boot package), so the facade kills
@@ -952,6 +956,40 @@ qq_fmt_escape = [fmt|use \{braces} for holes and } is literal|]
 qq_fmt_multiline :: T.Text
 qq_fmt_multiline = [fmt|line one
 line two|]
+
+-- Render-coerced holes: arbitrary expressions parsed by the vendored GHC
+-- parser, each wrapped in `render` (Tidepool.Render) so the hole need not be
+-- Text already.
+
+-- Int hole (render @Int): "count: 3"
+qq_fmt_int :: T.Text
+qq_fmt_int = [fmt|count: {count}|]
+  where count = 3 :: Int
+
+-- Operator hole (render @Int over an arithmetic expression): "next: 42"
+qq_fmt_op :: T.Text
+qq_fmt_op = [fmt|next: {n + 1}|]
+  where n = 41 :: Int
+
+-- Applied + operator hole (Text result, render @Text = id): "shout: HI!"
+qq_fmt_applied :: T.Text
+qq_fmt_applied = [fmt|shout: {T.toUpper s <> T.pack "!"}|]
+  where s = T.pack "hi" :: T.Text
+
+-- Double hole (render @Double → ShowDoubleAddr): "val: 3.5"
+qq_fmt_double :: T.Text
+qq_fmt_double = [fmt|val: {d}|]
+  where d = 3.5 :: Double
+
+-- Bool hole (render @Bool): "flag: True"
+qq_fmt_bool :: T.Text
+qq_fmt_bool = [fmt|flag: {b}|]
+  where b = True :: Bool
+
+-- Char hole (render @Char, via show → quoted): "ch: 'x'"
+qq_fmt_char :: T.Text
+qq_fmt_char = [fmt|ch: {c}|]
+  where c = 'x' :: Char
 
 -- ---- qq-suite: json section (owner: leaf qq-json) ----
 

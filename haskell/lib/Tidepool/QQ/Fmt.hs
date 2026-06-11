@@ -4,7 +4,7 @@
 -- == Grammar
 --
 -- @
--- [fmt| literal text with {antiquote} holes |]
+-- [fmt| literal text with {expr} holes |]
 -- @
 --
 -- The result type is @Data.Text.Text@.  Literal segments are wrapped with
@@ -14,27 +14,22 @@
 --
 -- == Antiquote expressions
 --
--- Inside @{...}@ the mini-grammar is:
+-- Inside @{...}@ is an arbitrary Haskell expression, parsed by the GHC parser
+-- (vendored 'Tidepool.QQ.HsMeta.Parse.parseExp').  Operators, function
+-- application, qualified names, sections, literals — anything the parser
+-- accepts.  Names are resolved at the SPLICE SITE (every parsed 'TH.Name' is
+-- built with 'Language.Haskell.TH.mkName'), so the imports in scope at the
+-- call site apply.
 --
--- @
--- expr := atom atom*
--- atom := qualified-varid | varid | integer | \'(\' expr \')\'
--- @
+-- Each hole expression is wrapped in @render@ (the 'Tidepool.Prelude.Render'
+-- single-method coercion class), so holes need not already be @Text@: @Int@,
+-- @Double@, @Bool@, @Char@, @String@ and @Text@ all interpolate directly.
+-- @{show x}@ still works — its @Text@ result renders as itself.  @render@ is
+-- resolved at the splice site too, so it must be in scope at the call site
+-- (the MCP preamble and 'Tidepool.Prelude' export it).
 --
--- Juxtaposition is left-nested function application ('AppE').
--- A @varid@ matches @[a-z_][A-Za-z0-9_\']*@; a @qualified-varid@ is one or
--- more @Conid.@ prefixes followed by a varid (e.g. @T.strip@,
--- @Data.Text.toUpper@).  Names are resolved at the SPLICE SITE via
--- 'Language.Haskell.TH.mkName', so the imports in scope at the call site
--- apply.
---
--- Antiquoted sub-expressions must be 'Data.Text.Text'-typed at the splice
--- site.  The quoter performs no implicit conversion.  In the tidepool eval
--- dialect @show@ returns @Text@, so @{show x}@ is valid.
---
--- Anything outside the grammar (operators, lambdas, string literals, record
--- syntax, empty holes) causes a compile-time 'fail'; factor those into a
--- @where@-bound helper and reference the helper name from the hole.
+-- A parse failure inside a hole is a compile-time 'fail' that quotes the hole
+-- text and the GHC parser's line\/column and message.
 --
 -- == Escapes in literal text
 --
@@ -58,8 +53,9 @@ module Tidepool.QQ.Fmt (fmt) where
 
 import Language.Haskell.TH        (Exp (..), Lit (..), Q, mkName)
 import Language.Haskell.TH.Quote  (QuasiQuoter (..))
-import Data.Char                   (isAlpha, isAlphaNum, isDigit, isSpace)
+import Data.Char                  (isSpace)
 import qualified Data.Text as T
+import Tidepool.QQ.HsMeta.Parse   (parseExp)
 
 -- | @[fmt|...|]@: quasi-quoted 'Data.Text.Text' interpolation.
 --
@@ -139,85 +135,23 @@ lexHole s = case break (== '}') s of
     (h, _:r) -> return (h, r)
 
 ------------------------------------------------------------------------
--- Antiquote parser
+-- Antiquote parser (delegates to the vendored GHC parser)
 ------------------------------------------------------------------------
 
+-- | Parse a hole's body as an arbitrary Haskell expression and wrap the
+--   result in @render@ so the hole may be of any 'Render'-able type.  The
+--   parsed expression is parenthesized first so operator holes (e.g.
+--   @{n + 1}@) bind as a whole argument to @render@.
 parseHole :: String -> Q Exp
 parseHole raw
-  | null t    = fail "fmt: empty antiquote '{}' — provide an expression or a where-bound name"
-  | otherwise = do
-      (e, r) <- parseExpr t
-      if null (trim r)
-        then return e
-        else fail ( "fmt: unexpected text in antiquote after expression: "
-                 ++ show (trim r)
-                 ++ " — factor operators or complex expressions into a where-bound helper" )
+  | null t    = fail "fmt: empty antiquote '{}' — provide an expression"
+  | otherwise = case parseExp t of
+      Left (line, col, msg) ->
+        fail $ "fmt: cannot parse antiquote " ++ show t
+            ++ " (" ++ show line ++ ":" ++ show col ++ "): " ++ msg
+      Right e -> return (AppE (VarE (mkName "render")) (ParensE e))
   where
     t = trim raw
-
--- | Parse an expression: one or more atoms assembled as left-nested 'AppE'.
-parseExpr :: String -> Q (Exp, String)
-parseExpr s = do
-    (a, r) <- parseAtom s
-    parseApps a (trim r)
-
--- | Accumulate further atoms as application arguments.
-parseApps :: Exp -> String -> Q (Exp, String)
-parseApps acc []     = return (acc, [])
-parseApps acc s@(c : _)
-  | couldStartAtom c = do
-      (a, r) <- parseAtom s
-      parseApps (AppE acc a) (trim r)
-  | otherwise        = return (acc, s)
-
--- | True when @c@ could be the first character of an atom.
-couldStartAtom :: Char -> Bool
-couldStartAtom '(' = True
-couldStartAtom c   = isAlpha c || c == '_' || isDigit c
-
--- | Parse exactly one atom, failing in Q when none matches.
-parseAtom :: String -> Q (Exp, String)
-parseAtom [] = fail "fmt: expected an expression atom but found end of antiquote"
-parseAtom ('(' : r) = do
-    (e, r2) <- parseExpr (trim r)
-    case trim r2 of
-      ')' : r3 -> return (e, r3)
-      _        -> fail "fmt: unclosed '(' in antiquote expression"
-parseAtom s = case parseAtomPure s of
-    Left  msg    -> fail ("fmt: " ++ msg
-                          ++ " — use a where-bound helper for complex expressions")
-    Right result -> return result
-
--- | Parse one atom without Q effects.
-parseAtomPure :: String -> Either String (Exp, String)
-parseAtomPure []     = Left "unexpected end of expression"
-parseAtomPure s@(c : _)
-  | isDigit c =
-      let (ds, r) = span isDigit s
-      in Right (LitE (IntegerL (read ds)), r)
-  | isAlpha c || c == '_' =
-      let (name, r) = spanQualified s
-      in Right (VarE (mkName name), r)
-  | otherwise =
-      Left ("unexpected character " ++ show c ++ " in antiquote")
-
-------------------------------------------------------------------------
--- Name lexers
-------------------------------------------------------------------------
-
--- | Span a possibly-qualified name: @Conid.Conid.varid@.
-spanQualified :: String -> (String, String)
-spanQualified s =
-    let (seg, r) = spanIdent s
-    in case r of
-         '.' : r2@(c : _) | isAlpha c || c == '_' ->
-             let (rest, r3) = spanQualified r2
-             in (seg ++ '.' : rest, r3)
-         _ -> (seg, r)
-
--- | Span one identifier segment: @[A-Za-z_][A-Za-z0-9_\']*@.
-spanIdent :: String -> (String, String)
-spanIdent = span (\c -> isAlphaNum c || c == '_' || c == '\'')
 
 ------------------------------------------------------------------------
 -- Utilities
