@@ -1305,45 +1305,36 @@ fn cap_boundary_clean_error() {
 }
 
 // ===========================================================================
-// #313 named repro. Run with:
-//   cargo test -p tidepool-runtime --test proptest_lazy_consumption -- \
-//     --ignored --exact repro_313_lib_t7_case_trap --nocapture
+// #313 regression test (FIXED 2026-06-10).
 //
 // MATRIX CELL: TupleStringList × (lib-module consumer `t7`)
 //   t7 = \(c,o,e) -> filter (\l -> len l > 1) (lines e) <> [pack (show c), o]
 //        defined in `.tidepool/lib/Probe.hs` (NOT inline).
-// OBSERVED:  yield error — "case trap: scrutinee constructor not among case
-//            alternatives (tag mismatch)" — IDENTICAL under lazy-ON and
-//            lazy-OFF.
-// EXPECTED:  ["item-0", … , "item-{n-1}", "0", "stdout"]  (the inline-t7
-//            reference, which this harness confirms is produced when the
-//            SAME source is written inline — see `repro_313_boundary`).
-// CLASS:     B2 (runtime trap where the reference succeeds).
-// COMPONENT: cross-module unfolding of a `.tidepool/lib` function. NOT the
-//            lazy effect-results machinery — every inline equivalent (incl.
-//            the exact t7 body) is clean, and both lazy modes trap
-//            identically, so the lazy channel is exonerated. The trigger is
-//            the module boundary × t7's use of `show @Int` / `<>` / `pack`
-//            (typeclass dictionaries resolved through Probe's `.hi`
-//            unfolding). Sibling lib fns t1/t2/t5/t6 (Prelude-only:
-//            lines/filter/map/isPrefixOf) do NOT trap.
-// SEED:      deterministic — (fn=t7, Producer=TupleStringList, n=4); no
-//            random proptest seed (the lazy property suite found zero
-//            divergences, so there is no `.proptest-regressions` entry).
+// WAS:       yield error — "case trap: scrutinee constructor not among case
+//            alternatives (tag mismatch)" — identical under lazy-ON/OFF, only
+//            when t7 was imported from the lib module (inline-identical source
+//            was clean).
+// ROOT CAUSE: VarId collision between top-level simplifier floats of
+//            different modules. `Translate.localVarId` hashes
+//            (occName, unique-key); GHC unique keys are per-module, so Probe's
+//            tuple-unpacking continuation `k_X1` and the preamble's unrelated
+//            `k_X1 :: [Text] -> ...` got the same VarId. The serialized
+//            program resumed `run`'s continuation through the WRONG `k_X1`,
+//            casing the raw (Int,Text,Text) response tuple as a list:
+//            [CASE TRAP] Con: tag=(,,) num_fields=3, expected=[[],( : )].
+// FIX:       `GhcPipeline.externalizeInternalTops` — internal top-level
+//            binders get module-qualified EXTERNAL names with the unique key
+//            baked into the OccName, so `stableVarId` is globally unique.
+// NOW ASSERTS: the documented expected value under both lazy modes.
 #[test]
-#[ignore = "BUG #313: lib-module t7 cross-module unfolding case-traps; inline-identical source is clean"]
-fn repro_313_lib_t7_case_trap() {
-    let on = spawn_lib_probe("t7", "[Text]", Producer::TupleStringList, 4, true);
-    let off = spawn_lib_probe("t7", "[Text]", Producer::TupleStringList, 4, false);
-    for (label, o) in [("lazy-ON", &on), ("lazy-OFF", &off)] {
-        match o {
-            WorkerOutcome::Err(e) if e.contains("case trap") => {
-                eprintln!("{label}: reproduced #313 — {}", first_line(e));
-            }
-            other => panic!(
-                "{label}: expected #313 case trap, got {other:?}\n\
-                 (if this no longer traps, #313 may be FIXED — update/retire this repro)"
-            ),
+fn regression_313_lib_t7() {
+    let want: serde_json::Value =
+        serde_json::json!(["item-0", "item-1", "item-2", "item-3", "0", "stdout"]);
+    for lazy in [true, false] {
+        let label = if lazy { "lazy-ON" } else { "lazy-OFF" };
+        match spawn_lib_probe("t7", "[Text]", Producer::TupleStringList, 4, lazy) {
+            WorkerOutcome::Ok(got) => assert_eq!(got, want, "{label}: lib t7 value"),
+            other => panic!("{label}: #313 regressed — expected {want}, got {other:?}"),
         }
     }
 }
@@ -1353,7 +1344,6 @@ fn repro_313_lib_t7_case_trap() {
 /// it localizes the bug to cross-module compilation, exonerating both the
 /// lazy-results channel and the t7 shape itself.
 #[test]
-#[ignore = "BUG #313 control: inline-identical t7 is clean (localizes the bug to the module boundary)"]
 fn repro_313_inline_t7_is_clean() {
     let case = mk(Producer::TupleStringList, Consumer::TupleAllFields, 4, false);
     let want = reference(&case);

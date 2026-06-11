@@ -6,9 +6,16 @@ import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Core.Ppr (pprCoreBindings)
 import GHC.Driver.Session (updOptLevel, gopt_set, gopt_unset)
 import GHC.Unit.Module.ModGuts (ModGuts(..))
-import GHC.Core (CoreBind)
+import GHC.Core (CoreBind, Bind(..), Expr(..), Alt(..))
 import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext)
+import GHC.Types.Id (idName)
+import GHC.Types.Name (nameOccName, nameUnique, mkExternalName)
+import GHC.Types.Name.Occurrence (mkOccName, occNameSpace, occNameString)
+import GHC.Types.Var (setVarName)
+import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
+import GHC.Types.Unique (getKey)
+import Data.Maybe (fromMaybe)
 import System.Process (readProcess)
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName)
@@ -73,7 +80,7 @@ runPipeline path includes = do
       let tcGblEnv = fst (tm_internals_ typechecked)
       desugared <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
       simplified <- liftIO $ core2core hscEnv desugared
-      return simplified
+      return (externalizeInternalTops simplified)
     -- Merge: dependency module bindings first, target module last
     let targetModName = capitalize (takeBaseName path)
         isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
@@ -94,6 +101,61 @@ runPipeline path includes = do
 capitalize :: String -> String
 capitalize [] = []
 capitalize (c:cs) = toUpper c : cs
+
+-- | #313 fix: disambiguate top-level simplifier floats across modules.
+--
+-- Top-level binders with INTERNAL names (floats like @k_X1@, @$wk_snOX@) keep
+-- per-module uniques. `runPipeline` concatenates several modules' bindings for
+-- translation, so (occName, unique-key) pairs collide across modules — and
+-- @Translate.localVarId@ hashes exactly that pair. Two distinct floats can
+-- then receive the same VarId and shadow each other in the serialized program.
+-- Observed as #313: Probe's tuple-unpacking continuation @k_X1@ resolved to
+-- the preamble's unrelated @k_X1 :: [Text] -> ...@, sending the raw effect
+-- tuple into a list case → CASE TRAP.
+--
+-- Fix: give every internal top-level binder an EXTERNAL name qualified by its
+-- defining module, with the unique key baked into the OccName
+-- (@k@ → @Probe.k_u8214565720323785735@), so @Translate.stableVarId@ yields a
+-- globally unique, deterministic VarId. Internal names cannot be referenced
+-- from other modules' ModGuts, so substituting binder + occurrences within the
+-- module is complete. Nested binders are untouched: their uniques cannot
+-- collide with top-level uniques of the same module, and cross-module nested
+-- references are lexically impossible.
+externalizeInternalTops :: ModGuts -> ModGuts
+externalizeInternalTops guts = guts { mg_binds = map goTop (mg_binds guts) }
+  where
+    m = mg_module guts
+    topBinders = concatMap binders (mg_binds guts)
+      where binders (NonRec b _) = [b]
+            binders (Rec ps)     = map fst ps
+    fixes = mkVarEnv [ (v, externalize v)
+                     | v <- topBinders
+                     , not (isExternalName (idName v)) ]
+    externalize v =
+      let n    = idName v
+          u    = nameUnique n
+          occ  = nameOccName n
+          occ' = mkOccName (occNameSpace occ)
+                           (occNameString occ ++ "_u" ++ show (getKey u))
+      in setVarName v (mkExternalName u m occ' (nameSrcSpan n))
+    sub v = fromMaybe v (lookupVarEnv fixes v)
+    goTop (NonRec b rhs) = NonRec (sub b) (goExpr rhs)
+    goTop (Rec ps)       = Rec [ (sub b, goExpr rhs) | (b, rhs) <- ps ]
+    -- Substitute occurrences only; nested binders keep their names.
+    goBind (NonRec b rhs) = NonRec b (goExpr rhs)
+    goBind (Rec ps)       = Rec [ (b, goExpr rhs) | (b, rhs) <- ps ]
+    goExpr e = case e of
+      Var v            -> Var (sub v)
+      Lit _            -> e
+      App f a          -> App (goExpr f) (goExpr a)
+      Lam b body       -> Lam b (goExpr body)
+      Let b body       -> Let (goBind b) (goExpr body)
+      Case s b t alts  -> Case (goExpr s) b t
+                            [ Alt c bs (goExpr rhs) | Alt c bs rhs <- alts ]
+      Cast e' co       -> Cast (goExpr e') co
+      Tick t e'        -> Tick t (goExpr e')
+      Type _           -> e
+      Coercion _       -> e
 
 dumpCore :: [CoreBind] -> String
 dumpCore binds = renderWithContext defaultSDocContext (pprCoreBindings binds)

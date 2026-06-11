@@ -89,6 +89,22 @@ property:
 
 ## #313 — reproduction + boundary characterization
 
+> **STATUS UPDATE (2026-06-10, same day): FIXED.** The localization below led
+> straight to the root cause: a **VarId collision between top-level simplifier
+> floats of different modules**. `Translate.localVarId` hashes
+> `(occName, unique-key)`, and GHC unique keys are per-module-compilation —
+> so Probe's tuple-unpacking continuation `k_X1` and the eval preamble's
+> unrelated `k_X1 :: [Text] -> …` received the SAME VarId when
+> `runPipeline` concatenated both modules' binds. The serialized program then
+> resumed `run`'s continuation through the wrong `k_X1`, casing the raw
+> `(Int,Text,Text)` response tuple as a list — the observed
+> `[CASE TRAP] Con: tag=(,,) num_fields=3, expected=[[], (:)]`.
+> Fix: `GhcPipeline.externalizeInternalTops` gives internal top-level binders
+> module-qualified external names with the unique key baked into the OccName,
+> making `stableVarId` globally unique. The `#[ignore]`d repro is now the
+> active `regression_313_lib_t7` (asserts the correct value, both lazy modes);
+> `repro_313_inline_t7_is_clean` is active as its control.
+
 **#313 reproduces, and is now sharply localized.** It is **NOT** a
 lazy-effect-results bug and **NOT** a partial-consumption bug.
 
