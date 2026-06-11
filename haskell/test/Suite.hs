@@ -791,3 +791,81 @@ round_negative_half = round (-2.5 :: Double)
 -- ---- qq-suite: fmt section (owner: leaf qq-fmt) ----
 
 -- ---- qq-suite: json section (owner: leaf qq-json) ----
+
+-- One-liner sanity: a bare scalar.
+qq_j_scalar :: Value
+qq_j_scalar = [j|null|]
+
+-- Nested object/array with string escapes, negative & fractional numbers,
+-- bools and null; no antiquotes (pure constructor application).
+qq_j_build :: Value
+qq_j_build = [j|
+  { "name": "tide\npool"
+  , "count": -3
+  , "ratio": 2.5
+  , "items": [1, 2, 3]
+  , "active": true
+  , "missing": null
+  , "nested": {"deep": [false, "x\u00e9"]}
+  }
+|]
+
+-- Both antiquote forms over where-bound Int/Text values (exercises toJSON).
+qq_j_anti :: Value
+qq_j_anti = [j|{"id": $x, "upper": {T.toUpper name}}|]
+  where
+    x :: Int
+    x = 7
+    name :: T.Text
+    name = T.pack "tide"
+
+-- Pattern side: open-world object match binding one key, then unwrap.
+qq_j_pat_extract :: T.Text
+qq_j_pat_extract =
+  case built of
+    [j|{"name": $n}|] -> case n of
+      String s -> s
+      _        -> T.pack "?"
+    _ -> T.pack "no-match"
+  where
+    built :: Value
+    built = [j|{"name": "river", "size": 4}|]
+
+-- Pattern side: literal leaves (number + string + null) with a failing first
+-- arm that falls through to the matching arm.
+qq_j_pat_literal :: Bool
+qq_j_pat_literal =
+  case [j|[1, "two", null]|] of
+    [j|[1, "three", null]|] -> False
+    [j|[1, "two", null]|]   -> True
+    _                       -> False
+
+-- Pattern side: fixed-prefix array match on a longer array; combine binders.
+qq_j_pat_array :: Int
+qq_j_pat_array =
+  case [j|[10, 20, 30, 40]|] of
+    [j|[$a, $b, ...]|] -> case (a, b) of
+      (Number da, Number db) -> if da < db then 1 else 0
+      _                      -> -1
+    _ -> 0
+
+-- Pattern side: nested object -> array -> element, open-world throughout.
+qq_j_pat_nested :: T.Text
+qq_j_pat_nested =
+  case nested of
+    [j|{"user": {"tags": [$first, ...]}}|] -> case first of
+      String s -> s
+      _        -> T.pack "?"
+    _ -> T.pack "no-match"
+  where
+    nested :: Value
+    nested = [j|{"user": {"tags": ["alpha", "beta"], "id": 1}}|]
+
+-- Pattern side: open-world: one-key pattern matches a three-key object.
+qq_j_pat_open :: Bool
+qq_j_pat_open =
+  case [j|{"a": 1, "b": 2, "c": 3}|] of
+    [j|{"b": $v}|] -> case v of
+      Number d -> d == 2.0
+      _        -> False
+    _ -> False
