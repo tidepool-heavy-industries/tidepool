@@ -6,9 +6,68 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use tidepool_repr::*;
 
-/// Generate a random well-typed CoreExpr.
+/// Selection weights for each `CoreFrame` variant in [`gen_expr`].
+///
+/// The defaults reproduce the historical hardcoded `prop_oneof!` weights
+/// exactly, so [`arb_core_expr`] / [`arb_ground_expr`] keep their established
+/// depth-3 distribution. [`arb_core_expr_weighted`] overrides selected fields.
+#[derive(Clone, Copy, Debug)]
+struct Weights {
+    leaf: u32,
+    app: u32,
+    lam: u32,
+    letnonrec: u32,
+    letrec: u32,
+    case: u32,
+    con: u32,
+    join: u32,
+    primop: u32,
+}
+
+impl Default for Weights {
+    fn default() -> Self {
+        Weights {
+            leaf: 3,
+            app: 5,
+            lam: 2,
+            letnonrec: 2,
+            letrec: 1,
+            case: 2,
+            con: 2,
+            join: 1,
+            primop: 1,
+        }
+    }
+}
+
+/// Generate a random well-typed CoreExpr at the default depth (3).
 pub fn arb_core_expr() -> impl Strategy<Value = RecursiveTree<CoreFrame<usize>>> {
-    arb_simple_type().prop_flat_map(|ty| arb_typed_expr(ty, 3)) // depth limit reduced to 3
+    arb_core_expr_depth(3)
+}
+
+/// Generate a random well-typed CoreExpr at an arbitrary `depth`.
+///
+/// `arb_core_expr_depth(3)` is observationally identical to [`arb_core_expr`].
+pub fn arb_core_expr_depth(depth: u32) -> impl Strategy<Value = RecursiveTree<CoreFrame<usize>>> {
+    arb_simple_type().prop_flat_map(move |ty| arb_typed_expr(ty, depth))
+}
+
+/// Generate a CoreExpr at `depth` with custom weights biasing Join, LetRec,
+/// and Case generation. All other variant weights keep their defaults. The
+/// result type may be any `SimpleType`.
+pub fn arb_core_expr_weighted(
+    depth: u32,
+    join_w: u32,
+    letrec_w: u32,
+    case_w: u32,
+) -> impl Strategy<Value = RecursiveTree<CoreFrame<usize>>> {
+    let weights = Weights {
+        join: join_w,
+        letrec: letrec_w,
+        case: case_w,
+        ..Weights::default()
+    };
+    arb_simple_type().prop_flat_map(move |ty| arb_typed_expr_weighted(ty, depth, weights))
 }
 
 /// Ground types: no Fun at any level. Values of ground type are always
@@ -36,7 +95,15 @@ fn arb_ground_type() -> impl Strategy<Value = SimpleType> {
 /// Fun synthesis), but the top-level value is always non-closure and
 /// structurally comparable.
 pub fn arb_ground_expr() -> impl Strategy<Value = RecursiveTree<CoreFrame<usize>>> {
-    arb_ground_type().prop_flat_map(|ty| arb_typed_expr(ty, 3))
+    arb_ground_expr_depth(3)
+}
+
+/// Generate a ground-typed CoreExpr at an arbitrary `depth`.
+///
+/// `arb_ground_expr_depth(3)` is observationally identical to
+/// [`arb_ground_expr`].
+pub fn arb_ground_expr_depth(depth: u32) -> impl Strategy<Value = RecursiveTree<CoreFrame<usize>>> {
+    arb_ground_type().prop_flat_map(move |ty| arb_typed_expr(ty, depth))
 }
 
 fn arb_simple_type() -> impl Strategy<Value = SimpleType> {
@@ -64,6 +131,7 @@ struct Context {
     vars: HashMap<VarId, SimpleType>,
     next_var: Rc<Cell<u64>>,
     next_join: Rc<Cell<u64>>,
+    weights: Weights,
 }
 
 impl Context {
@@ -72,7 +140,15 @@ impl Context {
             vars: HashMap::new(),
             next_var: Rc::new(Cell::new(0)),
             next_join: Rc::new(Cell::new(0)),
+            weights: Weights::default(),
         }
+    }
+
+    /// A fresh context carrying custom variant-selection weights.
+    fn with_weights(weights: Weights) -> Self {
+        let mut c = Self::new();
+        c.weights = weights;
+        c
     }
 
     fn add_var(&mut self, ty: SimpleType) -> VarId {
@@ -109,6 +185,15 @@ fn arb_typed_expr(
     gen_expr(ty, depth, Context::new()).prop_map(|(builder, _root)| builder.build())
 }
 
+/// Like [`arb_typed_expr`] but seeds the root context with custom weights.
+fn arb_typed_expr_weighted(
+    ty: SimpleType,
+    depth: u32,
+    weights: Weights,
+) -> impl Strategy<Value = RecursiveTree<CoreFrame<usize>>> {
+    gen_expr(ty, depth, Context::with_weights(weights)).prop_map(|(builder, _root)| builder.build())
+}
+
 fn gen_expr(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuilder, usize)> {
     if depth == 0 {
         return gen_leaf(ty, ctx);
@@ -131,16 +216,19 @@ fn gen_expr(ty: SimpleType, depth: u32, ctx: Context) -> BoxedStrategy<(TreeBuil
     let ctx7 = ctx.clone();
     let ctx8 = ctx.clone();
 
+    // Weights flow through `Context`, so nested `gen_expr` calls inherit them.
+    let w = ctx.weights;
+
     prop_oneof![
-        3 => gen_leaf(ty.clone(), ctx.clone()),
-        5 => gen_app(ty2, depth - 1, ctx2),
-        2 => gen_lam(ty3, depth - 1, ctx3),
-        2 => gen_let_non_rec(ty4, depth - 1, ctx4),
-        1 => gen_let_rec(ty5, depth - 1, ctx5),
-        2 => gen_case(ty6, depth - 1, ctx6),
-        2 => gen_con(ty7, depth - 1, ctx7),
-        1 => gen_join_jump(ty8, depth - 1, ctx8),
-        1 => gen_prim_op(ty, depth - 1, ctx),
+        w.leaf => gen_leaf(ty.clone(), ctx.clone()),
+        w.app => gen_app(ty2, depth - 1, ctx2),
+        w.lam => gen_lam(ty3, depth - 1, ctx3),
+        w.letnonrec => gen_let_non_rec(ty4, depth - 1, ctx4),
+        w.letrec => gen_let_rec(ty5, depth - 1, ctx5),
+        w.case => gen_case(ty6, depth - 1, ctx6),
+        w.con => gen_con(ty7, depth - 1, ctx7),
+        w.join => gen_join_jump(ty8, depth - 1, ctx8),
+        w.primop => gen_prim_op(ty, depth - 1, ctx),
     ]
     .boxed()
 }

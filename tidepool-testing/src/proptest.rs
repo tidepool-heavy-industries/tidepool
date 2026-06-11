@@ -21,19 +21,27 @@ use crate::gen::standard_datacon_table;
 /// may contain ThunkRefs, closures, and JoinConts that can't be compared
 /// structurally — these are skipped (treated as equal).
 pub fn values_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Lit(l1), Value::Lit(l2)) => l1 == l2,
-        (Value::Con(tag1, fields1), Value::Con(tag2, fields2)) => {
-            tag1 == tag2
-                && fields1.len() == fields2.len()
-                && fields1
-                    .iter()
-                    .zip(fields2.iter())
-                    .all(|(f1, f2)| values_equal(f1, f2))
+    let mut stack: Vec<(&Value, &Value)> = vec![(a, b)];
+    while let Some((x, y)) = stack.pop() {
+        match (x, y) {
+            (Value::Lit(l1), Value::Lit(l2)) => {
+                if l1 != l2 {
+                    return false;
+                }
+            }
+            (Value::Con(tag1, fields1), Value::Con(tag2, fields2)) => {
+                if tag1 != tag2 || fields1.len() != fields2.len() {
+                    return false;
+                }
+                for pair in fields1.iter().zip(fields2.iter()) {
+                    stack.push(pair);
+                }
+            }
+            // Closures, thunks, join conts: skip comparison (treated equal)
+            _ => {}
         }
-        // Closures, thunks, join conts: skip comparison
-        _ => true,
     }
+    true
 }
 
 /// Walk the tree to find all DataConIds and their arities.

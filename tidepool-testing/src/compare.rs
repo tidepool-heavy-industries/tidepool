@@ -13,33 +13,44 @@ use tidepool_repr::{DataConId, Literal};
 /// only to themselves (they're skipped/not comparable structurally).
 ///
 /// Returns true if structurally equal, false otherwise.
+///
+/// Uses an explicit worklist instead of recursion so deeply nested values
+/// (the whole point of lifting the depth-3 generator cap) cannot overflow the
+/// host stack. Semantics are identical to the prior recursive version.
 pub fn values_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Lit(la), Value::Lit(lb)) => lits_equal(la, lb),
-        (Value::Con(tag_a, fields_a), Value::Con(tag_b, fields_b)) => {
-            tag_a == tag_b
-                && fields_a.len() == fields_b.len()
-                && fields_a
-                    .iter()
-                    .zip(fields_b.iter())
-                    .all(|(fa, fb)| values_equal(fa, fb))
+    let mut stack: Vec<(&Value, &Value)> = vec![(a, b)];
+    while let Some((x, y)) = stack.pop() {
+        match (x, y) {
+            (Value::Lit(la), Value::Lit(lb)) => {
+                if !lits_equal(la, lb) {
+                    return false;
+                }
+            }
+            (Value::Con(tag_a, fields_a), Value::Con(tag_b, fields_b)) => {
+                if tag_a != tag_b || fields_a.len() != fields_b.len() {
+                    return false;
+                }
+                for pair in fields_a.iter().zip(fields_b.iter()) {
+                    stack.push(pair);
+                }
+            }
+            // Closures: can't structurally compare, so treat as equal if both are closures
+            (Value::Closure(..), Value::Closure(..)) => {}
+            // JoinConts: similarly not comparable
+            (Value::JoinCont(..), Value::JoinCont(..)) => {}
+            // ConFun: compare tag and accumulated args
+            (Value::ConFun(tag_a, arity_a, args_a), Value::ConFun(tag_b, arity_b, args_b)) => {
+                if tag_a != tag_b || arity_a != arity_b || args_a.len() != args_b.len() {
+                    return false;
+                }
+                for pair in args_a.iter().zip(args_b.iter()) {
+                    stack.push(pair);
+                }
+            }
+            _ => return false,
         }
-        // Closures: can't structurally compare, so treat as equal if both are closures
-        (Value::Closure(..), Value::Closure(..)) => true,
-        // JoinConts: similarly not comparable
-        (Value::JoinCont(..), Value::JoinCont(..)) => true,
-        // ConFun: compare tag and accumulated args
-        (Value::ConFun(tag_a, arity_a, args_a), Value::ConFun(tag_b, arity_b, args_b)) => {
-            tag_a == tag_b
-                && arity_a == arity_b
-                && args_a.len() == args_b.len()
-                && args_a
-                    .iter()
-                    .zip(args_b.iter())
-                    .all(|(fa, fb)| values_equal(fa, fb))
-        }
-        _ => false,
     }
+    true
 }
 
 /// Compare two Literals for equality, handling NaN for floating point.
@@ -78,6 +89,12 @@ const MAX_CON_FIELDS: usize = 256;
 
 /// Reconstruct an interpreter `Value` from a JIT heap object pointer.
 ///
+/// Uses an explicit worklist (mirroring `tidepool_eval::eval::deep_force`)
+/// instead of recursion, so deeply nested heap objects cannot overflow the
+/// host stack. Forwarding pointers are followed per-visit, so GC moves that
+/// occur while forcing a thunk in a sibling field are tolerated exactly as in
+/// the prior recursive version.
+///
 /// # Safety
 ///
 /// `ptr` must point to a valid HeapObject in the JIT nursery/heap.
@@ -86,96 +103,123 @@ pub unsafe fn heap_to_value(
     ptr: *const u8,
     vmctx: &mut tidepool_codegen::context::VMContext,
 ) -> Value {
-    heap_to_value_inner(ptr, vmctx, 0)
-}
-
-unsafe fn heap_to_value_inner(
-    ptr: *const u8,
-    vmctx: &mut tidepool_codegen::context::VMContext,
-    depth: usize,
-) -> Value {
     use tidepool_heap::layout;
 
-    if depth > MAX_HEAP_DEPTH {
-        return Value::ByteArray(std::sync::Arc::new(std::sync::Mutex::new(vec![])));
+    /// One unit of reconstruction work.
+    enum Work {
+        /// Decode the object at this pointer (carrying its depth).
+        Visit(*const u8, usize),
+        /// Pop `n` finished field values and assemble a `Con`.
+        BuildCon(DataConId, usize),
     }
 
-    // Follow forwarding pointer if GC moved this object during a previous
-    // recursive call (e.g., thunk forcing in a sibling Con field).
-    let mut ptr = ptr;
-    if layout::read_tag(ptr) == layout::TAG_FORWARDED {
-        ptr = *(ptr.add(8) as *const *const u8);
-    }
+    let mut stack: Vec<Work> = vec![Work::Visit(ptr, 0)];
+    let mut results: Vec<Value> = Vec::new();
 
-    let tag = layout::read_tag(ptr);
-    match tag {
-        layout::TAG_LIT => {
-            let lit_tag = *ptr.add(layout::LIT_TAG_OFFSET);
-            match layout::LitTag::from_byte(lit_tag) {
-                Some(layout::LitTag::Int) => Value::Lit(Literal::LitInt(
-                    *(ptr.add(layout::LIT_VALUE_OFFSET) as *const i64),
-                )),
-                Some(layout::LitTag::Word) => Value::Lit(Literal::LitWord(
-                    *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u64),
-                )),
-                Some(layout::LitTag::Char) => {
-                    let code = *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u32);
-                    Value::Lit(Literal::LitChar(char::from_u32(code).unwrap_or('\u{FFFD}')))
+    while let Some(w) = stack.pop() {
+        match w {
+            Work::Visit(mut ptr, depth) => {
+                if depth > MAX_HEAP_DEPTH {
+                    results.push(Value::ByteArray(std::sync::Arc::new(
+                        std::sync::Mutex::new(vec![]),
+                    )));
+                    continue;
                 }
-                Some(layout::LitTag::Float) => {
-                    let bits = *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u32);
-                    Value::Lit(Literal::LitFloat(bits as u64))
+
+                // Follow forwarding pointer if GC moved this object during a
+                // previous thunk force (e.g., a sibling Con field).
+                if layout::read_tag(ptr) == layout::TAG_FORWARDED {
+                    ptr = *(ptr.add(8) as *const *const u8);
                 }
-                Some(layout::LitTag::Double) => Value::Lit(Literal::LitDouble(
-                    *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u64),
-                )),
-                None => {
-                    // JIT uses extended lit tags (5=String, 7=ByteArray)
-                    Value::ByteArray(std::sync::Arc::new(std::sync::Mutex::new(vec![])))
+
+                let tag = layout::read_tag(ptr);
+                match tag {
+                    layout::TAG_LIT => {
+                        let lit_tag = *ptr.add(layout::LIT_TAG_OFFSET);
+                        let v = match layout::LitTag::from_byte(lit_tag) {
+                            Some(layout::LitTag::Int) => Value::Lit(Literal::LitInt(
+                                *(ptr.add(layout::LIT_VALUE_OFFSET) as *const i64),
+                            )),
+                            Some(layout::LitTag::Word) => Value::Lit(Literal::LitWord(
+                                *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u64),
+                            )),
+                            Some(layout::LitTag::Char) => {
+                                let code = *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u32);
+                                Value::Lit(Literal::LitChar(
+                                    char::from_u32(code).unwrap_or('\u{FFFD}'),
+                                ))
+                            }
+                            Some(layout::LitTag::Float) => {
+                                let bits = *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u32);
+                                Value::Lit(Literal::LitFloat(bits as u64))
+                            }
+                            Some(layout::LitTag::Double) => Value::Lit(Literal::LitDouble(
+                                *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u64),
+                            )),
+                            None => {
+                                // JIT uses extended lit tags (5=String, 7=ByteArray)
+                                Value::ByteArray(std::sync::Arc::new(std::sync::Mutex::new(vec![])))
+                            }
+                        };
+                        results.push(v);
+                    }
+                    layout::TAG_CON => {
+                        let con_tag = *(ptr.add(layout::CON_TAG_OFFSET) as *const u64);
+                        let num_fields =
+                            *(ptr.add(layout::CON_NUM_FIELDS_OFFSET) as *const u16) as usize;
+                        let num_fields = num_fields.min(MAX_CON_FIELDS);
+                        stack.push(Work::BuildCon(DataConId(con_tag), num_fields));
+                        // Push fields in reverse so they are reconstructed in
+                        // order and `BuildCon` pops them as field[0..n].
+                        for i in (0..num_fields).rev() {
+                            let field_ptr = *(ptr
+                                .add(layout::CON_FIELDS_OFFSET + layout::FIELD_STRIDE * i)
+                                as *const *const u8);
+                            stack.push(Work::Visit(field_ptr, depth + 1));
+                        }
+                    }
+                    layout::TAG_THUNK => {
+                        // Force the thunk first, then decode the result.
+                        let forced = tidepool_codegen::host_fns::heap_force(vmctx, ptr as *mut u8);
+                        stack.push(Work::Visit(forced as *const u8, depth + 1));
+                    }
+                    layout::TAG_CLOSURE => {
+                        // Can't reconstruct a closure — return a sentinel.
+                        results.push(Value::Closure(
+                            tidepool_eval::env::Env::new(),
+                            tidepool_repr::VarId(0),
+                            tidepool_repr::RecursiveTree {
+                                nodes: vec![tidepool_repr::CoreFrame::Var(tidepool_repr::VarId(0))],
+                            },
+                        ));
+                    }
+                    _ => panic!("unknown heap tag: {}", tag),
                 }
             }
+            Work::BuildCon(tag, n) => {
+                let start = results.len() - n;
+                let fields = results.split_off(start);
+                results.push(Value::Con(tag, fields));
+            }
         }
-        layout::TAG_CON => {
-            let con_tag = *(ptr.add(layout::CON_TAG_OFFSET) as *const u64);
-            let num_fields = *(ptr.add(layout::CON_NUM_FIELDS_OFFSET) as *const u16) as usize;
-            let num_fields = num_fields.min(MAX_CON_FIELDS);
-            let fields = (0..num_fields)
-                .map(|i| {
-                    let field_ptr = *(ptr.add(layout::CON_FIELDS_OFFSET + layout::FIELD_STRIDE * i)
-                        as *const *const u8);
-                    heap_to_value_inner(field_ptr, vmctx, depth + 1)
-                })
-                .collect();
-            Value::Con(DataConId(con_tag), fields)
-        }
-        layout::TAG_THUNK => {
-            // Force the thunk first, then read the result
-            let forced = tidepool_codegen::host_fns::heap_force(vmctx, ptr as *mut u8);
-            heap_to_value_inner(forced as *const u8, vmctx, depth + 1)
-        }
-        layout::TAG_CLOSURE => {
-            // Can't reconstruct a closure — return a sentinel
-            Value::Closure(
-                tidepool_eval::env::Env::new(),
-                tidepool_repr::VarId(0),
-                tidepool_repr::RecursiveTree {
-                    nodes: vec![tidepool_repr::CoreFrame::Var(tidepool_repr::VarId(0))],
-                },
-            )
-        }
-        _ => panic!("unknown heap tag: {}", tag),
     }
+
+    results.pop().expect("heap_to_value: empty result stack")
 }
 
 /// Check if a value contains any closures (which can't be structurally compared
 /// across backends).
 pub fn contains_closure(val: &Value) -> bool {
-    match val {
-        Value::Closure(..) => true,
-        Value::Con(_, fields) => fields.iter().any(contains_closure),
-        Value::ConFun(_, _, args) => args.iter().any(contains_closure),
-        _ => false,
+    let mut stack: Vec<&Value> = vec![val];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::Closure(..) => return true,
+            Value::Con(_, fields) => stack.extend(fields.iter()),
+            Value::ConFun(_, _, args) => stack.extend(args.iter()),
+            _ => {}
+        }
     }
+    false
 }
 
 #[cfg(test)]
