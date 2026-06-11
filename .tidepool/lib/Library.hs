@@ -8,6 +8,7 @@ module Library
   , module Asks
   , module Flow
   , module Patch
+  , module Optics
   ) where
 
 import Data.Maybe (mapMaybe)
@@ -17,6 +18,7 @@ import Tables
 import Asks
 import Flow
 import Patch
+import Optics
 
 -- ===========================================================================
 -- § Recursion Schemes

@@ -57,3 +57,22 @@ insertAfter path anchor block = do
           go (l : rest) = if anchor `isInfixOf` l then l : block : rest else l : go rest
       writeFile path (unlines (go ls))
       pure ("inserted into " <> path)
+
+-- | Compute-check-commit: write content only if every named check holds.
+-- The caller computes the checks against the CANDIDATE content (pure),
+-- so the failure report names exactly what blocked the write — no
+-- half-written files, no silent clobbering.
+--
+--   let new = render thing
+--   writeChecked "out.md" [ ("nonempty", not (isNull new))
+--                         , ("has header", "# " `isPrefixOf` new) ] new
+writeChecked :: Text -> [(Text, Bool)] -> Text -> M Value
+writeChecked path checks content = do
+  let failed = [name | (name, ok) <- checks, not ok]
+  if null failed
+    then do
+      writeFile path content
+      pure (object [ "file" .= path, "written" .= True
+                   , "checks" .= length checks ])
+    else pure (object [ "file" .= path, "written" .= False
+                      , "failed" .= failed ])
