@@ -1,6 +1,9 @@
+{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable #-}
 module Suite where
 
+import Prelude
 import qualified Data.Text as T
+type Text = T.Text
 
 -- ============================================================
 -- Int literals (5)
@@ -859,3 +862,53 @@ t_rightsLefts = let xs = [Left (T.pack "a"), Right (1::Int), Left (T.pack "b"), 
 
 t_fromEither :: (T.Text, Int)
 t_fromEither = (fromLeft (T.pack "d") (Right (1::Int)), fromRight 0 (Right 2::Either T.Text Int))
+
+-- pragma-uplift: extension smoke tests
+
+t_lambdaCase :: [Text]
+t_lambdaCase = map (\case { 0 -> "z"; n | n < 0 -> "n"; _ -> "p" }) [-1,0,2]
+
+t_tupleSections :: [(Int, Bool)]
+t_tupleSections = map (,True) [1,2,3]
+
+t_multiWayIf :: Text
+t_multiWayIf = let x = 5 :: Int in if | x < 0 -> "neg" | x > 0 -> "pos" | otherwise -> "zero"
+
+data RWRecord = RWRecord { rwField1 :: Int, rwField2 :: Text }
+t_recordWildCards :: (Int, Text)
+t_recordWildCards = let r = RWRecord { rwField1 = 42, rwField2 = "hello" } in let RWRecord{..} = r in (rwField1, rwField2)
+
+data PunRecord = PunRecord { punField :: Int }
+t_namedFieldPuns :: Int
+t_namedFieldPuns = let punField = 10 in let r = PunRecord { punField } in let PunRecord{punField} = r in punField
+
+t_viewPatterns :: Text
+t_viewPatterns = let f (T.toUpper -> u) = u in f "hello"
+
+t_bangPatterns :: Int
+t_bangPatterns = let go !acc [] = acc; go !acc (x:xs) = go (acc + x) xs in go 0 [1..10]
+
+t_typeApplications :: Int
+t_typeApplications = id @Int 5
+
+t_blockArguments :: Int
+t_blockArguments = length do [1,2,3]
+
+t_numericUnderscores :: Int
+t_numericUnderscores = 1_000_000
+
+t_multilineStrings :: Int
+t_multilineStrings = T.length """
+  multi
+  line
+  """
+
+data Box a = Box a deriving (Functor, Foldable, Traversable)
+t_deriveFunctor :: Int
+t_deriveFunctor = let Box x = fmap (+1) (Box 41) in x
+
+t_deriveFoldable :: Int
+t_deriveFoldable = sum (Box 42)
+
+t_deriveTraversable :: Maybe Int
+t_deriveTraversable = fmap (\(Box x) -> x) (traverse (\x -> Just (x + 1)) (Box 41))
