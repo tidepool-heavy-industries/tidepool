@@ -2139,9 +2139,11 @@ where
                     "  glob \"**/*.rs\" >>= mapM (\\p -> (,) p <$> getFileSize p) <&> sizeRank 9\n",
                     "  seek \"where are case traps emitted?\" 5  -- steered search: suspends to you each round\n",
                 ));
-                if user_lib.join("PATTERNS.md").exists() {
+                // PATTERNS.md lives beside lib/, at .tidepool/PATTERNS.md.
+                let patterns = user_lib.parent().map(|p| p.join("PATTERNS.md"));
+                if patterns.as_deref().is_some_and(|p| p.exists()) {
                     self.inner.eval_tool_description.push_str(
-                        "\nPattern catalog: read `.tidepool/lib/PATTERNS.md` for composition idioms.\n",
+                        "\nPattern catalog: read `.tidepool/PATTERNS.md` for composition idioms.\n",
                     );
                 }
             }

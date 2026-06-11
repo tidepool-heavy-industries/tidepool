@@ -66,7 +66,10 @@ fn proptest_minimum() {
 #[test]
 fn proptest_foldr1_add() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
-        let src = format!("foldr1 (+) (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
+        let src = format!(
+            "foldr1 (+) (filter (\\x -> x > {}) (enumFromTo 1 {}))",
+            k, n
+        );
         let expected: i64 = xs.iter().sum();
         (src, json!(expected))
     });
@@ -76,7 +79,10 @@ fn proptest_foldr1_add() {
 #[test]
 fn proptest_foldl1_add() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
-        let src = format!("foldl1 (+) (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
+        let src = format!(
+            "foldl1 (+) (filter (\\x -> x > {}) (enumFromTo 1 {}))",
+            k, n
+        );
         let expected: i64 = xs.iter().sum();
         (src, json!(expected))
     });
@@ -86,7 +92,10 @@ fn proptest_foldl1_add() {
 #[test]
 fn proptest_foldl1_sub() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
-        let src = format!("foldl1 (-) (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
+        let src = format!(
+            "foldl1 (-) (filter (\\x -> x > {}) (enumFromTo 1 {}))",
+            k, n
+        );
         let expected = xs[1..].iter().fold(xs[0], |acc, x| acc - x);
         (src, json!(expected))
     });
