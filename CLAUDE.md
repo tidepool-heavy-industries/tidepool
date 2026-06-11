@@ -203,7 +203,7 @@ MCP users get `import Tidepool.Prelude hiding (error)` auto-imported. Additional
 
 Everything MCP users need in one import.
 
-> **Text, not String — the #1 usability trap.** The Prelude standardizes on `Text`. `show` returns `Text` (not `String`), and `pack` is polymorphic (identity on Text, `T.pack` on String), so `pack (show x)` works fine. `lines`/`words`/`unlines`/`unwords` all operate on `Text`. `error` takes `Text`. String literals are `Text` via `OverloadedStrings`. The underlying `String` type (`[Char]`) exists but is expensive under the JIT's eager evaluation. Stick to `Text` everywhere.
+> **Text, not String — the #1 usability trap.** The Prelude standardizes on `Text`. `show` returns `Text` (not `String`), and `pack` is polymorphic (identity on Text, `T.pack` on String), so `pack (show x)` works fine. `lines`/`words`/`unlines`/`unwords` all operate on `Text`. `error` takes `Text`. String literals are `Text` via `OverloadedStrings`. The underlying `String` type (`[Char]`) works fine at moderate scale (verified to 20K chars) but `Text` is still the faster, idiomatic default. Stick to `Text` everywhere.
 
 - **Types**: Int, Double, Char, Bool, Text, String, Maybe, Either, Map, Set, Value
 - **Text ops**: pack/unpack, toUpper/toLower, strip, splitOn, replace, words/lines/unwords/unlines, isPrefixOf/isSuffixOf/isInfixOf, intercalate (Text→[Text]→Text), joinText, tReverse
@@ -214,6 +214,7 @@ Everything MCP users need in one import.
 - **JSON**: Value(..), toJSON, (.=), object, lenses (key/nth/_String/_Number/_Bool/_Array/_Object, ^?/^../preview/toListOf), helpers (?./lookupKey/asText/asInt). **No JSON parsing in Haskell** — `encode`/`decode` removed; use `runJson`/`httpGet` (parsed on Rust side)
 - **Map**: fromList/toList, insert/delete/adjust, union/intersection/difference/unionWith/intersectionWith, singleton/empty, findWithDefault, foldlWithKey'/foldrWithKey, mapKeys/mapWithKey/filterWithKey
 - **Monadic**: mapM/forM/foldM, when/unless/void/join/guard, (>=>)/(<=<), filterM, replicateM, zipWithM, concatMapM
+- **Kleisli profunctor**: (&&&)/(***)/(|||) for `a -> M b` (fanout / pair-wise / Either-merge), firstK/secondK
 
 ### Tidepool.Text (import explicitly)
 
@@ -251,13 +252,26 @@ Values returned via `pure x` are automatically rendered to JSON by the Rust runt
 
 To get named fields, return `Value` via `object ["name" .= x, "size" .= y]`.
 
-### Dangerous Patterns (silent crash → SIGILL/SIGSEGV)
+### Known Limits (audited 2026-06-11 — see `plans/gotcha-audit.md`)
 
-The JIT runs a strict subset of Haskell. These patterns crash without useful error messages:
+The JIT runs a strict subset of Haskell, but the failure modes are now LOUD:
+compile errors name the unsupported symbol, runtime errors carry the Haskell
+message, unbounded recursion is a clean "stack overflow" yield error — not
+SIGSEGV. The short, true standing list:
 
-- **`read`/`reads`**: Read typeclass crashes. Use `parseInt`/`parseDouble` from Prelude.
+- **`read`/`reads`**: clean COMPILE error ("Unsupported FFI call: …gmpn…" with
+  a GMP hint). Use `parseInt`/`parseDouble` from Prelude.
+- **`T.takeWhile`/`T.dropWhile` partially applied**: SILENTLY wrong results
+  (the one remaining silent failure). The Prelude shadows are load-bearing —
+  never use the `T.` versions point-free/partially applied.
+- **`cycle`**: unresolved external; use manual recursion.
+- **Double `T.breakOn` in a cross-module fn** (#313 t11): case-trap; inline
+  the shape in your do-block instead (fix in flight).
+- **Non-tail recursion** overflows ~10-20K frames with a clean yield error;
+  tail recursion is unbounded (TCO).
 
-When you hit SIGILL or SIGSEGV, the error message will be opaque ("null pointer", "signal 4", etc.). Common root causes: missing external binding, constructor tag mismatch, or unsupported typeclass dictionary.
+If you DO hit a SIGILL/SIGSEGV, that's a compiler bug — report it. Common
+root causes: constructor tag mismatch, missing external binding.
 
 ### MCP Eval Patterns
 

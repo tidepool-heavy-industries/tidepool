@@ -19,8 +19,6 @@ module Tidepool.Translate
 
 import GHC
 import GHC.Core
-import qualified Debug.Trace
-import Numeric (showHex)
 import GHC.Types.Id
 import GHC.Types.Var (isTyVar, varUnique, varName)
 import GHC.Types.Unique (getKey)
@@ -62,7 +60,6 @@ import qualified Data.Map.Strict as Map
 import Control.Monad.State
 import Control.Monad (foldM, forM, when)
 import System.IO (hPutStrLn, stderr)
-import Numeric (showHex)
 
 import GHC.Driver.Env (HscEnv)
 import Tidepool.Resolve (resolveExternals, UnresolvedVar(..))
@@ -913,9 +910,6 @@ translateHead = \case
       rhs' <- case isJoinId_maybe b of
         Just arity -> do
           let (params, joinBody) = collectValueBinders arity rhs
-          Debug.Trace.traceM ("[313-joinrec] " ++ occNameString (nameOccName (idName b))
-            ++ " varId=" ++ showHex' (varId b)
-            ++ " params=" ++ show (map (showHex' . varId) params))
           joinBodyIdx <- translate joinBody
           -- Build nested NLam chain: \p1 -> \p2 -> ... -> joinBody
           foldM (\inner p -> emitNode $ NLam (varId p) inner)
@@ -1528,7 +1522,15 @@ mapFfiCall pprName
   | "_hs_text_measure_off" `isInfixOf` pprName  = T.pack "FfiTextMeasureOff"
   | "_hs_text_memchr" `isInfixOf` pprName       = T.pack "FfiTextMemchr"
   | "_hs_text_reverse" `isInfixOf` pprName      = T.pack "FfiTextReverse"
-  | otherwise = error $ "Unsupported FFI call: " ++ pprName
+  | otherwise = error $ "Unsupported FFI call: " ++ pprName ++ hint
+  where
+    hint
+      | "gmp" `isInfixOf` pprName || "integer" `isInfixOf` pprName =
+          "\n  (Integer/GMP arithmetic is unsupported under the JIT. This usually\n\
+          \   means `read`, `Read` instances, or Integer-defaulted arithmetic that\n\
+          \   exceeded the integerAdd/integerSub shims. Use parseInt/parseDouble\n\
+          \   and add explicit `Int` type signatures.)"
+      | otherwise = ""
 
 isRuntimeErrorVar :: Id -> Bool
 isRuntimeErrorVar v =
@@ -1678,9 +1680,6 @@ isJoinId_maybe v = case idJoinPointHood v of
 -- expected I#, got Text). Conversion is always SAFE (a lambda+NApp is
 -- semantically a superset of a block+jump), so the predicate may be
 -- conservative.
-showHex' :: Word64 -> String
-showHex' w = "0x" ++ showHex w ""
-
 -- #313: "lambda" must include CONVERSION-INDUCED lambdas, not just
 -- source-level ones — Rec joinrecs always become LetRec lambdas (separate
 -- Cranelift functions), and a NonRec join that itself converts becomes a
