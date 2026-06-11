@@ -1,11 +1,11 @@
 module Tidepool.GhcPipeline (runPipeline, PipelineResult(..), dumpCore) where
 
 import GHC
-import GHC.Driver.Main (hscDesugar)
-import GHC.Driver.Env (hscUpdateFlags, hsc_unit_env)
-import GHC.Unit.Env (ue_eps)
-import GHC.Unit.External (euc_eps, initExternalPackageState)
-import Data.IORef (writeIORef)
+import GHC.Driver.Main (hscDesugar, batchMsg)
+import GHC.Driver.Env (hscUpdateFlags)
+import GHC.Driver.Make (load')
+import GHC.Types.Error (mkUnknownDiagnostic)
+import GHC.Unit.Module.Graph (mapMG)
 import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Core.Ppr (pprCoreBindings)
 import GHC.Driver.Session (updOptLevel, gopt_set, gopt_unset)
@@ -64,26 +64,35 @@ runPipeline path includes = do
     setSessionDynFlags dflags'
     target <- guessTarget path Nothing Nothing
     setTargets [target]
-    _ <- load LoadAllTargets
+    -- EPS unpoisoning (QQ/TH support — see canonicalizeDFlags haddock).
+    -- 'depanal' runs downsweep, whose @enableCodeGenForTH@ downgrades the
+    -- splice-needed home modules' ms_hspp_opts to -O0 +
+    -- Opt_IgnoreInterfacePragmas so 'load' can provision bytecode. That flag
+    -- ALSO governs how external interfaces are READ, and the downgraded
+    -- modules compile FIRST, so the session-global External Package State
+    -- would cache every interface they demand (GHC.Num, GHC.Float,
+    -- freer-simple, …) WITHOUT unfoldings — the -O2 extraction loop below
+    -- then can never fire class-op rules (@negate $fNumDouble@ never
+    -- reduces, chasing Integer machinery → "Unsupported primop: clz#").
+    -- Unset JUST that flag on every summary BEFORE compilation: the
+    -- backend/-O0 downgrade stays (splices still provision via bytecode),
+    -- but interface loading honors pragmas, so the EPS is healthy from the
+    -- start. Non-TH graphs carry no downgrade — the unset is a no-op there.
+    --
+    -- A post-'load' EPS flush (the previous fix) does NOT work: home-module
+    -- TyCons are already realized in the HPT, so re-typechecking lib modules
+    -- never re-demands the package interfaces that define their instances —
+    -- they never re-enter the fresh EPS, and typechecking fails with e.g.
+    -- "No instance for Monad (Eff '[Console, …])".
+    modGraphRaw <- depanal [] False
+    let unpoison ms =
+          ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
+    _ <- load' Nothing LoadAllTargets mkUnknownDiagnostic (Just batchMsg)
+               (mapMG unpoison modGraphRaw)
     modGraph <- getModuleGraph
     let summaries = mgModSummaries modGraph
     when (null summaries) $
       liftIO $ ioError (userError "runPipeline: empty module graph")
-    -- EPS unpoisoning (QQ/TH support — see canonicalizeDFlags haddock).
-    -- When 'load' provisions code for splices, the downgraded (-O0,
-    -- Opt_IgnoreInterfacePragmas) modules compile FIRST, so every external
-    -- interface they demand is cached in the session-global External
-    -- Package State WITHOUT unfoldings. The -O2 extraction loop below then
-    -- cannot fire class-op rules (e.g. @negate $fNumDouble@ never reduces,
-    -- chasing Integer machinery → "Unsupported primop: clz#") — for EVERY
-    -- module in the graph, pinned dflags notwithstanding. Reset the cache
-    -- so extraction re-reads interfaces with pragmas honored. Conditional
-    -- on actual poisoning: non-TH runs keep their warm, healthy cache.
-    let epsPoisoned = any (gopt Opt_IgnoreInterfacePragmas . ms_hspp_opts) summaries
-    when epsPoisoned $ do
-      hscEnvL <- getSession
-      liftIO $ writeIORef (euc_eps (ue_eps (hsc_unit_env hscEnvL)))
-                          initExternalPackageState
     -- Process all modules: parse, typecheck, desugar, optimize each.
     -- Re-canonicalize each module's DynFlags first (see canonicalizeDFlags):
     -- the load phase may have downgraded them for TH/QQ bytecode provisioning.

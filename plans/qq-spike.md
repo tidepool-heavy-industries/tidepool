@@ -58,8 +58,16 @@ very first run after boot pays ~0.5s extra cache warming.
 | M5 (TH-quotes quoter, home-module ref) | QuasiQuotes | yes | yes | ~2070ms | +1835ms |
 
 Reading:
-- **The pragma is free** (M2 ≈ M1). `QuasiQuotes` can sit unconditionally in
-  the eval pragma line.
+- **The pragma is free *only in a module with no home imports*** (M2 ≈ M1).
+  > **CORRECTION (Phase 2 wiring):** this generalized wrong. GHC's
+  > `enableCodeGenForTH` keys on extension PRESENCE
+  > (`needsTemplateHaskellOrQQ` checks `xopt`, not actual splice usage), so
+  > a `QuasiQuotes` pragma on a module WITH home-module imports
+  > bytecode-provisions the entire home dependency graph — M2 just had
+  > nothing to provision. In the full MCP preamble (19 home modules) the
+  > always-on pragma costs ~1s extra per uncached eval (measured: ~3.4s vs
+  > ~2.4s full-preamble extract+JIT, no splice present). Root accepted this
+  > cost — see "Phase 2 decision revision" below.
 - **The import alone is NOT free** (+385ms): `runPipeline` compiles every
   home module in the graph through parse/typecheck/desugar/core2core, and a
   quoter module drags template-haskell interface loading with it. An
@@ -92,6 +100,17 @@ Reading:
    the eval assembly path (`eval()` → `all_imports`), a hair outside the
    "string constants in build_preamble" boundary — escalated to root with
    these measurements before implementation.
+
+   > **Phase 2 decision revision (root, 2026-06-11): pragmas ALWAYS-ON.**
+   > When the "pragma is free" premise fell (see CORRECTION above), the
+   > choice became: token-gate the PRAGMA too (zero latency regression,
+   > implemented as 71d77fb, reverted) or keep one eval dialect everywhere
+   > and pay ~1s per uncached eval. Root chose always-on — "better to have
+   > logical simplicity… always-on + include a TODO fixme." The
+   > `Tidepool.QQ` IMPORT stays token-gated (that's scope hygiene, not
+   > grammar). The latency FIXME lives at the pragma line in
+   > `tidepool-mcp/src/lib.rs::build_preamble`; fix directions are
+   > token-gating (resurrect 71d77fb) or upstream lazy provisioning.
 4. **Suite regen: `--target-module-only`.** `--all-closed` sweeps binders
    from ALL home modules in the graph; with `import Tidepool.QQ` in
    Suite.hs, quoter internals (TH-library Core, 76KB+ per binding in the
@@ -136,11 +155,31 @@ the scratch gitignore as evidence).
   stays session-setup-only: re-pinning bare `genericPlatform` later
   strips the platform constants populated at session init ("Platform
   constants not available!" panic).
-- **Conditional EPS flush** after `load`: if any summary shows the
-  downgrade (`gopt Opt_IgnoreInterfacePragmas`), reset the EPS IORef to
-  `initExternalPackageState` so extraction re-reads interfaces with
-  pragmas honored. Conditional ⇒ non-TH runs keep their warm, healthy
-  cache — the no-QQ path is byte-identical, zero latency impact.
+- **Depanal-time unpoison** (v2 — replaces the v1 "conditional EPS
+  flush"): `runPipeline` now calls `depanal` itself, unsets
+  `Opt_IgnoreInterfacePragmas` on every summary in the returned graph
+  (the downgrade is applied during downsweep, so it's visible there),
+  and hands the patched graph to `load'`. The backend/-O0 half of the
+  downgrade is kept — splices still provision via bytecode — but
+  interface READING honors pragmas, so the EPS caches healthy,
+  unfolding-bearing entries from the start. Non-TH graphs carry no
+  downgrade; the unset is a no-op there.
+
+  **Why v1 (post-`load` EPS flush to `initExternalPackageState`) was
+  wrong:** it traded one bug for another. The flush empties
+  `eps_inst_env`, and lazy re-loading never refills the parts that
+  matter: home-module TyCons are already REALIZED in the HPT, so when
+  the extraction loop re-typechecks a lib module using `M = Eff '[…]`,
+  nothing ever re-demands the freer-simple interface that defines
+  `instance Monad (Eff effs)` — the instance never re-enters the fresh
+  EPS and typechecking dies with "No instance for `Monad (Eff
+  '[Console, …])`". The spike graphs never caught this (Suite.hs
+  imports no package whose instances arrive only via already-realized
+  home TyCons); the full MCP preamble graph (`.tidepool/lib` modules
+  over `Tidepool.Effects`) caught it immediately — pinned by the
+  `spliton_repro` tests. Diagnosis was blocked by `Main.hs` swallowing
+  `SourceError`s as a bare "Compilation failed." — it now prints the
+  diagnostics (Show instance on SourceError).
 
 **Verification (all green):** PlainD control folds; SpikeUse folds
 (`litd = D# -2.5##`, `addd = D# 3.75##`) with the splice intact
@@ -153,6 +192,23 @@ pre-existing `_u<uniquekey>` churn (below).
 
 ## Out-of-scope issues documented for root (TODOs)
 
+- **Installed-binary requirement (deploy hazard):** with always-on
+  `QuasiQuotes` in the eval preamble, EVERY eval triggers TH provisioning —
+  so every environment running the MCP server MUST have the unpoison-fixed
+  `tidepool-extract-bin` from this branch installed (and `~/.cache/tidepool/`
+  cleared). Under a pre-fix binary, every eval fails with the clz# deopt
+  class. The `spliton_repro` tests pin this end to end.
+- **Comparator extended-lit-tag stub:** `tidepool-testing/src/compare.rs`
+  maps the JIT's extended literal tags (5=String, 7=ByteArray) to an EMPTY
+  `ByteArray`, so every literal-backed Text shows as a content mismatch
+  (`jit=<ByteArray# len=0>`) in the differential, drowning real signal.
+  10 of the 16 qq fixtures "mismatch" only via this artifact (structure and
+  lengths correct). Pre-existing class (baseline `takeWhileT`/`showDouble*`
+  show it too).
+- **Interpreter-only divergences:** `qq_j_build`, `qq_j_build_u*`,
+  `qq_j_pat_open` — tree-walking eval errors while the JIT runs them
+  correctly (eval_jit_diverge class, JIT is the product path). Not
+  QQ-blocking; worth a look when someone owns tidepool-eval parity.
 - **aarch64 hosts + QQ:** the driver provisioned splice code via the
   NATIVE code generator on this host. Under the spoofed
   `genericPlatform` (x86_64) that works only because host == x86_64.
@@ -183,8 +239,11 @@ Text it computed at runtime. This does not violate the locked decision.
 ## Known dialect tradeoffs (documented, accepted)
 
 - With `QuasiQuotes` enabled, `[x|x<-xs]` (list comprehension with no space
-  before `|`) parses as a quasi-quote and fails. Mitigated by conditional
-  pragma injection if root prefers; otherwise a dialect note ("space before
-  `|` in comprehensions"). LLM-written code essentially always has spaces.
-- QQ-using evals pay ~+1.7s compile. Cached identically to all evals
-  (CBOR cache keyed on source), so repeat calls are unaffected.
+  before `|`) parses as a quasi-quote and fails. Root chose always-on over
+  conditional pragma injection, so this is a standing dialect note ("space
+  before `|` in comprehensions"). LLM-written code essentially always has
+  spaces.
+- ALL evals pay the TH-provisioning overhead (~+1s uncached, see the
+  CORRECTION in the latency section); QQ-using evals pay ~+1.7s total.
+  Cached identically to all evals (CBOR cache keyed on source), so repeat
+  calls are unaffected.

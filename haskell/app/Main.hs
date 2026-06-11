@@ -222,7 +222,12 @@ processFile args path = do
   case res of
     Left (e :: SomeException) -> do
       case fromException e of
-        Just (_ :: SourceError) -> hPutStrLn stderr "Compilation failed."
+        -- Show the actual GHC diagnostics: under the GHC API the error
+        -- messages are carried in the SourceError, NOT printed to stderr by
+        -- 'load' — swallowing them leaves callers (tidepool-runtime
+        -- ExtractFailed) with a bare "Compilation failed." and nothing to act
+        -- on. SourceError's Show instance renders the message envelopes.
+        Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
         Nothing -> hPutStrLn stderr $ "Error: " ++ show e
       exitFailure
     Right () -> return ()
