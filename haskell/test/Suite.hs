@@ -4,8 +4,8 @@ module Suite where
 
 import Prelude
 import qualified Data.Text as T
--- qq-suite: regen now needs `--include lib --target-module-only`
--- (see CLAUDE.md / plans/qq-spike.md)
+-- qq-suite: regen now needs `--include lib --target-module-only
+-- --output-dir test/suite_cbor` (see CLAUDE.md / plans/qq-spike.md)
 import Tidepool.QQ (fmt, j)
 -- Value module directly, NOT the Tidepool.Aeson facade: the facade
 -- re-exports Tidepool.Aeson.Lens -> Control.Lens, which the extract GHC

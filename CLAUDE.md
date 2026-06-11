@@ -164,8 +164,10 @@ The system PATH binary at `~/.local/bin/tidepool-extract-bin` is called by `~/.c
 The Haskell integration tests use pre-compiled CBOR fixtures in `haskell/test/suite_cbor/`. After changing the Haskell serializer or adding test bindings to `haskell/test/Suite.hs`:
 
 ```bash
-cd haskell && cabal run tidepool-extract-bin -- test/Suite.hs --all-closed
-# Copies .cbor files into haskell/test/suite_cbor/
+cd haskell && cabal run tidepool-extract-bin -- test/Suite.hs --all-closed \
+  --include lib --target-module-only --output-dir test/suite_cbor
+# --include lib + --target-module-only: Suite.hs imports Tidepool.QQ
+# --output-dir: default derives from module basename → test/Suite_cbor (wrong dir)
 ```
 
 ### MCP Server
