@@ -103,10 +103,10 @@ enum IntPred {
 /// Closed Int -> [Int] functions (for concatMap).
 #[derive(Clone, Copy, Debug)]
 enum ListFn {
-    Single,  // \x -> [x]
-    Dup,     // \x -> [x, x]
-    Empty,   // \x -> []
-    PairUp,  // \x -> [x, x + 1]
+    Single, // \x -> [x]
+    Dup,    // \x -> [x, x]
+    Empty,  // \x -> []
+    PairUp, // \x -> [x, x + 1]
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -678,7 +678,11 @@ fn pp(e: &HExpr) -> String {
         HExpr::IfInt(c, t, f) | HExpr::IfText(c, t, f) | HExpr::IfListInt(c, t, f) => {
             format!("(if {} then {} else {})", pp(c), pp(t), pp(f))
         }
-        HExpr::WhereGo { start, op, with_sig } => {
+        HExpr::WhereGo {
+            start,
+            op,
+            with_sig,
+        } => {
             let sig = if *with_sig {
                 "go :: Int -> Int -> Int; "
             } else {
@@ -748,7 +752,12 @@ fn pp(e: &HExpr) -> String {
         HExpr::ConcatMapI(f, l) => format!("(concatMap {} {})", pplistfn(*f), pp(l)),
         HExpr::EnumFromTo(a, b) => format!("(enumFromTo ({} :: Int) {})", a, lit(*b)),
         HExpr::TakeIterate(n, f, start) => {
-            format!("(take {} (iterate {} ({} :: Int)))", lit(*n), ppfn(*f), start)
+            format!(
+                "(take {} (iterate {} ({} :: Int)))",
+                lit(*n),
+                ppfn(*f),
+                start
+            )
         }
         HExpr::AppendI(a, b) => format!("({} ++ {})", pp(a), pp(b)),
         HExpr::ListTextLit(v) => pp_list_text(v),
@@ -918,13 +927,24 @@ fn eval(e: &HExpr, env: &mut Vec<(u32, HVal)>) -> HVal {
             };
             HVal::I(n as i64)
         }
-        HExpr::Sum(l) => HVal::I(eval(l, env).list_int().iter().fold(0i64, |a, x| a.wrapping_add(*x))),
-        HExpr::Product(l) => {
-            HVal::I(eval(l, env).list_int().iter().fold(1i64, |a, x| a.wrapping_mul(*x)))
-        }
-        HExpr::FoldlAdd(k, l) => {
-            HVal::I(eval(l, env).list_int().iter().fold(*k, |a, x| a.wrapping_add(*x)))
-        }
+        HExpr::Sum(l) => HVal::I(
+            eval(l, env)
+                .list_int()
+                .iter()
+                .fold(0i64, |a, x| a.wrapping_add(*x)),
+        ),
+        HExpr::Product(l) => HVal::I(
+            eval(l, env)
+                .list_int()
+                .iter()
+                .fold(1i64, |a, x| a.wrapping_mul(*x)),
+        ),
+        HExpr::FoldlAdd(k, l) => HVal::I(
+            eval(l, env)
+                .list_int()
+                .iter()
+                .fold(*k, |a, x| a.wrapping_add(*x)),
+        ),
         HExpr::NegateE(x) => HVal::I(0i64.wrapping_sub(eval(x, env).int())),
         HExpr::IfInt(c, t, f) | HExpr::IfText(c, t, f) | HExpr::IfListInt(c, t, f) => {
             if eval(c, env).boolean() {
@@ -956,7 +976,13 @@ fn eval(e: &HExpr, env: &mut Vec<(u32, HVal)>) -> HVal {
             }
         }
         HExpr::Guard {
-            arg, a, c, b1, b2, b3, ..
+            arg,
+            a,
+            c,
+            b1,
+            b2,
+            b3,
+            ..
         } => {
             let x = eval(arg, env).int();
             if x > *a {
@@ -975,7 +1001,7 @@ fn eval(e: &HExpr, env: &mut Vec<(u32, HVal)>) -> HVal {
             env.push((*va, HVal::I(vaval)));
             let val3 = eval(e3, env).int();
             env.push((*v0, HVal::I(val3))); // inner v0 shadows (last wins)
-            // body = inner v0 + va
+                                            // body = inner v0 + va
             let body = val3.wrapping_add(vaval);
             env.pop();
             env.pop();
@@ -1000,9 +1026,7 @@ fn eval(e: &HExpr, env: &mut Vec<(u32, HVal)>) -> HVal {
         HExpr::OrE(a, b) => HVal::B(eval(a, env).boolean() || eval(b, env).boolean()),
         HExpr::NotE(x) => HVal::B(!eval(x, env).boolean()),
         HExpr::StrLit(s) => HVal::S(s.clone()),
-        HExpr::Append(a, b) => {
-            HVal::S(format!("{}{}", eval(a, env).text(), eval(b, env).text()))
-        }
+        HExpr::Append(a, b) => HVal::S(format!("{}{}", eval(a, env).text(), eval(b, env).text())),
         HExpr::ShowInt(x) => HVal::S(show_int(eval(x, env).int())),
         HExpr::ToUpper(x) => HVal::S(eval(x, env).text().to_uppercase()),
         HExpr::ToLower(x) => HVal::S(eval(x, env).text().to_lowercase()),
@@ -1010,9 +1034,13 @@ fn eval(e: &HExpr, env: &mut Vec<(u32, HVal)>) -> HVal {
         HExpr::TReverse(x) => HVal::S(eval(x, env).text().chars().rev().collect()),
         HExpr::Unwords(x) => HVal::S(t_unwords(eval(x, env).list_text())),
         HExpr::ListIntLit(v) => HVal::LI(v.clone()),
-        HExpr::MapInt(f, l) => {
-            HVal::LI(eval(l, env).list_int().iter().map(|x| apply_int_fn(*f, *x)).collect())
-        }
+        HExpr::MapInt(f, l) => HVal::LI(
+            eval(l, env)
+                .list_int()
+                .iter()
+                .map(|x| apply_int_fn(*f, *x))
+                .collect(),
+        ),
         HExpr::FilterInt(p, l) => HVal::LI(
             eval(l, env)
                 .list_int()
@@ -1070,13 +1098,21 @@ fn eval(e: &HExpr, env: &mut Vec<(u32, HVal)>) -> HVal {
             HVal::LI(x)
         }
         HExpr::ListTextLit(v) => HVal::LS(v.clone()),
-        HExpr::MapShow(l) => {
-            HVal::LS(eval(l, env).list_int().iter().map(|n| show_int(*n)).collect())
-        }
+        HExpr::MapShow(l) => HVal::LS(
+            eval(l, env)
+                .list_int()
+                .iter()
+                .map(|n| show_int(*n))
+                .collect(),
+        ),
         HExpr::Words(x) => HVal::LS(t_words(eval(x, env).text())),
-        HExpr::MapToUpper(l) => {
-            HVal::LS(eval(l, env).list_text().iter().map(|s| s.to_uppercase()).collect())
-        }
+        HExpr::MapToUpper(l) => HVal::LS(
+            eval(l, env)
+                .list_text()
+                .iter()
+                .map(|s| s.to_uppercase())
+                .collect(),
+        ),
         HExpr::FilterPrefix(p, l) => HVal::LS(
             eval(l, env)
                 .list_text()
@@ -1146,7 +1182,10 @@ fn run_pure(source: &str) -> Result<serde_json::Value, String> {
 #[derive(Debug)]
 enum Outcome {
     Match,
-    Mismatch { expected: serde_json::Value, got: serde_json::Value },
+    Mismatch {
+        expected: serde_json::Value,
+        got: serde_json::Value,
+    },
     Error(String),
 }
 
@@ -1185,7 +1224,10 @@ fn reference_self_check_1000() {
         let mut env2 = Vec::new();
         let a = eval(&body, &mut env1);
         let b = eval(&body, &mut env2);
-        assert_eq!(a, b, "reference interpreter is nondeterministic at seed {i}");
+        assert_eq!(
+            a, b,
+            "reference interpreter is nondeterministic at seed {i}"
+        );
         // Pretty-printing must produce a non-empty body.
         assert!(!pp(&body).is_empty());
         // JSON projection must not panic.
@@ -1241,9 +1283,7 @@ mod committed {
         Config {
             cases: 30,
             failure_persistence: Some(Box::new(
-                proptest::test_runner::FileFailurePersistence::WithSource(
-                    "proptest-regressions",
-                ),
+                proptest::test_runner::FileFailurePersistence::WithSource("proptest-regressions"),
             )),
             ..Config::default()
         }
@@ -1320,10 +1360,7 @@ mod committed {
     /// A/B oracle on the effect path. Cap stays ≤30 per task boundary.
     #[test]
     fn effectful_lazy_ab_x8() {
-        let mut runner = TestRunner::new(Config {
-            cases: 8,
-            ..cfg()
-        });
+        let mut runner = TestRunner::new(Config { cases: 8, ..cfg() });
         runner
             .run(&any::<u64>(), |seed| {
                 let case = gen_effect_case(seed);
@@ -1341,6 +1378,22 @@ mod committed {
                             a, &expected,
                             "B1 effectful mismatch (seed {})\ncase: {:?}",
                             seed, case
+                        );
+                        Ok(())
+                    }
+                    // DOCUMENTED divergence, not a bug (cf. W4's
+                    // cap_boundary_clean_error): over the 100k node cap the
+                    // lazy path parks (streamed responses have no cap) while
+                    // the eager kill-switch drains and returns a clean
+                    // EffectResponseTooLarge. Lazy must still match the
+                    // reference; eager must fail CLEANLY (no signal).
+                    (WorkerResult::Ok(a), WorkerResult::Fail(msg)) if msg.contains("too large") => {
+                        prop_assert_eq!(
+                            a,
+                            &expected,
+                            "lazy result wrong in over-cap case (seed {})\ncase: {:?}",
+                            seed,
+                            case
                         );
                         Ok(())
                     }
@@ -1394,7 +1447,10 @@ fn long_haul() {
         }
     }
     eprintln!("[longhaul] DONE {n} cases, {failures} failures");
-    assert_eq!(failures, 0, "long-haul found {failures} failing cases (see stderr)");
+    assert_eq!(
+        failures, 0,
+        "long-haul found {failures} failing cases (see stderr)"
+    );
 }
 
 // ============================================================================
@@ -1488,8 +1544,7 @@ impl EffectCase {
                 serde_json::json!(items.iter().filter(|s| s.starts_with(p.as_str())).count())
             }
             EffectOp::MapUpperTake(k) => {
-                let v: Vec<String> =
-                    items.iter().take(*k).map(|s| s.to_uppercase()).collect();
+                let v: Vec<String> = items.iter().take(*k).map(|s| s.to_uppercase()).collect();
                 serde_json::json!(v)
             }
         }
@@ -1642,10 +1697,14 @@ fn count_constructs(e: &HExpr, t: &mut std::collections::BTreeMap<&'static str, 
         NegateE(_) => "NegateE",
         IfInt(..) => "IfInt",
         WhereGo { with_sig: true, .. } => "WhereGo(sig)",
-        WhereGo { with_sig: false, .. } => "WhereGo(unsigned)",
+        WhereGo {
+            with_sig: false, ..
+        } => "WhereGo(unsigned)",
         CaseOfCase(..) => "CaseOfCase",
         Guard { with_sig: true, .. } => "Guard(sig)",
-        Guard { with_sig: false, .. } => "Guard(unsigned)",
+        Guard {
+            with_sig: false, ..
+        } => "Guard(unsigned)",
         LetShadowInt { .. } => "LetShadowInt",
         Cmp(..) => "Cmp",
         EvenE(_) => "EvenE",
@@ -1689,17 +1748,39 @@ fn count_constructs(e: &HExpr, t: &mut std::collections::BTreeMap<&'static str, 
             count_constructs(a, t);
             count_constructs(b, t);
         }
-        Length(a) | Sum(a) | Product(a) | FoldlAdd(_, a) | NegateE(a) | EvenE(a) | OddE(a)
-        | NotE(a) | ShowInt(a) | ToUpper(a) | ToLower(a) | Strip(a) | TReverse(a) | Unwords(a)
-        | MapInt(_, a) | FilterInt(_, a) | TakeI(_, a) | DropI(_, a) | ReverseI(a)
-        | ConcatMapI(_, a) | MapShow(a) | Words(a) | MapToUpper(a) | FilterPrefix(_, a)
+        Length(a)
+        | Sum(a)
+        | Product(a)
+        | FoldlAdd(_, a)
+        | NegateE(a)
+        | EvenE(a)
+        | OddE(a)
+        | NotE(a)
+        | ShowInt(a)
+        | ToUpper(a)
+        | ToLower(a)
+        | Strip(a)
+        | TReverse(a)
+        | Unwords(a)
+        | MapInt(_, a)
+        | FilterInt(_, a)
+        | TakeI(_, a)
+        | DropI(_, a)
+        | ReverseI(a)
+        | ConcatMapI(_, a)
+        | MapShow(a)
+        | Words(a)
+        | MapToUpper(a)
+        | FilterPrefix(_, a)
         | TakeT(_, a) => count_constructs(a, t),
         IfInt(a, b, c) | IfText(a, b, c) | IfListInt(a, b, c) | CaseOfCase(a, b, c) => {
             count_constructs(a, t);
             count_constructs(b, t);
             count_constructs(c, t);
         }
-        Guard { arg, b1, b2, b3, .. } => {
+        Guard {
+            arg, b1, b2, b3, ..
+        } => {
             count_constructs(arg, t);
             count_constructs(b1, t);
             count_constructs(b2, t);
@@ -1739,7 +1820,10 @@ fn coverage_census() {
         let mut t = std::collections::BTreeMap::new();
         count_constructs(&body, &mut t);
         let has_join = t.keys().any(|k| {
-            k.starts_with("WhereGo") || *k == "CaseOfCase" || k.starts_with("Guard") || *k == "LetShadowInt"
+            k.starts_with("WhereGo")
+                || *k == "CaseOfCase"
+                || k.starts_with("Guard")
+                || *k == "LetShadowInt"
         });
         if has_join {
             programs_with_joinshape += 1;
