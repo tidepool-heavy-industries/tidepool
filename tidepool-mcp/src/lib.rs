@@ -548,12 +548,15 @@ pub fn ensure_effects_module(effects: &[EffectDecl]) -> std::io::Result<PathBuf>
 
 pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
     let mut out = String::new();
-    // QuasiQuotes + ViewPatterns are latency-free when unused (plans/qq-spike.md
-    // M2) and enable [fmt|...|]/[j|...|]; the Tidepool.QQ IMPORT is the part
-    // that costs, and is injected conditionally in eval() via uses_qq().
-    // Dialect note: with QuasiQuotes on, `[x|x<-xs]` (comprehension with no
-    // space before `|`) parses as a quasi-quote — write `[x | x <- xs]`.
-    out.push_str("{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, QuasiQuotes, ViewPatterns #-}\n");
+    // QuasiQuotes/ViewPatterns are NOT in this line — they are token-gated
+    // (QQ_PRAGMA_LINE, injected in eval() via uses_qq()). GHC's
+    // enableCodeGenForTH triggers on extension PRESENCE
+    // (needsTemplateHaskellOrQQ checks xopt, not splice usage), so an
+    // always-on QuasiQuotes pragma would bytecode-provision the entire home
+    // module graph and poison/flush the EPS on EVERY eval — a latency
+    // regression plus, under a pre-EPS-fix extract binary, the clz# deopt
+    // class (see plans/qq-spike.md "deoptimization bug").
+    out.push_str("{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules #-}\n");
     out.push_str("module Expr where\n");
     out.push_str("import Tidepool.Prelude hiding (error)\n");
     // Effect GADTs, `M`, the `error` shadow, and the send-wrapper helpers
@@ -905,6 +908,16 @@ pub fn aeson_imports() -> String {
 pub fn uses_qq(src: &str) -> bool {
     src.contains("[fmt|") || src.contains("[j|")
 }
+
+/// Extra LANGUAGE pragmas prepended to the module ONLY for QQ-using evals
+/// (token-gated alongside the Tidepool.QQ import). QuasiQuotes must never be
+/// always-on: GHC's enableCodeGenForTH keys on extension presence
+/// (needsTemplateHaskellOrQQ), so the pragma alone makes the driver
+/// bytecode-provision the whole home graph per eval. ViewPatterns rides along
+/// because the `[j|...|]` pattern expansion splices view patterns.
+/// Dialect note: with QuasiQuotes on, `[x|x<-xs]` (no-space comprehension)
+/// parses as a quasi-quote — write `[x | x <- xs]`.
+pub const QQ_PRAGMA_LINE: &str = "{-# LANGUAGE QuasiQuotes, ViewPatterns #-}\n";
 
 pub fn build_effect_stack_type(effects: &[EffectDecl]) -> String {
     if effects.is_empty() {
@@ -2085,17 +2098,26 @@ impl TidepoolMcpServerImpl {
         }
 
         let mut all_imports = aeson_imports();
-        // Tidepool.QQ is injected ONLY when a quoter token appears: the
-        // import alone drags the quoter home-module graph into every eval
-        // (~+385ms, plans/qq-spike.md M3); no-splice evals stay
-        // byte-identical (and cache-identical).
-        if uses_qq(&req.code) || uses_qq(&req.helpers) {
+        // Both the QuasiQuotes/ViewPatterns pragmas AND the Tidepool.QQ
+        // import are injected ONLY when a quoter token appears: the pragma
+        // alone triggers GHC's whole-graph bytecode provisioning
+        // (needsTemplateHaskellOrQQ is extension-keyed), and the import
+        // alone drags the quoter home-module graph into the eval (~+385ms,
+        // plans/qq-spike.md M3). No-splice evals stay byte-identical (and
+        // cache-identical).
+        let qq_used = uses_qq(&req.code) || uses_qq(&req.helpers);
+        if qq_used {
             all_imports.push_str("Tidepool.QQ (fmt, j)\n");
         }
         all_imports.push_str(&req.imports);
+        let preamble: std::borrow::Cow<'_, str> = if qq_used {
+            format!("{}{}", QQ_PRAGMA_LINE, self.haskell_preamble).into()
+        } else {
+            self.haskell_preamble.as_str().into()
+        };
         let normalized_input = req.input.as_ref().map(normalize_input);
         let source: Arc<str> = template_haskell(
-            &self.haskell_preamble,
+            &preamble,
             &self.effect_stack_type,
             &req.code,
             &all_imports,
@@ -2770,7 +2792,12 @@ mod tests {
     }
 
     #[test]
-    fn test_preamble_qq_pragmas_always_on() {
+    fn test_preamble_has_no_qq_pragmas() {
+        // QuasiQuotes must NEVER be in the static pragma line: GHC's
+        // enableCodeGenForTH keys on extension presence, so always-on
+        // QuasiQuotes bytecode-provisions the whole home graph (and
+        // poisons/flushes the EPS) on every eval — caught live by the
+        // spliton repro tests failing with the clz# deopt class.
         for (src, name) in [
             (build_preamble(&[], false), "preamble"),
             (
@@ -2780,26 +2807,36 @@ mod tests {
         ] {
             let pragma_line = src.lines().next().unwrap();
             assert!(
-                pragma_line.contains("QuasiQuotes"),
-                "{name}: QuasiQuotes missing from pragma line"
+                !pragma_line.contains("QuasiQuotes"),
+                "{name}: QuasiQuotes must be token-gated, not always-on"
             );
             assert!(
-                pragma_line.contains("ViewPatterns"),
-                "{name}: ViewPatterns missing from pragma line"
+                !pragma_line.contains("ViewPatterns"),
+                "{name}: ViewPatterns must be token-gated, not always-on"
             );
         }
     }
 
     #[test]
-    fn test_template_haskell_qq_import_placement() {
+    fn test_template_haskell_qq_injection() {
         let pre = build_preamble(&[], false);
         // mirror eval()'s assembly for a QQ-using request
         let code = "pure [fmt|hello {name}|]";
         let mut imports = aeson_imports();
-        if uses_qq(code) {
-            imports.push_str("Tidepool.QQ (fmt, j)\n");
-        }
-        let src = template_haskell(&pre, "'[]", code, &imports, "", None, None);
+        assert!(uses_qq(code));
+        imports.push_str("Tidepool.QQ (fmt, j)\n");
+        let pre_qq = format!("{QQ_PRAGMA_LINE}{pre}");
+        let src = template_haskell(&pre_qq, "'[]", code, &imports, "", None, None);
+        // pragma line must precede the module header
+        let pragma = src
+            .find("{-# LANGUAGE QuasiQuotes, ViewPatterns #-}")
+            .expect("QQ pragma line missing from rendered module");
+        let module_decl = src.find("module Expr where").unwrap();
+        assert!(
+            pragma < module_decl,
+            "QQ pragmas must precede module header"
+        );
+        // import must land in the import block (before the default decl)
         let qq = src
             .find("import Tidepool.QQ (fmt, j)\n")
             .expect("QQ import missing from rendered module");
@@ -2808,17 +2845,19 @@ mod tests {
     }
 
     #[test]
-    fn test_no_qq_import_without_token() {
+    fn test_no_qq_injection_without_token() {
         let pre = build_preamble(&[], false);
         let code = "pure [x | x <- xs]";
-        let mut imports = aeson_imports();
-        if uses_qq(code) {
-            imports.push_str("Tidepool.QQ (fmt, j)\n");
-        }
-        let src = template_haskell(&pre, "'[]", code, &imports, "", None, None);
+        assert!(!uses_qq(code));
+        // mirror eval(): no token -> no pragma prepend, no import
+        let src = template_haskell(&pre, "'[]", code, &aeson_imports(), "", None, None);
         assert!(
             !src.contains("Tidepool.QQ"),
             "no-splice eval must not import Tidepool.QQ"
+        );
+        assert!(
+            !src.contains("QuasiQuotes"),
+            "no-splice eval must not enable QuasiQuotes"
         );
     }
 
