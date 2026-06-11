@@ -1,6 +1,11 @@
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE ViewPatterns #-}
 module Suite where
 
 import qualified Data.Text as T
+-- qq-suite: regen now needs `--include lib --target-module-only`
+-- (see CLAUDE.md / plans/qq-spike.md)
+import Tidepool.QQ (fmt, j)
 
 -- ============================================================
 -- Int literals (5)
@@ -775,3 +780,13 @@ round_simple_up = round (3.7 :: Double)
 
 round_negative_half :: Int
 round_negative_half = round (-2.5 :: Double)
+
+-- ============================================================
+-- qq-suite: tests
+-- ============================================================
+-- Two sections below are owned by separate leaves; each leaf adds
+-- bindings ONLY inside its own section.
+
+-- ---- qq-suite: fmt section (owner: leaf qq-fmt) ----
+
+-- ---- qq-suite: json section (owner: leaf qq-json) ----

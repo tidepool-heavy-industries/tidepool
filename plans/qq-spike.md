@@ -1,0 +1,114 @@
+# QQ Spike (Phase 0): TH splices through the extract pipeline — VERDICT: GO
+
+Date: 2026-06-11. Branch: `root.qq-suite`. Env: GHC 9.12.2, x86_64-linux,
+nix dev shell, extract binary built via `cabal build tidepool-extract-bin`,
+pipeline at `-O2` with `backend = noBackend` (GhcPipeline.hs unchanged).
+
+## The question
+
+`haskell/src/Tidepool/GhcPipeline.hs:53` sets `backend = noBackend`. TH
+splices need an evaluator. Does GHC 9.12's API auto-provision bytecode for
+splice-needing modules under `noBackend`, and at what latency cost?
+
+## Answer: works AS-IS. Zero pipeline changes needed.
+
+GHC 9.12's driver (`enableCodeGenForTH` in `GHC.Driver.Make`) detects that a
+home module enables `QuasiQuotes`/`TemplateHaskell` and automatically
+compiles the splice-needed subgraph of home modules to **bytecode**, even
+under `noBackend`. The spoofed `genericPlatform`, SSE/AVX unsets, and
+`Opt_FullLaziness`/`Opt_CprAnal` unsets are unaffected — none of the
+candidate fallback recipes (`-fprefer-byte-code`, `bytecodeBackend`, prebuilt
+package) were needed.
+
+Spike artifacts in `scratch/qq-spike/`:
+- `UpperQQ.hs` — minimal quoter (`[upper|hello|]` → `"HELLO"`), combinator
+  style (`litE . stringL`), imports base + template-haskell only.
+- `UpperTH.hs` + `SpikeHelper.hs` — quoter #2 using **`TemplateHaskellQuotes`
+  `[| |]` quotes** whose expansion references a *home module* function
+  (`SpikeHelper.shout`) and a package module (`Data.Text.pack`).
+- `M1Plain/M2Pragma/M3Import/M4Splice/M5THQuote.hs` — the latency matrix.
+
+Both spike quoters compile, splice, translate, and serialize: `spike_upper`
+expands to a plain string literal (18-node CBOR, `unpackCString#` cons-cell
+chain — byte-shape identical to hand-written code); `M5THQuote.result`
+closes over `shout` + Text internals (3247 nodes) with hygienic `NameG`
+references resolving across the splice boundary. **Quoters can therefore be
+written hygienically with `[| |]` quotes — no `mkName` fragility — including
+references to home modules like `Tidepool.Aeson.Value`.**
+
+## Latency measurements
+
+`tidepool-extract-bin <mod>.hs --include scratch/qq-spike --target result`,
+5 runs each (3 for M5), steady-state. Note: each extract run is a fresh GHC
+session (no interface files written under `noBackend`), so there is no
+cross-run incremental state — "warm" here means OS page cache only. The
+very first run after boot pays ~0.5s extra cache warming.
+
+| Case | Pragma | Import quoter | Splice | Time | Δ vs M1 |
+|------|--------|---------------|--------|------|---------|
+| M1 baseline | – | – | – | ~235ms | – |
+| M2 | QuasiQuotes | – | – | ~245ms | **+10ms (noise)** |
+| M3 | QuasiQuotes | yes | – | ~620ms | **+385ms** |
+| M4 | QuasiQuotes | yes | yes | ~1900ms | +1665ms |
+| M5 (TH-quotes quoter, home-module ref) | QuasiQuotes | yes | yes | ~2070ms | +1835ms |
+
+Reading:
+- **The pragma is free** (M2 ≈ M1). `QuasiQuotes` can sit unconditionally in
+  the eval pragma line.
+- **The import alone is NOT free** (+385ms): `runPipeline` compiles every
+  home module in the graph through parse/typecheck/desugar/core2core, and a
+  quoter module drags template-haskell interface loading with it. An
+  unconditional `import Tidepool.QQ` in `build_preamble` would tax every
+  no-splice eval ~385ms — violating the "zero regression" gate.
+- **A splice costs ~1.3–1.5s on top of the import** (bytecode codegen for the
+  quoter subgraph + splice execution). Acceptable: it's paid only by evals
+  that actually use QQ, in exchange for compressing N tool calls into one.
+
+## Decisions
+
+1. **Recipe: home-module route.** `Tidepool.QQ` lives in
+   `haskell/lib/Tidepool/` like Tidepool.Prelude, found via `importPaths`.
+   No cabal package in the package db, no flake.nix toolchain change, no
+   GhcPipeline.hs change. (The package route would shave the M3/M4 deltas
+   but costs nix/cabal wiring complexity on every toolchain; revisit only if
+   QQ latency becomes a measured pain.)
+2. **Quoter style: `TemplateHaskellQuotes` + `[| |]` quotes** (hygienic
+   `NameG` references, proven by M5). Generated code references
+   `Tidepool.Aeson.Value` / `Data.Text` names directly; the *splice site*
+   needs no imports in scope. Antiquoted user expressions use `mkName`
+   (they SHOULD resolve in the eval's scope — that's the point).
+3. **Phase 2 wiring: conditional injection.** `QuasiQuotes` (+
+   `ViewPatterns` for the j-pattern side) go in the static pragma string
+   constants (free, M2). The `Tidepool.QQ` import is injected into the
+   eval's import set **only when the code contains `[fmt|` or `[j|`** —
+   detection is exact because GHC's QQ syntax is literally that token (no
+   space allowed after `[`). No-splice evals see byte-identical module
+   source → zero regression by construction. NOTE: the conditional lives in
+   the eval assembly path (`eval()` → `all_imports`), a hair outside the
+   "string constants in build_preamble" boundary — escalated to root with
+   these measurements before implementation.
+4. **Suite regen: `--target-module-only`.** `--all-closed` sweeps binders
+   from ALL home modules in the graph; with `import Tidepool.QQ` in
+   Suite.hs, quoter internals (TH-library Core, 76KB+ per binding in the
+   spike) would land in `suite_cbor/` and flow into the JIT differential —
+   bloat + crash risk. An additive Main.hs flag restricts fixture emission
+   to the target module's binders. Regen command becomes:
+   `cabal run tidepool-extract-bin -- test/Suite.hs --all-closed --include lib --target-module-only`.
+
+## Locked-decision clarification (for reviewers)
+
+"No JSON parsing in Haskell" (PR #144) bans **runtime** parsing capability
+in evals — `encode`/`decode` stay gone. The `[j|...|]` quoter contains a
+compile-time JSON parser that runs **only during GHC compilation** (inside
+the splice evaluator) and emits Value-construction/destructuring Core. No
+runtime parsing capability is reintroduced; an eval still cannot parse a
+Text it computed at runtime. This does not violate the locked decision.
+
+## Known dialect tradeoffs (documented, accepted)
+
+- With `QuasiQuotes` enabled, `[x|x<-xs]` (list comprehension with no space
+  before `|`) parses as a quasi-quote and fails. Mitigated by conditional
+  pragma injection if root prefers; otherwise a dialect note ("space before
+  `|` in comprehensions"). LLM-written code essentially always has spaces.
+- QQ-using evals pay ~+1.7s compile. Cached identically to all evals
+  (CBOR cache keyed on source), so repeat calls are unaffected.

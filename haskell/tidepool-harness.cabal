@@ -17,6 +17,9 @@ executable tidepool-extract-bin
     Tidepool.Aeson.Value
     Tidepool.Aeson.KeyMap
     Tidepool.Aeson.Lens
+    Tidepool.QQ
+    Tidepool.QQ.Fmt
+    Tidepool.QQ.Json
   build-depends:
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
@@ -25,6 +28,7 @@ executable tidepool-extract-bin
     filepath,
     directory,
     process,
+    template-haskell,
     text,
     cborg,
     mtl,

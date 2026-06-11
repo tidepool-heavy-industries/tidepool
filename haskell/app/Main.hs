@@ -7,15 +7,17 @@ import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Control.Exception (evaluate, try, SomeException, fromException)
+import Data.Char (toUpper)
 import Data.List (isPrefixOf)
 import Control.Monad (foldM)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
 
 import GHC.Types.SourceError (SourceError)
+import GHC (moduleName, moduleNameString)
 import GHC.Core (CoreBind, Bind(..))
 import GHC.Core.DataCon (DataCon)
-import GHC.Types.Name (nameOccName, isExternalName)
+import GHC.Types.Name (nameOccName, isExternalName, nameModule_maybe)
 import GHC.Types.Id (idName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Unique (getKey)
@@ -41,17 +43,19 @@ data Args = Args
   , argTarget :: Maybe String
   , argDumpCore :: Bool
   , argAllClosed :: Bool
+  , argTargetModuleOnly :: Bool
   , argIncludes :: [FilePath]
   , argFiles :: [String]
   }
 
 parseArgs :: [String] -> Args
-parseArgs = go (Args Nothing Nothing False False [] [])
+parseArgs = go (Args Nothing Nothing False False False [] [])
   where
     go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
     go a ("--target" : name : rest) = go a { argTarget = Just name } rest
     go a ("--dump-core" : rest) = go a { argDumpCore = True } rest
     go a ("--all-closed" : rest) = go a { argAllClosed = True } rest
+    go a ("--target-module-only" : rest) = go a { argTargetModuleOnly = True } rest
     go a ("--include" : dir : rest) = go a { argIncludes = argIncludes a ++ [dir] } rest
     go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
     go a [] = a
@@ -86,12 +90,26 @@ processFile args path = do
         -- GHC may mark user-defined bindings as Internal after optimization.
         -- Filter out GHC-generated names (starting with '$').
         -- Errors from translateModuleClosed are caught and those bindings are skipped.
-        let allBinders = [ b | bind <- binds
+        -- With --target-module-only, restrict fixture emission to binders
+        -- DEFINED in the target module (by basename convention, mirroring
+        -- GhcPipeline). Dep-module bindings (e.g. quasi-quoter internals
+        -- from Tidepool.QQ) still participate in closed translation as
+        -- dependencies — they just don't get their own fixtures, keeping
+        -- the fixture sweep (and the JIT differential that walks it) to
+        -- user-authored bindings.
+        let targetModName = capitalizeMod (takeBaseName path)
+            keepBinder b
+              | not (argTargetModuleOnly args) = True
+              | otherwise = case nameModule_maybe (idName b) of
+                  Just m  -> moduleNameString (moduleName m) == targetModName
+                  Nothing -> True
+            allBinders = [ b | bind <- binds
                          , b <- case bind of
                                   NonRec b _ -> [b]
                                   Rec pairs  -> map fst pairs ]
             uniqueNames = Map.keys $ Map.fromList
               [(n, ()) | b <- allBinders
+              , keepBinder b
               , let n = occNameString (nameOccName (idName b))
               , not ("$" `isPrefixOf` n)]
         (allMetaMap, allClosedBinds) <- foldM (\(acc, closedAcc) name -> do
@@ -208,6 +226,11 @@ processFile args path = do
         Nothing -> hPutStrLn stderr $ "Error: " ++ show e
       exitFailure
     Right () -> return ()
+
+-- | Module name from file basename, mirroring GhcPipeline's convention.
+capitalizeMod :: String -> String
+capitalizeMod [] = []
+capitalizeMod (c:cs) = toUpper c : cs
 
 -- | Deduplicate binding names by appending _1, _2, etc. for collisions.
 dedup :: Map.Map String Int -> [(String, a)] -> [(String, a)]
