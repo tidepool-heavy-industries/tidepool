@@ -4,6 +4,8 @@
 //! `compile_haskell`, and `eval` tools. Generic over effect handler stacks
 //! via `TidepoolMcpServer<H>`.
 
+pub mod validate;
+
 use dyn_clone::{clone_trait_object, DynClone};
 use parking_lot::Mutex;
 use rmcp::{
@@ -291,12 +293,36 @@ pub fn meta_decl() -> EffectDecl {
 pub fn ask_decl() -> EffectDecl {
     EffectDecl {
         type_name: "Ask",
-        description: "Suspend execution and ask the calling LLM a question. The LLM calls the resume tool with an answer, and execution continues.",
-        constructors: &["Ask :: Text -> Ask Value"],
-        type_defs: &[],
+        description: "Suspend execution and ask the calling LLM a question. The LLM calls the resume tool with an answer, and execution continues. `askQ` attaches a schema: the suspension carries it as JSON Schema and the resume reply is validated against it server-side before re-entering the computation (invalid replies do NOT consume the continuation).",
+        constructors: &[
+            "Ask :: Text -> Ask Value",
+            "AskWith :: Text -> Value -> Ask Value",
+        ],
+        type_defs: &[
+            // Schema vocabulary lives on the Ask effect (always present in
+            // every stack) so .tidepool/lib modules and Llm-less stacks can
+            // use Q/askQ. llmJson (llm_decl) references schemaToValue from
+            // here — same generated module.
+            "data Schema = SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema",
+            "data Q a = Q Schema (Value -> a) Double",
+            "data Judged a = Sure a | Unsure Double a",
+            "instance Functor Q where\n  fmap f (Q s p t) = Q s (f . p) t",
+            "instance Applicative Q where\n  pure a = Q (SObj []) (const a) 0.6\n  Q (SObj fs1) p1 t1 <*> Q (SObj fs2) p2 t2 = Q (SObj (fs1 ++ fs2)) (\\v -> p1 v (p2 v)) (if t1 >= t2 then t1 else t2)\n  Q s1 p1 t1 <*> Q s2 p2 t2 = Q s1 (\\v -> p1 v (p2 v)) (if t1 >= t2 then t1 else t2)",
+        ],
         helpers: &[
             "ask :: Text -> M Value\nask = send . Ask",
+            "askWith :: Value -> Text -> M Value\naskWith meta prompt = send (AskWith prompt meta)",
+            "askQ :: Q a -> Text -> M a\naskQ (Q schema parse _) prompt = parse <$> askWith (object [\"schema\" .= schemaToValue schema]) prompt",
             "getLine :: Text -> M Text\ngetLine prompt = do { v <- ask prompt; case v of { String s -> pure s; _ -> pure (show v) } }",
+            "isOpt :: Schema -> Bool\nisOpt (SOpt _) = True\nisOpt _ = False",
+            "innerSchema :: Schema -> Schema\ninnerSchema (SOpt s) = s\ninnerSchema s = s",
+            "schemaToValue :: Schema -> Value\nschemaToValue SStr = object [\"type\" .= (\"string\" :: Text)]\nschemaToValue SNum = object [\"type\" .= (\"number\" :: Text)]\nschemaToValue SBool = object [\"type\" .= (\"boolean\" :: Text)]\nschemaToValue (SEnum vs) = object [\"type\" .= (\"string\" :: Text), \"enum\" .= vs]\nschemaToValue (SArr item) = object [\"type\" .= (\"array\" :: Text), \"items\" .= schemaToValue item]\nschemaToValue (SOpt s) = schemaToValue s\nschemaToValue (SObj fields) = object [\"type\" .= (\"object\" :: Text), \"properties\" .= object (map (\\(k,s) -> k .= schemaToValue (innerSchema s)) fields), \"required\" .= map fst (filter (not . isOpt . snd) fields)]",
+            "pick :: [Text] -> Q Text\npick cats = Q (SObj [(\"pick\", SEnum cats)]) (\\v -> case v ^? key \"pick\" . _String of { Just s -> s; _ -> error \"Q: missing 'pick' in response\" }) 0.6",
+            "yn :: Q Bool\nyn = Q (SObj [(\"answer\", SBool)]) (\\v -> case v ^? key \"answer\" . _Bool of { Just b -> b; _ -> error \"Q: missing 'answer' in response\" }) 0.6",
+            "obj :: Schema -> Q Value\nobj s = Q s id 0.6",
+            "txt :: Text -> Q Text\ntxt k = Q (SObj [(k, SStr)]) (\\v -> case v ^? key k . _String of { Just s -> s; _ -> error (\"Q: missing '\" <> k <> \"' in response\") }) 0.6",
+            "num :: Text -> Q Double\nnum k = Q (SObj [(k, SNum)]) (\\v -> case v ^? key k . _Number of { Just n -> n; _ -> error (\"Q: missing '\" <> k <> \"' in response\") }) 0.6",
+            "bar :: Double -> Q a -> Q a\nbar t (Q s p _) = Q s p t",
         ],
     }
 }
@@ -310,15 +336,11 @@ pub fn llm_decl() -> EffectDecl {
             "LlmChat       :: Text -> Llm Text",
             "LlmStructured :: Text -> Value -> Llm Value",
         ],
-        type_defs: &[
-            "data Schema = SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema",
-        ],
+        type_defs: &[],
         helpers: &[
             "llm :: Text -> M Text\nllm = send . LlmChat",
+            // schemaToValue lives in ask_decl (Ask is always present).
             "llmJson :: Text -> Schema -> M Value\nllmJson prompt schema = send (LlmStructured prompt (schemaToValue schema))",
-            "isOpt :: Schema -> Bool\nisOpt (SOpt _) = True\nisOpt _ = False",
-            "innerSchema :: Schema -> Schema\ninnerSchema (SOpt s) = s\ninnerSchema s = s",
-            "schemaToValue :: Schema -> Value\nschemaToValue SStr = object [\"type\" .= (\"string\" :: Text)]\nschemaToValue SNum = object [\"type\" .= (\"number\" :: Text)]\nschemaToValue SBool = object [\"type\" .= (\"boolean\" :: Text)]\nschemaToValue (SEnum vs) = object [\"type\" .= (\"string\" :: Text), \"enum\" .= vs]\nschemaToValue (SArr item) = object [\"type\" .= (\"array\" :: Text), \"items\" .= schemaToValue item]\nschemaToValue (SOpt s) = schemaToValue s\nschemaToValue (SObj fields) = object [\"type\" .= (\"object\" :: Text), \"properties\" .= object (map (\\(k,s) -> k .= schemaToValue (innerSchema s)) fields), \"required\" .= map fst (filter (not . isOpt . snd) fields)]",
         ],
     }
 }
@@ -365,6 +387,10 @@ pub struct EvalRequest {
     #[serde(default)]
     pub helpers: String,
     /// Optional JSON input injected as `input :: Aeson.Value` binding.
+    /// Also the PAYLOAD LANE: large or quote-heavy content (file bodies,
+    /// generated source) rides here as a real JSON value — no Haskell
+    /// string escaping — while `code` stays a short verb that consumes
+    /// `input` (e.g. `writeFile path src where src = case input of { String s -> s; _ -> "" }`).
     #[serde(default)]
     pub input: Option<serde_json::Value>,
     /// Optional maximum character budget for paginated output.
@@ -381,8 +407,26 @@ pub struct EvalRequest {
 pub struct ResumeRequest {
     /// The continuation ID returned by a suspended eval call.
     pub continuation_id: String,
-    /// The response text to feed back to the suspended Haskell program.
-    pub response: String,
+    /// The response to feed back to the suspended Haskell program. May be
+    /// any JSON value; plain text is fine for schema-less asks. If the
+    /// suspension carried a `schema`, the response is validated against it
+    /// server-side BEFORE the continuation is consumed — pass the JSON
+    /// directly (not stringified). A failed validation returns the
+    /// violations and leaves the continuation alive for a corrected retry.
+    pub response: serde_json::Value,
+}
+
+/// Request parameters for the `abort` tool.
+///
+/// Terminates a suspended evaluation without answering it.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AbortRequest {
+    /// The continuation ID returned by a suspended eval call.
+    pub continuation_id: String,
+    /// Optional reason, surfaced to the computation as the error message
+    /// ("ask aborted by caller: <reason>").
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -799,21 +843,14 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
         let has_llm = effects.iter().any(|e| e.type_name == "Llm");
         let has_ask_eff = effects.iter().any(|e| e.type_name == "Ask");
         if has_llm && has_ask_eff {
-            out.push_str("-- Heuristic combinators\n");
-            out.push_str(concat!(
-                "data Q a = Q Schema (Value -> a) Double\n",
-                "data Judged a = Sure a | Unsure Double a\n",
-            ));
-            out.push_str(concat!(
-                "instance Functor Q where\n",
-                "  fmap f (Q s p t) = Q s (f . p) t\n",
-            ));
-            out.push_str(concat!(
-                "instance Applicative Q where\n",
-                "  pure a = Q (SObj []) (const a) 0.6\n",
-                "  Q (SObj fs1) p1 t1 <*> Q (SObj fs2) p2 t2 = Q (SObj (fs1 ++ fs2)) (\\v -> p1 v (p2 v)) (if t1 >= t2 then t1 else t2)\n",
-                "  Q s1 p1 t1 <*> Q s2 p2 t2 = Q s1 (\\v -> p1 v (p2 v)) (if t1 >= t2 then t1 else t2)\n",
-            ));
+            // Q itself (data Q, Schema, pick/yn/obj/txt/num/bar, askQ) lives
+            // in the generated Tidepool.Effects module (ask_decl) so
+            // .tidepool/lib modules can use it. Only the tier-1 cascade —
+            // Haiku-first, escalate-to-caller — lives here, because it
+            // needs llmJson.
+            out.push_str(
+                "-- Heuristic combinators: tier-1 cascade (Haiku-first, Ask-on-uncertainty)\n",
+            );
             // Internal helpers: augment schema with rubric, extract confidence, strip rubric
             out.push_str(concat!(
                 "h_aug :: Schema -> Schema\n",
@@ -831,7 +868,19 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
                 "h_strip (Object kvs) = Object (KM.delete (KM.fromText \"_unambiguous\") (KM.delete (KM.fromText \"_confident\") (KM.delete (KM.fromText \"_understood\") kvs)))\n",
                 "h_strip v = v\n",
             ));
-            // ?? operator: ask Haiku, auto-escalate on low confidence
+            // Escalation rewrap: the validator enforces the BARE schema on
+            // escalated replies, but tier-1 parsers for non-SObj schemas
+            // expect h_aug's {"value": ...} wrapping — re-wrap so both
+            // tiers hand `parse` the same shape.
+            out.push_str(concat!(
+                "h_wrap :: Schema -> Value -> Value\n",
+                "h_wrap (SObj _) v = v\n",
+                "h_wrap _ v = object [\"value\" .= v]\n",
+            ));
+            // ?? operator: ask Haiku, auto-escalate on low confidence.
+            // Escalation carries the schema STRUCTURALLY (suspension JSON
+            // "schema" field; resume validated server-side); the tier-1
+            // draft rides in the prompt as a proposed default.
             out.push_str(concat!(
                 "infixl 1 ??\n",
                 "(??) :: Q a -> Text -> M a\n",
@@ -839,7 +888,7 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
                 "  r <- llmJson prompt (h_aug schema)\n",
                 "  let c = h_conf r\n",
                 "  v <- if c >= threshold then pure (h_strip r)\n",
-                "       else ask (prompt <> \"\\n[haiku \" <> pack (showDouble c) <> \"]: \" <> show (h_strip r))\n",
+                "       else h_wrap schema <$> askWith (object [\"schema\" .= schemaToValue schema]) (prompt <> \"\\n[draft \" <> pack (showDouble c) <> \"]: \" <> show (h_strip r))\n",
                 "  pure (parse v)\n",
             ));
             // ?! operator: ask with evidence, returns Judged
@@ -852,33 +901,8 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
                 "  if c >= threshold\n",
                 "    then pure (Sure (parse (h_strip r)))\n",
                 "    else do\n",
-                "      v <- ask (prompt <> \"\\n[haiku \" <> pack (showDouble c) <> \"]: \" <> show (h_strip r))\n",
-                "      pure (Unsure c (parse v))\n",
-            ));
-            // Smart constructors
-            out.push_str(concat!(
-                "pick :: [Text] -> Q Text\n",
-                "pick cats = Q (SObj [(\"pick\", SEnum cats)]) (\\v -> case v ^? key \"pick\" . _String of { Just s -> s; _ -> error \"Q: missing 'pick' in response\" }) 0.6\n",
-            ));
-            out.push_str(concat!(
-                "yn :: Q Bool\n",
-                "yn = Q (SObj [(\"answer\", SBool)]) (\\v -> case v ^? key \"answer\" . _Bool of { Just b -> b; _ -> error \"Q: missing 'answer' in response\" }) 0.6\n",
-            ));
-            out.push_str(concat!(
-                "obj :: Schema -> Q Value\n",
-                "obj s = Q s id 0.6\n",
-            ));
-            out.push_str(concat!(
-                "txt :: Text -> Q Text\n",
-                "txt k = Q (SObj [(k, SStr)]) (\\v -> case v ^? key k . _String of { Just s -> s; _ -> error (\"Q: missing '\" <> k <> \"' in response\") }) 0.6\n",
-            ));
-            out.push_str(concat!(
-                "num :: Text -> Q Double\n",
-                "num k = Q (SObj [(k, SNum)]) (\\v -> case v ^? key k . _Number of { Just n -> n; _ -> error (\"Q: missing '\" <> k <> \"' in response\") }) 0.6\n",
-            ));
-            out.push_str(concat!(
-                "bar :: Double -> Q a -> Q a\n",
-                "bar t (Q s p _) = Q s p t\n",
+                "      v <- askWith (object [\"schema\" .= schemaToValue schema]) (prompt <> \"\\n[draft \" <> pack (showDouble c) <> \"]: \" <> show (h_strip r))\n",
+                "      pure (Unsure c (parse (h_wrap schema v)))\n",
             ));
             // Batch helpers
             out.push_str(concat!(
@@ -947,7 +971,13 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         "Return values are automatically rendered to JSON by the Rust runtime \u{2014} ",
         "Int becomes a number, [Char] becomes a string, Bool becomes true/false, ",
         "lists become arrays, etc. Prefer `pure x` over `send (Print (show x))` ",
-        "for returning results.",
+        "for returning results.\n",
+        "The `input` param is the PAYLOAD LANE: pass large or quote-heavy ",
+        "content (file bodies, generated source) as a real JSON value there \u{2014} ",
+        "no Haskell string escaping \u{2014} and keep `code` a short verb consuming ",
+        "the `input` binding. E.g. whole-file writes: code = ",
+        "`writeFile \".tidepool/lib/Mod.hs\" src where src = case input of { String s -> s; _ -> \"\" }` ",
+        "with the file content in `input`.",
     ));
 
     if !effects.is_empty() {
@@ -1399,25 +1429,45 @@ impl CapturedOutput {
 /// Messages from the eval thread to the MCP server.
 enum SessionMessage {
     /// The program hit an Ask effect and is waiting for a response.
-    Suspended { prompt: String },
+    /// `meta` carries AskWith metadata (e.g. a "schema" key) as JSON.
+    Suspended {
+        prompt: String,
+        meta: Option<serde_json::Value>,
+    },
     /// The program completed successfully.
     Completed { result: String },
     /// The program encountered an error.
     Error { error: String },
 }
 
+/// Messages from the MCP server to the blocked eval thread.
+///
+/// `Answer` carries the CANONICAL validated JSON value (the validator's
+/// parse, not the raw resume text — single source of truth). `Abort`
+/// terminates the ask as a handler error.
+enum ResumeMsg {
+    Answer(serde_json::Value),
+    Abort(String),
+}
+
 /// A suspended evaluation session, waiting for a resume call.
 struct EvalSession {
-    /// Send a response string to unblock the eval thread's Ask handler.
-    response_tx: std::sync::mpsc::Sender<String>,
+    /// Send a response to unblock the eval thread's Ask handler.
+    response_tx: std::sync::mpsc::Sender<ResumeMsg>,
     /// Receive the next message (Completed, Suspended, or Error) from the eval thread.
     session_rx: tokio::sync::mpsc::UnboundedReceiver<SessionMessage>,
     /// The Haskell source code, for error formatting on resume.
     source: Arc<str>,
-    /// When this session was created, for eviction ordering.
+    /// When this session was created, for eviction ordering. Refreshed on
+    /// failed validation so a retrying continuation isn't the eviction
+    /// victim while its caller fixes the reply.
     created_at: std::time::Instant,
     /// Output capture for this session.
     captured_output: CapturedOutput,
+    /// JSON Schema from the suspension's AskWith metadata ("schema" key);
+    /// resume replies are validated against it BEFORE the continuation is
+    /// consumed.
+    expected_schema: Option<serde_json::Value>,
 }
 
 /// Wraps an existing effect dispatcher and intercepts the Ask effect tag.
@@ -1428,7 +1478,7 @@ struct AskDispatcher {
     inner: Box<dyn McpEffectHandler>,
     ask_tag: u64,
     session_tx: tokio::sync::mpsc::UnboundedSender<SessionMessage>,
-    response_rx: std::sync::mpsc::Receiver<String>,
+    response_rx: std::sync::mpsc::Receiver<ResumeMsg>,
 }
 
 impl DispatchEffect<CapturedOutput> for AskDispatcher {
@@ -1439,72 +1489,105 @@ impl DispatchEffect<CapturedOutput> for AskDispatcher {
         cx: &tidepool_effect::dispatch::EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         if tag == self.ask_tag {
-            // Extract prompt from Ask constructor: Con(Ask, [prompt_val])
-            let prompt = extract_ask_prompt(request, cx.table())
+            // Extract prompt (+ AskWith metadata) from the Ask constructor
+            let (prompt, meta) = extract_ask_request(request, cx.table())
                 .map_err(tidepool_effect::error::EffectError::Handler)?;
 
             // Signal suspension to the MCP server
-            let _ = self.session_tx.send(SessionMessage::Suspended { prompt });
+            let _ = self
+                .session_tx
+                .send(SessionMessage::Suspended { prompt, meta });
 
-            // Block until the MCP server sends a response via the resume tool
-            let response = self.response_rx.recv().map_err(|_| {
+            // Block until the MCP server sends a response via the resume
+            // (or abort) tool. The server side has already JSON-parsed and
+            // schema-validated the response — what arrives is canonical.
+            let msg = self.response_rx.recv().map_err(|_| {
                 tidepool_effect::error::EffectError::Handler(
                     "Ask session closed (timeout or client disconnected)".into(),
                 )
             })?;
 
-            // Parse response as JSON → aeson Value; plain text wraps as Aeson.String
-            let json_val: serde_json::Value =
-                serde_json::from_str(&response).unwrap_or(serde_json::Value::String(response));
-            let core_val = json_val
-                .to_value(cx.table())
-                .map_err(tidepool_effect::error::EffectError::Bridge)?;
-            Ok(core_val.into())
+            match msg {
+                ResumeMsg::Answer(json_val) => {
+                    let core_val = json_val
+                        .to_value(cx.table())
+                        .map_err(tidepool_effect::error::EffectError::Bridge)?;
+                    Ok(core_val.into())
+                }
+                ResumeMsg::Abort(reason) => Err(tidepool_effect::error::EffectError::Handler(
+                    format!("ask aborted by caller: {reason}"),
+                )),
+            }
         } else {
             self.inner.dispatch(tag, request, cx)
         }
     }
 }
 
-/// Extract the prompt string from an Ask request Value.
+/// Extract the prompt (and optional AskWith metadata) from an Ask request.
 ///
-/// The request is `Con(Ask, [prompt_val])` where `prompt_val` is a Text value.
-/// Returns an error if the prompt cannot be extracted (e.g., unevaluated closure
-/// due to a crash in the string-building expression).
-fn extract_ask_prompt(
+/// The request is `Con(Ask, [prompt_val])` or `Con(AskWith, [prompt_val,
+/// meta_val])`, dispatched by constructor name. Returns an error if the
+/// prompt cannot be extracted (e.g., unevaluated closure due to a crash in
+/// the string-building expression).
+fn extract_ask_request(
     request: &tidepool_eval::value::Value,
     table: &tidepool_repr::DataConTable,
-) -> Result<String, String> {
+) -> Result<(String, Option<serde_json::Value>), String> {
     use tidepool_eval::value::Value;
 
-    let Value::Con(_, fields) = request else {
+    let Value::Con(con_id, fields) = request else {
         return Err(format!(
-            "ask received unexpected request shape (expected Con(Ask, [text])): {:?}",
+            "ask received unexpected request shape (expected Con(Ask|AskWith, ..)): {:?}",
             request
         ));
     };
 
+    let con_name = table.name_of(*con_id).unwrap_or("<unknown>");
+    let has_meta = match con_name {
+        "Ask" => false,
+        "AskWith" => true,
+        other => {
+            return Err(format!(
+                "ask received unexpected constructor {other:?} (expected Ask or AskWith)"
+            ))
+        }
+    };
+
     let Some(prompt_val) = fields.first() else {
         return Err(format!(
-            "ask received unexpected request shape (expected Con(Ask, [text])): {:?}",
+            "ask received unexpected request shape (expected Con({con_name}, ..)): {:?}",
             request
         ));
     };
 
     // Try using FromCore (handles Text, LitString, [Char])
-    match String::from_value(prompt_val, table) {
-        Ok(s) => Ok(s),
+    let prompt = match String::from_value(prompt_val, table) {
+        Ok(s) => s,
         Err(e) => {
             // Provide diagnostic: the prompt text couldn't be extracted,
             // likely because the string-building expression crashed
             // (e.g., unresolved external, partial evaluation).
-            Err(format!(
+            return Err(format!(
                 "ask prompt could not be evaluated to Text: {e}. \
                  The expression passed to `ask` likely crashed during evaluation \
                  (check for unresolved externals or runtime errors in the prompt string)."
-            ))
+            ));
         }
-    }
+    };
+
+    let meta = if has_meta {
+        // Requests arrive fully forced from the JIT bridge
+        // (heap_to_value_forcing), so the aeson Value sub-tree is already
+        // materialized — value_to_json renders it directly.
+        fields
+            .get(1)
+            .map(|m| tidepool_runtime::value_to_json(m, table, 0))
+    } else {
+        None
+    };
+
+    Ok((prompt, meta))
 }
 
 // ---------------------------------------------------------------------------
@@ -1576,7 +1659,7 @@ impl TidepoolMcpServerImpl {
         op: &str,
         mut session_rx: tokio::sync::mpsc::UnboundedReceiver<SessionMessage>,
         source: Arc<str>,
-        response_tx: std::sync::mpsc::Sender<String>,
+        response_tx: std::sync::mpsc::Sender<ResumeMsg>,
         captured_output: CapturedOutput,
         mut handle: Option<JoinHandle<()>>,
     ) -> Result<CallToolResult, McpError> {
@@ -1605,7 +1688,7 @@ impl TidepoolMcpServerImpl {
                         response.push_str(&result);
                         Ok(CallToolResult::success(vec![Content::text(response)]))
                     }
-                    SessionMessage::Suspended { prompt } => {
+                    SessionMessage::Suspended { prompt, meta } => {
                         tracing::info!(prompt = %prompt, "{} suspended on Ask", op);
                         let cont_id = self.next_continuation_id();
                         let mut json_obj = serde_json::json!({
@@ -1613,6 +1696,34 @@ impl TidepoolMcpServerImpl {
                             "continuation_id": cont_id,
                             "prompt": prompt,
                         });
+                        // AskWith metadata: hoist "schema" top-level (it
+                        // arms resume validation); everything else rides
+                        // under "meta" verbatim — no reserved-key
+                        // collisions, no silent drops.
+                        let mut expected_schema = None;
+                        match meta {
+                            Some(serde_json::Value::Object(mut meta_map)) => {
+                                if let Some(obj) = json_obj.as_object_mut() {
+                                    if let Some(schema) = meta_map.remove("schema") {
+                                        obj.insert("schema".into(), schema.clone());
+                                        expected_schema = Some(schema);
+                                    }
+                                    if !meta_map.is_empty() {
+                                        obj.insert(
+                                            "meta".into(),
+                                            serde_json::Value::Object(meta_map),
+                                        );
+                                    }
+                                }
+                            }
+                            Some(other) => {
+                                // Non-object metadata: pass through verbatim.
+                                if let Some(obj) = json_obj.as_object_mut() {
+                                    obj.insert("meta".into(), other);
+                                }
+                            }
+                            None => {}
+                        }
                         if !output.is_empty() {
                             if let Some(obj) = json_obj.as_object_mut() {
                                 obj.insert("output".into(), serde_json::Value::from(output));
@@ -1626,6 +1737,7 @@ impl TidepoolMcpServerImpl {
                                 source: Arc::clone(&source),
                                 created_at: std::time::Instant::now(),
                                 captured_output,
+                                expected_schema,
                             },
                         );
                         Ok(CallToolResult::success(vec![Content::text(
@@ -1793,7 +1905,7 @@ impl TidepoolMcpServerImpl {
 
         // Create channels for Ask effect communication
         let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel::<SessionMessage>();
-        let (response_tx, response_rx) = std::sync::mpsc::channel::<String>();
+        let (response_tx, response_rx) = std::sync::mpsc::channel::<ResumeMsg>();
 
         let permit = match self.eval_semaphore.clone().try_acquire_owned() {
             Ok(p) => p,
@@ -1916,6 +2028,83 @@ impl TidepoolMcpServerImpl {
     async fn resume(&self, req: ResumeRequest) -> Result<CallToolResult, McpError> {
         tracing::info!(continuation_id = %req.continuation_id, "resume request");
 
+        // Validate-then-consume, all inside ONE lock scope: a reply that
+        // fails schema validation must NOT consume the one-shot
+        // continuation (the caller fixes and retries), and two concurrent
+        // resumes must not both pass validation and both send.
+        let session = {
+            let mut conts = self.continuations.lock();
+            let expected_schema = conts
+                .get(&req.continuation_id)
+                .ok_or_else(|| {
+                    McpError::invalid_params(
+                        format!(
+                            "Unknown or expired continuation_id: {}",
+                            req.continuation_id
+                        ),
+                        None,
+                    )
+                })?
+                .expected_schema
+                .clone();
+
+            match validate::validate_response(expected_schema.as_ref(), &req.response) {
+                validate::Outcome::Invalid(violations) => {
+                    // Anti-starvation: a retrying continuation must not be
+                    // the oldest-first eviction victim while its caller
+                    // fixes the reply.
+                    if let Some(session) = conts.get_mut(&req.continuation_id) {
+                        session.created_at = std::time::Instant::now();
+                    }
+                    let body = serde_json::json!({
+                        "validation_failed": true,
+                        "violations": violations.iter().map(|v| v.to_json()).collect::<Vec<_>>(),
+                        "schema": expected_schema,
+                        "continuation_id": req.continuation_id,
+                        "continuation_not_consumed": true,
+                    });
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Response does not match the suspension's schema. Call resume again \
+                         with the same continuation_id and a corrected response (or abort).\n{}",
+                        body
+                    ))]));
+                }
+                validate::Outcome::Valid(canonical) => {
+                    let session = conts
+                        .remove(&req.continuation_id)
+                        .expect("session present: checked under the same lock");
+                    // Send the canonical validated value to the blocked
+                    // eval thread.
+                    session
+                        .response_tx
+                        .send(ResumeMsg::Answer(canonical))
+                        .map_err(|_| {
+                            McpError::internal_error("eval thread is no longer running", None)
+                        })?;
+                    session
+                }
+            }
+        };
+
+        let source = session.source.clone();
+        let response_tx = session.response_tx.clone();
+        let captured = session.captured_output.clone();
+
+        // Await the next message from the eval thread
+        self.handle_session_result(
+            "resume",
+            session.session_rx,
+            source,
+            response_tx,
+            captured,
+            None,
+        )
+        .await
+    }
+
+    async fn abort(&self, req: AbortRequest) -> Result<CallToolResult, McpError> {
+        tracing::info!(continuation_id = %req.continuation_id, "abort request");
+
         let session = {
             let mut conts = self.continuations.lock();
             conts.remove(&req.continuation_id).ok_or_else(|| {
@@ -1929,19 +2118,23 @@ impl TidepoolMcpServerImpl {
             })?
         };
 
-        // Send the response to the blocked eval thread
+        let reason = req
+            .reason
+            .unwrap_or_else(|| "aborted by caller".to_string());
         session
             .response_tx
-            .send(req.response)
+            .send(ResumeMsg::Abort(reason))
             .map_err(|_| McpError::internal_error("eval thread is no longer running", None))?;
 
         let source = session.source.clone();
         let response_tx = session.response_tx.clone();
         let captured = session.captured_output.clone();
 
-        // Await the next message from the eval thread
+        // The eval terminates as a normal error result ("ask aborted by
+        // caller: ...") carrying output-so-far — and its thread + semaphore
+        // permit are freed instead of waiting for pressure eviction.
         self.handle_session_result(
-            "resume",
+            "abort",
             session.session_rx,
             source,
             response_tx,
@@ -1981,6 +2174,13 @@ impl ServerHandler for TidepoolMcpServerImpl {
                         McpError::invalid_params(format!("invalid params: {}", e), None)
                     })?;
                 self.resume(req).await
+            }
+            "abort" => {
+                let req: AbortRequest = serde_json::from_value(serde_json::Value::Object(args))
+                    .map_err(|e| {
+                        McpError::invalid_params(format!("invalid params: {}", e), None)
+                    })?;
+                self.abort(req).await
             }
             _ => Err(McpError {
                 code: ErrorCode::METHOD_NOT_FOUND,
@@ -2025,10 +2225,33 @@ impl ServerHandler for TidepoolMcpServerImpl {
                 description: Some(
                     "Resume a suspended Haskell evaluation. When eval returns \
                      {\"suspended\": true, \"continuation_id\": \"...\", \"prompt\": \"...\"}, \
-                     call this tool with the continuation_id and your response to the prompt."
+                     call this tool with the continuation_id and your response to the prompt. \
+                     If the suspension carried a \"schema\" field, the response must be JSON \
+                     matching it — pass the JSON value directly (string/enum schemas also \
+                     accept raw text). A response that fails validation does NOT consume the \
+                     continuation: the violations are returned and you can call resume again \
+                     with the same continuation_id. If you cannot answer, call abort instead."
                         .into(),
                 ),
                 input_schema: schema_to_map(schemars::schema_for!(ResumeRequest))?,
+                output_schema: None,
+                annotations: None,
+                icons: None,
+                meta: None,
+                execution: None,
+            },
+            Tool {
+                name: "abort".into(),
+                title: None,
+                description: Some(
+                    "Abort a suspended Haskell evaluation without answering it. Use when you \
+                     cannot answer a suspension's question, or to clean up a suspended loop \
+                     you are abandoning (a suspended eval pins a thread until evicted). The \
+                     computation terminates with an error result (\"ask aborted by caller: \
+                     <reason>\") carrying any output produced so far."
+                        .into(),
+                ),
+                input_schema: schema_to_map(schemars::schema_for!(AbortRequest))?,
                 output_schema: None,
                 annotations: None,
                 icons: None,
@@ -2523,8 +2746,19 @@ data Console a where
     fn test_ask_decl() {
         let decl = ask_decl();
         assert_eq!(decl.type_name, "Ask");
-        assert_eq!(decl.constructors.len(), 1);
+        assert_eq!(decl.constructors.len(), 2);
         assert!(decl.constructors[0].contains("Ask :: Text -> Ask Value"));
+        assert!(decl.constructors[1].contains("AskWith :: Text -> Value -> Ask Value"));
+        // The Q layer lives on the Ask effect (always present in every
+        // stack) so .tidepool/lib modules and Llm-less stacks can use it.
+        let type_defs = decl.type_defs.join("\n");
+        assert!(type_defs.contains("data Schema"));
+        assert!(type_defs.contains("data Q a = Q Schema (Value -> a) Double"));
+        let helpers = decl.helpers.join("\n");
+        assert!(helpers.contains("askQ :: Q a -> Text -> M a"));
+        assert!(helpers.contains("askWith :: Value -> Text -> M Value"));
+        assert!(helpers.contains("schemaToValue :: Schema -> Value"));
+        assert!(helpers.contains("pick :: [Text] -> Q Text"));
     }
 
     #[test]
@@ -2614,20 +2848,30 @@ data Console a where
         assert!(preamble.contains("kvAll :: M [(Text, Value)]"));
         assert!(preamble.contains("kvClear :: M ()"));
         assert!(preamble.contains("runAll :: [Text] -> M [(Int, Text, Text)]"));
-        // Heuristic combinators
-        assert!(preamble.contains("data Q a = Q Schema (Value -> a) Double"));
-        assert!(preamble.contains("data Judged a = Sure a | Unsure Double a"));
+        // Tier-1 cascade operators (preamble, gated on Llm + Ask)
         assert!(preamble.contains("(??) :: Q a -> Text -> M a"));
         assert!(preamble.contains("(?!) :: Q a -> Text -> M (Judged a)"));
-        assert!(preamble.contains("pick :: [Text] -> Q Text"));
-        assert!(preamble.contains("yn :: Q Bool"));
-        assert!(preamble.contains("obj :: Schema -> Q Value"));
-        assert!(preamble.contains("txt :: Text -> Q Text"));
-        assert!(preamble.contains("num :: Text -> Q Double"));
-        assert!(preamble.contains("bar :: Double -> Q a -> Q a"));
         assert!(preamble.contains("triage :: Q b -> (a -> Text) -> [a] -> M [(a, b)]"));
         assert!(preamble.contains("survey :: Eq b => Q b -> (a -> Text) -> [a] -> M [(b, Int)]"));
         assert!(preamble.contains("sift :: Q Bool -> (a -> Text) -> [a] -> M ([a], [a])"));
+        // Escalation carries the schema structurally via askWith
+        assert!(preamble.contains("askWith (object [\"schema\" .= schemaToValue schema])"));
+        assert!(!preamble.contains("[haiku"));
+        // Q itself lives in the generated Tidepool.Effects module so
+        // .tidepool/lib modules can import it
+        let effects_mod = effects_module_source(&decls);
+        assert!(effects_mod.contains("data Q a = Q Schema (Value -> a) Double"));
+        assert!(effects_mod.contains("data Judged a = Sure a | Unsure Double a"));
+        assert!(effects_mod.contains("pick :: [Text] -> Q Text"));
+        assert!(effects_mod.contains("yn :: Q Bool"));
+        assert!(effects_mod.contains("obj :: Schema -> Q Value"));
+        assert!(effects_mod.contains("txt :: Text -> Q Text"));
+        assert!(effects_mod.contains("num :: Text -> Q Double"));
+        assert!(effects_mod.contains("bar :: Double -> Q a -> Q a"));
+        assert!(effects_mod.contains("askQ :: Q a -> Text -> M a"));
+        // and NOT duplicated in the preamble (one definition site)
+        assert!(!preamble.contains("data Q a"));
+        assert!(!preamble.contains("pick :: [Text] -> Q Text"));
     }
 
     #[test]
@@ -2862,6 +3106,7 @@ data Console a where
 
         tx.send(SessionMessage::Suspended {
             prompt: "what is your name?".into(),
+            meta: None,
         })
         .unwrap();
 
@@ -2886,6 +3131,206 @@ data Console a where
         let cont_id = json["continuation_id"].as_str().unwrap();
         let conts = server.continuations.lock();
         assert!(conts.contains_key(cont_id));
+    }
+
+    #[tokio::test]
+    async fn test_suspended_meta_schema_hoisted() {
+        let server = create_mock_server();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
+        let source: Arc<str> = "test source".into();
+        let captured = CapturedOutput::new();
+
+        tx.send(SessionMessage::Suspended {
+            prompt: "classify".into(),
+            meta: Some(serde_json::json!({
+                "schema": {"type": "string", "enum": ["a", "b"]},
+                "moves": ["grep", "view"],
+            })),
+        })
+        .unwrap();
+
+        let res = server
+            .handle_session_result("eval", rx, source, resp_tx, captured, None)
+            .await
+            .unwrap();
+        let text = match &res.content[0].raw {
+            RawContent::Text(t) => &t.text,
+            _ => panic!("Expected text content"),
+        };
+        let json: serde_json::Value = serde_json::from_str(text).unwrap();
+        // "schema" hoisted top-level; remaining metadata under "meta"
+        assert_eq!(json["schema"]["enum"], serde_json::json!(["a", "b"]));
+        assert_eq!(json["meta"]["moves"], serde_json::json!(["grep", "view"]));
+        assert!(json.get("moves").is_none());
+
+        // ...and stored as expected_schema for resume validation
+        let cont_id = json["continuation_id"].as_str().unwrap();
+        let conts = server.continuations.lock();
+        assert!(conts[cont_id].expected_schema.is_some());
+    }
+
+    /// Hand-insert a suspended session carrying a schema; resume with an
+    /// invalid reply (continuation must survive), then a valid one (the
+    /// CANONICAL value must cross the channel and the continuation must be
+    /// consumed).
+    #[tokio::test]
+    async fn test_resume_validation_fail_then_retry() {
+        let server = create_mock_server();
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel::<ResumeMsg>();
+        let (sess_tx, sess_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        server.continuations.lock().insert(
+            "cont_t1".into(),
+            EvalSession {
+                response_tx: resp_tx,
+                session_rx: sess_rx,
+                source: "src".into(),
+                created_at: std::time::Instant::now(),
+                captured_output: CapturedOutput::new(),
+                expected_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {"pick": {"type": "string", "enum": ["bug", "refactor"]}},
+                    "required": ["pick"],
+                })),
+            },
+        );
+
+        // 1: invalid reply — error result, continuation NOT consumed
+        let res = server
+            .resume(ResumeRequest {
+                continuation_id: "cont_t1".into(),
+                response: serde_json::json!("just some prose"),
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.is_error, Some(true));
+        let text = match &res.content[0].raw {
+            RawContent::Text(t) => &t.text,
+            _ => panic!("Expected text content"),
+        };
+        assert!(text.contains("validation_failed"));
+        assert!(text.contains("cont_t1"));
+        assert!(server.continuations.lock().contains_key("cont_t1"));
+
+        // 2: valid retry on the SAME continuation_id. Pre-load the session
+        // channel so handle_session_result returns immediately.
+        sess_tx
+            .send(SessionMessage::Completed {
+                result: "\"ok\"".into(),
+            })
+            .unwrap();
+        let res = server
+            .resume(ResumeRequest {
+                continuation_id: "cont_t1".into(),
+                response: serde_json::json!({"pick": "bug", "rationale": "extra keys fine"}),
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.is_error, Some(false));
+        // canonical value crossed the channel
+        match resp_rx.try_recv().unwrap() {
+            ResumeMsg::Answer(v) => assert_eq!(v["pick"], serde_json::json!("bug")),
+            ResumeMsg::Abort(_) => panic!("expected Answer"),
+        }
+        // consumed: a third resume is invalid_params
+        assert!(!server.continuations.lock().contains_key("cont_t1"));
+        let err = server
+            .resume(ResumeRequest {
+                continuation_id: "cont_t1".into(),
+                response: serde_json::json!({"pick": "bug"}),
+            })
+            .await;
+        assert!(err.is_err());
+    }
+
+    /// Stringified-JSON replies to object schemas unwrap one level (the
+    /// #315 failure mode) and deliver the parsed object.
+    #[tokio::test]
+    async fn test_resume_stringified_object_unwraps() {
+        let server = create_mock_server();
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel::<ResumeMsg>();
+        let (sess_tx, sess_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        server.continuations.lock().insert(
+            "cont_t2".into(),
+            EvalSession {
+                response_tx: resp_tx,
+                session_rx: sess_rx,
+                source: "src".into(),
+                created_at: std::time::Instant::now(),
+                captured_output: CapturedOutput::new(),
+                expected_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {"answer": {"type": "boolean"}},
+                    "required": ["answer"],
+                })),
+            },
+        );
+        sess_tx
+            .send(SessionMessage::Completed {
+                result: "true".into(),
+            })
+            .unwrap();
+
+        let res = server
+            .resume(ResumeRequest {
+                continuation_id: "cont_t2".into(),
+                response: serde_json::json!("{\"answer\": true}"),
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.is_error, Some(false));
+        match resp_rx.try_recv().unwrap() {
+            ResumeMsg::Answer(v) => assert_eq!(v, serde_json::json!({"answer": true})),
+            ResumeMsg::Abort(_) => panic!("expected Answer"),
+        }
+    }
+
+    /// abort consumes the continuation and the eval terminates as an error.
+    #[tokio::test]
+    async fn test_abort_consumes_continuation() {
+        let server = create_mock_server();
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel::<ResumeMsg>();
+        let (sess_tx, sess_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        server.continuations.lock().insert(
+            "cont_t3".into(),
+            EvalSession {
+                response_tx: resp_tx,
+                session_rx: sess_rx,
+                source: "src".into(),
+                created_at: std::time::Instant::now(),
+                captured_output: CapturedOutput::new(),
+                expected_schema: None,
+            },
+        );
+        // In a real run the eval thread receives Abort and sends Error;
+        // emulate it.
+        sess_tx
+            .send(SessionMessage::Error {
+                error: "ask aborted by caller: cannot answer".into(),
+            })
+            .unwrap();
+
+        let res = server
+            .abort(AbortRequest {
+                continuation_id: "cont_t3".into(),
+                reason: Some("cannot answer".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.is_error, Some(true));
+        let text = match &res.content[0].raw {
+            RawContent::Text(t) => &t.text,
+            _ => panic!("Expected text content"),
+        };
+        assert!(text.contains("aborted by caller"));
+        match resp_rx.try_recv().unwrap() {
+            ResumeMsg::Abort(r) => assert_eq!(r, "cannot answer"),
+            ResumeMsg::Answer(_) => panic!("expected Abort"),
+        }
+        assert!(!server.continuations.lock().contains_key("cont_t3"));
     }
 
     #[tokio::test]
