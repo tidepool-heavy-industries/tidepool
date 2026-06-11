@@ -20,8 +20,10 @@ module Tidepool.Translate
 import GHC
 import GHC.Core
 import GHC.Types.Id
-import GHC.Types.Var (isTyVar, varUnique, varName)
+import GHC.Types.Var (isTyVar, isCoVar, varUnique, varName, setVarUnique)
 import GHC.Types.Unique (getKey)
+import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
+import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
 import GHC.Core.DataCon (DataCon, dataConRepArity, dataConRepArgTys, dataConFullSig, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, dataConOrigArgTys, isUnboxedTupleDataCon, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
 import Language.Haskell.Syntax.Basic (Boxity(..))
 import GHC.Builtin.Types (consDataCon, nilDataCon, trueDataCon, falseDataCon, charDataCon, unitDataCon, tupleDataCon, ordLTDataCon, ordEQDataCon, ordGTDataCon, intDataCon, wordDataCon, doubleDataCon, floatDataCon)
@@ -65,6 +67,7 @@ import GHC.Driver.Env (HscEnv)
 import Tidepool.Resolve (resolveExternals, UnresolvedVar(..))
 import qualified System.Environment
 import qualified Data.List
+import qualified Numeric
 import qualified Tidepool.GhcPipeline
 
 data FlatNode
@@ -372,17 +375,50 @@ translateModule allBinds targetName unresolvedIds =
 -- be resolved (no unfolding available).
 translateModuleClosed :: HscEnv -> [CoreBind] -> String -> IO (Seq FlatNode, Map.Map Word64 DataCon, [UnresolvedVar], [CoreBind])
 translateModuleClosed hscEnv allBinds targetName = do
-  (closedBinds, unresolved) <- resolveExternals hscEnv allBinds
+  (closedBinds0, unresolved) <- resolveExternals hscEnv allBinds
+  closedBinds <- uniquifyDuplicateBinders closedBinds0
   -- TIDEPOOL_DUMP_CLOSED=<needle>: dump resolved bindings whose binder
   -- name contains the needle (post-resolveExternals Core — what the JIT
   -- actually compiles; can differ from --dump-core's module view).
   dumpNeedle <- System.Environment.lookupEnv "TIDEPOOL_DUMP_CLOSED"
   case dumpNeedle of
-    Just needle -> mapM_ (\cb ->
-      let names = map (occNameString . nameOccName . idName) (bindersOfBinds [cb])
-      in if any (needle `Data.List.isInfixOf`) names
-           then putStrLn ("=== CLOSED BIND " ++ show names ++ "\n" ++ Tidepool.GhcPipeline.dumpCore [cb])
-           else pure ()) closedBinds
+    Just needle ->
+      -- Match individual (binder, rhs) pairs (the closed graph is one giant
+      -- Rec post-resolveExternals); emit on stderr (stdout is swallowed by
+      -- the Rust runtime on success).
+      let pairs = concatMap (\cb -> case cb of
+            NonRec b rhs -> [(b, rhs)]
+            Rec ps       -> ps) closedBinds
+          matches = [ p | p@(b, _) <- pairs
+                    , needle `Data.List.isInfixOf` occNameString (nameOccName (idName b)) ]
+      in mapM_ (\(b, rhs) -> hPutStrLn stderr
+           ("=== CLOSED BIND " ++ occNameString (nameOccName (idName b)) ++ "\n"
+            ++ Tidepool.GhcPipeline.dumpCore [NonRec b rhs])) matches
+    Nothing -> pure ()
+  -- TIDEPOOL_VARID_AUDIT=1: report VarId collisions — distinct binding
+  -- sites whose varId hashes coincide. The JIT's emit env is a flat map
+  -- keyed by VarId; a collision aliases two closures (#313 t11 class).
+  auditEnv <- System.Environment.lookupEnv "TIDEPOOL_VARID_AUDIT"
+  case auditEnv of
+    Just _ -> do
+      let sites = filter (not . isTyVar . fst) (concatMap bindingSites closedBinds)
+          grouped = Map.fromListWith (++)
+            [ (varId b, [(b, top)]) | (b, top) <- sites ]
+          collisions = Map.filter (\xs -> length xs > 1) grouped
+          describe (b, top) =
+            (if top then "TOP " else "nested ")
+            ++ occNameString (nameOccName (varName b))
+            ++ "_" ++ showPprUnsafe (varUnique b)
+            ++ (case nameModule_maybe (varName b) of
+                  Just m  -> " [" ++ moduleNameString (moduleName m) ++ "]"
+                  Nothing -> "")
+      mapM_ (\(vid, xs) -> hPutStrLn stderr
+               ("[VARID COLLISION] 0x" ++ Numeric.showHex vid ""
+                ++ " sites=" ++ show (length xs) ++ ": "
+                ++ Data.List.intercalate " | " (map describe xs)))
+            (Map.toList collisions)
+      hPutStrLn stderr ("[VARID AUDIT] " ++ show (length sites)
+        ++ " binding sites, " ++ show (Map.size collisions) ++ " collisions")
     Nothing -> pure ()
   let unresolvedIds = Set.fromList (map uvKey unresolved)
       (nodes, usedDCs) = translateModule closedBinds targetName unresolvedIds
@@ -420,6 +456,116 @@ translateModuleClosed hscEnv allBinds targetName = do
     deepVarRefsOfExpr (Tick _ e) = deepVarRefsOfExpr e
     deepVarRefsOfExpr (Type _) = []
     deepVarRefsOfExpr (Coercion _) = []
+
+-- | #313 t11 fix: globally freshen duplicate binder uniques.
+--
+-- GHC's rapier-style simplifier clones a binder only when it clashes with
+-- the enclosing in-scope set, so identical uniques legitimately recur in
+-- DISJOINT sibling scopes (an unfolding template inlined at N sites keeps
+-- its binder uniques in every copy — observed: one @$j2@ bound at 20
+-- sites, 1491 duplicated binders in a single closed graph). Lexically
+-- harmless — but the serialized program keys everything by
+-- @VarId = hash(occName, unique)@: the JIT's flat emit env, the global
+-- rec-join registry ('tsRecJoinIds'), closure capture resolution. Two
+-- binding sites sharing a VarId alias each other's closures at runtime
+-- (#313 t11: the second T.breakOn's SpecConstr'd join @$j3@ aliased the
+-- first's — same code pointer, different captures → CASE TRAP).
+--
+-- Walk the whole program threading a global set of seen unique keys; a
+-- repeat binder gets a fresh unique, substituted through its scope via a
+-- lexical 'VarEnv'. Lexical scoping makes the local substitution
+-- complete. TyVars/CoVars are skipped (erased at translation). Top-level
+-- binders are never renamed (external names post-'externalizeInternalTops',
+-- referenced across bindings); their keys seed the seen set.
+uniquifyDuplicateBinders :: [CoreBind] -> IO [CoreBind]
+uniquifyDuplicateBinders binds = do
+  us0 <- mkSplitUniqSupply 'k'
+  let topKeys = Set.fromList
+        [ getKey (varUnique b) | bind <- binds, b <- topBindersOf bind ]
+  return (evalState (mapM goTop binds) (us0, topKeys))
+  where
+    topBindersOf (NonRec b _) = [b]
+    topBindersOf (Rec ps)     = map fst ps
+
+    goTop :: CoreBind -> State (UniqSupply, Set.Set Word64) CoreBind
+    goTop (NonRec b rhs) = NonRec b <$> goE emptyVarEnv rhs
+    goTop (Rec ps) = Rec <$> mapM (\(b, rhs) -> (b,) <$> goE emptyVarEnv rhs) ps
+
+    -- Visit a binder: rename iff its unique key was already seen.
+    goB :: VarEnv Var -> Var -> State (UniqSupply, Set.Set Word64) (VarEnv Var, Var)
+    goB env b
+      | isTyVar b || isCoVar b = return (env, b)
+      | otherwise = do
+          (us, seen) <- get
+          let k = getKey (varUnique b)
+          if k `Set.member` seen
+            then do
+              let fresh s = let (u, s') = takeUniqFromSupply s
+                            in if getKey u `Set.member` seen then fresh s' else (u, s')
+                  (u', us') = fresh us
+                  b' = setVarUnique b u'
+              put (us', Set.insert (getKey u') seen)
+              return (extendVarEnv env b b', b')
+            else do
+              put (us, Set.insert k seen)
+              return (env, b)
+
+    goBs :: VarEnv Var -> [Var] -> State (UniqSupply, Set.Set Word64) (VarEnv Var, [Var])
+    goBs env [] = return (env, [])
+    goBs env (b:bs) = do
+      (env', b') <- goB env b
+      (env'', bs') <- goBs env' bs
+      return (env'', b' : bs')
+
+    goE :: VarEnv Var -> CoreExpr -> State (UniqSupply, Set.Set Word64) CoreExpr
+    goE env expr = case expr of
+      Var v -> return (Var (maybe v id (lookupVarEnv env v)))
+      Lit{} -> return expr
+      App f a -> App <$> goE env f <*> goE env a
+      Lam b body -> do
+        (env', b') <- goB env b
+        Lam b' <$> goE env' body
+      Let (NonRec b rhs) body -> do
+        rhs' <- goE env rhs
+        (env', b') <- goB env b
+        Let (NonRec b' rhs') <$> goE env' body
+      Let (Rec ps) body -> do
+        (env', bs') <- goBs env (map fst ps)
+        rhss' <- mapM (goE env' . snd) ps
+        Let (Rec (zip bs' rhss')) <$> goE env' body
+      Case s b ty alts -> do
+        s' <- goE env s
+        (env', b') <- goB env b
+        alts' <- mapM (goAlt env') alts
+        return (Case s' b' ty alts')
+      Cast e co -> (`Cast` co) <$> goE env e
+      Tick t e -> Tick t <$> goE env e
+      Type{} -> return expr
+      Coercion{} -> return expr
+      where
+        goAlt env' (Alt c bs rhs) = do
+          (env'', bs') <- goBs env' bs
+          Alt c bs' <$> goE env'' rhs
+
+-- | All binding sites (binder, isTopLevel) in a CoreBind, including nested
+-- Lam/Let/Case binders. Used by the TIDEPOOL_VARID_AUDIT collision check.
+bindingSites :: CoreBind -> [(Var, Bool)]
+bindingSites (NonRec b rhs) = (b, True) : map (\v -> (v, False)) (nestedBinders rhs)
+bindingSites (Rec ps) =
+  concatMap (\(b, rhs) -> (b, True) : map (\v -> (v, False)) (nestedBinders rhs)) ps
+
+nestedBinders :: CoreExpr -> [Var]
+nestedBinders = go
+  where
+    go (Lam b e)                 = b : go e
+    go (Let (NonRec b r) e)      = b : go r ++ go e
+    go (Let (Rec ps) e)          = map fst ps ++ concatMap (go . snd) ps ++ go e
+    go (Case s b _ alts)         = b : go s ++ concatMap goAlt alts
+    go (App f a)                 = go f ++ go a
+    go (Cast e _)                = go e
+    go (Tick _ e)                = go e
+    go _                         = []
+    goAlt (Alt _ bs e)           = bs ++ go e
 
 -- | Collect all DataCons encountered during translation of Core bindings.
 -- This includes constructors from imported packages (e.g. freer-simple's
