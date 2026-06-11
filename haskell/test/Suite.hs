@@ -790,6 +790,29 @@ round_negative_half = round (-2.5 :: Double)
 
 -- ---- qq-suite: fmt section (owner: leaf qq-fmt) ----
 
+qq_fmt_empty :: T.Text
+qq_fmt_empty = [fmt||]
+
+qq_fmt_plain :: T.Text
+qq_fmt_plain = [fmt|hello, tidepool world|]
+
+qq_fmt_basic :: T.Text
+qq_fmt_basic = [fmt|user: {name}|]
+  where name = T.pack "alice" :: T.Text
+
+qq_fmt_multi :: T.Text
+qq_fmt_multi = [fmt|hello {T.toUpper greeting}, score {score}|]
+  where
+    greeting = T.pack "world" :: T.Text
+    score    = T.pack "42"   :: T.Text
+
+qq_fmt_escape :: T.Text
+qq_fmt_escape = [fmt|use \{braces} for holes and } is literal|]
+
+qq_fmt_multiline :: T.Text
+qq_fmt_multiline = [fmt|line one
+line two|]
+
 -- ---- qq-suite: json section (owner: leaf qq-json) ----
 
 -- One-liner sanity: a bare scalar.
