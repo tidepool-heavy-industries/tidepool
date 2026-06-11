@@ -548,7 +548,12 @@ pub fn ensure_effects_module(effects: &[EffectDecl]) -> std::io::Result<PathBuf>
 
 pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
     let mut out = String::new();
-    out.push_str("{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules #-}\n");
+    // QuasiQuotes + ViewPatterns are latency-free when unused (plans/qq-spike.md
+    // M2) and enable [fmt|...|]/[j|...|]; the Tidepool.QQ IMPORT is the part
+    // that costs, and is injected conditionally in eval() via uses_qq().
+    // Dialect note: with QuasiQuotes on, `[x|x<-xs]` (comprehension with no
+    // space before `|`) parses as a quasi-quote — write `[x | x <- xs]`.
+    out.push_str("{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, QuasiQuotes, ViewPatterns #-}\n");
     out.push_str("module Expr where\n");
     out.push_str("import Tidepool.Prelude hiding (error)\n");
     // Effect GADTs, `M`, the `error` shadow, and the send-wrapper helpers
@@ -889,6 +894,16 @@ pub fn aeson_imports() -> String {
         "qualified Tidepool.Aeson.KeyMap as KM\n",
     )
     .into()
+}
+
+/// Does eval source splice a tidepool quasi-quoter? Exact token match:
+/// GHC's quote-open syntax is literally `[fmt|`/`[j|` — no whitespace is
+/// permitted between bracket, quoter name, and bar — so substring search
+/// cannot false-negative. A false positive (the token inside a string
+/// literal) only costs the ~+385ms quoter-module import
+/// (plans/qq-spike.md, M3), never correctness.
+pub fn uses_qq(src: &str) -> bool {
+    src.contains("[fmt|") || src.contains("[j|")
 }
 
 pub fn build_effect_stack_type(effects: &[EffectDecl]) -> String {
@@ -2070,6 +2085,13 @@ impl TidepoolMcpServerImpl {
         }
 
         let mut all_imports = aeson_imports();
+        // Tidepool.QQ is injected ONLY when a quoter token appears: the
+        // import alone drags the quoter home-module graph into every eval
+        // (~+385ms, plans/qq-spike.md M3); no-splice evals stay
+        // byte-identical (and cache-identical).
+        if uses_qq(&req.code) || uses_qq(&req.helpers) {
+            all_imports.push_str("Tidepool.QQ (fmt, j)\n");
+        }
         all_imports.push_str(&req.imports);
         let normalized_input = req.input.as_ref().map(normalize_input);
         let source: Arc<str> = template_haskell(
@@ -2730,6 +2752,74 @@ mod tests {
         assert!(preamble.contains(
             "var m k = case [v | (k', v) <- matchVars m, k' == k] of { (x:_) -> x; _ -> \"\" }"
         ));
+    }
+
+    #[test]
+    fn test_uses_qq_detection() {
+        // quoter tokens
+        assert!(uses_qq("pure [fmt|hi {x}|]"));
+        assert!(uses_qq("case v of [j|{\"k\": $x}|] -> pure x"));
+        // list comprehensions with conventional spacing are NOT tokens
+        assert!(!uses_qq("pure [x | x <- xs]"));
+        assert!(!uses_qq("pure [ fmt | fmt <- fs ]"));
+        assert!(!uses_qq("plain code"));
+        // `[j|j<-js]` IS the quote-open token — same ambiguity GHC has
+        // once QuasiQuotes is on; detection mirrors the parser exactly
+        // (documented dialect tradeoff: space before `|` in comprehensions)
+        assert!(uses_qq("[j|j<-js]"));
+    }
+
+    #[test]
+    fn test_preamble_qq_pragmas_always_on() {
+        for (src, name) in [
+            (build_preamble(&[], false), "preamble"),
+            (
+                build_preamble(&[sg_decl(), fs_decl()], true),
+                "preamble+lib",
+            ),
+        ] {
+            let pragma_line = src.lines().next().unwrap();
+            assert!(
+                pragma_line.contains("QuasiQuotes"),
+                "{name}: QuasiQuotes missing from pragma line"
+            );
+            assert!(
+                pragma_line.contains("ViewPatterns"),
+                "{name}: ViewPatterns missing from pragma line"
+            );
+        }
+    }
+
+    #[test]
+    fn test_template_haskell_qq_import_placement() {
+        let pre = build_preamble(&[], false);
+        // mirror eval()'s assembly for a QQ-using request
+        let code = "pure [fmt|hello {name}|]";
+        let mut imports = aeson_imports();
+        if uses_qq(code) {
+            imports.push_str("Tidepool.QQ (fmt, j)\n");
+        }
+        let src = template_haskell(&pre, "'[]", code, &imports, "", None, None);
+        let qq = src
+            .find("import Tidepool.QQ (fmt, j)\n")
+            .expect("QQ import missing from rendered module");
+        let default_decl = src.find("default (Int").unwrap();
+        assert!(qq < default_decl, "QQ import must precede default decl");
+    }
+
+    #[test]
+    fn test_no_qq_import_without_token() {
+        let pre = build_preamble(&[], false);
+        let code = "pure [x | x <- xs]";
+        let mut imports = aeson_imports();
+        if uses_qq(code) {
+            imports.push_str("Tidepool.QQ (fmt, j)\n");
+        }
+        let src = template_haskell(&pre, "'[]", code, &imports, "", None, None);
+        assert!(
+            !src.contains("Tidepool.QQ"),
+            "no-splice eval must not import Tidepool.QQ"
+        );
     }
 
     #[test]
