@@ -1017,6 +1017,7 @@ enum LlmBackend {
     OpenAi(openai::OpenAiClient),
 }
 
+#[cfg(test)]
 impl LlmBackend {
     fn backend_kind(&self) -> &'static str {
         match self {
