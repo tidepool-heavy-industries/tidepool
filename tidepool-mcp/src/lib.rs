@@ -440,6 +440,10 @@ pub struct ResumeRequest {
     /// server-side BEFORE the continuation is consumed — pass the JSON
     /// directly (not stringified). A failed validation returns the
     /// violations and leaves the continuation alive for a corrected retry.
+    /// For PAUSED continuations (`"paused": true` suspensions) the
+    /// response is ignored and may be omitted — resuming just runs
+    /// another window.
+    #[serde(default)]
     pub response: serde_json::Value,
 }
 
@@ -1388,6 +1392,133 @@ enum ResumeMsg {
     Abort(String),
 }
 
+/// What a parked continuation is waiting for — decides resume semantics.
+enum SessionKind {
+    /// Eval thread is BLOCKED on an Ask: resume validates the reply
+    /// against `expected_schema` (if any) and sends it down the channel.
+    AwaitingAnswer {
+        expected_schema: Option<serde_json::Value>,
+    },
+    /// Eval thread is PAUSED at an effect boundary (timeout-as-yield):
+    /// resume wakes the gate and waits another window (its payload is
+    /// ignored — sending on the channel would poison the next ask);
+    /// abort wakes the gate with an error.
+    Paused,
+}
+
+/// The pause gate: timeout-as-yield-point. An eval only computes during
+/// an MCP call. When the caller's window expires, the server requests a
+/// pause and the eval thread parks itself at its NEXT effect dispatch
+/// (we own every dispatch, so every effect is a yield point). Between
+/// MCP calls: no compute, no LLM spend, nothing unobserved. Pure JIT
+/// stretches can't be interrupted — a thread that reaches no effect
+/// within a grace period is treated as a runaway and detached (the old
+/// timeout behavior, reserved for exactly that case).
+struct PauseGate {
+    inner: parking_lot::Mutex<GateInner>,
+    cv: parking_lot::Condvar,
+}
+
+struct GateInner {
+    state: GateState,
+    /// True while the thread is inside an effect handler (incl. blocked
+    /// on an ask). Used at the grace deadline to distinguish "will park
+    /// at the next boundary" from "pure compute runaway".
+    in_effect: bool,
+}
+
+#[derive(Clone, PartialEq)]
+enum GateState {
+    Run,
+    PauseRequested,
+    Paused,
+    AbortRequested(String),
+}
+
+impl PauseGate {
+    fn new() -> Arc<Self> {
+        Arc::new(PauseGate {
+            inner: parking_lot::Mutex::new(GateInner {
+                state: GateState::Run,
+                in_effect: false,
+            }),
+            cv: parking_lot::Condvar::new(),
+        })
+    }
+
+    /// Called by the eval thread at every effect dispatch entry. Parks
+    /// while paused; returns Err on abort. On Ok, marks in_effect (the
+    /// caller MUST pair with exit_effect).
+    fn checkpoint(&self) -> Result<(), String> {
+        let mut g = self.inner.lock();
+        loop {
+            match &g.state {
+                GateState::Run => {
+                    g.in_effect = true;
+                    return Ok(());
+                }
+                GateState::AbortRequested(r) => {
+                    let r = r.clone();
+                    g.state = GateState::Run;
+                    return Err(r);
+                }
+                GateState::PauseRequested => {
+                    g.state = GateState::Paused;
+                    self.cv.notify_all(); // tell the server side we parked
+                }
+                GateState::Paused => {
+                    self.cv.wait(&mut g);
+                }
+            }
+        }
+    }
+
+    fn exit_effect(&self) {
+        self.inner.lock().in_effect = false;
+    }
+
+    fn request_pause(&self) {
+        let mut g = self.inner.lock();
+        if g.state == GateState::Run {
+            g.state = GateState::PauseRequested;
+        }
+    }
+
+    /// Wake a paused (or pause-pending) thread back into Run.
+    fn resume_run(&self) {
+        let mut g = self.inner.lock();
+        g.state = GateState::Run;
+        self.cv.notify_all();
+    }
+
+    /// Wake the thread with an abort: its current/next checkpoint
+    /// returns Err and the eval terminates as a normal error.
+    fn request_abort(&self, reason: String) {
+        let mut g = self.inner.lock();
+        g.state = GateState::AbortRequested(reason);
+        self.cv.notify_all();
+    }
+
+    /// Server side, after request_pause: wait up to `grace` for the
+    /// thread to park. Returns true if it parked OR is inside an effect
+    /// (it will park at the next boundary — long LLM/IO calls must not
+    /// be mistaken for runaways); false = pure-compute runaway.
+    fn parked_or_in_effect(&self, grace: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + grace;
+        let mut g = self.inner.lock();
+        loop {
+            if g.state == GateState::Paused {
+                return true;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return g.in_effect;
+            }
+            self.cv.wait_for(&mut g, deadline - now);
+        }
+    }
+}
+
 /// A suspended evaluation session, waiting for a resume call.
 struct EvalSession {
     /// Send a response to unblock the eval thread's Ask handler.
@@ -1402,10 +1533,13 @@ struct EvalSession {
     created_at: std::time::Instant,
     /// Output capture for this session.
     captured_output: CapturedOutput,
-    /// JSON Schema from the suspension's AskWith metadata ("schema" key);
-    /// resume replies are validated against it BEFORE the continuation is
-    /// consumed.
-    expected_schema: Option<serde_json::Value>,
+    /// What this continuation is waiting for.
+    kind: SessionKind,
+    /// The eval thread's join handle, carried across park/resume cycles so
+    /// abort (and crash forensics) can reap the thread.
+    thread: Option<JoinHandle<()>>,
+    /// The pause gate shared with the eval thread's dispatcher.
+    gate: Arc<PauseGate>,
 }
 
 /// Wraps an existing effect dispatcher and intercepts the Ask effect tag.
@@ -1417,10 +1551,30 @@ struct AskDispatcher {
     ask_tag: u64,
     session_tx: tokio::sync::mpsc::UnboundedSender<SessionMessage>,
     response_rx: std::sync::mpsc::Receiver<ResumeMsg>,
+    /// Every dispatch entry is a yield point: pause/abort requests from
+    /// the server side take effect here.
+    gate: Arc<PauseGate>,
 }
 
 impl DispatchEffect<CapturedOutput> for AskDispatcher {
     fn dispatch(
+        &mut self,
+        tag: u64,
+        request: &tidepool_eval::value::Value,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        // Yield point: park here while paused; error out on abort.
+        self.gate
+            .checkpoint()
+            .map_err(tidepool_effect::error::EffectError::Handler)?;
+        let result = self.dispatch_inner(tag, request, cx);
+        self.gate.exit_effect();
+        result
+    }
+}
+
+impl AskDispatcher {
+    fn dispatch_inner(
         &mut self,
         tag: u64,
         request: &tidepool_eval::value::Value,
@@ -1578,8 +1732,11 @@ impl TidepoolMcpServerImpl {
     }
 
     /// Evict the oldest continuation, freeing its semaphore permit.
-    /// Dropping `EvalSession` drops `response_tx` → blocked eval thread's
-    /// `response_rx.recv()` returns Err → thread exits → permit freed.
+    /// AwaitingAnswer: dropping `EvalSession` drops `response_tx` → the
+    /// blocked eval thread's `response_rx.recv()` returns Err → thread
+    /// exits → permit freed. Paused: the thread is parked on the gate's
+    /// condvar (dropping the session would leak it parked forever) — wake
+    /// it with an abort and reap; the permit frees when it exits.
     fn evict_oldest_continuation(&self) {
         let mut conts = self.continuations.lock();
         if let Some(oldest_key) = conts
@@ -1588,10 +1745,18 @@ impl TidepoolMcpServerImpl {
             .map(|(k, _)| k.clone())
         {
             tracing::info!(cont_id = %oldest_key, "evicting oldest continuation under pressure");
-            conts.remove(&oldest_key);
+            if let Some(session) = conts.remove(&oldest_key) {
+                if matches!(session.kind, SessionKind::Paused) {
+                    session
+                        .gate
+                        .request_abort("evicted under pressure while paused".into());
+                    self.reap_detached(session.thread);
+                }
+            }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_session_result(
         &self,
         op: &str,
@@ -1600,10 +1765,109 @@ impl TidepoolMcpServerImpl {
         response_tx: std::sync::mpsc::Sender<ResumeMsg>,
         captured_output: CapturedOutput,
         mut handle: Option<JoinHandle<()>>,
+        gate: Arc<PauseGate>,
     ) -> Result<CallToolResult, McpError> {
         let eval_timeout = Duration::from_secs(EVAL_TIMEOUT_SECS);
-        match timeout(eval_timeout, session_rx.recv()).await {
-            Ok(Some(message)) => {
+        let received = match timeout(eval_timeout, session_rx.recv()).await {
+            Ok(received) => received,
+            Err(_elapsed) => {
+                // The window expired. A message may have raced the
+                // deadline (e.g. the thread suspended on an Ask just as
+                // we timed out) — drain it rather than pausing a thread
+                // that is actually parked on the answer channel.
+                match session_rx.try_recv() {
+                    Ok(message) => Some(message),
+                    Err(_) => {
+                        // Timeout is a YIELD POINT, not a failure: ask the
+                        // eval thread to pause at its next effect dispatch.
+                        // An eval only computes during an MCP call.
+                        gate.request_pause();
+                        let gate_for_wait = Arc::clone(&gate);
+                        let parked = tokio::task::spawn_blocking(move || {
+                            gate_for_wait.parked_or_in_effect(Duration::from_secs(2))
+                        })
+                        .await
+                        .unwrap_or(false);
+
+                        let output = captured_output.snapshot();
+                        if parked {
+                            // Parked (or mid-effect and will park at the
+                            // boundary): hand the caller a continuation.
+                            tracing::info!(
+                                "{} paused after {}s — parked as continuation",
+                                op,
+                                EVAL_TIMEOUT_SECS
+                            );
+                            let cont_id = self.next_continuation_id();
+                            let mut json_obj = serde_json::json!({
+                                "suspended": true,
+                                "paused": true,
+                                "continuation_id": cont_id,
+                                "note": format!(
+                                    "Paused after {}s at an effect boundary (no compute happens \
+                                     while paused). Call resume with this continuation_id to run \
+                                     another window (response payload ignored), or abort to kill it.",
+                                    EVAL_TIMEOUT_SECS
+                                ),
+                            });
+                            if !output.is_empty() {
+                                if let Some(obj) = json_obj.as_object_mut() {
+                                    obj.insert("output".into(), serde_json::Value::from(output));
+                                }
+                            }
+                            self.continuations.lock().insert(
+                                cont_id.clone(),
+                                EvalSession {
+                                    response_tx,
+                                    session_rx,
+                                    source: Arc::clone(&source),
+                                    created_at: std::time::Instant::now(),
+                                    captured_output,
+                                    kind: SessionKind::Paused,
+                                    thread: handle.take(),
+                                    gate,
+                                },
+                            );
+                            return Ok(CallToolResult::success(vec![Content::text(
+                                json_obj.to_string(),
+                            )]));
+                        }
+
+                        // Pure-compute runaway: no effect dispatch within
+                        // the grace period — nothing to park at. Old
+                        // timeout behavior, reserved for exactly this case:
+                        // detach to the reaper (the abort flag terminates
+                        // it if it ever reaches an effect).
+                        tracing::error!(
+                            "{} reached no yield point within grace after {}s — detaching",
+                            op,
+                            EVAL_TIMEOUT_SECS
+                        );
+                        gate.request_abort(
+                            "detached after timeout (no yield point reached)".into(),
+                        );
+                        self.reap_detached(handle.take());
+                        let mut detail = format!(
+                            "{} timed out after {}s WITHOUT reaching an effect boundary — \
+                             likely a pure infinite loop or unbounded pure recursion. The \
+                             thread was detached.",
+                            op, EVAL_TIMEOUT_SECS
+                        );
+                        if !output.is_empty() {
+                            detail.push_str("\n\n## Output Before Timeout\n");
+                            for line in &output {
+                                detail.push_str(line);
+                                detail.push('\n');
+                            }
+                        }
+                        let error_msg = format_error_with_source("Timeout", &detail, &source);
+                        return Ok(CallToolResult::error(vec![Content::text(error_msg)]));
+                    }
+                }
+            }
+        };
+        match received {
+            Some(message) => {
                 let output = match &message {
                     SessionMessage::Completed { .. } | SessionMessage::Error { .. } => {
                         captured_output.drain()
@@ -1675,7 +1939,9 @@ impl TidepoolMcpServerImpl {
                                 source: Arc::clone(&source),
                                 created_at: std::time::Instant::now(),
                                 captured_output,
-                                expected_schema,
+                                kind: SessionKind::AwaitingAnswer { expected_schema },
+                                thread: handle.take(),
+                                gate,
                             },
                         );
                         Ok(CallToolResult::success(vec![Content::text(
@@ -1696,7 +1962,7 @@ impl TidepoolMcpServerImpl {
                     }
                 }
             }
-            Ok(None) => {
+            None => {
                 tracing::error!("{} thread crashed", op);
                 let mut crash_info = String::new();
 
@@ -1757,41 +2023,25 @@ impl TidepoolMcpServerImpl {
                 );
                 Ok(CallToolResult::error(vec![Content::text(error_msg)]))
             }
-            Err(_elapsed) => {
-                tracing::error!("{} timed out after {}s", op, EVAL_TIMEOUT_SECS);
+        }
+    }
 
-                // Orphan thread cleanup: move handle to a background task that sleeps a grace period then joins.
-                // Use std::thread instead of tokio::task::spawn_blocking to avoid starving the runtime's
-                // blocking pool if the eval thread is in a tight infinite loop.
-                if let Some(h) = handle.take() {
-                    let orphan_count = Arc::clone(&self.orphaned_threads);
-                    orphan_count.fetch_add(1, Ordering::Relaxed);
-                    std::thread::spawn(move || {
-                        // Grace period for the thread to hopefully hit an Ask or return naturally
-                        std::thread::sleep(Duration::from_secs(2));
-                        let _ = h.join();
-                        orphan_count.fetch_sub(1, Ordering::Relaxed);
-                    });
-                }
-
-                // Output printed before the deadline answers "which step was
-                // it on?" — the question a timeout always raises. snapshot()
-                // (not drain) because the orphaned thread may still write.
-                let output = captured_output.snapshot();
-                let mut detail = format!(
-                    "{} timed out after {}s. This usually means an infinite loop or unbounded recursion.",
-                    op, EVAL_TIMEOUT_SECS
-                );
-                if !output.is_empty() {
-                    detail.push_str("\n\n## Output Before Timeout\n");
-                    for line in &output {
-                        detail.push_str(line);
-                        detail.push('\n');
-                    }
-                }
-                let error_msg = format_error_with_source("Timeout", &detail, &source);
-                Ok(CallToolResult::error(vec![Content::text(error_msg)]))
-            }
+    /// Detach an eval thread to a background reaper: a grace period, then
+    /// join, with orphan accounting (the admission gate refuses new evals
+    /// when too many detached threads are still running). std::thread, not
+    /// spawn_blocking — a tight infinite loop must not starve the runtime's
+    /// blocking pool.
+    fn reap_detached(&self, handle: Option<JoinHandle<()>>) {
+        if let Some(h) = handle {
+            let orphan_count = Arc::clone(&self.orphaned_threads);
+            orphan_count.fetch_add(1, Ordering::Relaxed);
+            std::thread::spawn(move || {
+                // Grace period for the thread to hit an Ask (where a queued
+                // Abort poison-pill terminates it) or return naturally.
+                std::thread::sleep(Duration::from_secs(2));
+                let _ = h.join();
+                orphan_count.fetch_sub(1, Ordering::Relaxed);
+            });
         }
     }
 
@@ -1841,9 +2091,11 @@ impl TidepoolMcpServerImpl {
         let ask_tag = self.ask_tag;
         let effect_names = self.effect_names.clone();
 
-        // Create channels for Ask effect communication
+        // Create channels for Ask effect communication + the pause gate
         let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel::<SessionMessage>();
         let (response_tx, response_rx) = std::sync::mpsc::channel::<ResumeMsg>();
+        let gate = PauseGate::new();
+        let gate_for_thread = Arc::clone(&gate);
 
         let permit = match self.eval_semaphore.clone().try_acquire_owned() {
             Ok(p) => p,
@@ -1882,6 +2134,7 @@ impl TidepoolMcpServerImpl {
                     ask_tag,
                     session_tx: thread_session_tx.clone(),
                     response_rx,
+                    gate: gate_for_thread,
                 };
 
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1959,6 +2212,7 @@ impl TidepoolMcpServerImpl {
             response_tx,
             captured,
             Some(handle),
+            gate,
         )
         .await
     }
@@ -1966,67 +2220,97 @@ impl TidepoolMcpServerImpl {
     async fn resume(&self, req: ResumeRequest) -> Result<CallToolResult, McpError> {
         tracing::info!(continuation_id = %req.continuation_id, "resume request");
 
-        // Validate-then-consume, all inside ONE lock scope: a reply that
-        // fails schema validation must NOT consume the one-shot
+        // Validate-then-consume, all inside ONE lock scope (no awaits): a
+        // reply that fails schema validation must NOT consume the one-shot
         // continuation (the caller fixes and retries), and two concurrent
-        // resumes must not both pass validation and both send.
-        let session = {
+        // resumes must not both pass validation and both send. The session
+        // is carried OUT of the scope before any await (Send hygiene).
+        enum Consumed {
+            Session(EvalSession),
+            Reply(CallToolResult),
+        }
+        let consumed = {
             let mut conts = self.continuations.lock();
-            let expected_schema = conts
-                .get(&req.continuation_id)
-                .ok_or_else(|| {
-                    McpError::invalid_params(
+            match conts.get(&req.continuation_id) {
+                None => {
+                    return Err(McpError::invalid_params(
                         format!(
                             "Unknown or expired continuation_id: {}",
                             req.continuation_id
                         ),
                         None,
-                    )
-                })?
-                .expected_schema
-                .clone();
-
-            match validate::validate_response(expected_schema.as_ref(), &req.response) {
-                validate::Outcome::Invalid(violations) => {
-                    // Anti-starvation: a retrying continuation must not be
-                    // the oldest-first eviction victim while its caller
-                    // fixes the reply.
-                    if let Some(session) = conts.get_mut(&req.continuation_id) {
-                        session.created_at = std::time::Instant::now();
-                    }
-                    let body = serde_json::json!({
-                        "validation_failed": true,
-                        "violations": violations.iter().map(|v| v.to_json()).collect::<Vec<_>>(),
-                        "schema": expected_schema,
-                        "continuation_id": req.continuation_id,
-                        "continuation_not_consumed": true,
-                    });
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Response does not match the suspension's schema. Call resume again \
-                         with the same continuation_id and a corrected response (or abort).\n{}",
-                        body
-                    ))]));
+                    ))
                 }
-                validate::Outcome::Valid(canonical) => {
+                // Paused eval: nothing is listening on the channel (sending
+                // would poison the next ask). Consume the entry, wake the
+                // gate, and wait another window; the payload is ignored.
+                Some(EvalSession {
+                    kind: SessionKind::Paused,
+                    ..
+                }) => {
                     let session = conts
                         .remove(&req.continuation_id)
                         .expect("session present: checked under the same lock");
-                    // Send the canonical validated value to the blocked
-                    // eval thread.
-                    session
-                        .response_tx
-                        .send(ResumeMsg::Answer(canonical))
-                        .map_err(|_| {
-                            McpError::internal_error("eval thread is no longer running", None)
-                        })?;
-                    session
+                    session.gate.resume_run();
+                    Consumed::Session(session)
+                }
+                Some(EvalSession {
+                    kind: SessionKind::AwaitingAnswer { expected_schema },
+                    ..
+                }) => {
+                    let expected_schema = expected_schema.clone();
+                    match validate::validate_response(expected_schema.as_ref(), &req.response) {
+                        validate::Outcome::Invalid(violations) => {
+                            // Anti-starvation: a retrying continuation must
+                            // not be the oldest-first eviction victim while
+                            // its caller fixes the reply.
+                            if let Some(session) = conts.get_mut(&req.continuation_id) {
+                                session.created_at = std::time::Instant::now();
+                            }
+                            let body = serde_json::json!({
+                                "validation_failed": true,
+                                "violations": violations.iter().map(|v| v.to_json()).collect::<Vec<_>>(),
+                                "schema": expected_schema,
+                                "continuation_id": req.continuation_id,
+                                "continuation_not_consumed": true,
+                            });
+                            Consumed::Reply(CallToolResult::error(vec![Content::text(format!(
+                                "Response does not match the suspension's schema. Call resume \
+                                 again with the same continuation_id and a corrected response \
+                                 (or abort).\n{}",
+                                body
+                            ))]))
+                        }
+                        validate::Outcome::Valid(canonical) => {
+                            let session = conts
+                                .remove(&req.continuation_id)
+                                .expect("session present: checked under the same lock");
+                            // Send the canonical validated value to the
+                            // blocked eval thread.
+                            match session.response_tx.send(ResumeMsg::Answer(canonical)) {
+                                Ok(()) => Consumed::Session(session),
+                                Err(_) => {
+                                    return Err(McpError::internal_error(
+                                        "eval thread is no longer running",
+                                        None,
+                                    ))
+                                }
+                            }
+                        }
+                    }
                 }
             }
+        };
+
+        let session = match consumed {
+            Consumed::Reply(r) => return Ok(r),
+            Consumed::Session(s) => s,
         };
 
         let source = session.source.clone();
         let response_tx = session.response_tx.clone();
         let captured = session.captured_output.clone();
+        let gate = Arc::clone(&session.gate);
 
         // Await the next message from the eval thread
         self.handle_session_result(
@@ -2035,7 +2319,8 @@ impl TidepoolMcpServerImpl {
             source,
             response_tx,
             captured,
-            None,
+            session.thread,
+            gate,
         )
         .await
     }
@@ -2059,25 +2344,43 @@ impl TidepoolMcpServerImpl {
         let reason = req
             .reason
             .unwrap_or_else(|| "aborted by caller".to_string());
-        session
-            .response_tx
-            .send(ResumeMsg::Abort(reason))
-            .map_err(|_| McpError::internal_error("eval thread is no longer running", None))?;
+
+        match &session.kind {
+            // Blocked on an ask: send the abort down the answer channel —
+            // the thread wakes from recv and errors cleanly.
+            SessionKind::AwaitingAnswer { .. } => {
+                session
+                    .response_tx
+                    .send(ResumeMsg::Abort(reason))
+                    .map_err(|_| {
+                        McpError::internal_error("eval thread is no longer running", None)
+                    })?;
+            }
+            // Paused at the gate: wake it with the abort — its checkpoint
+            // returns Err and the eval terminates as a normal error.
+            SessionKind::Paused => {
+                session
+                    .gate
+                    .request_abort(format!("aborted by caller (while paused): {reason}"));
+            }
+        }
 
         let source = session.source.clone();
         let response_tx = session.response_tx.clone();
         let captured = session.captured_output.clone();
+        let gate = Arc::clone(&session.gate);
 
-        // The eval terminates as a normal error result ("ask aborted by
-        // caller: ...") carrying output-so-far — and its thread + semaphore
-        // permit are freed instead of waiting for pressure eviction.
+        // The eval terminates as a normal error result carrying
+        // output-so-far — and its thread + semaphore permit are freed
+        // instead of waiting for pressure eviction.
         self.handle_session_result(
             "abort",
             session.session_rx,
             source,
             response_tx,
             captured,
-            None,
+            session.thread,
+            gate,
         )
         .await
     }
@@ -2168,7 +2471,11 @@ impl ServerHandler for TidepoolMcpServerImpl {
                      matching it — pass the JSON value directly (string/enum schemas also \
                      accept raw text). A response that fails validation does NOT consume the \
                      continuation: the violations are returned and you can call resume again \
-                     with the same continuation_id. If you cannot answer, call abort instead."
+                     with the same continuation_id. If you cannot answer, call abort instead. \
+                     If the suspension says \"paused\": true, the eval ran out of its time \
+                     window and is parked at an effect boundary (no compute happens while \
+                     paused): resume runs it another window (response ignored, may be \
+                     omitted); abort kills it."
                         .into(),
                 ),
                 input_schema: schema_to_map(schemars::schema_for!(ResumeRequest))?,
@@ -3031,7 +3338,15 @@ data Console a where
         .unwrap();
 
         let res = server
-            .handle_session_result("eval", rx, source, resp_tx, captured, None)
+            .handle_session_result(
+                "eval",
+                rx,
+                source,
+                resp_tx,
+                captured,
+                None,
+                PauseGate::new(),
+            )
             .await
             .unwrap();
         assert_eq!(res.is_error, Some(false));
@@ -3058,7 +3373,15 @@ data Console a where
         .unwrap();
 
         let res = server
-            .handle_session_result("eval", rx, source, resp_tx, captured, None)
+            .handle_session_result(
+                "eval",
+                rx,
+                source,
+                resp_tx,
+                captured,
+                None,
+                PauseGate::new(),
+            )
             .await
             .unwrap();
         assert_eq!(res.is_error, Some(false));
@@ -3098,7 +3421,15 @@ data Console a where
         .unwrap();
 
         let res = server
-            .handle_session_result("eval", rx, source, resp_tx, captured, None)
+            .handle_session_result(
+                "eval",
+                rx,
+                source,
+                resp_tx,
+                captured,
+                None,
+                PauseGate::new(),
+            )
             .await
             .unwrap();
         let text = match &res.content[0].raw {
@@ -3114,7 +3445,12 @@ data Console a where
         // ...and stored as expected_schema for resume validation
         let cont_id = json["continuation_id"].as_str().unwrap();
         let conts = server.continuations.lock();
-        assert!(conts[cont_id].expected_schema.is_some());
+        assert!(matches!(
+            conts[cont_id].kind,
+            SessionKind::AwaitingAnswer {
+                expected_schema: Some(_)
+            }
+        ));
     }
 
     /// Hand-insert a suspended session carrying a schema; resume with an
@@ -3135,11 +3471,15 @@ data Console a where
                 source: "src".into(),
                 created_at: std::time::Instant::now(),
                 captured_output: CapturedOutput::new(),
-                expected_schema: Some(serde_json::json!({
-                    "type": "object",
-                    "properties": {"pick": {"type": "string", "enum": ["bug", "refactor"]}},
-                    "required": ["pick"],
-                })),
+                kind: SessionKind::AwaitingAnswer {
+                    expected_schema: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {"pick": {"type": "string", "enum": ["bug", "refactor"]}},
+                        "required": ["pick"],
+                    })),
+                },
+                thread: None,
+                gate: PauseGate::new(),
             },
         );
 
@@ -3207,11 +3547,15 @@ data Console a where
                 source: "src".into(),
                 created_at: std::time::Instant::now(),
                 captured_output: CapturedOutput::new(),
-                expected_schema: Some(serde_json::json!({
-                    "type": "object",
-                    "properties": {"answer": {"type": "boolean"}},
-                    "required": ["answer"],
-                })),
+                kind: SessionKind::AwaitingAnswer {
+                    expected_schema: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {"answer": {"type": "boolean"}},
+                        "required": ["answer"],
+                    })),
+                },
+                thread: None,
+                gate: PauseGate::new(),
             },
         );
         sess_tx
@@ -3249,7 +3593,11 @@ data Console a where
                 source: "src".into(),
                 created_at: std::time::Instant::now(),
                 captured_output: CapturedOutput::new(),
-                expected_schema: None,
+                kind: SessionKind::AwaitingAnswer {
+                    expected_schema: None,
+                },
+                thread: None,
+                gate: PauseGate::new(),
             },
         );
         // In a real run the eval thread receives Abort and sends Error;
@@ -3294,7 +3642,15 @@ data Console a where
         .unwrap();
 
         let res = server
-            .handle_session_result("eval", rx, source, resp_tx, captured, None)
+            .handle_session_result(
+                "eval",
+                rx,
+                source,
+                resp_tx,
+                captured,
+                None,
+                PauseGate::new(),
+            )
             .await
             .unwrap();
         assert_eq!(res.is_error, Some(true));
@@ -3318,7 +3674,15 @@ data Console a where
         drop(tx);
 
         let res = server
-            .handle_session_result("eval", rx, source, resp_tx, captured, None)
+            .handle_session_result(
+                "eval",
+                rx,
+                source,
+                resp_tx,
+                captured,
+                None,
+                PauseGate::new(),
+            )
             .await
             .unwrap();
         assert_eq!(res.is_error, Some(true));
@@ -3342,7 +3706,15 @@ data Console a where
 
         let handle = tokio::spawn(async move {
             server
-                .handle_session_result("eval", rx, source, resp_tx, captured, None)
+                .handle_session_result(
+                    "eval",
+                    rx,
+                    source,
+                    resp_tx,
+                    captured,
+                    None,
+                    PauseGate::new(),
+                )
                 .await
         });
 
@@ -3357,6 +3729,112 @@ data Console a where
         };
         assert!(text.contains("## Timeout"));
         assert!(text.contains("timed out"));
+    }
+
+    /// The gate state machine: pause parks a checkpointing thread, resume
+    /// releases it, abort errors it out; in_effect threads are not
+    /// runaways.
+    #[test]
+    fn test_pause_gate_park_resume_abort() {
+        // pause → thread parks at checkpoint → resume releases it
+        let gate = PauseGate::new();
+        gate.request_pause();
+        let g2 = Arc::clone(&gate);
+        let t = std::thread::spawn(move || g2.checkpoint());
+        assert!(gate.parked_or_in_effect(Duration::from_secs(2)));
+        gate.resume_run();
+        assert!(t.join().unwrap().is_ok());
+        gate.exit_effect();
+
+        // pause → park → abort errors the checkpoint
+        gate.request_pause();
+        let g3 = Arc::clone(&gate);
+        let t = std::thread::spawn(move || g3.checkpoint());
+        assert!(gate.parked_or_in_effect(Duration::from_secs(2)));
+        gate.request_abort("killed".into());
+        let err = t.join().unwrap().unwrap_err();
+        assert!(err.contains("killed"));
+
+        // a running gate with no checkpointing thread = runaway
+        let lone = PauseGate::new();
+        lone.request_pause();
+        assert!(!lone.parked_or_in_effect(Duration::from_millis(50)));
+
+        // ...unless the thread is inside an effect (e.g. a long LLM
+        // call): it will park at the NEXT boundary — not a runaway.
+        let busy = PauseGate::new();
+        busy.checkpoint().unwrap(); // enter effect (in_effect = true)
+        busy.request_pause();
+        assert!(busy.parked_or_in_effect(Duration::from_millis(50)));
+    }
+
+    /// Timeout with a thread parked at the gate → paused continuation
+    /// (not an error), and resume wakes it and collects the result.
+    #[tokio::test]
+    async fn test_timeout_parks_paused_continuation_and_resume_collects() {
+        let server = create_mock_server();
+        let (sess_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
+        let source: Arc<str> = "test source".into();
+        let captured = CapturedOutput::new();
+        captured.push("step 1 done".into());
+
+        // A real "eval thread": parks at its checkpoint (pause is already
+        // requested), and once resumed reports completion.
+        let gate = PauseGate::new();
+        gate.request_pause();
+        let g2 = Arc::clone(&gate);
+        let thread_tx = sess_tx.clone();
+        let t = std::thread::spawn(move || {
+            g2.checkpoint().unwrap(); // parks here until resume
+            g2.exit_effect();
+            let _ = thread_tx.send(SessionMessage::Completed {
+                result: "\"finished\"".into(),
+            });
+        });
+
+        // Wait for the park, then drive the timeout branch.
+        assert!(gate.parked_or_in_effect(Duration::from_secs(2)));
+        tokio::time::pause();
+        let server2 = server.clone();
+        let h = tokio::spawn(async move {
+            server2
+                .handle_session_result("eval", rx, source, resp_tx, captured, None, gate)
+                .await
+        });
+        tokio::time::advance(Duration::from_secs(EVAL_TIMEOUT_SECS + 1)).await;
+        let res = h.await.unwrap().unwrap();
+        tokio::time::resume();
+
+        assert_eq!(res.is_error, Some(false));
+        let text = match &res.content[0].raw {
+            RawContent::Text(t) => &t.text,
+            _ => panic!("Expected text content"),
+        };
+        let json: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(json["paused"], true);
+        assert_eq!(json["output"][0], "step 1 done");
+        let cont_id = json["continuation_id"].as_str().unwrap().to_string();
+        assert!(matches!(
+            server.continuations.lock()[&cont_id].kind,
+            SessionKind::Paused
+        ));
+
+        // resume: wakes the gate; the thread completes and we collect.
+        let res = server
+            .resume(ResumeRequest {
+                continuation_id: cont_id,
+                response: serde_json::Value::Null,
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.is_error, Some(false));
+        let text = match &res.content[0].raw {
+            RawContent::Text(t) => &t.text,
+            _ => panic!("Expected text content"),
+        };
+        assert!(text.contains("finished"));
+        t.join().unwrap();
     }
 
     #[tokio::test]
