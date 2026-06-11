@@ -1578,10 +1578,11 @@ struct Args {
 
     /// LLM model for the Llm effect. genai routes the provider from the
     /// name: gpt-4o-mini → OpenAI, claude-haiku-4-5 → Anthropic, gemini-*
-    /// → Gemini, unknown names → Ollama; `ns::model` forces a namespace.
-    /// API keys come from the standard env vars (OPENAI_API_KEY, ...) or
-    /// from `.tidepool/secrets/<ENV_VAR_NAME>` files.
-    #[arg(long, env = "TIDEPOOL_LLM_MODEL", default_value = "ollama::llama3.2")]
+    /// → Gemini, unknown names → Ollama (e.g. qwen2.5:7b); `ns::model`
+    /// forces a namespace. API keys come from the standard env vars
+    /// (OPENAI_API_KEY, ...) or from `.tidepool/secrets/<ENV_VAR_NAME>`
+    /// files.
+    #[arg(long, env = "TIDEPOOL_LLM_MODEL", default_value = DEFAULT_OPENAI_MODEL)]
     llm: String,
 }
 
