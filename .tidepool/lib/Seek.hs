@@ -1,5 +1,5 @@
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
--- | Goal-directed code search as a vocabulary over Library.loopM.
+-- | Goal-directed code search as a vocabulary over Schemes.loopM.
 --
 -- The driver is generic (loopM: iterate until the body returns a
 -- result); this module supplies the search-specific parts: a 'Vocab'
@@ -11,12 +11,20 @@
 -- Field notes (2026-06-11, v1 runs):
 --   * ParkedStream per-id removal on exhaustion (host_fns.rs:2601),
 --     correcting a stale "lives to teardown" belief — 4 probes.
---   * continuation lifetime: resume-remove (lib.rs:1771) + pressure
---     eviction oldest-first, NO time expiry (lib.rs:1412) — 4 probes.
+--   * continuation lifetime: pressure eviction oldest-first, NO time
+--     expiry (lib.rs:1412) — 4 probes.
+--   * resume is one-shot: conts.remove consumes the entry
+--     (lib.rs:1921); the response String crosses the boundary via the
+--     session channel (lib.rs:1935) and lands as Value::String — so a
+--     continuation dies by eviction OR by its own resume; no replay.
 --
--- With an inline-LLM provider configured, tier 1 slots between the
--- pure default and the suspension (?? cascade): the model proposes
--- the next reply, the caller is asked only on low confidence.
+-- v2 (affordance fixes from dogfooding v1):
+--   * verbs carry usage syntax, rendered verbatim in the prompt — the
+--     caller never guesses argument format.
+--   * view takes an optional radius, default widened to +/-20 (v1's
+--     +/-10 cut a handler mid-body and cost a probe).
+--   * older evidence compacts to headers (latest 2 entries full) —
+--     the prompt stops growing linearly with probe count.
 module Seek where
 
 import Tidepool.Prelude hiding (error)
@@ -25,9 +33,11 @@ import Schemes (loopM)
 import Asks (oracle)
 import Explore (hitsByFile, aroundLine)
 
--- | A reply language: named verbs over the state. A verb's action
+-- | A reply language: named verbs over the state. (name, usage,
+-- action) — usage is shown verbatim in the prompt; the action
 -- receives the reply with the verb name stripped.
-type Vocab s = [(Text, Text -> s -> M s)]
+type Verb s = (Text, Text, Text -> s -> M s)
+type Vocab s = [Verb s]
 
 -- | Interpret one reply against a vocab. @DONE <r>@ terminates with
 -- the rest of the reply; otherwise the matching verb runs; an
@@ -36,17 +46,22 @@ type Vocab s = [(Text, Text -> s -> M s)]
 dispatch :: Vocab s -> Text -> s -> M (Either Text s)
 dispatch vocab a s
   | "DONE" `isPrefixOf` a = pure (Left (strip (sdrop 4 a)))
-  | otherwise = case filter (\(name, _) -> name `isPrefixOf` a) vocab of
-      ((name, run) : _) -> Right <$> run (strip (sdrop (len name) a)) s
+  | otherwise = case filter (\(name, _, _) -> name `isPrefixOf` a) vocab of
+      ((name, _, run) : _) -> Right <$> run (strip (sdrop (len name) a)) s
       [] -> case vocab of
-        ((_, run) : _) -> Right <$> run a s
-        []             -> pure (Right s)
+        ((_, _, run) : _) -> Right <$> run a s
+        []                -> pure (Right s)
+
+-- | Split a verb argument on " :: " into parts (each stripped).
+argN :: Text -> [Text]
+argN = map strip . splitOn " :: "
 
 -- | Split a verb argument on " :: " into (head, tail-or-empty).
 arg2 :: Text -> (Text, Text)
-arg2 a = case splitOn " :: " a of
-  [x, y] -> (strip x, strip y)
-  _      -> (strip a, "")
+arg2 a = case argN a of
+  (x : y : _) -> (x, y)
+  [x]         -> (x, "")
+  _           -> ("", "")
 
 -- | Digest grep hits: counts + per-file density + exemplar lines.
 -- Shows ALL hits when few (<=8); never floods the prompt when many.
@@ -61,35 +76,54 @@ digestHits hs =
      <> "\n top files: " <> pack (show (take 5 byFile))
      <> (if null lns then "" else "\n " <> label <> "\n  " <> intercalate "\n  " lns)
 
--- | grep <regex> :: <glob> — regex over files (glob defaults **/*.rs).
-grepVerb :: (Text, Text -> [Text] -> M [Text])
-grepVerb = ("grep", \arg ev -> do
+-- | grep — regex over files (glob defaults **/*.rs).
+grepVerb :: Verb [Text]
+grepVerb = ("grep", "grep <regex> :: <glob (default **/*.rs)>", \arg ev -> do
   let (rx, g) = arg2 arg
   hits <- grepGlob rx (if isNull g then "**/*.rs" else g)
   pure (("PROBE " <> arg <> "\n" <> digestHits hits) : ev))
 
--- | view <file> :: <line> — ~20-line window around a line.
-viewVerb :: (Text, Text -> [Text] -> M [Text])
-viewVerb = ("view", \arg ev -> do
-  let (f, lnT) = arg2 arg
-      ln = case parseIntM lnT of { Just n -> n; Nothing -> 1 }
+-- | view — window around a line, radius optional (default +/-20).
+viewVerb :: Verb [Text]
+viewVerb = ("view", "view <file> :: <line> [:: <radius (default 20)>]", \arg ev -> do
+  let parts = argN arg
+      f = case parts of { (x : _) -> x; _ -> arg }
+      ln = case parts of
+             (_ : l : _) -> case parseIntM l of { Just n -> n; Nothing -> 1 }
+             _ -> 1
+      r = case parts of
+            (_ : _ : x : _) -> case parseIntM x of { Just n -> n; Nothing -> 20 }
+            _ -> 20
   content <- readFile f
-  pure (("VIEW " <> f <> ":" <> lnT <> "\n  "
-         <> intercalate "\n  " (aroundLine ln 10 content)) : ev))
+  pure (("VIEW " <> f <> ":" <> pack (show ln)
+         <> "\n  " <> intercalate "\n  " (aroundLine ln r content)) : ev))
+
+-- | Render the trail chronologically: the most recent 2 entries in
+-- full, older entries compacted to their header line (plus the hit
+-- summary for probes). The full text already steered past probes;
+-- only the summary needs to persist.
+renderTrail :: [Text] -> Text
+renderTrail ev = intercalate "\n---\n" (reverse (imap render1 ev))
+  where
+    render1 i e = if i < 2 then e else compactE e
+    compactE e = case lines e of
+      (h : s : _) | "PROBE" `isPrefixOf` h -> h <> "  [" <> strip s <> "]"
+      (h : _) -> h <> "  [compacted]"
+      [] -> e
 
 -- | Goal-directed search with a custom vocabulary: loopM over
 -- (fuel, trail), one suspension per round.
 seekWith :: Vocab [Text] -> Text -> Int -> M Text
 seekWith vocab goal fuel = loopM round (fuel, [])
   where
-    verbs = intercalate " | " (map (\(n, _) -> "'" <> n <> " ...'") vocab)
-    trail ev = intercalate "\n---\n" (reverse ev)
-    round (0, ev) = pure (Left ("FUEL EXHAUSTED. Trail:\n" <> trail ev))
+    verbs = intercalate " | " (map (\(_, usage, _) -> "'" <> usage <> "'") vocab)
+    round (0, ev) = pure (Left ("FUEL EXHAUSTED. Trail:\n" <> renderTrail ev))
     round (k, ev) = do
       a <- oracle ("[seek] GOAL (fixed): " <> goal
             <> "\n\nEvidence so far:\n"
-            <> (if null ev then "(none yet)" else trail ev)
-            <> "\n\nReplies: " <> verbs <> " | 'DONE <answer>'. Probes left: " <> pack (show k))
+            <> (if null ev then "(none yet)" else renderTrail ev)
+            <> "\n\nReplies: " <> verbs
+            <> " | 'DONE <answer>'. Unprefixed reply = first verb. Probes left: " <> pack (show k))
       e <- dispatch vocab (strip a) ev
       pure (case e of
         Left ans  -> Left ("ANSWER: " <> ans <> "\n\n("
