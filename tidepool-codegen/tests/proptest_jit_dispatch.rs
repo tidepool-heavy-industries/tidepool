@@ -948,14 +948,12 @@ proptest! {
 
     /// Shape-mismatched response (string into an integer continuation).
     ///
-    /// CONTRACT (per task): a clean error is required — never a fatal trap, and
-    /// never a silently-wrong value. The *desired* assertion is "JIT rejects
-    /// the string just like eval does"; that assertion currently FAILS and is
-    /// captured by the ignored repro [`bug_shape_mismatch_jit_reads_string_as_int`]
-    /// and the findings ledger (class B2 / silent-garbage). The live property is
-    /// therefore relaxed to the one guarantee the JIT *does* honor here: it must
-    /// not crash the process (B3). This keeps the suite green while the strict
-    /// contract is tracked as a known bug.
+    /// CONTRACT: a clean error — never a fatal trap, never a silently-wrong
+    /// value. FIXED 2026-06-10: the unboxing loops now guard the Con-unwrap
+    /// step (boxing wrappers have exactly one field; see
+    /// emit_boxing_wrapper_guard), so a multi-field Con where a number was
+    /// expected traps cleanly instead of yielding pointer-derived garbage.
+    /// The full strict contract is asserted live.
     #[test]
     fn shape_mismatch_resume((expr, script) in shape_mismatch_strategy()) {
         let outcome = run_case(expr, script);
@@ -963,10 +961,16 @@ proptest! {
             Outcome::JitFault => {
                 prop_assert!(false, "B3: shape-mismatched response caused a fatal trap (not a clean error)");
             }
-            // EvalFault: known-divergence skip. Rec: JIT may currently return a
-            // garbage int (the tracked bug) — only the no-fatal-fault guarantee
-            // is asserted live.
-            Outcome::EvalFault | Outcome::Rec(_) => {}
+            Outcome::Rec(v) => {
+                // If eval rejected the shape, the JIT must reject it too —
+                // never "succeed" with a garbage number.
+                prop_assert!(
+                    v.eval_ok || !v.jit_ok,
+                    "B2 regressed: eval rejected the shape-mismatched response but \
+                     JIT returned Ok(kind={}, val={})", v.jit_kind, v.jit_val
+                );
+            }
+            Outcome::EvalFault => {} // known-divergence skip
         }
     }
 }
@@ -997,8 +1001,11 @@ proptest! {
 ///    with the continuation) — well-typed GHC output cannot reach it, so this
 ///    is a defensive-robustness gap, not a miscompile of valid programs.
 ///  * seed: proptest cc ee1877d8…84337f0 (shrinks to `Str("")`).
+// FIXED 2026-06-10 (emit_boxing_wrapper_guard in emit/primop.rs): the unbox
+// loops trap cleanly on a multi-field Con, so the string response yields a
+// clean error exactly like eval. Active regression test — the assertion below
+// is the desired contract and now passes.
 #[test]
-#[ignore = "BUG: JIT reads a string response as Int# and returns garbage where eval cleanly errors (B2)"]
 fn bug_shape_mismatch_jit_reads_string_as_int() {
     // Minimal shrunk form: E(Union(0, 0), Leaf(\x -> Val(x +# 7))) with the
     // tag-0 handler answering Complete(Lit("")).
@@ -1011,10 +1018,11 @@ fn bug_shape_mismatch_jit_reads_string_as_int() {
                 v.eval_ok == false,
                 "oracle precondition: eval must reject string-into-Int#"
             );
-            // The bug: the JIT accepts it and returns an int.
+            // FIXED: the JIT must reject it just like eval (clean error, not
+            // pointer-derived garbage).
             assert!(
                 !v.jit_ok,
-                "BUG REPRODUCED: eval rejected string+#Int but JIT returned Ok(int kind={}, val={}) — \
+                "B2 regressed: eval rejected string+#Int but JIT returned Ok(int kind={}, val={}) — \
                  the resume path read the string heap pointer as Int#",
                 v.jit_kind, v.jit_val
             );

@@ -1894,12 +1894,78 @@ fn emit_f32_compare(
     Ok(SsaVal::Raw(builder.ins().uextend(types::I64, cmp), tag))
 }
 
-/// Unbox an Addr# value recursively.
-fn unbox_addr(
-    _pipeline: &mut CodegenPipeline,
+/// Guard a Con-unwrap step inside an unboxing loop.
+///
+/// Numeric/addr/bytearray boxing wrappers (`I#`, `W#`, `D#`, `Addr#`,
+/// `ByteArray#`, ...) always have exactly ONE field. Blindly unwrapping
+/// field 0 of an arbitrary multi-field Con (e.g. a `Text` response where
+/// `Int#` was expected) silently turns a heap pointer into a "number" —
+/// observed as proptest_jit_dispatch B2 (shape-mismatched effect resume
+/// returned pointer-derived garbage instead of erroring).
+///
+/// Emits a `num_fields == 1` check. The failing path calls
+/// `runtime_case_trap` (records the offending Con in the diagnostics, sets
+/// the pending `RuntimeError` that the machine surfaces before the result is
+/// used) and jumps to `next_block` with the returned poison pointer. Leaves
+/// the builder positioned in a fresh sealed block where the single-field
+/// unwrap should be emitted.
+fn emit_boxing_wrapper_guard(
+    pipeline: &mut CodegenPipeline,
     builder: &mut FunctionBuilder,
-    val: SsaVal,
-) -> Value {
+    curr_v: Value,
+    next_block: ir::Block,
+) {
+    let num_fields = builder.ins().load(
+        types::I16,
+        MemFlags::trusted(),
+        curr_v,
+        layout::CON_NUM_FIELDS_OFFSET as i32,
+    );
+    let is_single = builder.ins().icmp_imm(IntCC::Equal, num_fields, 1);
+    let unwrap_block = builder.create_block();
+    let shape_trap_block = builder.create_block();
+    builder
+        .ins()
+        .brif(is_single, unwrap_block, &[], shape_trap_block, &[]);
+
+    builder.switch_to_block(shape_trap_block);
+    builder.seal_block(shape_trap_block);
+    let trap_fn = pipeline
+        .module
+        .declare_function("runtime_case_trap", Linkage::Import, &{
+            let mut sig = Signature::new(pipeline.isa.default_call_conv());
+            sig.params.push(AbiParam::new(types::I64)); // scrut_ptr
+            sig.params.push(AbiParam::new(types::I64)); // num_alts
+            sig.params.push(AbiParam::new(types::I64)); // alt_tags
+            sig.params.push(AbiParam::new(types::I64)); // fn name ptr
+            sig.params.push(AbiParam::new(types::I64)); // fn name len
+            sig.returns.push(AbiParam::new(types::I64)); // poison ptr
+            sig
+        })
+        .expect("declare runtime_case_trap");
+    let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
+    // No expected-tags list (the expectation is "a 1-field boxing wrapper",
+    // not a constructor set); pass a valid dummy slot so the host fn's slice
+    // construction stays sound with num_alts = 0.
+    let dummy_ss = builder.create_sized_stack_slot(ir::StackSlotData::new(
+        ir::StackSlotKind::ExplicitSlot,
+        8,
+        3, // align 8
+    ));
+    let dummy_addr = builder.ins().stack_addr(types::I64, dummy_ss, 0);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let call = builder
+        .ins()
+        .call(trap_ref, &[curr_v, zero, dummy_addr, zero, zero]);
+    let poison = builder.inst_results(call)[0];
+    builder.ins().jump(next_block, &[BlockArg::Value(poison)]);
+
+    builder.switch_to_block(unwrap_block);
+    builder.seal_block(unwrap_block);
+}
+
+/// Unbox an Addr# value recursively.
+fn unbox_addr(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val: SsaVal) -> Value {
     match val {
         SsaVal::Raw(v, _) => v,
         SsaVal::HeapPtr(v) => {
@@ -1930,6 +1996,9 @@ fn unbox_addr(
 
             builder.switch_to_block(con_block);
             builder.seal_block(con_block);
+            // Boxing wrappers have exactly one field; trap cleanly otherwise
+            // (proptest_jit_dispatch B2 — see emit_boxing_wrapper_guard).
+            emit_boxing_wrapper_guard(pipeline, builder, curr_v, next_block);
             let field0 = builder.ins().load(
                 types::I64,
                 MemFlags::trusted(),
@@ -1968,7 +2037,7 @@ fn unbox_addr(
 
 /// Extract the raw ByteArray pointer from a Lit(BYTEARRAY) heap object recursively.
 fn unbox_bytearray(
-    _pipeline: &mut CodegenPipeline,
+    pipeline: &mut CodegenPipeline,
     builder: &mut FunctionBuilder,
     val: SsaVal,
 ) -> Value {
@@ -2002,6 +2071,9 @@ fn unbox_bytearray(
 
             builder.switch_to_block(con_block);
             builder.seal_block(con_block);
+            // Boxing wrappers have exactly one field; trap cleanly otherwise
+            // (proptest_jit_dispatch B2 — see emit_boxing_wrapper_guard).
+            emit_boxing_wrapper_guard(pipeline, builder, curr_v, next_block);
             let field0 = builder.ins().load(
                 types::I64,
                 MemFlags::trusted(),
@@ -2071,6 +2143,9 @@ fn unbox_numeric(
 
             builder.switch_to_block(con_block);
             builder.seal_block(con_block);
+            // Boxing wrappers have exactly one field; trap cleanly otherwise
+            // (proptest_jit_dispatch B2 — see emit_boxing_wrapper_guard).
+            emit_boxing_wrapper_guard(pipeline, builder, curr_v, next_block);
             let field0 = builder.ins().load(
                 types::I64,
                 MemFlags::trusted(),
@@ -2115,9 +2190,81 @@ fn unbox_numeric(
             builder.seal_block(next_block);
             let v_final = builder.block_params(next_block)[0];
 
+            // Guard the final load: a numeric unbox must land on a TAG_LIT
+            // whose lit-tag holds a raw number. A pointer-valued lit (STRING /
+            // BYTEARRAY / SMALLARRAY / ARRAY — e.g. a bare string response
+            // where Int# was expected) or a non-Lit object here would silently
+            // turn its payload pointer into the "number"
+            // (proptest_jit_dispatch B2, shrunk witness: Str("")). Trap
+            // cleanly via runtime_case_trap instead; the poison object it
+            // returns is loaded from below, but the pending RuntimeError is
+            // surfaced before the garbage can be observed.
+            let obj_tag = builder
+                .ins()
+                .load(types::I8, MemFlags::trusted(), v_final, 0);
+            let not_lit = builder
+                .ins()
+                .icmp_imm(IntCC::NotEqual, obj_tag, layout::TAG_LIT as i64);
+            let lit_tag =
+                builder
+                    .ins()
+                    .load(types::I8, MemFlags::trusted(), v_final, LIT_TAG_OFFSET);
+            let is_string = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, lit_tag, LIT_TAG_STRING);
+            let is_ptrarr = builder.ins().icmp_imm(
+                IntCC::UnsignedGreaterThanOrEqual,
+                lit_tag,
+                LIT_TAG_BYTEARRAY,
+            );
+            let ptrish = builder.ins().bor(is_string, is_ptrarr);
+            let bad = builder.ins().bor(not_lit, ptrish);
+            let load_block = builder.create_block();
+            builder.append_block_param(load_block, types::I64);
+            let lit_trap_block = builder.create_block();
+            builder.ins().brif(
+                bad,
+                lit_trap_block,
+                &[],
+                load_block,
+                &[BlockArg::Value(v_final)],
+            );
+
+            builder.switch_to_block(lit_trap_block);
+            builder.seal_block(lit_trap_block);
+            let trap_fn = pipeline
+                .module
+                .declare_function("runtime_case_trap", Linkage::Import, &{
+                    let mut sig = Signature::new(pipeline.isa.default_call_conv());
+                    sig.params.push(AbiParam::new(types::I64)); // scrut_ptr
+                    sig.params.push(AbiParam::new(types::I64)); // num_alts
+                    sig.params.push(AbiParam::new(types::I64)); // alt_tags
+                    sig.params.push(AbiParam::new(types::I64)); // fn name ptr
+                    sig.params.push(AbiParam::new(types::I64)); // fn name len
+                    sig.returns.push(AbiParam::new(types::I64)); // poison ptr
+                    sig
+                })
+                .expect("declare runtime_case_trap");
+            let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
+            let dummy_ss = builder.create_sized_stack_slot(ir::StackSlotData::new(
+                ir::StackSlotKind::ExplicitSlot,
+                8,
+                3, // align 8
+            ));
+            let dummy_addr = builder.ins().stack_addr(types::I64, dummy_ss, 0);
+            let zero = builder.ins().iconst(types::I64, 0);
+            let call = builder
+                .ins()
+                .call(trap_ref, &[v_final, zero, dummy_addr, zero, zero]);
+            let poison = builder.inst_results(call)[0];
+            builder.ins().jump(load_block, &[BlockArg::Value(poison)]);
+
+            builder.switch_to_block(load_block);
+            builder.seal_block(load_block);
+            let v_load = builder.block_params(load_block)[0];
             builder
                 .ins()
-                .load(load_type, MemFlags::trusted(), v_final, LIT_VALUE_OFFSET)
+                .load(load_type, MemFlags::trusted(), v_load, LIT_VALUE_OFFSET)
         }
     }
 }

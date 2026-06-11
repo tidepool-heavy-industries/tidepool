@@ -172,7 +172,15 @@ impl JoinPointRegistry {
 
     pub(crate) fn get(&self, label: &JoinId) -> Result<&JoinInfo, EmitError> {
         self.map.get(label).ok_or_else(|| {
-            EmitError::NotYetImplemented(format!("Jump to unregistered join {:?}", label))
+            EmitError::NotYetImplemented(format!(
+                "Jump to unregistered join {:?}: a Jump crossed a Lam boundary, \
+                 so the join's block lives in a different Cranelift function. \
+                 The real pipeline never produces this shape — Translate.hs's \
+                 jumpCrossesLam rewrites such joins to LetNonRec + lambda \
+                 (CLAUDE.md gotcha #10); synthetic CoreExpr inputs must do the \
+                 same. (proptest_ghc_idioms bug1_join_crosses_lambda)",
+                label
+            ))
         })
     }
 
