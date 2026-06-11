@@ -885,7 +885,17 @@ fn emit_subtree(mut args: EmitArgs, idx: usize) -> Result<SsaVal, EmitError> {
     emit_subtree_with_tail(args, idx)
 }
 
-/// Stack-safe emission with explicit tail context. Case alt bodies inherit `tail`.
+/// Stack-safe emission of a value-position subtree via hylomorphism.
+///
+/// INVARIANT: the hylomorphism NEVER carries a `Tail` context. Every child the
+/// recursion crate visits bottom-up (App fun/arg, PrimOp args, Case scrutinee,
+/// Jump args, Con fields) is a *value position* — its result is consumed locally,
+/// so a tail call there would `return null` and escape as the enclosing
+/// function's result (see #313 t11). Tail-ness is owned exclusively by the
+/// evaluation spine in `emit_node`, which dispatches tail App/Case/Join directly
+/// (emit_tail_app / emit_case+Tail / emit_join+Tail) and only ever re-enters this
+/// hylomorphism for value positions. The `collapse_frame` Case/Join branches thus
+/// always run NonTail here; the spine supplies Tail to their alts/body separately.
 fn emit_subtree_with_tail(args: EmitArgs, idx: usize) -> Result<SsaVal, EmitError> {
     try_expand_and_collapse::<EmitFrameToken, _, _, _>(
         idx,
@@ -896,7 +906,9 @@ fn emit_subtree_with_tail(args: EmitArgs, idx: usize) -> Result<SsaVal, EmitErro
                     ctx: args.ctx,
                     sess: args.sess,
                     builder: args.builder,
-                    tail: args.tail,
+                    // Hard NonTail: never propagate the caller's tail into
+                    // value-position children. The spine owns tail (see above).
+                    tail: TailCtx::NonTail,
                 },
                 frame,
             )
@@ -1787,28 +1799,112 @@ impl EmitContext {
                                 )?;
                                 break; // exit inner loop
                             }
-                            // All non-Let nodes: delegate to stack-safe hylomorphism
+                            // All non-Let nodes. Tail-ness propagates ONLY along
+                            // the evaluation spine — never into value positions.
+                            // The hylomorphism (emit_subtree) is hard-NonTail, so a
+                            // tail App/Case/Join must be dispatched HERE to keep TCO;
+                            // everything else cannot tail-call and is emitted NonTail.
+                            // (Fixes #313 t11: a tail leak into a value-position join
+                            // made a tail App `return null`, escaping the function.)
                             _ => {
-                                if tail_ctx.is_tail()
-                                    && matches!(args.sess.tree.nodes[idx], CoreFrame::App { .. })
-                                {
-                                    let result = Self::emit_tail_app(
-                                        EmitArgs {
-                                            ctx: args.ctx,
-                                            sess: args.sess,
-                                            builder: args.builder,
-                                            tail: tail_ctx,
-                                        },
-                                        idx,
-                                    )?;
-                                    vals.push(result);
+                                if tail_ctx.is_tail() {
+                                    match &args.sess.tree.nodes[idx] {
+                                        CoreFrame::App { .. } => {
+                                            let result = Self::emit_tail_app(
+                                                EmitArgs {
+                                                    ctx: args.ctx,
+                                                    sess: args.sess,
+                                                    builder: args.builder,
+                                                    tail: tail_ctx,
+                                                },
+                                                idx,
+                                            )?;
+                                            vals.push(result);
+                                        }
+                                        CoreFrame::Case {
+                                            scrutinee,
+                                            binder,
+                                            alts,
+                                        } => {
+                                            // Scrutinee is a value position (NonTail,
+                                            // via emit_subtree); only the alts inherit
+                                            // Tail, preserving case-alt TCO.
+                                            let scrutinee = *scrutinee;
+                                            let binder = *binder;
+                                            let alts = alts.clone();
+                                            let scrut = emit_subtree(
+                                                EmitArgs {
+                                                    ctx: args.ctx,
+                                                    sess: args.sess,
+                                                    builder: args.builder,
+                                                    tail: TailCtx::NonTail,
+                                                },
+                                                scrutinee,
+                                            )?;
+                                            let result = crate::emit::case::emit_case(
+                                                EmitArgs {
+                                                    ctx: args.ctx,
+                                                    sess: args.sess,
+                                                    builder: args.builder,
+                                                    tail: TailCtx::Tail,
+                                                },
+                                                scrut,
+                                                &binder,
+                                                &alts,
+                                            )?;
+                                            vals.push(result);
+                                        }
+                                        CoreFrame::Join {
+                                            label,
+                                            params,
+                                            rhs,
+                                            body,
+                                        } => {
+                                            // Join body and rhs are the spine (both
+                                            // produce the join's value); emit_join
+                                            // propagates Tail to them and keeps jump
+                                            // args NonTail.
+                                            let label = *label;
+                                            let params = params.clone();
+                                            let rhs = *rhs;
+                                            let body = *body;
+                                            let result = crate::emit::join::emit_join(
+                                                EmitArgs {
+                                                    ctx: args.ctx,
+                                                    sess: args.sess,
+                                                    builder: args.builder,
+                                                    tail: TailCtx::Tail,
+                                                },
+                                                &label,
+                                                &params,
+                                                rhs,
+                                                body,
+                                            )?;
+                                            vals.push(result);
+                                        }
+                                        // Con/Lit/Var/PrimOp/Jump/etc: no tail call is
+                                        // possible, so NonTail is equivalent and keeps
+                                        // any nested value-position Case/Join NonTail.
+                                        _ => {
+                                            let result = emit_subtree(
+                                                EmitArgs {
+                                                    ctx: args.ctx,
+                                                    sess: args.sess,
+                                                    builder: args.builder,
+                                                    tail: TailCtx::NonTail,
+                                                },
+                                                idx,
+                                            )?;
+                                            vals.push(result);
+                                        }
+                                    }
                                 } else {
-                                    let result = emit_subtree_with_tail(
+                                    let result = emit_subtree(
                                         EmitArgs {
                                             ctx: args.ctx,
                                             sess: args.sess,
                                             builder: args.builder,
-                                            tail: tail_ctx,
+                                            tail: TailCtx::NonTail,
                                         },
                                         idx,
                                     )?;

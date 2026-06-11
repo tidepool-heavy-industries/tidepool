@@ -13,7 +13,9 @@ impl DispatchEffect<()> for TupleDispatcher {
         _request: &Value,
         cx: &tidepool_effect::EffectContext<'_, ()>,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
-        cx.respond("alpha countTable beta\n".to_string())
+        // TWO occurrences: drives occ2 down the False/False (deepest) path,
+        // the branch the #313 TailCtx leak miscompiled.
+        cx.respond("alpha countTable beta countTable gamma\n".to_string())
     }
 }
 
@@ -52,8 +54,19 @@ fn repro_313() {
     let include = [hs, lib, effects_dir];
     let mut d = TupleDispatcher;
     let r = compile_and_run(&src, "result", &include, &mut d, &());
+    // Regression gate (#313 t11): two occurrences → 2 (FORCE=1 → 3). The
+    // TailCtx leak returned the breakOn remainder Text instead, trapping
+    // downstream in the render path.
+    let expected = if force { 3 } else { 2 };
     match r {
-        Ok(v) => println!("RESULT OK: {:?}", v.to_json()),
-        Err(e) => println!("RESULT ERR: {e}"),
+        Ok(v) => {
+            println!("RESULT OK: {:?}", v.to_json());
+            assert_eq!(
+                v.to_json(),
+                serde_json::json!(expected),
+                "#313 t11 regression: occ2 must count {expected} occurrences"
+            );
+        }
+        Err(e) => panic!("#313 t11 regression: eval failed: {e}"),
     }
 }
