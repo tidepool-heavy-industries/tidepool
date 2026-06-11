@@ -992,8 +992,10 @@ fn reach_counters_capstraddle_coverage() {
 // boundary that decodes raw heap objects; the code clearly INTENDS to validate
 // the slice (`if off + len > ba.len()`) and merely does the arithmetic
 // unsafely. A `checked_add` (treating overflow as out-of-range) closes it.
+// FIXED 2026-06-10: off/len are now validated as signed and combined with
+// checked arithmetic in `String::from_value`; every malformed slice is a clean
+// `Err(TypeMismatch)`. This is the active regression test.
 #[test]
-#[ignore = "BUG B2: String::from_value panics on overflowing Text off+len; see findings ledger"]
 fn repro_b2_text_offset_overflow_panic() {
     let table = std_table();
     let v = Value::Con(
@@ -1046,33 +1048,31 @@ fn repro_b2_text_offset_overflow_panic() {
 // This is far beyond the 1024 field cap of interest, but the ENCODE side has
 // no cap at all and truncates instead of refusing, which is the defect. A
 // `u16::try_from(len)` (erroring on overflow) on the write side closes it.
+// FIXED 2026-06-10: the encode side now refuses Cons wider than MAX_FIELDS
+// (the same bound the decode side enforces) with a clean
+// `Err(TooManyFields)` instead of truncating the u16 header. This is the
+// active regression test: silent truncation is impossible because nothing
+// above the bound is ever written.
 #[test]
-#[ignore = "BUG B5: value_to_heap truncates Con field count to u16; silent corruption"]
 fn repro_b5_con_field_count_u16_truncation() {
-    let n = 65536usize; // 2^16 -> truncates to 0 in the u16 header
+    let n = 65536usize; // 2^16 -> would truncate to 0 in the u16 header
     let fields: Vec<Value> = (0..n)
         .map(|i| Value::Lit(Literal::LitInt(i as i64)))
         .collect();
     let v = Value::Con(DataConId(2), fields);
     let (_nursery, mut vmctx) = setup_vmctx(n * 64 + 4 * 1024 * 1024);
-    // SAFETY: nursery outlives vmctx; ptr stays in the live nursery.
-    let decoded = unsafe {
-        let ptr = value_to_heap(&v, &mut vmctx).expect("encode should not fail outright");
-        heap_to_value_forcing(ptr, &mut vmctx as *mut VMContext)
-    };
-    let got = match &decoded {
-        Ok(Value::Con(_, f)) => f.len(),
-        other => panic!("expected a Con back, got {:?}", other),
-    };
-    if let Ok(d) = decoded {
-        flatten_drop(d);
-    }
+    // SAFETY: nursery outlives vmctx.
+    let encoded = unsafe { value_to_heap(&v, &mut vmctx) };
     flatten_drop(v);
-    // With the bug present, `got` == 0 (silent truncation). The contract:
-    assert_eq!(
-        got, n,
-        "B5: {n}-field Con round-tripped to {got} fields (u16 truncation corruption)"
-    );
+    match encoded {
+        Err(tidepool_codegen::heap_bridge::BridgeError::TooManyFields { count }) => {
+            assert_eq!(count, n);
+        }
+        other => panic!(
+            "B5: expected clean Err(TooManyFields) for a {n}-field Con, got {:?}",
+            other.map(|_| "Ok(ptr)")
+        ),
+    }
 }
 
 // The hunting property that discovered B2. `#[ignore]`d so the active suite is

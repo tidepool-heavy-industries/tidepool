@@ -392,6 +392,15 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
             // whole traversal; vmctx_ptr is the caller's exclusive borrow.
             ValueFrame::Leaf(p) => unsafe { leaf_to_heap(&*p, &mut *vmctx_ptr) },
             ValueFrame::Con(id, field_ptrs) => unsafe {
+                // The header stores size and num_fields as u16; silently
+                // truncating (`len as u16`) made a 65536-field Con roundtrip to
+                // ZERO fields (proptest_boundary_roundtrip B5). Refuse cleanly at
+                // the same MAX_FIELDS bound heap_to_value enforces on read.
+                if field_ptrs.len() > MAX_FIELDS {
+                    return Err(BridgeError::TooManyFields {
+                        count: field_ptrs.len(),
+                    });
+                }
                 let size = 24 + 8 * field_ptrs.len();
                 let ptr = bump_alloc_from_vmctx(&mut *vmctx_ptr, size);
                 if ptr.is_null() {

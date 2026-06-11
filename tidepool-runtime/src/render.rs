@@ -141,7 +141,12 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                         let off = extract_boxed_int(off_val, table).unwrap_or(0) as usize;
                         let len = extract_boxed_int(len_val, table).unwrap_or(borrowed.len() as i64)
                             as usize;
-                        let end = (off + len).min(borrowed.len());
+                        // Clamp BOTH ends: a malformed Text whose offset exceeds the
+                        // backing array (or whose off+len overflows) must degrade to an
+                        // empty/short slice, never a start>end slice panic — render runs
+                        // in-process in the MCP server. (proptest_render_json B-panic)
+                        let off = off.min(borrowed.len());
+                        let end = off.saturating_add(len).min(borrowed.len());
                         match std::str::from_utf8(&borrowed[off..end]) {
                             Ok(s) => json!(s),
                             Err(_) => json!(format!("<Text invalid UTF-8 len={}>", len)),
@@ -155,7 +160,13 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
 
                 // List: try to collect as array or string
                 ("[]", []) => {
-                    // Empty list
+                    // Empty list. KNOWN LIMITATION (proptest_render_json B1): an
+                    // empty Haskell `String` ([Char]) is indistinguishable from any
+                    // other empty list at the Value level, so it renders as `[]`
+                    // while `Text ""`/`LitString ""` render as `""`. The char-vs-list
+                    // heuristic in `collect_list` needs a non-empty spine to fire.
+                    // Unfixable here; the Prelude's Text-everywhere policy is the
+                    // real mitigation.
                     json!([])
                 }
                 (":", [head, tail]) => collect_list(head, tail, table, d),
@@ -409,21 +420,24 @@ fn collect_list(
     let mut count = 1usize;
 
     loop {
-        if count >= MAX_LIST_LEN {
-            // Truncate
-            let mut arr: Vec<serde_json::Value> = elems
-                .iter()
-                .map(|e| value_to_json(e, table, depth))
-                .collect();
-            arr.push(json!("..."));
-            return json!(arr);
-        }
         match current {
             Value::Con(id, fields) => {
                 let name = con_name(*id, table);
                 match (name, fields.as_slice()) {
                     ("[]", []) => break,
                     (":", [h, t]) => {
+                        // Truncate only when MORE elements provably exist (we are
+                        // looking at a cons cell past the cap). Checking at the top
+                        // of the loop instead falsely truncated a complete list of
+                        // exactly MAX_LIST_LEN. (proptest_render_json B5)
+                        if count >= MAX_LIST_LEN {
+                            let mut arr: Vec<serde_json::Value> = elems
+                                .iter()
+                                .map(|e| value_to_json(e, table, depth))
+                                .collect();
+                            arr.push(json!("..."));
+                            return json!(arr);
+                        }
                         elems.push(h);
                         current = t;
                         count += 1;

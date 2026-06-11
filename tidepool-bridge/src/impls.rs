@@ -385,15 +385,23 @@ impl FromCore for String {
                     }
                     _ => return Err(type_mismatch("ByteArray or ByteArray# in Text", &fields[0])),
                 };
-                let off = i64::from_value(&fields[1], table)? as usize;
-                let len = i64::from_value(&fields[2], table)? as usize;
-                if off + len > ba.len() {
-                    return Err(BridgeError::TypeMismatch {
-                        expected: "valid Text slice".to_string(),
-                        got: format!("off={}, len={}, ba_len={}", off, len, ba.len()),
-                    });
-                }
-                String::from_utf8(ba[off..off + len].to_vec()).map_err(|e| {
+                let off_i = i64::from_value(&fields[1], table)?;
+                let len_i = i64::from_value(&fields[2], table)?;
+                // Validate as signed BEFORE casting: a negative offset cast to
+                // usize is huge, and `off + len` then overflows (panic in debug,
+                // wrap + OOB slice in release). Checked arithmetic turns every
+                // malformed slice into a clean Err. (proptest_boundary_roundtrip B2)
+                let bad_slice = || BridgeError::TypeMismatch {
+                    expected: "valid Text slice (non-negative off/len, in bounds)".to_string(),
+                    got: format!("off={}, len={}, ba_len={}", off_i, len_i, ba.len()),
+                };
+                let off = usize::try_from(off_i).map_err(|_| bad_slice())?;
+                let len = usize::try_from(len_i).map_err(|_| bad_slice())?;
+                let end = off
+                    .checked_add(len)
+                    .filter(|&e| e <= ba.len())
+                    .ok_or_else(bad_slice)?;
+                String::from_utf8(ba[off..end].to_vec()).map_err(|e| {
                     BridgeError::TypeMismatch {
                         expected: "UTF-8 Text".to_string(),
                         got: format!("Invalid UTF-8: {}", e),
