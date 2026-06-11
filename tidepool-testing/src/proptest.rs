@@ -19,10 +19,20 @@ use crate::gen::standard_datacon_table;
 
 /// Structural comparison for proptest contexts. Un-forced synthetic expressions
 /// may contain ThunkRefs, closures, and JoinConts that can't be compared
-/// structurally — these are skipped (treated as equal).
+/// structurally — a pair is skipped (treated equal) when EITHER side is such an
+/// incomparable kind. A Lit-vs-Con pair, however, is two COMPARABLE kinds that
+/// disagree — that is a divergence, not a skip. (The old catch-all equated
+/// them, so differential greens only proved agreement up to shape-class:
+/// proptest_infra_selftest BUG-1.)
 pub fn values_equal(a: &Value, b: &Value) -> bool {
+    fn incomparable(v: &Value) -> bool {
+        !matches!(v, Value::Lit(_) | Value::Con(_, _))
+    }
     let mut stack: Vec<(&Value, &Value)> = vec![(a, b)];
     while let Some((x, y)) = stack.pop() {
+        if incomparable(x) || incomparable(y) {
+            continue; // closure/thunk/joincont on either side: skip
+        }
         match (x, y) {
             (Value::Lit(l1), Value::Lit(l2)) => {
                 if l1 != l2 {
@@ -37,8 +47,8 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
                     stack.push(pair);
                 }
             }
-            // Closures, thunks, join conts: skip comparison (treated equal)
-            _ => {}
+            // Lit-vs-Con (either order): comparable kinds, different shapes.
+            _ => return false,
         }
     }
     true

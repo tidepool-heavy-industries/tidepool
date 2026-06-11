@@ -564,7 +564,8 @@ fn nan_characterization() {
 // --- THE 3 #[ignore] REPROS ---
 
 #[test]
-#[ignore = "BUG-1: proptest::values_equal equates heterogeneous pairs (Lit vs Con) — false-positive class"]
+// BUG-1 FIXED 2026-06-10: the wildcard now skips only when EITHER side is an
+// incomparable kind; Lit-vs-Con returns false. Active regression test.
 fn bug1_proptest_values_equal_heterogeneous() {
     let lit = Value::Lit(Literal::LitInt(1));
     let con = Value::Con(DataConId(0), vec![]);
@@ -576,7 +577,7 @@ fn bug1_proptest_values_equal_heterogeneous() {
 }
 
 #[test]
-#[ignore = "BUG-2: compare::values_equal is not reflexive on ByteArray — false-negative class"]
+// BUG-2 FIXED 2026-06-10: ByteArrays compare by content. Active regression test.
 fn bug2_compare_values_equal_bytearray_reflexivity() {
     let ba = Arc::new(Mutex::new(vec![1, 2, 3]));
     let v = Value::ByteArray(ba);

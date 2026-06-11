@@ -9,8 +9,9 @@ use tidepool_repr::{DataConId, Literal};
 /// Compare two interpreter Values for structural equality.
 ///
 /// Assumes both values have been deep-forced (no ThunkRef nodes).
-/// Closures, JoinConts, ConFuns, and ByteArrays are considered equal
-/// only to themselves (they're skipped/not comparable structurally).
+/// Closures and JoinConts are skipped (any pair compares equal); ConFuns
+/// compare by tag/arity/args; ByteArrays compare by CONTENT (the old
+/// catch-all made eq(ba, ba.clone()) false — proptest_infra_selftest BUG-2).
 ///
 /// Returns true if structurally equal, false otherwise.
 ///
@@ -45,6 +46,19 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
                 }
                 for pair in args_a.iter().zip(args_b.iter()) {
                     stack.push(pair);
+                }
+            }
+            // ByteArray: compare by content (BUG-2: the catch-all violated
+            // reflexivity — eq(ba, ba.clone()) was false). Arc::ptr_eq first:
+            // a cloned Value shares the SAME Mutex, and locking it twice in
+            // one thread deadlocks (std Mutex is not reentrant).
+            (Value::ByteArray(ba), Value::ByteArray(bb)) => {
+                if !std::sync::Arc::ptr_eq(ba, bb) {
+                    let xa = ba.lock().unwrap_or_else(|e| e.into_inner());
+                    let xb = bb.lock().unwrap_or_else(|e| e.into_inner());
+                    if *xa != *xb {
+                        return false;
+                    }
                 }
             }
             _ => return false,
