@@ -343,8 +343,8 @@ pub fn standard_decls() -> Vec<EffectDecl> {
 
 /// Request parameters for the `eval` tool.
 ///
-/// Provide a Haskell do-block as a single string. The server wraps it in a
-/// full module with the effect stack type, LANGUAGE pragmas, and imports.
+/// Provide a single Haskell expression of type `M a`. The server wraps it in
+/// a full module with the effect stack type, LANGUAGE pragmas, and imports.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EvalRequest {
     /// A single Haskell EXPRESSION of type `M a` — its value is the eval's
