@@ -182,24 +182,94 @@ fn emit_data_dispatch(
             .ins()
             .load(types::I64, MemFlags::trusted(), scrut_ptr, CON_TAG_OFFSET);
 
+    // Runtime Lit-tolerance: a literal materialized on the Rust side (e.g. the
+    // vendored aeson `Number`'s raw LitDouble field, see
+    // tidepool-bridge/src/json.rs) reaches a data case on a boxed-literal
+    // wrapper constructor (I#/W#/C#/F#/D#) as a *bare* Lit heap object, not a
+    // boxed Con. Its (garbage) con_tag matches no alt, so the chain below would
+    // fall through to the trap. Detect the (at most one) wrapper alt at emit
+    // time \u2014 zero cost for ordinary ADT cases \u2014 and, when the scrutinee is a
+    // Lit at runtime, route to that alt. The wrapper alt's single binder ends up
+    // bound to a pointer-to-Lit in BOTH paths (the con path loads field0, which
+    // is itself a pointer to a Lit; the Lit path uses the whole scrutinee), so
+    // the body's downstream unboxing sees an identical representation. The alt
+    // block is given a binder parameter so both paths share one emitted body.
+    let wrapper_pos = data_alts.iter().position(
+        |alt| matches!(&alt.con, AltCon::DataAlt(tag) if args.sess.lit_wrappers.is_wrapper(*tag)),
+    );
+
+    let wrapper_block = wrapper_pos.map(|_| {
+        let b = args.builder.create_block();
+        args.builder.append_block_param(b, types::I64);
+        b
+    });
+
+    if let Some(wb) = wrapper_block {
+        let kind_tag = args
+            .builder
+            .ins()
+            .load(types::I8, MemFlags::trusted(), scrut_ptr, 0);
+        let is_lit = args
+            .builder
+            .ins()
+            .icmp_imm(IntCC::Equal, kind_tag, TAG_LIT as i64);
+        let con_path_block = args.builder.create_block();
+        args.builder.ins().brif(
+            is_lit,
+            wb,
+            &[BlockArg::Value(scrut_ptr)],
+            con_path_block,
+            &[],
+        );
+        args.builder.switch_to_block(con_path_block);
+        args.builder.seal_block(con_path_block);
+    }
+
     // Use comparison chain instead of jump table because DataConIds are large
     // GHC Uniques (arbitrary u64 values), not small sequential integers.
-    for &alt in data_alts {
+    for (alt_idx, &alt) in data_alts.iter().enumerate() {
         let AltCon::DataAlt(tag) = &alt.con else {
             continue;
         };
+        let is_wrapper = Some(alt_idx) == wrapper_pos;
 
-        let alt_block = args.builder.create_block();
+        let alt_block = if is_wrapper {
+            wrapper_block.expect("wrapper_block is Some whenever wrapper_pos is Some")
+        } else {
+            args.builder.create_block()
+        };
         let next_check_block = args.builder.create_block();
 
         let tag_val = args.builder.ins().iconst(types::I64, tag.0 as i64);
         let eq = args.builder.ins().icmp(IntCC::Equal, con_tag, tag_val);
-        args.builder
-            .ins()
-            .brif(eq, alt_block, &[], next_check_block, &[]);
+        if is_wrapper {
+            // Con path: the wrapper has exactly one field \u2014 a pointer to a Lit.
+            // Pass it as the shared binder parameter (matching the Lit path,
+            // which passes the scrutinee Lit itself).
+            let field0 = args.builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                scrut_ptr,
+                CON_FIELDS_OFFSET,
+            );
+            args.builder.declare_value_needs_stack_map(field0);
+            args.builder.ins().brif(
+                eq,
+                alt_block,
+                &[BlockArg::Value(field0)],
+                next_check_block,
+                &[],
+            );
+        } else {
+            args.builder
+                .ins()
+                .brif(eq, alt_block, &[], next_check_block, &[]);
+        }
 
         // Emit alt body
         args.builder.switch_to_block(alt_block);
+        // For a wrapper alt block both predecessors (the Lit branch above and
+        // the con-tag branch just emitted) are now wired, so sealing is safe.
         args.builder.seal_block(alt_block);
         args.ctx.declare_env(args.builder);
 
@@ -220,16 +290,27 @@ fn emit_data_dispatch(
         let mut scope = EnvScope::new();
         // NOTE: EnvGuard cannot be used here because it would borrow ctx.env
         // mutably, preventing the use of ctx in emit_node.
-        for (i, &binder) in alt.binders.iter().enumerate() {
-            let offset = CON_FIELDS_OFFSET + (8 * i as i32);
-            let field_val =
-                args.builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), scrut_ptr, offset);
-            args.builder.declare_value_needs_stack_map(field_val);
-            args.ctx
-                .env
-                .insert_scoped(&mut scope, binder, SsaVal::HeapPtr(field_val));
+        if is_wrapper {
+            // Single binder bound to the binder parameter (a pointer to a Lit).
+            let binder_val = args.builder.block_params(alt_block)[0];
+            args.builder.declare_value_needs_stack_map(binder_val);
+            if let Some(&binder) = alt.binders.first() {
+                args.ctx
+                    .env
+                    .insert_scoped(&mut scope, binder, SsaVal::HeapPtr(binder_val));
+            }
+        } else {
+            for (i, &binder) in alt.binders.iter().enumerate() {
+                let offset = CON_FIELDS_OFFSET + (8 * i as i32);
+                let field_val =
+                    args.builder
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), scrut_ptr, offset);
+                args.builder.declare_value_needs_stack_map(field_val);
+                args.ctx
+                    .env
+                    .insert_scoped(&mut scope, binder, SsaVal::HeapPtr(field_val));
+            }
         }
 
         let result = EmitContext::emit_node(

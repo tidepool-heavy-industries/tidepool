@@ -146,6 +146,10 @@ impl JitEffectMachine {
         let expr = tidepool_repr::normalize(expr, table);
         let expr = crate::datacon_env::wrap_with_datacon_env(expr, table);
         let mut pipeline = CodegenPipeline::new(&crate::host_fns::host_fn_symbols())?;
+        // Give data-case dispatch runtime tolerance for bare Lit scrutinees of
+        // boxed-literal wrapper constructors (e.g. a Rust-materialized aeson
+        // `Number`'s LitDouble reaching `case x of { D# ds -> .. }`).
+        pipeline.lit_wrappers = crate::emit::LitWrapperIds::from_table(table);
         let func_id = crate::emit::expr::compile_expr(&mut pipeline, &expr, "main")
             .map_err(JitError::Compilation)?;
         pipeline.finalize()?;

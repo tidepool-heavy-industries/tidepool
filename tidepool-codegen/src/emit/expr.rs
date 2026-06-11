@@ -1080,6 +1080,7 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
         gc_sig: inner_gc_sig_ref,
         oom_func: inner_oom_func,
         tree: &body_tree,
+        lit_wrappers: args.sess.lit_wrappers,
     };
     let body_result = EmitContext::emit_node(
         EmitArgs {
@@ -1292,6 +1293,7 @@ fn emit_thunk(args: EmitArgs, body_idx: usize) -> Result<SsaVal, EmitError> {
         gc_sig: inner_gc_sig_ref,
         oom_func: inner_oom_func,
         tree: &body_tree,
+        lit_wrappers: args.sess.lit_wrappers,
     };
     let body_result = EmitContext::emit_node(
         EmitArgs {
@@ -1505,12 +1507,16 @@ pub fn compile_expr(
 
     let mut emit_ctx = EmitContext::new(name.to_string());
 
+    // Carried from the pipeline (set by the JIT entry point from the
+    // DataConTable; defaults to empty for direct test callers of compile_expr).
+    let lit_wrappers = pipeline.lit_wrappers;
     let mut sess = EmitSession {
         pipeline,
         vmctx,
         gc_sig: gc_sig_ref,
         oom_func,
         tree,
+        lit_wrappers,
     };
 
     let result = EmitContext::emit_node(
@@ -2516,6 +2522,7 @@ impl EmitContext {
                 gc_sig: inner_gc_sig_ref,
                 oom_func: inner_oom_func,
                 tree: &lam_body_tree,
+                lit_wrappers: args.sess.lit_wrappers,
             };
             let body_result = EmitContext::emit_node(
                 EmitArgs {
