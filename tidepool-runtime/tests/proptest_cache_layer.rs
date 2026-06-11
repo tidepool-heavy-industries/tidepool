@@ -16,10 +16,14 @@
 //! second compile with different inputs does NOT bump the counter, the two
 //! inputs collided on the same cache key.
 //!
-//! Convention: non-`#[ignore]` tests assert *current* behavior (including
-//! buggy behavior, with comments) and keep the suite green. Each confirmed
-//! bug also has an `#[ignore = "BUG: ..."]` twin asserting the *correct*
-//! behavior; run with `--ignored` to see them fail.
+//! Convention: non-`#[ignore]` tests assert *current* behavior and keep the
+//! suite green. A confirmed-but-unfixed bug keeps an `#[ignore = "BUG: ..."]`
+//! twin asserting the *correct* behavior (run with `--ignored` to see it
+//! fail). FIXED 2026-06-11: F1a/F1b (length-framed key fields), F2 (include
+//! order preserved), F3a (binary content hash, memoized), F3b/F4 (.hs content
+//! hash through symlinks), F5 (quoted exec targets) — their twins are now the
+//! ACTIVE regression tests and the old buggy-behavior pins are deleted. F6
+//! (payload integrity) remains open with its ignored twin.
 //!
 //! Findings table: `plans/proptest-findings-cache.md`.
 
@@ -160,6 +164,9 @@ impl Harness {
     }
 
     /// Swap the primary fixture (what a "recompile" would now produce).
+    /// Was used by the deleted F3a buggy-behavior pin; kept for future
+    /// staleness scenarios.
+    #[allow(dead_code)]
     fn set_fixture(&self, expr: &CoreExpr) {
         fs::write(self.path().join("fx/a.cbor"), write_cbor(expr).unwrap()).unwrap();
     }
@@ -361,137 +368,46 @@ fn load_after_store_identity_huge_payload() {
 // F1: key non-injectivity — NUL separator injection
 // ---------------------------------------------------------------------------
 
-/// BUG F1a (B5, confirmed): cache_key hashes `source \0 target \0 ...` without
-/// length framing, so a NUL in the source shifts bytes across the field
-/// boundary: key("a\0b", "c") == key("a", "b\0c"). The second compile below
-/// HITS the first one's entry and is served an artifact that was never
-/// compiled for its (source, target) pair. Green test asserts the collision
-/// exists; the `#[ignore]` twin asserts the fix.
 #[test]
 #[serial]
-fn key_collision_nul_source_target_boundary() {
-    let h = Harness::new();
-    let pfx = unique_src("nul-collide");
-
-    let src_a = format!("{pfx}a\0b");
-    assert!(h.compile(&src_a, "c", &[]).is_ok());
-    assert_eq!(h.runs(), 1);
-
-    let src_b = format!("{pfx}a");
-    let res = h.compile(&src_b, "b\0c", &[]);
-    // Served from cache: the extractor never ran for this (source, target).
-    // (A NUL target can't even be exec'd — Command would error — proving
-    // this Ok comes purely from the colliding cache entry.)
-    assert!(res.is_ok(), "expected cache HIT via key collision");
-    assert_eq!(
-        h.runs(),
-        1,
-        "BUG F1a: distinct (source,target) pairs collided on one cache key"
-    );
-}
-
-#[test]
-#[serial]
-#[ignore = "BUG F1a: cache_key is not injective — NUL in source shifts bytes into target (no length framing)"]
 fn key_should_separate_source_from_target() {
     let h = Harness::new();
     let pfx = unique_src("nul-collide-fix");
     assert!(h.compile(&format!("{pfx}a\0b"), "c", &[]).is_ok());
-    let _ = h.compile(&format!("{pfx}a"), "b\0c", &[]);
-    assert_eq!(
-        h.runs(),
-        2,
-        "distinct (source,target) must derive distinct keys"
-    );
-}
-
-/// BUG F1b (B5, confirmed): same construction across the target/include-list
-/// boundary. An include root's path bytes are hashed even when the directory
-/// does not exist, so key(s, "t", ["/p"]) == key(s, "t\0/p", []).
-#[test]
-#[serial]
-fn key_collision_target_vs_include_root() {
-    let h = Harness::new();
-    let pfx = unique_src("nul-include");
-    let ghost = "/nonexistent/tidepool-s5-cache-probe";
-
-    assert!(h.compile(&pfx, "t", &[Path::new(ghost)]).is_ok());
-    assert_eq!(h.runs(), 1);
-
-    let res = h.compile(&pfx, &format!("t\0{ghost}"), &[]);
-    assert!(res.is_ok(), "expected cache HIT via key collision");
-    assert_eq!(
-        h.runs(),
-        1,
-        "BUG F1b: target and include-root bytes collided across the field boundary"
+    // Distinct keys ⇒ cache MISS ⇒ the extractor is actually invoked — and a
+    // NUL target cannot be exec'd, so the compile must ERROR. (The pre-fix
+    // collision returned Ok served from the first entry's artifact; runs()
+    // cannot distinguish miss-then-spawn-fail from hit, but the Result can.)
+    let res = h.compile(&format!("{pfx}a"), "b\0c", &[]);
+    assert!(
+        res.is_err(),
+        "distinct (source,target) must derive distinct keys: Ok here means the \
+         colliding cache entry was served (F1a regressed)"
     );
 }
 
 #[test]
 #[serial]
-#[ignore = "BUG F1b: cache_key is not injective — target vs include-root boundary (no length framing)"]
 fn key_should_separate_target_from_include_roots() {
     let h = Harness::new();
     let pfx = unique_src("nul-include-fix");
     let ghost = "/nonexistent/tidepool-s5-cache-probe";
     assert!(h.compile(&pfx, "t", &[Path::new(ghost)]).is_ok());
-    let _ = h.compile(&pfx, &format!("t\0{ghost}"), &[]);
-    assert_eq!(h.runs(), 2);
+    // Same hit-vs-miss discrimination as key_should_separate_source_from_target:
+    // a NUL target only returns Ok if the colliding entry was served.
+    let res = h.compile(&pfx, &format!("t\0{ghost}"), &[]);
+    assert!(
+        res.is_err(),
+        "target vs include-root boundary must be framed (F1b regressed)"
+    );
 }
 
 // ---------------------------------------------------------------------------
 // F2: include-dir ORDER is sorted out of the key, but GHC honors order
 // ---------------------------------------------------------------------------
 
-/// BUG F2 (B5, confirmed): cache_key sorts include roots, so [A,B] and [B,A]
-/// share a key — but lib.rs passes `--include` flags in the ORIGINAL order,
-/// and GHC's search-path order decides which module wins when both dirs
-/// provide the same module name. Result: compiling with [B,A] can be served
-/// the [A,B] artifact (wrong module resolution) from cache.
 #[test]
 #[serial]
-fn key_insensitive_to_include_order_serves_other_orders_artifact() {
-    let h = Harness::new();
-    let dir_a = h.path().join("incA");
-    let dir_b = h.path().join("incB");
-    fs::create_dir_all(&dir_a).unwrap();
-    fs::create_dir_all(&dir_b).unwrap();
-    // Both dirs provide Lib.hs — a module-shadowing setup where order matters.
-    fs::write(dir_a.join("Lib.hs"), "-- A\nlibVal = 1\n").unwrap();
-    fs::write(dir_b.join("Lib.hs"), "-- B (different)\nlibVal = 2\n").unwrap();
-
-    let src = unique_src("inc-order");
-    let first = h.compile(&src, "t", &[&dir_a, &dir_b]).unwrap();
-    assert_eq!(h.runs(), 1);
-    assert_eq!(first.0, lit_expr(42));
-
-    // Simulate the toolchain producing a different artifact for the swapped
-    // order (as real GHC would under module shadowing).
-    h.set_fixture(&lit_expr(43));
-
-    let swapped = h.compile(&src, "t", &[&dir_b, &dir_a]).unwrap();
-    assert_eq!(
-        h.runs(),
-        1,
-        "BUG F2: swapped include order HIT the other order's cache entry"
-    );
-    assert_eq!(
-        swapped.0,
-        lit_expr(42),
-        "BUG F2: artifact for order [A,B] served for order [B,A]"
-    );
-
-    // Control: a fresh source with the swapped order really does produce 43,
-    // proving the stub fixture switch works and the 42 above came from cache.
-    let src2 = unique_src("inc-order-control");
-    let fresh = h.compile(&src2, "t", &[&dir_b, &dir_a]).unwrap();
-    assert_eq!(h.runs(), 2);
-    assert_eq!(fresh.0, lit_expr(43));
-}
-
-#[test]
-#[serial]
-#[ignore = "BUG F2: include order is sorted out of cache_key but passed in-order to GHC where it affects module resolution"]
 fn key_should_be_sensitive_to_include_order() {
     let h = Harness::new();
     let dir_a = h.path().join("incA");
@@ -590,54 +506,8 @@ fn staleness_binary_size_change_invalidates() {
     );
 }
 
-/// BUG F3a (B5 staleness, confirmed): the fingerprint never hashes binary
-/// CONTENT. A same-length content swap with restored mtime (realistic: nix
-/// store normalizes all mtimes to epoch+1; `cp -p`; `rsync -t`) leaves the
-/// key unchanged, and the cache silently serves artifacts from the OLD
-/// toolchain. This is exactly the #313 footgun shape surviving the fix.
 #[test]
 #[serial]
-fn staleness_binary_content_swap_same_size_mtime_served_stale() {
-    let h = Harness::new();
-    let src = unique_src("bin-swap");
-
-    let first = h.compile(&src, "t", &[]).unwrap();
-    assert_eq!(h.runs(), 1);
-    assert_eq!(first.0, lit_expr(42));
-
-    // Swap which fixture the "toolchain" produces: a.cbor -> b.cbor is a
-    // same-length edit; restore the stub's mtime afterwards.
-    let script = fs::read_to_string(h.stub()).unwrap();
-    let swapped = script.replace("/fx/a.cbor", "/fx/b.cbor");
-    assert_eq!(
-        script.len(),
-        swapped.len(),
-        "perturbation must preserve size"
-    );
-    swap_content_preserving_mtime(&h.stub(), swapped.as_bytes());
-    fs::set_permissions(h.stub(), fs::Permissions::from_mode(0o755)).unwrap();
-
-    let second = h.compile(&src, "t", &[]).unwrap();
-    assert_eq!(
-        h.runs(),
-        1,
-        "BUG F3a: content-swapped toolchain (same size+mtime) HIT the stale entry"
-    );
-    assert_eq!(
-        second.0,
-        lit_expr(42),
-        "BUG F3a: stale artifact served; new toolchain would produce Lit 43"
-    );
-
-    // Control: a fresh source proves the swapped toolchain now emits 43.
-    let src2 = unique_src("bin-swap-control");
-    let fresh = h.compile(&src2, "t", &[]).unwrap();
-    assert_eq!(fresh.0, lit_expr(43));
-}
-
-#[test]
-#[serial]
-#[ignore = "BUG F3a: binary fingerprint is (path,size,mtime) only — content swap with preserved size+mtime serves stale Core (nix epoch-mtime hazard)"]
 fn key_should_change_when_binary_content_changes() {
     let h = Harness::new();
     let src = unique_src("bin-swap-fix");
@@ -650,34 +520,8 @@ fn key_should_change_when_binary_content_changes() {
     assert_eq!(h.runs(), 2, "binary content change must MISS");
 }
 
-/// BUG F3b (B5 staleness, confirmed): same gap for include-dir .hs files —
-/// a same-size content edit with restored mtime is invisible to
-/// `fingerprint_dir`, so stale Core is served for changed dependency source.
 #[test]
 #[serial]
-fn staleness_hs_content_swap_same_size_mtime_served_stale() {
-    let h = Harness::new();
-    let inc = h.path().join("inc");
-    fs::create_dir_all(&inc).unwrap();
-    let lib = inc.join("Lib.hs");
-    fs::write(&lib, "libVal = 1\n").unwrap();
-    let src = unique_src("hs-swap");
-
-    assert!(h.compile(&src, "t", &[&inc]).is_ok());
-    assert_eq!(h.runs(), 1);
-
-    swap_content_preserving_mtime(&lib, b"libVal = 2\n"); // same length
-    assert!(h.compile(&src, "t", &[&inc]).is_ok());
-    assert_eq!(
-        h.runs(),
-        1,
-        "BUG F3b: same-size+mtime .hs edit HIT the stale entry"
-    );
-}
-
-#[test]
-#[serial]
-#[ignore = "BUG F3b: include-dir fingerprint is (path,size,mtime) only — same-size+mtime .hs edits serve stale Core"]
 fn key_should_change_when_hs_content_changes() {
     let h = Harness::new();
     let inc = h.path().join("inc");
@@ -695,41 +539,8 @@ fn key_should_change_when_hs_content_changes() {
 // F4: symlinked .hs files fingerprinted via lstat — target edits invisible
 // ---------------------------------------------------------------------------
 
-/// BUG F4 (B5 staleness, confirmed): `fingerprint_dir` uses
-/// `DirEntry::metadata()`, which does NOT traverse symlinks. A symlinked .hs
-/// file (common in nix / symlink-farm setups) is fingerprinted by the LINK's
-/// size/mtime, so ANY edit to the real file — even with new size and mtime —
-/// leaves the key unchanged and serves stale Core.
 #[test]
 #[serial]
-fn staleness_symlinked_hs_target_edit_served_stale() {
-    let h = Harness::new();
-    let ext = h.path().join("ext");
-    let inc = h.path().join("inc");
-    fs::create_dir_all(&ext).unwrap();
-    fs::create_dir_all(&inc).unwrap();
-    let real = ext.join("Real.hs");
-    fs::write(&real, "v1\n").unwrap();
-    std::os::unix::fs::symlink(&real, inc.join("Lib.hs")).unwrap();
-    let src = unique_src("symlink-hs");
-
-    assert!(h.compile(&src, "t", &[&inc]).is_ok());
-    assert_eq!(h.runs(), 1);
-
-    // Edit the real file: new content, new size, new mtime.
-    fs::write(&real, "v2 with a much longer body\n").unwrap();
-
-    assert!(h.compile(&src, "t", &[&inc]).is_ok());
-    assert_eq!(
-        h.runs(),
-        1,
-        "BUG F4: edit behind a symlinked .hs HIT the stale entry (lstat fingerprint)"
-    );
-}
-
-#[test]
-#[serial]
-#[ignore = "BUG F4: fingerprint_dir lstats symlinked .hs files — edits to the link target serve stale Core"]
 fn key_should_change_when_symlinked_hs_target_changes() {
     let h = Harness::new();
     let ext = h.path().join("ext");
@@ -777,37 +588,8 @@ fn staleness_unquoted_wrapper_target_followed() {
     );
 }
 
-/// BUG F5 (B5 staleness, confirmed): `extract_exec_target` only accepts a
-/// bare token starting with '/'. A QUOTED exec target — `exec "/path" "$@"`,
-/// the shellcheck-recommended form — is not followed, so upgrading the
-/// delegate binary behind such a wrapper silently serves stale Core. (Lines
-/// using `$HOME`, `env`, or any `=` are rejected the same way.)
 #[test]
 #[serial]
-fn staleness_quoted_wrapper_target_not_fingerprinted() {
-    let mut h = Harness::new();
-    h.install_wrapper(true);
-    let src = unique_src("wrapper-quoted");
-
-    assert!(h.compile(&src, "t", &[]).is_ok());
-    assert_eq!(h.runs(), 1);
-
-    let mut script = fs::read_to_string(h.stub()).unwrap();
-    script.push_str("# upgraded\n");
-    fs::write(h.stub(), script).unwrap();
-    fs::set_permissions(h.stub(), fs::Permissions::from_mode(0o755)).unwrap();
-
-    assert!(h.compile(&src, "t", &[]).is_ok());
-    assert_eq!(
-        h.runs(),
-        1,
-        "BUG F5: delegate change behind QUOTED wrapper HIT the stale entry"
-    );
-}
-
-#[test]
-#[serial]
-#[ignore = "BUG F5: extract_exec_target ignores quoted exec targets — delegate upgrades behind quoted wrappers serve stale Core"]
 fn key_should_follow_quoted_wrapper_targets() {
     let mut h = Harness::new();
     h.install_wrapper(true);

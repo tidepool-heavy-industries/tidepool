@@ -17,23 +17,31 @@ fn cache_dir() -> Option<PathBuf> {
 /// all include directories to ensure cache invalidation when dependencies change.
 pub(crate) fn cache_key(source: &str, target: &str, include: &[&Path]) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(source.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(target.as_bytes());
-    hasher.update(b"\0");
+    // Length-prefixed framing (proptest_cache_layer F1a/F1b): NUL separators
+    // alone let a NUL embedded in one field shift bytes across the boundary
+    // (key("a\0b","c") == key("a","b\0c")), serving the wrong artifact.
+    frame(&mut hasher, source.as_bytes());
+    frame(&mut hasher, target.as_bytes());
 
-    // Fingerprint include directories to catch changes in dependency modules.
-    let mut sorted_includes: Vec<&Path> = include.to_vec();
-    sorted_includes.sort();
-    for root in sorted_includes {
-        hasher.update(root.as_os_str().as_encoded_bytes());
-        hasher.update(b"\0");
+    // Fingerprint include directories in their ORIGINAL order
+    // (proptest_cache_layer F2): GHC receives `--include` flags in argument
+    // order, and search-path order decides module shadowing — [A,B] and
+    // [B,A] are different compilations and must not share a key.
+    frame(&mut hasher, &(include.len() as u64).to_le_bytes());
+    for root in include {
+        frame(&mut hasher, root.as_os_str().as_encoded_bytes());
         fingerprint_dir(root, &mut hasher);
     }
 
     extract_binary_fingerprint(&mut hasher);
 
     hasher.finalize().to_hex().to_string()
+}
+
+/// Hash a length-prefixed field: unambiguous framing regardless of content.
+fn frame(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
 }
 
 /// Fingerprints the compiler binary to ensure cache invalidation on upgrades.
@@ -64,28 +72,95 @@ fn extract_binary_fingerprint(hasher: &mut blake3::Hasher) {
     }
 }
 
-/// Fingerprints a single binary by path, size, and mtime.
+/// Fingerprints a single binary by path and CONTENT hash.
+///
+/// (proptest_cache_layer F3a): (size, mtime) alone is blind to same-size
+/// content swaps — and the nix store normalizes ALL mtimes to epoch+1, so
+/// for nix-deployed toolchains only size distinguished versions: a rebuilt
+/// extract binary silently served stale Core. Content is blake3-hashed,
+/// memoized per (path, size, mtime) so each binary is read once per change
+/// per process (~100ms for a GHC-sized binary, amortized to zero).
 fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
-    hasher.update(path.as_os_str().as_encoded_bytes());
-    hasher.update(b"\0");
-    if let Ok(meta) = fs::metadata(path) {
-        hasher.update(&meta.len().to_le_bytes());
-        if let Ok(mtime) = meta.modified() {
-            if let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH) {
-                hasher.update(&dur.as_nanos().to_le_bytes());
-            }
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    // Memo key includes (dev, ino, ctime): mtime/size are user-settable and
+    // preserved by adversarial in-place swaps, but ANY write bumps ctime and
+    // no userspace tool can reset it — the tamper-evident field. A same-size
+    // same-mtime in-place content swap therefore still re-hashes.
+    type MemoKey = (PathBuf, u64, u64, u64, i64, i64);
+    static MEMO: OnceLock<Mutex<HashMap<MemoKey, [u8; 32]>>> = OnceLock::new();
+
+    frame(hasher, path.as_os_str().as_encoded_bytes());
+    let Ok(meta) = fs::metadata(path) else {
+        return;
+    };
+    let key: MemoKey = {
+        use std::os::unix::fs::MetadataExt;
+        (
+            path.to_path_buf(),
+            meta.len(),
+            meta.dev(),
+            meta.ino(),
+            meta.ctime(),
+            meta.ctime_nsec(),
+        )
+    };
+    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+    let cached = memo
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+        .copied();
+    let content_hash = match cached {
+        Some(h) => h,
+        None => {
+            let h: [u8; 32] = match fs::read(path) {
+                Ok(bytes) => *blake3::hash(&bytes).as_bytes(),
+                // Unreadable: degrade to the metadata-only fingerprint rather
+                // than poisoning the key entirely.
+                Err(_) => {
+                    let mut mh = blake3::Hasher::new();
+                    mh.update(&meta.len().to_le_bytes());
+                    if let Ok(mtime) = meta.modified() {
+                        if let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH) {
+                            mh.update(&dur.as_nanos().to_le_bytes());
+                        }
+                    }
+                    *mh.finalize().as_bytes()
+                }
+            };
+            memo.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, h);
+            h
         }
-    }
+    };
+    hasher.update(&content_hash);
 }
 
 /// Extracts an absolute path from a shell exec line.
-/// Handles patterns like `exec /path/to/bin "$@"` or bare `/path/to/bin "$@"`.
+/// Handles `exec /path/to/bin "$@"`, bare `/path/to/bin "$@"`, and QUOTED
+/// targets — `exec "/path/to/bin" "$@"` (the shellcheck-recommended form,
+/// proptest_cache_layer F5): an unfollowed wrapper target means delegate
+/// binary upgrades silently serve stale Core.
 fn extract_exec_target(line: &str) -> Option<&str> {
     let line = line.strip_prefix("exec ").unwrap_or(line);
-    if line.is_empty() || line.starts_with('#') || line.contains('=') {
+    if line.is_empty() || line.starts_with('#') {
         return None;
     }
     let token = line.split_whitespace().next()?;
+    // Strip one layer of matching quotes.
+    let token = token
+        .strip_prefix('"')
+        .and_then(|t| t.strip_suffix('"'))
+        .or_else(|| token.strip_prefix('\'').and_then(|t| t.strip_suffix('\'')))
+        .unwrap_or(token);
+    // Reject env-var assignments (FOO=bar cmd) but not quoted paths that
+    // happen to contain '=' AFTER unquoting was already handled above.
+    if token.contains('=') {
+        return None;
+    }
     if token.starts_with('/') {
         Some(token)
     } else {
@@ -114,15 +189,16 @@ fn fingerprint_dir(dir: &Path, hasher: &mut blake3::Hasher) {
         if ext != "hs" && ext != "hs-boot" {
             continue;
         }
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        hasher.update(path.as_os_str().as_encoded_bytes());
-        hasher.update(&meta.len().to_le_bytes());
-        if let Ok(mtime) = meta.modified() {
-            if let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH) {
-                hasher.update(&dur.as_nanos().to_le_bytes());
-            }
+        // Content hash (proptest_cache_layer F3b/F4): (size, mtime) missed
+        // same-size edits, and `DirEntry::metadata()` is lstat — a symlinked
+        // .hs was fingerprinted by the LINK's metadata, so edits to the real
+        // file never invalidated the key. `fs::read` follows symlinks and
+        // hashes what GHC will actually compile. Source files are small;
+        // no memo needed.
+        frame(hasher, path.as_os_str().as_encoded_bytes());
+        match fs::read(&path) {
+            Ok(bytes) => frame(hasher, blake3::hash(&bytes).as_bytes()),
+            Err(_) => frame(hasher, b"<unreadable>"),
         }
     }
 }
