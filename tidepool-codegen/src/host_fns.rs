@@ -305,6 +305,215 @@ fn max_heap_bytes() -> usize {
     })
 }
 
+/// Kill-switched fail-loud mode: `TIDEPOOL_HEAP_VERIFY=1` walks the entire
+/// live set after every GC and panics on the first invariant violation.
+/// Tests opt in; production pays one cached env read.
+fn heap_verify_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("TIDEPOOL_HEAP_VERIFY").is_ok_and(|v| v == "1"))
+}
+
+/// Post-GC heap invariant walk (see `heap_verify_enabled`).
+///
+/// Walks the packed live set `to_start..+live_bytes` exactly like the Cheney
+/// scan and validates every object:
+/// - known tag (a FORWARDED header surviving into to-space is corruption);
+/// - header size consistent with the tag (for Cons: `24 + 8*num_fields`
+///   EXACTLY — catches the u16 size-wrap class, S3-C1/C2);
+/// - Lit tags within the known set (catches constant drift, S3-C3);
+/// - thunk state bytes valid;
+/// - every pointer field is null (legal mid-LetRec-construction), inside
+///   to-space (then 8-aligned), or outside BOTH spaces (poison / malloc'd
+///   byte arrays) — a pointer into FROM-SPACE is a dangling evacuation and
+///   fails loudly here instead of as a SIGSEGV collections later. BLACKHOLE
+///   capture slots are checked too: `for_each_pointer_field` skips them
+///   (S3-C6), so a from-space capture in a blackholed thunk is that bug
+///   manifesting.
+///
+/// From-space addresses are COMPARED, never dereferenced (the buffer may
+/// already be freed). Known v1 gap: in the heap-doubling path the
+/// intermediate to-space is a second (untracked) from-space; pointers
+/// dangling into it land in the "outside both" class and pass.
+unsafe fn verify_heap_post_gc(
+    to_start: *const u8,
+    live_bytes: usize,
+    from_start: *const u8,
+    from_end: *const u8,
+) {
+    use crate::layout as l;
+    let to_end = to_start.add(live_bytes);
+    let in_to = |p: *const u8| p >= to_start && p < to_end;
+    let in_from = |p: *const u8| p >= from_start && p < from_end;
+
+    let fail = |off: usize, idx: usize, what: &str, obj: *const u8| -> ! {
+        let dump_len = 32.min(live_bytes - off);
+        let bytes = std::slice::from_raw_parts(obj, dump_len);
+        panic!(
+            "[HEAP VERIFY] violation after GC: {what}\n  object #{idx} at to-space offset {off:#x} \
+             (live_bytes={live_bytes:#x})\n  first {dump_len} bytes: {bytes:02x?}\n  \
+             from-space was {from_start:p}..{from_end:p}, to-space {to_start:p}..{to_end:p}"
+        )
+    };
+
+    let check_field = |off: usize, idx: usize, obj: *const u8, slot: usize, label: &str| {
+        let p = *(obj.add(slot) as *const *const u8);
+        if p.is_null() {
+            return; // legal: deferred Con field mid-LetRec construction
+        }
+        if in_from(p) {
+            fail(
+                off,
+                idx,
+                &format!(
+                    "{label} slot +{slot} holds a FROM-SPACE pointer {p:p} (dangling evacuation)"
+                ),
+                obj,
+            );
+        }
+        if in_to(p) && !(p as usize).is_multiple_of(8) {
+            fail(
+                off,
+                idx,
+                &format!("{label} slot +{slot} holds a misaligned to-space pointer {p:p}"),
+                obj,
+            );
+        }
+        // Outside both spaces: poison object or malloc'd byte array — allowed.
+    };
+
+    let mut off = 0usize;
+    let mut idx = 0usize;
+    while off < live_bytes {
+        let obj = to_start.add(off);
+        let tag = *obj;
+        // Size is a u16 at byte offset 1 — intentionally unaligned in the
+        // header layout; must be read_unaligned (debug builds abort on
+        // misaligned derefs).
+        let size = std::ptr::read_unaligned(obj.add(1) as *const u16) as usize;
+        if size < 8 || off + size > live_bytes {
+            fail(
+                off,
+                idx,
+                &format!("size {size} out of bounds for tag {tag}"),
+                obj,
+            );
+        }
+        match tag {
+            l::TAG_CON => {
+                let nf = *(obj.add(l::CON_NUM_FIELDS_OFFSET as usize) as *const u16) as usize;
+                let expect = 24 + 8 * nf;
+                if size != expect {
+                    fail(
+                        off,
+                        idx,
+                        &format!("Con size {size} != 24 + 8*num_fields({nf}) = {expect} (size-wrap class)"),
+                        obj,
+                    );
+                }
+                for i in 0..nf {
+                    check_field(
+                        off,
+                        idx,
+                        obj,
+                        l::CON_FIELDS_OFFSET as usize + 8 * i,
+                        "Con field",
+                    );
+                }
+            }
+            l::TAG_LIT => {
+                if size != l::LIT_TOTAL_SIZE as usize {
+                    fail(
+                        off,
+                        idx,
+                        &format!("Lit size {size} != {}", l::LIT_TOTAL_SIZE),
+                        obj,
+                    );
+                }
+                let lt = *obj.add(l::LIT_TAG_OFFSET as usize);
+                if lt as i64 > l::LIT_TAG_ARRAY {
+                    fail(
+                        off,
+                        idx,
+                        &format!("unknown lit tag {lt} (constant drift?)"),
+                        obj,
+                    );
+                }
+            }
+            l::TAG_CLOSURE => {
+                let nc = *(obj.add(l::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16) as usize;
+                let min = l::CLOSURE_CAPTURED_OFFSET as usize + 8 * nc;
+                if size < min {
+                    fail(
+                        off,
+                        idx,
+                        &format!("Closure size {size} < captures end {min} (num_captured={nc})"),
+                        obj,
+                    );
+                }
+                let code = *(obj.add(l::CLOSURE_CODE_PTR_OFFSET as usize) as *const *const u8);
+                if code.is_null() {
+                    fail(off, idx, "Closure with null code pointer", obj);
+                }
+                for i in 0..nc {
+                    check_field(
+                        off,
+                        idx,
+                        obj,
+                        l::CLOSURE_CAPTURED_OFFSET as usize + 8 * i,
+                        "Closure capture",
+                    );
+                }
+            }
+            l::TAG_THUNK => {
+                let state = *obj.add(l::THUNK_STATE_OFFSET as usize);
+                match state {
+                    l::THUNK_UNEVALUATED => {
+                        let n = (size - l::THUNK_CAPTURED_OFFSET as usize) / 8;
+                        for i in 0..n {
+                            check_field(
+                                off,
+                                idx,
+                                obj,
+                                l::THUNK_CAPTURED_OFFSET as usize + 8 * i,
+                                "Thunk capture",
+                            );
+                        }
+                    }
+                    l::THUNK_EVALUATED => {
+                        check_field(
+                            off,
+                            idx,
+                            obj,
+                            l::THUNK_INDIRECTION_OFFSET as usize,
+                            "Thunk indirection",
+                        );
+                    }
+                    l::THUNK_BLACKHOLE => {
+                        // for_each_pointer_field skips blackhole captures
+                        // (S3-C6): a from-space capture here is that bug live.
+                        let n = (size - l::THUNK_CAPTURED_OFFSET as usize) / 8;
+                        for i in 0..n {
+                            check_field(
+                                off,
+                                idx,
+                                obj,
+                                l::THUNK_CAPTURED_OFFSET as usize + 8 * i,
+                                "BLACKHOLE capture (S3-C6: invisible to GC)",
+                            );
+                        }
+                    }
+                    other => fail(off, idx, &format!("invalid thunk state {other}"), obj),
+                }
+            }
+            l::TAG_FORWARDED => fail(off, idx, "FORWARDED header in to-space", obj),
+            other => fail(off, idx, &format!("unknown heap tag {other}"), obj),
+        }
+        off += (size + 7) & !7;
+        idx += 1;
+    }
+}
+
 fn perform_gc(fp: usize, vmctx: *mut VMContext) {
     STACK_MAP_REGISTRY.with(|reg_cell| {
         if let Some(registry_ptr) = *reg_cell.borrow() {
@@ -400,6 +609,26 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
                     unsafe {
                         (*vmctx).alloc_ptr = to_start.add(live_bytes);
                         (*vmctx).alloc_limit = to_start.add(new_size) as *const u8;
+                    }
+
+                    // Fail-loud heap invariant walk (TIDEPOOL_HEAP_VERIFY=1).
+                    // Runs while from-space is still distinguishable, so a
+                    // surviving from-space pointer — a dangling evacuation —
+                    // is detected HERE, not three collections later as a
+                    // SIGSEGV. (plans/future-plans.md item D)
+                    if heap_verify_enabled() {
+                        // SAFETY: to_start..+live_bytes is the packed live set
+                        // cheney_copy just produced; from range was the
+                        // pre-collection nursery (old buffer still alive in
+                        // state.active_buffer's predecessor scope).
+                        unsafe {
+                            verify_heap_post_gc(
+                                to_start,
+                                live_bytes,
+                                from_start as *const u8,
+                                from_end as *const u8,
+                            );
+                        }
                     }
                 }
             });
@@ -2802,6 +3031,60 @@ mod tests {
             assert_eq!(bytes[6], 0xFF);
             assert_eq!(bytes[7], 0);
             free_byte_array(ba);
+        }
+    }
+
+    /// The verifier must FIRE on a corrupted heap (size-wrap Con, the S3-C2
+    /// shape) and stay SILENT on a healthy one.
+    #[test]
+    fn test_heap_verifier_fires_and_passes() {
+        // Healthy to-space: one Lit(Int) + one 1-field Con pointing at it.
+        // u64 backing => 8-aligned base (object starts must be 8-aligned).
+        let mut buf = vec![0u64; 8];
+        let base = buf.as_mut_ptr() as *mut u8;
+        unsafe {
+            // Lit at offset 0: tag=3, size=24, lit_tag=0 (Int), value=42.
+            *base = layout::TAG_LIT;
+            std::ptr::write_unaligned(base.add(1) as *mut u16, 24);
+            *base.add(layout::LIT_TAG_OFFSET as usize) = 0;
+            *(base.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = 42;
+            // Con at offset 24: tag=2, size=32, con_tag, num_fields=1, field -> Lit.
+            let con = base.add(24);
+            *con = layout::TAG_CON;
+            std::ptr::write_unaligned(con.add(1) as *mut u16, 32);
+            *(con.add(layout::CON_TAG_OFFSET as usize) as *mut u64) = 7;
+            *(con.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) = 1;
+            *(con.add(layout::CON_FIELDS_OFFSET as usize) as *mut *mut u8) = base;
+            // from-space: an unrelated range that contains nothing we point at.
+            let fake_from = 0x1000 as *const u8;
+            let fake_from_end = 0x2000 as *const u8;
+            verify_heap_post_gc(base, 56, fake_from, fake_from_end); // silent
+
+            // Corruption 1 (S3-C2 shape): num_fields says 4 but size says 32.
+            *(con.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) = 4;
+            let r = std::panic::catch_unwind(|| {
+                verify_heap_post_gc(base, 56, fake_from, fake_from_end)
+            });
+            assert!(
+                r.is_err(),
+                "verifier must fire on Con size/num_fields mismatch"
+            );
+            *(con.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) = 1;
+
+            // Corruption 2: dangling evacuation — field points into from-space.
+            *(con.add(layout::CON_FIELDS_OFFSET as usize) as *mut *mut u8) = 0x1800 as *mut u8;
+            let r = std::panic::catch_unwind(|| {
+                verify_heap_post_gc(base, 56, fake_from, fake_from_end)
+            });
+            assert!(r.is_err(), "verifier must fire on from-space pointer");
+            *(con.add(layout::CON_FIELDS_OFFSET as usize) as *mut *mut u8) = base;
+
+            // Corruption 3: unknown lit tag (constant-drift class).
+            *base.add(layout::LIT_TAG_OFFSET as usize) = 99;
+            let r = std::panic::catch_unwind(|| {
+                verify_heap_post_gc(base, 56, fake_from, fake_from_end)
+            });
+            assert!(r.is_err(), "verifier must fire on unknown lit tag");
         }
     }
 

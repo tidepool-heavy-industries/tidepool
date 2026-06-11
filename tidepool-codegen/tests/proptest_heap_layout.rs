@@ -444,6 +444,9 @@ mod group5_thunk {
 
     #[test]
     fn test_thunk_pointer_fields_blackhole() {
+        // C6 FIXED 2026-06-11: blackhole captures are visited like an
+        // unevaluated thunk's (the thunk's code may still read them after a
+        // GC it triggered itself).
         let ncaps = 5;
         let byte_size = 24 + 8 * ncaps;
         let guard = alloc_buf(byte_size);
@@ -452,12 +455,12 @@ mod group5_thunk {
             *guard.ptr.add(THUNK_STATE_OFFSET) = THUNK_BLACKHOLE;
             let mut count = 0;
             for_each_pointer_field(guard.ptr, |_| count += 1);
-            assert_eq!(count, 0);
+            assert_eq!(count, ncaps, "blackhole captures must be visible to GC");
         }
     }
 
     #[test]
-    fn test_blackhole_gc_invisibility() {
+    fn test_blackhole_captures_evacuated() {
         let verdict = fork_contained(|| {
             let from_guard = alloc_buf(1024);
             let to_guard = alloc_buf(1024);
@@ -479,12 +482,25 @@ mod group5_thunk {
                 let to_space = std::slice::from_raw_parts_mut(to_guard.ptr, 1024);
                 cheney_copy(&roots, from_guard.ptr, from_guard.ptr.add(1024), to_space);
 
-                // 4. Verify thunk was copied but Lit was NOT
+                // 4. C6 FIXED 2026-06-11: blackhole captures are now visited
+                // by for_each_pointer_field, so the Lit MUST be evacuated and
+                // the capture slot updated to its to-space copy.
                 assert_ne!(root, thunk_ptr); // thunk moved
                 let captured_in_new = *(root.add(THUNK_CAPTURED_OFFSET) as *const *mut u8);
-                assert_eq!(
+                assert_ne!(
                     captured_in_new, lit_ptr,
-                    "Lit should NOT have been evacuated"
+                    "C6 regressed: blackhole capture still points at from-space"
+                );
+                let to_lo = to_guard.ptr as usize;
+                let to_hi = to_lo + 1024;
+                assert!(
+                    (captured_in_new as usize) >= to_lo && (captured_in_new as usize) < to_hi,
+                    "evacuated capture must live in to-space"
+                );
+                assert_eq!(
+                    read_tag(captured_in_new),
+                    TAG_LIT,
+                    "capture content preserved"
                 );
             }
         });

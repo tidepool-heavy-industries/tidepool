@@ -716,6 +716,15 @@ impl CompiledEffectMachine {
 
     /// Allocate a Con HeapObject on the nursery with the given tag and fields.
     unsafe fn alloc_con(&mut self, con_tag: u64, fields: &[*mut u8]) -> *mut u8 {
+        // The header stores size and num_fields as u16. Unbounded, `size as
+        // u16` wraps at >= 8189 fields while num_fields stays correct — GC
+        // evacuation then copies the wrapped size (fields LOST) and the
+        // cheney scan walks into garbage (proptest_heap_layout C2). Refuse at
+        // the bound the read side enforces; the null return routes through
+        // the caller's existing OOM/poison handling.
+        if fields.len() > heap_bridge::MAX_FIELDS {
+            return std::ptr::null_mut();
+        }
         // SAFETY: Bump-allocating from vmctx nursery. Writing Con header, tag,
         // num_fields, and field pointers at known layout offsets within the allocation.
         let size = 24 + 8 * fields.len();

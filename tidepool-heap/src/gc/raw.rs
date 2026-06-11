@@ -78,10 +78,18 @@ pub unsafe fn for_each_pointer_field(obj: *mut u8, mut f: impl FnMut(*mut *mut u
             // SAFETY: Thunk state byte is at THUNK_STATE_OFFSET within the valid object.
             let state = *obj.add(THUNK_STATE_OFFSET);
             match state {
-                THUNK_UNEVALUATED => {
-                    // SAFETY: Unevaluated thunk captures are pointer slots from
-                    // THUNK_CAPTURED_OFFSET to end of object (determined by size).
-                    let n = (size - THUNK_CAPTURED_OFFSET) / FIELD_STRIDE;
+                // BLACKHOLE = mid-evaluation: the thunk's code may still read
+                // its capture slots AFTER a GC its own allocations triggered,
+                // so captures must be evacuated and the slots updated exactly
+                // like an unevaluated thunk's. Skipping them (the old `_ => {}`)
+                // left blackhole captures invisible to GC — stale from-space
+                // pointers on resume (proptest_heap_layout C6).
+                THUNK_UNEVALUATED | THUNK_BLACKHOLE => {
+                    // SAFETY: Thunk captures are pointer slots from
+                    // THUNK_CAPTURED_OFFSET to end of object (determined by
+                    // size). saturating_sub: a header-only blackhole (size 16)
+                    // has no capture region at all.
+                    let n = size.saturating_sub(THUNK_CAPTURED_OFFSET) / FIELD_STRIDE;
                     for i in 0..n {
                         f(obj.add(THUNK_CAPTURED_OFFSET + i * FIELD_STRIDE) as *mut *mut u8);
                     }
@@ -90,6 +98,8 @@ pub unsafe fn for_each_pointer_field(obj: *mut u8, mut f: impl FnMut(*mut *mut u
                     // SAFETY: Evaluated thunk stores indirection pointer at THUNK_INDIRECTION_OFFSET.
                     f(obj.add(THUNK_INDIRECTION_OFFSET) as *mut *mut u8);
                 }
+                // Invalid states are left untouched here; the post-GC verifier
+                // (TIDEPOOL_HEAP_VERIFY=1) flags them loudly.
                 _ => {}
             }
         }
@@ -455,15 +465,26 @@ mod tests {
         // SAFETY: Test-only. Aligned buffer contains a valid Thunk in BlackHole state (no pointer fields).
         unsafe {
             let ptr = buf.as_mut_ptr();
-            // A blackhole thunk has size 16 (just header and state) and no pointers.
+            // Header-only blackhole (size 16): no capture region, no visits.
             write_header(ptr, TAG_THUNK, 16);
             *ptr.add(THUNK_STATE_OFFSET) = THUNK_BLACKHOLE;
-
             let mut count = 0;
             for_each_pointer_field(ptr, |_| {
                 count += 1;
             });
-            assert_eq!(count, 0, "blackhole thunks have no pointers to traverse");
+            assert_eq!(count, 0, "header-only blackhole has no capture region");
+
+            // C6 FIX (2026-06-11): a blackhole WITH captures must have them
+            // visited exactly like an unevaluated thunk — its code may still
+            // read the slots after a GC it triggered itself.
+            let ptr2 = buf.as_mut_ptr().add(64);
+            write_header(ptr2, TAG_THUNK, 24 + 8 * 3);
+            *ptr2.add(THUNK_STATE_OFFSET) = THUNK_BLACKHOLE;
+            let mut count2 = 0;
+            for_each_pointer_field(ptr2, |_| {
+                count2 += 1;
+            });
+            assert_eq!(count2, 3, "blackhole captures must be visible to GC (C6)");
         }
     }
 }
