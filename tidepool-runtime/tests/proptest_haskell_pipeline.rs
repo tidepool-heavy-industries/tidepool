@@ -220,6 +220,10 @@ struct Gen {
     /// bug is disabled here so the committed/live generator stays GREEN; the
     /// bug is captured separately as an #[ignore]d repro. See findings doc.
     enable_wh001_unsigned_go: bool,
+    /// When set (env PIPELINE_FORCE_UNSIGNED=1, hand-run hunting only), every
+    /// `WhereGo`/`Guard` helper omits its type signature — maximally exercises
+    /// the Integer-defaulting trap (gotcha #3). Off for committed runs.
+    force_unsigned: bool,
 }
 
 impl Gen {
@@ -228,6 +232,7 @@ impl Gen {
             rng: Rng::new(seed),
             next_var: 0,
             enable_wh001_unsigned_go: true,
+            force_unsigned: std::env::var("PIPELINE_FORCE_UNSIGNED").as_deref() == Ok("1"),
         }
     }
 
@@ -346,10 +351,15 @@ impl Gen {
         if self.rng.chance(1, 2) {
             match self.rng.pick(4) {
                 0 => {
+                    let with_sig = if self.force_unsigned {
+                        false
+                    } else {
+                        !self.enable_wh001_unsigned_go || self.rng.chance(4, 5)
+                    };
                     return HExpr::WhereGo {
                         start: self.rng.ri(0, 40),
                         op: self.arith_op(),
-                        with_sig: !self.enable_wh001_unsigned_go || self.rng.chance(4, 5),
+                        with_sig,
                     };
                 }
                 1 => {
@@ -360,6 +370,11 @@ impl Gen {
                     );
                 }
                 2 => {
+                    let with_sig = if self.force_unsigned {
+                        false
+                    } else {
+                        self.rng.chance(4, 5)
+                    };
                     return HExpr::Guard {
                         arg: Box::new(self.gen_int(b, scope)),
                         a: self.rng.ri(-5, 10),
@@ -367,7 +382,7 @@ impl Gen {
                         b1: Box::new(self.gen_int(b, scope)),
                         b2: Box::new(self.gen_int(b, scope)),
                         b3: Box::new(self.gen_int(b, scope)),
-                        with_sig: self.rng.chance(4, 5),
+                        with_sig,
                     };
                 }
                 _ => return self.gen_let_shadow(b, scope),
@@ -552,7 +567,12 @@ fn gen_program(seed: u64) -> (Ty, HExpr) {
     } else {
         Ty::Pair
     };
-    let budget = 3 + (seed % 2) as u32; // depth 3..4
+    // Depth 3..4 by default; env PIPELINE_DEPTH cranks it for hand-run hunting
+    // (deeper trees = more nested join points / shadowing / recursion).
+    let budget = std::env::var("PIPELINE_DEPTH")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(3 + (seed % 2) as u32);
     let mut scope = Vec::new();
     let body = g.gen(ty, budget, &mut scope);
     (ty, body)
@@ -1292,9 +1312,18 @@ mod committed {
     /// response, run in a subprocess under both TIDEPOOL_LAZY_RESULTS=1 and =0,
     /// compared to each other and to the reference. List sizes straddle the
     /// 2000-element lazy threshold.
+    ///
+    /// Only 8 cases: each case spawns TWO subprocesses, and every subprocess
+    /// JIT-compiles the full MCP effect preamble (~10-30s). 30 cases here cost
+    /// ~33 min — untenable for a committed smoke property. Deep lazy hunting is
+    /// the sibling W4 (proptest-lazy-consumption) workstream; this is a bonus
+    /// A/B oracle on the effect path. Cap stays ≤30 per task boundary.
     #[test]
-    fn effectful_lazy_ab_x30() {
-        let mut runner = TestRunner::new(cfg());
+    fn effectful_lazy_ab_x8() {
+        let mut runner = TestRunner::new(Config {
+            cases: 8,
+            ..cfg()
+        });
         runner
             .run(&any::<u64>(), |seed| {
                 let case = gen_effect_case(seed);
