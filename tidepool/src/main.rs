@@ -1013,12 +1013,27 @@ const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
 /// namespace). API keys come from the standard env vars (OPENAI_API_KEY,
 /// ANTHROPIC_API_KEY, ...), which `load_secrets` can fill from
 /// `.tidepool/secrets/` at startup.
-#[derive(Clone)]
 struct LlmHandler {
     client: genai::Client,
     model: String,
     rt: tokio::runtime::Handle,
     call_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+}
+
+/// The server clones the handler stack once per eval, so Clone is the
+/// per-eval budget boundary: a FRESH call counter per clone. (A derived
+/// Clone shared the Arc — making LLM_MAX_CALLS a server-LIFETIME cap that
+/// silently starved the Llm effect partway through long sessions; found
+/// 2026-06-11 while auditing orchestration limits.)
+impl Clone for LlmHandler {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            model: self.model.clone(),
+            rt: self.rt.clone(),
+            call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        }
+    }
 }
 
 const LLM_MAX_CALLS: u32 = 200;
@@ -2810,6 +2825,20 @@ mod tests {
             LlmHandler::normalize_model("tinyllama:latest".into()),
             "tinyllama:latest"
         );
+    }
+
+    #[tokio::test]
+    async fn test_llm_call_budget_resets_per_clone() {
+        let handler = LlmHandler::new("gpt-4o-mini".into());
+        handler
+            .call_count
+            .store(LLM_MAX_CALLS, std::sync::atomic::Ordering::Relaxed);
+        assert!(handler.check_rate_limit().is_err());
+        // a clone (= a new eval) gets a fresh budget
+        let fresh = handler.clone();
+        assert!(fresh.check_rate_limit().is_ok());
+        // and the original's exhaustion is untouched by the clone
+        assert!(handler.check_rate_limit().is_err());
     }
 
     #[test]
