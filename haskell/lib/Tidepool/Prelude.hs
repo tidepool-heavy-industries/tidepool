@@ -137,6 +137,10 @@ module Tidepool.Prelude
     -- * Set type (use qualified Set.xxx via preamble's `import qualified Data.Set as Set`)
     -- * Map helpers (local impls — unqualified, unlike Map.* re-exports above)
   , insertWith
+    -- * Prelude workhorses
+  , sortOn, Down(..), swap
+  , partitionEithers, rights, lefts, fromLeft, fromRight
+  , first, second, bimap
   ) where
 
 import Prelude
@@ -169,7 +173,10 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Char (ord, chr)
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe)
-import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy)
+import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, sortOn)
+import Data.Ord (Down(..))
+import Data.Tuple (swap)
+import Data.Either (partitionEithers, rights, lefts, fromLeft, fromRight)
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Control.Monad
@@ -905,3 +912,22 @@ insertWith f k v m = case Map.lookup k m of
   Nothing  -> Map.insert k v m
 {-# INLINE insertWith #-}
 
+
+-- ------------------------------------------------------------
+-- Prelude workhorses
+-- ------------------------------------------------------------
+
+-- | Monomorphic tuple first.
+first :: (a -> c) -> (a, b) -> (c, b)
+first f (a, b) = (f a, b)
+{-# INLINE first #-}
+
+-- | Monomorphic tuple second.
+second :: (b -> c) -> (a, b) -> (a, c)
+second f (a, b) = (a, f b)
+{-# INLINE second #-}
+
+-- | Monomorphic tuple bimap.
+bimap :: (a -> c) -> (b -> d) -> (a, b) -> (c, d)
+bimap f g (a, b) = (f a, g b)
+{-# INLINE bimap #-}
