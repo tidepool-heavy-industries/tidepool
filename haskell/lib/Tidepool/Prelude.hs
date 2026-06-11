@@ -245,32 +245,20 @@ isSuffixOf = T.isSuffixOf
 isInfixOf :: Text -> Text -> Bool
 isInfixOf = T.isInfixOf
 
--- Pure reimplementation for Prelude export (avoids text-package dependency chain).
+-- Delegates to T.words. HISTORY (2026-06-11): was a "pure reimplementation"
+-- round-tripping through [Char]; probe-verified T.words compiles and runs
+-- cleanly under today's JIT in both saturated AND higher-order position
+-- (unlike T.takeWhile/T.dropWhile — see takeWhileT below), so the String
+-- detour only cost performance. Same retirement as splitOn (3fb10e5).
 words :: Text -> [Text]
-words t = go (T.unpack t)
-  where
-    go [] = []
-    go s  = let s'       = P.dropWhile isSpace s
-                (w, rest) = breakOnSpace s'
-            in if P.null w then [] else T.pack w : go rest
-    breakOnSpace [] = ([], [])
-    breakOnSpace (c:cs)
-      | isSpace c = ([], c:cs)
-      | otherwise = let (w, r) = breakOnSpace cs in (c:w, r)
+words = T.words
+{-# INLINE words #-}
 
--- Pure reimplementation for Prelude export (avoids text-package dependency chain).
+-- Delegates to T.lines. Same retirement as words above; edge semantics
+-- verified equivalent (trailing newline, empty input, bare "\n").
 lines :: Text -> [Text]
-lines t = go (T.unpack t)
-  where
-    go [] = []
-    go s  = let (l, rest) = breakOnNL s
-            in T.pack l : case rest of
-                 []        -> []
-                 (_:rest') -> go rest'
-    breakOnNL [] = ([], [])
-    breakOnNL (c:cs)
-      | c == '\n' = ([], c:cs)
-      | otherwise = let (l, r) = breakOnNL cs in (c:l, r)
+lines = T.lines
+{-# INLINE lines #-}
 
 unwords :: [Text] -> Text
 unwords = T.unwords
@@ -418,8 +406,11 @@ tReverse = T.reverse
 {-# INLINE tReverse #-}
 
 -- | Text takeWhile: take the longest prefix of characters satisfying a predicate.
--- Pure reimplementation — avoids fat-interface PAP bug with @T.takeWhile@.
--- Use this instead of @T.takeWhile@ in point-free / higher-order contexts.
+-- Pure reimplementation — LOAD-BEARING shadow (probe-verified 2026-06-11):
+-- @T.takeWhile@ is correct when saturated but SILENTLY WRONG under partial
+-- application — @map (T.takeWhile p) ts@ returns the inputs unmodified
+-- (and @map (T.dropWhile p) ts@ returns empties). Wrong data, no crash.
+-- Do NOT delegate this to T.takeWhile until the PAP path is fixed.
 takeWhileT :: (Char -> Bool) -> Text -> Text
 takeWhileT p t = T.pack (go (T.unpack t))
   where
@@ -430,8 +421,8 @@ takeWhileT p t = T.pack (go (T.unpack t))
 {-# INLINE takeWhileT #-}
 
 -- | Text dropWhile: drop the longest prefix of characters satisfying a predicate.
--- Pure reimplementation — avoids fat-interface PAP bug with @T.dropWhile@.
--- Use this instead of @T.dropWhile@ in point-free / higher-order contexts.
+-- Pure reimplementation — LOAD-BEARING shadow; see takeWhileT above
+-- (T.dropWhile is silently wrong under partial application).
 dropWhileT :: (Char -> Bool) -> Text -> Text
 dropWhileT p t = T.pack (go (T.unpack t))
   where
