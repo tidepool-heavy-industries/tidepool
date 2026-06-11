@@ -1,5 +1,6 @@
 .tidepool/*
 !.tidepool/lib/
+!.tidepool/PATTERNS.md
 target/
 dist-newstyle/
 *.hi
