@@ -347,17 +347,21 @@ pub fn standard_decls() -> Vec<EffectDecl> {
 /// full module with the effect stack type, LANGUAGE pragmas, and imports.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EvalRequest {
-    /// Haskell do-notation code. Each line is indented into a do-block.
-    /// The last line is any expression of type `M a` — its result is the
-    /// eval's return value. Use `pure x` only to wrap a pure value;
-    /// never `r <- f` followed by `pure r`.
-    /// Use `send (Constructor args)` to invoke effects.
+    /// A single Haskell EXPRESSION of type `M a` — its value is the eval's
+    /// result. Compose with `>>=`, `<&>`, `>=>`, point-free pipelines;
+    /// attach a trailing `where` for local bindings. For step-by-step
+    /// sequencing write an explicit `do` block (bare statement lines do
+    /// NOT parse). `pure x` only to wrap a pure value — never
+    /// `r <- f` followed by `pure r`.
     pub code: String,
     /// Additional Haskell imports, one per line (e.g. "Data.List (sort)").
     #[serde(default)]
     pub imports: String,
-    /// Top-level helper definitions placed before the main do-block.
-    /// Function definitions only — custom `data` declarations are not supported.
+    /// Top-level definitions (functions, operators, type signatures) —
+    /// where your program's real structure lives; `code` is often one
+    /// call into these. Define `data` types in a `.tidepool/lib/<Mod>.hs`
+    /// module instead (scaffold with `Explore.defMod`) and pull them in
+    /// via `imports` — domain types belong in the library.
     #[serde(default)]
     pub helpers: String,
     /// Optional JSON input injected as `input :: Aeson.Value` binding.
@@ -932,11 +936,12 @@ pub fn build_effect_stack_type(effects: &[EffectDecl]) -> String {
 
 fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
     let mut desc = String::from(concat!(
-        "Write Haskell do-notation in `code`. The server wraps it in a module ",
-        "with the effect stack, pragmas, and imports. ",
-        "The last line is any expression of type `M a` — its result is the ",
-        "eval's return value (`pure x` only to wrap a pure value; never ",
-        "`r <- f` then `pure r`). ",
+        "`code` is a single Haskell EXPRESSION of type `M a`; its value is the ",
+        "eval's result. The server wraps it in a module with the effect stack, ",
+        "pragmas, and imports. Compose with `>>=`, `<&>`, `>=>`, point-free ",
+        "pipelines; attach a trailing `where` for local bindings. For ",
+        "step-by-step sequencing write an explicit `do` block — bare statement ",
+        "lines do NOT parse. ",
         "Use `send (Constructor args)` to invoke effects. ",
         "First call is slow (~2s). Subsequent calls are cached.\n",
         "Return values are automatically rendered to JSON by the Rust runtime \u{2014} ",
@@ -998,6 +1003,20 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
                 "  survey q render items    -- tally: [(answer, count)]\n",
                 "  sift yn render items     -- partition: ([true], [false])\n",
             ));
+        }
+
+        let has_fs = effects.iter().any(|e| e.type_name == "Fs");
+        if has_fs {
+            desc.push_str(concat!(
+                "\nExamples (idiomatic — expression-first):\n",
+                "  glob \"**/*.rs\" >>= mapM (\\p -> (,) p <$> getFileSize p)\n",
+                "  do { src <- readFile \"CLAUDE.md\"; pure (stake 5 (lines src)) }  -- explicit do when sequencing\n",
+            ));
+            if has_llm && has_ask_desc {
+                desc.push_str(
+                    "  glob \"**/*.hs\" >>= filterM (readFile >=> \\s -> yn ?? (\"test-only?\\n\" <> stake 2000 s))\n",
+                );
+            }
         }
     }
 
@@ -1164,15 +1183,21 @@ pub fn template_haskell(
         out.push_str(&format!("input = {}\n\n", json_to_haskell(val)));
     }
 
+    // User code is a real top-level binding: a single EXPRESSION (explicit
+    // `do` required for sequencing), so trailing `where`-clauses are legal
+    // and the inferred type rides into the wrapper below.
+    out.push_str("__user =\n");
+    for line in code.lines() {
+        out.push_str(&format!("  {}\n", line));
+    }
+    out.push('\n');
+
     out.push_str(&format!("result :: Eff {} Value\n", effect_stack));
     out.push_str("result = do\n");
     if budget.is_some() {
         out.push_str("  kvSet \"__sayChars\" (toJSON (0 :: Int))\n");
     }
-    out.push_str("  _r <- do\n");
-    for line in code.lines() {
-        out.push_str(&format!("    {}\n", line));
-    }
+    out.push_str("  _r <- __user\n");
     if let Some(b) = budget {
         out.push_str("  _scV <- kvGet \"__sayChars\"\n");
         out.push_str("  let _sayC = case _scV of { Just b -> case b ^? _Number of { Just n -> round n; _ -> 0 }; Nothing -> 0 }\n");
@@ -1249,11 +1274,18 @@ fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 fn format_error_with_source(title: &str, error: &str, source: &str) -> String {
-    // Extract user-written code: everything after the "-- [user]" marker.
+    // Extract user-written code: between the "-- [user]" marker and the
+    // generated `result ::` wrapper (helpers + input + the __user binding).
+    // Echoing the budget plumbing below teaches callers the wrong dialect.
     let user_section = source
         .find("-- [user]\n")
         .map(|pos| &source[pos + "-- [user]\n".len()..])
         .unwrap_or(source);
+    let user_section = user_section
+        .find("\nresult ::")
+        .map(|pos| &user_section[..pos])
+        .unwrap_or(user_section)
+        .trim_end();
     format!(
         "## {}\n{}\n\n## User Code\n```haskell\n{}\n```",
         title, error, user_section
@@ -2080,11 +2112,23 @@ where
                     "\n\nUser library: `Library` is auto-imported from `.tidepool/lib/Library.hs` \
                      and re-exports every module below — all names are in scope bare. \
                      Check this vocabulary for an existing combinator with the right shape \
-                     (fold/unfold/loop/batch) BEFORE hand-rolling a recursive helper:\n",
+                     (fold/unfold/loop/batch) BEFORE hand-rolling a recursive helper. \
+                     New `data` types go in a `.tidepool/lib/<Mod>.hs` module \
+                     (scaffold with `Explore.defMod`):\n",
                 );
                 self.inner
                     .eval_tool_description
                     .push_str(&library_vocab(&user_lib));
+                self.inner.eval_tool_description.push_str(concat!(
+                    "\nWith the library:\n",
+                    "  glob \"**/*.rs\" >>= mapM (\\p -> (,) p <$> getFileSize p) <&> sizeRank 9\n",
+                    "  seek \"where are case traps emitted?\" 5  -- steered search: suspends to you each round\n",
+                ));
+                if user_lib.join("PATTERNS.md").exists() {
+                    self.inner.eval_tool_description.push_str(
+                        "\nPattern catalog: read `.tidepool/lib/PATTERNS.md` for composition idioms.\n",
+                    );
+                }
             }
         }
 
@@ -2286,7 +2330,7 @@ mod tests {
         }];
         let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);
-        let source = "let x = 42\npure x";
+        let source = "do\n  let x = 42\n  pure x";
 
         let result = template_haskell(&preamble, &stack, source, "", "", None, None);
 
@@ -2295,10 +2339,37 @@ mod tests {
         // GADTs live in the generated Tidepool.Effects module now.
         assert!(result.contains("import Tidepool.Effects"));
         assert!(effects_module_source(&effects).contains("data Console a where"));
+        // User code is a real top-level binding (expression-first contract).
+        assert!(result.contains("__user =\n  do\n    let x = 42\n    pure x"));
         assert!(result.contains("result :: Eff '[Console] Value"));
         assert!(result.contains("result = do"));
-        assert!(result.contains("  let x = 42"));
-        assert!(result.contains("  pure x"));
+        assert!(result.contains("  _r <- __user"));
+    }
+
+    #[test]
+    fn test_template_haskell_expression_forms() {
+        let effects = vec![EffectDecl {
+            type_name: "Console",
+            description: "",
+            constructors: &["Print :: Text -> Console ()"],
+            type_defs: &[],
+            helpers: &[],
+        }];
+        let preamble = build_preamble(&effects, false);
+        let stack = build_effect_stack_type(&effects);
+
+        // Multi-line composition expression: continuation indentation rides
+        // through verbatim under the 2-space binding indent.
+        let pipeline = "glob \"**/*.rs\"\n  >>= mapM getFileSize\n  <&> sizeRank 9";
+        let r = template_haskell(&preamble, &stack, pipeline, "", "", None, None);
+        assert!(r.contains(
+            "__user =\n  glob \"**/*.rs\"\n    >>= mapM getFileSize\n    <&> sizeRank 9"
+        ));
+
+        // Trailing where-clause is legal: __user is a genuine declaration.
+        let with_where = "sizeRank 9 <$> sized\n  where\n    sized = mapM go =<< glob \"**/*.rs\"";
+        let r = template_haskell(&preamble, &stack, with_where, "", "", None, None);
+        assert!(r.contains("__user =\n  sizeRank 9 <$> sized\n    where\n      sized ="));
     }
 
     #[test]
@@ -2410,15 +2481,19 @@ data Console a where
     fn test_format_error_with_source() {
         let title = "Error";
         let error = "Type mismatch";
-        let source = "preamble stuff\n-- [user]\nresult = do\n  pure 42\n";
+        let source = "preamble stuff\n-- [user]\nhelper :: Int\nhelper = 7\n\n__user =\n  pure helper\n\nresult :: Eff '[] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON _r)\n";
         let formatted = format_error_with_source(title, error, source);
 
         assert!(formatted.contains("## Error"));
         assert!(formatted.contains("Type mismatch"));
         assert!(formatted.contains("## User Code"));
-        assert!(formatted.contains("```haskell\nresult = do\n  pure 42\n\n```"));
-        // Preamble should be trimmed
+        // Helpers + the __user binding are echoed…
+        assert!(formatted.contains("helper :: Int"));
+        assert!(formatted.contains("__user =\n  pure helper"));
+        // …but the preamble and the budget plumbing are trimmed.
         assert!(!formatted.contains("preamble stuff"));
+        assert!(!formatted.contains("result ="));
+        assert!(!formatted.contains("paginateResult"));
     }
 
     #[test]
