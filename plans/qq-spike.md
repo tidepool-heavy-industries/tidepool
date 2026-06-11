@@ -65,8 +65,9 @@ Reading:
   > a `QuasiQuotes` pragma on a module WITH home-module imports
   > bytecode-provisions the entire home dependency graph — M2 just had
   > nothing to provision. In the full MCP preamble (19 home modules) the
-  > always-on pragma costs ~1s extra per uncached eval (measured: ~3.4s vs
-  > ~2.4s full-preamble extract+JIT, no splice present). Root accepted this
+  > always-on pragma costs **+3.0s per uncached eval** (measured 2026-06-11,
+  > 3-run avg: 10.35s vs 7.30s full-preamble extract, no splice present,
+  > 96–99% CPU both — pure GHC compile time, not I/O). Root accepted this
   > cost — see "Phase 2 decision revision" below.
 - **The import alone is NOT free** (+385ms): `runPipeline` compiles every
   home module in the graph through parse/typecheck/desugar/core2core, and a
@@ -105,7 +106,7 @@ Reading:
    > When the "pragma is free" premise fell (see CORRECTION above), the
    > choice became: token-gate the PRAGMA too (zero latency regression,
    > implemented as 71d77fb, reverted) or keep one eval dialect everywhere
-   > and pay ~1s per uncached eval. Root chose always-on — "better to have
+   > and pay +3s per uncached eval. Root chose always-on — "better to have
    > logical simplicity… always-on + include a TODO fixme." The
    > `Tidepool.QQ` IMPORT stays token-gated (that's scope hygiene, not
    > grammar). The latency FIXME lives at the pragma line in
@@ -225,7 +226,14 @@ pre-existing `_u<uniquekey>` churn (below).
   regenerating ADDITIVELY (copy only new `qq_*` fixtures + merged
   meta). Someone with tidepool-eval write access should own a true
   reconcile (likely: make the include_bytes! names churn-proof, then
-  regen wholesale).
+  regen wholesale). Datapoint for that reconcile: the v2 unpoison
+  binary shifts unique seeds, so `qq_j_anti_u…`/`qq_j_build_u…` (checked
+  in at 4732f20 under v1-binary names) regen under NEW `_u` suffixes —
+  the checked-in fixtures stay valid (discovered dynamically by the
+  differential, contents are real v1-binary output), they're just no
+  longer name-stable against a fresh regen. Verified post-v2: full regen
+  of Suite.hs = zero skips, all 16 qq fixtures re-emitted, deopt litmus
+  (`litd = D# -2.5##`) folds across the entire M1–M8 matrix.
 
 ## Locked-decision clarification (for reviewers)
 
@@ -243,7 +251,7 @@ Text it computed at runtime. This does not violate the locked decision.
   conditional pragma injection, so this is a standing dialect note ("space
   before `|` in comprehensions"). LLM-written code essentially always has
   spaces.
-- ALL evals pay the TH-provisioning overhead (~+1s uncached, see the
-  CORRECTION in the latency section); QQ-using evals pay ~+1.7s total.
-  Cached identically to all evals (CBOR cache keyed on source), so repeat
-  calls are unaffected.
+- ALL evals pay the TH-provisioning overhead (+3.0s uncached, see the
+  CORRECTION in the latency section); QQ-using evals pay splice execution
+  on top. Cached identically to all evals (CBOR cache keyed on source), so
+  repeat calls are unaffected.

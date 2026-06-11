@@ -554,8 +554,9 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
     //
     // KNOWN COST / FIXME(root): GHC's enableCodeGenForTH keys on extension
     // PRESENCE (needsTemplateHaskellOrQQ checks xopt, not splice usage), so
-    // every eval bytecode-provisions its home-module graph — per-eval
-    // latency, paid even by evals that never splice. REQUIRES an
+    // every eval bytecode-provisions its home-module graph — +3.0s per
+    // uncached eval (measured: 10.35s vs 7.30s full-preamble extract,
+    // 3-run avg), paid even by evals that never splice. REQUIRES an
     // unpoison-fixed tidepool-extract-bin (this branch: GhcPipeline.hs
     // unsets Opt_IgnoreInterfacePragmas on the downgraded summaries between
     // depanal and load'); under a pre-fix binary every eval dies with the
