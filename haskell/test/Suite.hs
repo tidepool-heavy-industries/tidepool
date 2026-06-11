@@ -1,9 +1,18 @@
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable #-}
+{-# LANGUAGE QuasiQuotes #-}
 module Suite where
 
 import Prelude
 import qualified Data.Text as T
 type Text = T.Text
+-- qq-suite: regen now needs `--include lib --target-module-only`
+-- (see CLAUDE.md / plans/qq-spike.md)
+import Tidepool.QQ (fmt, j)
+-- Value module directly, NOT the Tidepool.Aeson facade: the facade
+-- re-exports Tidepool.Aeson.Lens -> Control.Lens, which the extract GHC
+-- session cannot see (lens is not a boot package), so the facade kills
+-- --all-closed regen at compile time.
+import Tidepool.Aeson.Value (Value (..))
 
 -- ============================================================
 -- Int literals (5)
@@ -912,3 +921,114 @@ t_deriveFoldable = sum (Box 42)
 
 t_deriveTraversable :: Maybe Int
 t_deriveTraversable = fmap (\(Box x) -> x) (traverse (\x -> Just (x + 1)) (Box 41))
+
+-- ============================================================
+-- qq-suite: tests
+-- ============================================================
+-- Two sections below are owned by separate leaves; each leaf adds
+-- bindings ONLY inside its own section.
+
+-- ---- qq-suite: fmt section (owner: leaf qq-fmt) ----
+
+qq_fmt_empty :: T.Text
+qq_fmt_empty = [fmt||]
+
+qq_fmt_plain :: T.Text
+qq_fmt_plain = [fmt|hello, tidepool world|]
+
+qq_fmt_basic :: T.Text
+qq_fmt_basic = [fmt|user: {name}|]
+  where name = T.pack "alice" :: T.Text
+
+qq_fmt_multi :: T.Text
+qq_fmt_multi = [fmt|hello {T.toUpper greeting}, score {score}|]
+  where
+    greeting = T.pack "world" :: T.Text
+    score    = T.pack "42"   :: T.Text
+
+qq_fmt_escape :: T.Text
+qq_fmt_escape = [fmt|use \{braces} for holes and } is literal|]
+
+qq_fmt_multiline :: T.Text
+qq_fmt_multiline = [fmt|line one
+line two|]
+
+-- ---- qq-suite: json section (owner: leaf qq-json) ----
+
+-- One-liner sanity: a bare scalar.
+qq_j_scalar :: Value
+qq_j_scalar = [j|null|]
+
+-- Nested object/array with string escapes, negative & fractional numbers,
+-- bools and null; no antiquotes (pure constructor application).
+qq_j_build :: Value
+qq_j_build = [j|
+  { "name": "tide\npool"
+  , "count": -3
+  , "ratio": 2.5
+  , "items": [1, 2, 3]
+  , "active": true
+  , "missing": null
+  , "nested": {"deep": [false, "x\u00e9"]}
+  }
+|]
+
+-- Both antiquote forms over where-bound Int/Text values (exercises toJSON).
+qq_j_anti :: Value
+qq_j_anti = [j|{"id": $x, "upper": {T.toUpper name}}|]
+  where
+    x :: Int
+    x = 7
+    name :: T.Text
+    name = T.pack "tide"
+
+-- Pattern side: open-world object match binding one key, then unwrap.
+qq_j_pat_extract :: T.Text
+qq_j_pat_extract =
+  case built of
+    [j|{"name": $n}|] -> case n of
+      String s -> s
+      _        -> T.pack "?"
+    _ -> T.pack "no-match"
+  where
+    built :: Value
+    built = [j|{"name": "river", "size": 4}|]
+
+-- Pattern side: literal leaves (number + string + null) with a failing first
+-- arm that falls through to the matching arm.
+qq_j_pat_literal :: Bool
+qq_j_pat_literal =
+  case [j|[1, "two", null]|] of
+    [j|[1, "three", null]|] -> False
+    [j|[1, "two", null]|]   -> True
+    _                       -> False
+
+-- Pattern side: fixed-prefix array match on a longer array; combine binders.
+qq_j_pat_array :: Int
+qq_j_pat_array =
+  case [j|[10, 20, 30, 40]|] of
+    [j|[$a, $b, ...]|] -> case (a, b) of
+      (Number da, Number db) -> if da < db then 1 else 0
+      _                      -> -1
+    _ -> 0
+
+-- Pattern side: nested object -> array -> element, open-world throughout.
+qq_j_pat_nested :: T.Text
+qq_j_pat_nested =
+  case nested of
+    [j|{"user": {"tags": [$first, ...]}}|] -> case first of
+      String s -> s
+      _        -> T.pack "?"
+    _ -> T.pack "no-match"
+  where
+    nested :: Value
+    nested = [j|{"user": {"tags": ["alpha", "beta"], "id": 1}}|]
+
+-- Pattern side: open-world: one-key pattern matches a three-key object.
+qq_j_pat_open :: Bool
+qq_j_pat_open =
+  case [j|{"a": 1, "b": 2, "c": 3}|] of
+    [j|{"b": $v}|] -> case v of
+      Number d -> d == 2.0
+      _        -> False
+    _ -> False
