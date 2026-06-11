@@ -322,14 +322,6 @@ steerM suspend step = go 0
         Left  b -> pure b
         Right b -> go (i+1) b xs
 
--- | Effectful loop: run the body until it returns Left (the result);
--- Right is the next seed. The generic core of steered searches that
--- terminate WITH an answer (see Seek) — the shape oracleAna can't
--- express (its termination is bare Nothing, the final reply is lost).
-loopM :: Monad m => (a -> m (Either r a)) -> a -> m r
-loopM f = go
-  where go a = f a >>= either pure go
-
 -- | Oracle-steered unfold: suspend at each step, response steers next seed.
 oracleAna :: Monad m
           => (r -> a -> m (Maybe (b, a)))
