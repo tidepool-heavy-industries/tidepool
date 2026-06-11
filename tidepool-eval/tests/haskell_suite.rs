@@ -799,3 +799,159 @@ fn text_dropwhilet_eta() {
     let result = collect_text_list(&val, &table);
     assert_eq!(result, vec!["/world", "/bar", ""]);
 }
+
+// =============================================================================
+// prelude-workhorses: tests
+// =============================================================================
+
+#[test]
+fn t_sorton() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_sortOn.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let mut result = Vec::new();
+    let mut cur = &val;
+    loop {
+        match cur {
+            Value::Con(id, fields) => {
+                let name = table.name_of(*id).unwrap();
+                if name == "[]" {
+                    break;
+                } else if name == ":" {
+                    let tuple = unwrap_tuple(&fields[0]);
+                    let text = collect_text(&tuple[0], &table);
+                    let inner = unbox(&tuple[1], &table);
+                    let n = if let Value::Lit(Literal::LitInt(n)) = inner {
+                        n
+                    } else {
+                        panic!("expected Int")
+                    };
+                    result.push((text, n));
+                    cur = &fields[1];
+                } else {
+                    panic!("expected [] or (:), got {name}");
+                }
+            }
+            other => panic!("expected list cons, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        result,
+        vec![
+            ("y".to_string(), 1),
+            ("z".to_string(), 2),
+            ("x".to_string(), 3)
+        ]
+    );
+}
+
+#[test]
+fn t_sortondown() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_sortOnDown.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let mut result = Vec::new();
+    let mut cur = &val;
+    loop {
+        match cur {
+            Value::Con(id, fields) => {
+                let name = table.name_of(*id).unwrap();
+                if name == "[]" {
+                    break;
+                } else if name == ":" {
+                    let tuple = unwrap_tuple(&fields[0]);
+                    let text = collect_text(&tuple[0], &table);
+                    let inner = unbox(&tuple[1], &table);
+                    let n = if let Value::Lit(Literal::LitInt(n)) = inner {
+                        n
+                    } else {
+                        panic!("expected Int")
+                    };
+                    result.push((text, n));
+                    cur = &fields[1];
+                } else {
+                    panic!("expected [] or (:), got {name}");
+                }
+            }
+            other => panic!("expected list cons, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        result,
+        vec![
+            ("x".to_string(), 3),
+            ("z".to_string(), 2),
+            ("y".to_string(), 1)
+        ]
+    );
+}
+
+#[test]
+fn t_swap() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_swap.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let fields = unwrap_tuple(&val);
+    assert_eq!(collect_text(&fields[0], &table), "s");
+    assert_int(&fields[1], 1, &table);
+}
+
+#[test]
+fn t_first() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_first.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let fields = unwrap_tuple(&val);
+    assert_int(&fields[0], 2, &table);
+    assert_eq!(collect_text(&fields[1], &table), "k");
+}
+
+#[test]
+fn t_second() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_second.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let fields = unwrap_tuple(&val);
+    assert_eq!(collect_text(&fields[0], &table), "k");
+    assert_int(&fields[1], 3, &table);
+}
+
+#[test]
+fn t_bimap() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_bimap.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let fields = unwrap_tuple(&val);
+    assert_int(&fields[0], 2, &table);
+    assert_int(&fields[1], 3, &table);
+}
+
+#[test]
+fn t_partitioneithers() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_partitionEithers.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let fields = unwrap_tuple(&val);
+    assert_eq!(collect_text_list(&fields[0], &table), vec!["a", "b"]);
+    assert_eq!(collect_int_list(&fields[1], &table), vec![1, 2]);
+}
+
+#[test]
+fn t_rightslefts() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_rightsLefts.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let fields = unwrap_tuple(&val);
+    assert_eq!(collect_int_list(&fields[0], &table), vec![1, 2]);
+    assert_eq!(collect_text_list(&fields[1], &table), vec!["a", "b"]);
+}
+
+#[test]
+fn t_fromeither() {
+    static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/t_fromEither.cbor");
+    let val = eval_fixture(CBOR);
+    let table = table();
+    let fields = unwrap_tuple(&val);
+    assert_eq!(collect_text(&fields[0], &table), "d");
+    assert_int(&fields[1], 2, &table);
+}

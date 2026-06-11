@@ -1,6 +1,19 @@
 module Suite where
 
 import qualified Data.Text as T
+import Data.List (sortOn)
+import Data.Ord (Down(..))
+import Data.Tuple (swap)
+import Data.Either (partitionEithers, rights, lefts, fromLeft, fromRight)
+
+first :: (a -> c) -> (a, b) -> (c, b)
+first f (a, b) = (f a, b)
+
+second :: (b -> c) -> (a, b) -> (a, c)
+second f (a, b) = (a, f b)
+
+bimap :: (a -> c) -> (b -> d) -> (a, b) -> (c, d)
+bimap f g (a, b) = (f a, g b)
 
 -- ============================================================
 -- Int literals (5)
@@ -775,3 +788,34 @@ round_simple_up = round (3.7 :: Double)
 
 round_negative_half :: Int
 round_negative_half = round (-2.5 :: Double)
+
+-- ============================================================
+-- prelude-workhorses: tests
+-- ============================================================
+
+t_sortOn :: [(T.Text, Int)]
+t_sortOn = sortOn snd [(T.pack "x",3),(T.pack "y",1),(T.pack "z",2)]
+
+t_sortOnDown :: [(T.Text, Int)]
+t_sortOnDown = sortOn (Down . snd) [(T.pack "x",3),(T.pack "y",1),(T.pack "z",2)]
+
+t_swap :: (T.Text, Int)
+t_swap = swap (1::Int, T.pack "s")
+
+t_first :: (Int, T.Text)
+t_first = first (+1) (1::Int, T.pack "k")
+
+t_second :: (T.Text, Int)
+t_second = second T.length (T.pack "k", T.pack "abc")
+
+t_bimap :: (Int, Int)
+t_bimap = bimap (+1) T.length ((1::Int), T.pack "abc")
+
+t_partitionEithers :: ([T.Text], [Int])
+t_partitionEithers = partitionEithers [Left (T.pack "a"), Right (1::Int), Left (T.pack "b"), Right 2]
+
+t_rightsLefts :: ([Int], [T.Text])
+t_rightsLefts = let xs = [Left (T.pack "a"), Right (1::Int), Left (T.pack "b"), Right 2] in (rights xs, lefts xs)
+
+t_fromEither :: (T.Text, Int)
+t_fromEither = (fromLeft (T.pack "d") (Right (1::Int)), fromRight 0 (Right 2::Either T.Text Int))
