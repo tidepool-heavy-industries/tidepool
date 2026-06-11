@@ -1622,3 +1622,143 @@ fn pipeline_effect_worker() {
         Err(e) => println!("\n__EFFECT_ERR__{e}"),
     }
 }
+
+// ============================================================================
+// Coverage census. Recursively tally construct occurrences over many generated
+// programs so the findings doc carries REAL idiom counters (not estimates) and
+// can prove the join-point / recursion / shadow shapes are actually emitted.
+// #[ignore]d (prints to stdout; run by hand with --ignored --nocapture).
+// ============================================================================
+
+fn count_constructs(e: &HExpr, t: &mut std::collections::BTreeMap<&'static str, usize>) {
+    use HExpr::*;
+    let name: &'static str = match e {
+        IntLit(_) => "IntLit",
+        Arith(..) => "Arith",
+        Length(_) => "Length",
+        Sum(_) => "Sum",
+        Product(_) => "Product",
+        FoldlAdd(..) => "FoldlAdd",
+        NegateE(_) => "NegateE",
+        IfInt(..) => "IfInt",
+        WhereGo { with_sig: true, .. } => "WhereGo(sig)",
+        WhereGo { with_sig: false, .. } => "WhereGo(unsigned)",
+        CaseOfCase(..) => "CaseOfCase",
+        Guard { with_sig: true, .. } => "Guard(sig)",
+        Guard { with_sig: false, .. } => "Guard(unsigned)",
+        LetShadowInt { .. } => "LetShadowInt",
+        Cmp(..) => "Cmp",
+        EvenE(_) => "EvenE",
+        OddE(_) => "OddE",
+        AndE(..) => "AndE",
+        OrE(..) => "OrE",
+        NotE(_) => "NotE",
+        StrLit(_) => "StrLit",
+        Append(..) => "Append",
+        ShowInt(_) => "ShowInt",
+        ToUpper(_) => "ToUpper",
+        ToLower(_) => "ToLower",
+        Strip(_) => "Strip",
+        TReverse(_) => "TReverse",
+        Unwords(_) => "Unwords",
+        IfText(..) => "IfText",
+        ListIntLit(_) => "ListIntLit",
+        MapInt(..) => "MapInt",
+        FilterInt(..) => "FilterInt",
+        TakeI(..) => "TakeI",
+        DropI(..) => "DropI",
+        ReverseI(_) => "ReverseI",
+        ConcatMapI(..) => "ConcatMapI",
+        EnumFromTo(..) => "EnumFromTo",
+        TakeIterate(..) => "TakeIterate",
+        AppendI(..) => "AppendI",
+        IfListInt(..) => "IfListInt",
+        ListTextLit(_) => "ListTextLit",
+        MapShow(_) => "MapShow",
+        Words(_) => "Words",
+        MapToUpper(_) => "MapToUpper",
+        FilterPrefix(..) => "FilterPrefix",
+        TakeT(..) => "TakeT",
+        PairLit(..) => "PairLit",
+        Var(_) => "Var",
+    };
+    *t.entry(name).or_insert(0) += 1;
+    // Recurse into children.
+    match e {
+        Arith(_, a, b) | AndE(a, b) | OrE(a, b) | Cmp(_, a, b) | Append(a, b) | AppendI(a, b) => {
+            count_constructs(a, t);
+            count_constructs(b, t);
+        }
+        Length(a) | Sum(a) | Product(a) | FoldlAdd(_, a) | NegateE(a) | EvenE(a) | OddE(a)
+        | NotE(a) | ShowInt(a) | ToUpper(a) | ToLower(a) | Strip(a) | TReverse(a) | Unwords(a)
+        | MapInt(_, a) | FilterInt(_, a) | TakeI(_, a) | DropI(_, a) | ReverseI(a)
+        | ConcatMapI(_, a) | MapShow(a) | Words(a) | MapToUpper(a) | FilterPrefix(_, a)
+        | TakeT(_, a) => count_constructs(a, t),
+        IfInt(a, b, c) | IfText(a, b, c) | IfListInt(a, b, c) | CaseOfCase(a, b, c) => {
+            count_constructs(a, t);
+            count_constructs(b, t);
+            count_constructs(c, t);
+        }
+        Guard { arg, b1, b2, b3, .. } => {
+            count_constructs(arg, t);
+            count_constructs(b1, t);
+            count_constructs(b2, t);
+            count_constructs(b3, t);
+        }
+        LetShadowInt { e1, e2, e3, .. } => {
+            count_constructs(e1, t);
+            count_constructs(e2, t);
+            count_constructs(e3, t);
+        }
+        PairLit(a, b) => {
+            count_constructs(a, t);
+            count_constructs(b, t);
+        }
+        _ => {}
+    }
+}
+
+#[test]
+#[ignore = "coverage census; run by hand with --ignored --nocapture"]
+fn coverage_census() {
+    let depth: u32 = std::env::var("PIPELINE_DEPTH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let n: u64 = 5000;
+    let mut totals = std::collections::BTreeMap::new();
+    let mut result_ty = std::collections::BTreeMap::new();
+    let mut programs_with_joinshape = 0usize;
+    for i in 0..n {
+        let seed = (i.wrapping_add(1)).wrapping_mul(0x9E3779B97F4A7C15);
+        if depth > 0 {
+            std::env::set_var("PIPELINE_DEPTH", depth.to_string());
+        }
+        let (ty, body) = gen_program(seed);
+        *result_ty.entry(format!("{ty:?}")).or_insert(0usize) += 1;
+        let mut t = std::collections::BTreeMap::new();
+        count_constructs(&body, &mut t);
+        let has_join = t.keys().any(|k| {
+            k.starts_with("WhereGo") || *k == "CaseOfCase" || k.starts_with("Guard") || *k == "LetShadowInt"
+        });
+        if has_join {
+            programs_with_joinshape += 1;
+        }
+        for (k, v) in t {
+            *totals.entry(k).or_insert(0usize) += v;
+        }
+    }
+    println!("\n=== COVERAGE CENSUS ({n} programs) ===");
+    println!(
+        "programs containing a join-point/recursion/shadow shape: {programs_with_joinshape}/{n} ({:.1}%)",
+        100.0 * programs_with_joinshape as f64 / n as f64
+    );
+    println!("\nresult types:");
+    for (k, v) in &result_ty {
+        println!("  {k:<10} {v}");
+    }
+    println!("\nconstruct occurrences:");
+    for (k, v) in &totals {
+        println!("  {k:<20} {v}");
+    }
+}
