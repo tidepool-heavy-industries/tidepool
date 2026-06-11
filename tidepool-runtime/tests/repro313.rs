@@ -25,7 +25,15 @@ fn repro_313() {
     // NONCE busts the cache so each run is a FRESH compile — probing
     // whether the miscompile is deterministic for identical source.
     let nonce = std::env::var("NONCE").unwrap_or_default();
-    let code = format!("x <- t11\n-- nonce {nonce}\npure x");
+    // FORCE=1: force the Int result inside the user continuation (`x + 1`
+    // unboxes); if occ2 miscompiled to return Text, the trap moves from the
+    // downstream toJSON render into the user k — localizing the bad value.
+    let force = std::env::var("FORCE").is_ok();
+    let code = if force {
+        format!("x <- t11\n-- nonce {nonce}\npure (x + 1)")
+    } else {
+        format!("x <- t11\n-- nonce {nonce}\npure x")
+    };
     let src = tidepool_mcp::template_haskell(
         &pre,
         &stack,

@@ -112,6 +112,18 @@ fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
         .unwrap_or_else(|e| e.into_inner())
         .get(&key)
         .copied();
+    if std::env::var("TIDEPOOL_FP_DEBUG").is_ok() {
+        eprintln!(
+            "[FP] path={} key=({},{},{},{},{}) memo_hit={}",
+            path.display(),
+            key.1,
+            key.2,
+            key.3,
+            key.4,
+            key.5,
+            cached.is_some()
+        );
+    }
     let content_hash = match cached {
         Some(h) => h,
         None => {
@@ -139,6 +151,13 @@ fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
                 let bytes = fs::read(p).ok()?;
                 <[u8; 32]>::try_from(bytes.as_slice()).ok()
             });
+            if std::env::var("TIDEPOOL_FP_DEBUG").is_ok() {
+                eprintln!(
+                    "[FP] stat_tag={} sidecar_hit={}",
+                    stat_tag,
+                    from_disk.is_some()
+                );
+            }
             let h: [u8; 32] = match from_disk {
                 Some(h) => h,
                 None => {
@@ -428,12 +447,33 @@ mod tests {
 
         let k1 = cache_key("source", "target", &[]);
 
-        // Change mtime
+        // mtime-only change: the fingerprint is content-defined (blake3 of
+        // the bytes — nix normalizes all store mtimes to epoch+1, so mtime
+        // can't distinguish versions). Key must NOT change.
         let past = filetime::FileTime::from_unix_time(100, 0);
         filetime::set_file_mtime(&bin_path, past).unwrap();
 
         let k2 = cache_key("source", "target", &[]);
-        assert_ne!(k1, k2, "Cache key should change when binary mtime changes");
+        assert_eq!(
+            k1, k2,
+            "mtime-only change must not change the cache key (content-defined fingerprint)"
+        );
+
+        // Same-size content swap (F3a, the case (size, mtime) was blind to):
+        // ctime bumps on write, forcing a re-hash that sees the new content.
+        // Sleep first: kernel ctime is coarse-grained (tick granularity, ~ms);
+        // a swap within the same tick as the create gets an IDENTICAL ctime
+        // and the memo legitimately serves the old hash. Real binary swaps
+        // are never sub-tick; the test must not be either.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::write(&bin_path, b"#!/bin/SH\n").unwrap();
+        filetime::set_file_mtime(&bin_path, past).unwrap();
+
+        let k3 = cache_key("source", "target", &[]);
+        assert_ne!(
+            k1, k3,
+            "Cache key should change on a same-size, same-mtime content swap"
+        );
     }
 
     #[cfg(unix)]
