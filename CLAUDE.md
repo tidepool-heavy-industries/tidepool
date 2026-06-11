@@ -203,7 +203,7 @@ MCP users get `import Tidepool.Prelude hiding (error)` auto-imported. Additional
 
 Everything MCP users need in one import.
 
-> **Text, not String — the #1 usability trap.** The Prelude standardizes on `Text`. `show` returns `Text` (not `String`), and `pack` is polymorphic (identity on Text, `T.pack` on String), so `pack (show x)` works fine. `lines`/`words`/`unlines`/`unwords` all operate on `Text`. `error` takes `Text`. String literals are `Text` via `OverloadedStrings`. The underlying `String` type (`[Char]`) exists but is expensive under the JIT's eager evaluation. Stick to `Text` everywhere.
+> **Text, not String — the #1 usability trap.** The Prelude standardizes on `Text`. `show` returns `Text` (not `String`), and `pack` is polymorphic (identity on Text, `T.pack` on String), so `pack (show x)` works fine. `lines`/`words`/`unlines`/`unwords` all operate on `Text`. `error` takes `Text`. String literals are `Text` via `OverloadedStrings`. The underlying `String` type (`[Char]`) works fine (verified: 20K-char `reverse`/`++`/`map` chains are fast), but the Prelude API is Text-typed throughout — stick to `Text` to avoid type mismatches.
 
 - **Types**: Int, Double, Char, Bool, Text, String, Maybe, Either, Map, Set, Value
 - **Text ops**: pack/unpack, toUpper/toLower, strip, splitOn, replace, words/lines/unwords/unlines, isPrefixOf/isSuffixOf/isInfixOf, intercalate (Text→[Text]→Text), joinText, tReverse
@@ -251,13 +251,17 @@ Values returned via `pure x` are automatically rendered to JSON by the Rust runt
 
 To get named fields, return `Value` via `object ["name" .= x, "size" .= y]`.
 
-### Dangerous Patterns (silent crash → SIGILL/SIGSEGV)
+### Known Limits (verified 2026-06-11)
 
-The JIT runs a strict subset of Haskell. These patterns crash without useful error messages:
+The JIT covers most of the Haskell the Prelude surfaces, and failures are loud now — clean compile-time or yield errors, not silent SIGILL/SIGSEGV.
 
-- **`read`/`reads`**: Read typeclass crashes. Use `parseInt`/`parseDouble` from Prelude.
+- **`read`/`reads`**: unsupported — fails at compile time with "Unsupported FFI call: ghc-bignum:__gmpn_add_1" (the Read lexer accumulates digits as arbitrary-precision Integer → GMP). Use `parseInt`/`parseDouble` from Prelude.
+- **Non-tail recursion depth**: overflows between ~10K and ~20K frames, with a clean "stack overflow (likely infinite list or unbounded recursion)" error. Tail recursion is unbounded (TCO).
+- **#313 (open)**: a second `T.breakOn` on the `sdrop` remainder of a first `breakOn` hits a "case trap: tag mismatch" error. Single `breakOn` is fine.
 
-When you hit SIGILL or SIGSEGV, the error message will be opaque ("null pointer", "signal 4", etc.). Common root causes: missing external binding, constructor tag mismatch, or unsupported typeclass dictionary.
+Stale fears, verified gone: Integer defaulting in untyped local helpers (works), `sum`/`product`/`maximum`/`minimum`, `Floating` ops (`sqrt`/`sin`/`exp`/`log`), `round` (correct banker's rounding), `even`/`odd`, `nub` — all fine.
+
+If you do hit a raw SIGILL or SIGSEGV, it's a bug worth filing: common root causes are missing external binding, constructor tag mismatch, or unsupported typeclass dictionary.
 
 ### MCP Eval Patterns
 
