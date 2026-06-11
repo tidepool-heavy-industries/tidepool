@@ -4,7 +4,6 @@ module Suite where
 
 import Prelude
 import qualified Data.Text as T
-type Text = T.Text
 -- qq-suite: regen now needs `--include lib --target-module-only`
 -- (see CLAUDE.md / plans/qq-spike.md)
 import Tidepool.QQ (fmt, j)
@@ -13,6 +12,7 @@ import Tidepool.QQ (fmt, j)
 -- session cannot see (lens is not a boot package), so the facade kills
 -- --all-closed regen at compile time.
 import Tidepool.Aeson.Value (Value (..))
+type Text = T.Text
 
 -- ============================================================
 -- Int literals (5)

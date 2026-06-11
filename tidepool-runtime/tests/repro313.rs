@@ -48,8 +48,7 @@ fn repro_313_patch_class() {
     let pre = tidepool_mcp::build_preamble(&decls, true);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let nonce = std::env::var("NONCE").unwrap_or_default();
-    let code =
-        format!("-- nonce {nonce}\npatchFile \"f.txt\" \"old needle\" \"new needle\"");
+    let code = format!("-- nonce {nonce}\npatchFile \"f.txt\" \"old needle\" \"new needle\"");
     let src = tidepool_mcp::template_haskell(
         &pre,
         &stack,
