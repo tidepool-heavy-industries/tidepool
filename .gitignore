@@ -1,4 +1,6 @@
 .tidepool/*
+# API keys dropbox — must NEVER be allowlisted back in
+.tidepool/secrets/
 !.tidepool/lib/
 !.tidepool/PATTERNS.md
 target/

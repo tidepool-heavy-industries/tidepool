@@ -13,8 +13,6 @@ use tidepool_effect::error::EffectError;
 use tidepool_eval::value::Value;
 use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl, TidepoolMcpServer};
 
-mod openai;
-
 // === Tag 0: Console ===
 
 #[derive(FromCore)]
@@ -995,7 +993,7 @@ impl EffectHandler<CapturedOutput> for ExecHandler {
 
 // (GitHandler removed — use `run "git ..."` instead)
 
-// === Tag 8: Llm (LLM calls — genai by default, OpenAI when TIDEPOOL_LLM_PROVIDER=openai) ===
+// === Tag 8: Llm (LLM calls via genai — multi-provider, model-name routed) ===
 
 #[derive(FromCore)]
 enum LlmReq {
@@ -1005,69 +1003,68 @@ enum LlmReq {
     Structured(String, Value), // Value is the Schema ADT, decoded in handler
 }
 
-/// LLM backend selected at startup from TIDEPOOL_LLM_PROVIDER. The genai
-/// variant is the historical default and is byte-identical to prior behavior.
-#[derive(Clone)]
-enum LlmBackend {
-    Genai {
-        client: genai::Client,
-        model: String,
-        rt: tokio::runtime::Handle,
-    },
-    OpenAi(openai::OpenAiClient),
-}
+/// Default OpenAI model when TIDEPOOL_LLM_PROVIDER=openai (deprecated alias)
+/// is set without an OpenAI-shaped model name.
+const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
 
-#[cfg(test)]
-impl LlmBackend {
-    fn backend_kind(&self) -> &'static str {
-        match self {
-            LlmBackend::Genai { .. } => "genai",
-            LlmBackend::OpenAi(_) => "openai",
-        }
-    }
-}
-
+/// All LLM traffic goes through genai (the known-good multi-provider crate);
+/// the adapter is routed from the model name (gpt-* → OpenAI, claude-* →
+/// Anthropic, gemini-* → Gemini, unknown → Ollama; `ns::model` forces a
+/// namespace). API keys come from the standard env vars (OPENAI_API_KEY,
+/// ANTHROPIC_API_KEY, ...), which `load_secrets` can fill from
+/// `.tidepool/secrets/` at startup.
 #[derive(Clone)]
 struct LlmHandler {
-    backend: LlmBackend,
+    client: genai::Client,
+    model: String,
+    rt: tokio::runtime::Handle,
     call_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 const LLM_MAX_CALLS: u32 = 200;
 
 impl LlmHandler {
-    fn genai_backend(model: String) -> LlmBackend {
-        LlmBackend::Genai {
+    /// TIDEPOOL_LLM_PROVIDER=openai is a deprecated alias from before the
+    /// genai consolidation: coerce the model into OpenAI's namespace
+    /// (strip a legacy `openai:` prefix; keep a bare model name; replace a
+    /// foreign-provider name with the default OpenAI model). Without the
+    /// alias the model passes through untouched and genai routes by name.
+    fn effective_model(model: String) -> String {
+        let provider = std::env::var("TIDEPOOL_LLM_PROVIDER").unwrap_or_default();
+        if !provider.eq_ignore_ascii_case("openai") {
+            return model;
+        }
+        let coerced = if let Some(m) = model.strip_prefix("openai:") {
+            m.to_string()
+        } else if !model.is_empty() && !model.contains(':') {
+            model
+        } else {
+            DEFAULT_OPENAI_MODEL.to_string()
+        };
+        tracing::warn!(
+            "TIDEPOOL_LLM_PROVIDER=openai is deprecated; genai routes by model name \
+             (set TIDEPOOL_LLM_MODEL={} instead)",
+            coerced
+        );
+        coerced
+    }
+
+    fn new(model: String) -> Self {
+        Self {
             client: genai::Client::default(),
-            model,
+            model: Self::effective_model(model),
             rt: tokio::runtime::Handle::current(),
+            call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
-    /// Select the LLM backend from TIDEPOOL_LLM_PROVIDER (default: genai path).
-    /// If `openai` is requested but init fails (e.g. OPENAI_API_KEY unset), log
-    /// a warning and fall back to the default backend so the server still runs.
-    fn new(model: String) -> Self {
-        let provider = std::env::var("TIDEPOOL_LLM_PROVIDER").unwrap_or_default();
-        let backend = if provider.eq_ignore_ascii_case("openai") {
-            match openai::OpenAiClient::from_env(openai::resolve_model(&model)) {
-                Ok(c) => LlmBackend::OpenAi(c),
-                Err(e) => {
-                    tracing::warn!(
-                        "TIDEPOOL_LLM_PROVIDER=openai but OpenAI init failed ({}); \
-                         falling back to default LLM backend",
-                        e
-                    );
-                    Self::genai_backend(model)
-                }
-            }
-        } else {
-            Self::genai_backend(model)
-        };
-        Self {
-            backend,
-            call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
-        }
+    /// Does the configured model route to an OpenAI-family adapter?
+    /// (Decides whether the structured-output schema needs strictifying.)
+    fn targets_openai(&self) -> bool {
+        matches!(
+            genai::adapter::AdapterKind::from_model(&self.model),
+            Ok(genai::adapter::AdapterKind::OpenAI | genai::adapter::AdapterKind::OpenAIResp)
+        )
     }
 
     fn check_rate_limit(&self) -> Result<(), EffectError> {
@@ -1085,6 +1082,53 @@ impl LlmHandler {
     }
 }
 
+/// OpenAI strict structured outputs require EVERY property to appear in
+/// `required` (optionality is expressed as a null-union instead), and genai's
+/// OpenAI adapter hardcodes `strict: true` + `additionalProperties: false`.
+/// Our Haskell `schemaToValue` expresses optional (SOpt) fields by omitting
+/// them from `required`. Bridge the dialects: walk every object schema,
+/// wrap originally-optional properties in `{"anyOf": [orig, {"type":"null"}]}`,
+/// and list every property in `required`. The result is a schema OpenAI
+/// ENFORCES (an upgrade over the old hand-rolled strict:false steering).
+fn strictify(schema: &mut serde_json::Value) {
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+    match obj.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        "object" => {
+            let required: std::collections::HashSet<String> = obj
+                .get("required")
+                .and_then(|r| r.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut all_keys: Vec<serde_json::Value> = Vec::new();
+            if let Some(props) = obj.get_mut("properties").and_then(|p| p.as_object_mut()) {
+                for (k, v) in props.iter_mut() {
+                    strictify(v);
+                    if !required.contains(k.as_str()) {
+                        let orig = v.take();
+                        *v = serde_json::json!({"anyOf": [orig, {"type": "null"}]});
+                    }
+                    all_keys.push(serde_json::Value::String(k.clone()));
+                }
+            }
+            if obj.contains_key("properties") {
+                obj.insert("required".into(), serde_json::Value::Array(all_keys));
+            }
+        }
+        "array" => {
+            if let Some(items) = obj.get_mut("items") {
+                strictify(items);
+            }
+        }
+        _ => {}
+    }
+}
+
 impl DescribeEffect for LlmHandler {
     fn effect_decl() -> EffectDecl {
         tidepool_mcp::llm_decl()
@@ -1099,49 +1143,88 @@ impl EffectHandler<CapturedOutput> for LlmHandler {
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, EffectError> {
         self.check_rate_limit()?;
-        match &self.backend {
-            LlmBackend::Genai { client, model, rt } => match req {
-                LlmReq::Chat(prompt) => {
-                    let req = genai::chat::ChatRequest::from_user(prompt);
-                    let resp = rt
-                        .block_on(client.exec_chat(model, req, None))
-                        .map_err(|e| EffectError::Handler(format!("LLM call failed: {}", e)))?;
-                    let text = resp.first_text().unwrap_or("").to_string();
-                    cx.respond(text)
+        match req {
+            LlmReq::Chat(prompt) => {
+                let req = genai::chat::ChatRequest::from_user(prompt);
+                let resp = self
+                    .rt
+                    .block_on(self.client.exec_chat(&self.model, req, None))
+                    .map_err(|e| EffectError::Handler(format!("LLM call failed: {}", e)))?;
+                let text = resp.first_text().unwrap_or("").to_string();
+                cx.respond(text)
+            }
+            LlmReq::Structured(prompt, schema_val) => {
+                let mut schema_json = tidepool_runtime::value_to_json(&schema_val, cx.table(), 0);
+                if self.targets_openai() {
+                    strictify(&mut schema_json);
                 }
-                LlmReq::Structured(prompt, schema_val) => {
-                    let schema_json = tidepool_runtime::value_to_json(&schema_val, cx.table(), 0);
-                    let json_spec = genai::chat::JsonSpec::new("structured_output", schema_json);
-                    let opts = genai::chat::ChatOptions::default()
-                        .with_response_format(genai::chat::ChatResponseFormat::JsonSpec(json_spec));
-                    let req = genai::chat::ChatRequest::from_user(format!(
-                        "{}\n\nRespond with ONLY valid JSON matching the provided schema. No markdown, no explanation.",
-                        prompt
-                    ));
-                    let resp = rt
-                        .block_on(client.exec_chat(model, req, Some(&opts)))
-                        .map_err(|e| {
-                            EffectError::Handler(format!("LLM structured call failed: {}", e))
-                        })?;
-                    let text = resp.first_text().unwrap_or("null");
-                    let parsed: serde_json::Value =
-                        serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
-                    cx.respond(parsed)
-                }
-            },
-            LlmBackend::OpenAi(client) => match req {
-                LlmReq::Chat(prompt) => {
-                    let text = client.chat(&prompt)?;
-                    cx.respond(text)
-                }
-                LlmReq::Structured(prompt, schema_val) => {
-                    let schema_json = tidepool_runtime::value_to_json(&schema_val, cx.table(), 0);
-                    let parsed = client.structured(&prompt, schema_json)?;
-                    cx.respond(parsed)
-                }
-            },
+                let json_spec = genai::chat::JsonSpec::new("structured_output", schema_json);
+                let opts = genai::chat::ChatOptions::default()
+                    .with_response_format(genai::chat::ChatResponseFormat::JsonSpec(json_spec));
+                let req = genai::chat::ChatRequest::from_user(format!(
+                    "{}\n\nRespond with ONLY valid JSON matching the provided schema. No markdown, no explanation.",
+                    prompt
+                ));
+                let resp = self
+                    .rt
+                    .block_on(self.client.exec_chat(&self.model, req, Some(&opts)))
+                    .map_err(|e| {
+                        EffectError::Handler(format!("LLM structured call failed: {}", e))
+                    })?;
+                let text = resp.first_text().unwrap_or("null");
+                let parsed: serde_json::Value =
+                    serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
+                cx.respond(parsed)
+            }
         }
     }
+}
+
+/// Load API keys from a secrets directory into the environment. Each file is
+/// named for the env var it fills (e.g. `.tidepool/secrets/OPENAI_API_KEY`)
+/// and contains the bare key — drop a key in, restart the server, done.
+/// Only names ending in `_API_KEY` are honored (this is a key dropbox, not a
+/// general env injector), and a variable already set in the environment
+/// wins. Key VALUES are never logged.
+fn load_secrets_from(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return; // no secrets dir — nothing to do
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let valid_name = name.ends_with("_API_KEY")
+            && name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+        if !valid_name {
+            tracing::warn!(
+                "{}/{}: ignored (filename must be an env-var name ending in _API_KEY)",
+                dir.display(),
+                name
+            );
+            continue;
+        }
+        if std::env::var_os(&name).is_some_and(|v| !v.is_empty()) {
+            tracing::info!("{name} already set in environment; secrets file ignored");
+            continue;
+        }
+        match std::fs::read_to_string(entry.path()) {
+            Ok(contents) => {
+                let key = contents.trim();
+                if key.is_empty() {
+                    tracing::warn!("{}/{}: empty; ignored", dir.display(), name);
+                } else {
+                    std::env::set_var(&name, key);
+                    tracing::info!("loaded {name} from {}", dir.display());
+                }
+            }
+            Err(e) => tracing::warn!("{}/{}: unreadable: {e}", dir.display(), name),
+        }
+    }
+}
+
+fn load_secrets() {
+    load_secrets_from(std::path::Path::new(".tidepool/secrets"));
 }
 
 // === Tag 6: Meta (runtime introspection) ===
@@ -1460,7 +1543,11 @@ struct Args {
     #[arg(long)]
     debug: bool,
 
-    /// LLM model for the Llm effect (e.g. ollama:llama3.2, anthropic:claude-haiku-4-5-20251001)
+    /// LLM model for the Llm effect. genai routes the provider from the
+    /// name: gpt-4o-mini → OpenAI, claude-haiku-4-5 → Anthropic, gemini-*
+    /// → Gemini, unknown names → Ollama; `ns::model` forces a namespace.
+    /// API keys come from the standard env vars (OPENAI_API_KEY, ...) or
+    /// from `.tidepool/secrets/<ENV_VAR_NAME>` files.
     #[arg(long, env = "TIDEPOOL_LLM_MODEL", default_value = "ollama:llama3.2")]
     llm: String,
 }
@@ -1501,6 +1588,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_writer(std::io::stderr)
         .init();
+
+    // Fill missing *_API_KEY env vars from .tidepool/secrets/ (drop a key
+    // file in, restart, done). Must run before any handler reads the env.
+    load_secrets();
 
     let prelude_dir = ensure_prelude()?;
 
@@ -2629,24 +2720,192 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_llm_handler_backend_selection() {
-        // 1. Default (unset) -> genai
+    async fn test_llm_effective_model() {
+        // No provider alias -> model passes through untouched
         std::env::remove_var("TIDEPOOL_LLM_PROVIDER");
-        let handler = LlmHandler::new("model".to_string());
-        assert_eq!(handler.backend.backend_kind(), "genai");
+        assert_eq!(
+            LlmHandler::effective_model("ollama:llama3.2".into()),
+            "ollama:llama3.2"
+        );
+        assert_eq!(LlmHandler::effective_model("gpt-4o".into()), "gpt-4o");
 
-        // 2. OpenAI requested + key set -> openai
+        // Deprecated TIDEPOOL_LLM_PROVIDER=openai alias coerces the model
         std::env::set_var("TIDEPOOL_LLM_PROVIDER", "openai");
-        std::env::set_var("OPENAI_API_KEY", "sk-dummy");
-        let handler = LlmHandler::new("gpt-4o".to_string());
-        assert_eq!(handler.backend.backend_kind(), "openai");
-
-        // 3. OpenAI requested but NO key -> fallback to genai
-        std::env::remove_var("OPENAI_API_KEY");
-        let handler = LlmHandler::new("gpt-4o".to_string());
-        assert_eq!(handler.backend.backend_kind(), "genai");
-
-        // Cleanup
+        assert_eq!(
+            LlmHandler::effective_model("openai:gpt-4o".into()),
+            "gpt-4o"
+        );
+        assert_eq!(LlmHandler::effective_model("gpt-4o".into()), "gpt-4o");
+        assert_eq!(
+            LlmHandler::effective_model("ollama:llama3.2".into()),
+            DEFAULT_OPENAI_MODEL
+        );
+        assert_eq!(
+            LlmHandler::effective_model(String::new()),
+            DEFAULT_OPENAI_MODEL
+        );
         std::env::remove_var("TIDEPOOL_LLM_PROVIDER");
+    }
+
+    #[test]
+    fn test_strictify_optional_fields() {
+        // schemaToValue output for SObj [("a", SStr), ("b", SOpt SNum)]:
+        // "b" omitted from required = optional.
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "number"}
+            },
+            "required": ["a"]
+        });
+        strictify(&mut schema);
+        // every property is now required...
+        let req: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(req.contains(&"a") && req.contains(&"b"));
+        // ...required field untouched, optional field null-unioned
+        assert_eq!(
+            schema["properties"]["a"],
+            serde_json::json!({"type": "string"})
+        );
+        assert_eq!(
+            schema["properties"]["b"],
+            serde_json::json!({"anyOf": [{"type": "number"}, {"type": "null"}]})
+        );
+    }
+
+    #[test]
+    fn test_strictify_nested_and_arrays() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"opt": {"type": "string"}},
+                        "required": []
+                    }
+                }
+            },
+            "required": ["items"]
+        });
+        strictify(&mut schema);
+        // nested object inside array items also strictified
+        let inner = &schema["properties"]["items"]["items"];
+        assert_eq!(inner["required"], serde_json::json!(["opt"]));
+        assert_eq!(
+            inner["properties"]["opt"],
+            serde_json::json!({"anyOf": [{"type": "string"}, {"type": "null"}]})
+        );
+    }
+
+    #[test]
+    fn test_strictify_all_required_unchanged() {
+        // h_aug-style schema (everything required) passes through unchanged
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {"answer": {"type": "boolean"}},
+            "required": ["answer"]
+        });
+        let before = schema.clone();
+        strictify(&mut schema);
+        assert_eq!(schema, before);
+    }
+
+    #[test]
+    fn test_load_secrets_from() {
+        let dir =
+            std::env::temp_dir().join(format!("tidepool-secrets-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Valid key file, var unset -> loaded (trimmed)
+        std::env::remove_var("TIDEPOOL_TEST_DUMMY_API_KEY");
+        std::fs::write(dir.join("TIDEPOOL_TEST_DUMMY_API_KEY"), "sk-test-123\n").unwrap();
+        // Invalid names / non-key files -> ignored
+        std::fs::write(dir.join("notes.txt"), "not a key").unwrap();
+        std::fs::write(dir.join("lower_api_key"), "nope").unwrap();
+        // Env already set -> file does NOT override
+        std::env::set_var("TIDEPOOL_TEST_PRESET_API_KEY", "from-env");
+        std::fs::write(dir.join("TIDEPOOL_TEST_PRESET_API_KEY"), "from-file").unwrap();
+
+        load_secrets_from(&dir);
+
+        assert_eq!(
+            std::env::var("TIDEPOOL_TEST_DUMMY_API_KEY").unwrap(),
+            "sk-test-123"
+        );
+        assert_eq!(
+            std::env::var("TIDEPOOL_TEST_PRESET_API_KEY").unwrap(),
+            "from-env"
+        );
+        assert!(std::env::var("notes.txt").is_err());
+
+        std::env::remove_var("TIDEPOOL_TEST_DUMMY_API_KEY");
+        std::env::remove_var("TIDEPOOL_TEST_PRESET_API_KEY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Live smoke against the real OpenAI API — runs only when
+    /// OPENAI_API_KEY is set (e.g. after dropping a key into
+    /// .tidepool/secrets and exporting it). Exercises the strictified
+    /// JsonSpec path end to end:
+    /// `OPENAI_API_KEY=$(cat .tidepool/secrets/OPENAI_API_KEY) cargo test -p tidepool live_smoke_openai -- --nocapture`
+    #[tokio::test(flavor = "multi_thread")]
+    async fn live_smoke_openai() {
+        if std::env::var("OPENAI_API_KEY")
+            .map(|k| k.trim().is_empty())
+            .unwrap_or(true)
+        {
+            eprintln!("skipping live_smoke_openai: OPENAI_API_KEY not set");
+            return;
+        }
+        let client = genai::Client::default();
+        let model = "gpt-4o-mini";
+
+        // chat
+        let resp = client
+            .exec_chat(
+                model,
+                genai::chat::ChatRequest::from_user("Reply with the single word: pong"),
+                None,
+            )
+            .await
+            .expect("chat");
+        assert!(!resp.first_text().unwrap_or("").is_empty());
+
+        // structured with an SOpt-shaped (optional-field) schema — the
+        // exact case genai's hardcoded strict:true would reject unshimmed
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "n": {"type": "number"},
+                "note": {"type": "string"}
+            },
+            "required": ["n"]
+        });
+        strictify(&mut schema);
+        let spec = genai::chat::JsonSpec::new("structured_output", schema);
+        let opts = genai::chat::ChatOptions::default()
+            .with_response_format(genai::chat::ChatResponseFormat::JsonSpec(spec));
+        let resp = client
+            .exec_chat(
+                model,
+                genai::chat::ChatRequest::from_user(
+                    "Return JSON with field n set to 7. Omit or null the note field.\n\n\
+                     Respond with ONLY valid JSON matching the provided schema.",
+                ),
+                Some(&opts),
+            )
+            .await
+            .expect("structured");
+        let parsed: serde_json::Value =
+            serde_json::from_str(resp.first_text().unwrap_or("null")).unwrap();
+        assert_eq!(parsed["n"], serde_json::json!(7));
     }
 }
