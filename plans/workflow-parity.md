@@ -53,6 +53,14 @@ big LLM is a coroutine peer, not a fire-and-forget spawner.
 
 ## Roadmap, by leverage
 
+> **STEER (user, 2026-06-11 evening): batch-judgment era (items 1, 2, 4) is
+> CUT for now.** Priority order is: (a) make *writing good Haskell*
+> frictionless — gotcha elimination, diagnostics quality; the QQ fmt/json
+> branch feeds this, so spec follow-ons after it merges — and (b)
+> consolidation / code quality (plans/README.md queue: doc-pass,
+> error-consolidation, mcp-hardening; post-#313 forensics cleanup).
+> Items below kept for the record; revisit after the friction+quality pass.
+
 ### 1. `LlmBatch` — parallel judgment fan-out (the big rock)
 New Llm op: `LlmBatch :: [(Text, Value)] -> Llm [Value]` (prompts+schemas →
 results). Handler does `join_all` on the tokio handle — the eval thread
