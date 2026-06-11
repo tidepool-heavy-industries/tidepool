@@ -67,6 +67,7 @@ import GHC.Driver.Env (HscEnv)
 import Tidepool.Resolve (resolveExternals, UnresolvedVar(..))
 import qualified System.Environment
 import qualified Data.List
+import qualified Data.Maybe
 import qualified Numeric
 import qualified Tidepool.GhcPipeline
 
@@ -405,8 +406,11 @@ translateModuleClosed hscEnv allBinds targetName = do
           grouped = Map.fromListWith (++)
             [ (varId b, [(b, top)]) | (b, top) <- sites ]
           collisions = Map.filter (\xs -> length xs > 1) grouped
-          describe (b, top) =
-            (if top then "TOP " else "nested ")
+          describe (b, mtop) =
+            (case mtop of
+               Nothing -> "TOP "
+               Just t  -> "in " ++ occNameString (nameOccName (varName t))
+                          ++ "_" ++ showPprUnsafe (varUnique t) ++ ": ")
             ++ occNameString (nameOccName (varName b))
             ++ "_" ++ showPprUnsafe (varUnique b)
             ++ (case nameModule_maybe (varName b) of
@@ -419,6 +423,24 @@ translateModuleClosed hscEnv allBinds targetName = do
             (Map.toList collisions)
       hPutStrLn stderr ("[VARID AUDIT] " ++ show (length sites)
         ++ " binding sites, " ++ show (Map.size collisions) ++ " collisions")
+      -- TIDEPOOL_VARID_AUDIT=<hex>,<hex>,...: additionally resolve specific
+      -- VarIds (e.g. lam_binder values from TIDEPOOL_TRACE=calls) to names.
+      case auditEnv of
+        Just spec | spec /= "1" -> do
+          let parseHex h = case Numeric.readHex (dropWhile (== 'x') (dropWhile (== '0') h)) of
+                [(n, "")] -> Just (n :: Word64)
+                _         -> Nothing
+              wanted = Data.Maybe.mapMaybe parseHex (splitOnComma spec)
+              splitOnComma s = case break (== ',') s of
+                (a, ',':rest) -> a : splitOnComma rest
+                (a, _)        -> [a]
+          mapM_ (\vid -> hPutStrLn stderr
+                   ("[VARID NAME] 0x" ++ Numeric.showHex vid "" ++ " = "
+                    ++ maybe "<not a binding site>"
+                             (Data.List.intercalate " | " . map describe)
+                             (Map.lookup vid grouped)))
+                wanted
+        _ -> pure ()
     Nothing -> pure ()
   let unresolvedIds = Set.fromList (map uvKey unresolved)
       (nodes, usedDCs) = translateModule closedBinds targetName unresolvedIds
@@ -547,12 +569,13 @@ uniquifyDuplicateBinders binds = do
           (env'', bs') <- goBs env' bs
           Alt c bs' <$> goE env'' rhs
 
--- | All binding sites (binder, isTopLevel) in a CoreBind, including nested
--- Lam/Let/Case binders. Used by the TIDEPOOL_VARID_AUDIT collision check.
-bindingSites :: CoreBind -> [(Var, Bool)]
-bindingSites (NonRec b rhs) = (b, True) : map (\v -> (v, False)) (nestedBinders rhs)
+-- | All binding sites (binder, enclosing top-level binder) in a CoreBind,
+-- including nested Lam/Let/Case binders (Nothing = the site IS top-level).
+-- Used by the TIDEPOOL_VARID_AUDIT collision check / name resolver.
+bindingSites :: CoreBind -> [(Var, Maybe Var)]
+bindingSites (NonRec b rhs) = (b, Nothing) : map (\v -> (v, Just b)) (nestedBinders rhs)
 bindingSites (Rec ps) =
-  concatMap (\(b, rhs) -> (b, True) : map (\v -> (v, False)) (nestedBinders rhs)) ps
+  concatMap (\(b, rhs) -> (b, Nothing) : map (\v -> (v, Just b)) (nestedBinders rhs)) ps
 
 nestedBinders :: CoreExpr -> [Var]
 nestedBinders = go
