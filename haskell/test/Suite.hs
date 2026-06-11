@@ -6,6 +6,7 @@ import qualified Data.Text as T
 -- qq-suite: regen now needs `--include lib --target-module-only`
 -- (see CLAUDE.md / plans/qq-spike.md)
 import Tidepool.QQ (fmt, j)
+import Tidepool.Aeson (Value (..))
 
 -- ============================================================
 -- Int literals (5)
