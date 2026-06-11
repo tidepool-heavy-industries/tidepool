@@ -13,12 +13,13 @@
 --     correcting a stale "lives to teardown" belief — 4 probes.
 --   * continuation lifetime: pressure eviction oldest-first, NO time
 --     expiry (lib.rs:1412) — 4 probes.
---   * resume is one-shot: conts.remove consumes the entry
---     (lib.rs:1921); the response String crosses the boundary via the
---     session channel (lib.rs:1935) — so a continuation dies by
---     eviction OR by its own resume; no replay. The response is
---     JSON-parsed with String fallback (lib.rs:1457) before
---     re-entering the JIT: a JSON-shaped reply arrives STRUCTURED.
+--   * resume is one-shot on SUCCESS: a continuation dies by eviction,
+--     abort, or a VALID resume. Since typed suspensions (2026-06-11):
+--     schema'd asks (askQ/askWith) are validated server-side BEFORE
+--     consumption — an invalid reply returns violations and the same
+--     continuation_id retries; the canonical validated JSON (not the
+--     raw text) is what re-enters the JIT. Raw text is accepted for
+--     string/enum schemas; abort is a dedicated tool.
 --   * the 30s timeout never kills the eval thread: Err(_elapsed)
 --     orphans it to a reaper (2s grace + join, lib.rs:1719) with
 --     orphaned_threads accounting; eval() refuses admission at
@@ -191,3 +192,13 @@ seekWith vocab goal fuel = loopM round (fuel, [])
 -- | The standard instance: grep (default) + view + def + ls.
 seek :: Text -> Int -> M Text
 seek = seekWith [grepVerb, viewVerb, defVerb, lsVerb]
+
+-- | Typed conclude-round verdict (v5): Q lives in Tidepool.Effects
+-- now, so lib modules can define schema'd verbs. The conclude round
+-- can ask for a structured verdict instead of prose.
+concludeQ :: Q (Text, Double)
+concludeQ = (,) <$> txt "answer" <*> num "confidence"
+
+-- | Ask the caller for a typed verdict (server-validated reply).
+conclude :: Text -> M (Text, Double)
+conclude = askQ concludeQ
