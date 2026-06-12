@@ -70,9 +70,15 @@ no-match" class to compile errors; CHEAPEST REAL WIN), `[uri|]`, `[glob|]`,
 
 ## Orchestrators beyond patch
 
-- `[prompt|]` — unify fmt interpolation with Q combinators: schema declared
-  inside the prompt text, desugars to applicative `Q` composition + one Haiku
-  call. Fixes the schema/prompt-text separation. Needs design love; high upside.
+- ~~`[prompt|]` unified prompt+schema literal~~ — DEMOTED (2026-06-12 design
+  discussion): once rendering is corrected to "prose → prompt channel, holes →
+  schema channel" (no in-prompt field markers — platforms take schemas natively),
+  the unified QQ reduces to [fmt|] (shipped) + the existing combinators + tuple
+  sugar. Not worth a wave slot. The surviving residue: a SCHEMA literal for deep
+  extractions where combinators get clumsy — `[ts|{...}|]` TypeScript-interface
+  syntax (the most-trained schema dialect) producing Schema + parser for
+  `obj … ?? prompt`. DEMAND-GATED: build only if dogfooding shows nested-obj
+  extraction friction.
 - Make-style recipe QQ over `run` + fsMetadata (Shake precedent) — e.g. the
   extract-rebuild→install→cache-clear dance as a checked recipe. Cute, not core.
 - `[sql|]` — parked until a DB effect exists (human: "later, when we have/want db").
