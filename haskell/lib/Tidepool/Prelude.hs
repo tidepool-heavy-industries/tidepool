@@ -263,9 +263,10 @@ isInfixOf = T.isInfixOf
 
 -- Delegates to T.words. HISTORY (2026-06-11): was a "pure reimplementation"
 -- round-tripping through [Char]; probe-verified T.words compiles and runs
--- cleanly under today's JIT in both saturated AND higher-order position
--- (unlike T.takeWhile/T.dropWhile — see takeWhileT below), so the String
--- detour only cost performance. Same retirement as splitOn (3fb10e5).
+-- cleanly under today's JIT in both saturated AND higher-order position, so the
+-- String detour only cost performance. Same retirement as splitOn (3fb10e5).
+-- (Contrast takeWhileT/dropWhileT below: the analogous delegation to Data.Text
+-- was MEASURED BROKEN, so their String detour stays load-bearing.)
 words :: Text -> [Text]
 words = T.words
 {-# INLINE words #-}
@@ -422,11 +423,26 @@ tReverse = T.reverse
 {-# INLINE tReverse #-}
 
 -- | Text takeWhile: take the longest prefix of characters satisfying a predicate.
--- Pure reimplementation — LOAD-BEARING shadow (probe-verified 2026-06-11):
--- @T.takeWhile@ is correct when saturated but SILENTLY WRONG under partial
--- application — @map (T.takeWhile p) ts@ returns the inputs unmodified
--- (and @map (T.dropWhile p) ts@ returns empties). Wrong data, no crash.
--- Do NOT delegate this to T.takeWhile until the PAP path is fixed.
+-- Pure reimplementation — LOAD-BEARING shadow. Do NOT delegate to @T.takeWhile@.
+--
+-- HISTORY: this began as a workaround for gotcha-audit #14 (real @T.takeWhile@
+-- was silently wrong under partial application). That DIRECT bug is fixed (EPS
+-- unpoison, commit 9a827a3): @map (T.takeWhile p) ts@ used straight from a user
+-- module is now correct — pinned by @repro_takewhile_pap.rs@. The retirement plan
+-- (plans/takewhile-shadow-retirement.md) proposed replacing this body with a
+-- delegation @takeWhileT = T.takeWhile@ on the theory it was now redundant.
+--
+-- It is NOT redundant. Both the eta-reduced @takeWhileT = T.takeWhile@ and the
+-- eta-expanded @takeWhileT p t = T.takeWhile p t@ delegations were MEASURED
+-- BROKEN in the eval path on 2026-06-11: @repro_takewhilet_alias_pap.rs@ went
+-- 10/14 red, while this manual body goes 14/14 green through the identical
+-- harness (three-way control). The corruption fires whenever @T.takeWhile@ is
+-- reached through this cross-module Prelude wrapper with an operator-section
+-- predicate like @(/= '/')@ — even a fully saturated @takeWhileT (/= '/') t@
+-- returns the input unmodified — but NOT with a named predicate. The unpoison
+-- fixed @T.takeWhile@ used directly; it did NOT fix @T.takeWhile@ wrapped behind
+-- a Prelude binding. Until that distinct codegen bug is mechanism-fixed, this
+-- String-detour body is the only correct form. Guard: @repro_takewhilet_alias_pap.rs@.
 takeWhileT :: (Char -> Bool) -> Text -> Text
 takeWhileT p t = T.pack (go (T.unpack t))
   where
@@ -437,8 +453,9 @@ takeWhileT p t = T.pack (go (T.unpack t))
 {-# INLINE takeWhileT #-}
 
 -- | Text dropWhile: drop the longest prefix of characters satisfying a predicate.
--- Pure reimplementation — LOAD-BEARING shadow; see takeWhileT above
--- (T.dropWhile is silently wrong under partial application).
+-- Pure reimplementation — LOAD-BEARING shadow; see @takeWhileT@ above. Delegation
+-- to @T.dropWhile@ was measured broken (2026-06-11, @repro_takewhilet_alias_pap.rs@);
+-- do NOT replace this body. Keep the manual String-detour recursion.
 dropWhileT :: (Char -> Bool) -> Text -> Text
 dropWhileT p t = T.pack (go (T.unpack t))
   where
