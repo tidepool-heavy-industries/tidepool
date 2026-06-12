@@ -1241,7 +1241,7 @@ pub fn template_haskell(
     if !imports.is_empty() {
         let insert_point = preamble.find("default (Int").unwrap_or(preamble.len());
         out.push_str(&preamble[..insert_point]);
-        for imp in imports.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+        for imp in imports.lines().map(str::trim).filter(|l| !l.is_empty()) {
             out.push_str(&format!("import {}\n", imp));
         }
         out.push_str(&preamble[insert_point..]);
@@ -1362,12 +1362,10 @@ fn format_error_with_source(title: &str, error: &str, source: &str) -> String {
     // Echoing the budget plumbing below teaches callers the wrong dialect.
     let user_section = source
         .find("-- [user]\n")
-        .map(|pos| &source[pos + "-- [user]\n".len()..])
-        .unwrap_or(source);
+        .map_or(source, |pos| &source[pos + "-- [user]\n".len()..]);
     let user_section = user_section
         .find("\nresult ::")
-        .map(|pos| &user_section[..pos])
-        .unwrap_or(user_section)
+        .map_or(user_section, |pos| &user_section[..pos])
         .trim_end();
     format!(
         "## {}\n{}\n\n## User Code\n```haskell\n{}\n```",
@@ -1418,9 +1416,11 @@ fn rejected_import(import_str: &str) -> Option<&str> {
 /// Captured output from effect handlers (e.g., Console Print).
 ///
 /// Clone is cheap (Arc-backed). Thread-safe for use across spawn_blocking.
+/// `parking_lot::Mutex` (the file-wide choice) — no poisoning, so `.lock()`
+/// hands back the guard directly.
 #[derive(Clone, Default)]
 pub struct CapturedOutput {
-    lines: Arc<std::sync::Mutex<Vec<String>>>,
+    lines: Arc<Mutex<Vec<String>>>,
 }
 
 impl CapturedOutput {
@@ -1430,33 +1430,17 @@ impl CapturedOutput {
 
     /// Push a line of output.
     pub fn push(&self, line: String) {
-        self.lines
-            .lock()
-            .unwrap_or_else(|e| {
-                tracing::warn!("CapturedOutput mutex was poisoned, recovering");
-                e.into_inner()
-            })
-            .push(line);
+        self.lines.lock().push(line);
     }
 
     /// Drain all captured lines, returning them and clearing the buffer.
     pub fn drain(&self) -> Vec<String> {
-        let mut lines = self.lines.lock().unwrap_or_else(|e| {
-            tracing::warn!("CapturedOutput mutex was poisoned, recovering");
-            e.into_inner()
-        });
-        std::mem::take(&mut *lines)
+        std::mem::take(&mut *self.lines.lock())
     }
 
     /// Snapshot current captured lines without clearing the buffer.
     pub fn snapshot(&self) -> Vec<String> {
-        self.lines
-            .lock()
-            .unwrap_or_else(|e| {
-                tracing::warn!("CapturedOutput mutex was poisoned, recovering");
-                e.into_inner()
-            })
-            .clone()
+        self.lines.lock().clone()
     }
 }
 
@@ -1912,7 +1896,7 @@ impl TidepoolMcpServerImpl {
                                 }
                             }
                             self.continuations.lock().insert(
-                                cont_id.clone(),
+                                cont_id,
                                 EvalSession {
                                     response_tx,
                                     session_rx,
@@ -2028,7 +2012,7 @@ impl TidepoolMcpServerImpl {
                             }
                         }
                         self.continuations.lock().insert(
-                            cont_id.clone(),
+                            cont_id,
                             EvalSession {
                                 response_tx,
                                 session_rx,
@@ -2151,12 +2135,7 @@ impl TidepoolMcpServerImpl {
         }
 
         // Reject unsafe/IO imports before compilation
-        for imp in req
-            .imports
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
-        {
+        for imp in req.imports.lines().map(str::trim).filter(|l| !l.is_empty()) {
             if let Some(module) = rejected_import(imp) {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Blocked import: `{}` is not available in the Tidepool sandbox.",
@@ -2233,7 +2212,10 @@ impl TidepoolMcpServerImpl {
                 // the whole server process.
                 tidepool_codegen::signal_safety::install();
 
-                let include_paths: Vec<&Path> = include_refs.iter().map(|p| p.as_path()).collect();
+                let include_paths: Vec<&Path> = include_refs
+                    .iter()
+                    .map(std::path::PathBuf::as_path)
+                    .collect();
                 let mut ask_dispatcher = AskDispatcher {
                     inner: handlers,
                     ask_tag,
@@ -2374,7 +2356,7 @@ impl TidepoolMcpServerImpl {
                             }
                             let body = serde_json::json!({
                                 "validation_failed": true,
-                                "violations": violations.iter().map(|v| v.to_json()).collect::<Vec<_>>(),
+                                "violations": violations.iter().map(validate::Violation::to_json).collect::<Vec<_>>(),
                                 "schema": expected_schema,
                                 "continuation_id": req.continuation_id,
                                 "continuation_not_consumed": true,
@@ -2680,9 +2662,7 @@ where
     /// (reverse, splitAt, sort, etc.) whose GHC base library workers lack
     /// unfoldings in .hi files.
     pub fn with_prelude(mut self, fallback: PathBuf) -> Self {
-        let prelude_dir = std::env::var_os("TIDEPOOL_PRELUDE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or(fallback);
+        let prelude_dir = std::env::var_os("TIDEPOOL_PRELUDE_DIR").map_or(fallback, PathBuf::from);
         self.inner.include.push(prelude_dir);
 
         // Probe for user library directory
@@ -2714,7 +2694,7 @@ where
                 ));
                 // PATTERNS.md lives beside lib/, at .tidepool/PATTERNS.md.
                 let patterns = user_lib.parent().map(|p| p.join("PATTERNS.md"));
-                if patterns.as_deref().is_some_and(|p| p.exists()) {
+                if patterns.as_deref().is_some_and(std::path::Path::exists) {
                     self.inner.eval_tool_description.push_str(
                         "\nPattern catalog: read `.tidepool/PATTERNS.md` for composition idioms.\n",
                     );

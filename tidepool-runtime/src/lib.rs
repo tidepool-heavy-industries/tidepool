@@ -112,9 +112,8 @@ pub fn compile_haskell(
     // Derive filename from the module declaration so GHC's module name matches
     // the filename (GhcPipeline uses capitalize(takeBaseName(path)) as target).
     let temp_dir = TempDir::new()?;
-    let filename = extract_module_name(source)
-        .map(|m| format!("{}.hs", m))
-        .unwrap_or_else(|| "Input.hs".to_string());
+    let filename =
+        extract_module_name(source).map_or_else(|| "Input.hs".to_string(), |m| format!("{}.hs", m));
     let input_path = temp_dir.path().join(&filename);
     std::fs::write(&input_path, source)?;
 
