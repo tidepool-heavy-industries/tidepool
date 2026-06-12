@@ -256,12 +256,19 @@ translateBinds binds = concatMap translateBind binds
 -- All bindings become nested Let expressions wrapping a Var reference to the
 -- target binding. This eliminates cross-binding Var references since all
 -- definitions share one flat node array.
-translateModule :: [CoreBind] -> String -> Set.Set Word64 -> (Seq FlatNode, Map.Map Word64 DataCon)
+--
+-- Returns the emitted nodes, the DataCons used during translation, and the
+-- reachable binds ('neededBinds') that were actually compiled. The reachable
+-- subset is exactly what the emitted program references; callers feed it to
+-- the DataConTable meta walks so those harvest only constructors the program
+-- can run, never the full closed graph (quoter-internal / TH machinery binds
+-- that merely sit on the include path).
+translateModule :: [CoreBind] -> String -> Set.Set Word64 -> (Seq FlatNode, Map.Map Word64 DataCon, [CoreBind])
 translateModule allBinds targetName unresolvedIds =
   let targetId = findTargetId targetName allBinds
       neededBinds = reachableBinds allBinds targetId
       (_, finalState) = runState (wrapAllBinds neededBinds targetId) (TransState Seq.empty Map.empty Set.empty 0 unresolvedIds)
-  in (tsNodes finalState, tsUsedDCs finalState)
+  in (tsNodes finalState, tsUsedDCs finalState, neededBinds)
   where
     findTargetId name binds =
       case filter isTarget (concatMap bindersOf binds) of
@@ -376,8 +383,11 @@ translateModule allBinds targetName unresolvedIds =
 
 -- | Like translateModule, but first resolves cross-module references
 -- by inlining unfoldings from the GHC environment. Returns the
--- translated tree, used DataCons, and any variables that could not
--- be resolved (no unfolding available).
+-- translated tree, used DataCons, any variables that could not be
+-- resolved (no unfolding available), and the REACHABLE binds that were
+-- actually compiled (the target's transitive closure, NOT the full closed
+-- graph) — the meta walks consume this so the DataConTable only ever sees
+-- constructors the emitted program references.
 translateModuleClosed :: HscEnv -> [CoreBind] -> String -> IO (Seq FlatNode, Map.Map Word64 DataCon, [UnresolvedVar], [CoreBind])
 translateModuleClosed hscEnv allBinds targetName = do
   (closedBinds0, unresolved) <- resolveExternals hscEnv allBinds
@@ -447,13 +457,21 @@ translateModuleClosed hscEnv allBinds targetName = do
         _ -> pure ()
     Nothing -> pure ()
   let unresolvedIds = Set.fromList (map uvKey unresolved)
-      (nodes, usedDCs) = translateModule closedBinds targetName unresolvedIds
+      (nodes, usedDCs, reachBinds) = translateModule closedBinds targetName unresolvedIds
   let referencedIds = foldl' (\acc n -> case n of { NVar v -> Set.insert v acc; _ -> acc }) Set.empty nodes
       trulyUnresolved = filter (\uv -> uvKey uv `Set.member` referencedIds) unresolved
       -- Debug: find dangling NVar references (referenced but not bound by any Let/Lam/Case)
       boundIds = foldl' collectBound Set.empty nodes
       danglingIds = Set.filter (\v -> not (Set.member v boundIds) && (v `shiftR` 56) /= 0x45) referencedIds
-  return (nodes, usedDCs, trulyUnresolved, closedBinds)
+  -- Return the REACHABLE binds (what 'translateModule' actually compiled), not
+  -- the full closed graph. The meta walks (collectUsedDataCons /
+  -- collectTransitiveDCons) run over this, so they harvest only constructors
+  -- the emitted program references — quoter-internal Tidepool.QQ.* AST cons and
+  -- other compile-time-only binds on the include path are no longer collected.
+  -- (The TIDEPOOL_DUMP_CLOSED / TIDEPOOL_VARID_AUDIT diagnostics above keep
+  -- scanning the FULL closedBinds: they are forensics over the whole compiled
+  -- graph, independent of what reaches the table.)
+  return (nodes, usedDCs, trulyUnresolved, reachBinds)
   where
     collectBound :: Set.Set Word64 -> FlatNode -> Set.Set Word64
     collectBound acc (NLam b _) = Set.insert b acc

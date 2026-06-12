@@ -112,9 +112,9 @@ processFile args path = do
               , keepBinder b
               , let n = occNameString (nameOccName (idName b))
               , not ("$" `isPrefixOf` n)]
-        (allMetaMap, allClosedBinds) <- foldM (\(acc, closedAcc) name -> do
+        (allMetaMap, allReachBinds) <- foldM (\(acc, reachAcc) name -> do
           result <- try $ do
-            (nodes, usedDCs, unresolved, closedBinds) <- translateModuleClosed hscEnv binds name
+            (nodes, usedDCs, unresolved, reachBinds) <- translateModuleClosed hscEnv binds name
             if not (null unresolved) then do
               let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
               putStrLn $ "  SKIPPED (" ++ name ++ "): unresolved external(s): " ++ unwords names
@@ -127,20 +127,24 @@ processFile args path = do
               BS.writeFile outFile cbor
               putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
               let usedMeta = map dcToMeta (Map.elems usedDCs)
-              return (Just (Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- usedMeta], closedBinds))
+              return (Just (Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- usedMeta], reachBinds))
           case result of
             Left (e :: SomeException) -> do
               hPutStrLn stderr $ "  SKIPPED (" ++ name ++ "): " ++ show e
-              return (acc, closedAcc)
-            Right Nothing -> return (acc, closedAcc)
-            Right (Just (metaMap, closedBinds)) ->
-              return (acc `Map.union` metaMap, closedAcc ++ closedBinds)
+              return (acc, reachAcc)
+            Right Nothing -> return (acc, reachAcc)
+            Right (Just (metaMap, reachBinds)) ->
+              return (acc `Map.union` metaMap, reachAcc ++ reachBinds)
           ) (Map.empty, []) uniqueNames
 
-        -- Write merged metadata
+        -- Write merged metadata. The scan/transitive walks run over the union
+        -- of every target's REACHABLE binds (not the full closed graph), so
+        -- they harvest only constructors the emitted fixtures reference. The
+        -- meta therefore covers every fixture's needs and nothing else
+        -- (quoter-internal Tidepool.QQ.* AST cons and TH machinery vanish).
         let tyconMeta = collectDataCons tycons
-            scanMeta = collectUsedDataCons allClosedBinds
-            transitiveMeta = collectTransitiveDCons allClosedBinds
+            scanMeta = collectUsedDataCons allReachBinds
+            transitiveMeta = collectTransitiveDCons allReachBinds
             wiredInMeta = wiredInDataCons
             -- Highest priority first; mergeMetaPreserving keeps colliding
             -- (same-varId, different-qualified-name) entries distinct so the
@@ -156,7 +160,7 @@ processFile args path = do
 
       (Just targetName, False) -> do
         -- Whole-module mode: serialize all bindings as nested lets around the target
-        (nodes, usedDCs, unresolved, closedBinds) <- translateModuleClosed hscEnv binds targetName
+        (nodes, usedDCs, unresolved, reachBinds) <- translateModuleClosed hscEnv binds targetName
         if not (null unresolved) then do
           let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
           error $ "Unresolved external(s): " ++ unwords names
@@ -171,8 +175,8 @@ processFile args path = do
         -- Write metadata: merge TyCon-derived + translation-derived + raw-binding-scan + transitive + wired-in
         let tyconMeta = collectDataCons tycons
             usedMeta = map dcToMeta (Map.elems usedDCs)
-            scanMeta = collectUsedDataCons closedBinds
-            transitiveMeta = collectTransitiveDCons closedBinds
+            scanMeta = collectUsedDataCons reachBinds
+            transitiveMeta = collectTransitiveDCons reachBinds
             wiredInMeta = wiredInDataCons
             -- Highest priority first; mergeMetaPreserving keeps colliding
             -- (same-varId, different-qualified-name) entries distinct so the
