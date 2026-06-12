@@ -304,9 +304,13 @@ SIGSEGV. The short, true standing list:
 
 - **`read`/`reads`**: clean COMPILE error ("Unsupported FFI call: …gmpn…" with
   a GMP hint). Use `parseInt`/`parseDouble` from Prelude.
-- **`T.takeWhile`/`T.dropWhile` partially applied**: SILENTLY wrong results
-  (the one remaining silent failure). The Prelude shadows are load-bearing —
-  never use the `T.` versions point-free/partially applied.
+- ~~`T.takeWhile`/`T.dropWhile` partially applied~~: FIXED 2026-06-11 — was the
+  last silent-corruption class; the EPS unpoison (9a827a3) made GHC load
+  unfoldings, so the PAP lifts to a worker that inlines the real fused
+  `Data.Text` definition (Core verified). `map (T.takeWhile p) ts` and friends
+  are now correct; pinned by `tidepool-runtime/tests/repro_takewhile_pap.rs`. The
+  `takeWhileT`/`dropWhileT` shadows remain only for source compatibility
+  (retirement: `plans/takewhile-shadow-retirement.md`).
 - **`cycle`**: unresolved external (clean yield error, verified post-sentinel-fix);
   use manual recursion.
 - ~~Double `T.breakOn` in a cross-module fn~~ (#313 t11): FIXED (TailCtx
