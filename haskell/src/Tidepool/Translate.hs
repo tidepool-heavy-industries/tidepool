@@ -33,6 +33,7 @@ import GHC.Types.Literal
 import GHC.Types.Name (nameOccName, isExternalName, isSystemName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Unit.Module (moduleName, moduleNameString)
+import GHC.Unit.Types (moduleUnitId, unitIdString)
 import GHC.Utils.Fingerprint (fingerprintString, Fingerprint(..))
 import GHC.Core.TyCon
 import GHC.Core.Type (splitTyConApp_maybe, splitFunTy_maybe, isCoercionTy)
@@ -592,13 +593,44 @@ nestedBinders = go
     go _                         = []
     goAlt (Alt _ bs e)           = bs ++ go e
 
+-- | True when a unit id names the GHC compiler library itself — id of the form
+-- @ghc-<version>@ (e.g. @ghc-9.12.2-fb67@). @ghc-prim@, @ghc-bignum@,
+-- @ghc-internal@, @ghc-boot@ all have a word (not a digit) after @ghc-@, so
+-- they are NOT matched — those carry executable constructors (@I#@, @D#@,
+-- @Integer@, …) the JIT really runs.
+isGhcCompilerUnitId :: String -> Bool
+isGhcCompilerUnitId uid = case Data.List.stripPrefix "ghc-" uid of
+  Just (c : _) -> c >= '0' && c <= '9'
+  _            -> False
+
+-- | True when a Name is defined in the GHC compiler library.
+--
+-- Such entities (HsExpr, DynFlags, RdrName, …) are reachable only through
+-- compile-time-only TH machinery: the vendored @Tidepool.QQ.HsMeta.*@ hole
+-- parser imports the GHC API, and those binders enter the translated set even
+-- though the JIT never runs them. Their constructors must be kept OUT of the
+-- DataConTable: the whole @DynFlags@ type closure is thousands of cons, and at
+-- that volume a 64-bit varId collision evicts a real constructor — notably
+-- freer-simple's @Union@, which fails effect-machine setup for every QQ eval.
+isGhcCompilerName :: Name -> Bool
+isGhcCompilerName n = case nameModule_maybe n of
+  Just m  -> isGhcCompilerUnitId (unitIdString (moduleUnitId m))
+  Nothing -> False
+
+isGhcCompilerDC :: DataCon -> Bool
+isGhcCompilerDC = isGhcCompilerName . dataConName
+
+isGhcCompilerTyCon :: TyCon -> Bool
+isGhcCompilerTyCon = isGhcCompilerName . tyConName
+
 -- | Collect all DataCons encountered during translation of Core bindings.
 -- This includes constructors from imported packages (e.g. freer-simple's
 -- Val, E, Leaf, Node, Union) that aren't in the module's mg_tcs.
+-- GHC compiler-library constructors are excluded (see 'isGhcCompilerDC').
 collectUsedDataCons :: [CoreBind] -> [(Word64, Text, Int, Int, [Text], Text)]
 collectUsedDataCons binds =
   let allDCs = foldMap collectFromBind binds
-  in map dcToMeta (Map.elems allDCs)
+  in map dcToMeta (filter (not . isGhcCompilerDC) (Map.elems allDCs))
   where
     collectFromBind (NonRec _ rhs) =
       let (_, s) = runState (translate rhs) (TransState Seq.empty Map.empty Set.empty 0 Set.empty)
@@ -624,7 +656,8 @@ dcToMeta dc =
 collectTransitiveDCons :: [CoreBind] -> [(Word64, Text, Int, Int, [Text], Text)]
 collectTransitiveDCons binds =
   let binderTypes = [ idType b | b <- concatMap bindersOfBind binds ]
-      seedTyCons  = foldMap (nonDetEltsUniqSet . tyConsOfType) binderTypes
+      seedTyCons  = filter (not . isGhcCompilerTyCon)
+                      (foldMap (nonDetEltsUniqSet . tyConsOfType) binderTypes)
       allTyCons   = closeTyCons emptyUniqSet seedTyCons
   in  concatMap tyConToDCMeta (nonDetEltsUniqSet allTyCons)
   where
@@ -635,6 +668,10 @@ closeTyCons :: UniqSet TyCon -> [TyCon] -> UniqSet TyCon
 closeTyCons visited []     = visited
 closeTyCons visited (tc:rest)
   | tc `elementOfUniqSet` visited = closeTyCons visited rest
+  -- Never enter the GHC compiler library's type closure (e.g. DynFlags): it is
+  -- enormous and only reachable from compile-time-only TH binders. See
+  -- 'isGhcCompilerName'.
+  | isGhcCompilerTyCon tc         = closeTyCons visited rest
   | otherwise =
       let visited' = addOneToUniqSet visited tc
           newtypeChildren = case unwrapNewTyCon_maybe tc of
