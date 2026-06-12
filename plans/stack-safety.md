@@ -30,10 +30,28 @@ testable struct (`assert!(size_of::<Frame>() <= 64)`).
 Payoff of conversion there is cost-model visibility only; risk is dominated by
 #313-class bugs. stacker removes the cliff for ~5 lines and zero invariant risk.
 
-## Notes
+## Measured (sigsegv-hunt, 2026-06-12)
 
-- Quantified margins (frame sizes before/after the frame-diet fix, observed
-  depths) land in the sigsegv-hunt final report — fold them in here.
-- The frame-diet fix (#[inline(never)] wrapper-path split) restores the pre-fix
-  margin but guards an emergent property; stacker is what makes the cliff
-  structurally unreachable.
+Deterministic threshold method: spawn thread of size N, compile a fixed deep
+program (`toUpper (strip ("" <> "o6s\nc1m"))`), binary-search smallest N that
+compiles (4 KiB resolution):
+- baseline 1cdbd68: ~2033 KiB — already at the 2048 KiB libtest cliff
+  (the gate was green-by-entropy; proptest seeds are non-deterministic)
+- lit-fix HEAD: ~2045 KiB (+12 KiB); frame-slim prototype recovered only ~4
+- frame-slim was therefore REJECTED: cannot restore margin that never existed,
+  and would churn validated emit code for an immaterial gain
+
+Shipped instead (7c52329): proptest compiles route through a 64 MiB worker —
+the SAME mechanism production uses (tidepool-mcp/src/lib.rs:2165 = 256 MiB
+eval threads). All eval compilation must run on a large stack until the emit
+work below lands.
+
+## Sharpened direction
+
+emit_node's Let-spine is ALREADY trampolined; the native recursion that costs
+~2 MiB is CASE-ALT BODY emission (emit_node↔collapse_frame↔emit_case↔dispatch,
+depth ~50-99 × tens-of-KB debug frames). So the targeted fix is: trampoline
+alt-body emission onto the existing work stack (value_to_heap hylo precedent)
+— NOT a blanket conversion of the whole emit family. stacker::maybe_grow at
+the spine remains the cheap interim insurance if large-stack discipline ever
+slips.
