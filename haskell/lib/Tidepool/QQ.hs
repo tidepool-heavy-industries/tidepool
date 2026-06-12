@@ -3,6 +3,8 @@
 -- @[fmt|...|]@   — Text interpolation with @{antiquote}@ holes.
 -- @[j|...|]@     — JSON 'Tidepool.Aeson.Value.Value' literals (expression
 --                  position) and shape-matching (pattern position).
+-- @[patch|...|]@ — unified-diff 'Tidepool.Patch.Patch' literals (expression
+--                  position) and structural diff matching (pattern position).
 -- @[sg|...|]@\/@[uri|...|]@ — validated 'Data.Text.Text' literals (an ast-grep
 --                  pattern, an http(s) URI), checked at compile time.
 --
@@ -14,10 +16,12 @@
 module Tidepool.QQ
   ( fmt
   , j
+  , patch
   , sg
   , uri
   ) where
 
 import Tidepool.QQ.Fmt (fmt)
 import Tidepool.QQ.Json (j)
+import Tidepool.QQ.Patch (patch)
 import Tidepool.QQ.Validate (sg, uri)
