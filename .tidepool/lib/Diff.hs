@@ -14,6 +14,8 @@ module Diff
   , planDiff
   , applyDiff
   , rollback
+  , diffFiles
+  , genPatchTo
   , module Tidepool.Patch
   ) where
 
@@ -80,3 +82,38 @@ readTarget :: FilePatch -> M (Maybe Text)
 readTarget fp = do
   exists <- doesFileExist (fpPath fp)
   if exists then fmap Just (readFile (fpPath fp)) else pure Nothing
+
+-- | Diff two existing files (old → new) and return the rendered unified diff
+-- plus summary stats as DATA. Reads both paths; the patch is labelled with the
+-- OLD path (the side it applies onto), so applying the returned diff to @oldP@
+-- makes it match @newP@'s current content. Identical content reports
+-- @{"path":…,"changed":false}@.
+diffFiles :: Text -> Text -> M Value
+diffFiles oldP newP = do
+  oldC <- readFile oldP
+  newC <- readFile newP
+  case genPatch oldP oldC newC of
+    Left _   -> pure (object [ "path" .= oldP, "changed" .= False ])
+    Right fp -> pure (object
+      [ "path"    .= oldP
+      , "changed" .= True
+      , "patch"   .= renderPatch [fp]
+      , "stats"   .= object
+          [ "hunks"    .= length (fpHunks fp)
+          , "oldLines" .= sum (map hunkOldLen (fpHunks fp))
+          , "newLines" .= sum (map hunkNewLen (fpHunks fp)) ] ])
+
+-- | Read the current content of @path@ and produce the unified diff that turns
+-- it into @newContent@ — the \"I have the new content, give me the
+-- reviewable\/appliable diff\" verb. An absent file yields a @--- \/dev\/null@
+-- creation patch; identical content yields the empty 'Text' (nothing to apply).
+genPatchTo :: Text -> Text -> M Text
+genPatchTo path newContent = do
+  exists <- doesFileExist path
+  if exists
+    then do
+      old <- readFile path
+      case genPatch path old newContent of
+        Left _   -> pure ""
+        Right fp -> pure (renderPatch [fp])
+    else pure (renderPatch [creationPatch path newContent])

@@ -198,3 +198,172 @@ fn patch_plan_reports() {
         .join()
         .unwrap();
 }
+
+// genPatchTo reads the current file, diffs it to the new content (Myers), and
+// renders the unified diff. Chaining `>>= applyDiff` proves the generated diff
+// is well-formed and reproduces the new content through the Fs effect: write
+// old → genPatchTo new → applyDiff → file == new. The diff rides nothing; the
+// NEW content rides the `input` lane.
+const GENPATCHTO_F: &str =
+    "genPatchTo \"f.txt\" (case input of { String s -> s; _ -> error \"no input\" }) >>= applyDiff";
+const GENPATCHTO_NEW: &str =
+    "genPatchTo \"new.txt\" (case input of { String s -> s; _ -> error \"no input\" }) >>= applyDiff";
+// checkDiff is pure: parse the input diff and report what it is, as data.
+const CHECKDIFF: &str =
+    "pure (checkDiff (case input of { String s -> s; _ -> error \"no input\" }))";
+
+#[test]
+fn genpatchto_roundtrip_through_fs() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            // f.txt currently holds `old`; ask for a diff to `new` (a change plus
+            // an appended line), apply it, and confirm the file becomes `new`.
+            let old = "alpha\nbeta\ngamma";
+            let new = "alpha\nBETA\ngamma\ndelta";
+            let mut d = preload(&[("f.txt", old)]);
+            let json = run_eval(GENPATCHTO_F, new, &mut d);
+            assert_eq!(
+                json["applied"],
+                serde_json::json!(true),
+                "genPatchTo → applyDiff applies cleanly; got {json}"
+            );
+            assert_eq!(
+                d.files.get("f.txt").map(String::as_str),
+                Some(new),
+                "file now holds the new content"
+            );
+            assert_eq!(
+                d.writes, 1,
+                "exactly one write (applyDiff); genPatchTo only reads"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn genpatchto_creation_absent_file() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            // new.txt does not exist → genPatchTo emits a --- /dev/null creation
+            // patch; applyDiff creates the file. Trailing-newline content round-
+            // trips exactly (each new-side line is newline-terminated).
+            let content = "line1\nline2\n";
+            let mut d = FsDispatcher::default();
+            let json = run_eval(GENPATCHTO_NEW, content, &mut d);
+            assert_eq!(
+                json["applied"],
+                serde_json::json!(true),
+                "creation patch applies; got {json}"
+            );
+            assert_eq!(
+                d.files.get("new.txt").map(String::as_str),
+                Some("line1\nline2\n"),
+                "absent file created with the new content"
+            );
+            assert_eq!(d.writes, 1, "one write — the created file");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn difffiles_reports_patch_and_stats() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            // Two existing files: diffFiles labels the patch with (and makes it
+            // apply onto) the OLD path, and reports rendered text plus stats.
+            let mut d = preload(&[("a.txt", "x\ny\nz"), ("b.txt", "x\nY\nz")]);
+            let json = run_eval("diffFiles \"a.txt\" \"b.txt\"", "", &mut d);
+            assert_eq!(json["changed"], serde_json::json!(true), "got {json}");
+            assert_eq!(json["path"], serde_json::json!("a.txt"), "got {json}");
+            assert!(
+                json["patch"].as_str().map(|s| s.contains("-y") && s.contains("+Y"))
+                    == Some(true),
+                "rendered patch carries the change; got {json}"
+            );
+            assert_eq!(json["stats"]["hunks"], serde_json::json!(1), "got {json}");
+            assert_eq!(d.writes, 0, "diffFiles is read-only");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn difffiles_identical_reports_unchanged() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let mut d = preload(&[("a.txt", "same\nlines"), ("b.txt", "same\nlines")]);
+            let json = run_eval("diffFiles \"a.txt\" \"b.txt\"", "", &mut d);
+            assert_eq!(
+                json["changed"],
+                serde_json::json!(false),
+                "identical content → unchanged; got {json}"
+            );
+            assert_eq!(d.writes, 0, "diffFiles is read-only");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn checkdiff_valid_reports_structure() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let diff = "--- a/x.txt\n+++ b/x.txt\n@@ -1,1 +1,1 @@\n-a\n+A\n";
+            let mut d = FsDispatcher::default();
+            let json = run_eval(CHECKDIFF, diff, &mut d);
+            assert_eq!(
+                json["parses"],
+                serde_json::json!(true),
+                "a well-formed diff parses; got {json}"
+            );
+            assert_eq!(
+                json["files"][0]["path"],
+                serde_json::json!("x.txt"),
+                "file path surfaced; got {json}"
+            );
+            assert_eq!(
+                json["files"][0]["hunks"],
+                serde_json::json!(1),
+                "one hunk; got {json}"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn checkdiff_invalid_reports_parse_error() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            // The dogfood failure mode: an unparseable diff is indistinguishable
+            // from a pattern shape mismatch — checkDiff separates the two.
+            let diff = "this is not a diff at all";
+            let mut d = FsDispatcher::default();
+            let json = run_eval(CHECKDIFF, diff, &mut d);
+            assert_eq!(
+                json["parses"],
+                serde_json::json!(false),
+                "garbage does not parse; got {json}"
+            );
+            assert!(
+                json["error"].is_string(),
+                "a parse-error message is present; got {json}"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

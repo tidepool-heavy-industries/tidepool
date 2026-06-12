@@ -1088,3 +1088,53 @@ suite_bool!(qq_patch_parse_runtime, true);
 suite_bool!(qq_patch_pat_match, true);
 suite_fmt!(qq_patch_pat_bind, "config.txt:DEBUG");
 suite_bool!(qq_patch_pat_fallthrough, true);
+
+// =============================================================================
+// genPatch: generate unified diffs (Myers O(ND), Data.Map-backed). Apply- and
+// render-roundtrip, drift, boundary context, trailing newline, coalescing.
+// Runs on the interpreter here and on the JIT in the differential harness.
+// =============================================================================
+suite_bool!(gen_patch_roundtrip, true);
+suite_int!(gen_patch_drift, 3);
+suite_fmt!(gen_patch_start, "X\nb\nc\nd");
+suite_fmt!(gen_patch_eof, "a\nb\nc\nZ");
+suite_fmt!(gen_patch_trailnl, "a\nb\n");
+suite_int!(gen_patch_coalesce, 1);
+suite_bool!(gen_patch_nochange, true);
+suite_fmt!(gen_patch_creation, "hello\nworld\n");
+
+// render_parse pulls genPatch + renderPatch + parsePatch; two_hunks runs the
+// two-range hunk assembly. Their deeply-inlined closed Core overflows the
+// default 2MB test-thread stack on the tree-walker (the JIT has no such limit;
+// the differential harness covers them at 8MB), so eval them in a 64MB thread.
+#[test]
+fn gen_patch_render_parse() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            static CBOR: &[u8] =
+                include_bytes!("../../haskell/test/suite_cbor/gen_patch_render_parse.cbor");
+            let val = eval_fixture(CBOR);
+            let table = table();
+            assert_bool(&val, true, &table);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn gen_patch_two_hunks() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            static CBOR: &[u8] =
+                include_bytes!("../../haskell/test/suite_cbor/gen_patch_two_hunks.cbor");
+            let val = eval_fixture(CBOR);
+            let table = table();
+            assert_int(&val, 2, &table);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
