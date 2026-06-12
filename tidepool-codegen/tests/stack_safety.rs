@@ -144,6 +144,39 @@ fn build_deep_app_chain(depth: usize) -> CoreExpr {
     RecursiveTree { nodes }
 }
 
+/// Build a deeply case-nested expression:
+/// `case 0 of { _ -> case 0 of { _ -> ... Lit(42) } }`, `depth` cases deep.
+///
+/// Unlike value-position subtrees (handled by the heap-based `emit_subtree`
+/// hylomorphism), case-ALT bodies are emitted by re-entering `emit_node`
+/// natively (emit_node → emit_subtree → collapse_frame → emit_case → emit_node),
+/// growing the call stack ~one frame per case level. This is the case-nesting
+/// cliff from plans/stack-safety.md that `stacker::maybe_grow` at `emit_node`
+/// guards. The shared `Lit(0)` scrutinee keeps the IR small so Cranelift's own
+/// (IR-size-proportional) passes stay well within the test stack — isolating
+/// the emit-recursion depth.
+fn build_deep_case_chain(depth: usize) -> CoreExpr {
+    let mut nodes: Vec<CoreFrame<usize>> = Vec::new();
+    let scrut = nodes.len();
+    nodes.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let mut inner = nodes.len();
+    nodes.push(CoreFrame::Lit(Literal::LitInt(42)));
+    for i in 0..depth {
+        let case = nodes.len();
+        nodes.push(CoreFrame::Case {
+            scrutinee: scrut,
+            binder: VarId(1_000_000 + i as u64),
+            alts: vec![Alt {
+                con: AltCon::Default,
+                binders: vec![],
+                body: inner,
+            }],
+        });
+        inner = case;
+    }
+    RecursiveTree { nodes }
+}
+
 /// Build a deep chain of Con nodes: Con(tag, [Con(tag, [... Lit(42)])])
 /// Nested unary constructors.
 fn build_deep_con_chain(depth: usize) -> CoreExpr {
@@ -368,6 +401,33 @@ fn test_deep_list_small_stack() {
         .expect("thread panicked — stack overflow?");
 
     assert_eq!(result, 1);
+}
+
+/// Stress test: deep case nesting on a 1 MiB stack.
+///
+/// Case-alt bodies re-enter `emit_node` natively, so without the
+/// `stacker::maybe_grow` guard at `emit_node` this overflows (debug emit frames
+/// are ~tens of KiB, so ~250 levels far exceed 1 MiB). With the guard, emit
+/// transparently grows onto fresh 4 MiB segments and compiles. The IR is tiny
+/// (one shared scrutinee + `depth` Default cases), so Cranelift's own passes
+/// stay well within the stack — what's exercised here is the emit recursion.
+#[test]
+fn test_deep_case_nesting_small_stack() {
+    let depth = 250;
+    let tree = build_deep_case_chain(depth);
+
+    let result = std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(move || {
+            let r = compile_and_run(&tree);
+            unsafe { read_lit_int(r.result_ptr) }
+        })
+        .unwrap()
+        .join()
+        .expect("thread panicked — emit recursion overflowed the stack?");
+
+    // Every case takes its Default alt down to the innermost Lit(42).
+    assert_eq!(result, 42);
 }
 
 /// Stress test: 200 nested App on a 512KB stack.

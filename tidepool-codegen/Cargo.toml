@@ -24,6 +24,10 @@ tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
 thiserror = "1"
 recursion = "0.5.4"
 rustc-hash = "2.1.0"
+# Stack-growth insurance at the emit recursion spine (emit_node). Tiny, widely
+# vendored (rustc itself uses it). NEW external dep — sanctioned for the
+# stack-safety pass; flagged for human veto at merge.
+stacker = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
