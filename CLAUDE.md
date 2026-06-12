@@ -271,6 +271,7 @@ Everything MCP users need in one import.
 
 First-class questions: `Q a` bundles schema + parser + confidence threshold.
 - `pick cats ?? prompt` — classify. `yn ?? prompt` — judge. `obj schema ?? prompt` — extract.
+- `Schema` ADT for `obj`/`llmJson` (NOT a JSON Value): `SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema`. Nested extraction: `obj (SObj [("items", SArr (SObj [("title", SStr), ("sev", SEnum ["p0","p1","p2"])]))]) ?? prompt`.
 - `txt "field"`, `num "field"` — single-field extraction.
 - `bar 0.95 q` — raise confidence threshold.
 - Applicative: `(,) <$> pick cats <*> num "pri" ?? prompt` — one Haiku call, multiple extractions.
@@ -341,6 +342,18 @@ if shouldProceed answer
 ```
 
 **Census pattern**: One eval replaces N tool calls. `fsGlob` + `mapM fsMetadata` + filtering gives a codebase overview in a single round-trip.
+
+**Diff-on-the-input-lane pattern** (`[patch|]`/Diff verbs): in EVALS, multi-line
+`[patch|...|]` literals in `code` are corrupted by template indentation — diffs
+ride the `input` payload lane instead: `applyDiff d where d = case input of
+{ String s -> s; _ -> "" }` with the unified diff as the JSON string. `applyDiff`
+is all-or-nothing (plan-first; zero writes on any conflict) and reports
+conflicts/already-applied as DATA. Hand-written hunk headers must satisfy count
+arithmetic (`@@ -l,c +l,c @@` where c = ctx+del / ctx+ins line counts) or
+parsePatch rejects loudly. Pattern-position `[patch|]` matches require the
+INPUT to parse first — on no-match, check `parsePatch` for a `Left` before
+suspecting the pattern. Column-0 `[patch|]` literals work fine in helpers and
+.tidepool/lib source files.
 
 ### Structural Search (MCP)
 

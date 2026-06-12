@@ -103,9 +103,14 @@ patch hunks. "Speak in formats, match in formats."
 
 ## Sequencing
 
-1. (in flight) fmt Phase 1: Render class + ghc-hs-meta holes.
-2. PyF Phase 2 (A′ if sibling-alt GADT fix lands first, else B).
-3. Validator family — leaf-sized, independent, can go anytime.
-4. `[patch|]` v1: QQ + plan/apply/invert verbs + conflict-as-data. The joy project.
-5. `[table|]`, `[prompt|]` design spike.
+1. SHIPPED 2026-06-11: fmt Phase 1 (Render class + ghc-hs-meta holes).
+2. SHIPPED 2026-06-12: PyF Phase 2, Strategy B (format specs; :e/:g clean-error).
+3. SHIPPED 2026-06-12: validators [sg|]/[uri|] (glob dropped — Fs verb collision).
+4. SHIPPED 2026-06-12: [patch|] whole (expr+pattern) + Diff verbs, all-or-nothing apply.
+5. `[table|]` literal. ~~`[ts|]` schema literal~~ — GATE CLOSED 2026-06-12: dogfood
+   showed the Schema ADT (SObj/SArr/SEnum/...) is terse and sufficient for nested
+   extraction; the friction was discoverability, fixed by documenting the ADT in
+   CLAUDE.md. Real demand signals from dogfood instead: `genPatch old new` (Myers —
+   hand-writing hunk count arithmetic is error-prone) and a parse-vs-match
+   introspection story for pattern-position [patch|].
 6. Pattern-position microformat family as demand appears.
