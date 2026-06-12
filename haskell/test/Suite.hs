@@ -13,6 +13,7 @@ import Tidepool.Patch
   ( FilePatch (..), Hunk (..), HunkLine (..), HunkResult (..)
   , Conflict (..), ConflictKind (..)
   , parsePatch, renderPatch, invertPatch, applyFilePatch
+  , genPatch, creationPatch
   , hunkOldSide, hOldStart, hNewStart, hBody, hrDrift )
 -- render lives in lens-free Tidepool.Render (re-exported by Tidepool.Prelude);
 -- Suite.hs cannot import Tidepool.Prelude here (it pulls Control.Lens, which
@@ -1420,3 +1421,111 @@ qq_patch_pat_fallthrough = case diffText of
   where
     diffText = T.intercalate "\n"
       ["--- a/real.txt", "+++ b/real.txt", "@@ -1,1 +1,1 @@", "-x", "+y"]
+
+-- ============================================================
+-- genPatch: generate unified diffs (Myers O(ND) over lines, Data.Map-backed).
+-- These run on the interpreter here and on the JIT in the differential harness,
+-- proving the diff generator is JIT-safe. Inputs stay small (tiny edit
+-- distance → trivial Myers) and use T.intercalate "\n" (no multiline strings).
+-- ============================================================
+
+-- apply-roundtrip: genPatch old→new yields a diff that reproduces new exactly.
+gen_patch_roundtrip :: Bool
+gen_patch_roundtrip = case genPatch "f.txt" old new of
+  Right fp -> case applyFilePatch fp (Just old) of
+    Right (out, _) -> out == new
+    Left _         -> False
+  Left _ -> False
+  where
+    old = T.intercalate "\n" ["alpha", "beta", "gamma"]
+    new = T.intercalate "\n" ["alpha", "BETA", "gamma"]
+
+-- render-parse roundtrip: renderPatch then parsePatch returns the same patch.
+gen_patch_render_parse :: Bool
+gen_patch_render_parse = case genPatch "f.txt" old new of
+  Right fp -> parsePatch (renderPatch [fp]) == Right [fp]
+  Left _   -> False
+  where
+    old = T.intercalate "\n" ["a", "b", "c", "d"]
+    new = T.intercalate "\n" ["a", "X", "c", "Z"]
+
+-- drift tolerance: the generated diff applies to an old shifted down by three
+-- padding lines, locating the hunk by context and reporting drift 3.
+gen_patch_drift :: Int
+gen_patch_drift = case genPatch "f.txt" old new of
+  Right fp -> case applyFilePatch fp (Just shifted) of
+    Right (_, [hr]) -> hrDrift hr
+    _               -> -1
+  Left _ -> -1
+  where
+    old     = T.intercalate "\n" ["a", "b", "target", "x", "tail"]
+    new     = T.intercalate "\n" ["a", "b", "target", "y", "tail"]
+    shifted = T.intercalate "\n" ["p1", "p2", "p3", "a", "b", "target", "x", "tail"]
+
+-- change at file start: no leading context; apply reproduces new.
+gen_patch_start :: T.Text
+gen_patch_start = case genPatch "f.txt" old new of
+  Right fp -> case applyFilePatch fp (Just old) of
+    Right (out, _) -> out
+    Left _         -> "CONFLICT"
+  Left _ -> "LEFT"
+  where
+    old = T.intercalate "\n" ["a", "b", "c", "d"]
+    new = T.intercalate "\n" ["X", "b", "c", "d"]
+
+-- change at EOF: no trailing context; apply reproduces new.
+gen_patch_eof :: T.Text
+gen_patch_eof = case genPatch "f.txt" old new of
+  Right fp -> case applyFilePatch fp (Just old) of
+    Right (out, _) -> out
+    Left _         -> "CONFLICT"
+  Left _ -> "LEFT"
+  where
+    old = T.intercalate "\n" ["a", "b", "c", "d"]
+    new = T.intercalate "\n" ["a", "b", "c", "Z"]
+
+-- trailing-newline preservation: the phantom empty line is diffed like any
+-- other, so adding a trailing newline round-trips.
+gen_patch_trailnl :: T.Text
+gen_patch_trailnl = case genPatch "f.txt" old new of
+  Right fp -> case applyFilePatch fp (Just old) of
+    Right (out, _) -> out
+    Left _         -> "CONFLICT"
+  Left _ -> "LEFT"
+  where
+    old = "a\nb"
+    new = "a\nb\n"
+
+-- coalescing: two adjacent changes land in a single hunk.
+gen_patch_coalesce :: Int
+gen_patch_coalesce = case genPatch "f.txt" old new of
+  Right fp -> length (fpHunks fp)
+  Left _   -> -1
+  where
+    old = T.intercalate "\n" ["1", "2", "3", "4", "5", "6", "7", "8"]
+    new = T.intercalate "\n" ["1", "2", "C", "D", "5", "6", "7", "8"]
+
+-- far-apart changes (more than 2*context unchanged lines between) split into
+-- two hunks. The changes at line 1 and line 9 are seven unchanged lines apart
+-- (> 2*3), so their context windows do not touch.
+gen_patch_two_hunks :: Int
+gen_patch_two_hunks = case genPatch "f.txt" old new of
+  Right fp -> length (fpHunks fp)
+  Left _   -> -1
+  where
+    old = T.intercalate "\n" ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+    new = T.intercalate "\n" ["A", "2", "3", "4", "5", "6", "7", "8", "Z"]
+
+-- identical content yields Left (no empty patch).
+gen_patch_nochange :: Bool
+gen_patch_nochange = case genPatch "f.txt" same same of
+  Left _  -> True
+  Right _ -> False
+  where
+    same = T.intercalate "\n" ["a", "b", "c"]
+
+-- creationPatch applies against an absent file, newline-terminating each line.
+gen_patch_creation :: T.Text
+gen_patch_creation = case applyFilePatch (creationPatch "new.txt" "hello\nworld") Nothing of
+  Right (out, _) -> out
+  Left _         -> "CONFLICT"
