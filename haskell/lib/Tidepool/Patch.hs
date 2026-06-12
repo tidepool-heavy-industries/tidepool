@@ -36,6 +36,11 @@ module Tidepool.Patch
   , invertPatch
   , validatePatch
   , applyFilePatch
+    -- * Generate
+  , genPatch
+  , creationPatch
+    -- * Introspect
+  , checkDiff
   ) where
 
 import Prelude
@@ -44,7 +49,7 @@ import Data.List (isPrefixOf, stripPrefix)
 import Data.Text (Text)
 import qualified Data.Text as T
 
-import Tidepool.Aeson.Value (Pair, ToJSON (..), object, (.=))
+import Tidepool.Aeson.Value (Pair, ToJSON (..), Value, object, (.=))
 
 -- ---------------------------------------------------------------------------
 -- Types
@@ -637,3 +642,279 @@ sublistOffsets needle hay
 -- | The old-len-line window at the (1-based) hint position, clamped.
 windowAt :: Int -> Int -> [Text] -> [Text]
 windowAt hint oldLen origLines = take oldLen (drop (hint - 1) origLines)
+
+-- ---------------------------------------------------------------------------
+-- Generate  (genPatch :: produce a context-anchored FilePatch from old/new)
+--
+-- The pipeline is, end to end:
+--
+--   1. split both sides on '\n' in String space (the same 'splitLinesS' the
+--      parser uses, so the trailing-newline phantom is a real line and survives
+--      the round trip);
+--   2. trim the common prefix and suffix (cheap, and it bounds the Myers work);
+--   3. run a Myers O(ND) line diff on the changed middle (see 'myersDiff');
+--   4. reassemble the full edit script and group it into hunks with three lines
+--      of context, coalescing changes whose context windows touch ('buildHunks').
+--
+-- Everything runs in String space and packs to 'Text' only at the 'HunkLine'
+-- leaves, matching this module's empty-'Text' discipline.  The result is fed
+-- through 'validatePatch' so a successful 'genPatch' always round-trips through
+-- @parsePatch . renderPatch@ and applies cleanly back onto @old@.
+-- ---------------------------------------------------------------------------
+
+-- | One line-level edit produced by the diff (String space, internal).
+data Edit = EKeep String | EDel String | EIns String
+
+isKeep :: Edit -> Bool
+isKeep (EKeep _) = True
+isKeep _         = False
+
+-- | Generate a context-anchored 'FilePatch' that turns @old@ into @new@ for
+-- @path@.  Identical content yields @Left "genPatch: no changes …"@ (an empty
+-- patch would not survive 'validatePatch' anyway).  The hunks carry three lines
+-- of context (the @diff -u@ convention), with nearby changes coalesced and the
+-- @\@\@@ start hints correct by construction.  For an absent original file the
+-- verb layer calls 'creationPatch' instead.
+genPatch :: Text -> Text -> Text -> Either Text FilePatch
+genPatch path old new =
+  let oldS   = splitLinesS (T.unpack old)
+      newS   = splitLinesS (T.unpack new)
+      script = diffLines oldS newS
+  in if all isKeep script
+       then Left "genPatch: no changes (old and new content are identical)"
+       else
+         let fp = FilePatch path False (buildHunks script)
+         in case validatePatch [fp] of
+              Left e   -> Left ("genPatch: " <> e)
+              Right () -> Right fp
+
+-- | Build a @--- \/dev\/null@ creation 'FilePatch' from new content (used by
+-- the verb layer when the target file does not yet exist).  A trailing-newline
+-- phantom is dropped so 'applyFilePatch' (which newline-terminates every line
+-- of the new side) reproduces newline-terminated content faithfully; content
+-- without a trailing newline gains one, the conventional created-file shape.
+creationPatch :: Text -> Text -> FilePatch
+creationPatch path new =
+  let ls   = dropTrailingEmpty (splitLinesS (T.unpack new))
+      body = map (Ins . T.pack) ls
+  in FilePatch path True [Hunk 0 1 body]
+  where
+    dropTrailingEmpty xs = case reverse xs of
+      ("" : rs) -> reverse rs
+      _         -> xs
+
+-- ---------------------------------------------------------------------------
+-- Diff: common-prefix/suffix trim + Myers on the middle
+-- ---------------------------------------------------------------------------
+
+-- | A full line edit script over the two sides: the common prefix\/suffix as
+-- 'EKeep's, the changed middle as the Myers result.
+diffLines :: [String] -> [String] -> [Edit]
+diffLines a b =
+  let (pre, a1, b1) = commonPrefix a b
+      (a2, b2, suf) = commonSuffix a1 b1
+  in map EKeep pre ++ myersDiff a2 b2 ++ map EKeep suf
+
+-- | Split off the maximal common prefix: @(common, restA, restB)@.
+commonPrefix :: [String] -> [String] -> ([String], [String], [String])
+commonPrefix = go []
+  where
+    go acc (x : xs) (y : ys) | x == y = go (x : acc) xs ys
+    go acc xs ys = (reverse acc, xs, ys)
+
+-- | Split off the maximal common suffix: @(restA, restB, common)@ (computed by
+-- trimming the common prefix of the reversed inputs).
+commonSuffix :: [String] -> [String] -> ([String], [String], [String])
+commonSuffix a b =
+  let (sufR, aR, bR) = commonPrefix (reverse a) (reverse b)
+  in (reverse aR, reverse bR, reverse sufR)
+
+-- | Myers' O(ND) line diff (Eugene Myers, 1986): the forward greedy search with
+-- a recorded trace plus a backtrack.  Both loops are tail-recursive (the @d@ and
+-- @k@ sweeps thread an immutable @V@; the snake is a tail loop), so the JIT runs
+-- it without deep non-tail recursion.  Line content is compared in String space
+-- (empty lines are @[]@, never an empty 'Text').
+--
+-- @V@ (furthest-reaching @x@ per diagonal @k@) is a small association list keyed
+-- by @k@ rather than a balanced tree — keeping the JIT-loaded closure free of
+-- @Data.Map@'s tree machinery (much smaller closed Core, no balance error
+-- branches) at the cost of O(D) lookups.  Per-side line access is list indexing.
+--
+-- Complexity is O((N+M)·D) edits with O(D²) trace space, where D is the edit
+-- distance of the /trimmed middle/ — small for the localized edits evals
+-- produce (the prefix\/suffix trim collapses D to the changed region).
+myersDiff :: [String] -> [String] -> [Edit]
+myersDiff a b
+  | null a && null b = []
+  | null a           = map EIns b
+  | null b           = map EDel a
+  | otherwise =
+      let n = length a
+          m = length b
+          (d, trace) = searchD a b n m
+      in backtrack a b n m d trace
+
+-- | The furthest-reaching endpoint @x@ per diagonal @k@ (association list).
+type V = [(Int, Int)]
+
+getI :: Int -> V -> Int
+getI k v = case lookup k v of
+  Just x  -> x
+  Nothing -> 0
+
+setI :: Int -> Int -> V -> V
+setI k x v = (k, x) : filter (\p -> fst p /= k) v
+
+-- | List indexing with an empty-line fallback (only reached in range).
+strAt :: [String] -> Int -> String
+strAt xs i = case drop i xs of
+  (x : _) -> x
+  []      -> []
+
+-- | The signal a single @k@-sweep returns: either the diff reached @(N,M)@
+-- (done), or it produced the updated @V@ for the next depth.
+data KStep = KFound | KMore V
+
+-- | Outer @d@-loop: snapshot @V@ into the trace (newest-first), run the @k@-sweep
+-- at depth @d@, and either stop or recurse at @d+1@.  Returns the edit distance
+-- and the trace (head = the @V@ snapshot used at the deepest @d@).
+searchD :: [String] -> [String] -> Int -> Int -> (Int, [V])
+searchD a b n m = goD 0 [(1, 0)] []
+  where
+    goD d v traceAcc =
+      let trace' = v : traceAcc
+      in case goK a b n m d (negate d) v of
+           KFound   -> (d, trace')
+           KMore v' -> goD (d + 1) v' trace'
+
+-- | Inner @k@-sweep at depth @d@: @k@ runs @-d, -d+2, …, d@, threading the
+-- furthest-reaching @V@.  Neighbours @v[k±1]@ are read from the incoming (depth
+-- @d-1@) entries — never a value written this sweep — so a single accumulating
+-- @V@ is correct.
+goK :: [String] -> [String] -> Int -> Int -> Int -> Int -> V -> KStep
+goK a b n m d k v
+  | k > d = KMore v
+  | otherwise =
+      let down = (k == negate d) || (k /= d && getI (k - 1) v < getI (k + 1) v)
+          x0   = if down then getI (k + 1) v else getI (k - 1) v + 1
+          y0   = x0 - k
+          (x, y) = snake a b n m x0 y0
+          v'   = setI k x v
+      in if x >= n && y >= m
+           then KFound
+           else goK a b n m d (k + 2) v'
+
+-- | Extend a diagonal while the lines match (tail loop; String equality).
+snake :: [String] -> [String] -> Int -> Int -> Int -> Int -> (Int, Int)
+snake a b n m x y
+  | x < n && y < m && strAt a x == strAt b y = snake a b n m (x + 1) (y + 1)
+  | otherwise = (x, y)
+
+-- | Walk the trace from @(N,M)@ back to @(0,0)@, prepending edits (so the result
+-- is in forward order).  At each depth the move that reached the current @V@
+-- entry is recovered exactly as in the forward sweep; the diagonal run before it
+-- is emitted as 'EKeep's.
+backtrack :: [String] -> [String] -> Int -> Int -> Int -> [V] -> [Edit]
+backtrack a b n m dStart trace = goB dStart n m trace []
+  where
+    goB _ _ _ [] acc = acc
+    goB d x y (v : vs) acc =
+      let k     = x - y
+          down  = (k == negate d) || (k /= d && getI (k - 1) v < getI (k + 1) v)
+          prevK = if down then k + 1 else k - 1
+          prevX = getI prevK v
+          prevY = prevX - prevK
+          (x1, _, acc1) = walkDiag x y prevX prevY acc
+          acc2 = if d > 0
+                   then if x1 == prevX
+                          then EIns (strAt b prevY) : acc1
+                          else EDel (strAt a prevX) : acc1
+                   else acc1
+      in if d == 0 then acc2 else goB (d - 1) prevX prevY vs acc2
+    walkDiag x y px py acc
+      | x > px && y > py = walkDiag (x - 1) (y - 1) px py (EKeep (strAt a (x - 1)) : acc)
+      | otherwise        = (x, y, acc)
+
+-- ---------------------------------------------------------------------------
+-- Hunk assembly: group the edit script into context-anchored hunks
+-- ---------------------------------------------------------------------------
+
+-- | Number of context lines around each change (the @diff -u@ default).
+genContext :: Int
+genContext = 3
+
+-- | Group a full edit script into hunks: each change carries up to
+-- 'genContext' lines of surrounding context, and changes whose context windows
+-- touch are coalesced into one hunk (the standard rule: merge when separated by
+-- at most @2·context@ unchanged lines).  Windows are clamped at the file
+-- boundaries, so a change at the very start\/end has no leading\/trailing
+-- context.
+buildHunks :: [Edit] -> [Hunk]
+buildHunks edits =
+  let annotated = zip3 [0 ..] (positions edits) edits   -- (ix, (oldLn,newLn), edit)
+      total     = length edits
+      changed   = [ ix | (ix, _, e) <- annotated, not (isKeep e) ]
+      windows   = map (\ix -> (max 0 (ix - genContext), min (total - 1) (ix + genContext))) changed
+  in map (sliceHunk annotated) (mergeRanges windows)
+
+-- | The 1-based @(oldLine, newLine)@ each edit occupies on entry (a keep
+-- advances both sides, a deletion only the old side, an insertion only the new).
+positions :: [Edit] -> [(Int, Int)]
+positions = go 1 1
+  where
+    go _ _ []       = []
+    go o w (e : es) = (o, w) : go o' w' es
+      where
+        (o', w') = case e of
+          EKeep _ -> (o + 1, w + 1)
+          EDel _  -> (o + 1, w)
+          EIns _  -> (o, w + 1)
+
+-- | Merge sorted, possibly-touching index ranges (touching = a gap of at most
+-- one index, i.e. their context windows already overlap).
+mergeRanges :: [(Int, Int)] -> [(Int, Int)]
+mergeRanges []                = []
+mergeRanges ((lo, hi) : rest) = go lo hi rest
+  where
+    go l h [] = [(l, h)]
+    go l h ((lo2, hi2) : rs)
+      | lo2 <= h + 1 = go l (max h hi2) rs
+      | otherwise    = (l, h) : go lo2 hi2 rs
+
+-- | Cut one hunk out of the annotated script for an index range.  The header
+-- starts are the @(oldLine, newLine)@ of the first edit in the slice; the body
+-- is the slice rendered to 'HunkLine's (packing to 'Text' at the leaves).
+sliceHunk :: [(Int, (Int, Int), Edit)] -> (Int, Int) -> Hunk
+sliceHunk annotated (lo, hi) =
+  let slice          = [ (p, e) | (ix, p, e) <- annotated, ix >= lo, ix <= hi ]
+      (oStart, nStart) = case slice of
+        ((p, _) : _) -> p
+        []           -> (1, 1)   -- unreachable: ranges come from real indices
+      body = map (editToHunkLine . snd) slice
+  in Hunk oStart nStart body
+
+editToHunkLine :: Edit -> HunkLine
+editToHunkLine (EKeep s) = Ctx (T.pack s)
+editToHunkLine (EDel s)  = Del (T.pack s)
+editToHunkLine (EIns s)  = Ins (T.pack s)
+
+-- ---------------------------------------------------------------------------
+-- Introspect  (checkDiff :: parse-vs-match first responder)
+-- ---------------------------------------------------------------------------
+
+-- | Parse a diff and report what it is, as data — the first stop when a
+-- @[patch|…|]@ pattern silently fails to match: it separates \"the text does not
+-- parse\" from \"it parses but the pattern shape is wrong\".  On a parse error:
+-- @{"parses": false, "error": <message>}@.  On success:
+-- @{"parses": true, "files": [{"path","create","hunks","oldLines","newLines"}…]}@.
+checkDiff :: Text -> Value
+checkDiff t = case parsePatch t of
+  Left e    -> object [ "parses" .= False, "error" .= e ]
+  Right fps -> object [ "parses" .= True, "files" .= map fileInfo fps ]
+  where
+    fileInfo fp = object
+      [ "path"     .= fpPath fp
+      , "create"   .= fpCreate fp
+      , "hunks"    .= length (fpHunks fp)
+      , "oldLines" .= sum (map hunkOldLen (fpHunks fp))
+      , "newLines" .= sum (map hunkNewLen (fpHunks fp)) ]
