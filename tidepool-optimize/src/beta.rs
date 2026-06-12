@@ -29,53 +29,23 @@ impl Pass for BetaReduce {
 }
 
 fn try_beta_reduce(expr: &CoreExpr) -> Option<CoreExpr> {
-    // Start from root (last node)
-    try_beta_at(expr, expr.nodes.len() - 1)
+    crate::rewrite::find_redex(expr, try_beta_at)
 }
 
+/// Beta redex test for a single node: an `App` whose function is a manifest
+/// `Lam`. Non-redex nodes return `None`; the search driver handles descent.
 fn try_beta_at(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
-    match &expr.nodes[idx] {
-        CoreFrame::App { fun, arg } => {
-            // Check if fun is a Lam
-            let CoreFrame::Lam { binder, body } = &expr.nodes[*fun] else {
-                // Try to find redex in children
-                return try_beta_at(expr, *fun).or_else(|| try_beta_at(expr, *arg));
-            };
-            // Found a manifest beta redex!
-            let body_tree = expr.extract_subtree(*body);
-            let arg_tree = expr.extract_subtree(*arg);
-            let substituted = tidepool_repr::subst::subst(&body_tree, *binder, &arg_tree);
-            Some(replace_subtree(expr, idx, &substituted))
-        }
-        // For other nodes, try each child
-        other => match other {
-            CoreFrame::Var(_) | CoreFrame::Lit(_) => None,
-            CoreFrame::App { .. } => {
-                // App nodes are handled in the outer match — this arm should never fire.
-                None
-            }
-            CoreFrame::Lam { body, .. } => try_beta_at(expr, *body),
-            CoreFrame::LetNonRec { rhs, body, .. } => {
-                try_beta_at(expr, *rhs).or_else(|| try_beta_at(expr, *body))
-            }
-            CoreFrame::LetRec { bindings, body } => bindings
-                .iter()
-                .find_map(|(_, rhs)| try_beta_at(expr, *rhs))
-                .or_else(|| try_beta_at(expr, *body)),
-            CoreFrame::Case {
-                scrutinee, alts, ..
-            } => try_beta_at(expr, *scrutinee)
-                .or_else(|| alts.iter().find_map(|alt| try_beta_at(expr, alt.body))),
-            CoreFrame::Con { fields, .. } => {
-                fields.iter().find_map(|field| try_beta_at(expr, *field))
-            }
-            CoreFrame::Join { rhs, body, .. } => {
-                try_beta_at(expr, *rhs).or_else(|| try_beta_at(expr, *body))
-            }
-            CoreFrame::Jump { args, .. } => args.iter().find_map(|arg| try_beta_at(expr, *arg)),
-            CoreFrame::PrimOp { args, .. } => args.iter().find_map(|arg| try_beta_at(expr, *arg)),
-        },
-    }
+    let CoreFrame::App { fun, arg } = &expr.nodes[idx] else {
+        return None;
+    };
+    let CoreFrame::Lam { binder, body } = &expr.nodes[*fun] else {
+        return None;
+    };
+    // Found a manifest beta redex!
+    let body_tree = expr.extract_subtree(*body);
+    let arg_tree = expr.extract_subtree(*arg);
+    let substituted = tidepool_repr::subst::subst(&body_tree, *binder, &arg_tree);
+    Some(replace_subtree(expr, idx, &substituted))
 }
 
 #[cfg(test)]

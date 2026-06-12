@@ -2,7 +2,7 @@
 
 use crate::occ::{get_occ, occ_analysis, Occ};
 use tidepool_eval::{Changed, Pass};
-use tidepool_repr::{get_children, replace_subtree, CoreExpr, CoreFrame};
+use tidepool_repr::{replace_subtree, CoreExpr, CoreFrame};
 
 /// Dead Code Elimination pass.
 /// Removes `LetNonRec` bindings where the binder is unused.
@@ -30,9 +30,12 @@ impl Pass for Dce {
 }
 
 fn try_dce(expr: &CoreExpr, occ_map: &crate::occ::OccMap) -> Option<CoreExpr> {
-    try_dce_at(expr, expr.nodes.len() - 1, occ_map)
+    crate::rewrite::find_redex(expr, |expr, idx| try_dce_at(expr, idx, occ_map))
 }
 
+/// Dead-binding test for a single node: a `LetNonRec` whose binder is dead, or a
+/// `LetRec` whose binders are all dead. Non-redex nodes return `None`; the
+/// search driver handles descent.
 fn try_dce_at(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> Option<CoreExpr> {
     match &expr.nodes[idx] {
         CoreFrame::LetNonRec { binder, body, .. } => {
@@ -41,7 +44,7 @@ fn try_dce_at(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> Opti
                 let body_tree = expr.extract_subtree(*body);
                 Some(replace_subtree(expr, idx, &body_tree))
             } else {
-                try_children(expr, idx, occ_map)
+                None
             }
         }
         CoreFrame::LetRec { bindings, body } => {
@@ -53,17 +56,11 @@ fn try_dce_at(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> Opti
                 let body_tree = expr.extract_subtree(*body);
                 Some(replace_subtree(expr, idx, &body_tree))
             } else {
-                try_children(expr, idx, occ_map)
+                None
             }
         }
-        _ => try_children(expr, idx, occ_map),
+        _ => None,
     }
-}
-
-fn try_children(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> Option<CoreExpr> {
-    get_children(&expr.nodes[idx])
-        .into_iter()
-        .find_map(|child| try_dce_at(expr, child, occ_map))
 }
 
 #[cfg(test)]

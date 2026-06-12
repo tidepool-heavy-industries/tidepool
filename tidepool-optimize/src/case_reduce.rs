@@ -1,7 +1,7 @@
 //! Case reduction pass for Core expressions.
 
 use tidepool_eval::{Changed, Pass};
-use tidepool_repr::{get_children, replace_subtree, AltCon, CoreExpr, CoreFrame};
+use tidepool_repr::{replace_subtree, AltCon, CoreExpr, CoreFrame};
 
 /// A pass that performs case-of-known-constructor and case-of-known-literal reductions.
 pub struct CaseReduce;
@@ -26,77 +26,66 @@ impl Pass for CaseReduce {
 }
 
 fn try_case_reduce(expr: &CoreExpr) -> Option<CoreExpr> {
-    try_case_reduce_at(expr, expr.nodes.len() - 1)
+    crate::rewrite::find_redex(expr, try_case_reduce_at)
 }
 
+/// Case-of-known-constructor / case-of-known-literal test for a single node.
+/// Returns `Some` only when the `Case`'s scrutinee is a manifest `Con`/`Lit`
+/// with a matching (and, for `DataAlt`, correctly-arity'd) alternative; every
+/// other shape — including a `Case` with no matching alt or an arity mismatch —
+/// returns `None` so the search driver descends into children.
 fn try_case_reduce_at(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
-    match &expr.nodes[idx] {
-        CoreFrame::Case {
-            scrutinee,
-            binder,
-            alts,
-        } => {
-            match &expr.nodes[*scrutinee] {
-                CoreFrame::Con { tag, fields } => {
-                    // Find matching DataAlt or Default
-                    let alt = alts
-                        .iter()
-                        .find(|a| matches!(&a.con, AltCon::DataAlt(t) if t == tag))
-                        .or_else(|| alts.iter().find(|a| matches!(&a.con, AltCon::Default)));
+    let CoreFrame::Case {
+        scrutinee,
+        binder,
+        alts,
+    } = &expr.nodes[idx]
+    else {
+        return None;
+    };
+    match &expr.nodes[*scrutinee] {
+        CoreFrame::Con { tag, fields } => {
+            // Find matching DataAlt or Default
+            let alt = alts
+                .iter()
+                .find(|a| matches!(&a.con, AltCon::DataAlt(t) if t == tag))
+                .or_else(|| alts.iter().find(|a| matches!(&a.con, AltCon::Default)))?;
 
-                    let Some(alt) = alt else {
-                        // No matching alt — try children
-                        return try_children(expr, idx);
-                    };
-
-                    // Arity check for DataAlt: binders must match fields.
-                    // If mismatch, skip this reduction (malformed IR).
-                    if let AltCon::DataAlt(_) = &alt.con {
-                        if alt.binders.len() != fields.len() {
-                            return try_children(expr, idx);
-                        }
-                    }
-
-                    let mut body = expr.extract_subtree(alt.body);
-                    // Bind fields to alt binders
-                    if let AltCon::DataAlt(_) = &alt.con {
-                        for (alt_binder, field_idx) in alt.binders.iter().zip(fields.iter()) {
-                            let field_tree = expr.extract_subtree(*field_idx);
-                            body = tidepool_repr::subst::subst(&body, *alt_binder, &field_tree);
-                        }
-                    }
-                    // Substitute case binder with scrutinee
-                    let scrut_tree = expr.extract_subtree(*scrutinee);
-                    body = tidepool_repr::subst::subst(&body, *binder, &scrut_tree);
-                    Some(replace_subtree(expr, idx, &body))
+            // Arity check for DataAlt: binders must match fields.
+            // If mismatch, skip this reduction (malformed IR).
+            if let AltCon::DataAlt(_) = &alt.con {
+                if alt.binders.len() != fields.len() {
+                    return None;
                 }
-                CoreFrame::Lit(lit) => {
-                    let alt = alts
-                        .iter()
-                        .find(|a| matches!(&a.con, AltCon::LitAlt(l) if l == lit))
-                        .or_else(|| alts.iter().find(|a| matches!(&a.con, AltCon::Default)));
-
-                    let Some(alt) = alt else {
-                        return try_children(expr, idx);
-                    };
-
-                    let mut body = expr.extract_subtree(alt.body);
-                    // Substitute case binder with scrutinee literal
-                    let scrut_tree = expr.extract_subtree(*scrutinee);
-                    body = tidepool_repr::subst::subst(&body, *binder, &scrut_tree);
-                    Some(replace_subtree(expr, idx, &body))
-                }
-                _ => try_children(expr, idx),
             }
-        }
-        _ => try_children(expr, idx),
-    }
-}
 
-fn try_children(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
-    get_children(&expr.nodes[idx])
-        .into_iter()
-        .find_map(|child| try_case_reduce_at(expr, child))
+            let mut body = expr.extract_subtree(alt.body);
+            // Bind fields to alt binders
+            if let AltCon::DataAlt(_) = &alt.con {
+                for (alt_binder, field_idx) in alt.binders.iter().zip(fields.iter()) {
+                    let field_tree = expr.extract_subtree(*field_idx);
+                    body = tidepool_repr::subst::subst(&body, *alt_binder, &field_tree);
+                }
+            }
+            // Substitute case binder with scrutinee
+            let scrut_tree = expr.extract_subtree(*scrutinee);
+            body = tidepool_repr::subst::subst(&body, *binder, &scrut_tree);
+            Some(replace_subtree(expr, idx, &body))
+        }
+        CoreFrame::Lit(lit) => {
+            let alt = alts
+                .iter()
+                .find(|a| matches!(&a.con, AltCon::LitAlt(l) if l == lit))
+                .or_else(|| alts.iter().find(|a| matches!(&a.con, AltCon::Default)))?;
+
+            let mut body = expr.extract_subtree(alt.body);
+            // Substitute case binder with scrutinee literal
+            let scrut_tree = expr.extract_subtree(*scrutinee);
+            body = tidepool_repr::subst::subst(&body, *binder, &scrut_tree);
+            Some(replace_subtree(expr, idx, &body))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

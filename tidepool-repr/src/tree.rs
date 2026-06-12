@@ -16,40 +16,121 @@ pub struct RecursiveTree<F> {
     pub nodes: Vec<F>,
 }
 
-impl<F> RecursiveTree<F>
-where
-    F: MapLayer<usize, usize, Output = F> + Clone,
-{
+/// A single step of an explicit-stack post-order walk over a flat tree.
+/// `Enter` discovers a node's children (scheduling them first); `Exit` rebuilds
+/// the node once all its children have new indices. Two `usize` per frame keeps
+/// the work item pointer-sized.
+enum WalkStep {
+    Enter(usize),
+    Exit(usize),
+}
+
+// The work item must stay small: a fat step type would defeat the point of
+// moving the recursion onto the heap. (One discriminant + one index.)
+const _: () = assert!(std::mem::size_of::<WalkStep>() <= 16);
+
+impl RecursiveTree<CoreFrame<usize>> {
     /// Extract a subtree rooted at `idx` into a new standalone tree.
+    ///
+    /// Stack-safe: an explicit-stack post-order walk (children before parents,
+    /// root emitted last) with index memoization — no call-stack growth per
+    /// tree level, so arbitrarily deep towers extract without overflowing.
+    ///
+    /// Output is identical to the former recursive `collect`: nodes land in
+    /// left-to-right post-order, and DAG sharing is preserved (a node reachable
+    /// from several parents is emitted exactly once, via `old_to_new`).
     pub fn extract_subtree(&self, idx: usize) -> Self {
-        let mut new_nodes = Vec::new();
-        let mut old_to_new = HashMap::new();
+        let mut new_nodes: Vec<CoreFrame<usize>> = Vec::new();
+        // old index -> new index, written at Exit; presence marks "emitted"
+        // and is the sole bookkeeping (no separate "seen" set): an Enter or
+        // Exit for an already-emitted index is skipped, which both preserves
+        // DAG sharing and — for the common pure-tree case (in-degree 1) — costs
+        // exactly the one map probe the recursive `collect` did.
+        let mut old_to_new: HashMap<usize, usize> = HashMap::new();
 
-        fn collect<F>(
-            idx: usize,
-            tree: &RecursiveTree<F>,
-            new_nodes: &mut Vec<F>,
-            old_to_new: &mut HashMap<usize, usize>,
-        ) -> usize
-        where
-            F: MapLayer<usize, usize, Output = F> + Clone,
-        {
-            if let Some(&new_idx) = old_to_new.get(&idx) {
-                return new_idx;
+        let mut stack = vec![WalkStep::Enter(idx)];
+        while let Some(step) = stack.pop() {
+            match step {
+                WalkStep::Enter(i) => {
+                    if old_to_new.contains_key(&i) {
+                        continue;
+                    }
+                    stack.push(WalkStep::Exit(i));
+                    // Children pop left-to-right, matching the recursive walk's
+                    // child order (and thus node ordering).
+                    for_each_child_rev(&self.nodes[i], |c| {
+                        if !old_to_new.contains_key(&c) {
+                            stack.push(WalkStep::Enter(c));
+                        }
+                    });
+                }
+                WalkStep::Exit(i) => {
+                    if old_to_new.contains_key(&i) {
+                        continue; // already emitted via another (shared) path
+                    }
+                    // Every child has an `old_to_new` entry by post-order
+                    // discipline (acyclic IR ⇒ no in-progress child here).
+                    let mapped = self.nodes[i].clone().map_layer(|c| old_to_new[&c]);
+                    let new_idx = new_nodes.len();
+                    new_nodes.push(mapped);
+                    old_to_new.insert(i, new_idx);
+                }
             }
-
-            let frame = &tree.nodes[idx];
-            let mapped = frame
-                .clone()
-                .map_layer(|child| collect(child, tree, new_nodes, old_to_new));
-            let new_idx = new_nodes.len();
-            new_nodes.push(mapped);
-            old_to_new.insert(idx, new_idx);
-            new_idx
         }
-
-        collect(idx, self, &mut new_nodes, &mut old_to_new);
         RecursiveTree { nodes: new_nodes }
+    }
+}
+
+/// Apply `f` to each child index of `frame` in REVERSE of [`get_children`]
+/// order, allocation-free. Reversed so that pushing onto a LIFO work stack
+/// yields left-to-right pop order — the explicit-stack walks
+/// (`extract_subtree`, `replace_subtree`, `free_vars`) use this in their Enter
+/// phase to schedule children without a per-node `Vec` allocation.
+pub(crate) fn for_each_child_rev(frame: &CoreFrame<usize>, mut f: impl FnMut(usize)) {
+    match frame {
+        CoreFrame::Var(_) | CoreFrame::Lit(_) => {}
+        CoreFrame::App { fun, arg } => {
+            f(*arg);
+            f(*fun);
+        }
+        CoreFrame::Lam { body, .. } => f(*body),
+        CoreFrame::LetNonRec { rhs, body, .. } => {
+            f(*body);
+            f(*rhs);
+        }
+        CoreFrame::LetRec { bindings, body } => {
+            f(*body);
+            for (_, r) in bindings.iter().rev() {
+                f(*r);
+            }
+        }
+        CoreFrame::Case {
+            scrutinee, alts, ..
+        } => {
+            for alt in alts.iter().rev() {
+                f(alt.body);
+            }
+            f(*scrutinee);
+        }
+        CoreFrame::Con { fields, .. } => {
+            for &x in fields.iter().rev() {
+                f(x);
+            }
+        }
+        CoreFrame::Join { rhs, body, .. } => {
+            f(*body);
+            f(*rhs);
+        }
+        CoreFrame::Jump { args, .. } => {
+            for &a in args.iter().rev() {
+                f(a);
+            }
+        }
+        CoreFrame::PrimOp { args, .. } => {
+            for &a in args.iter().rev() {
+                f(a);
+            }
+        }
     }
 }
 
@@ -103,49 +184,55 @@ pub fn replace_subtree(
         expr.nodes.len()
     );
 
-    let mut new_nodes = Vec::new();
-    let mut old_to_new = HashMap::new();
-    rebuild(
-        expr,
-        expr.nodes.len() - 1,
-        target_idx,
-        replacement,
-        &mut new_nodes,
-        &mut old_to_new,
-    );
-    RecursiveTree { nodes: new_nodes }
-}
+    let mut new_nodes: Vec<CoreFrame<usize>> = Vec::new();
+    let mut old_to_new: HashMap<usize, usize> = HashMap::new();
 
-fn rebuild(
-    expr: &RecursiveTree<CoreFrame<usize>>,
-    idx: usize,
-    target: usize,
-    replacement: &RecursiveTree<CoreFrame<usize>>,
-    new_nodes: &mut Vec<CoreFrame<usize>>,
-    old_to_new: &mut HashMap<usize, usize>,
-) -> usize {
-    if let Some(&ni) = old_to_new.get(&idx) {
-        return ni;
-    }
-    if idx == target {
-        let offset = new_nodes.len();
-        for node in &replacement.nodes {
-            new_nodes.push(node.clone().map_layer(|i| i + offset));
+    // Stack-safe rebuild: explicit-stack post-order copy of `expr`, splicing
+    // `replacement` wholesale wherever the walk reaches `target_idx`. Mirrors
+    // the former recursive `rebuild` (same node ordering, same memoized DAG
+    // sharing) without per-level call-stack growth. `old_to_new` is the sole
+    // bookkeeping — an Enter/Exit for an already-emitted index is skipped.
+    let mut stack = vec![WalkStep::Enter(expr.nodes.len() - 1)];
+    while let Some(step) = stack.pop() {
+        match step {
+            WalkStep::Enter(i) => {
+                if old_to_new.contains_key(&i) {
+                    continue;
+                }
+                if i == target_idx {
+                    // Splice the replacement here and stop — the original
+                    // subtree at `target_idx` is discarded (no Exit, no
+                    // descent), exactly as the recursive version returned early.
+                    let offset = new_nodes.len();
+                    for node in &replacement.nodes {
+                        new_nodes.push(node.clone().map_layer(|j| j + offset));
+                    }
+                    let root = new_nodes
+                        .len()
+                        .checked_sub(1)
+                        .expect("replacement tree must not be empty");
+                    old_to_new.insert(i, root);
+                    continue;
+                }
+                stack.push(WalkStep::Exit(i));
+                for_each_child_rev(&expr.nodes[i], |c| {
+                    if !old_to_new.contains_key(&c) {
+                        stack.push(WalkStep::Enter(c));
+                    }
+                });
+            }
+            WalkStep::Exit(i) => {
+                if old_to_new.contains_key(&i) {
+                    continue; // already emitted via another (shared) path
+                }
+                let mapped = expr.nodes[i].clone().map_layer(|c| old_to_new[&c]);
+                let new_idx = new_nodes.len();
+                new_nodes.push(mapped);
+                old_to_new.insert(i, new_idx);
+            }
         }
-        let root = new_nodes
-            .len()
-            .checked_sub(1)
-            .expect("replacement tree must not be empty");
-        old_to_new.insert(idx, root);
-        return root;
     }
-    let mapped = expr.nodes[idx]
-        .clone()
-        .map_layer(|child| rebuild(expr, child, target, replacement, new_nodes, old_to_new));
-    let new_idx = new_nodes.len();
-    new_nodes.push(mapped);
-    old_to_new.insert(idx, new_idx);
-    new_idx
+    RecursiveTree { nodes: new_nodes }
 }
 
 /// Functor map over the recursive positions of a frame.

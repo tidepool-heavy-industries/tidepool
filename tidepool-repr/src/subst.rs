@@ -76,6 +76,22 @@ fn find_max_var_id(tree: &CoreExpr) -> VarId {
 
 /// Recursive helper for substitution.
 /// `env` maps binders that have been renamed (due to capture avoidance) to their new IDs.
+///
+/// NOTE (stack-safety): `subst_at`/`copy_with_env` are deliberately left
+/// natively recursive while `extract_subtree`/`replace_subtree`/`free_vars` were
+/// converted to explicit-stack walks. They are NOT index-memoizable: the
+/// renaming `env` differs per path (binders rename as the walk descends through
+/// shadowing/capturing scopes), so the same source index can map to different
+/// output under different envs — the post-order memoization the other walks rely
+/// on is unsound here. A faithful explicit-stack conversion would have to thread
+/// per-frame env state through a two-phase work item and re-pair the
+/// `copy_with_env` sub-walks by construction, whose failure mode is SILENT
+/// miscapture rather than a crash — the #313-class risk the stack-safety plan
+/// explicitly defers (`plans/stack-safety.md`, "stacker at the emit spine"
+/// rationale). `subst` is also confined to the optimize passes, which are not on
+/// the JIT compile path, so its residual recursion depth (the substitution
+/// target's subtree depth) is not reachable from production eval. Revisit only
+/// if the optimizer is wired into the compile path over deep trees.
 fn subst_at(
     tree: &CoreExpr,
     idx: usize,

@@ -54,6 +54,18 @@ impl Pass for PartialEval {
 }
 
 /// Recursively partially evaluate an expression at a given index.
+///
+/// NOTE (stack-safety): left native-recursive, like `tidepool_repr::subst`. It
+/// threads a `PartialEnv` that differs per path (bindings accumulate as the walk
+/// descends, and the Known/Unknown abstract value flows down), so post-order
+/// index memoization — the basis of the converted `extract_subtree`/`free_vars`
+/// walks — is unsound here. It also fuses control flow (a Known let/case
+/// short-circuits straight to a sub-result, never emitting the binder). A
+/// faithful explicit-stack conversion would re-pair per-frame env state and
+/// these short-circuits by construction, whose failure mode is SILENT
+/// miswritten residual code, not a crash — the #313-class risk the stack-safety
+/// plan defers. PartialEval is optimize-only (off the JIT compile path), so its
+/// residual recursion depth is unreachable from production eval.
 fn partial_eval_at(
     expr: &CoreExpr,
     idx: usize,
