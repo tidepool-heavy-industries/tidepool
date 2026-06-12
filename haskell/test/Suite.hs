@@ -6,7 +6,14 @@ import Prelude
 import qualified Data.Text as T
 -- qq-suite: regen now needs `--include lib --target-module-only
 -- --output-dir test/suite_cbor` (see CLAUDE.md / plans/qq-spike.md)
-import Tidepool.QQ (fmt, j)
+import Tidepool.QQ (fmt, j, patch, sg, uri)
+-- Patch core types/functions are lens-free, so the --all-closed extract
+-- session can import them directly (like Tidepool.Render below).
+import Tidepool.Patch
+  ( FilePatch (..), Hunk (..), HunkLine (..), HunkResult (..)
+  , Conflict (..), ConflictKind (..)
+  , parsePatch, renderPatch, invertPatch, applyFilePatch
+  , hunkOldSide, hOldStart, hNewStart, hBody, hrDrift )
 -- render lives in lens-free Tidepool.Render (re-exported by Tidepool.Prelude);
 -- Suite.hs cannot import Tidepool.Prelude here (it pulls Control.Lens, which
 -- the --all-closed extract session cannot see), so import render directly.
@@ -1156,3 +1163,260 @@ qq_j_pat_open =
       Number d -> d == 2.0
       _        -> False
     _ -> False
+
+-- ============================================================
+-- qq-suite: validators (owner: leaf qq-tree, A1)
+-- ============================================================
+-- Accept cases only — the literal Text comes through.  Reject cases fail
+-- at COMPILE time and so cannot be CBOR fixtures; their coverage lives in
+-- tidepool-runtime/tests/validator_reject.rs.
+
+-- [sg|…|]: single ($NAME) and multi ($$$ARGS) metavariables, balanced ().
+qq_sg_accept :: T.Text
+qq_sg_accept = [sg|fn $NAME($$$ARGS)|]
+
+-- [uri|…|]: https scheme + non-empty host, no whitespace.
+qq_uri_accept :: T.Text
+qq_uri_accept = [uri|https://example.com/a/b?q=1|]
+
+-- ============================================================
+-- qq-suite: [patch|…|] + Tidepool.Patch (owner: leaf qq-tree, A2)
+-- ============================================================
+-- The pure engine (parsePatch/renderPatch/invertPatch/applyFilePatch) runs
+-- on the JIT in the differential harness, so every helper here is JIT-safe.
+-- Diff bodies in [patch|…|] are LEFT-ALIGNED (column-0 prefixes); runtime
+-- diff Texts are assembled with T.intercalate "\n" [...] (no multiline
+-- strings — indentation stripping would eat significant leading spaces).
+
+-- Expression literal: the quote expands to constructor applications.
+qq_patch_literal :: Bool
+qq_patch_literal = case p of
+  [FilePatch path False [h]] ->
+       path == "foo.txt"
+    && hOldStart h == 1 && hNewStart h == 1
+    && length (hBody h) == 4
+    && hunkOldSide h == ["alpha", "beta", "gamma"]
+  _ -> False
+  where
+    p = [patch|
+--- a/foo.txt
++++ b/foo.txt
+@@ -1,3 +1,3 @@
+ alpha
+-beta
++BETA
+ gamma
+|]
+
+-- parsePatch . renderPatch == Right (canonical-form round trip).
+qq_patch_render_roundtrip :: Bool
+qq_patch_render_roundtrip = parsePatch (renderPatch p) == Right p
+  where
+    p = [patch|
+--- a/foo.txt
++++ b/foo.txt
+@@ -1,3 +1,3 @@
+ alpha
+-beta
++BETA
+ gamma
+|]
+
+-- invert . invert == id (involution; double-swap restores the original).
+qq_patch_invert_involution :: Bool
+qq_patch_invert_involution = case invertPatch p of
+  Right ip -> invertPatch ip == Right p
+  Left _   -> False
+  where
+    p = [patch|
+--- a/foo.txt
++++ b/foo.txt
+@@ -1,3 +1,3 @@
+ alpha
+-beta
++BETA
+ gamma
+|]
+
+-- Clean apply: the hunk locates exactly once; the new side replaces it.
+qq_patch_apply_clean :: T.Text
+qq_patch_apply_clean = case p of
+  (fp : _) -> case applyFilePatch fp (Just orig) of
+    Right (out, _) -> out
+    Left _         -> "CONFLICT"
+  _ -> "EMPTY"
+  where
+    orig = T.intercalate "\n" ["alpha", "beta", "gamma"]
+    p = [patch|
+--- a/foo.txt
++++ b/foo.txt
+@@ -1,3 +1,3 @@
+ alpha
+-beta
++BETA
+ gamma
+|]
+
+-- Drift: the old side is found 3 lines below the header hint → hrDrift == 3.
+qq_patch_apply_drift :: Int
+qq_patch_apply_drift = case p of
+  (fp : _) -> case applyFilePatch fp (Just orig) of
+    Right (_, [hr]) -> hrDrift hr
+    _               -> -1
+  _ -> -1
+  where
+    orig = T.intercalate "\n" ["pad1", "pad2", "pad3", "target", "x", "tail"]
+    p = [patch|
+--- a/f.txt
++++ b/f.txt
+@@ -1,2 +1,2 @@
+ target
+-x
++y
+|]
+
+-- No-match conflict: the old side is absent; the payload carries the
+-- expected lines and the actual window at the hint (line 2 → ["two"]).
+qq_patch_conflict_nomatch :: T.Text
+qq_patch_conflict_nomatch = case p of
+  (fp : _) -> case applyFilePatch fp (Just orig) of
+    Left [Conflict _ _ (NoMatch expd act)] -> T.intercalate "|" (expd ++ ["/"] ++ act)
+    _ -> "NO-CONFLICT"
+  _ -> "EMPTY"
+  where
+    orig = T.intercalate "\n" ["one", "two", "three"]
+    p = [patch|
+--- a/f.txt
++++ b/f.txt
+@@ -2,1 +2,1 @@
+-needle
++replacement
+|]
+
+-- Ambiguous conflict: the old side matches at lines 1 and 3 → sum == 4.
+qq_patch_conflict_ambiguous :: Int
+qq_patch_conflict_ambiguous = case p of
+  (fp : _) -> case applyFilePatch fp (Just orig) of
+    Left [Conflict _ _ (Ambiguous cands)] -> sum cands
+    _ -> -1
+  _ -> -1
+  where
+    orig = T.intercalate "\n" ["dup", "mid", "dup"]
+    p = [patch|
+--- a/f.txt
++++ b/f.txt
+@@ -1,1 +1,1 @@
+-dup
++changed
+|]
+
+-- Already-applied: the old side is gone but the new side is present at
+-- line 2 → AlreadyApplied 2.
+qq_patch_already_applied :: Int
+qq_patch_already_applied = case p of
+  (fp : _) -> case applyFilePatch fp (Just orig) of
+    Left [Conflict _ _ (AlreadyApplied ln)] -> ln
+    _ -> -1
+  _ -> -1
+  where
+    orig = T.intercalate "\n" ["pre", "new", "post"]
+    p = [patch|
+--- a/f.txt
++++ b/f.txt
+@@ -1,1 +1,1 @@
+-old
++new
+|]
+
+-- Creation: --- /dev/null → apply against Nothing yields the new content.
+qq_patch_creation :: T.Text
+qq_patch_creation = case p of
+  (fp : _) -> case applyFilePatch fp Nothing of
+    Right (out, _) -> out
+    Left _         -> "CONFLICT"
+  _ -> "EMPTY"
+  where
+    p = [patch|
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1,2 @@
++hello
++world
+|]
+
+-- Runtime parse: noise tolerance (git headers) is Right; a header whose
+-- counts exceed the body is a Left.
+qq_patch_parse_runtime :: Bool
+qq_patch_parse_runtime = goodOk && badRejected
+  where
+    goodOk = case parsePatch goodDiff of { Right _ -> True; Left _ -> False }
+    badRejected = case parsePatch badDiff of { Left _ -> True; Right _ -> False }
+    goodDiff = T.intercalate "\n"
+      [ "diff --git a/x.txt b/x.txt"
+      , "index 1111111..2222222 100644"
+      , "--- a/x.txt"
+      , "+++ b/x.txt"
+      , "@@ -1,1 +1,1 @@"
+      , "-a"
+      , "+b" ]
+    badDiff = T.intercalate "\n"
+      [ "--- a/y.txt"
+      , "+++ b/y.txt"
+      , "@@ -1,5 +1,5 @@"
+      , " a"
+      , "-b"
+      , "+B" ]
+
+-- Pattern side: a fully-literal patch pattern matches a runtime diff Text.
+qq_patch_pat_match :: Bool
+qq_patch_pat_match = case diffText of
+  [patch|
+--- a/foo.txt
++++ b/foo.txt
+@@ -1,1 +1,1 @@
+-old
++new
+|] -> True
+  _ -> False
+  where
+    diffText = T.intercalate "\n"
+      ["--- a/foo.txt", "+++ b/foo.txt", "@@ -1,1 +1,1 @@", "-old", "+new"]
+
+-- Pattern side: a path hole ($path) and a line-content hole (-$oldline) bind
+-- Text from the runtime diff.
+qq_patch_pat_bind :: T.Text
+qq_patch_pat_bind = case diffText of
+  [patch|
+--- $path
++++ $path
+@@ -1,1 +1,1 @@
+-$oldline
++fixed
+|] -> T.concat [path, ":", oldline]
+  _ -> "no-match"
+  where
+    diffText = T.intercalate "\n"
+      ["--- a/config.txt", "+++ b/config.txt", "@@ -1,1 +1,1 @@", "-DEBUG", "+fixed"]
+
+-- Pattern side: the first arm's path literal mismatches and falls through to
+-- the matching second arm.
+qq_patch_pat_fallthrough :: Bool
+qq_patch_pat_fallthrough = case diffText of
+  [patch|
+--- a/nope.txt
++++ b/nope.txt
+@@ -1,1 +1,1 @@
+-x
++y
+|] -> False
+  [patch|
+--- a/real.txt
++++ b/real.txt
+@@ -1,1 +1,1 @@
+-x
++y
+|] -> True
+  _ -> False
+  where
+    diffText = T.intercalate "\n"
+      ["--- a/real.txt", "+++ b/real.txt", "@@ -1,1 +1,1 @@", "-x", "+y"]

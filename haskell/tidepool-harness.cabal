@@ -23,6 +23,9 @@ executable tidepool-extract-bin
     Tidepool.QQ.Fmt.Runtime
     Tidepool.QQ.PyF.Spec
     Tidepool.QQ.Json
+    Tidepool.QQ.Validate
+    Tidepool.Patch
+    Tidepool.QQ.Patch
     Tidepool.QQ.HsMeta.Parse
     Tidepool.QQ.HsMeta.Settings
     Tidepool.QQ.HsMeta.Translate

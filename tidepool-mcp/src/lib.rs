@@ -949,7 +949,11 @@ pub fn aeson_imports() -> String {
 /// literal) only costs the ~+385ms quoter-module import
 /// (plans/qq-spike.md, M3), never correctness.
 pub fn uses_qq(src: &str) -> bool {
-    src.contains("[fmt|") || src.contains("[j|")
+    src.contains("[fmt|")
+        || src.contains("[j|")
+        || src.contains("[patch|")
+        || src.contains("[sg|")
+        || src.contains("[uri|")
 }
 
 pub fn build_effect_stack_type(effects: &[EffectDecl]) -> String {
@@ -2169,7 +2173,7 @@ impl TidepoolMcpServerImpl {
         // QuasiQuotes/ViewPatterns PRAGMAS are always-on in build_preamble
         // (root decision — see the comment there for the latency FIXME).
         if uses_qq(&req.code) || uses_qq(&req.helpers) {
-            all_imports.push_str("Tidepool.QQ (fmt, j)\n");
+            all_imports.push_str("Tidepool.QQ (fmt, j, patch, sg, uri)\n");
         }
         all_imports.push_str(&req.imports);
         let normalized_input = req.input.as_ref().map(normalize_input);
@@ -2838,6 +2842,12 @@ mod tests {
         // quoter tokens
         assert!(uses_qq("pure [fmt|hi {x}|]"));
         assert!(uses_qq("case v of [j|{\"k\": $x}|] -> pure x"));
+        // wave-4 quoters: patch + the validators (glob omitted — see Validate.hs)
+        assert!(uses_qq("apply [patch|--- a/x|]"));
+        assert!(uses_qq("pure [sg|fn $NAME|]"));
+        assert!(uses_qq("pure [uri|https://x|]"));
+        // a glob-quoter token is NOT special (the quoter was dropped)
+        assert!(!uses_qq("pure [glob|src/*.rs|]"));
         // list comprehensions with conventional spacing are NOT tokens
         assert!(!uses_qq("pure [x | x <- xs]"));
         assert!(!uses_qq("pure [ fmt | fmt <- fs ]"));
@@ -2880,11 +2890,11 @@ mod tests {
         let code = "pure [fmt|hello {name}|]";
         let mut imports = aeson_imports();
         if uses_qq(code) {
-            imports.push_str("Tidepool.QQ (fmt, j)\n");
+            imports.push_str("Tidepool.QQ (fmt, j, patch, sg, uri)\n");
         }
         let src = template_haskell(&pre, "'[]", code, &imports, "", None, None);
         let qq = src
-            .find("import Tidepool.QQ (fmt, j)\n")
+            .find("import Tidepool.QQ (fmt, j, patch, sg, uri)\n")
             .expect("QQ import missing from rendered module");
         let default_decl = src.find("default (Int").unwrap();
         assert!(qq < default_decl, "QQ import must precede default decl");
@@ -2896,7 +2906,7 @@ mod tests {
         let code = "pure [x | x <- xs]";
         let mut imports = aeson_imports();
         if uses_qq(code) {
-            imports.push_str("Tidepool.QQ (fmt, j)\n");
+            imports.push_str("Tidepool.QQ (fmt, j, patch, sg, uri)\n");
         }
         let src = template_haskell(&pre, "'[]", code, &imports, "", None, None);
         assert!(
