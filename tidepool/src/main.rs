@@ -171,6 +171,8 @@ enum FsReq {
     Exists(String),
     #[core(name = "FsMetadata")]
     Metadata(String),
+    #[core(name = "TryFsRead")]
+    TryRead(String),
 }
 
 const DEFAULT_IGNORE_DIRS: &[&str] = &["target", ".git", "node_modules", "dist-newstyle"];
@@ -279,6 +281,16 @@ impl FsHandler {
         }
         Ok(check_path)
     }
+
+    /// Fallible core for reading a file: shared by the plain
+    /// (`?`-propagating) and isolating (`respond_caught`) handler arms. The
+    /// path is folded into the error so an isolated `Left` carries operation
+    /// context. See `respond_caught` for the policy + block-level-`try` seam.
+    fn read_core(&self, path: &str) -> Result<String, EffectError> {
+        let resolved = self.resolve(path)?;
+        std::fs::read_to_string(&resolved)
+            .map_err(|e| EffectError::Handler(format!("read '{}' failed: {}", path, e)))
+    }
 }
 
 impl DescribeEffect for FsHandler {
@@ -295,12 +307,10 @@ impl EffectHandler<CapturedOutput> for FsHandler {
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
-            FsReq::Read(path) => {
-                let resolved = self.resolve(&path)?;
-                let contents = std::fs::read_to_string(&resolved)
-                    .map_err(|e| EffectError::Handler(e.to_string()))?;
-                cx.respond(contents)
-            }
+            FsReq::Read(path) => cx.respond(self.read_core(&path)?),
+            // Isolating: a read error (missing file, permission, non-UTF-8)
+            // becomes Left instead of aborting the eval.
+            FsReq::TryRead(path) => cx.respond_caught(self.read_core(&path)),
             FsReq::Write(path, contents) => {
                 let resolved = self.resolve(&path)?;
                 std::fs::write(&resolved, &contents)
@@ -782,6 +792,10 @@ enum HttpReq {
     Get(String),
     #[core(name = "HttpPost")]
     Post(String, Value),
+    #[core(name = "TryHttpGet")]
+    TryGet(String),
+    #[core(name = "TryHttpPost")]
+    TryPost(String, Value),
 }
 
 #[derive(Clone)]
@@ -836,6 +850,39 @@ impl HttpHandler {
             Ok(serde_json::Value::String(body.to_string()))
         })
     }
+
+    /// Fallible core for GET: shared by the plain (`?`-propagating) and the
+    /// isolating (`respond_caught`) handler arms. See `respond_caught` for the
+    /// catch-vs-propagate policy and the block-level-`try` seam note.
+    fn get(&self, url_str: &str) -> Result<serde_json::Value, EffectError> {
+        let url = Self::validate_url(url_str)?;
+        let resp = ureq::get(url.as_str())
+            .timeout(std::time::Duration::from_secs(30))
+            .call()
+            .map_err(|e| EffectError::Handler(format!("HTTP GET '{}' failed: {}", url_str, e)))?;
+        let body = resp.into_string().map_err(|e| {
+            EffectError::Handler(format!("Read body from '{}' failed: {}", url_str, e))
+        })?;
+        Self::parse_response(url_str, &body)
+    }
+
+    /// Fallible core for POST (body pre-converted to JSON by the caller, which
+    /// holds the `EffectContext` needed for `value_to_json`).
+    fn post(
+        &self,
+        url_str: &str,
+        json_body: &serde_json::Value,
+    ) -> Result<serde_json::Value, EffectError> {
+        let url = Self::validate_url(url_str)?;
+        let resp = ureq::post(url.as_str())
+            .timeout(std::time::Duration::from_secs(30))
+            .send_json(json_body)
+            .map_err(|e| EffectError::Handler(format!("HTTP POST '{}' failed: {}", url_str, e)))?;
+        let body = resp.into_string().map_err(|e| {
+            EffectError::Handler(format!("Read body from '{}' failed: {}", url_str, e))
+        })?;
+        Self::parse_response(url_str, &body)
+    }
 }
 
 impl DescribeEffect for HttpHandler {
@@ -852,34 +899,16 @@ impl EffectHandler<CapturedOutput> for HttpHandler {
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
-            HttpReq::Get(url_str) => {
-                let url = Self::validate_url(&url_str)?;
-                let resp = ureq::get(url.as_str())
-                    .timeout(std::time::Duration::from_secs(30))
-                    .call()
-                    .map_err(|e| {
-                        EffectError::Handler(format!("HTTP GET '{}' failed: {}", url_str, e))
-                    })?;
-                let body = resp.into_string().map_err(|e| {
-                    EffectError::Handler(format!("Read body from '{}' failed: {}", url_str, e))
-                })?;
-                let json = Self::parse_response(&url_str, &body)?;
-                cx.respond(json)
-            }
+            HttpReq::Get(url_str) => cx.respond(self.get(&url_str)?),
             HttpReq::Post(url_str, body_val) => {
-                let url = Self::validate_url(&url_str)?;
                 let json_body = tidepool_runtime::value_to_json(&body_val, cx.table(), 0);
-                let resp = ureq::post(url.as_str())
-                    .timeout(std::time::Duration::from_secs(30))
-                    .send_json(&json_body)
-                    .map_err(|e| {
-                        EffectError::Handler(format!("HTTP POST '{}' failed: {}", url_str, e))
-                    })?;
-                let body = resp.into_string().map_err(|e| {
-                    EffectError::Handler(format!("Read body from '{}' failed: {}", url_str, e))
-                })?;
-                let json = Self::parse_response(&url_str, &body)?;
-                cx.respond(json)
+                cx.respond(self.post(&url_str, &json_body)?)
+            }
+            // Isolating: a network error or non-2xx status becomes Left.
+            HttpReq::TryGet(url_str) => cx.respond_caught(self.get(&url_str)),
+            HttpReq::TryPost(url_str, body_val) => {
+                let json_body = tidepool_runtime::value_to_json(&body_val, cx.table(), 0);
+                cx.respond_caught(self.post(&url_str, &json_body))
             }
         }
     }
@@ -893,6 +922,10 @@ enum ExecReq {
     Run(String),
     #[core(name = "RunIn")]
     RunIn(String, String),
+    #[core(name = "TryRun")]
+    TryRun(String),
+    #[core(name = "TryRunIn")]
+    TryRunIn(String, String),
 }
 
 #[derive(Clone)]
@@ -987,6 +1020,14 @@ impl EffectHandler<CapturedOutput> for ExecHandler {
                 let (code, stdout, stderr) = self.run_command(&cmd, &target)?;
                 cx.respond((code, stdout, stderr))
             }
+            // Isolating: a SPAWN failure (sandbox escape, exec error) becomes
+            // Left. A nonzero exit is NOT a failure — run_command returns it in
+            // the Ok tuple, so it arrives as Right (code, out, err).
+            ExecReq::TryRun(cmd) => cx.respond_caught(self.run_command(&cmd, &self.root)),
+            ExecReq::TryRunIn(dir, cmd) => cx.respond_caught(
+                self.resolve_dir(&dir)
+                    .and_then(|target| self.run_command(&cmd, &target)),
+            ),
         }
     }
 }
@@ -1001,6 +1042,10 @@ enum LlmReq {
     Chat(String),
     #[core(name = "LlmStructured")]
     Structured(String, Value), // Value is the Schema ADT, decoded in handler
+    #[core(name = "TryLlmChat")]
+    TryChat(String),
+    #[core(name = "TryLlmStructured")]
+    TryStructured(String, Value),
 }
 
 /// Default OpenAI model when TIDEPOOL_LLM_PROVIDER=openai (deprecated alias)
@@ -1128,6 +1173,46 @@ impl LlmHandler {
             Ok(())
         }
     }
+
+    /// Fallible core for a freeform chat call. Shared by the plain
+    /// (`?`-propagating) and isolating (`respond_caught`) handler arms. The
+    /// caller runs `check_rate_limit` first so budget exhaustion is NOT
+    /// caught by the isolating arm (it is a hard control limit, not a probe
+    /// failure). See `respond_caught` for the policy + block-level-`try` seam.
+    fn chat_core(&self, prompt: String) -> Result<String, EffectError> {
+        let req = genai::chat::ChatRequest::from_user(prompt);
+        let resp = self
+            .rt
+            .block_on(self.client.exec_chat(&self.model, req, None))
+            .map_err(|e| EffectError::Handler(format!("LLM call failed: {}", e)))?;
+        Ok(resp.first_text().unwrap_or("").to_string())
+    }
+
+    /// Fallible core for a structured (JSON-schema) call. `schema_json` is the
+    /// already-`value_to_json`'d Schema (the caller holds the `EffectContext`);
+    /// strictification for OpenAI-family models happens here.
+    fn structured_core(
+        &self,
+        prompt: String,
+        mut schema_json: serde_json::Value,
+    ) -> Result<serde_json::Value, EffectError> {
+        if self.targets_openai() {
+            strictify(&mut schema_json);
+        }
+        let json_spec = genai::chat::JsonSpec::new("structured_output", schema_json);
+        let opts = genai::chat::ChatOptions::default()
+            .with_response_format(genai::chat::ChatResponseFormat::JsonSpec(json_spec));
+        let req = genai::chat::ChatRequest::from_user(format!(
+            "{}\n\nRespond with ONLY valid JSON matching the provided schema. No markdown, no explanation.",
+            prompt
+        ));
+        let resp = self
+            .rt
+            .block_on(self.client.exec_chat(&self.model, req, Some(&opts)))
+            .map_err(|e| EffectError::Handler(format!("LLM structured call failed: {}", e)))?;
+        let text = resp.first_text().unwrap_or("null");
+        Ok(serde_json::from_str(text).unwrap_or(serde_json::Value::Null))
+    }
 }
 
 /// OpenAI strict structured outputs require EVERY property to appear in
@@ -1190,39 +1275,21 @@ impl EffectHandler<CapturedOutput> for LlmHandler {
         req: LlmReq,
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, EffectError> {
+        // check_rate_limit stays a hard `?` for ALL arms (including the try*
+        // ones): budget exhaustion is a control limit that aborts the eval, it
+        // is NOT an external probe failure to be isolated into a `Left`.
         self.check_rate_limit()?;
         match req {
-            LlmReq::Chat(prompt) => {
-                let req = genai::chat::ChatRequest::from_user(prompt);
-                let resp = self
-                    .rt
-                    .block_on(self.client.exec_chat(&self.model, req, None))
-                    .map_err(|e| EffectError::Handler(format!("LLM call failed: {}", e)))?;
-                let text = resp.first_text().unwrap_or("").to_string();
-                cx.respond(text)
-            }
+            LlmReq::Chat(prompt) => cx.respond(self.chat_core(prompt)?),
             LlmReq::Structured(prompt, schema_val) => {
-                let mut schema_json = tidepool_runtime::value_to_json(&schema_val, cx.table(), 0);
-                if self.targets_openai() {
-                    strictify(&mut schema_json);
-                }
-                let json_spec = genai::chat::JsonSpec::new("structured_output", schema_json);
-                let opts = genai::chat::ChatOptions::default()
-                    .with_response_format(genai::chat::ChatResponseFormat::JsonSpec(json_spec));
-                let req = genai::chat::ChatRequest::from_user(format!(
-                    "{}\n\nRespond with ONLY valid JSON matching the provided schema. No markdown, no explanation.",
-                    prompt
-                ));
-                let resp = self
-                    .rt
-                    .block_on(self.client.exec_chat(&self.model, req, Some(&opts)))
-                    .map_err(|e| {
-                        EffectError::Handler(format!("LLM structured call failed: {}", e))
-                    })?;
-                let text = resp.first_text().unwrap_or("null");
-                let parsed: serde_json::Value =
-                    serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
-                cx.respond(parsed)
+                let schema_json = tidepool_runtime::value_to_json(&schema_val, cx.table(), 0);
+                cx.respond(self.structured_core(prompt, schema_json)?)
+            }
+            // Isolating: an API/network error or refusal becomes Left.
+            LlmReq::TryChat(prompt) => cx.respond_caught(self.chat_core(prompt)),
+            LlmReq::TryStructured(prompt, schema_val) => {
+                let schema_json = tidepool_runtime::value_to_json(&schema_val, cx.table(), 0);
+                cx.respond_caught(self.structured_core(prompt, schema_json))
             }
         }
     }
@@ -2621,6 +2688,12 @@ mod tests {
             match req {
                 LlmReq::Chat(_) => cx.respond("mock response".to_string()),
                 LlmReq::Structured(_, _) => cx.respond(self.response.clone()),
+                LlmReq::TryChat(_) => {
+                    cx.respond_caught(Ok::<String, EffectError>("mock response".to_string()))
+                }
+                LlmReq::TryStructured(_, _) => {
+                    cx.respond_caught(Ok::<serde_json::Value, EffectError>(self.response.clone()))
+                }
             }
         }
     }

@@ -149,10 +149,14 @@ pub fn fs_decl() -> EffectDecl {
             "FsGrep :: Text -> Text -> Fs [(Text, Int, Text)]",
             "FsExists :: Text -> Fs Bool",
             "FsMetadata :: Text -> Fs (Int, Bool, Bool)",
+            // Failure-isolating read: Left on a read error (missing file,
+            // permission, non-UTF-8) instead of killing the eval.
+            "TryFsRead :: Text -> Fs (Either Text Text)",
         ],
         type_defs: &[],
         helpers: &[
             "readFile :: Text -> M Text\nreadFile = send . FsRead",
+            "-- | Read a file, isolating failure: `Left err` on a read error\n-- (missing file, permission, non-UTF-8) instead of aborting the eval.\ntryReadFile :: Text -> M (Either Text Text)\ntryReadFile = send . TryFsRead",
             "writeFile :: Text -> Text -> M ()\nwriteFile f c = send (FsWrite f c)",
             "appendFile :: Text -> Text -> M ()\nappendFile p t = readFile p >>= \\old -> writeFile p (old <> t)",
             "listDirectory :: Text -> M [Text]\nlistDirectory = send . FsListDir",
@@ -233,11 +237,19 @@ pub fn http_decl() -> EffectDecl {
         constructors: &[
             "HttpGet :: Text -> Http Value",
             "HttpPost :: Text -> Value -> Http Value",
+            // Failure-isolating variants: a network error or non-2xx status
+            // becomes `Left err` instead of killing the eval.
+            "TryHttpGet :: Text -> Http (Either Text Value)",
+            "TryHttpPost :: Text -> Value -> Http (Either Text Value)",
         ],
         type_defs: &[],
         helpers: &[
             "httpGet :: Text -> M Value\nhttpGet = send . HttpGet",
             "httpPost :: Text -> Value -> M Value\nhttpPost url body = send (HttpPost url body)",
+            // Isolating variants: a 404/network failure becomes `Left err`
+            // (carrying the URL + cause) instead of aborting the eval.
+            "tryHttpGet :: Text -> M (Either Text Value)\ntryHttpGet = send . TryHttpGet",
+            "tryHttpPost :: Text -> Value -> M (Either Text Value)\ntryHttpPost url body = send (TryHttpPost url body)",
         ],
     }
 }
@@ -250,6 +262,11 @@ pub fn exec_decl() -> EffectDecl {
         constructors: &[
             "Run :: Text -> Exec (Int, Text, Text)",
             "RunIn :: Text -> Text -> Exec (Int, Text, Text)",
+            // Failure-isolating spawn: Left only when the process cannot be
+            // SPAWNED (sandbox/exec error). A command that runs and exits
+            // nonzero is Right (code, out, err) — the eval inspects the code.
+            "TryRun :: Text -> Exec (Either Text (Int, Text, Text))",
+            "TryRunIn :: Text -> Text -> Exec (Either Text (Int, Text, Text))",
         ],
         type_defs: &[],
         helpers: &[
@@ -257,6 +274,12 @@ pub fn exec_decl() -> EffectDecl {
             "readProcess :: Text -> M Text\nreadProcess cmd = do { (ec, out, err) <- send (Run cmd); if ec == 0 then pure out else error (\"command failed (\" <> show ec <> \"): \" <> err) }",
             "run :: Text -> M (Int, Text, Text)\nrun = send . Run",
             "runIn :: Text -> Text -> M (Int, Text, Text)\nrunIn dir cmd = send (RunIn dir cmd)",
+            // Isolating variants: spawn failure becomes `Left err` instead of
+            // aborting the eval. A nonzero exit is NOT a failure here — it
+            // arrives as `Right (code, out, err)`, so the common eval-killer
+            // (readProcess on nonzero exit) is avoided by inspecting the code.
+            "tryRun :: Text -> M (Either Text (Int, Text, Text))\ntryRun = send . TryRun",
+            "tryRunIn :: Text -> Text -> M (Either Text (Int, Text, Text))\ntryRunIn dir cmd = send (TryRunIn dir cmd)",
         ],
     }
 }
@@ -335,12 +358,22 @@ pub fn llm_decl() -> EffectDecl {
         constructors: &[
             "LlmChat       :: Text -> Llm Text",
             "LlmStructured :: Text -> Value -> Llm Value",
+            // Failure-isolating variants: an API/network error or refusal
+            // becomes `Left err` instead of killing the eval. (Budget
+            // exhaustion still aborts — that's a hard control limit.)
+            "TryLlmChat       :: Text -> Llm (Either Text Text)",
+            "TryLlmStructured :: Text -> Value -> Llm (Either Text Value)",
         ],
         type_defs: &[],
         helpers: &[
             "llm :: Text -> M Text\nllm = send . LlmChat",
             // schemaToValue lives in ask_decl (Ask is always present).
             "llmJson :: Text -> Schema -> M Value\nllmJson prompt schema = send (LlmStructured prompt (schemaToValue schema))",
+            // Isolating variants: an API failure/refusal becomes `Left err`
+            // instead of aborting the eval (the LLM call-budget limit still
+            // aborts — it is a hard control limit, not a probe failure).
+            "tryLlm :: Text -> M (Either Text Text)\ntryLlm = send . TryLlmChat",
+            "tryLlmJson :: Text -> Schema -> M (Either Text Value)\ntryLlmJson prompt schema = send (TryLlmStructured prompt (schemaToValue schema))",
             // --- Tier-1 cascade: model-first, escalate-to-caller. Lives
             // here (not the preamble) so .tidepool/lib modules can define
             // tier-1-driven verbs. Ask is always in the stack, so the
@@ -1022,6 +1055,32 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
                     "  glob \"**/*.hs\" >>= filterM (readFile >=> \\s -> yn ?? (\"test-only?\\n\" <> stake 2000 s))\n",
                 );
             }
+        }
+
+        // Failure isolation: be explicit about the half-promise — what the
+        // try* verbs catch AND what they deliberately don't.
+        let has_try = effects
+            .iter()
+            .any(|e| matches!(e.type_name, "Http" | "Exec" | "Llm" | "Fs"));
+        if has_try {
+            desc.push_str(concat!(
+                "\nFailure isolation (long-running evals): the try* verbs return ",
+                "`M (Either Text a)` so one bad probe doesn't kill an eval. An ",
+                "EXTERNAL failure \u{2014} bad URL, 404/network error, LLM API ",
+                "error or refusal, exec spawn failure, unreadable file \u{2014} ",
+                "becomes `Left err` (carrying the cause) and the eval continues:\n",
+                "  tryRun, tryRunIn      :: ... -> M (Either Text (Int, Text, Text))\n",
+                "  tryHttpGet, tryHttpPost :: ... -> M (Either Text Value)\n",
+                "  tryLlm                :: Text -> M (Either Text Text)\n",
+                "  tryLlmJson            :: Text -> Schema -> M (Either Text Value)\n",
+                "  tryReadFile           :: Text -> M (Either Text Text)\n",
+                "They do NOT catch: Haskell `error`/partial functions (including ",
+                "readProcess/callCommand on a nonzero exit), other runtime faults, ",
+                "eval cancellation/timeout, or the LLM call-budget limit \u{2014} ",
+                "those still abort the eval. A command that RUNS but exits nonzero ",
+                "is NOT a failure: tryRun returns `Right (code, out, err)`; inspect ",
+                "`code` yourself instead of using readProcess (which calls `error`).\n",
+            ));
         }
     }
 
