@@ -41,6 +41,10 @@ pub enum ReadError {
     /// Unsupported CBOR version.
     #[error("Unsupported CBOR version {0}.{1}")]
     UnsupportedVersion(u16, u16),
+    /// Two distinct constructors in the metadata hash to the same DataConId
+    /// (a `stableVarId` collision) — loud instead of a silent table overwrite.
+    #[error(transparent)]
+    DataConCollision(#[from] crate::datacon_table::DataConCollision),
 }
 
 /// 4-byte magic: ASCII 'TPLR'

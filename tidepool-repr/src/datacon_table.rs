@@ -4,6 +4,39 @@ use crate::datacon::DataCon;
 use crate::types::{AltCon, DataConId};
 use std::collections::HashMap;
 
+/// The module-qualified identity of a constructor, used to distinguish a true
+/// varId collision from a harmless re-encounter of the same constructor. Falls
+/// back to the unqualified name when no qualified name is recorded.
+fn dc_identity(dc: &DataCon) -> &str {
+    dc.qualified_name.as_deref().unwrap_or(&dc.name)
+}
+
+/// Two DISTINCT constructors (different module-qualified identity) sharing one
+/// [`DataConId`] — i.e. a 56-bit `stableVarId` hash collision.
+///
+/// This is the silent-eviction class that took out freer-simple's `Union`: a
+/// dcid-keyed map would overwrite one constructor's entry with the other, and
+/// the lost constructor then resolves to `None` (or to the wrong metadata) at
+/// effect-machine setup / case dispatch. [`DataConTable::insert_checked`]
+/// surfaces it loudly instead of overwriting.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "DataConId {:#018x} collision: two distinct constructors hash to the same \
+     varId — '{first}' and '{second}'. One would silently shadow the other in \
+     the DataConTable (the freer-simple Union eviction class). This is a \
+     Haskell-side stableVarId hash collision; rename one constructor or widen \
+     the hash. (Set TIDEPOOL_VARID_AUDIT=1 on the extract for the forensic dump.)",
+    .id.0
+)]
+pub struct DataConCollision {
+    /// The colliding identifier.
+    pub id: DataConId,
+    /// Module-qualified identity of the constructor already in the table.
+    pub first: String,
+    /// Module-qualified identity of the constructor that collided with it.
+    pub second: String,
+}
+
 /// Lookup table for data constructor metadata.
 /// Populated during deserialization from the CBOR metadata section.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -23,6 +56,32 @@ impl DataConTable {
     /// Create an empty table.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Insert a data constructor, refusing to silently overwrite a DISTINCT
+    /// constructor already bound to the same id (a `stableVarId` collision).
+    ///
+    /// A re-encounter of the SAME constructor (identical module-qualified
+    /// identity) is idempotent — the table load legitimately sees a constructor
+    /// from several metadata sources. Only a different-identity clash at one id
+    /// is an error. Zero extra cost in the no-collision case beyond the existing
+    /// `by_id` lookup that `insert` already performs.
+    ///
+    /// This is the always-on table-integrity guard; it covers every producer,
+    /// including future non-extract ones. (The Haskell extractor additionally
+    /// stops coalescing colliding entries so they actually reach this check.)
+    pub fn insert_checked(&mut self, dc: DataCon) -> Result<(), DataConCollision> {
+        if let Some(existing) = self.by_id.get(&dc.id) {
+            if dc_identity(existing) != dc_identity(&dc) {
+                return Err(DataConCollision {
+                    id: dc.id,
+                    first: dc_identity(existing).to_string(),
+                    second: dc_identity(&dc).to_string(),
+                });
+            }
+        }
+        self.insert(dc);
+        Ok(())
     }
 
     /// Insert a data constructor. Overwrites if id already exists.
@@ -423,6 +482,85 @@ mod tests {
     fn test_get_by_qualified_name_missing() {
         let table = DataConTable::new();
         assert_eq!(table.get_by_qualified_name("No.Such.Thing"), None);
+    }
+
+    // ---- insert_checked: loud varId-collision detection ----
+
+    /// Two DISTINCT constructors hashing to one id must be rejected loudly,
+    /// naming both module-qualified — instead of the silent overwrite `insert`
+    /// performs (which evicted freer-simple's Union).
+    #[test]
+    fn insert_checked_rejects_true_collision() {
+        let mut table = DataConTable::new();
+        table
+            .insert_checked(make_datacon_qualified(
+                42,
+                "Union",
+                1,
+                1,
+                "Data.OpenUnion.Internal.Union",
+            ))
+            .expect("first insert is clean");
+        let err = table
+            .insert_checked(make_datacon_qualified(
+                42,
+                "DynFlags",
+                1,
+                1,
+                "GHC.Driver.Session.DynFlags",
+            ))
+            .expect_err("distinct constructor at same id must collide");
+        assert_eq!(err.id, DataConId(42));
+        assert_eq!(err.first, "Data.OpenUnion.Internal.Union");
+        assert_eq!(err.second, "GHC.Driver.Session.DynFlags");
+        // The survivor is unchanged — the collision did not overwrite it.
+        assert_eq!(
+            table.get_by_qualified_name("Data.OpenUnion.Internal.Union"),
+            Some(DataConId(42))
+        );
+        assert_eq!(
+            table.get_by_qualified_name("GHC.Driver.Session.DynFlags"),
+            None
+        );
+        // Error message names both constructors and the id.
+        let msg = err.to_string();
+        assert!(msg.contains("Union"), "msg: {msg}");
+        assert!(msg.contains("DynFlags"), "msg: {msg}");
+        assert!(msg.contains("0x000000000000002a"), "msg: {msg}");
+    }
+
+    /// The SAME constructor seen twice (same module-qualified identity, e.g.
+    /// from both the wired-in list and a tycon scan) is a legitimate
+    /// re-encounter and must stay silent (idempotent).
+    #[test]
+    fn insert_checked_allows_same_constructor_reencounter() {
+        let mut table = DataConTable::new();
+        let dc = make_datacon_qualified(7, "Just", 2, 1, "GHC.Maybe.Just");
+        table.insert_checked(dc.clone()).expect("first insert");
+        table
+            .insert_checked(dc)
+            .expect("identical re-encounter is not a collision");
+        assert_eq!(table.len(), 1);
+        assert_eq!(
+            table.get_by_qualified_name("GHC.Maybe.Just"),
+            Some(DataConId(7))
+        );
+    }
+
+    /// Without qualified names, identity falls back to the unqualified name:
+    /// same name = silent, different name = collision.
+    #[test]
+    fn insert_checked_falls_back_to_unqualified_name() {
+        let mut table = DataConTable::new();
+        table.insert_checked(make_datacon(9, "Same", 1, 0)).unwrap();
+        table
+            .insert_checked(make_datacon(9, "Same", 1, 0))
+            .expect("same unqualified name is a re-encounter");
+        let err = table
+            .insert_checked(make_datacon(9, "Different", 1, 0))
+            .expect_err("different unqualified name at same id collides");
+        assert_eq!(err.first, "Same");
+        assert_eq!(err.second, "Different");
     }
 
     #[test]
