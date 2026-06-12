@@ -2011,7 +2011,7 @@ impl EmitContext {
     fn emit_tail_app(args: EmitArgs, idx: usize) -> Result<SsaVal, EmitError> {
         let (fun_idx, arg_idx) = match &args.sess.tree.nodes[idx] {
             CoreFrame::App { fun, arg } => (*fun, *arg),
-            _ => unreachable!(),
+            other => unreachable!("emit_tail_app dispatched on non-App node: {other:?}"),
         };
 
         // Evaluate fun and arg in NON-tail position
