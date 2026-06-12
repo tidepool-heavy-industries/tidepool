@@ -109,7 +109,7 @@ fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
     let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
     let cached = memo
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&key)
         .copied();
     if std::env::var("TIDEPOOL_FP_DEBUG").is_ok() {
@@ -186,7 +186,7 @@ fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
                 }
             };
             memo.lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(key, h);
             h
         }
@@ -229,8 +229,8 @@ fn fingerprint_dir(dir: &Path, hasher: &mut blake3::Hasher) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    let mut paths: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-    paths.sort_by_key(|e| e.path());
+    let mut paths: Vec<_> = entries.filter_map(std::result::Result::ok).collect();
+    paths.sort_by_key(std::fs::DirEntry::path);
 
     for entry in paths {
         let path = entry.path();

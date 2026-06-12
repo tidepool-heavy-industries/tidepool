@@ -236,7 +236,7 @@ impl FsHandler {
 
         let paths: Vec<PathBuf> = glob::glob(&full_pattern)
             .map_err(|e| EffectError::Handler(format!("invalid glob: {}", e)))?
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|p| {
                 p.canonicalize()
                     .map(|cp| cp.starts_with(&canonical_root))
@@ -321,7 +321,7 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                 let resolved = self.resolve(&path)?;
                 let mut entries: Vec<String> = std::fs::read_dir(&resolved)
                     .map_err(|e| EffectError::Handler(e.to_string()))?
-                    .filter_map(|e| e.ok())
+                    .filter_map(std::result::Result::ok)
                     .map(|e| e.file_name().to_string_lossy().to_string())
                     .collect();
                 entries.sort();
