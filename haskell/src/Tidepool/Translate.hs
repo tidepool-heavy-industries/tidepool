@@ -106,7 +106,14 @@ data LitEnc
 
 data TransState = TransState
   { tsNodes :: !(Seq FlatNode)
-  , tsUsedDCs :: !(Map.Map Word64 DataCon)
+  -- Keyed by (stableVarId, module-qualified name), NOT varId alone. Two
+  -- DISTINCT constructors whose 56-bit varIds collide would otherwise coalesce
+  -- here — silently, within a single scan, before the (varId,qname)-keyed
+  -- merge and the Rust insert_checked guard could ever see the clash. Keying on
+  -- the qualified name too keeps both colliding entries distinct so the
+  -- collision reaches the loud guard. In the no-collision case each varId maps
+  -- to exactly one qname, so the recorded constructor set is unchanged.
+  , tsUsedDCs :: !(Map.Map (Word64, Text) DataCon)
   , tsRecJoinIds :: !(Set.Set Word64)  -- join IDs from Rec groups (translated as LetRec lambdas)
   , tsSynthCounter :: !Word64          -- counter for synthetic VarIds (tag 'T')
   , tsUnresolvedIds :: !(Set.Set Word64) -- IDs that should be translated as error nodes
@@ -132,7 +139,7 @@ freshSynthVarId = do
 
 recordDC :: DataCon -> TransM ()
 recordDC dc = modify' $ \s ->
-  s { tsUsedDCs = Map.insert (varId (dataConWorkId dc)) dc (tsUsedDCs s) }
+  s { tsUsedDCs = Map.insert (varId (dataConWorkId dc), qualifiedName (dataConName dc)) dc (tsUsedDCs s) }
 
 -- | Emit a runtime unpackCString# loop for a non-static Addr# value.
 -- Produces: letrec go = \a -> case indexCharOffAddr# a 0# of
@@ -263,7 +270,7 @@ translateBinds binds = concatMap translateBind binds
 -- the DataConTable meta walks so those harvest only constructors the program
 -- can run, never the full closed graph (quoter-internal / TH machinery binds
 -- that merely sit on the include path).
-translateModule :: [CoreBind] -> String -> Set.Set Word64 -> (Seq FlatNode, Map.Map Word64 DataCon, [CoreBind])
+translateModule :: [CoreBind] -> String -> Set.Set Word64 -> (Seq FlatNode, Map.Map (Word64, Text) DataCon, [CoreBind])
 translateModule allBinds targetName unresolvedIds =
   let targetId = findTargetId targetName allBinds
       neededBinds = reachableBinds allBinds targetId
@@ -388,7 +395,7 @@ translateModule allBinds targetName unresolvedIds =
 -- actually compiled (the target's transitive closure, NOT the full closed
 -- graph) — the meta walks consume this so the DataConTable only ever sees
 -- constructors the emitted program references.
-translateModuleClosed :: HscEnv -> [CoreBind] -> String -> IO (Seq FlatNode, Map.Map Word64 DataCon, [UnresolvedVar], [CoreBind])
+translateModuleClosed :: HscEnv -> [CoreBind] -> String -> IO (Seq FlatNode, Map.Map (Word64, Text) DataCon, [UnresolvedVar], [CoreBind])
 translateModuleClosed hscEnv allBinds targetName = do
   (closedBinds0, unresolved) <- resolveExternals hscEnv allBinds
   closedBinds <- uniquifyDuplicateBinders closedBinds0
