@@ -197,14 +197,14 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
             None
         };
 
-        table.insert(DataCon {
+        table.insert_checked(DataCon {
             id: DataConId(dcid),
             name,
             tag,
             rep_arity: arity,
             field_bangs: bangs,
             qualified_name,
-        });
+        })?;
     }
 
     Ok((table, warnings))
@@ -619,5 +619,65 @@ mod tests {
             err,
             ReadError::UnsupportedVersion(super::super::VERSION_MAJOR, m) if m == super::super::VERSION_MINOR + 1
         ));
+    }
+
+    // ---- load-path seam: read_metadata rejects a varId collision ----
+    //
+    // A real extractor can never be made to emit a guaranteed hash collision on
+    // demand, so we inject at the CBOR seam: a hand-built meta with two entries
+    // sharing one DataConId but with distinct module-qualified names — exactly
+    // what `mergeMetaPreserving` now lets through to the loader. read_metadata
+    // must surface it as a loud `DataConCollision`, not silently keep one.
+
+    fn meta_entry(dcid: u64, name: &str, qn: &str) -> ciborium::value::Value {
+        use ciborium::value::Value as Cbor;
+        Cbor::Array(vec![
+            Cbor::Integer(dcid.into()),
+            Cbor::Text(name.to_string()),
+            Cbor::Integer(1u64.into()),
+            Cbor::Integer(1u64.into()),
+            Cbor::Array(vec![]),
+            Cbor::Text(qn.to_string()),
+        ])
+    }
+
+    fn meta_bytes(entries: Vec<ciborium::value::Value>) -> Vec<u8> {
+        use ciborium::value::Value as Cbor;
+        let root = Cbor::Array(vec![
+            Cbor::Array(entries),
+            Cbor::Map(vec![(Cbor::Text("has_io".to_string()), Cbor::Bool(false))]),
+        ]);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&super::super::HEADER_MAGIC);
+        bytes.extend_from_slice(&super::super::VERSION_MAJOR.to_be_bytes());
+        bytes.extend_from_slice(&super::super::VERSION_MINOR.to_be_bytes());
+        ciborium::ser::into_writer(&root, &mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn read_metadata_rejects_varid_collision() {
+        let bytes = meta_bytes(vec![
+            meta_entry(42, "Union", "Data.OpenUnion.Internal.Union"),
+            meta_entry(42, "DynFlags", "GHC.Driver.Session.DynFlags"),
+        ]);
+        match read_metadata(&bytes).expect_err("colliding meta must be rejected") {
+            ReadError::DataConCollision(c) => {
+                assert_eq!(c.id, crate::types::DataConId(42));
+                assert_eq!(c.first, "Data.OpenUnion.Internal.Union");
+                assert_eq!(c.second, "GHC.Driver.Session.DynFlags");
+            }
+            other => panic!("expected DataConCollision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_metadata_accepts_distinct_ids() {
+        let bytes = meta_bytes(vec![
+            meta_entry(1, "Just", "GHC.Maybe.Just"),
+            meta_entry(2, "Nothing", "GHC.Maybe.Nothing"),
+        ]);
+        let (table, _) = read_metadata(&bytes).expect("distinct ids load cleanly");
+        assert_eq!(table.len(), 2);
     }
 }

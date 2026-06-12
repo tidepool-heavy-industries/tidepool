@@ -6,6 +6,7 @@ module Tidepool.Translate
   , collectUsedDataCons
   , collectTransitiveDCons
   , wiredInDataCons
+  , mergeMetaPreserving
   , dcToMeta
   , valueRepArity
   , mapBang
@@ -650,6 +651,29 @@ dcToMeta dc =
   , map mapBang (dataConSrcBangs dc)
   , qualifiedName (dataConName dc)
   )
+
+-- | Combine the metadata sources (HIGHEST priority FIRST, e.g.
+-- @[wiredIn, tycon, used, scan, transitive]@) into the final entry list.
+--
+-- Entries are coalesced by @(varId, module-qualified name)@: the same
+-- constructor seen across several sources collapses to its highest-priority
+-- copy. Two DISTINCT constructors that hash to the SAME varId (a collision)
+-- have different qualified names, so they key DIFFERENTLY here and are BOTH
+-- preserved — the loader then rejects the duplicate id loudly
+-- (@DataConTable::insert_checked@), naming both. This replaces the old
+-- @Map.fromList@/@Map.union@ merge that was keyed on the varId alone and
+-- silently dropped one of a colliding pair (the freer-simple @Union@
+-- eviction). In the no-collision case the output is identical — every varId
+-- still appears once, in ascending varId order — so meta.cbor is unchanged.
+mergeMetaPreserving :: [[(Word64, Text, Int, Int, [Text], Text)]]
+                    -> [(Word64, Text, Int, Int, [Text], Text)]
+mergeMetaPreserving sources =
+  -- Map.fromList keeps the LAST value per key, so feed the flattened sources
+  -- reversed: the highest-priority copy (earliest in the input) is seen last
+  -- and wins. Map.elems then yields ascending (varId, qname) order.
+  Map.elems $ Map.fromList
+    [ ((dcid, qname), e)
+    | e@(dcid, _, _, _, _, qname) <- reverse (concat sources) ]
 
 -- | Compute transitive closure of TyCons reachable from all binder types,
 -- expanding through newtypes, then return metadata for all their DataCons.

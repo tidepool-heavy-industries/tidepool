@@ -27,7 +27,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 
 import Tidepool.GhcPipeline (runPipeline, PipelineResult(..), dumpCore)
-import Tidepool.Translate (translateBinds, translateModuleClosed, collectDataCons, collectUsedDataCons, collectTransitiveDCons, wiredInDataCons, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO)
+import Tidepool.Translate (translateBinds, translateModuleClosed, collectDataCons, collectUsedDataCons, collectTransitiveDCons, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO)
 import Tidepool.CborEncode (encodeTree, encodeMetadata)
 
 main :: IO ()
@@ -142,12 +142,12 @@ processFile args path = do
             scanMeta = collectUsedDataCons allClosedBinds
             transitiveMeta = collectTransitiveDCons allClosedBinds
             wiredInMeta = wiredInDataCons
-            mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- wiredInMeta]
-                        `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- tyconMeta]
-                        `Map.union` allMetaMap
-                        `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- scanMeta]
-                        `Map.union` Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- transitiveMeta]
-            allMeta = Map.elems mergedMap
+            -- Highest priority first; mergeMetaPreserving keeps colliding
+            -- (same-varId, different-qualified-name) entries distinct so the
+            -- loader rejects them loudly instead of one silently winning.
+            allMeta = mergeMetaPreserving
+                        [ wiredInMeta, tyconMeta, Map.elems allMetaMap
+                        , scanMeta, transitiveMeta ]
             hasIO = any (targetBindingHasIO binds) uniqueNames
         let metaCbor = encodeMetadata allMeta hasIO
         let metaFile = outDir </> "meta.cbor"
@@ -174,16 +174,11 @@ processFile args path = do
             scanMeta = collectUsedDataCons closedBinds
             transitiveMeta = collectTransitiveDCons closedBinds
             wiredInMeta = wiredInDataCons
-            mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- wiredInMeta]
-                        `Map.union`
-                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- tyconMeta]
-                        `Map.union`
-                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- usedMeta]
-                        `Map.union`
-                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- scanMeta]
-                        `Map.union`
-                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- transitiveMeta]
-            allMeta = Map.elems mergedMap
+            -- Highest priority first; mergeMetaPreserving keeps colliding
+            -- (same-varId, different-qualified-name) entries distinct so the
+            -- loader rejects them loudly instead of one silently winning.
+            allMeta = mergeMetaPreserving
+                        [ wiredInMeta, tyconMeta, usedMeta, scanMeta, transitiveMeta ]
             hasIO = targetBindingHasIO binds targetName
         let metaCbor = encodeMetadata allMeta hasIO
         let metaFile = outDir </> "meta.cbor"
@@ -206,14 +201,11 @@ processFile args path = do
             usedMeta = collectUsedDataCons binds
             transitiveMeta = collectTransitiveDCons binds
             wiredInMeta = wiredInDataCons
-            mergedMap = Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- wiredInMeta]
-                        `Map.union`
-                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- tyconMeta]
-                        `Map.union`
-                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- usedMeta]
-                        `Map.union`
-                        Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- transitiveMeta]
-            allMeta = Map.elems mergedMap
+            -- Highest priority first; mergeMetaPreserving keeps colliding
+            -- (same-varId, different-qualified-name) entries distinct so the
+            -- loader rejects them loudly instead of one silently winning.
+            allMeta = mergeMetaPreserving
+                        [ wiredInMeta, tyconMeta, usedMeta, transitiveMeta ]
         let metaCbor = encodeMetadata allMeta False
         let metaFile = outDir </> "meta.cbor"
         BS.writeFile metaFile metaCbor
