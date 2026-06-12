@@ -96,7 +96,9 @@ fn apply_rules_once(expr: &CoreExpr, table: &DataConTable) -> (CoreExpr, usize) 
         debug_assert_eq!(old_to_new.len(), old_idx);
         old_to_new.push(new_idx);
     }
-    let last_mapped_idx = *old_to_new.last().expect("non-empty");
+    let last_mapped_idx = *old_to_new
+        .last()
+        .expect("normalize: old_to_new is non-empty (input RecursiveTree had ≥1 node)");
     (RecursiveTree { nodes: out }, last_mapped_idx)
 }
 
