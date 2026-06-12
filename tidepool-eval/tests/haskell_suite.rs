@@ -996,3 +996,60 @@ fn qq_fmt_escape() {
         "use {braces} for holes and } is literal",
     );
 }
+
+// =============================================================================
+// [fmt|{expr:spec}|] format specs (Phase 2 — PyF mini-language, Strategy B)
+//
+// The quoter interprets the spec at compile time and emits calls to monomorphic
+// JIT-safe helpers (Tidepool.QQ.Fmt.Runtime). Floats use the round primop (no
+// floatToDigits). The differential harness re-runs each on the JIT.
+// =============================================================================
+
+macro_rules! suite_fmt {
+    ($name:ident, $expected:expr) => {
+        #[test]
+        fn $name() {
+            assert_fmt(
+                include_bytes!(concat!(
+                    "../../haskell/test/suite_cbor/",
+                    stringify!($name),
+                    ".cbor"
+                )),
+                $expected,
+            );
+        }
+    };
+}
+
+// Fixed-point: the research's proven cases (round primop, no floatToDigits).
+suite_fmt!(qq_fmt_spec_fixed2, "3.14");
+suite_fmt!(qq_fmt_spec_fixed_half, "2.50");
+suite_fmt!(qq_fmt_spec_fixed_neg, "-1.20");
+suite_fmt!(qq_fmt_spec_fixed_small, "0.07");
+
+// Integer width / bases.
+suite_fmt!(qq_fmt_spec_zero_pad, "0042");
+suite_fmt!(qq_fmt_spec_hex, "ff");
+suite_fmt!(qq_fmt_spec_oct, "100");
+suite_fmt!(qq_fmt_spec_bin, "101010");
+
+// Alignment over a Text hole (width 10).
+suite_fmt!(qq_fmt_spec_align_right, "        hi");
+suite_fmt!(qq_fmt_spec_align_left, "hi        ");
+suite_fmt!(qq_fmt_spec_align_center, "    hi    ");
+
+// Sign and percent.
+suite_fmt!(qq_fmt_spec_sign, "+42");
+suite_fmt!(qq_fmt_spec_percent, "50.000000%");
+suite_fmt!(qq_fmt_spec_percent1, "50.0%");
+
+// Brace-nesting: a '}' inside a string literal in the hole (old lexer broke).
+suite_fmt!(qq_fmt_spec_brace, "a}b");
+// A ':' inside a string literal is not the spec separator.
+suite_fmt!(qq_fmt_spec_colon, "a:b");
+// {{ / }} doubling alongside the \{ escape.
+suite_fmt!(qq_fmt_spec_escapes, "{x} and {y} done");
+
+// K canary: GADT sibling-alt `show` at refined Int/Double types. Returns "1.5".
+// Guards the DataConTable / stableVarId-collision class.
+suite_fmt!(qq_fmt_usek, "1.5");

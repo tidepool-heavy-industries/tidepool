@@ -11,6 +11,10 @@ import Tidepool.QQ (fmt, j)
 -- Suite.hs cannot import Tidepool.Prelude here (it pulls Control.Lens, which
 -- the --all-closed extract session cannot see), so import render directly.
 import Tidepool.Render (render)
+-- Spec'd [fmt|{expr:spec}|] holes expand to calls into Tidepool.QQ.Fmt.Runtime
+-- (FSign/FAlign + the fmt* helpers). Like render, these live in a lens-free
+-- module so the --all-closed extract session can import them directly.
+import Tidepool.QQ.Fmt.Runtime
 -- Value module directly, NOT the Tidepool.Aeson facade: the facade
 -- re-exports Tidepool.Aeson.Lens -> Control.Lens, which the extract GHC
 -- session cannot see (lens is not a boot package), so the facade kills
@@ -990,6 +994,88 @@ qq_fmt_bool = [fmt|flag: {b}|]
 qq_fmt_char :: T.Text
 qq_fmt_char = [fmt|ch: {c}|]
   where c = 'x' :: Char
+
+-- ---- qq-suite: fmt format-spec section (Phase 2 — PyF {expr:spec}) ----
+--
+-- Spec'd holes route through the compile-time interpreter (Tidepool.QQ.Fmt) to
+-- monomorphic JIT-safe helpers (Tidepool.QQ.Fmt.Runtime).  Floats use the
+-- round primop (no floatToDigits); the differential harness re-runs every
+-- fixture on the JIT and checks interpreter ≡ JIT.
+
+-- Fixed-point: the research's proven cases.
+qq_fmt_spec_fixed2 :: T.Text          -- {d:.2f} on 3.14159 -> "3.14"
+qq_fmt_spec_fixed2 = [fmt|{d:.2f}|] where d = 3.14159 :: Double
+
+qq_fmt_spec_fixed_half :: T.Text      -- 2.5 -> "2.50"
+qq_fmt_spec_fixed_half = [fmt|{d:.2f}|] where d = 2.5 :: Double
+
+qq_fmt_spec_fixed_neg :: T.Text       -- -1.2 -> "-1.20"
+qq_fmt_spec_fixed_neg = [fmt|{d:.2f}|] where d = -1.2 :: Double
+
+qq_fmt_spec_fixed_small :: T.Text     -- 0.07 -> "0.07"
+qq_fmt_spec_fixed_small = [fmt|{d:.2f}|] where d = 0.07 :: Double
+
+-- Integer width / bases.
+qq_fmt_spec_zero_pad :: T.Text        -- {n:04d} on 42 -> "0042"
+qq_fmt_spec_zero_pad = [fmt|{n:04d}|] where n = 42 :: Int
+
+qq_fmt_spec_hex :: T.Text             -- {n:x} on 255 -> "ff"
+qq_fmt_spec_hex = [fmt|{n:x}|] where n = 255 :: Int
+
+qq_fmt_spec_oct :: T.Text             -- {n:o} on 64 -> "100"
+qq_fmt_spec_oct = [fmt|{n:o}|] where n = 64 :: Int
+
+qq_fmt_spec_bin :: T.Text             -- {n:b} on 42 -> "101010"
+qq_fmt_spec_bin = [fmt|{n:b}|] where n = 42 :: Int
+
+-- Alignment over a Text hole.
+qq_fmt_spec_align_right :: T.Text     -- {t:>10} -> "        hi"
+qq_fmt_spec_align_right = [fmt|{t:>10}|] where t = T.pack "hi"
+
+qq_fmt_spec_align_left :: T.Text      -- {t:<10} -> "hi        "
+qq_fmt_spec_align_left = [fmt|{t:<10}|] where t = T.pack "hi"
+
+qq_fmt_spec_align_center :: T.Text    -- {t:^10} -> "    hi    "
+qq_fmt_spec_align_center = [fmt|{t:^10}|] where t = T.pack "hi"
+
+-- Sign and percent.
+qq_fmt_spec_sign :: T.Text            -- {n:+} on 42 -> "+42"
+qq_fmt_spec_sign = [fmt|{n:+}|] where n = 42 :: Int
+
+qq_fmt_spec_percent :: T.Text         -- {d:%} on 0.5 -> "50.000000%"
+qq_fmt_spec_percent = [fmt|{d:%}|] where d = 0.5 :: Double
+
+qq_fmt_spec_percent1 :: T.Text        -- {d:.1%} on 0.5 -> "50.0%"
+qq_fmt_spec_percent1 = [fmt|{d:.1%}|] where d = 0.5 :: Double
+
+-- Brace-nesting: a string literal containing '}' inside the hole (the old
+-- `break (== '}')` lexer stopped at the first '}'; the new lexer skips the
+-- string literal and finds the real closing brace).
+qq_fmt_spec_brace :: T.Text           -- -> "a}b"
+qq_fmt_spec_brace = [fmt|{T.pack "a}b"}|]
+
+-- A ':' inside a string literal is not mistaken for the spec separator.
+qq_fmt_spec_colon :: T.Text           -- -> "a:b"
+qq_fmt_spec_colon = [fmt|{T.pack "a:b"}|]
+
+-- {{ / }} doubling and the existing \{ escape, together.
+qq_fmt_spec_escapes :: T.Text         -- -> "{x} and {y} done"
+qq_fmt_spec_escapes = [fmt|{{x}} and \{y} done|]
+
+-- K canary: a GADT whose sibling case alts call `show` at two refined types
+-- (Int / Double).  Guards the DataConTable / stableVarId-collision class that
+-- the CLAUDE.md GADT-sibling-alt note tracks.  Returns "1.5".
+data FmtK a where
+  FmtKInt  :: FmtK Int
+  FmtKPrec :: Int -> FmtK Double
+
+useFmtK :: FmtK a -> a -> T.Text
+useFmtK k x = case k of
+  FmtKInt    -> T.pack (show x)   -- show @Int
+  FmtKPrec _ -> T.pack (show x)   -- show @Double
+
+qq_fmt_usek :: T.Text
+qq_fmt_usek = useFmtK (FmtKPrec 1) (1.5 :: Double)
 
 -- ---- qq-suite: json section (owner: leaf qq-json) ----
 
