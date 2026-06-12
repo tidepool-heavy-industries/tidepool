@@ -283,7 +283,9 @@ fn difffiles_reports_patch_and_stats() {
             assert_eq!(json["changed"], serde_json::json!(true), "got {json}");
             assert_eq!(json["path"], serde_json::json!("a.txt"), "got {json}");
             assert!(
-                json["patch"].as_str().map(|s| s.contains("-y") && s.contains("+Y"))
+                json["patch"]
+                    .as_str()
+                    .map(|s| s.contains("-y") && s.contains("+Y"))
                     == Some(true),
                 "rendered patch carries the change; got {json}"
             );
