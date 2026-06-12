@@ -358,9 +358,11 @@ Shadow with a monomorphic version only for:
    not the dictionary.
 2. **Ergonomics** — Pack/Len/Null/Slice-style Text+list polymorphism by design.
 
-One known dictionary bug (open): a GADT case using a dictionary method at TWO
-different refined types in sibling alts SIGSEGVs. 8-line repro:
-`data K a where { KInt :: K Int; KPrec :: Int -> K Double }` with sibling alts
-`show n` / `show d` — crashes on the `KPrec` path; removing either `show` fixes it.
-The non-GADT `Either Int Double` equivalent is fine. If you hit this shape, restructure
-to per-constructor helper functions until the emit bug is fixed.
+A GADT-sibling-alt crash observed live on 2026-06-11 (dictionary method at two
+different refined types: `data K a where { KInt :: K Int; KPrec :: Int -> K Double }`
+with sibling alts `show n` / `show d`) RESOLVED without a targeted fix after the
+2026-06-12 lib/table changes and was never reproducible in the test harness on any
+build — prime suspect is a DataConTable stableVarId collision (56-bit hash; the
+same class that evicted freer-simple's Union when the ghc package flooded the
+table). If a GADT case crashes with no other explanation: re-run with
+TIDEPOOL_VARID_AUDIT=1 and check for collisions FIRST, before suspecting emit.
