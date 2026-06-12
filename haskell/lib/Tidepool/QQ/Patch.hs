@@ -30,7 +30,21 @@
 --   * everything else is a literal that must match exactly.
 --
 -- Duplicate binders are a compile error.  Line numbers in @\@\@@ headers are
--- hints and are NOT matched — only body shape and content are.
+-- hints and are NOT matched — only body shape and content are.  There is no
+-- hole that binds a hunk's body /lines as a list/ (line holes are per-line) and
+-- no multi-hunk-with-structure binder; the @qq_patch_pat_*@ Suite fixtures are
+-- the canonical working shapes.
+--
+-- == Debugging a silent no-match
+--
+-- When a pattern arm silently falls through, the cause is ambiguous: the
+-- scrutinee might not 'Tidepool.Patch.parsePatch' at all, or it parses but its
+-- structure differs from the pattern.  'Tidepool.Patch.checkDiff' (pure, returns
+-- a 'Tidepool.Aeson.Value.Value') tells the two apart — @{"parses":false,…}@
+-- means fix the /diff text/, @{"parses":true,"files":[…]}@ means fix the
+-- /pattern shape/ against that reported structure.  To /produce/ a diff in the
+-- first place, reach for 'Tidepool.Patch.genPatch' (or the @genPatchTo@ verb)
+-- rather than hand-writing @\@\@@ count arithmetic.
 module Tidepool.QQ.Patch (patch) where
 
 import Data.Char (isAlpha, isAlphaNum)

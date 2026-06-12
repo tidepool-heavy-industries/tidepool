@@ -348,12 +348,33 @@ if shouldProceed answer
 ride the `input` payload lane instead: `applyDiff d where d = case input of
 { String s -> s; _ -> "" }` with the unified diff as the JSON string. `applyDiff`
 is all-or-nothing (plan-first; zero writes on any conflict) and reports
-conflicts/already-applied as DATA. Hand-written hunk headers must satisfy count
-arithmetic (`@@ -l,c +l,c @@` where c = ctx+del / ctx+ins line counts) or
-parsePatch rejects loudly. Pattern-position `[patch|]` matches require the
-INPUT to parse first — on no-match, check `parsePatch` for a `Left` before
-suspecting the pattern. Column-0 `[patch|]` literals work fine in helpers and
-.tidepool/lib source files.
+conflicts/already-applied as DATA.
+
+**Never hand-write hunk arithmetic** — `genPatchTo path newContent` reads the
+current file and *generates* the unified diff for you (Myers O(ND) line diff,
+3-line context, changes coalesced, counts/start-hints correct by construction,
+output round-trips through `parsePatch`); an absent file yields a creation
+patch, identical content yields `""`. Put the new file body on the `input` lane
+(`genPatchTo "f" newC >>= applyDiff` where `newC = case input of {String s -> s;
+_ -> ""}`) — generate then apply in one eval. `genPatch path old new ::
+Either Text FilePatch` is the pure core; `diffFiles a b` diffs two existing
+files. Hand-written hunk headers (when you must) still need count arithmetic
+(`@@ -l,c +l,c @@`, c = ctx+del / ctx+ins line counts) or `parsePatch` rejects
+loudly — but reach for `genPatchTo` first.
+
+**checkDiff-first when a `[patch|]` pattern silently fails to match.** A no-match
+is ambiguous: the INPUT might not parse at all, OR it parses but the pattern
+shape differs. `checkDiff diffText` (pure, returns a `Value`) disambiguates:
+`{"parses":false,"error":…}` means fix the *diff text*; `{"parses":true,"files":
+[{path,create,hunks,oldLines,newLines}…]}` means fix the *pattern shape* against
+that structure. The v1 pattern holes are: `$var` at a path; per-line content
+holes ` $x`/`-$x`/`+$x` (each binds ONE line's `Text`); a bare `$var` in the
+hunks position binds that file's whole `[Hunk]`; a trailing `...` allows extra
+files. Line numbers in `@@` headers are HINTS — NOT matched (only body shape and
+content are). There is no hole that binds a hunk's body lines as a list, and no
+multi-hunk-with-structure binder — see the `qq_patch_pat_*` Suite fixtures for
+the canonical, working shapes. Column-0 `[patch|]` literals work fine in helpers
+and .tidepool/lib source files.
 
 ### Structural Search (MCP)
 
