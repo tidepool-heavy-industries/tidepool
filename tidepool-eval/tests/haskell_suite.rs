@@ -221,6 +221,7 @@ fn collect_int_list(val: &Value, table: &DataConTable) -> Vec<i64> {
 macro_rules! suite_int {
     ($name:ident, $expected:expr) => {
         #[test]
+        #[allow(non_snake_case)]
         fn $name() {
             static CBOR: &[u8] = include_bytes!(concat!(
                 "../../haskell/test/suite_cbor/",
@@ -237,6 +238,7 @@ macro_rules! suite_int {
 macro_rules! suite_int_list {
     ($name:ident, $expected:expr) => {
         #[test]
+        #[allow(non_snake_case)]
         fn $name() {
             static CBOR: &[u8] = include_bytes!(concat!(
                 "../../haskell/test/suite_cbor/",
@@ -254,6 +256,7 @@ macro_rules! suite_int_list {
 macro_rules! suite_bool {
     ($name:ident, $expected:expr) => {
         #[test]
+        #[allow(non_snake_case)]
         fn $name() {
             static CBOR: &[u8] = include_bytes!(concat!(
                 "../../haskell/test/suite_cbor/",
@@ -270,6 +273,7 @@ macro_rules! suite_bool {
 macro_rules! suite_char {
     ($name:ident, $expected:expr) => {
         #[test]
+        #[allow(non_snake_case)]
         fn $name() {
             static CBOR: &[u8] = include_bytes!(concat!(
                 "../../haskell/test/suite_cbor/",
@@ -286,6 +290,7 @@ macro_rules! suite_char {
 macro_rules! suite_double {
     ($name:ident, $expected:expr) => {
         #[test]
+        #[allow(non_snake_case)]
         fn $name() {
             static CBOR: &[u8] = include_bytes!(concat!(
                 "../../haskell/test/suite_cbor/",
