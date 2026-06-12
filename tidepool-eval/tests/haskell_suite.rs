@@ -1058,3 +1058,33 @@ suite_fmt!(qq_fmt_spec_escapes, "{x} and {y} done");
 // K canary: GADT sibling-alt `show` at refined Int/Double types. Returns "1.5".
 // Guards the DataConTable / stableVarId-collision class.
 suite_fmt!(qq_fmt_usek, "1.5");
+
+// =============================================================================
+// [sg|…|] / [uri|…|] validators: accept cases (Text passthrough). The
+// validators run their check at COMPILE time and emit the body verbatim;
+// reject cases live in tidepool-runtime/tests/validator_reject.rs.
+// =============================================================================
+suite_fmt!(qq_sg_accept, "fn $NAME($$$ARGS)");
+suite_fmt!(qq_uri_accept, "https://example.com/a/b?q=1");
+
+// =============================================================================
+// [patch|…|] + Tidepool.Patch: the pure engine (parse / render / invert /
+// apply) runs on the interpreter here and on the JIT in the differential
+// harness (tidepool-codegen), proving it is JIT-safe.
+// =============================================================================
+suite_bool!(qq_patch_literal, true);
+suite_bool!(qq_patch_render_roundtrip, true);
+suite_bool!(qq_patch_invert_involution, true);
+suite_fmt!(qq_patch_apply_clean, "alpha\nBETA\ngamma");
+suite_int!(qq_patch_apply_drift, 3);
+suite_fmt!(qq_patch_conflict_nomatch, "needle|/|two");
+suite_int!(qq_patch_conflict_ambiguous, 4);
+suite_int!(qq_patch_already_applied, 2);
+suite_fmt!(qq_patch_creation, "hello\nworld\n");
+suite_bool!(qq_patch_parse_runtime, true);
+
+// Pattern side: structural matching of a runtime diff Text (parsePatch runs at
+// match time, so this exercises the parser on the JIT too).
+suite_bool!(qq_patch_pat_match, true);
+suite_fmt!(qq_patch_pat_bind, "config.txt:DEBUG");
+suite_bool!(qq_patch_pat_fallthrough, true);
