@@ -164,6 +164,53 @@ impl<'a, U> EffectContext<'a, U> {
             .map_err(EffectError::Bridge)
     }
 
+    /// Catch an external handler failure and surface it to the JIT as an
+    /// `Either Text result` instead of aborting the whole eval — the
+    /// substrate for the `try*` verbs (failure isolation for long-running
+    /// orchestrations).
+    ///
+    /// - `Ok(v)`   → `Right v`   (success carries the converted value)
+    /// - `Err(EffectError::Handler(msg))` → `Left msg`   (the external
+    ///   failure text, `String` → Haskell `Text`, preserved verbatim so the
+    ///   eval sees the URL/command/operation context the handler recorded)
+    /// - `Err(other)` → propagated unchanged. Structural/bridge/eval errors
+    ///   are runtime-invariant violations (real bugs), NOT external probe
+    ///   failures; swallowing them would hide corruption behind a `Left`.
+    ///   The line between failure ISOLATION and corruption HIDING runs
+    ///   exactly here.
+    ///
+    /// Relies on `impl<T: ToCore, E: ToCore> ToCore for Result<T, E>`
+    /// (`Ok → Right`, `Err → Left`) in `tidepool-bridge`.
+    ///
+    /// SEAM NOTE for a future block-level `try :: M a -> M (Either Text a)`
+    /// (workflow-parity.md item 3, "the destination"): that requires driving
+    /// the body as a first-class `M a` through the JIT effect machine
+    /// (`tidepool-codegen`), since its continuations are JIT closures and
+    /// cannot be Value-walked here. When it lands, the fallible-core split
+    /// the handlers grew for `respond_caught` (each external op exposed as a
+    /// `Result<T, EffectError>` core) is the reusable substrate — the
+    /// catch-vs-propagate policy above is the same one block-level `try`
+    /// wants. The per-call `tryX` verbs then either remain or collapse to
+    /// `tryX = try . x`.
+    pub fn respond_caught<T: ToCore>(
+        &self,
+        r: Result<T, EffectError>,
+    ) -> Result<Response, EffectError> {
+        match r {
+            Ok(v) => self.respond(Ok::<T, String>(v)),
+            Err(EffectError::Handler(msg)) => {
+                // Secondary telemetry: the eval's own `Left` is the primary
+                // signal; this gives the server log a breadcrumb. Gated on the
+                // existing effect-tracing knob to stay quiet by default.
+                if std::env::var("TIDEPOOL_TRACE_EFFECTS").is_ok() {
+                    eprintln!("[try-caught] {msg}");
+                }
+                self.respond(Err::<T, String>(msg))
+            }
+            Err(other) => Err(other),
+        }
+    }
+
     /// Respond with a lazily-streamed list: elements convert and materialize
     /// chunk-by-chunk as the Haskell program demands them. `take k` of a huge
     /// listing only ever converts ~one chunk; an infinite iterator is a
@@ -412,6 +459,97 @@ mod tests {
         match result {
             Response::Complete(Value::Lit(Literal::LitInt(42))) => {}
             other => panic!("expected LitInt(42), got {other:?}"),
+        }
+    }
+
+    /// Table with the constructors `respond_caught` needs to build an
+    /// `Either Text result`: `Right`/`Left` (arity 1) and `Text` (arity 3,
+    /// for `String` → Haskell `Text`).
+    fn either_table() -> DataConTable {
+        use tidepool_repr::datacon::DataCon;
+        use tidepool_repr::types::DataConId;
+        let mut table = DataConTable::new();
+        let mut add = |id: u64, name: &str, rep_arity: u32| {
+            table.insert(DataCon {
+                id: DataConId(id),
+                name: name.to_string(),
+                tag: id as u32,
+                rep_arity,
+                field_bangs: vec![],
+                qualified_name: None,
+            });
+        };
+        add(1, "Right", 1);
+        add(2, "Left", 1);
+        add(3, "Text", 3);
+        table
+    }
+
+    fn con_name<'a>(table: &'a DataConTable, v: &Value) -> Option<(&'a str, usize)> {
+        match v {
+            Value::Con(id, fields) => table.name_of(*id).map(|n| (n, fields.len())),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn respond_caught_ok_yields_right() {
+        let table = either_table();
+        let cx = make_cx(&table);
+        // Use a raw `Value` payload (identity ToCore) so the table needs only
+        // Right/Left/Text — not the `I#` boxing constructor a bare i64 wants.
+        let result = cx
+            .respond_caught(Ok::<Value, EffectError>(lit_int(7)))
+            .unwrap();
+        match result {
+            Response::Complete(ref v) => {
+                assert_eq!(con_name(&table, v), Some(("Right", 1)));
+                if let Value::Con(_, fields) = v {
+                    assert!(matches!(fields[0], Value::Lit(Literal::LitInt(7))));
+                }
+            }
+            other => panic!("expected Right(7), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn respond_caught_handler_err_yields_left_with_text() {
+        let table = either_table();
+        let cx = make_cx(&table);
+        let result = cx
+            .respond_caught(Err::<i64, EffectError>(EffectError::Handler(
+                "HTTP GET 'http://bad' failed: boom".into(),
+            )))
+            .unwrap();
+        match result {
+            Response::Complete(ref v) => {
+                assert_eq!(con_name(&table, v), Some(("Left", 1)));
+                // Left field is a Text Con carrying the original message bytes.
+                if let Value::Con(_, fields) = v {
+                    let s = String::from_value(&fields[0], &table)
+                        .expect("Left payload decodes as Text");
+                    assert!(
+                        s.contains("http://bad") && s.contains("boom"),
+                        "Left text must carry operation context, got {s:?}"
+                    );
+                }
+            }
+            other => panic!("expected Left(text), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn respond_caught_structural_err_propagates_not_swallowed() {
+        // The line between failure ISOLATION and corruption HIDING: a
+        // non-Handler error (here a Bridge error) must NOT become a `Left`.
+        let table = either_table();
+        let cx = make_cx(&table);
+        let result = cx.respond_caught(Err::<i64, EffectError>(EffectError::Bridge(
+            tidepool_bridge::BridgeError::UnknownDataConName("Whatever".into()),
+        )));
+        match result {
+            Err(EffectError::Bridge(_)) => {}
+            other => panic!("expected Bridge error to propagate, got {other:?}"),
         }
     }
 }
