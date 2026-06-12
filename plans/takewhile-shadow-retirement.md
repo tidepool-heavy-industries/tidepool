@@ -1,5 +1,42 @@
 # Follow-up: retire the `takeWhileT` / `dropWhileT` Prelude shadows
 
+**Status: CLOSED — REJECTED (2026-06-11).** The verification gate this plan
+mandates came back RED. Executing the plan's own gate proved the shadows are
+NOT redundant: delegating them to `Data.Text` reintroduces silent corruption.
+Decision: **Option A — keep the manual reimplementations.** Do not re-attempt
+without a mechanism fix to the underlying codegen bug.
+
+### What was measured (three-way control, identical `compile_and_run_pure` harness)
+
+| `takeWhileT`/`dropWhileT` body                  | `repro_takewhilet_alias_pap.rs` |
+|-------------------------------------------------|---------------------------------|
+| manual `T.pack . go . T.unpack` (current/main)  | **14/14 GREEN**                 |
+| eta-reduced `takeWhileT = T.takeWhile` (plan B)  | 10/14 RED                       |
+| eta-expanded `takeWhileT p t = T.takeWhile p t`  | 10/14 RED (same 10 failures)    |
+
+The 10 failures are exactly the cases with an operator-section predicate
+`(/= '/')`; the 4 passes use a named predicate (`isDig`). The break is NOT about
+partial application — even the fully saturated `takeWhileT (/= '/') t` returns
+its input unmodified under both delegations. `repro_takewhile_pap.rs` (real
+`Data.Text` used DIRECTLY in the user module) stays 14/14 green throughout.
+
+### Root cause (for the future mechanism fix)
+
+The EPS unpoison (9a827a3) fixed gotcha-#14 for `T.takeWhile`/`T.dropWhile` used
+**directly** in a user module — GHC loads the unfolding and the fused worker is
+produced. It did NOT fix `T.takeWhile` reached through a **cross-module Prelude
+binding** (`takeWhileT`). With a section predicate `(/= '/')` the wrapped call
+behaves as if the predicate were constantly true (takeWhile takes everything /
+dropWhile drops everything), suggesting the `'/'` literal or `Eq Char` evidence
+captured in the section is lost when the closure crosses into the wrapped call.
+This is a distinct, narrower codegen bug; the manual String-detour body sidesteps
+it by never calling `T.takeWhile`. Fixing the mechanism (not the shadow) would
+unblock the retirement. Guard: `tidepool-runtime/tests/repro_takewhilet_alias_pap.rs`.
+
+---
+
+#### Original proposal (retained for context; superseded by the verdict above)
+
 **Status:** PROPOSED — do NOT execute as part of the gotcha-#14 fix. This is a
 separate, independently-verified follow-up. The #14 commit only pins the
 mechanism fix (`repro_takewhile_pap.rs`) and trues up the docs; the shadows
