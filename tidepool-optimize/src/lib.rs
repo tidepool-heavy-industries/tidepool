@@ -10,5 +10,6 @@ pub mod inline;
 pub mod occ;
 pub mod partial;
 pub mod pipeline;
+mod rewrite;
 
 pub use pipeline::{default_passes, optimize, run_pipeline, PipelineStats};

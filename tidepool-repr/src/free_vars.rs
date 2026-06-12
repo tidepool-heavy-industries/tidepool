@@ -1,22 +1,70 @@
 //! Analysis to identify free variables in Tidepool IR expressions.
 
+use crate::tree::for_each_child_rev;
 use crate::{CoreExpr, CoreFrame, VarId};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Collect all free variables in the expression rooted at this tree's root node.
 /// Returns a sorted, deduplicated `Vec<VarId>` for efficient access and minimal allocation.
+///
+/// Stack-safe: an explicit-stack post-order walk memoizes each subtree's
+/// free-variable set by node index, so arbitrarily deep trees (this runs in the
+/// emit hot path) are analyzed without per-level call-stack growth. A subtree's
+/// free-var set is intrinsic to that subtree (binder removal happens at the
+/// binding node, never propagated inward), so memoizing by index yields the
+/// same result as the former recursive walk — and is strictly cheaper on shared
+/// (DAG) subtrees, which the recursive version recomputed per occurrence.
 pub fn free_vars(tree: &CoreExpr) -> Vec<VarId> {
     if tree.nodes.is_empty() {
         return Vec::new();
     }
-    let mut fvs: Vec<VarId> = free_vars_at(tree, tree.nodes.len() - 1)
-        .into_iter()
-        .collect();
+    let root = tree.nodes.len() - 1;
+    // memo[i] = free vars of the subtree rooted at i, filled at Exit. Presence
+    // is the sole bookkeeping (no separate "seen" set): an Enter/Exit for an
+    // already-computed index is skipped, so shared subtrees are analyzed once.
+    let mut memo: FxHashMap<usize, FxHashSet<VarId>> = FxHashMap::default();
+
+    enum Step {
+        Enter(usize),
+        Exit(usize),
+    }
+    let mut stack = vec![Step::Enter(root)];
+    while let Some(step) = stack.pop() {
+        match step {
+            Step::Enter(i) => {
+                if memo.contains_key(&i) {
+                    continue;
+                }
+                stack.push(Step::Exit(i));
+                for_each_child_rev(&tree.nodes[i], |c| {
+                    if !memo.contains_key(&c) {
+                        stack.push(Step::Enter(c));
+                    }
+                });
+            }
+            Step::Exit(i) => {
+                if memo.contains_key(&i) {
+                    continue; // already computed via another (shared) path
+                }
+                let s = node_free_vars(tree, i, &memo);
+                memo.insert(i, s);
+            }
+        }
+    }
+
+    let mut fvs: Vec<VarId> = memo.remove(&root).unwrap_or_default().into_iter().collect();
     fvs.sort_unstable();
     fvs
 }
 
-fn free_vars_at(tree: &CoreExpr, idx: usize) -> FxHashSet<VarId> {
+/// Compute one node's free-variable set from its already-computed children's
+/// sets (`memo`). Scoping is identical to the former recursive `free_vars_at`.
+fn node_free_vars(
+    tree: &CoreExpr,
+    idx: usize,
+    memo: &FxHashMap<usize, FxHashSet<VarId>>,
+) -> FxHashSet<VarId> {
+    let child = |i: &usize| memo.get(i).cloned().unwrap_or_default();
     match &tree.nodes[idx] {
         CoreFrame::Var(v) => {
             let mut s = FxHashSet::default();
@@ -25,18 +73,18 @@ fn free_vars_at(tree: &CoreExpr, idx: usize) -> FxHashSet<VarId> {
         }
         CoreFrame::Lit(_) => FxHashSet::default(),
         CoreFrame::App { fun, arg } => {
-            let mut s = free_vars_at(tree, *fun);
-            s.extend(free_vars_at(tree, *arg));
+            let mut s = child(fun);
+            s.extend(child(arg));
             s
         }
         CoreFrame::Lam { binder, body } => {
-            let mut s = free_vars_at(tree, *body);
+            let mut s = child(body);
             s.remove(binder);
             s
         }
         CoreFrame::LetNonRec { binder, rhs, body } => {
-            let mut s = free_vars_at(tree, *rhs);
-            let mut body_fvs = free_vars_at(tree, *body);
+            let mut s = child(rhs);
+            let mut body_fvs = child(body);
             body_fvs.remove(binder);
             s.extend(body_fvs);
             s
@@ -45,11 +93,11 @@ fn free_vars_at(tree: &CoreExpr, idx: usize) -> FxHashSet<VarId> {
             let bound: FxHashSet<VarId> = bindings.iter().map(|(v, _)| *v).collect();
             let mut s: FxHashSet<VarId> = bindings
                 .iter()
-                .flat_map(|(_, rhs)| free_vars_at(tree, *rhs))
+                .flat_map(|(_, rhs)| child(rhs))
                 .filter(|v| !bound.contains(v))
                 .collect();
 
-            let body_fvs = free_vars_at(tree, *body);
+            let body_fvs = child(body);
             s.extend(body_fvs.difference(&bound));
             s
         }
@@ -58,9 +106,9 @@ fn free_vars_at(tree: &CoreExpr, idx: usize) -> FxHashSet<VarId> {
             binder,
             alts,
         } => {
-            let mut s = free_vars_at(tree, *scrutinee);
+            let mut s = child(scrutinee);
             for alt in alts {
-                let mut alt_fvs = free_vars_at(tree, alt.body);
+                let mut alt_fvs = child(&alt.body);
                 alt_fvs.remove(binder); // case binder
                 for b in &alt.binders {
                     alt_fvs.remove(b); // pattern binders
@@ -69,9 +117,7 @@ fn free_vars_at(tree: &CoreExpr, idx: usize) -> FxHashSet<VarId> {
             }
             s
         }
-        CoreFrame::Con { fields, .. } => {
-            fields.iter().flat_map(|f| free_vars_at(tree, *f)).collect()
-        }
+        CoreFrame::Con { fields, .. } => fields.iter().flat_map(child).collect(),
         CoreFrame::Join {
             label: _,
             params,
@@ -79,20 +125,18 @@ fn free_vars_at(tree: &CoreExpr, idx: usize) -> FxHashSet<VarId> {
             body,
         } => {
             let param_set: FxHashSet<VarId> = params.iter().copied().collect();
-            let mut rhs_fvs = free_vars_at(tree, *rhs);
+            let mut rhs_fvs = child(rhs);
             for p in &param_set {
                 rhs_fvs.remove(p);
             }
             // Join label scopes over body (and rhs references label via Jump, not as free var)
-            let body_fvs = free_vars_at(tree, *body);
+            let body_fvs = child(body);
             let mut s = rhs_fvs;
             s.extend(body_fvs);
             s
         }
-        CoreFrame::Jump { args, .. } => args.iter().flat_map(|a| free_vars_at(tree, *a)).collect(),
-        CoreFrame::PrimOp { args, .. } => {
-            args.iter().flat_map(|a| free_vars_at(tree, *a)).collect()
-        }
+        CoreFrame::Jump { args, .. } => args.iter().flat_map(child).collect(),
+        CoreFrame::PrimOp { args, .. } => args.iter().flat_map(child).collect(),
     }
 }
 

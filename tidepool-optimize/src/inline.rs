@@ -2,7 +2,7 @@
 
 use crate::occ::{get_occ, occ_analysis, Occ};
 use tidepool_eval::{Changed, Pass};
-use tidepool_repr::{get_children, replace_subtree, CoreExpr, CoreFrame};
+use tidepool_repr::{replace_subtree, CoreExpr, CoreFrame};
 
 /// Inlining pass: eliminates single-use `LetNonRec` bindings by substituting the RHS directly at the use site.
 pub struct Inline;
@@ -28,9 +28,12 @@ impl Pass for Inline {
 }
 
 fn try_inline(expr: &CoreExpr, occ_map: &crate::occ::OccMap) -> Option<CoreExpr> {
-    try_inline_at(expr, expr.nodes.len() - 1, occ_map)
+    crate::rewrite::find_redex(expr, |expr, idx| try_inline_at(expr, idx, occ_map))
 }
 
+/// Inline test for a single node: a `LetNonRec` whose binder is used exactly
+/// once. `LetRec` is never inlined (possible self-reference). Non-redex nodes
+/// return `None`; the search driver handles descent.
 fn try_inline_at(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> Option<CoreExpr> {
     match &expr.nodes[idx] {
         CoreFrame::LetNonRec { binder, rhs, body } => {
@@ -41,19 +44,12 @@ fn try_inline_at(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> O
                 let inlined = tidepool_repr::subst::subst(&body_tree, *binder, &rhs_tree);
                 Some(replace_subtree(expr, idx, &inlined))
             } else {
-                // Try children
-                try_inline_at(expr, *rhs, occ_map).or_else(|| try_inline_at(expr, *body, occ_map))
+                None
             }
         }
         // Never inline LetRec, even if Once (it might be recursive via own RHS)
-        _ => try_children(expr, idx, occ_map),
+        _ => None,
     }
-}
-
-fn try_children(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> Option<CoreExpr> {
-    get_children(&expr.nodes[idx])
-        .into_iter()
-        .find_map(|child| try_inline_at(expr, child, occ_map))
 }
 
 #[cfg(test)]
