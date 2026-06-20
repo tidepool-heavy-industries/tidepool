@@ -28,6 +28,21 @@ use tokio::io::{stdin, stdout};
 use tokio::time::{timeout, Duration};
 
 const EVAL_TIMEOUT_SECS: u64 = 120;
+
+/// Hard ceiling for the per-eval `timeout_secs` knob (seconds). The default is
+/// `EVAL_TIMEOUT_SECS`; a caller may raise the window up to this cap for
+/// deliberately heavy dev evals. Beyond it a runaway is likelier than an
+/// intentional compute, so the request is clamped here.
+const MAX_EVAL_TIMEOUT_SECS: u64 = 600;
+
+/// Resolve the effective eval window (seconds) from an optional per-request
+/// override: `None` → the server default (`EVAL_TIMEOUT_SECS`); `Some(t)` → `t`
+/// clamped to `[1, MAX_EVAL_TIMEOUT_SECS]`.
+fn resolve_eval_timeout_secs(requested: Option<u64>) -> u64 {
+    requested
+        .map(|t| t.clamp(1, MAX_EVAL_TIMEOUT_SECS))
+        .unwrap_or(EVAL_TIMEOUT_SECS)
+}
 const MAX_CONCURRENT_EVALS: usize = 4;
 const MAX_ORPHANED_EVALS: usize = 10;
 
@@ -448,6 +463,14 @@ pub struct EvalRequest {
     /// Default: 4096.
     #[serde(default)]
     pub max_len: Option<u32>,
+    /// Optional eval window in SECONDS before the timeout-yield fires.
+    /// Default 120; clamped to [1, 600]. Raise it for deliberately heavy
+    /// evals — e.g. a `cargo check`/`cargo build` driven through the `run`
+    /// effect — so they aren't cut off mid-compile. The runaway backstop is
+    /// unchanged: at the window an eval at an effect boundary parks as a
+    /// continuation, and a pure infinite loop is still detached.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 /// Request parameters for the `resume` tool.
@@ -1591,8 +1614,39 @@ impl TidepoolMcpServerImpl {
         }
     }
 
+    /// Default-timeout entry (resume/abort + tests): drive a session with the
+    /// server's standard window. Delegates to the timeout-aware impl.
     #[allow(clippy::too_many_arguments)]
     async fn handle_session_result(
+        &self,
+        op: &str,
+        session_rx: tokio::sync::mpsc::UnboundedReceiver<SessionMessage>,
+        source: Arc<str>,
+        response_tx: std::sync::mpsc::Sender<ResumeMsg>,
+        captured_output: CapturedOutput,
+        handle: Option<JoinHandle<()>>,
+        gate: Arc<PauseGate>,
+    ) -> Result<CallToolResult, McpError> {
+        self.handle_session_result_with_timeout(
+            op,
+            session_rx,
+            source,
+            response_tx,
+            captured_output,
+            handle,
+            gate,
+            EVAL_TIMEOUT_SECS,
+        )
+        .await
+    }
+
+    /// Drive an eval session to its first result/yield, with the window set by
+    /// `timeout_secs`. At the window: an eval at (or about to reach) an effect
+    /// boundary parks as a continuation; a pure runaway is detached. The
+    /// per-eval `timeout_secs` (clamped by the caller) lets heavy dev evals run
+    /// longer than the default without weakening the runaway backstop.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_session_result_with_timeout(
         &self,
         op: &str,
         mut session_rx: tokio::sync::mpsc::UnboundedReceiver<SessionMessage>,
@@ -1601,8 +1655,9 @@ impl TidepoolMcpServerImpl {
         captured_output: CapturedOutput,
         mut handle: Option<JoinHandle<()>>,
         gate: Arc<PauseGate>,
+        timeout_secs: u64,
     ) -> Result<CallToolResult, McpError> {
-        let eval_timeout = Duration::from_secs(EVAL_TIMEOUT_SECS);
+        let eval_timeout = Duration::from_secs(timeout_secs);
         let received = match timeout(eval_timeout, session_rx.recv()).await {
             Ok(received) => received,
             Err(_elapsed) => {
@@ -1631,7 +1686,7 @@ impl TidepoolMcpServerImpl {
                             tracing::info!(
                                 "{} paused after {}s — parked as continuation",
                                 op,
-                                EVAL_TIMEOUT_SECS
+                                timeout_secs
                             );
                             let cont_id = self.next_continuation_id();
                             let mut json_obj = serde_json::json!({
@@ -1642,7 +1697,7 @@ impl TidepoolMcpServerImpl {
                                     "Paused after {}s at an effect boundary (no compute happens \
                                      while paused). Call resume with this continuation_id to run \
                                      another window (response payload ignored), or abort to kill it.",
-                                    EVAL_TIMEOUT_SECS
+                                    timeout_secs
                                 ),
                             });
                             if !output.is_empty() {
@@ -1676,7 +1731,7 @@ impl TidepoolMcpServerImpl {
                         tracing::error!(
                             "{} reached no yield point within grace after {}s — detaching",
                             op,
-                            EVAL_TIMEOUT_SECS
+                            timeout_secs
                         );
                         gate.request_abort(
                             "detached after timeout (no yield point reached)".into(),
@@ -1686,7 +1741,7 @@ impl TidepoolMcpServerImpl {
                             "{} timed out after {}s WITHOUT reaching an effect boundary — \
                              likely a pure infinite loop or unbounded pure recursion. The \
                              thread was detached.",
-                            op, EVAL_TIMEOUT_SECS
+                            op, timeout_secs
                         );
                         if !output.is_empty() {
                             detail.push_str("\n\n## Output Before Timeout\n");
@@ -2057,8 +2112,12 @@ impl TidepoolMcpServerImpl {
             })
             .map_err(|e| McpError::internal_error(format!("thread spawn error: {}", e), None))?;
 
+        // Per-eval timeout knob: default to the server window, but let callers
+        // extend it (clamped) for deliberately heavy dev evals like `cargo check`.
+        let timeout_secs = resolve_eval_timeout_secs(req.timeout_secs);
+
         // Await first message from the eval thread
-        self.handle_session_result(
+        self.handle_session_result_with_timeout(
             "eval",
             session_rx,
             source,
@@ -2066,6 +2125,7 @@ impl TidepoolMcpServerImpl {
             captured,
             Some(handle),
             gate,
+            timeout_secs,
         )
         .await
     }
@@ -3106,6 +3166,26 @@ data Console a where
     }
 
     #[test]
+    fn test_resolve_eval_timeout_secs() {
+        // None → server default.
+        assert_eq!(resolve_eval_timeout_secs(None), EVAL_TIMEOUT_SECS);
+        // In-range values pass through.
+        assert_eq!(resolve_eval_timeout_secs(Some(1)), 1);
+        assert_eq!(resolve_eval_timeout_secs(Some(300)), 300);
+        assert_eq!(
+            resolve_eval_timeout_secs(Some(MAX_EVAL_TIMEOUT_SECS)),
+            MAX_EVAL_TIMEOUT_SECS
+        );
+        // Below floor clamps up to 1 (never 0 — a 0s window would insta-yield).
+        assert_eq!(resolve_eval_timeout_secs(Some(0)), 1);
+        // Above ceiling clamps down to the cap.
+        assert_eq!(
+            resolve_eval_timeout_secs(Some(100_000)),
+            MAX_EVAL_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
     fn test_effect_decls_basic_validation() {
         let console = console_decl();
         assert_eq!(console.type_name, "Console");
@@ -3762,6 +3842,7 @@ data Console a where
             helpers: String::new(),
             input: None,
             max_len: None,
+            timeout_secs: None,
         };
 
         let res = server.eval(req).await.unwrap();
