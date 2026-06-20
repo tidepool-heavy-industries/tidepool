@@ -368,6 +368,28 @@ files. Hand-written hunk headers (when you must) still need count arithmetic
 (`@@ -l,c +l,c @@`, c = ctx+del / ctx+ins line counts) or `parsePatch` rejects
 loudly — but reach for `genPatchTo` first.
 
+**Declarative small edits (line-range / anchor) — the `Edit` verbs.** When a
+change is awkward as a diff (replace lines 10-15, insert after an anchor, an
+edit that shouldn't have to reproduce surrounding context or the whole file),
+name it with an `Edit` and let the engine lower it to a CONTEXT-anchored patch
+that rides the same atomic apply: `applyEdits :: Text -> [Edit] -> M Value`
+(in-eval) and `editsJ :: Value -> M Value` (input lane: `{file, edits:[{op,…}]}`).
+`Edit` = `ReplaceLines lo hi [Text]` / `InsertAt n [Text]` / `ReplaceAnchor a
+[Text]` / `InsertAfterAnchor a [Text]` / `InsertBeforeAnchor a [Text]` (1-based
+lines; anchors are substring tests that must hit exactly one line). They INHERIT
+the keystone discipline: `planEdits`/`planEditsJ` is a dry run returning the
+rendered review `diff` (feed it to `applyDiff` after an `ask` — the edit
+front-end and diff back-end meet at the patch text); `applyEdits` is
+all-or-nothing (any conflict → zero writes); resolution problems come back as
+DATA — `{"kind":"anchor-missing"|"anchor-ambiguous"|"range-out-of-bounds"|
+"edits-overlap",…}`. **Line-number safety:** numbers resolve against the file
+read in the SAME eval and bake into a context-anchored patch, so an in-eval
+read+edit (e.g. line numbers straight from `grepGlob`/`rsFn`/`hsDef`) is safe;
+passing numbers captured in a PRIOR eval is the footgun — prefer the anchor ops
+for cross-eval edits (they are content-addressed and self-checking). The older
+`patchFile`/`insertAfter` surgery verbs still work unchanged; the `Edit` verbs
+are the keystone-integrated path and could later subsume them.
+
 **checkDiff-first when a `[patch|]` pattern silently fails to match.** A no-match
 is ambiguous: the INPUT might not parse at all, OR it parses but the pattern
 shape differs. `checkDiff diffText` (pure, returns a `Value`) disambiguates:
