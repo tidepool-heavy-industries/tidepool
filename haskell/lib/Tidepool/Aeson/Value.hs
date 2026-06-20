@@ -28,7 +28,7 @@ module Tidepool.Aeson.Value
 
 import Prelude
 import Data.Text (Text)
-import qualified Data.Text as T
+import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 

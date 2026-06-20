@@ -7,7 +7,7 @@ module Patch where
 
 import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
-import qualified Data.Text as T
+import qualified Tidepool.Data.Text as T
 
 -- | #313 RESOLVED (TailCtx fix, commit 0317fe5): the pure module-level
 -- `occurrences` helper and cross-module M fns of this shape compile

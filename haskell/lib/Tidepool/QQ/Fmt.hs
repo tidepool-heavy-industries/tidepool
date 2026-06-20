@@ -56,7 +56,7 @@ import Language.Haskell.TH        (Exp (..), Lit (..), Q, mkName)
 import Language.Haskell.TH.Quote  (QuasiQuoter (..))
 import Data.Char                  (isSpace, isAlphaNum)
 import Data.Maybe                 (fromMaybe)
-import qualified Data.Text as T
+import qualified Tidepool.Data.Text as T
 import Tidepool.QQ.HsMeta.Parse   (parseExp)
 import Tidepool.QQ.PyF.Spec
   ( FormatMode (..), Padding (..), Precision (..), TypeFormat (..)

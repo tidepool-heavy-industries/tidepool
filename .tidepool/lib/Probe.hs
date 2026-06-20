@@ -3,7 +3,7 @@ module Probe where
 
 import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
-import qualified Data.Text as T
+import qualified Tidepool.Data.Text as T
 
 t1 :: M [Text]
 t1 = do

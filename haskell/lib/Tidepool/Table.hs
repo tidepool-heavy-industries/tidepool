@@ -26,7 +26,7 @@ import Prelude
   , zip, length, replicate, reverse, concatMap
   )
 import Data.Text (Text)
-import qualified Data.Text as T
+import qualified Tidepool.Data.Text as T
 import Tidepool.Prelude (enumFromTo, lines, splitOn, sortBy, comparing, strip)
 import Tidepool.Text (padRightWith)
 

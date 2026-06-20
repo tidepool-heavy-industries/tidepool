@@ -27,6 +27,30 @@ type, module `Tidepool.Data.Text`). Awaiting final verify + commit.
 - Fixtures: NO regen needed — `Suite.hs` imports external `Data.Text` directly,
   not the preamble/vendored module/Prelude; its CBOR is independent.
 
+## Phase 2b — exhaustive home-module import sweep (root's follow-up)
+Repointed EVERY home-module `import qualified Data.Text as T` →
+`import qualified Tidepool.Data.Text as T` (drop-in re-export; uniform, table-neutral).
+Type-only `import Data.Text (Text)` left as-is (the Text type is external/fine).
+
+Swept modules (12): haskell/lib — Tidepool/Text.hs, Render.hs, Table.hs, Patch.hs,
+Aeson/Value.hs, QQ/Validate.hs, QQ/Patch.hs, QQ/Json.hs, QQ/Fmt.hs,
+QQ/Fmt/Runtime.hs; .tidepool/lib — Probe.hs, Patch.hs. (Prelude.hs already done in
+2a; the vendor module imports `Data.Text hiding(…)`; DataTextWrap already points at
+the vendor.)
+
+Real runtime bug fixed: `Tidepool.Text.dedent`'s
+`countLeading = T.length . T.takeWhile (== ' ')` (section predicate via a home
+binding) was silently wrong with external T (returned full line length →
+over-dropped); now correct. Guard: `sweep_repoint_smoke.rs::dedent_runtime_fix`.
+`QQ.Validate`'s `T.takeWhile` runs at SPLICE time (GHC-compiled, never
+JIT-affected) — repoint is harmless there; covered by the differential recompiling
+Suite's `qq_uri_accept`/`qq_sg_accept` + `sweep_repoint_smoke` uri/sg accept+reject.
+
+Stack note: importing Tidepool.Data.Text deepens in-session emit; the live MCP
+eval thread is 256MB (`tidepool-mcp/src/lib.rs`), so production is safe. The
+`sweep_repoint_smoke` test compiles on a 64MB thread (the 2MB default test-thread
+class, cf. repro_qq_union).
+
 ## Phase 2 — verify status
 - vendor_text_functions: 16/16 GREEN.
 - repro_takewhilet_alias_pap (retirement gate): 14/14 GREEN with delegation form

@@ -35,7 +35,7 @@ module Tidepool.QQ.Fmt.Runtime
   ) where
 
 import Data.Text (Text)
-import qualified Data.Text as T
+import qualified Tidepool.Data.Text as T
 import Data.Char (chr)
 import Prelude
   ( Int, Double, Char, Bool (..), Maybe (..), String

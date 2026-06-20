@@ -14,7 +14,7 @@
 module Tidepool.Render (Render(..)) where
 
 import Data.Text (Text)
-import qualified Data.Text as T
+import qualified Tidepool.Data.Text as T
 import Prelude (Int, Double, Bool, Char, String, Show, id, (.))
 import qualified Prelude as P
 
