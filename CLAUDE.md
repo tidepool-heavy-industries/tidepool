@@ -331,7 +331,12 @@ SIGSEGV. The short, true standing list:
 - ~~Double `T.breakOn` in a cross-module fn~~ (#313 t11): FIXED (TailCtx
   leak in the emit hylo, commit 0317fe5; guarded by repro313 tests).
 - **Non-tail recursion** overflows ~10-20K frames with a clean yield error;
-  tail recursion is unbounded (TCO).
+  tail recursion is unbounded (TCO). Caveat: a *no-base-case* non-tail
+  recursion (`go n = n + go (n+1)`) is loopified by GHC into a
+  non-stack-growing spin — it does NOT overflow; it runs until the eval
+  *timeout* fires (clean `timeout` failure-class). Any recursion with a base
+  case overflows cleanly as above; correctness of the accumulation is intact
+  either way (verified: `sumTo`/`fac`/`sumTo2` give exact values).
 
 Stale fears, verified gone: Integer defaulting in untyped local helpers,
 `sum`/`product`/`maximum`/`minimum`/`foldr1`/`last`/`init` (error-worker
