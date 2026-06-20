@@ -2127,6 +2127,345 @@ pub extern "C" fn runtime_text_reverse(dest: i64, src: i64, off: i64, len: i64) 
     }
 }
 
+// ── ghc-bignum gmp-backend mpn intercepts (phase-1) ──────────────────────────
+// The JIT hands raw little-endian u64-limb payload pointers (a ByteArray# heap
+// object's data, i.e. obj + 8) plus limb counts / scalar words. Output buffers
+// are pre-allocated by ghc-bignum to exactly the GMP contract size, so we slice
+// them from the input sizes and fill them via `tidepool-bignum` (the same core
+// the tree-walker calls, so JIT and oracle agree). On a bad pointer we bail with
+// a benign default rather than risk UB — matching the text host-fn convention.
+
+#[inline]
+fn gmpn_bad(ptrs: &[i64]) -> bool {
+    ptrs.iter()
+        .any(|&p| check_ptr_invalid(p as *const u8, "runtime_gmpn"))
+}
+
+/// `__gmpn_add_1(rp, s1, n, s2limb) -> carry`. `rp`/`s1` are `n` limbs.
+pub extern "C" fn runtime_gmpn_add_1(rp: i64, s1: i64, n: i64, s2limb: i64) -> i64 {
+    if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() { eprintln!("[bn] runtime_gmpn_add_1"); }
+    if n <= 0 || gmpn_bad(&[rp, s1]) {
+        return 0;
+    }
+    let n = n as usize;
+    // SAFETY: rp/s1 are 8-aligned JIT-allocated limb payloads of >= n limbs.
+    unsafe {
+        let s1s = std::slice::from_raw_parts(s1 as *const u64, n);
+        let rps = std::slice::from_raw_parts_mut(rp as *mut u64, n);
+        tidepool_bignum::mpn_add_1(rps, s1s, s2limb as u64) as i64
+    }
+}
+
+/// `__gmpn_sub_1(rp, s1, n, s2limb) -> borrow`.
+pub extern "C" fn runtime_gmpn_sub_1(rp: i64, s1: i64, n: i64, s2limb: i64) -> i64 {
+    if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() { eprintln!("[bn] runtime_gmpn_sub_1"); }
+    if n <= 0 || gmpn_bad(&[rp, s1]) {
+        return 0;
+    }
+    let n = n as usize;
+    // SAFETY: see runtime_gmpn_add_1.
+    unsafe {
+        let s1s = std::slice::from_raw_parts(s1 as *const u64, n);
+        let rps = std::slice::from_raw_parts_mut(rp as *mut u64, n);
+        tidepool_bignum::mpn_sub_1(rps, s1s, s2limb as u64) as i64
+    }
+}
+
+/// `__gmpn_mul_1(rp, s1, n, s2limb) -> carry`.
+pub extern "C" fn runtime_gmpn_mul_1(rp: i64, s1: i64, n: i64, s2limb: i64) -> i64 {
+    if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() { eprintln!("[bn] runtime_gmpn_mul_1"); }
+    if n <= 0 || gmpn_bad(&[rp, s1]) {
+        return 0;
+    }
+    let n = n as usize;
+    // SAFETY: see runtime_gmpn_add_1.
+    unsafe {
+        let s1s = std::slice::from_raw_parts(s1 as *const u64, n);
+        let rps = std::slice::from_raw_parts_mut(rp as *mut u64, n);
+        tidepool_bignum::mpn_mul_1(rps, s1s, s2limb as u64) as i64
+    }
+}
+
+/// `__gmpn_add(rp, s1, s1n, s2, s2n) -> carry`. `rp` is `s1n` limbs (`s1n >= s2n`).
+pub extern "C" fn runtime_gmpn_add(rp: i64, s1: i64, s1n: i64, s2: i64, s2n: i64) -> i64 {
+    if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() { eprintln!("[bn] runtime_gmpn_add"); }
+    if s1n <= 0 || s2n < 0 || gmpn_bad(&[rp, s1, s2]) {
+        return 0;
+    }
+    let (s1n, s2n) = (s1n as usize, s2n as usize);
+    // SAFETY: s1/s2/rp are JIT-allocated limb payloads of the stated lengths.
+    unsafe {
+        let a = std::slice::from_raw_parts(s1 as *const u64, s1n);
+        let b = std::slice::from_raw_parts(s2 as *const u64, s2n);
+        let r = std::slice::from_raw_parts_mut(rp as *mut u64, s1n);
+        tidepool_bignum::mpn_add(r, a, b) as i64
+    }
+}
+
+/// `__gmpn_sub(rp, s1, s1n, s2, s2n) -> borrow`. `rp` is `s1n` limbs.
+pub extern "C" fn runtime_gmpn_sub(rp: i64, s1: i64, s1n: i64, s2: i64, s2n: i64) -> i64 {
+    if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() { eprintln!("[bn] runtime_gmpn_sub"); }
+    if s1n <= 0 || s2n < 0 || gmpn_bad(&[rp, s1, s2]) {
+        return 0;
+    }
+    let (s1n, s2n) = (s1n as usize, s2n as usize);
+    // SAFETY: see runtime_gmpn_add.
+    unsafe {
+        let a = std::slice::from_raw_parts(s1 as *const u64, s1n);
+        let b = std::slice::from_raw_parts(s2 as *const u64, s2n);
+        let r = std::slice::from_raw_parts_mut(rp as *mut u64, s1n);
+        tidepool_bignum::mpn_sub(r, a, b) as i64
+    }
+}
+
+/// `__gmpn_mul(rp, s1, s1n, s2, s2n) -> top limb`. `rp` is `s1n + s2n` limbs.
+pub extern "C" fn runtime_gmpn_mul(rp: i64, s1: i64, s1n: i64, s2: i64, s2n: i64) -> i64 {
+    if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() { eprintln!("[bn] runtime_gmpn_mul"); }
+    if s1n <= 0 || s2n <= 0 || gmpn_bad(&[rp, s1, s2]) {
+        return 0;
+    }
+    let (s1n, s2n) = (s1n as usize, s2n as usize);
+    // SAFETY: rp has s1n+s2n limbs; s1/s2 have s1n/s2n limbs.
+    unsafe {
+        let a = std::slice::from_raw_parts(s1 as *const u64, s1n);
+        let b = std::slice::from_raw_parts(s2 as *const u64, s2n);
+        let r = std::slice::from_raw_parts_mut(rp as *mut u64, s1n + s2n);
+        tidepool_bignum::mpn_mul(r, a, b) as i64
+    }
+}
+
+/// `__gmpn_cmp(s1, s2, n) -> {-1,0,1}` (equal length).
+pub extern "C" fn runtime_gmpn_cmp(s1: i64, s2: i64, n: i64) -> i64 {
+    if n <= 0 || gmpn_bad(&[s1, s2]) {
+        return 0;
+    }
+    let n = n as usize;
+    // SAFETY: s1/s2 are n-limb payloads.
+    unsafe {
+        let a = std::slice::from_raw_parts(s1 as *const u64, n);
+        let b = std::slice::from_raw_parts(s2 as *const u64, n);
+        let r = tidepool_bignum::mpn_cmp(a, b) as i64;
+        if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() {
+            eprintln!("[bn] cmp a={a:?} b={b:?} -> {r}");
+        }
+        r
+    }
+}
+
+/// `__gmpn_tdiv_qr(qp, rp, qxn, np, nn, dp, dn)`: quotient (`nn-dn+1` limbs) +
+/// remainder (`dn` limbs). `qxn` is 0 in ghc-bignum and ignored here.
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn runtime_gmpn_tdiv_qr(
+    qp: i64,
+    rp: i64,
+    _qxn: i64,
+    np: i64,
+    nn: i64,
+    dp: i64,
+    dn: i64,
+) {
+    if nn <= 0 || dn <= 0 || nn < dn || gmpn_bad(&[qp, rp, np, dp]) {
+        return;
+    }
+    let (nn, dn) = (nn as usize, dn as usize);
+    let qlen = nn - dn + 1;
+    // SAFETY: np/dp are nn/dn limbs; qp/rp pre-sized to qlen/dn limbs.
+    unsafe {
+        let npr = std::slice::from_raw_parts(np as *const u64, nn);
+        let dpr = std::slice::from_raw_parts(dp as *const u64, dn);
+        let qpr = std::slice::from_raw_parts_mut(qp as *mut u64, qlen);
+        let rpr = std::slice::from_raw_parts_mut(rp as *mut u64, dn);
+        tidepool_bignum::mpn_tdiv_qr(qpr, rpr, npr, dpr);
+    }
+}
+
+/// `integer_gmp_mpn_tdiv_q(qp, np, nn, dp, dn)`: quotient only (`nn-dn+1` limbs).
+pub extern "C" fn runtime_gmpn_tdiv_q(qp: i64, np: i64, nn: i64, dp: i64, dn: i64) {
+    if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() { eprintln!("[bn] runtime_gmpn_tdiv_q"); }
+    if nn <= 0 || dn <= 0 || nn < dn || gmpn_bad(&[qp, np, dp]) {
+        return;
+    }
+    let (nn, dn) = (nn as usize, dn as usize);
+    let qlen = nn - dn + 1;
+    // SAFETY: np/dp are nn/dn limbs; qp pre-sized to qlen limbs.
+    unsafe {
+        let npr = std::slice::from_raw_parts(np as *const u64, nn);
+        let dpr = std::slice::from_raw_parts(dp as *const u64, dn);
+        let qpr = std::slice::from_raw_parts_mut(qp as *mut u64, qlen);
+        tidepool_bignum::mpn_tdiv_q(qpr, npr, dpr);
+    }
+}
+
+/// `integer_gmp_mpn_tdiv_r(rp, np, nn, dp, dn)`: remainder only (`dn` limbs).
+pub extern "C" fn runtime_gmpn_tdiv_r(rp: i64, np: i64, nn: i64, dp: i64, dn: i64) {
+    if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() { eprintln!("[bn] runtime_gmpn_tdiv_r"); }
+    if nn <= 0 || dn <= 0 || nn < dn || gmpn_bad(&[rp, np, dp]) {
+        return;
+    }
+    let (nn, dn) = (nn as usize, dn as usize);
+    // SAFETY: np/dp are nn/dn limbs; rp pre-sized to dn limbs.
+    unsafe {
+        let npr = std::slice::from_raw_parts(np as *const u64, nn);
+        let dpr = std::slice::from_raw_parts(dp as *const u64, dn);
+        let rpr = std::slice::from_raw_parts_mut(rp as *mut u64, dn);
+        tidepool_bignum::mpn_tdiv_r(rpr, npr, dpr);
+    }
+}
+
+/// `__gmpn_divrem_1(qp, qxn, s2p, s2n, s3limb) -> remainder`. `qp` is `s2n+qxn` limbs.
+pub extern "C" fn runtime_gmpn_divrem_1(qp: i64, qxn: i64, s2p: i64, s2n: i64, s3limb: i64) -> i64 {
+    if s2n <= 0 || qxn < 0 || gmpn_bad(&[qp, s2p]) {
+        return 0;
+    }
+    let (qxn, s2n) = (qxn as usize, s2n as usize);
+    // SAFETY: s2p is s2n limbs; qp pre-sized to s2n+qxn limbs.
+    unsafe {
+        let np = std::slice::from_raw_parts(s2p as *const u64, s2n);
+        let qpr = std::slice::from_raw_parts_mut(qp as *mut u64, s2n + qxn);
+        let r = tidepool_bignum::mpn_divrem_1(qpr, qxn, np, s3limb as u64) as i64;
+        if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() {
+            eprintln!("[bn] divrem_1 np={np:?} s3limb={s3limb} -> q={qpr:?} r={r}");
+        }
+        r
+    }
+}
+
+/// `__gmpn_mod_1(s1p, s1n, s2limb) -> remainder`.
+pub extern "C" fn runtime_gmpn_mod_1(s1p: i64, s1n: i64, s2limb: i64) -> i64 {
+    if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() {
+        eprintln!("[bn] mod_1 s1p={s1p:#x} s1n={s1n} s2limb={s2limb}");
+    }
+    if s1n <= 0 || gmpn_bad(&[s1p]) {
+        return 0;
+    }
+    let s1n = s1n as usize;
+    // SAFETY: s1p is s1n limbs.
+    unsafe {
+        let np = std::slice::from_raw_parts(s1p as *const u64, s1n);
+        tidepool_bignum::mpn_mod_1(np, s2limb as u64) as i64
+    }
+}
+
+/// `integer_gmp_mpn_get_d(sp, sn, exp) -> double` (sign from `sn`), returned as
+/// raw f64 bits.
+pub extern "C" fn runtime_gmpn_get_d(sp: i64, sn: i64, exp: i64) -> i64 {
+    if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() { eprintln!("[bn] runtime_gmpn_get_d"); }
+    if gmpn_bad(&[sp]) {
+        return 0;
+    }
+    let n = sn.unsigned_abs() as usize;
+    // SAFETY: sp is |sn| limbs.
+    let d = unsafe {
+        let s = std::slice::from_raw_parts(sp as *const u64, n);
+        tidepool_bignum::mpn_get_d(s, sn, exp)
+    };
+    d.to_bits() as i64
+}
+
+/// `integer_gmp_gcd_word(a, b) -> gcd`.
+pub extern "C" fn runtime_gmp_gcd_word(a: i64, b: i64) -> i64 {
+    if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() { eprintln!("[bn] runtime_gmp_gcd_word"); }
+    tidepool_bignum::gcd_word(a as u64, b as u64) as i64
+}
+
+/// `integer_gmp_mpn_lshift(rp, sp, sn, count) -> top limb`.
+/// Dest is `sn + count/64 + (count%64 != 0 ? 1 : 0)` limbs (GHC wrapper contract).
+pub extern "C" fn runtime_gmpn_lshift(rp: i64, sp: i64, sn: i64, count: i64) -> i64 {
+    if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() { eprintln!("[bn] runtime_gmpn_lshift"); }
+    if sn <= 0 || count < 0 || gmpn_bad(&[rp, sp]) {
+        return 0;
+    }
+    let (sn, count) = (sn as usize, count as u64);
+    let limb_shift = (count / 64) as usize;
+    let extra = if count % 64 != 0 { 1 } else { 0 };
+    let rlen = sn + limb_shift + extra;
+    // SAFETY: sp is sn limbs; rp pre-sized to rlen limbs by the wrapper.
+    unsafe {
+        let s = std::slice::from_raw_parts(sp as *const u64, sn);
+        let r = std::slice::from_raw_parts_mut(rp as *mut u64, rlen);
+        tidepool_bignum::mpn_lshift(r, s, count) as i64
+    }
+}
+
+/// `integer_gmp_mpn_rshift(rp, sp, sn, count) -> top limb`.
+/// Dest is `sn - count/64` limbs (ghc-bignum guarantees `count < sn*64`).
+pub extern "C" fn runtime_gmpn_rshift(rp: i64, sp: i64, sn: i64, count: i64) -> i64 {
+    if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() { eprintln!("[bn] runtime_gmpn_rshift"); }
+    if sn <= 0 || count < 0 || gmpn_bad(&[rp, sp]) {
+        return 0;
+    }
+    let (sn, count) = (sn as usize, count as u64);
+    let limb_shift = (count / 64) as usize;
+    if limb_shift >= sn {
+        return 0;
+    }
+    let rlen = sn - limb_shift;
+    // SAFETY: sp is sn limbs; rp pre-sized to rlen limbs.
+    unsafe {
+        let s = std::slice::from_raw_parts(sp as *const u64, sn);
+        let r = std::slice::from_raw_parts_mut(rp as *mut u64, rlen);
+        tidepool_bignum::mpn_rshift(r, s, count) as i64
+    }
+}
+
+/// `integer_gmp_mpn_rshift_2c(rp, sp, sn, count) -> top limb`.
+/// Dest is `sn - (count-1)/64` limbs (extra limb of headroom for the round-up carry).
+pub extern "C" fn runtime_gmpn_rshift_2c(rp: i64, sp: i64, sn: i64, count: i64) -> i64 {
+    if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() { eprintln!("[bn] runtime_gmpn_rshift_2c"); }
+    if sn <= 0 || count <= 0 || gmpn_bad(&[rp, sp]) {
+        return 0;
+    }
+    let (sn, count) = (sn as usize, count as u64);
+    let limb_shift = ((count - 1) / 64) as usize;
+    if limb_shift >= sn {
+        return 0;
+    }
+    let rlen = sn - limb_shift;
+    // SAFETY: sp is sn limbs; rp pre-sized to rlen limbs.
+    unsafe {
+        let s = std::slice::from_raw_parts(sp as *const u64, sn);
+        let r = std::slice::from_raw_parts_mut(rp as *mut u64, rlen);
+        tidepool_bignum::mpn_rshift_2c(r, s, count) as i64
+    }
+}
+
+/// `__int_encodeDouble(mantissa, exp) -> Double#` (returned as raw f64 bits).
+pub extern "C" fn runtime_int_encode_double(mantissa: i64, exp: i64) -> i64 {
+    tidepool_bignum::encode_double(mantissa, exp).to_bits() as i64
+}
+
+/// `integer_gmp_mpn_gcd_1(sp, sn, b) -> gcd` (result fits a word).
+pub extern "C" fn runtime_gmpn_gcd_1(sp: i64, sn: i64, b: i64) -> i64 {
+    if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() { eprintln!("[bn] runtime_gmpn_gcd_1"); }
+    if sn <= 0 || gmpn_bad(&[sp]) {
+        return 0;
+    }
+    let sn = sn as usize;
+    // SAFETY: sp is sn limbs.
+    unsafe {
+        let s = std::slice::from_raw_parts(sp as *const u64, sn);
+        tidepool_bignum::mpn_gcd_1(s, b as u64) as i64
+    }
+}
+
+/// `integer_gmp_mpn_gcd(rp, s1, s1n, s2, s2n) -> result limb count`.
+/// `rp` is pre-sized to `min(s1n, s2n)` limbs (gcd cannot exceed the smaller).
+pub extern "C" fn runtime_gmpn_gcd(rp: i64, s1: i64, s1n: i64, s2: i64, s2n: i64) -> i64 {
+    if std::env::var("TIDEPOOL_BIGNUM_TRACE").is_ok() { eprintln!("[bn] runtime_gmpn_gcd"); }
+    if s1n <= 0 || s2n <= 0 || gmpn_bad(&[rp, s1, s2]) {
+        return 0;
+    }
+    let (s1n, s2n) = (s1n as usize, s2n as usize);
+    let rlen = s1n.min(s2n);
+    // SAFETY: s1/s2 are s1n/s2n limbs; rp pre-sized to min(s1n,s2n) limbs.
+    unsafe {
+        let a = std::slice::from_raw_parts(s1 as *const u64, s1n);
+        let b = std::slice::from_raw_parts(s2 as *const u64, s2n);
+        let r = std::slice::from_raw_parts_mut(rp as *mut u64, rlen);
+        tidepool_bignum::mpn_gcd(r, a, b) as i64
+    }
+}
+
 /// Format a Double as a null-terminated C string and return its address.
 /// The CString is leaked (small bounded strings, acceptable).
 pub extern "C" fn runtime_show_double_addr(bits: i64) -> i64 {
@@ -2792,6 +3131,33 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
         ),
         ("runtime_text_memchr", runtime_text_memchr as *const u8),
         ("runtime_text_reverse", runtime_text_reverse as *const u8),
+        // ghc-bignum gmp-backend mpn intercepts (phase-1).
+        ("runtime_gmpn_add_1", runtime_gmpn_add_1 as *const u8),
+        ("runtime_gmpn_sub_1", runtime_gmpn_sub_1 as *const u8),
+        ("runtime_gmpn_mul_1", runtime_gmpn_mul_1 as *const u8),
+        ("runtime_gmpn_add", runtime_gmpn_add as *const u8),
+        ("runtime_gmpn_sub", runtime_gmpn_sub as *const u8),
+        ("runtime_gmpn_mul", runtime_gmpn_mul as *const u8),
+        ("runtime_gmpn_cmp", runtime_gmpn_cmp as *const u8),
+        ("runtime_gmpn_tdiv_qr", runtime_gmpn_tdiv_qr as *const u8),
+        ("runtime_gmpn_tdiv_q", runtime_gmpn_tdiv_q as *const u8),
+        ("runtime_gmpn_tdiv_r", runtime_gmpn_tdiv_r as *const u8),
+        ("runtime_gmpn_divrem_1", runtime_gmpn_divrem_1 as *const u8),
+        ("runtime_gmpn_mod_1", runtime_gmpn_mod_1 as *const u8),
+        ("runtime_gmpn_get_d", runtime_gmpn_get_d as *const u8),
+        ("runtime_gmp_gcd_word", runtime_gmp_gcd_word as *const u8),
+        ("runtime_gmpn_gcd_1", runtime_gmpn_gcd_1 as *const u8),
+        ("runtime_gmpn_gcd", runtime_gmpn_gcd as *const u8),
+        ("runtime_gmpn_lshift", runtime_gmpn_lshift as *const u8),
+        ("runtime_gmpn_rshift", runtime_gmpn_rshift as *const u8),
+        (
+            "runtime_gmpn_rshift_2c",
+            runtime_gmpn_rshift_2c as *const u8,
+        ),
+        (
+            "runtime_int_encode_double",
+            runtime_int_encode_double as *const u8,
+        ),
         (
             "runtime_new_boxed_array",
             runtime_new_boxed_array as *const u8,

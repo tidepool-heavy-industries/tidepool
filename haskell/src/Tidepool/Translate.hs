@@ -100,6 +100,7 @@ data LitEnc
   | LEWord !Word64
   | LEChar !Word32
   | LEString !ByteString
+  | LEByteArray !ByteString  -- raw ByteArray# contents (e.g. BigNat# payload)
   | LEFloat !Word64    -- IEEE 754 bits
   | LEDouble !Word64   -- IEEE 754 bits
   deriving (Show)
@@ -1447,7 +1448,11 @@ mapLit = \case
     LitNumWord16 -> LEWord (fromInteger n)
     LitNumWord32 -> LEWord (fromInteger n)
     LitNumWord64 -> LEWord (fromInteger n)
-    LitNumBigNat -> error "BigNat literal not supported"
+    -- BigNat# literal (the payload of a big IP/IN Integer literal): materialize
+    -- as a little-endian 64-bit-limb ByteArray#. ghc-bignum reads the limb count
+    -- from sizeofByteArray#, so the byte length must be exactly the significant
+    -- limbs (no extra zero limb). See bigNatLitBytes.
+    LitNumBigNat -> LEByteArray (BS.pack (bigNatLitBytes n))
   LitChar c              -> LEChar (fromIntegral (ord c))
   LitString bs           -> LEString bs
   LitFloat r             -> LEFloat (fromIntegral (castFloatToWord32 (fromRational r)))
@@ -1456,6 +1461,18 @@ mapLit = \case
   LitLabel{}             -> LEInt 0  -- Function label → dummy value (dead code path)
   LitRubbish{}           -> LEInt 0  -- Rubbish literal → dummy value
   other                  -> error $ "Unsupported literal: " ++ showPprUnsafe other
+
+-- | Little-endian 64-bit-limb bytes for a BigNat# literal payload (ByteArray#).
+-- @n@ is the non-negative magnitude (sign lives in the IP/IN constructor).
+-- Bytes are padded up to a whole limb; the top limb stays non-zero (normalized),
+-- so sizeofByteArray# yields the correct GMP limb count.
+bigNatLitBytes :: Integer -> [Word8]
+bigNatLitBytes n =
+  let go 0 = []
+      go k = fromIntegral (k .&. 0xff) : go (k `shiftR` 8)
+      raw = go n
+      pad = (8 - length raw `mod` 8) `mod` 8
+  in if null raw then replicate 8 0 else raw ++ replicate pad 0
 
 mapPrimOp :: PrimOp -> Text
 mapPrimOp = \case
@@ -1565,6 +1582,7 @@ mapPrimOp = \case
   DoublePowerOp -> "DoublePower"
   -- Type conversions
   IntToDoubleOp   -> "Int2Double"
+  WordToDoubleOp  -> "Word2Double"
   DoubleToIntOp   -> "Double2Int"
   IntToFloatOp    -> "Int2Float"
   FloatToIntOp    -> "Float2Int"
@@ -1577,6 +1595,11 @@ mapPrimOp = \case
   AddrAddOp           -> "PlusAddr"
   -- ByteArray#
   NewByteArrayOp_Char         -> "NewByteArray"
+  -- Pinned alloc is identical to a normal ByteArray# for us; contents# yields the
+  -- payload Addr#. These ride the dead Integer->Addr# serialization closure.
+  NewPinnedByteArrayOp_Char        -> "NewByteArray"
+  ByteArrayContents_Char           -> "ByteArrayContents"
+  MutableByteArrayContents_Char    -> "ByteArrayContents"
   SizeofByteArrayOp           -> "SizeofByteArray"
   SizeofMutableByteArrayOp    -> "SizeofByteArray"
   UnsafeFreezeByteArrayOp     -> "UnsafeFreezeByteArray"
@@ -1590,6 +1613,7 @@ mapPrimOp = \case
   ShrinkMutableByteArrayOp_Char -> "ShrinkMutableByteArray"
   IndexByteArrayOp_Word8      -> "IndexWord8Array"
   IndexOffAddrOp_Word8        -> "IndexWord8OffAddr"
+  WriteOffAddrOp_Word8        -> "WriteWord8OffAddr"
   CopyByteArrayOp             -> "CopyByteArray"
   CopyMutableByteArrayOp      -> "CopyMutableByteArray"
   CompareByteArraysOp         -> "CompareByteArrays"
@@ -1619,12 +1643,22 @@ mapPrimOp = \case
   Int64ToWord64Op             -> "Int64ToWord64"
   -- Word64
   Word64ToInt64Op             -> "Word64ToInt64"
+  Word64ToWordOp              -> "Word64ToWord"
+  WordToWord64Op              -> "WordToWord64"
   Word64SllOp                 -> "Word64Shl"
+  Word64SrlOp                 -> "Word64Shrl"
   Word64OrOp                  -> "Word64Or"
   Word64AndOp                 -> "Word64And"
+  Word64EqOp                  -> "Word64Eq"
+  Word64NeOp                  -> "Word64Ne"
+  Word64LtOp                  -> "Word64Lt"
+  Word64LeOp                  -> "Word64Le"
+  Word64GtOp                  -> "Word64Gt"
+  Word64GeOp                  -> "Word64Ge"
   -- Carry arithmetic and wide multiply handled by splitMultiReturnPrimOp / splitTripleReturnPrimOp
   -- CLZ
   Clz8Op                      -> "Clz8"
+  ClzOp                       -> "Clz"
   -- SmallArray#
   NewSmallArrayOp             -> "NewSmallArray"
   ReadSmallArrayOp            -> "ReadSmallArray"
@@ -1667,6 +1701,10 @@ mapPrimOp = \case
   Ctz64Op                     -> "Ctz64"
   -- Exception
   RaiseOp     -> "Raise"
+  -- Arithmetic exceptions raised in ghc-bignum's check branches.
+  RaiseUnderflowOp -> "RaiseUnderflow"
+  RaiseOverflowOp  -> "RaiseOverflow"
+  RaiseDivZeroOp   -> "RaiseDivZero"
   other       -> error $ "Unsupported primop: " ++ showPprUnsafe other
 
 -- | Check whether a named top-level binding has IO in its result type.
@@ -1783,8 +1821,41 @@ mapFfiCall pprName
   | "_hs_text_measure_off" `isInfixOf` pprName  = T.pack "FfiTextMeasureOff"
   | "_hs_text_memchr" `isInfixOf` pprName       = T.pack "FfiTextMemchr"
   | "_hs_text_reverse" `isInfixOf` pprName      = T.pack "FfiTextReverse"
+  -- ghc-bignum gmp-backend mpn surface (phase-1: multi-limb Integer arithmetic).
+  -- Backed host-side by tidepool-bignum. ORDER MATTERS: the more specific symbols
+  -- (`_1` scalar variants, `gcd_1`, `tdiv_qr`) must precede their substring siblings
+  -- (`__gmpn_add` is an infix of `__gmpn_add_1`).
+  | "__gmpn_add_1" `isInfixOf` pprName          = T.pack "FfiGmpnAdd1"
+  | "__gmpn_sub_1" `isInfixOf` pprName          = T.pack "FfiGmpnSub1"
+  | "__gmpn_mul_1" `isInfixOf` pprName          = T.pack "FfiGmpnMul1"
+  | "__gmpn_add" `isInfixOf` pprName            = T.pack "FfiGmpnAdd"
+  | "__gmpn_sub" `isInfixOf` pprName            = T.pack "FfiGmpnSub"
+  | "__gmpn_mul" `isInfixOf` pprName            = T.pack "FfiGmpnMul"
+  | "__gmpn_cmp" `isInfixOf` pprName            = T.pack "FfiGmpnCmp"
+  | "__gmpn_tdiv_qr" `isInfixOf` pprName        = T.pack "FfiGmpnTdivQr"
+  | "__gmpn_divrem_1" `isInfixOf` pprName       = T.pack "FfiGmpnDivrem1"
+  | "__gmpn_mod_1" `isInfixOf` pprName          = T.pack "FfiGmpnMod1"
+  | "integer_gmp_mpn_tdiv_q" `isInfixOf` pprName = T.pack "FfiGmpnTdivQ"
+  | "integer_gmp_mpn_tdiv_r" `isInfixOf` pprName = T.pack "FfiGmpnTdivR"
+  | "integer_gmp_mpn_get_d" `isInfixOf` pprName = T.pack "FfiGmpnGetD"
+  | "integer_gmp_gcd_word" `isInfixOf` pprName  = T.pack "FfiGmpGcdWord"
+  | "integer_gmp_mpn_gcd_1" `isInfixOf` pprName = T.pack "FfiGmpnGcd1"
+  | "integer_gmp_mpn_gcd" `isInfixOf` pprName   = T.pack "FfiGmpnGcd"
+  -- rshift_2c (arithmetic shift for negative Integers) MUST be tested before the
+  -- rshift arm, which is its substring.
+  | "integer_gmp_mpn_rshift_2c" `isInfixOf` pprName = T.pack "FfiGmpnRshift2c"
+  | "integer_gmp_mpn_lshift" `isInfixOf` pprName = T.pack "FfiGmpnLshift"
+  | "integer_gmp_mpn_rshift" `isInfixOf` pprName = T.pack "FfiGmpnRshift"
+  | "__int_encodeDouble" `isInfixOf` pprName    = T.pack "FfiIntEncodeDouble"
+  -- Deferred bignum ops: fail LOUD with a named error (NOT the generic FFI hint),
+  -- so a probe that needs one points us at exactly which to implement next.
+  | isBignumFfi pprName = error $ "unsupported mpn op: " ++ pprName
+      ++ "\n  (not yet implemented — phase-1 bignum covers add/sub/mul/div/mod/cmp/"
+      ++ "get_d/gcd/shifts/encodeDouble; deferred: bitwise and/andn/ior/xor, "
+      ++ "popcount, powm, gcdext, invert. File which symbol you hit.)"
   | otherwise = error $ "Unsupported FFI call: " ++ pprName ++ hint
   where
+    isBignumFfi s = "__gmpn_" `isInfixOf` s || "integer_gmp_" `isInfixOf` s
     hint
       | "gmp" `isInfixOf` pprName || "integer" `isInfixOf` pprName =
           "\n  (Integer/GMP arithmetic is unsupported under the JIT. This usually\n\
@@ -1874,6 +1945,7 @@ splitMultiReturnPrimOp = \case
   IntQuotRemOp  -> Just (T.pack "IntQuot", T.pack "IntRem")
   WordQuotRemOp -> Just (T.pack "WordQuot", T.pack "WordRem")
   IntAddCOp     -> Just (T.pack "AddIntCVal", T.pack "AddIntCCarry")
+  IntSubCOp     -> Just (T.pack "SubIntCVal", T.pack "SubIntCCarry")
   WordAddCOp    -> Just (T.pack "AddWordCVal", T.pack "AddWordCCarry")
   WordSubCOp    -> Just (T.pack "SubWordCVal", T.pack "SubWordCCarry")
   WordMul2Op    -> Just (T.pack "TimesWord2Hi", T.pack "TimesWord2Lo")

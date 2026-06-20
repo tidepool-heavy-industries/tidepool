@@ -525,7 +525,7 @@ fn emit_lit_dispatch(
                         .ins()
                         .brif(eq, alt_block, &[], next_check_block, &[]);
                 }
-                Literal::LitString(_) => {
+                Literal::LitString(_) | Literal::LitByteArray(_) => {
                     return Err(EmitError::NotYetImplemented("LitString in Case".into()))
                 }
             }

@@ -72,6 +72,7 @@ encodeLitEnc = \case
   LEWord n   -> encodeListLen 2 <> encodeString "LitWord" <> encodeWord64 n
   LEChar n   -> encodeListLen 2 <> encodeString "LitChar" <> encodeWord32 n
   LEString b -> encodeListLen 2 <> encodeString "LitString" <> encodeBytes b
+  LEByteArray b -> encodeListLen 2 <> encodeString "LitByteArray" <> encodeBytes b
   LEFloat n  -> encodeListLen 2 <> encodeString "LitFloat" <> encodeWord64 n
   LEDouble n -> encodeListLen 2 <> encodeString "LitDouble" <> encodeWord64 n
 

@@ -60,6 +60,7 @@ impl std::fmt::Display for Value {
                     Ok(s) => write!(f, "{:?}", s),
                     Err(_) => write!(f, "<bytes len={}>", bs.len()),
                 },
+                Literal::LitByteArray(bs) => write!(f, "<bytearray len={}>", bs.len()),
                 Literal::LitFloat(bits) => match u32::try_from(*bits) {
                     Ok(bits32) => write!(f, "{}", f32::from_bits(bits32)),
                     Err(_) => write!(f, "<invalid f32 bits=0x{:016x}>", *bits),

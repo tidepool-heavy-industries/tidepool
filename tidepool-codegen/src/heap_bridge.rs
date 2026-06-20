@@ -469,6 +469,22 @@ unsafe fn leaf_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u8, Br
                     *ptr.add(layout::LIT_TAG_OFFSET as usize) = LIT_TAG_STRING as u8;
                     *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = data_ptr as i64;
                 }
+                Literal::LitByteArray(bytes) => {
+                    // Same [len: u64][bytes...] data section as LitString, but
+                    // tagged BYTEARRAY so sizeofByteArray# reads the length and
+                    // mpn/index ops read the limbs (no unpackCString# +8 skip).
+                    // (eval lowers LitByteArray to Value::ByteArray, so this is a
+                    // belt-and-suspenders path for any direct Lit conversion.)
+                    let data_ptr =
+                        crate::host_fns::runtime_new_byte_array(bytes.len() as i64) as *mut u8;
+                    if data_ptr.is_null() {
+                        return Err(BridgeError::NurseryExhausted);
+                    }
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr.add(8), bytes.len());
+
+                    *ptr.add(layout::LIT_TAG_OFFSET as usize) = LIT_TAG_BYTEARRAY as u8;
+                    *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = data_ptr as i64;
+                }
             }
             Ok(ptr)
         }

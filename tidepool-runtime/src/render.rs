@@ -384,6 +384,7 @@ fn literal_to_json(lit: &Literal) -> serde_json::Value {
             Ok(s) => json!(s),
             Err(_) => json!(format!("<binary:{} bytes>", bytes.len())),
         },
+        Literal::LitByteArray(bytes) => json!(format!("<bytearray:{} bytes>", bytes.len())),
         Literal::LitFloat(bits) => {
             let f = f32::from_bits(*bits as u32) as f64;
             if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {

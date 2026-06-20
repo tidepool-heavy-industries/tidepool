@@ -178,6 +178,12 @@ fn eval_at(
             }
             env.get(v).cloned().ok_or(EvalError::UnboundVar(*v))
         }
+        // A ByteArray# literal (e.g. a BigNat# payload) becomes a mutable byte
+        // array so the byte-array primops (sizeofByteArray#, indexWordArray#, the
+        // mpn intercepts) read it uniformly with runtime-allocated arrays.
+        CoreFrame::Lit(Literal::LitByteArray(bytes)) => Ok(Value::ByteArray(
+            std::sync::Arc::new(std::sync::Mutex::new(bytes.clone())),
+        )),
         CoreFrame::Lit(lit) => Ok(Value::Lit(lit.clone())),
         CoreFrame::App { fun, arg } => {
             let mut fun_val = force(eval_at(expr, *fun, env, heap)?, heap)?;
@@ -475,12 +481,12 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let (a, b) = bin_op_word(op, &args)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_mul(b))))
         }
-        PrimOpKind::WordEq => cmp_word(op, &args, |a, b| a == b),
-        PrimOpKind::WordNe => cmp_word(op, &args, |a, b| a != b),
-        PrimOpKind::WordLt => cmp_word(op, &args, |a, b| a < b),
-        PrimOpKind::WordLe => cmp_word(op, &args, |a, b| a <= b),
-        PrimOpKind::WordGt => cmp_word(op, &args, |a, b| a > b),
-        PrimOpKind::WordGe => cmp_word(op, &args, |a, b| a >= b),
+        PrimOpKind::WordEq | PrimOpKind::Word64Eq => cmp_word(op, &args, |a, b| a == b),
+        PrimOpKind::WordNe | PrimOpKind::Word64Ne => cmp_word(op, &args, |a, b| a != b),
+        PrimOpKind::WordLt | PrimOpKind::Word64Lt => cmp_word(op, &args, |a, b| a < b),
+        PrimOpKind::WordLe | PrimOpKind::Word64Le => cmp_word(op, &args, |a, b| a <= b),
+        PrimOpKind::WordGt | PrimOpKind::Word64Gt => cmp_word(op, &args, |a, b| a > b),
+        PrimOpKind::WordGe | PrimOpKind::Word64Ge => cmp_word(op, &args, |a, b| a >= b),
         PrimOpKind::WordQuot => {
             let (a, b) = bin_op_word(op, &args)?;
             if b == 0 {
@@ -929,6 +935,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let a = expect_int(&args[0])?;
             Ok(Value::Lit(Literal::LitDouble((a as f64).to_bits())))
         }
+        PrimOpKind::Word2Double => {
+            let a = expect_word(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble((a as f64).to_bits())))
+        }
         PrimOpKind::Double2Int => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
@@ -1143,6 +1153,15 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         }
         PrimOpKind::ReallyUnsafePtrEquality => Ok(Value::Lit(Literal::LitInt(0))),
         PrimOpKind::Raise => Err(EvalError::UserError),
+        PrimOpKind::RaiseDivZero => Err(EvalError::InternalError(
+            "division by zero (raiseDivZero#)".into(),
+        )),
+        PrimOpKind::RaiseOverflow => Err(EvalError::InternalError(
+            "arithmetic overflow (raiseOverflow#)".into(),
+        )),
+        PrimOpKind::RaiseUnderflow => Err(EvalError::InternalError(
+            "arithmetic underflow (raiseUnderflow#)".into(),
+        )),
         PrimOpKind::IndexArray | PrimOpKind::TagToEnum => Err(EvalError::UnsupportedPrimOp(op)),
 
         // --- ByteArray# / MutableByteArray# ---
@@ -1289,6 +1308,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 (w as u8).leading_zeros() as u64
             )))
         }
+        PrimOpKind::Clz => {
+            let w = expect_word(&args[0])?;
+            Ok(Value::Lit(Literal::LitWord(w.leading_zeros() as u64)))
+        }
         PrimOpKind::IntToInt64 => {
             // Identity on 64-bit: Int# == Int64#
             Ok(args[0].clone())
@@ -1345,6 +1368,25 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let idx = expect_int(&args[1])? as usize;
             let val = bytes.get(idx).copied().unwrap_or(0);
             Ok(Value::Lit(Literal::LitWord(val as u64)))
+        }
+        PrimOpKind::ByteArrayContents => {
+            // byteArrayContents# / mutableByteArrayContents# :: ByteArray# -> Addr#.
+            // The tree-walker models Addr# as an immutable LitString; this only
+            // appears via the dead Integer->Addr# serialization closure, so a
+            // snapshot copy of the bytes suffices (never read back on live paths).
+            let ba = expect_byte_array(&args[0])?;
+            let bytes = ba
+                .lock()
+                .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?
+                .clone();
+            Ok(Value::Lit(Literal::LitString(bytes)))
+        }
+        PrimOpKind::WriteWord8OffAddr => {
+            // writeWord8OffAddr# only appears via dead Integer->Addr# serialization
+            // (bigNatToAddr#) pulled into the closure; the tree-walker models Addr#
+            // as an immutable LitString, so there is no writable target. It is never
+            // reached at runtime for the paths we support; no-op with a dummy state.
+            Ok(Value::Lit(Literal::LitInt(0)))
         }
         PrimOpKind::CompareByteArrays => {
             // compareByteArrays# ba1 off1 ba2 off2 len -> Int#
@@ -1410,6 +1452,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // Identity on 64-bit
             Ok(args[0].clone())
         }
+        PrimOpKind::Word64ToWord | PrimOpKind::WordToWord64 => {
+            // Identity on 64-bit; normalize to a Word literal.
+            Ok(Value::Lit(Literal::LitWord(expect_word(&args[0])?)))
+        }
         PrimOpKind::Word64ToInt64 => {
             // Identity on 64-bit (reinterpret Word64 as Int64)
             let w = match &args[0] {
@@ -1447,6 +1493,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Word64Shl => {
             let (a, b) = bin_op_word(op, &args)?;
             Ok(Value::Lit(Literal::LitWord(a << (b as u32))))
+        }
+        PrimOpKind::Word64Shrl => {
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitWord(a >> (b as u32))))
         }
         PrimOpKind::Word8Ge => {
             let (a, b) = bin_op_word(op, &args)?;
@@ -1639,6 +1689,17 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // addIntC# carry flag: 1 if overflow, 0 otherwise
             let (a, b) = bin_op_int(op, &args)?;
             let overflow = a.checked_add(b).is_none();
+            Ok(Value::Lit(Literal::LitInt(if overflow { 1 } else { 0 })))
+        }
+        PrimOpKind::SubIntCVal => {
+            // subIntC# result component: a - b (wrapping)
+            let (a, b) = bin_op_int(op, &args)?;
+            Ok(Value::Lit(Literal::LitInt(a.wrapping_sub(b))))
+        }
+        PrimOpKind::SubIntCCarry => {
+            // subIntC# overflow flag: 1 if signed subtraction overflowed
+            let (a, b) = bin_op_int(op, &args)?;
+            let overflow = a.checked_sub(b).is_none();
             Ok(Value::Lit(Literal::LitInt(if overflow { 1 } else { 0 })))
         }
         PrimOpKind::SubWordCVal => {
@@ -1876,6 +1937,183 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             Ok(Value::ByteArray(dst_ba.clone()))
         }
 
+        // ── ghc-bignum gmp-backend mpn intercepts (phase-1) ──────────────────
+        // Mirror the JIT host fns over the tree-walker's ByteArray# values (Vec<u8>
+        // of little-endian limbs), sharing tidepool-bignum so both engines agree.
+        // Inputs are read into owned limb Vecs first (releasing locks), then the
+        // distinct output array is written — no aliasing in ghc-bignum's calls.
+        PrimOpKind::FfiGmpnAdd1 | PrimOpKind::FfiGmpnSub1 | PrimOpKind::FfiGmpnMul1 => {
+            let n = expect_int_like(&args[2])?.max(0) as usize;
+            let s1 = ba_read_limbs(&args[1], n)?;
+            let s2limb = expect_int_like(&args[3])? as u64;
+            let mut rp = vec![0u64; n];
+            let carry = match op {
+                PrimOpKind::FfiGmpnAdd1 => tidepool_bignum::mpn_add_1(&mut rp, &s1, s2limb),
+                PrimOpKind::FfiGmpnSub1 => tidepool_bignum::mpn_sub_1(&mut rp, &s1, s2limb),
+                _ => tidepool_bignum::mpn_mul_1(&mut rp, &s1, s2limb),
+            };
+            ba_write_limbs(&args[0], &rp)?;
+            Ok(Value::Lit(Literal::LitWord(carry)))
+        }
+        PrimOpKind::FfiGmpnAdd | PrimOpKind::FfiGmpnSub => {
+            let s1n = expect_int_like(&args[2])?.max(0) as usize;
+            let s2n = expect_int_like(&args[4])?.max(0) as usize;
+            let s1 = ba_read_limbs(&args[1], s1n)?;
+            let s2 = ba_read_limbs(&args[3], s2n)?;
+            let mut rp = vec![0u64; s1n];
+            let carry = match op {
+                PrimOpKind::FfiGmpnAdd => tidepool_bignum::mpn_add(&mut rp, &s1, &s2),
+                _ => tidepool_bignum::mpn_sub(&mut rp, &s1, &s2),
+            };
+            ba_write_limbs(&args[0], &rp)?;
+            Ok(Value::Lit(Literal::LitWord(carry)))
+        }
+        PrimOpKind::FfiGmpnMul => {
+            let s1n = expect_int_like(&args[2])?.max(0) as usize;
+            let s2n = expect_int_like(&args[4])?.max(0) as usize;
+            let s1 = ba_read_limbs(&args[1], s1n)?;
+            let s2 = ba_read_limbs(&args[3], s2n)?;
+            let mut rp = vec![0u64; s1n + s2n];
+            let top = tidepool_bignum::mpn_mul(&mut rp, &s1, &s2);
+            ba_write_limbs(&args[0], &rp)?;
+            Ok(Value::Lit(Literal::LitWord(top)))
+        }
+        PrimOpKind::FfiGmpnCmp => {
+            let n = expect_int_like(&args[2])?.max(0) as usize;
+            let s1 = ba_read_limbs(&args[0], n)?;
+            let s2 = ba_read_limbs(&args[1], n)?;
+            Ok(Value::Lit(Literal::LitInt(
+                tidepool_bignum::mpn_cmp(&s1, &s2) as i64,
+            )))
+        }
+        PrimOpKind::FfiGmpnTdivQr => {
+            let nn = expect_int_like(&args[4])?.max(0) as usize;
+            let dn = expect_int_like(&args[6])?.max(0) as usize;
+            let np = ba_read_limbs(&args[3], nn)?;
+            let dp = ba_read_limbs(&args[5], dn)?;
+            let qlen = (nn + 1).saturating_sub(dn);
+            let mut qp = vec![0u64; qlen];
+            let mut rp = vec![0u64; dn];
+            tidepool_bignum::mpn_tdiv_qr(&mut qp, &mut rp, &np, &dp);
+            ba_write_limbs(&args[0], &qp)?;
+            ba_write_limbs(&args[1], &rp)?;
+            Ok(Value::Lit(Literal::LitInt(0)))
+        }
+        PrimOpKind::FfiGmpnTdivQ | PrimOpKind::FfiGmpnTdivR => {
+            let nn = expect_int_like(&args[2])?.max(0) as usize;
+            let dn = expect_int_like(&args[4])?.max(0) as usize;
+            let np = ba_read_limbs(&args[1], nn)?;
+            let dp = ba_read_limbs(&args[3], dn)?;
+            match op {
+                PrimOpKind::FfiGmpnTdivQ => {
+                    let mut qp = vec![0u64; (nn + 1).saturating_sub(dn)];
+                    tidepool_bignum::mpn_tdiv_q(&mut qp, &np, &dp);
+                    ba_write_limbs(&args[0], &qp)?;
+                }
+                _ => {
+                    let mut rp = vec![0u64; dn];
+                    tidepool_bignum::mpn_tdiv_r(&mut rp, &np, &dp);
+                    ba_write_limbs(&args[0], &rp)?;
+                }
+            }
+            Ok(Value::Lit(Literal::LitInt(0)))
+        }
+        PrimOpKind::FfiGmpnDivrem1 => {
+            let qxn = expect_int_like(&args[1])?.max(0) as usize;
+            let s2n = expect_int_like(&args[3])?.max(0) as usize;
+            let np = ba_read_limbs(&args[2], s2n)?;
+            let s3limb = expect_int_like(&args[4])? as u64;
+            let mut qp = vec![0u64; s2n + qxn];
+            let rem = tidepool_bignum::mpn_divrem_1(&mut qp, qxn, &np, s3limb);
+            ba_write_limbs(&args[0], &qp)?;
+            Ok(Value::Lit(Literal::LitWord(rem)))
+        }
+        PrimOpKind::FfiGmpnMod1 => {
+            let s1n = expect_int_like(&args[1])?.max(0) as usize;
+            let np = ba_read_limbs(&args[0], s1n)?;
+            let s2limb = expect_int_like(&args[2])? as u64;
+            Ok(Value::Lit(Literal::LitWord(tidepool_bignum::mpn_mod_1(
+                &np, s2limb,
+            ))))
+        }
+        PrimOpKind::FfiGmpnGetD => {
+            let sn = expect_int_like(&args[1])?;
+            let exp = expect_int_like(&args[2])?;
+            let n = sn.unsigned_abs() as usize;
+            let sp = ba_read_limbs(&args[0], n)?;
+            let d = tidepool_bignum::mpn_get_d(&sp, sn, exp);
+            Ok(Value::Lit(Literal::LitDouble(d.to_bits())))
+        }
+        PrimOpKind::FfiGmpGcdWord => {
+            let a = expect_int_like(&args[0])? as u64;
+            let b = expect_int_like(&args[1])? as u64;
+            Ok(Value::Lit(Literal::LitWord(tidepool_bignum::gcd_word(a, b))))
+        }
+        PrimOpKind::FfiGmpnLshift | PrimOpKind::FfiGmpnRshift | PrimOpKind::FfiGmpnRshift2c => {
+            let sn = expect_int_like(&args[2])?.max(0) as usize;
+            let count = expect_int_like(&args[3])?.max(0) as u64;
+            let sp = ba_read_limbs(&args[1], sn)?;
+            let top = match op {
+                PrimOpKind::FfiGmpnLshift => {
+                    let limb_shift = (count / 64) as usize;
+                    let extra = if count % 64 != 0 { 1 } else { 0 };
+                    let mut rp = vec![0u64; sn + limb_shift + extra];
+                    let t = tidepool_bignum::mpn_lshift(&mut rp, &sp, count);
+                    ba_write_limbs(&args[0], &rp)?;
+                    t
+                }
+                PrimOpKind::FfiGmpnRshift => {
+                    let limb_shift = (count / 64) as usize;
+                    if limb_shift >= sn {
+                        0
+                    } else {
+                        let mut rp = vec![0u64; sn - limb_shift];
+                        let t = tidepool_bignum::mpn_rshift(&mut rp, &sp, count);
+                        ba_write_limbs(&args[0], &rp)?;
+                        t
+                    }
+                }
+                _ => {
+                    // rshift_2c: dest is sn - (count-1)/64 limbs.
+                    let limb_shift = (count.saturating_sub(1) / 64) as usize;
+                    if limb_shift >= sn {
+                        0
+                    } else {
+                        let mut rp = vec![0u64; sn - limb_shift];
+                        let t = tidepool_bignum::mpn_rshift_2c(&mut rp, &sp, count);
+                        ba_write_limbs(&args[0], &rp)?;
+                        t
+                    }
+                }
+            };
+            Ok(Value::Lit(Literal::LitWord(top)))
+        }
+        PrimOpKind::FfiIntEncodeDouble => {
+            let m = expect_int_like(&args[0])?;
+            let e = expect_int_like(&args[1])?;
+            Ok(Value::Lit(Literal::LitDouble(
+                tidepool_bignum::encode_double(m, e).to_bits(),
+            )))
+        }
+        PrimOpKind::FfiGmpnGcd1 => {
+            let sn = expect_int_like(&args[1])?.max(0) as usize;
+            let sp = ba_read_limbs(&args[0], sn)?;
+            let b = expect_int_like(&args[2])? as u64;
+            Ok(Value::Lit(Literal::LitWord(tidepool_bignum::mpn_gcd_1(
+                &sp, b,
+            ))))
+        }
+        PrimOpKind::FfiGmpnGcd => {
+            let s1n = expect_int_like(&args[2])?.max(0) as usize;
+            let s2n = expect_int_like(&args[4])?.max(0) as usize;
+            let s1 = ba_read_limbs(&args[1], s1n)?;
+            let s2 = ba_read_limbs(&args[3], s2n)?;
+            let mut rp = vec![0u64; s1n.min(s2n)];
+            let len = tidepool_bignum::mpn_gcd(&mut rp, &s1, &s2);
+            ba_write_limbs(&args[0], &rp)?;
+            Ok(Value::Lit(Literal::LitInt(len as i64)))
+        }
+
         // SmallArray# / Array# / PopCnt / Ctz — only used by JIT, not tree-walker
         PrimOpKind::NewSmallArray
         | PrimOpKind::ReadSmallArray
@@ -1913,6 +2151,40 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         | PrimOpKind::Ctz32
         | PrimOpKind::Ctz64 => Err(EvalError::UnsupportedPrimOp(op)),
     }
+}
+
+/// Read `n` little-endian u64 limbs from a ByteArray# value, zero-extending if
+/// the backing buffer is shorter. Returns an owned Vec so the lock is released
+/// before any output array is written (avoids self-deadlock / aliasing issues).
+fn ba_read_limbs(v: &Value, n: usize) -> Result<Vec<u64>, EvalError> {
+    let ba = expect_byte_array(v)?;
+    let bytes = ba
+        .lock()
+        .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+    let mut limbs = vec![0u64; n];
+    for (i, limb) in limbs.iter_mut().enumerate() {
+        let o = i * 8;
+        if o + 8 <= bytes.len() {
+            *limb = u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap());
+        }
+    }
+    Ok(limbs)
+}
+
+/// Write little-endian u64 limbs into a ByteArray# value in place (bounded by
+/// the buffer length, which ghc-bignum pre-sized to the GMP contract).
+fn ba_write_limbs(v: &Value, limbs: &[u64]) -> Result<(), EvalError> {
+    let ba = expect_byte_array(v)?;
+    let mut bytes = ba
+        .lock()
+        .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
+    for (i, &l) in limbs.iter().enumerate() {
+        let o = i * 8;
+        if o + 8 <= bytes.len() {
+            bytes[o..o + 8].copy_from_slice(&l.to_le_bytes());
+        }
+    }
+    Ok(())
 }
 
 fn expect_byte_array(v: &Value) -> Result<&crate::value::SharedByteArray, EvalError> {
