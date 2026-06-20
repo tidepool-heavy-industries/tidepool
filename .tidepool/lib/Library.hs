@@ -18,6 +18,7 @@ module Library
   , module Flow
   , module Patch
   , module Diff
+  , module Edit
   , module Seek
   , module Optics
   , module Glue
@@ -31,6 +32,7 @@ import Asks
 import Flow
 import Patch
 import Diff
+import Edit
 import Seek
 import Optics
 import Glue
