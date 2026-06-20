@@ -107,15 +107,13 @@ fn print_then_error_resolves() {
     }
 }
 
-/// SUSPECT: a simple `pure` continuation after the Print.
-/// CURRENTLY FAILS — root cause confirmed: commit a9a0082 scoped the
-/// DataConTable meta walk to the target's reachable VALUE bindings, which
-/// excludes `()` (the unit-returning effect's result, discarded by `>> pure`
-/// and never lexically constructed in user Core). The Print handler injects
-/// `()` at runtime → unresolved variable. Un-ignore when the meta walk seeds
-/// runtime-injectable (effect-result) constructors. See
-/// plans/send-print-unresolved-bug.md.
-#[ignore = "regression from a9a0082: () pruned from DataConTable meta walk; un-ignore when fixed"]
+/// REPRO (currently fails, #[ignore]d): `send (Print x) >> (pure y)` resolves to
+/// unresolved external VarId(0xfe75fa6b4241aaa3) at runtime. The var is NOT `()`
+/// (hash-disproven) and NOT a binding site (varid-audit, no collision) — some
+/// global con/external in the effect-seq path, identity still TBD. The earlier
+/// "a9a0082 pruned ()" diagnosis was WRONG. See plans/send-print-unresolved-bug.md.
+/// Un-ignore when fixed (→ regression guard).
+#[ignore = "unresolved-external bug in `send(effect) >> pure`; var unidentified; see plans/send-print-unresolved-bug.md"]
 #[test]
 fn print_then_pure_resolves() {
     let (_out, r) = run(r#"send (Print (T.pack "MARK")) >> (pure (123 :: Int))"#);
@@ -125,9 +123,9 @@ fn print_then_pure_resolves() {
     );
 }
 
-/// SUSPECT: a strict `pure $!` continuation after the Print. Same root cause as
-/// `print_then_pure_resolves` (the `$!` is irrelevant — any `pure` tail).
-#[ignore = "regression from a9a0082: () pruned from DataConTable meta walk; un-ignore when fixed"]
+/// REPRO (currently fails, #[ignore]d): same bug as `print_then_pure_resolves`
+/// (the `$!` is irrelevant — any `pure` tail after a unit-returning effect).
+#[ignore = "unresolved-external bug in `send(effect) >> pure`; var unidentified; see plans/send-print-unresolved-bug.md"]
 #[test]
 fn print_then_strict_pure_resolves() {
     let (_out, r) = run(r#"send (Print (T.pack "MARK")) >> (pure $! (123 :: Int))"#);
