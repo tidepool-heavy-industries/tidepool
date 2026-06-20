@@ -108,11 +108,15 @@ fn run_capturing_expect_err(code: &str, helpers: &str) -> (Vec<String>, String) 
         .name("eval-failclass".into())
         .stack_size(256 * 1024 * 1024)
         .spawn(move || {
-            // Faithful to the server's eval thread (lib.rs:2034): the JIT's
-            // clean stack-overflow yield + trap recovery rely on these handlers
-            // (sigaltstack + SIGSEGV/SIGILL -> siglongjmp). Without them a deep
-            // recursion corrupts into a spurious [CASE TRAP] instead of yielding
-            // cleanly the way the real eval does.
+            // Faithful to the server's eval thread (lib.rs:2034): installs the
+            // sigaltstack + SIGSEGV/SIGILL -> siglongjmp handlers so a genuine
+            // JIT fault returns a clean error instead of killing the thread.
+            // (Redundant for crash recovery — `machine.run()` calls install()
+            // itself — but kept for server fidelity.) NOTE: it does NOT suppress
+            // the `[CASE TRAP] in compiled fn: …` stderr breadcrumbs; those are
+            // the benign StackOverflow poison-cascade unwinding and fire on the
+            // live server too. They are stderr-only and do not affect the
+            // returned error (which is the clean StackOverflow yield).
             tidepool_codegen::signal_safety::install();
             let include = [pp, ulp, eff];
             let mut handlers = frunk::hlist![ConsoleHandler];
@@ -162,31 +166,39 @@ fn say_then_haskell_error_is_captured_and_classified() {
     );
 }
 
-/// Unbounded non-tail recursion after a `say`: the printed line should survive
-/// and the stack-overflow yield classify as `runtime-yield`. The nospec bug
-/// this `>> (pure $! …)` form used to hit is FIXED — the LIVE server runs this
-/// exact eval to a clean runtime-yield (verified). But this minimal-stack
-/// harness (single Console handler, worker thread WITHOUT signal handlers)
-/// produces a spurious [CASE TRAP] for the DEEP-recursion variant where the
-/// real full-stack eval does not — a harness-fidelity gap, not a codegen
-/// regression. The simple nospec cases are covered (green) by
-/// repro_print_unresolved.rs. Re-ignored pending a harness fix (install signal
-/// handlers / use the full effect stack). See plans/send-print-unresolved-bug.md.
-#[ignore = "harness-fidelity: minimal-stack worker case-traps on deep recursion; the live full-stack eval yields cleanly. Separate from the (fixed) nospec bug."]
+/// Unbounded non-tail recursion whose RESULT is returned after a `say`: the
+/// printed line survives and the stack-overflow yield classifies as
+/// `runtime-yield`. Verified identical on the LIVE MCP server.
+///
+/// SUBTLE — do NOT add `$!`. The earlier form `>> (pure $! (go 5_000_000))`
+/// does NOT capture the marker, on the live server OR here: `pure $! x` is
+/// `x \`seq\` pure x`, and GHC's strictness/let-floating on the standalone
+/// `__user` binding forces `go 5_000_000` *while evaluating* `__user`, BEFORE
+/// the `Print` effect ever yields — so the recursion overflows first and the
+/// `say` is lost. (The repeated `[CASE TRAP] in compiled fn: …` stderr
+/// breadcrumbs that form emits are the benign StackOverflow poison-cascade
+/// unwinding through `go`'s `if`, error flag already set — not a codegen bug;
+/// the live server prints them too. This was the whole "harness diverges"
+/// red herring: it never diverged, the `$!` just loses the marker everywhere.)
+///
+/// With a plain `pure (go 5_000_000)` the result is a thunk: the `Print` yields
+/// first (marker captured), then the final `toJSON`/`paginateResult` forces the
+/// thunk — genuinely AFTER the say — and overflows there → clean
+/// stack-overflow yield. That is the real "print, then return a value whose
+/// computation blows the stack" scenario this test means to pin.
+///
+/// `go` is non-tail (the `n +` keeps a live frame) and recurses far past the
+/// JIT's call-depth budget before its base case. IMPORTANT: it MUST have a
+/// base case. A no-base-case `n + go (n + 1)` is loopified by GHC into a
+/// non-stack-growing spin (it never overflows) and would hang this test forever
+/// — see the worker-thread timeout above. (Recursive helpers must live in the
+/// top-level `helpers` slot, not a `where` on the eval expression, or the
+/// self-call resolves to an unresolved external.)
 #[test]
 fn say_then_stack_overflow_is_captured_and_classified() {
     let marker = "PARTIAL-OUTPUT-MARKER-yield";
-    // `go` is non-tail (the `n +` keeps a live frame) and recurses far past the
-    // JIT's call-depth budget before its base case, so `$!` forcing it to WHNF —
-    // after the Print — blows the call stack → clean stack-overflow yield.
-    // IMPORTANT: it MUST have a base case. A no-base-case `n + go (n + 1)` is
-    // loopified by GHC into a non-stack-growing spin (it never overflows) and
-    // would hang this test forever — see the worker-thread timeout above.
-    // (Recursive helpers must live in the top-level `helpers` slot, not a
-    // `where` on the eval expression, or the self-call resolves to an
-    // unresolved external.)
     let (output, err) = run_capturing_expect_err(
-        &format!(r#"send (Print (T.pack "{marker}")) >> (pure $! (go 5000000 :: Int))"#),
+        &format!(r#"send (Print (T.pack "{marker}")) >> (pure (go 5000000 :: Int))"#),
         "go :: Int -> Int\ngo n = if n <= 0 then 0 else n + go (n - 1)\n",
     );
 
