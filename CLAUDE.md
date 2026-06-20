@@ -305,6 +305,12 @@ SIGSEGV. The short, true standing list:
 
 - **`read`/`reads`**: clean COMPILE error ("Unsupported FFI call: …gmpn…" with
   a GMP hint). Use `parseInt`/`parseDouble` from Prelude.
+- **Near-DBL_MAX Double LITERALS** (e.g. `1.79e308`, `1.7976931348623157e308`):
+  same clean `gmpn` COMPILE error. The literal desugars through a rational whose
+  integer mantissa overflows the integerAdd/integerSub shims into multi-limb GMP.
+  An authoring trap — write a smaller literal or compute the value at runtime.
+  Moderate-magnitude literals (`3.14`, `1.0e10`, `1.23e100`) stay within the
+  shims and are fine. (Pinned: `gotcha_registry::loud_fail_large_double_literal_pulls_gmp`.)
 - **`T.takeWhile`/`T.dropWhile` — DIRECT use fixed, Prelude-wrapped use still
   broken.** The EPS unpoison (9a827a3) made GHC load unfoldings, so `map
   (T.takeWhile p) ts` used STRAIGHT from a user module is now correct (Core
@@ -328,7 +334,14 @@ SIGSEGV. The short, true standing list:
 Stale fears, verified gone: Integer defaulting in untyped local helpers,
 `sum`/`product`/`maximum`/`minimum`/`foldr1`/`last`/`init` (error-worker
 sentinel fix, commit 4273c51), `Floating` ops (`sqrt`/`sin`/`exp`/`log`),
-`round` (correct banker's rounding), `even`/`odd`, `nub` — all fine.
+`round` (correct banker's rounding), `even`/`odd`, `nub`, and bounded
+consumption of "infinite" producers (`take n [0..]`, `take n (repeat x)`,
+`zipWith f xs [0..]`, `take n (filter p [0..])`) — all fine.
+
+Every entry in this list (WORKS, LOUD-FAIL, and stale-doc) is pinned as a live
+eval probe in `tidepool-runtime/tests/gotcha_registry.rs`: a regression flips a
+green probe red; a footgun that ever fails SILENTLY (SIGILL/SIGSEGV/wrong
+output) instead of with its named clean error trips the matching LOUD-FAIL probe.
 
 If you DO hit a SIGILL/SIGSEGV, that's a compiler bug — report it. Common
 root causes: constructor tag mismatch, missing external binding.
