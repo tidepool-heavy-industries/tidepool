@@ -1,65 +1,66 @@
-# Bug: `send (Print …)` resolves to an unresolved variable
+# Bug: unit-returning effect `>> pure` → unresolved `()` variable
 
-Found 2026-06-20 via dogfooding while fixing the `eval_partial_output_failclass`
-suite hang. Real behavior on the *current* build (extract + server rebuilt this
-session), not a stale artifact.
+Found + root-caused 2026-06-20 via dogfooding. **Regression from commit
+`a9a0082` (table-hygiene: "scope DataConTable meta walks to reachable
+closure"), recent.** Reproduced in tests: `tidepool-mcp/tests/repro_print_unresolved.rs`.
 
 ## Symptom
-`send (Print …)` type-checks (the Console GADT + `Print` constructor are in
-scope) but resolves to an **unresolved variable at runtime**:
+A unit-returning effect followed by a `pure` continuation fails at runtime:
 
 ```
-yield error: unresolved variable VarId(0xfe75fa6b4241aaa3) [tag='þ', key=33207910855191203]
+yield error: unresolved variable VarId(0xfe75fa6b4241aaa3) [tag='þ', key=…]
 ```
 
-The VarId is deterministic across distinct sources.
+(deterministic VarId = the `()` / unit constructor).
 
-## What works vs fails (live server, full effect stack)
-- `pure (1 + 1)` ✓
-- `run "echo hi"` ✓ → `[0,"hi\n",""]`  (so `send`/effect machinery is fine)
-- `pure (go 5000000)` and `pure $! (go 5000000)` ✓ → clean stack-overflow yield
-  (`go n = if n <= 0 then 0 else n + go (n-1)`)
-- `send (Print (T.pack "hi"))` ✗ → unresolved variable
-- `send (Print …) >> (pure 42)` ✗ → unresolved variable
-- `do { send (Print …); pure 7 }` ✗ → unresolved variable
+## Minimal trigger (mapped in repro_print_unresolved.rs)
+- `pure 123` ✓
+- `send (Print x) >> (error …)` ✓ — Print resolves (the `()`-tag-0 issue is
+  masked: the error is thrown before the unit result must be produced)
+- `send (Print x) >> (pure 123)` ✗ — unresolved `()`
+- `send (KvSet k v) >> (pure 1)` ✗ — same (KvSet also returns `()`)
+- `run "echo hi" >> pure 42` ✓ — `run` returns a tuple, which IS retained
 
-So: **only the Console/`Print` constructor is unresolved**; `run` (another
-effect via `send`) resolves fine.
+So the class is **any unit-returning effect (`()` result) whose result is
+discarded by a `pure` continuation**, not Console-specific. `run >> pure` works
+because tuple constructors are retained by the meta walk.
 
-## Fresh minimal-stack compile (the test, single ConsoleHandler)
-- `send (Print marker) >> (error "boom")` ✓ — `say_then_haskell_error` passes,
-  marker captured, classifies as `haskell-error`. **So `Print` CAN resolve.**
-- `send (Print marker) >> (pure $! (go 5000000))` ✗ — `[CASE TRAP]` +
-  unresolved external VarId(0xfe75…), empty captured output.
+## Root cause (confirmed)
+`a9a0082` changed the DataConTable meta walks (`collectUsedDataCons` /
+`collectTransitiveDCons`) to harvest constructors only from the target's
+**reachable VALUE bindings** (`reachableBinds`) instead of the full closed bind
+set — a correct fix for the 56-bit varId-collision flood (909→172 entries). But
+its retained-con list (`I#/D#/C#/F#/W#`, list, tuples, Integer, Map) **omits
+`()`**, because `()` is never *lexically constructed* in the user's Core for
+`effect () >> pure y`: the `()` is injected by the effect HANDLER at runtime and
+discarded by the `pure` continuation. Pre-`a9a0082`, the full-closed-set walk
+swept `()` in incidentally, so it worked.
 
-So in a minimal stack the trigger is the *continuation shape*: `>> error`
-resolves `Print`, `>> (pure $! <deep>)` does not. On the full live stack even
-bare `send (Print …)` fails. Possibly two faces of one root cause, or two
-bugs with the same symptom.
+General statement of the gap: **constructors that effect handlers inject at
+runtime (the effects' RESULT-type cons) must be in the table even when they are
+not reachable from the user's value bindings.** `()` is the dominant case; a
+discarded `Maybe`/`Bool`/etc. effect result would hit the same gap.
 
-## Hypotheses (unverified — for the hunt)
-1. **Closed-Core reachability**: the reachable-closure meta walk drops `Print`'s
-   binding from the closed Core when the eval's continuation is
-   `pure $! <recursion>` (vs `error …`). The binding is in scope at type-check
-   but absent from the JIT-linked set → unresolved at runtime.
-2. **DataConTable VarId collision** (the class that once evicted freer's
-   `Union`): the full effect stack pressures the table and `Print`'s 56-bit id
-   collides → unresolved. Minimal stack (Console-only) avoids the pressure, so
-   `Print` resolves there (case 1). Run TIDEPOOL_VARID_AUDIT=1 first.
-3. **effects_module_source surgery**: this module (now in
-   `tidepool-mcp/src/eval_prep.rs`) was moved + sed-edited during the eval-prep
-   merge-conflict resolution. Diff its generated Console/Print against a
-   known-good emission. (Type-checks, so not a gross corruption — but worth a
-   look.)
+## Fix options (all in haskell/src/Tidepool/Translate.hs; need extract rebuild
+##  + suite_cbor meta regen + retest; must NOT revert to the full-closure walk)
+1. **Principled** — for each effect constructor used in the reachable binds,
+   also include the constructors of its GADT RESULT type (`Print :: … ->
+   Console ()` ⇒ include `()`; an effect returning `Maybe Value` ⇒ include
+   `Just`/`Nothing`). True mechanism fix; needs GADT-result-type analysis.
+2. **Pragmatic wired set** — seed the meta walk with a fixed set of
+   runtime-injectable cons: `()` (+ `Just`/`Nothing`, `True`/`False`, and the
+   `Value` cons). Covers all realistic effect results; simple; no GADT analysis;
+   small risk of missing an exotic result type.
+3. **Minimal** — seed just `()` (unitDataCon). Fixes exactly the reported bug;
+   leaves rarer discarded non-unit effect results (e.g. a thrown-away `Maybe`).
 
-## Repro (live server)
-```
-send (Print (T.pack "hi"))      -- ✗ unresolved variable
-run "echo hi"                    -- ✓
-```
+Implementing any of these and watching the repro tests flip green is the
+forward confirmation of the diagnosis (cheaper than rebuilding the old extract).
 
 ## Status
-- Test `say_then_stack_overflow_is_captured_and_classified` is `#[ignore]`d
-  pending this fix (the worker-thread timeout already removed the prior hang).
-- First step of the hunt: `TIDEPOOL_VARID_AUDIT=1` on a `send (Print …)` eval to
-  rule in/out a VarId collision (hypothesis 2) before chasing reachability.
+- Reproduced + root-caused. `repro_print_unresolved.rs` has the failing cases
+  `#[ignore]`d (un-ignore when fixed → they become regression guards).
+- `eval_partial_output_failclass::say_then_stack_overflow` also `#[ignore]`d
+  (it hit this same bug via `>> (pure $! …)`).
+- Live dogfooding impact: `say`/Console (and any unit-returning effect followed
+  by `pure`) is broken until the fix ships.
