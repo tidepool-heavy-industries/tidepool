@@ -116,7 +116,11 @@ const F3: &str = "alpha\nbeta\ngamma";
 fn applyedits_replace_line_range() {
     on_big_stack(|| {
         let mut d = preload(&[("f.txt", F3)]);
-        let json = run_eval("applyEdits \"f.txt\" [ReplaceLines 2 2 [\"BETA\"]]", "", &mut d);
+        let json = run_eval(
+            "applyEdits \"f.txt\" [ReplaceLines 2 2 [\"BETA\"]]",
+            "",
+            &mut d,
+        );
         assert_eq!(json["applied"], serde_json::json!(true), "got {json}");
         assert_eq!(d.writes, 1, "exactly one write");
         assert_eq!(
@@ -151,7 +155,11 @@ fn applyedits_ambiguous_anchor_is_conflict_data() {
     on_big_stack(|| {
         // "x" appears on lines 1 and 3 → AnchorAmbiguous, reported as data, no write.
         let mut d = preload(&[("f.txt", "xa\nbbb\nxc")]);
-        let json = run_eval("applyEdits \"f.txt\" [ReplaceAnchor \"x\" [\"Y\"]]", "", &mut d);
+        let json = run_eval(
+            "applyEdits \"f.txt\" [ReplaceAnchor \"x\" [\"Y\"]]",
+            "",
+            &mut d,
+        );
         assert_eq!(json["applied"], serde_json::json!(false), "got {json}");
         assert_eq!(
             json["conflicts"][0]["kind"],
@@ -164,7 +172,10 @@ fn applyedits_ambiguous_anchor_is_conflict_data() {
             "the candidate lines are reported; got {json}"
         );
         assert_eq!(d.writes, 0, "no write on a resolution conflict");
-        assert_eq!(d.files.get("f.txt").map(String::as_str), Some("xa\nbbb\nxc"));
+        assert_eq!(
+            d.files.get("f.txt").map(String::as_str),
+            Some("xa\nbbb\nxc")
+        );
     });
 }
 
@@ -172,14 +183,22 @@ fn applyedits_ambiguous_anchor_is_conflict_data() {
 fn applyedits_range_out_of_bounds_is_conflict_data() {
     on_big_stack(|| {
         let mut d = preload(&[("f.txt", F3)]);
-        let json = run_eval("applyEdits \"f.txt\" [ReplaceLines 5 6 [\"Z\"]]", "", &mut d);
+        let json = run_eval(
+            "applyEdits \"f.txt\" [ReplaceLines 5 6 [\"Z\"]]",
+            "",
+            &mut d,
+        );
         assert_eq!(json["applied"], serde_json::json!(false), "got {json}");
         assert_eq!(
             json["conflicts"][0]["kind"],
             serde_json::json!("range-out-of-bounds"),
             "out-of-range surfaced as data; got {json}"
         );
-        assert_eq!(json["conflicts"][0]["fileLines"], serde_json::json!(3), "got {json}");
+        assert_eq!(
+            json["conflicts"][0]["fileLines"],
+            serde_json::json!(3),
+            "got {json}"
+        );
         assert_eq!(d.writes, 0, "no write");
     });
 }
@@ -202,7 +221,11 @@ fn applyedits_overlapping_batch_is_atomic() {
             "overlap detected as a resolution conflict; got {json}"
         );
         assert_eq!(d.writes, 0, "ATOMIC: one bad edit blocks the whole batch");
-        assert_eq!(d.files.get("f.txt").map(String::as_str), Some(F3), "file untouched");
+        assert_eq!(
+            d.files.get("f.txt").map(String::as_str),
+            Some(F3),
+            "file untouched"
+        );
     });
 }
 
@@ -210,7 +233,11 @@ fn applyedits_overlapping_batch_is_atomic() {
 fn planedits_is_a_dry_run_with_a_diff() {
     on_big_stack(|| {
         let mut d = preload(&[("f.txt", F3)]);
-        let json = run_eval("planEdits \"f.txt\" [ReplaceLines 2 2 [\"BETA\"]]", "", &mut d);
+        let json = run_eval(
+            "planEdits \"f.txt\" [ReplaceLines 2 2 [\"BETA\"]]",
+            "",
+            &mut d,
+        );
         assert_eq!(json["ok"], serde_json::json!(true), "got {json}");
         assert_eq!(json["changed"], serde_json::json!(true), "got {json}");
         assert!(
@@ -257,7 +284,8 @@ const EDITSJ: &str = "editsJ (case input of { Object _ -> input; _ -> error \"no
 fn editsj_json_front_door_applies() {
     on_big_stack(|| {
         let mut d = preload(&[("f.txt", F3)]);
-        let payload = r#"{"file":"f.txt","edits":[{"op":"replaceAnchor","anchor":"beta","lines":["BETA"]}]}"#;
+        let payload =
+            r#"{"file":"f.txt","edits":[{"op":"replaceAnchor","anchor":"beta","lines":["BETA"]}]}"#;
         // editsJ reads the structured payload off the input lane directly.
         let decls = tidepool_mcp::standard_decls();
         let pre = tidepool_mcp::build_preamble(&decls, true);
