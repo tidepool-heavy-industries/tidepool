@@ -269,6 +269,13 @@ define_primops! {
     AddWordCCarry => "AddWordCCarry", "addWordC#_carry";
     TimesWord2Hi => "TimesWord2Hi", "timesWord2#_hi";
     TimesWord2Lo => "TimesWord2Lo", "timesWord2#_lo";
+    // plusWord2# :: Word# -> Word# -> (# high, low #) — the native ghc-bignum
+    // backend's add-with-carry. quotRemWord2# :: (high, low, divisor) -> (# q, r #)
+    // — its 128/64 division primitive (the core of multi-precision division).
+    WordAdd2Hi => "WordAdd2Hi", "plusWord2#_hi";
+    WordAdd2Lo => "WordAdd2Lo", "plusWord2#_lo";
+    WordQuotRem2Quot => "WordQuotRem2Quot", "quotRemWord2#_quot";
+    WordQuotRem2Rem => "WordQuotRem2Rem", "quotRemWord2#_rem";
     QuotRemWordVal => "QuotRemWordVal", "quotRemWord#_val";
     QuotRemWordRem => "QuotRemWordRem", "quotRemWord#_rem";
     FfiStrlen => "FfiStrlen", "ffi_strlen";
@@ -300,6 +307,7 @@ define_primops! {
     FfiGmpnRshift => "FfiGmpnRshift", "gmpn_rshift";
     FfiGmpnRshift2c => "FfiGmpnRshift2c", "gmpn_rshift_2c";
     FfiIntEncodeDouble => "FfiIntEncodeDouble", "int_encode_double";
+    FfiWordEncodeDouble => "FfiWordEncodeDouble", "word_encode_double";
     NewSmallArray => "NewSmallArray", "newSmallArray#";
     ReadSmallArray => "ReadSmallArray", "readSmallArray#";
     WriteSmallArray => "WriteSmallArray", "writeSmallArray#";

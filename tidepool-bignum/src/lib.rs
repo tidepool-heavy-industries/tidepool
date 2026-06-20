@@ -307,8 +307,20 @@ pub fn mpn_rshift_2c(rp: &mut [u64], sp: &[u64], count: u64) -> u64 {
 /// shift the exponent in same-sign chunks (each factor stays finite), which
 /// reproduces `ldexp` over/underflow (→ ±inf / 0) without premature overflow.
 pub fn encode_double(mantissa: i64, exp: i64) -> f64 {
-    let mut x = mantissa as f64;
-    let mut e = exp;
+    scale_pow2(mantissa as f64, exp)
+}
+
+/// `__word_encodeDouble(mantissa, exp)`: as `encode_double` but with an UNSIGNED
+/// mantissa (GHC's `wordEncodeDouble#`; the native bignum backend's
+/// `bigNatToDouble#` uses this since the magnitude is a `Word#`).
+pub fn encode_double_word(mantissa: u64, exp: i64) -> f64 {
+    scale_pow2(mantissa as f64, exp)
+}
+
+/// `x * 2^e`, scaling the exponent in same-sign chunks so each factor stays
+/// finite — reproduces `ldexp` over/underflow (→ ±inf / 0) without premature
+/// overflow. Power-of-two scaling is exact, so the only rounding is `x`'s.
+fn scale_pow2(mut x: f64, mut e: i64) -> f64 {
     while e > 1000 {
         x *= 2f64.powi(1000);
         e -= 1000;

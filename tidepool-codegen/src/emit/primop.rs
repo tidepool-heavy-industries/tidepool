@@ -1082,6 +1082,44 @@ pub fn emit_primop(
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             Ok(SsaVal::Raw(builder.ins().imul(a, b), LIT_TAG_WORD))
         }
+        // plusWord2# :: Word# -> Word# -> (# high, low #)
+        PrimOpKind::WordAdd2Lo => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            Ok(SsaVal::Raw(builder.ins().iadd(a, b), LIT_TAG_WORD))
+        }
+        PrimOpKind::WordAdd2Hi => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let sum = builder.ins().iadd(a, b);
+            // High word of a+b is the carry-out: 1 iff the sum wrapped (sum < a).
+            let carry = builder.ins().icmp(IntCC::UnsignedLessThan, sum, a);
+            Ok(SsaVal::Raw(builder.ins().uextend(types::I64, carry), LIT_TAG_WORD))
+        }
+        // quotRemWord2# :: Word#(hi) -> Word#(lo) -> Word#(d) -> (# quot, rem #)
+        // 128/64 division; native ghc-bignum's multi-precision division core.
+        PrimOpKind::WordQuotRem2Quot | PrimOpKind::WordQuotRem2Rem => {
+            check_arity(op, 3, args.len())?;
+            let hi = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let lo = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let d = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
+            let name = if matches!(op, PrimOpKind::WordQuotRem2Quot) {
+                "runtime_word2_quot"
+            } else {
+                "runtime_word2_rem"
+            };
+            let result = emit_runtime_call(
+                sess.pipeline,
+                builder,
+                name,
+                &i64_params(3),
+                &[AbiParam::new(types::I64)],
+                &[hi, lo, d],
+            )?;
+            Ok(SsaVal::Raw(result, LIT_TAG_WORD))
+        }
 
         // quotRemWord# :: Word# -> Word# -> (# Word#, Word# #)
         PrimOpKind::QuotRemWordVal => {
@@ -1849,15 +1887,20 @@ pub fn emit_primop(
             )?;
             Ok(SsaVal::Raw(result, LIT_TAG_WORD))
         }
-        PrimOpKind::FfiIntEncodeDouble => {
-            // __int_encodeDouble(mantissa, exp) -> Double# (returned as raw bits).
+        PrimOpKind::FfiIntEncodeDouble | PrimOpKind::FfiWordEncodeDouble => {
+            // __{int,word}_encodeDouble(mantissa, exp) -> Double# (returned as raw bits).
             check_arity(op, 2, args.len())?;
             let m = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let e = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let name = if matches!(op, PrimOpKind::FfiIntEncodeDouble) {
+                "runtime_int_encode_double"
+            } else {
+                "runtime_word_encode_double"
+            };
             let result = emit_runtime_call(
                 sess.pipeline,
                 builder,
-                "runtime_int_encode_double",
+                name,
                 &i64_params(2),
                 &[AbiParam::new(types::I64)],
                 &[m, e],

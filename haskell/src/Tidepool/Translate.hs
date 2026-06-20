@@ -1205,6 +1205,24 @@ translateHead = \case
         rCaseIdx <- emitNode $ NCase rValIdx (varId rBinder) [FlatAlt FDefault [] bodyIdx]
         -- case qVal of qBinder { DEFAULT -> rCaseIdx }
         emitNode $ NCase qValIdx (varId qBinder) [FlatAlt FDefault [] rCaseIdx]
+  -- 3-input / 2-output: case quotRemWord2# hi lo d of (# q, r #) -> body
+  Case scrut _caseBinder _ty [Alt (DataAlt dc) binders body]
+    | isUnboxedTupleDataCon dc
+    , (Var v, allArgs) <- collectArgs (stripTicksAndCasts scrut)
+    , Just pop <- isPrimOpId_maybe v
+    , Just (op1Name, op2Name) <- splitWord2DivPrimOp pop
+    , let valArgs = filter isValueArg allArgs
+    , [a, b, c] <- valArgs
+    , vBinders <- filter (not . isTyVar) binders
+    , [qBinder, rBinder] <- vBinders -> do
+        aIdx <- translate a
+        bIdx <- translate b
+        cIdx <- translate c
+        qValIdx <- emitOp op1Name [aIdx, bIdx, cIdx]
+        rValIdx <- emitOp op2Name [aIdx, bIdx, cIdx]
+        bodyIdx <- translate body
+        rCaseIdx <- emitNode $ NCase rValIdx (varId rBinder) [FlatAlt FDefault [] bodyIdx]
+        emitNode $ NCase qValIdx (varId qBinder) [FlatAlt FDefault [] rCaseIdx]
   -- Desugar unary multi-return primops: case decodeDouble_Int64# x of (# m, e #) -> body
   Case scrut _caseBinder _ty [Alt (DataAlt dc) binders body]
     | isUnboxedTupleDataCon dc
@@ -1847,6 +1865,7 @@ mapFfiCall pprName
   | "integer_gmp_mpn_lshift" `isInfixOf` pprName = T.pack "FfiGmpnLshift"
   | "integer_gmp_mpn_rshift" `isInfixOf` pprName = T.pack "FfiGmpnRshift"
   | "__int_encodeDouble" `isInfixOf` pprName    = T.pack "FfiIntEncodeDouble"
+  | "__word_encodeDouble" `isInfixOf` pprName   = T.pack "FfiWordEncodeDouble"
   -- Deferred bignum ops: fail LOUD with a named error (NOT the generic FFI hint),
   -- so a probe that needs one points us at exactly which to implement next.
   | isBignumFfi pprName = error $ "unsupported mpn op: " ++ pprName
@@ -1949,12 +1968,24 @@ splitMultiReturnPrimOp = \case
   WordAddCOp    -> Just (T.pack "AddWordCVal", T.pack "AddWordCCarry")
   WordSubCOp    -> Just (T.pack "SubWordCVal", T.pack "SubWordCCarry")
   WordMul2Op    -> Just (T.pack "TimesWord2Hi", T.pack "TimesWord2Lo")
+  WordAdd2Op    -> Just (T.pack "WordAdd2Hi", T.pack "WordAdd2Lo")
   _             -> Nothing
+
+-- | 3-input / 2-output primops: @quotRemWord2# high low divisor -> (# q, r #)@.
+-- Like 'splitMultiReturnPrimOp' but the scrutinee op takes THREE value args.
+splitWord2DivPrimOp :: PrimOp -> Maybe (Text, Text)
+splitWord2DivPrimOp = \case
+  WordQuotRem2Op -> Just (T.pack "WordQuotRem2Quot", T.pack "WordQuotRem2Rem")
+  _              -> Nothing
 
 -- | Like splitMultiReturnPrimOp but for primops returning 3-element unboxed tuples.
 splitTripleReturnPrimOp :: PrimOp -> Maybe (Text, Text, Text)
 splitTripleReturnPrimOp = \case
-  IntMul2Op -> Just (T.pack "TimesInt2Hi", T.pack "TimesInt2Lo", T.pack "TimesInt2Overflow")
+  -- timesInt2# returns (# isHighNeeded#, high#, low# #) — the FIRST component is
+  -- the overflow flag, not the high word. The native ghc-bignum backend's
+  -- integerMul small path relies on this exact order (it was dormant under the
+  -- gmp backend, which multiplied via FFI).
+  IntMul2Op -> Just (T.pack "TimesInt2Overflow", T.pack "TimesInt2Hi", T.pack "TimesInt2Lo")
   _         -> Nothing
 
 -- | Like splitMultiReturnPrimOp but for unary primops (single argument)

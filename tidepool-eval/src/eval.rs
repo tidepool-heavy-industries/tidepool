@@ -1732,6 +1732,34 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let (a, b) = bin_op_word(op, &args)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_mul(b))))
         }
+        PrimOpKind::WordAdd2Lo => {
+            // plusWord2# low word: a + b (wrapping)
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitWord(a.wrapping_add(b))))
+        }
+        PrimOpKind::WordAdd2Hi => {
+            // plusWord2# high word: the carry-out (0 or 1)
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitWord(
+                if a.checked_add(b).is_none() { 1 } else { 0 },
+            )))
+        }
+        PrimOpKind::WordQuotRem2Quot | PrimOpKind::WordQuotRem2Rem => {
+            // quotRemWord2# hi lo d -> ((hi<<64)|lo) `quotRem` d
+            let hi = expect_word(&args[0])?;
+            let lo = expect_word(&args[1])?;
+            let d = expect_word(&args[2])?;
+            if d == 0 {
+                return Ok(Value::Lit(Literal::LitWord(0)));
+            }
+            let n = ((hi as u128) << 64) | (lo as u128);
+            let r = if matches!(op, PrimOpKind::WordQuotRem2Quot) {
+                n / d as u128
+            } else {
+                n % d as u128
+            };
+            Ok(Value::Lit(Literal::LitWord(r as u64)))
+        }
         PrimOpKind::QuotRemWordVal => {
             // quotRemWord# quotient: a / b
             let (a, b) = bin_op_word(op, &args)?;
@@ -2093,6 +2121,13 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let e = expect_int_like(&args[1])?;
             Ok(Value::Lit(Literal::LitDouble(
                 tidepool_bignum::encode_double(m, e).to_bits(),
+            )))
+        }
+        PrimOpKind::FfiWordEncodeDouble => {
+            let m = expect_word(&args[0])?;
+            let e = expect_int_like(&args[1])?;
+            Ok(Value::Lit(Literal::LitDouble(
+                tidepool_bignum::encode_double_word(m, e).to_bits(),
             )))
         }
         PrimOpKind::FfiGmpnGcd1 => {

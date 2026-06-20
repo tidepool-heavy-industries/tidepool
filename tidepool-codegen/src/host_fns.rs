@@ -2127,6 +2127,28 @@ pub extern "C" fn runtime_text_reverse(dest: i64, src: i64, off: i64, len: i64) 
     }
 }
 
+/// `quotRemWord2#` quotient: `((hi << 64) | lo) / d`. The native ghc-bignum
+/// backend's 128/64 division primitive. `d == 0` is guarded by the Haskell
+/// caller (raiseDivZero#); we still return 0 rather than panic.
+pub extern "C" fn runtime_word2_quot(hi: i64, lo: i64, d: i64) -> i64 {
+    let d = d as u64;
+    if d == 0 {
+        return 0;
+    }
+    let n = ((hi as u64 as u128) << 64) | (lo as u64 as u128);
+    (n / d as u128) as u64 as i64
+}
+
+/// `quotRemWord2#` remainder: `((hi << 64) | lo) % d`.
+pub extern "C" fn runtime_word2_rem(hi: i64, lo: i64, d: i64) -> i64 {
+    let d = d as u64;
+    if d == 0 {
+        return 0;
+    }
+    let n = ((hi as u64 as u128) << 64) | (lo as u64 as u128);
+    (n % d as u128) as u64 as i64
+}
+
 // ── ghc-bignum gmp-backend mpn intercepts (phase-1) ──────────────────────────
 // The JIT hands raw little-endian u64-limb payload pointers (a ByteArray# heap
 // object's data, i.e. obj + 8) plus limb counts / scalar words. Output buffers
@@ -2432,6 +2454,11 @@ pub extern "C" fn runtime_gmpn_rshift_2c(rp: i64, sp: i64, sn: i64, count: i64) 
 /// `__int_encodeDouble(mantissa, exp) -> Double#` (returned as raw f64 bits).
 pub extern "C" fn runtime_int_encode_double(mantissa: i64, exp: i64) -> i64 {
     tidepool_bignum::encode_double(mantissa, exp).to_bits() as i64
+}
+
+/// `__word_encodeDouble(mantissa, exp) -> Double#` (unsigned mantissa; raw bits).
+pub extern "C" fn runtime_word_encode_double(mantissa: i64, exp: i64) -> i64 {
+    tidepool_bignum::encode_double_word(mantissa as u64, exp).to_bits() as i64
 }
 
 /// `integer_gmp_mpn_gcd_1(sp, sn, b) -> gcd` (result fits a word).
@@ -3131,6 +3158,8 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
         ),
         ("runtime_text_memchr", runtime_text_memchr as *const u8),
         ("runtime_text_reverse", runtime_text_reverse as *const u8),
+        ("runtime_word2_quot", runtime_word2_quot as *const u8),
+        ("runtime_word2_rem", runtime_word2_rem as *const u8),
         // ghc-bignum gmp-backend mpn intercepts (phase-1).
         ("runtime_gmpn_add_1", runtime_gmpn_add_1 as *const u8),
         ("runtime_gmpn_sub_1", runtime_gmpn_sub_1 as *const u8),
@@ -3157,6 +3186,10 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
         (
             "runtime_int_encode_double",
             runtime_int_encode_double as *const u8,
+        ),
+        (
+            "runtime_word_encode_double",
+            runtime_word_encode_double as *const u8,
         ),
         (
             "runtime_new_boxed_array",
