@@ -40,11 +40,17 @@ Validated: repro_print_unresolved 4/4; haskell_suite 217; and the LIVE server no
 runs `send (Print x) >> pure y` (and bare `send (Print …)`) correctly — `say`
 restored.
 
-## Follow-up (separate, NOT a regression)
-`eval_partial_output_failclass::say_then_stack_overflow` is re-`#[ignore]`d. Its
-DEEP-recursion variant (`>> (pure $! (go 5_000_000))`) trips a spurious
-`[CASE TRAP]` in the test's MINIMAL-stack, signal-handler-less worker harness —
-but the **live full-stack eval of the exact same expression yields cleanly**
-(runtime-yield, verified). So it's a harness-fidelity gap (install signal
-handlers / use the full effect stack), not a codegen regression. The nospec
-cases it cared about are covered by repro_print_unresolved.
+## Follow-up — RESOLVED (was misdiagnosed as a harness gap)
+`eval_partial_output_failclass::say_then_stack_overflow` is now un-`#[ignore]`d
+and green (commit e008314). The earlier "harness-fidelity gap" framing was WRONG:
+the `>> (pure $! (go 5_000_000))` form dropped the marker EVERYWHERE (live server
+too — verified by the harness-fix worker, who checked the captured marker, not
+just the yield class). `pure $! x` = `x \`seq\` pure x`; GHC's strictness/
+let-floating on the standalone `__user` binding forces the recursion *while
+evaluating `__user`*, BEFORE the `Print` effect yields → overflow first, the
+`say` never fires. The `[CASE TRAP]` lines were benign StackOverflow
+poison-cascade unwinding (error flag already set → poison return, no SIGILL; no
+"raw bytes" line follows). Fix: drop the `$!` → `pure (go 5_000_000)` (lazy
+thunk; Print yields first, the final toJSON forces it after the say → clean
+runtime-yield). Not a harness bug, not a codegen bug — a test that forced its own
+crash too early.
