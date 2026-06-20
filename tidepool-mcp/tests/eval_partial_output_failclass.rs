@@ -120,9 +120,15 @@ fn run_capturing_expect_err(code: &str, helpers: &str) -> (Vec<String>, String) 
             tidepool_codegen::signal_safety::install();
             let include = [pp, ulp, eff];
             let mut handlers = frunk::hlist![ConsoleHandler];
-            let err = compile_and_run(&source, "result", &include, &mut handlers, &captured_for_thread)
-                .expect_err("eval was expected to fail")
-                .to_string();
+            let err = compile_and_run(
+                &source,
+                "result",
+                &include,
+                &mut handlers,
+                &captured_for_thread,
+            )
+            .expect_err("eval was expected to fail")
+            .to_string();
             let _ = tx.send(err);
         })
         .expect("spawn eval-failclass thread");

@@ -76,3 +76,4 @@ viz/index.html
 
 # cabal-generated GHC environment files (written by cabal v2 in-place builds)
 .ghc.environment.*
+tmp/

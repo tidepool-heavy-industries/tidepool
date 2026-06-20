@@ -101,7 +101,10 @@ fn print_then_error_resolves() {
                 !e.contains("unresolved variable"),
                 "Print unresolved even with `>> error`: {e}"
             );
-            assert!(out.iter().any(|l| l.contains("MARK")), "marker not captured: {out:?}");
+            assert!(
+                out.iter().any(|l| l.contains("MARK")),
+                "marker not captured: {out:?}"
+            );
         }
         Ok(v) => panic!("expected an error, got Ok({v})"),
     }
