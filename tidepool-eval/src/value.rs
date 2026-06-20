@@ -188,6 +188,20 @@ impl Drop for Value {
             detach_children(self, &mut queue);
             *cell.borrow_mut() = Some(queue);
 
+            // Panic-safety: reset the thread-local on scope exit (normal OR
+            // unwind). Without this, a panic mid-drain would leave DROP_QUEUE as
+            // Some(partial); subsequent drops on this thread would see it, treat
+            // themselves as re-entrant, hand off their children, and never drain
+            // them — a silent leak. Value drops cannot panic today, but this
+            // keeps the invariant robust against future Value variants.
+            struct ResetGuard<'a>(&'a RefCell<Option<Vec<DropWork>>>);
+            impl Drop for ResetGuard<'_> {
+                fn drop(&mut self) {
+                    *self.0.borrow_mut() = None;
+                }
+            }
+            let _reset = ResetGuard(cell);
+
             loop {
                 // Release the borrow BEFORE dropping: the drop re-enters and
                 // borrows again to push more work.
@@ -203,8 +217,8 @@ impl Drop for Value {
                     None => break,
                 }
             }
-
-            *cell.borrow_mut() = None;
+            // `_reset` drops here, clearing DROP_QUEUE back to None (and would
+            // do the same on an unwind out of the drain loop above).
         });
     }
 }
