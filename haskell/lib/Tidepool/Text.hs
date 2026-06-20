@@ -33,7 +33,7 @@ import Prelude
   , null, error, fromIntegral, reverse, concatMap
   )
 import Data.Text (Text)
-import qualified Data.Text as T
+import qualified Tidepool.Data.Text as T
 import Tidepool.Prelude
   ( words, lines, splitOn
   , isUpper, isLower, isAlphaNum, toLowerChar, toUpperChar

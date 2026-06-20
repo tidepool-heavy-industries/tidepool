@@ -49,7 +49,7 @@ module Tidepool.QQ.Patch (patch) where
 
 import Data.Char (isAlpha, isAlphaNum)
 import Data.Text (Text)
-import qualified Data.Text as T
+import qualified Tidepool.Data.Text as T
 
 import Language.Haskell.TH
   ( Exp (..)

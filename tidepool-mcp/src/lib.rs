@@ -524,7 +524,7 @@ pub fn effects_module_source(effects: &[EffectDecl]) -> String {
     out.push_str("-- declarations. Do not edit; regenerated (content-addressed) at startup.\n");
     out.push_str("module Tidepool.Effects where\n");
     out.push_str("import Tidepool.Prelude hiding (error)\n");
-    out.push_str("import qualified Data.Text as T\n");
+    out.push_str("import qualified Tidepool.Data.Text as T\n");
     out.push_str("import qualified Data.Map.Strict as Map\n");
     out.push_str("import qualified Tidepool.Aeson.KeyMap as KM\n");
     out.push_str("import Control.Monad.Freer hiding (run)\n");
@@ -607,7 +607,7 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
     // `effects_module_source`) so .tidepool/lib modules can import the
     // SAME types and define effectful verbs.
     out.push_str("import Tidepool.Effects\n");
-    out.push_str("import qualified Data.Text as T\n");
+    out.push_str("import qualified Tidepool.Data.Text as T\n");
     out.push_str("import qualified Data.Map.Strict as Map\n");
     out.push_str("import qualified Data.Set as Set\n");
     out.push_str("import qualified Tidepool.Aeson.KeyMap as KM\n");
@@ -3451,7 +3451,7 @@ data Console a where
         let decls = standard_decls();
         let preamble = build_preamble(&decls, false);
         assert!(preamble.contains("import Tidepool.Prelude hiding (error)"));
-        assert!(preamble.contains("import qualified Data.Text as T"));
+        assert!(preamble.contains("import qualified Tidepool.Data.Text as T"));
         assert!(preamble.contains("import Control.Monad.Freer hiding (run)"));
         assert!(preamble.contains("import qualified Tidepool.Aeson.KeyMap as KM"));
     }

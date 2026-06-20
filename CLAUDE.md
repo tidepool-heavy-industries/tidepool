@@ -311,19 +311,21 @@ SIGSEGV. The short, true standing list:
   An authoring trap — write a smaller literal or compute the value at runtime.
   Moderate-magnitude literals (`3.14`, `1.0e10`, `1.23e100`) stay within the
   shims and are fine. (Pinned: `gotcha_registry::loud_fail_large_double_literal_pulls_gmp`.)
-- **`T.takeWhile`/`T.dropWhile` — DIRECT use fixed, Prelude-wrapped use still
-  broken.** The EPS unpoison (9a827a3) made GHC load unfoldings, so `map
-  (T.takeWhile p) ts` used STRAIGHT from a user module is now correct (Core
-  verified; pinned by `tidepool-runtime/tests/repro_takewhile_pap.rs`). But the
-  `takeWhileT`/`dropWhileT` Prelude shadows are NOT retirable: delegating them to
-  `T.takeWhile`/`T.dropWhile` (eta-reduced OR eta-expanded) was MEASURED BROKEN
-  2026-06-11 — `repro_takewhilet_alias_pap.rs` went 10/14 red vs 14/14 for the
-  manual `T.pack . go . T.unpack` body (three-way control). Corruption fires when
-  `T.takeWhile` is reached through the cross-module Prelude wrapper with an
-  operator-section predicate (`(/= '/')`) — even saturated — but not with a named
-  predicate. So keep the manual shadows; the retirement plan
-  (`plans/takewhile-shadow-retirement.md`) is CLOSED/REJECTED. Underlying
-  codegen bug (cross-module wrapper + section predicate) awaits a mechanism fix.
+- ~~`T.takeWhile`/`T.dropWhile` wrapped-use corruption~~ — **FIXED 2026-06-20 by
+  vendoring.** `T` in the preamble + Prelude now points at the HOME-module
+  `Tidepool.Data.Text`, which overrides every `(Char -> Bool)`-taking Data.Text
+  function (takeWhile/dropWhile/takeWhileEnd/dropWhileEnd/dropAround/span/break/
+  filter/partition/all/any/find/findIndex/split/groupBy) with text-2.1.2's bodies
+  compiled in-session — so wrapping them in a Prelude shadow, a `.tidepool/lib`
+  verb, or a user helper with an operator-section predicate (`(/= '/')`) is
+  correct. (Root cause: the corruption was a property of the EXTERNAL-package
+  interface unfolding routed through a home binding, not the body or the `Text`
+  repr — proven by the probe in `text-vendor-mechanism-proven`.) The
+  `takeWhileT`/`dropWhileT` shadows are now thin aliases for the vendored
+  `T.takeWhile`/`T.dropWhile`; the String-detour bodies are gone. Guards:
+  `repro_takewhilet_alias_pap.rs` (delegation now GREEN), `vendor_text_functions.rs`
+  (all 15 fns, direct + wrapped), `repro_takewhile_pap.rs` (direct external path).
+  Note: only function bodies are vendored — the `Text` TYPE stays external.
 - **`cycle`**: unresolved external (clean yield error, verified post-sentinel-fix);
   use manual recursion.
 - ~~Double `T.breakOn` in a cross-module fn~~ (#313 t11): FIXED (TailCtx

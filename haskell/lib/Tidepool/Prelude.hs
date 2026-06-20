@@ -174,7 +174,12 @@ import Prelude
   )
 import qualified Prelude as P (show, drop, length, null, dropWhile, round)
 import Data.Text (Text)
-import qualified Data.Text as T
+-- Vendored drop-in for Data.Text: re-exports all of Data.Text but overrides the
+-- (Char -> Bool)-taking functions (takeWhile/dropWhile/span/break/filter/all/…)
+-- with HOME-module bodies, so wrapping them here (or in a lib verb) with an
+-- operator-section predicate is correct on the JIT. See Tidepool.Data.Text and
+-- the text-vendor-mechanism-proven memory.
+import qualified Tidepool.Data.Text as T
 import Data.Char (ord, chr)
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe)
 import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, sortOn)
@@ -423,46 +428,27 @@ tReverse = T.reverse
 {-# INLINE tReverse #-}
 
 -- | Text takeWhile: take the longest prefix of characters satisfying a predicate.
--- Pure reimplementation — LOAD-BEARING shadow. Do NOT delegate to @T.takeWhile@.
+-- Thin alias for the vendored @T.takeWhile@ (@Tidepool.Data.Text@), kept for
+-- source compatibility.
 --
--- HISTORY: this began as a workaround for gotcha-audit #14 (real @T.takeWhile@
--- was silently wrong under partial application). That DIRECT bug is fixed (EPS
--- unpoison, commit 9a827a3): @map (T.takeWhile p) ts@ used straight from a user
--- module is now correct — pinned by @repro_takewhile_pap.rs@. The retirement plan
--- (plans/takewhile-shadow-retirement.md) proposed replacing this body with a
--- delegation @takeWhileT = T.takeWhile@ on the theory it was now redundant.
---
--- It is NOT redundant. Both the eta-reduced @takeWhileT = T.takeWhile@ and the
--- eta-expanded @takeWhileT p t = T.takeWhile p t@ delegations were MEASURED
--- BROKEN in the eval path on 2026-06-11: @repro_takewhilet_alias_pap.rs@ went
--- 10/14 red, while this manual body goes 14/14 green through the identical
--- harness (three-way control). The corruption fires whenever @T.takeWhile@ is
--- reached through this cross-module Prelude wrapper with an operator-section
--- predicate like @(/= '/')@ — even a fully saturated @takeWhileT (/= '/') t@
--- returns the input unmodified — but NOT with a named predicate. The unpoison
--- fixed @T.takeWhile@ used directly; it did NOT fix @T.takeWhile@ wrapped behind
--- a Prelude binding. Until that distinct codegen bug is mechanism-fixed, this
--- String-detour body is the only correct form. Guard: @repro_takewhilet_alias_pap.rs@.
+-- RETIRED (2026-06-20): the old @T.pack . go . T.unpack@ String-detour body was a
+-- LOAD-BEARING workaround for the cross-module-wrapper + operator-section
+-- corruption of EXTERNAL @Data.Text.takeWhile@ (gotcha-audit #14). With @T@ now
+-- repointed to the vendored home-module @Tidepool.Data.Text@, @T.takeWhile@ is a
+-- HOME body — proven correct under exactly this wrapped-section path (the probe
+-- in text-vendor-mechanism-proven; guard @repro_takewhilet_alias_pap.rs@). So the
+-- delegation that was MEASURED BROKEN against external text is now correct, and
+-- the String detour (slow, allocating) is gone.
 takeWhileT :: (Char -> Bool) -> Text -> Text
-takeWhileT p t = T.pack (go (T.unpack t))
-  where
-    go [] = []
-    go (c:cs)
-      | p c       = c : go cs
-      | otherwise = []
+takeWhileT = T.takeWhile
 {-# INLINE takeWhileT #-}
 
 -- | Text dropWhile: drop the longest prefix of characters satisfying a predicate.
--- Pure reimplementation — LOAD-BEARING shadow; see @takeWhileT@ above. Delegation
--- to @T.dropWhile@ was measured broken (2026-06-11, @repro_takewhilet_alias_pap.rs@);
--- do NOT replace this body. Keep the manual String-detour recursion.
+-- Thin alias for the vendored @T.dropWhile@; see @takeWhileT@ above. RETIRED
+-- (2026-06-20) from the String-detour shadow now that @T@ is the vendored
+-- home-module Data.Text.
 dropWhileT :: (Char -> Bool) -> Text -> Text
-dropWhileT p t = T.pack (go (T.unpack t))
-  where
-    go [] = []
-    go s@(c:cs)
-      | p c       = go cs
-      | otherwise = s
+dropWhileT = T.dropWhile
 {-# INLINE dropWhileT #-}
 
 -- ---------------------------------------------------------------------------

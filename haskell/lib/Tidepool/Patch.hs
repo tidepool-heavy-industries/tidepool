@@ -47,7 +47,7 @@ import Prelude
 import Data.Char (ord)
 import Data.List (isPrefixOf, stripPrefix)
 import Data.Text (Text)
-import qualified Data.Text as T
+import qualified Tidepool.Data.Text as T
 
 import Tidepool.Aeson.Value (Pair, ToJSON (..), Value, object, (.=))
 

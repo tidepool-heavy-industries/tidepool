@@ -63,7 +63,7 @@ module Tidepool.QQ.Json (j) where
 
 import Data.Char (chr, digitToInt, isAlpha, isAlphaNum, isDigit, isHexDigit)
 import Data.Text (Text)
-import qualified Data.Text as T
+import qualified Tidepool.Data.Text as T
 
 import Language.Haskell.TH
   ( Exp (..)

@@ -38,7 +38,7 @@ module Tidepool.QQ.Validate
 
 import Data.Char (isAlphaNum, isLower, isUpper)
 import Data.Text (Text)
-import qualified Data.Text as T
+import qualified Tidepool.Data.Text as T
 
 import Language.Haskell.TH (Exp, Q, litE, stringL)
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
