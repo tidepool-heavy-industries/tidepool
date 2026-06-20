@@ -2,7 +2,7 @@ use crate::gc::trace::ForwardingTable;
 use tidepool_eval::env::Env;
 use tidepool_eval::heap::{Heap, ThunkState, VecHeap};
 use tidepool_eval::value::{ThunkId, Value};
-use tidepool_repr::{CoreFrame, RecursiveTree, VarId};
+use tidepool_repr::{CoreExpr, CoreFrame, DataConId, RecursiveTree, VarId};
 
 /// Compact the heap by moving reachable thunks to a new VecHeap.
 pub fn compact(table: &ForwardingTable, old_heap: &dyn Heap) -> VecHeap {
@@ -55,32 +55,117 @@ fn rewrite_env(env: &Env, table: &ForwardingTable) -> Env {
         .collect()
 }
 
-fn rewrite_value(val: &Value, table: &ForwardingTable) -> Value {
-    match val {
-        Value::Lit(l) => Value::Lit(l.clone()),
-        Value::Con(id, fields) => Value::Con(
-            *id,
-            fields.iter().map(|f| rewrite_value(f, table)).collect(),
-        ),
-        Value::ConFun(id, arity, args) => Value::ConFun(
-            *id,
-            *arity,
-            args.iter().map(|a| rewrite_value(a, table)).collect(),
-        ),
-        Value::Closure(env, binder, expr) => {
-            Value::Closure(rewrite_env(env, table), *binder, expr.clone())
-        }
-        Value::ThunkRef(id) => Value::ThunkRef(table.lookup(*id).unwrap_or_else(|_| {
-            panic!(
-                "GC compact: ThunkRef({}) not in forwarding table — GC trace bug",
-                id.0
-            );
-        })),
-        Value::JoinCont(binders, expr, env) => {
-            Value::JoinCont(binders.clone(), expr.clone(), rewrite_env(env, table))
-        }
-        Value::ByteArray(ba) => Value::ByteArray(ba.clone()),
+/// Post-order work item for the iterative [`rewrite_value`] fold. A `Rewrite`
+/// projects one node's children onto the stack; each `Build*` pops its already-
+/// rewritten children off the results stack and reassembles the node.
+///
+/// `Closure`/`JoinCont` carry their environment's keys so the rewritten env
+/// values (pushed as `Rewrite`s, popped here) can be zipped back into a fresh
+/// `Env` — turning a nested-closure chain (the spine that overflowed
+/// `Value::drop`) into queue length rather than call depth.
+enum RewriteWork<'a> {
+    Rewrite(&'a Value),
+    BuildCon(DataConId, usize),
+    BuildConFun(DataConId, usize, usize),
+    BuildClosure(Vec<VarId>, VarId, &'a CoreExpr),
+    BuildJoinCont(Vec<VarId>, Vec<VarId>, &'a CoreExpr),
+}
+
+// The per-item cost of the explicit work list is a visible, testable property
+// — the point of replacing the compiler-hidden recursive fold over Value spines.
+const _: () = assert!(std::mem::size_of::<RewriteWork<'static>>() <= 64);
+
+/// Split an env into parallel `(keys, values)` vectors in iteration order. The
+/// matching `Build*` holds `keys`; the caller pushes `values` in REVERSE after
+/// the `Build*` so they pop (and land in `results`) in forward key order.
+fn env_keys_vals(env: &Env) -> (Vec<VarId>, Vec<&Value>) {
+    let mut keys = Vec::with_capacity(env.len());
+    let mut vals = Vec::with_capacity(env.len());
+    for (k, v) in env.iter() {
+        keys.push(*k);
+        vals.push(v);
     }
+    (keys, vals)
+}
+
+/// Rewrite every `ThunkRef` in `val` through the forwarding `table`, returning a
+/// fresh `Value`.
+///
+/// Iterative (explicit post-order work stack, mirroring `deep_force`): a GC
+/// rewrite must not recurse the host stack over `Con`/`ConFun` field spines or
+/// `Closure`/`JoinCont` environment chains — a deep value would overflow the
+/// host thread (the "host stack-overflow" class: a silent thread death outside
+/// the JIT signal handler). Sibling rewrite ORDER is unobservable.
+fn rewrite_value(val: &Value, table: &ForwardingTable) -> Value {
+    let mut stack: Vec<RewriteWork> = vec![RewriteWork::Rewrite(val)];
+    let mut results: Vec<Value> = Vec::new();
+
+    while let Some(work) = stack.pop() {
+        match work {
+            RewriteWork::Rewrite(v) => match v {
+                Value::Lit(l) => results.push(Value::Lit(l.clone())),
+                Value::ByteArray(ba) => results.push(Value::ByteArray(ba.clone())),
+                Value::ThunkRef(id) => {
+                    results.push(Value::ThunkRef(table.lookup(*id).unwrap_or_else(|_| {
+                        panic!(
+                            "GC compact: ThunkRef({}) not in forwarding table — GC trace bug",
+                            id.0
+                        );
+                    })));
+                }
+                Value::Con(id, fields) => {
+                    stack.push(RewriteWork::BuildCon(*id, fields.len()));
+                    for f in fields.iter().rev() {
+                        stack.push(RewriteWork::Rewrite(f));
+                    }
+                }
+                Value::ConFun(id, arity, args) => {
+                    stack.push(RewriteWork::BuildConFun(*id, *arity, args.len()));
+                    for a in args.iter().rev() {
+                        stack.push(RewriteWork::Rewrite(a));
+                    }
+                }
+                Value::Closure(env, binder, expr) => {
+                    let (keys, vals) = env_keys_vals(env);
+                    // `Build*` first (bottom), env values reversed on top: they
+                    // pop in forward key order and the build runs after them.
+                    stack.push(RewriteWork::BuildClosure(keys, *binder, expr));
+                    for v in vals.into_iter().rev() {
+                        stack.push(RewriteWork::Rewrite(v));
+                    }
+                }
+                Value::JoinCont(binders, expr, env) => {
+                    let (keys, vals) = env_keys_vals(env);
+                    stack.push(RewriteWork::BuildJoinCont(keys, binders.clone(), expr));
+                    for v in vals.into_iter().rev() {
+                        stack.push(RewriteWork::Rewrite(v));
+                    }
+                }
+            },
+            RewriteWork::BuildCon(id, n) => {
+                let fields = results.split_off(results.len() - n);
+                results.push(Value::Con(id, fields));
+            }
+            RewriteWork::BuildConFun(id, arity, n) => {
+                let args = results.split_off(results.len() - n);
+                results.push(Value::ConFun(id, arity, args));
+            }
+            RewriteWork::BuildClosure(keys, binder, expr) => {
+                let vals = results.split_off(results.len() - keys.len());
+                let env: Env = keys.into_iter().zip(vals).collect();
+                results.push(Value::Closure(env, binder, expr.clone()));
+            }
+            RewriteWork::BuildJoinCont(keys, binders, expr) => {
+                let vals = results.split_off(results.len() - keys.len());
+                let env: Env = keys.into_iter().zip(vals).collect();
+                results.push(Value::JoinCont(binders, expr.clone(), env));
+            }
+        }
+    }
+
+    results
+        .pop()
+        .expect("rewrite_value: work stack always leaves exactly one result")
 }
 
 #[cfg(test)]
@@ -172,5 +257,101 @@ mod tests {
             },
             _ => panic!("Expected Evaluated"),
         }
+    }
+
+    /// Equivalence: the iterative `rewrite_value` reproduces the obvious
+    /// recursive spec on a small mixed value (Con of ThunkRef + nested Con +
+    /// closure capturing a ThunkRef). Guards the post-order reassembly.
+    #[test]
+    fn rewrite_value_matches_spec_on_mixed_value() {
+        use tidepool_repr::Literal;
+        // Forwarding table mapping old ThunkId(3) -> new ThunkId(0).
+        let mut heap = VecHeap::new();
+        let target = heap.alloc(Env::new(), empty_expr()); // ThunkId(0)
+        let table = trace(&[target], &heap);
+
+        let mut env = Env::new();
+        env.insert(VarId(7), Value::ThunkRef(target));
+        env.insert(VarId(8), Value::Lit(Literal::LitInt(9)));
+        let val = Value::Con(
+            DataConId(1),
+            vec![
+                Value::ThunkRef(target),
+                Value::Con(DataConId(2), vec![Value::Lit(Literal::LitInt(5))]),
+                Value::Closure(env, VarId(1), empty_expr()),
+            ],
+        );
+
+        let got = rewrite_value(&val, &table);
+        let Value::Con(id, fields) = &got else {
+            panic!("expected Con")
+        };
+        assert_eq!(*id, DataConId(1));
+        assert!(matches!(fields[0], Value::ThunkRef(ThunkId(0))));
+        assert!(matches!(&fields[1], Value::Con(DataConId(2), inner)
+            if matches!(inner[0], Value::Lit(Literal::LitInt(5)))));
+        let Value::Closure(renv, b, _) = &fields[2] else {
+            panic!("expected Closure")
+        };
+        assert_eq!(*b, VarId(1));
+        assert!(matches!(
+            renv.get(&VarId(7)),
+            Some(Value::ThunkRef(ThunkId(0)))
+        ));
+        assert!(matches!(
+            renv.get(&VarId(8)),
+            Some(Value::Lit(Literal::LitInt(9)))
+        ));
+    }
+
+    /// Run `f` on a deliberately small (512 KiB) thread and require it to
+    /// finish — a stack overflow inside `f` aborts the process.
+    fn on_small_stack<F: FnOnce() + Send + 'static>(f: F) {
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(f)
+            .expect("spawn small-stack thread")
+            .join()
+            .expect("GC compact overflowed the host thread stack");
+    }
+
+    /// Deep `Con` field spine in an evaluated thunk: `rewrite_value` must fold it
+    /// onto its work stack, not the host call stack. A recursive fold SIGSEGVs
+    /// here (the "host stack-overflow" class).
+    #[test]
+    fn compact_deep_con_spine_is_stack_safe() {
+        use tidepool_repr::Literal;
+        let mut spine = Value::Lit(Literal::LitInt(0));
+        for _ in 0..400_000 {
+            spine = Value::Con(DataConId(1), vec![spine]);
+        }
+        let mut heap = VecHeap::new();
+        let id = heap.alloc(Env::new(), empty_expr());
+        heap.write(id, ThunkState::Evaluated(spine));
+        let table = trace(&[id], &heap);
+        on_small_stack(move || {
+            let _ = compact(&table, &heap);
+        });
+    }
+
+    /// Nested-closure chain (each closure captures the previous in its env) in
+    /// an evaluated thunk — the env-chain spine that overflowed `Value::drop`.
+    /// `rewrite_value` must descend into `Closure` envs iteratively.
+    #[test]
+    fn compact_deep_closure_env_chain_is_stack_safe() {
+        use tidepool_repr::Literal;
+        let mut v = Value::Lit(Literal::LitInt(0));
+        for _ in 0..200_000 {
+            let mut env = Env::new();
+            env.insert(VarId(0), v);
+            v = Value::Closure(env, VarId(1), empty_expr());
+        }
+        let mut heap = VecHeap::new();
+        let id = heap.alloc(Env::new(), empty_expr());
+        heap.write(id, ThunkState::Evaluated(v));
+        let table = trace(&[id], &heap);
+        on_small_stack(move || {
+            let _ = compact(&table, &heap);
+        });
     }
 }

@@ -1,6 +1,7 @@
 //! Runtime values for the tree-walking interpreter.
 
 use crate::env::Env;
+use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 use tidepool_repr::{CoreExpr, DataConId, Literal, VarId};
 
@@ -103,33 +104,108 @@ impl Value {
     }
 }
 
-/// Iterative destructor: the auto-derived recursive drop costs ~3 stack
-/// frames per nested `Con` level, and effect responses / results can be
-/// cons-spines tens of thousands deep — overflowing the host thread's stack
-/// (a SIGSEGV outside JIT signal protection, which presents as a silent
-/// thread death). Children are detached into a flat worklist before they
-/// drop, so the compiler-generated field drop only ever sees empty Vecs.
+/// Work item for the iterative destructor: a sub-`Value` whose own children
+/// still need detaching, or a captured environment that must drop without
+/// re-entering this destructor along the call stack.
+enum DropWork {
+    Val(Value),
+    Env(Env),
+}
+
+// The per-item cost of the explicit work list is a visible, testable property
+// — the whole point of replacing the compiler's hidden recursive drop.
+const _: () = assert!(std::mem::size_of::<DropWork>() <= 80);
+
+thread_local! {
+    /// Re-entrancy queue for the iterative `Value` destructor. `None` when no
+    /// drop loop is running on this thread; `Some(queue)` while one is. A
+    /// nested `Value::drop` (e.g. `im` dropping an env value) sees `Some`,
+    /// hands its children to the running loop, and returns — turning spine
+    /// depth into queue length.
+    static DROP_QUEUE: RefCell<Option<Vec<DropWork>>> = const { RefCell::new(None) };
+}
+
+/// Detach the directly-owned recursive children of `v` into `queue`, leaving
+/// `v` shallow so the compiler's field-drop glue does no recursive work.
 ///
-/// Leaf variants take the no-op arm; `Closure`/`JoinCont` envs drop through
-/// their own (interpreter-plane, bounded-depth) structure unchanged.
+/// `Con`/`ConFun` fields move into the queue as values. `Closure`/`JoinCont`
+/// environments move in as whole `Env`s rather than being drained here:
+/// draining would force `im`'s copy-on-write (`PoolRef::make_mut`) to deep-
+/// CLONE every structurally shared binding — the interpreter captures envs by
+/// `clone`, so sharing is the norm — re-introducing the very stack overflow
+/// (and an O(env) perf cliff on every closure drop) we are removing. Each
+/// `Env` is instead dropped later through `im`'s own refcount-aware
+/// destructor: uniquely-owned values re-enter `Value::drop` (caught by the
+/// running loop), shared values are merely decremented, never cloned. `im`'s
+/// node recursion is bounded by HAMT depth, never the spine depth.
+fn detach_children(v: &mut Value, queue: &mut Vec<DropWork>) {
+    match v {
+        Value::Con(_, fields) | Value::ConFun(_, _, fields) => {
+            queue.extend(std::mem::take(fields).into_iter().map(DropWork::Val));
+        }
+        Value::Closure(env, _, _) | Value::JoinCont(_, _, env) => {
+            if !env.is_empty() {
+                queue.push(DropWork::Env(std::mem::take(env)));
+            }
+        }
+        Value::Lit(_) | Value::ThunkRef(_) | Value::ByteArray(_) => {}
+    }
+}
+
+/// Iterative destructor: the auto-derived recursive drop costs ~3 stack frames
+/// per nested `Con` level, and effect responses / results can be cons-spines
+/// (or CPS closure chains) tens of thousands deep — overflowing the host
+/// thread's stack (a SIGSEGV outside JIT signal protection, which presents as
+/// a silent thread death). Recursive children are detached onto a thread-local
+/// work list before they drop, so the compiler-generated field drop only ever
+/// sees empty `Vec`s / empty `Env`s.
+///
+/// Covers both spine families: `Con`/`ConFun` field spines AND
+/// `Closure`/`JoinCont` environment chains (the latter via `im`'s own
+/// refcount-aware drop — see [`detach_children`]).
 impl Drop for Value {
     fn drop(&mut self) {
+        // Leaves (and already-emptied containers) own nothing recursive — skip
+        // the machinery entirely. This is the overwhelmingly common drop and
+        // never touches the thread-local.
         match self {
-            Value::Con(_, fields) | Value::ConFun(_, _, fields) if !fields.is_empty() => {
-                let mut work = std::mem::take(fields);
-                let mut i = 0;
-                while i < work.len() {
-                    if let Value::Con(_, fs) | Value::ConFun(_, _, fs) = &mut work[i] {
-                        let mut inner = std::mem::take(fs);
-                        work.append(&mut inner);
-                    }
-                    i += 1;
-                }
-                // `work` drops here: every entry's fields are empty, so each
-                // element drop is shallow.
-            }
+            Value::Con(_, f) | Value::ConFun(_, _, f) if f.is_empty() => return,
+            Value::Lit(_) | Value::ThunkRef(_) | Value::ByteArray(_) => return,
             _ => {}
         }
+
+        DROP_QUEUE.with(|cell| {
+            // Re-entrant: a drop loop is already running on this thread and we
+            // are being dropped from inside it. Hand our children to that loop;
+            // our field-drop glue then runs shallow.
+            if let Some(queue) = cell.borrow_mut().as_mut() {
+                detach_children(self, queue);
+                return;
+            }
+
+            // We own the loop. Seed the queue with our children, then drain.
+            let mut queue: Vec<DropWork> = Vec::new();
+            detach_children(self, &mut queue);
+            *cell.borrow_mut() = Some(queue);
+
+            loop {
+                // Release the borrow BEFORE dropping: the drop re-enters and
+                // borrows again to push more work.
+                let item = cell.borrow_mut().as_mut().and_then(Vec::pop);
+                match item {
+                    // `v`'s own `Value::drop` re-enters, detaches its children,
+                    // and drops shallow.
+                    Some(DropWork::Val(v)) => drop(v),
+                    // `im`'s refcount-aware drop; uniquely-owned values re-enter
+                    // `Value::drop` (caught above), shared values are merely
+                    // decremented — never cloned.
+                    Some(DropWork::Env(env)) => drop(env),
+                    None => break,
+                }
+            }
+
+            *cell.borrow_mut() = None;
+        });
     }
 }
 

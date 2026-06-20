@@ -16,6 +16,15 @@ impl std::fmt::Display for crate::tree::RecursiveTree<CoreFrame<usize>> {
     }
 }
 
+// NOTE (stack-safety audit, 2026-06-20): `pp_at` recurses the host stack over
+// the `CoreExpr` spine and so could overflow on a pathologically deep tree. It
+// is deliberately left recursive: it is a debug/`Display`-only renderer (never
+// on the compile or eval hot path — see the host-stack-safety pass, which
+// converted the spine walks that ARE on those paths). The collapse interleaves
+// parenthesization decisions that depend on each child's *frame kind*, so an
+// explicit-stack rewrite buys cost-model visibility only, against real
+// string-context churn risk. Convert if deep-IR pretty-printing ever lands on a
+// hot path.
 fn pp_at(expr: &CoreExpr, idx: usize) -> String {
     match &expr.nodes[idx] {
         CoreFrame::Var(id) => format_var(id),
