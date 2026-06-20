@@ -108,6 +108,12 @@ fn run_capturing_expect_err(code: &str, helpers: &str) -> (Vec<String>, String) 
         .name("eval-failclass".into())
         .stack_size(256 * 1024 * 1024)
         .spawn(move || {
+            // Faithful to the server's eval thread (lib.rs:2034): the JIT's
+            // clean stack-overflow yield + trap recovery rely on these handlers
+            // (sigaltstack + SIGSEGV/SIGILL -> siglongjmp). Without them a deep
+            // recursion corrupts into a spurious [CASE TRAP] instead of yielding
+            // cleanly the way the real eval does.
+            tidepool_codegen::signal_safety::install();
             let include = [pp, ulp, eff];
             let mut handlers = frunk::hlist![ConsoleHandler];
             let err = compile_and_run(&source, "result", &include, &mut handlers, &captured_for_thread)

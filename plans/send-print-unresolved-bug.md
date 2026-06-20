@@ -17,10 +17,17 @@ resolved), and the JIT — which only special-cased `runRW#` among the magic
 functions — had no binding/con for it → forced it as an unresolved external.
 `run >> pure` differs in its dictionary path, so `nospec` isn't inserted there.
 
-It is a **regression from re-enabling `Opt_Specialise`** (GhcPipeline.hs): once
-specialization is on, GHC emits `nospec`. (The earlier "a9a0082 pruned ()"
-diagnosis was wrong — disproved by reproducing `stableVarId`: `()` hashes to
-`0xfeb080…`, not `0xfe75…`; the `0xFE` byte is the universal prefix, not a tag.)
+It is a **regression from `1dc47d1` "feat(mcp): expression-first eval contract"**
+(empirically bisected). 1dc47d1 moved user code out of an inline nested `do`
+into a separate top-level `__user` binding; GHC optimizes that standalone binding
+in isolation and leaves the `nospec`-wrapped recursive `Member Console '[…]`
+dictionary unsimplified, whereas the old inline form let GHC inline `send` and
+simplify `nospec` away. The real axis is raw `send` (live polymorphic Member
+dict) vs `run` (monomorphic via the `M` alias) — NOT unit-vs-tuple.
+NOT `Opt_Specialise` (16f0014): putting those flags back still reproduces, so
+`nospec` comes from desugaring the recursive instance dict, not the Specialise
+pass. (Both the earlier "a9a0082 pruned ()" and the "Opt_Specialise" guesses
+were wrong — disproved empirically; the fix is correct regardless of the date.)
 
 ## Fix
 Treat `GHC.Magic.nospec` as the identity in `Translate.hs` (like `runRW#`):
