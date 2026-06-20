@@ -1356,7 +1356,83 @@ fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-fn format_error_with_source(title: &str, error: &str, source: &str) -> String {
+/// Coarse classification of an eval failure, surfaced as a stable,
+/// machine-greppable tag (`**failure-class:** `<tag>``) on every error payload.
+///
+/// Doubles as a loud-vs-silent health signal: `signal-crash` marks an actual
+/// compiler bug — a caught JIT trap/signal or an eval thread that died with the
+/// channel — and must be loud; `haskell-error` is the user's program failing on
+/// purpose. The four together let a caller (and later, aggregation) separate
+/// benign user errors from codegen bugs without parsing free-form prose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureClass {
+    /// A clean Haskell `error`/`undefined`, or any other non-crash JIT yield
+    /// carrying a message (unhandled effect, unsupported feature). The program
+    /// failed deterministically — not a codegen bug.
+    HaskellError,
+    /// Resource exhaustion: stack overflow, heap overflow, unbounded recursion,
+    /// or a self-forcing thunk (blackhole). A user resource problem, not a bug.
+    RuntimeYield,
+    /// A fatal JIT signal or trap (SIGILL/SIGSEGV/SIGBUS, case trap, bad
+    /// pointer, null/non-closure application) — whether caught and reported as
+    /// an error string, or fatal enough to take the eval thread down with it
+    /// (the dead-channel path). These are compiler bugs.
+    SignalCrash,
+    /// The eval exceeded its wall-clock budget without reaching a yield point.
+    Timeout,
+}
+
+impl FailureClass {
+    /// Stable lowercase tag, safe to grep and count. Never reword these — they
+    /// are the health-signal vocabulary.
+    #[must_use]
+    pub fn tag(self) -> &'static str {
+        match self {
+            FailureClass::HaskellError => "haskell-error",
+            FailureClass::RuntimeYield => "runtime-yield",
+            FailureClass::SignalCrash => "signal-crash",
+            FailureClass::Timeout => "timeout",
+        }
+    }
+
+    /// Classify the text of a `SessionMessage::Error` payload. The dead-thread
+    /// (`None`) and timeout call sites classify themselves; this only splits the
+    /// in-band error channel into haskell-error / runtime-yield / (caught)
+    /// signal-crash.
+    ///
+    /// Order matters: a case trap that also blew the stack reads as the signal
+    /// crash it fundamentally is, so signal markers are checked first.
+    #[must_use]
+    pub fn classify_error_text(error: &str) -> FailureClass {
+        // Markers from tidepool-codegen `YieldType` Display impls + the
+        // always-on `[CASE TRAP]`/bad-pointer breadcrumbs (all matched
+        // lowercase).
+        const SIGNAL_MARKERS: &[&str] = &[
+            "jit signal:",
+            "case trap",
+            "bad pointer",
+            "null function pointer",
+            "application of non-closure",
+            "forced type metadata",
+        ];
+        const YIELD_MARKERS: &[&str] = &[
+            "stack overflow",
+            "heap overflow",
+            "unbounded recursion",
+            "blackhole",
+        ];
+        let lower = error.to_ascii_lowercase();
+        if SIGNAL_MARKERS.iter().any(|m| lower.contains(m)) {
+            FailureClass::SignalCrash
+        } else if YIELD_MARKERS.iter().any(|m| lower.contains(m)) {
+            FailureClass::RuntimeYield
+        } else {
+            FailureClass::HaskellError
+        }
+    }
+}
+
+fn format_error_with_source(class: FailureClass, title: &str, error: &str, source: &str) -> String {
     // Extract user-written code: between the "-- [user]" marker and the
     // generated `result ::` wrapper (helpers + input + the __user binding).
     // Echoing the budget plumbing below teaches callers the wrong dialect.
@@ -1368,8 +1444,11 @@ fn format_error_with_source(title: &str, error: &str, source: &str) -> String {
         .map_or(user_section, |pos| &user_section[..pos])
         .trim_end();
     format!(
-        "## {}\n{}\n\n## User Code\n```haskell\n{}\n```",
-        title, error, user_section
+        "## {}\n**failure-class:** `{}`\n\n{}\n\n## User Code\n```haskell\n{}\n```",
+        title,
+        class.tag(),
+        error,
+        user_section
     )
 }
 
@@ -1940,7 +2019,12 @@ impl TidepoolMcpServerImpl {
                                 detail.push('\n');
                             }
                         }
-                        let error_msg = format_error_with_source("Timeout", &detail, &source);
+                        let error_msg = format_error_with_source(
+                            FailureClass::Timeout,
+                            "Timeout",
+                            &detail,
+                            &source,
+                        );
                         return Ok(CallToolResult::error(vec![Content::text(error_msg)]));
                     }
                 }
@@ -2029,7 +2113,12 @@ impl TidepoolMcpServerImpl {
                         )]))
                     }
                     SessionMessage::Error { error } => {
-                        let mut error_msg = format_error_with_source("Error", &error, &source);
+                        // The in-band error channel carries both clean Haskell
+                        // errors and runtime yields (and caught JIT signals) —
+                        // split them by content for the failure-class tag.
+                        let class = FailureClass::classify_error_text(&error);
+                        let mut error_msg =
+                            format_error_with_source(class, "Error", &error, &source);
                         if !output.is_empty() {
                             error_msg.push_str("\n\n## Output So Far\n");
                             for line in &output {
@@ -2094,6 +2183,7 @@ impl TidepoolMcpServerImpl {
                     }
                 }
                 let error_msg = format_error_with_source(
+                    FailureClass::SignalCrash,
                     "Crash",
                     &format!(
                         "{} thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.{}",
@@ -3130,9 +3220,10 @@ data Console a where
         let title = "Error";
         let error = "Type mismatch";
         let source = "preamble stuff\n-- [user]\nhelper :: Int\nhelper = 7\n\n__user =\n  pure helper\n\nresult :: Eff '[] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON _r)\n";
-        let formatted = format_error_with_source(title, error, source);
+        let formatted = format_error_with_source(FailureClass::HaskellError, title, error, source);
 
         assert!(formatted.contains("## Error"));
+        assert!(formatted.contains("**failure-class:** `haskell-error`"));
         assert!(formatted.contains("Type mismatch"));
         assert!(formatted.contains("## User Code"));
         // Helpers + the __user binding are echoed…
@@ -3146,7 +3237,8 @@ data Console a where
 
     #[test]
     fn test_format_error_no_marker_shows_full() {
-        let formatted = format_error_with_source("Error", "oops", "full source");
+        let formatted =
+            format_error_with_source(FailureClass::HaskellError, "Error", "oops", "full source");
         assert!(formatted.contains("full source"));
     }
 
@@ -3798,6 +3890,8 @@ data Console a where
         let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
         let source: Arc<str> = "test source".into();
         let captured = CapturedOutput::new();
+        // The eval printed before failing — that output must survive.
+        captured.push("printed before failure".into());
 
         tx.send(SessionMessage::Error {
             error: "oops".into(),
@@ -3823,6 +3917,81 @@ data Console a where
         };
         assert!(text.contains("## Error"));
         assert!(text.contains("oops"));
+        // A plain error message is a clean Haskell error.
+        assert!(text.contains("**failure-class:** `haskell-error`"));
+        // Partial output is surfaced on the failure path.
+        assert!(text.contains("printed before failure"));
+    }
+
+    /// A `SessionMessage::Error` carrying a stack-overflow yield must tag
+    /// `runtime-yield`, not `haskell-error`.
+    #[tokio::test]
+    async fn test_handle_session_result_runtime_yield() {
+        let server = create_mock_server();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
+        let source: Arc<str> = "test source".into();
+        let captured = CapturedOutput::new();
+        captured.push("loop iter 1".into());
+
+        tx.send(SessionMessage::Error {
+            error: "stack overflow (likely infinite list or unbounded recursion)".into(),
+        })
+        .unwrap();
+
+        let res = server
+            .handle_session_result(
+                "eval",
+                rx,
+                source,
+                resp_tx,
+                captured,
+                None,
+                PauseGate::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.is_error, Some(true));
+        let text = match &res.content[0].raw {
+            RawContent::Text(t) => &t.text,
+            _ => panic!("Expected text content"),
+        };
+        assert!(text.contains("**failure-class:** `runtime-yield`"));
+        assert!(text.contains("loop iter 1"));
+    }
+
+    /// A caught JIT signal arrives on the in-band error channel; it must still
+    /// tag `signal-crash` (compiler bug), not `haskell-error`.
+    #[tokio::test]
+    async fn test_handle_session_result_caught_signal() {
+        let server = create_mock_server();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
+        let source: Arc<str> = "test source".into();
+        let captured = CapturedOutput::new();
+
+        tx.send(SessionMessage::Error {
+            error: "JIT signal: SIGILL (illegal instruction — likely exhausted case branch)".into(),
+        })
+        .unwrap();
+
+        let res = server
+            .handle_session_result(
+                "eval",
+                rx,
+                source,
+                resp_tx,
+                captured,
+                None,
+                PauseGate::new(),
+            )
+            .await
+            .unwrap();
+        let text = match &res.content[0].raw {
+            RawContent::Text(t) => &t.text,
+            _ => panic!("Expected text content"),
+        };
+        assert!(text.contains("**failure-class:** `signal-crash`"));
     }
 
     #[tokio::test]
@@ -3832,6 +4001,8 @@ data Console a where
         let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
         let source: Arc<str> = "test source".into();
         let captured = CapturedOutput::new();
+        // Output printed before the thread died must still be surfaced.
+        captured.push("printed before crash".into());
 
         // Close the channel without sending anything
         drop(tx);
@@ -3855,6 +4026,10 @@ data Console a where
         };
         assert!(text.contains("## Crash"));
         assert!(text.contains("eval thread crashed"));
+        // A dead eval thread is a signal-crash (compiler bug), and its last
+        // words must survive.
+        assert!(text.contains("**failure-class:** `signal-crash`"));
+        assert!(text.contains("printed before crash"));
     }
 
     #[tokio::test]
@@ -3866,6 +4041,7 @@ data Console a where
         let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
         let source: Arc<str> = "test source".into();
         let captured = CapturedOutput::new();
+        captured.push("printed before timeout".into());
 
         let handle = tokio::spawn(async move {
             server
@@ -3892,6 +4068,63 @@ data Console a where
         };
         assert!(text.contains("## Timeout"));
         assert!(text.contains("timed out"));
+        assert!(text.contains("**failure-class:** `timeout`"));
+        // Output before a pure-compute timeout is surfaced.
+        assert!(text.contains("printed before timeout"));
+    }
+
+    #[test]
+    fn test_failure_class_classify() {
+        use FailureClass::{HaskellError, RuntimeYield, SignalCrash};
+        // Clean Haskell errors / unsupported features / unhandled effects.
+        assert_eq!(
+            FailureClass::classify_error_text("Haskell error: boom"),
+            HaskellError
+        );
+        assert_eq!(
+            FailureClass::classify_error_text("Unhandled effect at tag 3"),
+            HaskellError
+        );
+        // Resource exhaustion.
+        assert_eq!(
+            FailureClass::classify_error_text(
+                "stack overflow (likely infinite list or unbounded recursion)"
+            ),
+            RuntimeYield
+        );
+        assert_eq!(
+            FailureClass::classify_error_text("heap overflow (nursery exhausted after GC)"),
+            RuntimeYield
+        );
+        assert_eq!(
+            FailureClass::classify_error_text("blackhole detected (infinite loop)"),
+            RuntimeYield
+        );
+        // Caught JIT signals / traps are compiler bugs even on the in-band lane.
+        assert_eq!(
+            FailureClass::classify_error_text("JIT signal: SIGSEGV (segmentation fault)"),
+            SignalCrash
+        );
+        assert_eq!(
+            FailureClass::classify_error_text(
+                "case trap: scrutinee constructor not among case alternatives"
+            ),
+            SignalCrash
+        );
+        assert_eq!(
+            FailureClass::classify_error_text("bad pointer in JIT runtime"),
+            SignalCrash
+        );
+        // Signal markers win over co-occurring yield markers.
+        assert_eq!(
+            FailureClass::classify_error_text("case trap after stack overflow"),
+            SignalCrash
+        );
+        // Tags are the stable health-signal vocabulary.
+        assert_eq!(FailureClass::HaskellError.tag(), "haskell-error");
+        assert_eq!(FailureClass::RuntimeYield.tag(), "runtime-yield");
+        assert_eq!(FailureClass::SignalCrash.tag(), "signal-crash");
+        assert_eq!(FailureClass::Timeout.tag(), "timeout");
     }
 
     /// The gate state machine: pause parks a checkpointing thread, resume
@@ -4076,7 +4309,7 @@ data Console a where
         let title = "Compile Error";
         let error = "Variable not in scope: x";
         let source = "module Test where\n-- [user]\nmain = do\n  print x\n  print y\n  print z";
-        let formatted = format_error_with_source(title, error, source);
+        let formatted = format_error_with_source(FailureClass::HaskellError, title, error, source);
 
         assert!(formatted.contains("## Compile Error"));
         assert!(formatted.contains("Variable not in scope: x"));
@@ -4087,7 +4320,7 @@ data Console a where
 
     #[test]
     fn test_format_error_empty_source() {
-        let formatted = format_error_with_source("Error", "msg", "");
+        let formatted = format_error_with_source(FailureClass::HaskellError, "Error", "msg", "");
         assert!(formatted.contains("## Error"));
         assert!(formatted.contains("msg"));
         assert!(formatted.contains("## User Code"));
