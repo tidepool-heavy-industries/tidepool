@@ -31,3 +31,5 @@ tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
 # For the effectful integration tests: a capturing Console handler decoded the
 # same way the production handler is (`tidepool/src/main.rs`).
 tidepool-bridge-derive = { version = "0.1.0", path = "../tidepool-bridge-derive" }
+# Property tests for the pure eval-prep helpers (src/eval_prep.rs).
+proptest = "1"

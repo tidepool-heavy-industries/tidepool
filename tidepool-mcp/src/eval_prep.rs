@@ -353,6 +353,163 @@ pub(crate) fn format_error_with_source(
 mod tests {
     use super::*;
     use crate::EffectDecl;
+    use proptest::prelude::*;
+
+    // ---- Property tests for the extracted pure helpers ----
+    //
+    // These functions were previously only reachable through the async server
+    // and exercised by integration tests. Pulled into a sibling module, they
+    // can be hit directly: determinism, structural invariants, and the
+    // failure-class ordering rule.
+
+    /// The five quasi-quoter open-tokens `uses_qq` must recognize.
+    const QQ_TOKENS: &[&str] = &["[fmt|", "[j|", "[patch|", "[sg|", "[uri|"];
+
+    /// Signal/yield marker pools mirroring the private `const`s inside
+    /// `classify_error_text` — kept here so the property checks the same
+    /// vocabulary the function uses.
+    const SIGNAL_MARKERS: &[&str] = &[
+        "jit signal:",
+        "case trap",
+        "bad pointer",
+        "null function pointer",
+        "application of non-closure",
+        "forced type metadata",
+    ];
+    const YIELD_MARKERS: &[&str] = &[
+        "stack overflow",
+        "heap overflow",
+        "unbounded recursion",
+        "blackhole",
+    ];
+
+    proptest! {
+        /// Any text containing a quoter open-token is detected as QQ, no matter
+        /// what surrounds it.
+        #[test]
+        fn prop_uses_qq_detects_every_token(
+            tok in 0usize..5,
+            prefix in "[a-zA-Z0-9 ]{0,40}",
+            suffix in "[a-zA-Z0-9 ]{0,40}",
+        ) {
+            let src = format!("{prefix}{}{suffix}", QQ_TOKENS[tok]);
+            prop_assert!(uses_qq(&src), "token {:?} not detected in {:?}", QQ_TOKENS[tok], src);
+        }
+
+        /// Every quoter token opens with `[`, so text with no `[` can never be a
+        /// quote-open and must classify as non-QQ.
+        #[test]
+        fn prop_uses_qq_rejects_tokenless(s in "[a-zA-Z0-9 ()<>=:|]{0,80}") {
+            prop_assert!(!uses_qq(&s));
+        }
+
+        /// `template_haskell` is a pure function: identical inputs yield
+        /// byte-identical output.
+        #[test]
+        fn prop_template_haskell_deterministic(code in "[a-zA-Z0-9 \n]{0,40}") {
+            let pre = "module Expr where\ndefault (Int)\n";
+            let a = template_haskell(pre, "'[Console]", &code, "", "", None, None);
+            let b = template_haskell(pre, "'[Console]", &code, "", "", None, None);
+            prop_assert_eq!(a, b);
+        }
+
+        /// The user code rides into the rendered module verbatim under the
+        /// `__user` binding, indented two spaces.
+        #[test]
+        fn prop_template_haskell_embeds_user_code(code in "[a-zA-Z0-9 ]{1,40}") {
+            let pre = "module Expr where\ndefault (Int)\n";
+            let src = template_haskell(pre, "'[Console]", &code, "", "", None, None);
+            let indented = format!("  {code}\n");
+            prop_assert!(src.contains("__user =\n"));
+            prop_assert!(src.contains(&indented));
+        }
+
+        /// `wrap_do` prefixes a `do`, indents every line two spaces, and keeps
+        /// each original line intact.
+        #[test]
+        fn prop_wrap_do_indents_and_preserves(
+            lines in proptest::collection::vec("[a-zA-Z0-9 ]{1,20}", 1..6),
+        ) {
+            let code = lines.join("\n");
+            let wrapped = wrap_do(&code);
+            prop_assert!(wrapped.starts_with("do\n"));
+            for (orig, out) in code.lines().zip(wrapped.lines().skip(1)) {
+                let expected = format!("  {orig}");
+                prop_assert_eq!(out, expected.as_str());
+            }
+        }
+
+        /// A signal marker always wins, even when a resource-yield marker
+        /// co-occurs AND appears first. Digit-only filler introduces no marker.
+        #[test]
+        fn prop_classify_signal_beats_yield(
+            sig in 0usize..6,
+            yld in 0usize..4,
+            a in "[0-9]{0,10}",
+            b in "[0-9]{0,10}",
+            c in "[0-9]{0,10}",
+        ) {
+            let msg = format!("{a}{}{b}{}{c}", YIELD_MARKERS[yld], SIGNAL_MARKERS[sig]);
+            prop_assert_eq!(
+                FailureClass::classify_error_text(&msg),
+                FailureClass::SignalCrash
+            );
+        }
+
+        /// A yield marker with no signal marker is a runtime yield.
+        #[test]
+        fn prop_classify_yield_without_signal(
+            yld in 0usize..4,
+            a in "[0-9]{0,10}",
+            b in "[0-9]{0,10}",
+        ) {
+            let msg = format!("{a}{}{b}", YIELD_MARKERS[yld]);
+            prop_assert_eq!(
+                FailureClass::classify_error_text(&msg),
+                FailureClass::RuntimeYield
+            );
+        }
+
+        /// Digit-only noise carries no marker, so it is a plain Haskell error.
+        #[test]
+        fn prop_classify_plain_haskell_error(s in "[0-9]{0,20}") {
+            prop_assert_eq!(
+                FailureClass::classify_error_text(&s),
+                FailureClass::HaskellError
+            );
+        }
+
+        /// `build_effect_stack_type` names every decl, in a promoted list, and
+        /// is itself pure.
+        #[test]
+        fn prop_stack_type_lists_every_decl(n in 0usize..=8) {
+            let all = standard_decls();
+            let decls = &all[..n];
+            let stack = build_effect_stack_type(decls);
+            prop_assert!(stack.starts_with("'["));
+            prop_assert!(stack.ends_with(']'));
+            for d in decls {
+                prop_assert!(stack.contains(d.type_name), "{} missing from {}", d.type_name, stack);
+            }
+            prop_assert_eq!(&stack, &build_effect_stack_type(decls));
+        }
+    }
+
+    #[test]
+    fn build_effect_stack_type_empty_is_nil() {
+        assert_eq!(build_effect_stack_type(&[]), "'[]");
+    }
+
+    #[test]
+    fn standard_decls_is_stable() {
+        let a: Vec<&str> = standard_decls().iter().map(|d| d.type_name).collect();
+        let b: Vec<&str> = standard_decls().iter().map(|d| d.type_name).collect();
+        assert_eq!(a, b);
+        // Canonical order is load-bearing: handlers are tag-indexed by it.
+        assert_eq!(a.first(), Some(&"Console"));
+        assert_eq!(a.last(), Some(&"Ask"));
+        assert_eq!(a.len(), 8);
+    }
 
     #[test]
     fn test_uses_qq_detection() {

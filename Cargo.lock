@@ -3590,6 +3590,7 @@ dependencies = [
  "dyn-clone",
  "frunk",
  "parking_lot",
+ "proptest",
  "rmcp",
  "schemars 1.2.1",
  "serde",
