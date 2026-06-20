@@ -136,6 +136,12 @@ enum Spec {
     /// `Complete(Lit(String))` fed into an integer continuation — shape
     /// mismatch; a clean error is required, never a fatal trap.
     Str(String),
+    /// `Complete(Lit(Double bits))` fed into an integer continuation. The
+    /// double's raw bits are NOT a valid `Int#`; eval's strict `expect_int`
+    /// rejects it, so the JIT must reject it too rather than bit-reinterpret
+    /// the float payload as a "number" (proptest_jit_dispatch B2, FP residual:
+    /// the original guard only rejected pointer-valued lits).
+    Double(f64),
     /// Handler returns `Err` at this dispatch position (trampoline error path).
     Err,
 }
@@ -155,6 +161,7 @@ impl Spec {
             }
             Spec::Stream(n) => cx.respond_stream(0..*n as i64),
             Spec::Str(s) => Ok(Value::Lit(Literal::LitString(s.clone().into_bytes())).into()),
+            Spec::Double(d) => Ok(Value::Lit(Literal::LitDouble(d.to_bits())).into()),
             Spec::Err => Err(EffectError::Handler("scripted error".into())),
         }
     }
@@ -855,11 +862,17 @@ fn invalid_tag_strategy() -> impl Strategy<Value = (CoreExpr, Vec<Spec>)> {
         })
 }
 
-/// A single valid-tag effect whose integer continuation receives a string —
-/// the shape-mismatch probe.
+/// A single valid-tag effect whose integer continuation receives a wrong-shape
+/// response — a string (pointer-valued lit) or a double (float-class lit). Both
+/// are rejected by eval's strict `expect_int`, so the JIT must reject them too
+/// rather than reinterpret a pointer / IEEE-754 payload as `Int#`.
 fn shape_mismatch_strategy() -> impl Strategy<Value = (CoreExpr, Vec<Spec>)> {
-    (valid_tag(), "[a-z]{0,8}")
-        .prop_map(|(tag, s)| (build_arith1(&Eff { tag, req: 0 }), vec![Spec::Str(s)]))
+    let wrong_shape = prop_oneof![
+        "[a-z]{0,8}".prop_map(Spec::Str),
+        (-1e9f64..1e9f64).prop_map(Spec::Double),
+    ];
+    (valid_tag(), wrong_shape)
+        .prop_map(|(tag, spec)| (build_arith1(&Eff { tag, req: 0 }), vec![spec]))
 }
 
 // ---------------------------------------------------------------------------
@@ -1024,6 +1037,53 @@ fn bug_shape_mismatch_jit_reads_string_as_int() {
                 !v.jit_ok,
                 "B2 regressed: eval rejected string+#Int but JIT returned Ok(int kind={}, val={}) — \
                  the resume path read the string heap pointer as Int#",
+                v.jit_kind, v.jit_val
+            );
+        }
+        Outcome::JitFault => panic!("expected a (buggy) value, not a fatal fault"),
+        Outcome::EvalFault => panic!("eval oracle faulted unexpectedly"),
+    }
+}
+
+/// BUG (B2 / silent-garbage, FP residual): a handler returns a `Double` where
+/// the continuation does `Int#` arithmetic. The original `f137d34` guard only
+/// rejected *pointer*-valued lits (STRING / arrays), so a `Double` lit slipped
+/// through `unbox_int` and its raw IEEE-754 bits were loaded as an `i64` — a
+/// silently-wrong number where the eval oracle's strict `expect_int` cleanly
+/// errors.
+///
+///  * observed (pre-fix): JIT `run` returns `Ok(Lit(LitInt(<double bits as
+///    i64>)))`; eval returns `Err(EffectError::Eval(TypeMismatch))`.
+///  * expected: the JIT surfaces a clean error, never a bit-reinterpreted
+///    number, when an `Int#` continuation forces a floating-point response.
+///  * class: B2 (JIT-only divergence; eval errors, JIT "succeeds" with garbage).
+///  * component: compiled `IntAdd` primop's numeric unbox
+///    (`tidepool-codegen/src/emit/primop.rs` `unbox_numeric` lit-tag guard).
+///  * note: only ill-typed Core reaches this (well-typed GHC emits an explicit
+///    `Double2Int`/`Int2Double`), so it is a defensive-robustness gap. Unlike
+///    Word#/Char# — which `unbox_int` *legitimately* accepts for `Ord#`/Word
+///    ops — a float-class lit is never a valid `Int#` source, so rejecting it
+///    cannot regress valid programs.
+// FIXED (class-compatible lit-tag guard in unbox_numeric): an `I64` numeric
+// unbox now accepts only INT/WORD/CHAR lits and traps cleanly on a
+// FLOAT/DOUBLE (or pointer) lit. Active regression test.
+#[test]
+fn bug_shape_mismatch_jit_reads_double_as_int() {
+    // E(Union(0, 0), Leaf(\x -> Val(x +# 7))) with the tag-0 handler answering
+    // Complete(Lit(Double 3.5)).
+    let expr = build_arith1(&Eff { tag: 0, req: 0 });
+    let script = vec![Spec::Double(3.5)];
+
+    match run_case(expr, script) {
+        Outcome::Rec(v) => {
+            assert!(
+                !v.eval_ok,
+                "oracle precondition: eval must reject double-into-Int#"
+            );
+            assert!(
+                !v.jit_ok,
+                "B2 regressed: eval rejected double+#Int but JIT returned Ok(int kind={}, val={}) — \
+                 the resume path read the double's IEEE-754 bits as Int#",
                 v.jit_kind, v.jit_val
             );
         }
