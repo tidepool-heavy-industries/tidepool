@@ -74,18 +74,36 @@ fmtInt sgn base upper alt grp width fill align n =
 -- @round@ primop.  @percent@ pre-multiplies by 100 and appends @%@; @prec@ is
 -- the number of fractional digits.
 fmtFrac :: FSign -> Bool -> Int -> Int -> Char -> FAlign -> Double -> Text
-fmtFrac sgn percent prec width fill align d0 =
-  let d      = if percent then d0 * 100.0 else d0
-      neg    = d < 0.0
-      a      = if neg then negate d else d
-      scaled = round (a * powD prec) :: Int
-      pI     = powI prec
-      ip     = scaled `div` pI
-      fp     = scaled `mod` pI
-      fracS  = if prec <= 0 then "" else "." ++ padZeros prec (show fp)
-      body   = show ip ++ fracS ++ (if percent then "%" else "")
-      pre    = if neg then "-" else signStr sgn
-   in T.pack (fpad align width fill pre body)
+fmtFrac sgn percent prec width fill align d0
+  -- Non-finite guard: the @round@ primop saturates +/-Infinity to a garbage
+  -- Int and maps NaN to 0, so fixed-point formatting of a non-finite Double
+  -- would silently print nonsense (e.g. Infinity -> "92233720368547758.07").
+  -- Special-case them to Python's spellings (inf / -inf / nan, percent suffix
+  -- preserved) before the round path. Finiteness is tested WITHOUT RealFloat
+  -- (no dict on the JIT) AND without a huge Double literal (a literal like
+  -- 1.79e308 desugars through fromRational over multi-limb Integers, which the
+  -- JIT rejects as GMP): @d0 == d0@ is False only for NaN, and @|d|@ is its own
+  -- fixed point under halving only for +/-Inf among nonzero finites.
+  | d0 == d0 && absD0 > 0.0 && absD0 * 0.5 == absD0 =
+      T.pack (fpad align width fill (if d0 < 0.0 then "-" else signStr sgn)
+                                    ("inf" ++ pctSuffix))
+  | d0 == d0 =
+      let d      = if percent then d0 * 100.0 else d0
+          neg    = d < 0.0
+          a      = if neg then negate d else d
+          scaled = round (a * powD prec) :: Int
+          pI     = powI prec
+          ip     = scaled `div` pI
+          fp     = scaled `mod` pI
+          fracS  = if prec <= 0 then "" else "." ++ padZeros prec (show fp)
+          body   = show ip ++ fracS ++ pctSuffix
+          pre    = if neg then "-" else signStr sgn
+       in T.pack (fpad align width fill pre body)
+  | otherwise =
+      T.pack (fpad align width fill (signStr sgn) ("nan" ++ pctSuffix))
+  where
+    absD0     = if d0 < 0.0 then negate d0 else d0
+    pctSuffix = if percent then "%" else ""
 
 -- | The string type (@s@): optional precision truncates to @Just maxLen@.
 fmtStr :: Maybe Int -> Int -> Char -> FAlign -> Text -> Text
