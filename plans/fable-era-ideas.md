@@ -74,11 +74,21 @@ in HEAD. The proptest-campaign-report.md "open" items are MOSTLY already FIXED
   gauntlet (verb library as a continuous JIT integration test), AST-generator with
   twin render/eval, shape-dossier coverage ratchet, server-side CI gate.
 
-## ANOMALIES (flagged, being resolved by bug-cleanup agent)
-- heap-verifier: code-miner claimed a `heap_verify_enabled()` gate at host_fns.rs:
-  ~352; grep for TIDEPOOL_HEAP_VERIFY came back absent. Contradiction.
-- reachable-closure: merged Wave 5 but grep pattern missed the identifier; confirm
-  actual names.
+## ANOMALIES — RESOLVED 2026-06-20 (both were imprecise greps, nothing broken)
+- heap-verifier: EXISTS. `heap_verify_enabled()` (host_fns.rs:311, reads
+  TIDEPOOL_HEAP_VERIFY); `verify_heap_post_gc()` (:338) invoked at :619. The
+  miner was right; the contradicting grep ran wrong. (So future-plans §D
+  heap-verifier is partly built — a gated post-GC walk already exists.)
+- reachable-closure: PRESENT. Bind walk = `reachableBinds`/`neededBinds`
+  (Translate.hs:306/276); meta walk = `collectTransitiveDCons`/`closeTyCons`
+  (:705/716) — the meta-walk function names don't contain "reachable", which is
+  why a name-grep missed it.
+
+## CLEANUP FOLLOW-UPS (verified, deferred)
+- `insertWith` Prelude shadow (Prelude.hs:933) is RETIRABLE — bug-cleanup probed
+  real Data.Map.Strict.insertWith under today's JIT (500-entry Int + 300-entry
+  Text maps, no timeout). Retire in the post-text-vendor Prelude pass (both touch
+  the shadow block; sequence to avoid conflict).
 
 ## IN FLIGHT (2026-06-20 wave, worktree Opus agents)
 text-vendor (scout-first) · recursion-sweep (Value::Drop + spine family) ·
