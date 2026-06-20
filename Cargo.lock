@@ -3595,6 +3595,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tidepool-bridge",
+ "tidepool-bridge-derive",
  "tidepool-codegen",
  "tidepool-effect",
  "tidepool-eval",
