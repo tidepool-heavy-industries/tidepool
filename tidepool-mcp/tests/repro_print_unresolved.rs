@@ -107,13 +107,11 @@ fn print_then_error_resolves() {
     }
 }
 
-/// REPRO (currently fails, #[ignore]d): `send (Print x) >> (pure y)` resolves to
-/// unresolved external VarId(0xfe75fa6b4241aaa3) at runtime. The var is NOT `()`
-/// (hash-disproven) and NOT a binding site (varid-audit, no collision) — some
-/// global con/external in the effect-seq path, identity still TBD. The earlier
-/// "a9a0082 pruned ()" diagnosis was WRONG. See plans/send-print-unresolved-bug.md.
-/// Un-ignore when fixed (→ regression guard).
-#[ignore = "unresolved-external bug in `send(effect) >> pure`; var unidentified; see plans/send-print-unresolved-bug.md"]
+/// REGRESSION GUARD (was failing): `send (Print x) >> (pure y)` forced the
+/// unresolved external `GHC.Magic.nospec` — the specializer's identity wrapper
+/// (emitted once Opt_Specialise is on), which the JIT didn't handle (only
+/// runRW#). Fixed by desugaring nospec as identity in Translate.hs. See
+/// plans/send-print-unresolved-bug.md.
 #[test]
 fn print_then_pure_resolves() {
     let (_out, r) = run(r#"send (Print (T.pack "MARK")) >> (pure (123 :: Int))"#);
@@ -123,9 +121,8 @@ fn print_then_pure_resolves() {
     );
 }
 
-/// REPRO (currently fails, #[ignore]d): same bug as `print_then_pure_resolves`
+/// REGRESSION GUARD (was failing): same bug as `print_then_pure_resolves`
 /// (the `$!` is irrelevant — any `pure` tail after a unit-returning effect).
-#[ignore = "unresolved-external bug in `send(effect) >> pure`; var unidentified; see plans/send-print-unresolved-bug.md"]
 #[test]
 fn print_then_strict_pure_resolves() {
     let (_out, r) = run(r#"send (Print (T.pack "MARK")) >> (pure $! (123 :: Int))"#);

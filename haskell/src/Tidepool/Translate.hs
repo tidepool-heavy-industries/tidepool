@@ -1061,6 +1061,17 @@ translate expr =
       body <- emitNode $ NApp argRef tokIdx
       emitNode $ NLam argId body
 
+    -- nospec :: a -> a  (GHC.Magic) — the identity, inserted by the specializer
+    -- (once Opt_Specialise is on) to block over-specialization of dictionary /
+    -- class-method code. It has no unfolding, so the JIT can't link it; desugar
+    -- `nospec @t f x...` → `f x...` (drop the wrapper, apply its first value arg
+    -- to the rest). See plans/send-print-unresolved-bug.md.
+    Var v | isNospecVar v
+          , (f:rest) <- args -> do
+      fIdx <- translate f
+      restIdxs <- mapM translate rest
+      foldM (\acc aIdx -> emitNode $ NApp acc aIdx) fIdx restIdxs
+
     -- tagToEnum# @T arg → case arg of { 0# → C0; 1# → C1; ... }
     -- We desugar here because type information is erased downstream.
     Var v | Just pop <- isPrimOpId_maybe v
@@ -1124,6 +1135,12 @@ translateHead = \case
         emitNode $ NLit (LEInt 0)  -- realWorld# state token → dummy literal
     | isTypeMetadataVar v ->
         emitNode $ NVar 0x4500000000000004  -- tag 'E', kind 4 (type metadata)
+    | isNospecVar v -> do
+        -- GHC.Magic.nospec is the identity; bare / zero-value-arg occurrence
+        -- (the applied form is desugared in the App handler). Emit `\x -> x`.
+        argId <- freshSynthVarId
+        argRef <- emitNode $ NVar argId
+        emitNode $ NLam argId argRef
     | otherwise -> do
         unresolved <- gets (Set.member (varId v) . tsUnresolvedIds)
         if unresolved
@@ -1813,6 +1830,15 @@ isUnsafeEqualityCase expr =
 
 isRunRWVar :: Id -> Bool
 isRunRWVar v = occNameString (nameOccName (idName v)) == "runRW#"
+
+-- | GHC.Magic.nospec :: a -> a — the specializer's identity wrapper (emitted
+-- once Opt_Specialise is on). No unfolding, so it can't be resolved as an
+-- external; we desugar it to the identity (see the App + translateHead cases).
+isNospecVar :: Id -> Bool
+isNospecVar v =
+     occNameString (nameOccName (idName v)) == "nospec"
+  && maybe False ((== "GHC.Magic") . normalizeMod . moduleNameString . moduleName)
+           (nameModule_maybe (idName v))
 
 -- | Recognize GHC type-representation metadata vars ($tc*, $trModule*, krep$*, $krep*).
 -- These have no runtime semantics and no unfoldings; emit as error VarId.
