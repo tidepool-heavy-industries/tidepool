@@ -2190,15 +2190,25 @@ fn unbox_numeric(
             builder.seal_block(next_block);
             let v_final = builder.block_params(next_block)[0];
 
-            // Guard the final load: a numeric unbox must land on a TAG_LIT
-            // whose lit-tag holds a raw number. A pointer-valued lit (STRING /
-            // BYTEARRAY / SMALLARRAY / ARRAY — e.g. a bare string response
-            // where Int# was expected) or a non-Lit object here would silently
-            // turn its payload pointer into the "number"
-            // (proptest_jit_dispatch B2, shrunk witness: Str("")). Trap
-            // cleanly via runtime_case_trap instead; the poison object it
-            // returns is loaded from below, but the pending RuntimeError is
-            // surfaced before the garbage can be observed.
+            // Guard the final load: a numeric unbox must land on a TAG_LIT whose
+            // lit-tag holds a value of THIS unbox's class, not a foreign payload
+            // reinterpreted as one. Accepted lit-tags by load width:
+            //   * I64 integer unbox → INT / WORD / CHAR (each stores a 64-bit
+            //     integer or codepoint; Ord# feeds a CHAR lit, Word ops feed a
+            //     WORD lit — all legitimate, so they must pass);
+            //   * F64 double unbox → DOUBLE only;
+            //   * F32 float  unbox → FLOAT only.
+            // Anything else is rejected: a pointer-valued STRING / BYTEARRAY /
+            // SMALLARRAY / ARRAY lit (whose payload is an ADDRESS — the original
+            // f137d34 witness Str("")), a non-Lit object, OR a numeric lit of
+            // the wrong float/integer class (e.g. a DOUBLE response forced by an
+            // Int# continuation — witness Double(3.5), whose IEEE-754 bits would
+            // otherwise load as a garbage i64). Trap cleanly via
+            // runtime_case_trap instead; the poison object it returns is loaded
+            // from below, but the pending RuntimeError is surfaced before the
+            // garbage can be observed. Only ill-typed Core reaches a class
+            // mismatch — valid GHC output emits explicit Int2Double/Double2Int —
+            // so this cannot regress well-typed programs.
             let obj_tag = builder
                 .ins()
                 .load(types::I8, MemFlags::trusted(), v_final, 0);
@@ -2209,16 +2219,23 @@ fn unbox_numeric(
                 builder
                     .ins()
                     .load(types::I8, MemFlags::trusted(), v_final, LIT_TAG_OFFSET);
-            let is_string = builder
-                .ins()
-                .icmp_imm(IntCC::Equal, lit_tag, LIT_TAG_STRING);
-            let is_ptrarr = builder.ins().icmp_imm(
-                IntCC::UnsignedGreaterThanOrEqual,
-                lit_tag,
-                LIT_TAG_BYTEARRAY,
-            );
-            let ptrish = builder.ins().bor(is_string, is_ptrarr);
-            let bad = builder.ins().bor(not_lit, ptrish);
+            let wrong_class = if load_type == types::F64 {
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::NotEqual, lit_tag, LIT_TAG_DOUBLE)
+            } else if load_type == types::F32 {
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::NotEqual, lit_tag, LIT_TAG_FLOAT)
+            } else {
+                // Integer-width unbox: reject any lit-tag above CHAR — i.e.
+                // FLOAT(3) / DOUBLE(4) / STRING(5) / BYTEARRAY(7) / SMALLARRAY(8)
+                // / ARRAY(9). INT(0) / WORD(1) / CHAR(2) pass.
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::UnsignedGreaterThan, lit_tag, LIT_TAG_CHAR)
+            };
+            let bad = builder.ins().bor(not_lit, wrong_class);
             let load_block = builder.create_block();
             builder.append_block_param(load_block, types::I64);
             let lit_trap_block = builder.create_block();
