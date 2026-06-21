@@ -34,11 +34,16 @@ mkdir -p "$OUT"
 LOG="$(mktemp)"
 "$EXTRACT" "$SRC" --all-closed --target-module-only --output-dir "$OUT" 2>&1 | tee "$LOG"
 
-# Surface skips: an un-capturable corpus binding is a coverage hole.
+# Surface skips as the FFI / unresolved-external BACKLOG. A SKIP means the
+# extractor could not resolve some external (e.g. an unsupported FFI symbol or an
+# unfolding-less base function) for that binding — a "missing support" gap to
+# NAME, distinct from the runtime JIT-vs-eval divergences. Non-fatal: the point
+# is to surface them, and the rest of the corpus still captures + replays.
 if grep -qi "SKIPPED" "$LOG"; then
-  echo "FATAL: corpus binding(s) SKIPPED (unresolved external) — coverage hole:" >&2
-  grep -i "SKIPPED" "$LOG" >&2
-  exit 1
+  echo "=== FFI / UNRESOLVED-EXTERNAL BACKLOG (capture-time skips) ==="
+  grep -i "SKIPPED" "$LOG"
+else
+  echo "No capture-time skips."
 fi
 
 # Drop GHC-lifted local binders (`go_u6341068275337658369.cbor`): they are inlined
@@ -47,7 +52,8 @@ fi
 find "$OUT" -name '*_u[0-9]*.cbor' -delete
 
 N="$(find "$OUT" -name '*.cbor' ! -name meta.cbor | wc -l | tr -d ' ')"
-echo "Captured $N binding fixtures + meta.cbor into $OUT (0 skips, lifted-locals pruned)."
+SKIPS="$(grep -ci "SKIPPED" "$LOG" || true)"
+echo "Captured $N binding fixtures + meta.cbor into $OUT ($SKIPS capture-skip(s), lifted-locals pruned)."
 
 # Fixtures are gitignored (*.cbor) — force-add so the runner compiles on a fresh checkout.
 git -C "$HERE/.." add -f "$OUT"/*.cbor

@@ -10,6 +10,8 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use tidepool_codegen::jit_machine::JitError;
+use tidepool_codegen::yield_type::YieldError;
+use tidepool_eval::error::EvalError;
 use tidepool_eval::value::Value;
 use tidepool_repr::serial::read::{read_cbor, read_metadata};
 use tidepool_repr::{CoreExpr, DataConTable};
@@ -44,7 +46,20 @@ fn err_short(e: &JitError) -> String {
     s.chars().take(70).collect()
 }
 
-/// (tag, detail) for the table.
+/// Is a JIT failure a missing-SUPPORT gap (unresolved external / unimplemented)
+/// rather than an implemented-but-wrong BUG?
+fn jit_is_gap(e: &JitError) -> bool {
+    matches!(e, JitError::Yield(YieldError::UnresolvedVar(_)))
+}
+
+/// Is an eval failure a missing-SUPPORT gap (unsupported primop) vs a BUG?
+fn eval_is_gap(e: &EvalError) -> bool {
+    matches!(e, EvalError::UnsupportedPrimOp(_))
+}
+
+/// Classify into a tag that separates SUPPORT gaps (missing primop / FFI /
+/// unresolved external — the "not implemented" backlog) from BUGs
+/// (implemented-but-wrong / crash / value divergence).
 fn classify(o: &CapturedOutcome) -> (&'static str, String) {
     match o {
         CapturedOutcome::Agree(v) => ("MATCH", short(v)),
@@ -52,15 +67,44 @@ fn classify(o: &CapturedOutcome) -> (&'static str, String) {
             "DIVERGE",
             format!("eval={} jit={}", short(eval), short(jit)),
         ),
-        CapturedOutcome::JitOnlyFailure { jit, .. } => ("JIT-ERR", err_short(jit)),
-        CapturedOutcome::EvalOnlyFailure { eval, .. } => {
-            ("EVAL-ERR", format!("{eval:?}").chars().take(70).collect())
-        }
-        CapturedOutcome::BothFail { eval, jit } => (
-            "BOTH-ERR",
-            format!("eval={:?} jit={}", eval, err_short(jit)),
+        CapturedOutcome::JitOnlyFailure { jit, .. } => (
+            if jit_is_gap(jit) {
+                "JIT-GAP"
+            } else {
+                "JIT-BUG"
+            },
+            err_short(jit),
         ),
+        CapturedOutcome::EvalOnlyFailure { eval, .. } => (
+            if eval_is_gap(eval) {
+                "EVAL-GAP"
+            } else {
+                "EVAL-BUG"
+            },
+            format!("{eval:?}").chars().take(70).collect(),
+        ),
+        CapturedOutcome::BothFail { eval, jit } => {
+            let tag = match (eval_is_gap(eval), jit_is_gap(jit)) {
+                (true, true) => "BOTH-GAP",
+                (false, false) => "BOTH-BUG",
+                _ => "BOTH-MIXED",
+            };
+            (tag, format!("eval={eval:?} jit={}", err_short(jit)))
+        }
     }
+}
+
+/// Tags whose failure is a missing-support gap (→ the FFI/primop/external backlog).
+fn is_gap_tag(tag: &str) -> bool {
+    matches!(tag, "JIT-GAP" | "EVAL-GAP" | "BOTH-GAP" | "BOTH-MIXED")
+}
+
+/// Tags whose failure is an implemented-but-wrong bug (→ the divergence findings).
+fn is_bug_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "DIVERGE" | "JIT-BUG" | "EVAL-BUG" | "BOTH-BUG" | "BOTH-MIXED" | "CRASH"
+    )
 }
 
 /// A helper function (GHC lifts `where`/instance methods / record selectors to
@@ -84,7 +128,7 @@ fn eval_is_closure(o: &CapturedOutcome) -> bool {
 fn run_one(node: &[u8], meta: &[u8]) -> (bool, &'static str, String, BTreeSet<&'static str>) {
     let node = node.to_vec();
     let meta = meta.to_vec();
-    std::thread::Builder::new()
+    let handle = std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)
         .spawn(move || {
             let expr: CoreExpr = read_cbor(&node).unwrap();
@@ -96,9 +140,19 @@ fn run_one(node: &[u8], meta: &[u8]) -> (bool, &'static str, String, BTreeSet<&'
             let (tag, detail) = classify(&outcome);
             (is_fn, tag, detail, cov)
         })
-        .unwrap()
-        .join()
-        .unwrap()
+        .unwrap();
+    // A binding can terminate its worker via a fatal signal (e.g. host stack
+    // overflow on Drop of a deep Value spine — host-stack-overflow-class). Catch
+    // it so one crash doesn't abort the whole corpus; record it as a finding.
+    match handle.join() {
+        Ok(r) => r,
+        Err(_) => (
+            false,
+            "CRASH",
+            "worker terminated (fatal signal / panic — likely host Drop overflow)".to_string(),
+            BTreeSet::new(),
+        ),
+    }
 }
 
 /// KNOWN non-`MATCH` outcomes: each is a real-Core bug surfaced by this corpus,
@@ -106,53 +160,53 @@ fn run_one(node: &[u8], meta: &[u8]) -> (bool, &'static str, String, BTreeSet<&'
 /// green until fixed. `(binding, expected_tag, bug-class)`. Fixing a bug flips it
 /// to `MATCH` (which still passes — then prune the stale entry).
 const KNOWN: &[(&str, &str, &str)] = &[
+    // ── BUGS (implemented-but-wrong) ──
     // #1 — JIT mis-dispatches the inlined roundingMode# Integer case (IS->IN).
     // ALL non-folded fromIntegral Integer->Double, magnitude-independent.
-    ("convFromInt5", "JIT-ERR", "#1 roundingMode#:IN"),
-    ("convFromInt1025", "JIT-ERR", "#1 roundingMode#:IN"),
-    ("convFromIntPow40", "JIT-ERR", "#1 roundingMode#:IN"),
-    ("convFromIntPow80", "JIT-ERR", "#1 roundingMode#:IN"),
-    // #1 reached via Rational/Double-literal, AND eval lacks the PopCnt primop.
+    ("convFromInt5", "JIT-BUG", "#1 roundingMode#:IN"),
+    ("convFromInt1025", "JIT-BUG", "#1 roundingMode#:IN"),
+    ("convFromIntPow40", "JIT-BUG", "#1 roundingMode#:IN"),
+    ("convFromIntPow80", "JIT-BUG", "#1 roundingMode#:IN"),
+    // #1 (JIT bug) compounded with eval's missing PopCnt primop (a GAP) → MIXED.
     (
         "convDoubleLitBig",
-        "BOTH-ERR",
-        "#1 (JIT) + eval-missing-PopCnt",
+        "BOTH-MIXED",
+        "#1 JIT-bug + eval-GAP PopCnt",
     ),
     (
         "convFromRational",
-        "BOTH-ERR",
-        "#1 (JIT) + eval-missing-PopCnt",
+        "BOTH-MIXED",
+        "#1 JIT-bug + eval-GAP PopCnt",
     ),
-    // NEW: JIT leaves a GHC.Float/Real external unresolved on these paths.
+    // GADT with equality evidence — eval case-binder arity off, JIT SIGSEGV.
+    (
+        "gadtEval",
+        "BOTH-BUG",
+        "GADT eqspec arity (eval) + SIGSEGV (JIT)",
+    ),
+    // #2 — ReadP ~R# newtype coercion: a Con in function position. Both engines.
+    ("readInt", "BOTH-BUG", "#2 read/ReadP newtype-coercion"),
+    ("readListInt", "BOTH-BUG", "#2 read/ReadP newtype-coercion"),
+    ("readDouble", "BOTH-BUG", "#2 read + #1 (JIT roundingMode#)"),
+    // ── SUPPORT GAPS (missing primop / unresolved external) ──
     (
         "convProperFraction",
-        "JIT-ERR",
-        "NEW: properFraction unresolved-external (JIT)",
+        "JIT-GAP",
+        "properFraction unresolved-external",
     ),
     (
         "convRealToFrac",
-        "JIT-ERR",
-        "NEW: realToFrac unresolved-external (JIT)",
+        "JIT-GAP",
+        "realToFrac unresolved-external",
     ),
     (
         "sumRange",
-        "JIT-ERR",
-        "NEW: sum [1..n] unresolved-external (JIT; eval=5050 ok)",
+        "JIT-GAP",
+        "sum [1..n] unresolved-external (eval=5050 ok)",
     ),
-    // NEW: GADT with equality evidence — eval case-binder arity off, JIT SIGSEGV.
-    (
-        "gadtEval",
-        "BOTH-ERR",
-        "NEW: GADT eqspec arity (eval) + SIGSEGV (JIT)",
-    ),
-    // #2 — ReadP ~R# newtype coercion: a Con in function position. Both engines.
-    ("readInt", "BOTH-ERR", "#2 read/ReadP newtype-coercion"),
-    ("readListInt", "BOTH-ERR", "#2 read/ReadP newtype-coercion"),
-    ("readDouble", "BOTH-ERR", "#2 read + #1 (JIT roundingMode#)"),
-    // Known-Limit: cycle is an unresolved external by design.
     (
         "cycleTake",
-        "JIT-ERR",
+        "JIT-GAP",
         "Known-Limit: cycle unresolved-external",
     ),
 ];
@@ -181,6 +235,8 @@ fn corpus_report() {
     let mut funcs = 0usize;
     let mut violations: Vec<String> = Vec::new();
     let mut coverage: BTreeSet<&'static str> = BTreeSet::new();
+    let mut gaps: Vec<String> = Vec::new();
+    let mut bugs: Vec<String> = Vec::new();
 
     println!("\n=== REAL-CORE CORPUS ===");
     for (name, path) in &entries {
@@ -199,6 +255,13 @@ fn corpus_report() {
             _ => "** UNEXPECTED **",
         };
         println!("{tag:9} {name:26} {mark:18} {detail}");
+        let row = format!("{tag:10} {name:26} {detail}");
+        if is_gap_tag(tag) {
+            gaps.push(row.clone());
+        }
+        if is_bug_tag(tag) {
+            bugs.push(row);
+        }
         if mark == "** UNEXPECTED **" {
             violations.push(format!("{tag:9} {name:26} {detail}"));
         }
@@ -212,9 +275,21 @@ fn corpus_report() {
     for (tag, n) in &counts {
         println!("  {tag:9} {n}");
     }
-    println!("\n=== KNOWN real-Core bugs surfaced ===");
-    for (n, tag, note) in KNOWN {
-        println!("  {tag:9} {n:26} {note}");
+
+    // Two distinct backlogs, per the coverage mandate.
+    println!(
+        "\n=== SUPPORT GAPS (missing primop / FFI / unresolved external) — {} ===",
+        gaps.len()
+    );
+    for g in &gaps {
+        println!("  {g}");
+    }
+    println!(
+        "\n=== DIVERGENCE BUGS (implemented-but-wrong / crash) — {} ===",
+        bugs.len()
+    );
+    for b in &bugs {
+        println!("  {b}");
     }
 
     // Emit-path coverage (P2): which emitter decision points the corpus exercised.

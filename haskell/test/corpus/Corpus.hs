@@ -10,9 +10,11 @@
 -- conversion/parse Core survives to runtime (a folded literal tests nothing).
 module Corpus where
 
+import Data.Int (Int8)
 import Data.List (foldl', nub, sort)
 import Data.Maybe (mapMaybe)
 import Data.Ratio ((%))
+import Data.Word (Word8)
 
 -- NOINLINE seeds — opaque inputs that defeat constant-folding.
 {-# NOINLINE seedI5 #-}
@@ -224,7 +226,100 @@ concatMapList = concatMap (\x -> [x, x * 10]) [1, 2, 3]
 unwordsJoin :: String
 unwordsJoin = unwords ["hello", "world", "foo"]
 
+-- ── Family I: primop / FFI-stress — exercise broad opcode + C-likely surface ──
+-- Targets unhit primops (Float*, Double transcendentals, Narrow*, Seq) so the
+-- coverage % rises AND any unsupported-FFI / unresolved-external survivor is named.
+
+floatingSin :: Double
+floatingSin = sin 1.0 + cos 0.5
+
+floatingExpLog :: Double
+floatingExpLog = exp 1.0 + log 2.718281828
+
+floatingTanAtan :: Double
+floatingTanAtan = tan 0.5 + atan2 1.0 2.0
+
+floatingPow :: Double
+floatingPow = 2.0 ** 10.0
+
+floatVal :: Float
+floatVal = let x = 1.5 :: Float in x * 2.0 + sqrt x
+
+floatCompare :: Bool
+floatCompare = (1.5 :: Float) < 2.5 && (3.0 :: Float) >= 3.0
+
+narrowWord8 :: Int
+narrowWord8 = fromIntegral (fromIntegral (300 :: Int) :: Word8)
+
+narrowInt8 :: Int
+narrowInt8 = fromIntegral (fromIntegral (200 :: Int) :: Int8)
+
+seqForce :: Int
+seqForce = let x = 1 + 2 :: Int in x `seq` (x * 10)
+
+floorOfSin :: Int
+floorOfSin = floor (sin 1.0 * 100.0 :: Double)
+
+-- ── Family J: laziness / strictness / thunk ──
+
+lazyConField :: Int
+lazyConField = snd (error "must stay unforced", 5 :: Int)
+
+bangStrict :: Int
+bangStrict = let !x = 3 + 4 :: Int in x * 2
+
+seqChain :: Int
+seqChain = seq (1 + 1 :: Int) (seq (2 + 2 :: Int) 42)
+
+takeInfinite :: [Int]
+takeInfinite = take 5 [0 ..]
+
+fibsTake :: [Int]
+fibsTake = take 8 fibs
+  where
+    fibs = 0 : 1 : zipWith (+) fibs (tail fibs)
+
+zipInfinite :: [Int]
+zipInfinite = take 4 (zipWith (*) [1 ..] [10, 20 ..])
+
+repeatTake :: [Int]
+repeatTake = take 3 (repeat 7)
+
+iterateTake :: [Int]
+iterateTake = take 5 (iterate (* 2) 1)
+
+sharedThunk :: Int
+sharedThunk = let t = sum [1 .. 100 :: Int] in t + t
+
+-- ── Family K: GC / heap stress — large intermediates; eval VecHeap must agree
+-- with the JIT copying collector on the final VALUE (a GC bug = value divergence).
+
+-- Sizes capped ~1000: large enough to churn the JIT copying GC, small enough
+-- that eval's recursive Drop of the intermediate Value spine stays under the
+-- host-thread stack (host-stack-overflow-class). The VALUE (an Int) must agree.
+gcMapSum :: Int
+gcMapSum = sum (map (* 2) [1 .. 1000])
+
+gcConcatLen :: Int
+gcConcatLen = length (concat (replicate 40 [1 .. 25 :: Int]))
+
+gcFilterLen :: Int
+gcFilterLen = length (filter even [1 .. 2000 :: Int])
+
+gcReverseSum :: Int
+gcReverseSum = sum (reverse [1 .. 1000])
+
+gcTreeBuild :: Int
+gcTreeBuild = sumTree (buildTree 10)
+
+gcStringAlloc :: Int
+gcStringAlloc = foldl' (\acc x -> acc + length (show x)) 0 [1 .. 800 :: Int]
+
 -- ── supporting decls (not captured as bindings themselves) ──
+
+buildTree :: Int -> Tree
+buildTree 0 = Leaf 1
+buildTree n = Branch (buildTree (n - 1)) (buildTree (n - 1))
 
 data StrictPair = SP !Int !Int
 
