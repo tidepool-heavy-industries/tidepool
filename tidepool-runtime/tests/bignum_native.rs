@@ -28,10 +28,65 @@ fn show_pure(body: &str) -> serde_json::Value {
         .unwrap()
 }
 
+/// Run a `Double` binding and return its rendered JSON number.
+fn dbl_pure(body: &str) -> serde_json::Value {
+    let body = body.to_string();
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || {
+            let src = format!("module M where\nx :: Double\nx = {body}\n");
+            match compile_and_run_pure(&src, "x", &[]) {
+                Ok(r) => r.to_json(),
+                Err(e) => panic!("eval failed for `{body}`: {e}"),
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+// The ORIGINAL trigger: large base-10-exponent Double literals desugar to a
+// runtime `rationalToDouble` computation. Two over-collection layers dragged the
+// type-representation machinery into its closure via the DEAD error branches
+// (ratio/divide-by-zero exceptions carry `Typeable` `SomeException`):
+// GHC.Fingerprint (MD5) AND GHC.Data.Typeable (`mkTrCon1/2/3`). Both are now
+// pruned at the module boundary (`isNeverResolve` -> lazy poison), so the
+// formerly force-trapped externals stay un-forced in the dead branches.
+//
+// With that resolved, these now reach the SAME blocker as `from_integral_to_double`
+// below: `GHC.Float.roundingMode#: IN` — a positive value reaching the negative-
+// bignat (`IN`) constructor branch in the JIT's Integer IS/IP/IN case dispatch
+// (integerToBinaryFloat' / roundingMode#). #1 (computed Integer->Double) and #2
+// (big Double literals) are therefore one root cause: the Integer-constructor
+// dispatch in the GHC.Float Double-conversion path. Tracked together.
+#[test]
+#[ignore = "GHC.Float roundingMode#: IN — JIT Integer IS/IP/IN dispatch (shared with from_integral_to_double)"]
+fn big_double_e308() {
+    assert_eq!(dbl_pure("1.0e308"), json!(1.0e308));
+}
+
+#[test]
+#[ignore = "GHC.Float roundingMode#: IN — JIT Integer IS/IP/IN dispatch (shared with from_integral_to_double)"]
+fn big_double_max_finite() {
+    assert_eq!(
+        dbl_pure("1.7976931348623157e308"),
+        json!(1.7976931348623157e308)
+    );
+}
+
+#[test]
+#[ignore = "GHC.Float roundingMode#: IN — JIT Integer IS/IP/IN dispatch (shared with from_integral_to_double)"]
+fn big_double_neg_exp() {
+    assert_eq!(dbl_pure("1.0e-300"), json!(1.0e-300));
+}
+
 #[test]
 fn diag_computed_pos() {
     // 2^100 > 0 — exercises the computed-BigNat dispatch (IS x / DEFAULT).
-    assert_eq!(show_pure("show ((2 ^ (100 :: Int) :: Integer) > 0)"), json!("True"));
+    assert_eq!(
+        show_pure("show ((2 ^ (100 :: Int) :: Integer) > 0)"),
+        json!("True")
+    );
 }
 
 #[test]

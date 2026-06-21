@@ -163,7 +163,8 @@ resolveExternals varIdFn hscEnv binds = do
     -- boundary keeps that out of the table; the dead reference becomes a poison.
     isNeverResolve :: Var -> Bool
     isNeverResolve v = case nameModule_maybe (varName v) of
-      Just m  -> "Fingerprint" `isInfixOf` moduleNameString (moduleName m)
+      Just m  -> let mn = moduleNameString (moduleName m)
+                 in "Fingerprint" `isInfixOf` mn || "Typeable" `isInfixOf` mn
       Nothing -> False
 
     toRecPairs :: CoreBind -> [(Var, CoreExpr)]
