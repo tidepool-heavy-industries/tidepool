@@ -398,6 +398,31 @@ pcInt64Arith = sI64 + sI64 * 2 - 1
 pcInt64Cmp :: Bool
 pcInt64Cmp = sI64 < 6000000000 && sI64 > 1
 
+{-# NOINLINE sW8 #-}
+sW8 :: Word8
+sW8 = 200
+
+pcWordMul :: Word
+pcWordMul = sW * sW * 3
+
+pcWordCmp :: Bool
+pcWordCmp = sW /= 5 && sW >= 1 && sW * 2 > 10
+
+pcDoubleFabs :: Double
+pcDoubleFabs = abs sD + abs (negate sD - 1.0)
+
+pcWord8Arith :: Int
+pcWord8Arith = fromIntegral (sW8 + 50 - 10)
+
+pcWord8Cmp :: Bool
+pcWord8Cmp = sW8 < 250 && sW8 >= 100
+
+pcQuotRemW :: Word
+pcQuotRemW = let (q, r) = quotRem sW 3 in q + r
+
+pcDivModInt :: Int
+pcDivModInt = let (q, r) = divMod sI 7 in q * 100 + r
+
 -- ── supporting decls (not captured as bindings themselves) ──
 
 buildTree :: Int -> Tree
