@@ -972,6 +972,72 @@ fn is_trivial_field(idx: usize, expr: &CoreExpr) -> bool {
     }
 }
 
+/// Topologically sort deferred simple LetRec bindings so each appears AFTER the
+/// deferred-simple siblings it (transitively) depends on. `all_bindings` is the
+/// full Rec group (the dependency graph spans Lam/Con siblings too). A true
+/// cycle leaves its members un-orderable; they are appended last (resolving to
+/// unresolved-on-force — the `cycle` Known-Limit). Binding in this order lets
+/// each thunk capture its already-bound deps instead of dropping them.
+fn topo_sort_deferred_simple(
+    deferred_simple: Vec<(VarId, usize)>,
+    all_bindings: &[(VarId, usize)],
+    tree: &CoreExpr,
+) -> Vec<(VarId, usize)> {
+    let deferred_set: FxHashSet<VarId> = deferred_simple.iter().map(|(b, _)| *b).collect();
+
+    let mut direct_deps: FxHashMap<VarId, Vec<VarId>> =
+        FxHashMap::with_capacity_and_hasher(all_bindings.len(), Default::default());
+    for (binder, rhs_idx) in all_bindings {
+        let fvs = tidepool_repr::free_vars::free_vars(&tree.extract_subtree(*rhs_idx));
+        direct_deps.insert(*binder, fvs.into_iter().collect());
+    }
+
+    let mut reachable_deferred: FxHashMap<VarId, FxHashSet<VarId>> =
+        FxHashMap::with_capacity_and_hasher(deferred_simple.len(), Default::default());
+    for &(start_node, _) in &deferred_simple {
+        let mut visited = FxHashSet::default();
+        let mut stack = vec![start_node];
+        let mut reached = FxHashSet::default();
+
+        while let Some(node) = stack.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            if node != start_node && deferred_set.contains(&node) {
+                reached.insert(node);
+            }
+            if let Some(neighbors) = direct_deps.get(&node) {
+                for &next in neighbors {
+                    stack.push(next);
+                }
+            }
+        }
+        reachable_deferred.insert(start_node, reached);
+    }
+
+    let mut sorted = Vec::with_capacity(deferred_simple.len());
+    let mut remaining: Vec<(VarId, usize)> = deferred_simple;
+    let mut progress = true;
+    while !remaining.is_empty() && progress {
+        progress = false;
+        let mut next_remaining = Vec::with_capacity(remaining.len());
+        for (binder, rhs_idx) in remaining {
+            let blocked = reachable_deferred[&binder]
+                .iter()
+                .any(|fv| !sorted.iter().any(|(b, _): &(VarId, usize)| *b == *fv));
+            if blocked {
+                next_remaining.push((binder, rhs_idx));
+            } else {
+                sorted.push((binder, rhs_idx));
+                progress = true;
+            }
+        }
+        remaining = next_remaining;
+    }
+    sorted.extend(remaining);
+    sorted
+}
+
 // ---------------------------------------------------------------------------
 // Lam compilation helper (extracted for readability)
 // ---------------------------------------------------------------------------
@@ -2048,26 +2114,6 @@ impl EmitContext {
                     }
                     args.ctx.env.insert(binder, val);
                 }
-                EmitWork::LetRecPostSimple { binder, state_idx } => {
-                    let val = vals.pop().ok_or_else(|| {
-                        EmitError::InternalError("LetRecPostSimple: empty value stack".into())
-                    })?;
-                    if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                        args.ctx
-                            .trace_scope(&format!("insert LetRec(simple) {:?}", binder));
-                    }
-                    args.ctx.env.insert(binder, val);
-                    Self::letrec_post_simple_step(
-                        EmitArgs {
-                            ctx: args.ctx,
-                            sess: args.sess,
-                            builder: args.builder,
-                            tail: TailCtx::NonTail,
-                        },
-                        &binder,
-                        state_idx,
-                    )?;
-                }
                 EmitWork::LetRecFinish {
                     body,
                     state_idx,
@@ -2287,21 +2333,24 @@ impl EmitContext {
                 )
             });
 
-        // If no recursive bindings, push simple evals onto work stack
+        // All-simple Rec (no Lam/Con): no closures/cyclic data to knot-tie, so
+        // there is no pre-alloc and no incremental fill. Classify exactly like the
+        // rec-present path — error-call RHS → lazy poison; everything else binds
+        // in topological order under the lazy-default rule (thunk unless the RHS
+        // is trivially resolvable now). The LetRecFinish then evaluates the body.
         if rec_bindings.is_empty() {
-            // Store empty deferred state for post-simple steps
             let state_idx = args.ctx.push_letrec_state(LetRecDeferredState {
                 pending_capture_updates: FxHashMap::default(),
                 deferred_con_deps: Vec::new(),
             });
-
-            // Push finish + simple evals in reverse order (LIFO)
             work.push(EmitWork::LetRecFinish {
                 body,
                 state_idx,
                 tail,
             });
-            for (binder, rhs_idx) in simple_bindings.iter().rev() {
+
+            let mut deferred_simple = Vec::with_capacity(simple_bindings.len());
+            for (binder, rhs_idx) in &simple_bindings {
                 if EmitContext::rhs_is_error_call_in_group(args.sess.tree, *rhs_idx, &group) {
                     let poison_sv = emit_error_binding(
                         EmitArgs {
@@ -2314,16 +2363,44 @@ impl EmitContext {
                     )?;
                     if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
                         args.ctx
-                            .trace_scope(&format!("defer error LetRec(simple) {:?}", binder));
+                            .trace_scope(&format!("defer error LetRec(all-simple) {:?}", binder));
                     }
                     args.ctx.env.insert(*binder, poison_sv);
                 } else {
-                    work.push(EmitWork::LetRecPostSimple {
-                        binder: *binder,
-                        state_idx,
-                    });
-                    work.push(EmitWork::Eval(*rhs_idx, TailCtx::NonTail));
+                    deferred_simple.push((*binder, *rhs_idx));
                 }
+            }
+            let deferred_simple =
+                topo_sort_deferred_simple(deferred_simple, bindings, args.sess.tree);
+            for (binder, rhs_idx) in deferred_simple.iter() {
+                let resolvable_now = is_trivial_field(*rhs_idx, args.sess.tree)
+                    && tidepool_repr::free_vars::free_vars(
+                        &args.sess.tree.extract_subtree(*rhs_idx),
+                    )
+                    .iter()
+                    .all(|v| args.ctx.env.contains_key(v));
+                let sv = if resolvable_now {
+                    emit_subtree(
+                        EmitArgs {
+                            ctx: args.ctx,
+                            sess: args.sess,
+                            builder: args.builder,
+                            tail: TailCtx::NonTail,
+                        },
+                        *rhs_idx,
+                    )?
+                } else {
+                    emit_thunk(
+                        EmitArgs {
+                            ctx: args.ctx,
+                            sess: args.sess,
+                            builder: args.builder,
+                            tail: TailCtx::NonTail,
+                        },
+                        *rhs_idx,
+                    )?
+                };
+                args.ctx.env.insert(*binder, sv);
             }
             return Ok(());
         }
@@ -2489,15 +2566,14 @@ impl EmitContext {
             args.ctx.env.insert(binder, SsaVal::HeapPtr(ptr));
         }
 
-        // Phase 2.5: Evaluate trivial simple bindings (Var aliases) before
-        // Lam body compilation. These are just env lookups that don't depend
-        // on closure code pointers.
+        // Phase 2.5: classify simple bindings. An error-call RHS binds a lazy
+        // poison closure now (the error fires only on force). Everything else is
+        // pushed to `deferred_simple`; the topo-sorted Phase 3c loop binds each
+        // lazily (a thunk) \u2014 or eagerly when it is trivially resolvable now.
+        // (This subsumes the old Var-alias-to-already-bound fast path, Gap A: a
+        // Var alias is just a trivially-resolvable RHS handled in Phase 3c.)
         let mut deferred_simple = Vec::with_capacity(simple_bindings.len());
         for (binder, rhs_idx) in &simple_bindings {
-            let alias_target = match &args.sess.tree.nodes[*rhs_idx] {
-                CoreFrame::Var(v) => Some(*v),
-                _ => None,
-            };
             if EmitContext::rhs_is_error_call_in_group(args.sess.tree, *rhs_idx, &group) {
                 let poison_sv = emit_error_binding(
                     EmitArgs {
@@ -2510,38 +2586,9 @@ impl EmitContext {
                 )?;
                 if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
                     args.ctx
-                        .trace_scope(&format!("defer error LetRec(trivial) {:?}", binder));
+                        .trace_scope(&format!("defer error LetRec(simple) {:?}", binder));
                 }
                 args.ctx.env.insert(*binder, poison_sv);
-            } else if let Some(target) = alias_target {
-                // A bare `Var` alias is trivial \u2014 just an env lookup \u2014 but ONLY when
-                // its target is already bound: an outer var, a rec binder inserted
-                // in Phase 2, or an alias resolved earlier in this loop. If the
-                // target is a sibling SIMPLE binding still pending (e.g. an App-CAF
-                // `start = go 1 0`), resolving the alias now looks up an absent var
-                // and binds this alias to an UnresolvedVar trap \u2014 which then fires
-                // when the body forces it. Defer it instead so the topological sort
-                // below evaluates it AFTER its target. (sum [1..100], properFraction
-                // and realToFrac all produce such `result = computation` aliases:
-                // their post-resolution Rec ends in `alias = Var(caf); body = alias`.)
-                if args.ctx.env.contains_key(&target) {
-                    let rhs_val = emit_subtree(
-                        EmitArgs {
-                            ctx: args.ctx,
-                            sess: args.sess,
-                            builder: args.builder,
-                            tail: TailCtx::NonTail,
-                        },
-                        *rhs_idx,
-                    )?;
-                    if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                        args.ctx
-                            .trace_scope(&format!("insert LetRec(trivial) {:?}", binder));
-                    }
-                    args.ctx.env.insert(*binder, rhs_val);
-                } else {
-                    deferred_simple.push((*binder, *rhs_idx));
-                }
             } else {
                 deferred_simple.push((*binder, *rhs_idx));
             }
@@ -2790,63 +2837,9 @@ impl EmitContext {
             }
         }
 
-        // Topological sort for deferred simple bindings
-        let deferred_simple = {
-            let deferred_set: FxHashSet<VarId> = deferred_simple.iter().map(|(b, _)| *b).collect();
-
-            let mut direct_deps: FxHashMap<VarId, Vec<VarId>> =
-                FxHashMap::with_capacity_and_hasher(bindings.len(), Default::default());
-            for (binder, rhs_idx) in bindings {
-                let fvs =
-                    tidepool_repr::free_vars::free_vars(&args.sess.tree.extract_subtree(*rhs_idx));
-                direct_deps.insert(*binder, fvs.into_iter().collect());
-            }
-
-            let mut reachable_deferred: FxHashMap<VarId, FxHashSet<VarId>> =
-                FxHashMap::with_capacity_and_hasher(deferred_simple.len(), Default::default());
-            for &(start_node, _) in &deferred_simple {
-                let mut visited = FxHashSet::default();
-                let mut stack = vec![start_node];
-                let mut reached = FxHashSet::default();
-
-                while let Some(node) = stack.pop() {
-                    if !visited.insert(node) {
-                        continue;
-                    }
-                    if node != start_node && deferred_set.contains(&node) {
-                        reached.insert(node);
-                    }
-                    if let Some(neighbors) = direct_deps.get(&node) {
-                        for &next in neighbors {
-                            stack.push(next);
-                        }
-                    }
-                }
-                reachable_deferred.insert(start_node, reached);
-            }
-
-            let mut sorted = Vec::with_capacity(deferred_simple.len());
-            let mut remaining: Vec<(VarId, usize)> = deferred_simple;
-            let mut progress = true;
-            while !remaining.is_empty() && progress {
-                progress = false;
-                let mut next_remaining = Vec::with_capacity(remaining.len());
-                for (binder, rhs_idx) in remaining {
-                    let blocked = reachable_deferred[&binder]
-                        .iter()
-                        .any(|fv| !sorted.iter().any(|(b, _): &(VarId, usize)| *b == *fv));
-                    if blocked {
-                        next_remaining.push((binder, rhs_idx));
-                    } else {
-                        sorted.push((binder, rhs_idx));
-                        progress = true;
-                    }
-                }
-                remaining = next_remaining;
-            }
-            sorted.extend(remaining);
-            sorted
-        };
+        // Bind deferred simple bindings in topological order (deps first) so each
+        // thunk captures its already-bound siblings (see Phase 3c below).
+        let deferred_simple = topo_sort_deferred_simple(deferred_simple, bindings, args.sess.tree);
 
         // Build deferred Con deps tracking
         let mut deferred_con_deps: Vec<DeferredConDep> = Vec::with_capacity(deferred_cons.len());
@@ -2869,7 +2862,7 @@ impl EmitContext {
             });
         }
 
-        // Store deferred state for LetRecSimpleEval/LetRecPostSimple/LetRecFinish
+        // Store deferred state for the Phase 3c post-step + LetRecFinish
         let state_idx = args.ctx.push_letrec_state(LetRecDeferredState {
             pending_capture_updates,
             deferred_con_deps,
@@ -2882,9 +2875,24 @@ impl EmitContext {
             tail,
         });
 
-        for (binder, rhs_idx) in deferred_simple.iter().rev() {
-            if EmitContext::rhs_is_error_call_in_group(args.sess.tree, *rhs_idx, &group) {
-                let poison_sv = emit_error_binding(
+        // Phase 3c: bind deferred simple bindings in TOPOLOGICAL order (deps
+        // first). Lazy-default: thunkify the RHS, EXCEPT when it is trivially
+        // resolvable now \u2014 a WHNF / strict-primop expr (`is_trivial_field`) all
+        // of whose free vars are already in env \u2014 which we evaluate eagerly
+        // (fast path, no thunk; this subsumes the old Var-alias-to-bound Gap A
+        // case). Topo order guarantees each binding's deferred-simple deps are
+        // already in env, so `emit_thunk` captures them rather than dropping;
+        // a true cycle (the `cycle` Known-Limit) leaves a dep unbound and
+        // resolves to unresolved-on-force, unchanged. The post-step then fills
+        // any closure captures / deferred Con fields that depended on this
+        // binder with its (thunk or eager) value. Errors were poisoned in 2.5.
+        for (binder, rhs_idx) in deferred_simple.iter() {
+            let resolvable_now = is_trivial_field(*rhs_idx, args.sess.tree)
+                && tidepool_repr::free_vars::free_vars(&args.sess.tree.extract_subtree(*rhs_idx))
+                    .iter()
+                    .all(|v| args.ctx.env.contains_key(v));
+            let sv = if resolvable_now {
+                emit_subtree(
                     EmitArgs {
                         ctx: args.ctx,
                         sess: args.sess,
@@ -2892,87 +2900,36 @@ impl EmitContext {
                         tail: TailCtx::NonTail,
                     },
                     *rhs_idx,
-                )?;
-                if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                    args.ctx
-                        .trace_scope(&format!("defer error LetRec(deferred) {:?}", binder));
-                }
-                args.ctx.env.insert(*binder, poison_sv);
-                // Run post-step inline: closures may capture error-poisoned
-                // bindings, and deferred Cons may depend on them. Without this,
-                // capture slots stay zero-initialized \u2192 SIGSEGV instead of
-                // clean poison closure invocation.
-                Self::letrec_post_simple_step(
+                )?
+            } else {
+                emit_thunk(
                     EmitArgs {
                         ctx: args.ctx,
                         sess: args.sess,
                         builder: args.builder,
                         tail: TailCtx::NonTail,
                     },
-                    binder,
-                    state_idx,
-                )?;
-            } else {
-                let refs_deferred_con = !args
-                    .ctx
-                    .letrec_state(state_idx)
-                    .deferred_con_deps
-                    .is_empty()
-                    && args
-                        .ctx
-                        .letrec_state(state_idx)
-                        .deferred_con_deps
-                        .iter()
-                        .any(|d| d.remaining_deps.contains(binder));
-                // Check if thunkification would drop sibling deps: emit_thunk
-                // creates a fresh EmitContext and only captures vars in the
-                // current env. Sibling deferred simple bindings not yet in env
-                // would be dropped from captures \u2192 unresolved var at runtime.
-                let can_thunkify = if refs_deferred_con {
-                    let body_tree = args.sess.tree.extract_subtree(*rhs_idx);
-                    let fvs = tidepool_repr::free_vars::free_vars(&body_tree);
-                    !fvs.iter().any(|v| {
-                        !args.ctx.env.contains_key(v) && deferred_simple.iter().any(|(b, _)| b == v)
-                    })
-                } else {
-                    false
-                };
-                if can_thunkify {
-                    // Thunked: compile as thunk inline (no work stack needed,
-                    // emit_thunk creates a new EmitContext \u2014 bounded recursion).
-                    let thunk_val = emit_thunk(
-                        EmitArgs {
-                            ctx: args.ctx,
-                            sess: args.sess,
-                            builder: args.builder,
-                            tail: TailCtx::NonTail,
-                        },
-                        *rhs_idx,
-                    )?;
-                    if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                        args.ctx
-                            .trace_scope(&format!("insert LetRec(simple) {:?}", binder));
-                    }
-                    args.ctx.env.insert(*binder, thunk_val);
-                    Self::letrec_post_simple_step(
-                        EmitArgs {
-                            ctx: args.ctx,
-                            sess: args.sess,
-                            builder: args.builder,
-                            tail: TailCtx::NonTail,
-                        },
-                        binder,
-                        state_idx,
-                    )?;
-                } else {
-                    // Non-thunked: push eval + post-step onto work stack
-                    work.push(EmitWork::LetRecPostSimple {
-                        binder: *binder,
-                        state_idx,
-                    });
-                    work.push(EmitWork::Eval(*rhs_idx, TailCtx::NonTail));
-                }
+                    *rhs_idx,
+                )?
+            };
+            if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+                args.ctx.trace_scope(&format!(
+                    "{} LetRec(simple) {:?}",
+                    if resolvable_now { "insert" } else { "thunk" },
+                    binder
+                ));
             }
+            args.ctx.env.insert(*binder, sv);
+            Self::letrec_post_simple_step(
+                EmitArgs {
+                    ctx: args.ctx,
+                    sess: args.sess,
+                    builder: args.builder,
+                    tail: TailCtx::NonTail,
+                },
+                binder,
+                state_idx,
+            )?;
         }
 
         Ok(())
@@ -3144,10 +3101,6 @@ impl EmitContext {
         LetRecStateId(idx)
     }
 
-    fn letrec_state(&self, id: LetRecStateId) -> &LetRecDeferredState {
-        &self.letrec_states[id.0]
-    }
-
     fn letrec_state_mut(&mut self, id: LetRecStateId) -> &mut LetRecDeferredState {
         &mut self.letrec_states[id.0]
     }
@@ -3163,11 +3116,6 @@ enum EmitWork {
     Eval(usize, TailCtx),
     /// Pop value stack, bind to env
     Bind(VarId),
-    /// After deferred simple binding eval: pop value, bind, fill captures + Cons
-    LetRecPostSimple {
-        binder: VarId,
-        state_idx: LetRecStateId,
-    },
     /// Phases 3a'/3d + push body eval
     LetRecFinish {
         body: usize,
