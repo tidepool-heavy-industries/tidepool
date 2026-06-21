@@ -1511,46 +1511,6 @@ fn emit_thunk(args: EmitArgs, body_idx: usize) -> Result<SsaVal, EmitError> {
     Ok(SsaVal::HeapPtr(thunk_ptr))
 }
 
-/// Bind an error-call RHS without evaluating it. Preference order:
-/// 1. Message statically extractable -> message-carrying lazy poison.
-/// 2. Otherwise -> a real thunk: forcing it executes the Raise, which
-///    materializes the message from the live argument at runtime
-///    (`runtime_error_dynamic`).
-/// 3. Thunk captures unavailable in this context (subtree-severed sibling
-///    deps) -> message-less lazy poison, the old behavior.
-fn emit_error_binding(args: EmitArgs, rhs_idx: usize) -> Result<SsaVal, EmitError> {
-    let kind = EmitContext::extract_error_kind(args.sess.tree, rhs_idx);
-    if let Some(msg) = EmitContext::extract_error_message(args.sess.tree, rhs_idx) {
-        let addr = crate::host_fns::error_poison_ptr_lazy_msg(kind, &msg) as i64;
-        let v = args.builder.ins().iconst(types::I64, addr);
-        return Ok(SsaVal::HeapPtr(v));
-    }
-    // Bare sentinel Var: no message expression exists anywhere — the poison
-    // value is exact (and self-swallows non-string args if applied later).
-    if matches!(&args.sess.tree.nodes[rhs_idx], CoreFrame::Var(_)) {
-        let addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
-        let v = args.builder.ins().iconst(types::I64, addr);
-        return Ok(SsaVal::HeapPtr(v));
-    }
-    match emit_thunk(
-        EmitArgs {
-            ctx: args.ctx,
-            sess: args.sess,
-            builder: args.builder,
-            tail: TailCtx::NonTail,
-        },
-        rhs_idx,
-    ) {
-        Ok(v) => Ok(v),
-        Err(EmitError::MissingCaptureVar(_, _)) => {
-            let addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
-            let v = args.builder.ins().iconst(types::I64, addr);
-            Ok(SsaVal::HeapPtr(v))
-        }
-        Err(e) => Err(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -1673,58 +1633,6 @@ impl EmitContext {
                 // lowered to a conditional `EmitFrame::Raise`, but as a LetRec
                 // SIMPLE binding the strict spine would evaluate it eagerly and
                 // throw regardless of control flow unless it is deferred here.
-                CoreFrame::PrimOp {
-                    op: PrimOpKind::Raise,
-                    ..
-                } => return true,
-                _ => return false,
-            }
-        }
-    }
-
-    /// Group-aware variant of `rhs_is_error_call`: additionally follows the
-    /// App-spine head through SIBLING binders of the same binding group.
-    ///
-    /// GHC .hi unfoldings float error CAFs in two steps, e.g. for the
-    /// Foldable [] instance of foldl1:
-    ///   lvl  = \cs -> error (pushCallStack ... cs) "foldl1"   -- lambda: safe
-    ///   lvl2 = lvl callStackValue                             -- App CAF: bottom!
-    /// The plain check sees `lvl2`'s head var is not a sentinel and lets the
-    /// eager Let spine evaluate it at setup — raising "foldl1" before any case
-    /// dispatch ever runs. Following the head into `lvl`'s RHS (stripping its
-    /// lambda binders, since reaching it via an App spine means they get
-    /// applied) finds the sentinel and defers the binding instead.
-    ///
-    /// A `Lam` RHS at the top level is still NOT an error call (binding a
-    /// lambda value is always safe); lambdas are only stripped after entering
-    /// a sibling via its use in head position. Cycle-guarded via `visited`.
-    fn rhs_is_error_call_in_group(
-        tree: &CoreExpr,
-        rhs_idx: usize,
-        group: &FxHashMap<VarId, usize>,
-    ) -> bool {
-        let mut visited: FxHashSet<VarId> = FxHashSet::default();
-        let mut idx = rhs_idx;
-        loop {
-            match &tree.nodes[idx] {
-                CoreFrame::Var(v) => {
-                    if (v.0 >> 56) as u8 == tidepool_repr::ERROR_SENTINEL_TAG {
-                        return true;
-                    }
-                    match group.get(v) {
-                        Some(&sib_rhs) if visited.insert(*v) => {
-                            idx = sib_rhs;
-                            while let CoreFrame::Lam { body, .. } = &tree.nodes[idx] {
-                                idx = *body;
-                            }
-                        }
-                        _ => return false,
-                    }
-                }
-                CoreFrame::App { fun, .. } => idx = *fun,
-                // See `rhs_is_error_call`: a `case <error> of {}` bottoms via its
-                // forced scrutinee; `raise# exc` is a bottoming RHS.
-                CoreFrame::Case { scrutinee, .. } => idx = *scrutinee,
                 CoreFrame::PrimOp {
                     op: PrimOpKind::Raise,
                     ..
@@ -1892,31 +1800,7 @@ impl EmitContext {
                                     &args.sess.tree.extract_subtree(body),
                                 );
                                 if body_fvs.binary_search(&binder).is_ok() {
-                                    if Self::rhs_is_error_call(args.sess.tree, rhs) {
-                                        // Bind lazily: error only triggers on force/call.
-                                        let poison_sv = emit_error_binding(
-                                            EmitArgs {
-                                                ctx: args.ctx,
-                                                sess: args.sess,
-                                                builder: args.builder,
-                                                tail: TailCtx::NonTail,
-                                            },
-                                            rhs,
-                                        )?;
-                                        if crate::debug::trace_level()
-                                            >= crate::debug::TraceLevel::Scope
-                                        {
-                                            args.ctx.trace_scope(&format!(
-                                                "defer error LetNonRec {:?}",
-                                                binder
-                                            ));
-                                        }
-                                        let old_val = args.ctx.env.insert(binder, poison_sv);
-                                        // No RHS eval needed, just push cleanup and continue to body
-                                        work.push(EmitWork::LetCleanupMark(LetCleanup::Single(
-                                            binder, old_val,
-                                        )));
-                                    } else if is_trivial_field(rhs, args.sess.tree) {
+                                    if is_trivial_field(rhs, args.sess.tree) {
                                         // Trivial RHS (already WHNF \u2014 Var/Lit/Lam/Con \u2014 or a
                                         // strict, terminating PrimOp): evaluate eagerly. This is
                                         // the fast path; no thunk allocation.
@@ -2319,12 +2203,8 @@ impl EmitContext {
         work: &mut Vec<EmitWork>,
     ) -> Result<(), EmitError> {
         let tail = args.tail;
-        // Binder → RHS map for the group-aware error-CAF check (see
-        // rhs_is_error_call_in_group): floated error bindings can reference
-        // the sentinel only through a sibling lambda.
-        let group: FxHashMap<VarId, usize> = bindings.iter().copied().collect();
         // Split bindings: Lam/Con need 3-phase pre-allocation (recursive),
-        // everything else is evaluated eagerly as simple bindings first.
+        // everything else binds lazily as simple bindings (Phase 3c).
         let (rec_bindings, simple_bindings): (Vec<_>, Vec<_>) =
             bindings.iter().partition(|(_, rhs_idx)| {
                 matches!(
@@ -2349,27 +2229,8 @@ impl EmitContext {
                 tail,
             });
 
-            let mut deferred_simple = Vec::with_capacity(simple_bindings.len());
-            for (binder, rhs_idx) in &simple_bindings {
-                if EmitContext::rhs_is_error_call_in_group(args.sess.tree, *rhs_idx, &group) {
-                    let poison_sv = emit_error_binding(
-                        EmitArgs {
-                            ctx: args.ctx,
-                            sess: args.sess,
-                            builder: args.builder,
-                            tail: TailCtx::NonTail,
-                        },
-                        *rhs_idx,
-                    )?;
-                    if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                        args.ctx
-                            .trace_scope(&format!("defer error LetRec(all-simple) {:?}", binder));
-                    }
-                    args.ctx.env.insert(*binder, poison_sv);
-                } else {
-                    deferred_simple.push((*binder, *rhs_idx));
-                }
-            }
+            let deferred_simple: Vec<(VarId, usize)> =
+                simple_bindings.iter().map(|(b, r)| (*b, *r)).collect();
             let deferred_simple =
                 topo_sort_deferred_simple(deferred_simple, bindings, args.sess.tree);
             for (binder, rhs_idx) in deferred_simple.iter() {
@@ -2566,33 +2427,14 @@ impl EmitContext {
             args.ctx.env.insert(binder, SsaVal::HeapPtr(ptr));
         }
 
-        // Phase 2.5: classify simple bindings. An error-call RHS binds a lazy
-        // poison closure now (the error fires only on force). Everything else is
-        // pushed to `deferred_simple`; the topo-sorted Phase 3c loop binds each
-        // lazily (a thunk) \u2014 or eagerly when it is trivially resolvable now.
-        // (This subsumes the old Var-alias-to-already-bound fast path, Gap A: a
-        // Var alias is just a trivially-resolvable RHS handled in Phase 3c.)
-        let mut deferred_simple = Vec::with_capacity(simple_bindings.len());
-        for (binder, rhs_idx) in &simple_bindings {
-            if EmitContext::rhs_is_error_call_in_group(args.sess.tree, *rhs_idx, &group) {
-                let poison_sv = emit_error_binding(
-                    EmitArgs {
-                        ctx: args.ctx,
-                        sess: args.sess,
-                        builder: args.builder,
-                        tail: TailCtx::NonTail,
-                    },
-                    *rhs_idx,
-                )?;
-                if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                    args.ctx
-                        .trace_scope(&format!("defer error LetRec(simple) {:?}", binder));
-                }
-                args.ctx.env.insert(*binder, poison_sv);
-            } else {
-                deferred_simple.push((*binder, *rhs_idx));
-            }
-        }
+        // Phase 2.5: collect simple bindings. The topo-sorted Phase 3c loop binds
+        // each lazily (a thunk) \u2014 or eagerly when it is trivially resolvable now.
+        // An error-call RHS (`error \u2026` / `raise#` / `case error of {}`) is
+        // non-trivial, so it thunkifies \u2192 forced only on demand \u2192 throws exactly
+        // as the old poison closure did (error-reporting parity verified). This
+        // also subsumes Gap A: a Var alias is a trivially-resolvable RHS in 3c.
+        let deferred_simple: Vec<(VarId, usize)> =
+            simple_bindings.iter().map(|(b, r)| (*b, *r)).collect();
 
         // Phase 3a: Compile Lam bodies and set code pointers.
         // Capture VALUES are NOT filled here \u2014 some captures reference
