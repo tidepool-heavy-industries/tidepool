@@ -30,6 +30,7 @@ use tidepool_testing::proptest::{check_jit_vs_eval_captured, CapturedOutcome};
 
 static META: &[u8] = include_bytes!("captured_core/meta.cbor");
 static ROUND_IN: &[u8] = include_bytes!("captured_core/reproRoundIN.cbor");
+static ROUND_IN_MIN: &[u8] = include_bytes!("captured_core/reproRoundINMin.cbor");
 static READ_INT: &[u8] = include_bytes!("captured_core/reproReadInt.cbor");
 
 const NURSERY: usize = 8 * 1024 * 1024;
@@ -49,6 +50,21 @@ fn boxed_double(v: &Value) -> Option<f64> {
         _ => None,
     }
 }
+
+/// Unwrap a boxed `I# n` (a `Con` with one `LitInt` field) to its `i64`.
+fn boxed_int(v: &Value) -> Option<i64> {
+    match v {
+        Value::Con(_, fields) => match fields.first() {
+            Some(Value::Lit(Literal::LitInt(n))) => Some(*n),
+            _ => None,
+        },
+        Value::Lit(Literal::LitInt(n)) => Some(*n),
+        _ => None,
+    }
+}
+
+/// The golden value `read "42" :: Int` must produce once #2 is fixed.
+const READ_INT_EXPECTED: i64 = 42;
 
 /// Run on a large stack: the real conversion / ReadP Core recurses deeper than
 /// the 2 MiB default test stack.
@@ -91,6 +107,34 @@ fn captured_round_in_is_jit_only_failure() {
     });
 }
 
+// #1 MINIMIZED — the same differential delta-debugged from 2630 down to 84 nodes
+// (replace_subtree with Lit holes, largest-first, preserving eval=1025.0 vs
+// JIT=roundingMode#:IN). The surviving live path is just the inlined
+// integerToBinaryFloat'/roundingMode# dispatch — 3 Cases (the IS/IP/IN case is
+// the one that misreads the tag) over the rebound Integer; the 28 LetRec binders
+// are dead holes. This is the precise target a fix must clear.
+#[test]
+fn captured_round_in_minimized_is_jit_only_failure() {
+    on_big_stack(|| {
+        let (expr, table) = load(ROUND_IN_MIN);
+        assert!(
+            expr.nodes.len() <= 100,
+            "minimized fixture should be ~84 nodes, got {}",
+            expr.nodes.len()
+        );
+        match check_jit_vs_eval_captured(&expr, &table, NURSERY) {
+            CapturedOutcome::JitOnlyFailure { eval, jit } => {
+                assert_eq!(boxed_double(&eval), Some(1025.0), "eval got {eval:?}");
+                assert!(
+                    matches!(&jit, JitError::Yield(YieldError::UserErrorMsg(m)) if m.contains("roundingMode#")),
+                    "expected roundingMode# divergence, got {jit:?}"
+                );
+            }
+            other => panic!("minimized #1 must stay a JitOnlyFailure differential, got {other:?}"),
+        }
+    });
+}
+
 // #2 — NOT a JIT-vs-eval differential. `read "42" :: Int` fails in BOTH engines:
 // the tree-walker yields `NotAFunction` and the JIT `BadFunPtrTag` (a constructor
 // in function position, reached through ReadP's newtype coercion). Because eval
@@ -114,6 +158,33 @@ fn captured_read_int_both_engines_fail() {
                 );
             }
             other => panic!("expected #2 to be BothFail (not a differential), got {other:?}"),
+        }
+    });
+}
+
+// #2 GOLDEN guard (eval-vs-EXPECTED). #2-class bugs are shared front-end /
+// newtype-coercion lowering failures that break BOTH engines, so the JIT-vs-eval
+// differential is structurally blind to them — they need an eval-vs-expected
+// golden. The golden: `read "42" :: Int` must produce 42 in BOTH engines
+// (CapturedOutcome::Agree(42)). It is #[ignore]'d because it is currently BLOCKED
+// on #2 (ReadP `~R#` newtype-coercion lowering lands a constructor in function
+// position). Drop the #[ignore] the moment #2 is fixed and it becomes a live
+// golden guard. The sibling `captured_read_int_both_engines_fail` is the active
+// tripwire that fires the instant #2's behaviour changes at all.
+#[test]
+#[ignore = "blocked on #2: ReadP ~R# newtype-coercion lowering (read yields a non-function)"]
+fn captured_read_int_golden_expects_42() {
+    on_big_stack(|| {
+        let (expr, table) = load(READ_INT);
+        match check_jit_vs_eval_captured(&expr, &table, NURSERY) {
+            CapturedOutcome::Agree(v) => assert_eq!(
+                boxed_int(&v),
+                Some(READ_INT_EXPECTED),
+                "read \"42\" must evaluate to 42 in both engines; got {v:?}"
+            ),
+            other => panic!(
+                "golden: read \"42\" must be {READ_INT_EXPECTED} in BOTH engines, got {other:?}"
+            ),
         }
     });
 }
