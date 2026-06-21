@@ -161,27 +161,16 @@ fn run_one(node: &[u8], meta: &[u8]) -> (bool, &'static str, String, BTreeSet<&'
 /// to `MATCH` (which still passes — then prune the stale entry).
 const KNOWN: &[(&str, &str, &str)] = &[
     // ── BUGS (implemented-but-wrong) ──
-    // #1 (roundingMode#:IN) FIXED — the convFromInt* fromIntegral cases now MATCH.
-    // Root cause was eager-eval of GHC's bottoming `case error "roundingMode#: IN"
-    // of {}` CAF (the error-deferral check missed it through the forced case
-    // scrutinee); fix in tidepool-codegen/src/emit/expr.rs. Entries pruned.
+    // The GHC.Float Double-conversion bugs are FIXED (entries pruned, now MATCH):
+    //  - #1 roundingMode#:IN (convFromInt*): eager-eval of GHC's bottoming
+    //    `case error "roundingMode#: IN" of {}` CAF — the error-deferral check
+    //    missed it through the forced case scrutinee.
+    //  - the rationalToDouble follow-on (convDoubleLitBig 1.0e308, convFromRational):
+    //    eager-eval of a `raise# exc` LetRec binding — the same check did not
+    //    recognise a `PrimOp Raise` RHS as bottoming.
+    // Both fixed in tidepool-codegen/src/emit/expr.rs (error-call walkers follow the
+    // case scrutinee AND treat raise# as a bottoming, deferred RHS).
     //
-    // FOLLOW-ON (un-masked by the #1 fix, same way PopCnt un-masked #1): the
-    // Double-literal / Rational->Double path (rationalToDouble) no longer raises
-    // roundingMode# but now raises a bare UserError — the JIT force-evaluates a
-    // (correctly-poisoned) error binding on the live path where eval defers it
-    // (eager-force class, distinct from the eager-CAF-eval #1 just fixed; eval
-    // returns the exact value). Tracked as a separate root-cause.
-    (
-        "convDoubleLitBig",
-        "JIT-BUG",
-        "FOLLOW-ON: rationalToDouble JIT eager-forces a poison (UserError); eval ok",
-    ),
-    (
-        "convFromRational",
-        "JIT-BUG",
-        "FOLLOW-ON: rationalToDouble JIT eager-forces a poison (UserError); eval ok",
-    ),
     // GADT with equality evidence — eval case-binder arity off, JIT SIGSEGV.
     (
         "gadtEval",
@@ -191,7 +180,11 @@ const KNOWN: &[(&str, &str, &str)] = &[
     // #2 — ReadP ~R# newtype coercion: a Con in function position. Both engines.
     ("readInt", "BOTH-BUG", "#2 read/ReadP newtype-coercion"),
     ("readListInt", "BOTH-BUG", "#2 read/ReadP newtype-coercion"),
-    ("readDouble", "BOTH-BUG", "#2 read + #1 (JIT roundingMode#)"),
+    (
+        "readDouble",
+        "BOTH-BUG",
+        "#2 read/ReadP (JIT BadFunPtrTag); Double-conv part now fixed",
+    ),
     // ── SUPPORT GAPS (missing primop / unresolved external) ──
     (
         "convProperFraction",

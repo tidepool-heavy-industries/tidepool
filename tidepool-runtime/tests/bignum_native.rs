@@ -46,20 +46,18 @@ fn dbl_pure(body: &str) -> serde_json::Value {
 }
 
 // The ORIGINAL trigger: large base-10-exponent Double literals desugar to a
-// runtime `rationalToDouble` computation. The roundingMode#:IN eager-CAF-eval bug
-// (#1) is now FIXED (see `from_integral_to_double`, which passes), but fixing it
-// UN-MASKED a distinct follow-on on this rationalToDouble path: the JIT now
-// force-evaluates a correctly-poisoned error binding on the live path (eval
-// defers it and returns the exact value) -> a bare UserError. A separate
-// root-cause (eager-force class), tracked apart from the fixed eager-CAF-eval #1.
+// runtime `rationalToDouble` computation. FIXED across two related root causes:
+// (a) the roundingMode#:IN eager-CAF-eval (#1, see `from_integral_to_double`), and
+// (b) this path's eager-eval of a `raise# exc` LetRec binding (rationalToDouble's
+// overflow/ratio-error throw) — the error-deferral check did not recognise a
+// `PrimOp Raise` RHS, so the strict spine threw it regardless of control flow.
+// Fix: the error-call walkers also treat `raise#` as a bottoming, deferred RHS.
 #[test]
-#[ignore = "FOLLOW-ON of the #1 fix: rationalToDouble now raises a bare UserError (JIT eager-forces a poison); distinct from the fixed roundingMode# eager-CAF-eval"]
 fn big_double_e308() {
     assert_eq!(dbl_pure("1.0e308"), json!(1.0e308));
 }
 
 #[test]
-#[ignore = "FOLLOW-ON of the #1 fix: rationalToDouble now raises a bare UserError (JIT eager-forces a poison); distinct from the fixed roundingMode# eager-CAF-eval"]
 fn big_double_max_finite() {
     assert_eq!(
         dbl_pure("1.7976931348623157e308"),
@@ -68,7 +66,6 @@ fn big_double_max_finite() {
 }
 
 #[test]
-#[ignore = "FOLLOW-ON of the #1 fix: rationalToDouble now raises a bare UserError (JIT eager-forces a poison); distinct from the fixed roundingMode# eager-CAF-eval"]
 fn big_double_neg_exp() {
     assert_eq!(dbl_pure("1.0e-300"), json!(1.0e-300));
 }

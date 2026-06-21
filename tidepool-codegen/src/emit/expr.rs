@@ -1601,6 +1601,16 @@ impl EmitContext {
                 // binding bottoms — follow the scrutinee (NOT the alt bodies,
                 // which are conditional, keeping branch-local errors un-poisoned).
                 CoreFrame::Case { scrutinee, .. } => idx = *scrutinee,
+                // `raise# exc` (GHC's primitive exception throw, e.g. the
+                // overflow / ratioZeroDenominator path in rationalToDouble) is a
+                // bottoming RHS just like `error …`. As an inline expression it is
+                // lowered to a conditional `EmitFrame::Raise`, but as a LetRec
+                // SIMPLE binding the strict spine would evaluate it eagerly and
+                // throw regardless of control flow unless it is deferred here.
+                CoreFrame::PrimOp {
+                    op: PrimOpKind::Raise,
+                    ..
+                } => return true,
                 _ => return false,
             }
         }
@@ -1647,8 +1657,12 @@ impl EmitContext {
                 }
                 CoreFrame::App { fun, .. } => idx = *fun,
                 // See `rhs_is_error_call`: a `case <error> of {}` bottoms via its
-                // forced scrutinee.
+                // forced scrutinee; `raise# exc` is a bottoming RHS.
                 CoreFrame::Case { scrutinee, .. } => idx = *scrutinee,
+                CoreFrame::PrimOp {
+                    op: PrimOpKind::Raise,
+                    ..
+                } => return true,
                 _ => return false,
             }
         }
