@@ -460,6 +460,12 @@ fn decode_literal(val: &Value) -> Result<Literal, ReadError> {
                 "LitString expects bytes".to_string(),
             )),
         },
+        "LitByteArray" => match &arr[1] {
+            Value::Bytes(b) => Ok(Literal::LitByteArray(b.clone())),
+            _ => Err(ReadError::InvalidLiteral(
+                "LitByteArray expects bytes".to_string(),
+            )),
+        },
         "LitFloat" => Ok(Literal::LitFloat(as_u64(&arr[1])?)),
         "LitDouble" => Ok(Literal::LitDouble(as_u64(&arr[1])?)),
         _ => Err(ReadError::InvalidLiteral(tag.to_string())),

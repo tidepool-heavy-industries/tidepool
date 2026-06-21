@@ -229,6 +229,10 @@ fn encode_literal(lit: &Literal) -> Value {
             Value::Text("LitString".to_string()),
             Value::Bytes(s.clone()),
         ]),
+        Literal::LitByteArray(s) => Value::Array(vec![
+            Value::Text("LitByteArray".to_string()),
+            Value::Bytes(s.clone()),
+        ]),
         Literal::LitFloat(f) => Value::Array(vec![
             Value::Text("LitFloat".to_string()),
             Value::Integer((*f).into()),

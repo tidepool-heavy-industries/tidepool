@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "tidepool-repr",
+    "tidepool-bignum",
     "tidepool-eval",
     "tidepool-testing",
     "tidepool-heap",

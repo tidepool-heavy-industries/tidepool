@@ -26,6 +26,11 @@ pub enum Literal {
     LitChar(char),
     /// UTF-8 or raw byte string.
     LitString(Vec<u8>),
+    /// Raw `ByteArray#` literal (e.g. a `BigNat#` payload): the bytes ARE the
+    /// array contents. Distinct from `LitString` so it lowers with the
+    /// ByteArray# layout (`sizeofByteArray#` reads the length prefix; no
+    /// unpackCString# `+8` adjustment) instead of the string layout.
+    LitByteArray(Vec<u8>),
     /// 32-bit floating point (stored as IEEE 754 bits).
     LitFloat(u64),
     /// 64-bit floating point (stored as IEEE 754 bits).
@@ -181,6 +186,7 @@ define_primops! {
     DoubleAtanh => "DoubleAtanh", "atanhDouble#";
     DoublePower => "DoublePower", "**##";
     Int2Double => "Int2Double", "int2Double#";
+    Word2Double => "Word2Double", "word2Double#";
     Double2Int => "Double2Int", "double2Int#";
     Int2Float => "Int2Float", "int2Float#";
     Float2Int => "Float2Int", "float2Int#";
@@ -190,6 +196,11 @@ define_primops! {
     IndexCharOffAddr => "IndexCharOffAddr", "indexCharOffAddr#";
     PlusAddr => "PlusAddr", "plusAddr#";
     Raise => "Raise", "raise#";
+    // Arithmetic-exception primops (GHC inserts these in ghc-bignum's underflow /
+    // divide-by-zero / overflow check branches). Bottoming; lowered to a runtime error.
+    RaiseUnderflow => "RaiseUnderflow", "raiseUnderflow#";
+    RaiseOverflow => "RaiseOverflow", "raiseOverflow#";
+    RaiseDivZero => "RaiseDivZero", "raiseDivZero#";
     NewByteArray => "NewByteArray", "newByteArray#";
     ReadWord8Array => "ReadWord8Array", "readWord8Array#";
     WriteWord8Array => "WriteWord8Array", "writeWord8Array#";
@@ -201,6 +212,7 @@ define_primops! {
     ShrinkMutableByteArray => "ShrinkMutableByteArray", "shrinkMutableByteArray#";
     ResizeMutableByteArray => "ResizeMutableByteArray", "resizeMutableByteArray#";
     Clz8 => "Clz8", "clz8#";
+    Clz => "Clz", "clz#";
     IntToInt64 => "IntToInt64", "intToInt64#";
     Int64ToWord64 => "Int64ToWord64", "int64ToWord64#";
     TimesInt2Hi => "TimesInt2Hi", "timesInt2Hi";
@@ -208,17 +220,22 @@ define_primops! {
     TimesInt2Overflow => "TimesInt2Overflow", "timesInt2Overflow";
     IndexWord8Array => "IndexWord8Array", "indexWord8Array#";
     IndexWord8OffAddr => "IndexWord8OffAddr", "indexWord8OffAddr#";
+    WriteWord8OffAddr => "WriteWord8OffAddr", "writeWord8OffAddr#";
+    ByteArrayContents => "ByteArrayContents", "byteArrayContents#";
     CompareByteArrays => "CompareByteArrays", "compareByteArrays#";
     WordToWord8 => "WordToWord8", "wordToWord8#";
     Word64And => "Word64And", "andWord64#";
     Int64ToInt => "Int64ToInt", "int64ToInt#";
     Word64ToInt64 => "Word64ToInt64", "word64ToInt64#";
+    Word64ToWord => "Word64ToWord", "word64ToWord#";
+    WordToWord64 => "WordToWord64", "wordToWord64#";
     Word8ToWord => "Word8ToWord", "word8ToWord#";
     Word8Lt => "Word8Lt", "ltWord8#";
     Int64Ge => "Int64Ge", "geInt64#";
     Int64Negate => "Int64Negate", "negateInt64#";
     Int64Shra => "Int64Shra", "uncheckedIShiftRA64#";
     Word64Shl => "Word64Shl", "uncheckedShiftL64#";
+    Word64Shrl => "Word64Shrl", "uncheckedShiftRL64#";
     Word8Ge => "Word8Ge", "geWord8#";
     Word8Sub => "Word8Sub", "subWord8#";
     SizeofByteArray => "SizeofByteArray", "sizeofByteArray#";
@@ -234,16 +251,31 @@ define_primops! {
     ReadWordArray => "ReadWordArray", "readWordArray#";
     SetByteArray => "SetByteArray", "setByteArray#";
     Word64Or => "Word64Or", "or64#";
+    Word64Eq => "Word64Eq", "eqWord64#";
+    Word64Ne => "Word64Ne", "neWord64#";
+    Word64Lt => "Word64Lt", "ltWord64#";
+    Word64Le => "Word64Le", "leWord64#";
+    Word64Gt => "Word64Gt", "gtWord64#";
+    Word64Ge => "Word64Ge", "geWord64#";
     Word8Add => "Word8Add", "plusWord8#";
     Word8Le => "Word8Le", "leWord8#";
     AddIntCVal => "AddIntCVal", "addIntC#_val";
     AddIntCCarry => "AddIntCCarry", "addIntC#_overflow";
     SubWordCVal => "SubWordCVal", "subWordC#_val";
     SubWordCCarry => "SubWordCCarry", "subWordC#_carry";
+    SubIntCVal => "SubIntCVal", "subIntC#_val";
+    SubIntCCarry => "SubIntCCarry", "subIntC#_overflow";
     AddWordCVal => "AddWordCVal", "addWordC#_val";
     AddWordCCarry => "AddWordCCarry", "addWordC#_carry";
     TimesWord2Hi => "TimesWord2Hi", "timesWord2#_hi";
     TimesWord2Lo => "TimesWord2Lo", "timesWord2#_lo";
+    // plusWord2# :: Word# -> Word# -> (# high, low #) — the native ghc-bignum
+    // backend's add-with-carry. quotRemWord2# :: (high, low, divisor) -> (# q, r #)
+    // — its 128/64 division primitive (the core of multi-precision division).
+    WordAdd2Hi => "WordAdd2Hi", "plusWord2#_hi";
+    WordAdd2Lo => "WordAdd2Lo", "plusWord2#_lo";
+    WordQuotRem2Quot => "WordQuotRem2Quot", "quotRemWord2#_quot";
+    WordQuotRem2Rem => "WordQuotRem2Rem", "quotRemWord2#_rem";
     QuotRemWordVal => "QuotRemWordVal", "quotRemWord#_val";
     QuotRemWordRem => "QuotRemWordRem", "quotRemWord#_rem";
     FfiStrlen => "FfiStrlen", "ffi_strlen";
@@ -251,6 +283,11 @@ define_primops! {
     FfiTextMeasureOff => "FfiTextMeasureOff", "ffi_text_measure_off";
     FfiTextMemchr => "FfiTextMemchr", "ffi_text_memchr";
     FfiTextReverse => "FfiTextReverse", "ffi_text_reverse";
+    // __int_encodeDouble(mantissa, exp) -> Double# (ldexp); the final Integer->Double step.
+    // The only surviving ghc-bignum FFI: under the native backend, all other
+    // Integer/Natural arithmetic is pure Core over Word#/ByteArray# primops.
+    FfiIntEncodeDouble => "FfiIntEncodeDouble", "int_encode_double";
+    FfiWordEncodeDouble => "FfiWordEncodeDouble", "word_encode_double";
     NewSmallArray => "NewSmallArray", "newSmallArray#";
     ReadSmallArray => "ReadSmallArray", "readSmallArray#";
     WriteSmallArray => "WriteSmallArray", "writeSmallArray#";
@@ -339,6 +376,7 @@ impl std::fmt::Display for Literal {
                 Ok(s) => write!(f, "\"{}\"#", s),
                 Err(_) => write!(f, "<bytes len={}>", bs.len()),
             },
+            Literal::LitByteArray(bs) => write!(f, "<bytearray len={}>", bs.len()),
             Literal::LitFloat(bits) => write!(f, "{}#", f32::from_bits(*bits as u32)),
             Literal::LitDouble(bits) => write!(f, "{}##", f64::from_bits(*bits)),
         }

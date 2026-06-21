@@ -177,7 +177,7 @@ fn mutate_value(v: &mut Value, path: &mut Vec<usize>, seed: u64) -> bool {
                         n.wrapping_add(1)
                     };
                 }
-                Literal::LitString(bs) => {
+                Literal::LitString(bs) | Literal::LitByteArray(bs) => {
                     if bs.is_empty() {
                         bs.push(1);
                     } else {

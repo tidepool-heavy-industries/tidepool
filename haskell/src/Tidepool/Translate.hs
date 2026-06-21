@@ -100,6 +100,7 @@ data LitEnc
   | LEWord !Word64
   | LEChar !Word32
   | LEString !ByteString
+  | LEByteArray !ByteString  -- raw ByteArray# contents (e.g. BigNat# payload)
   | LEFloat !Word64    -- IEEE 754 bits
   | LEDouble !Word64   -- IEEE 754 bits
   deriving (Show)
@@ -397,7 +398,7 @@ translateModule allBinds targetName unresolvedIds =
 -- constructors the emitted program references.
 translateModuleClosed :: HscEnv -> [CoreBind] -> String -> IO (Seq FlatNode, Map.Map (Word64, Text) DataCon, [UnresolvedVar], [CoreBind])
 translateModuleClosed hscEnv allBinds targetName = do
-  (closedBinds0, unresolved) <- resolveExternals hscEnv allBinds
+  (closedBinds0, unresolved) <- resolveExternals varId hscEnv allBinds
   closedBinds <- uniquifyDuplicateBinders closedBinds0
   -- TIDEPOOL_DUMP_CLOSED=<needle>: dump resolved bindings whose binder
   -- name contains the needle (post-resolveExternals Core — what the JIT
@@ -1108,11 +1109,14 @@ translate expr =
             childIdxs <- mapM translate args
             emitNode $ NJump (varId v) childIdxs
     
-    -- Foreign calls: map known FFI functions to our primops
+    -- Foreign calls: map known FFI functions to our primops; unsupported ones
+    -- (often over-collected into a closure, in a dead branch) become poisons.
     Var v | isFCallId v -> do
         let pprName = showPprUnsafe v
         childIdxs <- mapM translate args
-        emitOp (mapFfiCall pprName) childIdxs
+        case mapFfiCall pprName of
+          Just name -> emitOp name childIdxs
+          Nothing   -> emitFfiPoison
 
     _ -> do
       hIdx <- translateHead hd
@@ -1221,6 +1225,24 @@ translateHead = \case
         rCaseIdx <- emitNode $ NCase rValIdx (varId rBinder) [FlatAlt FDefault [] bodyIdx]
         -- case qVal of qBinder { DEFAULT -> rCaseIdx }
         emitNode $ NCase qValIdx (varId qBinder) [FlatAlt FDefault [] rCaseIdx]
+  -- 3-input / 2-output: case quotRemWord2# hi lo d of (# q, r #) -> body
+  Case scrut _caseBinder _ty [Alt (DataAlt dc) binders body]
+    | isUnboxedTupleDataCon dc
+    , (Var v, allArgs) <- collectArgs (stripTicksAndCasts scrut)
+    , Just pop <- isPrimOpId_maybe v
+    , Just (op1Name, op2Name) <- splitWord2DivPrimOp pop
+    , let valArgs = filter isValueArg allArgs
+    , [a, b, c] <- valArgs
+    , vBinders <- filter (not . isTyVar) binders
+    , [qBinder, rBinder] <- vBinders -> do
+        aIdx <- translate a
+        bIdx <- translate b
+        cIdx <- translate c
+        qValIdx <- emitOp op1Name [aIdx, bIdx, cIdx]
+        rValIdx <- emitOp op2Name [aIdx, bIdx, cIdx]
+        bodyIdx <- translate body
+        rCaseIdx <- emitNode $ NCase rValIdx (varId rBinder) [FlatAlt FDefault [] bodyIdx]
+        emitNode $ NCase qValIdx (varId qBinder) [FlatAlt FDefault [] rCaseIdx]
   -- Desugar unary multi-return primops: case decodeDouble_Int64# x of (# m, e #) -> body
   Case scrut _caseBinder _ty [Alt (DataAlt dc) binders body]
     | isUnboxedTupleDataCon dc
@@ -1282,11 +1304,12 @@ translateHead = \case
                          else valArgs
     -> do
         childIdxs <- mapM translate nonStateArgs
-        -- Emit the primop or FFI call
-        opName <- case isPrimOpId_maybe v of
-                    Just pop -> return (mapPrimOp pop)
-                    Nothing  -> return (mapFfiCall (showPprUnsafe v))
-        primIdx <- emitOp opName childIdxs
+        -- Emit the primop or FFI call (unsupported FFI -> lazy poison).
+        primIdx <- case isPrimOpId_maybe v of
+                    Just pop -> emitOp (mapPrimOp pop) childIdxs
+                    Nothing  -> case mapFfiCall (showPprUnsafe v) of
+                                  Just name -> emitOp name childIdxs
+                                  Nothing   -> emitFfiPoison
         if hasStateBinder then do
           -- Stateful primop: bind s' (state token) to dummy, bind results to primop
           dummyState <- emitNode $ NLit (LEInt 0)
@@ -1464,7 +1487,11 @@ mapLit = \case
     LitNumWord16 -> LEWord (fromInteger n)
     LitNumWord32 -> LEWord (fromInteger n)
     LitNumWord64 -> LEWord (fromInteger n)
-    LitNumBigNat -> error "BigNat literal not supported"
+    -- BigNat# literal (the payload of a big IP/IN Integer literal): materialize
+    -- as a little-endian 64-bit-limb ByteArray#. ghc-bignum reads the limb count
+    -- from sizeofByteArray#, so the byte length must be exactly the significant
+    -- limbs (no extra zero limb). See bigNatLitBytes.
+    LitNumBigNat -> LEByteArray (BS.pack (bigNatLitBytes n))
   LitChar c              -> LEChar (fromIntegral (ord c))
   LitString bs           -> LEString bs
   LitFloat r             -> LEFloat (fromIntegral (castFloatToWord32 (fromRational r)))
@@ -1473,6 +1500,18 @@ mapLit = \case
   LitLabel{}             -> LEInt 0  -- Function label → dummy value (dead code path)
   LitRubbish{}           -> LEInt 0  -- Rubbish literal → dummy value
   other                  -> error $ "Unsupported literal: " ++ showPprUnsafe other
+
+-- | Little-endian 64-bit-limb bytes for a BigNat# literal payload (ByteArray#).
+-- @n@ is the non-negative magnitude (sign lives in the IP/IN constructor).
+-- Bytes are padded up to a whole limb; the top limb stays non-zero (normalized),
+-- so sizeofByteArray# yields the correct GMP limb count.
+bigNatLitBytes :: Integer -> [Word8]
+bigNatLitBytes n =
+  let go 0 = []
+      go k = fromIntegral (k .&. 0xff) : go (k `shiftR` 8)
+      raw = go n
+      pad = (8 - length raw `mod` 8) `mod` 8
+  in if null raw then replicate 8 0 else raw ++ replicate pad 0
 
 mapPrimOp :: PrimOp -> Text
 mapPrimOp = \case
@@ -1582,6 +1621,7 @@ mapPrimOp = \case
   DoublePowerOp -> "DoublePower"
   -- Type conversions
   IntToDoubleOp   -> "Int2Double"
+  WordToDoubleOp  -> "Word2Double"
   DoubleToIntOp   -> "Double2Int"
   IntToFloatOp    -> "Int2Float"
   FloatToIntOp    -> "Float2Int"
@@ -1594,6 +1634,11 @@ mapPrimOp = \case
   AddrAddOp           -> "PlusAddr"
   -- ByteArray#
   NewByteArrayOp_Char         -> "NewByteArray"
+  -- Pinned alloc is identical to a normal ByteArray# for us; contents# yields the
+  -- payload Addr#. These ride the dead Integer->Addr# serialization closure.
+  NewPinnedByteArrayOp_Char        -> "NewByteArray"
+  ByteArrayContents_Char           -> "ByteArrayContents"
+  MutableByteArrayContents_Char    -> "ByteArrayContents"
   SizeofByteArrayOp           -> "SizeofByteArray"
   SizeofMutableByteArrayOp    -> "SizeofByteArray"
   UnsafeFreezeByteArrayOp     -> "UnsafeFreezeByteArray"
@@ -1607,6 +1652,7 @@ mapPrimOp = \case
   ShrinkMutableByteArrayOp_Char -> "ShrinkMutableByteArray"
   IndexByteArrayOp_Word8      -> "IndexWord8Array"
   IndexOffAddrOp_Word8        -> "IndexWord8OffAddr"
+  WriteOffAddrOp_Word8        -> "WriteWord8OffAddr"
   CopyByteArrayOp             -> "CopyByteArray"
   CopyMutableByteArrayOp      -> "CopyMutableByteArray"
   CompareByteArraysOp         -> "CompareByteArrays"
@@ -1636,12 +1682,22 @@ mapPrimOp = \case
   Int64ToWord64Op             -> "Int64ToWord64"
   -- Word64
   Word64ToInt64Op             -> "Word64ToInt64"
+  Word64ToWordOp              -> "Word64ToWord"
+  WordToWord64Op              -> "WordToWord64"
   Word64SllOp                 -> "Word64Shl"
+  Word64SrlOp                 -> "Word64Shrl"
   Word64OrOp                  -> "Word64Or"
   Word64AndOp                 -> "Word64And"
+  Word64EqOp                  -> "Word64Eq"
+  Word64NeOp                  -> "Word64Ne"
+  Word64LtOp                  -> "Word64Lt"
+  Word64LeOp                  -> "Word64Le"
+  Word64GtOp                  -> "Word64Gt"
+  Word64GeOp                  -> "Word64Ge"
   -- Carry arithmetic and wide multiply handled by splitMultiReturnPrimOp / splitTripleReturnPrimOp
   -- CLZ
   Clz8Op                      -> "Clz8"
+  ClzOp                       -> "Clz"
   -- SmallArray#
   NewSmallArrayOp             -> "NewSmallArray"
   ReadSmallArrayOp            -> "ReadSmallArray"
@@ -1684,6 +1740,10 @@ mapPrimOp = \case
   Ctz64Op                     -> "Ctz64"
   -- Exception
   RaiseOp     -> "Raise"
+  -- Arithmetic exceptions raised in ghc-bignum's check branches.
+  RaiseUnderflowOp -> "RaiseUnderflow"
+  RaiseOverflowOp  -> "RaiseOverflow"
+  RaiseDivZeroOp   -> "RaiseDivZero"
   other       -> error $ "Unsupported primop: " ++ showPprUnsafe other
 
 -- | Check whether a named top-level binding has IO in its result type.
@@ -1793,22 +1853,32 @@ isUnsafeTakeVar v =
 isRealWorldVar :: Id -> Bool
 isRealWorldVar v = occNameString (nameOccName (idName v)) == "realWorld#"
 
-mapFfiCall :: String -> Text
+-- | Map a foreign-call's pretty-printed name to a supported primop name, or
+-- Nothing if unsupported. Unsupported FFI calls are emitted as LAZY POISONS by
+-- the caller (`emitFfiPoison`), not hard errors: GHC over-collects unrelated FFI
+-- into a binding's closure (e.g. __hsbase_MD5Init via GHC.Fingerprint reaches
+-- rationalToDouble's closure, in a branch never taken for a Double literal). A
+-- poison lets such a binding compile and only raises if the FFI is actually
+-- forced at runtime — same discipline as the `error` sentinel / unresolved-var
+-- poisons. (Integer/Natural now use the native ghc-bignum backend — pure Core,
+-- no __gmpn_*/integer_gmp_* FFI — so those arms are gone.)
+mapFfiCall :: String -> Maybe Text
 mapFfiCall pprName
-  | "strlen" `isInfixOf` pprName                = T.pack "FfiStrlen"
-  | "rintDouble" `isInfixOf` pprName            = T.pack "FfiRintDouble"
-  | "_hs_text_measure_off" `isInfixOf` pprName  = T.pack "FfiTextMeasureOff"
-  | "_hs_text_memchr" `isInfixOf` pprName       = T.pack "FfiTextMemchr"
-  | "_hs_text_reverse" `isInfixOf` pprName      = T.pack "FfiTextReverse"
-  | otherwise = error $ "Unsupported FFI call: " ++ pprName ++ hint
-  where
-    hint
-      | "gmp" `isInfixOf` pprName || "integer" `isInfixOf` pprName =
-          "\n  (Integer/GMP arithmetic is unsupported under the JIT. This usually\n\
-          \   means `read`, `Read` instances, or Integer-defaulted arithmetic that\n\
-          \   exceeded the integerAdd/integerSub shims. Use parseInt/parseDouble\n\
-          \   and add explicit `Int` type signatures.)"
-      | otherwise = ""
+  | "strlen" `isInfixOf` pprName                = Just (T.pack "FfiStrlen")
+  | "rintDouble" `isInfixOf` pprName            = Just (T.pack "FfiRintDouble")
+  | "_hs_text_measure_off" `isInfixOf` pprName  = Just (T.pack "FfiTextMeasureOff")
+  | "_hs_text_memchr" `isInfixOf` pprName       = Just (T.pack "FfiTextMemchr")
+  | "_hs_text_reverse" `isInfixOf` pprName      = Just (T.pack "FfiTextReverse")
+  -- Integer/Natural -> Double encoders (RTS primitives, used by both bignum backends).
+  | "__int_encodeDouble" `isInfixOf` pprName    = Just (T.pack "FfiIntEncodeDouble")
+  | "__word_encodeDouble" `isInfixOf` pprName   = Just (T.pack "FfiWordEncodeDouble")
+  | otherwise                                   = Nothing
+
+-- | Emit a lazy poison node for an unsupported (or dead-branch) construct: a
+-- tag-'E' UserError Var. The JIT lowers it to a poison closure that only raises
+-- when forced/applied, so it is harmless in dead branches.
+emitFfiPoison :: TransM Int
+emitFfiPoison = emitNode $ NVar 0x4500000000000002
 
 isRuntimeErrorVar :: Id -> Bool
 isRuntimeErrorVar v =
@@ -1900,15 +1970,28 @@ splitMultiReturnPrimOp = \case
   IntQuotRemOp  -> Just (T.pack "IntQuot", T.pack "IntRem")
   WordQuotRemOp -> Just (T.pack "WordQuot", T.pack "WordRem")
   IntAddCOp     -> Just (T.pack "AddIntCVal", T.pack "AddIntCCarry")
+  IntSubCOp     -> Just (T.pack "SubIntCVal", T.pack "SubIntCCarry")
   WordAddCOp    -> Just (T.pack "AddWordCVal", T.pack "AddWordCCarry")
   WordSubCOp    -> Just (T.pack "SubWordCVal", T.pack "SubWordCCarry")
   WordMul2Op    -> Just (T.pack "TimesWord2Hi", T.pack "TimesWord2Lo")
+  WordAdd2Op    -> Just (T.pack "WordAdd2Hi", T.pack "WordAdd2Lo")
   _             -> Nothing
+
+-- | 3-input / 2-output primops: @quotRemWord2# high low divisor -> (# q, r #)@.
+-- Like 'splitMultiReturnPrimOp' but the scrutinee op takes THREE value args.
+splitWord2DivPrimOp :: PrimOp -> Maybe (Text, Text)
+splitWord2DivPrimOp = \case
+  WordQuotRem2Op -> Just (T.pack "WordQuotRem2Quot", T.pack "WordQuotRem2Rem")
+  _              -> Nothing
 
 -- | Like splitMultiReturnPrimOp but for primops returning 3-element unboxed tuples.
 splitTripleReturnPrimOp :: PrimOp -> Maybe (Text, Text, Text)
 splitTripleReturnPrimOp = \case
-  IntMul2Op -> Just (T.pack "TimesInt2Hi", T.pack "TimesInt2Lo", T.pack "TimesInt2Overflow")
+  -- timesInt2# returns (# isHighNeeded#, high#, low# #) — the FIRST component is
+  -- the overflow flag, not the high word. The native ghc-bignum backend's
+  -- integerMul small path relies on this exact order (it was dormant under the
+  -- gmp backend, which multiplied via FFI).
+  IntMul2Op -> Just (T.pack "TimesInt2Overflow", T.pack "TimesInt2Hi", T.pack "TimesInt2Lo")
   _         -> Nothing
 
 -- | Like splitMultiReturnPrimOp but for unary primops (single argument)

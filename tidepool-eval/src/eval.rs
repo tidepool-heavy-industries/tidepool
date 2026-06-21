@@ -28,6 +28,70 @@ pub fn env_from_datacon_table(table: &DataConTable) -> Env {
         .collect()
 }
 
+/// A pending tail-`Jump`, captured by [`eval_at`] for the trampoline driven by
+/// [`eval_settled`].
+///
+/// Join points are GHC's non-stack-growing control construct: a `Jump` is a
+/// *tail* transfer of control (a goto to a labelled block), NOT a call that
+/// grows the stack — which is exactly why the JIT lowers join self-jumps to a
+/// loop. To match that semantics from first principles (and so the recursive
+/// join points GHC emits for every -O2 loop evaluate without overflowing the
+/// host stack), `eval_at` never recurses on a `Jump`: it resolves the
+/// continuation, evaluates the arguments, parks the result here, and unwinds to
+/// the nearest driver, which loops. Host-stack use is O(1) in the number of
+/// self-jumps.
+struct JumpReq {
+    /// The join label, encoded as a `VarId` (high bit set) for env lookup.
+    join_var: VarId,
+    /// The join point's parameters.
+    params: Vec<VarId>,
+    /// The join point's right-hand side (its own subtree).
+    rhs: CoreExpr,
+    /// The scope captured at the join's definition site (excludes the join).
+    join_env: Env,
+    /// The jump arguments, already evaluated under the call-site env.
+    args: Vec<Value>,
+}
+
+thread_local! {
+    /// Trampoline slot (see [`JumpReq`]). Set by a tail `Jump` in [`eval_at`],
+    /// drained by [`eval_settled`]. `None` whenever no jump is in flight.
+    static JUMP_SLOT: std::cell::RefCell<Option<JumpReq>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Evaluate the node at `idx`, then trampoline any tail-`Jump`s it unwinds with.
+///
+/// Returns a value in Weak Head Normal Form (WHNF), NOT deeply forced. The
+/// trampoline (see [`JumpReq`]) keeps recursive join points O(1) in host stack:
+/// a tail jump parks itself in [`JUMP_SLOT`] and returns a placeholder; this
+/// loop picks it up, ties the recursive knot (the join is in scope inside its
+/// OWN rhs — GHC `joinrec` semantics), binds the parameters, and re-evaluates
+/// the rhs — iterating until a jump-free value is produced.
+fn eval_settled(
+    expr: &CoreExpr,
+    idx: usize,
+    env: &Env,
+    heap: &mut dyn Heap,
+) -> Result<Value, EvalError> {
+    let mut res = eval_at(expr, idx, env, heap)?;
+    while let Some(req) = JUMP_SLOT.with(|s| s.borrow_mut().take()) {
+        // rhs scope = definition-site env + recursive knot + parameters.
+        // For a non-recursive join the rhs never references `join_var`, so the
+        // knot binding is inert and behaviour matches a plain continuation jump.
+        let mut new_env = req.join_env.update(
+            req.join_var,
+            Value::JoinCont(req.params.clone(), req.rhs.clone(), req.join_env.clone()),
+        );
+        for (param, arg) in req.params.iter().zip(req.args) {
+            new_env = new_env.update(*param, arg);
+        }
+        let root = req.rhs.nodes.len() - 1;
+        res = eval_at(&req.rhs, root, &new_env, heap)?;
+    }
+    Ok(res)
+}
+
 /// Evaluate a [`CoreExpr`] to a [`Value`] under a given environment and heap.
 ///
 /// Returns a value in Weak Head Normal Form (WHNF). This only forces the
@@ -40,7 +104,7 @@ pub fn eval(expr: &CoreExpr, env: &Env, heap: &mut dyn Heap) -> Result<Value, Ev
             got: crate::error::ValueKind::Other("empty tree".into()),
         });
     }
-    let res = eval_at(expr, expr.nodes.len() - 1, env, heap)?;
+    let res = eval_settled(expr, expr.nodes.len() - 1, env, heap)?;
     force(res, heap)
 }
 
@@ -178,6 +242,12 @@ fn eval_at(
             }
             env.get(v).cloned().ok_or(EvalError::UnboundVar(*v))
         }
+        // A ByteArray# literal (e.g. a BigNat# payload) becomes a mutable byte
+        // array so the byte-array primops (sizeofByteArray#, indexWordArray#, the
+        // mpn intercepts) read it uniformly with runtime-allocated arrays.
+        CoreFrame::Lit(Literal::LitByteArray(bytes)) => Ok(Value::ByteArray(std::sync::Arc::new(
+            std::sync::Mutex::new(bytes.clone()),
+        ))),
         CoreFrame::Lit(lit) => Ok(Value::Lit(lit.clone())),
         CoreFrame::App { fun, arg } => {
             let mut fun_val = force(eval_at(expr, *fun, env, heap)?, heap)?;
@@ -366,32 +436,72 @@ fn eval_at(
             let join_val = Value::JoinCont(params.clone(), expr.extract_subtree(*rhs), env.clone());
             let join_var = VarId(label.0 | (1u64 << 63)); // high bit distinguishes join labels
             let new_env = env.update(join_var, join_val);
-            eval_at(expr, *body, &new_env, heap)
+            // Drive the body through `eval_settled`, not bare `eval_at`: a `Jump`
+            // in the body (the only place this join is in scope) parks itself in
+            // JUMP_SLOT and returns a placeholder. Draining it HERE means a
+            // `Join` node always yields a settled value, so a join expression in
+            // a non-tail position (e.g. a `case (join … in …) of …` scrutinee)
+            // never leaks the placeholder. Self-jumps from the rhs iterate in
+            // this same loop — O(1) host stack.
+            eval_settled(expr, *body, &new_env, heap)
         }
-        CoreFrame::Jump { label, args } => {
-            let join_var = VarId(label.0 | (1u64 << 63));
-            match env.get(&join_var) {
-                Some(Value::JoinCont(params, rhs_expr, join_env)) => {
-                    if params.len() != args.len() {
-                        return Err(EvalError::ArityMismatch {
-                            context: "arguments",
-                            expected: params.len(),
-                            got: args.len(),
-                        });
-                    }
-                    let params = params.clone();
-                    let rhs_expr = rhs_expr.clone();
-                    let mut new_env = join_env.clone();
-                    for (param, arg_idx) in params.iter().zip(args.iter()) {
-                        let arg_val = eval_at(expr, *arg_idx, env, heap)?;
-                        new_env = new_env.update(*param, arg_val);
-                    }
-                    eval(&rhs_expr, &new_env, heap)
-                }
-                _ => Err(EvalError::UnboundJoin(*label)),
-            }
-        }
+        CoreFrame::Jump { label, args } => enqueue_jump(expr, label, args, env, heap),
     }
+}
+
+/// Resolve a `Jump` and park it in [`JUMP_SLOT`] for the trampoline.
+///
+/// A `Jump` is a tail transfer of control: rather than recurse into the join's
+/// rhs here (which would grow the host stack once per self-jump and overflow on
+/// the recursive joins GHC emits for loops), we look up the continuation,
+/// evaluate the arguments under the CALL-SITE env, store everything in the
+/// thread-local slot, and return a placeholder. The nearest [`eval_settled`]
+/// driver picks the slot up and loops. By the join-point invariant a `Jump`
+/// only ever appears in tail position (the JIT relies on this too), so the
+/// placeholder is only ever propagated up tail-return paths to that driver and
+/// is never inspected.
+///
+/// Marked `#[inline(never)]` so the join machinery's locals do not inflate the
+/// stack frame of the hot `eval_at` match.
+#[inline(never)]
+fn enqueue_jump(
+    expr: &CoreExpr,
+    label: &tidepool_repr::JoinId,
+    args: &[usize],
+    env: &Env,
+    heap: &mut dyn Heap,
+) -> Result<Value, EvalError> {
+    let join_var = VarId(label.0 | (1u64 << 63));
+    let (params, rhs, join_env) = match env.get(&join_var) {
+        Some(Value::JoinCont(p, r, e)) => (p.clone(), r.clone(), e.clone()),
+        _ => return Err(EvalError::UnboundJoin(*label)),
+    };
+    if params.len() != args.len() {
+        return Err(EvalError::ArityMismatch {
+            context: "arguments",
+            expected: params.len(),
+            got: args.len(),
+        });
+    }
+    // Arguments are evaluated under the CALL-SITE env (`env`) — they are not in
+    // scope of the join's parameters. `eval_settled` (not bare `eval_at`) drives
+    // any self-contained join nested inside an argument to completion, so it
+    // never leaks its own pending jump into our slot.
+    let mut arg_vals = Vec::with_capacity(args.len());
+    for &arg_idx in args {
+        arg_vals.push(eval_settled(expr, arg_idx, env, heap)?);
+    }
+    JUMP_SLOT.with(|s| {
+        *s.borrow_mut() = Some(JumpReq {
+            join_var,
+            params,
+            rhs,
+            join_env,
+            args: arg_vals,
+        });
+    });
+    // Placeholder — replaced by the driver; never inspected (see fn doc).
+    Ok(Value::Lit(Literal::LitInt(0)))
 }
 
 fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError> {
@@ -475,12 +585,12 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let (a, b) = bin_op_word(op, &args)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_mul(b))))
         }
-        PrimOpKind::WordEq => cmp_word(op, &args, |a, b| a == b),
-        PrimOpKind::WordNe => cmp_word(op, &args, |a, b| a != b),
-        PrimOpKind::WordLt => cmp_word(op, &args, |a, b| a < b),
-        PrimOpKind::WordLe => cmp_word(op, &args, |a, b| a <= b),
-        PrimOpKind::WordGt => cmp_word(op, &args, |a, b| a > b),
-        PrimOpKind::WordGe => cmp_word(op, &args, |a, b| a >= b),
+        PrimOpKind::WordEq | PrimOpKind::Word64Eq => cmp_word(op, &args, |a, b| a == b),
+        PrimOpKind::WordNe | PrimOpKind::Word64Ne => cmp_word(op, &args, |a, b| a != b),
+        PrimOpKind::WordLt | PrimOpKind::Word64Lt => cmp_word(op, &args, |a, b| a < b),
+        PrimOpKind::WordLe | PrimOpKind::Word64Le => cmp_word(op, &args, |a, b| a <= b),
+        PrimOpKind::WordGt | PrimOpKind::Word64Gt => cmp_word(op, &args, |a, b| a > b),
+        PrimOpKind::WordGe | PrimOpKind::Word64Ge => cmp_word(op, &args, |a, b| a >= b),
         PrimOpKind::WordQuot => {
             let (a, b) = bin_op_word(op, &args)?;
             if b == 0 {
@@ -929,6 +1039,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let a = expect_int(&args[0])?;
             Ok(Value::Lit(Literal::LitDouble((a as f64).to_bits())))
         }
+        PrimOpKind::Word2Double => {
+            let a = expect_word(&args[0])?;
+            Ok(Value::Lit(Literal::LitDouble((a as f64).to_bits())))
+        }
         PrimOpKind::Double2Int => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
@@ -1143,6 +1257,15 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         }
         PrimOpKind::ReallyUnsafePtrEquality => Ok(Value::Lit(Literal::LitInt(0))),
         PrimOpKind::Raise => Err(EvalError::UserError),
+        PrimOpKind::RaiseDivZero => Err(EvalError::InternalError(
+            "division by zero (raiseDivZero#)".into(),
+        )),
+        PrimOpKind::RaiseOverflow => Err(EvalError::InternalError(
+            "arithmetic overflow (raiseOverflow#)".into(),
+        )),
+        PrimOpKind::RaiseUnderflow => Err(EvalError::InternalError(
+            "arithmetic underflow (raiseUnderflow#)".into(),
+        )),
         PrimOpKind::IndexArray | PrimOpKind::TagToEnum => Err(EvalError::UnsupportedPrimOp(op)),
 
         // --- ByteArray# / MutableByteArray# ---
@@ -1289,6 +1412,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 (w as u8).leading_zeros() as u64
             )))
         }
+        PrimOpKind::Clz => {
+            let w = expect_word(&args[0])?;
+            Ok(Value::Lit(Literal::LitWord(w.leading_zeros() as u64)))
+        }
         PrimOpKind::IntToInt64 => {
             // Identity on 64-bit: Int# == Int64#
             Ok(args[0].clone())
@@ -1345,6 +1472,25 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let idx = expect_int(&args[1])? as usize;
             let val = bytes.get(idx).copied().unwrap_or(0);
             Ok(Value::Lit(Literal::LitWord(val as u64)))
+        }
+        PrimOpKind::ByteArrayContents => {
+            // byteArrayContents# / mutableByteArrayContents# :: ByteArray# -> Addr#.
+            // The tree-walker models Addr# as an immutable LitString; this only
+            // appears via the dead Integer->Addr# serialization closure, so a
+            // snapshot copy of the bytes suffices (never read back on live paths).
+            let ba = expect_byte_array(&args[0])?;
+            let bytes = ba
+                .lock()
+                .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?
+                .clone();
+            Ok(Value::Lit(Literal::LitString(bytes)))
+        }
+        PrimOpKind::WriteWord8OffAddr => {
+            // writeWord8OffAddr# only appears via dead Integer->Addr# serialization
+            // (bigNatToAddr#) pulled into the closure; the tree-walker models Addr#
+            // as an immutable LitString, so there is no writable target. It is never
+            // reached at runtime for the paths we support; no-op with a dummy state.
+            Ok(Value::Lit(Literal::LitInt(0)))
         }
         PrimOpKind::CompareByteArrays => {
             // compareByteArrays# ba1 off1 ba2 off2 len -> Int#
@@ -1410,6 +1556,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // Identity on 64-bit
             Ok(args[0].clone())
         }
+        PrimOpKind::Word64ToWord | PrimOpKind::WordToWord64 => {
+            // Identity on 64-bit; normalize to a Word literal.
+            Ok(Value::Lit(Literal::LitWord(expect_word(&args[0])?)))
+        }
         PrimOpKind::Word64ToInt64 => {
             // Identity on 64-bit (reinterpret Word64 as Int64)
             let w = match &args[0] {
@@ -1447,6 +1597,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Word64Shl => {
             let (a, b) = bin_op_word(op, &args)?;
             Ok(Value::Lit(Literal::LitWord(a << (b as u32))))
+        }
+        PrimOpKind::Word64Shrl => {
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitWord(a >> (b as u32))))
         }
         PrimOpKind::Word8Ge => {
             let (a, b) = bin_op_word(op, &args)?;
@@ -1641,6 +1795,17 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let overflow = a.checked_add(b).is_none();
             Ok(Value::Lit(Literal::LitInt(if overflow { 1 } else { 0 })))
         }
+        PrimOpKind::SubIntCVal => {
+            // subIntC# result component: a - b (wrapping)
+            let (a, b) = bin_op_int(op, &args)?;
+            Ok(Value::Lit(Literal::LitInt(a.wrapping_sub(b))))
+        }
+        PrimOpKind::SubIntCCarry => {
+            // subIntC# overflow flag: 1 if signed subtraction overflowed
+            let (a, b) = bin_op_int(op, &args)?;
+            let overflow = a.checked_sub(b).is_none();
+            Ok(Value::Lit(Literal::LitInt(if overflow { 1 } else { 0 })))
+        }
         PrimOpKind::SubWordCVal => {
             // subWordC# result component: a - b (wrapping)
             let (a, b) = bin_op_word(op, &args)?;
@@ -1670,6 +1835,34 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // timesWord2# low word: (a * b) & 0xFFFFFFFFFFFFFFFF
             let (a, b) = bin_op_word(op, &args)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_mul(b))))
+        }
+        PrimOpKind::WordAdd2Lo => {
+            // plusWord2# low word: a + b (wrapping)
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitWord(a.wrapping_add(b))))
+        }
+        PrimOpKind::WordAdd2Hi => {
+            // plusWord2# high word: the carry-out (0 or 1)
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitWord(
+                if a.checked_add(b).is_none() { 1 } else { 0 },
+            )))
+        }
+        PrimOpKind::WordQuotRem2Quot | PrimOpKind::WordQuotRem2Rem => {
+            // quotRemWord2# hi lo d -> ((hi<<64)|lo) `quotRem` d
+            let hi = expect_word(&args[0])?;
+            let lo = expect_word(&args[1])?;
+            let d = expect_word(&args[2])?;
+            if d == 0 {
+                return Ok(Value::Lit(Literal::LitWord(0)));
+            }
+            let n = ((hi as u128) << 64) | (lo as u128);
+            let r = if matches!(op, PrimOpKind::WordQuotRem2Quot) {
+                n / d as u128
+            } else {
+                n % d as u128
+            };
+            Ok(Value::Lit(Literal::LitWord(r as u64)))
         }
         PrimOpKind::QuotRemWordVal => {
             // quotRemWord# quotient: a / b
@@ -1876,7 +2069,62 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             Ok(Value::ByteArray(dst_ba.clone()))
         }
 
-        // SmallArray# / Array# / PopCnt / Ctz — only used by JIT, not tree-walker
+        PrimOpKind::FfiIntEncodeDouble => {
+            let m = expect_int_like(&args[0])?;
+            let e = expect_int_like(&args[1])?;
+            Ok(Value::Lit(Literal::LitDouble(
+                tidepool_bignum::encode_double(m, e).to_bits(),
+            )))
+        }
+        PrimOpKind::FfiWordEncodeDouble => {
+            let m = expect_word(&args[0])?;
+            let e = expect_int_like(&args[1])?;
+            Ok(Value::Lit(Literal::LitDouble(
+                tidepool_bignum::encode_double_word(m, e).to_bits(),
+            )))
+        }
+
+        // popCnt#/popCntN# :: Word# -> Word#  — population count (set bits) of the
+        //   low N bits. ctz#/ctzN# :: Word# -> Word#  — count of trailing zero bits
+        //   in the low N bits; the result is N when those bits are all zero (GHC
+        //   spec; Rust's `(w as uN).trailing_zeros()` returns N for 0). The full-
+        //   width forms popCnt64#/ctz64# operate on the whole Word64. Implementing
+        //   these un-blinds the differential on the Double-literal / Rational->Double
+        //   paths (eval previously errored UnsupportedPrimOp, masking the JIT).
+        PrimOpKind::PopCnt
+        | PrimOpKind::PopCnt8
+        | PrimOpKind::PopCnt16
+        | PrimOpKind::PopCnt32
+        | PrimOpKind::PopCnt64
+        | PrimOpKind::Ctz
+        | PrimOpKind::Ctz8
+        | PrimOpKind::Ctz16
+        | PrimOpKind::Ctz32
+        | PrimOpKind::Ctz64 => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let w = expect_word(&args[0])?;
+            let r = match op {
+                PrimOpKind::PopCnt | PrimOpKind::PopCnt64 => w.count_ones(),
+                PrimOpKind::PopCnt8 => (w as u8).count_ones(),
+                PrimOpKind::PopCnt16 => (w as u16).count_ones(),
+                PrimOpKind::PopCnt32 => (w as u32).count_ones(),
+                PrimOpKind::Ctz | PrimOpKind::Ctz64 => w.trailing_zeros(),
+                PrimOpKind::Ctz8 => (w as u8).trailing_zeros(),
+                PrimOpKind::Ctz16 => (w as u16).trailing_zeros(),
+                PrimOpKind::Ctz32 => (w as u32).trailing_zeros(),
+                _ => unreachable!("outer match restricts op to PopCnt*/Ctz*"),
+            };
+            Ok(Value::Lit(Literal::LitWord(r as u64)))
+        }
+
+        // SmallArray# / Array# (boxed) — would need a boxed-array `Value` variant
+        // (the tree-walker only has the unboxed `ByteArray`); used only by the JIT.
         PrimOpKind::NewSmallArray
         | PrimOpKind::ReadSmallArray
         | PrimOpKind::WriteSmallArray
@@ -1901,17 +2149,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         | PrimOpKind::CopyArray
         | PrimOpKind::CopyMutableArray
         | PrimOpKind::CloneArray
-        | PrimOpKind::CloneMutableArray
-        | PrimOpKind::PopCnt
-        | PrimOpKind::PopCnt8
-        | PrimOpKind::PopCnt16
-        | PrimOpKind::PopCnt32
-        | PrimOpKind::PopCnt64
-        | PrimOpKind::Ctz
-        | PrimOpKind::Ctz8
-        | PrimOpKind::Ctz16
-        | PrimOpKind::Ctz32
-        | PrimOpKind::Ctz64 => Err(EvalError::UnsupportedPrimOp(op)),
+        | PrimOpKind::CloneMutableArray => Err(EvalError::UnsupportedPrimOp(op)),
     }
 }
 
@@ -2087,7 +2325,8 @@ cmp_fn!(cmp_char, bin_op_char, char);
 mod tests {
     use super::*;
     use tidepool_repr::{
-        Alt, AltCon, CoreFrame, DataConId, JoinId, Literal, PrimOpKind, RecursiveTree, VarId,
+        Alt, AltCon, CoreFrame, DataConId, JoinId, Literal, PrimOpKind, RecursiveTree, TreeBuilder,
+        VarId,
     };
 
     #[test]
@@ -3167,5 +3406,165 @@ mod tests {
             );
         };
         assert_eq!(*n_x, 42);
+    }
+
+    // ------------------------------------------------------------------
+    // Recursive join points (`joinrec`).
+    //
+    // GHC emits recursive join points constantly under -O2 (loops compile to
+    // them). The interpreter must keep a join point in scope inside its OWN rhs
+    // so a tail-recursive self-`Jump` resolves; before the knot-tying fix such a
+    // self-jump died with `UnboundJoin`.
+    // ------------------------------------------------------------------
+
+    /// Build the canonical recursive-join counting loop:
+    ///
+    /// ```text
+    /// join go (acc, i) = case (i ># limit) of
+    ///                      1# -> acc
+    ///                      _  -> jump go (acc +# i, i +# 1)
+    /// in jump go (0, 0)
+    /// ```
+    ///
+    /// Evaluates to `sum [0..limit] = limit*(limit+1)/2`.
+    fn build_sum_joinrec(limit: i64) -> CoreExpr {
+        let mut b = TreeBuilder::new();
+        let go = JoinId(0);
+        let acc = VarId(100);
+        let i = VarId(101);
+        let cbind = VarId(102);
+
+        // rhs: case (i ># limit) of { 1# -> acc ; _ -> jump go (acc +# i, i +# 1) }
+        let iv = b.push(CoreFrame::Var(i));
+        let lim = b.push(CoreFrame::Lit(Literal::LitInt(limit)));
+        let cond = b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::IntGt,
+            args: vec![iv, lim],
+        });
+        let acc_done = b.push(CoreFrame::Var(acc));
+        let acc_r = b.push(CoreFrame::Var(acc));
+        let i_r = b.push(CoreFrame::Var(i));
+        let new_acc = b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::IntAdd,
+            args: vec![acc_r, i_r],
+        });
+        let i_r2 = b.push(CoreFrame::Var(i));
+        let one = b.push(CoreFrame::Lit(Literal::LitInt(1)));
+        let new_i = b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::IntAdd,
+            args: vec![i_r2, one],
+        });
+        let recur = b.push(CoreFrame::Jump {
+            label: go,
+            args: vec![new_acc, new_i],
+        });
+        let rhs = b.push(CoreFrame::Case {
+            scrutinee: cond,
+            binder: cbind,
+            alts: vec![
+                Alt {
+                    con: AltCon::LitAlt(Literal::LitInt(1)),
+                    binders: vec![],
+                    body: acc_done,
+                },
+                Alt {
+                    con: AltCon::Default,
+                    binders: vec![],
+                    body: recur,
+                },
+            ],
+        });
+
+        // body: jump go (0, 0)
+        let z1 = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+        let z2 = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+        let body = b.push(CoreFrame::Jump {
+            label: go,
+            args: vec![z1, z2],
+        });
+
+        // root must be the LAST node (eval roots at nodes.len() - 1).
+        let _root = b.push(CoreFrame::Join {
+            label: go,
+            params: vec![acc, i],
+            rhs,
+            body,
+        });
+        b.build()
+    }
+
+    #[test]
+    fn recursive_join_self_jump_resolves() {
+        // limit = 5 -> 0+1+2+3+4+5 = 15. Pre-fix this died with UnboundJoin on
+        // the first recursive self-jump.
+        let expr = build_sum_joinrec(5);
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("expected LitInt, got {:?}", res);
+        };
+        assert_eq!(n, 15);
+    }
+
+    #[test]
+    fn recursive_join_many_iterations() {
+        // limit = 100 -> 5050. Exercises ~100 self-jumps (the loop the JIT TCOs).
+        let expr = build_sum_joinrec(100);
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("expected LitInt, got {:?}", res);
+        };
+        assert_eq!(n, 5050);
+    }
+
+    #[test]
+    fn recursive_join_is_constant_stack() {
+        // 200_000 self-jumps. A join `Jump` is a tail transfer of control, so
+        // the trampoline must run this in O(1) host stack. Recursing per jump
+        // (the naive fix) would overflow the test thread's stack here.
+        let expr = build_sum_joinrec(200_000);
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("expected LitInt, got {:?}", res);
+        };
+        assert_eq!(n, 200_000i64 * 200_001 / 2);
+    }
+
+    #[test]
+    fn non_recursive_join_unchanged() {
+        // join k (p) = p +# 10 in jump k 5  ->  15
+        // The rhs never references the join label, so the knot-tying rebinding is
+        // inert: behaviour must be identical to a plain continuation jump.
+        let mut b = TreeBuilder::new();
+        let k = JoinId(7);
+        let p = VarId(200);
+
+        let pv = b.push(CoreFrame::Var(p));
+        let ten = b.push(CoreFrame::Lit(Literal::LitInt(10)));
+        let rhs = b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::IntAdd,
+            args: vec![pv, ten],
+        });
+        let five = b.push(CoreFrame::Lit(Literal::LitInt(5)));
+        let body = b.push(CoreFrame::Jump {
+            label: k,
+            args: vec![five],
+        });
+        let _root = b.push(CoreFrame::Join {
+            label: k,
+            params: vec![p],
+            rhs,
+            body,
+        });
+        let expr = b.build();
+
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap).unwrap();
+        let Value::Lit(Literal::LitInt(n)) = res else {
+            panic!("expected LitInt, got {:?}", res);
+        };
+        assert_eq!(n, 15);
     }
 }

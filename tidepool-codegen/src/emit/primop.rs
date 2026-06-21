@@ -31,6 +31,12 @@ fn emit_div_zero_check(builder: &mut FunctionBuilder, divisor: Value) {
 }
 
 /// Emit a primitive operation. Unboxes HeapPtr args, performs the op, returns Raw.
+/// `n` i64 ABI params, for the uniform-i64 host-fn signatures of the bignum
+/// (`__gmpn_*` / `integer_gmp_*`) intercepts.
+fn i64_params(n: usize) -> Vec<AbiParam> {
+    (0..n).map(|_| AbiParam::new(types::I64)).collect()
+}
+
 pub fn emit_primop(
     sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
@@ -253,7 +259,7 @@ pub fn emit_primop(
         }
 
         // Word comparison (unsigned)
-        PrimOpKind::WordEq => emit_int_compare(
+        PrimOpKind::WordEq | PrimOpKind::Word64Eq => emit_int_compare(
             sess.pipeline,
             builder,
             sess.vmctx,
@@ -262,7 +268,7 @@ pub fn emit_primop(
             args,
             LIT_TAG_INT,
         ),
-        PrimOpKind::WordNe => emit_int_compare(
+        PrimOpKind::WordNe | PrimOpKind::Word64Ne => emit_int_compare(
             sess.pipeline,
             builder,
             sess.vmctx,
@@ -271,7 +277,7 @@ pub fn emit_primop(
             args,
             LIT_TAG_INT,
         ),
-        PrimOpKind::WordLt => emit_int_compare(
+        PrimOpKind::WordLt | PrimOpKind::Word64Lt => emit_int_compare(
             sess.pipeline,
             builder,
             sess.vmctx,
@@ -280,7 +286,7 @@ pub fn emit_primop(
             args,
             LIT_TAG_INT,
         ),
-        PrimOpKind::WordLe => emit_int_compare(
+        PrimOpKind::WordLe | PrimOpKind::Word64Le => emit_int_compare(
             sess.pipeline,
             builder,
             sess.vmctx,
@@ -289,7 +295,7 @@ pub fn emit_primop(
             args,
             LIT_TAG_INT,
         ),
-        PrimOpKind::WordGt => emit_int_compare(
+        PrimOpKind::WordGt | PrimOpKind::Word64Gt => emit_int_compare(
             sess.pipeline,
             builder,
             sess.vmctx,
@@ -298,7 +304,7 @@ pub fn emit_primop(
             args,
             LIT_TAG_INT,
         ),
-        PrimOpKind::WordGe => emit_int_compare(
+        PrimOpKind::WordGe | PrimOpKind::Word64Ge => emit_int_compare(
             sess.pipeline,
             builder,
             sess.vmctx,
@@ -489,6 +495,14 @@ pub fn emit_primop(
                 LIT_TAG_INT
             };
             Ok(SsaVal::Raw(v, tag))
+        }
+        PrimOpKind::Word2Double => {
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            Ok(SsaVal::Raw(
+                builder.ins().fcvt_from_uint(types::F64, v),
+                LIT_TAG_DOUBLE,
+            ))
         }
         PrimOpKind::Int2Double => {
             check_arity(op, 1, args.len())?;
@@ -865,6 +879,12 @@ pub fn emit_primop(
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             Ok(SsaVal::Raw(builder.ins().ishl(a, b), LIT_TAG_WORD))
         }
+        PrimOpKind::Word64Shrl => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            Ok(SsaVal::Raw(builder.ins().ushr(a, b), LIT_TAG_WORD))
+        }
         PrimOpKind::Word64Or => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
@@ -877,6 +897,12 @@ pub fn emit_primop(
             check_arity(op, 1, args.len())?;
             let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             Ok(SsaVal::Raw(v, LIT_TAG_INT))
+        }
+        PrimOpKind::Word64ToWord | PrimOpKind::WordToWord64 => {
+            // Identity on 64-bit; Word64# and Word# share the machine representation.
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            Ok(SsaVal::Raw(v, LIT_TAG_WORD))
         }
         PrimOpKind::IntToInt64 => {
             check_arity(op, 1, args.len())?;
@@ -1055,6 +1081,47 @@ pub fn emit_primop(
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
             Ok(SsaVal::Raw(builder.ins().imul(a, b), LIT_TAG_WORD))
+        }
+        // plusWord2# :: Word# -> Word# -> (# high, low #)
+        PrimOpKind::WordAdd2Lo => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            Ok(SsaVal::Raw(builder.ins().iadd(a, b), LIT_TAG_WORD))
+        }
+        PrimOpKind::WordAdd2Hi => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let sum = builder.ins().iadd(a, b);
+            // High word of a+b is the carry-out: 1 iff the sum wrapped (sum < a).
+            let carry = builder.ins().icmp(IntCC::UnsignedLessThan, sum, a);
+            Ok(SsaVal::Raw(
+                builder.ins().uextend(types::I64, carry),
+                LIT_TAG_WORD,
+            ))
+        }
+        // quotRemWord2# :: Word#(hi) -> Word#(lo) -> Word#(d) -> (# quot, rem #)
+        // 128/64 division; native ghc-bignum's multi-precision division core.
+        PrimOpKind::WordQuotRem2Quot | PrimOpKind::WordQuotRem2Rem => {
+            check_arity(op, 3, args.len())?;
+            let hi = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let lo = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let d = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
+            let name = if matches!(op, PrimOpKind::WordQuotRem2Quot) {
+                "runtime_word2_quot"
+            } else {
+                "runtime_word2_rem"
+            };
+            let result = emit_runtime_call(
+                sess.pipeline,
+                builder,
+                name,
+                &i64_params(3),
+                &[AbiParam::new(types::I64)],
+                &[hi, lo, d],
+            )?;
+            Ok(SsaVal::Raw(result, LIT_TAG_WORD))
         }
 
         // quotRemWord# :: Word# -> Word# -> (# Word#, Word# #)
@@ -1347,6 +1414,29 @@ pub fn emit_primop(
             let word = builder.ins().uextend(types::I64, byte);
             Ok(SsaVal::Raw(word, LIT_TAG_WORD))
         }
+        PrimOpKind::ByteArrayContents => {
+            // byteArrayContents# / mutableByteArrayContents# :: ByteArray# -> Addr#
+            // The payload starts after the 8-byte length prefix.
+            check_arity(op, 1, args.len())?;
+            let ba = unbox_bytearray(sess.pipeline, builder, args[0]);
+            Ok(SsaVal::Raw(
+                builder.ins().iadd_imm(ba, 8),
+                crate::layout::LIT_TAG_ADDR,
+            ))
+        }
+        PrimOpKind::WriteWord8OffAddr => {
+            // writeWord8OffAddr# :: Addr# -> Int# -> Word8# -> State# s -> State# s
+            let addr = unbox_addr(sess.pipeline, builder, args[0]);
+            let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let val = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
+            let ptr = builder.ins().iadd(addr, off);
+            let byte = builder.ins().ireduce(types::I8, val);
+            builder.ins().store(MemFlags::trusted(), byte, ptr, 0);
+            Ok(SsaVal::Raw(
+                builder.ins().iconst(types::I64, 0),
+                LIT_TAG_INT,
+            ))
+        }
         PrimOpKind::Clz8 => {
             // clz8# :: Word# -> Word#
             check_arity(op, 1, args.len())?;
@@ -1355,6 +1445,48 @@ pub fn emit_primop(
             let clz8 = builder.ins().clz(narrow);
             let result = builder.ins().uextend(types::I64, clz8);
             Ok(SsaVal::Raw(result, LIT_TAG_WORD))
+        }
+        PrimOpKind::Clz => {
+            // clz# :: Word# -> Word# (count leading zeros of a 64-bit word)
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            Ok(SsaVal::Raw(builder.ins().clz(v), LIT_TAG_WORD))
+        }
+        // subIntC# :: Int# -> Int# -> (# Int#, Int# #) (result, overflow flag)
+        PrimOpKind::SubIntCVal => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            Ok(SsaVal::Raw(builder.ins().isub(a, b), LIT_TAG_INT))
+        }
+        PrimOpKind::SubIntCCarry => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let diff = builder.ins().isub(a, b);
+            // Signed-sub overflow: signs of a and b differ AND sign of result differs
+            // from a, i.e. (a ^ b) & (a ^ diff) has bit 63 set.
+            let xor_ab = builder.ins().bxor(a, b);
+            let xor_ad = builder.ins().bxor(a, diff);
+            let overflow_bits = builder.ins().band(xor_ab, xor_ad);
+            let shifted = builder.ins().ushr_imm(overflow_bits, 63);
+            Ok(SsaVal::Raw(shifted, LIT_TAG_INT))
+        }
+        PrimOpKind::RaiseUnderflow | PrimOpKind::RaiseOverflow | PrimOpKind::RaiseDivZero => {
+            // raise{Underflow,Overflow,DivZero}# :: (# #) -> b — bottoming arithmetic
+            // exceptions in ghc-bignum's check branches. GHC hoists these into shared
+            // `let` bindings (e.g. `let z = raiseDivZero# in case d of 0## -> z; ...`),
+            // and the JIT binds lets eagerly — so an EAGER error would fire even when
+            // the divisor is nonzero. Emit a LAZY poison instead (same discipline as
+            // the `error` sentinel): it only raises when actually forced in the taken
+            // branch. kind: 0=DivZero, 1=Overflow/Underflow.
+            let kind = match op {
+                PrimOpKind::RaiseDivZero => 0u64,
+                _ => 1u64,
+            };
+            let addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
+            let v = builder.ins().iconst(types::I64, addr);
+            Ok(SsaVal::HeapPtr(v))
         }
         PrimOpKind::Raise => {
             // raise# :: a -> b — always errors
@@ -1481,6 +1613,28 @@ pub fn emit_primop(
                 builder.ins().iconst(types::I64, 0),
                 LIT_TAG_INT,
             ))
+        }
+
+        PrimOpKind::FfiIntEncodeDouble | PrimOpKind::FfiWordEncodeDouble => {
+            // __{int,word}_encodeDouble(mantissa, exp) -> Double# (returned as raw bits).
+            check_arity(op, 2, args.len())?;
+            let m = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let e = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let name = if matches!(op, PrimOpKind::FfiIntEncodeDouble) {
+                "runtime_int_encode_double"
+            } else {
+                "runtime_word_encode_double"
+            };
+            let result = emit_runtime_call(
+                sess.pipeline,
+                builder,
+                name,
+                &i64_params(2),
+                &[AbiParam::new(types::I64)],
+                &[m, e],
+            )?;
+            let d = builder.ins().bitcast(types::F64, MemFlags::new(), result);
+            Ok(SsaVal::Raw(d, LIT_TAG_DOUBLE))
         }
 
         // Float arithmetic + comparison

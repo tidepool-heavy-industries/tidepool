@@ -29,6 +29,7 @@ enum EmitFrame<A> {
     Var(VarId),
     Lit(Literal),
     LitString(Vec<u8>),
+    LitByteArray(Vec<u8>),
 
     // Simple recursive \u2014 children are A (stack-safe)
     Con {
@@ -95,6 +96,7 @@ impl MappableFrame for EmitFrameToken {
             EmitFrame::Var(v) => EmitFrame::Var(v),
             EmitFrame::Lit(l) => EmitFrame::Lit(l),
             EmitFrame::LitString(b) => EmitFrame::LitString(b),
+            EmitFrame::LitByteArray(b) => EmitFrame::LitByteArray(b),
             EmitFrame::Con { tag, fields } => EmitFrame::Con {
                 tag,
                 fields: fields.into_iter().map(&mut f).collect(),
@@ -154,6 +156,7 @@ fn expand_node(tree: &CoreExpr, idx: usize) -> Result<EmitFrame<usize>, EmitErro
     match &tree.nodes[idx] {
         CoreFrame::Var(v) => Ok(EmitFrame::Var(*v)),
         CoreFrame::Lit(Literal::LitString(bytes)) => Ok(EmitFrame::LitString(bytes.clone())),
+        CoreFrame::Lit(Literal::LitByteArray(bytes)) => Ok(EmitFrame::LitByteArray(bytes.clone())),
         CoreFrame::Lit(lit) => Ok(EmitFrame::Lit(lit.clone())),
         CoreFrame::Con { tag, fields } => {
             let has_non_trivial = fields.iter().any(|&f| !is_trivial_field(f, tree));
@@ -250,10 +253,40 @@ fn expand_node(tree: &CoreExpr, idx: usize) -> Result<EmitFrame<usize>, EmitErro
 }
 
 /// Collapse: assemble Cranelift IR from child results.
+/// Emit-coverage key for an `EmitFrame` variant (see `crate::coverage`).
+fn emit_frame_cov_key(frame: &EmitFrame<SsaVal>) -> &'static str {
+    match frame {
+        EmitFrame::Var(_) => "frame:Var",
+        EmitFrame::Lit(_) => "frame:Lit",
+        EmitFrame::LitString(_) => "frame:LitString",
+        EmitFrame::LitByteArray(_) => "frame:LitByteArray",
+        EmitFrame::Con { .. } => "frame:Con",
+        EmitFrame::ThunkCon { .. } => "frame:ThunkCon",
+        EmitFrame::App { .. } => "frame:App",
+        EmitFrame::PrimOp { .. } => "frame:PrimOp",
+        EmitFrame::Jump { .. } => "frame:Jump",
+        EmitFrame::Case { .. } => "frame:Case",
+        EmitFrame::Lam { .. } => "frame:Lam",
+        EmitFrame::Join { .. } => "frame:Join",
+        EmitFrame::LetBoundary(_) => "frame:LetBoundary",
+        EmitFrame::Raise { .. } => "frame:Raise",
+    }
+}
+
 fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, EmitError> {
     let tail = args.tail;
+    crate::coverage::hit(emit_frame_cov_key(&frame));
     match frame {
         EmitFrame::LitString(ref bytes) => emit_lit_string(
+            args.sess.pipeline,
+            args.builder,
+            args.sess.vmctx,
+            args.sess.gc_sig,
+            args.sess.oom_func,
+            bytes,
+            &mut args.ctx.lambda_counter,
+        ),
+        EmitFrame::LitByteArray(ref bytes) => emit_lit_bytearray_literal(
             args.sess.pipeline,
             args.builder,
             args.sess.vmctx,
@@ -316,6 +349,11 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             }
         },
         EmitFrame::Con { tag, fields } => {
+            crate::coverage::hit(if fields.is_empty() {
+                "con:nullary"
+            } else {
+                "con:nonnullary"
+            });
             let field_vals: Vec<Value> = fields
                 .iter()
                 .map(|v| {
@@ -453,9 +491,10 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             ref op,
             args: ref prim_args,
         } => {
-            // Force thunked args: PrimOps are strict in all arguments.
-            // Case alt binders can be thunks (lazy Con fields), so force
-            // them before passing to primop unboxing.
+            crate::coverage::hit(op.serial_name()); // per-primop emit coverage
+                                                    // Force thunked args: PrimOps are strict in all arguments.
+                                                    // Case alt binders can be thunks (lazy Con fields), so force
+                                                    // them before passing to primop unboxing.
             let forced_args: Vec<SsaVal> = prim_args
                 .iter()
                 .map(|a| force_thunk_ssaval(args.sess.pipeline, args.builder, args.sess.vmctx, *a))
@@ -1750,6 +1789,7 @@ impl EmitContext {
                     loop {
                         match &args.sess.tree.nodes[idx] {
                             CoreFrame::LetNonRec { binder, rhs, body } => {
+                                crate::coverage::hit("frame:LetNonRec");
                                 let binder = *binder;
                                 let rhs = *rhs;
                                 let body = *body;
@@ -1804,6 +1844,7 @@ impl EmitContext {
                                 continue;
                             }
                             CoreFrame::LetRec { bindings, body } => {
+                                crate::coverage::hit("frame:LetRec");
                                 let bindings = bindings.clone();
                                 let body = *body;
                                 // Run phases 1-3b inline, push deferred evals + finish + cleanup
@@ -3166,8 +3207,67 @@ fn emit_lit(
             builder.declare_value_needs_stack_map(ptr);
             Ok(SsaVal::HeapPtr(ptr))
         }
-        Literal::LitString(_) => Err(EmitError::NotYetImplemented("LitString".into())),
+        Literal::LitString(_) | Literal::LitByteArray(_) => {
+            Err(EmitError::NotYetImplemented("LitString".into()))
+        }
     }
+}
+
+/// Emit a `LitByteArray` (e.g. a `BigNat#` payload) as a heap Lit object.
+///
+/// Identical data-section layout to `emit_lit_string` (`[len: u64][bytes...]`),
+/// but tagged `LIT_TAG_BYTEARRAY` instead of `LIT_TAG_STRING`. The tag matters at
+/// read time: `unbox_bytearray` adds `+8` for STRING (to skip the length prefix,
+/// for `unpackCString#`), but returns the data pointer as-is for BYTEARRAY — so
+/// `sizeofByteArray#` reads the length and `indexWordArray#`/the mpn intercepts
+/// (which add their own `+8`) read the limbs. Using STRING here would
+/// double-offset and make `sizeofByteArray#` read a limb as the length.
+fn emit_lit_bytearray_literal(
+    pipeline: &mut CodegenPipeline,
+    builder: &mut FunctionBuilder,
+    vmctx: Value,
+    gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
+    bytes: &[u8],
+    counter: &mut u32,
+) -> Result<SsaVal, EmitError> {
+    let data_name = format!("__litba_{}", *counter);
+    *counter += 1;
+
+    let data_id = pipeline
+        .module
+        .declare_data(&data_name, Linkage::Local, false, false)
+        .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+
+    let mut data_desc = DataDescription::new();
+    data_desc.set_align(8);
+    let mut contents = Vec::with_capacity(8 + bytes.len());
+    contents.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    contents.extend_from_slice(bytes);
+    data_desc.define(contents.into_boxed_slice());
+
+    pipeline
+        .module
+        .define_data(data_id, &data_desc)
+        .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+
+    let local_data = pipeline.module.declare_data_in_func(data_id, builder.func);
+    let data_ptr = builder.ins().symbol_value(types::I64, local_data);
+
+    let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig, oom_func);
+    let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);
+    builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
+    let size = builder.ins().iconst(types::I16, LIT_TOTAL_SIZE as i64);
+    builder.ins().store(MemFlags::trusted(), size, ptr, 1);
+    let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_BYTEARRAY);
+    builder
+        .ins()
+        .store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
+    builder
+        .ins()
+        .store(MemFlags::trusted(), data_ptr, ptr, LIT_VALUE_OFFSET);
+    builder.declare_value_needs_stack_map(ptr);
+    Ok(SsaVal::HeapPtr(ptr))
 }
 
 /// Emit a LitString as a heap Lit object pointing to a JIT data section.

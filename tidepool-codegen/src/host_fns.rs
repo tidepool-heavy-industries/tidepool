@@ -2127,6 +2127,38 @@ pub extern "C" fn runtime_text_reverse(dest: i64, src: i64, off: i64, len: i64) 
     }
 }
 
+/// `quotRemWord2#` quotient: `((hi << 64) | lo) / d`. The native ghc-bignum
+/// backend's 128/64 division primitive. `d == 0` is guarded by the Haskell
+/// caller (raiseDivZero#); we still return 0 rather than panic.
+pub extern "C" fn runtime_word2_quot(hi: i64, lo: i64, d: i64) -> i64 {
+    let d = d as u64;
+    if d == 0 {
+        return 0;
+    }
+    let n = ((hi as u64 as u128) << 64) | (lo as u64 as u128);
+    (n / d as u128) as u64 as i64
+}
+
+/// `quotRemWord2#` remainder: `((hi << 64) | lo) % d`.
+pub extern "C" fn runtime_word2_rem(hi: i64, lo: i64, d: i64) -> i64 {
+    let d = d as u64;
+    if d == 0 {
+        return 0;
+    }
+    let n = ((hi as u64 as u128) << 64) | (lo as u64 as u128);
+    (n % d as u128) as u64 as i64
+}
+
+/// `__int_encodeDouble(mantissa, exp) -> Double#` (returned as raw f64 bits).
+pub extern "C" fn runtime_int_encode_double(mantissa: i64, exp: i64) -> i64 {
+    tidepool_bignum::encode_double(mantissa, exp).to_bits() as i64
+}
+
+/// `__word_encodeDouble(mantissa, exp) -> Double#` (unsigned mantissa; raw bits).
+pub extern "C" fn runtime_word_encode_double(mantissa: i64, exp: i64) -> i64 {
+    tidepool_bignum::encode_double_word(mantissa as u64, exp).to_bits() as i64
+}
+
 /// Format a Double as a null-terminated C string and return its address.
 /// The CString is leaked (small bounded strings, acceptable).
 pub extern "C" fn runtime_show_double_addr(bits: i64) -> i64 {
@@ -2792,6 +2824,18 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
         ),
         ("runtime_text_memchr", runtime_text_memchr as *const u8),
         ("runtime_text_reverse", runtime_text_reverse as *const u8),
+        ("runtime_word2_quot", runtime_word2_quot as *const u8),
+        ("runtime_word2_rem", runtime_word2_rem as *const u8),
+        // ghc-bignum Integer->Double FFI (the only mpn-adjacent FFI under the
+        // native backend; mantissa * 2^exp via tidepool-bignum).
+        (
+            "runtime_int_encode_double",
+            runtime_int_encode_double as *const u8,
+        ),
+        (
+            "runtime_word_encode_double",
+            runtime_word_encode_double as *const u8,
+        ),
         (
             "runtime_new_boxed_array",
             runtime_new_boxed_array as *const u8,

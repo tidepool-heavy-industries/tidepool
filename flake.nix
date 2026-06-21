@@ -26,7 +26,12 @@
         # base is just re-exports; ghc-prim has no Haskell Core.
         ghcInternalOverlay = final: prev:
           let
-            patchedGhc = prev.haskell.compiler.ghc912.overrideAttrs (old: {
+            patchedGhc = (prev.haskell.compiler.ghc912.override {
+              # Native (pure-Haskell) ghc-bignum backend: Integer/Natural ops desugar
+              # to pure Core over Word#/ByteArray# primops (no __gmpn_*/integer_gmp_*
+              # FFI), which the JIT compiles directly — correct by construction.
+              enableNativeBignum = true;
+            }).overrideAttrs (old: {
               postPatch = (old.postPatch or "") + ''
                 TIDEPOOL_GHC_OPTS="-fexpose-all-unfoldings -funfolding-creation-threshold=100000 -fwrite-if-simplified-core"
 

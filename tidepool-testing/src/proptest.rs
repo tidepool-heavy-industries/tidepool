@@ -7,6 +7,7 @@
 use proptest::prelude::*;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
+use tidepool_eval::error::EvalError;
 use tidepool_eval::pass::Pass;
 use tidepool_eval::value::Value;
 use tidepool_eval::{env_from_datacon_table, eval, Env, VecHeap};
@@ -160,6 +161,60 @@ pub fn check_jit_vs_eval(expr: CoreExpr, nursery_size: usize) -> Result<(), Test
     }
 
     Ok(())
+}
+
+/// The full, UN-SKIPPED classification of one JIT-vs-eval run. Unlike
+/// [`check_jit_vs_eval`] (which `prop_assume!`-skips both-fail and several
+/// synthetic-IR-only JIT failures), every case is an explicit, inspectable
+/// outcome — required for a captured REAL-Core corpus where eval-failure and
+/// both-fail are FINDINGS, not noise to swallow.
+#[derive(Debug)]
+pub enum CapturedOutcome {
+    /// Both engines succeeded and agree — no bug.
+    Agree(Value),
+    /// Both succeeded but produced different values — a value bug (either side).
+    Diverge { eval: Value, jit: Value },
+    /// Eval succeeded, JIT failed — the canonical JIT-only bug (e.g. #1
+    /// roundingMode#). The captured differential's primary signal.
+    JitOnlyFailure { eval: Value, jit: JitError },
+    /// JIT succeeded, eval failed — an interpreter/tree-walker bug.
+    EvalOnlyFailure { eval: EvalError, jit: Value },
+    /// BOTH failed — a shared/translation bug (e.g. #2 read): NOT a JIT-vs-eval
+    /// differential, so the differential oracle structurally cannot catch it.
+    BothFail { eval: EvalError, jit: JitError },
+}
+
+/// Strict JIT-vs-eval differential for REAL captured Core, run against the
+/// extractor's `meta.cbor` `DataConTable` (NOT the synthetic
+/// `build_table_for_expr`, which fabricates tags — fatal here, since the bugs
+/// ARE constructor tag/field misreads). Classifies the run into a
+/// [`CapturedOutcome`] with NO silent skips.
+pub fn check_jit_vs_eval_captured(
+    expr: &CoreExpr,
+    table: &DataConTable,
+    nursery_size: usize,
+) -> CapturedOutcome {
+    let mut heap_eval = VecHeap::new();
+    let env_eval = env_from_datacon_table(table);
+    let res_eval = eval(expr, &env_eval, &mut heap_eval);
+
+    let res_jit = match JitEffectMachine::compile(expr, table, nursery_size) {
+        Ok(mut machine) => machine.run_pure(),
+        Err(e) => Err(e),
+    };
+
+    match (res_eval, res_jit) {
+        (Ok(ev), Ok(jit)) => {
+            if values_equal(&ev, &jit) {
+                CapturedOutcome::Agree(ev)
+            } else {
+                CapturedOutcome::Diverge { eval: ev, jit }
+            }
+        }
+        (Ok(ev), Err(jit)) => CapturedOutcome::JitOnlyFailure { eval: ev, jit },
+        (Err(ev), Ok(jit)) => CapturedOutcome::EvalOnlyFailure { eval: ev, jit },
+        (Err(ev), Err(jit)) => CapturedOutcome::BothFail { eval: ev, jit },
+    }
 }
 
 /// Verify an optimization pass preserves evaluation results.
