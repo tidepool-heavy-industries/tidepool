@@ -10,11 +10,12 @@
 -- conversion/parse Core survives to runtime (a folded literal tests nothing).
 module Corpus where
 
-import Data.Int (Int8)
+import Data.Bits (complement, xor)
+import Data.Int (Int8, Int16, Int64)
 import Data.List (foldl', nub, sort)
 import Data.Maybe (mapMaybe)
 import Data.Ratio ((%))
-import Data.Word (Word8)
+import Data.Word (Word16, Word32, Word8)
 
 -- NOINLINE seeds — opaque inputs that defeat constant-folding.
 {-# NOINLINE seedI5 #-}
@@ -314,6 +315,88 @@ gcTreeBuild = sumTree (buildTree 10)
 
 gcStringAlloc :: Int
 gcStringAlloc = foldl' (\acc x -> acc + length (show x)) 0 [1 .. 800 :: Int]
+
+-- ── Family L: primop-coverage curation — NOINLINE seeds defeat folding so the
+-- arithmetic/compare/convert/narrow opcodes survive to runtime emit. ──
+
+{-# NOINLINE sF #-}
+sF :: Float
+sF = 1.5
+{-# NOINLINE sD #-}
+sD :: Double
+sD = 2.5
+{-# NOINLINE sC #-}
+sC :: Char
+sC = 'm'
+{-# NOINLINE sW #-}
+sW :: Word
+sW = 12
+{-# NOINLINE sI #-}
+sI :: Int
+sI = 300
+{-# NOINLINE sI64 #-}
+sI64 :: Int64
+sI64 = 5000000000
+
+pcFloatArith :: Float
+pcFloatArith = sF + sF * 2.0 - sF / 4.0
+
+pcFloatNeg :: Float
+pcFloatNeg = negate sF
+
+pcFloatCmp :: Bool
+pcFloatCmp = sF < 2.0 && sF /= 3.0 && sF >= 1.0 && sF == 1.5
+
+pcDoubleSubMul :: Double
+pcDoubleSubMul = sD - 1.0 * 2.0
+
+pcDoubleCmp :: Bool
+pcDoubleCmp = sD < 3.0 && sD /= 1.0 && sD >= 2.0
+
+pcCharCmp :: Bool
+pcCharCmp = sC /= 'a' && sC < 'z' && sC > 'a'
+
+pcIntNot :: Int
+pcIntNot = complement sI
+
+pcWordXor :: Word
+pcWordXor = xor sW 10
+
+pcTranscend :: Double
+pcTranscend = asin 0.5 + acos 0.5 + sinh sD + cosh sD + tanh sD
+
+pcTranscend2 :: Double
+pcTranscend2 = atanh 0.5 + asinh sD + acosh (sD + 1.0)
+
+pcIntToFloat :: Float
+pcIntToFloat = fromIntegral sI
+
+pcFloatToInt :: Int
+pcFloatToInt = truncate sF
+
+pcDoubleToFloat :: Float
+pcDoubleToFloat = realToFrac sD
+
+pcNarrowW8 :: Int
+pcNarrowW8 = fromIntegral (fromIntegral sI :: Word8)
+
+pcNarrowI8 :: Int
+pcNarrowI8 = fromIntegral (fromIntegral sI :: Int8)
+
+pcNarrowW16 :: Int
+pcNarrowW16 = fromIntegral (fromIntegral sI :: Word16)
+
+pcNarrowI16 :: Int
+pcNarrowI16 = fromIntegral (fromIntegral sI :: Int16)
+
+pcNarrowW32 :: Int
+pcNarrowW32 = fromIntegral (fromIntegral sI64 :: Word32)
+
+pcInt64Arith :: Int64
+pcInt64Arith = sI64 + sI64 * 2 - 1
+
+pcInt64Cmp :: Bool
+pcInt64Cmp = sI64 < 6000000000 && sI64 > 1
 
 -- ── supporting decls (not captured as bindings themselves) ──
 

@@ -2084,7 +2084,47 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             )))
         }
 
-        // SmallArray# / Array# / PopCnt / Ctz — only used by JIT, not tree-walker
+        // popCnt#/popCntN# :: Word# -> Word#  — population count (set bits) of the
+        //   low N bits. ctz#/ctzN# :: Word# -> Word#  — count of trailing zero bits
+        //   in the low N bits; the result is N when those bits are all zero (GHC
+        //   spec; Rust's `(w as uN).trailing_zeros()` returns N for 0). The full-
+        //   width forms popCnt64#/ctz64# operate on the whole Word64. Implementing
+        //   these un-blinds the differential on the Double-literal / Rational->Double
+        //   paths (eval previously errored UnsupportedPrimOp, masking the JIT).
+        PrimOpKind::PopCnt
+        | PrimOpKind::PopCnt8
+        | PrimOpKind::PopCnt16
+        | PrimOpKind::PopCnt32
+        | PrimOpKind::PopCnt64
+        | PrimOpKind::Ctz
+        | PrimOpKind::Ctz8
+        | PrimOpKind::Ctz16
+        | PrimOpKind::Ctz32
+        | PrimOpKind::Ctz64 => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let w = expect_word(&args[0])?;
+            let r = match op {
+                PrimOpKind::PopCnt | PrimOpKind::PopCnt64 => w.count_ones(),
+                PrimOpKind::PopCnt8 => (w as u8).count_ones(),
+                PrimOpKind::PopCnt16 => (w as u16).count_ones(),
+                PrimOpKind::PopCnt32 => (w as u32).count_ones(),
+                PrimOpKind::Ctz | PrimOpKind::Ctz64 => w.trailing_zeros(),
+                PrimOpKind::Ctz8 => (w as u8).trailing_zeros(),
+                PrimOpKind::Ctz16 => (w as u16).trailing_zeros(),
+                PrimOpKind::Ctz32 => (w as u32).trailing_zeros(),
+                _ => unreachable!("outer match restricts op to PopCnt*/Ctz*"),
+            };
+            Ok(Value::Lit(Literal::LitWord(r as u64)))
+        }
+
+        // SmallArray# / Array# (boxed) — would need a boxed-array `Value` variant
+        // (the tree-walker only has the unboxed `ByteArray`); used only by the JIT.
         PrimOpKind::NewSmallArray
         | PrimOpKind::ReadSmallArray
         | PrimOpKind::WriteSmallArray
@@ -2109,17 +2149,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         | PrimOpKind::CopyArray
         | PrimOpKind::CopyMutableArray
         | PrimOpKind::CloneArray
-        | PrimOpKind::CloneMutableArray
-        | PrimOpKind::PopCnt
-        | PrimOpKind::PopCnt8
-        | PrimOpKind::PopCnt16
-        | PrimOpKind::PopCnt32
-        | PrimOpKind::PopCnt64
-        | PrimOpKind::Ctz
-        | PrimOpKind::Ctz8
-        | PrimOpKind::Ctz16
-        | PrimOpKind::Ctz32
-        | PrimOpKind::Ctz64 => Err(EvalError::UnsupportedPrimOp(op)),
+        | PrimOpKind::CloneMutableArray => Err(EvalError::UnsupportedPrimOp(op)),
     }
 }
 

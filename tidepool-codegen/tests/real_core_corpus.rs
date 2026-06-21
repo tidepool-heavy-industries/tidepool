@@ -167,16 +167,18 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("convFromInt1025", "JIT-BUG", "#1 roundingMode#:IN"),
     ("convFromIntPow40", "JIT-BUG", "#1 roundingMode#:IN"),
     ("convFromIntPow80", "JIT-BUG", "#1 roundingMode#:IN"),
-    // #1 (JIT bug) compounded with eval's missing PopCnt primop (a GAP) → MIXED.
+    // #1 reached via the Double-literal / Rational->Double path. UN-MASKED once
+    // eval gained PopCnt (was BOTH-MIXED): eval now computes the value, so the JIT
+    // roundingMode#:IN is revealed as a pure divergence (same #1 bug).
     (
         "convDoubleLitBig",
-        "BOTH-MIXED",
-        "#1 JIT-bug + eval-GAP PopCnt",
+        "JIT-BUG",
+        "#1 roundingMode#:IN (Double literal)",
     ),
     (
         "convFromRational",
-        "BOTH-MIXED",
-        "#1 JIT-bug + eval-GAP PopCnt",
+        "JIT-BUG",
+        "#1 roundingMode#:IN (Rational->Double)",
     ),
     // GADT with equality evidence — eval case-binder arity off, JIT SIGSEGV.
     (
@@ -322,11 +324,26 @@ fn corpus_report() {
         );
         let p_hit: Vec<&&str> = primops.iter().filter(|p| coverage.contains(*p)).collect();
         println!("    HIT primops ({}): {p_hit:?}", p_hit.len());
-        println!(
-            "    UNHIT primops ({}) — where a generator would extend reach:",
-            p_unhit.len()
-        );
+        println!("    UNHIT primops ({}) — residual reach:", p_unhit.len());
         println!("    {p_unhit:?}");
+        // The residual is dominated by opcodes UNREACHABLE from surface Haskell —
+        // a generator emitting raw Core could hit them; curation cannot:
+        //  - GHC rewrites the surface op away: `x - c` -> `x + negate c`
+        //    (DoubleSub/FloatSub), `x /= y` -> `not (x == y)` (DoubleNe/CharNe),
+        //    `x >= y` -> `not (x < y)` (DoubleGe). Only the rewritten-TO op is hit.
+        //  - 64-bit representation collapse: Int64*/Word64* == Int*/Word* on a
+        //    64-bit host, so surface Int64/Word64 arithmetic emits the Int/Word op.
+        //  - narrowing via mask: `fromIntegral :: Word8` emits `and# 0xFF`, not
+        //    narrow8Word#.
+        //  - compiler-internal: TagToEnum / SeqOp desugar to `case`; Raise /
+        //    ReallyUnsafePtrEquality are not surfaced.
+        //  - eval-oracle GAP (separate task): boxed Array#/SmallArray# ops need a
+        //    boxed-array `Value` variant the tree-walker lacks.
+        //  - need Data.Text / ByteString: FfiStrlen / FfiText* / low-level
+        //    ByteArray ops (ReadWord8Array, SetByteArray, ...).
+        println!(
+            "    (residual ≈ GHC-rewritten-away + 64-bit-collapsed + eval-array-gap\n     + Text/ByteArray + compiler-internal — see source note; generator-only.)"
+        );
     } else {
         println!("\n(emit-path coverage off — set TIDEPOOL_EMIT_COVERAGE=1)");
     }
