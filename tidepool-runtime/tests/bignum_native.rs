@@ -130,11 +130,12 @@ fn factorial_30() {
     );
 }
 
-// read pulls in the Read/ReadP CPS-parser machinery, which currently hits a JIT
-// closure-handling bug ("application of non-closure"); orthogonal to bignum —
-// the Integer arithmetic the lexer accumulates is itself correct now.
+// read pulls in the Read/ReadP CPS-parser machinery. Both root causes are now
+// fixed: the unboxed-1-tuple (`MkSolo#`) build erasure in Translate.hs, and
+// lazy-let thunkification in the JIT (ReadP `expect`'s `let x = F k` corecursion
+// no longer force-recurses). The Integer arithmetic the lexer accumulates was
+// already correct.
 #[test]
-#[ignore = "Read/ReadP CPS machinery: JIT non-closure application (orthogonal to bignum)"]
 fn read_integer() {
     assert_eq!(
         show_pure("show (read \"123456789012345678901234567890\" :: Integer)"),
@@ -143,7 +144,6 @@ fn read_integer() {
 }
 
 #[test]
-#[ignore = "Read/ReadP CPS machinery: JIT non-closure application (orthogonal to bignum)"]
 fn read_int() {
     assert_eq!(show_pure("show (read \"42\" :: Int)"), json!("42"));
 }

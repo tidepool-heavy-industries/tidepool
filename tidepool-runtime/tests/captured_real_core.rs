@@ -21,8 +21,6 @@
 //! These fixtures pin two DISTINCT, currently-unfixed bugs. The asserts encode
 //! the present (buggy) behaviour; when a fix lands, the relevant assert flips and
 //! this test fails loudly — that is the signal to update it.
-use tidepool_codegen::jit_machine::JitError;
-use tidepool_codegen::yield_type::YieldError;
 use tidepool_eval::value::Value;
 use tidepool_repr::serial::read::{read_cbor, read_metadata};
 use tidepool_repr::{CoreExpr, DataConTable, Literal};
@@ -122,44 +120,21 @@ fn captured_round_in_minimized_agrees_1025() {
     });
 }
 
-// #2 — NOT a JIT-vs-eval differential. `read "42" :: Int` fails in BOTH engines:
-// the tree-walker yields `NotAFunction` and the JIT `BadFunPtrTag` (a constructor
-// in function position, reached through ReadP's newtype coercion). Because eval
-// also fails, the differential oracle structurally CANNOT catch this — it is a
-// translation / shared-repr bug, a different class from #1. Captured (as the
-// explicit `BothFail` outcome) so that class is on record rather than swallowed.
+// #2 — `read "42" :: Int` is now FIXED in BOTH engines (was a `BothFail`: the
+// tree-walker yielded `NotAFunction`, the JIT `BadFunPtrTag`). The diagnosis was
+// NOT a ReadP `~R#` newtype coercion; it was two distinct root causes, both
+// landed:
+//   1. The unboxed-1-tuple build asymmetry (Translate.hs): GHC wraps the ReadP
+//      CPS function in `MkSolo#`, the unboxed 1-tuple `(# f #)` (no runtime rep);
+//      the Con-build path boxed it into a heap Con instead of erasing it to its
+//      field → a constructor in function position. The `reproReadInt` fixture was
+//      regenerated with this fix (meta.cbor + the #1 fixtures are unchanged).
+//   2. Eager-let in the JIT (emit/expr.rs): ReadP `expect` is a productive
+//      corecursion `F = \k -> let x = F k in <Get parser using x>`; the strict
+//      LetNonRec spine force-evaluated `let x = F k` into infinite recursion.
+//      Non-trivial LetNonRec RHS is now thunkified (GHC Core `let` is non-strict).
+// The golden below is the live eval-vs-expected guard.
 #[test]
-fn captured_read_int_both_engines_fail() {
-    on_big_stack(|| {
-        let (expr, table) = load(READ_INT);
-        match check_jit_vs_eval_captured(&expr, &table, NURSERY) {
-            CapturedOutcome::BothFail { eval, jit } => {
-                // Tree-walker also fails — proves this is NOT JIT-only.
-                assert!(
-                    format!("{eval:?}").contains("NotAFunction"),
-                    "expected eval NotAFunction, got {eval:?}"
-                );
-                assert!(
-                    matches!(jit, JitError::Yield(YieldError::BadFunPtrTag(_))),
-                    "expected JIT BadFunPtrTag (non-function applied), got {jit:?}"
-                );
-            }
-            other => panic!("expected #2 to be BothFail (not a differential), got {other:?}"),
-        }
-    });
-}
-
-// #2 GOLDEN guard (eval-vs-EXPECTED). #2-class bugs are shared front-end /
-// newtype-coercion lowering failures that break BOTH engines, so the JIT-vs-eval
-// differential is structurally blind to them — they need an eval-vs-expected
-// golden. The golden: `read "42" :: Int` must produce 42 in BOTH engines
-// (CapturedOutcome::Agree(42)). It is #[ignore]'d because it is currently BLOCKED
-// on #2 (ReadP `~R#` newtype-coercion lowering lands a constructor in function
-// position). Drop the #[ignore] the moment #2 is fixed and it becomes a live
-// golden guard. The sibling `captured_read_int_both_engines_fail` is the active
-// tripwire that fires the instant #2's behaviour changes at all.
-#[test]
-#[ignore = "blocked on #2: ReadP ~R# newtype-coercion lowering (read yields a non-function)"]
 fn captured_read_int_golden_expects_42() {
     on_big_stack(|| {
         let (expr, table) = load(READ_INT);

@@ -178,38 +178,21 @@ const KNOWN: &[(&str, &str, &str)] = &[
     // Translate.hs (alt binders now exclude CoVars, matching the Con build's
     // isValueArg / valueRepArity).
     //
-    // #2 read/ReadP — the SHARED bug is FIXED (was BOTH-BUG). It was NOT the ReadP
-    // newtype ~R# coercion (the serializer already strips newtype casts) but the
-    // unboxed-1-tuple build: GHC wraps the ReadP CPS function in `MkSolo#`, the
-    // unboxed 1-tuple `(# f #)` (no runtime rep — it IS its field). The Con-build
-    // path boxed it into a heap Con while the case side already treats
-    // `case scrut of (# x #) -> body` as identity — a boxed Con in function
-    // position → JIT BadFunPtrTag / eval NotAFunction. Fixed in Translate.hs
-    // (1-element unboxed-tuple builds now erase to their field, symmetric with the
-    // case side). Eval is now CORRECT (42 / [1,2,3] / 3.14).
-    //
-    // The RESIDUAL is a SEPARATE, JIT-only root cause: the JIT compiles the
-    // now-correct ReadP CPS into runaway recursion — `read "42"` (2 chars) blows
-    // MAX_CALL_DEPTH=20_000 → StackOverflow / native SIGSEGV — while eval is
-    // bounded. TCO not applying to ReadP's `(a->P b)->P b` continuation chains;
-    // the next focused target. (KNOWN matches on the JIT-BUG tag; the specific
-    // StackOverflow-vs-Signal(11) split is stack-layout-dependent — both are
-    // JitOnlyFailure, eval correct.)
-    (
-        "readInt",
-        "JIT-BUG",
-        "JIT-CPS runaway-recursion residual; eval correct = 42",
-    ),
-    (
-        "readListInt",
-        "JIT-BUG",
-        "JIT-CPS runaway-recursion residual; eval correct = [1,2,3]",
-    ),
-    (
-        "readDouble",
-        "JIT-BUG",
-        "JIT-CPS runaway-recursion residual; eval correct = 3.14",
-    ),
+    // #2 read/ReadP — FULLY FIXED (now MATCH, entries pruned), in two parts:
+    //  - The SHARED translation bug: GHC wraps the ReadP CPS function in `MkSolo#`,
+    //    the unboxed 1-tuple `(# f #)` (no runtime rep — it IS its field). The
+    //    Con-build path boxed it into a heap Con while the case side already treats
+    //    `case scrut of (# x #) -> body` as identity — a boxed Con in function
+    //    position → JIT BadFunPtrTag / eval NotAFunction. Fixed in Translate.hs
+    //    (1-element unboxed-tuple builds erase to their field). That made EVAL
+    //    correct (42 / [1,2,3] / 3.14) but left a JIT-only residual.
+    //  - The JIT residual (eager-let): ReadP `expect` is a productive corecursion
+    //    `F = \k -> let x = F k in <Get parser using x>`. The JIT evaluated every
+    //    LetNonRec RHS EAGERLY, forcing `let x = F k` into infinite self-recursion
+    //    → StackOverflow; eval (lazy let) is bounded by demand. Fixed in
+    //    emit/expr.rs: non-trivial LetNonRec RHS is thunkified (GHC Core `let` is
+    //    non-strict — strictness is via `case`, never `let`). Trivial RHS
+    //    (Var/Lit/Lam/Con/PrimOp) stays eager. Both engines now MATCH on all reads.
     // ── SUPPORT GAPS (missing primop / unresolved external) ──
     (
         "convProperFraction",

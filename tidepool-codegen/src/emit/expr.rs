@@ -1850,7 +1850,10 @@ impl EmitContext {
                                         work.push(EmitWork::LetCleanupMark(LetCleanup::Single(
                                             binder, old_val,
                                         )));
-                                    } else {
+                                    } else if is_trivial_field(rhs, args.sess.tree) {
+                                        // Trivial RHS (already WHNF \u2014 Var/Lit/Lam/Con \u2014 or a
+                                        // strict, terminating PrimOp): evaluate eagerly. This is
+                                        // the fast path; no thunk allocation.
                                         // Push work in LIFO order: cleanup, eval body, bind, eval rhs
                                         // After rhs eval \u2192 bind \u2192 eval body \u2192 cleanup
                                         let old_val = args.ctx.env.get(&binder).cloned();
@@ -1861,6 +1864,31 @@ impl EmitContext {
                                         work.push(EmitWork::Bind(binder));
                                         work.push(EmitWork::Eval(rhs, TailCtx::NonTail));
                                         break; // exit inner loop, process work stack
+                                    } else {
+                                        // Non-trivial RHS (App/Case/Let/Jump): thunkify. GHC Core
+                                        // `let` is NON-STRICT \u2014 strictness is expressed via `case`,
+                                        // never `let`. Eager eval here would force a productive
+                                        // corecursion into infinite self-recursion: ReadP `expect`
+                                        // is `F = \k -> let x = F k in <Get parser using x>`, where
+                                        // the `let x = F k` is the lazy "next layer"; the strict
+                                        // spine drove it to StackOverflow while eval (lazy) is
+                                        // bounded by demand. Binding a thunk restores the correct
+                                        // semantics \u2014 and subsumes the error-deferral special case
+                                        // above (a bottoming RHS is just one non-terminating RHS).
+                                        let thunk_val = emit_thunk(
+                                            EmitArgs {
+                                                ctx: args.ctx,
+                                                sess: args.sess,
+                                                builder: args.builder,
+                                                tail: TailCtx::NonTail,
+                                            },
+                                            rhs,
+                                        )?;
+                                        let old_val = args.ctx.env.insert(binder, thunk_val);
+                                        // No work-stack RHS eval; push cleanup, continue to body.
+                                        work.push(EmitWork::LetCleanupMark(LetCleanup::Single(
+                                            binder, old_val,
+                                        )));
                                     }
                                 } else if crate::debug::trace_level()
                                     >= crate::debug::TraceLevel::Scope
