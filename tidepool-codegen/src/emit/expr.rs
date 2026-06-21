@@ -2494,6 +2494,10 @@ impl EmitContext {
         // on closure code pointers.
         let mut deferred_simple = Vec::with_capacity(simple_bindings.len());
         for (binder, rhs_idx) in &simple_bindings {
+            let alias_target = match &args.sess.tree.nodes[*rhs_idx] {
+                CoreFrame::Var(v) => Some(*v),
+                _ => None,
+            };
             if EmitContext::rhs_is_error_call_in_group(args.sess.tree, *rhs_idx, &group) {
                 let poison_sv = emit_error_binding(
                     EmitArgs {
@@ -2509,22 +2513,35 @@ impl EmitContext {
                         .trace_scope(&format!("defer error LetRec(trivial) {:?}", binder));
                 }
                 args.ctx.env.insert(*binder, poison_sv);
-            } else if matches!(&args.sess.tree.nodes[*rhs_idx], CoreFrame::Var(_)) {
-                // Var aliases are trivial \u2014 just an env lookup via emit_subtree
-                let rhs_val = emit_subtree(
-                    EmitArgs {
-                        ctx: args.ctx,
-                        sess: args.sess,
-                        builder: args.builder,
-                        tail: TailCtx::NonTail,
-                    },
-                    *rhs_idx,
-                )?;
-                if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                    args.ctx
-                        .trace_scope(&format!("insert LetRec(trivial) {:?}", binder));
+            } else if let Some(target) = alias_target {
+                // A bare `Var` alias is trivial \u2014 just an env lookup \u2014 but ONLY when
+                // its target is already bound: an outer var, a rec binder inserted
+                // in Phase 2, or an alias resolved earlier in this loop. If the
+                // target is a sibling SIMPLE binding still pending (e.g. an App-CAF
+                // `start = go 1 0`), resolving the alias now looks up an absent var
+                // and binds this alias to an UnresolvedVar trap \u2014 which then fires
+                // when the body forces it. Defer it instead so the topological sort
+                // below evaluates it AFTER its target. (sum [1..100], properFraction
+                // and realToFrac all produce such `result = computation` aliases:
+                // their post-resolution Rec ends in `alias = Var(caf); body = alias`.)
+                if args.ctx.env.contains_key(&target) {
+                    let rhs_val = emit_subtree(
+                        EmitArgs {
+                            ctx: args.ctx,
+                            sess: args.sess,
+                            builder: args.builder,
+                            tail: TailCtx::NonTail,
+                        },
+                        *rhs_idx,
+                    )?;
+                    if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+                        args.ctx
+                            .trace_scope(&format!("insert LetRec(trivial) {:?}", binder));
+                    }
+                    args.ctx.env.insert(*binder, rhs_val);
+                } else {
+                    deferred_simple.push((*binder, *rhs_idx));
                 }
-                args.ctx.env.insert(*binder, rhs_val);
             } else {
                 deferred_simple.push((*binder, *rhs_idx));
             }

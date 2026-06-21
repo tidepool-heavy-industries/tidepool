@@ -194,25 +194,19 @@ const KNOWN: &[(&str, &str, &str)] = &[
     //    non-strict — strictness is via `case`, never `let`). Trivial RHS
     //    (Var/Lit/Lam/Con/PrimOp) stays eager. Both engines now MATCH on all reads.
     // ── SUPPORT GAPS (missing primop / unresolved external) ──
-    (
-        "convProperFraction",
-        "JIT-GAP",
-        "properFraction unresolved-external",
-    ),
-    (
-        "convRealToFrac",
-        "JIT-GAP",
-        "realToFrac unresolved-external",
-    ),
-    (
-        "sumRange",
-        "JIT-GAP",
-        "sum [1..n] unresolved-external (eval=5050 ok)",
-    ),
+    // convProperFraction / convRealToFrac / sumRange were MISDIAGNOSED as
+    // "unresolved external" — the yielded VarId is a LOCAL LetRec binder, not a
+    // base-library symbol. After resolveExternals merges everything into one Rec,
+    // these end in `caf = <computation>; alias = Var(caf); body = alias`. The
+    // LetRec emit's Phase 2.5 eagerly resolved the `alias = Var(caf)` *before* the
+    // App-CAF `caf` was evaluated, binding the alias to an UnresolvedVar trap that
+    // fired when the body forced it. Fixed in emit/expr.rs (Phase 2.5 only fast-
+    // paths a Var alias when its target is already bound; otherwise defers it so
+    // the topological sort evaluates it after its target). All three now MATCH.
     (
         "cycleTake",
         "JIT-GAP",
-        "Known-Limit: cycle unresolved-external",
+        "Known-Limit: cycle — self-referential lazy CAF (`xs = f a b xs`); needs knot-tying back-patch",
     ),
 ];
 
