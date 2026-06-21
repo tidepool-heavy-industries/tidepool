@@ -107,14 +107,27 @@ pub fn build_table_for_expr(expr: &CoreExpr) -> DataConTable {
 /// `prop_assume!`.
 pub fn check_jit_vs_eval(expr: CoreExpr, nursery_size: usize) -> Result<(), TestCaseError> {
     let table = build_table_for_expr(&expr);
+    check_jit_vs_eval_with_table(expr, &table, nursery_size)
+}
 
+/// Like [`check_jit_vs_eval`] but with an EXPLICIT `DataConTable` — required for
+/// real captured Core, whose constructor tags (e.g. Integer `IS`/`IP`/`IN`) must
+/// come from the extractor's `meta.cbor`, not the synthetic `build_table_for_expr`
+/// (which can't even mint the bignum repr). Returns `Err` when JIT and eval
+/// disagree (or JIT fails while eval succeeds) — that disagreement IS the captured
+/// bug. Both-fail and the acceptable JIT-only failures are skipped (returns `Ok`).
+pub fn check_jit_vs_eval_with_table(
+    expr: CoreExpr,
+    table: &DataConTable,
+    nursery_size: usize,
+) -> Result<(), TestCaseError> {
     // Tree-walking evaluation
     let mut heap_eval = VecHeap::new();
-    let env_eval = env_from_datacon_table(&table);
+    let env_eval = env_from_datacon_table(table);
     let res_eval = eval(&expr, &env_eval, &mut heap_eval);
 
     // JIT compilation and execution
-    let res_jit = match JitEffectMachine::compile(&expr, &table, nursery_size) {
+    let res_jit = match JitEffectMachine::compile(&expr, table, nursery_size) {
         Ok(mut machine) => machine.run_pure(),
         Err(e) => Err(e),
     };
