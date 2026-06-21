@@ -6,10 +6,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "GMP mpn-level multi-precision arithmetic for the Tidepool JIT and tree-walker (num-bigint backed)"
+description = "Integer/Natural -> Double encoding helpers for the Tidepool JIT and tree-walker"
 readme = "../README.md"
 
 [dependencies]
-num-bigint = "0.4"
-num-integer = "0.1"
-num-traits = "0.2"

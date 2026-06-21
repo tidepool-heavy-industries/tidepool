@@ -49,8 +49,12 @@ data UnresolvedVar = UnresolvedVar
 -- whose unfoldings aren't exposed via realIdUnfolding.
 --
 -- Returns: (augmented bindings, list of variables that could not be resolved).
-resolveExternals :: HscEnv -> [CoreBind] -> IO ([CoreBind], [UnresolvedVar])
-resolveExternals hscEnv binds = do
+-- | @varIdFn@ is Translate's stable @varId@: the unresolved-var KEY must be in
+-- the SAME key space the translator looks them up by (its NVar varIds), NOT the
+-- raw GHC varUnique — otherwise the guard silently never fires and unresolved
+-- externals leak through as live NVars instead of poison error nodes.
+resolveExternals :: (Var -> Word64) -> HscEnv -> [CoreBind] -> IO ([CoreBind], [UnresolvedVar])
+resolveExternals varIdFn hscEnv binds = do
   let localBinders = foldMap bindersOfSet binds
       allFreeVars  = foldMap freeVarsOfBind binds
       allFVList    = nonDetEltsUniqSet allFreeVars
@@ -76,6 +80,18 @@ resolveExternals hscEnv binds = do
     go _ [] visited _ acc subAcc unres = return (reverse acc, reverse subAcc, visited, reverse unres)
     go fatCache (v:rest) visited localSet acc subAcc unres
       | elemVarSet v visited = go fatCache rest visited localSet acc subAcc unres
+      -- Over-collected modules (e.g. GHC.Fingerprint's MD5 machinery, dragged into
+      -- rationalToDouble's closure) — record as unresolved -> lazy poison instead of
+      -- pulling their (always-dead-here) MD5/Int32 bodies into the table.
+      | isNeverResolve v =
+          let uv = UnresolvedVar
+                { uvKey    = varIdFn v
+                , uvName   = occNameString (nameOccName (varName v))
+                , uvModule = case nameModule_maybe (varName v) of
+                               Just m  -> moduleNameString (moduleName m)
+                               Nothing -> "<no module>"
+                }
+          in go fatCache rest (extendVarSet visited v) localSet acc subAcc (uv : unres)
       | otherwise = do
           let visited' = extendVarSet visited v
           let handleUnfolding unfoldingExpr =
@@ -131,13 +147,24 @@ resolveExternals hscEnv binds = do
                                in go fatCache (newExternals ++ rest) visited'' localSet' (fatBinds ++ acc) subAcc unres
                              Nothing ->
                                let uv = UnresolvedVar
-                                     { uvKey    = fromIntegral (getKey (varUnique v))
+                                     { uvKey    = varIdFn v
                                      , uvName   = occNameString (nameOccName (varName v))
                                      , uvModule = case nameModule_maybe (varName v) of
                                                     Just m  -> moduleNameString (moduleName m)
                                                     Nothing -> "<no module>"
                                      }
                                in go fatCache rest visited' localSet acc subAcc (uv : unres)
+
+    -- | Modules whose bindings are over-collected into closures but never
+    -- genuinely needed by JIT-compiled evals. GHC.Fingerprint (MD5) reaches
+    -- rationalToDouble's transitive closure (via type fingerprinting) yet is
+    -- only ever in dead branches for actual Double arithmetic; resolving it
+    -- drags in the whole MD5/Int32 chain. Stopping resolution at the module
+    -- boundary keeps that out of the table; the dead reference becomes a poison.
+    isNeverResolve :: Var -> Bool
+    isNeverResolve v = case nameModule_maybe (varName v) of
+      Just m  -> "Fingerprint" `isInfixOf` moduleNameString (moduleName m)
+      Nothing -> False
 
     toRecPairs :: CoreBind -> [(Var, CoreExpr)]
     toRecPairs (NonRec b rhs) = [(b, rhs)]

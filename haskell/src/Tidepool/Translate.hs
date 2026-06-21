@@ -398,7 +398,7 @@ translateModule allBinds targetName unresolvedIds =
 -- constructors the emitted program references.
 translateModuleClosed :: HscEnv -> [CoreBind] -> String -> IO (Seq FlatNode, Map.Map (Word64, Text) DataCon, [UnresolvedVar], [CoreBind])
 translateModuleClosed hscEnv allBinds targetName = do
-  (closedBinds0, unresolved) <- resolveExternals hscEnv allBinds
+  (closedBinds0, unresolved) <- resolveExternals varId hscEnv allBinds
   closedBinds <- uniquifyDuplicateBinders closedBinds0
   -- TIDEPOOL_DUMP_CLOSED=<needle>: dump resolved bindings whose binder
   -- name contains the needle (post-resolveExternals Core — what the JIT
@@ -1098,11 +1098,14 @@ translate expr =
             childIdxs <- mapM translate args
             emitNode $ NJump (varId v) childIdxs
     
-    -- Foreign calls: map known FFI functions to our primops
+    -- Foreign calls: map known FFI functions to our primops; unsupported ones
+    -- (often over-collected into a closure, in a dead branch) become poisons.
     Var v | isFCallId v -> do
         let pprName = showPprUnsafe v
         childIdxs <- mapM translate args
-        emitOp (mapFfiCall pprName) childIdxs
+        case mapFfiCall pprName of
+          Just name -> emitOp name childIdxs
+          Nothing   -> emitFfiPoison
 
     _ -> do
       hIdx <- translateHead hd
@@ -1284,11 +1287,12 @@ translateHead = \case
                          else valArgs
     -> do
         childIdxs <- mapM translate nonStateArgs
-        -- Emit the primop or FFI call
-        opName <- case isPrimOpId_maybe v of
-                    Just pop -> return (mapPrimOp pop)
-                    Nothing  -> return (mapFfiCall (showPprUnsafe v))
-        primIdx <- emitOp opName childIdxs
+        -- Emit the primop or FFI call (unsupported FFI -> lazy poison).
+        primIdx <- case isPrimOpId_maybe v of
+                    Just pop -> emitOp (mapPrimOp pop) childIdxs
+                    Nothing  -> case mapFfiCall (showPprUnsafe v) of
+                                  Just name -> emitOp name childIdxs
+                                  Nothing   -> emitFfiPoison
         if hasStateBinder then do
           -- Stateful primop: bind s' (state token) to dummy, bind results to primop
           dummyState <- emitNode $ NLit (LEInt 0)
@@ -1832,56 +1836,32 @@ isUnsafeTakeVar v =
 isRealWorldVar :: Id -> Bool
 isRealWorldVar v = occNameString (nameOccName (idName v)) == "realWorld#"
 
-mapFfiCall :: String -> Text
+-- | Map a foreign-call's pretty-printed name to a supported primop name, or
+-- Nothing if unsupported. Unsupported FFI calls are emitted as LAZY POISONS by
+-- the caller (`emitFfiPoison`), not hard errors: GHC over-collects unrelated FFI
+-- into a binding's closure (e.g. __hsbase_MD5Init via GHC.Fingerprint reaches
+-- rationalToDouble's closure, in a branch never taken for a Double literal). A
+-- poison lets such a binding compile and only raises if the FFI is actually
+-- forced at runtime — same discipline as the `error` sentinel / unresolved-var
+-- poisons. (Integer/Natural now use the native ghc-bignum backend — pure Core,
+-- no __gmpn_*/integer_gmp_* FFI — so those arms are gone.)
+mapFfiCall :: String -> Maybe Text
 mapFfiCall pprName
-  | "strlen" `isInfixOf` pprName                = T.pack "FfiStrlen"
-  | "rintDouble" `isInfixOf` pprName            = T.pack "FfiRintDouble"
-  | "_hs_text_measure_off" `isInfixOf` pprName  = T.pack "FfiTextMeasureOff"
-  | "_hs_text_memchr" `isInfixOf` pprName       = T.pack "FfiTextMemchr"
-  | "_hs_text_reverse" `isInfixOf` pprName      = T.pack "FfiTextReverse"
-  -- ghc-bignum gmp-backend mpn surface (phase-1: multi-limb Integer arithmetic).
-  -- Backed host-side by tidepool-bignum. ORDER MATTERS: the more specific symbols
-  -- (`_1` scalar variants, `gcd_1`, `tdiv_qr`) must precede their substring siblings
-  -- (`__gmpn_add` is an infix of `__gmpn_add_1`).
-  | "__gmpn_add_1" `isInfixOf` pprName          = T.pack "FfiGmpnAdd1"
-  | "__gmpn_sub_1" `isInfixOf` pprName          = T.pack "FfiGmpnSub1"
-  | "__gmpn_mul_1" `isInfixOf` pprName          = T.pack "FfiGmpnMul1"
-  | "__gmpn_add" `isInfixOf` pprName            = T.pack "FfiGmpnAdd"
-  | "__gmpn_sub" `isInfixOf` pprName            = T.pack "FfiGmpnSub"
-  | "__gmpn_mul" `isInfixOf` pprName            = T.pack "FfiGmpnMul"
-  | "__gmpn_cmp" `isInfixOf` pprName            = T.pack "FfiGmpnCmp"
-  | "__gmpn_tdiv_qr" `isInfixOf` pprName        = T.pack "FfiGmpnTdivQr"
-  | "__gmpn_divrem_1" `isInfixOf` pprName       = T.pack "FfiGmpnDivrem1"
-  | "__gmpn_mod_1" `isInfixOf` pprName          = T.pack "FfiGmpnMod1"
-  | "integer_gmp_mpn_tdiv_q" `isInfixOf` pprName = T.pack "FfiGmpnTdivQ"
-  | "integer_gmp_mpn_tdiv_r" `isInfixOf` pprName = T.pack "FfiGmpnTdivR"
-  | "integer_gmp_mpn_get_d" `isInfixOf` pprName = T.pack "FfiGmpnGetD"
-  | "integer_gmp_gcd_word" `isInfixOf` pprName  = T.pack "FfiGmpGcdWord"
-  | "integer_gmp_mpn_gcd_1" `isInfixOf` pprName = T.pack "FfiGmpnGcd1"
-  | "integer_gmp_mpn_gcd" `isInfixOf` pprName   = T.pack "FfiGmpnGcd"
-  -- rshift_2c (arithmetic shift for negative Integers) MUST be tested before the
-  -- rshift arm, which is its substring.
-  | "integer_gmp_mpn_rshift_2c" `isInfixOf` pprName = T.pack "FfiGmpnRshift2c"
-  | "integer_gmp_mpn_lshift" `isInfixOf` pprName = T.pack "FfiGmpnLshift"
-  | "integer_gmp_mpn_rshift" `isInfixOf` pprName = T.pack "FfiGmpnRshift"
-  | "__int_encodeDouble" `isInfixOf` pprName    = T.pack "FfiIntEncodeDouble"
-  | "__word_encodeDouble" `isInfixOf` pprName   = T.pack "FfiWordEncodeDouble"
-  -- Deferred bignum ops: fail LOUD with a named error (NOT the generic FFI hint),
-  -- so a probe that needs one points us at exactly which to implement next.
-  | isBignumFfi pprName = error $ "unsupported mpn op: " ++ pprName
-      ++ "\n  (not yet implemented — phase-1 bignum covers add/sub/mul/div/mod/cmp/"
-      ++ "get_d/gcd/shifts/encodeDouble; deferred: bitwise and/andn/ior/xor, "
-      ++ "popcount, powm, gcdext, invert. File which symbol you hit.)"
-  | otherwise = error $ "Unsupported FFI call: " ++ pprName ++ hint
-  where
-    isBignumFfi s = "__gmpn_" `isInfixOf` s || "integer_gmp_" `isInfixOf` s
-    hint
-      | "gmp" `isInfixOf` pprName || "integer" `isInfixOf` pprName =
-          "\n  (Integer/GMP arithmetic is unsupported under the JIT. This usually\n\
-          \   means `read`, `Read` instances, or Integer-defaulted arithmetic that\n\
-          \   exceeded the integerAdd/integerSub shims. Use parseInt/parseDouble\n\
-          \   and add explicit `Int` type signatures.)"
-      | otherwise = ""
+  | "strlen" `isInfixOf` pprName                = Just (T.pack "FfiStrlen")
+  | "rintDouble" `isInfixOf` pprName            = Just (T.pack "FfiRintDouble")
+  | "_hs_text_measure_off" `isInfixOf` pprName  = Just (T.pack "FfiTextMeasureOff")
+  | "_hs_text_memchr" `isInfixOf` pprName       = Just (T.pack "FfiTextMemchr")
+  | "_hs_text_reverse" `isInfixOf` pprName      = Just (T.pack "FfiTextReverse")
+  -- Integer/Natural -> Double encoders (RTS primitives, used by both bignum backends).
+  | "__int_encodeDouble" `isInfixOf` pprName    = Just (T.pack "FfiIntEncodeDouble")
+  | "__word_encodeDouble" `isInfixOf` pprName   = Just (T.pack "FfiWordEncodeDouble")
+  | otherwise                                   = Nothing
+
+-- | Emit a lazy poison node for an unsupported (or dead-branch) construct: a
+-- tag-'E' UserError Var. The JIT lowers it to a poison closure that only raises
+-- when forced/applied, so it is harmless in dead branches.
+emitFfiPoison :: TransM Int
+emitFfiPoison = emitNode $ NVar 0x4500000000000002
 
 isRuntimeErrorVar :: Id -> Bool
 isRuntimeErrorVar v =

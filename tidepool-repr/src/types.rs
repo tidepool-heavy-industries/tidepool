@@ -283,29 +283,9 @@ define_primops! {
     FfiTextMeasureOff => "FfiTextMeasureOff", "ffi_text_measure_off";
     FfiTextMemchr => "FfiTextMemchr", "ffi_text_memchr";
     FfiTextReverse => "FfiTextReverse", "ffi_text_reverse";
-    // ghc-bignum gmp-backend mpn surface (intercepted FFI; backed by tidepool-bignum).
-    // Limbs are little-endian 64-bit words in ByteArray# payloads. See tidepool-bignum
-    // for the per-op GMP contract (limb counts written + scalar return).
-    FfiGmpnAdd1 => "FfiGmpnAdd1", "gmpn_add_1";
-    FfiGmpnSub1 => "FfiGmpnSub1", "gmpn_sub_1";
-    FfiGmpnMul1 => "FfiGmpnMul1", "gmpn_mul_1";
-    FfiGmpnAdd => "FfiGmpnAdd", "gmpn_add";
-    FfiGmpnSub => "FfiGmpnSub", "gmpn_sub";
-    FfiGmpnMul => "FfiGmpnMul", "gmpn_mul";
-    FfiGmpnCmp => "FfiGmpnCmp", "gmpn_cmp";
-    FfiGmpnTdivQr => "FfiGmpnTdivQr", "gmpn_tdiv_qr";
-    FfiGmpnTdivQ => "FfiGmpnTdivQ", "gmpn_tdiv_q";
-    FfiGmpnTdivR => "FfiGmpnTdivR", "gmpn_tdiv_r";
-    FfiGmpnDivrem1 => "FfiGmpnDivrem1", "gmpn_divrem_1";
-    FfiGmpnMod1 => "FfiGmpnMod1", "gmpn_mod_1";
-    FfiGmpnGetD => "FfiGmpnGetD", "gmpn_get_d";
-    FfiGmpGcdWord => "FfiGmpGcdWord", "gmp_gcd_word";
-    FfiGmpnGcd1 => "FfiGmpnGcd1", "gmpn_gcd_1";
-    FfiGmpnGcd => "FfiGmpnGcd", "gmpn_gcd";
     // __int_encodeDouble(mantissa, exp) -> Double# (ldexp); the final Integer->Double step.
-    FfiGmpnLshift => "FfiGmpnLshift", "gmpn_lshift";
-    FfiGmpnRshift => "FfiGmpnRshift", "gmpn_rshift";
-    FfiGmpnRshift2c => "FfiGmpnRshift2c", "gmpn_rshift_2c";
+    // The only surviving ghc-bignum FFI: under the native backend, all other
+    // Integer/Natural arithmetic is pure Core over Word#/ByteArray# primops.
     FfiIntEncodeDouble => "FfiIntEncodeDouble", "int_encode_double";
     FfiWordEncodeDouble => "FfiWordEncodeDouble", "word_encode_double";
     NewSmallArray => "NewSmallArray", "newSmallArray#";

@@ -1096,7 +1096,10 @@ pub fn emit_primop(
             let sum = builder.ins().iadd(a, b);
             // High word of a+b is the carry-out: 1 iff the sum wrapped (sum < a).
             let carry = builder.ins().icmp(IntCC::UnsignedLessThan, sum, a);
-            Ok(SsaVal::Raw(builder.ins().uextend(types::I64, carry), LIT_TAG_WORD))
+            Ok(SsaVal::Raw(
+                builder.ins().uextend(types::I64, carry),
+                LIT_TAG_WORD,
+            ))
         }
         // quotRemWord2# :: Word#(hi) -> Word#(lo) -> Word#(d) -> (# quot, rem #)
         // 128/64 division; native ghc-bignum's multi-precision division core.
@@ -1429,7 +1432,10 @@ pub fn emit_primop(
             let ptr = builder.ins().iadd(addr, off);
             let byte = builder.ins().ireduce(types::I8, val);
             builder.ins().store(MemFlags::trusted(), byte, ptr, 0);
-            Ok(SsaVal::Raw(builder.ins().iconst(types::I64, 0), LIT_TAG_INT))
+            Ok(SsaVal::Raw(
+                builder.ins().iconst(types::I64, 0),
+                LIT_TAG_INT,
+            ))
         }
         PrimOpKind::Clz8 => {
             // clz8# :: Word# -> Word#
@@ -1480,7 +1486,7 @@ pub fn emit_primop(
             };
             let addr = crate::host_fns::error_poison_ptr_lazy(kind) as i64;
             let v = builder.ins().iconst(types::I64, addr);
-            return Ok(SsaVal::HeapPtr(v));
+            Ok(SsaVal::HeapPtr(v))
         }
         PrimOpKind::Raise => {
             // raise# :: a -> b — always errors
@@ -1609,284 +1615,6 @@ pub fn emit_primop(
             ))
         }
 
-        // ── ghc-bignum gmp-backend mpn intercepts (phase-1) ──────────────────
-        // Each ByteArray#/MutableByteArray# arg is unboxed and advanced past its
-        // 8-byte length prefix to the limb payload; sizes/limbs pass as raw i64.
-        // The arithmetic lives in tidepool-bignum (shared with the tree-walker).
-        // `get_d` returns the f64 as raw bits (like the libm runtime calls).
-        PrimOpKind::FfiGmpnAdd1
-        | PrimOpKind::FfiGmpnSub1
-        | PrimOpKind::FfiGmpnMul1 => {
-            // op(rp, s1, n, s2limb) -> carry/borrow. [rp:BA, s1:BA, n, s2limb]
-            check_arity(op, 4, args.len())?;
-            let rp_ba = unbox_bytearray(sess.pipeline, builder, args[0]);
-            let rp = builder.ins().iadd_imm(rp_ba, 8);
-            let s1_ba = unbox_bytearray(sess.pipeline, builder, args[1]);
-            let s1 = builder.ins().iadd_imm(s1_ba, 8);
-            let n = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
-            let s2limb = unbox_int(sess.pipeline, builder, sess.vmctx, args[3]);
-            let name = match op {
-                PrimOpKind::FfiGmpnAdd1 => "runtime_gmpn_add_1",
-                PrimOpKind::FfiGmpnSub1 => "runtime_gmpn_sub_1",
-                _ => "runtime_gmpn_mul_1",
-            };
-            let result = emit_runtime_call(
-                sess.pipeline,
-                builder,
-                name,
-                &i64_params(4),
-                &[AbiParam::new(types::I64)],
-                &[rp, s1, n, s2limb],
-            )?;
-            Ok(SsaVal::Raw(result, LIT_TAG_WORD))
-        }
-        PrimOpKind::FfiGmpnAdd | PrimOpKind::FfiGmpnSub => {
-            // op(rp, s1, s1n, s2, s2n) -> carry/borrow. [rp:BA, s1:BA, s1n, s2:BA, s2n]
-            check_arity(op, 5, args.len())?;
-            let rp_ba = unbox_bytearray(sess.pipeline, builder, args[0]);
-            let rp = builder.ins().iadd_imm(rp_ba, 8);
-            let s1_ba = unbox_bytearray(sess.pipeline, builder, args[1]);
-            let s1 = builder.ins().iadd_imm(s1_ba, 8);
-            let s1n = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
-            let s2_ba = unbox_bytearray(sess.pipeline, builder, args[3]);
-            let s2 = builder.ins().iadd_imm(s2_ba, 8);
-            let s2n = unbox_int(sess.pipeline, builder, sess.vmctx, args[4]);
-            let name = match op {
-                PrimOpKind::FfiGmpnAdd => "runtime_gmpn_add",
-                _ => "runtime_gmpn_sub",
-            };
-            let result = emit_runtime_call(
-                sess.pipeline,
-                builder,
-                name,
-                &i64_params(5),
-                &[AbiParam::new(types::I64)],
-                &[rp, s1, s1n, s2, s2n],
-            )?;
-            Ok(SsaVal::Raw(result, LIT_TAG_WORD))
-        }
-        PrimOpKind::FfiGmpnMul => {
-            // __gmpn_mul(rp, s1, s1n, s2, s2n) -> top limb. [rp:BA, s1:BA, s1n, s2:BA, s2n]
-            check_arity(op, 5, args.len())?;
-            let rp_ba = unbox_bytearray(sess.pipeline, builder, args[0]);
-            let rp = builder.ins().iadd_imm(rp_ba, 8);
-            let s1_ba = unbox_bytearray(sess.pipeline, builder, args[1]);
-            let s1 = builder.ins().iadd_imm(s1_ba, 8);
-            let s1n = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
-            let s2_ba = unbox_bytearray(sess.pipeline, builder, args[3]);
-            let s2 = builder.ins().iadd_imm(s2_ba, 8);
-            let s2n = unbox_int(sess.pipeline, builder, sess.vmctx, args[4]);
-            let result = emit_runtime_call(
-                sess.pipeline,
-                builder,
-                "runtime_gmpn_mul",
-                &i64_params(5),
-                &[AbiParam::new(types::I64)],
-                &[rp, s1, s1n, s2, s2n],
-            )?;
-            Ok(SsaVal::Raw(result, LIT_TAG_WORD))
-        }
-        PrimOpKind::FfiGmpnCmp => {
-            // __gmpn_cmp(s1, s2, n) -> Int#. [s1:BA, s2:BA, n]
-            check_arity(op, 3, args.len())?;
-            let s1_ba = unbox_bytearray(sess.pipeline, builder, args[0]);
-            let s1 = builder.ins().iadd_imm(s1_ba, 8);
-            let s2_ba = unbox_bytearray(sess.pipeline, builder, args[1]);
-            let s2 = builder.ins().iadd_imm(s2_ba, 8);
-            let n = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
-            let result = emit_runtime_call(
-                sess.pipeline,
-                builder,
-                "runtime_gmpn_cmp",
-                &i64_params(3),
-                &[AbiParam::new(types::I64)],
-                &[s1, s2, n],
-            )?;
-            Ok(SsaVal::Raw(result, LIT_TAG_INT))
-        }
-        PrimOpKind::FfiGmpnTdivQr => {
-            // __gmpn_tdiv_qr(qp, rp, qxn, np, nn, dp, dn) -> (). 7 args.
-            check_arity(op, 7, args.len())?;
-            let qp_ba = unbox_bytearray(sess.pipeline, builder, args[0]);
-            let qp = builder.ins().iadd_imm(qp_ba, 8);
-            let rp_ba = unbox_bytearray(sess.pipeline, builder, args[1]);
-            let rp = builder.ins().iadd_imm(rp_ba, 8);
-            let qxn = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
-            let np_ba = unbox_bytearray(sess.pipeline, builder, args[3]);
-            let np = builder.ins().iadd_imm(np_ba, 8);
-            let nn = unbox_int(sess.pipeline, builder, sess.vmctx, args[4]);
-            let dp_ba = unbox_bytearray(sess.pipeline, builder, args[5]);
-            let dp = builder.ins().iadd_imm(dp_ba, 8);
-            let dn = unbox_int(sess.pipeline, builder, sess.vmctx, args[6]);
-            let _ = emit_runtime_call(
-                sess.pipeline,
-                builder,
-                "runtime_gmpn_tdiv_qr",
-                &i64_params(7),
-                &[],
-                &[qp, rp, qxn, np, nn, dp, dn],
-            )?;
-            Ok(SsaVal::Raw(builder.ins().iconst(types::I64, 0), LIT_TAG_INT))
-        }
-        PrimOpKind::FfiGmpnTdivQ | PrimOpKind::FfiGmpnTdivR => {
-            // integer_gmp_mpn_tdiv_{q,r}(dst, np, nn, dp, dn) -> (). [dst:BA, np:BA, nn, dp:BA, dn]
-            check_arity(op, 5, args.len())?;
-            let dst_ba = unbox_bytearray(sess.pipeline, builder, args[0]);
-            let dst = builder.ins().iadd_imm(dst_ba, 8);
-            let np_ba = unbox_bytearray(sess.pipeline, builder, args[1]);
-            let np = builder.ins().iadd_imm(np_ba, 8);
-            let nn = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
-            let dp_ba = unbox_bytearray(sess.pipeline, builder, args[3]);
-            let dp = builder.ins().iadd_imm(dp_ba, 8);
-            let dn = unbox_int(sess.pipeline, builder, sess.vmctx, args[4]);
-            let name = match op {
-                PrimOpKind::FfiGmpnTdivQ => "runtime_gmpn_tdiv_q",
-                _ => "runtime_gmpn_tdiv_r",
-            };
-            let _ = emit_runtime_call(
-                sess.pipeline,
-                builder,
-                name,
-                &i64_params(5),
-                &[],
-                &[dst, np, nn, dp, dn],
-            )?;
-            Ok(SsaVal::Raw(builder.ins().iconst(types::I64, 0), LIT_TAG_INT))
-        }
-        PrimOpKind::FfiGmpnDivrem1 => {
-            // __gmpn_divrem_1(qp, qxn, s2p, s2n, s3limb) -> remainder. [qp:BA, qxn, s2p:BA, s2n, s3limb]
-            check_arity(op, 5, args.len())?;
-            let qp_ba = unbox_bytearray(sess.pipeline, builder, args[0]);
-            let qp = builder.ins().iadd_imm(qp_ba, 8);
-            let qxn = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            let s2_ba = unbox_bytearray(sess.pipeline, builder, args[2]);
-            let s2 = builder.ins().iadd_imm(s2_ba, 8);
-            let s2n = unbox_int(sess.pipeline, builder, sess.vmctx, args[3]);
-            let s3limb = unbox_int(sess.pipeline, builder, sess.vmctx, args[4]);
-            let result = emit_runtime_call(
-                sess.pipeline,
-                builder,
-                "runtime_gmpn_divrem_1",
-                &i64_params(5),
-                &[AbiParam::new(types::I64)],
-                &[qp, qxn, s2, s2n, s3limb],
-            )?;
-            Ok(SsaVal::Raw(result, LIT_TAG_WORD))
-        }
-        PrimOpKind::FfiGmpnMod1 => {
-            // __gmpn_mod_1(s1p, s1n, s2limb) -> remainder. [s1p:BA, s1n, s2limb]
-            check_arity(op, 3, args.len())?;
-            let s1_ba = unbox_bytearray(sess.pipeline, builder, args[0]);
-            let s1 = builder.ins().iadd_imm(s1_ba, 8);
-            let s1n = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            let s2limb = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
-            let result = emit_runtime_call(
-                sess.pipeline,
-                builder,
-                "runtime_gmpn_mod_1",
-                &i64_params(3),
-                &[AbiParam::new(types::I64)],
-                &[s1, s1n, s2limb],
-            )?;
-            Ok(SsaVal::Raw(result, LIT_TAG_WORD))
-        }
-        PrimOpKind::FfiGmpnGetD => {
-            // integer_gmp_mpn_get_d(sp, sn, exp) -> Double# (returned as raw bits). [sp:BA, sn, exp]
-            check_arity(op, 3, args.len())?;
-            let sp_ba = unbox_bytearray(sess.pipeline, builder, args[0]);
-            let sp = builder.ins().iadd_imm(sp_ba, 8);
-            let sn = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            let exp = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
-            let result = emit_runtime_call(
-                sess.pipeline,
-                builder,
-                "runtime_gmpn_get_d",
-                &i64_params(3),
-                &[AbiParam::new(types::I64)],
-                &[sp, sn, exp],
-            )?;
-            let d = builder.ins().bitcast(types::F64, MemFlags::new(), result);
-            Ok(SsaVal::Raw(d, LIT_TAG_DOUBLE))
-        }
-        PrimOpKind::FfiGmpGcdWord => {
-            // integer_gmp_gcd_word(a, b) -> Word#. [a, b] (both scalar words)
-            check_arity(op, 2, args.len())?;
-            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
-            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            let result = emit_runtime_call(
-                sess.pipeline,
-                builder,
-                "runtime_gmp_gcd_word",
-                &i64_params(2),
-                &[AbiParam::new(types::I64)],
-                &[a, b],
-            )?;
-            Ok(SsaVal::Raw(result, LIT_TAG_WORD))
-        }
-        PrimOpKind::FfiGmpnGcd1 => {
-            // integer_gmp_mpn_gcd_1(sp, sn, b) -> Word#. [sp:BA, sn, b]
-            check_arity(op, 3, args.len())?;
-            let sp_ba = unbox_bytearray(sess.pipeline, builder, args[0]);
-            let sp = builder.ins().iadd_imm(sp_ba, 8);
-            let sn = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
-            let result = emit_runtime_call(
-                sess.pipeline,
-                builder,
-                "runtime_gmpn_gcd_1",
-                &i64_params(3),
-                &[AbiParam::new(types::I64)],
-                &[sp, sn, b],
-            )?;
-            Ok(SsaVal::Raw(result, LIT_TAG_WORD))
-        }
-        PrimOpKind::FfiGmpnGcd => {
-            // integer_gmp_mpn_gcd(rp, s1, s1n, s2, s2n) -> GmpSize. [rp:BA, s1:BA, s1n, s2:BA, s2n]
-            check_arity(op, 5, args.len())?;
-            let rp_ba = unbox_bytearray(sess.pipeline, builder, args[0]);
-            let rp = builder.ins().iadd_imm(rp_ba, 8);
-            let s1_ba = unbox_bytearray(sess.pipeline, builder, args[1]);
-            let s1 = builder.ins().iadd_imm(s1_ba, 8);
-            let s1n = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
-            let s2_ba = unbox_bytearray(sess.pipeline, builder, args[3]);
-            let s2 = builder.ins().iadd_imm(s2_ba, 8);
-            let s2n = unbox_int(sess.pipeline, builder, sess.vmctx, args[4]);
-            let result = emit_runtime_call(
-                sess.pipeline,
-                builder,
-                "runtime_gmpn_gcd",
-                &i64_params(5),
-                &[AbiParam::new(types::I64)],
-                &[rp, s1, s1n, s2, s2n],
-            )?;
-            Ok(SsaVal::Raw(result, LIT_TAG_INT))
-        }
-
-        PrimOpKind::FfiGmpnLshift | PrimOpKind::FfiGmpnRshift | PrimOpKind::FfiGmpnRshift2c => {
-            // integer_gmp_mpn_{l,r}shift[_2c](rp, sp, sn, count) -> top limb.
-            // [rp:BA, sp:BA, sn, count]
-            check_arity(op, 4, args.len())?;
-            let rp_ba = unbox_bytearray(sess.pipeline, builder, args[0]);
-            let rp = builder.ins().iadd_imm(rp_ba, 8);
-            let sp_ba = unbox_bytearray(sess.pipeline, builder, args[1]);
-            let sp = builder.ins().iadd_imm(sp_ba, 8);
-            let sn = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
-            let count = unbox_int(sess.pipeline, builder, sess.vmctx, args[3]);
-            let name = match op {
-                PrimOpKind::FfiGmpnLshift => "runtime_gmpn_lshift",
-                PrimOpKind::FfiGmpnRshift => "runtime_gmpn_rshift",
-                _ => "runtime_gmpn_rshift_2c",
-            };
-            let result = emit_runtime_call(
-                sess.pipeline,
-                builder,
-                name,
-                &i64_params(4),
-                &[AbiParam::new(types::I64)],
-                &[rp, sp, sn, count],
-            )?;
-            Ok(SsaVal::Raw(result, LIT_TAG_WORD))
-        }
         PrimOpKind::FfiIntEncodeDouble | PrimOpKind::FfiWordEncodeDouble => {
             // __{int,word}_encodeDouble(mantissa, exp) -> Double# (returned as raw bits).
             check_arity(op, 2, args.len())?;

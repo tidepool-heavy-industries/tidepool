@@ -156,9 +156,7 @@ fn expand_node(tree: &CoreExpr, idx: usize) -> Result<EmitFrame<usize>, EmitErro
     match &tree.nodes[idx] {
         CoreFrame::Var(v) => Ok(EmitFrame::Var(*v)),
         CoreFrame::Lit(Literal::LitString(bytes)) => Ok(EmitFrame::LitString(bytes.clone())),
-        CoreFrame::Lit(Literal::LitByteArray(bytes)) => {
-            Ok(EmitFrame::LitByteArray(bytes.clone()))
-        }
+        CoreFrame::Lit(Literal::LitByteArray(bytes)) => Ok(EmitFrame::LitByteArray(bytes.clone())),
         CoreFrame::Lit(lit) => Ok(EmitFrame::Lit(lit.clone())),
         CoreFrame::Con { tag, fields } => {
             let has_non_trivial = fields.iter().any(|&f| !is_trivial_field(f, tree));
