@@ -1099,28 +1099,7 @@ suite_int!(gen_patch_drift, 3);
 suite_fmt!(gen_patch_start, "X\nb\nc\nd");
 suite_fmt!(gen_patch_eof, "a\nb\nc\nZ");
 suite_fmt!(gen_patch_trailnl, "a\nb\n");
-// gen_patch_coalesce contains a recursive join point (joinrec). Now that the
-// tree-walker correctly resolves recursive joins (a join is in scope in its own
-// rhs — see the Jump knot in eval.rs), this fixture executes its loop as genuine
-// non-tail recursion, whose depth overflows the default 2MB test-thread stack
-// (the JIT has TCO; the differential harness covers it at 8MB). Run in a 64MB
-// thread, matching gen_patch_render_parse / gen_patch_two_hunks below. The
-// asserted value is unchanged (1) — only the stack budget differs.
-#[test]
-fn gen_patch_coalesce() {
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
-            static CBOR: &[u8] =
-                include_bytes!("../../haskell/test/suite_cbor/gen_patch_coalesce.cbor");
-            let val = eval_fixture(CBOR);
-            let table = table();
-            assert_int(&val, 1, &table);
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
+suite_int!(gen_patch_coalesce, 1);
 suite_bool!(gen_patch_nochange, true);
 suite_fmt!(gen_patch_creation, "hello\nworld\n");
 

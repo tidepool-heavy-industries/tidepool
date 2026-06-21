@@ -387,20 +387,7 @@ fn eval_at(
                     }
                     let params = params.clone();
                     let rhs_expr = rhs_expr.clone();
-                    let join_env = join_env.clone();
-                    // Tie the recursive knot. A join point is in scope in its OWN
-                    // rhs (GHC `joinrec` semantics): a tail `jump` to self inside
-                    // the rhs must resolve. The captured `join_env` was taken when
-                    // this join was created — BEFORE its own binder existed — so it
-                    // lacks the self-reference (outer joins are still present, as
-                    // this join was created lexically inside them). Re-bind the
-                    // join var to its continuation before evaluating the rhs so the
-                    // self-jump resolves; deeper recursion re-ties the knot on each
-                    // entry. This is independent of the JIT's basic-block lowering.
-                    let self_cont =
-                        Value::JoinCont(params.clone(), rhs_expr.clone(), join_env.clone());
-                    let mut new_env = join_env;
-                    new_env = new_env.update(join_var, self_cont);
+                    let mut new_env = join_env.clone();
                     for (param, arg_idx) in params.iter().zip(args.iter()) {
                         let arg_val = eval_at(expr, *arg_idx, env, heap)?;
                         new_env = new_env.update(*param, arg_val);
