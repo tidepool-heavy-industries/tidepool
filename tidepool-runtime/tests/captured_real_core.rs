@@ -21,13 +21,12 @@
 //! These fixtures pin two DISTINCT, currently-unfixed bugs. The asserts encode
 //! the present (buggy) behaviour; when a fix lands, the relevant assert flips and
 //! this test fails loudly — that is the signal to update it.
-use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
+use tidepool_codegen::jit_machine::JitError;
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_eval::value::Value;
-use tidepool_eval::{env_from_datacon_table, eval, VecHeap};
 use tidepool_repr::serial::read::{read_cbor, read_metadata};
 use tidepool_repr::{CoreExpr, DataConTable, Literal};
-use tidepool_testing::proptest::check_jit_vs_eval_with_table;
+use tidepool_testing::proptest::{check_jit_vs_eval_captured, CapturedOutcome};
 
 static META: &[u8] = include_bytes!("captured_core/meta.cbor");
 static ROUND_IN: &[u8] = include_bytes!("captured_core/reproRoundIN.cbor");
@@ -67,76 +66,54 @@ fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T 
 // `roundingMode#` Integer case (IS → IN) and raises `roundingMode#: IN`. This is
 // the captured target a fix for the constructor-tag-misread bug must clear.
 #[test]
-fn captured_round_in_is_jit_vs_eval_divergence() {
+fn captured_round_in_is_jit_only_failure() {
     on_big_stack(|| {
         let (expr, table) = load(ROUND_IN);
-        let env = env_from_datacon_table(&table);
-        let mut heap = VecHeap::new();
-
-        // Eval is correct: 1025.0.
-        let ev = eval(&expr, &env, &mut heap).expect("eval should succeed");
-        assert_eq!(
-            boxed_double(&ev),
-            Some(1025.0),
-            "eval must compute the exact value; got {ev:?}"
-        );
-
-        // JIT diverges: roundingMode#: IN.
-        let jit = JitEffectMachine::compile(&expr, &table, NURSERY)
-            .expect("compile should succeed")
-            .run_pure();
-        match jit {
-            Err(JitError::Yield(YieldError::UserErrorMsg(msg))) => {
-                assert!(
-                    msg.contains("roundingMode#"),
-                    "expected the roundingMode# divergence, got: {msg}"
+        match check_jit_vs_eval_captured(&expr, &table, NURSERY) {
+            CapturedOutcome::JitOnlyFailure { eval, jit } => {
+                // Eval is correct: exactly 1025.0.
+                assert_eq!(
+                    boxed_double(&eval),
+                    Some(1025.0),
+                    "eval must compute the exact value; got {eval:?}"
                 );
+                // JIT diverges with roundingMode#: IN.
+                match jit {
+                    JitError::Yield(YieldError::UserErrorMsg(msg)) => assert!(
+                        msg.contains("roundingMode#"),
+                        "expected the roundingMode# divergence, got: {msg}"
+                    ),
+                    other => panic!("expected JIT roundingMode#: IN, got {other:?}"),
+                }
             }
-            other => panic!("expected JIT roundingMode#: IN, got {other:?}"),
+            other => panic!("expected #1 to be a JitOnlyFailure differential, got {other:?}"),
         }
-
-        // The oracle itself flags the divergence (eval Ok, JIT Err).
-        let (expr2, table2) = load(ROUND_IN);
-        assert!(
-            check_jit_vs_eval_with_table(expr2, &table2, NURSERY).is_err(),
-            "oracle must detect the #1 JIT-vs-eval divergence"
-        );
     });
 }
 
 // #2 — NOT a JIT-vs-eval differential. `read "42" :: Int` fails in BOTH engines:
 // the tree-walker yields `NotAFunction` and the JIT `BadFunPtrTag` (a constructor
 // in function position, reached through ReadP's newtype coercion). Because eval
-// also fails, the differential oracle CANNOT catch this — it is a translation /
-// shared-repr bug, a different class from #1. Captured so that class is on record.
+// also fails, the differential oracle structurally CANNOT catch this — it is a
+// translation / shared-repr bug, a different class from #1. Captured (as the
+// explicit `BothFail` outcome) so that class is on record rather than swallowed.
 #[test]
 fn captured_read_int_both_engines_fail() {
     on_big_stack(|| {
         let (expr, table) = load(READ_INT);
-        let env = env_from_datacon_table(&table);
-        let mut heap = VecHeap::new();
-
-        let ev = eval(&expr, &env, &mut heap);
-        assert!(
-            ev.is_err(),
-            "tree-walker also fails (not JIT-only); got {ev:?}"
-        );
-
-        let jit = JitEffectMachine::compile(&expr, &table, NURSERY)
-            .expect("compile should succeed")
-            .run_pure();
-        assert!(
-            matches!(jit, Err(JitError::Yield(YieldError::BadFunPtrTag(_)))),
-            "expected JIT BadFunPtrTag (non-function applied), got {jit:?}"
-        );
-
-        // Because BOTH fail, the differential oracle does NOT flag #2 — proving
-        // it is out of the JIT-vs-eval net's reach (translation-level, not a
-        // JIT-only value-repr bug).
-        let (expr2, table2) = load(READ_INT);
-        assert!(
-            check_jit_vs_eval_with_table(expr2, &table2, NURSERY).is_ok(),
-            "oracle cannot flag #2: both engines fail, so it is not a differential"
-        );
+        match check_jit_vs_eval_captured(&expr, &table, NURSERY) {
+            CapturedOutcome::BothFail { eval, jit } => {
+                // Tree-walker also fails — proves this is NOT JIT-only.
+                assert!(
+                    format!("{eval:?}").contains("NotAFunction"),
+                    "expected eval NotAFunction, got {eval:?}"
+                );
+                assert!(
+                    matches!(jit, JitError::Yield(YieldError::BadFunPtrTag(_))),
+                    "expected JIT BadFunPtrTag (non-function applied), got {jit:?}"
+                );
+            }
+            other => panic!("expected #2 to be BothFail (not a differential), got {other:?}"),
+        }
     });
 }
