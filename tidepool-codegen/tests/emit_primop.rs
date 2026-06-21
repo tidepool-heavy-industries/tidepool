@@ -162,6 +162,40 @@ fn test_emit_primop_float_negate() {
 }
 
 #[test]
+fn test_emit_primop_float_sqrt() {
+    let tree = RecursiveTree {
+        nodes: vec![
+            CoreFrame::Lit(Literal::from(16.0f32)),
+            CoreFrame::PrimOp {
+                op: PrimOpKind::FloatSqrt,
+                args: vec![0],
+            },
+        ],
+    };
+    let result = compile_and_run(&tree);
+    unsafe {
+        assert_eq!(read_lit_float(result.result_ptr), 4.0);
+    }
+}
+
+#[test]
+fn test_emit_primop_float_fabs() {
+    let tree = RecursiveTree {
+        nodes: vec![
+            CoreFrame::Lit(Literal::from(-2.5f32)),
+            CoreFrame::PrimOp {
+                op: PrimOpKind::FloatFabs,
+                args: vec![0],
+            },
+        ],
+    };
+    let result = compile_and_run(&tree);
+    unsafe {
+        assert_eq!(read_lit_float(result.result_ptr), 2.5);
+    }
+}
+
+#[test]
 fn test_emit_primop_float_eq() {
     let tree = RecursiveTree {
         nodes: vec![

@@ -927,6 +927,29 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             let a = expect_float(&args[0])?;
             Ok(Value::Lit(Literal::LitFloat((-a).to_bits() as u64)))
         }
+        // sqrtFloat# / fabsFloat# — native f32 (parallel to DoubleSqrt/DoubleFabs).
+        PrimOpKind::FloatSqrt => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_float(&args[0])?;
+            Ok(Value::Lit(Literal::LitFloat(a.sqrt().to_bits() as u64)))
+        }
+        PrimOpKind::FloatFabs => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: "arguments",
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_float(&args[0])?;
+            Ok(Value::Lit(Literal::LitFloat(a.abs().to_bits() as u64)))
+        }
         PrimOpKind::FloatEq => cmp_float(op, &args, |a, b| a == b),
         PrimOpKind::FloatNe => cmp_float(op, &args, |a, b| a != b),
         PrimOpKind::FloatLt => cmp_float(op, &args, |a, b| a < b),

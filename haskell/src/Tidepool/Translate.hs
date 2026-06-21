@@ -1109,7 +1109,7 @@ translate expr =
     Var v | Just pop <- isPrimOpId_maybe v
           , length args == primOpArity pop -> do
         childIdxs <- mapM translate args
-        emitOp (mapPrimOp pop) childIdxs
+        emitPrimOpDispatch pop childIdxs
 
     Var v | Just arity <- isJoinId_maybe v
           , length allArgs == arity -> do
@@ -1321,7 +1321,7 @@ translateHead = \case
         childIdxs <- mapM translate nonStateArgs
         -- Emit the primop or FFI call (unsupported FFI -> lazy poison).
         primIdx <- case isPrimOpId_maybe v of
-                    Just pop -> emitOp (mapPrimOp pop) childIdxs
+                    Just pop -> emitPrimOpDispatch pop childIdxs
                     Nothing  -> case mapFfiCall (showPprUnsafe v) of
                                   Just name -> emitOp name childIdxs
                                   Nothing   -> emitFfiPoison
@@ -1620,6 +1620,11 @@ mapPrimOp = \case
   FloatLeOp     -> "FloatLe"
   FloatGtOp     -> "FloatGt"
   FloatGeOp     -> "FloatGe"
+  -- Float unary math with native hardware opcodes (sqrt/fabs). The Float
+  -- transcendentals (expFloat#, sinFloat#, …) have no hardware opcode and are
+  -- desugared to the Double libm path in `desugarFloatMath` before reaching here.
+  FloatSqrtOp   -> "FloatSqrt"
+  FloatFabsOp   -> "FloatFabs"
   -- Double extras
   DoubleNegOp   -> "DoubleNegate"
   DoubleFabsOp  -> "DoubleFabs"
@@ -1768,6 +1773,45 @@ mapPrimOp = \case
   RaiseOverflowOp  -> "RaiseOverflow"
   RaiseDivZeroOp   -> "RaiseDivZero"
   other       -> error $ "Unsupported primop: " ++ showPprUnsafe other
+
+-- | Float transcendental primops (expFloat#, sinFloat#, …) have no hardware
+-- opcode. Map each to its Double-precision sibling's serial name so it can be
+-- desugared to the Double libm path (the JIT/eval implement only Double libm).
+-- Hardware-opcode Float ops (sqrtFloat#/fabsFloat#) are NOT here — they go
+-- through mapPrimOp natively. Returns Nothing for any non-transcendental primop.
+floatMathToDouble :: PrimOp -> Maybe Text
+floatMathToDouble = \case
+  FloatExpOp   -> Just "DoubleExp"
+  FloatExpM1Op -> Just "DoubleExpM1"
+  FloatLogOp   -> Just "DoubleLog"
+  FloatLog1POp -> Just "DoubleLog1P"
+  FloatSinOp   -> Just "DoubleSin"
+  FloatCosOp   -> Just "DoubleCos"
+  FloatTanOp   -> Just "DoubleTan"
+  FloatAsinOp  -> Just "DoubleAsin"
+  FloatAcosOp  -> Just "DoubleAcos"
+  FloatAtanOp  -> Just "DoubleAtan"
+  FloatSinhOp  -> Just "DoubleSinh"
+  FloatCoshOp  -> Just "DoubleCosh"
+  FloatTanhOp  -> Just "DoubleTanh"
+  FloatAsinhOp -> Just "DoubleAsinh"
+  FloatAcoshOp -> Just "DoubleAcosh"
+  FloatAtanhOp -> Just "DoubleAtanh"
+  FloatPowerOp -> Just "DoublePower"
+  _            -> Nothing
+
+-- | Emit a saturated primop. A Float transcendental is desugared to the Double
+-- libm path: each Float arg is promoted (`float2Double#`), the Double op runs,
+-- and the result is demoted (`double2Float#`). Everything else (including the
+-- native sqrtFloat#/fabsFloat#) goes straight through mapPrimOp.
+emitPrimOpDispatch :: PrimOp -> [Int] -> TransM Int
+emitPrimOpDispatch pop childIdxs =
+  case floatMathToDouble pop of
+    Just dop -> do
+      promoted <- mapM (\c -> emitOp "Float2Double" [c]) childIdxs
+      dres <- emitOp dop promoted
+      emitOp "Double2Float" [dres]
+    Nothing -> emitOp (mapPrimOp pop) childIdxs
 
 -- | Check whether a named top-level binding has IO in its result type.
 targetBindingHasIO :: [CoreBind] -> String -> Bool

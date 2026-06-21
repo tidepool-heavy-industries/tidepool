@@ -347,6 +347,16 @@ pcFloatNeg = negate sF
 pcFloatCmp :: Bool
 pcFloatCmp = sF < 2.0 && sF /= 3.0 && sF >= 1.0 && sF == 1.5
 
+-- Float unary math. `sqrt`/`abs` lower to native sqrtFloat#/fabsFloat# (hardware
+-- opcodes); `exp`/`log`/`sin` lower to the *Float# transcendentals, which the
+-- extractor desugars to the Double libm path. NOINLINE sF defeats folding so the
+-- ops survive to runtime emit. (Closes Gap B: `sqrtFloat#` was an extractor gap.)
+pcFloatSqrt :: Float
+pcFloatSqrt = sqrt sF + abs (sF - 3.0)
+
+pcFloatTranscend :: Float
+pcFloatTranscend = exp sF + log sF + sin sF
+
 pcDoubleSubMul :: Double
 pcDoubleSubMul = sD - 1.0 * 2.0
 

@@ -165,6 +165,12 @@ define_primops! {
     FloatLe => "FloatLe", "leFloat#";
     FloatGt => "FloatGt", "gtFloat#";
     FloatGe => "FloatGe", "geFloat#";
+    // Float unary math with direct hardware opcodes (parallel to DoubleSqrt /
+    // DoubleFabs). The transcendental Float ops (expFloat#, sinFloat#, …) have no
+    // hardware opcode and are desugared in Translate.hs to the Double libm path
+    // (float2Double# → *Double# → double2Float#), so they need no variant here.
+    FloatSqrt => "FloatSqrt", "sqrtFloat#";
+    FloatFabs => "FloatFabs", "fabsFloat#";
     DoubleNegate => "DoubleNegate", "negateDouble#";
     DoubleFabs => "DoubleFabs", "fabsDouble#";
     DoubleSqrt => "DoubleSqrt", "sqrtDouble#";

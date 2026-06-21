@@ -760,6 +760,19 @@ pub fn emit_primop(
             let a = unbox_float(sess.pipeline, builder, sess.vmctx, args[0]);
             Ok(SsaVal::Raw(builder.ins().fneg(a), LIT_TAG_FLOAT))
         }
+        // sqrtFloat# / fabsFloat# — native f32 opcodes (cranelift `sqrt`/`fabs`
+        // are type-polymorphic). Parallel to DoubleSqrt/DoubleFabs; bit-exact, no
+        // libm. (Float transcendentals are desugared to the Double path upstream.)
+        PrimOpKind::FloatSqrt => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_float(sess.pipeline, builder, sess.vmctx, args[0]);
+            Ok(SsaVal::Raw(builder.ins().sqrt(a), LIT_TAG_FLOAT))
+        }
+        PrimOpKind::FloatFabs => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_float(sess.pipeline, builder, sess.vmctx, args[0]);
+            Ok(SsaVal::Raw(builder.ins().fabs(a), LIT_TAG_FLOAT))
+        }
 
         PrimOpKind::ReallyUnsafePtrEquality => {
             check_arity(op, 2, args.len())?;
