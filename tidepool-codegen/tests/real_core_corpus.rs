@@ -171,12 +171,13 @@ const KNOWN: &[(&str, &str, &str)] = &[
     // Both fixed in tidepool-codegen/src/emit/expr.rs (error-call walkers follow the
     // case scrutinee AND treat raise# as a bottoming, deferred RHS).
     //
-    // GADT with equality evidence — eval case-binder arity off, JIT SIGSEGV.
-    (
-        "gadtEval",
-        "BOTH-BUG",
-        "GADT eqspec arity (eval) + SIGSEGV (JIT)",
-    ),
+    // GADT eqspec arity (gadtEval) is FIXED too (now MATCH, entry pruned): GHC's
+    // GADT case alt binds the equality-evidence CoVar (`AddE co a b`), but
+    // translateAlt only filtered TyVars — so the alt bound one field too many
+    // (eval ArityMismatch, JIT read past the fields -> SIGSEGV). Fixed in
+    // Translate.hs (alt binders now exclude CoVars, matching the Con build's
+    // isValueArg / valueRepArity).
+    //
     // #2 — ReadP ~R# newtype coercion: a Con in function position. Both engines.
     ("readInt", "BOTH-BUG", "#2 read/ReadP newtype-coercion"),
     ("readListInt", "BOTH-BUG", "#2 read/ReadP newtype-coercion"),

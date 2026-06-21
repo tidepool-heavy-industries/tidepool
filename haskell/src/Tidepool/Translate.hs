@@ -1392,7 +1392,15 @@ translateHead = \case
 
 translateAlt :: CoreAlt -> TransM FlatAlt
 translateAlt (Alt con binders body) = do
-  let vBinders = filter (not . isTyVar) binders
+  -- Keep only VALUE binders. A GADT pattern's Core binders include the
+  -- equality-evidence coercion var (e.g. `AddE co a b` for
+  -- `AddE :: Expr Int -> Expr Int -> Expr Int`), which is a CoVar — NOT a
+  -- TyVar — so filtering `isTyVar` alone leaves it in, binding one too many
+  -- fields. The Con BUILD drops it (via `isValueArg`, which excludes both type
+  -- AND coercion args / `valueRepArity = dataConRepArity - |eqSpec|`), so an
+  -- unfiltered alt reads past the stored fields: eval ArityMismatch, JIT SIGSEGV.
+  -- Exclude coercion binders too, matching the build's value-field count.
+  let vBinders = filter (\b -> not (isTyVar b) && not (isCoVar b)) binders
   altCon <- mapAltCon con
   bodyIdx <- translate body
   return $ FlatAlt altCon (map varId vBinders) bodyIdx
