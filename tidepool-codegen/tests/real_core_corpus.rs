@@ -161,24 +161,26 @@ fn run_one(node: &[u8], meta: &[u8]) -> (bool, &'static str, String, BTreeSet<&'
 /// to `MATCH` (which still passes — then prune the stale entry).
 const KNOWN: &[(&str, &str, &str)] = &[
     // ── BUGS (implemented-but-wrong) ──
-    // #1 — JIT mis-dispatches the inlined roundingMode# Integer case (IS->IN).
-    // ALL non-folded fromIntegral Integer->Double, magnitude-independent.
-    ("convFromInt5", "JIT-BUG", "#1 roundingMode#:IN"),
-    ("convFromInt1025", "JIT-BUG", "#1 roundingMode#:IN"),
-    ("convFromIntPow40", "JIT-BUG", "#1 roundingMode#:IN"),
-    ("convFromIntPow80", "JIT-BUG", "#1 roundingMode#:IN"),
-    // #1 reached via the Double-literal / Rational->Double path. UN-MASKED once
-    // eval gained PopCnt (was BOTH-MIXED): eval now computes the value, so the JIT
-    // roundingMode#:IN is revealed as a pure divergence (same #1 bug).
+    // #1 (roundingMode#:IN) FIXED — the convFromInt* fromIntegral cases now MATCH.
+    // Root cause was eager-eval of GHC's bottoming `case error "roundingMode#: IN"
+    // of {}` CAF (the error-deferral check missed it through the forced case
+    // scrutinee); fix in tidepool-codegen/src/emit/expr.rs. Entries pruned.
+    //
+    // FOLLOW-ON (un-masked by the #1 fix, same way PopCnt un-masked #1): the
+    // Double-literal / Rational->Double path (rationalToDouble) no longer raises
+    // roundingMode# but now raises a bare UserError — the JIT force-evaluates a
+    // (correctly-poisoned) error binding on the live path where eval defers it
+    // (eager-force class, distinct from the eager-CAF-eval #1 just fixed; eval
+    // returns the exact value). Tracked as a separate root-cause.
     (
         "convDoubleLitBig",
         "JIT-BUG",
-        "#1 roundingMode#:IN (Double literal)",
+        "FOLLOW-ON: rationalToDouble JIT eager-forces a poison (UserError); eval ok",
     ),
     (
         "convFromRational",
         "JIT-BUG",
-        "#1 roundingMode#:IN (Rational->Double)",
+        "FOLLOW-ON: rationalToDouble JIT eager-forces a poison (UserError); eval ok",
     ),
     // GADT with equality evidence — eval case-binder arity off, JIT SIGSEGV.
     (

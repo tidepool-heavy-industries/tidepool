@@ -46,27 +46,20 @@ fn dbl_pure(body: &str) -> serde_json::Value {
 }
 
 // The ORIGINAL trigger: large base-10-exponent Double literals desugar to a
-// runtime `rationalToDouble` computation. Two over-collection layers dragged the
-// type-representation machinery into its closure via the DEAD error branches
-// (ratio/divide-by-zero exceptions carry `Typeable` `SomeException`):
-// GHC.Fingerprint (MD5) AND GHC.Data.Typeable (`mkTrCon1/2/3`). Both are now
-// pruned at the module boundary (`isNeverResolve` -> lazy poison), so the
-// formerly force-trapped externals stay un-forced in the dead branches.
-//
-// With that resolved, these now reach the SAME blocker as `from_integral_to_double`
-// below: `GHC.Float.roundingMode#: IN` — a positive value reaching the negative-
-// bignat (`IN`) constructor branch in the JIT's Integer IS/IP/IN case dispatch
-// (integerToBinaryFloat' / roundingMode#). #1 (computed Integer->Double) and #2
-// (big Double literals) are therefore one root cause: the Integer-constructor
-// dispatch in the GHC.Float Double-conversion path. Tracked together.
+// runtime `rationalToDouble` computation. The roundingMode#:IN eager-CAF-eval bug
+// (#1) is now FIXED (see `from_integral_to_double`, which passes), but fixing it
+// UN-MASKED a distinct follow-on on this rationalToDouble path: the JIT now
+// force-evaluates a correctly-poisoned error binding on the live path (eval
+// defers it and returns the exact value) -> a bare UserError. A separate
+// root-cause (eager-force class), tracked apart from the fixed eager-CAF-eval #1.
 #[test]
-#[ignore = "GHC.Float roundingMode#: IN — JIT Integer IS/IP/IN dispatch (shared with from_integral_to_double)"]
+#[ignore = "FOLLOW-ON of the #1 fix: rationalToDouble now raises a bare UserError (JIT eager-forces a poison); distinct from the fixed roundingMode# eager-CAF-eval"]
 fn big_double_e308() {
     assert_eq!(dbl_pure("1.0e308"), json!(1.0e308));
 }
 
 #[test]
-#[ignore = "GHC.Float roundingMode#: IN — JIT Integer IS/IP/IN dispatch (shared with from_integral_to_double)"]
+#[ignore = "FOLLOW-ON of the #1 fix: rationalToDouble now raises a bare UserError (JIT eager-forces a poison); distinct from the fixed roundingMode# eager-CAF-eval"]
 fn big_double_max_finite() {
     assert_eq!(
         dbl_pure("1.7976931348623157e308"),
@@ -75,7 +68,7 @@ fn big_double_max_finite() {
 }
 
 #[test]
-#[ignore = "GHC.Float roundingMode#: IN — JIT Integer IS/IP/IN dispatch (shared with from_integral_to_double)"]
+#[ignore = "FOLLOW-ON of the #1 fix: rationalToDouble now raises a bare UserError (JIT eager-forces a poison); distinct from the fixed roundingMode# eager-CAF-eval"]
 fn big_double_neg_exp() {
     assert_eq!(dbl_pure("1.0e-300"), json!(1.0e-300));
 }
@@ -185,12 +178,13 @@ fn big_gcd() {
     );
 }
 
-// fromIntegral :: Integer -> Double of a LITERAL big Integer works; of a COMPUTED
-// one hits GHC.Float's `roundingMode#: IN` (a positive value reaching it as a
-// negative bignat — a representation issue in integerToBinaryFloat', deep in the
-// Double-conversion path). Tracked separately.
+// fromIntegral :: Integer -> Double, COMPUTED big Integer. This was the canonical
+// #1 case (`roundingMode#: IN`). FIXED: the bug was eager-eval of GHC's bottoming
+// `case error "roundingMode#: IN" of {}` CAF — the JIT's error-deferral check did
+// not see the error through the forced case scrutinee, so it evaluated the CAF at
+// LetRec setup and raised the error regardless of the (correct) case dispatch.
+// Fix: the error-call walkers follow the case scrutinee (tidepool-codegen emit).
 #[test]
-#[ignore = "computed Integer -> Double: GHC.Float roundingMode#: IN (Double-conversion path)"]
 fn from_integral_to_double() {
     assert_eq!(
         show_pure("show (fromIntegral (2 ^ (100 :: Int) :: Integer) :: Double)"),

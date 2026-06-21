@@ -77,44 +77,35 @@ fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T 
         .unwrap()
 }
 
-// #1 — a TRUE JIT-vs-eval differential. `fromIntegral (1025 :: Integer) :: Double`
-// is trivially exact (eval returns 1025.0), but the JIT mis-dispatches the inlined
-// `roundingMode#` Integer case (IS → IN) and raises `roundingMode#: IN`. This is
-// the captured target a fix for the constructor-tag-misread bug must clear.
+// #1 — FIXED. `fromIntegral (1025 :: Integer) :: Double` now AGREES at 1025.0 in
+// both engines. The bug was NOT a constructor-tag misread (the dispatch reads IS
+// correctly): GHC lowers roundingMode#'s `IN -> error` to a bottoming unlifted
+// CAF shaped `case error "roundingMode#: IN" of {}`, and the JIT's error-deferral
+// check only saw `error ...` directly — not through the forced case scrutinee — so
+// it evaluated the CAF eagerly and raised the error regardless of which branch the
+// case took. Fix: the error-call walkers follow the case scrutinee (expr.rs).
 #[test]
-fn captured_round_in_is_jit_only_failure() {
+fn captured_round_in_agrees_1025() {
     on_big_stack(|| {
         let (expr, table) = load(ROUND_IN);
         match check_jit_vs_eval_captured(&expr, &table, NURSERY) {
-            CapturedOutcome::JitOnlyFailure { eval, jit } => {
-                // Eval is correct: exactly 1025.0.
-                assert_eq!(
-                    boxed_double(&eval),
-                    Some(1025.0),
-                    "eval must compute the exact value; got {eval:?}"
-                );
-                // JIT diverges with roundingMode#: IN.
-                match jit {
-                    JitError::Yield(YieldError::UserErrorMsg(msg)) => assert!(
-                        msg.contains("roundingMode#"),
-                        "expected the roundingMode# divergence, got: {msg}"
-                    ),
-                    other => panic!("expected JIT roundingMode#: IN, got {other:?}"),
-                }
-            }
-            other => panic!("expected #1 to be a JitOnlyFailure differential, got {other:?}"),
+            CapturedOutcome::Agree(v) => assert_eq!(
+                boxed_double(&v),
+                Some(1025.0),
+                "fromIntegral 1025 :: Double must be 1025.0 in both engines; got {v:?}"
+            ),
+            other => panic!("expected #1 to be FIXED (Agree 1025.0), got {other:?}"),
         }
     });
 }
 
-// #1 MINIMIZED — the same differential delta-debugged from 2630 down to 84 nodes
-// (replace_subtree with Lit holes, largest-first, preserving eval=1025.0 vs
-// JIT=roundingMode#:IN). The surviving live path is just the inlined
-// integerToBinaryFloat'/roundingMode# dispatch — 3 Cases (the IS/IP/IN case is
-// the one that misreads the tag) over the rebound Integer; the 28 LetRec binders
-// are dead holes. This is the precise target a fix must clear.
+// #1 MINIMIZED — the 84-node delta-debugged fixture (the precise fix target).
+// Confirms the fix on the minimal failing subtree: the surviving live path is the
+// inlined integerToBinaryFloat'/roundingMode# dispatch plus the bottoming error
+// CAF (`case error … of {}`) as a LetRec binding — the eager-eval of which was the
+// real bug. Now Agree at 1025.0.
 #[test]
-fn captured_round_in_minimized_is_jit_only_failure() {
+fn captured_round_in_minimized_agrees_1025() {
     on_big_stack(|| {
         let (expr, table) = load(ROUND_IN_MIN);
         assert!(
@@ -123,14 +114,10 @@ fn captured_round_in_minimized_is_jit_only_failure() {
             expr.nodes.len()
         );
         match check_jit_vs_eval_captured(&expr, &table, NURSERY) {
-            CapturedOutcome::JitOnlyFailure { eval, jit } => {
-                assert_eq!(boxed_double(&eval), Some(1025.0), "eval got {eval:?}");
-                assert!(
-                    matches!(&jit, JitError::Yield(YieldError::UserErrorMsg(m)) if m.contains("roundingMode#")),
-                    "expected roundingMode# divergence, got {jit:?}"
-                );
+            CapturedOutcome::Agree(v) => {
+                assert_eq!(boxed_double(&v), Some(1025.0), "got {v:?}")
             }
-            other => panic!("minimized #1 must stay a JitOnlyFailure differential, got {other:?}"),
+            other => panic!("minimized #1 must now Agree at 1025.0 (FIXED), got {other:?}"),
         }
     });
 }

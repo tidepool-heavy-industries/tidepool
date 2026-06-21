@@ -1593,6 +1593,14 @@ impl EmitContext {
             match &tree.nodes[idx] {
                 CoreFrame::Var(v) => return (v.0 >> 56) as u8 == tidepool_repr::ERROR_SENTINEL_TAG,
                 CoreFrame::App { fun, .. } => idx = *fun,
+                // GHC gives a bottoming binding of unlifted type the shape
+                // `case error "..." of {}` (an empty case forcing the error to
+                // realise its unlifted result type — e.g. roundingMode#'s
+                // `IN -> error` lifted to a top-level `Int#` CAF). Forcing the
+                // binding forces the case SCRUTINEE first, so if that bottoms the
+                // binding bottoms — follow the scrutinee (NOT the alt bodies,
+                // which are conditional, keeping branch-local errors un-poisoned).
+                CoreFrame::Case { scrutinee, .. } => idx = *scrutinee,
                 _ => return false,
             }
         }
@@ -1638,6 +1646,9 @@ impl EmitContext {
                     }
                 }
                 CoreFrame::App { fun, .. } => idx = *fun,
+                // See `rhs_is_error_call`: a `case <error> of {}` bottoms via its
+                // forced scrutinee.
+                CoreFrame::Case { scrutinee, .. } => idx = *scrutinee,
                 _ => return false,
             }
         }
@@ -1652,6 +1663,7 @@ impl EmitContext {
                     return v.0 & 0xFF
                 }
                 CoreFrame::App { fun, .. } => idx = *fun,
+                CoreFrame::Case { scrutinee, .. } => idx = *scrutinee,
                 _ => return 2, // fallback: UserError
             }
         }
@@ -1673,6 +1685,8 @@ impl EmitContext {
                     }
                     idx = *fun; // continue walking the App chain
                 }
+                // `case error "..." of {}`: the message is inside the scrutinee.
+                CoreFrame::Case { scrutinee, .. } => idx = *scrutinee,
                 _ => return None,
             }
         }
