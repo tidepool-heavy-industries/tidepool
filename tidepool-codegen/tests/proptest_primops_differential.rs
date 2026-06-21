@@ -159,14 +159,14 @@ fn edge_i64_values() -> Vec<i64> {
         255,
         256,
         -256,
-        0x7FFF_FFFF,           // i32::MAX
-        -0x8000_0000,          // i32::MIN
-        0x1_0000_0000,         // 2^32
-        0x7FFF,                // i16::MAX
-        -0x8000,               // i16::MIN
-        0x7F,                  // i8::MAX
-        -0x80,                 // i8::MIN
-        0x5555_5555_5555_5555, // alternating bits
+        0x7FFF_FFFF,               // i32::MAX
+        -0x8000_0000,              // i32::MIN
+        0x1_0000_0000,             // 2^32
+        0x7FFF,                    // i16::MAX
+        -0x8000,                   // i16::MIN
+        0x7F,                      // i8::MAX
+        -0x80,                     // i8::MIN
+        0x5555_5555_5555_5555,     // alternating bits
         -0x5555_5555_5555_5556i64, // ~alternating
         0x0123_4567_89AB_CDEF,
         i64::MIN / 2,
@@ -246,7 +246,7 @@ fn arb_codepoint() -> impl Strategy<Value = i64> {
         (0i64..0xD800),
         (0xE000i64..0x11_0000),
         Just(0i64),
-        Just(0x41i64),  // 'A'
+        Just(0x41i64), // 'A'
         Just(0xD7FFi64),
         Just(0xE000i64),
         Just(0x10_FFFFi64),
@@ -426,7 +426,10 @@ fn prog_triple_slots_int(
     let mk = |b: &mut TreeBuilder, op: PrimOpKind| {
         let x = lit_int(b, a);
         let y = lit_int(b, b_);
-        b.push(CoreFrame::PrimOp { op, args: vec![x, y] })
+        b.push(CoreFrame::PrimOp {
+            op,
+            args: vec![x, y],
+        })
     };
     let s0 = mk(&mut b, slot0);
     let s1 = mk(&mut b, slot1);

@@ -66,10 +66,10 @@ const BOX1: DataConId = DataConId(30); // Box (a -> b)
 const BOX2: DataConId = DataConId(31); // Box2 (a -> b) Int   (closure + ground sibling)
 const CPS_MORE: DataConId = DataConId(32); // More (Int -> Int) K
 const CPS_DONE: DataConId = DataConId(33); // Done
-// Mixed sum: same field offset 0 holds a CLOSURE in one con, a non-closure (Int)
-// in the sibling — the ReadP P-monad shape (some constructors carry functions,
-// some carry values). Dispatching + applying/using field 0 stresses the
-// "field read as the wrong representation" path (#2 non-closure-application).
+                                           // Mixed sum: same field offset 0 holds a CLOSURE in one con, a non-closure (Int)
+                                           // in the sibling — the ReadP P-monad shape (some constructors carry functions,
+                                           // some carry values). Dispatching + applying/using field 0 stresses the
+                                           // "field read as the wrong representation" path (#2 non-closure-application).
 const FBOX: DataConId = DataConId(34); // FBox (Int -> Int)
 const VBOX: DataConId = DataConId(35); // VBox Int
 
@@ -172,9 +172,9 @@ fn run_oracles(expr: CoreExpr) -> Result<(), TestCaseError> {
 #[derive(Clone, Debug)]
 enum EnumVal {
     Nil,
-    Unb(i64),       // E_UNB n          (unboxed Int# field)
-    Box(i64),       // E_BOX (Just m)   (boxed field)
-    Mix(i64, i64),  // E_MIX n (Just m)
+    Unb(i64),      // E_UNB n          (unboxed Int# field)
+    Box(i64),      // E_BOX (Just m)   (boxed field)
+    Mix(i64, i64), // E_MIX n (Just m)
     Nl2,
 }
 
@@ -617,12 +617,25 @@ enum ClosKind {
 
 #[derive(Clone, Debug)]
 enum ClosSpec {
-    Box1 { f: ClosKind, arg: i64 },
-    Box2 { f: ClosKind, k: i64 },
-    Cps { fs: Vec<ClosKind>, seed: i64 },
+    Box1 {
+        f: ClosKind,
+        arg: i64,
+    },
+    Box2 {
+        f: ClosKind,
+        k: i64,
+    },
+    Cps {
+        fs: Vec<ClosKind>,
+        seed: i64,
+    },
     /// 3-arg lambda partially applied to 2 args, stored in a Con field (a THUNKED
     /// PAP), then completed with the 3rd arg. `g (a3) where g = (\x y z -> ...) a1 a2`.
-    Pap { a1: i64, a2: i64, a3: i64 },
+    Pap {
+        a1: i64,
+        a2: i64,
+        a3: i64,
+    },
     /// Mixed sum `FBox (Int->Int) | VBox Int`. Build one variant, dispatch both:
     ///   case x of { FBox g -> g arg ; VBox n -> n +# k }
     /// Field 0 is a closure in FBox, a non-closure in VBox.
@@ -636,11 +649,17 @@ enum ClosSpec {
     /// A closure CAPTURING an outer variable, stored in a field, then applied:
     ///   (\outer -> case Box (\x -> x +# outer) of Box g -> g arg) c
     /// The field holds a closure with a captured free var (not closed).
-    Capture { c: i64, arg: i64 },
+    Capture {
+        c: i64,
+        arg: i64,
+    },
     /// HIGHER-ORDER: a field holds a closure that RETURNS a closure; extract and
     /// apply to TWO args in sequence:
     ///   case Box (\x -> \y -> x +# y) of Box g -> (g a) b
-    HigherOrder { a: i64, b: i64 },
+    HigherOrder {
+        a: i64,
+        b: i64,
+    },
 }
 
 fn arb_clos_kind() -> impl Strategy<Value = ClosKind> {
@@ -907,10 +926,7 @@ fn build_clos(spec: &ClosSpec) -> CoreExpr {
             let xref = b.push(CoreFrame::Var(x));
             let yref = b.push(CoreFrame::Var(y));
             let body = add(&mut b, xref, yref);
-            let ly = b.push(CoreFrame::Lam {
-                binder: y,
-                body,
-            });
+            let ly = b.push(CoreFrame::Lam { binder: y, body });
             let lx = b.push(CoreFrame::Lam {
                 binder: x,
                 body: ly,
@@ -922,15 +938,9 @@ fn build_clos(spec: &ClosSpec) -> CoreExpr {
             let g = fresh_var();
             let gref = b.push(CoreFrame::Var(g));
             let al = lit(&mut b, *a);
-            let app1 = b.push(CoreFrame::App {
-                fun: gref,
-                arg: al,
-            });
+            let app1 = b.push(CoreFrame::App { fun: gref, arg: al });
             let bl = lit(&mut b, *bb);
-            let app2 = b.push(CoreFrame::App {
-                fun: app1,
-                arg: bl,
-            });
+            let app2 = b.push(CoreFrame::App { fun: app1, arg: bl });
             let cbind = fresh_var();
             b.push(CoreFrame::Case {
                 scrutinee: boxed,
@@ -970,12 +980,7 @@ fn build_cps_chain(b: &mut TreeBuilder, fs: &[ClosKind], seed: i64) -> usize {
 
     // Unroll the walk to depth fs.len()+1. We thread the current accumulator SSA
     // index and the current chain Var index downward.
-    fn walk(
-        b: &mut TreeBuilder,
-        chain_idx: usize,
-        acc_idx: usize,
-        remaining: usize,
-    ) -> usize {
+    fn walk(b: &mut TreeBuilder, chain_idx: usize, acc_idx: usize, remaining: usize) -> usize {
         if remaining == 0 {
             // Only Done can remain; case it to stay total.
             let cb = fresh_var();
@@ -1058,8 +1063,17 @@ enum BoxKind {
 
 #[derive(Clone, Debug)]
 enum WwSpec {
-    Chain { kind: BoxKind, seed: i64, steps: Vec<i64> },
-    Rec3 { i: i64, w: u64, d: f64, c: u32 },
+    Chain {
+        kind: BoxKind,
+        seed: i64,
+        steps: Vec<i64>,
+    },
+    Rec3 {
+        i: i64,
+        w: u64,
+        d: f64,
+        c: u32,
+    },
 }
 
 fn arb_box_kind() -> impl Strategy<Value = BoxKind> {
@@ -1073,7 +1087,11 @@ fn arb_box_kind() -> impl Strategy<Value = BoxKind> {
 
 fn arb_ww() -> impl Strategy<Value = WwSpec> {
     prop_oneof![
-        (arb_box_kind(), -40i64..40, prop::collection::vec(-12i64..12, 1..5))
+        (
+            arb_box_kind(),
+            -40i64..40,
+            prop::collection::vec(-12i64..12, 1..5)
+        )
             .prop_map(|(kind, seed, steps)| WwSpec::Chain { kind, seed, steps }),
         (-1000i64..1000, 0u64..2000, -100i64..100, 0u32..128).prop_map(|(i, w, d, c)| {
             WwSpec::Rec3 {
