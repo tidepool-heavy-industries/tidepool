@@ -7,6 +7,7 @@
 //! and not on the documented KNOWN allow-list is a newly-surfaced real-Core bug.
 //!
 //! Regenerate fixtures with `haskell/regen-corpus.sh` (native-bignum binary).
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use tidepool_codegen::jit_machine::JitError;
 use tidepool_eval::value::Value;
@@ -77,9 +78,10 @@ fn eval_is_closure(o: &CapturedOutcome) -> bool {
     matches!(v, Value::Closure(..) | Value::ConFun(..))
 }
 
-/// Returns `(is_function_program, tag, detail)`. The closure-check runs inside the
-/// worker thread because `Value`/`Env` are not `Send`.
-fn run_one(node: &[u8], meta: &[u8]) -> (bool, &'static str, String) {
+/// Returns `(is_function_program, tag, detail, emit_coverage)`. The closure-check
+/// and the emit-coverage snapshot both run inside the worker thread (`Value`/`Env`
+/// aren't `Send`, and coverage is a per-thread set populated during this compile).
+fn run_one(node: &[u8], meta: &[u8]) -> (bool, &'static str, String, BTreeSet<&'static str>) {
     let node = node.to_vec();
     let meta = meta.to_vec();
     std::thread::Builder::new()
@@ -87,10 +89,12 @@ fn run_one(node: &[u8], meta: &[u8]) -> (bool, &'static str, String) {
         .spawn(move || {
             let expr: CoreExpr = read_cbor(&node).unwrap();
             let table: DataConTable = read_metadata(&meta).unwrap().0;
+            tidepool_codegen::coverage::reset();
             let outcome = check_jit_vs_eval_captured(&expr, &table, NURSERY);
+            let cov = tidepool_codegen::coverage::snapshot();
             let is_fn = eval_is_closure(&outcome);
             let (tag, detail) = classify(&outcome);
-            (is_fn, tag, detail)
+            (is_fn, tag, detail, cov)
         })
         .unwrap()
         .join()
@@ -176,11 +180,13 @@ fn corpus_report() {
     let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     let mut funcs = 0usize;
     let mut violations: Vec<String> = Vec::new();
+    let mut coverage: BTreeSet<&'static str> = BTreeSet::new();
 
     println!("\n=== REAL-CORE CORPUS ===");
     for (name, path) in &entries {
         let node = std::fs::read(path).unwrap();
-        let (is_fn, tag, detail) = run_one(&node, &meta);
+        let (is_fn, tag, detail, cov) = run_one(&node, &meta);
+        coverage.extend(cov);
         if is_fn {
             funcs += 1; // helper function (Closure result) — not a program; skip.
             continue;
@@ -209,6 +215,45 @@ fn corpus_report() {
     println!("\n=== KNOWN real-Core bugs surfaced ===");
     for (n, tag, note) in KNOWN {
         println!("  {tag:9} {n:26} {note}");
+    }
+
+    // Emit-path coverage (P2): which emitter decision points the corpus exercised.
+    // Two dimensions: STRUCTURAL (frame/case/con shapes) and PRIMOP (per opcode).
+    if tidepool_codegen::coverage::is_enabled() {
+        println!("\n=== EMIT-PATH COVERAGE ===");
+
+        let s_tgt = tidepool_codegen::coverage::TARGETS;
+        let s_unhit: Vec<&&str> = s_tgt.iter().filter(|t| !coverage.contains(*t)).collect();
+        println!(
+            "  structural: {}/{} ({:.0}%) hit",
+            s_tgt.len() - s_unhit.len(),
+            s_tgt.len(),
+            100.0 * (s_tgt.len() - s_unhit.len()) as f64 / s_tgt.len() as f64
+        );
+        if !s_unhit.is_empty() {
+            println!("    UNHIT: {s_unhit:?}");
+        }
+
+        let primops: Vec<&'static str> = tidepool_repr::PrimOpKind::ALL_VARIANTS
+            .iter()
+            .map(|p| p.serial_name())
+            .collect();
+        let p_unhit: Vec<&&str> = primops.iter().filter(|p| !coverage.contains(*p)).collect();
+        println!(
+            "  primops:    {}/{} ({:.0}%) hit",
+            primops.len() - p_unhit.len(),
+            primops.len(),
+            100.0 * (primops.len() - p_unhit.len()) as f64 / primops.len() as f64
+        );
+        let p_hit: Vec<&&str> = primops.iter().filter(|p| coverage.contains(*p)).collect();
+        println!("    HIT primops ({}): {p_hit:?}", p_hit.len());
+        println!(
+            "    UNHIT primops ({}) — where a generator would extend reach:",
+            p_unhit.len()
+        );
+        println!("    {p_unhit:?}");
+    } else {
+        println!("\n(emit-path coverage off — set TIDEPOOL_EMIT_COVERAGE=1)");
     }
 
     assert!(

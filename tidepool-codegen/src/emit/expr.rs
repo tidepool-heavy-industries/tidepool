@@ -253,8 +253,29 @@ fn expand_node(tree: &CoreExpr, idx: usize) -> Result<EmitFrame<usize>, EmitErro
 }
 
 /// Collapse: assemble Cranelift IR from child results.
+/// Emit-coverage key for an `EmitFrame` variant (see `crate::coverage`).
+fn emit_frame_cov_key(frame: &EmitFrame<SsaVal>) -> &'static str {
+    match frame {
+        EmitFrame::Var(_) => "frame:Var",
+        EmitFrame::Lit(_) => "frame:Lit",
+        EmitFrame::LitString(_) => "frame:LitString",
+        EmitFrame::LitByteArray(_) => "frame:LitByteArray",
+        EmitFrame::Con { .. } => "frame:Con",
+        EmitFrame::ThunkCon { .. } => "frame:ThunkCon",
+        EmitFrame::App { .. } => "frame:App",
+        EmitFrame::PrimOp { .. } => "frame:PrimOp",
+        EmitFrame::Jump { .. } => "frame:Jump",
+        EmitFrame::Case { .. } => "frame:Case",
+        EmitFrame::Lam { .. } => "frame:Lam",
+        EmitFrame::Join { .. } => "frame:Join",
+        EmitFrame::LetBoundary(_) => "frame:LetBoundary",
+        EmitFrame::Raise { .. } => "frame:Raise",
+    }
+}
+
 fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, EmitError> {
     let tail = args.tail;
+    crate::coverage::hit(emit_frame_cov_key(&frame));
     match frame {
         EmitFrame::LitString(ref bytes) => emit_lit_string(
             args.sess.pipeline,
@@ -328,6 +349,11 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             }
         },
         EmitFrame::Con { tag, fields } => {
+            crate::coverage::hit(if fields.is_empty() {
+                "con:nullary"
+            } else {
+                "con:nonnullary"
+            });
             let field_vals: Vec<Value> = fields
                 .iter()
                 .map(|v| {
@@ -465,9 +491,10 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             ref op,
             args: ref prim_args,
         } => {
-            // Force thunked args: PrimOps are strict in all arguments.
-            // Case alt binders can be thunks (lazy Con fields), so force
-            // them before passing to primop unboxing.
+            crate::coverage::hit(op.serial_name()); // per-primop emit coverage
+                                                    // Force thunked args: PrimOps are strict in all arguments.
+                                                    // Case alt binders can be thunks (lazy Con fields), so force
+                                                    // them before passing to primop unboxing.
             let forced_args: Vec<SsaVal> = prim_args
                 .iter()
                 .map(|a| force_thunk_ssaval(args.sess.pipeline, args.builder, args.sess.vmctx, *a))
@@ -1762,6 +1789,7 @@ impl EmitContext {
                     loop {
                         match &args.sess.tree.nodes[idx] {
                             CoreFrame::LetNonRec { binder, rhs, body } => {
+                                crate::coverage::hit("frame:LetNonRec");
                                 let binder = *binder;
                                 let rhs = *rhs;
                                 let body = *body;
@@ -1816,6 +1844,7 @@ impl EmitContext {
                                 continue;
                             }
                             CoreFrame::LetRec { bindings, body } => {
+                                crate::coverage::hit("frame:LetRec");
                                 let bindings = bindings.clone();
                                 let body = *body;
                                 // Run phases 1-3b inline, push deferred evals + finish + cleanup
