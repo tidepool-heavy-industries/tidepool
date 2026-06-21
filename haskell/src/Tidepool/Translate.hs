@@ -1015,6 +1015,21 @@ translate expr =
         -- Build: letrec go = \i -> \a -> ... in go n xs
         emitNode $ NLetRec [(goId, lamI)] goNXs
 
+    -- Unboxed 1-tuple (# x #) has no runtime representation: it IS its single
+    -- field. GHC introduces these (MkSolo#) to wrap a representation-polymorphic
+    -- value — e.g. the ReadP CPS function of type `forall b. (a -> P b) -> P b`.
+    -- Erase the Con to its field, symmetric with the case side, where
+    -- `case scrut of (# x #) -> body` binds x = scrut (identity — see the
+    -- single value-binder isUnboxedTupleDataCon branch below). Boxing it here
+    -- would leave a constructor in function position when the field is later
+    -- applied → BadFunPtrTag (JIT) / NotAFunction (eval). Nullary (# #) and
+    -- multi-element (# a, b #) builds keep the NCon path (state token /
+    -- heap-boxed, matching their case branches).
+    Var v | Just dc <- isDataConWorkId_maybe v
+          , isUnboxedTupleDataCon dc
+          , length args == valueRepArity dc
+          , [singleArg] <- args ->
+        translate singleArg
     Var v | Just dc <- isDataConWorkId_maybe v
           , length args == valueRepArity dc -> do
         recordDC dc

@@ -178,13 +178,37 @@ const KNOWN: &[(&str, &str, &str)] = &[
     // Translate.hs (alt binders now exclude CoVars, matching the Con build's
     // isValueArg / valueRepArity).
     //
-    // #2 — ReadP ~R# newtype coercion: a Con in function position. Both engines.
-    ("readInt", "BOTH-BUG", "#2 read/ReadP newtype-coercion"),
-    ("readListInt", "BOTH-BUG", "#2 read/ReadP newtype-coercion"),
+    // #2 read/ReadP — the SHARED bug is FIXED (was BOTH-BUG). It was NOT the ReadP
+    // newtype ~R# coercion (the serializer already strips newtype casts) but the
+    // unboxed-1-tuple build: GHC wraps the ReadP CPS function in `MkSolo#`, the
+    // unboxed 1-tuple `(# f #)` (no runtime rep — it IS its field). The Con-build
+    // path boxed it into a heap Con while the case side already treats
+    // `case scrut of (# x #) -> body` as identity — a boxed Con in function
+    // position → JIT BadFunPtrTag / eval NotAFunction. Fixed in Translate.hs
+    // (1-element unboxed-tuple builds now erase to their field, symmetric with the
+    // case side). Eval is now CORRECT (42 / [1,2,3] / 3.14).
+    //
+    // The RESIDUAL is a SEPARATE, JIT-only root cause: the JIT compiles the
+    // now-correct ReadP CPS into runaway recursion — `read "42"` (2 chars) blows
+    // MAX_CALL_DEPTH=20_000 → StackOverflow / native SIGSEGV — while eval is
+    // bounded. TCO not applying to ReadP's `(a->P b)->P b` continuation chains;
+    // the next focused target. (KNOWN matches on the JIT-BUG tag; the specific
+    // StackOverflow-vs-Signal(11) split is stack-layout-dependent — both are
+    // JitOnlyFailure, eval correct.)
+    (
+        "readInt",
+        "JIT-BUG",
+        "JIT-CPS runaway-recursion residual; eval correct = 42",
+    ),
+    (
+        "readListInt",
+        "JIT-BUG",
+        "JIT-CPS runaway-recursion residual; eval correct = [1,2,3]",
+    ),
     (
         "readDouble",
-        "BOTH-BUG",
-        "#2 read/ReadP (JIT BadFunPtrTag); Double-conv part now fixed",
+        "JIT-BUG",
+        "JIT-CPS runaway-recursion residual; eval correct = 3.14",
     ),
     // ── SUPPORT GAPS (missing primop / unresolved external) ──
     (
