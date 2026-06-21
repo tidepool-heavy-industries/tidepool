@@ -1406,8 +1406,16 @@ unsafe extern "C" fn poison_trampoline_lazy_msg(
 }
 
 /// Check and take any pending runtime error from JIT code.
+///
+/// Uses `try_borrow_mut` defensively: this runs on the signal/teardown path
+/// (`runtime_error_or_signal` and `RegistryGuard::drop`), and a signal can fire
+/// while JIT host code (e.g. `debug_app_check` setting `StackOverflow`) still
+/// holds a `borrow_mut` on the cell. A plain `borrow_mut` would then panic —
+/// and panicking inside `Drop`/unwind double-panics → `abort()`. If the cell is
+/// momentarily borrowed, there is no error we can safely take here; return None
+/// and let the caller fall back (e.g. `Signal(sig)`).
 pub fn take_runtime_error() -> Option<RuntimeError> {
-    RUNTIME_ERROR.with(|cell| cell.borrow_mut().take())
+    RUNTIME_ERROR.with(|cell| cell.try_borrow_mut().ok().and_then(|mut e| e.take()))
 }
 
 /// Reset the call depth counter. Call before each JIT invocation.
