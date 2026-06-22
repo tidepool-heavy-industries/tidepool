@@ -97,7 +97,7 @@ module Tidepool.Prelude
   , mapM, mapM_, sequence, sequence_
   , when, unless, void, join, guard
   , forM, forM_
-  , (=<<), (>=>), (<=<), (<&>)
+  , (=<<), (>=>), (<=<)  -- (<&>) comes via module Control.Lens
   , foldM, foldM_
   , filterM, replicateM, zipWithM
     -- * Maybe/Either utilities
@@ -214,7 +214,9 @@ import Tidepool.Aeson (Value(..), Key, object, (.=), toJSON, ToJSON, fromText)
 import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double, members, values, _Null)
 -- Wholesale Control.Lens, hiding only the two genuine clashes: `imap` (Prelude's
 -- list-index map, defined below) and `(.=)` (Aeson's object-pair operator, above).
-import Control.Lens hiding (imap, (.=))
+-- `(??)` is Tidepool's LLM heuristic combinator (Tidepool.Effects), NOT lens's
+-- flipped-apply; keep ours. `imap`/`(.=)` clash as noted above.
+import Control.Lens hiding (imap, (.=), (??))
 import qualified Data.Map.Strict as Map
 
 -- Permanent binding-level interception in Translate.hs.
