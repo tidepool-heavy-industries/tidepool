@@ -128,7 +128,10 @@ pub fn console_decl() -> EffectDecl {
         description: "Print text output.",
         constructors: &["Print :: Text -> Console ()"],
         type_defs: &[],
-        helpers: &[],
+        helpers: &[
+            "-- | Emit a line of console output. Thin wrapper over the Print effect\n-- so chains never need `send (Print …)`.\nsay :: Text -> M ()\nsay = send . Print",
+            "-- | `say` on anything Showable (`say . show`).\nsayShow :: Show a => a -> M ()\nsayShow = say . show",
+        ],
     }
 }
 

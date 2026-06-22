@@ -8,6 +8,8 @@ module Tidepool.Prelude
   ( -- * Types (re-exported from base)
     Int, Integer, Word, Char, Bool(..), Double, Float
   , String, Ordering(..), Maybe(..), Either(..)
+    -- * NonEmpty type + (:|) constructor (functions stay behind the NE. qualifier)
+  , NonEmpty(..)
     -- * Text type (re-exported from Data.Text)
   , Text
   , Pack(..), unpack
@@ -193,6 +195,7 @@ import qualified Tidepool.Data.Text as T
 import Data.Char (ord, chr)
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe)
 import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, sortOn)
+import Data.List.NonEmpty (NonEmpty(..))
 import Data.Monoid (Sum(..), Product(..), Any(..), All(..), First(..), Last(..), Endo(..), appEndo)
 import Data.Semigroup (Max(..), Min(..), Arg(..), sconcat)
 import Data.Ord (Down(..))
