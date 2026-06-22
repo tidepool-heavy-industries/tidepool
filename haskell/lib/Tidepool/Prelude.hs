@@ -10,6 +10,8 @@ module Tidepool.Prelude
   , String, Ordering(..), Maybe(..), Either(..)
     -- * NonEmpty type + (:|) constructor (functions stay behind the NE. qualifier)
   , NonEmpty(..)
+    -- * Bifunctor first/second (polymorphic; bimap comes via Control.Lens below)
+  , first, second
     -- * Text type (re-exported from Data.Text)
   , Text
   , Pack(..), unpack
@@ -194,6 +196,9 @@ import Data.Char (ord, chr)
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe)
 import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, sortOn)
 import Data.List.NonEmpty (NonEmpty(..))
+-- Bifunctor first/second (polymorphic — tuples AND Either). Control.Lens
+-- re-exports `bimap` but NOT first/second, so import those two from the library.
+import Data.Bifunctor (first, second)
 import Data.Monoid (Sum(..), Product(..), Any(..), All(..), First(..), Last(..), Endo(..), appEndo)
 import Data.Semigroup (Max(..), Min(..), Arg(..), sconcat)
 import Data.Ord (Down(..))
@@ -214,8 +219,9 @@ import Tidepool.Aeson (Value(..), Key, object, (.=), toJSON, ToJSON, fromText)
 import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double, members, values, _Null)
 -- Wholesale Control.Lens, hiding only the two genuine clashes: `imap` (Prelude's
 -- list-index map, defined below) and `(.=)` (Aeson's object-pair operator, above).
--- `(??)` is Tidepool's LLM heuristic combinator (Tidepool.Effects), NOT lens's
--- flipped-apply; keep ours. `imap`/`(.=)` clash as noted above.
+-- Hide `(??)`: the heuristic LLM operator was removed (it burned tokens behind
+-- an innocent-looking operator); keep `??` entirely absent rather than expose
+-- lens's flipped-apply under that name. `imap`/`(.=)` clash as noted above.
 import Control.Lens hiding (imap, (.=), (??))
 import qualified Data.Map.Strict as Map
 
