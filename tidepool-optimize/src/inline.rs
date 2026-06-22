@@ -9,17 +9,7 @@ pub struct Inline;
 
 impl Pass for Inline {
     fn run(&self, expr: &mut CoreExpr) -> Changed {
-        if expr.nodes.is_empty() {
-            return false;
-        }
-        let occ_map = occ_analysis(expr);
-        match try_inline(expr, &occ_map) {
-            Some(new_expr) => {
-                *expr = new_expr;
-                true
-            }
-            None => false,
-        }
+        crate::apply_rewrite(expr, |e| try_inline(e, &occ_analysis(e)))
     }
 
     fn name(&self) -> &str {

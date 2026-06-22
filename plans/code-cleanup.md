@@ -63,6 +63,31 @@ cross-file repeats. Lesson: line-overlap % flags candidates; it can't tell
 test-from-production or identical-from-merely-similar — that needs the pull +
 a human/structural check, which is exactly the tidepool loop.
 
+## Pattern-2b finds (cross-file exact 8-line windows) — triage
+
+The iterated detector (cross-file EXACT normalized windows, `#[cfg(test)]`
+excluded, file-set coalesced) surfaced three more pairs beyond the ABI-signature
+dedups already landed. Verdicts:
+
+- **optimizer-pass `run` bodies — DONE.** All five `Pass::run` impls
+  (`beta`/`case_reduce`/`dce`/`inline`/`partial`) shared the same empty-tree
+  guard + install-and-report-`Changed` boilerplate. Extracted to
+  `tidepool_optimize::apply_rewrite(expr, rewrite)` where the closure returns
+  `Option<CoreExpr>`; each `run` now supplies only its rewrite (the four
+  redex-finders pass their `try_*`, dce/inline thread `occ_analysis(e)`,
+  `partial` rebuilds then `(new != *e).then_some(new)` for its equality-based
+  change-test). The 2b detector only surfaced four — `partial` was found in the
+  review pass. Clean, same-crate, behavior-identical (49+ optimize tests green).
+- **double `decodeFloat`/IEEE-754 split — DEFER (backlog).** The mantissa/exp
+  decomposition math is duplicated in `tidepool-eval/src/eval.rs` (~2284) and
+  `tidepool-codegen/src/host_fns.rs` (~2024). Genuine logic dup, but
+  **cross-crate** — a shared home (`tidepool-repr`) is the right fix and a
+  bigger change than a mechanical extract. Backlog candidate, not done here.
+- **thunk arena/heap accessors — SKIP (false pairing).** The detector matched
+  surface-similar `read`/`write`/`children_of` shapes across arena and heap, but
+  `heap.rs` has no matching `ThunkId`-keyed methods — the two sides aren't the
+  same operation. Detector false positive.
+
 ## Notes
 
 - One commit per extraction so a regression bisects cleanly.

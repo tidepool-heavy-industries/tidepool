@@ -8,16 +8,7 @@ pub struct CaseReduce;
 
 impl Pass for CaseReduce {
     fn run(&self, expr: &mut CoreExpr) -> Changed {
-        if expr.nodes.is_empty() {
-            return false;
-        }
-        match try_case_reduce(expr) {
-            Some(new_expr) => {
-                *expr = new_expr;
-                true
-            }
-            None => false,
-        }
+        crate::apply_rewrite(expr, try_case_reduce)
     }
 
     fn name(&self) -> &str {

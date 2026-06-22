@@ -11,17 +11,7 @@ pub struct Dce;
 
 impl Pass for Dce {
     fn run(&self, expr: &mut CoreExpr) -> Changed {
-        if expr.nodes.is_empty() {
-            return false;
-        }
-        let occ_map = occ_analysis(expr);
-        match try_dce(expr, &occ_map) {
-            Some(new_expr) => {
-                *expr = new_expr;
-                true
-            }
-            None => false,
-        }
+        crate::apply_rewrite(expr, |e| try_dce(e, &occ_analysis(e)))
     }
 
     fn name(&self) -> &str {

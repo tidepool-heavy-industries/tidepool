@@ -30,23 +30,15 @@ pub struct PartialEval;
 
 impl Pass for PartialEval {
     fn run(&self, expr: &mut CoreExpr) -> Changed {
-        if expr.nodes.is_empty() {
-            return false;
-        }
-        let mut new_nodes = Vec::new();
-        let (root_idx, _) = partial_eval_at(
-            expr,
-            expr.nodes.len() - 1,
-            &PartialEnv::default(),
-            &mut new_nodes,
-        );
-        let new_expr = CoreExpr { nodes: new_nodes }.extract_subtree(root_idx);
-        if new_expr != *expr {
-            *expr = new_expr;
-            true
-        } else {
-            false
-        }
+        crate::apply_rewrite(expr, |e| {
+            let mut new_nodes = Vec::new();
+            let (root_idx, _) =
+                partial_eval_at(e, e.nodes.len() - 1, &PartialEnv::default(), &mut new_nodes);
+            let new_expr = CoreExpr { nodes: new_nodes }.extract_subtree(root_idx);
+            // Unlike the redex-finding passes, PartialEval always produces a
+            // rebuilt tree; signal Changed only when it actually differs.
+            (new_expr != *e).then_some(new_expr)
+        })
     }
     fn name(&self) -> &str {
         "PartialEval"

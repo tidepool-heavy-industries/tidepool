@@ -11,16 +11,7 @@ pub struct BetaReduce;
 
 impl Pass for BetaReduce {
     fn run(&self, expr: &mut CoreExpr) -> Changed {
-        if expr.nodes.is_empty() {
-            return false;
-        }
-        match try_beta_reduce(expr) {
-            Some(new_expr) => {
-                *expr = new_expr;
-                true
-            }
-            None => false,
-        }
+        crate::apply_rewrite(expr, try_beta_reduce)
     }
 
     fn name(&self) -> &str {
