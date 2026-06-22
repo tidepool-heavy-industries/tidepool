@@ -271,7 +271,9 @@ impl JitEffectMachine {
                     // handler-driven scenario without depending on the
                     // shape of the compiled program.
                     if self.cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        break Err(JitError::Yield(crate::yield_type::YieldError::Cancelled));
+                        break Err(JitError::Yield(crate::yield_type::YieldError::Runtime(
+                            crate::host_fns::RuntimeError::Cancelled,
+                        )));
                     }
 
                     // Response materialization. Two channels:
@@ -683,7 +685,10 @@ mod tests {
         let err = runtime_error_or_signal(libc::SIGBUS);
 
         // Should get DivisionByZero, not Signal(SIGBUS)
-        assert_eq!(err, YieldError::DivisionByZero);
+        assert_eq!(
+            err,
+            YieldError::Runtime(crate::host_fns::RuntimeError::DivisionByZero)
+        );
     }
 
     /// When no RuntimeError is pending, the signal number comes through.

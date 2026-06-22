@@ -74,6 +74,7 @@ fn with_big_stack<F: FnOnce() + Send + 'static>(f: F) {
 use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
 
+use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_testing::proptest::{build_table_for_expr, check_jit_vs_eval, values_equal};
@@ -185,8 +186,8 @@ fn run_gc_oracle(expr: CoreExpr) -> Result<(), TestCaseError> {
     for &n in NURSERY_LADDER {
         match JitEffectMachine::compile(&expr, &table, n).and_then(|mut m| m.run_pure()) {
             Ok(v) => jit_results.push((n, v)),
-            Err(JitError::Yield(YieldError::HeapOverflow))
-            | Err(JitError::Yield(YieldError::UnresolvedVar(_)))
+            Err(JitError::Yield(YieldError::Runtime(RuntimeError::HeapOverflow)))
+            | Err(JitError::Yield(YieldError::Runtime(RuntimeError::UnresolvedVar(_))))
             | Err(JitError::HeapBridge(_)) => {
                 tolerated_smallest = Some(n);
             }
@@ -937,7 +938,8 @@ fn anchor_long_spine_sum_tiny_nursery_body() {
                 v,
                 ev
             ),
-            Err(JitError::Yield(YieldError::HeapOverflow)) => { /* tolerated */ }
+            Err(JitError::Yield(YieldError::Runtime(RuntimeError::HeapOverflow))) => { /* tolerated */
+            }
             Err(e) => panic!("anchor: JIT (nursery {}) errored: {:?}", n, e),
         }
     }
@@ -980,7 +982,8 @@ fn anchor_accum_loop_tiny_nursery_body() {
                 v,
                 ev
             ),
-            Err(JitError::Yield(YieldError::HeapOverflow)) => { /* tolerated */ }
+            Err(JitError::Yield(YieldError::Runtime(RuntimeError::HeapOverflow))) => { /* tolerated */
+            }
             Err(e) => panic!("anchor: JIT (nursery {}) errored: {:?}", n, e),
         }
     }

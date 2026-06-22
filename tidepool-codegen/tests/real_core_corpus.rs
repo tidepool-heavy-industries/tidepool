@@ -9,6 +9,7 @@
 //! Regenerate fixtures with `haskell/regen-corpus.sh` (native-bignum binary).
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::JitError;
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_eval::error::EvalError;
@@ -49,7 +50,10 @@ fn err_short(e: &JitError) -> String {
 /// Is a JIT failure a missing-SUPPORT gap (unresolved external / unimplemented)
 /// rather than an implemented-but-wrong BUG?
 fn jit_is_gap(e: &JitError) -> bool {
-    matches!(e, JitError::Yield(YieldError::UnresolvedVar(_)))
+    matches!(
+        e,
+        JitError::Yield(YieldError::Runtime(RuntimeError::UnresolvedVar(_)))
+    )
 }
 
 /// Is an eval failure a missing-SUPPORT gap (unsupported primop) vs a BUG?

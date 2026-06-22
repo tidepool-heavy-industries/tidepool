@@ -63,6 +63,7 @@ use frunk::hlist;
 use proptest::prelude::*;
 use proptest::test_runner::Config as PtConfig;
 
+use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_effect::dispatch::{EffectContext, EffectHandler, Response};
@@ -529,8 +530,8 @@ fn jit_err_class(e: &JitError) -> (u8, i64) {
         JitError::EffectResponseTooLarge { .. } => (errclass::TOO_LARGE, -1),
         JitError::Yield(y) => match y {
             YieldError::Signal(_) => (errclass::SIGNAL, -1),
-            YieldError::CaseTrap => (errclass::CASE_TRAP, -1),
-            YieldError::HeapOverflow => (errclass::HEAP_OVERFLOW, -1),
+            YieldError::Runtime(RuntimeError::CaseTrap) => (errclass::CASE_TRAP, -1),
+            YieldError::Runtime(RuntimeError::HeapOverflow) => (errclass::HEAP_OVERFLOW, -1),
             _ => (errclass::OTHER, -1),
         },
         _ => (errclass::OTHER, -1),

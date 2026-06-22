@@ -9,6 +9,7 @@
 //! internals should live in a separate test module.
 
 use tidepool_codegen::host_fns;
+use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_eval::value::Value;
@@ -198,7 +199,9 @@ fn test_multiple_gc_cycles() {
                     "Expected multiple GC cycles, got {}",
                     gc_count
                 );
-            } else if let Err(JitError::Yield(YieldError::HeapOverflow)) = result {
+            } else if let Err(JitError::Yield(YieldError::Runtime(RuntimeError::HeapOverflow))) =
+                result
+            {
                 // HeapOverflow is acceptable for small nursery
             } else if let Err(e) = result {
                 panic!("Expected HeapOverflow but got: {}", e);

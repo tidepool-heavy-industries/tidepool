@@ -11,7 +11,7 @@ use tidepool_heap::layout as heap_layout;
 const MIN_VALID_ADDR: u64 = 0x1000;
 
 /// Runtime errors raised by JIT code via host functions.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RuntimeError {
     #[error("division by zero")]
     DivisionByZero,

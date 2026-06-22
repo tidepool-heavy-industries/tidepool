@@ -38,6 +38,7 @@ use std::os::unix::process::ExitStatusExt;
 use tidepool_codegen::context::VMContext;
 use tidepool_codegen::emit::expr::compile_expr;
 use tidepool_codegen::host_fns;
+use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_codegen::yield_type::YieldError;
@@ -130,9 +131,9 @@ fn classify_jit_error(err: &JitError) -> JitErrClass {
         }
         JitError::HeapBridge(_) => JitErrClass::Skip,
         JitError::Yield(y) => match y {
-            YieldError::UnresolvedVar(_) | YieldError::HeapOverflow | YieldError::StackOverflow => {
-                JitErrClass::Skip
-            }
+            YieldError::Runtime(RuntimeError::UnresolvedVar(_))
+            | YieldError::Runtime(RuntimeError::HeapOverflow)
+            | YieldError::Runtime(RuntimeError::StackOverflow) => JitErrClass::Skip,
             YieldError::Signal(sig) => JitErrClass::B3(*sig),
             _ => JitErrClass::B2,
         },

@@ -18,6 +18,7 @@ use proptest::prelude::*;
 
 use tidepool_codegen::context::VMContext;
 use tidepool_codegen::host_fns;
+use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_effect::dispatch::{EffectContext, EffectHandler, Response};
@@ -1432,7 +1433,7 @@ proptest! {
             ];
             let res = run_prog(build_return_list(0), handlers, 4<<20);
             match res {
-                Err(JitError::Yield(YieldError::UserErrorMsg(msg))) => {
+                Err(JitError::Yield(YieldError::Runtime(RuntimeError::UserErrorMsg(msg)))) => {
                     assert!(msg.contains("panicked"), "Error msg should contain 'panicked', got: {}", msg);
                 }
                 other => panic!("Expected UserErrorMsg with panic message, got {:?}", other),
@@ -1466,7 +1467,7 @@ proptest! {
             ];
             let res = run_prog(build_return_list(0), handlers, 4<<20);
             match res {
-                Err(JitError::Yield(YieldError::UserErrorMsg(msg))) => {
+                Err(JitError::Yield(YieldError::Runtime(RuntimeError::UserErrorMsg(msg)))) => {
                     assert!(msg.contains("out of bounds"), "Expected OOB error, got: {}", msg);
                 }
                 other => panic!("Expected UserErrorMsg OOB, got {:?}", other),
@@ -1512,7 +1513,7 @@ fn p8_stream_element_panic_containment() {
         // build_sum_chain(k) with k > panic_idx → run must be Err
         let res = run_prog(build_sum_chain(k, 0), handlers, 4 << 20);
         match res {
-            Err(JitError::Yield(YieldError::UserErrorMsg(msg))) => {
+            Err(JitError::Yield(YieldError::Runtime(RuntimeError::UserErrorMsg(msg)))) => {
                 assert!(
                     msg.contains("panicked"),
                     "Expected 'panicked' in error msg, got: {}",
@@ -1600,7 +1601,7 @@ fn p9_bridge_error_conversion_failure() {
             ];
             let res = run_prog(build_return_list(0), handlers, 4 << 20);
             match res {
-                Err(JitError::Yield(YieldError::UserErrorMsg(msg))) => {
+                Err(JitError::Yield(YieldError::Runtime(RuntimeError::UserErrorMsg(msg)))) => {
                     assert!(
                         msg.contains("conversion failed"),
                         "Expected 'conversion failed', got: {}",
@@ -1639,7 +1640,7 @@ fn p9_bridge_error_conversion_failure() {
             ];
             let res = run_prog(build_sum_chain(fail_at + 1, 0), handlers, 4 << 20);
             match res {
-                Err(JitError::Yield(YieldError::UserErrorMsg(msg))) => {
+                Err(JitError::Yield(YieldError::Runtime(RuntimeError::UserErrorMsg(msg)))) => {
                     assert!(
                         msg.contains("conversion failed"),
                         "Expected 'conversion failed', got: {}",
@@ -1746,7 +1747,7 @@ fn p7_fork_contained_gc() {
                         0
                     }
                 }
-                Err(JitError::Yield(YieldError::HeapOverflow)) => 2,
+                Err(JitError::Yield(YieldError::Runtime(RuntimeError::HeapOverflow))) => 2,
                 _ => 0,
             };
             unsafe {
@@ -1801,7 +1802,7 @@ fn t_panic_payload_nonstring() {
     ];
     let res = run_prog(build_return_list(0), handlers, 4 << 20);
     match res {
-        Err(JitError::Yield(YieldError::UserErrorMsg(msg))) => {
+        Err(JitError::Yield(YieldError::Runtime(RuntimeError::UserErrorMsg(msg)))) => {
             assert!(
                 msg.contains("<non-string panic>"),
                 "Expected fallback msg, got: {}",
@@ -1881,7 +1882,7 @@ fn t_g3_fired_panic_isolation() {
 
     let res = run_prog(build_b_then_a_tail(), handlers, 4 << 20);
     match res {
-        Err(JitError::Yield(YieldError::UserErrorMsg(msg))) => {
+        Err(JitError::Yield(YieldError::Runtime(RuntimeError::UserErrorMsg(msg)))) => {
             assert!(msg.contains("panicked"), "Expected panic msg, got: {}", msg);
         }
         other => panic!("Expected UserErrorMsg with panic, got {:?}", other),

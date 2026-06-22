@@ -5,7 +5,7 @@
 //! shape: a Haskell program that yields effect requests in a tickLoop, with the
 //! cancellation flag flipped from inside an effect handler. The JIT must
 //! observe the flag at the next safepoint after `machine.resume()` returns
-//! from handling the request, surfacing `YieldError::Cancelled` through the
+//! from handling the request, surfacing `YieldError::Runtime(RuntimeError::Cancelled)` through the
 //! same error path as a top-level cancel.
 
 mod common;
@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use tidepool_bridge_derive::FromCore;
+use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{CancelHandle, JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
@@ -117,9 +118,9 @@ fn cancel_from_inside_effect_handler_unwinds() {
     );
 
     match result {
-        Err(JitError::Yield(YieldError::Cancelled)) => {}
+        Err(JitError::Yield(YieldError::Runtime(RuntimeError::Cancelled))) => {}
         Err(other) => panic!(
-            "expected JitError::Yield(YieldError::Cancelled) after handler-driven cancel, \
+            "expected JitError::Yield(YieldError::Runtime(RuntimeError::Cancelled)) after handler-driven cancel, \
              got {:?} (handler ran {} times)",
             other, calls
         ),

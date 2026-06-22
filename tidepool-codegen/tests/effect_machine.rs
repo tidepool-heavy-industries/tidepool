@@ -3,6 +3,7 @@ use tidepool_codegen::context::VMContext;
 use tidepool_codegen::effect_machine::{CompiledEffectMachine, ConTags};
 use tidepool_codegen::emit::expr::compile_expr;
 use tidepool_codegen::host_fns;
+use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_codegen::yield_type::{Yield, YieldError};
 use tidepool_heap::layout;
@@ -414,7 +415,7 @@ fn test_unexpected_tag() {
     assert_eq!(result, Yield::Error(YieldError::UnexpectedTag(TAG_LIT)));
 }
 
-/// Test 5: runtime_error(0) → YieldError::DivisionByZero.
+/// Test 5: runtime_error(0) → YieldError::Runtime(RuntimeError::DivisionByZero).
 #[test]
 fn test_runtime_error_div_zero() {
     let (_pipeline, func) =
@@ -452,10 +453,13 @@ fn test_runtime_error_div_zero() {
         },
     );
     let result = machine.step();
-    assert_eq!(result, Yield::Error(YieldError::DivisionByZero));
+    assert_eq!(
+        result,
+        Yield::Error(YieldError::Runtime(RuntimeError::DivisionByZero))
+    );
 }
 
-/// Test 6: runtime_error(1) → YieldError::Overflow.
+/// Test 6: runtime_error(1) → YieldError::Runtime(RuntimeError::Overflow).
 #[test]
 fn test_runtime_error_overflow() {
     let (_pipeline, func) =
@@ -492,7 +496,10 @@ fn test_runtime_error_overflow() {
         },
     );
     let result = machine.step();
-    assert_eq!(result, Yield::Error(YieldError::Overflow));
+    assert_eq!(
+        result,
+        Yield::Error(YieldError::Runtime(RuntimeError::Overflow))
+    );
 }
 
 /// Test 7: null without runtime_error → YieldError::NullPointer (not a false positive).
@@ -820,9 +827,9 @@ fn test_resume_unknown_tag() {
 
     assert_eq!(
         result,
-        Yield::Error(YieldError::UserErrorMsg(
+        Yield::Error(YieldError::Runtime(RuntimeError::UserErrorMsg(
             "apply_cont_heap: unexpected heap tag 3 in continuation position (expected TAG_CON or TAG_CLOSURE)".to_string()
-        ))
+        )))
     );
 }
 
@@ -1001,9 +1008,9 @@ fn test_force_ptr_invalid_tag() {
 
     assert_eq!(
         result,
-        Yield::Error(YieldError::UserErrorMsg(
+        Yield::Error(YieldError::Runtime(RuntimeError::UserErrorMsg(
             "force_ptr: unexpected heap tag 254 (not a thunk, con, lit, or closure)".to_string()
-        ))
+        )))
     );
 }
 
@@ -1029,9 +1036,9 @@ fn test_resume_unexpected_con_tag_harden() {
 
     assert_eq!(
         result,
-        Yield::Error(YieldError::UserErrorMsg(
+        Yield::Error(YieldError::Runtime(RuntimeError::UserErrorMsg(
             "apply_cont_heap: unexpected continuation con_tag 9999 (expected Leaf or Node)"
                 .to_string()
-        ))
+        )))
     );
 }

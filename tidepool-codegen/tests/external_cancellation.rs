@@ -2,11 +2,12 @@
 //!
 //! `JitEffectMachine::cancel_handle` hands out a `CancelHandle` that external
 //! code (e.g. a watchdog thread) can flip. The next GC safepoint observes the
-//! flag and aborts with `YieldError::Cancelled`.
+//! flag and aborts with `YieldError::Runtime(RuntimeError::Cancelled)`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{CancelHandle, JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_repr::datacon_table::DataConTable;
@@ -167,7 +168,7 @@ fn cancel_handle_is_send_sync() {
 
 /// A runaway tail-recursive loop is aborted by an external
 /// `cancel()` call within a bounded time budget. The program must surface
-/// `YieldError::Cancelled` via the normal error path. The fixture uses a
+/// `YieldError::Runtime(RuntimeError::Cancelled)` via the normal error path. The fixture uses a
 /// non-allocating countdown so the cancel-observation site exercised here
 /// is the tail-call trampoline (see `host_fns::trampoline_resolve`) rather
 /// than `gc_trigger`.
@@ -211,8 +212,11 @@ fn cancel_runaway_tail_recursive_loop() {
 
     let err = jit_thread.join().unwrap().unwrap_err();
     match err {
-        JitError::Yield(YieldError::Cancelled) => {}
-        other => panic!("expected YieldError::Cancelled, got {:?}", other),
+        JitError::Yield(YieldError::Runtime(RuntimeError::Cancelled)) => {}
+        other => panic!(
+            "expected YieldError::Runtime(RuntimeError::Cancelled), got {:?}",
+            other
+        ),
     }
 }
 
@@ -319,7 +323,7 @@ fn build_alloc_recursive_loop(n: i64, wrap_id: DataConId) -> CoreExpr {
 /// only reachable cancel safepoint is `gc_trigger`. Today, `gc_trigger`
 /// skips `perform_gc` after observing a cancel and routes through
 /// `runtime_oom`'s poison path; the unwind surfaces as
-/// `YieldError::Cancelled` within a bounded time, not as `HeapOverflow`.
+/// `YieldError::Runtime(RuntimeError::Cancelled)` within a bounded time, not as `HeapOverflow`.
 #[test]
 fn cancel_pure_non_tail_call_allocator_loop() {
     let table = test_table();
@@ -342,8 +346,11 @@ fn cancel_pure_non_tail_call_allocator_loop() {
     let elapsed = start.elapsed();
 
     match err {
-        JitError::Yield(YieldError::Cancelled) => {}
-        other => panic!("expected YieldError::Cancelled, got {:?}", other),
+        JitError::Yield(YieldError::Runtime(RuntimeError::Cancelled)) => {}
+        other => panic!(
+            "expected YieldError::Runtime(RuntimeError::Cancelled), got {:?}",
+            other
+        ),
     }
     assert!(
         elapsed < Duration::from_secs(2),
@@ -365,7 +372,10 @@ fn reset_enables_reuse_after_cancellation() {
     handle.cancel();
     let err = machine.run_pure().unwrap_err();
     assert!(
-        matches!(err, JitError::Yield(YieldError::Cancelled)),
+        matches!(
+            err,
+            JitError::Yield(YieldError::Runtime(RuntimeError::Cancelled))
+        ),
         "first run must surface Cancelled, got {:?}",
         err
     );

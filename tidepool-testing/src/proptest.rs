@@ -5,6 +5,7 @@
 //! 4+ test files.
 
 use proptest::prelude::*;
+use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_eval::error::EvalError;
@@ -130,12 +131,12 @@ pub fn check_jit_vs_eval(expr: CoreExpr, nursery_size: usize) -> Result<(), Test
                 expr
             );
         }
-        (Ok(_), Err(JitError::Yield(YieldError::HeapOverflow))) => {
+        (Ok(_), Err(JitError::Yield(YieldError::Runtime(RuntimeError::HeapOverflow)))) => {
             // HeapOverflow is acceptable — means GC couldn't free enough space
             // for a very small nursery. Skip these rather than failing.
             prop_assume!(false, "HeapOverflow with tiny nursery");
         }
-        (Ok(_), Err(JitError::Yield(YieldError::UnresolvedVar(_)))) => {
+        (Ok(_), Err(JitError::Yield(YieldError::Runtime(RuntimeError::UnresolvedVar(_))))) => {
             // UnresolvedVar in synthetic IR: LetRec simple bindings with
             // inter-dependencies are thunked by the interpreter but evaluated
             // sequentially by the JIT. GHC Core LetRec always has Lam/Con RHS.

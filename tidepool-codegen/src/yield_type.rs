@@ -54,56 +54,18 @@ pub enum YieldError {
     /// Null pointer encountered.
     #[error("null pointer in effect result")]
     NullPointer,
-    /// Division by zero in JIT code.
-    #[error("division by zero")]
-    DivisionByZero,
-    /// Arithmetic overflow in JIT code.
-    #[error("arithmetic overflow")]
-    Overflow,
-    /// Haskell `error` called in JIT code.
-    #[error("Haskell error called")]
-    UserError,
-    /// Haskell `error` called with a specific message.
-    #[error("Haskell error: {0}")]
-    UserErrorMsg(String),
-    /// Haskell `undefined` forced in JIT code.
-    #[error("Haskell undefined forced")]
-    Undefined,
-    #[error("case trap: scrutinee constructor not among case alternatives (tag mismatch; diagnostics on server stderr)")]
-    CaseTrap,
-    #[error("bad pointer in JIT runtime (diagnostics on server stderr)")]
-    BadPointer,
-    /// GHC type metadata forced (should be dead code).
-    #[error("forced type metadata (should be dead code)")]
-    TypeMetadata,
-    /// Unresolved external variable forced.
-    #[error("unresolved variable VarId({0:#x}) [tag='{tag}', key={key}]", tag=(*.0 >> 56) as u8 as char, key=(*.0 & ((1u64 << 56) - 1)))]
-    UnresolvedVar(u64),
-    /// Application of null function pointer.
-    #[error("application of null function pointer")]
-    NullFunPtr,
-    /// Application of non-closure heap object.
-    #[error("application of non-closure (tag={0})")]
-    BadFunPtrTag(u8),
-    /// Heap overflow after GC.
-    #[error("heap overflow (nursery exhausted after GC)")]
-    HeapOverflow,
-    /// Call depth exceeded (likely infinite list or unbounded recursion).
-    #[error("stack overflow (likely infinite list or unbounded recursion — use zipWithIndex/imap/enumFromTo instead of [0..])")]
-    StackOverflow,
     /// Fatal signal during JIT execution (SIGILL, SIGSEGV, SIGBUS, SIGTRAP).
     #[error("{}", format_yield_signal(*.0))]
     Signal(i32),
-    /// Blackhole detected (infinite loop: thunk forced itself).
-    #[error("blackhole detected (infinite loop: thunk forced itself)")]
-    BlackHole,
-    /// Thunk encountered with an invalid evaluation state.
-    #[error("thunk has invalid evaluation state: {0}")]
-    BadThunkState(u8),
-    /// External cancellation observed at a GC safepoint. Raised when a holder
-    /// of `CancelHandle` flips the flag while the JIT is executing.
-    #[error("execution cancelled by external request")]
-    Cancelled,
+    /// A runtime error raised by host/JIT code via the RUNTIME_ERROR flag. Holds
+    /// the shared error set ONCE — DivisionByZero, Overflow, UserError(Msg),
+    /// Undefined, CaseTrap, BadPointer, TypeMetadata, UnresolvedVar, NullFunPtr,
+    /// BadFunPtrTag, HeapOverflow, StackOverflow, BlackHole, BadThunkState,
+    /// Cancelled — rather than re-declaring each variant + message (they were
+    /// duplicated verbatim from `RuntimeError`). `#[from]` derives
+    /// `From<RuntimeError>`; `transparent` forwards its Display unchanged.
+    #[error(transparent)]
+    Runtime(#[from] crate::host_fns::RuntimeError),
 }
 
 fn format_yield_signal(sig: i32) -> String {
@@ -135,29 +97,5 @@ fn format_yield_signal(sig: i32) -> String {
         format!("JIT signal: signal {} (context: {})", sig, ctx)
     } else {
         format!("JIT signal: signal {}", sig)
-    }
-}
-
-impl From<crate::host_fns::RuntimeError> for YieldError {
-    fn from(err: crate::host_fns::RuntimeError) -> Self {
-        use crate::host_fns::RuntimeError;
-        match err {
-            RuntimeError::DivisionByZero => YieldError::DivisionByZero,
-            RuntimeError::Overflow => YieldError::Overflow,
-            RuntimeError::UserError => YieldError::UserError,
-            RuntimeError::UserErrorMsg(msg) => YieldError::UserErrorMsg(msg),
-            RuntimeError::Undefined => YieldError::Undefined,
-            RuntimeError::CaseTrap => YieldError::CaseTrap,
-            RuntimeError::BadPointer => YieldError::BadPointer,
-            RuntimeError::TypeMetadata => YieldError::TypeMetadata,
-            RuntimeError::UnresolvedVar(id) => YieldError::UnresolvedVar(id),
-            RuntimeError::NullFunPtr => YieldError::NullFunPtr,
-            RuntimeError::BadFunPtrTag(tag) => YieldError::BadFunPtrTag(tag),
-            RuntimeError::HeapOverflow => YieldError::HeapOverflow,
-            RuntimeError::StackOverflow => YieldError::StackOverflow,
-            RuntimeError::BlackHole => YieldError::BlackHole,
-            RuntimeError::BadThunkState(state) => YieldError::BadThunkState(state),
-            RuntimeError::Cancelled => YieldError::Cancelled,
-        }
     }
 }
