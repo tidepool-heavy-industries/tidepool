@@ -86,6 +86,19 @@ enum EmitFrame<A> {
         msg: Option<Vec<u8>>,
         arg: Option<A>,
     },
+
+    /// Error call sitting in App-ARGUMENT position. GHC's demand analysis can
+    /// pass a bottoming fallback into a statically-dead arg slot (e.g. the
+    /// `_last` fallback after `INLINE _Snoc` specialization). The JIT evaluates
+    /// App arguments eagerly, so an eager `Raise` here would fire the dead
+    /// error. Emit a LAZY poison closure instead (carrying the static message
+    /// when known): it raises only if actually forced, matching Haskell's
+    /// non-strict `error`. No children — the whole error-call subtree collapses
+    /// to a constant poison-closure pointer.
+    RaiseLazy {
+        kind: u64,
+        msg: Option<Vec<u8>>,
+    },
 }
 
 impl MappableFrame for EmitFrameToken {
@@ -138,6 +151,7 @@ impl MappableFrame for EmitFrameToken {
                 EmitFrame::ThunkCon { tag, field_indices }
             }
             EmitFrame::LetBoundary(idx) => EmitFrame::LetBoundary(idx),
+            EmitFrame::RaiseLazy { kind, msg } => EmitFrame::RaiseLazy { kind, msg },
             EmitFrame::Raise { kind, msg, arg } => EmitFrame::Raise {
                 kind,
                 msg,
@@ -151,8 +165,26 @@ impl MappableFrame for EmitFrameToken {
 // Hylomorphism: expand + collapse
 // ---------------------------------------------------------------------------
 
+/// Set of node indices that appear as the `arg` field of some `App` in the
+/// tree, i.e. expressions evaluated in App-argument position. Used to route
+/// error calls in argument position through a LAZY poison closure rather than
+/// an eager `Raise` (see `EmitFrame::RaiseLazy`).
+fn collect_app_arg_positions(tree: &CoreExpr) -> std::collections::HashSet<usize> {
+    let mut set = std::collections::HashSet::new();
+    for node in &tree.nodes {
+        if let CoreFrame::App { arg, .. } = node {
+            set.insert(*arg);
+        }
+    }
+    set
+}
+
 /// Expand: classify a tree node into an EmitFrame.
-fn expand_node(tree: &CoreExpr, idx: usize) -> Result<EmitFrame<usize>, EmitError> {
+fn expand_node(
+    tree: &CoreExpr,
+    idx: usize,
+    arg_positions: &std::collections::HashSet<usize>,
+) -> Result<EmitFrame<usize>, EmitError> {
     match &tree.nodes[idx] {
         CoreFrame::Var(v) => Ok(EmitFrame::Var(*v)),
         CoreFrame::Lit(Literal::LitString(bytes)) => Ok(EmitFrame::LitString(bytes.clone())),
@@ -175,8 +207,20 @@ fn expand_node(tree: &CoreExpr, idx: usize) -> Result<EmitFrame<usize>, EmitErro
         CoreFrame::App { fun, arg } => {
             if EmitContext::rhs_is_error_call(tree, idx) {
                 if let Some(msg) = EmitContext::extract_error_message(tree, idx) {
-                    // Static fast path: the message is known at compile time.
                     let kind = EmitContext::extract_error_kind(tree, idx);
+                    // Error call consumed as an App ARGUMENT: emit a LAZY poison
+                    // closure (carrying the static message) instead of eagerly
+                    // raising. GHC may pass a bottoming fallback into a
+                    // statically-dead arg slot; raising it here is wrong because
+                    // the JIT evaluates App args eagerly. The poison closure
+                    // raises only if the slot is actually forced.
+                    if arg_positions.contains(&idx) {
+                        return Ok(EmitFrame::RaiseLazy {
+                            kind,
+                            msg: Some(msg),
+                        });
+                    }
+                    // Static fast path: the message is known at compile time.
                     return Ok(EmitFrame::Raise {
                         kind,
                         msg: Some(msg),
@@ -270,6 +314,7 @@ fn emit_frame_cov_key(frame: &EmitFrame<SsaVal>) -> &'static str {
         EmitFrame::Join { .. } => "frame:Join",
         EmitFrame::LetBoundary(_) => "frame:LetBoundary",
         EmitFrame::Raise { .. } => "frame:Raise",
+        EmitFrame::RaiseLazy { .. } => "frame:RaiseLazy",
     }
 }
 
@@ -799,6 +844,19 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                 idx,
             )
         }
+        EmitFrame::RaiseLazy { kind, msg } => {
+            // Constant pointer to a pre-allocated lazy poison closure. The error
+            // flag is set only when the closure is forced (called / pattern
+            // matched), so a statically-dead arg slot never raises. Mirrors the
+            // sentinel-Var lazy poison path above, but preserves the static
+            // message via the message-carrying poison variant when known.
+            let poison_addr = match &msg {
+                Some(bytes) => crate::host_fns::error_poison_ptr_lazy_msg(kind, bytes) as i64,
+                None => crate::host_fns::error_poison_ptr_lazy(kind) as i64,
+            };
+            let poison_val = args.builder.ins().iconst(types::I64, poison_addr);
+            Ok(SsaVal::HeapPtr(poison_val))
+        }
         EmitFrame::Raise { kind, msg, arg } => {
             if let Some(bytes) = msg {
                 let msg_val = emit_lit_string(
@@ -936,9 +994,10 @@ fn emit_subtree(mut args: EmitArgs, idx: usize) -> Result<SsaVal, EmitError> {
 /// hylomorphism for value positions. The `collapse_frame` Case/Join branches thus
 /// always run NonTail here; the spine supplies Tail to their alts/body separately.
 fn emit_subtree_with_tail(args: EmitArgs, idx: usize) -> Result<SsaVal, EmitError> {
+    let arg_positions = collect_app_arg_positions(args.sess.tree);
     try_expand_and_collapse::<EmitFrameToken, _, _, _>(
         idx,
-        |idx| expand_node(args.sess.tree, idx),
+        |idx| expand_node(args.sess.tree, idx, &arg_positions),
         |frame| {
             collapse_frame(
                 EmitArgs {

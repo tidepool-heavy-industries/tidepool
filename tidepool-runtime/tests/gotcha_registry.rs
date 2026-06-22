@@ -346,3 +346,89 @@ fn loud_fail_large_value_lens_fold_overflow() {
         "stack overflow",
     );
 }
+
+/// As `eval_raw`, but injects extra `import` lines (one per line of `imports`).
+fn eval_raw_with_imports(imports: &str, code: &str) -> Result<serde_json::Value, String> {
+    let decls = tidepool_mcp::standard_decls();
+    let pre = tidepool_mcp::build_preamble(&decls, true);
+    let stack = tidepool_mcp::build_effect_stack_type(&decls);
+    let src = tidepool_mcp::template_haskell(&pre, &stack, code, imports, "", None, None);
+    let effects_dir = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let hs = root.join("haskell/lib");
+    let lib = root.join(".tidepool/lib");
+    let include = [hs.as_path(), lib.as_path(), effects_dir.as_path()];
+    let mut d = NullDispatcher;
+    match compile_and_run(&src, "result", &include, &mut d, &()) {
+        Ok(v) => Ok(v.to_json()),
+        Err(e) => Err(format!("{e}")),
+    }
+}
+
+fn works_with_imports(imports: &str, code: &str, expected: serde_json::Value) {
+    let imports = imports.to_string();
+    let code = code.to_string();
+    let imports_t = imports.clone();
+    let code_t = code.clone();
+    let got = std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            tidepool_codegen::signal_safety::install();
+            eval_raw_with_imports(&imports_t, &code_t)
+        })
+        .unwrap()
+        .join()
+        .map_err(|_| "thread panicked (HARD crash / uncaught signal)".to_string())
+        .and_then(|r| r);
+    match got {
+        Ok(got) => assert_eq!(
+            got, expected,
+            "\nWORKS probe returned the wrong value:\n  code: {code}\n  want: {expected}\n  got:  {got}"
+        ),
+        Err(e) => panic!("\nWORKS probe REGRESSED (was supposed to succeed):\n  code: {code}\n  error: {e}"),
+    }
+}
+
+/// Control.Lens `_last`/`_init`/`unsnoc` on a LIST. With -O2 + cross-module
+/// specialization, GHC's `INLINE _Snoc` compiles `xs ^? _last` to a worker that
+/// passes the bottoming `lastError "last"` thunk into a demand-analysis-DEAD
+/// fallback arg slot. The JIT evaluates App args eagerly, so before the fix
+/// `[10,20,30] ^? _last` died with `yield error: Haskell error: last` instead
+/// of returning `Just 30`. The fix (a) tags `lastError`/`initError` as error
+/// vars and (b) routes an error call in App-argument position through a LAZY
+/// poison closure (`EmitFrame::RaiseLazy`) rather than an eager `Raise`. `_head`
+/// always worked (Cons, no dead-arg fallback); the empty-list cases must stay
+/// `Nothing` (never raise).
+#[test]
+fn works_lens_last_init_unsnoc_on_list() {
+    works_with_imports(
+        "Control.Lens (_last, _head, _init, unsnoc)",
+        "pure (object \
+         [ \"last\" .= ([10,20,30::Int] ^? _last) \
+         , \"head\" .= ([10,20,30::Int] ^? _head) \
+         , \"init\" .= ([10,20,30::Int] ^? _init) \
+         , \"unsnoc\" .= (unsnoc [10,20,30::Int]) \
+         , \"last_empty\" .= (([]::[Int]) ^? _last) \
+         , \"init_empty\" .= (([]::[Int]) ^? _init) \
+         ])",
+        serde_json::json!({
+            "last": 30,
+            "head": 10,
+            "init": [10, 20],
+            "unsnoc": [[10, 20], 30],
+            "last_empty": null,
+            "init_empty": null,
+        }),
+    );
+}
+
+/// `"abc" ^? _last` rides the Text `Snoc` instance, NOT the list dead-arg path —
+/// it always worked and MUST keep working after the fix.
+#[test]
+fn works_lens_last_on_text() {
+    works_with_imports(
+        "Control.Lens (_last)",
+        "pure ((\"abc\" :: Text) ^? _last)",
+        serde_json::json!("c"),
+    );
+}

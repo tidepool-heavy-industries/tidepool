@@ -1904,6 +1904,14 @@ isErrorVar v =
      -- because GHC constant-folds them away). errorEmptyList covers the whole
      -- GHC.List family: maximum/minimum/foldr1/foldl1/last/init/cycle.
      || name == "errorEmptyList"
+     -- `lastError`/`initError` are GHC.List's bottoming workers for `last []`
+     -- and `init []`. With -O2 + cross-module specialization, an `INLINE _Snoc`
+     -- lens (`xs ^? _last`) compiles to a specialized worker that passes
+     -- `lastError "last"` into a demand-analysis-DEAD fallback arg slot. Without
+     -- the sentinel tag the Var is untagged, so the eager App-argument
+     -- evaluation forces the bottoming thunk and raises spuriously. Tagging it
+     -- lets the codegen route it through a lazy poison (see EmitFrame::RaiseLazy).
+     || name == "lastError" || name == "initError"
      || name == "irrefutPatError" || name == "nonExhaustiveGuardsError"
      || name == "assertError" || name == "absentError"
      || name == "divZeroError" || name == "overflowError"
