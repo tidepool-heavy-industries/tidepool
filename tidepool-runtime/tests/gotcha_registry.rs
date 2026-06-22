@@ -472,8 +472,5 @@ fn works_data_tree_node_no_freer_collision() {
 /// full ConTags resolution (Val/E/Union/Leaf/Node) at machine setup.
 #[test]
 fn works_freer_node_resolves_without_data_tree() {
-    works(
-        "pure (sum [1..10::Int])",
-        serde_json::json!(55),
-    );
+    works("pure (sum [1..10::Int])", serde_json::json!(55));
 }
