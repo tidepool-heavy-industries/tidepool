@@ -1003,6 +1003,12 @@ qq_fmt_char :: T.Text
 qq_fmt_char = [fmt|ch: {c}|]
   where c = 'x' :: Char
 
+-- List comprehension in a hole (GHC HsDo/ListComp → TH.CompE; exercises a
+-- generator, a guard, and the result body): "evens: [2,4,6]"
+qq_fmt_comprehension :: T.Text
+qq_fmt_comprehension = [fmt|evens: {show [x * 2 | x <- nums, x > 0]}|]
+  where nums = [1, 2, 3] :: [Int]
+
 -- ---- qq-suite: fmt format-spec section (Phase 2 — PyF {expr:spec}) ----
 --
 -- Spec'd holes route through the compile-time interpreter (Tidepool.QQ.Fmt) to

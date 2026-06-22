@@ -984,6 +984,16 @@ fn qq_fmt_char() {
     );
 }
 
+// List comprehension in a hole: GHC `HsDo ListComp` → TH `CompE` (the vendored
+// Translate.hs case for generators/guards/result). `[x*2 | x <- [1,2,3], x>0]`.
+#[test]
+fn qq_fmt_comprehension() {
+    assert_fmt(
+        include_bytes!("../../haskell/test/suite_cbor/qq_fmt_comprehension.cbor"),
+        "evens: [2,4,6]",
+    );
+}
+
 // Text-hole regression (render @Text = id).
 #[test]
 fn qq_fmt_basic() {

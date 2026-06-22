@@ -164,10 +164,13 @@ toExp _ (Expr.RecordCon _ name HsRecFields {rec_flds})
   = TH.RecConE (toName . unLoc $ name) (fmap toFieldExp rec_flds)
 
 -- toExp (Expr.RecUpdate _ e xs)                 = TH.RecUpdE (toExp e) (fmap toFieldExp xs)
--- toExp (Expr.ListComp _ e ss)                  = TH.CompE $ map convert ss ++ [TH.NoBindS (toExp e)]
---  where
---   convert (Expr.QualStmt _ st)                = toStmt st
---   convert s                                   = noTH "toExp ListComp" s
+-- List comprehensions: GHC represents @[e | quals]@ as @HsDo ListComp stmts@,
+-- with the result @e@ folded in as the trailing @LastStmt@.  TH's 'TH.CompE'
+-- wants the same shape (qualifiers, then the result as a 'TH.NoBindS'), so
+-- mapping every statement through 'toStmt' lines up one-to-one.  (The original
+-- ghc-hs-meta stub here named haskell-src-exts constructors and was dead code.)
+toExp d (Expr.HsDo _ Expr.ListComp (unLoc -> stmts))
+  = TH.CompE (map (toStmt d . unLoc) stmts)
 -- toExp (Expr.ExpTypeSig _ e t)                 = TH.SigE (toExp e) (toType t)
 --
 toExp d (Expr.ExplicitList _ (map unLoc -> args)) = TH.ListE (map (toExp d) args)
@@ -197,6 +200,17 @@ toExp d (Expr.HsGetField _ expr locatedField) =
 toExp _ (Expr.HsOverLabel _ fastString) = TH.LabelE (unpackFS fastString)
 
 toExp dynFlags e = todo "toExp" (showSDoc dynFlags . ppr $ e)
+
+-- | Translate a comprehension\/do statement.  Covers the forms that occur in a
+-- list comprehension: generators (@x <- xs@), boolean guards, and the trailing
+-- result.  A @let@ qualifier needs full declaration translation, which this
+-- vendored subset omits, so it fails loudly rather than miscompiling.
+toStmt :: DynFlags -> Expr.StmtLR GhcPs GhcPs (Expr.LHsExpr GhcPs) -> TH.Stmt
+toStmt d (Expr.BindStmt _ p body) = TH.BindS (toPat d (unLoc p)) (toExp d (unLoc body))
+toStmt d (Expr.BodyStmt _ body _ _) = TH.NoBindS (toExp d (unLoc body))
+toStmt d (Expr.LastStmt _ body _ _) = TH.NoBindS (toExp d (unLoc body))
+toStmt _ (Expr.LetStmt _ _) = noTH "toStmt" "LetStmt (let in a comprehension)"
+toStmt _ _ = noTH "toStmt" "unsupported comprehension statement"
 
 todo :: (HasCallStack, Show e) => String -> e -> a
 todo fun thing = error . concat $ [moduleName, ".", fun, ": not implemented: ", show thing]
