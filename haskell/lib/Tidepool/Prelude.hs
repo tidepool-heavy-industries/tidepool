@@ -26,8 +26,8 @@ module Tidepool.Prelude
   , Eq(..), Ord(..), Num(..), Integral(..), Real, Fractional(..), Floating(..), Show
   , Semigroup(..), Monoid(..)
     -- * Monoid / Semigroup aggregation newtypes
-  , Sum(..), Product(..), Any(..), All(..), First(..), Last(..), Endo(..), appEndo
-  , Max(..), Min(..), Arg(..), sconcat
+  , Sum(..), Product(..), Any(..), All(..), First(..), Last(..), Endo(..)
+  , Max(..), Min(..), Arg(..)
   , fromIntegral, realToFrac, truncate, ceiling, floor, round
   , Functor(..), Applicative(..), Monad(..)
   , (<$>)
