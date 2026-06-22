@@ -25,6 +25,12 @@ fn compile_and_run(tree: &CoreExpr) -> TestResult {
     let func: unsafe extern "C" fn(*mut VMContext) -> i64 = unsafe { std::mem::transmute(ptr) };
     let result = unsafe { func(&mut vmctx as *mut VMContext) };
 
+    // Force the top-level result to WHNF, exactly as the real eval pipeline does
+    // (effect_machine `parse_result`). A deferred-simple LetRec binding bound in
+    // the body (e.g. `letrec … x = f 5 in x`) is a lazy thunk; without this the
+    // raw result pointer is an unforced thunk rather than its value.
+    let result = host_fns::heap_force(&mut vmctx as *mut VMContext, result as *mut u8);
+
     TestResult {
         result_ptr: result as *const u8,
         _nursery: nursery,
