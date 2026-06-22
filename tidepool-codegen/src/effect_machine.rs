@@ -173,8 +173,16 @@ impl CompiledEffectMachine {
             return Yield::Error(YieldError::NullPointer);
         }
 
-        // Force result if it's a thunk (lazy Con field from parent)
+        // Force result if it's a thunk (lazy Con field from parent). Forcing runs
+        // JIT code, which can raise a runtime error AFTER the check above — e.g. a
+        // top-level result that is itself a thunk (`pure (go 500000)`) drives the
+        // whole computation here, and the recursion-depth guard sets StackOverflow
+        // and returns the tag-0 poison closure. Re-check so that error is surfaced
+        // instead of being masked by the poison's tag in the TAG_CON check below.
         let result = self.force_ptr(result);
+        if let Some(err) = crate::host_fns::take_runtime_error() {
+            return Yield::Error(YieldError::from(err));
+        }
         if result.is_null() {
             return Yield::Error(YieldError::NullPointer);
         }
@@ -195,8 +203,14 @@ impl CompiledEffectMachine {
                 return Yield::Error(YieldError::BadValFields(num_fields));
             }
             let value = unsafe { Self::read_con_field(result, 0) };
-            // Force value field — it may be a thunk
+            // Force value field — it may be a thunk. Forcing runs JIT code that
+            // can raise a runtime error; surface it rather than handing the tag-0
+            // poison object to the caller (which would mis-render it or hand it to
+            // the heap bridge). Same invariant as the post-force re-check above.
             let value = self.force_ptr(value);
+            if let Some(err) = crate::host_fns::take_runtime_error() {
+                return Yield::Error(YieldError::from(err));
+            }
             Yield::Done(value)
         } else if con_tag == self.tags.e {
             // E(union, continuation) — extract Union and k

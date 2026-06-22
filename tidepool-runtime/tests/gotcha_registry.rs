@@ -320,13 +320,14 @@ fn loud_fail_cycle_unresolved_external() {
 /// yield error — never SIGSEGV. (500k non-tail frames here.) Contrast
 /// `works_tco_deep_tail_recursion`.
 ///
-/// BUG-FIND (2026-06-21), committed RED to track: this is the CORRECT behavior
-/// and the MCP server path delivers it (verified live — clean "stack overflow").
-/// But this test's `compile_and_run` + `NullDispatcher` path instead corrupts to
-/// "unexpected heap tag: 0" — the JIT's clean recursion-overflow guard does NOT
-/// fire on the library path, so deep non-tail recursion blows past it into heap
-/// corruption. A real server-vs-library eval divergence, not a test artifact
-/// (same stack size now via EVAL_STACK_SIZE; size was ruled out). FIX PENDING.
+/// Regression guard for the masked-StackOverflow bug (fixed 2026-06-21,
+/// effect_machine `parse_result`): when the top-level result is itself a thunk,
+/// the deep recursion runs inside `force_ptr`, so the depth guard sets
+/// StackOverflow AFTER `parse_result`'s pre-force error check — the tag-0 poison
+/// closure was then mis-reported as "unexpected heap tag: 0". `parse_result` now
+/// re-checks `take_runtime_error()` after forcing. (The bug was invisible on the
+/// MCP server, which surfaced the still-pending error via a later teardown path;
+/// only the library/`compile_and_run` path exposed it.)
 #[test]
 fn loud_fail_nontail_recursion_overflow() {
     loud_fail(
@@ -347,10 +348,8 @@ fn loud_fail_let_in_braced_do_parse_error() {
 /// style-guide #18 claims. The cause is a non-tail lens fold, not "complex
 /// traversal". Doc trued up in tidepool-style-guide.md.
 ///
-/// BUG-FIND (2026-06-21), committed RED to track: same divergence as
-/// `loud_fail_nontail_recursion_overflow` — the MCP server path yields clean
-/// "stack overflow" (verified live), but this test's `compile_and_run` +
-/// `NullDispatcher` path corrupts to "unexpected heap tag: 0". FIX PENDING.
+/// Regression guard for the same masked-StackOverflow bug as
+/// `loud_fail_nontail_recursion_overflow` (fixed 2026-06-21 in `parse_result`).
 #[test]
 fn loud_fail_large_value_lens_fold_overflow() {
     loud_fail(
