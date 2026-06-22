@@ -25,6 +25,9 @@ module Tidepool.Prelude
     -- * Typeclasses (re-exported from base)
   , Eq(..), Ord(..), Num(..), Integral(..), Real, Fractional(..), Floating(..), Show
   , Semigroup(..), Monoid(..)
+    -- * Monoid / Semigroup aggregation newtypes
+  , Sum(..), Product(..), Any(..), All(..), First(..), Last(..), Endo(..), appEndo
+  , Max(..), Min(..), Arg(..), sconcat
   , fromIntegral, realToFrac, truncate, ceiling, floor, round
   , Functor(..), Applicative(..), Monad(..)
   , (<$>)
@@ -35,9 +38,10 @@ module Tidepool.Prelude
   , id, const, flip, (.), ($), ($!)
   , not, (&&), (||), otherwise, seq
   , fst, snd, curry, uncurry
+  , subtract
   , error, undefined
     -- * List operations
-  , map, filter, foldl, foldl', foldr
+  , map, filter, foldl, foldl', foldr, foldMap
   , null
   , take, drop, zip, zipWith, unzip
   , lookup, elem, notElem
@@ -166,14 +170,14 @@ import Prelude
   , fst, snd, curry, uncurry
   , error, undefined
   , maybe, either
-  , map, foldl, foldr
+  , map, foldl, foldr, foldMap
   , take, drop, zip, zipWith, unzip
   , lookup, elem, notElem
   , any, all, and, or
   , sum, product, minimum, maximum
   , concat, iterate, repeat, cycle
   , scanl, scanr
-  , negate, quot, rem
+  , negate, quot, rem, subtract
   , compare
   , fromEnum
   , mapM, mapM_, sequence, sequence_
@@ -189,6 +193,8 @@ import qualified Tidepool.Data.Text as T
 import Data.Char (ord, chr)
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe)
 import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, sortOn)
+import Data.Monoid (Sum(..), Product(..), Any(..), All(..), First(..), Last(..), Endo(..), appEndo)
+import Data.Semigroup (Max(..), Min(..), Arg(..), sconcat)
 import Data.Ord (Down(..))
 import Data.Tuple (swap)
 import Data.Either (partitionEithers, rights, lefts, fromLeft, fromRight)
