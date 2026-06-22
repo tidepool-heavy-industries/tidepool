@@ -181,6 +181,7 @@ pub fn fs_decl() -> EffectDecl {
             "doesFileExist :: Text -> M Bool\ndoesFileExist = send . FsExists",
             "doesDirectoryExist :: Text -> M Bool\ndoesDirectoryExist p = do { (_, _, d) <- send (FsMetadata p); pure d }",
             "getFileSize :: Text -> M Int\ngetFileSize p = do { (s, _, _) <- send (FsMetadata p); pure s }",
+            "fsMeta :: Text -> M (Int, Bool, Bool)\nfsMeta = send . FsMetadata",
             "getCurrentDirectory :: M Text\ngetCurrentDirectory = do { (_, d, _) <- run \"pwd\"; pure (T.strip d) }",
             "glob :: Text -> M [Text]\nglob = send . FsGlob",
             "-- | Search for a regex pattern in files matching a glob.\ngrepGlob :: Text -> Text -> M [(Text, Int, Text)]\ngrepGlob pat g = send (FsGrep pat g)",
@@ -2871,6 +2872,7 @@ data Console a where
         assert!(preamble.contains("listDirectory :: Text -> M [Text]"));
         assert!(preamble.contains("doesFileExist :: Text -> M Bool"));
         assert!(preamble.contains("getFileSize :: Text -> M Int"));
+        assert!(preamble.contains("fsMeta :: Text -> M (Int, Bool, Bool)\nfsMeta = send . FsMetadata"));
         assert!(preamble.contains("glob :: Text -> M [Text]"));
         assert!(preamble.contains("callCommand :: Text -> M ()"));
         assert!(preamble.contains("readProcess :: Text -> M Text"));
