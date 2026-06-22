@@ -176,6 +176,13 @@ pub fn compile_haskell(
 
 const DEFAULT_NURSERY_SIZE: usize = 1 << 26; // 64 MiB
 
+/// Stack size for eval threads. The JIT's clean recursion-overflow guard needs
+/// stack headroom; too small a stack lets a deep non-tail recursion blow the
+/// host stack into corruption ("unexpected heap tag") before the guard fires.
+/// Shared by the MCP server's eval thread and the test harness so they can't
+/// drift — a smaller test stack made the overflow probes diverge from real evals.
+pub const EVAL_STACK_SIZE: usize = 256 * 1024 * 1024; // 256 MiB
+
 /// Compile Haskell source and run it with the given effect handlers,
 /// using the specified nursery size.
 ///

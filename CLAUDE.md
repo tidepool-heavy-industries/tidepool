@@ -303,14 +303,13 @@ compile errors name the unsupported symbol, runtime errors carry the Haskell
 message, unbounded recursion is a clean "stack overflow" yield error — not
 SIGSEGV. The short, true standing list:
 
-- **`read`/`reads`**: clean COMPILE error ("Unsupported FFI call: …gmpn…" with
-  a GMP hint). Use `parseInt`/`parseDouble` from Prelude.
-- **Near-DBL_MAX Double LITERALS** (e.g. `1.79e308`, `1.7976931348623157e308`):
-  same clean `gmpn` COMPILE error. The literal desugars through a rational whose
-  integer mantissa overflows the integerAdd/integerSub shims into multi-limb GMP.
-  An authoring trap — write a smaller literal or compute the value at runtime.
-  Moderate-magnitude literals (`3.14`, `1.0e10`, `1.23e100`) stay within the
-  shims and are fine. (Pinned: `gotcha_registry::loud_fail_large_double_literal_pulls_gmp`.)
+- ~~`read`/`reads` pull GMP~~, ~~near-DBL_MAX Double LITERALS pull GMP~~ — **BOTH
+  FIXED by the native-bignum toolchain (verified live 2026-06-22).** The deployed
+  extract uses GHC's native ghc-bignum (no `__gmpn_*`), so `read "42" :: Int` →
+  `42`, `P.read "42"` → `42`, and `1.79e308 :: Double` → `1.79e+308` all WORK now
+  — the gmp wall is gone. (`parseInt`/`parseDouble` remain fine too.) Pinned:
+  `gotcha_registry::stale_doc_read_now_works`,
+  `stale_doc_large_double_literal_now_works`.
 - ~~`T.takeWhile`/`T.dropWhile` wrapped-use corruption~~ — **FIXED 2026-06-20 by
   vendoring.** `T` in the preamble + Prelude now points at the HOME-module
   `Tidepool.Data.Text`, which overrides every `(Char -> Bool)`-taking Data.Text

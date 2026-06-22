@@ -69,13 +69,13 @@ fn eval_raw(code: &str) -> Result<serde_json::Value, String> {
     }
 }
 
-/// Run a probe on a generous 64 MiB stack with signal safety installed. A hard
+/// Run a probe on the shared `EVAL_STACK_SIZE` (same as the MCP server's eval thread, so test and server can't drift) with signal safety installed. A hard
 /// crash (uncaught SIGSEGV/SIGILL — i.e. a STILL-SILENT footgun) becomes a
 /// thread panic, reported here as an `Err` rather than killing the process.
 fn run_probe(code: &str) -> Result<serde_json::Value, String> {
     let code = code.to_string();
     std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
+        .stack_size(tidepool_runtime::EVAL_STACK_SIZE)
         .spawn(move || {
             tidepool_codegen::signal_safety::install();
             eval_raw(&code)
@@ -291,22 +291,21 @@ fn stale_doc_infinite_list_transform_now_works() {
 // error (never a silent SIGILL/SIGSEGV / wrong output). Assert Err + marker.
 // =========================================================================
 
-/// `read`/`Read` parse Int through Integer → multi-limb GMP FFI beyond the
-/// shims. Clean COMPILE error naming the `gmpn` symbol. (`read` is not exported
-/// unqualified — must go through `P.read` to reach the GMP path.)
+/// `read` now WORKS on the native-bignum toolchain — the `__gmpn_*` wall is gone
+/// (was a clean gmp COMPILE error). Flipped from loud_fail 2026-06-22; the
+/// deployed extract uses GHC's native ghc-bignum.
 #[test]
-fn loud_fail_read_pulls_gmp() {
-    loud_fail("pure (P.read \"42\" :: Int)", "gmpn");
+fn stale_doc_read_now_works() {
+    works("pure (P.read \"42\" :: Int)", serde_json::json!(42));
 }
 
-/// A near-DBL_MAX Double LITERAL (`1.79e308`) desugars through a rational whose
-/// integer mantissa overflows the integerAdd/integerSub shims into multi-limb
-/// GMP → the SAME clean `gmpn` compile error as `read`. Currently UNDOCUMENTED;
-/// added to CLAUDE.md "Known Limits". Moderate literals are fine (see
+/// A near-DBL_MAX Double LITERAL now WORKS on the native-bignum toolchain (was a
+/// clean gmp COMPILE error via the integerAdd/integerSub shims). Flipped from
+/// loud_fail 2026-06-22. Moderate literals were always fine (see
 /// `works_moderate_double_literals`).
 #[test]
-fn loud_fail_large_double_literal_pulls_gmp() {
-    loud_fail("pure (1.79e308 :: Double)", "gmpn");
+fn stale_doc_large_double_literal_now_works() {
+    works("pure (1.79e308 :: Double)", serde_json::json!(1.79e308));
 }
 
 /// `cycle` is an unresolved external — clean yield error ("unresolved
@@ -320,6 +319,14 @@ fn loud_fail_cycle_unresolved_external() {
 /// NON-tail recursion overflows (~10-20K frames) with a CLEAN "stack overflow"
 /// yield error — never SIGSEGV. (500k non-tail frames here.) Contrast
 /// `works_tco_deep_tail_recursion`.
+///
+/// BUG-FIND (2026-06-21), committed RED to track: this is the CORRECT behavior
+/// and the MCP server path delivers it (verified live — clean "stack overflow").
+/// But this test's `compile_and_run` + `NullDispatcher` path instead corrupts to
+/// "unexpected heap tag: 0" — the JIT's clean recursion-overflow guard does NOT
+/// fire on the library path, so deep non-tail recursion blows past it into heap
+/// corruption. A real server-vs-library eval divergence, not a test artifact
+/// (same stack size now via EVAL_STACK_SIZE; size was ruled out). FIX PENDING.
 #[test]
 fn loud_fail_nontail_recursion_overflow() {
     loud_fail(
@@ -339,6 +346,11 @@ fn loud_fail_let_in_braced_do_parse_error() {
 /// overflows with a CLEAN "stack overflow" yield error — NOT the SIGILL the
 /// style-guide #18 claims. The cause is a non-tail lens fold, not "complex
 /// traversal". Doc trued up in tidepool-style-guide.md.
+///
+/// BUG-FIND (2026-06-21), committed RED to track: same divergence as
+/// `loud_fail_nontail_recursion_overflow` — the MCP server path yields clean
+/// "stack overflow" (verified live), but this test's `compile_and_run` +
+/// `NullDispatcher` path corrupts to "unexpected heap tag: 0". FIX PENDING.
 #[test]
 fn loud_fail_large_value_lens_fold_overflow() {
     loud_fail(
@@ -371,7 +383,7 @@ fn works_with_imports(imports: &str, code: &str, expected: serde_json::Value) {
     let imports_t = imports.clone();
     let code_t = code.clone();
     let got = std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
+        .stack_size(tidepool_runtime::EVAL_STACK_SIZE)
         .spawn(move || {
             tidepool_codegen::signal_safety::install();
             eval_raw_with_imports(&imports_t, &code_t)

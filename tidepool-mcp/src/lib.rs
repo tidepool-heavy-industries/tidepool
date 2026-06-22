@@ -2026,7 +2026,7 @@ impl TidepoolMcpServerImpl {
         let thread_session_tx = session_tx;
         let handle = std::thread::Builder::new()
             .name("tidepool-eval".into())
-            .stack_size(256 * 1024 * 1024)
+            .stack_size(tidepool_runtime::EVAL_STACK_SIZE)
             .spawn(move || {
                 let _permit = permit;
                 // Install signal handlers so SIGILL/SIGSEGV from JIT code
