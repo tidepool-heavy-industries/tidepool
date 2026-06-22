@@ -136,6 +136,7 @@ impl JitEffectMachine {
         table: &DataConTable,
         nursery_size: usize,
     ) -> Result<Self, JitError> {
+        crate::debug::init_logging();
         // #313 defense: a duplicate VarId on the top-level Let spine means two
         // distinct top-level bindings silently shadow each other — fail loudly
         // at load instead. Runs on the raw deserialized tree (the wrapAllBinds
@@ -254,9 +255,7 @@ impl JitEffectMachine {
                         break Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
                     }
                     let req_val = bridge_res.map_err(JitError::HeapBridge)?;
-                    if std::env::var("TIDEPOOL_TRACE_EFFECTS").is_ok() {
-                        eprintln!("[jit_machine] effect tag={} request={:?}", tag, req_val);
-                    }
+                    log::debug!(target: "tidepool::effects", "effect tag={} request={:?}", tag, req_val);
                     let cx = EffectContext::with_user(table, user);
                     let response = handlers.dispatch(tag, &req_val, &cx)?;
 

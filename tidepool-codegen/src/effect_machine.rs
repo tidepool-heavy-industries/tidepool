@@ -125,6 +125,7 @@ impl CompiledEffectMachine {
         vmctx: VMContext,
         tags: ConTags,
     ) -> Self {
+        crate::debug::init_logging();
         Self {
             func_ptr,
             vmctx,
@@ -285,19 +286,18 @@ impl CompiledEffectMachine {
             let mut request = unsafe { Self::read_con_field(union_ptr, 1) };
             request = self.force_ptr(request);
 
-            if std::env::var("TIDEPOOL_TRACE_EFFECTS").is_ok() {
-                eprintln!(
-                    "[effect_machine] effect_tag={} tag_ptr_tag={} union_con_tag={} request_tag={}",
-                    effect_tag,
-                    tag_ptr_tag,
-                    unsafe { Self::read_con_tag(union_ptr) },
-                    if request.is_null() {
-                        255
-                    } else {
-                        unsafe { *request }
-                    }
-                );
-            }
+            log::debug!(
+                target: "tidepool::effects",
+                "effect_tag={} tag_ptr_tag={} union_con_tag={} request_tag={}",
+                effect_tag,
+                tag_ptr_tag,
+                unsafe { Self::read_con_tag(union_ptr) },
+                if request.is_null() {
+                    255
+                } else {
+                    unsafe { *request }
+                }
+            );
 
             Yield::Request {
                 tag: effect_tag,
@@ -632,25 +632,25 @@ impl CompiledEffectMachine {
         // SAFETY: closure is a valid Closure heap object. Reading code_ptr at the known offset.
         let code_ptr = *(closure.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const usize);
 
-        let trace = crate::debug::trace_level();
-        if trace >= crate::debug::TraceLevel::Calls {
+        if log::log_enabled!(target: "tidepool::calls", log::Level::Trace) {
             let name = crate::debug::lookup_lambda(code_ptr)
                 .unwrap_or_else(|| format!("0x{:x}", code_ptr));
-            eprintln!(
-                "[trace] call_closure {} closure={:?} arg={}",
+            log::trace!(
+                target: "tidepool::calls",
+                "call_closure {} closure={:?} arg={}",
                 name,
                 closure,
                 crate::debug::heap_describe(arg),
             );
         }
-        if trace >= crate::debug::TraceLevel::Heap {
+        if log::log_enabled!(target: "tidepool::heap", log::Level::Trace) {
             if let Err(e) = crate::debug::heap_validate_deep(closure) {
-                eprintln!("[trace] INVALID closure: {}", e);
-                eprintln!("[trace]   {}", crate::debug::heap_describe(closure));
+                log::trace!(target: "tidepool::heap", "INVALID closure: {}", e);
+                log::trace!(target: "tidepool::heap", "  {}", crate::debug::heap_describe(closure));
                 return std::ptr::null_mut();
             }
             if let Err(e) = crate::debug::heap_validate(arg) {
-                eprintln!("[trace] INVALID arg: {}", e);
+                log::trace!(target: "tidepool::heap", "INVALID arg: {}", e);
                 return std::ptr::null_mut();
             }
             // Dump captures
@@ -660,10 +660,11 @@ impl CompiledEffectMachine {
                 let cap = *(closure.add(layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * i)
                     as *const *const u8);
                 if cap.is_null() {
-                    eprintln!("[trace]   capture[{}] = NULL", i);
+                    log::trace!(target: "tidepool::heap", "  capture[{}] = NULL", i);
                 } else {
-                    eprintln!(
-                        "[trace]   capture[{}] = {}",
+                    log::trace!(
+                        target: "tidepool::heap",
+                        "  capture[{}] = {}",
                         i,
                         crate::debug::heap_describe(cap)
                     );
@@ -681,14 +682,15 @@ impl CompiledEffectMachine {
             self.resolve_tail_calls(&mut result);
         }
 
-        if trace >= crate::debug::TraceLevel::Calls {
+        if log::log_enabled!(target: "tidepool::calls", log::Level::Trace) {
             let name = crate::debug::lookup_lambda(code_ptr)
                 .unwrap_or_else(|| format!("0x{:x}", code_ptr));
             if result.is_null() {
-                eprintln!("[trace] {} returned NULL", name);
+                log::trace!(target: "tidepool::calls", "{} returned NULL", name);
             } else {
-                eprintln!(
-                    "[trace] {} returned {}",
+                log::trace!(
+                    target: "tidepool::calls",
+                    "{} returned {}",
                     name,
                     crate::debug::heap_describe(result)
                 );

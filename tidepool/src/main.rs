@@ -1705,6 +1705,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .init();
 
+    // Initialize the `log`-crate diagnostic logging for the JIT subsystems
+    // (tidepool::calls / scope / heap / effects / fp). Routed to stderr via
+    // env_logger; honors RUST_LOG plus the legacy TIDEPOOL_TRACE* env vars.
+    // Independent of the tracing subscriber above (which owns the `tracing::`
+    // macros at the MCP layer); env_logger owns the `log::` global logger.
+    tidepool_codegen::debug::init_logging();
+
     // Fill missing *_API_KEY env vars from .tidepool/secrets/ (drop a key
     // file in, restart, done). Must run before any handler reads the env.
     load_secrets();

@@ -84,6 +84,8 @@ fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
+    tidepool_codegen::debug::init_logging();
+
     // Memo key includes (dev, ino, ctime): mtime/size are user-settable and
     // preserved by adversarial in-place swaps, but ANY write bumps ctime and
     // no userspace tool can reset it — the tamper-evident field. A same-size
@@ -112,18 +114,17 @@ fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&key)
         .copied();
-    if std::env::var("TIDEPOOL_FP_DEBUG").is_ok() {
-        eprintln!(
-            "[FP] path={} key=({},{},{},{},{}) memo_hit={}",
-            path.display(),
-            key.1,
-            key.2,
-            key.3,
-            key.4,
-            key.5,
-            cached.is_some()
-        );
-    }
+    log::debug!(
+        target: "tidepool::fp",
+        "path={} key=({},{},{},{},{}) memo_hit={}",
+        path.display(),
+        key.1,
+        key.2,
+        key.3,
+        key.4,
+        key.5,
+        cached.is_some()
+    );
     let content_hash = match cached {
         Some(h) => h,
         None => {
@@ -151,13 +152,12 @@ fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
                 let bytes = fs::read(p).ok()?;
                 <[u8; 32]>::try_from(bytes.as_slice()).ok()
             });
-            if std::env::var("TIDEPOOL_FP_DEBUG").is_ok() {
-                eprintln!(
-                    "[FP] stat_tag={} sidecar_hit={}",
-                    stat_tag,
-                    from_disk.is_some()
-                );
-            }
+            log::debug!(
+                target: "tidepool::fp",
+                "stat_tag={} sidecar_hit={}",
+                stat_tag,
+                from_disk.is_some()
+            );
             let h: [u8; 32] = match from_disk {
                 Some(h) => h,
                 None => {

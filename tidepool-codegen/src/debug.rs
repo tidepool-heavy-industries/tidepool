@@ -6,9 +6,24 @@
 //! - **heap_validate**: structural integrity checks for heap objects
 //! - **TracingClosureCaller**: wraps closure calls with logging
 //!
-//! Tracing is controlled by the `TIDEPOOL_TRACE` env var:
-//! - `TIDEPOOL_TRACE=calls` — log each closure call (name, arg, result)
-//! - `TIDEPOOL_TRACE=heap` — also validate heap objects before use
+//! Diagnostic tracing is routed through the `log` crate with per-subsystem
+//! targets and controlled by `RUST_LOG` (standard) or the legacy
+//! `TIDEPOOL_TRACE` env var (back-compat). See [`init_logging`].
+//!
+//! Targets:
+//! - `tidepool::calls` (trace) — each closure call (name, arg, result)
+//! - `tidepool::scope` (trace) — emit-time scope/env bookkeeping
+//! - `tidepool::heap`  (trace) — heap-object validation before use
+//! - `tidepool::effects` (debug) — effect dispatch at the JIT↔Rust boundary
+//! - `tidepool::fp` (debug) — runtime cache binary-fingerprint memo
+//!
+//! Legacy mapping (honored by [`init_logging`] for back-compat):
+//! - `TIDEPOOL_TRACE=calls` → `tidepool::calls=trace`
+//! - `TIDEPOOL_TRACE=scope` → `tidepool::calls=trace,tidepool::scope=trace`
+//! - `TIDEPOOL_TRACE=heap`  → calls+scope+heap at trace (preserves the old
+//!   `heap >= scope >= calls` ordering)
+//! - `TIDEPOOL_TRACE_EFFECTS=1` → `tidepool::effects=debug`
+//! - `TIDEPOOL_FP_DEBUG=1` → `tidepool::fp=debug`
 
 use crate::layout;
 use std::cell::RefCell;
@@ -277,8 +292,8 @@ impl TracingClosureCaller {
     /// Caller must ensure callee and arg are valid heap object pointers.
     pub unsafe fn call(&self, callee: *mut u8, arg: *mut u8) -> Result<*mut u8, String> {
         // SAFETY: callee and arg must point to valid HeapObjects.
-        // Tracing is controlled by TIDEPOOL_TRACE=heap.
-        if crate::debug::trace_level() >= crate::debug::TraceLevel::Heap {
+        // Validation is gated on the `tidepool::heap` log target.
+        if log::log_enabled!(target: "tidepool::heap", log::Level::Trace) {
             heap_validate(callee).map_err(|e| format!("Closure validation failed: {}", e))?;
             heap_validate(arg).map_err(|e| format!("Arg validation failed: {}", e))?;
         }
@@ -293,15 +308,14 @@ impl TracingClosureCaller {
             *(callee.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
         let name = lookup_lambda(code_ptr);
 
-        if crate::debug::trace_level() >= crate::debug::TraceLevel::Calls {
-            eprintln!(
-                "[trace] CALL {} callee={:?} arg={:?} ({} captures)",
-                name.as_deref().unwrap_or("unknown"),
-                callee,
-                arg,
-                num_captured
-            );
-        }
+        log::trace!(
+            target: "tidepool::calls",
+            "CALL {} callee={:?} arg={:?} ({} captures)",
+            name.as_deref().unwrap_or("unknown"),
+            callee,
+            arg,
+            num_captured
+        );
 
         // Call the closure
         let func: unsafe extern "C" fn(
@@ -311,15 +325,14 @@ impl TracingClosureCaller {
         ) -> *mut u8 = std::mem::transmute(code_ptr);
         let result = func(self.vmctx, callee, arg);
 
-        if crate::debug::trace_level() >= crate::debug::TraceLevel::Calls {
-            eprintln!(
-                "[trace] RET  {} result={:?}",
-                name.as_deref().unwrap_or("unknown"),
-                result
-            );
-        }
+        log::trace!(
+            target: "tidepool::calls",
+            "RET  {} result={:?}",
+            name.as_deref().unwrap_or("unknown"),
+            result
+        );
 
-        if !result.is_null() && crate::debug::trace_level() >= crate::debug::TraceLevel::Heap {
+        if !result.is_null() && log::log_enabled!(target: "tidepool::heap", log::Level::Trace) {
             heap_validate(result).map_err(|e| format!("Result validation failed: {}", e))?;
         }
 
@@ -378,25 +391,75 @@ pub unsafe fn heap_validate_deep(ptr: *const u8) -> Result<(), HeapError> {
     Ok(())
 }
 
-// ── Trace Level ──────────────────────────────────────────────
+// ── Logging Init ─────────────────────────────────────────────
 
-/// Trace level, controlled by `TIDEPOOL_TRACE` env var.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum TraceLevel {
-    Off,
-    Calls,
-    Scope,
-    Heap,
-}
+/// Initialize diagnostic logging for the JIT subsystems.
+///
+/// Routes the per-subsystem `tidepool::*` log targets to stderr via
+/// `env_logger`. Idempotent and safe to call multiple times (uses `try_init`),
+/// so tests, library entry points, and the MCP server binary may all call it.
+///
+/// Resolution order for the filter:
+/// 1. `RUST_LOG` (standard `env_logger` syntax) — primary mechanism.
+/// 2. Legacy `TIDEPOOL_TRACE` / `TIDEPOOL_TRACE_EFFECTS` / `TIDEPOOL_FP_DEBUG`
+///    env vars, mapped to the equivalent `tidepool::*` targets for back-compat.
+///
+/// If `RUST_LOG` is set it takes precedence (and the legacy vars are appended
+/// after it, so they still add their targets unless `RUST_LOG` already names
+/// them). If neither is set, nothing is logged.
+pub fn init_logging() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let mut directives: Vec<String> = Vec::new();
 
-/// Read the trace level from the environment. Cached after first call.
-pub fn trace_level() -> TraceLevel {
-    use std::sync::OnceLock;
-    static LEVEL: OnceLock<TraceLevel> = OnceLock::new();
-    *LEVEL.get_or_init(|| match std::env::var("TIDEPOOL_TRACE").as_deref() {
-        Ok("calls") => TraceLevel::Calls,
-        Ok("scope") => TraceLevel::Scope,
-        Ok("heap") => TraceLevel::Heap,
-        _ => TraceLevel::Off,
-    })
+        // RUST_LOG first (highest precedence in env_logger's last-wins parser
+        // is actually first-match-wins per target, so put explicit user
+        // directives ahead of legacy-derived ones).
+        if let Ok(rust_log) = std::env::var("RUST_LOG") {
+            if !rust_log.is_empty() {
+                directives.push(rust_log);
+            }
+        }
+
+        // Legacy TIDEPOOL_TRACE — preserve old `heap >= scope >= calls`
+        // ordering: a higher level enables all lower targets.
+        match std::env::var("TIDEPOOL_TRACE").as_deref() {
+            Ok("calls") => {
+                directives.push("tidepool::calls=trace".into());
+            }
+            Ok("scope") => {
+                directives.push("tidepool::calls=trace".into());
+                directives.push("tidepool::scope=trace".into());
+            }
+            Ok("heap") => {
+                directives.push("tidepool::calls=trace".into());
+                directives.push("tidepool::scope=trace".into());
+                directives.push("tidepool::heap=trace".into());
+            }
+            _ => {}
+        }
+
+        if std::env::var("TIDEPOOL_TRACE_EFFECTS").is_ok() {
+            directives.push("tidepool::effects=debug".into());
+        }
+        if std::env::var("TIDEPOOL_FP_DEBUG").is_ok() {
+            directives.push("tidepool::fp=debug".into());
+        }
+
+        let filter = directives.join(",");
+
+        let mut builder = env_logger::Builder::new();
+        builder.target(env_logger::Target::Stderr);
+        if filter.is_empty() {
+            // Nothing requested: env_logger defaults to `error`, which is fine —
+            // our diagnostic targets are trace/debug and stay silent.
+            builder.parse_filters("");
+        } else {
+            builder.parse_filters(&filter);
+        }
+        // try_init: don't panic if a logger is already installed (e.g. a test
+        // harness or another crate set one first).
+        let _ = builder.try_init();
+    });
 }

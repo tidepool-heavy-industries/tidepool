@@ -363,13 +363,11 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                     return Ok(SsaVal::HeapPtr(poison_val));
                 }
 
-                if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                    args.ctx.trace_scope(&format!(
-                        "MISS var {:?} (env has {} entries)",
-                        vid,
-                        args.ctx.env.len()
-                    ));
-                }
+                args.ctx.trace_scope(&format!(
+                    "MISS var {:?} (env has {} entries)",
+                    vid,
+                    args.ctx.env.len()
+                ));
                 let trap_fn = args
                     .sess
                     .pipeline
@@ -1118,7 +1116,7 @@ fn compute_captures(
         .filter(|v| !ctx.env.contains_key(v))
         .copied()
         .collect();
-    if !dropped.is_empty() && crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
+    if !dropped.is_empty() {
         ctx.trace_scope(&format!(
             "{} capture: dropped {} free vars not in scope: {:?}",
             label,
@@ -1175,9 +1173,7 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
     args.sess
         .pipeline
         .register_lambda(lambda_func_id, lambda_name.clone());
-    if crate::debug::trace_level() >= crate::debug::TraceLevel::Calls {
-        eprintln!("[emit] {} binder={:#x}", lambda_name, binder.0);
-    }
+    log::trace!(target: "tidepool::calls", "[emit] {} binder={:#x}", lambda_name, binder.0);
 
     let mut inner_ctx = Context::new();
     inner_ctx.func.signature = closure_sig;
@@ -1220,9 +1216,7 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
     inner_emit.lambda_counter = args.ctx.lambda_counter;
     inner_emit.current_fn = lambda_name.clone();
 
-    if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-        inner_emit.trace_scope(&format!("insert lam binder {:?}", binder));
-    }
+    inner_emit.trace_scope(&format!("insert lam binder {:?}", binder));
     inner_emit.env.insert(binder, SsaVal::HeapPtr(arg_param));
 
     for (i, (var_id, _)) in captures.iter().enumerate() {
@@ -1231,9 +1225,7 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
             .ins()
             .load(types::I64, MemFlags::trusted(), closure_self, offset);
         inner_builder.declare_value_needs_stack_map(val);
-        if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-            inner_emit.trace_scope(&format!("insert lam capture {:?}", var_id));
-        }
+        inner_emit.trace_scope(&format!("insert lam capture {:?}", var_id));
         inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
     }
 
@@ -1443,9 +1435,7 @@ fn emit_thunk(args: EmitArgs, body_idx: usize) -> Result<SsaVal, EmitError> {
             .ins()
             .load(types::I64, MemFlags::trusted(), thunk_self, offset);
         inner_builder.declare_value_needs_stack_map(val);
-        if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-            inner_emit.trace_scope(&format!("insert thunk capture {:?}", var_id));
-        }
+        inner_emit.trace_scope(&format!("insert thunk capture {:?}", var_id));
         inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
     }
 
@@ -1899,9 +1889,7 @@ impl EmitContext {
                                             binder, old_val,
                                         )));
                                     }
-                                } else if crate::debug::trace_level()
-                                    >= crate::debug::TraceLevel::Scope
-                                {
+                                } else {
                                     args.ctx
                                         .trace_scope(&format!("DCE skip LetNonRec {:?}", binder));
                                 }
@@ -2051,10 +2039,8 @@ impl EmitContext {
                     let val = vals.pop().ok_or_else(|| {
                         EmitError::InternalError("Bind: empty value stack".into())
                     })?;
-                    if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                        args.ctx
-                            .trace_scope(&format!("insert LetNonRec {:?}", binder));
-                    }
+                    args.ctx
+                        .trace_scope(&format!("insert LetNonRec {:?}", binder));
                     args.ctx.env.insert(binder, val);
                 }
                 EmitWork::LetRecFinish {
@@ -2076,10 +2062,8 @@ impl EmitContext {
                 }
                 EmitWork::LetCleanupMark(cleanup) => match cleanup {
                     LetCleanup::Single(var, old_val) => {
-                        if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                            args.ctx
-                                .trace_scope(&format!("restore LetCleanup {:?}", var));
-                        }
+                        args.ctx
+                            .trace_scope(&format!("restore LetCleanup {:?}", var));
                         args.ctx.env.restore(var, old_val);
                     }
                     LetCleanup::Rec(scope) => {
@@ -2361,9 +2345,7 @@ impl EmitContext {
                         })
                         .copied()
                         .collect();
-                    if !dropped_fvs.is_empty()
-                        && crate::debug::trace_level() >= crate::debug::TraceLevel::Scope
-                    {
+                    if !dropped_fvs.is_empty() {
                         args.ctx.trace_scope(&format!(
                             "LetRec lam {:?}: dropped FVs {:?}",
                             binder, dropped_fvs
@@ -2479,10 +2461,8 @@ impl EmitContext {
                 PreAlloc::Lam { binder, ptr, .. } => (*binder, *ptr),
                 PreAlloc::Con { binder, ptr, .. } => (*binder, *ptr),
             };
-            if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                args.ctx
-                    .trace_scope(&format!("insert LetRec(rec) {:?}", binder));
-            }
+            args.ctx
+                .trace_scope(&format!("insert LetRec(rec) {:?}", binder));
             args.ctx.env.insert(binder, SsaVal::HeapPtr(ptr));
         }
 
@@ -2576,12 +2556,11 @@ impl EmitContext {
             let mut inner_emit = EmitContext::new(args.ctx.prefix.clone());
             inner_emit.lambda_counter = args.ctx.lambda_counter;
             inner_emit.current_fn = lambda_name.clone();
-            if crate::debug::trace_level() >= crate::debug::TraceLevel::Calls {
-                eprintln!(
-                    "[emit-letrec] {} lam_binder={:#x}",
-                    lambda_name, lam_binder.0
-                );
-            }
+            log::trace!(
+                target: "tidepool::calls",
+                "[emit-letrec] {} lam_binder={:#x}",
+                lambda_name, lam_binder.0
+            );
             inner_emit
                 .env
                 .insert(lam_binder, SsaVal::HeapPtr(inner_arg));
@@ -2813,13 +2792,11 @@ impl EmitContext {
                     *rhs_idx,
                 )?
             };
-            if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-                args.ctx.trace_scope(&format!(
-                    "{} LetRec(simple) {:?}",
-                    if resolvable_now { "insert" } else { "thunk" },
-                    binder
-                ));
-            }
+            args.ctx.trace_scope(&format!(
+                "{} LetRec(simple) {:?}",
+                if resolvable_now { "insert" } else { "thunk" },
+                binder
+            ));
             args.ctx.env.insert(*binder, sv);
             Self::letrec_post_simple_step(
                 EmitArgs {

@@ -23,6 +23,8 @@ tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
 tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
 tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
 thiserror = "1"
+log = "0.4"
+env_logger = "0.11"
 recursion = "0.5.4"
 rustc-hash = "2.1.0"
 # Stack-growth insurance at the emit recursion spine (emit_node). Tiny, widely

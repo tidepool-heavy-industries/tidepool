@@ -289,9 +289,7 @@ impl EmitContext {
     }
 
     pub fn trace_scope(&self, msg: &str) {
-        if crate::debug::trace_level() >= crate::debug::TraceLevel::Scope {
-            eprintln!("[scope:{}] {}", self.prefix, msg);
-        }
+        log::trace!(target: "tidepool::scope", "[{}] {}", self.prefix, msg);
     }
 
     pub fn next_lambda_name(&mut self) -> String {
