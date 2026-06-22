@@ -212,7 +212,7 @@ histogram (x:xs) =
 
 -- | Remove elements at specified indices
 removeAt :: [Int] -> [a] -> [a]
-removeAt is = map snd . filter (\(i,_) -> not (elem i is)) . indexed
+removeAt is = map snd . filter (\(i,_) -> not (elem i is)) . zip [0..]
 
 -- | Insert an element at a given index
 insertAt :: Int -> a -> [a] -> [a]
