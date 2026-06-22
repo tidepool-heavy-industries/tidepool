@@ -132,13 +132,11 @@ module Tidepool.Prelude
     -- * JSON lenses (Tidepool.Aeson.Lens + Control.Lens)
   , key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double
   , members, values, _Null
-  , preview, toListOf, (^?), (^..), (&), (.~), (%~), to, _Just, traverse
-    -- * Control.Lens analysis-side combinators
-  , view, (^.), over, set, filtered, has, hasn't, only, each, both, folded
-  , at, (?~), sans, non, _Left, _Right, _Nothing
-  , sumOf, maximumOf, minimumOf, lengthOf, anyOf, allOf
-  , re, taking, dropping, mapMOf, forOf_
-  , _1, _2, ix
+    -- * ALL of Control.Lens, re-exported wholesale (indexed optics ^@.. / itoListOf,
+    -- partsOf, _head/_last/_init/_tail, prism/iso/lens builders, etc.). The clashing
+    -- names keep the Tidepool version: `imap`, `first`/`second`/`bimap` (Prelude's
+    -- monomorphic list/tuple defs) and `(.=)` (Aeson's object-pair operator).
+  , module Control.Lens
     -- * JSON Value helpers
   , (?.), lookupKey, asText, asInt, asDouble, asBool, asArray, asObject
     -- * Map operations (qualified via Map prefix)
@@ -214,14 +212,9 @@ import Tidepool.QQ.Fmt.Runtime
   (FSign(..), FAlign(..), fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain)
 import Tidepool.Aeson (Value(..), Key, object, (.=), toJSON, ToJSON, fromText)
 import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double, members, values, _Null)
-import Control.Lens
-  ( preview, toListOf, (^?), (^..), (&), (<&>), (.~), (%~), to, _Just, traverse
-  , view, (^.), over, set, filtered, has, hasn't, only, each, both, folded
-  , at, (?~), sans, non, _Left, _Right, _Nothing
-  , sumOf, maximumOf, minimumOf, lengthOf, anyOf, allOf
-  , re, taking, dropping, mapMOf, forOf_
-  , _1, _2, ix
-  )
+-- Wholesale Control.Lens, hiding only the two genuine clashes: `imap` (Prelude's
+-- list-index map, defined below) and `(.=)` (Aeson's object-pair operator, above).
+import Control.Lens hiding (imap, (.=), first, second, bimap)
 import qualified Data.Map.Strict as Map
 
 -- Permanent binding-level interception in Translate.hs.
