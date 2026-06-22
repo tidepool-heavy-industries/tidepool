@@ -86,6 +86,28 @@ Trace flag → both machines (eval + JIT) keep a ring buffer of
 index. Localizes future #313-style hunts to one rerun. A tool, not a
 subsystem; build when the next gnarly divergence shows up.
 
+## G. JSON decode for evals (vendored-aeson gap) — TODO (small)
+
+The vendored aeson is construction-only (ToJSON; parser stripped, PR #144). An
+eval can BUILD JSON freely and CONSUME the `input` lane via lens
+(`^?`/`^..`/`_String`/`as*`), but there is no way to turn an arbitrary JSON
+**string** (from `readFile`/`run` output) into a `Value` — the only parse path
+is `httpGet`/`httpPost`, which already `serde_json::from_str` the body Rust-side
+(`tidepool/src/main.rs` `parse_response`). Note: `httpGet` already returns a
+parsed `Value`, so an `httpGetJSON` variant would be a no-op duplicate.
+
+- **Minimal bandaid:** expose that same Rust-side parse as a standalone verb —
+  `parseJson :: Text -> M Value` (+ `tryParseJson :: Text -> M (Either Text Value)`).
+  One new effect constructor mirroring `HttpGet`'s structure (decl in
+  `tidepool-mcp/src/lib.rs` + handler in `tidepool/src/main.rs`); reuses the
+  existing `serde_json::from_str`. Closes the gap; lens consumes the result.
+- **Bigger (separate):** typed decode — re-add `FromJSON` + `fromJSON ::
+  Value -> Result a` + `Result(..)` (pure Haskell, operates on an existing
+  `Value`, no text-parser risk) so records decode without hand-lensing every
+  field. Generic deriving is the nice-but-heavier part. Do only if the lens
+  path proves too verbose in practice.
+- Trigger: any eval that needs to parse local/command-produced JSON.
+
 ## F. Retire the eager effect-results path — TODO (after soak)
 
 The lazy path is default-on and W4 exonerated it across a 33-cell
