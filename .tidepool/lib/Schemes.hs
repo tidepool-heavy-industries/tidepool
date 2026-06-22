@@ -85,26 +85,6 @@ paraM f z []     = pure z
 paraM f z (x:xs) = paraM f z xs >>= f x xs
 
 -- ===========================================================================
--- § Lenses (van Laarhoven — compose with ^?, .~, %~, &)
--- ===========================================================================
-
-lens :: (s -> a) -> (s -> a -> s) -> Functor f => (a -> f a) -> s -> f s
-lens get set f s = (\a -> set s a) <$> f (get s)
-
-_1 :: Functor f => (a -> f a) -> (a, b) -> f (a, b)
-_1 f (a, b) = (\a' -> (a', b)) <$> f a
-
-_2 :: Functor f => (b -> f b) -> (a, b) -> f (a, b)
-_2 f (a, b) = (\b' -> (a, b')) <$> f b
-
-ix :: Applicative f => Int -> (a -> f a) -> [a] -> f [a]
-ix i f xs
-  | i < 0     = pure xs
-  | otherwise = case splitAt i xs of
-      (before, x:after) -> (\x' -> before ++ [x'] ++ after) <$> f x
-      _                 -> pure xs  -- index out of bounds: no-op
-
--- ===========================================================================
 -- § Bounded Iteration
 -- ===========================================================================
 

@@ -127,6 +127,12 @@ module Tidepool.Prelude
   , key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double
   , members, values, _Null
   , preview, toListOf, (^?), (^..), (&), (.~), (%~), to, _Just, traverse
+    -- * Control.Lens analysis-side combinators
+  , view, (^.), over, set, filtered, has, hasn't, only, each, both, folded
+  , at, (?~), sans, non, _Left, _Right, _Nothing
+  , sumOf, maximumOf, minimumOf, lengthOf, anyOf, allOf
+  , re, taking, dropping, mapMOf, forOf_
+  , _1, _2, ix
     -- * JSON Value helpers
   , (?.), lookupKey, asText, asInt, asDouble, asBool, asArray, asObject
     -- * Map operations (qualified via Map prefix)
@@ -199,7 +205,14 @@ import Tidepool.QQ.Fmt.Runtime
   (FSign(..), FAlign(..), fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain)
 import Tidepool.Aeson (Value(..), Key, object, (.=), toJSON, ToJSON, fromText)
 import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double, members, values, _Null)
-import Control.Lens (preview, toListOf, (^?), (^..), (&), (<&>), (.~), (%~), to, _Just, traverse)
+import Control.Lens
+  ( preview, toListOf, (^?), (^..), (&), (<&>), (.~), (%~), to, _Just, traverse
+  , view, (^.), over, set, filtered, has, hasn't, only, each, both, folded
+  , at, (?~), sans, non, _Left, _Right, _Nothing
+  , sumOf, maximumOf, minimumOf, lengthOf, anyOf, allOf
+  , re, taking, dropping, mapMOf, forOf_
+  , _1, _2, ix
+  )
 import qualified Data.Map.Strict as Map
 
 -- Permanent binding-level interception in Translate.hs.
