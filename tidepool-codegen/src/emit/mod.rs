@@ -28,6 +28,20 @@ pub(crate) fn runtime_case_trap_sig(
     sig
 }
 
+/// ABI signature of the `heap_force` host fn: `(vmctx, obj)` (both `I64`)
+/// returning the forced WHNF pointer (`I64`). Centralized — it was hand-declared
+/// identically at five emit sites (case.rs, expr.rs ×3, primop.rs).
+pub(crate) fn heap_force_sig(
+    call_conv: cranelift_codegen::isa::CallConv,
+) -> cranelift_codegen::ir::Signature {
+    use cranelift_codegen::ir::{types, AbiParam, Signature};
+    let mut sig = Signature::new(call_conv);
+    sig.params.push(AbiParam::new(types::I64)); // vmctx
+    sig.params.push(AbiParam::new(types::I64)); // obj
+    sig.returns.push(AbiParam::new(types::I64)); // forced
+    sig
+}
+
 /// DataConIds of GHC's boxed-literal wrapper constructors (`I#`, `W#`, `C#`,
 /// `F#`, `D#`), resolved once per compile from the [`DataConTable`].
 ///

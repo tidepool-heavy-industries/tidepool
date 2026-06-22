@@ -25,24 +25,41 @@ similar) → extract a named helper → `cargo build`/`clippy`/`test`. A pair th
 turns out non-trivially different on inspection is SKIPPED with a note (like the
 report's `oracle.rs` pair).
 
-- [x] **1. `runtime_case_trap` sig** (primop.rs ×2 + **case.rs** — tidepool found
-  a 3rd site the report missed). 100% identical ABI sig. → `runtime_case_trap_sig`
-  in `emit/mod.rs`; each site keeps its own declare + `.expect`/`.map_err`.
-  GREEN (build/clippy/test).
-- [ ] 2. `from_value` codegen — bridge-derive `codegen.rs:194,357` (92%) →
-  `generate_from_to_core_base`. (Near-dup; verify the 8% delta first.)
-- [ ] 3. unbox heap pointer — primop.rs:2134,2205 (90%) → `emit_unbox_heap_ptr`.
-- [ ] 4. pipeline fn-decl setup — pipeline.rs:271,295 (90%) → `declare_fn_common`.
-- [ ] 5. HS path resolution — macro `expand.rs:46,171` (90%) → `resolve_hs_path`.
-- [ ] 6. effect-machine apply — `effect_machine.rs` apply_cont variants (87%) →
-  `apply_cont_common`. (Verify carefully — apply_cont is #313-adjacent.)
-- [ ] 7. emit force_fn — expr.rs:585,2141 (84%) → `emit_force_fn`. (Lowest
-  overlap; most likely to be a judgment call.)
+- [x] **1. `runtime_case_trap` sig** — DONE. primop.rs ×2 + **case.rs** (tidepool
+  found a 3rd site the report missed); 100% identical ABI sig. →
+  `runtime_case_trap_sig` in `emit/mod.rs`. GREEN, committed `1465027`.
+- [x] **7. `heap_force` sig** — DONE. The report saw 2 (expr.rs); tidepool found
+  **5** (case.rs, expr.rs ×3, primop.rs), all the same `(vmctx,obj)->I64` sig. →
+  `heap_force_sig` in `emit/mod.rs`; trimmed case.rs's now-unused import. GREEN.
+- [ ] **5. `resolve_hs_path`** — TODO (real). `tidepool-macro/src/expand.rs`
+  `expand_hs`/`expand_expr_hs` share the `::binding`-suffix + manifest-dir path
+  prologue (pure string logic). Extract a shared `resolve_hs_path`.
+- ~~2. from_value codegen~~ — SKIP. bridge-derive `codegen.rs` — two *different*
+  `quote!` generators (multi-con match-arms vs single-con+arity). 92% lines but
+  divergent templates; factoring the scaffolding out of `quote!` blocks isn't a
+  net win.
+- ~~3. unbox heap pointer~~ — DEFER. `unbox_addr`/`unbox_bytearray` share the
+  HeapPtr-unbox prologue, but it's delicate Cranelift block-building feeding
+  divergent continuations, and there's a whole `unbox_*` family — a real but
+  riskier refactor for later, not a quick win.
+- ~~4. pipeline fn-decl setup~~ — SKIP. Both are `#[test]` fns
+  (`test_get_function_ptr_after_finalize`/`test_build_lambda_registry`) sharing
+  setup boilerplate. Test code; marginal.
+- ~~6. apply_cont~~ — SKIP (mislabeled). Not apply_cont — two identical
+  `impl FromValue for TestReq` fixtures in `#[cfg(test)]` modules of
+  `tidepool-effect/src/machine.rs`. Test code.
+
+## Findings about the LLM line-similarity report
+
+Tidepool's structural pull + judgment found the report's "7 extractable" was
+~50% false-positive for *production* wins: 2 were test boilerplate (#4, #6), 1
+divergent `quote!` (#2), 1 risky family (#3). The genuine wins were the two
+ABI-signature dedups (#1, #7) — which the report UNDER-counted (3 and 5 sites,
+reported as 2 each), because the in-file pairwise detector can't see the
+cross-file repeats. Lesson: line-overlap % flags candidates; it can't tell
+test-from-production or identical-from-merely-similar — that needs the pull +
+a human/structural check, which is exactly the tidepool loop.
 
 ## Notes
 
-- Items 2–7 are near-dups (84–92%), NOT 100% — each needs the "confirm identical
-  enough" eval before extracting; some may be SKIP-as-intentional.
-- #6 (apply_cont) touches the effect machine — gate on the full
-  `tidepool-codegen` + `tidepool-runtime` suites, not just a build.
-- One commit per extraction (or per small batch) so a regression bisects cleanly.
+- One commit per extraction so a regression bisects cleanly.

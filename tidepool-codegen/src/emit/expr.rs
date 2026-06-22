@@ -587,13 +587,11 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                 .sess
                 .pipeline
                 .module
-                .declare_function("heap_force", Linkage::Import, &{
-                    let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-                    sig.params.push(AbiParam::new(types::I64)); // vmctx
-                    sig.params.push(AbiParam::new(types::I64)); // thunk
-                    sig.returns.push(AbiParam::new(types::I64)); // result
-                    sig
-                })
+                .declare_function(
+                    "heap_force",
+                    Linkage::Import,
+                    &crate::emit::heap_force_sig(args.sess.pipeline.isa.default_call_conv()),
+                )
                 .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
             let force_ref = args
                 .sess
@@ -2143,13 +2141,11 @@ impl EmitContext {
             .sess
             .pipeline
             .module
-            .declare_function("heap_force", Linkage::Import, &{
-                let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-                sig.params.push(AbiParam::new(types::I64));
-                sig.params.push(AbiParam::new(types::I64));
-                sig.returns.push(AbiParam::new(types::I64));
-                sig
-            })
+            .declare_function(
+                "heap_force",
+                Linkage::Import,
+                &crate::emit::heap_force_sig(args.sess.pipeline.isa.default_call_conv()),
+            )
             .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
         let force_ref = args
             .sess
@@ -3261,13 +3257,11 @@ pub(crate) fn force_thunk_ssaval(
 
             let force_fn = pipeline
                 .module
-                .declare_function("heap_force", Linkage::Import, &{
-                    let mut sig = Signature::new(pipeline.isa.default_call_conv());
-                    sig.params.push(AbiParam::new(types::I64)); // vmctx
-                    sig.params.push(AbiParam::new(types::I64)); // thunk
-                    sig.returns.push(AbiParam::new(types::I64)); // result
-                    sig
-                })
+                .declare_function(
+                    "heap_force",
+                    Linkage::Import,
+                    &crate::emit::heap_force_sig(pipeline.isa.default_call_conv()),
+                )
                 .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
             let force_ref = pipeline.module.declare_func_in_func(force_fn, builder.func);
             let call = builder.ins().call(force_ref, &[vmctx, ptr]);

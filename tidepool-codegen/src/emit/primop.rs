@@ -2334,13 +2334,11 @@ fn unbox_numeric(
             builder.seal_block(thunk_force_block);
             let force_fn = pipeline
                 .module
-                .declare_function("heap_force", Linkage::Import, &{
-                    let mut sig = Signature::new(pipeline.isa.default_call_conv());
-                    sig.params.push(AbiParam::new(types::I64)); // vmctx
-                    sig.params.push(AbiParam::new(types::I64)); // obj
-                    sig.returns.push(AbiParam::new(types::I64)); // forced
-                    sig
-                })
+                .declare_function(
+                    "heap_force",
+                    Linkage::Import,
+                    &crate::emit::heap_force_sig(pipeline.isa.default_call_conv()),
+                )
                 .expect("declare heap_force");
             let force_ref = pipeline.module.declare_func_in_func(force_fn, builder.func);
             let inst = builder.ins().call(force_ref, &[vmctx, curr_v]);

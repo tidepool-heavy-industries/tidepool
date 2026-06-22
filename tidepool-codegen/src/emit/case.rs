@@ -1,7 +1,7 @@
 use crate::emit::expr::{ensure_heap_ptr, force_thunk_ssaval};
 use crate::emit::*;
 use cranelift_codegen::ir::{
-    self, condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlags, Signature, Value,
+    self, condcodes::IntCC, types, BlockArg, InstBuilder, MemFlags, Value,
 };
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
@@ -162,13 +162,11 @@ fn emit_data_dispatch(
         .sess
         .pipeline
         .module
-        .declare_function("heap_force", Linkage::Import, &{
-            let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-            sig.params.push(AbiParam::new(types::I64)); // vmctx
-            sig.params.push(AbiParam::new(types::I64)); // thunk
-            sig.returns.push(AbiParam::new(types::I64)); // result
-            sig
-        })
+        .declare_function(
+            "heap_force",
+            Linkage::Import,
+            &crate::emit::heap_force_sig(args.sess.pipeline.isa.default_call_conv()),
+        )
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
     let force_ref = args
         .sess
