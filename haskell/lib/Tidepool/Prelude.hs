@@ -64,6 +64,7 @@ module Tidepool.Prelude
   , nubBy
   , sort
   , sortBy
+  , maximumBy, minimumBy
   , concatMap, concatMapM
   , append
   , (++)
@@ -195,7 +196,7 @@ import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import Data.Char (ord, chr)
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe)
-import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, sortOn)
+import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, sortOn, maximumBy, minimumBy)
 -- Bifunctor first/second (polymorphic — tuples AND Either). Control.Lens
 -- re-exports `bimap` but NOT first/second, so import those two from the library.
 import Data.Bifunctor (first, second)
