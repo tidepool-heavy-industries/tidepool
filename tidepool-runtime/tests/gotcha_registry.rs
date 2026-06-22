@@ -140,6 +140,27 @@ fn works_error_worker_folds() {
     );
 }
 
+/// `FromJSON` — the pure `Value -> a` structural-decode layer that backs
+/// `parseJson`. Typeclass-dictionary dispatch over `Value` constructor matches,
+/// running on the JIT: `[a]` traverses, `Int` reads a `Number`, the polymorphic
+/// `fromJSON` round-trips a `toJSON`-built `Value`. (The `ParseJson` *effect*
+/// half — serde_json text→Value — is exercised by live eval + the FromCore
+/// roundtrip; the `NullDispatcher` here returns `0` for all effects, so only the
+/// pure layer is probeable.) Feature shipped 2026-06-22.
+#[test]
+fn works_from_json() {
+    // FromJSON [Int]: build an Array via toJSON, decode it back, sum it.
+    works(
+        r#"pure (case (fromJSON (toJSON [1,2,3::Int]) :: Result [Int]) of { Success xs -> sum xs; Error _ -> (-1) })"#,
+        serde_json::json!(6),
+    );
+    // FromJSON Value is identity; mismatches surface as Error, not a crash.
+    works(
+        r#"pure (case (fromJSON (toJSON ("hi"::Text)) :: Result Int) of { Success _ -> "wrong"::Text; Error _ -> "mismatch-ok" })"#,
+        serde_json::json!("mismatch-ok"),
+    );
+}
+
 /// `nub` — works (O(n²) but correct), no longer a SIGILL fear.
 #[test]
 fn works_nub_dedup() {

@@ -18,6 +18,7 @@ executable tidepool-extract-bin
     Tidepool.Aeson.Value
     Tidepool.Aeson.KeyMap
     Tidepool.Aeson.Lens
+    Tidepool.Aeson.FromJSON
     Tidepool.QQ
     Tidepool.QQ.Fmt
     Tidepool.QQ.Fmt.Runtime

@@ -803,6 +803,16 @@ enum HttpReq {
     TryGet(String),
     #[core(name = "TryHttpPost")]
     TryPost(String, Value),
+    #[core(name = "ParseJson")]
+    ParseJson(String),
+    #[core(name = "TryParseJson")]
+    TryParseJson(String),
+}
+
+/// Parse a JSON string into a `serde_json::Value` (the bridge then marshals it to
+/// the eval's `Value`, same path as `HttpGet`). Spec-compliant via serde_json.
+fn parse_json_str(s: &str) -> Result<serde_json::Value, EffectError> {
+    serde_json::from_str(s).map_err(|e| EffectError::Handler(format!("invalid JSON: {e}")))
 }
 
 #[derive(Clone)]
@@ -917,6 +927,10 @@ impl EffectHandler<CapturedOutput> for HttpHandler {
                 let json_body = tidepool_runtime::value_to_json(&body_val, cx.table(), 0);
                 cx.respond_caught(self.post(&url_str, &json_body))
             }
+            // Parse a JSON string Rust-side (serde_json); ParseJson raises on
+            // invalid JSON, TryParseJson isolates it to Left.
+            HttpReq::ParseJson(s) => cx.respond(parse_json_str(&s)?),
+            HttpReq::TryParseJson(s) => cx.respond_caught(parse_json_str(&s)),
         }
     }
 }

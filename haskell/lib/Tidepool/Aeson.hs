@@ -19,6 +19,11 @@ module Tidepool.Aeson
   , emptyArray
     -- * ToJSON class
   , ToJSON(..)
+    -- * FromJSON / structural decode (from Tidepool.Aeson.FromJSON)
+  , FromJSON(..)
+  , Result(..)
+  , fromJSON
+  , resultToEither
     -- * Lens accessors (from Tidepool.Aeson.Lens)
   , key
   , members
@@ -36,3 +41,4 @@ module Tidepool.Aeson
 
 import Tidepool.Aeson.Value
 import Tidepool.Aeson.Lens
+import Tidepool.Aeson.FromJSON
