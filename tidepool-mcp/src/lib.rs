@@ -169,7 +169,9 @@ pub fn fs_decl() -> EffectDecl {
             "FsGlob :: Text -> Fs [Text]",
             "FsGrep :: Text -> Text -> Fs [(Text, Int, Text)]",
             "FsExists :: Text -> Fs Bool",
-            "FsMetadata :: Text -> Fs (Int, Bool, Bool)",
+            // Value-native: `{size, is_file, is_dir}` on success, `Null` for a
+            // missing/unreadable path — lens in with `^? key \"size\" . _Int`.
+            "FsMetadata :: Text -> Fs Value",
             // Failure-isolating read: Left on a read error (missing file,
             // permission, non-UTF-8) instead of killing the eval.
             "TryFsRead :: Text -> Fs (Either Text Text)",
@@ -182,9 +184,9 @@ pub fn fs_decl() -> EffectDecl {
             "appendFile :: Text -> Text -> M ()\nappendFile p t = readFile p >>= \\old -> writeFile p (old <> t)",
             "listDirectory :: Text -> M [Text]\nlistDirectory = send . FsListDir",
             "doesFileExist :: Text -> M Bool\ndoesFileExist = send . FsExists",
-            "doesDirectoryExist :: Text -> M Bool\ndoesDirectoryExist p = do { (_, _, d) <- send (FsMetadata p); pure d }",
-            "getFileSize :: Text -> M Int\ngetFileSize p = do { (s, _, _) <- send (FsMetadata p); pure s }",
-            "fsMeta :: Text -> M (Int, Bool, Bool)\nfsMeta = send . FsMetadata",
+            "doesDirectoryExist :: Text -> M Bool\ndoesDirectoryExist p = send (FsMetadata p) <&> (== Just True) . (^? key \"is_dir\" . _Bool)",
+            "-- | File size in bytes, or `Nothing` if the path is missing.\ngetFileSize :: Text -> M (Maybe Int)\ngetFileSize p = send (FsMetadata p) <&> (^? key \"size\" . _Int)",
+            "-- | Raw metadata as a Value: `{size, is_file, is_dir}`, or `Null` if missing.\nfsMeta :: Text -> M Value\nfsMeta = send . FsMetadata",
             "getCurrentDirectory :: M Text\ngetCurrentDirectory = do { (_, d, _) <- run \"pwd\"; pure (T.strip d) }",
             "glob :: Text -> M [Text]\nglob = send . FsGlob",
             "-- | Search for a regex pattern in files matching a glob.\ngrepGlob :: Text -> Text -> M [(Text, Int, Text)]\ngrepGlob pat g = send (FsGrep pat g)",
@@ -205,10 +207,16 @@ pub fn sg_decl() -> EffectDecl {
         ),
         type_defs: &[
             "data Lang = Rust | Python | TypeScript | JavaScript | Go | Java | C | Cpp | Haskell | Nix | Html | Css | Json | Yaml | Toml",
-            "data Match = Match { matchText :: Text, matchFile :: Text, matchLine :: Int, matchVars :: [(Text, Text)], matchReplacement :: Text }",
-            "instance ToJSON Match where\n  toJSON (Match t f l vs r) = object ([\"text\" .= t, \"file\" .= f, \"line\" .= l] ++ (if null vs then [] else [\"vars\" .= toJSON (Map.fromList vs)]) ++ (if T.null r then [] else [\"replacement\" .= r]))",
+            // matchVarsList is the wire field the bridge fills (a list of pairs);
+            // matchVars is the Map-typed accessor models actually reach for
+            // (`Map.lookup \"NAME\" (matchVars m)`). Map.fromList reuses Data.Map's
+            // own balancing in the JIT — no Rust-side tree build needed.
+            "data Match = Match { matchText :: Text, matchFile :: Text, matchLine :: Int, matchVarsList :: [(Text, Text)], matchReplacement :: Text }",
+            "matchVars :: Match -> Map Text Text",
+            "matchVars = Map.fromList . matchVarsList",
+            "instance ToJSON Match where\n  toJSON m@(Match t f l _ r) = object ([\"text\" .= t, \"file\" .= f, \"line\" .= l] ++ (let vs = matchVars m in if Map.null vs then [] else [\"vars\" .= toJSON vs]) ++ (if T.null r then [] else [\"replacement\" .= r]))",
             "var :: Match -> Text -> Text",
-            "var m k = case [v | (k', v) <- matchVars m, k' == k] of { (x:_) -> x; _ -> \"\" }",
+            "var m k = Map.findWithDefault \"\" k (matchVars m)",
         ],
         constructors: &[
             "SgFind    :: Lang -> Text -> [Text] -> SG [Match]",
@@ -546,6 +554,9 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
     out.push_str("import Tidepool.Effects\n");
     out.push_str("import qualified Tidepool.Data.Text as T\n");
     out.push_str("import qualified Data.Map.Strict as Map\n");
+    // Merge/reconcile API (merge, zipWithMatched, mapMissing, …) — strict, to
+    // match Map. Needs its own qualifier; not covered by the Map. submodule.
+    out.push_str("import qualified Data.Map.Merge.Strict as MM\n");
     out.push_str("import qualified Data.Set as Set\n");
     out.push_str("import qualified Tidepool.Aeson.KeyMap as KM\n");
     out.push_str("import qualified Data.List as L\n");
@@ -890,8 +901,9 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         "Use `send (Constructor args)` to invoke effects. ",
         "First call is slow (~2s). Subsequent calls are cached.\n",
         "Qualified namespaces always in scope: T. (Data.Text), L. (Data.List), ",
-        "Map. (Data.Map.Strict), Set. (Data.Set), KM. (Tidepool.Aeson.KeyMap), ",
-        "TT. (Tidepool.Text), Tab. (Tidepool.Table), P. (Prelude) \u{2014} ",
+        "Map. (Data.Map.Strict), MM. (Data.Map.Merge.Strict), Set. (Data.Set), ",
+        "KM. (Tidepool.Aeson.KeyMap), TT. (Tidepool.Text), Tab. (Tidepool.Table), ",
+        "P. (Prelude) \u{2014} ",
         "prefer the unqualified Prelude shadows where they exist (they are ",
         "the JIT-safe versions).\n",
         "Return values are automatically rendered to JSON by the Rust runtime \u{2014} ",
@@ -2621,11 +2633,10 @@ mod tests {
         // Verify grepGlob exists in Fs section
         assert!(preamble.contains("grepGlob :: Text -> Text -> M [(Text, Int, Text)]"));
 
-        // Verify Match record syntax
-        assert!(preamble.contains("data Match = Match { matchText :: Text, matchFile :: Text, matchLine :: Int, matchVars :: [(Text, Text)], matchReplacement :: Text }"));
-        assert!(preamble.contains(
-            "var m k = case [v | (k', v) <- matchVars m, k' == k] of { (x:_) -> x; _ -> \"\" }"
-        ));
+        // Verify Match record syntax + the Map-typed matchVars accessor
+        assert!(preamble.contains("data Match = Match { matchText :: Text, matchFile :: Text, matchLine :: Int, matchVarsList :: [(Text, Text)], matchReplacement :: Text }"));
+        assert!(preamble.contains("matchVars :: Match -> Map Text Text"));
+        assert!(preamble.contains("var m k = Map.findWithDefault \"\" k (matchVars m)"));
     }
 
     #[test]
@@ -2855,10 +2866,8 @@ data Console a where
         assert!(preamble.contains("appendFile :: Text -> Text -> M ()"));
         assert!(preamble.contains("listDirectory :: Text -> M [Text]"));
         assert!(preamble.contains("doesFileExist :: Text -> M Bool"));
-        assert!(preamble.contains("getFileSize :: Text -> M Int"));
-        assert!(
-            preamble.contains("fsMeta :: Text -> M (Int, Bool, Bool)\nfsMeta = send . FsMetadata")
-        );
+        assert!(preamble.contains("getFileSize :: Text -> M (Maybe Int)"));
+        assert!(preamble.contains("fsMeta :: Text -> M Value\nfsMeta = send . FsMetadata"));
         assert!(preamble.contains("glob :: Text -> M [Text]"));
         assert!(preamble.contains("callCommand :: Text -> M ()"));
         assert!(preamble.contains("readProcess :: Text -> M Text"));

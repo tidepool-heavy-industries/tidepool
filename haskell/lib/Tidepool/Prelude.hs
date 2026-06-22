@@ -8,8 +8,9 @@ module Tidepool.Prelude
   ( -- * Types (re-exported from base)
     Int, Integer, Word, Char, Bool(..), Double, Float
   , String, Ordering(..), Maybe(..), Either(..)
-    -- * NonEmpty type + (:|) constructor (functions stay behind the NE. qualifier)
-  , NonEmpty(..)
+    -- NonEmpty is intentionally NOT re-exported: `maximumBy (compare `on` snd)`
+    -- and friends cover the argmax case without the NE machinery. Users who
+    -- genuinely need it can `import Data.List.NonEmpty as NE` explicitly.
     -- * Bifunctor first/second (polymorphic; bimap comes via Control.Lens below)
   , first, second
     -- * Text type (re-exported from Data.Text)
@@ -195,12 +196,11 @@ import qualified Tidepool.Data.Text as T
 import Data.Char (ord, chr)
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe)
 import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, sortOn)
-import Data.List.NonEmpty (NonEmpty(..))
 -- Bifunctor first/second (polymorphic — tuples AND Either). Control.Lens
 -- re-exports `bimap` but NOT first/second, so import those two from the library.
 import Data.Bifunctor (first, second)
 import Data.Monoid (Sum(..), Product(..), Any(..), All(..), First(..), Last(..), Endo(..), appEndo)
-import Data.Semigroup (Max(..), Min(..), Arg(..), sconcat)
+import Data.Semigroup (Max(..), Min(..), Arg(..))
 import Data.Ord (Down(..))
 import Data.Tuple (swap)
 import Data.Either (partitionEithers, rights, lefts, fromLeft, fromRight)

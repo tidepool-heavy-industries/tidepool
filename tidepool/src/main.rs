@@ -396,9 +396,16 @@ impl EffectHandler<CapturedOutput> for FsHandler {
             }
             FsReq::Metadata(path) => {
                 let resolved = self.resolve(&path)?;
-                let meta = std::fs::metadata(&resolved)
-                    .map_err(|e| EffectError::Handler(e.to_string()))?;
-                cx.respond((meta.len() as i64, meta.is_file(), meta.is_dir()))
+                // Value-native: a JSON object on success, Null for a missing/
+                // unreadable path (so it doubles as an existence check — no throw).
+                match std::fs::metadata(&resolved) {
+                    Ok(meta) => cx.respond(serde_json::json!({
+                        "size": meta.len() as i64,
+                        "is_file": meta.is_file(),
+                        "is_dir": meta.is_dir(),
+                    })),
+                    Err(_) => cx.respond(serde_json::Value::Null),
+                }
             }
         }
     }

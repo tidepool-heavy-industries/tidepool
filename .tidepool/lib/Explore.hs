@@ -72,5 +72,5 @@ refs pat g = hitsByFile <$> grepGlob pat g
 census :: Text -> M Value
 census pat = do
   ps <- glob pat
-  sized <- mapM (\p -> do { s <- getFileSize p; pure (p, s) }) ps
+  sized <- mapM (\p -> do { s <- getFileSize p; pure (p, fromMaybe 0 s) }) ps
   pure (object ["files" .= len ps, "exts" .= take 5 (extHisto ps), "heaviest" .= sizeRank 5 sized])
