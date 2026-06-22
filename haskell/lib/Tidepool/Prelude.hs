@@ -219,10 +219,14 @@ import Tidepool.Aeson (Value(..), Key, object, (.=), toJSON, ToJSON, fromText)
 import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double, members, values, _Null)
 -- Wholesale Control.Lens, hiding only the two genuine clashes: `imap` (Prelude's
 -- list-index map, defined below) and `(.=)` (Aeson's object-pair operator, above).
--- Hide `(??)`: the heuristic LLM operator was removed (it burned tokens behind
--- an innocent-looking operator); keep `??` entirely absent rather than expose
--- lens's flipped-apply under that name. `imap`/`(.=)` clash as noted above.
-import Control.Lens hiding (imap, (.=), (??))
+-- Hidden from the wholesale import because they clash with names we keep:
+--   imap — Prelude's own list-index map (above);
+--   (.=) — Aeson's object-pair operator;
+--   (??) — removed heuristic LLM operator (kept absent, not aliased to lens's
+--          flipped-apply);
+--   para — the .tidepool/lib `Schemes.para` list paramorphism (canonical name;
+--          lens's `para` is the niche Plated one).
+import Control.Lens hiding (imap, (.=), (??), para)
 import qualified Data.Map.Strict as Map
 
 -- Permanent binding-level interception in Translate.hs.

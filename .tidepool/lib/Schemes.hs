@@ -191,12 +191,9 @@ windows n xs
   | Prelude.length xs < n = []
   | otherwise = Prelude.take n xs : windows n (Prelude.drop 1 xs)
 
--- | Zip a list with indices starting from 0
-indexed :: [a] -> [(Int, a)]
-indexed = go 0
-  where
-    go _ []     = []
-    go !n (x:xs) = (n, x) : go (n + 1) xs
+-- (`indexed` removed: it was a verbatim duplicate of the Prelude's
+-- `zipWithIndex :: [a] -> [(Int, a)]`. Use that. Dropping it also frees the
+-- name for Control.Lens's `indexed`, now re-exported wholesale by the Prelude.)
 
 -- | Safe list indexing
 (!?) :: [a] -> Int -> Maybe a
