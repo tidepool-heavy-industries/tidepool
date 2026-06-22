@@ -31,9 +31,12 @@ report's `oracle.rs` pair).
 - [x] **7. `heap_force` sig** — DONE. The report saw 2 (expr.rs); tidepool found
   **5** (case.rs, expr.rs ×3, primop.rs), all the same `(vmctx,obj)->I64` sig. →
   `heap_force_sig` in `emit/mod.rs`; trimmed case.rs's now-unused import. GREEN.
-- [ ] **5. `resolve_hs_path`** — TODO (real). `tidepool-macro/src/expand.rs`
-  `expand_hs`/`expand_expr_hs` share the `::binding`-suffix + manifest-dir path
-  prologue (pure string logic). Extract a shared `resolve_hs_path`.
+- [x] **5. `resolve_hs_path`** — DONE. `expand_hs`/`expand_expr_hs` had a
+  byte-identical ~58-line prologue (parse `::binding`, resolve manifest dir,
+  exists-check, run extract, find `.cbor`). Extracted
+  `resolve_hs_path(path_lit, raw_path) -> Result<(abs_hs, cbor, output_dir),
+  TokenStream>`; each fn keeps only its divergent `quote!` (expr_hs adds
+  `meta.cbor`). Macro tests (`hs_eval`) green.
 - ~~2. from_value codegen~~ — SKIP. bridge-derive `codegen.rs` — two *different*
   `quote!` generators (multi-con match-arms vs single-con+arity). 92% lines but
   divergent templates; factoring the scaffolding out of `quote!` blocks isn't a

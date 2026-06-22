@@ -44,7 +44,15 @@ fn expand_cbor(path_lit: &LitStr) -> TokenStream {
     }
 }
 
-fn expand_hs(path_lit: &LitStr, raw_path: &str) -> TokenStream {
+/// Shared front-end for the `hs!`/`expr_hs!` macros: parse an optional
+/// `.hs::binding` suffix, resolve the `.hs` path against `CARGO_MANIFEST_DIR`,
+/// run the extractor, and locate the target `.cbor`. Returns
+/// `(abs_hs_path, cbor_path, output_dir)`, or a compile-error `TokenStream` to
+/// be returned verbatim from the caller.
+fn resolve_hs_path(
+    path_lit: &LitStr,
+    raw_path: &str,
+) -> Result<(PathBuf, PathBuf, PathBuf), TokenStream> {
     // Parse optional ::binding suffix
     let (hs_path_str, binding_name) = match raw_path.split_once(".hs::") {
         Some((prefix, binding)) => (format!("{}.hs", prefix), Some(binding.to_string())),
@@ -55,17 +63,18 @@ fn expand_hs(path_lit: &LitStr, raw_path: &str) -> TokenStream {
     let manifest_dir = match std::env::var("CARGO_MANIFEST_DIR") {
         Ok(d) => d,
         Err(_) => {
-            return syn::Error::new(path_lit.span(), "CARGO_MANIFEST_DIR not set")
-                .to_compile_error();
+            return Err(
+                syn::Error::new(path_lit.span(), "CARGO_MANIFEST_DIR not set").to_compile_error(),
+            );
         }
     };
     let abs_hs_path = Path::new(&manifest_dir).join(&hs_path_str);
     if !abs_hs_path.exists() {
-        return syn::Error::new(
+        return Err(syn::Error::new(
             path_lit.span(),
             format!("Haskell source not found: {}", abs_hs_path.display()),
         )
-        .to_compile_error();
+        .to_compile_error());
     }
 
     let basename = abs_hs_path.file_stem().unwrap().to_str().unwrap();
@@ -80,7 +89,7 @@ fn expand_hs(path_lit: &LitStr, raw_path: &str) -> TokenStream {
         binding_name.as_deref(),
         Path::new(&manifest_dir),
     ) {
-        return syn::Error::new(path_lit.span(), msg).to_compile_error();
+        return Err(syn::Error::new(path_lit.span(), msg).to_compile_error());
     }
 
     // Find the target .cbor file
@@ -89,20 +98,29 @@ fn expand_hs(path_lit: &LitStr, raw_path: &str) -> TokenStream {
             let p = output_dir.join(format!("{}.cbor", name));
             if !p.exists() {
                 let available = list_bindings(&output_dir);
-                return syn::Error::new(
+                return Err(syn::Error::new(
                     path_lit.span(),
                     format!("Binding '{}' not found. Available: {:?}", name, available),
                 )
-                .to_compile_error();
+                .to_compile_error());
             }
             p
         }
         None => match find_single_binding(&output_dir) {
             Ok(p) => p,
             Err(msg) => {
-                return syn::Error::new(path_lit.span(), msg).to_compile_error();
+                return Err(syn::Error::new(path_lit.span(), msg).to_compile_error());
             }
         },
+    };
+
+    Ok((abs_hs_path, cbor_path, output_dir))
+}
+
+fn expand_hs(path_lit: &LitStr, raw_path: &str) -> TokenStream {
+    let (abs_hs_path, cbor_path, _output_dir) = match resolve_hs_path(path_lit, raw_path) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
 
     let cbor_path_str = cbor_path.to_str().unwrap();
@@ -170,64 +188,9 @@ fn expand_expr_cbor(path_lit: &LitStr) -> TokenStream {
 }
 
 fn expand_expr_hs(path_lit: &LitStr, raw_path: &str) -> TokenStream {
-    // Parse optional ::binding suffix
-    let (hs_path_str, binding_name) = match raw_path.split_once(".hs::") {
-        Some((prefix, binding)) => (format!("{}.hs", prefix), Some(binding.to_string())),
-        None => (raw_path.to_string(), None),
-    };
-
-    // Resolve absolute paths
-    let manifest_dir = match std::env::var("CARGO_MANIFEST_DIR") {
-        Ok(d) => d,
-        Err(_) => {
-            return syn::Error::new(path_lit.span(), "CARGO_MANIFEST_DIR not set")
-                .to_compile_error();
-        }
-    };
-    let abs_hs_path = Path::new(&manifest_dir).join(&hs_path_str);
-    if !abs_hs_path.exists() {
-        return syn::Error::new(
-            path_lit.span(),
-            format!("Haskell source not found: {}", abs_hs_path.display()),
-        )
-        .to_compile_error();
-    }
-
-    let basename = abs_hs_path.file_stem().unwrap().to_str().unwrap();
-    let output_dir = Path::new(&manifest_dir)
-        .join("target")
-        .join("tidepool-cbor")
-        .join(basename);
-
-    if let Err(msg) = run_tidepool_extract(
-        &abs_hs_path,
-        &output_dir,
-        binding_name.as_deref(),
-        Path::new(&manifest_dir),
-    ) {
-        return syn::Error::new(path_lit.span(), msg).to_compile_error();
-    }
-
-    // Find the target .cbor file
-    let cbor_path = match binding_name {
-        Some(ref name) => {
-            let p = output_dir.join(format!("{}.cbor", name));
-            if !p.exists() {
-                let available = list_bindings(&output_dir);
-                return syn::Error::new(
-                    path_lit.span(),
-                    format!("Binding '{}' not found. Available: {:?}", name, available),
-                )
-                .to_compile_error();
-            }
-            p
-        }
-        None => match find_single_binding(&output_dir) {
-            Ok(p) => p,
-            Err(msg) => {
-                return syn::Error::new(path_lit.span(), msg).to_compile_error();
-            }
-        },
+    let (abs_hs_path, cbor_path, output_dir) = match resolve_hs_path(path_lit, raw_path) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
 
     let cbor_path_str = cbor_path.to_str().unwrap();
