@@ -133,9 +133,10 @@ module Tidepool.Prelude
   , key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double
   , members, values, _Null
     -- * ALL of Control.Lens, re-exported wholesale (indexed optics ^@.. / itoListOf,
-    -- partsOf, _head/_last/_init/_tail, prism/iso/lens builders, etc.). The clashing
-    -- names keep the Tidepool version: `imap`, `first`/`second`/`bimap` (Prelude's
-    -- monomorphic list/tuple defs) and `(.=)` (Aeson's object-pair operator).
+    -- partsOf, _head/_last/_init/_tail, prism/iso/lens builders, the Bifunctor
+    -- first/second/bimap, etc.). Only two names keep the Tidepool version (hidden
+    -- from the import): `imap` (Prelude's list-index map) and `(.=)` (Aeson's
+    -- object-pair operator).
   , module Control.Lens
     -- * JSON Value helpers
   , (?.), lookupKey, asText, asInt, asDouble, asBool, asArray, asObject
@@ -154,7 +155,6 @@ module Tidepool.Prelude
     -- * Prelude workhorses
   , sortOn, Down(..), swap
   , partitionEithers, rights, lefts, fromLeft, fromRight
-  , first, second, bimap
   ) where
 
 import Prelude
@@ -214,7 +214,7 @@ import Tidepool.Aeson (Value(..), Key, object, (.=), toJSON, ToJSON, fromText)
 import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double, members, values, _Null)
 -- Wholesale Control.Lens, hiding only the two genuine clashes: `imap` (Prelude's
 -- list-index map, defined below) and `(.=)` (Aeson's object-pair operator, above).
-import Control.Lens hiding (imap, (.=), first, second, bimap)
+import Control.Lens hiding (imap, (.=))
 import qualified Data.Map.Strict as Map
 
 -- Permanent binding-level interception in Translate.hs.
@@ -936,23 +936,3 @@ insertWith f k v m = case Map.lookup k m of
   Just old -> let !combined = f v old in Map.insert k combined m
   Nothing  -> Map.insert k v m
 {-# INLINE insertWith #-}
-
-
--- ------------------------------------------------------------
--- Prelude workhorses
--- ------------------------------------------------------------
-
--- | Monomorphic tuple first.
-first :: (a -> c) -> (a, b) -> (c, b)
-first f (a, b) = (f a, b)
-{-# INLINE first #-}
-
--- | Monomorphic tuple second.
-second :: (b -> c) -> (a, b) -> (a, c)
-second f (a, b) = (a, f b)
-{-# INLINE second #-}
-
--- | Monomorphic tuple bimap.
-bimap :: (a -> c) -> (b -> d) -> (a, b) -> (c, d)
-bimap f g (a, b) = (f a, g b)
-{-# INLINE bimap #-}
