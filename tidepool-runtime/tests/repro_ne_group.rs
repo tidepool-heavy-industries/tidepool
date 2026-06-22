@@ -27,18 +27,18 @@
 //!   dictionary value arg, ships without an unfolding/fat-iface, and is reached
 //!   via its SPEC rule will hit it (NE.group/groupBy/groupBy1/groupWith, ...).
 //!
-//! PROPOSED FIX (deferred — touches the shared resolver, needs care):
-//!   In `attemptSpecFallback`, when `idArity genId > idArity specVar` (a
-//!   dictionary was specialized away), do NOT emit the bare alias. Instead
-//!   reconstruct `specVar = \@tv -> genId @T @tv <concreteDict>` from the SPEC
-//!   rule on `genId` (eps_rule_base): its `ru_args` give the type/dict argument
-//!   shape, and each universally-quantified dict binder is replaced by the
-//!   concrete instance dictionary resolved via `lookupInstEnv` on the binder's
-//!   class-pred type. Gate strictly on the arity mismatch so working
-//!   (arity-matched) aliases are untouched — this can only affect currently
-//!   case-trapping specializations.
-//!
-//! Marked `#[ignore]` until the resolver fix lands; remove `#[ignore]` then.
+//! FIX (landed, branch `fix/ne-group-dict`): in `attemptSpecFallback`
+//!   (`haskell/src/Tidepool/Resolve.hs`), when the generic parent's value
+//!   arity exceeds the specialization's (a dictionary was specialized away),
+//!   do NOT emit the bare alias. Instead `reconstructSpecAlias` builds an
+//!   eta-expanded wrapper `\@spTvs v1..vn -> genId @Tys dict1..dictk v1..vn`:
+//!   the type args come from unifying the generic's result type with the
+//!   specialization's (`tcMatchTy`), and each erased class constraint's
+//!   concrete dictionary is resolved via `lookupInstEnv` on the EPS global
+//!   instance env (for `NE.group`: `Foldable []` → unique `$fFoldableList`).
+//!   The wrapper's new free var (the dfun) is fed back into the resolver
+//!   worklist so it resolves too. Gated strictly on the arity mismatch, so
+//!   arity-matched aliases (the common path) are untouched.
 
 use std::path::Path;
 use tidepool_effect::DispatchEffect;
@@ -90,9 +90,9 @@ fn run(code: &str, imports: &str, helpers: &str) -> Result<serde_json::Value, St
 }
 
 /// `NE.group [1,1,2,3,3,3]` → `[[1,1],[2],[3,3,3]]` (via `NE.toList`).
-/// Currently CASE-TRAPs; see the module header for the root cause.
+/// Was a CASE TRAP (dropped `Foldable` dict); fixed by the dict-reconstructing
+/// spec-fallback alias — see the module header for the root cause + fix.
 #[test]
-#[ignore = "known bug: groupBy_$sgroupBy bare-alias drops the Foldable dict (see module header)"]
 fn ne_group_round_trips() {
     let got = run(
         "pure (toJSON (map NE.toList (NE.group [1,1,2,3,3,3::Int])))",
@@ -102,5 +102,35 @@ fn ne_group_round_trips() {
     match got {
         Ok(v) => assert_eq!(v, serde_json::json!([[1, 1], [2], [3, 3, 3]]), "wrong value"),
         Err(e) => panic!("NE.group crashed: {e}"),
+    }
+}
+
+/// Sibling of the same CLASS: `NE.groupBy` is rewritten to the same
+/// `groupBy_$sgroupBy` spec binding, so it exercises the identical
+/// dict-reconstruction path.
+#[test]
+fn ne_group_by_round_trips() {
+    let got = run(
+        "pure (toJSON (map NE.toList (NE.groupBy (\\a b -> a == b) [1,1,2,3,3,3::Int])))",
+        "qualified Data.List.NonEmpty as NE",
+        "",
+    );
+    match got {
+        Ok(v) => assert_eq!(v, serde_json::json!([[1, 1], [2], [3, 3, 3]]), "wrong value"),
+        Err(e) => panic!("NE.groupBy crashed: {e}"),
+    }
+}
+
+/// `NE.groupWith` (keyed grouping) over the same input.
+#[test]
+fn ne_group_with_round_trips() {
+    let got = run(
+        "pure (toJSON (map NE.toList (NE.groupWith id [1,1,2,3,3,3::Int])))",
+        "qualified Data.List.NonEmpty as NE",
+        "",
+    );
+    match got {
+        Ok(v) => assert_eq!(v, serde_json::json!([[1, 1], [2], [3, 3, 3]]), "wrong value"),
+        Err(e) => panic!("NE.groupWith crashed: {e}"),
     }
 }

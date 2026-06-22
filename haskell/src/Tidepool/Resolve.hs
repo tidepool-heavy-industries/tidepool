@@ -4,7 +4,7 @@ import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..), maybeUnfolding
 import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Core.Subst (substExpr, mkEmptySubst)
 import GHC.Types.Var.Env (mkInScopeSet)
-import GHC.Types.Id (Id, idUnfolding, realIdUnfolding, isGlobalId, isPrimOpId_maybe, isDataConWorkId_maybe, isDataConWrapId_maybe, isDeadEndId)
+import GHC.Types.Id (Id, idType, idUnfolding, realIdUnfolding, isGlobalId, isPrimOpId_maybe, isDataConWorkId_maybe, isDataConWrapId_maybe, isDeadEndId, mkSysLocalOrCoVar)
 import GHC.Types.Var (Var, varName, varUnique)
 import GHC.Types.Var.Set (VarSet, emptyVarSet, unitVarSet, elemVarSet, extendVarSet)
 import GHC.Types.Unique (getKey)
@@ -15,6 +15,7 @@ import GHC.Unit.Module (moduleName, moduleNameString)
 import Data.Word (Word64)
 import Data.Char (isDigit)
 import Data.List (isPrefixOf, isInfixOf)
+import Data.Maybe (catMaybes)
 
 -- For specialization fallback
 import GHC.Driver.Env (HscEnv(..), hscEPS)
@@ -23,6 +24,24 @@ import GHC.Types.Name.Cache (nsNames, lookupOrigNameCache)
 import GHC.Types.Name.Env (lookupNameEnv)
 import GHC.Types.TyThing (TyThing(..))
 import Control.Concurrent.MVar (readMVar)
+
+-- For dictionary reconstruction (spec-fallback arity-mismatch repair).
+-- GHC's SPEC rules rewrite e.g. NE.group/groupBy to a base binding whose
+-- Foldable dictionary value-arg was specialized away, shipped with no
+-- unfolding. Despecializing to a BARE ALIAS of the generic (which still
+-- takes the dict) under-saturates it → partial application → case trap.
+-- We instead reconstruct the concrete dictionary and eta-expand.
+import GHC.Core.InstEnv (InstEnvs(..), lookupInstEnv, instanceDFunId, emptyInstEnv)
+import GHC.Core.Make (mkCoreLams, mkCoreApps)
+import GHC.Core.Predicate (getClassPredTys_maybe)
+import GHC.Core.Type (substTy, mkTyVarTy)
+import GHC.Core.Unify (tcMatchTy)
+import GHC.Core.Multiplicity (scaledThing)
+import GHC.Tc.Utils.TcType (tcSplitSigmaTy, tcSplitFunTys)
+import GHC.Builtin.Types (manyDataConTy)
+import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, uniqsFromSupply)
+import GHC.Unit.Module.Env (emptyModuleSet)
+import GHC.Data.FastString (fsLit)
 
 -- Fat interface fallback (mi_extra_decls) — for loop-breakers whose
 -- unfoldings are not exposed via realIdUnfolding even with threshold bumps.
@@ -111,15 +130,20 @@ resolveExternals varIdFn hscEnv binds = do
                    -- Standard unfolding failed. Attempt specialization fallback.
                    mbFallback <- attemptSpecFallback hscEnv v
                    case mbFallback of
-                     Just (genId, unfoldingExpr) ->
+                     Just (genId, unfoldingExpr, aliasRhs) ->
                        let renamedExpr = alphaRenameExpr localSet unfoldingExpr
                            genBind = NonRec genId renamedExpr
-                           aliasBind = NonRec v (Var genId)
+                           -- aliasRhs is either a bare `Var genId` or a
+                           -- dict-reconstructing wrapper. The wrapper introduces
+                           -- a NEW external (the instance dfun), so collect its
+                           -- free vars too — otherwise the dfun never resolves.
+                           aliasBind = NonRec v aliasRhs
                            newFVs = exprSomeFreeVars (const True) renamedExpr
+                           aliasFVs = exprSomeFreeVars (const True) aliasRhs
                            internalBinders = collectLocalBinders renamedExpr
                            localSet' = foldl extendVarSet (extendVarSet (extendVarSet localSet v) genId) internalBinders
                            newExternals = filter (isResolvable localSet')
-                                                 (nonDetEltsUniqSet newFVs)
+                                                 (nonDetEltsUniqSet newFVs ++ nonDetEltsUniqSet aliasFVs)
                        in go fatCache (newExternals ++ rest) visited' localSet' (genBind : acc) (aliasBind : subAcc) unres
                      Nothing -> do
                            -- Despec failed too. Fat interface fallback (mi_extra_decls).
@@ -274,7 +298,18 @@ resolveExternals varIdFn hscEnv binds = do
 -- | Attempt to resolve a specialized Id by deriving its generic parent.
 -- Parses the OccName for $s markers, strips them to get the generic name,
 -- then looks up the generic Id in the same module via NameCache + EPS.
-attemptSpecFallback :: HscEnv -> Var -> IO (Maybe (Id, CoreExpr))
+--
+-- Returns @(genId, genUnfolding, aliasRhs)@ where:
+--   * @genId@ + @genUnfolding@ register the generic parent (with its body),
+--   * @aliasRhs@ is what the specialized binder should be bound to.
+--
+-- @aliasRhs@ is normally a bare @Var genId@ (arity-matched alias). But when
+-- the generic has GREATER value arity than the specialization — i.e. a
+-- dictionary value-arg was specialized away — a bare alias under-saturates
+-- the generic (partial application → case trap). In that case we reconstruct
+-- the concrete dictionary via 'reconstructSpecAlias' and bind to an
+-- eta-expanded wrapper @\\\@tvs vs -> genId \@Tys dicts vs@.
+attemptSpecFallback :: HscEnv -> Var -> IO (Maybe (Id, CoreExpr, CoreExpr))
 attemptSpecFallback hscEnv specVar = do
   let occStr = occNameString (nameOccName (varName specVar))
   case despecializeOccName occStr of
@@ -293,13 +328,69 @@ attemptSpecFallback hscEnv specVar = do
               let pte = eps_PTE eps
               case lookupNameEnv pte genName of
                 Just (AnId genId) ->
-                  case maybeUnfoldingTemplate (realIdUnfolding genId) of
-                    Just expr -> return (Just (genId, expr))
-                    Nothing ->
-                      case maybeUnfoldingTemplate (idUnfolding genId) of
-                        Just expr -> return (Just (genId, expr))
-                        Nothing -> return Nothing
+                  case firstUnfolding genId of
+                    Nothing   -> return Nothing
+                    Just expr -> do
+                      us <- mkSplitUniqSupply 'R'
+                      let aliasRhs = case reconstructSpecAlias eps us genId specVar of
+                                       Just wrapper -> wrapper
+                                       Nothing      -> Var genId
+                      return (Just (genId, expr, aliasRhs))
                 _ -> return Nothing
+  where
+    firstUnfolding gid =
+      case maybeUnfoldingTemplate (realIdUnfolding gid) of
+        Just e  -> Just e
+        Nothing -> maybeUnfoldingTemplate (idUnfolding gid)
+
+-- | Reconstruct the alias RHS for a specialized binder whose generic parent
+-- takes MORE value args (a dictionary was specialized away).
+--
+-- Builds @\\\@spTvs v1..vn -> genId \@Tys dict1..dictk v1..vn@ where:
+--   * @Tys@ instantiate genId's type binders (discovered by unifying the
+--     generic's result type with the specialization's via 'tcMatchTy'),
+--   * @dictK@ are the concrete instance dictionaries for genId's class
+--     constraints at those types, resolved via 'lookupInstEnv' on the EPS
+--     global instance environment,
+--   * @v1..vn@ are fresh binders for the specialization's value args.
+--
+-- Returns 'Nothing' (→ caller falls back to the bare alias, unchanged
+-- behavior) when arity matches, the type match fails, or any constraint has
+-- no unique instance — so arity-matched aliases and unresolvable cases are
+-- never disturbed.
+reconstructSpecAlias :: ExternalPackageState -> UniqSupply -> Id -> Var -> Maybe CoreExpr
+reconstructSpecAlias eps us genId specVar = do
+  let (genTvs, genTheta, genBody) = tcSplitSigmaTy (idType genId)
+      (spTvs, spTheta, spBody)    = tcSplitSigmaTy (idType specVar)
+      (genArgTys, _)              = tcSplitFunTys genBody
+      (spArgTys, _)               = tcSplitFunTys spBody
+      genValArity = length genTheta + length genArgTys
+      spValArity  = length spTheta  + length spArgTys
+  -- Only act when a dictionary value-arg was erased. Arity-matched aliases
+  -- (the common path) return Nothing → caller keeps the bare alias.
+  if genValArity <= spValArity
+    then Nothing
+    else do
+      subst <- tcMatchTy genBody spBody
+      let instEnvs = InstEnvs { ie_global  = eps_inst_env eps
+                              , ie_local   = emptyInstEnv
+                              , ie_visible = emptyModuleSet }
+          resolveDict pty = do
+            (cls, tys) <- getClassPredTys_maybe (substTy subst pty)
+            case lookupInstEnv False instEnvs cls tys of
+              ([(ci, dfunTyArgs)], _, _) ->
+                Just (mkCoreApps (Var (instanceDFunId ci))
+                                 (map Type (catMaybes dfunTyArgs)))
+              _ -> Nothing   -- not a unique match → bail to bare alias
+      dicts <- mapM resolveDict genTheta
+      let typeArgs = map (substTy subst . mkTyVarTy) genTvs
+          uniqs    = uniqsFromSupply us
+          valBndrs = zipWith
+                       (\u sty -> mkSysLocalOrCoVar (fsLit "wsp") u manyDataConTy (scaledThing sty))
+                       uniqs spArgTys
+          body = mkCoreApps (Var genId)
+                   (map Type typeArgs ++ dicts ++ map Var valBndrs)
+      Just (mkCoreLams (spTvs ++ valBndrs) body)
 
 -- | Strip GHC specialization markers from an OccName string.
 -- Returns Just the generic name, or Nothing if no $s markers found.
