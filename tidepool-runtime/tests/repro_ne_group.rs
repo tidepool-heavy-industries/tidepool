@@ -57,7 +57,11 @@ impl DispatchEffect<()> for NullDispatcher {
     }
 }
 
-fn eval_with_imports(code: &str, imports: &str, helpers: &str) -> Result<serde_json::Value, String> {
+fn eval_with_imports(
+    code: &str,
+    imports: &str,
+    helpers: &str,
+) -> Result<serde_json::Value, String> {
     let decls = tidepool_mcp::standard_decls();
     let pre = tidepool_mcp::build_preamble(&decls, true);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
@@ -100,7 +104,11 @@ fn ne_group_round_trips() {
         "",
     );
     match got {
-        Ok(v) => assert_eq!(v, serde_json::json!([[1, 1], [2], [3, 3, 3]]), "wrong value"),
+        Ok(v) => assert_eq!(
+            v,
+            serde_json::json!([[1, 1], [2], [3, 3, 3]]),
+            "wrong value"
+        ),
         Err(e) => panic!("NE.group crashed: {e}"),
     }
 }
@@ -116,7 +124,11 @@ fn ne_group_by_round_trips() {
         "",
     );
     match got {
-        Ok(v) => assert_eq!(v, serde_json::json!([[1, 1], [2], [3, 3, 3]]), "wrong value"),
+        Ok(v) => assert_eq!(
+            v,
+            serde_json::json!([[1, 1], [2], [3, 3, 3]]),
+            "wrong value"
+        ),
         Err(e) => panic!("NE.groupBy crashed: {e}"),
     }
 }
@@ -130,7 +142,11 @@ fn ne_group_with_round_trips() {
         "",
     );
     match got {
-        Ok(v) => assert_eq!(v, serde_json::json!([[1, 1], [2], [3, 3, 3]]), "wrong value"),
+        Ok(v) => assert_eq!(
+            v,
+            serde_json::json!([[1, 1], [2], [3, 3, 3]]),
+            "wrong value"
+        ),
         Err(e) => panic!("NE.groupWith crashed: {e}"),
     }
 }

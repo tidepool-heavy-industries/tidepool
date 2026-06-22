@@ -2872,7 +2872,9 @@ data Console a where
         assert!(preamble.contains("listDirectory :: Text -> M [Text]"));
         assert!(preamble.contains("doesFileExist :: Text -> M Bool"));
         assert!(preamble.contains("getFileSize :: Text -> M Int"));
-        assert!(preamble.contains("fsMeta :: Text -> M (Int, Bool, Bool)\nfsMeta = send . FsMetadata"));
+        assert!(
+            preamble.contains("fsMeta :: Text -> M (Int, Bool, Bool)\nfsMeta = send . FsMetadata")
+        );
         assert!(preamble.contains("glob :: Text -> M [Text]"));
         assert!(preamble.contains("callCommand :: Text -> M ()"));
         assert!(preamble.contains("readProcess :: Text -> M Text"));
