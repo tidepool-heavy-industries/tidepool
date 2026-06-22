@@ -2099,16 +2099,11 @@ fn emit_boxing_wrapper_guard(
     builder.seal_block(shape_trap_block);
     let trap_fn = pipeline
         .module
-        .declare_function("runtime_case_trap", Linkage::Import, &{
-            let mut sig = Signature::new(pipeline.isa.default_call_conv());
-            sig.params.push(AbiParam::new(types::I64)); // scrut_ptr
-            sig.params.push(AbiParam::new(types::I64)); // num_alts
-            sig.params.push(AbiParam::new(types::I64)); // alt_tags
-            sig.params.push(AbiParam::new(types::I64)); // fn name ptr
-            sig.params.push(AbiParam::new(types::I64)); // fn name len
-            sig.returns.push(AbiParam::new(types::I64)); // poison ptr
-            sig
-        })
+        .declare_function(
+            "runtime_case_trap",
+            Linkage::Import,
+            &crate::emit::runtime_case_trap_sig(pipeline.isa.default_call_conv()),
+        )
         .expect("declare runtime_case_trap");
     let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
     // No expected-tags list (the expectation is "a 1-field boxing wrapper",
@@ -2418,16 +2413,11 @@ fn unbox_numeric(
             builder.seal_block(lit_trap_block);
             let trap_fn = pipeline
                 .module
-                .declare_function("runtime_case_trap", Linkage::Import, &{
-                    let mut sig = Signature::new(pipeline.isa.default_call_conv());
-                    sig.params.push(AbiParam::new(types::I64)); // scrut_ptr
-                    sig.params.push(AbiParam::new(types::I64)); // num_alts
-                    sig.params.push(AbiParam::new(types::I64)); // alt_tags
-                    sig.params.push(AbiParam::new(types::I64)); // fn name ptr
-                    sig.params.push(AbiParam::new(types::I64)); // fn name len
-                    sig.returns.push(AbiParam::new(types::I64)); // poison ptr
-                    sig
-                })
+                .declare_function(
+                    "runtime_case_trap",
+                    Linkage::Import,
+                    &crate::emit::runtime_case_trap_sig(pipeline.isa.default_call_conv()),
+                )
                 .expect("declare runtime_case_trap");
             let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
             let dummy_ss = builder.create_sized_stack_slot(ir::StackSlotData::new(

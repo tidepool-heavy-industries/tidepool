@@ -438,16 +438,11 @@ fn emit_case_trap(
     let trap_fn = sess
         .pipeline
         .module
-        .declare_function("runtime_case_trap", Linkage::Import, &{
-            let mut sig = Signature::new(sess.pipeline.isa.default_call_conv());
-            sig.params.push(AbiParam::new(types::I64)); // scrut_ptr
-            sig.params.push(AbiParam::new(types::I64)); // num_alts
-            sig.params.push(AbiParam::new(types::I64)); // alt_tags
-            sig.params.push(AbiParam::new(types::I64)); // fn name ptr
-            sig.params.push(AbiParam::new(types::I64)); // fn name len
-            sig.returns.push(AbiParam::new(types::I64)); // returns poison ptr
-            sig
-        })
+        .declare_function(
+            "runtime_case_trap",
+            Linkage::Import,
+            &crate::emit::runtime_case_trap_sig(sess.pipeline.isa.default_call_conv()),
+        )
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
     let trap_ref = sess
         .pipeline
