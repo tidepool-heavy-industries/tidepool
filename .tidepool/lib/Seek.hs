@@ -249,36 +249,6 @@ seek = seekWith [grepVerb, viewVerb, defVerb, lsVerb]
 stdVocab :: Vocab [Text]
 stdVocab = [grepVerb, viewVerb, defVerb, lsVerb]
 
--- | Tier-1 move-selector. Field-calibrated (2026-06-11, 2 live runs):
--- mini's MOVES are good (openers, follow-ups, recovery from lost
--- evidence — 7/9 drafts blessable verbatim) but its self-assessed
--- confidence on move-selection is structurally pessimistic (0.0-0.33
--- when the trail is thin: "is this THE right move" is unanswerable
--- cold, and any sensible probe is fine). So: bar 0.0 — never escalate
--- mid-search; fuel bounds the damage and the move log is the audit
--- trail. Conclusion-readiness is mini's weakest skill, hence the
--- explicit DONE nudge.
-miniDriver :: Text -> M Text
-miniDriver p = do
-  m <- bar 0.0 (txt "move") ?? (p
-        <> "\n\nReply ONLY with the literal move string in the 'move' field"
-        <> " (e.g. 'grep <regex> :: <glob>', 'view <file> :: <line> :: <radius>',"
-        <> " 'def <name>', 'ls <glob>', or 'DONE <answer>')."
-        <> " When the evidence lines above answer the goal, reply DONE with the"
-        <> " answer CITING file:line from that evidence — do not probe further."
-        <> " Never repeat a probe already in the evidence; never DONE without"
-        <> " evidence.")
-  send (Print ("[move] " <> stake 150 m))
-  pure m
-
--- | Zero-touch goal-directed search: tier-1 drives every round, the
--- caller never suspends. The [move] log rides back in the output for
--- post-hoc audit; if the ANSWER smells wrong, re-run with `seek`
--- (caller-driven). Uses the full (uncompacted) trail — the driver has
--- no other memory.
-seekAuto :: Text -> Int -> M Text
-seekAuto = seekDriveR fullTrail miniDriver stdVocab
-
 -- | Typed conclude-round verdict (v5): Q lives in Tidepool.Effects
 -- now, so lib modules can define schema'd verbs. The conclude round
 -- can ask for a structured verdict instead of prose.

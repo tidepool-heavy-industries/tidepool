@@ -274,16 +274,24 @@ Everything MCP users need in one import.
 - `sortByColumn :: Int -> [[Text]] -> [[Text]]`
 - `filterByColumn :: Int -> (Text -> Bool) -> [[Text]] -> [[Text]]`
 
-### Heuristic Combinators — `Q a` (in preamble, auto-available)
+### Q-builders — `Q a` (auto-available)
 
-First-class questions: `Q a` bundles schema + parser + confidence threshold.
-- `pick cats ?? prompt` — classify. `yn ?? prompt` — judge. `obj schema ?? prompt` — extract.
-- `Schema` ADT for `obj`/`llmJson` (NOT a JSON Value): `SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema`. Nested extraction: `obj (SObj [("items", SArr (SObj [("title", SStr), ("sev", SEnum ["p0","p1","p2"])]))]) ?? prompt`.
+First-class questions: `Q a` bundles a schema + parser + confidence threshold.
+Build one with a builder, then RUN it with the named runner `askQ q prompt`,
+which SUSPENDS to the calling LLM (resume validated server-side against the
+schema) — no autonomous token burn.
+- Builders: `pick cats` — classify. `yn` — judge. `obj schema` — extract.
+  Run them: `pick cats \`askQ\` prompt`, `yn \`askQ\` prompt`, `obj schema \`askQ\` prompt`.
+- `Schema` ADT for `obj`/`llmJson` (NOT a JSON Value): `SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema`. Nested extraction: `obj (SObj [("items", SArr (SObj [("title", SStr), ("sev", SEnum ["p0","p1","p2"])]))]) \`askQ\` prompt`.
 - `txt "field"`, `num "field"` — single-field extraction.
-- `bar 0.95 q` — raise confidence threshold.
-- Applicative: `(,) <$> pick cats <*> num "pri" ?? prompt` — one Haiku call, multiple extractions.
-- `q ?! prompt` — returns `Sure a | Unsure Double a` (preserves confidence).
-- `triage q render items`, `survey q render items`, `sift q render items` — batch ops.
+- `bar 0.95 q` — raise the confidence threshold.
+- Applicative: `(,) <$> pick cats <*> num "pri" \`askQ\` prompt` — merged schema, one ask.
+- For an explicit server-side LLM call (no caller suspend, no auto-escalation) use `llmJson prompt schema`.
+
+> **Removed:** the `??`/`?!` operators and the `triage`/`survey`/`sift` batch
+> helpers are gone — they fired a server-side LLM (Haiku) call behind an
+> innocent-looking operator and encouraged token-burning overuse. Use the named
+> `askQ` (suspend to caller) or `llmJson` (explicit server call) instead.
 
 ### Haskell → JSON Rendering
 

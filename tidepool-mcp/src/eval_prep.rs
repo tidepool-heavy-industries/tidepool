@@ -37,7 +37,7 @@ pub fn standard_decls() -> Vec<EffectDecl> {
 /// alias over the full effect list, and thin helper functions (e.g. `say`, `kvGet`).
 ///
 /// When `user_library` is true and both `Llm` and `Ask` effects are present, also
-/// emits the heuristic combinator definitions (`Q`, `??`, `pick`, `yn`, etc.).
+/// emits the Q-builder definitions (`Q`, `pick`, `yn`, etc.) runnable via `askQ`.
 /// Source of the generated `Tidepool.Effects` module: effect type_defs,
 /// GADTs, the `M` alias, the `error :: Text -> a` shadow, and the thin
 /// send-wrapper helpers.

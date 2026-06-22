@@ -21,7 +21,6 @@ module Library
   , module Edit
   , module Seek
   , module Optics
-  , module Glue
   ) where
 
 import Schemes
@@ -35,4 +34,3 @@ import Diff
 import Edit
 import Seek
 import Optics
-import Glue

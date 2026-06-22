@@ -350,7 +350,6 @@ pub fn ask_decl() -> EffectDecl {
             // here — same generated module.
             "data Schema = SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema",
             "data Q a = Q Schema (Value -> a) Double",
-            "data Judged a = Sure a | Unsure Double a",
             "instance Functor Q where\n  fmap f (Q s p t) = Q s (f . p) t",
             "instance Applicative Q where\n  pure a = Q (SObj []) (const a) 0.6\n  Q (SObj fs1) p1 t1 <*> Q (SObj fs2) p2 t2 = Q (SObj (fs1 ++ fs2)) (\\v -> p1 v (p2 v)) (if t1 >= t2 then t1 else t2)\n  Q s1 p1 t1 <*> Q s2 p2 t2 = Q s1 (\\v -> p1 v (p2 v)) (if t1 >= t2 then t1 else t2)",
         ],
@@ -396,33 +395,10 @@ pub fn llm_decl() -> EffectDecl {
             // aborts — it is a hard control limit, not a probe failure).
             "tryLlm :: Text -> M (Either Text Text)\ntryLlm = send . TryLlmChat",
             "tryLlmJson :: Text -> Schema -> M (Either Text Value)\ntryLlmJson prompt schema = send (TryLlmStructured prompt (schemaToValue schema))",
-            // --- Tier-1 cascade: model-first, escalate-to-caller. Lives
-            // here (not the preamble) so .tidepool/lib modules can define
-            // tier-1-driven verbs. Ask is always in the stack, so the
-            // askWith escalation path is always available.
-            // Internal: augment schema with self-assessment rubric,
-            // extract confidence, strip rubric.
-            "h_aug :: Schema -> Schema\nh_aug (SObj fs) = SObj (fs ++ [(\"_understood\", SBool), (\"_confident\", SBool), (\"_unambiguous\", SBool)])\nh_aug s = SObj [(\"value\", s), (\"_understood\", SBool), (\"_confident\", SBool), (\"_unambiguous\", SBool)]",
-            "h_conf :: Value -> Double\nh_conf v =\n  let b k = case v ^? key k . _Bool of { Just True -> 1.0; _ -> 0.0 }\n  in (b \"_understood\" + b \"_confident\" + b \"_unambiguous\") / 3.0",
-            "h_strip :: Value -> Value\nh_strip (Object kvs) = Object (KM.delete (KM.fromText \"_unambiguous\") (KM.delete (KM.fromText \"_confident\") (KM.delete (KM.fromText \"_understood\") kvs)))\nh_strip v = v",
-            // Escalation rewrap: the validator enforces the BARE schema on
-            // escalated replies, but tier-1 parsers for non-SObj schemas
-            // expect h_aug's {"value": ...} wrapping — re-wrap so both
-            // tiers hand `parse` the same shape.
-            "h_wrap :: Schema -> Value -> Value\nh_wrap (SObj _) v = v\nh_wrap _ v = object [\"value\" .= v]",
-            // ?? : ask the model, auto-escalate on low confidence. The
-            // escalation carries the schema STRUCTURALLY (suspension JSON
-            // "schema" field; resume validated server-side); the tier-1
-            // draft rides in the prompt as a proposed default.
-            "infixl 1 ??\n(??) :: Q a -> Text -> M a\n(Q schema parse threshold) ?? prompt = do\n  r <- llmJson prompt (h_aug schema)\n  let c = h_conf r\n  v <- if c >= threshold then pure (h_strip r)\n       else h_wrap schema <$> askWith (object [\"schema\" .= schemaToValue schema]) (prompt <> \"\\n[draft \" <> pack (showDouble c) <> \"]: \" <> show (h_strip r))\n  pure (parse v)",
-            // ?! : like ?? but preserves the confidence verdict.
-            "infixl 1 ?!\n(?!) :: Q a -> Text -> M (Judged a)\n(Q schema parse threshold) ?! prompt = do\n  r <- llmJson prompt (h_aug schema)\n  let c = h_conf r\n  if c >= threshold\n    then pure (Sure (parse (h_strip r)))\n    else do\n      v <- askWith (object [\"schema\" .= schemaToValue schema]) (prompt <> \"\\n[draft \" <> pack (showDouble c) <> \"]: \" <> show (h_strip r))\n      pure (Unsure c (parse (h_wrap schema v)))",
-            // Batch judgment helpers.
-            "triage :: Q b -> (a -> Text) -> [a] -> M [(a, b)]\ntriage q render = mapM (\\x -> (,) x <$> (q ?? render x))",
+            // Pure tally utilities (no LLM/Ask): build a frequency list while
+            // preserving first-seen order. Kept for .tidepool/lib verbs.
             "findTally :: Eq a => a -> [(a, Int)] -> Maybe [(a, Int)]\nfindTally _ [] = Nothing\nfindTally x ((k, n):rest) = if x == k then Just ((k, n + 1) : rest) else case findTally x rest of { Just rest' -> Just ((k, n) : rest'); Nothing -> Nothing }",
             "tallyList :: Eq a => [a] -> [(a, Int)]\ntallyList = foldl' (\\acc x -> case findTally x acc of { Just acc' -> acc'; Nothing -> acc ++ [(x, 1)] }) []",
-            "survey :: Eq b => Q b -> (a -> Text) -> [a] -> M [(b, Int)]\nsurvey q render xs = do\n  bs <- mapM (\\x -> q ?? render x) xs\n  pure (tallyList bs)",
-            "sift :: Q Bool -> (a -> Text) -> [a] -> M ([a], [a])\nsift q render xs = do\n  tagged <- mapM (\\x -> (,) x <$> (q ?? render x)) xs\n  pure (map fst (filter snd tagged), map fst (filter (not . snd) tagged))",
         ],
     }
 }
@@ -875,10 +851,10 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
             "runAll = mapM run\n",
         ));
 
-        // The tier-1 cascade (??, ?!, triage/survey/sift) lives in the
-        // generated Tidepool.Effects module as llm_decl helpers — emitted
-        // exactly when the Llm effect is in the stack — so .tidepool/lib
-        // modules can define tier-1-driven verbs (seekAuto, grepSift, ...).
+        // Q-builders (pick/yn/obj/txt/num/bar) and the named runner `askQ`
+        // live in the generated Tidepool.Effects module (ask_decl type_defs +
+        // helpers) — always present, since the Ask effect is always in the
+        // stack — so .tidepool/lib modules can define Q-driven verbs.
 
         out.push('\n');
     }
@@ -963,19 +939,17 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         let has_ask_desc = effects.iter().any(|e| e.type_name == "Ask");
         if has_llm && has_ask_desc {
             desc.push_str(concat!(
-                "\n\nHeuristic combinators (Library, auto-imported):\n",
+                "\n\nQ-builders + the named runner `askQ` (Library, auto-imported):\n",
                 "  Q a — first-class question (schema + parser + confidence gate)\n",
-                "  pick cats ?? prompt      -- classify (M Text)\n",
-                "  yn ?? prompt             -- yes/no (M Bool)\n",
-                "  obj schema ?? prompt     -- structured extraction (M Value)\n",
-                "  txt \"field\" ?? prompt    -- single text field (M Text)\n",
-                "  num \"field\" ?? prompt    -- single number field (M Double)\n",
-                "  (,) <$> pick cs <*> num \"n\" ?? p  -- Applicative: merged schema, one call\n",
-                "  bar 0.95 q ?? prompt     -- raise threshold\n",
-                "  q ?! prompt             -- returns Sure a | Unsure Double a\n",
-                "  triage q render items    -- batch: [(item, answer)]\n",
-                "  survey q render items    -- tally: [(answer, count)]\n",
-                "  sift yn render items     -- partition: ([true], [false])\n",
+                "  pick cats `askQ` prompt    -- classify; suspends to caller (M Text)\n",
+                "  yn `askQ` prompt           -- yes/no (M Bool)\n",
+                "  obj schema `askQ` prompt   -- structured extraction (M Value)\n",
+                "  txt \"field\" `askQ` prompt  -- single text field (M Text)\n",
+                "  num \"field\" `askQ` prompt  -- single number field (M Double)\n",
+                "  (,) <$> pick cs <*> num \"n\" `askQ` p  -- Applicative: merged schema, one ask\n",
+                "  bar 0.95 q `askQ` prompt   -- raise threshold\n",
+                "`askQ` suspends to the calling LLM (no autonomous token burn).\n",
+                "For an explicit server-side LLM call use `llmJson prompt schema` (no auto-escalation).\n",
             ));
         }
 
@@ -988,7 +962,7 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
             ));
             if has_llm && has_ask_desc {
                 desc.push_str(
-                    "  glob \"**/*.hs\" >>= filterM (readFile >=> \\s -> yn ?? (\"test-only?\\n\" <> stake 2000 s))\n",
+                    "  glob \"**/*.hs\" >>= filterM (readFile >=> \\s -> yn `askQ` (\"test-only?\\n\" <> stake 2000 s))\n",
                 );
             }
         }
@@ -2844,8 +2818,8 @@ data Rose a = Rose a [Rose a]
 data Console a where
   Print :: Text -> Console ()
 
-(??) :: Q a -> Text -> M a
-(Q s p t) ?? prompt = undefined
+(<?>) :: Q a -> Text -> M a
+(Q s p t) <?> prompt = undefined
 ";
         let sigs = extract_sigs(src);
         assert!(sigs.contains(&"oracle :: Text -> M Text".to_string()));
@@ -2854,7 +2828,7 @@ data Console a where
         ));
         assert!(sigs.contains(&"type Vocab s = [(Text, Text -> s -> M s)]".to_string()));
         assert!(sigs.contains(&"data Rose a = Rose a [Rose a]".to_string()));
-        assert!(sigs.contains(&"(??) :: Q a -> Text -> M a".to_string()));
+        assert!(sigs.contains(&"(<?>) :: Q a -> Text -> M a".to_string()));
         // GADT `where` heads and indented constructor sigs are excluded;
         // comment-embedded `::` never matches.
         assert!(!sigs.iter().any(|s| s.contains("Console")));
@@ -2885,7 +2859,8 @@ data Console a where
         // No old aliases
         assert!(!preamble.contains("fsRead"));
         assert!(!preamble.contains("fsWrite"));
-        assert!(!preamble.contains("\nsay "));
+        // `say` is the Console wrapper (re-added 2026-06-22, friction #5).
+        assert!(preamble.contains("say :: Text -> M ()\nsay = send . Print"));
         // Other helpers unchanged
         assert!(preamble.contains("kvGet :: Text -> M (Maybe Value)\nkvGet = send . KvGet"));
         assert!(preamble.contains("httpGet :: Text -> M Value\nhttpGet = send . HttpGet"));
@@ -3014,12 +2989,12 @@ data Console a where
         assert!(preamble.contains("kvAll :: M [(Text, Value)]"));
         assert!(preamble.contains("kvClear :: M ()"));
         assert!(preamble.contains("runAll :: [Text] -> M [(Int, Text, Text)]"));
-        // The entire Q layer + tier-1 cascade lives in the generated
+        // The Q layer + named runner `askQ` live in the generated
         // Tidepool.Effects module so .tidepool/lib modules can define
-        // tier-1-driven verbs (seekAuto, grepSift, ...)
+        // Q-driven verbs. The token-burning `??`/`?!`/triage/survey/sift
+        // sugar has been removed.
         let effects_mod = effects_module_source(&decls);
         assert!(effects_mod.contains("data Q a = Q Schema (Value -> a) Double"));
-        assert!(effects_mod.contains("data Judged a = Sure a | Unsure Double a"));
         assert!(effects_mod.contains("pick :: [Text] -> Q Text"));
         assert!(effects_mod.contains("yn :: Q Bool"));
         assert!(effects_mod.contains("obj :: Schema -> Q Value"));
@@ -3027,19 +3002,19 @@ data Console a where
         assert!(effects_mod.contains("num :: Text -> Q Double"));
         assert!(effects_mod.contains("bar :: Double -> Q a -> Q a"));
         assert!(effects_mod.contains("askQ :: Q a -> Text -> M a"));
-        assert!(effects_mod.contains("(??) :: Q a -> Text -> M a"));
-        assert!(effects_mod.contains("(?!) :: Q a -> Text -> M (Judged a)"));
-        assert!(effects_mod.contains("triage :: Q b -> (a -> Text) -> [a] -> M [(a, b)]"));
-        assert!(effects_mod.contains("survey :: Eq b => Q b -> (a -> Text) -> [a] -> M [(b, Int)]"));
-        assert!(effects_mod.contains("sift :: Q Bool -> (a -> Text) -> [a] -> M ([a], [a])"));
-        // Escalation carries the schema structurally via askWith
+        // askQ suspends to the caller via askWith (no autonomous LLM call)
         assert!(effects_mod.contains("askWith (object [\"schema\" .= schemaToValue schema])"));
-        assert!(!effects_mod.contains("[haiku"));
+        // Removed sugar is gone.
+        assert!(!effects_mod.contains("data Judged a"));
+        assert!(!effects_mod.contains("(??)"));
+        assert!(!effects_mod.contains("(?!)"));
+        assert!(!effects_mod.contains("triage ::"));
+        assert!(!effects_mod.contains("survey ::"));
+        assert!(!effects_mod.contains("sift ::"));
         // and NOT duplicated in the preamble (one definition site)
         assert!(!preamble.contains("data Q a"));
         assert!(!preamble.contains("pick :: [Text] -> Q Text"));
-        assert!(!preamble.contains("(??) :: Q a -> Text -> M a"));
-        // cascade ops gated on the Llm effect: absent from an Llm-less stack
+        // askQ lives in ask_decl (always present), so it survives an Llm-less stack
         let no_llm: Vec<EffectDecl> = standard_decls()
             .into_iter()
             .filter(|d| d.type_name != "Llm")
