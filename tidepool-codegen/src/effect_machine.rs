@@ -15,7 +15,7 @@ pub enum EffContKind {
 }
 
 impl EffContKind {
-    /// The constructor name as it appears in the DataConTable.
+    /// The unqualified constructor name as it appears in the DataConTable.
     pub fn name(self) -> &'static str {
         match self {
             EffContKind::Val => "Val",
@@ -23,6 +23,24 @@ impl EffContKind {
             EffContKind::Union => "Union",
             EffContKind::Leaf => "Leaf",
             EffContKind::Node => "Node",
+        }
+    }
+
+    /// The module-qualified constructor name as recorded in the DataConTable
+    /// (`Module.Ctor`, via `Tidepool.Translate.qualifiedName`).
+    ///
+    /// These are fixed: the freer-simple / open-union / FTCQueue packages are
+    /// pinned in the toolchain, so the defining modules never move. This is the
+    /// reliable discriminator when a user import collides on the unqualified
+    /// name — e.g. `Data.Tree.Node` shadows the FTCQueue continuation `Node`,
+    /// both at arity 2, so unqualified-name and arity lookup are both ambiguous.
+    pub fn qualified_name(self) -> &'static str {
+        match self {
+            EffContKind::Val => "Control.Monad.Freer.Val",
+            EffContKind::E => "Control.Monad.Freer.E",
+            EffContKind::Union => "Data.OpenUnion.Union",
+            EffContKind::Leaf => "Data.FTCQueue.Leaf",
+            EffContKind::Node => "Data.FTCQueue.Node",
         }
     }
 
@@ -59,8 +77,19 @@ impl TryFrom<&tidepool_repr::DataConTable> for ConTags {
     type Error = EffContKind;
 
     fn try_from(table: &tidepool_repr::DataConTable) -> Result<Self, Self::Error> {
+        // Resolve each freer continuation constructor. Prefer the module-qualified
+        // name: it is unambiguous even when a user import collides on the
+        // unqualified name (e.g. `Data.Tree.Node` vs the FTCQueue continuation
+        // `Data.FTCQueue.Node`, both arity 2 — `get_by_name` returns `None` for
+        // such collisions, and arity does not disambiguate). Fall back to the
+        // unqualified lookup only when the qualified name is absent, preserving
+        // the no-collision behaviour for any producer that omits qualified names.
         let resolve = |kind: EffContKind| -> Result<u64, EffContKind> {
-            table.get_by_name(kind.name()).map(|t| t.0).ok_or(kind)
+            table
+                .get_by_qualified_name(kind.qualified_name())
+                .or_else(|| table.get_by_name(kind.name()))
+                .map(|t| t.0)
+                .ok_or(kind)
         };
         Ok(ConTags {
             val: resolve(EffContKind::Val)?,
