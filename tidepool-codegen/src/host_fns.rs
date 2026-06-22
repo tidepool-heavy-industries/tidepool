@@ -706,6 +706,20 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                         let result = f(vmctx, current);
                         truncate_rust_roots(mark);
 
+                        // If the thunk body raised an error (e.g. HeapOverflow
+                        // from runtime_oom), memoize the poison result so
+                        // re-forces follow the indirection instead of
+                        // re-entering the failed body (which would GC-thrash
+                        // until SIGSEGV). Then return poison immediately —
+                        // don't loop into further forces.
+                        if has_runtime_error() {
+                            *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize)
+                                as *mut *mut u8) = result;
+                            *current.add(layout::THUNK_STATE_OFFSET as usize) =
+                                layout::THUNK_EVALUATED;
+                            return error_poison_ptr();
+                        }
+
                         debug_assert_ne!(
                             heap_layout::read_tag(current),
                             layout::TAG_FORWARDED,
@@ -766,6 +780,19 @@ pub extern "C" fn trampoline_resolve(vmctx: *mut VMContext) -> *mut u8 {
             // poison here unwinds up to `JitEffectMachine::run_pure`, which
             // then surfaces `RuntimeError::Cancelled`.
             if check_cancel_and_set_error() {
+                (*vmctx).tail_callee = std::ptr::null_mut();
+                (*vmctx).tail_arg = std::ptr::null_mut();
+                return error_poison_ptr();
+            }
+
+            // Runtime-error safepoint. A tail-recursive loop that exhausts the
+            // heap gets a poison pointer from `runtime_oom` (which sets
+            // `HeapOverflow`) but, like cancel, never returns to the top-level
+            // JIT call on its own — it would re-enter the trampoline forever,
+            // GC-thrashing a full heap until it corrupts and SIGSEGVs. Bail the
+            // moment any error is pending so the poison unwinds to the run loop,
+            // which surfaces the clean `HeapOverflow` (or other) error.
+            if has_runtime_error() {
                 (*vmctx).tail_callee = std::ptr::null_mut();
                 (*vmctx).tail_arg = std::ptr::null_mut();
                 return error_poison_ptr();
