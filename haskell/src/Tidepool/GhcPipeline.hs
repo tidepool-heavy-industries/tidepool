@@ -170,6 +170,10 @@ capitalize (c:cs) = toUpper c : cs
 --     it stays enabled.
 canonicalizeDFlags :: DynFlags -> DynFlags
 canonicalizeDFlags dflags =
+  -- Trim machine-channel noise: typed-hole "Valid hole fits include …" lists
+  -- are enormous (dozens of candidates) and useless to an LLM caller; the
+  -- "Perhaps you meant …" similar-name hints are a separate mechanism and stay.
+  (`gopt_unset` Opt_ShowValidHoleFits) $
   gopt_set (gopt_set (gopt_unset (gopt_unset (updOptLevel 2 $ dflags
         { backend = noBackend
         , ghcLink = NoLink
