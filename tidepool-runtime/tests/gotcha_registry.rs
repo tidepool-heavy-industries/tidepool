@@ -443,3 +443,37 @@ fn works_lens_last_on_text() {
         serde_json::json!("c"),
     );
 }
+
+/// `Data.Tree`'s `Node` constructor collides on the UNQUALIFIED name with
+/// freer-simple's FTCQueue continuation `Node` — both arity 2. Before the fix,
+/// `ConTags::try_from` resolved the freer continuations via `get_by_name`, which
+/// returns `None` for a 2-entry unqualified collision, so any eval importing
+/// `Data.Tree (Tree(..))` and using `Node` died at effect-machine setup with
+/// `missing freer-simple constructor 'Node' in DataConTable`. The fix resolves
+/// the freer continuations by their fixed MODULE-QUALIFIED name
+/// (`Data.FTCQueue.Node`), which is unambiguous regardless of user imports.
+/// Asserts the documented repro: `treeDepth` over a depth-3 tree returns 3.
+#[test]
+fn works_data_tree_node_no_freer_collision() {
+    works_with_imports(
+        "Data.Tree (Tree(..))",
+        "pure (treeDepth t) where { \
+         t = Node (1::Int) [Node 2 [], Node 3 [Node 4 []]]; \
+         treeDepth (Node _ []) = 1::Int; \
+         treeDepth (Node _ cs) = 1 + maximum (map treeDepth cs) }",
+        serde_json::json!(3),
+    );
+}
+
+/// Companion to the collision guard: a NORMAL eval (no `Data.Tree`) must still
+/// resolve the freer continuation `Node` and run the effect machine. This is the
+/// no-regression half — the qualified-name resolution must not break the common
+/// (no-collision) case. `pure` exercises `Val`; running at all exercises the
+/// full ConTags resolution (Val/E/Union/Leaf/Node) at machine setup.
+#[test]
+fn works_freer_node_resolves_without_data_tree() {
+    works(
+        "pure (sum [1..10::Int])",
+        serde_json::json!(55),
+    );
+}
