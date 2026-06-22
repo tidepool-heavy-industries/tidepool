@@ -276,12 +276,15 @@ Everything MCP users need in one import.
 
 ### Q-builders — `Q a` (auto-available)
 
-First-class questions: `Q a` bundles a schema + parser + confidence threshold.
-Build one with a builder, then RUN it with the named runner `askQ q prompt`,
-which SUSPENDS to the calling LLM (resume validated server-side against the
-schema) — no autonomous token burn.
+First-class questions: `Q a` bundles a schema + parser. Build one with a builder,
+then RUN it with one of two NAMED runners (same builders, different cost — pick
+deliberately):
+- `q \`askQ\` prompt` — SUSPENDS to the calling LLM (resume validated server-side
+  against the schema). No autonomous token burn; the caller answers.
+- `q \`llmQ\` prompt` — AUTONOMOUS server-side model call (one structured call;
+  costs tokens). The named, cost-honest replacement for the removed `??`.
 - Builders: `pick cats` — classify. `yn` — judge. `obj schema` — extract.
-  Run them: `pick cats \`askQ\` prompt`, `yn \`askQ\` prompt`, `obj schema \`askQ\` prompt`.
+  Run them: `pick cats \`askQ\` prompt` (or \`llmQ\`), `yn \`askQ\` prompt`, etc.
 - `Schema` ADT for `obj`/`llmJson` (NOT a JSON Value): `SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema`. Nested extraction: `obj (SObj [("items", SArr (SObj [("title", SStr), ("sev", SEnum ["p0","p1","p2"])]))]) \`askQ\` prompt`.
 - `txt "field"`, `num "field"` — single-field extraction.
 - `bar 0.95 q` — raise the confidence threshold.
@@ -291,7 +294,8 @@ schema) — no autonomous token burn.
 > **Removed:** the `??`/`?!` operators and the `triage`/`survey`/`sift` batch
 > helpers are gone — they fired a server-side LLM (Haiku) call behind an
 > innocent-looking operator and encouraged token-burning overuse. Use the named
-> `askQ` (suspend to caller) or `llmJson` (explicit server call) instead.
+> runners instead: `llmQ` (autonomous server call — the direct `??` replacement),
+> `askQ` (suspend to caller), or `llmJson` (raw structured call).
 
 ### Haskell → JSON Rendering
 

@@ -390,6 +390,12 @@ pub fn llm_decl() -> EffectDecl {
             "llm :: Text -> M Text\nllm = send . LlmChat",
             // schemaToValue lives in ask_decl (Ask is always present).
             "llmJson :: Text -> Schema -> M Value\nllmJson prompt schema = send (LlmStructured prompt (schemaToValue schema))",
+            // Autonomous Q runner: run a Q-builder (pick/yn/obj/txt/num) against
+            // the server-side model in one structured call — the named,
+            // cost-honest counterpart to `askQ` (which suspends to the caller).
+            // This is what `??` used to do, minus the hidden confidence cascade;
+            // the `llm`-prefix makes the per-call model cost obvious at the site.
+            "llmQ :: Q a -> Text -> M a\nllmQ (Q schema parse _) prompt = parse <$> llmJson prompt schema",
             // Isolating variants: an API failure/refusal becomes `Left err`
             // instead of aborting the eval (the LLM call-budget limit still
             // aborts — it is a hard control limit, not a probe failure).
@@ -947,9 +953,10 @@ fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
                 "  txt \"field\" `askQ` prompt  -- single text field (M Text)\n",
                 "  num \"field\" `askQ` prompt  -- single number field (M Double)\n",
                 "  (,) <$> pick cs <*> num \"n\" `askQ` p  -- Applicative: merged schema, one ask\n",
-                "  bar 0.95 q `askQ` prompt   -- raise threshold\n",
-                "`askQ` suspends to the calling LLM (no autonomous token burn).\n",
-                "For an explicit server-side LLM call use `llmJson prompt schema` (no auto-escalation).\n",
+                "Two runners (same Q-builders, different cost):\n",
+                "  q `askQ` prompt   -- SUSPEND to the calling LLM; no autonomous tokens\n",
+                "  q `llmQ` prompt   -- AUTONOMOUS server-side model call (costs tokens); e.g. pick cats `llmQ` p\n",
+                "Or `llmJson prompt schema` for a raw structured call.\n",
             ));
         }
 
@@ -3004,6 +3011,8 @@ data Console a where
         assert!(effects_mod.contains("askQ :: Q a -> Text -> M a"));
         // askQ suspends to the caller via askWith (no autonomous LLM call)
         assert!(effects_mod.contains("askWith (object [\"schema\" .= schemaToValue schema])"));
+        // llmQ is the named AUTONOMOUS runner (server-side model call via llmJson).
+        assert!(effects_mod.contains("llmQ :: Q a -> Text -> M a"));
         // Removed sugar is gone.
         assert!(!effects_mod.contains("data Judged a"));
         assert!(!effects_mod.contains("(??)"));
@@ -3022,6 +3031,8 @@ data Console a where
         let no_llm_mod = effects_module_source(&no_llm);
         assert!(!no_llm_mod.contains("(??)"));
         assert!(no_llm_mod.contains("askQ :: Q a -> Text -> M a"));
+        // llmQ needs the Llm effect — absent from an Llm-less stack.
+        assert!(!no_llm_mod.contains("llmQ ::"));
     }
 
     #[test]
