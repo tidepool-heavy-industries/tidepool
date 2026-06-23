@@ -1601,6 +1601,171 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // Widen Word8 to Word (identity, already fits)
             Ok(args[0].clone())
         }
+        PrimOpKind::Word8Gt => {
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitInt(if a > b { 1 } else { 0 })))
+        }
+        PrimOpKind::Word8Mul => {
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitWord((a.wrapping_mul(b)) & 0xFF)))
+        }
+        PrimOpKind::Word8Quot => {
+            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = (a & 0xFF, b & 0xFF);
+            if b == 0 {
+                return Err(EvalError::InternalError("Word8 division by zero".into()));
+            }
+            Ok(Value::Lit(Literal::LitWord(a / b)))
+        }
+        PrimOpKind::Word8Rem => {
+            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = (a & 0xFF, b & 0xFF);
+            if b == 0 {
+                return Err(EvalError::InternalError("Word8 division by zero".into()));
+            }
+            Ok(Value::Lit(Literal::LitWord(a % b)))
+        }
+        // --- Int8 conversions ---
+        PrimOpKind::Int8ToInt | PrimOpKind::Word8ToInt8 => {
+            // Reinterpret the low byte as signed and sign-extend to 64 bits.
+            let v = expect_int_like(&args[0])?;
+            Ok(Value::Lit(Literal::LitInt(v as i8 as i64)))
+        }
+        PrimOpKind::Int8ToWord8 => {
+            let v = expect_int_like(&args[0])?;
+            Ok(Value::Lit(Literal::LitWord((v as u8) as u64)))
+        }
+        PrimOpKind::Int8Negate => {
+            let v = expect_int_like(&args[0])?;
+            Ok(Value::Lit(Literal::LitInt((v as i8).wrapping_neg() as i64)))
+        }
+        // --- Int32 / Word32 conversions and arithmetic ---
+        PrimOpKind::Int32ToInt => {
+            let v = expect_int_like(&args[0])?;
+            Ok(Value::Lit(Literal::LitInt(v as i32 as i64)))
+        }
+        PrimOpKind::Word32ToWord | PrimOpKind::WordToWord32 => {
+            let v = expect_int_like(&args[0])?;
+            Ok(Value::Lit(Literal::LitWord((v as u64) & 0xFFFF_FFFF)))
+        }
+        PrimOpKind::Word32Add => {
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitWord(
+                (a.wrapping_add(b)) & 0xFFFF_FFFF,
+            )))
+        }
+        PrimOpKind::Word32Sub => {
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitWord(
+                (a.wrapping_sub(b)) & 0xFFFF_FFFF,
+            )))
+        }
+        PrimOpKind::Word32Gt => {
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitInt(if a > b { 1 } else { 0 })))
+        }
+        PrimOpKind::Word32Le => {
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitInt(if a <= b { 1 } else { 0 })))
+        }
+        PrimOpKind::Word32Lt => {
+            let (a, b) = bin_op_word(op, &args)?;
+            Ok(Value::Lit(Literal::LitInt(if a < b { 1 } else { 0 })))
+        }
+        // --- Addr# ---
+        PrimOpKind::EqAddr => {
+            // eqAddr# :: Addr# -> Addr# -> Int#. Addr# modeled as LitString; equal
+            // iff the same byte content (sufficient for the tree-walker's uses).
+            let eq = match (&args[0], &args[1]) {
+                (Value::Lit(Literal::LitString(a)), Value::Lit(Literal::LitString(b))) => a == b,
+                _ => false,
+            };
+            Ok(Value::Lit(Literal::LitInt(if eq { 1 } else { 0 })))
+        }
+        PrimOpKind::MinusAddr => {
+            // minusAddr# :: Addr# -> Addr# -> Int#. Tree-walker models Addr# as a
+            // byte-suffix slice; the difference is the length delta of the suffixes.
+            let la = match &args[0] {
+                Value::Lit(Literal::LitString(bs)) => bs.len() as i64,
+                _ => 0,
+            };
+            let lb = match &args[1] {
+                Value::Lit(Literal::LitString(bs)) => bs.len() as i64,
+                _ => 0,
+            };
+            // a - b where a is at offset (total-la) and b at (total-lb): a-b = lb-la.
+            Ok(Value::Lit(Literal::LitInt(lb - la)))
+        }
+        PrimOpKind::IndexAddrArray => {
+            // indexAddrArray# :: ByteArray# -> Int# -> Addr#. Read an 8-byte slot
+            // and return it as a one-byte-snapshot Addr# is not meaningful here;
+            // appears only on dead Integer->Addr# paths. Return an empty Addr#.
+            Ok(Value::Lit(Literal::LitString(Vec::new())))
+        }
+        PrimOpKind::IndexAddrOffAddr => {
+            // index/readAddrOffAddr# — dead Integer->Addr# path; empty Addr#.
+            Ok(Value::Lit(Literal::LitString(Vec::new())))
+        }
+        PrimOpKind::IndexInt8OffAddr => {
+            // index/readInt8OffAddr# :: Addr# -> Int# -> Int8#
+            let bytes = match &args[0] {
+                Value::Lit(Literal::LitString(bs)) => bs,
+                other => {
+                    return Err(EvalError::TypeMismatch {
+                        expected: "Addr# (LitString)",
+                        got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                    })
+                }
+            };
+            let idx = expect_int(&args[1])? as usize;
+            let val = bytes.get(idx).copied().unwrap_or(0) as i8;
+            Ok(Value::Lit(Literal::LitInt(val as i64)))
+        }
+        PrimOpKind::IndexWord32OffAddr => {
+            // index/readWord32OffAddr# :: Addr# -> Int# -> Word32# (4-byte stride)
+            let bytes = match &args[0] {
+                Value::Lit(Literal::LitString(bs)) => bs,
+                other => {
+                    return Err(EvalError::TypeMismatch {
+                        expected: "Addr# (LitString)",
+                        got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                    })
+                }
+            };
+            let idx = expect_int(&args[1])? as usize;
+            let off = idx.wrapping_mul(4);
+            let mut buf = [0u8; 4];
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = bytes.get(off + i).copied().unwrap_or(0);
+            }
+            Ok(Value::Lit(Literal::LitWord(u32::from_ne_bytes(buf) as u64)))
+        }
+        PrimOpKind::IndexWideCharOffAddr => {
+            // index/readWideCharOffAddr# :: Addr# -> Int# -> Char# (4-byte stride)
+            let bytes = match &args[0] {
+                Value::Lit(Literal::LitString(bs)) => bs,
+                other => {
+                    return Err(EvalError::TypeMismatch {
+                        expected: "Addr# (LitString)",
+                        got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                    })
+                }
+            };
+            let idx = expect_int(&args[1])? as usize;
+            let off = idx.wrapping_mul(4);
+            let mut buf = [0u8; 4];
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = bytes.get(off + i).copied().unwrap_or(0);
+            }
+            Ok(Value::Lit(Literal::LitChar(
+                char::from_u32(u32::from_ne_bytes(buf)).unwrap_or('\0'),
+            )))
+        }
+        PrimOpKind::WriteWideCharOffAddr => {
+            // writeWideCharOffAddr# — like WriteWord8OffAddr, the tree-walker's
+            // Addr# is an immutable LitString; no writable target on live paths.
+            Ok(Value::Lit(Literal::LitInt(0)))
+        }
         PrimOpKind::Word8Lt => {
             let (a, b) = bin_op_word(op, &args)?;
             Ok(Value::Lit(Literal::LitInt(if a < b { 1 } else { 0 })))

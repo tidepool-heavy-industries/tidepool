@@ -982,6 +982,150 @@ pub fn emit_primop(
             args,
             LIT_TAG_INT,
         ),
+        PrimOpKind::Word8Gt => emit_int_compare(
+            sess.pipeline,
+            builder,
+            sess.vmctx,
+            op,
+            IntCC::UnsignedGreaterThan,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::Word8Mul => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let prod = builder.ins().imul(a, b);
+            Ok(SsaVal::Raw(
+                builder.ins().band_imm(prod, 0xFF),
+                LIT_TAG_WORD,
+            ))
+        }
+        PrimOpKind::Word8Quot => {
+            // quotWord8# :: Word8# -> Word8# -> Word8# (unsigned, operands < 256)
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let a8 = builder.ins().band_imm(a, 0xFF);
+            let b8 = builder.ins().band_imm(b, 0xFF);
+            Ok(SsaVal::Raw(builder.ins().udiv(a8, b8), LIT_TAG_WORD))
+        }
+        PrimOpKind::Word8Rem => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let a8 = builder.ins().band_imm(a, 0xFF);
+            let b8 = builder.ins().band_imm(b, 0xFF);
+            Ok(SsaVal::Raw(builder.ins().urem(a8, b8), LIT_TAG_WORD))
+        }
+
+        // Int8 conversions (64-bit: sign-extend the low byte / mask)
+        PrimOpKind::Int8ToInt => {
+            // int8ToInt# :: Int8# -> Int# — sign-extend the low byte to 64 bits.
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let lo = builder.ins().ireduce(types::I8, v);
+            let ext = builder.ins().sextend(types::I64, lo);
+            Ok(SsaVal::Raw(ext, LIT_TAG_INT))
+        }
+        PrimOpKind::Int8ToWord8 => {
+            // int8ToWord8# :: Int8# -> Word8# — reinterpret low byte (mask).
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            Ok(SsaVal::Raw(builder.ins().band_imm(v, 0xFF), LIT_TAG_WORD))
+        }
+        PrimOpKind::Word8ToInt8 => {
+            // word8ToInt8# :: Word8# -> Int8# — reinterpret low byte as signed.
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let lo = builder.ins().ireduce(types::I8, v);
+            let ext = builder.ins().sextend(types::I64, lo);
+            Ok(SsaVal::Raw(ext, LIT_TAG_INT))
+        }
+        PrimOpKind::Int8Negate => {
+            // negateInt8# :: Int8# -> Int8# — negate then sign-extend low byte.
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let neg = builder.ins().ineg(v);
+            let lo = builder.ins().ireduce(types::I8, neg);
+            let ext = builder.ins().sextend(types::I64, lo);
+            Ok(SsaVal::Raw(ext, LIT_TAG_INT))
+        }
+
+        // Int32 / Word32 conversions and arithmetic
+        PrimOpKind::Int32ToInt => {
+            // int32ToInt# :: Int32# -> Int# — sign-extend the low 32 bits.
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let lo = builder.ins().ireduce(types::I32, v);
+            let ext = builder.ins().sextend(types::I64, lo);
+            Ok(SsaVal::Raw(ext, LIT_TAG_INT))
+        }
+        PrimOpKind::Word32ToWord => {
+            // word32ToWord# :: Word32# -> Word# — zero-extend the low 32 bits.
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            Ok(SsaVal::Raw(
+                builder.ins().band_imm(v, 0xFFFF_FFFF),
+                LIT_TAG_WORD,
+            ))
+        }
+        PrimOpKind::WordToWord32 => {
+            // wordToWord32# :: Word# -> Word32# — truncate to 32 bits.
+            check_arity(op, 1, args.len())?;
+            let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            Ok(SsaVal::Raw(
+                builder.ins().band_imm(v, 0xFFFF_FFFF),
+                LIT_TAG_WORD,
+            ))
+        }
+        PrimOpKind::Word32Add => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let sum = builder.ins().iadd(a, b);
+            Ok(SsaVal::Raw(
+                builder.ins().band_imm(sum, 0xFFFF_FFFF),
+                LIT_TAG_WORD,
+            ))
+        }
+        PrimOpKind::Word32Sub => {
+            check_arity(op, 2, args.len())?;
+            let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let diff = builder.ins().isub(a, b);
+            Ok(SsaVal::Raw(
+                builder.ins().band_imm(diff, 0xFFFF_FFFF),
+                LIT_TAG_WORD,
+            ))
+        }
+        PrimOpKind::Word32Gt => emit_int_compare(
+            sess.pipeline,
+            builder,
+            sess.vmctx,
+            op,
+            IntCC::UnsignedGreaterThan,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::Word32Le => emit_int_compare(
+            sess.pipeline,
+            builder,
+            sess.vmctx,
+            op,
+            IntCC::UnsignedLessThanOrEqual,
+            args,
+            LIT_TAG_INT,
+        ),
+        PrimOpKind::Word32Lt => emit_int_compare(
+            sess.pipeline,
+            builder,
+            sess.vmctx,
+            op,
+            IntCC::UnsignedLessThan,
+            args,
+            LIT_TAG_INT,
+        ),
 
         // ---------------------------------------------------------------
         // Carry/overflow arithmetic
@@ -1450,6 +1594,90 @@ pub fn emit_primop(
                 LIT_TAG_INT,
             ))
         }
+        PrimOpKind::EqAddr => {
+            // eqAddr# :: Addr# -> Addr# -> Int# (0/1)
+            check_arity(op, 2, args.len())?;
+            let a = unbox_addr(sess.pipeline, builder, args[0]);
+            let b = unbox_addr(sess.pipeline, builder, args[1]);
+            let cmp = builder.ins().icmp(IntCC::Equal, a, b);
+            Ok(SsaVal::Raw(
+                builder.ins().uextend(types::I64, cmp),
+                LIT_TAG_INT,
+            ))
+        }
+        PrimOpKind::MinusAddr => {
+            // minusAddr# :: Addr# -> Addr# -> Int# (pointer difference)
+            check_arity(op, 2, args.len())?;
+            let a = unbox_addr(sess.pipeline, builder, args[0]);
+            let b = unbox_addr(sess.pipeline, builder, args[1]);
+            Ok(SsaVal::Raw(builder.ins().isub(a, b), LIT_TAG_INT))
+        }
+        PrimOpKind::IndexAddrArray => {
+            // indexAddrArray# :: ByteArray# -> Int# -> Addr# (8-byte slot load)
+            check_arity(op, 2, args.len())?;
+            let ba_ptr = unbox_bytearray(sess.pipeline, builder, args[0]);
+            let idx = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let base = builder.ins().iadd_imm(ba_ptr, 8);
+            let byte_offset = builder.ins().imul_imm(idx, 8);
+            let effective = builder.ins().iadd(base, byte_offset);
+            let addr = builder
+                .ins()
+                .load(types::I64, MemFlags::new(), effective, 0);
+            Ok(SsaVal::Raw(addr, crate::layout::LIT_TAG_ADDR))
+        }
+        PrimOpKind::IndexAddrOffAddr => {
+            // index/readAddrOffAddr# :: Addr# -> Int# -> Addr# (8-byte stride)
+            let addr = unbox_addr(sess.pipeline, builder, args[0]);
+            let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let byte_off = builder.ins().imul_imm(off, 8);
+            let ptr = builder.ins().iadd(addr, byte_off);
+            let loaded = builder.ins().load(types::I64, MemFlags::trusted(), ptr, 0);
+            Ok(SsaVal::Raw(loaded, crate::layout::LIT_TAG_ADDR))
+        }
+        PrimOpKind::IndexInt8OffAddr => {
+            // index/readInt8OffAddr# :: Addr# -> Int# -> Int8# (sign-extend the byte)
+            let addr = unbox_addr(sess.pipeline, builder, args[0]);
+            let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let ptr = builder.ins().iadd(addr, off);
+            let byte = builder.ins().load(types::I8, MemFlags::trusted(), ptr, 0);
+            let val = builder.ins().sextend(types::I64, byte);
+            Ok(SsaVal::Raw(val, LIT_TAG_INT))
+        }
+        PrimOpKind::IndexWord32OffAddr => {
+            // index/readWord32OffAddr# :: Addr# -> Int# -> Word32# (4-byte stride)
+            let addr = unbox_addr(sess.pipeline, builder, args[0]);
+            let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let byte_off = builder.ins().imul_imm(off, 4);
+            let ptr = builder.ins().iadd(addr, byte_off);
+            let w32 = builder.ins().load(types::I32, MemFlags::trusted(), ptr, 0);
+            let val = builder.ins().uextend(types::I64, w32);
+            Ok(SsaVal::Raw(val, LIT_TAG_WORD))
+        }
+        PrimOpKind::IndexWideCharOffAddr => {
+            // index/readWideCharOffAddr# :: Addr# -> Int# -> Char# (4-byte stride)
+            let addr = unbox_addr(sess.pipeline, builder, args[0]);
+            let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let byte_off = builder.ins().imul_imm(off, 4);
+            let ptr = builder.ins().iadd(addr, byte_off);
+            let w32 = builder.ins().load(types::I32, MemFlags::trusted(), ptr, 0);
+            let val = builder.ins().uextend(types::I64, w32);
+            Ok(SsaVal::Raw(val, LIT_TAG_CHAR))
+        }
+        PrimOpKind::WriteWideCharOffAddr => {
+            // writeWideCharOffAddr# :: Addr# -> Int# -> Char# -> State# s -> State# s
+            let addr = unbox_addr(sess.pipeline, builder, args[0]);
+            let off = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
+            let val = unbox_int(sess.pipeline, builder, sess.vmctx, args[2]);
+            let byte_off = builder.ins().imul_imm(off, 4);
+            let ptr = builder.ins().iadd(addr, byte_off);
+            let w32 = builder.ins().ireduce(types::I32, val);
+            builder.ins().store(MemFlags::trusted(), w32, ptr, 0);
+            Ok(SsaVal::Raw(
+                builder.ins().iconst(types::I64, 0),
+                LIT_TAG_INT,
+            ))
+        }
+
         PrimOpKind::Clz8 => {
             // clz8# :: Word# -> Word#
             check_arity(op, 1, args.len())?;

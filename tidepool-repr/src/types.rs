@@ -330,6 +330,32 @@ define_primops! {
     Ctz64 => "Ctz64", "ctz64#";
     CasSmallArray => "CasSmallArray", "casSmallArray#";
     ShowDoubleAddr => "ShowDoubleAddr", "showDoubleAddr";
+    // Sized Word8/Int8/Word32 (on 64-bit these are masked Int#/Word#).
+    Word8Gt => "Word8Gt", "gtWord8#";
+    Word8Quot => "Word8Quot", "quotWord8#";
+    Word8Rem => "Word8Rem", "remWord8#";
+    Word8Mul => "Word8Mul", "timesWord8#";
+    Int8ToInt => "Int8ToInt", "int8ToInt#";
+    Int8ToWord8 => "Int8ToWord8", "int8ToWord8#";
+    Word8ToInt8 => "Word8ToInt8", "word8ToInt8#";
+    Int8Negate => "Int8Negate", "negateInt8#";
+    Int32ToInt => "Int32ToInt", "int32ToInt#";
+    Word32ToWord => "Word32ToWord", "word32ToWord#";
+    WordToWord32 => "WordToWord32", "wordToWord32#";
+    Word32Gt => "Word32Gt", "gtWord32#";
+    Word32Le => "Word32Le", "leWord32#";
+    Word32Lt => "Word32Lt", "ltWord32#";
+    Word32Add => "Word32Add", "plusWord32#";
+    Word32Sub => "Word32Sub", "subWord32#";
+    // Addr#
+    EqAddr => "EqAddr", "eqAddr#";
+    MinusAddr => "MinusAddr", "minusAddr#";
+    IndexAddrArray => "IndexAddrArray", "indexAddrArray#";
+    IndexAddrOffAddr => "IndexAddrOffAddr", "indexAddrOffAddr#";
+    IndexInt8OffAddr => "IndexInt8OffAddr", "indexInt8OffAddr#";
+    IndexWord32OffAddr => "IndexWord32OffAddr", "indexWord32OffAddr#";
+    IndexWideCharOffAddr => "IndexWideCharOffAddr", "indexWideCharOffAddr#";
+    WriteWideCharOffAddr => "WriteWideCharOffAddr", "writeWideCharOffAddr#";
 }
 
 /// Case alternative constructor.

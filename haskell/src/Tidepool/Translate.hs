@@ -1660,6 +1660,22 @@ mapPrimOp = \case
   -- Addr#
   IndexOffAddrOp_Char -> "IndexCharOffAddr"
   AddrAddOp           -> "PlusAddr"
+  AddrEqOp            -> "EqAddr"
+  AddrSubOp           -> "MinusAddr"
+  IndexByteArrayOp_Addr -> "IndexAddrArray"
+  -- Off-addr reads (the stateful `read*OffAddr#` variants share the serial name
+  -- with their pure `index*OffAddr#` siblings — the trailing State# arg is erased
+  -- and the (# State#, result #) tuple collapses to just the result at emit).
+  IndexOffAddrOp_Addr     -> "IndexAddrOffAddr"
+  ReadOffAddrOp_Addr      -> "IndexAddrOffAddr"
+  IndexOffAddrOp_Int8     -> "IndexInt8OffAddr"
+  ReadOffAddrOp_Int8      -> "IndexInt8OffAddr"
+  IndexOffAddrOp_Word32   -> "IndexWord32OffAddr"
+  ReadOffAddrOp_Word32    -> "IndexWord32OffAddr"
+  ReadOffAddrOp_Word8     -> "IndexWord8OffAddr"
+  IndexOffAddrOp_WideChar -> "IndexWideCharOffAddr"
+  ReadOffAddrOp_WideChar  -> "IndexWideCharOffAddr"
+  WriteOffAddrOp_WideChar -> "WriteWideCharOffAddr"
   -- ByteArray#
   NewByteArrayOp_Char         -> "NewByteArray"
   -- Pinned alloc is identical to a normal ByteArray# for us; contents# yields the
@@ -1694,6 +1710,24 @@ mapPrimOp = \case
   Word8LtOp                   -> "Word8Lt"
   Word8LeOp                   -> "Word8Le"
   Word8GeOp                   -> "Word8Ge"
+  Word8GtOp                   -> "Word8Gt"
+  Word8QuotOp                 -> "Word8Quot"
+  Word8RemOp                  -> "Word8Rem"
+  Word8MulOp                  -> "Word8Mul"
+  -- Int8
+  Int8ToIntOp                 -> "Int8ToInt"
+  Int8ToWord8Op               -> "Int8ToWord8"
+  Word8ToInt8Op               -> "Word8ToInt8"
+  Int8NegOp                   -> "Int8Negate"
+  -- Word32 / Int32
+  Int32ToIntOp                -> "Int32ToInt"
+  Word32ToWordOp              -> "Word32ToWord"
+  WordToWord32Op              -> "WordToWord32"
+  Word32GtOp                  -> "Word32Gt"
+  Word32LeOp                  -> "Word32Le"
+  Word32LtOp                  -> "Word32Lt"
+  Word32AddOp                 -> "Word32Add"
+  Word32SubOp                 -> "Word32Sub"
   -- Int64
   Int64AddOp                  -> "Int64Add"
   Int64SubOp                  -> "Int64Sub"
@@ -2044,6 +2078,7 @@ splitMultiReturnPrimOp :: PrimOp -> Maybe (Text, Text)
 splitMultiReturnPrimOp = \case
   IntQuotRemOp  -> Just (T.pack "IntQuot", T.pack "IntRem")
   WordQuotRemOp -> Just (T.pack "WordQuot", T.pack "WordRem")
+  Word8QuotRemOp -> Just (T.pack "Word8Quot", T.pack "Word8Rem")
   IntAddCOp     -> Just (T.pack "AddIntCVal", T.pack "AddIntCCarry")
   IntSubCOp     -> Just (T.pack "SubIntCVal", T.pack "SubIntCCarry")
   WordAddCOp    -> Just (T.pack "AddWordCVal", T.pack "AddWordCCarry")
