@@ -136,13 +136,38 @@ pub struct AbortRequest {
 /// Write the generated `Tidepool/Effects.hs` into a content-addressed
 /// directory and return that directory (an include root). Idempotent:
 /// the path is keyed on the module source, so distinct effect stacks
-/// coexist and repeat startups reuse the same dir.
+/// coexist and repeat startups reuse the same dir. Re-callable per eval
+/// (see [`write_effects_module_src`]) to self-heal if the dir is reaped.
 pub fn ensure_effects_module(effects: &[EffectDecl]) -> std::io::Result<PathBuf> {
+    write_effects_module_src(&effects_module_source(effects))
+}
+
+/// Base dir for tidepool scratch that must outlive a single eval. Prefers a
+/// stable cache location over `$TMPDIR`: macOS reaps `/var/folders/.../T` out
+/// from under a long-running server, after which every eval fails with
+/// "Could not find module Tidepool.Effects". Order: `XDG_CACHE_HOME` →
+/// `~/.cache` → `$TMPDIR` (last-resort).
+fn stable_cache_base() -> PathBuf {
+    if let Some(d) = std::env::var_os("XDG_CACHE_HOME") {
+        return PathBuf::from(d).join("tidepool");
+    }
+    if let Some(h) = std::env::var_os("HOME") {
+        return PathBuf::from(h).join(".cache").join("tidepool");
+    }
+    std::env::temp_dir().join("tidepool")
+}
+
+/// Materialize the effects module from a pre-generated source string, writing
+/// it into its content-addressed staging dir if absent, and returning the dir.
+/// Lets the server self-heal each eval without re-deriving the source from
+/// decls — the cheap path is a single `exists()` stat.
+pub(crate) fn write_effects_module_src(src: &str) -> std::io::Result<PathBuf> {
     use std::hash::{Hash, Hasher};
-    let src = effects_module_source(effects);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     src.hash(&mut hasher);
-    let root = std::env::temp_dir().join(format!("tidepool-effects-{:016x}", hasher.finish()));
+    let root = stable_cache_base()
+        .join("effects")
+        .join(format!("tidepool-effects-{:016x}", hasher.finish()));
     let module_dir = root.join("Tidepool");
     let module_path = module_dir.join("Effects.hs");
     if !module_path.exists() {
@@ -1567,7 +1592,38 @@ data Console a where
             next_cont_id: Arc::new(AtomicU64::new(1)),
             eval_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_EVALS)),
             orphaned_threads: Arc::new(AtomicUsize::new(0)),
+            effects_source: String::new(),
         }
+    }
+
+    #[test]
+    fn test_effects_module_self_heals_after_reap() {
+        // Unique source → unique content-addressed dir, so this can't collide
+        // with a real effect stack or a parallel test. Cleans up after.
+        let src = format!(
+            "module Tidepool.Effects where\n-- probe {}\n",
+            std::process::id()
+        );
+        let dir = write_effects_module_src(&src).unwrap();
+        let module = dir.join("Tidepool").join("Effects.hs");
+        assert!(module.exists(), "module written on first call");
+        // Staged off $TMPDIR — the macOS-reaped location we moved away from
+        // (unless neither XDG_CACHE_HOME nor HOME is set, the last-resort case).
+        if std::env::var_os("HOME").is_some() || std::env::var_os("XDG_CACHE_HOME").is_some() {
+            assert!(
+                !dir.starts_with(std::env::temp_dir()),
+                "effects module should not stage under $TMPDIR"
+            );
+        }
+        // Simulate the OS reaping the staging dir mid-session.
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(!module.exists());
+        // The per-eval self-heal recreates it at the same content-addressed path.
+        let dir2 = write_effects_module_src(&src).unwrap();
+        assert_eq!(dir, dir2, "content-addressed path is stable across calls");
+        assert!(module.exists(), "self-healed after reap");
+        assert_eq!(std::fs::read_to_string(&module).unwrap(), src);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

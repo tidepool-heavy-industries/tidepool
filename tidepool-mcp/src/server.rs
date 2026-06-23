@@ -49,6 +49,9 @@ pub struct TidepoolMcpServer<H> {
 pub struct TidepoolMcpServerImpl {
     pub(crate) handler_factory: Arc<dyn McpEffectHandler>,
     pub(crate) include: Vec<PathBuf>,
+    /// Generated `Tidepool/Effects.hs` source, kept so the eval path can
+    /// re-materialize its staging dir if it is reaped mid-session.
+    pub(crate) effects_source: String,
     pub(crate) haskell_preamble: String,
     pub(crate) effect_stack_type: String,
     pub(crate) eval_tool_description: String,
@@ -470,6 +473,12 @@ impl TidepoolMcpServerImpl {
         .into();
 
         let handlers = dyn_clone::clone_box(&*self.handler_factory);
+        // Self-heal: re-materialize Tidepool.Effects if its staging dir was
+        // reaped mid-session (macOS purges $TMPDIR / cache). Cheap stat when
+        // intact; rewrites only if the file is missing.
+        if let Err(e) = write_effects_module_src(&self.effects_source) {
+            eprintln!("[tidepool] failed to refresh Tidepool.Effects module: {e}");
+        }
         let include_refs: Vec<PathBuf> = self.include.clone();
         let source_for_blocking = Arc::clone(&source);
         let captured = CapturedOutput::new();
@@ -925,10 +934,13 @@ where
         decls.push(ask_decl());
         let effect_names: Vec<String> = decls.iter().map(|d| d.type_name.to_string()).collect();
         // The generated Tidepool.Effects module must be on the include path
-        // for every eval (the preamble imports it). Failure is survivable
-        // here — evals will fail with a clear missing-module error.
+        // for every eval (the preamble imports it). Keep its source so the
+        // eval path can re-materialize it if the staging dir is reaped mid-
+        // session (macOS purges $TMPDIR / cache). Failure is survivable here —
+        // evals will fail with a clear missing-module error.
+        let effects_source = effects_module_source(&decls);
         let mut include = Vec::new();
-        match ensure_effects_module(&decls) {
+        match write_effects_module_src(&effects_source) {
             Ok(dir) => include.push(dir),
             Err(e) => eprintln!("[tidepool] failed to write Tidepool.Effects module: {e}"),
         }
@@ -936,6 +948,7 @@ where
             inner: TidepoolMcpServerImpl {
                 handler_factory: Arc::new(handler),
                 include,
+                effects_source,
                 haskell_preamble: build_preamble(&decls, false),
                 effect_stack_type: build_effect_stack_type(&decls),
                 eval_tool_description: build_eval_tool_description(&decls),
