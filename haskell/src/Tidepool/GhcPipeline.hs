@@ -96,6 +96,12 @@ runPipeline path includes = do
     -- they never re-enter the fresh EPS, and typechecking fails with e.g.
     -- "No instance for Monad (Eff '[Console, …])".
     modGraphRaw <- depanal [] False
+    -- unpoison: keep the EPS healthy under the TH/QQ downgrade by unsetting
+    -- Opt_IgnoreInterfacePragmas on every summary (see the depanal/load'
+    -- haddock above). The bytecode-vs-object provisioning choice is made
+    -- session-wide in canonicalizeDFlags (Opt_UseBytecodeRatherThanObjects) —
+    -- it has to be set before downsweep, since 'load' re-derives each module's
+    -- backend and ignores a field patched onto a summary here.
     let unpoison ms =
           ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
     _ <- load' Nothing LoadAllTargets mkUnknownDiagnostic (Just batchMsg)
@@ -173,6 +179,17 @@ canonicalizeDFlags dflags =
   -- Trim machine-channel noise: typed-hole "Valid hole fits include …" lists
   -- are enormous (dozens of candidates) and useless to an LLM caller; the
   -- "Perhaps you meant …" similar-name hints are a separate mechanism and stay.
+  -- -fprefer-byte-code (session-wide): when enableCodeGenForTH must provision
+  -- a splice's home-module dependencies, provision them as BYTECODE, not native
+  -- object code. Set at session init (NOT just per-summary) so GHC's downsweep
+  -- — which re-derives each module's backend inside 'load' and ignores a
+  -- backend field we patch onto a summary afterwards — chooses the interpreter.
+  -- Object-code provisioning emits a .s and shells to the assembler; under the
+  -- genericPlatform spoof that .s is x86_64/ELF and the macOS Mach-O assembler
+  -- rejects it (`.type …, @object`; x86 mnemonics on aarch64). Bytecode is
+  -- architecture-neutral, so the spoof stays confined to extracted Core while
+  -- splices run host-agnostically. (Was the OSX/aarch64 hang.)
+  (`gopt_set` Opt_UseBytecodeRatherThanObjects) $
   (`gopt_unset` Opt_ShowValidHoleFits) $
   gopt_set (gopt_set (gopt_unset (gopt_unset (updOptLevel 2 $ dflags
         { backend = noBackend
