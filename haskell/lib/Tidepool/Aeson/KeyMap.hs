@@ -20,6 +20,7 @@ module Tidepool.Aeson.KeyMap
     -- * Conversion
   , toList
   , toAscList
+  , toMapText
   , keys
   , elems
     -- * Traversal
@@ -35,6 +36,7 @@ module Tidepool.Aeson.KeyMap
   ) where
 
 import Prelude (Bool, Int, Maybe, Eq, Ord, Show, (.), ($))
+import Data.Text (Text)
 import qualified Data.Map.Strict as Map
 import Tidepool.Aeson.Value (Key, KeyMap, fromText, toText)
 
@@ -67,6 +69,11 @@ toList = Map.toList
 
 toAscList :: KeyMap v -> [(Key, v)]
 toAscList = Map.toAscList
+
+-- | Re-key to plain 'Text', yielding a @Map Text v@ — the ergonomic way to
+-- iterate a JSON object's fields (the result is key-sorted, like any 'Map').
+toMapText :: KeyMap v -> Map.Map Text v
+toMapText = Map.mapKeys toText
 
 keys :: KeyMap v -> [Key]
 keys = Map.keys

@@ -24,6 +24,14 @@ module Tidepool.Aeson
   , Result(..)
   , fromJSON
   , resultToEither
+  , (.:)
+  , (.:?)
+  , (.!=)
+  , withObject
+  , withText
+  , withArray
+  , withBool
+  , withDouble
     -- * Lens accessors (from Tidepool.Aeson.Lens)
   , key
   , members
