@@ -196,6 +196,7 @@ import Data.Text (Text)
 -- operator-section predicate is correct on the JIT. See Tidepool.Data.Text and
 -- the text-vendor-mechanism-proven memory.
 import qualified Tidepool.Data.Text as T
+import Tidepool.Data.Text (Pack(..), pack)
 import Data.Char (ord, chr)
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe)
 import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, sortOn, maximumBy, minimumBy)
@@ -249,18 +250,10 @@ show = T.pack . P.show
 showT :: Show a => a -> Text
 showT = show
 
--- | Polymorphic pack: identity on Text, T.pack on String.
--- Single-method typeclass, no error branches — JIT-safe.
-class Pack a where
-  pack :: a -> Text
-
-instance Pack String where
-  pack = T.pack
-  {-# INLINE pack #-}
-
-instance Pack Text where
-  pack = id
-  {-# INLINE pack #-}
+-- | Polymorphic @pack@ (identity on 'Text', pack on 'String') now lives in
+-- 'Tidepool.Data.Text' so that the qualified @T.pack@ and this unqualified
+-- @pack@ are the SAME function — @T.pack (show x)@ is no longer a trap.
+-- Imported + re-exported below; see 'Tidepool.Data.Text.Pack'.
 
 unpack :: Text -> String
 unpack = T.unpack

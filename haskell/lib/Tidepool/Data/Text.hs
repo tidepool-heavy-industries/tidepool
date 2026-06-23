@@ -28,6 +28,7 @@
 -- shape) to keep the predicate application in home Core.
 module Tidepool.Data.Text
   ( module Data.Text
+  , Pack(..)
   , takeWhile, takeWhileEnd, dropWhile, dropWhileEnd, dropAround
   , span, break, filter, partition
   , find, findIndex, all, any
@@ -39,14 +40,32 @@ import Data.Text hiding
   ( takeWhile, takeWhileEnd, dropWhile, dropWhileEnd, dropAround
   , span, break, filter, partition
   , find, findIndex, all, any
-  , split, groupBy )
+  , split, groupBy, pack )
 import Data.Text (null, empty)
+import qualified Data.Text as DT (pack)
 import Data.Text.Internal (Text(..), text)
 import Data.Text.Unsafe (Iter(..), iter, reverseIter, unsafeTail)
 import qualified Data.Text.Array as A
 import Data.Text.Internal.Encoding.Utf8 (utf8LengthByLeader, chr2, chr3, chr4)
 import Data.Text.Internal.Unsafe.Char (unsafeChr8)
 import Control.Monad.ST (ST, runST)
+
+-- | Polymorphic @pack@: identity on 'Text', 'Data.Text.pack' on 'String'.
+-- Both the qualified @T.pack@ and the unqualified Prelude @pack@ resolve here,
+-- so @T.pack (show x)@ is no longer a trap (@show@ returns 'Text', which @pack@
+-- accepts as the identity). Single-method class, no error branches — JIT-safe.
+-- (Cost: @T.pack \"literalString\"@ is now ambiguous — write the 'Text' literal
+-- directly; @T.pack@ on a 'String' VALUE and on @show@-output both work.)
+class Pack a where
+  pack :: a -> Text
+
+instance Pack String where
+  pack = DT.pack
+  {-# INLINE pack #-}
+
+instance Pack Text where
+  pack = id
+  {-# INLINE pack #-}
 
 -- ---------------------------------------------------------------------------
 -- takeWhile / dropWhile family (direct iter loops — text-2.1.2 verbatim)

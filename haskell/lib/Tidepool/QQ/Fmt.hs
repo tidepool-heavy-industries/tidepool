@@ -94,7 +94,7 @@ buildExp items = do
         nonempty = filter (not . emptyLit) merged
     parts <- mapM itemToExp nonempty
     case parts of
-      []  -> [| T.pack "" |]
+      []  -> [| T.empty |]
       [e] -> return e
       es  -> [| T.concat $(return (ListE es)) |]
   where
