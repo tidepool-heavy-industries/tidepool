@@ -188,7 +188,8 @@ canonicalizeDFlags dflags =
   -- genericPlatform spoof that .s is x86_64/ELF and the macOS Mach-O assembler
   -- rejects it (`.type …, @object`; x86 mnemonics on aarch64). Bytecode is
   -- architecture-neutral, so the spoof stays confined to extracted Core while
-  -- splices run host-agnostically. (Was the OSX/aarch64 hang.)
+  -- splices run host-agnostically. (Was the aarch64-darwin assembler failure
+  -- that broke every eval on Apple Silicon.)
   (`gopt_set` Opt_UseBytecodeRatherThanObjects) $
   (`gopt_unset` Opt_ShowValidHoleFits) $
   gopt_set (gopt_set (gopt_unset (gopt_unset (updOptLevel 2 $ dflags
