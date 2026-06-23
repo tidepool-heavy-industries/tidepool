@@ -149,15 +149,38 @@ cargo fmt --all -- --check               # Format check
 
 ### Rebuilding the Haskell Toolchain
 
-After changing `haskell/` code (Translate.hs, GhcPipeline.hs, Prelude, etc.):
+After changing `haskell/` code (Translate.hs, GhcPipeline.hs, Prelude, etc.).
+
+**How the extract binary is resolved.** `tidepool-extract` is the GHC→Core
+extractor. The Rust runtime invokes it via the `TIDEPOOL_EXTRACT` env var if set,
+else `tidepool-extract` on `$PATH` (`tidepool-runtime/src/lib.rs:123`,
+`cache.rs:52`). On `$PATH` that resolves to `~/.nix-profile/bin/tidepool-extract`
+— a **nix wrapper** that prepends the with-packages GHC (supplies `lens`) to PATH
+and `exec`s the `tidepool-harness` binary **in the nix store**. It does NOT exec
+anything under `~/.local/bin` or `~/.cargo/bin`, so a `cp … ~/.local/bin/…` does
+nothing. (Those copies, and the `~/.cargo/bin/tidepool-extract` duplicate wrapper,
+are stale cruft shadowed by the nix-profile entry, which is earlier on PATH.)
+
+**Local iteration — test against a worktree build (no deploy):**
 
 ```bash
-cd haskell && cabal build tidepool-extract-bin # Build the Haskell compiler
-cp $(cabal list-bin tidepool-extract-bin) ~/.local/bin/tidepool-extract-bin  # Install
-rm -rf ~/.cache/tidepool/                    # Clear cached CBOR (stale after binary changes)
+cd haskell && cabal build tidepool-extract-bin      # build in dist-newstyle
+# Point tests/evals at it; with-packages GHC on PATH supplies lens (see
+# repro-test-libdir-gotcha memory). A new binary fingerprint forces a cache miss.
+TIDEPOOL_EXTRACT=$(cabal list-bin tidepool-extract-bin) \
+  PATH=/nix/store/<hash>-ghc-native-bignum-9.12.2-with-packages/bin:$PATH \
+  cargo test -p tidepool-runtime ...
 ```
 
-The system PATH binary at `~/.local/bin/tidepool-extract-bin` is called by `~/.cargo/bin/tidepool-extract` wrapper. Both must be current.
+**Deploy to the live MCP server (nix profile):**
+
+```bash
+git add haskell/...                          # nix flake builds see only TRACKED files
+nix profile upgrade tidepool-extract         # rebuild + install the wrapper+harness
+# (or: nix profile install .#tidepool-extract for a first install)
+rm -rf ~/.cache/tidepool/                     # clear stale cached CBOR
+# Then /mcp-reconnect so the server picks up the new extract.
+```
 
 ### Regenerating Test Fixtures
 
