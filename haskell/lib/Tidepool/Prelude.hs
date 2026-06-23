@@ -105,7 +105,7 @@ module Tidepool.Prelude
   , foldM, foldM_
   , filterM, replicateM, zipWithM
     -- * Maybe/Either utilities
-  , maybe, fromMaybe, isJust, isNothing, catMaybes, mapMaybe
+  , maybe, fromMaybe, isJust, isNothing, catMaybes, mapMaybe, listToMaybe, maybeToList
   , either
     -- * Partial functions (use with care)
   , head
@@ -198,7 +198,7 @@ import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import Tidepool.Data.Text (Pack(..), pack)
 import Data.Char (ord, chr)
-import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe, listToMaybe, maybeToList)
 import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, sortOn, maximumBy, minimumBy)
 -- Bifunctor first/second (polymorphic — tuples AND Either). Control.Lens
 -- re-exports `bimap` but NOT first/second, so import those two from the library.
