@@ -1,3 +1,21 @@
+//! Host functions for the JIT runtime — the Rust side of the JIT↔host ABI.
+//!
+//! Cranelift-emitted code calls into these symbols, which are handed to the JIT
+//! module via `host_fn_symbols()` (the registration table near the bottom of the
+//! file). Four concerns live here:
+//!
+//! - **Primop dispatch** — runtime implementations for primops not inlined as
+//!   Cranelift IR (the bignum / `__gmpn_*` / `integer_gmp_*` intercepts, etc.).
+//! - **GC trigger** — allocation slow-path callbacks into the copying collector,
+//!   driven through the `VMContext` + stack-map registry.
+//! - **Error poisoning** — `RuntimeError` raising: case traps, bad pointers,
+//!   division by zero, and forced `error`/`undefined` sentinels.
+//! - **Lazy-result streaming** — the `ValueSource` / `ValueStream` machinery that
+//!   parks an effect-result iterator and serves it element-at-a-time.
+//!
+//! Always-on stderr breadcrumbs (`[CASE TRAP]`, `[BUG]`) fire only on genuine
+//! compiler bugs and must stay loud.
+
 use crate::context::VMContext;
 use crate::gc::frame_walker;
 use crate::layout;

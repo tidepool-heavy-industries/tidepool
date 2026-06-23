@@ -1,3 +1,18 @@
+//! Cranelift IR for primitive operations.
+//!
+//! `emit_primop` is one large `match` on `PrimOpKind`. The arms unbox `HeapPtr`
+//! args, perform the op, and return a `Raw` SSA value. Arms are grouped by GHC
+//! primop family, in this order (follow the `// ---`/`// family` markers):
+//! Int (arith / bitwise / shifts / comparison) → Word → Double → Char →
+//! Conversions → Narrowing → Special → Double-math (libm) → Float (native f32) →
+//! sized Int64/Word64/Word8/Int8/Int32/Word32 → carry/overflow widening.
+//!
+//! Every `PrimOpKind` variant is implemented (the `_ =>` catch-alls are local to
+//! sub-dispatches, not a global fallback — an unhandled top-level primop is a
+//! bug). This must stay in lockstep with the eval oracle in
+//! `tidepool-eval/src/eval.rs` and the `define_primops!` table in
+//! `tidepool-repr/src/types.rs`.
+
 use super::*;
 use crate::alloc::emit_alloc_fast_path;
 use crate::emit::{EmitError, SsaVal};

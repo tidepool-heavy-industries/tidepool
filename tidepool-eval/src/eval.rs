@@ -1,4 +1,15 @@
 //! Tree-walking interpreter for Core expressions.
+//!
+//! This is the differential **oracle** the JIT is checked against: it must agree
+//! with `tidepool-codegen` on every observable result. Reading path:
+//!
+//! - `eval` — top-level entry; sets up the datacon environment and evaluates.
+//! - `eval_settled` — the trampoline that drives tail-jumps without growing the
+//!   host stack (mirrors the JIT's TCO).
+//! - `force` — reduces a value to WHNF, resolving thunks.
+//! - the big `match op { … }` (primop section) — one arm per `PrimOpKind`, kept
+//!   in lockstep with `emit/primop.rs` and the `define_primops!` table in
+//!   `tidepool-repr/src/types.rs`.
 
 use crate::env::Env;
 use crate::error::EvalError;

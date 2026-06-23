@@ -1,3 +1,21 @@
+//! Cranelift IR emission for Core expressions.
+//!
+//! Entry point: `compile_expr` (bottom of the file). Emission is a stack-safe
+//! hylomorphism over `EmitFrame` so deeply-nested Core can't overflow the host
+//! stack. The file reads top-to-bottom in these sections:
+//!
+//! - **EmitFrame** — the hylomorphism frame: which child positions are processed
+//!   stack-safely vs. via bounded recursion (block/pattern setup needs top-down
+//!   context).
+//! - **hylomorphism** — the expand/collapse driver.
+//! - **LetRec deferred state** — the multi-phase binding fill (see the LetRec
+//!   phase-ordering notes in the repo Core-translation gotchas).
+//! - **closure capture** — free-var capture analysis for lambdas/thunks.
+//! - **lambda / thunk emission** — closure allocation + code-pointer wiring.
+//!
+//! Tail-ness is owned by the `emit_node` spine, NOT carried through the hylo
+//! (the #313 invariant): the hylo is hard-NonTail.
+
 use crate::alloc::emit_alloc_fast_path;
 use crate::emit::*;
 use crate::pipeline::CodegenPipeline;
