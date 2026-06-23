@@ -3,13 +3,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Returns the platform-specific cache directory for Tidepool.
-/// Following XDG conventions: `$XDG_CACHE_HOME/tidepool` or `~/.cache/tidepool`.
+/// Returns the cache directory for Tidepool's compiled-artifact memos.
+/// Delegates to the canonical resolver ([`crate::paths::cache_dir`]); wrapped in
+/// `Some` to preserve the historical Option-returning call sites.
 fn cache_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .map(|d| d.join("tidepool"))
+    Some(crate::paths::cache_dir())
 }
 
 /// Computes a unique cache key for a compilation request.

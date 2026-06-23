@@ -11,6 +11,32 @@ Adding an effect = a `*_decl()` here (Haskell-facing constructors + helpers) + a
 The cheap path is a new constructor on an existing effect (e.g. `ParseJson` on
 `Http`); a wholly new effect type needs a positional union-tag slot.
 
+## On-disk paths & config (`tidepool_runtime::paths`)
+
+The installed server is self-sufficient from any directory. All locations resolve
+through one module, `tidepool-runtime/src/paths.rs`:
+
+- **Cache (regenerable)** — `$XDG_CACHE_HOME/tidepool` → `~/.cache/tidepool`. Holds
+  the materialized **bundled stdlib** (`stdlib/<content-hash>/`, complete tree,
+  embedded at build time by `tidepool/build.rs`, re-materialized when the binary
+  changes — no version-stamp staleness), the generated `Tidepool.Effects` module
+  (`effects/`, self-healed per eval), and the compiled-artifact memos.
+- **User-global config** — `$TIDEPOOL_CONFIG_DIR` → `$XDG_CONFIG_HOME/tidepool` →
+  `~/.config/tidepool`. Holds the global verb `lib/`, `secrets/`, and
+  `config.toml`. Legacy `~/.tidepool/{lib,secrets}` is honored if present.
+- **Project-local** — the nearest ancestor of CWD containing a `.tidepool/`
+  (git-style walk-up): `lib/`, `secrets/`, `kv.json`, `config.toml`, `PATTERNS.md`.
+- **CWD** — the Fs/Exec sandbox (unchanged).
+
+**Verb library resolution** is layered: GHC include order
+`[effects, stdlib, project-lib, global-lib]` (first match wins), so `Tidepool.*`
+resolves from the bundle and a project `Library`/module shadows the global one.
+The tool-description vocab digest merges both dirs (project overrides global).
+**Config** (`config.toml`) layers default < global < project < env; keys:
+`llm_model`, `eval_timeout_secs`. Env knobs: `TIDEPOOL_PRELUDE_DIR`,
+`TIDEPOOL_CONFIG_DIR`, `TIDEPOOL_LLM_MODEL`, `TIDEPOOL_EVAL_TIMEOUT_SECS`,
+`TIDEPOOL_EXTRACT`. In-repo, `ensure_prelude` short-circuits to `haskell/lib`.
+
 ## Eval-authoring patterns (know-how, not in the tool description)
 
 **Aperture** (`ask`/`oracle` as a decision gate): place the suspend after data

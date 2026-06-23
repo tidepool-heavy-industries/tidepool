@@ -985,40 +985,60 @@ where
         let prelude_dir = std::env::var_os("TIDEPOOL_PRELUDE_DIR").map_or(fallback, PathBuf::from);
         self.inner.include.push(prelude_dir);
 
-        // Probe for user library directory
-        let user_lib = PathBuf::from(".tidepool/lib");
-        if user_lib.is_dir() {
-            self.inner.has_user_library = user_lib.join("Library.hs").exists();
-            self.inner.include.push(user_lib.clone());
-            if self.inner.has_user_library {
-                // Rebuild preamble with user library import
-                let mut decls = H::collect_decls();
-                decls.push(ask_decl());
-                self.inner.haskell_preamble = build_preamble(&decls, true);
-                // Append note + vocabulary digest to tool description
-                self.inner.eval_tool_description.push_str(
-                    "\n\nUser library: `Library` is auto-imported from `.tidepool/lib/Library.hs` \
-                     and re-exports every module below — all names are in scope bare. \
-                     Check this vocabulary for an existing combinator with the right shape \
-                     (fold/unfold/loop/batch) BEFORE hand-rolling a recursive helper. \
-                     New `data` types go in a `.tidepool/lib/<Mod>.hs` module \
-                     (scaffold with `Explore.defMod`):\n",
-                );
-                self.inner
-                    .eval_tool_description
-                    .push_str(&library_vocab(&user_lib));
-                self.inner.eval_tool_description.push_str(concat!(
-                    "\nWith the library:\n",
-                    "  glob \"**/*.rs\" >>= mapM (\\p -> (,) p <$> getFileSize p) <&> sizeRank 9\n",
-                    "  seek \"where are case traps emitted?\" 5  -- steered search: suspends to you each round\n",
-                ));
-                // PATTERNS.md lives beside lib/, at .tidepool/PATTERNS.md.
-                let patterns = user_lib.parent().map(|p| p.join("PATTERNS.md"));
-                if patterns.as_deref().is_some_and(std::path::Path::exists) {
-                    self.inner.eval_tool_description.push_str(
-                        "\nPattern catalog: read `.tidepool/PATTERNS.md` for composition idioms.\n",
-                    );
+        // Layered verb libraries: project-local first (walk up from CWD for a
+        // `.tidepool/`), then user-global (`~/.config/tidepool/lib`, legacy
+        // `~/.tidepool/lib`). Both sit AFTER the stdlib on the include path so
+        // `Tidepool.*` resolves from the bundle; project is BEFORE global so a
+        // project `Library`/module shadows the global one (GHC first-match-wins).
+        let mut lib_dirs: Vec<PathBuf> = Vec::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Some(root) = tidepool_runtime::paths::find_project_root(&cwd) {
+                let project_lib = root.join(".tidepool").join("lib");
+                if project_lib.is_dir() {
+                    lib_dirs.push(project_lib);
                 }
+            }
+        }
+        lib_dirs.extend(tidepool_runtime::paths::global_lib_dirs());
+
+        for dir in &lib_dirs {
+            self.inner.include.push(dir.clone());
+        }
+
+        // The `Library` digest entry-point is the first lib dir that defines it.
+        let library_dir = lib_dirs
+            .iter()
+            .find(|d| d.join("Library.hs").exists())
+            .cloned();
+        self.inner.has_user_library = library_dir.is_some();
+        if let Some(lib_root) = library_dir {
+            // Rebuild preamble with the user library import
+            let mut decls = H::collect_decls();
+            decls.push(ask_decl());
+            self.inner.haskell_preamble = build_preamble(&decls, true);
+            // Append note + merged vocabulary digest to the tool description
+            self.inner.eval_tool_description.push_str(
+                "\n\nUser library: `Library` is auto-imported (project or global \
+                 `.tidepool/lib/Library.hs`) and re-exports every module below — all names \
+                 are in scope bare. Check this vocabulary for an existing combinator with the \
+                 right shape (fold/unfold/loop/batch) BEFORE hand-rolling a recursive helper. \
+                 New `data` types go in a `<lib>/<Mod>.hs` module (scaffold with \
+                 `Explore.defMod`):\n",
+            );
+            self.inner
+                .eval_tool_description
+                .push_str(&library_vocab(&lib_dirs));
+            self.inner.eval_tool_description.push_str(concat!(
+                "\nWith the library:\n",
+                "  glob \"**/*.rs\" >>= mapM (\\p -> (,) p <$> getFileSize p) <&> sizeRank 9\n",
+                "  seek \"where are case traps emitted?\" 5  -- steered search: suspends to you each round\n",
+            ));
+            // PATTERNS.md lives beside the active Library dir (at `.tidepool/`).
+            let patterns = lib_root.parent().map(|p| p.join("PATTERNS.md"));
+            if patterns.as_deref().is_some_and(std::path::Path::exists) {
+                self.inner.eval_tool_description.push_str(
+                    "\nPattern catalog: read `.tidepool/PATTERNS.md` for composition idioms.\n",
+                );
             }
         }
 

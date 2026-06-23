@@ -17,6 +17,7 @@ use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings, ReadError};
 use tidepool_repr::{CoreExpr, DataConTable};
 
 mod cache;
+pub mod paths;
 mod render;
 
 pub use render::{value_to_json, EvalResult};

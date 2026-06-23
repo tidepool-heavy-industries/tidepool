@@ -73,7 +73,16 @@ Env-gated, OFF by default. For the JIT-runtime / effect-machine / cache knobs se
 
 MCP users get `import Tidepool.Prelude hiding (error)` auto-imported; more modules
 via the `imports` field. Inline `data` decls in `helpers` work for eval-local
-types; promote to a `.tidepool/lib/` module when reused across evals.
+types; promote to a `.tidepool/lib/` module (project) or `~/.config/tidepool/lib/`
+(global) when reused across evals.
+
+> **Shipping the stdlib:** the WHOLE `lib/Tidepool/**` tree is embedded into the
+> server binary at build time (`tidepool/build.rs`) and materialized to
+> `~/.cache/tidepool/stdlib/<hash>/` at startup — so `cargo install --path
+> tidepool` is all that's needed to ship a stdlib change to an installed server
+> (no manual prelude copy, no nix step; that's for the *extract* binary). In-repo,
+> the server uses `haskell/lib/` directly. The materialization is content-hashed,
+> so it can't go stale across binary versions.
 
 **The live API reference is the MCP `eval` tool description** (emitted by the
 server) plus the source under `lib/Tidepool/`. Do not re-list the full function

@@ -39,7 +39,14 @@ const MAX_EVAL_TIMEOUT_SECS: u64 = 600;
 /// override: `None` → the server default (`EVAL_TIMEOUT_SECS`); `Some(t)` → `t`
 /// clamped to `[1, MAX_EVAL_TIMEOUT_SECS]`.
 pub(crate) fn resolve_eval_timeout_secs(requested: Option<u64>) -> u64 {
-    requested
+    if let Some(t) = requested {
+        return t.clamp(1, MAX_EVAL_TIMEOUT_SECS);
+    }
+    // Server default: `TIDEPOOL_EVAL_TIMEOUT_SECS` (set directly or bridged from
+    // config.toml) else the built-in `EVAL_TIMEOUT_SECS`.
+    std::env::var("TIDEPOOL_EVAL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
         .map(|t| t.clamp(1, MAX_EVAL_TIMEOUT_SECS))
         .unwrap_or(EVAL_TIMEOUT_SECS)
 }
@@ -142,31 +149,17 @@ pub fn ensure_effects_module(effects: &[EffectDecl]) -> std::io::Result<PathBuf>
     write_effects_module_src(&effects_module_source(effects))
 }
 
-/// Base dir for tidepool scratch that must outlive a single eval. Prefers a
-/// stable cache location over `$TMPDIR`: macOS reaps `/var/folders/.../T` out
-/// from under a long-running server, after which every eval fails with
-/// "Could not find module Tidepool.Effects". Order: `XDG_CACHE_HOME` →
-/// `~/.cache` → `$TMPDIR` (last-resort).
-fn stable_cache_base() -> PathBuf {
-    if let Some(d) = std::env::var_os("XDG_CACHE_HOME") {
-        return PathBuf::from(d).join("tidepool");
-    }
-    if let Some(h) = std::env::var_os("HOME") {
-        return PathBuf::from(h).join(".cache").join("tidepool");
-    }
-    std::env::temp_dir().join("tidepool")
-}
-
 /// Materialize the effects module from a pre-generated source string, writing
 /// it into its content-addressed staging dir if absent, and returning the dir.
 /// Lets the server self-heal each eval without re-deriving the source from
-/// decls — the cheap path is a single `exists()` stat.
+/// decls — the cheap path is a single `exists()` stat. Staged under the stable
+/// cache root (`tidepool_runtime::paths::effects_dir`), NOT `$TMPDIR`, which
+/// macOS reaps out from under a long-running server.
 pub(crate) fn write_effects_module_src(src: &str) -> std::io::Result<PathBuf> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     src.hash(&mut hasher);
-    let root = stable_cache_base()
-        .join("effects")
+    let root = tidepool_runtime::paths::effects_dir()
         .join(format!("tidepool-effects-{:016x}", hasher.finish()));
     let module_dir = root.join("Tidepool");
     let module_path = module_dir.join("Effects.hs");

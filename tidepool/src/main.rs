@@ -13,6 +13,9 @@ use tidepool_effect::error::EffectError;
 use tidepool_eval::value::Value;
 use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl, TidepoolMcpServer};
 
+mod config;
+use config::Config;
+
 // === Tag 0: Console ===
 
 #[derive(FromCore)]
@@ -1360,7 +1363,18 @@ fn load_secrets_from(dir: &std::path::Path) {
 }
 
 fn load_secrets() {
-    load_secrets_from(std::path::Path::new(".tidepool/secrets"));
+    // Project-local first (walk up from CWD for `.tidepool/secrets`), then
+    // user-global (`~/.config/tidepool/secrets`, legacy `~/.tidepool/secrets`).
+    // `load_secrets_from` lets an already-set var win, so the FIRST source to
+    // provide a key takes precedence — project overrides global.
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(root) = tidepool_runtime::paths::find_project_root(&cwd) {
+            load_secrets_from(&root.join(".tidepool").join("secrets"));
+        }
+    }
+    for dir in tidepool_runtime::paths::global_secrets_dirs() {
+        load_secrets_from(&dir);
+    }
 }
 
 // === Tag 6: Meta (runtime introspection) ===
@@ -1495,29 +1509,32 @@ impl EffectHandler<CapturedOutput> for MetaHandler {
 }
 
 // ---------------------------------------------------------------------------
-// Embedded Haskell stdlib — written to ~/.tidepool/prelude/ on startup
+// Bundled Haskell stdlib — embedded at build time (build.rs walks the whole
+// haskell/lib/Tidepool tree), materialized to a content-addressed cache dir.
 // ---------------------------------------------------------------------------
 
-const PRELUDE_HS: &str = include_str!("../haskell-lib/Tidepool/Prelude.hs");
-const TEXTFORMAT_HS: &str = include_str!("../haskell-lib/Tidepool/TextFormat.hs");
-const TABLE_HS: &str = include_str!("../haskell-lib/Tidepool/Table.hs");
-const AESON_HS: &str = include_str!("../haskell-lib/Tidepool/Aeson.hs");
-const AESON_VALUE_HS: &str = include_str!("../haskell-lib/Tidepool/Aeson/Value.hs");
-const AESON_KEYMAP_HS: &str = include_str!("../haskell-lib/Tidepool/Aeson/KeyMap.hs");
-const AESON_LENS_HS: &str = include_str!("../haskell-lib/Tidepool/Aeson/Lens.hs");
+// `EMBEDDED_STDLIB: &[(&str, &str)]` — (Tidepool/<rel>, contents) for every
+// `.hs` module in the tree (Internal/ + Prelude_cbor excluded). @generated.
+include!(concat!(env!("OUT_DIR"), "/embedded_stdlib.rs"));
 
-const EMBEDDED_FILES: &[(&str, &str)] = &[
-    ("Tidepool/Prelude.hs", PRELUDE_HS),
-    ("Tidepool/TextFormat.hs", TEXTFORMAT_HS),
-    ("Tidepool/Table.hs", TABLE_HS),
-    ("Tidepool/Aeson.hs", AESON_HS),
-    ("Tidepool/Aeson/Value.hs", AESON_VALUE_HS),
-    ("Tidepool/Aeson/KeyMap.hs", AESON_KEYMAP_HS),
-    ("Tidepool/Aeson/Lens.hs", AESON_LENS_HS),
-];
+/// Deterministic hash of the embedded stdlib content. Stable across runs
+/// (`DefaultHasher` has fixed keys) so a given binary always maps to the same
+/// cache dir; a changed binary maps to a fresh one.
+fn stdlib_content_hash() -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (rel, content) in EMBEDDED_STDLIB {
+        rel.hash(&mut h);
+        content.hash(&mut h);
+    }
+    format!("{:016x}", h.finish())
+}
 
-/// Ensure embedded Haskell stdlib is written to ~/.tidepool/prelude/.
-/// Returns the prelude directory path. Respects TIDEPOOL_PRELUDE_DIR override.
+/// Resolve the directory holding the Tidepool stdlib (an include root for GHC).
+/// Precedence: `TIDEPOOL_PRELUDE_DIR` → in-repo `haskell/lib` → materialized
+/// bundle in the content-addressed cache dir. The bundle is the COMPLETE tree
+/// and is keyed on content, so it can't go stale across binary versions (the
+/// old `.version` stamp froze it) and can't drift from a hand-maintained subset.
 fn ensure_prelude() -> Result<PathBuf, Box<dyn std::error::Error>> {
     if let Some(dir) = std::env::var_os("TIDEPOOL_PRELUDE_DIR") {
         return Ok(PathBuf::from(dir));
@@ -1535,25 +1552,22 @@ fn ensure_prelude() -> Result<PathBuf, Box<dyn std::error::Error>> {
         }
     }
 
-    // Installed mode: write embedded files to ~/.tidepool/prelude/
-    let base = dirs::home_dir()
-        .ok_or("could not determine home directory")?
-        .join(".tidepool")
-        .join("prelude");
-    let stamp = base.join(".version");
-    let version = env!("CARGO_PKG_VERSION");
-    if stamp.exists() && std::fs::read_to_string(&stamp).ok().as_deref() == Some(version) {
-        return Ok(base);
-    }
-
-    for (path, content) in EMBEDDED_FILES {
-        let full = base.join(path);
-        if let Some(parent) = full.parent() {
-            let _ = std::fs::create_dir_all(parent);
+    // Installed mode: materialize the bundled stdlib to a content-addressed dir.
+    let hash = stdlib_content_hash();
+    let base = tidepool_runtime::paths::stdlib_dir(&hash);
+    // Sentinel marks a COMPLETE write — guards against serving a half-written dir
+    // (e.g. a crash mid-materialization) and against the macOS cache reaper.
+    let sentinel = base.join(".complete");
+    if !sentinel.exists() {
+        for (rel, content) in EMBEDDED_STDLIB {
+            let full = base.join(rel);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&full, content)?;
         }
-        let _ = std::fs::write(&full, content);
+        std::fs::write(&sentinel, hash.as_bytes())?;
     }
-    let _ = std::fs::write(&stamp, version);
     Ok(base)
 }
 
@@ -1685,8 +1699,9 @@ struct Args {
     /// forces a namespace. API keys come from the standard env vars
     /// (OPENAI_API_KEY, ...) or from `.tidepool/secrets/<ENV_VAR_NAME>`
     /// files.
-    #[arg(long, env = "TIDEPOOL_LLM_MODEL", default_value = DEFAULT_OPENAI_MODEL)]
-    llm: String,
+    /// (Unset → falls back to `config.toml` `llm_model`, then the built-in default.)
+    #[arg(long, env = "TIDEPOOL_LLM_MODEL")]
+    llm: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1791,8 +1806,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tidepool_codegen::signal_safety::install();
 
     let cwd = std::env::current_dir()?;
-    let tidepool_dir = cwd.join(".tidepool");
-    let kv_path = tidepool_dir.join("kv.json");
+    let project_root = tidepool_runtime::paths::find_project_root(&cwd);
+
+    // Layered config: defaults < global config.toml < project config.toml < env.
+    let cfg = Config::load(project_root.as_deref());
+    // Model precedence: --llm / TIDEPOOL_LLM_MODEL (args.llm) > config > default.
+    let model = args
+        .llm
+        .clone()
+        .or(cfg.llm_model)
+        .unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
+    // Bridge the configured default eval timeout into the env knob the server
+    // reads, unless it's already set explicitly (env stays authoritative).
+    if std::env::var_os("TIDEPOOL_EVAL_TIMEOUT_SECS").is_none() {
+        if let Some(t) = cfg.eval_timeout_secs {
+            std::env::set_var("TIDEPOOL_EVAL_TIMEOUT_SECS", t.to_string());
+        }
+    }
+
+    // KV persists in the project's `.tidepool/` if we're inside one (walk up from
+    // CWD), so it's found from any subdir; otherwise a global store under the
+    // cache dir, so state survives even when launched outside any project.
+    let kv_path = match &project_root {
+        Some(root) => root.join(".tidepool").join("kv.json"),
+        None => tidepool_runtime::paths::cache_dir().join("kv.json"),
+    };
     if args.debug {
         // Build Meta's effect_names/helper_sigs from full decls (standard + meta)
         let mut decls = tidepool_mcp::standard_decls();
@@ -1816,7 +1854,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             HttpHandler,
             ExecHandler::new(cwd.clone()),
             MetaHandler::new(effect_names, helper_sigs),
-            LlmHandler::new(args.llm.clone())
+            LlmHandler::new(model.clone())
         ];
         let server = TidepoolMcpServer::new(handlers).with_prelude(prelude_dir);
         if let Some(addr) = http_addr {
@@ -1832,7 +1870,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             SgHandler::new(cwd.clone()),
             HttpHandler,
             ExecHandler::new(cwd.clone()),
-            LlmHandler::new(args.llm.clone())
+            LlmHandler::new(model.clone())
         ];
         let server = TidepoolMcpServer::new(handlers).with_prelude(prelude_dir);
         if let Some(addr) = http_addr {

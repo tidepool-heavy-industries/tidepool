@@ -582,44 +582,50 @@ pub(crate) fn extract_sigs(src: &str) -> Vec<String> {
 /// code shape-first: the combinators a user would otherwise re-invent
 /// are visible at every call site instead of requiring a read of the
 /// lib sources. Snapshot at server start; restart to refresh.
-pub(crate) fn library_vocab(dir: &std::path::Path) -> String {
+pub(crate) fn library_vocab(dirs: &[std::path::PathBuf]) -> String {
     // Diagnostic modules, not vocabulary.
     const SKIP: &[&str] = &["Probe", "SelfTest"];
     const SIG_MAX: usize = 120;
     const TOTAL_MAX: usize = 8000;
 
-    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.extension().is_some_and(|x| x == "hs"))
-                .collect()
-        })
-        .unwrap_or_default();
-    files.sort();
-
+    // Layered across dirs (project first, then global): a module name seen in an
+    // earlier dir shadows the same name later, so a project module overrides a
+    // global one — matching GHC's first-match-wins include search.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut out = String::new();
-    'files: for path in files {
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if SKIP.contains(&stem) {
-            continue;
-        }
-        let Ok(src) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let sigs = extract_sigs(&src);
-        if sigs.is_empty() {
-            continue;
-        }
-        out.push_str(&format!("  {stem}:\n"));
-        for s in sigs {
-            let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-            let s: String = s.chars().take(SIG_MAX).collect();
-            out.push_str(&format!("    {s}\n"));
-            if out.len() > TOTAL_MAX {
-                out.push_str("  …(truncated)\n");
-                break 'files;
+    for dir in dirs {
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.extension().is_some_and(|x| x == "hs"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort();
+
+        for path in files {
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if SKIP.contains(&stem) || !seen.insert(stem.to_string()) {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let sigs = extract_sigs(&src);
+            if sigs.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("  {stem}:\n"));
+            for s in sigs {
+                let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+                let s: String = s.chars().take(SIG_MAX).collect();
+                out.push_str(&format!("    {s}\n"));
+                if out.len() > TOTAL_MAX {
+                    out.push_str("  …(truncated)\n");
+                    return out;
+                }
             }
         }
     }
