@@ -1,8 +1,9 @@
--- | Phase-2 test helper: home-module bindings that DELEGATE to the vendored
--- Tidepool.Data.Text (mirrors how a Prelude shadow / .tidepool/lib verb / user
--- helper wraps a T.* op). Delegating to a vendored HOME body is the proven-green
--- pattern; delegating to EXTERNAL Data.Text is the red one.
-module Tidepool.DataTextWrap where
+-- | TEST-ONLY probe (not part of the user-facing eval surface): home-module
+-- bindings that DELEGATE to the vendored Tidepool.Data.Text, mirroring how a
+-- Prelude shadow / .tidepool/lib verb / user helper wraps a T.* op. Delegating
+-- to a vendored HOME body is the proven-green pattern; delegating to EXTERNAL
+-- Data.Text is the red one. Consumed only by tests/vendor_text_functions.rs.
+module Tidepool.Internal.DataTextProbe where
 
 import qualified Tidepool.Data.Text as T
 import Data.Text (Text)

@@ -28,7 +28,7 @@ import Prelude
 import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import Tidepool.Prelude (enumFromTo, lines, splitOn, sortBy, comparing, strip)
-import Tidepool.Text (padRightWith)
+import Tidepool.TextFormat (padRightWith)
 
 -- ---------------------------------------------------------------------------
 -- Parsing

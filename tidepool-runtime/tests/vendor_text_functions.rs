@@ -3,7 +3,7 @@
 //! Every vendored predicate function is exercised under the operator-section
 //! predicate via `map` (the canonical PAP trigger), BOTH directly (`T.foo`,
 //! T = vendored home body) AND through a home-module wrapper
-//! (`Tidepool.DataTextWrap`, mirroring a Prelude shadow / lib verb). Both must
+//! (`Tidepool.Internal.DataTextProbe`, mirroring a Prelude shadow / lib verb). Both must
 //! match GHC semantics. If the vendoring works, all of these are GREEN — the
 //! external-package landmine (`takewhile-shadow-load-bearing`) is dissolved.
 
@@ -22,7 +22,7 @@ module Test where
 import Tidepool.Prelude hiding (error)
 import qualified Data.Text as DT
 import qualified Tidepool.Data.Text as T
-import Tidepool.DataTextWrap
+import Tidepool.Internal.DataTextProbe
 default (Int, Text)
 
 result :: _

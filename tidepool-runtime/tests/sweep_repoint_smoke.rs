@@ -2,7 +2,7 @@
 //! qualified Data.Text as T` in haskell/lib repointed to the vendored
 //! `Tidepool.Data.Text`).
 //!
-//! - `dedent_runtime_fix`: `Tidepool.Text.dedent` uses
+//! - `dedent_runtime_fix`: `Tidepool.TextFormat.dedent` uses
 //!   `countLeading = T.length . T.takeWhile (== ' ')` — a section predicate
 //!   through a home binding. With EXTERNAL `T` this was silently wrong (takeWhile
 //!   returned the input unmodified → countLeading = full line length → dedent
@@ -23,7 +23,7 @@ fn prelude_path() -> std::path::PathBuf {
 
 /// Compile + run a pure `result = <body>` with the given pragmas/imports.
 ///
-/// Runs on a 64MB-stack thread: importing the utils (`Tidepool.Text`) AND the
+/// Runs on a 64MB-stack thread: importing the utils (`Tidepool.TextFormat`) AND the
 /// vendored `Tidepool.Data.Text` deepens in-session emit recursion past the 2MB
 /// default test-thread stack (the known compile-time emit-depth class — cf.
 /// `repro_qq_union`'s 64MB wrapper; the live MCP server compiles on a 256MB
@@ -64,8 +64,8 @@ fn dedent_runtime_fix() {
     // Pre-sweep (external T): countLeading returned full line length → wrong.
     let got = run_src(
         "",
-        "import qualified Tidepool.Text as TT",
-        r#"TT.dedent (DT.pack "  hello\n    world")"#,
+        "import qualified Tidepool.TextFormat as TF",
+        r#"TF.dedent (DT.pack "  hello\n    world")"#,
     )
     .expect("dedent compile/run");
     assert_eq!(got, json!("hello\n  world\n"));

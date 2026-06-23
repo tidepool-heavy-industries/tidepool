@@ -206,13 +206,13 @@ result = Utils.maybe' (0 :: Int) (+1) (Just 41)
 
 #[test]
 fn pure_text_camel_to_snake_cross_mode_equivalent() {
-    // We use the existing camelToSnake from Tidepool.Text to ensure breadth coverage
+    // We use the existing camelToSnake from Tidepool.TextFormat to ensure breadth coverage
     let fixture = CrossModeFixture {
         single: r#"
 {-# LANGUAGE OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
-import Tidepool.Text (camelToSnake)
+import Tidepool.TextFormat (camelToSnake)
 
 result = camelToSnake "helloWorld"
 "#
@@ -223,7 +223,7 @@ result = camelToSnake "helloWorld"
                 r#"
 module TextWrap where
 import Tidepool.Prelude
-import Tidepool.Text (camelToSnake)
+import Tidepool.TextFormat (camelToSnake)
 wrapCamel :: Text -> Text
 {-# NOINLINE wrapCamel #-}
 wrapCamel = camelToSnake

@@ -25,7 +25,7 @@ fn run_expr(expr: &str) -> serde_json::Value {
         r#"{{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, ScopedTypeVariables #-}}
 module Expr where
 import Tidepool.Prelude
-import Tidepool.Text
+import Tidepool.TextFormat
 import qualified Data.Text as T
 import Library
 default (Int, Text)

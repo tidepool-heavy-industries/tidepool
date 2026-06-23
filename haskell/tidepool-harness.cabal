@@ -15,6 +15,10 @@ executable tidepool-extract-bin
     Tidepool.Prelude
     Tidepool.FilePath
     Tidepool.Render
+    Tidepool.Data.Text
+    Tidepool.TextFormat
+    Tidepool.Table
+    Tidepool.Internal.DataTextProbe
     Tidepool.Aeson
     Tidepool.Aeson.Value
     Tidepool.Aeson.KeyMap

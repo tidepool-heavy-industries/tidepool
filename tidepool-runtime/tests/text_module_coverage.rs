@@ -11,7 +11,7 @@ fn run_plain(body: &str) -> serde_json::Value {
         r#"{{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, PartialTypeSignatures #-}}
 module Test where
 import Tidepool.Prelude
-import Tidepool.Text
+import Tidepool.TextFormat
 import qualified Data.Text as T
 default (Int, Text)
 

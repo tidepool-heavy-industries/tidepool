@@ -1,9 +1,11 @@
 {-# LANGUAGE BangPatterns, NoImplicitPrelude, OverloadedStrings #-}
--- | Advanced text utilities for code generation and formatting.
+-- | Advanced text formatting utilities for code generation (case conversion,
+-- padding/alignment, indent/dedent/wrap, slugify). NOT the canonical text
+-- surface — that is @Tidepool.Data.Text@ (the vendored @Data.Text@ drop-in).
 --
 -- All functions operate on Data.Text. Available in MCP via:
--- @import Tidepool.Text@
-module Tidepool.Text
+-- @import qualified Tidepool.TextFormat as TF@
+module Tidepool.TextFormat
   ( -- * Case conversion
     camelToSnake
   , snakeToCamel

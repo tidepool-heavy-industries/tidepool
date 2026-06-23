@@ -1499,7 +1499,7 @@ impl EffectHandler<CapturedOutput> for MetaHandler {
 // ---------------------------------------------------------------------------
 
 const PRELUDE_HS: &str = include_str!("../haskell-lib/Tidepool/Prelude.hs");
-const TEXT_HS: &str = include_str!("../haskell-lib/Tidepool/Text.hs");
+const TEXTFORMAT_HS: &str = include_str!("../haskell-lib/Tidepool/TextFormat.hs");
 const TABLE_HS: &str = include_str!("../haskell-lib/Tidepool/Table.hs");
 const AESON_HS: &str = include_str!("../haskell-lib/Tidepool/Aeson.hs");
 const AESON_VALUE_HS: &str = include_str!("../haskell-lib/Tidepool/Aeson/Value.hs");
@@ -1508,7 +1508,7 @@ const AESON_LENS_HS: &str = include_str!("../haskell-lib/Tidepool/Aeson/Lens.hs"
 
 const EMBEDDED_FILES: &[(&str, &str)] = &[
     ("Tidepool/Prelude.hs", PRELUDE_HS),
-    ("Tidepool/Text.hs", TEXT_HS),
+    ("Tidepool/TextFormat.hs", TEXTFORMAT_HS),
     ("Tidepool/Table.hs", TABLE_HS),
     ("Tidepool/Aeson.hs", AESON_HS),
     ("Tidepool/Aeson/Value.hs", AESON_VALUE_HS),

@@ -81,9 +81,10 @@ surface here — it drifts. Module map:
 
 - `Prelude` — the auto-imported hub (Text-first; `show :: a -> Text`; polymorphic
   `pack`; lists/Map/Maybe/monadic combinators; JSON construction + lenses).
-- `Data/Text` (`T.`) — vendored Data.Text bodies (predicate fns are JIT-safe here;
-  `pack` is the polymorphic `Pack` class). `Text` (`TT.`) — case/format utilities.
-  `Table` (`Tab.`) — CSV/TSV parse + render.
+- `Data/Text` (`T.`) — the canonical text surface: vendored Data.Text bodies
+  (predicate fns are JIT-safe here; `pack` is the polymorphic `Pack` class).
+  `TextFormat` (`TF.`) — case/format/slugify/pad utilities (NOT the canonical
+  surface). `Table` (`Tab.`) — CSV/TSV parse + render.
 - `FilePath` — System.FilePath over Text (`FilePath = Text`); the file-IO interface.
 - `Aeson/*` — `Value`, `FromJSON`/`.:`/`withObject`, KeyMap, aeson-lens.
 - `QQ/*` — `[fmt|]`/`[j|]`/`[patch|]` quasiquoters.

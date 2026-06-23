@@ -914,7 +914,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Tidepool.Aeson.KeyMap as KM
 import qualified Data.List as L
-import qualified Tidepool.Text as TT
+import qualified Tidepool.TextFormat as TF
 import qualified Tidepool.Table as Tab
 import Control.Monad.Freer hiding (run)
 import qualified Prelude as P
