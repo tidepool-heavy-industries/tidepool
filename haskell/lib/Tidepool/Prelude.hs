@@ -797,6 +797,7 @@ min' a b = if a <= b then a else b
 -- | Monomorphic max for Int.
 max' :: Int -> Int -> Int
 max' a b = if a >= b then a else b
+{-# INLINE max' #-}
 
 -- ---------------------------------------------------------------------------
 -- Kleisli profunctor squad (probe-verified under the JIT 2026-06-11):
@@ -843,7 +844,6 @@ secondK :: Monad m => (a -> m b) -> (c, a) -> m (c, b)
 secondK f (c, a) = do
   b <- f a
   pure (c, b)
-{-# INLINE max' #-}
 
 -- ---------------------------------------------------------------------------
 -- Indexed list operations (safe alternatives to [0..])
