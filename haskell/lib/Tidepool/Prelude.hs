@@ -130,6 +130,12 @@ module Tidepool.Prelude
   , zip3, unzip3
     -- * Map/Set types
   , Map, Set
+    -- * File paths (Tidepool.FilePath — System.FilePath over Text)
+  , FilePath, pathSeparator, (</>), joinPath, splitFileName, splitDirectories
+  , takeFileName, takeBaseName, takeDirectory
+  , (<.>), (-<.>), takeExtension, takeExtensions, dropExtension, dropExtensions
+  , addExtension, replaceExtension, splitExtension, hasExtension, isExtensionOf
+  , isAbsolute, isRelative
     -- * JSON (Tidepool.Aeson — vendored, construction-only)
   , Value(..), Key, object, (.=), toJSON
   , ToJSON
@@ -197,6 +203,7 @@ import Data.Text (Text)
 -- the text-vendor-mechanism-proven memory.
 import qualified Tidepool.Data.Text as T
 import Tidepool.Data.Text (Pack(..), pack)
+import Tidepool.FilePath
 import Data.Char (ord, chr)
 import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe, listToMaybe, maybeToList)
 import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, sortOn, maximumBy, minimumBy)
@@ -229,8 +236,10 @@ import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, 
 --   (??) — removed heuristic LLM operator (kept absent, not aliased to lens's
 --          flipped-apply);
 --   para — the .tidepool/lib `Schemes.para` list paramorphism (canonical name;
---          lens's `para` is the niche Plated one).
-import Control.Lens hiding (imap, (.=), (??), para)
+--          lens's `para` is the niche Plated one);
+--   (<.>) — System.FilePath's add-extension operator (Tidepool.FilePath, above);
+--          lens's `(<.>)` is the niche indexed-optic composition.
+import Control.Lens hiding (imap, (.=), (??), para, (<.>))
 import qualified Data.Map.Strict as Map
 
 -- Permanent binding-level interception in Translate.hs.

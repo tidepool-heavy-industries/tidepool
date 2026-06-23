@@ -13,6 +13,7 @@ executable tidepool-extract-bin
     Tidepool.FatIface
     Tidepool.CborEncode
     Tidepool.Prelude
+    Tidepool.FilePath
     Tidepool.Render
     Tidepool.Aeson
     Tidepool.Aeson.Value

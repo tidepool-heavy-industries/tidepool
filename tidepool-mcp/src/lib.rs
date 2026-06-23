@@ -178,20 +178,20 @@ pub fn fs_decl() -> EffectDecl {
         ],
         type_defs: &[],
         helpers: &[
-            "readFile :: Text -> M Text\nreadFile = send . FsRead",
-            "-- | Read a file, isolating failure: `Left err` on a read error\n-- (missing file, permission, non-UTF-8) instead of aborting the eval.\ntryReadFile :: Text -> M (Either Text Text)\ntryReadFile = send . TryFsRead",
-            "writeFile :: Text -> Text -> M ()\nwriteFile f c = send (FsWrite f c)",
-            "appendFile :: Text -> Text -> M ()\nappendFile p t = readFile p >>= \\old -> writeFile p (old <> t)",
-            "listDirectory :: Text -> M [Text]\nlistDirectory = send . FsListDir",
-            "doesFileExist :: Text -> M Bool\ndoesFileExist = send . FsExists",
-            "doesDirectoryExist :: Text -> M Bool\ndoesDirectoryExist p = send (FsMetadata p) <&> (== Just True) . (^? key \"is_dir\" . _Bool)",
-            "-- | File size in bytes, or `Nothing` if the path is missing.\ngetFileSize :: Text -> M (Maybe Int)\ngetFileSize p = send (FsMetadata p) <&> (^? key \"size\" . _Int)",
-            "-- | Raw metadata as a Value: `{size, is_file, is_dir}`, or `Null` if missing.\nfsMeta :: Text -> M Value\nfsMeta = send . FsMetadata",
-            "-- | Alias of `fsMeta` — metadata as a Value, lens in with `^? key \"size\" . _Int`.\nfsMetadata :: Text -> M Value\nfsMetadata = send . FsMetadata",
-            "getCurrentDirectory :: M Text\ngetCurrentDirectory = do { (_, d, _) <- run \"pwd\"; pure (T.strip d) }",
-            "glob :: Text -> M [Text]\nglob = send . FsGlob",
-            "-- | Alias of `glob` — expand a glob to matching paths.\nfsGlob :: Text -> M [Text]\nfsGlob = send . FsGlob",
-            "-- | Search for a regex pattern in files matching a glob.\ngrepGlob :: Text -> Text -> M [(Text, Int, Text)]\ngrepGlob pat g = send (FsGrep pat g)",
+            "readFile :: FilePath -> M Text\nreadFile = send . FsRead",
+            "-- | Read a file, isolating failure: `Left err` on a read error\n-- (missing file, permission, non-UTF-8) instead of aborting the eval.\ntryReadFile :: FilePath -> M (Either Text Text)\ntryReadFile = send . TryFsRead",
+            "writeFile :: FilePath -> Text -> M ()\nwriteFile f c = send (FsWrite f c)",
+            "appendFile :: FilePath -> Text -> M ()\nappendFile p t = readFile p >>= \\old -> writeFile p (old <> t)",
+            "listDirectory :: FilePath -> M [FilePath]\nlistDirectory = send . FsListDir",
+            "doesFileExist :: FilePath -> M Bool\ndoesFileExist = send . FsExists",
+            "doesDirectoryExist :: FilePath -> M Bool\ndoesDirectoryExist p = send (FsMetadata p) <&> (== Just True) . (^? key \"is_dir\" . _Bool)",
+            "-- | File size in bytes, or `Nothing` if the path is missing.\ngetFileSize :: FilePath -> M (Maybe Int)\ngetFileSize p = send (FsMetadata p) <&> (^? key \"size\" . _Int)",
+            "-- | Raw metadata as a Value: `{size, is_file, is_dir}`, or `Null` if missing.\nfsMeta :: FilePath -> M Value\nfsMeta = send . FsMetadata",
+            "-- | Alias of `fsMeta` — metadata as a Value, lens in with `^? key \"size\" . _Int`.\nfsMetadata :: FilePath -> M Value\nfsMetadata = send . FsMetadata",
+            "getCurrentDirectory :: M FilePath\ngetCurrentDirectory = do { (_, d, _) <- run \"pwd\"; pure (T.strip d) }",
+            "glob :: FilePath -> M [FilePath]\nglob = send . FsGlob",
+            "-- | Alias of `glob` — expand a glob to matching paths.\nfsGlob :: FilePath -> M [FilePath]\nfsGlob = send . FsGlob",
+            "-- | Search for a regex pattern in files matching a glob.\ngrepGlob :: Text -> FilePath -> M [(FilePath, Int, Text)]\ngrepGlob pat g = send (FsGrep pat g)",
         ],
     }
 }
@@ -2646,7 +2646,7 @@ mod tests {
         assert!(preamble.contains("rsFn :: Text -> [Text] -> M [Match]"));
 
         // Verify grepGlob exists in Fs section
-        assert!(preamble.contains("grepGlob :: Text -> Text -> M [(Text, Int, Text)]"));
+        assert!(preamble.contains("grepGlob :: Text -> FilePath -> M [(FilePath, Int, Text)]"));
 
         // Verify Match record syntax + the Map-typed matchVars accessor
         assert!(preamble.contains("data Match = Match { matchText :: Text, matchFile :: Text, matchLine :: Int, matchVarsList :: [(Text, Text)], matchReplacement :: Text }"));
@@ -2876,14 +2876,14 @@ data Console a where
         let preamble = generated_sources(&decls, false);
         // Standard Haskell names as primary
         assert!(preamble.contains("putStrLn :: Text -> M ()"));
-        assert!(preamble.contains("readFile :: Text -> M Text\nreadFile = send . FsRead"));
-        assert!(preamble.contains("writeFile :: Text -> Text -> M ()"));
-        assert!(preamble.contains("appendFile :: Text -> Text -> M ()"));
-        assert!(preamble.contains("listDirectory :: Text -> M [Text]"));
-        assert!(preamble.contains("doesFileExist :: Text -> M Bool"));
-        assert!(preamble.contains("getFileSize :: Text -> M (Maybe Int)"));
-        assert!(preamble.contains("fsMeta :: Text -> M Value\nfsMeta = send . FsMetadata"));
-        assert!(preamble.contains("glob :: Text -> M [Text]"));
+        assert!(preamble.contains("readFile :: FilePath -> M Text\nreadFile = send . FsRead"));
+        assert!(preamble.contains("writeFile :: FilePath -> Text -> M ()"));
+        assert!(preamble.contains("appendFile :: FilePath -> Text -> M ()"));
+        assert!(preamble.contains("listDirectory :: FilePath -> M [FilePath]"));
+        assert!(preamble.contains("doesFileExist :: FilePath -> M Bool"));
+        assert!(preamble.contains("getFileSize :: FilePath -> M (Maybe Int)"));
+        assert!(preamble.contains("fsMeta :: FilePath -> M Value\nfsMeta = send . FsMetadata"));
+        assert!(preamble.contains("glob :: FilePath -> M [FilePath]"));
         assert!(preamble.contains("callCommand :: Text -> M ()"));
         assert!(preamble.contains("readProcess :: Text -> M Text"));
         assert!(preamble.contains("getLine :: Text -> M Text"));
