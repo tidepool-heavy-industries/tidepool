@@ -187,8 +187,10 @@ pub fn fs_decl() -> EffectDecl {
             "doesDirectoryExist :: Text -> M Bool\ndoesDirectoryExist p = send (FsMetadata p) <&> (== Just True) . (^? key \"is_dir\" . _Bool)",
             "-- | File size in bytes, or `Nothing` if the path is missing.\ngetFileSize :: Text -> M (Maybe Int)\ngetFileSize p = send (FsMetadata p) <&> (^? key \"size\" . _Int)",
             "-- | Raw metadata as a Value: `{size, is_file, is_dir}`, or `Null` if missing.\nfsMeta :: Text -> M Value\nfsMeta = send . FsMetadata",
+            "-- | Alias of `fsMeta` — metadata as a Value, lens in with `^? key \"size\" . _Int`.\nfsMetadata :: Text -> M Value\nfsMetadata = send . FsMetadata",
             "getCurrentDirectory :: M Text\ngetCurrentDirectory = do { (_, d, _) <- run \"pwd\"; pure (T.strip d) }",
             "glob :: Text -> M [Text]\nglob = send . FsGlob",
+            "-- | Alias of `glob` — expand a glob to matching paths.\nfsGlob :: Text -> M [Text]\nfsGlob = send . FsGlob",
             "-- | Search for a regex pattern in files matching a glob.\ngrepGlob :: Text -> Text -> M [(Text, Int, Text)]\ngrepGlob pat g = send (FsGrep pat g)",
         ],
     }
