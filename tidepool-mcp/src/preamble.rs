@@ -375,108 +375,35 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
     ));
 
     if !effects.is_empty() {
-        desc.push_str("\nAvailable effects (use `send` to invoke):\n");
-        effects.iter().for_each(|eff| {
-            desc.push_str(&format!("\n{}: {}\n", eff.type_name, eff.description));
-            // Surface each effect's type vocabulary (data/type/newtype heads) so
-            // models don't have to grep for Schema/Lang/Match constructors. Skip
-            // the helper-function / instance entries that also live in type_defs.
-            for td in eff.type_defs {
-                let head = td.lines().next().unwrap_or(td).trim_start();
-                if head.starts_with("data ")
-                    || head.starts_with("type ")
-                    || head.starts_with("newtype ")
-                {
-                    desc.push_str("    ");
-                    desc.push_str(head);
-                    desc.push('\n');
-                }
-            }
-        });
-
-        // List built-in helpers
-        let has_console = effects.iter().any(|e| e.type_name == "Console");
-        let has_helpers = has_console || effects.iter().any(|e| !e.helpers.is_empty());
-        if has_helpers {
-            desc.push_str("\nBuilt-in helpers (always available, no need to define):\n");
-            if has_console {
-                desc.push_str("  putStrLn :: Text -> M ()\n");
-            }
-            effects.iter().flat_map(|e| e.helpers).for_each(|h| {
-                // Extract just the type signature line
-                if let Some(sig) = h.lines().next() {
-                    desc.push_str(&format!("  {}\n", sig));
-                }
-            });
-            desc.push_str(
-                "\nPrefer helpers over raw `send`: `putStrLn \"hi\"` not `send (Print \"hi\")`.\n",
-            );
-            desc.push_str("Use `>>=` chains and `<$>`/`<*>` for dense composition. Named bindings as escape hatch.\n");
-            desc.push('\n');
-            desc.push_str(concat!(
-                "Prelude polymorphic ops: `len` for length of Text or [a], ",
-                "`isNull` for emptiness of Text or [a], ",
-                "`stake`/`sdrop` for take/drop on both Text and [a]. ",
-                "`intercalate` joins Text (not lists). ",
-                "`joinText` is an alias. `tReverse` reverses Text. ",
-                "List-only: `length`, `take`, `drop`, `null` remain unchanged.",
-            ));
+        desc.push_str(
+            "\nEffects (invoke via the helper verbs; read tidepool://effect/{name} for each one's constructors + helpers):\n",
+        );
+        for eff in effects {
+            desc.push_str(&format!("  {}: {}\n", eff.type_name, eff.description));
         }
 
         let has_llm = effects.iter().any(|e| e.type_name == "Llm");
-        let has_ask_desc = effects.iter().any(|e| e.type_name == "Ask");
-        if has_llm && has_ask_desc {
+        let has_ask = effects.iter().any(|e| e.type_name == "Ask");
+        if has_llm && has_ask {
             desc.push_str(concat!(
-                "\n\nStructured LLM / Ask — one Schema vocabulary, validated JSON back:\n",
+                "\nStructured LLM / Ask (one Schema vocabulary; full detail in tidepool://schema):\n",
                 "  Schema = SObj [(Text,Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema\n",
-                "  ask schema prompt    -- SUSPEND to the calling agent; reply validated vs schema, no token burn\n",
-                "  llm schema prompt    -- AUTONOMOUS server-side model call (costs tokens); structured Value, no fences\n",
-                "  tryLlm schema prompt -- as llm, but an API error/refusal becomes Left err instead of aborting\n",
-                "Both ask/llm return a Value; extract with optics, e.g.:\n",
-                "  cat <- llm (SObj [(\"category\", SEnum [\"bug\",\"feat\"])]) prompt <&> (^? key \"category\" . _String)\n",
-                "  ok  <- ask (SObj [(\"ok\", SBool)]) \"proceed?\" <&> (^? key \"ok\" . _Bool)\n",
-                "Orchestration: let the LLM DECIDE (SEnum/SBool) and let deterministic code EMIT syntax (regex/AST patterns) — models are unreliable at generating domain-specific syntax directly.\n",
+                "  ask schema prompt  -- SUSPEND to the caller; reply validated vs schema, no token burn\n",
+                "  llm schema prompt  -- AUTONOMOUS server-side call (costs tokens); structured Value, no fences\n",
+                "  extract with optics, e.g. llm (SObj [(\"k\", SEnum [\"a\",\"b\"])]) p <&> (^? key \"k\" . _String)\n",
             ));
         }
 
-        let has_fs = effects.iter().any(|e| e.type_name == "Fs");
-        if has_fs {
-            desc.push_str(concat!(
-                "\nExamples (idiomatic — expression-first):\n",
-                "  glob \"**/*.rs\" >>= mapM (\\p -> (,) p <$> getFileSize p)\n",
-                "  do { src <- readFile \"CLAUDE.md\"; pure (stake 5 (lines src)) }  -- explicit do when sequencing\n",
-            ));
-            if has_llm && has_ask_desc {
-                desc.push_str(
-                    "  glob \"**/*.hs\" >>= filterM (readFile >=> \\s -> ask (SObj [(\"t\", SBool)]) (\"test-only?\\n\" <> stake 2000 s) <&> (\\v -> v ^? key \"t\" . _Bool == Just True))\n",
-                );
-            }
-        }
-
-        // Failure isolation: be explicit about the half-promise — what the
-        // try* verbs catch AND what they deliberately don't.
-        let has_try = effects
-            .iter()
-            .any(|e| matches!(e.type_name, "Http" | "Exec" | "Llm" | "Fs"));
-        if has_try {
-            desc.push_str(concat!(
-                "\nFailure isolation (long-running evals): the try* verbs return ",
-                "`M (Either Text a)` so one bad probe doesn't kill an eval. An ",
-                "EXTERNAL failure \u{2014} bad URL, 404/network error, LLM API ",
-                "error or refusal, exec spawn failure, unreadable file \u{2014} ",
-                "becomes `Left err` (carrying the cause) and the eval continues:\n",
-                "  tryRun, tryRunIn      :: ... -> M (Either Text (Int, Text, Text))\n",
-                "  tryHttpGet, tryHttpPost :: ... -> M (Either Text Value)\n",
-                "  tryLlm                :: Schema -> Text -> M (Either Text Value)\n",
-                "  tryReadFile           :: Text -> M (Either Text Text)\n",
-                "They do NOT catch: Haskell `error`/partial functions (including ",
-                "readProcess/callCommand on a nonzero exit), other runtime faults, ",
-                "eval cancellation/timeout, or the LLM call-budget limit \u{2014} ",
-                "those still abort the eval. A command that RUNS but exits nonzero ",
-                "is NOT a failure: tryRun returns `Right (code, out, err)`; inspect ",
-                "`code` yourself instead of using readProcess (which calls `error`).\n",
-            ));
-        }
+        desc.push_str(concat!(
+            "\nResources — this description is a FLOOR; pull the depth on demand via resources/read:\n",
+            "  tidepool://guide           full guide: returning JSON, the input lane, examples, failure isolation\n",
+            "  tidepool://effect/{name}   per-effect constructors, types, and helper signatures\n",
+            "  tidepool://schema          the Schema grammar + ask/llm/tryLlm in full\n",
+            "  tidepool://edits           the declarative Edit verb JSON schema\n",
+            "  tidepool://vocab           live project-library verb signatures (.tidepool/lib)\n",
+            "  tidepool://patterns        worked examples\n",
+            "  tidepool://stdlib/{module} vendored stdlib module source (e.g. Tidepool.Prelude)\n",
+        ));
     }
 
     desc

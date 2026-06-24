@@ -15,6 +15,8 @@ pub use effect_decls::*;
 mod preamble;
 pub use preamble::*;
 
+mod resources;
+
 mod ask;
 pub(crate) use ask::*;
 
@@ -497,10 +499,12 @@ mod tests {
             helpers: &["putStrLn :: Text -> M ()\nputStrLn = send . Print"],
         }];
         let desc = build_eval_tool_description(&effects);
+        // The slim floor lists each effect name + one-liner …
         assert!(desc.contains("Console: Print to console"));
-        // Constructors not shown separately (helpers section covers them)
-        assert!(desc.contains("putStrLn :: Text -> M ()"));
-        assert!(desc.contains("Built-in helpers"));
+        // … and points at the resources that carry the depth (per-effect
+        // constructors/helpers now live in `tidepool://effect/{name}`, not inline).
+        assert!(desc.contains("tidepool://effect/{name}"));
+        assert!(!desc.contains("Built-in helpers"));
     }
 
     #[test]
@@ -1576,6 +1580,10 @@ data Console a where
             has_user_library: false,
             ask_tag: 0,
             effect_names: Vec::new(),
+            effect_decls: Vec::new(),
+            lib_dirs: Vec::new(),
+            patterns_path: None,
+            stdlib_dir: None,
             continuations: Arc::new(Mutex::new(HashMap::new())),
             next_cont_id: Arc::new(AtomicU64::new(1)),
             eval_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_EVALS)),

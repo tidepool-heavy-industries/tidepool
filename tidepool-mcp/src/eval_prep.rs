@@ -637,11 +637,13 @@ mod tests {
         assert!(formatted.contains("**failure-class:** `haskell-error`"));
         assert!(formatted.contains("Type mismatch"));
         assert!(formatted.contains("## User Code"));
-        // Helpers + the __user binding are echoed…
-        assert!(formatted.contains("helper :: Int"));
-        assert!(formatted.contains("__user =\n  pure helper"));
-        // …but the preamble and the budget plumbing are trimmed.
+        // The user's code (after `__user =`) is echoed, so reported line numbers
+        // count 1-based from the snippet…
+        assert!(formatted.contains("pure helper"));
+        // …and everything before it (preamble, helper scaffold, the `__user =`
+        // wrapper) plus the budget plumbing below is trimmed.
         assert!(!formatted.contains("preamble stuff"));
+        assert!(!formatted.contains("__user ="));
         assert!(!formatted.contains("result ="));
         assert!(!formatted.contains("paginateResult"));
     }
@@ -657,14 +659,17 @@ mod tests {
     fn test_format_error_with_source_multiline() {
         let title = "Compile Error";
         let error = "Variable not in scope: x";
-        let source = "module Test where\n-- [user]\nmain = do\n  print x\n  print y\n  print z";
+        let source = "module Test where\n-- [user]\n__user =\n  go x y z\n  where go a b c = print [a,b,c]\n\nresult :: Eff '[] Value\nresult = do\n  _r <- __user\n";
         let formatted = format_error_with_source(FailureClass::HaskellError, title, error, source);
 
         assert!(formatted.contains("## Compile Error"));
         assert!(formatted.contains("Variable not in scope: x"));
         assert!(formatted.contains("## User Code"));
-        assert!(formatted.contains("main = do\n  print x\n  print y\n  print z"));
+        // Multi-line user code (after `__user =`) echoes; scaffold is trimmed.
+        assert!(formatted.contains("go x y z"));
+        assert!(formatted.contains("where go a b c = print [a,b,c]"));
         assert!(!formatted.contains("module Test where"));
+        assert!(!formatted.contains("result ="));
     }
 
     #[test]

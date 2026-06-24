@@ -61,6 +61,12 @@ pub struct TidepoolMcpServerImpl {
     pub(crate) ask_tag: u64,
     // Effect names for error annotation (indexed by tag)
     pub(crate) effect_names: Vec<String>,
+    // MCP resource backing: the raw sources rendered on demand by `read_resource`
+    // (per-effect detail, live library vocab, patterns, stdlib module sources).
+    pub(crate) effect_decls: Vec<EffectDecl>,
+    pub(crate) lib_dirs: Vec<PathBuf>,
+    pub(crate) patterns_path: Option<PathBuf>,
+    pub(crate) stdlib_dir: Option<PathBuf>,
     pub(crate) continuations: Arc<Mutex<HashMap<String, EvalSession>>>,
     pub(crate) next_cont_id: Arc<AtomicU64>,
     pub(crate) eval_semaphore: Arc<tokio::sync::Semaphore>,
@@ -71,6 +77,17 @@ impl TidepoolMcpServerImpl {
     fn next_continuation_id(&self) -> String {
         let id = self.next_cont_id.fetch_add(1, Ordering::Relaxed);
         format!("cont_{}", id)
+    }
+
+    /// Borrow the raw sources that back the MCP resources (per-effect detail,
+    /// library vocab, patterns, stdlib module sources).
+    fn resource_ctx(&self) -> crate::resources::ResourceCtx<'_> {
+        crate::resources::ResourceCtx {
+            effects: &self.effect_decls,
+            lib_dirs: &self.lib_dirs,
+            patterns_path: self.patterns_path.as_deref(),
+            stdlib_dir: self.stdlib_dir.as_deref(),
+        }
     }
 
     /// Evict the oldest continuation, freeing its semaphore permit.
@@ -793,8 +810,88 @@ impl ServerHandler for TidepoolMcpServerImpl {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(self.eval_tool_description.clone()),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
             ..Default::default()
+        }
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        let ctx = self.resource_ctx();
+        let resources = crate::resources::list(&ctx)
+            .into_iter()
+            .map(|d| {
+                RawResource {
+                    uri: d.uri,
+                    name: d.name,
+                    title: None,
+                    description: Some(d.description),
+                    mime_type: Some(d.mime.to_string()),
+                    size: None,
+                    icons: None,
+                    meta: None,
+                }
+                .no_annotation()
+            })
+            .collect();
+        Ok(ListResourcesResult {
+            resources,
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        let resource_templates = crate::resources::templates()
+            .into_iter()
+            .map(|t| {
+                RawResourceTemplate {
+                    uri_template: t.uri_template.to_string(),
+                    name: t.name.to_string(),
+                    title: None,
+                    description: Some(t.description.to_string()),
+                    mime_type: Some(t.mime.to_string()),
+                    icons: None,
+                }
+                .no_annotation()
+            })
+            .collect();
+        Ok(ListResourceTemplatesResult {
+            resource_templates,
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, McpError> {
+        let ctx = self.resource_ctx();
+        match crate::resources::read(&ctx, &request.uri) {
+            Some(b) => Ok(ReadResourceResult {
+                contents: vec![ResourceContents::TextResourceContents {
+                    uri: request.uri,
+                    mime_type: Some(b.mime.to_string()),
+                    text: b.text,
+                    meta: None,
+                }],
+            }),
+            None => Err(McpError::resource_not_found(
+                format!("Unknown resource: {}", request.uri),
+                None,
+            )),
         }
     }
 
@@ -955,6 +1052,10 @@ where
                 has_user_library: false,
                 ask_tag,
                 effect_names,
+                effect_decls: decls.clone(),
+                lib_dirs: Vec::new(),
+                patterns_path: None,
+                stdlib_dir: None,
                 continuations: Arc::new(Mutex::new(HashMap::new())),
                 next_cont_id: Arc::new(AtomicU64::new(1)),
                 eval_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_EVALS)),
@@ -983,6 +1084,9 @@ where
     /// unfoldings in .hi files.
     pub fn with_prelude(mut self, fallback: PathBuf) -> Self {
         let prelude_dir = std::env::var_os("TIDEPOOL_PRELUDE_DIR").map_or(fallback, PathBuf::from);
+        // The prelude dir holds the vendored `Tidepool/*.hs` stdlib — back the
+        // `tidepool://stdlib/{module}` resources with it.
+        self.inner.stdlib_dir = Some(prelude_dir.clone());
         self.inner.include.push(prelude_dir);
 
         // Layered verb libraries: project-local first (walk up from CWD for a
@@ -1004,6 +1108,7 @@ where
         for dir in &lib_dirs {
             self.inner.include.push(dir.clone());
         }
+        self.inner.lib_dirs = lib_dirs.clone();
 
         // The `Library` digest entry-point is the first lib dir that defines it.
         let library_dir = lib_dirs
@@ -1016,29 +1121,19 @@ where
             let mut decls = H::collect_decls();
             decls.push(ask_decl());
             self.inner.haskell_preamble = build_preamble(&decls, true);
-            // Append note + merged vocabulary digest to the tool description
-            self.inner.eval_tool_description.push_str(
-                "\n\nUser library: `Library` is auto-imported (project or global \
-                 `.tidepool/lib/Library.hs`) and re-exports every module below — all names \
-                 are in scope bare. Check this vocabulary for an existing combinator with the \
-                 right shape (fold/unfold/loop/batch) BEFORE hand-rolling a recursive helper. \
-                 New `data` types go in a `<lib>/<Mod>.hs` module (scaffold with \
-                 `Explore.defMod`):\n",
-            );
-            self.inner
-                .eval_tool_description
-                .push_str(&library_vocab(&lib_dirs));
+            // The full vocabulary digest now lives in `tidepool://vocab` (pulled on
+            // demand); the description keeps a short pointer instead of inlining it.
             self.inner.eval_tool_description.push_str(concat!(
-                "\nWith the library:\n",
-                "  vocab  -- re-list the project library verbs (.tidepool/lib) at runtime; the effect verbs + helpers are above\n",
-                "  glob \"**/*.rs\" >>= mapM (\\p -> (,) p <$> getFileSize p) <&> sizeRank 9\n",
+                "\nUser library: `Library` is auto-imported (project/global ",
+                "`.tidepool/lib/Library.hs`); all its verbs are in scope bare. Read ",
+                "`tidepool://vocab` for the signatures (or call `vocab` at runtime) and ",
+                "check there for an existing combinator BEFORE hand-rolling a recursive helper.\n",
             ));
-            // PATTERNS.md lives beside the active Library dir (at `.tidepool/`).
+            // PATTERNS.md lives beside the active Library dir (at `.tidepool/`),
+            // surfaced as the `tidepool://patterns` resource.
             let patterns = lib_root.parent().map(|p| p.join("PATTERNS.md"));
             if patterns.as_deref().is_some_and(std::path::Path::exists) {
-                self.inner.eval_tool_description.push_str(
-                    "\nPattern catalog: read `.tidepool/PATTERNS.md` for composition idioms.\n",
-                );
+                self.inner.patterns_path = patterns;
             }
         }
 
