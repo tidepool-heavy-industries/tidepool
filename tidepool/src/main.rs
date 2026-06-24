@@ -1692,6 +1692,12 @@ struct Args {
     #[arg(long)]
     debug: bool,
 
+    /// Advertise the `help` tool — reference docs (the same content as the
+    /// `tidepool://…` MCP resources) via a plain tool call. Enable for clients
+    /// that don't support MCP resources; resource-capable clients don't need it.
+    #[arg(long)]
+    help_tool: bool,
+
     /// LLM model for the Llm effect. genai routes the provider from the
     /// name: gpt-4o-mini → OpenAI, claude-haiku-4-5 → Anthropic, gemini-*
     /// → Gemini, unknown names → Ollama (e.g. qwen2.5:7b); `ns::model`
@@ -1855,7 +1861,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             MetaHandler::new(effect_names, helper_sigs),
             LlmHandler::new(model.clone())
         ];
-        let server = TidepoolMcpServer::new(handlers).with_prelude(prelude_dir);
+        let server = TidepoolMcpServer::new(handlers)
+            .with_prelude(prelude_dir)
+            .with_help_tool(args.help_tool);
         if let Some(addr) = http_addr {
             server.serve_http(addr).await
         } else {
@@ -1871,7 +1879,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ExecHandler::new(cwd.clone()),
             LlmHandler::new(model.clone())
         ];
-        let server = TidepoolMcpServer::new(handlers).with_prelude(prelude_dir);
+        let server = TidepoolMcpServer::new(handlers)
+            .with_prelude(prelude_dir)
+            .with_help_tool(args.help_tool);
         if let Some(addr) = http_addr {
             server.serve_http(addr).await
         } else {

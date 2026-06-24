@@ -138,6 +138,20 @@ pub struct AbortRequest {
     pub reason: Option<String>,
 }
 
+/// Request parameters for the `help` tool.
+///
+/// Returns reference content (the same text behind the `tidepool://…` resources)
+/// via a plain tool call, so any MCP client can reach it — not just ones that
+/// implement `resources/read`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct HelpRequest {
+    /// The topic to fetch. One of `guide`, `schema`, `edits`, `vocab`,
+    /// `patterns`, `effect <Name>` (e.g. `effect Fs`), or `stdlib <Module>`
+    /// (e.g. `stdlib Tidepool.Prelude`). Omit (or pass empty) to list topics.
+    #[serde(default)]
+    pub topic: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Templating
 // ---------------------------------------------------------------------------
@@ -1589,6 +1603,7 @@ data Console a where
             lib_dirs: Vec::new(),
             patterns_path: None,
             stdlib_dir: None,
+            help_tool: false,
             continuations: Arc::new(Mutex::new(HashMap::new())),
             next_cont_id: Arc::new(AtomicU64::new(1)),
             eval_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_EVALS)),

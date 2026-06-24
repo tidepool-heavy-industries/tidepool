@@ -67,6 +67,10 @@ pub struct TidepoolMcpServerImpl {
     pub(crate) lib_dirs: Vec<PathBuf>,
     pub(crate) patterns_path: Option<PathBuf>,
     pub(crate) stdlib_dir: Option<PathBuf>,
+    // Advertise the `help` TOOL (reference content via tools/call). OFF by
+    // default — only worth it for clients that can't read MCP resources, where
+    // it would otherwise be redundant tool clutter. Toggled by `--help-tool`.
+    pub(crate) help_tool: bool,
     pub(crate) continuations: Arc<Mutex<HashMap<String, EvalSession>>>,
     pub(crate) next_cont_id: Arc<AtomicU64>,
     pub(crate) eval_semaphore: Arc<tokio::sync::Semaphore>,
@@ -923,6 +927,15 @@ impl ServerHandler for TidepoolMcpServerImpl {
                     })?;
                 self.abort(req).await
             }
+            "help" if self.help_tool => {
+                let req: HelpRequest = serde_json::from_value(serde_json::Value::Object(args))
+                    .map_err(|e| {
+                        McpError::invalid_params(format!("invalid params: {}", e), None)
+                    })?;
+                let ctx = self.resource_ctx();
+                let text = crate::resources::help(&ctx, req.topic.as_deref().unwrap_or(""));
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
             _ => Err(McpError {
                 code: ErrorCode::METHOD_NOT_FOUND,
                 message: format!("Tool not found: {}", request.name).into(),
@@ -948,7 +961,7 @@ impl ServerHandler for TidepoolMcpServerImpl {
             }
         }
 
-        let tools = vec![
+        let mut tools = vec![
             Tool {
                 name: "eval".into(),
                 title: None,
@@ -1005,6 +1018,32 @@ impl ServerHandler for TidepoolMcpServerImpl {
             },
         ];
 
+        // The `help` tool is only advertised when enabled (`--help-tool`) — for
+        // clients without MCP `resources` support, where it's the only way to
+        // reach the depth. Resource-capable clients get it via resources/read.
+        if self.help_tool {
+            tools.push(Tool {
+                name: "help".into(),
+                title: None,
+                description: Some(
+                    "Fetch reference content on demand — the same depth as the tidepool:// \
+                     resources, via a plain tool call so ANY client can reach it (no \
+                     resources/read support needed). topic: `guide` (how to write eval code), \
+                     `schema` (Schema + ask/llm), `edits` (editing verbs), `vocab` (every verb \
+                     signature in scope), `patterns` (worked examples), `effect <Name>` (e.g. \
+                     `effect Fs` — one effect's constructors + helpers), or `stdlib <Module>` \
+                     (e.g. `stdlib Tidepool.Prelude` — vendored source). Omit topic to list topics."
+                        .into(),
+                ),
+                input_schema: schema_to_map(schemars::schema_for!(HelpRequest))?,
+                output_schema: None,
+                annotations: None,
+                icons: None,
+                meta: None,
+                execution: None,
+            });
+        }
+
         Ok(ListToolsResult {
             tools,
             next_cursor: None,
@@ -1056,6 +1095,7 @@ where
                 lib_dirs: Vec::new(),
                 patterns_path: None,
                 stdlib_dir: None,
+                help_tool: false,
                 continuations: Arc::new(Mutex::new(HashMap::new())),
                 next_cont_id: Arc::new(AtomicU64::new(1)),
                 eval_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_EVALS)),
@@ -1070,6 +1110,22 @@ where
     /// `Tidepool.Effects` dir).
     pub fn with_include(mut self, paths: Vec<PathBuf>) -> Self {
         self.inner.include.extend(paths);
+        self
+    }
+
+    /// Advertise the `help` tool (reference content via a plain tool call).
+    /// Enable for clients that don't support MCP `resources`. When on, the eval
+    /// description gains a pointer to `help` (the resource pointers aren't
+    /// actionable for a client that can't read resources).
+    pub fn with_help_tool(mut self, enabled: bool) -> Self {
+        self.inner.help_tool = enabled;
+        if enabled {
+            self.inner.eval_tool_description.push_str(
+                "\nNo MCP `resources` support in your client? Call the `help` tool for the same \
+                 depth — topics: guide, schema, edits, vocab, patterns, `effect <Name>`, \
+                 `stdlib <Module>`.\n",
+            );
+        }
         self
     }
 

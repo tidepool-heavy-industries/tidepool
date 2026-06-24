@@ -132,6 +132,67 @@ pub fn read(ctx: &ResourceCtx, uri: &str) -> Option<ResourceBody> {
     }
 }
 
+/// Resolve a `help` topic to rendered content (the same text behind the
+/// resources), or a topic index for an empty/unknown topic. Backs the `help`
+/// TOOL, which any MCP client can call even without `resources/read` support.
+pub fn help(ctx: &ResourceCtx, topic: &str) -> String {
+    let t = topic.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("topics") || t.eq_ignore_ascii_case("index") {
+        return help_index(ctx);
+    }
+    for uri in topic_uris(t) {
+        if let Some(b) = read(ctx, &uri) {
+            return b.text;
+        }
+    }
+    format!("Unknown help topic: {t:?}\n\n{}", help_index(ctx))
+}
+
+fn topic_uris(t: &str) -> Vec<String> {
+    match t {
+        "guide" | "schema" | "edits" | "vocab" | "patterns" => vec![format!("tidepool://{t}")],
+        _ => {
+            if let Some(rest) = t.strip_prefix("effect") {
+                vec![format!(
+                    "tidepool://effect/{}",
+                    rest.trim_start_matches([':', ' ', '/'])
+                )]
+            } else if let Some(rest) = t.strip_prefix("stdlib") {
+                vec![format!(
+                    "tidepool://stdlib/{}",
+                    rest.trim_start_matches([':', ' ', '/'])
+                )]
+            } else {
+                // Bare token: try it as an effect name, then a stdlib module.
+                vec![
+                    format!("tidepool://effect/{t}"),
+                    format!("tidepool://stdlib/{t}"),
+                ]
+            }
+        }
+    }
+}
+
+fn help_index(ctx: &ResourceCtx) -> String {
+    let effects: Vec<&str> = ctx.effects.iter().map(|e| e.type_name).collect();
+    let modules = stdlib_modules(ctx);
+    let mut s = String::from(
+        "# help topics\n\nCall `help` with one of:\n\
+         - `guide`     — how to write eval code (the M-a model, returning JSON, the input lane)\n\
+         - `schema`    — the Schema grammar + ask/llm/tryLlm\n\
+         - `edits`     — editing verbs (update, planUpdate, the Edit DSL, diffs, ast-grep)\n\
+         - `vocab`     — every verb signature in scope (effects + project library)\n\
+         - `patterns`  — worked examples\n\
+         - `effect <Name>`   — one effect's constructors + helpers\n\
+         - `stdlib <Module>` — a vendored stdlib module's source\n\n",
+    );
+    s.push_str(&format!("Effects: {}\n", effects.join(", ")));
+    if !modules.is_empty() {
+        s.push_str(&format!("Stdlib modules: {}\n", modules.join(", ")));
+    }
+    s
+}
+
 // --- content renderers ------------------------------------------------------
 
 fn guide_md(ctx: &ResourceCtx) -> String {
@@ -381,5 +442,31 @@ fn first_sentence(s: &str) -> String {
     match s.find(". ") {
         Some(i) => s[..=i].trim().to_string(),
         None => s.trim().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_resolves_topics() {
+        let decls = crate::standard_decls();
+        let ctx = ResourceCtx {
+            effects: &decls,
+            lib_dirs: &[],
+            patterns_path: None,
+            stdlib_dir: None,
+        };
+        // Fixed docs.
+        assert!(help(&ctx, "guide").contains("eval guide"));
+        assert!(help(&ctx, "schema").to_lowercase().contains("schema"));
+        assert!(help(&ctx, "edits").contains("update"));
+        // Effect topics: bare name and `effect <Name>` both resolve.
+        assert!(help(&ctx, "Fs").contains("readFile"));
+        assert!(help(&ctx, "effect Llm").contains("llm :: Schema"));
+        // Empty / unknown fall back to the index.
+        assert!(help(&ctx, "").contains("help topics"));
+        assert!(help(&ctx, "nope").contains("Unknown help topic"));
     }
 }
