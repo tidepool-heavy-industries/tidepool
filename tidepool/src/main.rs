@@ -1062,12 +1062,8 @@ impl EffectHandler<CapturedOutput> for ExecHandler {
 
 #[derive(FromCore)]
 enum LlmReq {
-    #[core(name = "LlmChat")]
-    Chat(String),
     #[core(name = "LlmStructured")]
     Structured(String, Value), // Value is the Schema ADT, decoded in handler
-    #[core(name = "TryLlmChat")]
-    TryChat(String),
     #[core(name = "TryLlmStructured")]
     TryStructured(String, Value),
 }
@@ -1198,20 +1194,6 @@ impl LlmHandler {
         }
     }
 
-    /// Fallible core for a freeform chat call. Shared by the plain
-    /// (`?`-propagating) and isolating (`respond_caught`) handler arms. The
-    /// caller runs `check_rate_limit` first so budget exhaustion is NOT
-    /// caught by the isolating arm (it is a hard control limit, not a probe
-    /// failure). See `respond_caught` for the policy + block-level-`try` seam.
-    fn chat_core(&self, prompt: String) -> Result<String, EffectError> {
-        let req = genai::chat::ChatRequest::from_user(prompt);
-        let resp = self
-            .rt
-            .block_on(self.client.exec_chat(&self.model, req, None))
-            .map_err(|e| EffectError::Handler(format!("LLM call failed: {}", e)))?;
-        Ok(resp.first_text().unwrap_or("").to_string())
-    }
-
     /// Fallible core for a structured (JSON-schema) call. `schema_json` is the
     /// already-`value_to_json`'d Schema (the caller holds the `EffectContext`);
     /// strictification for OpenAI-family models happens here.
@@ -1304,13 +1286,11 @@ impl EffectHandler<CapturedOutput> for LlmHandler {
         // is NOT an external probe failure to be isolated into a `Left`.
         self.check_rate_limit()?;
         match req {
-            LlmReq::Chat(prompt) => cx.respond(self.chat_core(prompt)?),
             LlmReq::Structured(prompt, schema_val) => {
                 let schema_json = tidepool_runtime::value_to_json(&schema_val, cx.table(), 0);
                 cx.respond(self.structured_core(prompt, schema_json)?)
             }
             // Isolating: an API/network error or refusal becomes Left.
-            LlmReq::TryChat(prompt) => cx.respond_caught(self.chat_core(prompt)),
             LlmReq::TryStructured(prompt, schema_val) => {
                 let schema_json = tidepool_runtime::value_to_json(&schema_val, cx.table(), 0);
                 cx.respond_caught(self.structured_core(prompt, schema_json))
@@ -2679,17 +2659,20 @@ mod tests {
     #[test]
     fn test_ask_constructor_in_table() {
         let table = full_effect_test_table();
-        let con_id = table.get_by_name("Ask").unwrap();
+        // Bare `Ask` was reaped with the structured-Ask collapse; `ask` suspends
+        // via AskWith (prompt + schema-carrying meta Value).
+        let con_id = table.get_by_name("AskWith").unwrap();
         let dc = table.get(con_id).unwrap();
-        // Ask :: Text -> Ask Value  →  arity 1
-        assert_eq!(dc.rep_arity, 1, "Ask should have arity 1");
-        // Verify we can construct a well-formed Ask request Value
+        // AskWith :: Text -> Value -> Ask Value  →  arity 2
+        assert_eq!(dc.rep_arity, 2, "AskWith should have arity 2");
+        // Verify we can construct a well-formed AskWith request Value
         let prompt = "What is your name?".to_string().to_value(&table).unwrap();
-        let val = Value::Con(con_id, vec![prompt]);
+        let meta = "{}".to_string().to_value(&table).unwrap();
+        let val = Value::Con(con_id, vec![prompt, meta]);
         match &val {
             Value::Con(id, fields) => {
-                assert_eq!(table.name_of(*id).unwrap(), "Ask");
-                assert_eq!(fields.len(), 1);
+                assert_eq!(table.name_of(*id).unwrap(), "AskWith");
+                assert_eq!(fields.len(), 2);
             }
             _ => panic!("Expected Con"),
         }
@@ -2752,11 +2735,7 @@ mod tests {
             cx: &EffectContext<'_, CapturedOutput>,
         ) -> Result<tidepool_effect::Response, EffectError> {
             match req {
-                LlmReq::Chat(_) => cx.respond("mock response".to_string()),
                 LlmReq::Structured(_, _) => cx.respond(self.response.clone()),
-                LlmReq::TryChat(_) => {
-                    cx.respond_caught(Ok::<String, EffectError>("mock response".to_string()))
-                }
                 LlmReq::TryStructured(_, _) => {
                     cx.respond_caught(Ok::<serde_json::Value, EffectError>(self.response.clone()))
                 }
@@ -2803,8 +2782,7 @@ mod tests {
     #[test]
     fn test_llm_structured_simple_object() {
         let mock = serde_json::json!({"greeting": "hello"});
-        let result =
-            jit_eval_with_mock_llm(&["llmJson \"test\" (SObj [(\"greeting\", SStr)])"], mock);
+        let result = jit_eval_with_mock_llm(&["llm (SObj [(\"greeting\", SStr)]) \"test\""], mock);
         assert_eq!(result["greeting"], "hello");
     }
 
@@ -2818,7 +2796,7 @@ mod tests {
             ]
         });
         let result = jit_eval_with_mock_llm(
-            &["llmJson \"test\" (SObj [(\"languages\", SArr (SObj [(\"name\", SStr), (\"year\", SNum)]))])"],
+            &["llm (SObj [(\"languages\", SArr (SObj [(\"name\", SStr), (\"year\", SNum)]))]) \"test\""],
             mock,
         );
         let langs = result["languages"]
@@ -2830,11 +2808,11 @@ mod tests {
 
     #[test]
     fn test_llm_structured_encode_roundtrip() {
-        // Roundtrip: llmJson → extract field → return via JSON bridge
+        // Roundtrip: llm → extract field → return via JSON bridge
         let mock = serde_json::json!({"greeting": "hello"});
         let result = jit_eval_with_mock_llm(
             &[
-                "r <- llmJson \"test\" (SObj [(\"greeting\", SStr)])",
+                "r <- llm (SObj [(\"greeting\", SStr)]) \"test\"",
                 "pure (object [\"result\" .= r, \"field\" .= (r ?. \"greeting\")])",
             ],
             mock,
@@ -2853,7 +2831,7 @@ mod tests {
         });
         let result = jit_eval_with_mock_llm(
             &[
-                "r <- llmJson \"test\" (SObj [(\"languages\", SArr (SObj [(\"name\", SStr), (\"year\", SNum)]))])",
+                "r <- llm (SObj [(\"languages\", SArr (SObj [(\"name\", SStr), (\"year\", SNum)]))]) \"test\"",
                 "pure r",
             ],
             mock,
@@ -2867,7 +2845,7 @@ mod tests {
     #[test]
     fn test_llm_structured_empty_object() {
         let mock = serde_json::json!({});
-        let result = jit_eval_with_mock_llm(&["llmJson \"test\" (SObj [])"], mock);
+        let result = jit_eval_with_mock_llm(&["llm (SObj []) \"test\""], mock);
         assert!(result.is_object());
         assert_eq!(result.as_object().unwrap().len(), 0);
     }
@@ -2880,7 +2858,7 @@ mod tests {
             "active": true
         });
         let result = jit_eval_with_mock_llm(
-            &["llmJson \"test\" (SObj [(\"name\", SStr), (\"count\", SNum), (\"active\", SBool)])"],
+            &["llm (SObj [(\"name\", SStr), (\"count\", SNum), (\"active\", SBool)]) \"test\""],
             mock,
         );
         assert_eq!(result["name"], "test");
@@ -2897,7 +2875,7 @@ mod tests {
         });
         let result = jit_eval_with_mock_llm(
             &[
-                "r <- llmJson \"test\" (SObj [(\"name\", SStr), (\"count\", SNum), (\"active\", SBool)])",
+                "r <- llm (SObj [(\"name\", SStr), (\"count\", SNum), (\"active\", SBool)]) \"test\"",
                 "pure r",
             ],
             mock,

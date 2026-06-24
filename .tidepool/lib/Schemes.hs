@@ -1,21 +1,19 @@
--- | Pure, Monad-polymorphic combinators: recursion schemes, bounded
--- iteration, effect orchestration, oracle-steered folds/unfolds, rose
--- trees, grouping. NO effect imports — everything here works in any
--- Monad, which is what makes it importable everywhere.
+-- | Pure, Monad-polymorphic combinators: recursion schemes (the ana/cata/hylo
+-- family), bounded iteration, rose trees, grouping. NO effect imports —
+-- everything here works in any Monad, which is what makes it importable everywhere.
 --
 -- LAYERING (import direction is strict):
 --   Schemes (pure generics)
---     -> verb modules (Explore/Asks/Flow/Seek/...: effectful vocabularies)
+--     -> verb modules (Explore/Dev/...: effectful vocabularies)
 --       -> Library (re-export facade; auto-imported into evals)
 -- Verb modules import Schemes, never Library (re-export cycle).
 module Schemes where
 
 import Data.Maybe (mapMaybe)
 
--- | Effectful loop: run the body until it returns Left (the result);
--- Right is the next seed. The generic core of steered searches that
--- terminate WITH an answer (see Seek) — the shape oracleAna can't
--- express (its termination is bare Nothing, the final reply is lost).
+-- | Effectful loop: run the body until it returns Left (the result); Right is
+-- the next seed. Terminates WITH an answer (unlike `ana`, whose `Nothing`
+-- termination carries no final value).
 loopM :: Monad m => (a -> m (Either r a)) -> a -> m r
 loopM f = go
   where go a = f a >>= either pure go
@@ -29,10 +27,6 @@ hylo f z g seed = case g seed of
   Nothing      -> z
   Just (b, a') -> f b (hylo f z g a')
 
-para :: (a -> [a] -> b -> b) -> b -> [a] -> b
-para f z []     = z
-para f z (x:xs) = f x xs (para f z xs)
-
 ana :: (a -> Maybe (b, a)) -> a -> [b]
 ana f seed = case f seed of
   Nothing      -> []
@@ -40,23 +34,6 @@ ana f seed = case f seed of
 
 cata :: (a -> b -> b) -> b -> [a] -> b
 cata = foldr
-
-apo :: (a -> Either [b] (b, a)) -> a -> [b]
-apo f seed = case f seed of
-  Left bs      -> bs
-  Right (b, a') -> b : apo f a'
-
-treeHylo :: (c -> b -> c -> c) -> (a -> c) -> (a -> Either a (a, b, a)) -> a -> c
-treeHylo alg leaf coalg seed = case coalg seed of
-  Left a           -> leaf a
-  Right (l, b, r)  -> alg (treeHylo alg leaf coalg l) b (treeHylo alg leaf coalg r)
-
-zygo :: (a -> b -> b) -> (a -> (b, c) -> c) -> b -> c -> [a] -> c
-zygo f g bz cz []     = cz
-zygo f g bz cz (x:xs) =
-  let b = f x (cata f bz xs)
-      c = zygo f g bz cz xs
-  in  g x (b, c)
 
 -- Monadic variants
 hyloM :: Monad m => (b -> c -> m c) -> c -> (a -> m (Maybe (b, a))) -> a -> m c
@@ -72,17 +49,6 @@ anaM f seed = do
   case r of
     Nothing      -> pure []
     Just (b, a') -> (b :) <$> anaM f a'
-
-apoM :: Monad m => (a -> m (Either [b] (b, a))) -> a -> m [b]
-apoM f seed = do
-  r <- f seed
-  case r of
-    Left bs       -> pure bs
-    Right (b, a') -> (b :) <$> apoM f a'
-
-paraM :: Monad m => (a -> [a] -> b -> m b) -> b -> [a] -> m b
-paraM f z []     = pure z
-paraM f z (x:xs) = paraM f z xs >>= f x xs
 
 -- ===========================================================================
 -- § Bounded Iteration
@@ -162,17 +128,6 @@ pipeline (f:fs) x = f x >>= pipeline fs
 -- | Run the same input through multiple effectful functions
 fanOut :: Monad m => [a -> m b] -> a -> m [b]
 fanOut fs a = mapM (\f -> f a) fs
-
--- | Effectful unfold with side-channel emission at each step
-tracedUnfoldM :: Monad m => (b -> m ()) -> (a -> m (Maybe (b, a))) -> a -> m [b]
-tracedUnfoldM emit step seed = do
-  r <- step seed
-  case r of
-    Nothing      -> pure []
-    Just (b, a') -> do
-      emit b
-      rest <- tracedUnfoldM emit step a'
-      pure (b : rest)
 
 -- ===========================================================================
 -- § Text Utilities
@@ -265,63 +220,6 @@ report fmt groups =
   Prelude.unlines (map (\(k, vs) -> fmt k (Prelude.length vs)) groups)
 
 -- ===========================================================================
--- § Oracle Combinators (ask-steered effectful folds)
--- ===========================================================================
-
--- | Walk a list with monadic steering at each element.
---   The suspend function yields context and returns a response.
---   The step function uses the response to decide: Left = stop, Right = continue.
-steer :: Monad m
-      => (Int -> Int -> a -> m r)
-      -> (r -> a -> b -> Either b b)
-      -> b -> [a] -> m b
-steer suspend step = go 0
-  where
-    go _ acc [] = pure acc
-    go i acc (x:xs) = do
-      resp <- suspend i (Prelude.length xs) x
-      case step resp x acc of
-        Left  b -> pure b
-        Right b -> go (i+1) b xs
-
--- | Like steer but the step function is effectful.
-steerM :: Monad m
-       => (Int -> Int -> a -> m r)
-       -> (r -> a -> b -> m (Either b b))
-       -> b -> [a] -> m b
-steerM suspend step = go 0
-  where
-    go _ acc [] = pure acc
-    go i acc (x:xs) = do
-      resp <- suspend i (Prelude.length xs) x
-      r <- step resp x acc
-      case r of
-        Left  b -> pure b
-        Right b -> go (i+1) b xs
-
--- | Oracle-steered unfold: suspend at each step, response steers next seed.
-oracleAna :: Monad m
-          => (r -> a -> m (Maybe (b, a)))
-          -> (a -> m r)
-          -> a -> m [b]
-oracleAna step suspend seed = do
-  resp <- suspend seed
-  r <- step resp seed
-  case r of
-    Nothing      -> pure []
-    Just (b, a') -> (b :) <$> oracleAna step suspend a'
-
--- | Oracle hylo: unfold with steering, then fold the results.
-oracleHylo :: Monad m
-           => (r -> a -> m (Maybe (b, a)))
-           -> (a -> m r)
-           -> (b -> c -> c)
-           -> c -> a -> m c
-oracleHylo step suspend alg z seed = do
-  items <- oracleAna step suspend seed
-  pure (foldr alg z items)
-
--- ===========================================================================
 -- § Rose Trees
 -- ===========================================================================
 
@@ -367,64 +265,6 @@ unfoldRose f seed = let (b, seeds) = f seed in Rose b (map (unfoldRose f) seeds)
 -- | Monadic fold over a rose tree
 foldRoseM :: Monad m => (a -> [b] -> m b) -> Rose a -> m b
 foldRoseM f (Rose x cs) = mapM (foldRoseM f) cs >>= f x
-
--- ===========================================================================
--- § Ask-Steered Traversals (pure combinators, parameterized over monad)
--- ===========================================================================
-
--- | Walk items with monadic steering at each step.
---   Present each item, fold responses into accumulator.
---   Step function returns Left to halt, Right to continue.
-guidedFoldM :: Monad m
-            => (Int -> a -> m r)    -- ^ present item with index
-            -> (r -> a -> b -> Either b b)  -- ^ integrate response
-            -> b -> [a] -> m b
-guidedFoldM _ _ z [] = pure z
-guidedFoldM present step z (x:xs) = do
-  resp <- present (Prelude.length xs) x
-  case step resp x z of
-    Left  b -> pure b
-    Right b -> guidedFoldM present step b xs
-
--- | Explore a rose tree with monadic guidance.
---   At each non-leaf node, present the node and its children.
---   The pick function selects which child indices to recurse into.
-guidedSearchM :: Monad m
-              => (a -> [a] -> Int -> m [Int])  -- ^ node, child vals, depth → selected indices
-              -> Rose a -> m [a]
-guidedSearchM pick = go 0
-  where
-    go d (Rose x []) = pure [x]
-    go d (Rose x cs) = do
-      indices <- pick x (map roseVal cs) d
-      let selected = mapMaybe (\i -> cs !? i) indices
-      results <- mapM (go (d+1)) selected
-      pure (x : concat results)
-
--- | Iterative refinement: transform state, yield for feedback, repeat.
---   Stops when the check function returns Nothing (= done).
-refineM :: Monad m
-        => Int                     -- ^ max iterations
-        -> (s -> m (Maybe s))      -- ^ present state, get adjusted state (Nothing = done)
-        -> s -> m s
-refineM 0 _ s = pure s
-refineM n step s = do
-  r <- step s
-  case r of
-    Nothing -> pure s
-    Just s' -> refineM (n - 1) step s'
-
--- | Execute named phases with monadic review between each.
---   Review function can revise the input for the next phase.
-phasesM :: Monad m
-        => (Prelude.String -> a -> m a)   -- ^ review: phase name, result → next input
-        -> [(Prelude.String, a -> m a)]   -- ^ named phases
-        -> a -> m [a]
-phasesM _ [] _ = pure []
-phasesM review ((name, act):rest) input = do
-  result <- act input
-  nextInput <- review name result
-  (result :) <$> phasesM review rest nextInput
 
 -- | Map over rose tree children with monadic filter.
 --   Useful for pruning subtrees based on effectful checks.

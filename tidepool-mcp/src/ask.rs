@@ -282,12 +282,13 @@ pub(crate) fn extract_ask_request(
     };
 
     let con_name = table.name_of(*con_id).unwrap_or("<unknown>");
+    // `ask` always suspends via AskWith (carrying the schema); the bare `Ask`
+    // constructor was reaped with the structured-Ask collapse.
     let has_meta = match con_name {
-        "Ask" => false,
         "AskWith" => true,
         other => {
             return Err(format!(
-                "ask received unexpected constructor {other:?} (expected Ask or AskWith)"
+                "ask received unexpected constructor {other:?} (expected AskWith)"
             ))
         }
     };

@@ -39,17 +39,18 @@ The tool-description vocab digest merges both dirs (project overrides global).
 
 ## Eval-authoring patterns (know-how, not in the tool description)
 
-**Aperture** (`ask`/`oracle` as a decision gate): place the suspend after data
+**Aperture** (`ask schema prompt` as a decision gate): place the suspend after data
 gathering, before expensive ops. The computation does the grunt work (scan, parse,
 format a menu) then suspends; during the suspend→resume gap the caller scouts
 independently (bash, grep, other evals) and resumes with an informed choice that
 steers the rest. The suspended eval is a coroutine checkpoint; the gap is a
-free-form intelligence window.
+free-form intelligence window. `ask` is structured — the reply is validated
+against the schema, extract it with optics.
 
 ```haskell
 data   <- expensiveScan
-answer <- ask (formatMenu data)        -- suspend; caller scouts during the gap
-if shouldProceed answer then expensiveAnalysis data else pure "skipped"
+go     <- ask (SObj [("proceed", SBool)]) (formatMenu data) <&> (^? key "proceed" . _Bool)
+if go == Just True then expensiveAnalysis data else pure "skipped"
 ```
 
 **Census**: one eval replaces N tool calls — `fsGlob` + `mapM fsMetadata` +

@@ -1,7 +1,7 @@
 //! Resume-response validation against the JSON-Schema subset emitted by the
 //! Haskell `schemaToValue` (see `ask_decl` in lib.rs).
 //!
-//! The contract: a schema'd suspension (`askQ`/`askWith` with a "schema" key)
+//! The contract: a schema'd suspension (`ask`, via `AskWith` with a "schema" key)
 //! requires the resume reply to match. Validation is coerce-into-contract,
 //! not gatekeeping for its own sake:
 //!   * a string reply that *contains* JSON is unwrapped one level when the

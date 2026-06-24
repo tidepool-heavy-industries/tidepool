@@ -52,8 +52,8 @@ tidepool/
 **Per-crate `CLAUDE.md` files hold the crate-specific docs** (loaded when you work
 in that directory):
 - `haskell/CLAUDE.md` — rebuilding the toolchain, regenerating fixtures,
-  extract diagnostics, the eval stdlib map + Q-builders, Known Limits, adding
-  Prelude functions.
+  extract diagnostics, the eval stdlib map + structured Ask/Llm surface, Known
+  Limits, adding Prelude functions.
 - `tidepool-codegen/CLAUDE.md` — JIT/effect/cache diagnostics, SIGILL = case trap.
 - `tidepool-mcp/CLAUDE.md` — eval-authoring patterns (aperture/census/diff verbs),
   structural search, how to add an effect.

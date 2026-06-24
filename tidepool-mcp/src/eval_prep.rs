@@ -36,8 +36,8 @@ pub fn standard_decls() -> Vec<EffectDecl> {
 /// import (if present), GADT declarations for each registered effect, the `type M`
 /// alias over the full effect list, and thin helper functions (e.g. `say`, `kvGet`).
 ///
-/// When `user_library` is true and both `Llm` and `Ask` effects are present, also
-/// emits the Q-builder definitions (`Q`, `pick`, `yn`, etc.) runnable via `askQ`.
+/// The Schema vocabulary + structured `ask`/`llm`/`tryLlm` come from the Ask/Llm
+/// effect decls (`ask`/Schema always present; `llm`/`tryLlm` need the Llm effect).
 /// Source of the generated `Tidepool.Effects` module: effect type_defs,
 /// GADTs, the `M` alias, the `error :: Text -> a` shadow, and the thin
 /// send-wrapper helpers.
@@ -330,23 +330,56 @@ pub(crate) fn format_error_with_source(
     error: &str,
     source: &str,
 ) -> String {
+    const MARKER: &str = "-- [user]\n";
+    let marker_pos = source.find(MARKER);
     // Extract user-written code: between the "-- [user]" marker and the
     // generated `result ::` wrapper (helpers + input + the __user binding).
     // Echoing the budget plumbing below teaches callers the wrong dialect.
-    let user_section = source
-        .find("-- [user]\n")
-        .map_or(source, |pos| &source[pos + "-- [user]\n".len()..]);
+    let user_section = marker_pos.map_or(source, |pos| &source[pos + MARKER.len()..]);
     let user_section = user_section
         .find("\nresult ::")
         .map_or(user_section, |pos| &user_section[..pos])
         .trim_end();
+    // Remap `Expr.hs:<n>` line numbers in the diagnostic so they count from the
+    // user section (the marker) instead of the ~200-line generated preamble — a
+    // reported line then lands on the echoed User Code below.
+    let offset = marker_pos
+        .map(|pos| source[..pos + MARKER.len()].matches('\n').count())
+        .unwrap_or(0);
+    let remapped = remap_expr_lines(error, offset);
     format!(
         "## {}\n**failure-class:** `{}`\n\n{}\n\n## User Code\n```haskell\n{}\n```",
         title,
         class.tag(),
-        error,
+        remapped,
         user_section
     )
+}
+
+/// Subtract `offset` from each `Expr.hs:<n>` line number in a GHC diagnostic so
+/// reported lines count from the user-code section rather than the generated
+/// preamble. Numbers `<= offset` (inside the preamble) are left untouched.
+fn remap_expr_lines(error: &str, offset: usize) -> String {
+    const NEEDLE: &str = "Expr.hs:";
+    if offset == 0 || !error.contains(NEEDLE) {
+        return error.to_string();
+    }
+    let mut out = String::with_capacity(error.len());
+    let mut rest = error;
+    while let Some(idx) = rest.find(NEEDLE) {
+        out.push_str(&rest[..idx + NEEDLE.len()]);
+        rest = &rest[idx + NEEDLE.len()..];
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            rest = &rest[digits.len()..];
+            match digits.parse::<usize>() {
+                Ok(n) if n > offset => out.push_str(&(n - offset).to_string()),
+                _ => out.push_str(&digits),
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]

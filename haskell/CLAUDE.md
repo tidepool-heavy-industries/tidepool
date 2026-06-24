@@ -98,24 +98,33 @@ surface here — it drifts. Module map:
 - `Aeson/*` — `Value`, `FromJSON`/`.:`/`withObject`, KeyMap, aeson-lens.
 - `QQ/*` — `[fmt|]`/`[j|]`/`[patch|]` quasiquoters.
 
-### Q-builders — `Q a` (the eval LLM-call surface)
+### Structured LLM / Ask — one `Schema` vocabulary
 
-First-class questions: `Q a` bundles a schema + parser. Build with a builder, then
-RUN with a NAMED runner (same builders, different cost — pick deliberately):
+Two primitives share one schema vocabulary; both return a validated `Value` you
+extract with optics:
 
-- `q \`askQ\` prompt` — SUSPENDS to the calling LLM (resume validated server-side
-  against the schema). No autonomous token burn; the caller answers.
-- `q \`llmQ\` prompt` — AUTONOMOUS server-side model call (one structured call;
-  costs tokens). The named, cost-honest replacement for the removed `??`.
-- Builders: `pick cats` (classify), `yn` (judge), `obj schema` (extract),
-  `txt "field"`/`num "field"` (single field), `bar 0.95 q` (raise threshold).
+- `ask schema prompt` — SUSPENDS to the calling agent; the reply is validated
+  server-side against `schema` before re-entering (invalid replies do NOT consume
+  the continuation). No autonomous token burn — the caller answers.
+- `llm schema prompt` — AUTONOMOUS server-side model call (one structured call,
+  costs tokens); returns a `Value` with no markdown fences.
+- `tryLlm schema prompt` — as `llm`, but an API error/refusal becomes `Left err`
+  instead of aborting the eval.
 - `Schema` ADT (NOT a JSON Value): `SObj [(Text,Schema)] | SArr Schema | SStr |
   SNum | SBool | SEnum [Text] | SOpt Schema`.
-- Applicative: `(,) <$> pick cats <*> num "pri" \`askQ\` prompt` (merged schema,
-  one ask). `llmJson prompt schema` = explicit server LLM call, no suspend.
+- Extract: `v ^? key "f" . _String` (also `_Int`/`_Double`/`_Bool`/`_Array`). E.g.
+  `cat <- llm (SObj [("c", SEnum ["a","b"])]) p <&> (^? key "c" . _String)`;
+  `ok <- ask (SObj [("ok", SBool)]) "proceed?" <&> (^? key "ok" . _Bool)`.
+- Orchestration: let the LLM DECIDE (`SEnum`/`SBool`) and let deterministic code
+  EMIT syntax (regex/AST) — models are unreliable at generating domain syntax.
 
-> **Removed:** `??`/`?!` and `triage`/`survey`/`sift` (fired a hidden Haiku call
-> behind an innocent operator — token-burn footgun). Use `llmQ`/`askQ`/`llmJson`.
+> **Removed (2026-06-23, structured-Ask collapse):** the unstructured `llm :: Text
+> -> M Text` / `ask :: Text -> M Value`, the `Q` mini-DSL (`askQ`/`llmQ`/`pick`/
+> `yn`/`obj`/`txt`/`num`/`bar`), and `llmJson`/`tryLlmJson` (now just `llm`/`tryLlm`).
+> Every `Q` builder was a `Schema` shape in disguise (`pick`=`SEnum`, `yn`=`SBool`,
+> …) — collapsed to the one vocabulary above. Also removed earlier: `??`/`?!`,
+> `triage`/`survey`/`sift` (hidden-LLM-call token-burn footguns). The `.tidepool/lib`
+> `Asks`/`Seek`/`Flow` verb modules (free-form-ask sugar) were cut in the same pass.
 
 ## Known Limits (the JIT runs a strict Haskell subset; failures are LOUD)
 

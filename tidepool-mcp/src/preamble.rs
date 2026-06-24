@@ -185,7 +185,7 @@ fn pagination_helpers(out: &mut String, effects: &[EffectDecl]) {
             "        [] -> pure truncated\n",
             "        _ -> do\n",
             "          let stubInfo = Array (map (\\(sid, sv) -> object [\"id\" .= (\"stub_\" <> showI sid), \"size\" .= toJSON (valSize sv)]) stubs)\n",
-            "          resp <- ask (\"[Pagination] truncated: \" <> renderJson truncated <> \" stubs: \" <> renderJson stubInfo <> \" | Reply with a stub id (e.g. stub_0) to fetch that chunk; any other reply ends pagination and returns the current chunk.\")\n",
+            "          resp <- ask SStr (\"[Pagination] truncated: \" <> renderJson truncated <> \" stubs: \" <> renderJson stubInfo <> \" | Reply with a stub id (e.g. stub_0) to fetch that chunk; any other reply ends pagination and returns the current chunk.\")\n",
             "          case resp ^? _String of\n",
             "            Just s -> case parseIntM (T.drop 5 s) of\n",
             "              Just sid -> case lookupStub sid stubs of\n",
@@ -205,57 +205,18 @@ fn pagination_helpers(out: &mut String, effects: &[EffectDecl]) {
     out.push('\n');
 }
 
-/// Emit the Library-preamble effect-orchestration helpers (`converse`,
-/// `askUntil`, `memo`, the `kv*` combinators, file/process verbs, …). Only
-/// emitted when a user library is present AND the stack has effects.
+/// Emit the Library-preamble orchestration helpers (`memo`, the `kv*`
+/// combinators, file/process verbs, …). Only emitted when a user library is
+/// present AND the stack has effects.
+///
+/// Note: the old free-form-`ask` wrappers (`converse`/`askUntil`/`askChoice`/
+/// `confirm`/`repl`/`supervised`/`gather`) were removed with the structured-Ask
+/// collapse — they're expressible directly as `ask SBool`/`ask (SEnum …)`/`ask SStr`.
 fn orchestration_helpers(out: &mut String, effects: &[EffectDecl], user_library: bool) {
     if !user_library || effects.is_empty() {
         return;
     }
-    out.push_str("-- Effect orchestration (from Library preamble)\n");
-    out.push_str(concat!(
-        "converse :: (s -> Value -> Either a (Text, s)) -> Text -> s -> M a\n",
-        "converse decide firstQ s0 = do\n",
-        "  v <- ask firstQ\n",
-        "  case decide s0 v of\n",
-        "    Left a        -> pure a\n",
-        "    Right (q, s') -> converse decide q s'\n",
-    ));
-    out.push_str(concat!(
-        "askUntil :: (Value -> Maybe a) -> Text -> M a\n",
-        "askUntil check prompt = do\n",
-        "  v <- ask prompt\n",
-        "  case check v of\n",
-        "    Just a  -> pure a\n",
-        "    Nothing -> askUntil check (prompt <> \" (invalid, try again)\")\n",
-    ));
-    out.push_str(concat!(
-        "askChoice :: Text -> [(Text, a)] -> M a\n",
-        "askChoice prompt choices = do\n",
-        "  let choiceText = T.intercalate \", \" (map fst choices)\n",
-        "  v <- ask (prompt <> \" [\" <> choiceText <> \"]\")\n",
-        "  let answer = case v ^? _String of { Just s -> s; _ -> \"\" }\n",
-        "  case lookup answer choices of\n",
-        "    Just a  -> pure a\n",
-        "    Nothing -> askChoice prompt choices\n",
-    ));
-    out.push_str(concat!(
-        "confirm :: Text -> M Bool\n",
-        "confirm prompt = do\n",
-        "  v <- ask (prompt <> \" [yes/no]\")\n",
-        "  let answer = case v ^? _String of { Just s -> toLower s; _ -> \"\" }\n",
-        "  pure (answer == \"yes\" || answer == \"y\")\n",
-    ));
-    out.push_str(concat!(
-        "repl :: Text -> (Text -> M (Maybe a)) -> M a\n",
-        "repl prompt dispatch = do\n",
-        "  v <- ask prompt\n",
-        "  let cmd = case v ^? _String of { Just s -> s; _ -> \"\" }\n",
-        "  r <- dispatch cmd\n",
-        "  case r of\n",
-        "    Just a  -> pure a\n",
-        "    Nothing -> repl prompt dispatch\n",
-    ));
+    out.push_str("-- KV + file orchestration helpers\n");
     out.push_str(concat!(
         "memo :: Text -> M Value -> M Value\n",
         "memo k compute = do\n",
@@ -289,25 +250,6 @@ fn orchestration_helpers(out: &mut String, effects: &[EffectDecl], user_library:
         "  let xs' = xs ++ [v]\n",
         "  kvSet k (toJSON xs')\n",
         "  pure xs'\n",
-    ));
-    out.push_str(concat!(
-        "supervised :: Text -> M Value -> (Value -> Maybe a) -> M a\n",
-        "supervised label body check = do\n",
-        "  putStrLn (\"[\" <> label <> \"] running...\")\n",
-        "  v <- body\n",
-        "  case check v of\n",
-        "    Just a  -> putStrLn (\"[\" <> label <> \"] done\") >> pure a\n",
-        "    Nothing -> do\n",
-        "      correction <- ask (\"[\" <> label <> \"] result: \" <> show v <> \"\\nHow should I adjust?\")\n",
-        "      supervised label body check\n",
-    ));
-    out.push_str(concat!(
-        "gather :: [(Text, Value -> a)] -> M [a]\n",
-        "gather [] = pure []\n",
-        "gather ((q, parse):rest) = do\n",
-        "  v <- ask q\n",
-        "  as <- gather rest\n",
-        "  pure (parse v : as)\n",
     ));
     out.push_str(concat!(
         "mapFiles :: [Text] -> (Text -> Text -> M Text) -> M [Text]\n",
@@ -369,10 +311,10 @@ fn orchestration_helpers(out: &mut String, effects: &[EffectDecl], user_library:
         "runAll = mapM run\n",
     ));
 
-    // Q-builders (pick/yn/obj/txt/num/bar) and the named runner `askQ`
-    // live in the generated Tidepool.Effects module (ask_decl type_defs +
-    // helpers) — always present, since the Ask effect is always in the
-    // stack — so .tidepool/lib modules can define Q-driven verbs.
+    // The Schema vocabulary + structured `ask`/`llm`/`tryLlm` live in the
+    // generated Tidepool.Effects module (ask_decl/llm_decl type_defs +
+    // helpers) — `ask`/Schema are always present, since the Ask effect is
+    // always in the stack — so .tidepool/lib modules can build schemas.
 
     out.push('\n');
 }
@@ -415,10 +357,15 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         "P. (Prelude) \u{2014} ",
         "prefer the unqualified Prelude shadows where they exist (they are ",
         "the JIT-safe versions).\n",
-        "Return values are automatically rendered to JSON by the Rust runtime \u{2014} ",
-        "Int becomes a number, [Char] becomes a string, Bool becomes true/false, ",
-        "lists become arrays, etc. Prefer `pure x` over `send (Print (show x))` ",
-        "for returning results.\n",
+        "The final value of `code` is rendered to JSON for the caller \u{2014} Int → ",
+        "number, [Char] → string, Bool → true/false, lists → arrays, and a ",
+        "`Value` → that JSON directly. RETURN a `Value` for structured output (via ",
+        "`object`/`toJSON`/`parseJson`/`llm`/`tryHttpGet`, …), e.g. ",
+        "`tryHttpGet \"https://api.github.com/repos/o/r\"`; use `putStrLn`/`say` only ",
+        "for human-readable debug traces, not to stringify results. Extract from a ",
+        "`Value` with optics: `v ^? key \"f\" . _String` (also `_Int`, `_Double`, ",
+        "`_Bool`, `_Array`); `renderJson :: Value -> Text` renders one to compact JSON. ",
+        "Prefer `pure x` over `send (Print (show x))`.\n",
         "The `input` param is the PAYLOAD LANE: pass large or quote-heavy ",
         "content (file bodies, generated source) as a real JSON value there \u{2014} ",
         "no Haskell string escaping \u{2014} and keep `code` a short verb consuming ",
@@ -431,6 +378,20 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         desc.push_str("\nAvailable effects (use `send` to invoke):\n");
         effects.iter().for_each(|eff| {
             desc.push_str(&format!("\n{}: {}\n", eff.type_name, eff.description));
+            // Surface each effect's type vocabulary (data/type/newtype heads) so
+            // models don't have to grep for Schema/Lang/Match constructors. Skip
+            // the helper-function / instance entries that also live in type_defs.
+            for td in eff.type_defs {
+                let head = td.lines().next().unwrap_or(td).trim_start();
+                if head.starts_with("data ")
+                    || head.starts_with("type ")
+                    || head.starts_with("newtype ")
+                {
+                    desc.push_str("    ");
+                    desc.push_str(head);
+                    desc.push('\n');
+                }
+            }
         });
 
         // List built-in helpers
@@ -466,18 +427,15 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         let has_ask_desc = effects.iter().any(|e| e.type_name == "Ask");
         if has_llm && has_ask_desc {
             desc.push_str(concat!(
-                "\n\nQ-builders + the named runner `askQ` (Library, auto-imported):\n",
-                "  Q a — first-class question (schema + parser + confidence gate)\n",
-                "  pick cats `askQ` prompt    -- classify; suspends to caller (M Text)\n",
-                "  yn `askQ` prompt           -- yes/no (M Bool)\n",
-                "  obj schema `askQ` prompt   -- structured extraction (M Value)\n",
-                "  txt \"field\" `askQ` prompt  -- single text field (M Text)\n",
-                "  num \"field\" `askQ` prompt  -- single number field (M Double)\n",
-                "  (,) <$> pick cs <*> num \"n\" `askQ` p  -- Applicative: merged schema, one ask\n",
-                "Two runners (same Q-builders, different cost):\n",
-                "  q `askQ` prompt   -- SUSPEND to the calling LLM; no autonomous tokens\n",
-                "  q `llmQ` prompt   -- AUTONOMOUS server-side model call (costs tokens); e.g. pick cats `llmQ` p\n",
-                "Or `llmJson prompt schema` for a raw structured call.\n",
+                "\n\nStructured LLM / Ask — one Schema vocabulary, validated JSON back:\n",
+                "  Schema = SObj [(Text,Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema\n",
+                "  ask schema prompt    -- SUSPEND to the calling agent; reply validated vs schema, no token burn\n",
+                "  llm schema prompt    -- AUTONOMOUS server-side model call (costs tokens); structured Value, no fences\n",
+                "  tryLlm schema prompt -- as llm, but an API error/refusal becomes Left err instead of aborting\n",
+                "Both ask/llm return a Value; extract with optics, e.g.:\n",
+                "  cat <- llm (SObj [(\"category\", SEnum [\"bug\",\"feat\"])]) prompt <&> (^? key \"category\" . _String)\n",
+                "  ok  <- ask (SObj [(\"ok\", SBool)]) \"proceed?\" <&> (^? key \"ok\" . _Bool)\n",
+                "Orchestration: let the LLM DECIDE (SEnum/SBool) and let deterministic code EMIT syntax (regex/AST patterns) — models are unreliable at generating domain-specific syntax directly.\n",
             ));
         }
 
@@ -490,7 +448,7 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
             ));
             if has_llm && has_ask_desc {
                 desc.push_str(
-                    "  glob \"**/*.hs\" >>= filterM (readFile >=> \\s -> yn `askQ` (\"test-only?\\n\" <> stake 2000 s))\n",
+                    "  glob \"**/*.hs\" >>= filterM (readFile >=> \\s -> ask (SObj [(\"t\", SBool)]) (\"test-only?\\n\" <> stake 2000 s) <&> (\\v -> v ^? key \"t\" . _Bool == Just True))\n",
                 );
             }
         }
@@ -509,8 +467,7 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
                 "becomes `Left err` (carrying the cause) and the eval continues:\n",
                 "  tryRun, tryRunIn      :: ... -> M (Either Text (Int, Text, Text))\n",
                 "  tryHttpGet, tryHttpPost :: ... -> M (Either Text Value)\n",
-                "  tryLlm                :: Text -> M (Either Text Text)\n",
-                "  tryLlmJson            :: Text -> Schema -> M (Either Text Value)\n",
+                "  tryLlm                :: Schema -> Text -> M (Either Text Value)\n",
                 "  tryReadFile           :: Text -> M (Either Text Text)\n",
                 "They do NOT catch: Haskell `error`/partial functions (including ",
                 "readProcess/callCommand on a nonzero exit), other runtime faults, ",

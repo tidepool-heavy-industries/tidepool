@@ -1030,8 +1030,8 @@ where
                 .push_str(&library_vocab(&lib_dirs));
             self.inner.eval_tool_description.push_str(concat!(
                 "\nWith the library:\n",
+                "  vocab  -- list every library verb's signature; call it bare to discover the surface\n",
                 "  glob \"**/*.rs\" >>= mapM (\\p -> (,) p <$> getFileSize p) <&> sizeRank 9\n",
-                "  seek \"where are case traps emitted?\" 5  -- steered search: suspends to you each round\n",
             ));
             // PATTERNS.md lives beside the active Library dir (at `.tidepool/`).
             let patterns = lib_root.parent().map(|p| p.join("PATTERNS.md"));

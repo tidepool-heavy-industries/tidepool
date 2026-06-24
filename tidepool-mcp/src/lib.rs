@@ -568,7 +568,6 @@ data Console a where
         assert!(preamble.contains("glob :: FilePath -> M [FilePath]"));
         assert!(preamble.contains("callCommand :: Text -> M ()"));
         assert!(preamble.contains("readProcess :: Text -> M Text"));
-        assert!(preamble.contains("getLine :: Text -> M Text"));
         // No old aliases
         assert!(!preamble.contains("fsRead"));
         assert!(!preamble.contains("fsWrite"));
@@ -577,7 +576,7 @@ data Console a where
         // Other helpers unchanged
         assert!(preamble.contains("kvGet :: Text -> M (Maybe Value)"));
         assert!(preamble.contains("httpGet :: Text -> M Value"));
-        assert!(preamble.contains("ask :: Text -> M Value"));
+        assert!(preamble.contains("ask :: Schema -> Text -> M Value"));
     }
 
     #[test]
@@ -600,19 +599,19 @@ data Console a where
     fn test_ask_decl() {
         let decl = ask_decl();
         assert_eq!(decl.type_name, "Ask");
-        assert_eq!(decl.constructors.len(), 2);
-        assert!(decl.constructors[0].contains("Ask :: Text -> Ask Value"));
-        assert!(decl.constructors[1].contains("AskWith :: Text -> Value -> Ask Value"));
-        // The Q layer lives on the Ask effect (always present in every
-        // stack) so .tidepool/lib modules and Llm-less stacks can use it.
+        // Bare `Ask` was reaped with the structured-Ask collapse; only AskWith
+        // (schema-carrying) remains.
+        assert_eq!(decl.constructors.len(), 1);
+        assert!(decl.constructors[0].contains("AskWith :: Text -> Value -> Ask Value"));
+        // The Schema vocabulary lives on the Ask effect (always present in every
+        // stack) so .tidepool/lib modules and Llm-less stacks can build schemas.
         let type_defs = decl.type_defs.join("\n");
         assert!(type_defs.contains("data Schema"));
-        assert!(type_defs.contains("data Q a = Q Schema (Value -> a) Double"));
+        assert!(!type_defs.contains("data Q a"));
         let helpers = decl.helpers.join("\n");
-        assert!(helpers.contains("askQ :: Q a -> Text -> M a"));
-        assert!(helpers.contains("askWith :: Value -> Text -> M Value"));
+        assert!(helpers.contains("ask :: Schema -> Text -> M Value"));
         assert!(helpers.contains("schemaToValue :: Schema -> Value"));
-        assert!(helpers.contains("pick :: [Text] -> Q Text"));
+        assert!(!helpers.contains("askQ"));
     }
 
     #[test]
@@ -641,7 +640,7 @@ data Console a where
         let decls = standard_decls();
         let preamble = generated_sources(&decls, false);
         assert!(preamble.contains("data Ask a where"));
-        assert!(preamble.contains("  Ask :: Text -> Ask Value"));
+        assert!(preamble.contains("  AskWith :: Text -> Value -> Ask Value"));
         assert!(preamble.contains("type M = Eff '[Console, KV, Fs, SG, Http, Exec, Llm, Ask]"));
     }
 
@@ -705,43 +704,39 @@ data Console a where
         assert!(preamble.contains("kvAll :: M [(Text, Value)]"));
         assert!(preamble.contains("kvClear :: M ()"));
         assert!(preamble.contains("runAll :: [Text] -> M [(Int, Text, Text)]"));
-        // The Q layer + named runner `askQ` live in the generated
-        // Tidepool.Effects module so .tidepool/lib modules can define
-        // Q-driven verbs. The token-burning `??`/`?!`/triage/survey/sift
-        // sugar has been removed.
+        // The structured Ask/Llm surface lives in the generated Tidepool.Effects
+        // module — one Schema vocabulary, extract with optics. The Q-builder DSL
+        // and the `??`/`?!`/triage/survey/sift sugar are removed.
         let effects_mod = effects_module_source(&decls);
-        assert!(effects_mod.contains("data Q a = Q Schema (Value -> a) Double"));
-        assert!(effects_mod.contains("pick :: [Text] -> Q Text"));
-        assert!(effects_mod.contains("yn :: Q Bool"));
-        assert!(effects_mod.contains("obj :: Schema -> Q Value"));
-        assert!(effects_mod.contains("txt :: Text -> Q Text"));
-        assert!(effects_mod.contains("num :: Text -> Q Double"));
-        assert!(effects_mod.contains("bar :: Double -> Q a -> Q a"));
-        assert!(effects_mod.contains("askQ :: Q a -> Text -> M a"));
-        // askQ suspends to the caller via askWith (no autonomous LLM call)
-        assert!(effects_mod.contains("askWith (object [\"schema\" .= schemaToValue schema])"));
-        // llmQ is the named AUTONOMOUS runner (server-side model call via llmJson).
-        assert!(effects_mod.contains("llmQ :: Q a -> Text -> M a"));
-        // Removed sugar is gone.
-        assert!(!effects_mod.contains("data Judged a"));
+        assert!(effects_mod.contains("data Schema = SObj"));
+        assert!(effects_mod.contains("ask :: Schema -> Text -> M Value"));
+        assert!(effects_mod.contains("llm :: Schema -> Text -> M Value"));
+        assert!(effects_mod.contains("tryLlm :: Schema -> Text -> M (Either Text Value)"));
+        // ask suspends to the caller via AskWith (no autonomous LLM call)
+        assert!(effects_mod
+            .contains("send (AskWith prompt (object [\"schema\" .= schemaToValue schema]))"));
+        // The removed Q layer + sugar are gone.
+        assert!(!effects_mod.contains("data Q a"));
+        assert!(!effects_mod.contains("askQ ::"));
+        assert!(!effects_mod.contains("llmQ ::"));
+        assert!(!effects_mod.contains("llmJson ::"));
+        assert!(!effects_mod.contains("pick :: [Text] -> Q Text"));
         assert!(!effects_mod.contains("(??)"));
         assert!(!effects_mod.contains("(?!)"));
         assert!(!effects_mod.contains("triage ::"));
         assert!(!effects_mod.contains("survey ::"));
         assert!(!effects_mod.contains("sift ::"));
         // and NOT duplicated in the preamble (one definition site)
-        assert!(!preamble.contains("data Q a"));
-        assert!(!preamble.contains("pick :: [Text] -> Q Text"));
-        // askQ lives in ask_decl (always present), so it survives an Llm-less stack
+        assert!(!preamble.contains("data Schema = SObj"));
+        // ask lives in ask_decl (always present), so it survives an Llm-less stack
         let no_llm: Vec<EffectDecl> = standard_decls()
             .into_iter()
             .filter(|d| d.type_name != "Llm")
             .collect();
         let no_llm_mod = effects_module_source(&no_llm);
-        assert!(!no_llm_mod.contains("(??)"));
-        assert!(no_llm_mod.contains("askQ :: Q a -> Text -> M a"));
-        // llmQ needs the Llm effect — absent from an Llm-less stack.
-        assert!(!no_llm_mod.contains("llmQ ::"));
+        assert!(no_llm_mod.contains("ask :: Schema -> Text -> M Value"));
+        // llm needs the Llm effect — absent from an Llm-less stack.
+        assert!(!no_llm_mod.contains("llm :: Schema -> Text -> M Value"));
     }
 
     #[test]

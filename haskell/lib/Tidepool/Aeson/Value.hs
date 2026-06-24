@@ -9,7 +9,7 @@
 module Tidepool.Aeson.Value
   ( -- * Core types
     Value(..)
-  , Key(..)
+  , Key
   , KeyMap
   , Object
   , Array
@@ -32,17 +32,17 @@ import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
--- | A JSON key — thin wrapper around Text.
-newtype Key = Key Text
-  deriving (Eq, Ord, Show)
+-- | A JSON object key. Transparently Text (like 'FilePath') — object keys are
+-- just Text, so @KM.lookup "k" m@ and @KM.keys@ work directly with no wrapper.
+type Key = Text
 
--- | Convert Text to a Key.
+-- | Convert Text to a Key. Identity (kept for call-site compatibility).
 fromText :: Text -> Key
-fromText = Key
+fromText = id
 
--- | Convert a Key back to Text.
+-- | Convert a Key back to Text. Identity (kept for call-site compatibility).
 toText :: Key -> Text
-toText (Key t) = t
+toText = id
 
 -- | KeyMap backed by Data.Map.Strict (avoids HashMap primop issues).
 type KeyMap v = Map.Map Key v
@@ -72,7 +72,7 @@ object = Object . Map.fromList
 
 -- | Pair a text key with a JSON-encodable value.
 (.=) :: ToJSON v => Text -> v -> Pair
-k .= v = (Key k, toJSON v)
+k .= v = (k, toJSON v)
 infixr 8 .=
 
 -- | Empty JSON object.
@@ -133,8 +133,8 @@ instance ToJSON Ordering where
   toJSON GT = String "GT"
 
 instance (ToJSON a, ToJSON b) => ToJSON (Either a b) where
-  toJSON (Left a)  = Object (Map.singleton (Key "Left") (toJSON a))
-  toJSON (Right b) = Object (Map.singleton (Key "Right") (toJSON b))
+  toJSON (Left a)  = Object (Map.singleton "Left" (toJSON a))
+  toJSON (Right b) = Object (Map.singleton "Right" (toJSON b))
 
 instance (ToJSON a, ToJSON b) => ToJSON (a, b) where
   toJSON (a, b) = Array [toJSON a, toJSON b]
@@ -149,7 +149,7 @@ instance (ToJSON a, ToJSON b, ToJSON c, ToJSON d, ToJSON e) => ToJSON (a, b, c, 
   toJSON (a, b, c, d, e) = Array [toJSON a, toJSON b, toJSON c, toJSON d, toJSON e]
 
 instance ToJSON a => ToJSON (Map.Map Text a) where
-  toJSON m = Object (Map.mapKeys Key (Map.map toJSON m))
+  toJSON m = Object (Map.map toJSON m)  -- keys are already Text (= Key)
 
 instance ToJSON a => ToJSON (Set.Set a) where
   toJSON = Array . map toJSON . Set.toList

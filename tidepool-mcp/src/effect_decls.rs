@@ -163,6 +163,7 @@ pub fn sg_decl() -> EffectDecl {
         description: concat!(
             "Structural code search via ast-grep. ",
             "Use patterns with $VAR for single-node captures and $$$VAR for multi-node. ",
+            "Pass the language as a Lang DATA CONSTRUCTOR (e.g. `Rust`, `Python`), not a string. ",
             "Supported: Rust | Python | TypeScript | JavaScript | Go | Java | C | Cpp | Haskell | Nix | Html | Css | Json | Yaml | Toml. ",
             "Example: hsDef \"filter\" [\"haskell/lib\"] returns the definition of filter with file/line. ",
             "Use grepGlob for structured text-level search with regex and filename globbing.",
@@ -321,35 +322,22 @@ pub fn meta_decl() -> EffectDecl {
 pub fn ask_decl() -> EffectDecl {
     EffectDecl {
         type_name: "Ask",
-        description: "Suspend execution and ask the calling LLM a question. The LLM calls the resume tool with an answer, and execution continues. `askQ` attaches a schema: the suspension carries it as JSON Schema and the resume reply is validated against it server-side before re-entering the computation (invalid replies do NOT consume the continuation).",
+        description: "Suspend execution and ask the calling agent a STRUCTURED question. `ask schema prompt` carries the schema as JSON Schema in the suspension; the resume reply is validated against it server-side before re-entering the computation (invalid replies do NOT consume the continuation). Extract fields from the returned Value with optics, e.g. `v ^? key \"path\" . _String`.",
         constructors: &[
-            "Ask :: Text -> Ask Value",
             "AskWith :: Text -> Value -> Ask Value",
         ],
         type_defs: &[
             // Schema vocabulary lives on the Ask effect (always present in
             // every stack) so .tidepool/lib modules and Llm-less stacks can
-            // use Q/askQ. llmJson (llm_decl) references schemaToValue from
+            // build schemas. llm (llm_decl) references schemaToValue from
             // here — same generated module.
             "data Schema = SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema",
-            "data Q a = Q Schema (Value -> a) Double",
-            "instance Functor Q where\n  fmap f (Q s p t) = Q s (f . p) t",
-            "instance Applicative Q where\n  pure a = Q (SObj []) (const a) 0.6\n  Q (SObj fs1) p1 t1 <*> Q (SObj fs2) p2 t2 = Q (SObj (fs1 ++ fs2)) (\\v -> p1 v (p2 v)) (if t1 >= t2 then t1 else t2)\n  Q s1 p1 t1 <*> Q s2 p2 t2 = Q s1 (\\v -> p1 v (p2 v)) (if t1 >= t2 then t1 else t2)",
         ],
         helpers: &[
-            "ask :: Text -> M Value\nask = send . Ask",
-            "askWith :: Value -> Text -> M Value\naskWith meta prompt = send (AskWith prompt meta)",
-            "askQ :: Q a -> Text -> M a\naskQ (Q schema parse _) prompt = parse <$> askWith (object [\"schema\" .= schemaToValue schema]) prompt",
-            "getLine :: Text -> M Text\ngetLine prompt = do { v <- ask prompt; case v of { String s -> pure s; _ -> pure (show v) } }",
+            "ask :: Schema -> Text -> M Value\nask schema prompt = send (AskWith prompt (object [\"schema\" .= schemaToValue schema]))",
             "isOpt :: Schema -> Bool\nisOpt (SOpt _) = True\nisOpt _ = False",
             "innerSchema :: Schema -> Schema\ninnerSchema (SOpt s) = s\ninnerSchema s = s",
             "schemaToValue :: Schema -> Value\nschemaToValue SStr = object [\"type\" .= (\"string\" :: Text)]\nschemaToValue SNum = object [\"type\" .= (\"number\" :: Text)]\nschemaToValue SBool = object [\"type\" .= (\"boolean\" :: Text)]\nschemaToValue (SEnum vs) = object [\"type\" .= (\"string\" :: Text), \"enum\" .= vs]\nschemaToValue (SArr item) = object [\"type\" .= (\"array\" :: Text), \"items\" .= schemaToValue item]\nschemaToValue (SOpt s) = schemaToValue s\nschemaToValue (SObj fields) = object [\"type\" .= (\"object\" :: Text), \"properties\" .= object (map (\\(k,s) -> k .= schemaToValue (innerSchema s)) fields), \"required\" .= map fst (filter (not . isOpt . snd) fields)]",
-            "pick :: [Text] -> Q Text\npick cats = Q (SObj [(\"pick\", SEnum cats)]) (\\v -> case v ^? key \"pick\" . _String of { Just s -> s; _ -> error \"Q: missing 'pick' in response\" }) 0.6",
-            "yn :: Q Bool\nyn = Q (SObj [(\"answer\", SBool)]) (\\v -> case v ^? key \"answer\" . _Bool of { Just b -> b; _ -> error \"Q: missing 'answer' in response\" }) 0.6",
-            "obj :: Schema -> Q Value\nobj s = Q s id 0.6",
-            "txt :: Text -> Q Text\ntxt k = Q (SObj [(k, SStr)]) (\\v -> case v ^? key k . _String of { Just s -> s; _ -> error (\"Q: missing '\" <> k <> \"' in response\") }) 0.6",
-            "num :: Text -> Q Double\nnum k = Q (SObj [(k, SNum)]) (\\v -> case v ^? key k . _Number of { Just n -> n; _ -> error (\"Q: missing '\" <> k <> \"' in response\") }) 0.6",
-            "bar :: Double -> Q a -> Q a\nbar t (Q s p _) = Q s p t",
         ],
     }
 }
@@ -358,32 +346,22 @@ pub fn ask_decl() -> EffectDecl {
 pub fn llm_decl() -> EffectDecl {
     EffectDecl {
         type_name: "Llm",
-        description: "Call an LLM for classification, extraction, or judgment.",
+        description: "Call an LLM for classification, extraction, or judgment. `llm schema prompt` returns a Value validated against the schema (structured output, no markdown fences). Extract with optics, e.g. `v ^? key \"category\" . _String`.",
         constructors: &[
-            "LlmChat       :: Text -> Llm Text",
             "LlmStructured :: Text -> Value -> Llm Value",
-            // Failure-isolating variants: an API/network error or refusal
+            // Failure-isolating variant: an API/network error or refusal
             // becomes `Left err` instead of killing the eval. (Budget
             // exhaustion still aborts — that's a hard control limit.)
-            "TryLlmChat       :: Text -> Llm (Either Text Text)",
             "TryLlmStructured :: Text -> Value -> Llm (Either Text Value)",
         ],
         type_defs: &[],
         helpers: &[
-            "llm :: Text -> M Text\nllm = send . LlmChat",
             // schemaToValue lives in ask_decl (Ask is always present).
-            "llmJson :: Text -> Schema -> M Value\nllmJson prompt schema = send (LlmStructured prompt (schemaToValue schema))",
-            // Autonomous Q runner: run a Q-builder (pick/yn/obj/txt/num) against
-            // the server-side model in one structured call — the named,
-            // cost-honest counterpart to `askQ` (which suspends to the caller).
-            // This is what `??` used to do, minus the hidden confidence cascade;
-            // the `llm`-prefix makes the per-call model cost obvious at the site.
-            "llmQ :: Q a -> Text -> M a\nllmQ (Q schema parse _) prompt = parse <$> llmJson prompt schema",
-            // Isolating variants: an API failure/refusal becomes `Left err`
+            "llm :: Schema -> Text -> M Value\nllm schema prompt = send (LlmStructured prompt (schemaToValue schema))",
+            // Isolating variant: an API failure/refusal becomes `Left err`
             // instead of aborting the eval (the LLM call-budget limit still
             // aborts — it is a hard control limit, not a probe failure).
-            "tryLlm :: Text -> M (Either Text Text)\ntryLlm = send . TryLlmChat",
-            "tryLlmJson :: Text -> Schema -> M (Either Text Value)\ntryLlmJson prompt schema = send (TryLlmStructured prompt (schemaToValue schema))",
+            "tryLlm :: Schema -> Text -> M (Either Text Value)\ntryLlm schema prompt = send (TryLlmStructured prompt (schemaToValue schema))",
             // Pure tally utilities (no LLM/Ask): build a frequency list while
             // preserving first-seen order. Kept for .tidepool/lib verbs.
             "findTally :: Eq a => a -> [(a, Int)] -> Maybe [(a, Int)]\nfindTally _ [] = Nothing\nfindTally x ((k, n):rest) = if x == k then Just ((k, n + 1) : rest) else case findTally x rest of { Just rest' -> Just ((k, n) : rest'); Nothing -> Nothing }",

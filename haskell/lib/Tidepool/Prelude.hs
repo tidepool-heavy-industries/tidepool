@@ -102,6 +102,7 @@ module Tidepool.Prelude
   , when, unless, void, join, guard
   , forM, forM_
   , (=<<), (>=>), (<=<)  -- (<&>) comes via module Control.Lens
+  , (<|>)                -- Alternative (Maybe/[]); Control.Lens omits it
   , foldM, foldM_
   , filterM, replicateM, zipWithM
     -- * Maybe/Either utilities
@@ -235,11 +236,14 @@ import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, 
 --   (.=) — Aeson's object-pair operator;
 --   (??) — removed heuristic LLM operator (kept absent, not aliased to lens's
 --          flipped-apply);
---   para — the .tidepool/lib `Schemes.para` list paramorphism (canonical name;
---          lens's `para` is the niche Plated one);
+--   para — removed (was the `Schemes.para` list paramorphism, since cut); lens's
+--          `para` is the niche Plated one, kept hidden so `para` stays unbound;
 --   (<.>) — System.FilePath's add-extension operator (Tidepool.FilePath, above);
 --          lens's `(<.>)` is the niche indexed-optic composition.
-import Control.Lens hiding (imap, (.=), (??), para, (<.>))
+--   rewrite — the structural ast-grep verb `Flow.rewrite` (Library); lens's
+--             `rewrite` is the niche Plated bottom-up traversal, never wanted in eval.
+import Control.Lens hiding (imap, (.=), (??), para, (<.>), rewrite)
+import Control.Applicative ((<|>))  -- Alternative (<|>) — Control.Lens omits it
 import qualified Data.Map.Strict as Map
 
 -- Permanent binding-level interception in Translate.hs.
@@ -421,7 +425,7 @@ replicateM n act = go n
          | otherwise = do { x <- act; xs <- go (i - 1); pure (x : xs) }
 
 -- | Zip two lists with an effectful function.
--- @zipWithM (\\a b -> llmJson (a \<\> b) schema) prompts contexts@
+-- @zipWithM (\\a b -> llm schema (a \<\> b)) prompts contexts@
 zipWithM :: Monad m => (a -> b -> m c) -> [a] -> [b] -> m [c]
 zipWithM f (a:as) (b:bs) = do { c <- f a b; cs <- zipWithM f as bs; pure (c : cs) }
 zipWithM _ _      _      = pure []
