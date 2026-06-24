@@ -58,6 +58,9 @@ pub fn effects_module_source(effects: &[EffectDecl]) -> String {
     out.push_str("import qualified Tidepool.Data.Text as T\n");
     out.push_str("import qualified Data.Map.Strict as Map\n");
     out.push_str("import qualified Tidepool.Aeson.KeyMap as KM\n");
+    // Pure Myers-diff core: the `planUpdate` editing helper renders its review
+    // diff via `Patch.genPatch`/`Patch.renderPatch`.
+    out.push_str("import qualified Tidepool.Patch as Patch\n");
     out.push_str("import Control.Monad.Freer hiding (run)\n");
     out.push_str("import qualified Prelude as P\n");
     out.push_str("default (Int, Double, Text)\n");

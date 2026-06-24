@@ -11,9 +11,10 @@ extract with optics (`v ^? key "f" . _String`).
 - `ask schema prompt` — suspend to the caller (no token burn; they answer).
 - `llm schema prompt` — autonomous server-side model call (costs tokens).
 
-Verbs used here ride along with the auto-imported Library: `census`, `refs`,
-`hitsByFile`/`sizeRank`, `patchFile`/`insertAfter`/`writeChecked`, the `Edit`
-verbs, `linesOf`/`filteredT`/`overFileM`, the Kleisli combinators (`&&&`/`***`/`|||`).
+Verbs used here: `update`/`updateAll`/`planUpdate`/`insertAfter` (core editing),
+plus the auto-imported Library's `census`, `refs`, `hitsByFile`/`sizeRank`, the
+`Edit` verbs, `linesOf`/`filteredT`/`overFileM`, the Kleisli combinators
+(`&&&`/`***`/`|||`).
 
 ---
 
@@ -59,24 +60,26 @@ to the caller instead. The schema forces a clean label — no fence-stripping.
 deterministic code EMIT syntax (regex/AST) — models are unreliable at
 generating domain-specific syntax directly.
 
-## Chained Text Surgery — exactly-once patches, optics for the line-level
+## Editing files — `update` first
 
-`patchFile` errors loudly on absent OR ambiguous needles (ambiguity is how
-string surgery corrupts silently); `insertAfter` anchors on a unique line;
-`overFileM` reports what changed instead of editing blind.
+`update path old new` is exact str-replace — it errors loudly if `old` is absent
+OR ambiguous (ambiguity is how string surgery corrupts silently), so pass enough
+surrounding context to be unique. `insertAfter` anchors on a unique line;
+`overFileM` rewrites matching lines through optics.
 
 ```haskell
-r1 <- patchFile "target/demo.cfg" "retries = 3" "retries = 5"
-r2 <- insertAfter "target/demo.cfg" "[limits]" "max_depth = 64"
-r3 <- overFileM "target/demo.cfg" (linesOf . filteredT (isPrefixOf "#")) (("# [reviewed] " <>) . sdrop 2)
-pure (object ["patch" .= r1, "insert" .= r2, "sweep" .= r3])
+update "target/demo.cfg" "retries = 3" "retries = 5"        -- exact, exactly-once
+insertAfter "target/demo.cfg" "[limits]" "max_depth = 64"   -- after the unique anchor line
+overFileM "target/demo.cfg" (linesOf . filteredT (isPrefixOf "#")) (("# [reviewed] " <>) . sdrop 2)
+pure "edited"
 ```
 
-Big needles? Pass them via the eval `input` field and use `patchJ input` —
-nothing needs escaping in code. For whole-file rewrites, end the chain with
-`writeChecked` so a botched compose can't land. For line-range/anchor edits,
-the `Edit` verbs (`applyEdits`/`editsJ`, 1-based) lower to a context-anchored
-patch on an all-or-nothing apply.
+Fragments are plain `Text`, so COMPUTE them: `update p old (TF.camelToSnake x)` —
+no quoter, no escaping. Big/quote-heavy `new` rides the input lane via `updateJ`
+(`{file, old, new}`). Preview first with `planUpdate path old new` (returns the
+diff, writes nothing, never errors). For line/anchor BATCHES use the `Edit` verbs
+(`applyEdits`/`editsJ`, 1-based, atomic); for a real diff `applyDiff`; for
+syntax-aware rename, ast-grep (`hsDef`/`rsFn`). Full surface: `tidepool://edits`.
 
 ## Kleisli plumbing — (&&&), (***), (|||), firstK, secondK
 

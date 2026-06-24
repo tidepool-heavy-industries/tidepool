@@ -56,6 +56,16 @@ if go == Just True then expensiveAnalysis data else pure "skipped"
 **Census**: one eval replaces N tool calls — `fsGlob` + `mapM fsMetadata` +
 filtering gives a codebase overview in a single round-trip.
 
+**Editing — `update` is the common-case core verb** (always available in any repo;
+in `fs_decl` helpers, not project-lib): `update path old new :: M ()` is exact
+str-replace, exactly-once, and THROWS a precise error on not-found/ambiguous —
+the MCP Edit-tool shape. `updateAll` returns a count; `planUpdate :: M Value` is the
+dry-run that returns `{changed,diff}` as DATA (never throws — the branch-before-commit
+path); `updateJ` rides the input lane; `insertAfter`/`writeChecked` migrated here too.
+The tiers below (`Edit` DSL, `[patch|]`/Diff, ast-grep) are power tools for
+batch / diff-shaped / syntax-aware work; `tidepool://edits` documents all four,
+common-case first.
+
 **Diff-on-the-input-lane** (`[patch|]`/Diff verbs): multi-line `[patch|...|]`
 literals in `code` are corrupted by template indentation — ride the `input`
 payload lane instead: `applyDiff d where d = case input of { String s -> s; _ ->

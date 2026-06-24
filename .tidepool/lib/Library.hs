@@ -14,7 +14,6 @@ module Library
   , module Explore
   , module Dev
   , module Tables
-  , module Patch
   , module Diff
   , module Edit
   , module Optics
@@ -24,7 +23,6 @@ import Schemes
 import Explore
 import Dev
 import Tables
-import Patch
 import Diff
 import Edit
 import Optics

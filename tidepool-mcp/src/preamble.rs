@@ -52,6 +52,10 @@ fn pragmas_and_imports(out: &mut String, user_library: bool) {
     out.push_str("import qualified Data.List as L\n");
     out.push_str("import qualified Tidepool.TextFormat as TF\n");
     out.push_str("import qualified Tidepool.Table as Tab\n");
+    // Pure Myers-diff core: `planUpdate` renders its review diff via
+    // `Patch.genPatch`/`Patch.renderPatch`, and it gives eval authors the
+    // diff/patch primitives qualified.
+    out.push_str("import qualified Tidepool.Patch as Patch\n");
     out.push_str("import Control.Monad.Freer hiding (run)\n");
     if user_library {
         out.push_str("import Library\n");
@@ -393,6 +397,12 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
                 "  extract with optics, e.g. llm (SObj [(\"k\", SEnum [\"a\",\"b\"])]) p <&> (^? key \"k\" . _String)\n",
             ));
         }
+
+        desc.push_str(concat!(
+            "\nEdit files: `update path old new` — exact str-replace, errors if the text is ",
+            "not-found or ambiguous (add surrounding context); `planUpdate` previews the diff. ",
+            "The full editing surface (Edit DSL, diffs, ast-grep) is in tidepool://edits.\n",
+        ));
 
         desc.push_str(concat!(
             "\nResources — this description is a FLOOR; pull the depth on demand via resources/read:\n",

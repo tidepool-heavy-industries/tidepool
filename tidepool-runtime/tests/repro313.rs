@@ -38,17 +38,19 @@ impl DispatchEffect<()> for PatchDispatcher {
     }
 }
 
-/// Layer0-audit member of the #313 TailCtx class: Patch.patchFile is a
-/// cross-module M fn with the double-T.breakOn occurrence check inlined;
-/// pre-fix it died on the success/ambiguous paths with "apply_cont_heap:
-/// result con_tag <garbage> is neither Val nor E".
+/// Layer0-audit member of the #313 TailCtx class: the core `update` verb (the
+/// successor to Patch.patchFile) is an occurrence-check case-dispatch in M
+/// (`case len (splitOn ...) - 1 of { 0; 1; n }`) with effectful branches —
+/// pre-fix this shape died on the success path with "apply_cont_heap: result
+/// con_tag <garbage> is neither Val nor E". (The cross-module occ2 variant is
+/// guarded by repro_313 above.)
 #[test]
 fn repro_313_patch_class() {
     let decls = tidepool_mcp::standard_decls();
     let pre = tidepool_mcp::build_preamble(&decls, true);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let nonce = std::env::var("NONCE").unwrap_or_default();
-    let code = format!("-- nonce {nonce}\npatchFile \"f.txt\" \"old needle\" \"new needle\"");
+    let code = format!("-- nonce {nonce}\nupdate \"f.txt\" \"old needle\" \"new needle\"");
     let src = tidepool_mcp::template_haskell(
         &pre,
         &stack,
@@ -68,12 +70,10 @@ fn repro_313_patch_class() {
     let mut d = PatchDispatcher;
     let r = compile_and_run(&src, "result", &include, &mut d, &());
     match r {
-        Ok(v) => assert_eq!(
-            v.to_json(),
-            serde_json::json!("patched f.txt"),
-            "#313 Patch-class regression: patchFile success path must complete"
-        ),
-        Err(e) => panic!("#313 Patch-class regression: eval failed: {e}"),
+        // `update :: M ()` — success means the occurrence-check case-dispatch ran
+        // to completion (no #313 CASE TRAP); the unit result's exact JSON is moot.
+        Ok(_) => {}
+        Err(e) => panic!("#313 update-class regression: eval failed: {e}"),
     }
 }
 
