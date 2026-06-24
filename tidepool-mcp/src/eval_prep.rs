@@ -330,19 +330,21 @@ pub(crate) fn format_error_with_source(
     error: &str,
     source: &str,
 ) -> String {
-    const MARKER: &str = "-- [user]\n";
+    // Anchor on the `__user =` binding line — the user's `code` starts on the
+    // very next line, so offsets/echo align with the snippet the caller wrote
+    // (anchoring on the earlier `-- [user]` marker was off by the `__user =`
+    // line itself). The generated `result ::` wrapper below the code is dropped:
+    // echoing the budget plumbing teaches callers the wrong dialect.
+    const MARKER: &str = "__user =\n";
     let marker_pos = source.find(MARKER);
-    // Extract user-written code: between the "-- [user]" marker and the
-    // generated `result ::` wrapper (helpers + input + the __user binding).
-    // Echoing the budget plumbing below teaches callers the wrong dialect.
     let user_section = marker_pos.map_or(source, |pos| &source[pos + MARKER.len()..]);
     let user_section = user_section
         .find("\nresult ::")
         .map_or(user_section, |pos| &user_section[..pos])
         .trim_end();
-    // Remap `Expr.hs:<n>` line numbers in the diagnostic so they count from the
-    // user section (the marker) instead of the ~200-line generated preamble — a
-    // reported line then lands on the echoed User Code below.
+    // Remap `Expr.hs:<n>` line numbers so they count from the user's first code
+    // line (= `__user =` line + 1) instead of the ~200-line generated preamble;
+    // a reported line then lands 1-based on the echoed User Code below.
     let offset = marker_pos
         .map(|pos| source[..pos + MARKER.len()].matches('\n').count())
         .unwrap_or(0);

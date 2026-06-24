@@ -1030,7 +1030,7 @@ where
                 .push_str(&library_vocab(&lib_dirs));
             self.inner.eval_tool_description.push_str(concat!(
                 "\nWith the library:\n",
-                "  vocab  -- list every library verb's signature; call it bare to discover the surface\n",
+                "  vocab  -- re-list the project library verbs (.tidepool/lib) at runtime; the effect verbs + helpers are above\n",
                 "  glob \"**/*.rs\" >>= mapM (\\p -> (,) p <$> getFileSize p) <&> sizeRank 9\n",
             ));
             // PATTERNS.md lives beside the active Library dir (at `.tidepool/`).

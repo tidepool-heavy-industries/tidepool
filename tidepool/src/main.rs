@@ -1202,6 +1202,18 @@ impl LlmHandler {
         prompt: String,
         mut schema_json: serde_json::Value,
     ) -> Result<serde_json::Value, EffectError> {
+        // Providers (OpenAI especially) require a top-level `type: "object"`
+        // structured-output schema. If the caller passed a non-object schema
+        // (e.g. `llm (SEnum …)` / `llm SStr …`), wrap it as `{value: <schema>}`
+        // and unwrap the result so the bare value rides back transparently.
+        let wrapped = schema_json.get("type").and_then(|t| t.as_str()) != Some("object");
+        if wrapped {
+            schema_json = serde_json::json!({
+                "type": "object",
+                "properties": { "value": schema_json },
+                "required": ["value"],
+            });
+        }
         if self.targets_openai() {
             strictify(&mut schema_json);
         }
@@ -1217,7 +1229,14 @@ impl LlmHandler {
             .block_on(self.client.exec_chat(&self.model, req, Some(&opts)))
             .map_err(|e| EffectError::Handler(format!("LLM structured call failed: {}", e)))?;
         let text = resp.first_text().unwrap_or("null");
-        Ok(serde_json::from_str(text).unwrap_or(serde_json::Value::Null))
+        let mut out = serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
+        if wrapped {
+            out = out
+                .get_mut("value")
+                .map(serde_json::Value::take)
+                .unwrap_or(serde_json::Value::Null);
+        }
+        Ok(out)
     }
 }
 
