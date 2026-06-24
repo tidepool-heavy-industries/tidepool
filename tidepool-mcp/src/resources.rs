@@ -60,7 +60,7 @@ pub fn list(ctx: &ResourceCtx) -> Vec<ResourceDescriptor> {
         descriptor("tidepool://guide", "Eval guide", "How to write eval `code`: the M-a model, composition, returning JSON, the input payload lane, examples, and failure isolation."),
         descriptor("tidepool://schema", "Schema + ask/llm", "The structured-output Schema grammar and the ask/llm/tryLlm primitives; how to extract results with optics."),
         descriptor("tidepool://edits", "Edit verb schema", "The declarative line/anchor `Edit` JSON schema (applyEdits/editsJ) and its conflict vocabulary."),
-        descriptor("tidepool://vocab", "Library vocabulary", "Live signatures of every project-library verb (.tidepool/lib), refreshed from disk on read."),
+        descriptor("tidepool://vocab", "Vocabulary", "Live signatures of every verb in scope — core effect verbs + project library (.tidepool/lib), refreshed on read."),
     ];
     if ctx.patterns_path.is_some() {
         out.push(descriptor(
@@ -284,12 +284,33 @@ fn effect_md(e: &EffectDecl) -> String {
 }
 
 fn vocab_md(ctx: &ResourceCtx) -> String {
+    // The complete verb surface: core effect verbs (always available) + the
+    // project library. The per-effect detail (constructors/types) is in
+    // tidepool://effect/{name}; this is the flat signature index.
+    let mut s = String::from(
+        "# Vocabulary — every verb in scope\n\nEffect verbs are core (always available); \
+         library verbs come from `.tidepool/lib`.\n\n## Effect verbs\n",
+    );
+    for eff in ctx.effects {
+        let sigs = crate::extract_sigs(&eff.helpers.join("\n"));
+        if sigs.is_empty() {
+            continue;
+        }
+        s.push_str(&format!("\n### {}\n", eff.type_name));
+        for sig in sigs {
+            s.push_str("  ");
+            s.push_str(&sig);
+            s.push('\n');
+        }
+    }
     let digest = crate::library_vocab(ctx.lib_dirs);
     if digest.trim().is_empty() {
-        "# Library vocabulary\n\nNo project library found (.tidepool/lib).\n".to_string()
+        s.push_str("\n## Project library\n\n(none — no .tidepool/lib in scope)\n");
     } else {
-        format!("# Library vocabulary (.tidepool/lib)\n{}", digest)
+        s.push_str("\n## Project library (.tidepool/lib)\n");
+        s.push_str(&digest);
     }
+    s
 }
 
 // --- stdlib source ----------------------------------------------------------
