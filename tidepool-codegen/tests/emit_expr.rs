@@ -4,6 +4,7 @@
 
 use tidepool_codegen::context::VMContext;
 use tidepool_codegen::emit::expr::compile_expr;
+use tidepool_codegen::emit::ScopedEnv;
 use tidepool_codegen::host_fns;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_heap::layout;
@@ -26,7 +27,7 @@ impl TestResult {
 /// Helper: set up pipeline + nursery, compile expr, call it, return result ptr.
 fn compile_and_run(tree: &CoreExpr) -> TestResult {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
-    let func_id = compile_expr(&mut pipeline, tree, "test_fn").expect("compile_expr failed");
+    let func_id = compile_expr(&mut pipeline, tree, "test_fn", &ScopedEnv::new()).expect("compile_expr failed");
     pipeline.finalize().expect("failed to finalize");
 
     let mut nursery = vec![0u8; 65536]; // 64KB nursery
@@ -849,9 +850,9 @@ fn test_emit_unique_lambda_names() {
 
     // This should NOT panic due to "duplicate function name"
 
-    compile_expr(&mut pipeline, &tree1, "f1").expect("First compilation failed");
+    compile_expr(&mut pipeline, &tree1, "f1", &ScopedEnv::new()).expect("First compilation failed");
 
-    compile_expr(&mut pipeline, &tree2, "f2").expect("Second compilation failed");
+    compile_expr(&mut pipeline, &tree2, "f2", &ScopedEnv::new()).expect("Second compilation failed");
 }
 
 #[test]

@@ -126,6 +126,12 @@ impl TailCtx {
 }
 
 /// A scoped environment mapping variables to SSA values.
+///
+/// `Clone` is derived so a per-compile `external_env` (session bindings) can be
+/// seeded into `EmitContext` and propagated into nested function contexts. See
+/// the `external_env` field on [`EmitContext`] for the per-function-Value
+/// invariant Wave 1 must uphold.
+#[derive(Clone)]
 pub struct ScopedEnv {
     inner: FxHashMap<VarId, SsaVal>,
 }
@@ -214,6 +220,21 @@ impl Default for EnvScope {
 /// Emission context — bundles state during IR generation for one function.
 pub struct EmitContext {
     pub env: ScopedEnv,
+    /// Session-scoped external bindings (`name`'s `VarId` → seeded heap value),
+    /// consulted at Var-miss sites to resolve a reference to a value bound in a
+    /// *prior* JIT fragment (the ghci-session re-entry path; Wave 1, component
+    /// C). Empty for the one-shot eval path and all current callers.
+    ///
+    /// SCAFFOLD STATE (Wave 0): threaded but never read — `compile_expr` seeds
+    /// it from its `external_env` argument and it is cloned into nested function
+    /// contexts, but no emission code consults it yet.
+    ///
+    /// INVARIANT for Wave 1 (review item 3): entries must NOT be shared
+    /// `SsaVal` cranelift `Value`s — those are per-function SSA and cannot cross
+    /// a function boundary. The session pointer is carried as raw data and
+    /// **re-lowered as a fresh `iconst` at each Var-miss site, per fragment**.
+    /// Do not pre-populate `EmitContext.env` with a shared `SsaVal::Value`.
+    pub external_env: ScopedEnv,
     pub(crate) join_blocks: JoinPointRegistry,
     pub lambda_counter: u32,
     pub prefix: String,
@@ -298,6 +319,7 @@ impl EmitContext {
     pub fn new(prefix: String) -> Self {
         Self {
             env: ScopedEnv::new(),
+            external_env: ScopedEnv::new(),
             join_blocks: JoinPointRegistry::new(),
             lambda_counter: 0,
             current_fn: prefix.clone(),
