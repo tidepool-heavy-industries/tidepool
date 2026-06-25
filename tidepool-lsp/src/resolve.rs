@@ -78,47 +78,56 @@ fn severity(s: u64) -> &'static str {
     }
 }
 
-/// Build a node JSON object (the wire/effect currency).
-fn node(name: &str, container: &str, kind: &str, file: &str, line1: u64, text: &str) -> Value {
+/// Build a node JSON object (the wire/effect currency). `line1` is 1-based
+/// (display); `char0` is the EXACT 0-based UTF-16 column from the LSP response.
+/// Together they form the `pos` that re-resolution reads back — no guessing.
+fn node(
+    name: &str,
+    container: &str,
+    kind: &str,
+    file: &str,
+    line1: u64,
+    char0: u64,
+    text: &str,
+) -> Value {
     json!({
-        "name": name, "container": container, "kind": kind,
-        "file": file, "line": line1, "text": text,
+        "name": name, "container": container, "kind": kind, "file": file,
+        "pos": { "line": line1, "char": char0 }, "text": text,
     })
-}
-
-/// UTF-16 code-unit length of a string (LSP character offsets are UTF-16).
-fn utf16_len(s: &str) -> u64 {
-    s.chars().map(|c| c.len_utf16() as u64).sum()
 }
 
 // --- addressing ----------------------------------------------------------
 
-/// Resolve a node `{file, line, name}` to an LSP position: the column of `name`
-/// on that line (UTF-16), so the position lands on the identifier token.
+/// Resolve a node to its exact LSP position, read straight from `node.pos`
+/// (which the daemon populated from the originating LSP response). No substring
+/// search → no wrong-column aborts.
 fn node_position(client: &RaClient, n: &Value) -> Result<(String, u64, u64), String> {
     let file = n
         .get("file")
         .and_then(Value::as_str)
         .ok_or("node missing 'file'")?;
-    let line1 = n
+    let pos = n.get("pos").ok_or("node missing 'pos'")?;
+    let line1 = pos
         .get("line")
         .and_then(Value::as_u64)
-        .ok_or("node missing 'line'")?;
-    let name = n.get("name").and_then(Value::as_str).unwrap_or("");
+        .ok_or("node pos missing 'line'")?;
+    let char0 = pos.get("char").and_then(Value::as_u64).unwrap_or(0);
     let abs = abs_of(client.root(), file);
-    let line0 = line1.saturating_sub(1);
+    Ok((path_to_uri(&abs), line1.saturating_sub(1), char0))
+}
 
-    let col = std::fs::read_to_string(&abs)
-        .ok()
-        .and_then(|s| {
-            s.lines().nth(line0 as usize).map(|l| match l.find(name) {
-                Some(b) if !name.is_empty() => utf16_len(&l[..b]),
-                _ => 0,
-            })
-        })
-        .ok_or_else(|| format!("no symbol at {}:{}", file, line1))?;
-
-    Ok((path_to_uri(&abs), line0, col))
+/// `(0-based line, 0-based UTF-16 char)` of a range's start.
+fn start_lc(range: &Value) -> (u64, u64) {
+    let start = range.get("start");
+    let line = start
+        .and_then(|s| s.get("line"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let ch = start
+        .and_then(|s| s.get("character"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    (line, ch)
 }
 
 // --- where (the name seed) ----------------------------------------------
@@ -138,7 +147,7 @@ pub fn where_symbol(client: &RaClient, name: &str) -> Result<Vec<Value>, String>
         let Some(loc) = sym.get("location") else {
             continue;
         };
-        let Some((abs, line0)) = location_of_loc(loc) else {
+        let Some((abs, line0, char0)) = location_of_loc(loc) else {
             continue;
         };
         let container = sym
@@ -151,8 +160,9 @@ pub fn where_symbol(client: &RaClient, name: &str) -> Result<Vec<Value>, String>
             container,
             kind,
             &rel_of(&root, &abs),
-            line0 as u64 + 1,
-            &cache.line(&abs, line0),
+            line0 + 1,
+            char0,
+            &cache.line(&abs, line0 as usize),
         ));
     }
     Ok(out)
@@ -160,46 +170,50 @@ pub fn where_symbol(client: &RaClient, name: &str) -> Result<Vec<Value>, String>
 
 // --- graph edges: callers / callees / def / references -------------------
 
-/// Incoming calls — the functions that call this node.
-pub fn callers(client: &RaClient, n: &Value) -> Result<Vec<Value>, String> {
-    let item = prepare_call_item(client, n)?;
+/// Incoming calls — the functions that call this node. `Ok(None)` when the
+/// node isn't callable (no call hierarchy); `Ok(Some(_))` (maybe empty) when it is.
+pub fn callers(client: &RaClient, n: &Value) -> Result<Option<Vec<Value>>, String> {
+    let Some(item) = prepare_call_item(client, n)? else {
+        return Ok(None);
+    };
     let result = client.request("callHierarchy/incomingCalls", json!({ "item": item }))?;
     let arr = result.as_array().cloned().unwrap_or_default();
     let root = client.root().to_path_buf();
     let mut cache = FileCache::default();
-    Ok(arr
-        .iter()
-        .filter_map(|c| c.get("from"))
-        .map(|item| item_to_node(&root, item, &mut cache))
-        .collect())
+    Ok(Some(
+        arr.iter()
+            .filter_map(|c| c.get("from"))
+            .map(|item| item_to_node(&root, item, &mut cache))
+            .collect(),
+    ))
 }
 
-/// Outgoing calls — the functions this node calls.
-pub fn callees(client: &RaClient, n: &Value) -> Result<Vec<Value>, String> {
-    let item = prepare_call_item(client, n)?;
+/// Outgoing calls — the functions this node calls. `Ok(None)` when not callable.
+pub fn callees(client: &RaClient, n: &Value) -> Result<Option<Vec<Value>>, String> {
+    let Some(item) = prepare_call_item(client, n)? else {
+        return Ok(None);
+    };
     let result = client.request("callHierarchy/outgoingCalls", json!({ "item": item }))?;
     let arr = result.as_array().cloned().unwrap_or_default();
     let root = client.root().to_path_buf();
     let mut cache = FileCache::default();
-    Ok(arr
-        .iter()
-        .filter_map(|c| c.get("to"))
-        .map(|item| item_to_node(&root, item, &mut cache))
-        .collect())
+    Ok(Some(
+        arr.iter()
+            .filter_map(|c| c.get("to"))
+            .map(|item| item_to_node(&root, item, &mut cache))
+            .collect(),
+    ))
 }
 
-/// prepareCallHierarchy at the node's position → the first CallHierarchyItem.
-fn prepare_call_item(client: &RaClient, n: &Value) -> Result<Value, String> {
+/// prepareCallHierarchy at the node's position → the first CallHierarchyItem,
+/// or `None` when the symbol has no call hierarchy (not callable — not an error).
+fn prepare_call_item(client: &RaClient, n: &Value) -> Result<Option<Value>, String> {
     let (uri, line, ch) = node_position(client, n)?;
     let result = client.request(
         "textDocument/prepareCallHierarchy",
         json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": ch } }),
     )?;
-    result
-        .as_array()
-        .and_then(|a| a.first())
-        .cloned()
-        .ok_or_else(|| "no call hierarchy at this symbol (not a callable?)".to_string())
+    Ok(result.as_array().and_then(|a| a.first()).cloned())
 }
 
 /// A CallHierarchyItem → a node. `detail` is rust-analyzer's container/signature.
@@ -210,19 +224,19 @@ fn item_to_node(root: &Path, item: &Value, cache: &mut FileCache) -> Value {
     let uri = item.get("uri").and_then(Value::as_str).unwrap_or("");
     let abs = uri_to_path(uri);
     // selectionRange points at the identifier; fall back to range.
-    let line0 = item
+    let range = item
         .get("selectionRange")
         .or_else(|| item.get("range"))
-        .and_then(|r| r.get("start"))
-        .and_then(|s| s.get("line"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+        .cloned()
+        .unwrap_or(Value::Null);
+    let (line0, char0) = start_lc(&range);
     node(
         name,
         container,
         kind,
         &rel_of(root, &abs),
         line0 + 1,
+        char0,
         &cache.line(&abs, line0 as usize),
     )
 }
@@ -247,13 +261,12 @@ pub fn def(client: &RaClient, n: &Value) -> Result<Option<Value>, String> {
         .or_else(|| loc.get("targetUri"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    let def_line0 = loc
+    let def_range = loc
         .get("range")
         .or_else(|| loc.get("targetSelectionRange"))
-        .and_then(|r| r.get("start"))
-        .and_then(|s| s.get("line"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+        .cloned()
+        .unwrap_or(Value::Null);
+    let (def_line0, def_char0) = start_lc(&def_range);
     let abs = uri_to_path(def_uri);
     let root = client.root().to_path_buf();
     let mut cache = FileCache::default();
@@ -275,12 +288,14 @@ pub fn def(client: &RaClient, n: &Value) -> Result<Option<Value>, String> {
         &kind,
         &rel_of(&root, &abs),
         def_line0 + 1,
+        def_char0,
         &cache.line(&abs, def_line0 as usize),
     )))
 }
 
 /// References (use sites) of the node's symbol. Tagged `kind:"reference"`.
-pub fn references(client: &RaClient, n: &Value) -> Result<Vec<Value>, String> {
+/// `Ok(None)` when the position isn't a symbol (RA returns null).
+pub fn references(client: &RaClient, n: &Value) -> Result<Option<Vec<Value>>, String> {
     let (uri, line, ch) = node_position(client, n)?;
     let name = n.get("name").and_then(Value::as_str).unwrap_or("");
     let result = client.request(
@@ -291,12 +306,15 @@ pub fn references(client: &RaClient, n: &Value) -> Result<Vec<Value>, String> {
             "context": { "includeDeclaration": true }
         }),
     )?;
+    if result.is_null() {
+        return Ok(None);
+    }
     let arr = result.as_array().cloned().unwrap_or_default();
     let root = client.root().to_path_buf();
     let mut cache = FileCache::default();
     let mut out = Vec::new();
     for loc in arr {
-        let Some((abs, line0)) = location_of_loc(&loc) else {
+        let Some((abs, line0, char0)) = location_of_loc(&loc) else {
             continue;
         };
         out.push(node(
@@ -304,11 +322,12 @@ pub fn references(client: &RaClient, n: &Value) -> Result<Vec<Value>, String> {
             "",
             "reference",
             &rel_of(&root, &abs),
-            line0 as u64 + 1,
-            &cache.line(&abs, line0),
+            line0 + 1,
+            char0,
+            &cache.line(&abs, line0 as usize),
         ));
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
 // --- hover / rename / diagnostics ----------------------------------------
@@ -327,7 +346,8 @@ pub fn hover(client: &RaClient, n: &Value) -> Result<Option<String>, String> {
 }
 
 /// Rename the node's symbol to `new_name`; returns a unified diff (not applied).
-pub fn rename(client: &RaClient, n: &Value, new_name: &str) -> Result<String, String> {
+/// `Ok(None)` when the symbol can't be renamed (RA returns null).
+pub fn rename(client: &RaClient, n: &Value, new_name: &str) -> Result<Option<String>, String> {
     let (uri, line, ch) = node_position(client, n)?;
     let result = client.request(
         "textDocument/rename",
@@ -338,7 +358,7 @@ pub fn rename(client: &RaClient, n: &Value, new_name: &str) -> Result<String, St
         }),
     )?;
     if result.is_null() {
-        return Ok(String::new());
+        return Ok(None);
     }
 
     // WorkspaceEdit: either `changes: {uri: [edit]}` or `documentChanges: [...]`.
@@ -375,7 +395,7 @@ pub fn rename(client: &RaClient, n: &Value, new_name: &str) -> Result<String, St
         let rel = rel_of(&root, &abs);
         diff_out.push_str(&diff::unified(&rel, &old, &new));
     }
-    Ok(diff_out)
+    Ok(Some(diff_out))
 }
 
 /// Diagnostics for `file` (pull request, falling back to pushed cache).
@@ -435,15 +455,12 @@ pub fn diagnostics(client: &RaClient, file: &str) -> Result<Vec<Value>, String> 
 
 // --- shared helpers ------------------------------------------------------
 
-/// `(abs path, 0-based line)` from a `Location`.
-fn location_of_loc(loc: &Value) -> Option<(String, usize)> {
+/// `(abs path, 0-based line, 0-based UTF-16 char)` from a `Location`.
+fn location_of_loc(loc: &Value) -> Option<(String, u64, u64)> {
     let uri = loc.get("uri").and_then(Value::as_str)?;
-    let line = loc
-        .get("range")
-        .and_then(|r| r.get("start"))
-        .and_then(|s| s.get("line"))
-        .and_then(Value::as_u64)? as usize;
-    Some((uri_to_path(uri), line))
+    let range = loc.get("range")?;
+    let (line0, char0) = start_lc(range);
+    Some((uri_to_path(uri), line0, char0))
 }
 
 /// Find the innermost `DocumentSymbol` covering `line0`; returns

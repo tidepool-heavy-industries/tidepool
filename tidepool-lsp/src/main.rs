@@ -157,9 +157,10 @@ fn dispatch(line: &str, client: &RaClient) -> Value {
             Some(s) => resolve::where_symbol(client, s).map(Value::from),
             None => Err("'where' needs a symbol".into()),
         },
-        "callers" => on_node(&|n| resolve::callers(client, n).map(Value::from)),
-        "callees" => on_node(&|n| resolve::callees(client, n).map(Value::from)),
-        "references" => on_node(&|n| resolve::references(client, n).map(Value::from)),
+        // Failable list ops: Ok(None) → result:null (Nothing), Ok(Some) → array.
+        "callers" => on_node(&|n| resolve::callers(client, n).map(opt_list)),
+        "callees" => on_node(&|n| resolve::callees(client, n).map(opt_list)),
+        "references" => on_node(&|n| resolve::references(client, n).map(opt_list)),
         "def" => on_node(&|n| resolve::def(client, n).map(|o| o.unwrap_or(Value::Null))),
         "hover" => on_node(&|n| {
             resolve::hover(client, n).map(|o| o.map(Value::String).unwrap_or(Value::Null))
@@ -167,7 +168,10 @@ fn dispatch(line: &str, client: &RaClient) -> Value {
         "rename" => {
             let new_name = req.get("newName").and_then(Value::as_str);
             match new_name {
-                Some(nn) => on_node(&|n| resolve::rename(client, n, nn).map(Value::String)),
+                Some(nn) => on_node(&|n| {
+                    resolve::rename(client, n, nn)
+                        .map(|o| o.map(Value::String).unwrap_or(Value::Null))
+                }),
                 None => Err("'rename' needs newName".into()),
             }
         }
@@ -186,6 +190,11 @@ fn dispatch(line: &str, client: &RaClient) -> Value {
 
 fn err(msg: impl Into<String>) -> Value {
     json!({ "ok": false, "error": msg.into() })
+}
+
+/// `Some(nodes)` → JSON array; `None` → `null` (the daemon's "Nothing").
+fn opt_list(o: Option<Vec<Value>>) -> Value {
+    o.map(Value::from).unwrap_or(Value::Null)
 }
 
 /// Read a `--flag value` argument.

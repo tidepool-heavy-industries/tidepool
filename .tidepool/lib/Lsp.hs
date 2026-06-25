@@ -31,6 +31,15 @@ isTest :: Node -> Bool
 isTest n = isInfixOf "tests/" f || isInfixOf "/test" f || isInfixOf "_test" f
   where f = nodeFile n
 
+-- | Unwrapping helpers: the effect ops return `Maybe [Node]` (Nothing = the
+-- node isn't analyzable). For plain graph-walking you usually want "[] = stop",
+-- so these collapse Nothing → []. The honest `lsp*` primitives stay available
+-- when you want to distinguish "not a function" from "no callers".
+callersOf, calleesOf, refsOf :: Node -> M [Node]
+callersOf = fmap (fromMaybe []) . lspCallers
+calleesOf = fmap (fromMaybe []) . lspCallees
+refsOf    = fmap (fromMaybe []) . lspRefs
+
 -- ===== the steer cascade =====
 
 -- | Escalate only as far as needed: pure rule, else a local model, else
@@ -84,7 +93,7 @@ walk edge keep depth root = loopM step (depth, [root], [])
 -- | Walk the caller graph, pruning each frontier with the cascade: skip tests
 -- by rule, else the local model judges "on the path to GOAL?", else ask.
 explore :: Int -> Text -> Node -> M [Node]
-explore depth goal = walk lspCallers onPath depth
+explore depth goal = walk callersOf onPath depth
   where
     onPath = steer
       (\n -> if isTest n then Just False else Nothing)
@@ -119,7 +128,7 @@ the name intent = do
 -- via the existing diff path. Returns a structured outcome.
 saferRename :: Node -> Text -> M Value
 saferRename sym new = do
-  refs  <- lspRefs sym
+  refs  <- refsOf sym
   risky <- filterM (steer
              (\r -> if crateOf sym == crateOf r then Just False else Nothing)
              (\r -> judgeBool 0.8 ("Risky to rename this use?  " <> nodeText r))
@@ -129,16 +138,19 @@ saferRename sym new = do
                else askBool (pack (show (length risky)) <> " risky site(s) — proceed?")
   if proceed
     then do
-      d <- lspRename sym new
-      report <- applyDiff d
-      pure (object ["applied" .= report, "risky" .= length risky])
+      md <- lspRename sym new
+      case md of
+        Just d  -> do
+          report <- applyDiff d
+          pure (object ["applied" .= report, "risky" .= length risky])
+        Nothing -> pure (object ["rename_unsupported" .= True])
     else pure (object ["aborted" .= True, "risky" .= toJSON risky])
 
 -- | Subsystem cartographer: BFS the callee graph, hover each node, have the
 -- local model write a one-line role (escalating unclear ones), emit a map.
 chart :: Int -> Node -> M Value
 chart depth entry = do
-  ns   <- walk lspCallees (\_ -> pure True) depth entry
+  ns   <- walk calleesOf (\_ -> pure True) depth entry
   rows <- mapM describe ns
   pure (toJSON rows)
   where

@@ -820,9 +820,19 @@ enum LspReq {
     Diagnostics(String),
 }
 
+/// Exact location, threaded inside a `Node`. Field order matches the Haskell
+/// `Position` constructor (`posLine`, `posChar`); `character` maps to `posChar`
+/// (`char` is a Rust keyword — ToCore is positional, so the name is free).
+#[derive(FromCore, ToCore, Clone)]
+#[core(name = "Position")]
+struct LspPosition {
+    line: i64,
+    character: i64,
+}
+
 /// The composition currency. `FromCore` (a `Node` arg crossing in) +
 /// `ToCore` (results crossing out). Field order matches the Haskell `Node`
-/// constructor (see `lsp_decl`).
+/// constructor (see `lsp_decl`): name, container, kind, file, pos, text.
 #[derive(FromCore, ToCore, Clone)]
 #[core(name = "Node")]
 struct LspNode {
@@ -830,26 +840,35 @@ struct LspNode {
     container: String,
     kind: String,
     file: String,
-    line: i64,
+    pos: LspPosition,
     text: String,
 }
 
 impl LspNode {
-    /// Serialize back to the daemon's wire `node` object.
+    /// Serialize back to the daemon's wire `node` object (pos nested).
     fn to_wire(&self) -> serde_json::Value {
         serde_json::json!({
-            "name": self.name, "container": self.container, "kind": self.kind,
-            "file": self.file, "line": self.line, "text": self.text,
+            "name": self.name, "container": self.container, "kind": self.kind, "file": self.file,
+            "pos": { "line": self.pos.line, "char": self.pos.character }, "text": self.text,
         })
     }
 
     fn from_wire(o: &serde_json::Value) -> LspNode {
+        let pos = o.get("pos");
+        let line = pos
+            .and_then(|p| p.get("line"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        let character = pos
+            .and_then(|p| p.get("char"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
         LspNode {
             name: json_str(o, "name"),
             container: json_str(o, "container"),
             kind: json_str(o, "kind"),
             file: json_str(o, "file"),
-            line: json_line(o),
+            pos: LspPosition { line, character },
             text: json_str(o, "text"),
         }
     }
@@ -944,13 +963,21 @@ impl EffectHandler<CapturedOutput> for LspHandler {
         req: LspReq,
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        // The node-returning ops all marshal a `[node]` result the same way.
+        // A `[node]` result → Vec<LspNode>.
         let nodes = |r: &serde_json::Value| -> Vec<LspNode> {
             r.as_array()
                 .into_iter()
                 .flatten()
                 .map(LspNode::from_wire)
                 .collect()
+        };
+        // A `[node] | null` result → Option<Vec<LspNode>> (null = Nothing).
+        let maybe_nodes = |r: &serde_json::Value| -> Option<Vec<LspNode>> {
+            if r.is_null() {
+                None
+            } else {
+                Some(nodes(r))
+            }
         };
         match req {
             LspReq::Where(symbol) => {
@@ -959,16 +986,16 @@ impl EffectHandler<CapturedOutput> for LspHandler {
             }
             LspReq::Callers(n) => {
                 let r = self.query(serde_json::json!({ "op": "callers", "node": n.to_wire() }))?;
-                cx.respond_list(nodes(&r))
+                cx.respond(maybe_nodes(&r))
             }
             LspReq::Callees(n) => {
                 let r = self.query(serde_json::json!({ "op": "callees", "node": n.to_wire() }))?;
-                cx.respond_list(nodes(&r))
+                cx.respond(maybe_nodes(&r))
             }
             LspReq::Refs(n) => {
                 let r =
                     self.query(serde_json::json!({ "op": "references", "node": n.to_wire() }))?;
-                cx.respond_list(nodes(&r))
+                cx.respond(maybe_nodes(&r))
             }
             LspReq::Def(n) => {
                 let r = self.query(serde_json::json!({ "op": "def", "node": n.to_wire() }))?;
@@ -987,7 +1014,7 @@ impl EffectHandler<CapturedOutput> for LspHandler {
                 let r = self.query(serde_json::json!({
                     "op": "rename", "node": n.to_wire(), "newName": new_name
                 }))?;
-                cx.respond(r.as_str().unwrap_or("").to_string())
+                cx.respond(r.as_str().map(str::to_string))
             }
             LspReq::Diagnostics(file) => {
                 let r = self.query(serde_json::json!({ "op": "diagnostics", "file": file }))?;
