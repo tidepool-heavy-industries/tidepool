@@ -157,9 +157,12 @@ impl ExternalEnv {
         self.0.get(&var).copied()
     }
 
-    /// Seed a session binding. The pointer must reference a tenured, persistently
-    /// rooted heap value (Wave 1.A) that outlives every fragment compiled against
-    /// this env.
+    /// Seed a session binding. `insert` itself is safe — it only stores a
+    /// `*const u8` in a map and never dereferences it, so there is no immediate
+    /// UB. The requirement that `ptr` reference a tenured, persistently rooted
+    /// heap value (Wave 1.A) outliving every fragment compiled against this env
+    /// is a **Wave 1.B correctness invariant**, enforced where the pointer is
+    /// lowered and used (the Var-miss `iconst` site), not here.
     pub fn insert(&mut self, var: VarId, ptr: *const u8) -> Option<*const u8> {
         self.0.insert(var, ptr)
     }

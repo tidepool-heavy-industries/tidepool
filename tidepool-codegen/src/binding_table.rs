@@ -31,6 +31,14 @@ pub struct BindingEntry {
     /// GC root slot holding the (tenured, strict-forced) heap value. Registered
     /// via [`crate::jit_machine::JitEffectMachine::register_persistent_root`] so
     /// the copying GC updates it in place across collections.
+    ///
+    /// # Safety invariant
+    /// This slot carries the same GC-liveness contract as
+    /// `register_persistent_root`: it must be non-null, point to a valid
+    /// `*mut u8`, and stay valid + dereferenceable until the session machine is
+    /// dropped — the GC rewrites `*root_slot` in place on every collection.
+    /// Wave 3 code reading this field therefore needs `unsafe` and must uphold
+    /// that invariant; do not dereference a slot from a dropped binding.
     pub root_slot: *mut *mut u8,
     /// Captured GHC type of the binding (component H), rendered to a string for
     /// the synthetic-decl typing path. `None` until type capture is wired.
@@ -71,8 +79,23 @@ impl BindingTable {
     /// `value_id` and repoints the name map; any prior entry's root stays live.
     ///
     /// Wave 3 (J1 + I): the `x <- e` / `let x = e` bind path.
+    ///
+    /// # Safety
+    /// Carries the same GC-liveness contract as
+    /// [`crate::jit_machine::JitEffectMachine::register_persistent_root`]: the
+    /// caller guarantees `root_slot` is non-null, points to a valid `*mut u8`,
+    /// and remains valid + dereferenceable until the session machine is dropped
+    /// — the GC rewrites `*root_slot` in place on every collection while the
+    /// binding lives. `unsafe` is frozen into the Wave-0 surface so Wave 3
+    /// callers get a compile-time signal (upgrading a safe fn later would be a
+    /// breaking change).
     #[allow(unused_variables)]
-    pub fn bind(&mut self, name: &str, root_slot: *mut *mut u8, type_string: Option<String>) -> VarId {
+    pub unsafe fn bind(
+        &mut self,
+        name: &str,
+        root_slot: *mut *mut u8,
+        type_string: Option<String>,
+    ) -> VarId {
         todo!("Wave 3: mint 0xFD valueId, repoint name map, keep old root (component J1)")
     }
 }
