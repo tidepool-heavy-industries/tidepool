@@ -70,6 +70,10 @@ processFile args path = do
     let binds = prBinds result
         tycons = prTyCons result
         hscEnv = prHscEnv result
+        -- Inferred type of the eval's top expression (the @__user@ binding),
+        -- threaded into meta.cbor for the Rust side. Nothing for non-eval
+        -- extractions (no @__user@). See GhcPipeline.capturedUserType.
+        mCapturedTy = fmap T.pack (prCapturedType result)
     putStrLn $ "  Top-level bindings: " ++ show (length binds)
 
     if argDumpCore args
@@ -153,7 +157,7 @@ processFile args path = do
                         [ wiredInMeta, tyconMeta, Map.elems allMetaMap
                         , scanMeta, transitiveMeta ]
             hasIO = any (targetBindingHasIO binds) uniqueNames
-        let metaCbor = encodeMetadata allMeta hasIO
+        let metaCbor = encodeMetadata allMeta hasIO mCapturedTy
         let metaFile = outDir </> "meta.cbor"
         BS.writeFile metaFile metaCbor
         putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
@@ -184,7 +188,7 @@ processFile args path = do
             allMeta = mergeMetaPreserving
                         [ wiredInMeta, tyconMeta, usedMeta, scanMeta, transitiveMeta ]
             hasIO = targetBindingHasIO binds targetName
-        let metaCbor = encodeMetadata allMeta hasIO
+        let metaCbor = encodeMetadata allMeta hasIO mCapturedTy
         let metaFile = outDir </> "meta.cbor"
         BS.writeFile metaFile metaCbor
         putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
@@ -210,7 +214,7 @@ processFile args path = do
             -- loader rejects them loudly instead of one silently winning.
             allMeta = mergeMetaPreserving
                         [ wiredInMeta, tyconMeta, usedMeta, transitiveMeta ]
-        let metaCbor = encodeMetadata allMeta False
+        let metaCbor = encodeMetadata allMeta False mCapturedTy
         let metaFile = outDir </> "meta.cbor"
         BS.writeFile metaFile metaCbor
         putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"

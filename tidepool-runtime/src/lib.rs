@@ -311,6 +311,39 @@ mod tests {
         assert!(expr.nodes.len() >= 2);
     }
 
+    /// H / Wave-0.3: the extractor captures the GHC-inferred type of the eval's
+    /// top expression (the `__user` binding) and threads it out as
+    /// `MetaWarnings::captured_type`. A module whose `__user` is `[1,2,3] :: [Int]`
+    /// must report `[Int]` (GHC's `ppr` rendering of the list type).
+    #[test]
+    #[serial]
+    fn test_captured_type_simple_list() {
+        if !ensure_extract_available() {
+            eprintln!("Skipping: GHC not available (run inside `nix develop`)");
+            return;
+        }
+        let source = "module Probe where\n__user :: [Int]\n__user = [1, 2, 3]\n";
+        let (_expr, _table, warnings) =
+            compile_haskell(source, "__user", &[]).expect("Failed to compile probe");
+        eprintln!("captured_type = {:?}", warnings.captured_type);
+        assert_eq!(warnings.captured_type.as_deref(), Some("[Int]"));
+    }
+
+    /// A binding with no explicit signature still gets a captured type; and an
+    /// extraction with no `__user` binding reports `None` (fixture-style build).
+    #[test]
+    #[serial]
+    fn test_captured_type_absent_without_user() {
+        if !ensure_extract_available() {
+            eprintln!("Skipping: GHC not available (run inside `nix develop`)");
+            return;
+        }
+        let source = "module Probe where\nidentity x = x\n";
+        let (_expr, _table, warnings) =
+            compile_haskell(source, "identity", &[]).expect("Failed to compile identity");
+        assert_eq!(warnings.captured_type, None);
+    }
+
     #[test]
     #[serial]
     fn test_compile_error() {

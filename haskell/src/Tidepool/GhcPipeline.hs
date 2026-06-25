@@ -14,8 +14,10 @@ import GHC.Driver.Session
 import GHC.Unit.Module.ModGuts (ModGuts(..))
 import GHC.Core (CoreBind, Bind(..), Expr(..), Alt(..))
 import GHC.Platform (genericPlatform)
-import GHC.Utils.Outputable (renderWithContext, defaultSDocContext)
-import GHC.Types.Id (idName)
+import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, ppr)
+import GHC.Types.Id (idName, idType)
+import GHC.Types.TypeEnv (typeEnvIds)
+import GHC.Tc.Types (TcGblEnv, tcg_type_env)
 import GHC.Types.Name (nameOccName, nameUnique, mkExternalName)
 import GHC.Types.Name.Occurrence (mkOccName, occNameSpace, occNameString)
 import GHC.Types.Var (setVarName)
@@ -33,6 +35,17 @@ data PipelineResult = PipelineResult
   { prBinds  :: [CoreBind]
   , prTyCons :: [TyCon]
   , prHscEnv :: HscEnv
+  -- | The GHC-inferred type of the target module's @__user@ binding (the eval's
+  -- top-level expression), rendered to a string via 'ppr'. 'Nothing' when no
+  -- @__user@ binding is present (e.g. fixture/Suite extraction). Captured at the
+  -- typecheck stage because our CBOR serializer strips all type information.
+  --
+  -- CAVEAT (Wave-4): 'ppr' rendering is NOT parser-faithful — it can elide
+  -- qualifiers / use unicode that won't round-trip through GHC's parser. Fine
+  -- for v1 display + the synthetic @x :: <type>@ decl when the type is simple,
+  -- but cross-turn typechecking of references (round-3 plan) may need a
+  -- structured @IfaceType@ instead of this string. See plans/ghci-swarm-orchestration.md §0.3.
+  , prCapturedType :: Maybe String
   }
 
 runPipeline :: FilePath -> [FilePath] -> IO PipelineResult
@@ -120,17 +133,22 @@ runPipeline path includes = do
       hscEnv0 <- getSession
       let hscEnv = hscUpdateFlags canonicalizeDFlags hscEnv0
       let tcGblEnv = fst (tm_internals_ typechecked)
+      -- Capture the inferred type of the eval's top expression NOW, before
+      -- optimization can inline/rename @__user@ away. Types live on the Id in
+      -- the typechecked type env; our CBOR drops them downstream (Translate.hs).
+      let mCapturedTy = capturedUserType tcGblEnv
       desugared <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
       simplified <- liftIO $ core2core hscEnv desugared
-      return (externalizeInternalTops simplified)
+      return (externalizeInternalTops simplified, mCapturedTy)
     -- Merge: dependency module bindings first, target module last
     let targetModName = capitalize (takeBaseName path)
         isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
-    (targetGuts, depGuts) <- case filter isTargetMod results of
-      (tgt:_) -> return (tgt, [g | g <- results, mg_module g /= mg_module tgt])
+        allGuts = map fst results
+    (targetGuts, depGuts, capturedTy) <- case filter (isTargetMod . fst) results of
+      ((tgt, ty):_) -> return (tgt, [g | g <- allGuts, mg_module g /= mg_module tgt], ty)
       []      -> liftIO $ ioError $ userError $
         "Target module '" ++ targetModName ++ "' not found among compiled modules: "
-        ++ show (map (moduleNameString . moduleName . mg_module) results)
+        ++ show (map (moduleNameString . moduleName . mg_module) allGuts)
     let allBinds = concatMap mg_binds depGuts ++ mg_binds targetGuts
         allTyCons = concatMap mg_tcs depGuts ++ mg_tcs targetGuts
     hscEnv <- getSession
@@ -138,11 +156,27 @@ runPipeline path includes = do
       { prBinds  = allBinds
       , prTyCons = allTyCons
       , prHscEnv = hscEnv
+      , prCapturedType = capturedTy
       }
 
 capitalize :: String -> String
 capitalize [] = []
 capitalize (c:cs) = toUpper c : cs
+
+-- | Read the inferred type of the @__user@ binding out of a module's
+-- typechecked type env and render it to a (re-injectable) string.
+--
+-- @__user@ is the binder the eval template wraps the user's expression in
+-- (eval_prep.rs); its 'idType' is exactly the type of the eval's top-level
+-- expression. We render with the same 'renderWithContext'/'ppr' pattern as
+-- 'dumpCore'. 'Nothing' when no such binder exists (non-eval extractions like
+-- the test Suite have no @__user@).
+capturedUserType :: TcGblEnv -> Maybe String
+capturedUserType tcg =
+  case [ i | i <- typeEnvIds (tcg_type_env tcg)
+           , occNameString (nameOccName (idName i)) == "__user" ] of
+    (i:_) -> Just (renderWithContext defaultSDocContext (ppr (idType i)))
+    []    -> Nothing
 
 -- | The canonical extraction DynFlags transformation, applied to the session
 -- flags at startup AND re-applied per-module before extraction.

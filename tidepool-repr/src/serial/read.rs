@@ -83,6 +83,15 @@ pub fn read_cbor(bytes: &[u8]) -> Result<RecursiveTree<CoreFrame<usize>>, ReadEr
 pub struct MetaWarnings {
     /// Whether the extracted code contains IO operations.
     pub has_io: bool,
+    /// The GHC-inferred type of the eval's top-level expression (the `__user`
+    /// binding), rendered to a string by `ppr` on the Haskell side. `None` when
+    /// the extraction had no `__user` binding (fixture/Suite builds) or used an
+    /// older extractor that didn't emit the key.
+    ///
+    /// NB: `ppr` is not parser-faithful — fine for v1 display / simple synthetic
+    /// decls, but cross-turn typechecking of references may eventually need a
+    /// structured type rather than this string (see GhcPipeline.PipelineResult).
+    pub captured_type: Option<String>,
 }
 
 /// Reads a DataConTable and warnings from CBOR-encoded metadata bytes (meta.cbor format).
@@ -215,10 +224,18 @@ fn parse_warnings(val: &Value) -> MetaWarnings {
     if let Value::Map(pairs) = val {
         for (k, v) in pairs {
             if let Value::Text(key) = k {
-                if key.as_str() == "has_io" {
-                    if let Value::Bool(b) = v {
-                        warnings.has_io = *b;
+                match key.as_str() {
+                    "has_io" => {
+                        if let Value::Bool(b) = v {
+                            warnings.has_io = *b;
+                        }
                     }
+                    "captured_type" => {
+                        if let Value::Text(t) = v {
+                            warnings.captured_type = Some(t.clone());
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -685,5 +702,46 @@ mod tests {
         ]);
         let (table, _) = read_metadata(&bytes).expect("distinct ids load cleanly");
         assert_eq!(table.len(), 2);
+    }
+
+    // ---- type capture: the warnings map carries the eval's captured type ----
+
+    /// Build a meta payload whose warnings map carries a `captured_type` key
+    /// alongside `has_io` (mirrors GhcPipeline/CborEncode emission).
+    fn meta_bytes_with_type(captured: &str) -> Vec<u8> {
+        use ciborium::value::Value as Cbor;
+        let root = Cbor::Array(vec![
+            Cbor::Array(vec![]),
+            Cbor::Map(vec![
+                (Cbor::Text("has_io".to_string()), Cbor::Bool(false)),
+                (
+                    Cbor::Text("captured_type".to_string()),
+                    Cbor::Text(captured.to_string()),
+                ),
+            ]),
+        ]);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&super::super::HEADER_MAGIC);
+        bytes.extend_from_slice(&super::super::VERSION_MAJOR.to_be_bytes());
+        bytes.extend_from_slice(&super::super::VERSION_MINOR.to_be_bytes());
+        ciborium::ser::into_writer(&root, &mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn read_metadata_captures_type_when_present() {
+        let bytes = meta_bytes_with_type("[Int]");
+        let (_table, warnings) = read_metadata(&bytes).expect("loads cleanly");
+        assert_eq!(warnings.captured_type.as_deref(), Some("[Int]"));
+        assert!(!warnings.has_io);
+    }
+
+    #[test]
+    fn read_metadata_captured_type_absent_is_none() {
+        // The has_io-only warnings map (no captured_type key) parses to None —
+        // backward compatibility with older extractor output.
+        let bytes = meta_bytes(vec![meta_entry(1, "Just", "GHC.Maybe.Just")]);
+        let (_table, warnings) = read_metadata(&bytes).expect("loads cleanly");
+        assert_eq!(warnings.captured_type, None);
     }
 }

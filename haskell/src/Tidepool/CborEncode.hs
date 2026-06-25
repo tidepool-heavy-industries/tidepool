@@ -90,11 +90,23 @@ encodeFlatAltCon = \case
   FLitAlt lit   -> encodeListLen 2 <> encodeString "LitAlt" <> encodeLitEnc lit
   FDefault      -> encodeListLen 1 <> encodeString "Default"
 
-encodeMetadata :: [(Word64, Text, Int, Int, [Text], Text)] -> Bool -> ByteString
-encodeMetadata entries hasIO = tplrHeader <> toStrictByteString (
+-- | Encode the DataCon table + a warnings map: @[entries_array, warnings_map]@.
+-- The warnings map always carries @has_io@; when a captured type is present
+-- (the eval's @__user@ binding type — see GhcPipeline.capturedUserType) it also
+-- carries @captured_type@. The Rust reader (serial/read.rs parse_warnings)
+-- tolerates either map shape, so omitting the key on Nothing is backward-safe.
+encodeMetadata :: [(Word64, Text, Int, Int, [Text], Text)] -> Bool -> Maybe Text -> ByteString
+encodeMetadata entries hasIO mCapturedType = tplrHeader <> toStrictByteString (
   encodeListLen 2
   <> (encodeListLen (fromIntegral (length entries)) <> foldMap encodeMetaEntry entries)
-  <> encodeMapLen 1 <> encodeString "has_io" <> encodeBool hasIO)
+  <> warningsMap)
+  where
+    warningsMap = case mCapturedType of
+      Nothing -> encodeMapLen 1
+                 <> encodeString "has_io" <> encodeBool hasIO
+      Just ty -> encodeMapLen 2
+                 <> encodeString "has_io" <> encodeBool hasIO
+                 <> encodeString "captured_type" <> encodeString ty
 
 encodeMetaEntry :: (Word64, Text, Int, Int, [Text], Text) -> Encoding
 encodeMetaEntry (dcid, name, tag, arity, bangs, qualName) =
