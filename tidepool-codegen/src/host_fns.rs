@@ -183,11 +183,47 @@ pub fn set_gc_state(start: *mut u8, size: usize) {
 }
 
 /// Clear the active GC state for the current thread.
+///
+/// LIFECYCLE SEAM (Wave 1.A, review item 2/4 — frozen here, body unchanged):
+/// today this runs on every `RegistryGuard::drop` and both (a) drops `GcState`
+/// — which, after the first GC, OWNS the live heap in `active_buffer`
+/// (`host_fns.rs` `perform_gc`) — and (b) wipes all roots. For a persistent
+/// session that is a use-after-free: a GC between two fragments would free the
+/// heap and strand every persisted pointer. Wave 1.A splits this into the two
+/// stubs below ([`clear_run_scratch`] per-run, [`free_session_heap`] at machine
+/// drop) and moves `active_buffer` + persistent-root ownership onto the machine.
+/// Until 1.A lands, this stays the wired teardown for the one-shot path.
 pub fn clear_gc_state() {
     GC_STATE.with(|cell| {
         cell.borrow_mut().take();
     });
     clear_rust_roots();
+}
+
+/// PER-RUN teardown stub (Wave 1.A, component E′ — body lands in 1.A).
+///
+/// The half of [`clear_gc_state`] that is safe to run on every
+/// `RegistryGuard::drop`: clear run-scoped scratch (the per-run `RUST_ROOTS`,
+/// stream/diagnostic registries) WITHOUT freeing the machine-owned live heap
+/// (`active_buffer`) or the session-scoped `PERSISTENT_ROOTS`. This is what lets
+/// a GC fire between two session fragments without dangling persisted pointers.
+///
+/// SCAFFOLD STATE (Wave 0): not yet wired — `clear_gc_state` remains the active
+/// per-run teardown. Wave 1.A will repoint `RegistryGuard::drop` here.
+pub fn clear_run_scratch() {
+    todo!("Wave 1.A: per-run teardown that preserves the machine-owned heap (E′)")
+}
+
+/// MACHINE-DROP teardown stub (Wave 1.A, component E′ — body lands in 1.A).
+///
+/// The other half of [`clear_gc_state`]: free the machine-owned live heap
+/// (`active_buffer`) and the session-scoped `PERSISTENT_ROOTS`. Runs exactly
+/// once, when the `JitEffectMachine` is dropped — NOT per run — so session
+/// bindings outlive the runs that read them.
+///
+/// SCAFFOLD STATE (Wave 0): not yet wired. See [`JitEffectMachine::register_persistent_root`].
+pub fn free_session_heap() {
+    todo!("Wave 1.A: machine-drop teardown that frees the session heap + roots (E′)")
 }
 
 /// Install an external cancellation flag for the current thread. The next

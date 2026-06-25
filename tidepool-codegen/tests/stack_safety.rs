@@ -6,6 +6,7 @@
 
 use tidepool_codegen::context::VMContext;
 use tidepool_codegen::emit::expr::compile_expr;
+use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::host_fns;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_heap::layout;
@@ -19,7 +20,7 @@ struct TestResult {
 
 fn compile_and_run(tree: &CoreExpr) -> TestResult {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
-    let func_id = compile_expr(&mut pipeline, tree, "test_fn").expect("compile_expr failed");
+    let func_id = compile_expr(&mut pipeline, tree, "test_fn", &ExternalEnv::new()).expect("compile_expr failed");
     pipeline.finalize().expect("failed to finalize");
 
     let mut nursery = vec![0u8; 1 << 20]; // 1 MiB nursery for deep trees

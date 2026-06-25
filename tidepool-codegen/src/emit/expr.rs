@@ -1229,6 +1229,10 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
     };
 
     let mut inner_emit = EmitContext::new(args.ctx.prefix.clone());
+    // Propagate session bindings into the lambda's own function context so a
+    // Var-miss inside the body can resolve them (Wave 1, component C). Empty in
+    // the one-shot path. See the `external_env` per-function-Value invariant.
+    inner_emit.external_env = args.ctx.external_env.clone();
     inner_emit.lambda_counter = args.ctx.lambda_counter;
     inner_emit.current_fn = lambda_name.clone();
 
@@ -1441,6 +1445,8 @@ fn emit_thunk(args: EmitArgs, body_idx: usize) -> Result<SsaVal, EmitError> {
     };
 
     let mut inner_emit = EmitContext::new(args.ctx.prefix.clone());
+    // See the lambda case: propagate session bindings into the thunk's context.
+    inner_emit.external_env = args.ctx.external_env.clone();
     inner_emit.lambda_counter = args.ctx.lambda_counter;
     inner_emit.current_fn = thunk_name.clone();
 
@@ -1587,6 +1593,7 @@ pub fn compile_expr(
     pipeline: &mut CodegenPipeline,
     tree: &CoreExpr,
     name: &str,
+    external_env: &ExternalEnv,
 ) -> Result<FuncId, EmitError> {
     if std::env::var("TIDEPOOL_DUMP_TREE").is_ok() {
         eprintln!(
@@ -1636,6 +1643,10 @@ pub fn compile_expr(
     };
 
     let mut emit_ctx = EmitContext::new(name.to_string());
+    // Seed session-scoped external bindings for Var-miss resolution (Wave 1,
+    // component C). Empty for the one-shot path; cloned into nested function
+    // contexts below. Unused by emission until Wave 1 wires the resolution.
+    emit_ctx.external_env = external_env.clone();
 
     // Carried from the pipeline (set by the JIT entry point from the
     // DataConTable; defaults to empty for direct test callers of compile_expr).
@@ -2568,6 +2579,8 @@ impl EmitContext {
             };
 
             let mut inner_emit = EmitContext::new(args.ctx.prefix.clone());
+            // See the lambda case above: propagate session bindings.
+            inner_emit.external_env = args.ctx.external_env.clone();
             inner_emit.lambda_counter = args.ctx.lambda_counter;
             inner_emit.current_fn = lambda_name.clone();
             log::trace!(

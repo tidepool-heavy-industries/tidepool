@@ -125,6 +125,59 @@ impl TailCtx {
     }
 }
 
+/// Session-scoped external bindings for GHCi-style re-entry: `VarId → raw heap
+/// pointer` (component C; `plans/ghci-swarm-orchestration.md` review item 3).
+///
+/// This is deliberately NOT a [`ScopedEnv`]. A `ScopedEnv` maps to `SsaVal`,
+/// i.e. Cranelift `Value`s — which are **per-function** SSA values; reusing one
+/// across separately-compiled fragments would leak an SSA value across a
+/// function boundary (a Wave-1 miscompile/UB trap). Instead a seeded binding is
+/// carried here as a **raw heap pointer** and, in Wave 1.B, lowered to a
+/// **fresh `iconst` at the Var-miss site each fragment** — never a shared SSA
+/// `Value`. Cloning this map across nested function contexts is therefore safe
+/// (raw pointers, not SSA values).
+///
+/// Single-threaded, same-session use (the machine is pinned to one thread), so
+/// no `Send`/`Sync` is required despite the raw pointers.
+///
+/// SCAFFOLD STATE (Wave 0): always empty; threaded but never read.
+#[derive(Clone, Default)]
+pub struct ExternalEnv(FxHashMap<VarId, *const u8>);
+
+impl ExternalEnv {
+    /// Create an empty external environment.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resolve a session `VarId` to its seeded raw heap pointer, if bound.
+    /// Wave 1.B consults this at the Var-miss site and lowers the pointer to a
+    /// fresh `iconst` (per fragment) — see the type-level invariant above.
+    pub fn get(&self, var: VarId) -> Option<*const u8> {
+        self.0.get(&var).copied()
+    }
+
+    /// Seed a session binding. `insert` itself is safe — it only stores a
+    /// `*const u8` in a map and never dereferences it, so there is no immediate
+    /// UB. The requirement that `ptr` reference a tenured, persistently rooted
+    /// heap value (Wave 1.A) outliving every fragment compiled against this env
+    /// is a **Wave 1.B correctness invariant**, enforced where the pointer is
+    /// lowered and used (the Var-miss `iconst` site), not here.
+    pub fn insert(&mut self, var: VarId, ptr: *const u8) -> Option<*const u8> {
+        self.0.insert(var, ptr)
+    }
+
+    /// Number of seeded bindings.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether no bindings are seeded.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// A scoped environment mapping variables to SSA values.
 pub struct ScopedEnv {
     inner: FxHashMap<VarId, SsaVal>,
@@ -214,6 +267,16 @@ impl Default for EnvScope {
 /// Emission context — bundles state during IR generation for one function.
 pub struct EmitContext {
     pub env: ScopedEnv,
+    /// Session-scoped external bindings (`VarId` → seeded **raw heap pointer**),
+    /// consulted at Var-miss sites to resolve a reference to a value bound in a
+    /// *prior* JIT fragment (the ghci-session re-entry path; Wave 1, component
+    /// C). Empty for the one-shot eval path and all current callers.
+    ///
+    /// SCAFFOLD STATE (Wave 0): threaded but never read — `compile_expr` seeds
+    /// it from its `external_env` argument and it is cloned into nested function
+    /// contexts, but no emission code consults it yet. See [`ExternalEnv`] for
+    /// the type-level invariant (raw pointers, not per-function SSA `Value`s).
+    pub external_env: ExternalEnv,
     pub(crate) join_blocks: JoinPointRegistry,
     pub lambda_counter: u32,
     pub prefix: String,
@@ -298,6 +361,7 @@ impl EmitContext {
     pub fn new(prefix: String) -> Self {
         Self {
             env: ScopedEnv::new(),
+            external_env: ExternalEnv::new(),
             join_blocks: JoinPointRegistry::new(),
             lambda_counter: 0,
             current_fn: prefix.clone(),

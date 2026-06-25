@@ -112,6 +112,19 @@ impl CancelHandle {
 }
 
 /// Ensures thread-local JIT registries are cleaned up even on early error return.
+///
+/// LIFECYCLE SEAM (Wave 1.A, review item 2/4 — frozen contract, body unchanged).
+/// This drop is the per-run teardown. For the one-shot eval path that is
+/// correct: the machine dies with the run. For a GHCi-style *session*, the heap
+/// and roots must outlive a single run, so Wave 1.A will:
+///   - move `active_buffer` (the live heap after the first GC) ownership ONTO
+///     `JitEffectMachine`, so dropping `GcState` here no longer frees it;
+///   - retain session-scoped `PERSISTENT_ROOTS` here (only `clear_run_scratch`
+///     run-scoped state is wiped per run; `free_session_heap` runs at machine
+///     drop instead — see the `host_fns` seam stubs).
+///
+/// So a GC fired by `run_fragment` between two fragments cannot strand a
+/// persisted pointer. Until 1.A lands this calls `clear_gc_state` as before.
 struct RegistryGuard;
 
 impl Drop for RegistryGuard {
@@ -151,8 +164,14 @@ impl JitEffectMachine {
         // boxed-literal wrapper constructors (e.g. a Rust-materialized aeson
         // `Number`'s LitDouble reaching `case x of { D# ds -> .. }`).
         pipeline.lit_wrappers = crate::emit::LitWrapperIds::from_table(table);
-        let func_id = crate::emit::expr::compile_expr(&mut pipeline, &expr, "main")
-            .map_err(JitError::Compilation)?;
+        // One-shot path: no session bindings, so the external env is empty.
+        let func_id = crate::emit::expr::compile_expr(
+            &mut pipeline,
+            &expr,
+            "main",
+            &crate::emit::ExternalEnv::new(),
+        )
+        .map_err(JitError::Compilation)?;
         pipeline.finalize()?;
 
         let tags = ConTags::from_table(table).map_err(|kind| kind.name());
@@ -174,6 +193,10 @@ impl JitEffectMachine {
         CancelHandle(self.cancel_flag.clone())
     }
 
+    // LIFECYCLE SEAM (Wave 1.A): this is the per-run registry install that pairs
+    // with `RegistryGuard::drop`. Wave 1.A moves `active_buffer` (live heap) +
+    // persistent-root retention onto the machine here so `run_fragment` reuses a
+    // persistent heap instead of a per-run nursery view. Unchanged for Wave 0.
     fn install_registries(&mut self) -> RegistryGuard {
         crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
         crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
@@ -535,6 +558,73 @@ impl JitEffectMachine {
             return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
         }
         bridge_result.map_err(JitError::HeapBridge)
+    }
+
+    // ----------------------------------------------------------------------
+    // GHCi-style session re-entry (Wave 1 — components C, D, K). SCAFFOLD ONLY.
+    //
+    // These freeze the codegen contracts the tidepool-repl session manager
+    // (Wave 2) builds on. Bodies land in Wave 1.A (lifecycle/heap ownership)
+    // and 1.B (re-entry/env-seeding); see plans/ghci-swarm-orchestration.md
+    // §1.A/§1.B. Do NOT implement here — these are unreachable stubs that exist
+    // so later waves have a stable, conflict-free surface to code against.
+    // ----------------------------------------------------------------------
+
+    /// Compile an additional `CoreExpr` fragment into this machine's *live*
+    /// `JITModule` and return its `FuncId`, without tearing down the existing
+    /// code or heap. The new fragment may reference session bindings via
+    /// `external_env` (Var-miss resolution to seeded heap pointers).
+    ///
+    /// Wave 1.B (component C1): declare + define the fragment, re-run
+    /// `finalize_definitions` (verified multi-round-safe in cranelift 0.129.1 —
+    /// a new `FuncId` post-finalize carves a fresh arena segment, leaving
+    /// round-1 code stable), and return the id for a later [`Self::run_fragment`].
+    #[allow(unused_variables)]
+    pub fn add_function(
+        &mut self,
+        name: &str,
+        expr: &CoreExpr,
+        external_env: &crate::emit::ExternalEnv,
+    ) -> Result<FuncId, JitError> {
+        todo!("Wave 1.B: re-entrant fragment compilation (component C1)")
+    }
+
+    /// Run a previously-[`add_function`](Self::add_function)ed fragment against
+    /// this machine's live, machine-owned heap, dispatching effects through the
+    /// handler HList exactly as [`Self::run`] does for the one-shot entry.
+    ///
+    /// Wave 1.B (component C2): like `run`, but targets `func_id` instead of the
+    /// machine's original `self.func_id`, reusing the persistent heap via the
+    /// 1.A buffer-retention contract (must NOT re-implement run-scoped teardown).
+    /// Mirrors `run`'s parameter shape.
+    #[allow(unused_variables)]
+    pub fn run_fragment<U, H: DispatchEffect<U>>(
+        &mut self,
+        func_id: FuncId,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+    ) -> Result<Value, JitError> {
+        todo!("Wave 1.B: run a fragment against the live heap (component C2)")
+    }
+
+    /// Register a session-scoped GC root slot that survives across runs (i.e.
+    /// across `RegistryGuard` drops), unlike the per-run `RUST_ROOTS`.
+    ///
+    /// Wave 1.A (component D): fill the `PERSISTENT_ROOTS` thread-local so a
+    /// tenured binding's root is appended to `perform_gc`'s root set and is NOT
+    /// cleared by the per-run `clear_run_scratch`. Takes a slot pointer
+    /// (`*mut *mut u8`) like `host_fns::register_rust_root`.
+    ///
+    /// # Safety
+    /// The caller guarantees that `slot` is non-null, points to a valid
+    /// `*mut u8` heap-pointer location, and remains valid and dereferenceable
+    /// until the session ends (the `JitEffectMachine` is dropped) — the copying
+    /// GC will read and rewrite `*slot` in place on every collection until then.
+    /// A slot freed or moved before machine teardown is a use-after-free.
+    #[allow(unused_variables)]
+    pub unsafe fn register_persistent_root(&self, slot: *mut *mut u8) {
+        todo!("Wave 1.A: session-scoped persistent GC root (component D)")
     }
 }
 

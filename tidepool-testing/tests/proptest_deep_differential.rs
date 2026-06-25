@@ -37,6 +37,7 @@ use std::os::unix::process::ExitStatusExt;
 
 use tidepool_codegen::context::VMContext;
 use tidepool_codegen::emit::expr::compile_expr;
+use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::host_fns;
 use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
@@ -151,7 +152,7 @@ fn jit_compile_and_run(
     nursery_size: usize,
 ) -> Option<(*const u8, VMContext, Vec<u8>, CodegenPipeline)> {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).ok()?;
-    let func_id = compile_expr(&mut pipeline, tree, "deep_diff").ok()?;
+    let func_id = compile_expr(&mut pipeline, tree, "deep_diff", &ExternalEnv::new()).ok()?;
     pipeline.finalize().ok()?;
 
     let mut nursery = vec![0u8; nursery_size];

@@ -4,6 +4,7 @@
 //! for yielding on algebraic effects and resuming with handler responses.
 
 pub mod alloc;
+pub mod binding_table;
 pub mod context;
 pub mod coverage;
 pub mod datacon_env;

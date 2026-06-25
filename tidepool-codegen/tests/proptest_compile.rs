@@ -6,6 +6,7 @@
 
 use proptest::test_runner::{Config, TestRunner};
 use tidepool_codegen::emit::expr::compile_expr;
+use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::host_fns;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_testing::gen::arb_core_expr;
@@ -24,7 +25,7 @@ fn jit_compile_never_panics() {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let mut pipeline =
                             CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
-                        let _ = compile_expr(&mut pipeline, &expr, "proptest_fn");
+                        let _ = compile_expr(&mut pipeline, &expr, "proptest_fn", &ExternalEnv::new());
                         // Don't finalize or run — just test compilation
                     }));
                     // The test passes if compile_expr returns Ok or Err —

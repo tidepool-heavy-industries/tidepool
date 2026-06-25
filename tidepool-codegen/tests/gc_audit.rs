@@ -22,6 +22,7 @@ The following tests verify these properties programmatically.
 */
 
 use tidepool_codegen::emit::expr::compile_expr;
+use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::host_fns;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_repr::*;
@@ -48,7 +49,7 @@ fn test_stack_map_app_safepoints() {
 
     let tree = CoreExpr { nodes };
 
-    let _ = compile_expr(&mut pipeline, &tree, "test_app").unwrap();
+    let _ = compile_expr(&mut pipeline, &tree, "test_app", &ExternalEnv::new()).unwrap();
     pipeline.finalize().expect("failed to finalize");
 
     // The App(0, 1) is a safepoint.
@@ -88,7 +89,7 @@ fn test_stack_map_case_safepoints() {
     });
 
     let tree = CoreExpr { nodes };
-    let _ = compile_expr(&mut pipeline, &tree, "test_case_safepoint").unwrap();
+    let _ = compile_expr(&mut pipeline, &tree, "test_case_safepoint", &ExternalEnv::new()).unwrap();
     pipeline.finalize().expect("failed to finalize");
 
     // App(0, 1) inside Case alt is a safepoint.
@@ -129,7 +130,7 @@ fn test_stack_map_join_safepoints() {
 
     let tree = CoreExpr { nodes };
 
-    let _ = compile_expr(&mut pipeline, &tree, "test_join_safepoint").unwrap();
+    let _ = compile_expr(&mut pipeline, &tree, "test_join_safepoint", &ExternalEnv::new()).unwrap();
     pipeline.finalize().expect("failed to finalize");
 
     // App(0, 1) in RHS is a safepoint.
