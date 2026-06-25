@@ -7,7 +7,7 @@
 
 use tidepool_codegen::context::VMContext;
 use tidepool_codegen::emit::expr::compile_expr;
-use tidepool_codegen::emit::ScopedEnv;
+use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::host_fns;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_heap::layout;
@@ -21,7 +21,7 @@ struct TestResult {
 
 fn compile_and_run(tree: &CoreExpr) -> TestResult {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
-    let func_id = compile_expr(&mut pipeline, tree, "test_fn", &ScopedEnv::new()).expect("compile_expr failed");
+    let func_id = compile_expr(&mut pipeline, tree, "test_fn", &ExternalEnv::new()).expect("compile_expr failed");
     pipeline.finalize().expect("failed to finalize");
 
     let mut nursery = vec![0u8; 65536];
@@ -457,7 +457,7 @@ fn compile_repl_cbor_inner() {
     let expr = tidepool_codegen::datacon_env::wrap_with_datacon_env(expr, &table);
 
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
-    let result = compile_expr(&mut pipeline, &expr, "repl", &ScopedEnv::new());
+    let result = compile_expr(&mut pipeline, &expr, "repl", &ExternalEnv::new());
     assert!(result.is_ok(), "compile_expr failed: {:?}", result.err());
     pipeline.finalize().expect("failed to finalize");
 }

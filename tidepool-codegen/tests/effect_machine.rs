@@ -2,7 +2,7 @@ use tidepool_codegen::alloc::emit_alloc_fast_path;
 use tidepool_codegen::context::VMContext;
 use tidepool_codegen::effect_machine::{CompiledEffectMachine, ConTags};
 use tidepool_codegen::emit::expr::compile_expr;
-use tidepool_codegen::emit::ScopedEnv;
+use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::host_fns;
 use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::pipeline::CodegenPipeline;
@@ -637,7 +637,7 @@ fn test_resume_leaf_identity() {
         ],
     };
 
-    let func_id = compile_expr(&mut pipeline, &tree, "identity", &ScopedEnv::new()).unwrap();
+    let func_id = compile_expr(&mut pipeline, &tree, "identity", &ExternalEnv::new()).unwrap();
 
     pipeline.finalize().unwrap();
 
@@ -722,7 +722,7 @@ fn test_resume_node_identity() {
         ],
     };
 
-    let func_id = compile_expr(&mut pipeline, &tree, "identity", &ScopedEnv::new()).unwrap();
+    let func_id = compile_expr(&mut pipeline, &tree, "identity", &ExternalEnv::new()).unwrap();
 
     pipeline.finalize().unwrap();
 
@@ -866,7 +866,7 @@ fn test_resume_node_with_effect_result() {
 
     // Identity to use as g
 
-    let func_id_identity = compile_expr(&mut pipeline, &tree_identity, "identity", &ScopedEnv::new()).unwrap();
+    let func_id_identity = compile_expr(&mut pipeline, &tree_identity, "identity", &ExternalEnv::new()).unwrap();
 
     pipeline.finalize().unwrap();
 
@@ -924,7 +924,7 @@ fn test_resume_node_with_effect_result() {
 
     let mut pipeline2 = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
 
-    let f_id = compile_expr(&mut pipeline2, &tree_returns_e, "returns_e", &ScopedEnv::new()).unwrap();
+    let f_id = compile_expr(&mut pipeline2, &tree_returns_e, "returns_e", &ExternalEnv::new()).unwrap();
 
     pipeline2.finalize().unwrap();
 

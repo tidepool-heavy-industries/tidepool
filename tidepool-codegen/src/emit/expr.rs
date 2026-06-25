@@ -1593,7 +1593,7 @@ pub fn compile_expr(
     pipeline: &mut CodegenPipeline,
     tree: &CoreExpr,
     name: &str,
-    external_env: &ScopedEnv,
+    external_env: &ExternalEnv,
 ) -> Result<FuncId, EmitError> {
     if std::env::var("TIDEPOOL_DUMP_TREE").is_ok() {
         eprintln!(

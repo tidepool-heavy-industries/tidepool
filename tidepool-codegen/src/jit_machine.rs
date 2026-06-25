@@ -165,9 +165,13 @@ impl JitEffectMachine {
         // `Number`'s LitDouble reaching `case x of { D# ds -> .. }`).
         pipeline.lit_wrappers = crate::emit::LitWrapperIds::from_table(table);
         // One-shot path: no session bindings, so the external env is empty.
-        let func_id =
-            crate::emit::expr::compile_expr(&mut pipeline, &expr, "main", &crate::emit::ScopedEnv::new())
-                .map_err(JitError::Compilation)?;
+        let func_id = crate::emit::expr::compile_expr(
+            &mut pipeline,
+            &expr,
+            "main",
+            &crate::emit::ExternalEnv::new(),
+        )
+        .map_err(JitError::Compilation)?;
         pipeline.finalize()?;
 
         let tags = ConTags::from_table(table).map_err(|kind| kind.name());
@@ -580,7 +584,7 @@ impl JitEffectMachine {
         &mut self,
         name: &str,
         expr: &CoreExpr,
-        external_env: &crate::emit::ScopedEnv,
+        external_env: &crate::emit::ExternalEnv,
     ) -> Result<FuncId, JitError> {
         todo!("Wave 1.B: re-entrant fragment compilation (component C1)")
     }
@@ -612,10 +616,14 @@ impl JitEffectMachine {
     /// cleared by the per-run `clear_run_scratch`. Takes a slot pointer
     /// (`*mut *mut u8`) like `host_fns::register_rust_root`.
     ///
-    /// # Safety contract (to be enforced when implemented)
-    /// The slot must remain valid and dereferenceable until machine drop.
+    /// # Safety
+    /// The caller guarantees that `slot` is non-null, points to a valid
+    /// `*mut u8` heap-pointer location, and remains valid and dereferenceable
+    /// until the session ends (the `JitEffectMachine` is dropped) — the copying
+    /// GC will read and rewrite `*slot` in place on every collection until then.
+    /// A slot freed or moved before machine teardown is a use-after-free.
     #[allow(unused_variables)]
-    pub fn register_persistent_root(&self, slot: *mut *mut u8) {
+    pub unsafe fn register_persistent_root(&self, slot: *mut *mut u8) {
         todo!("Wave 1.A: session-scoped persistent GC root (component D)")
     }
 }
