@@ -13,7 +13,9 @@
 //! dir — IO, not pure — and only wraps the pure `effects_module_source` here).
 
 use crate::EffectDecl;
-use crate::{ask_decl, console_decl, exec_decl, fs_decl, http_decl, kv_decl, llm_decl, sg_decl};
+use crate::{
+    ask_decl, console_decl, exec_decl, fs_decl, http_decl, kv_decl, llm_decl, lsp_decl, sg_decl,
+};
 
 /// All standard effects in canonical order.
 pub fn standard_decls() -> Vec<EffectDecl> {
@@ -24,6 +26,7 @@ pub fn standard_decls() -> Vec<EffectDecl> {
         sg_decl(),
         http_decl(),
         exec_decl(),
+        lsp_decl(),
         llm_decl(),
         ask_decl(),
     ]
@@ -546,7 +549,7 @@ mod tests {
         // Canonical order is load-bearing: handlers are tag-indexed by it.
         assert_eq!(a.first(), Some(&"Console"));
         assert_eq!(a.last(), Some(&"Ask"));
-        assert_eq!(a.len(), 8);
+        assert_eq!(a.len(), 9);
     }
 
     #[test]

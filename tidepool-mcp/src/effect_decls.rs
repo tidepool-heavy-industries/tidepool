@@ -229,6 +229,58 @@ pub fn sg_decl() -> EffectDecl {
     }
 }
 
+/// LSP effect: a node-addressed semantic code graph via the `tidepool-lsp-daemon`.
+///
+/// `Node` is the composition currency — both the output of one op and the input
+/// of the next, so navigation chains without destructuring. `lspWhere name`
+/// seeds from a name; every other op takes a `Node` and the daemon re-resolves
+/// it by position (so there is no name ambiguity). Graph edges
+/// (`lspCallers`/`lspCallees`/`lspDef`) return `Node`s, so you fold them with
+/// `concatMapM`/`loopM`. All LSP detail (positions, UTF-16, `WorkspaceEdit`,
+/// call hierarchy) lives in the daemon. The `Lsp` lib module adds the `steer`
+/// cascade + ready-made explorers (`explore`/`the`/`saferRename`/`chart`).
+pub fn lsp_decl() -> EffectDecl {
+    EffectDecl {
+        type_name: "Lsp",
+        description: concat!(
+            "Semantic code-graph navigation via a language server (rust-analyzer, .rs). ",
+            "Everything is a Node {name, container, kind, file, line, text} — the currency you thread. ",
+            "`lspWhere name` → all definitions of NAME (the seed). Then walk the graph: ",
+            "`lspCallers n` / `lspCallees n` (incoming/outgoing calls), `lspRefs n` (use sites), ",
+            "`lspDef n` (any node → its definition), `lspHover n` (type/sig/docs), ",
+            "`lspRename n new` (→ unified diff; review then `applyDiff`). Each returns Nodes you feed ",
+            "back in (e.g. `lspWhere \"x\" >>= concatMapM lspCallers`). `lspDiags file` for a file's errors. ",
+            "Needs the `tidepool-lsp-daemon` running in the workspace; queries error cleanly if not.",
+        ),
+        type_defs: &[
+            "data Node = Node { nodeName :: Text, nodeContainer :: Text, nodeKind :: Text, nodeFile :: Text, nodeLine :: Int, nodeText :: Text }",
+            "data Diag = Diag { diagFile :: Text, diagLine :: Int, diagSeverity :: Text, diagMessage :: Text }",
+            "instance ToJSON Node where\n  toJSON (Node n c k f l t) = object [\"name\" .= n, \"container\" .= c, \"kind\" .= k, \"file\" .= f, \"line\" .= l, \"text\" .= t]",
+            "instance ToJSON Diag where\n  toJSON (Diag f l s m) = object [\"file\" .= f, \"line\" .= l, \"severity\" .= s, \"message\" .= m]",
+        ],
+        constructors: &[
+            "LspWhere       :: Text -> Lsp [Node]",
+            "LspCallers     :: Node -> Lsp [Node]",
+            "LspCallees     :: Node -> Lsp [Node]",
+            "LspRefs        :: Node -> Lsp [Node]",
+            "LspDef         :: Node -> Lsp (Maybe Node)",
+            "LspHover       :: Node -> Lsp (Maybe Text)",
+            "LspRename      :: Node -> Text -> Lsp Text",
+            "LspDiagnostics :: Text -> Lsp [Diag]",
+        ],
+        helpers: &[
+            "-- | Seed: every workspace definition named X (each a Node with container/file/line/source line).\nlspWhere :: Text -> M [Node]\nlspWhere = send . LspWhere",
+            "-- | Incoming calls — the functions that call this node (each a Node; recurse with concatMapM).\nlspCallers :: Node -> M [Node]\nlspCallers = send . LspCallers",
+            "-- | Outgoing calls — the functions this node calls.\nlspCallees :: Node -> M [Node]\nlspCallees = send . LspCallees",
+            "-- | Use sites of this node's symbol (each a Node, kind = \"reference\").\nlspRefs :: Node -> M [Node]\nlspRefs = send . LspRefs",
+            "-- | Resolve any node (e.g. a use site) to its definition node.\nlspDef :: Node -> M (Maybe Node)\nlspDef = send . LspDef",
+            "-- | Type / signature / docs for a node.\nlspHover :: Node -> M (Maybe Text)\nlspHover = send . LspHover",
+            "-- | Rename a node's symbol to NEW across the workspace; returns a unified diff (apply with applyDiff).\nlspRename :: Node -> Text -> M Text\nlspRename n new = send (LspRename n new)",
+            "-- | Diagnostics (errors / warnings) for FILE.\nlspDiags :: FilePath -> M [Diag]\nlspDiags = send . LspDiagnostics",
+        ],
+    }
+}
+
 /// Http effect: JSON I/O — fetch from HTTP endpoints, or parse a JSON string.
 pub fn http_decl() -> EffectDecl {
     EffectDecl {

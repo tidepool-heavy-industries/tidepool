@@ -640,11 +640,12 @@ data Console a where
     #[test]
     fn test_standard_decls_includes_ask() {
         let decls = standard_decls();
-        assert_eq!(decls.len(), 8);
+        assert_eq!(decls.len(), 9);
         assert_eq!(decls[4].type_name, "Http");
         assert_eq!(decls[5].type_name, "Exec");
-        assert_eq!(decls[6].type_name, "Llm");
-        assert_eq!(decls[7].type_name, "Ask");
+        assert_eq!(decls[6].type_name, "Lsp");
+        assert_eq!(decls[7].type_name, "Llm");
+        assert_eq!(decls[8].type_name, "Ask");
     }
 
     #[test]
@@ -664,14 +665,14 @@ data Console a where
         let preamble = generated_sources(&decls, false);
         assert!(preamble.contains("data Ask a where"));
         assert!(preamble.contains("  AskWith :: Text -> Value -> Ask Value"));
-        assert!(preamble.contains("type M = Eff '[Console, KV, Fs, SG, Http, Exec, Llm, Ask]"));
+        assert!(preamble.contains("type M = Eff '[Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Ask]"));
     }
 
     #[test]
     fn test_ask_in_effect_stack_type() {
         let decls = standard_decls();
         let stack = build_effect_stack_type(&decls);
-        assert_eq!(stack, "'[Console, KV, Fs, SG, Http, Exec, Llm, Ask]");
+        assert_eq!(stack, "'[Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Ask]");
     }
 
     #[test]

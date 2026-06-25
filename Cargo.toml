@@ -13,6 +13,7 @@ members = [
     "tidepool-codegen",
     "tidepool-runtime",
     "tidepool-mcp",
+    "tidepool-lsp",
     "tidepool",
     "examples/guess",
     "examples/tide",
