@@ -57,11 +57,14 @@ half feeds the JIT's value plane, keyed by one stable VarId.
 The spike (`Spike.hs`) proved this path. Wave 3 productionizes it inside the haskell extract layer.
 
 **Write (on bind, turn M):** after `typecheckModule`, take the binder's `TyThing` (its `Id` with the
-inferred, tidied type), `tyThingToIfaceDecl` → assemble a `ModIface` (`mkIfaceTc`/`mkFullIface`) for
-the session home module `Tidepool.Session.G<g>`, `writeBinIface` to a session `.hi`. **Critical:
-the binder `IfaceDecl` must carry the TYPE only, NO unfolding** — so tidepool's `resolveExternals`
-can't inline a (nonexistent) definition and instead leaves it an unresolved external the JIT
-overrides. (Verify: a session binder reaches codegen as an external Var, not an inlined body.)
+inferred, tidied type), `tyThingToIfaceDecl` → assemble a **THIN** `ModIface` for the session module
+`Tidepool.Session.Val.G<g>`, `writeBinIface` to a session `.hi`. The iface serves the **front-end
+typechecker only** (HPT injection), NOT tidepool's `resolveExternals` back-end. **Critical (kimi B1):**
+it must carry **no `mi_extra_decls` and no `ifIdUnfolding`** — the extractor runs
+`-fwrite-if-simplified-core` (`GhcPipeline.hs:233`) and `resolveExternals` falls through to
+`lookupFatIface` → `mi_extra_decls` (`Resolve.hs:148-172`, `FatIface.hs:56-128`); a fat session iface
+would carry the binder's Core and inline it, defeating the override. Build the iface deliberately thin
+(strip `mi_extra_decls`/unfoldings), and/or exclude session modules from the fat fallback.
 
 **Inject + reference (every later turn):** in the fresh batch `runGhc` extract —
 1. `GHC.Iface.Load.readIface` by **raw path** (NOT `findAndReadIface` — the finder is source-anchored
@@ -72,14 +75,28 @@ overrides. (Verify: a session binder reaches codegen as an external Var, not an 
    `hscUpdateHPT (addHomeModInfoToHpt hmi)` → `addHomeModuleToFinder fc homeUnit (GWIB modNm NotBoot)
    modLoc` with `ml_hs_file = Nothing`. (Home module, NOT the `interactive:GhciN` package — that is
    exactly what sidesteps the finder-exclusion blocker.)
-4. Bring into scope + typecheck: `setContext [IIDecl (simpleImportDecl modNm), …]`, then the user
-   expression goes through `tcRnStmt` → `deSugarExpr` → **`CoreExpr`** (we feed our JIT, not GHC's
-   `hscCompileCoreExpr`).
+4. Bring the session module into scope and compile the **wrapped user turn as a normal module** via
+   the EXISTING `typecheckModule` → `hscDesugar`/`core2core` pipeline (which already yields Core) — NOT
+   GHCi's `tcRnStmt`/`deSugarExpr` interactive-stmt path. **(kimi B4):** the spike proved
+   *typecheck* against an injected HPT iface (`exprType`), it did NOT prove Core emission, and
+   `tcRnStmt` risks re-introducing the `interactive:GhciN` path the spike deliberately avoided. The
+   production reference lives in a real wrapper module that `import`s the session module, so the normal
+   module pipeline desugars it to Core with the injected iface in the HPT. **Follow-on proof required**
+   (Wave-3 first task): extend the spike to *emit Core* that references an injected session binder
+   (not just `exprType`). The bind-statement auto-detect (`foo <- bar`) is SEPARABLE — handle it by
+   template-wrapping into a `do`-block compiled as a module, not by the interactive-stmt path.
 
-**Type+value resolution, unified by stable VarId.** The iface declares `x :: T` in module
-`Tidepool.Session.G<g>`. A later reference compiles to a Core `Var` for `Tidepool.Session.G<g>.x`.
-`stableVarId = hash("Tidepool.Session.G<g>:x")` (`Translate.hs:1466`) — the SAME id the JIT seeds in
-`ExternalEnv` → the heap root. So **iface = type, ExternalEnv = value, one key.**
+**Type+value resolution — session binders are a DISTINCT resolution category (kimi B2).** A reference
+to `Tidepool.Session.Val.G<g>.x` must NOT go through `resolveExternals`: an unresolved external is put
+in `tsUnresolvedIds` and emitted as an **error-sentinel `NVar 0x45…`** (`Translate.hs:120,467-470`),
+discarding the session id → the `ExternalEnv` override (keyed on the session id) never fires. Fix:
+recognize session-module Names (`Tidepool.Session.Val.*`) in the extract and route them to a **direct
+`NVar (stableVarId name)`** emission — excluded from BOTH unfolding-resolution (B1) AND
+`tsUnresolvedIds` (B2). Then `stableVarId = hash("Tidepool.Session.Val.G<g>:x")` (`Translate.hs:1466`)
+reaches codegen intact; the `emit/expr.rs:368` Var-miss site resolves it via `ExternalEnv` → heap
+root. So: **iface = type (front-end only), direct-NVar + ExternalEnv = value, one `stableVarId` key.**
+This is new extract/codegen wiring (a third category beside "resolved" and "unresolved"), not a
+property we get for free — specify and test it explicitly in Wave 3.
 
 **Fidelity test vehicle:** `nameStableString` over `tyConsOfType` (content-addressed). **NOT**
 `eqType`/`IfaceType (==)`/`ppr` — those report false-negatives across sessions purely from
@@ -93,17 +110,30 @@ qualified-only; C carries the original `Name`+module, exact regardless) + do-it-
 
 ## 3. Naming & shadowing — one unified scheme
 
-One monotonic per-session generation counter `g` (= GHCi's `ic_mod_index`):
-- **Value binding** `x` at gen `g` → home module `Tidepool.Session.G<g>`, declared in its synthesized
-  iface; VarId `= stableVarId("Tidepool.Session.G<g>:x")`. The JIT binding table maps that VarId → heap root.
-- **Rebinding** `x` (new value/type) → bump `g`, new module `G<g'>`, new VarId, new iface entry; the
-  **old `G<g>` iface + heap root stay alive** (already-compiled references to old `x` keep resolving).
-  `BindingTable` maps current name `"x"` → latest VarId, and retains all live VarId→root.
-- **User type/class decls** (Lane A) → a real session-library module; redefining a *type's shape*
-  bumps `g` too (coexisting `Foo` generations), so old values of old `Foo` stay dispatchable
-  (content-addressed `DataConId`; case-trap is graceful — proven). Functions shadow latest-wins (text).
-- This realizes H1 (Ids-shadow / TyCons-coexist), H2 (single `g`), C1 (counter-minted ids) concretely
-  via the module-name namespace. Cache key includes `(sessionId, g)`.
+One monotonic per-session generation counter `g` (= GHCi's `ic_mod_index`). **Everything is
+gen-versioned by module name** — because `DataConId`/`stableVarId = hash(module:occ)`
+(`Translate.hs:1466-1474`) is **module-name-addressed, NOT shape-addressed** (kimi R3): redefining
+`Foo`'s shape in the *same* module yields the same `DataConId` → `insert_checked` collision
+(`datacon_table.rs:73-85`). Gen-versioned module names are what make redefinition coexist safely.
+- **User decls** (Lane A) → module **`Tidepool.Session.Lib.G<g>`** (NOT a single regenerated module —
+  kimi B3). A turn adding/redefining a decl mints `Lib.G<g+1>` (re-exporting `Lib.G<g>` + the change);
+  old gen modules are stable + cached. Redefining `Foo`'s shape → new module → new `DataConId`, so
+  old `Foo` values stay dispatchable/renderable against `Lib.G<g_old>`'s still-live iface. Functions
+  shadow latest-wins (newest gen).
+- **Value binding** `x` at gen `g` → module **`Tidepool.Session.Val.G<g>`**; VarId =
+  **`stableVarId("Tidepool.Session.Val.G<g>:x")`** — a normal **`0xFE`-tagged external id**, since the
+  binder has a real module name under C. **Drop the scaffold's `0xFD` counter-minted id and the
+  `type_string` field** — both were the pre-C (synthetic-decl) design (`binding_table.rs:12-13,43-45`);
+  under C the gen-versioned module name already gives a fresh, collision-free id per (re)bind, and the
+  type carrier is the structured iface, not a string. **BindingTable revised to**
+  `name → (stableVarId[0xFE], root_slot, ifaceDecl)`.
+- **Rebinding** `x` → bump `g`, new `Val.G<g'>`, new stableVarId, new iface; old gen module + heap
+  root stay alive (already-compiled refs to old `x` keep resolving via their old stableVarId).
+  `BindingTable` maps current name `"x"` → latest stableVarId, retains all live stableVarId→root.
+- A redefined-shape `Foo` value sliced by new-`Foo` code is a **clean type error** (distinct modules =
+  distinct types), or at runtime a graceful `CaseTrap` (proven), never SIGILL.
+- Realizes H1/H2/C1 via the module namespace. Cache key += `(sessionId, g)` — keyed so two sessions'
+  identical-text `Lib.G<g>` don't collide and a gen bump invalidates correctly (R6: spell out in Lane A).
 
 ---
 
@@ -116,7 +146,12 @@ spawn→review→merge unit.
 - **E′ (the load-bearing fix):** after the first GC the live heap migrates off the machine's
   `Nursery` into `GcState::active_buffer` (a thread-local that `RegistryGuard::drop` frees every run,
   `host_fns.rs:623,186`). Make `active_buffer` **machine-owned**; split `clear_gc_state` into
-  `clear_run_scratch()` (per-run) vs `free_session_heap()` (machine-drop).
+  `clear_run_scratch()` (per-run) vs `free_session_heap()` (machine-drop). **Also (kimi R1):**
+  `install_registries` (`jit_machine.rs:200-206`) calls `set_gc_state` with `self.nursery.start()`
+  **every run** — for a session machine with a retained `active_buffer`, re-point GC state at the
+  retained buffer + its high-water mark, NOT back to `nursery.start()`, or run-2 silently runs against
+  the stale empty nursery and the persisted heap is orphaned. This is the same fix as F (persistent
+  cursor) and must cover both the `RegistryGuard::drop` and `install_registries` ends of the lifecycle.
 - **D — `PERSISTENT_ROOTS`:** a thread-local parallel to `RUST_ROOTS`, appended to GC roots, cleared
   only at machine drop. `register_persistent_root` (stub landed in scaffold, `unsafe`).
 - **E — tenuring:** split `GcState` into nursery (gen-0) + append-only growable `old_space` (gen-1);
@@ -200,20 +235,43 @@ Wave-2/3 multi-turn sweeps are the proofs. Fidelity comparisons use `nameStableS
 
 ---
 
-## 7. Open risks / unknowns (post-C-GO)
+## 7. Open risks / unknowns (post-C-GO, post-kimi-r1)
 
-1. **Type-only iface synthesis** — must confirm `tyThingToIfaceDecl` of a session binder yields a
-   TYPE-only decl (no unfolding) so `resolveExternals` leaves it external for the JIT override; if it
-   carries an unfolding, strip it. (Wave-3 first task, right after porting the spike.)
-2. **Instance/orphan replay** — if a session binding's type or a later reference needs an instance
-   accumulated in a prior turn, the injected ifaces must carry/replay `mi_insts`. Simple data-wrangling
-   types don't; flag for the first exotic case.
-3. **Session-iface ↔ session-library Name resolution** — a value binding `x :: Foo` where `Foo` is a
-   Lane-A user type: the iface references `Foo` by Name in the (real, in-scope) session-library
-   module. Confirm both are in scope together each turn.
-4. **Per-session memory** — one live machine + a warm-ish extract; bounded by one-session MVP and
-   `TIDEPOOL_MAX_HEAP`. Multi-session is Wave 4.
-5. **Cranelift FuncId non-redefinition** — `add_function` adds NEW ids (fine); never redefine an id.
+1. **Thin-iface synthesis (was B1)** — confirm we can build a session iface with NO `mi_extra_decls`
+   and NO `ifIdUnfolding` (strip them post-`mkIfaceTc`), and/or exclude `Tidepool.Session.*` from
+   `lookupFatIface`. Wave-3 first task.
+2. **Instance/orphan replay (kimi R4 — elevated)** — NOT exotic-only: even `show sessionMap` needs the
+   relevant `Show`/`Ord` instances in scope. The injected ifaces (or the in-scope session-library
+   modules) must carry/replay `mi_insts` for any instance a binding's type or a reference needs. Treat
+   as a real Wave-3 requirement, scoped in the C-port task.
+3. **Core-emission-with-injection (was B4)** — UNPROVEN; the spike only did `exprType`. Wave-3 first
+   task includes a follow-on micro-spike that emits Core referencing an injected binder via the normal
+   module pipeline (not `tcRnStmt`).
+4. **Binder-name extraction coverage (kimi R5)** — verify `collectLStmtBinders`/`collectPatBinders`
+   handle the bind forms we accept (`x <-`, `(a,b) <-`, `let x =`, pattern binds) in the extract.
+5. **Session-iface ↔ session-library Name resolution** — `x :: Foo` (Foo a Lane-A type): confirm the
+   `Val.G<g>` iface and the `Lib.G<g'>` module are co-resolvable each turn.
+6. **Per-session memory** — one live machine; bounded by one-session MVP + `TIDEPOOL_MAX_HEAP`.
+7. **Cranelift FuncId non-redefinition** — `add_function` adds NEW ids (fine); never redefine an id.
+
+## 9. Review round 1 (kimi `kimi-review`) — BLOCKING fixes applied
+
+| Finding | Resolution (where) |
+|---|---|
+| **B1** fat-iface (`mi_extra_decls`, `-fwrite-if-simplified-core`) would inline the session binder, defeating the override | §2 Write — thin iface (no `mi_extra_decls`/unfolding) + exclude session modules from fat fallback |
+| **B2** unresolved external → error-sentinel `NVar 0x45…` (`Translate.hs:120,467-470`), session id discarded; "JIT overrides unresolved external" is false | §2 — session binders are a **distinct category**: recognized by `Tidepool.Session.Val.*` module, emitted as **direct `NVar(stableVarId)`**, excluded from unfolding-resolution AND `tsUnresolvedIds`; resolved at codegen via `ExternalEnv`. New extract/codegen wiring, specified + tested in Wave 3. |
+| **B3** single regenerated Lane-A module contradicts type coexistence; `DataConId` is module-addressed so same-module reshape collides | §3 — gen-version **both** `Lib.G<g>` (decls) and `Val.G<g>` (values); reshape → new module → new `DataConId`, old gen stays |
+| **B4** spike only proved `exprType`, not Core emission; `tcRnStmt` risks the GhciN path | §2 step 4 — production uses the **normal module pipeline** (not `tcRnStmt`) with HPT injection; **follow-on Core micro-spike** required (§7.3) |
+| **R1** `install_registries` resets `set_gc_state` to `nursery.start()` every run | §4 1.A E′ — re-point GC state at the retained `active_buffer`, both lifecycle ends |
+| **R2** scaffold `BindingTable` is `0xFD`/`type_string` (pre-C) | §3 — drop `0xFD` + `type_string`; revise to `name → (stableVarId[0xFE], root_slot, ifaceDecl)` |
+| **R3** "content-addressed DataConId" misleading | §3 — stated as **module-name-addressed**, the reason gen-versioning is needed |
+| **R4** instance replay under-scoped | §7.2 — elevated to a real Wave-3 requirement |
+| **R5/R6, NITs** | §7.4, §3 cache-key note; terminology reconciled (thin iface, not "fat") |
+
+Bottom line shift: the C *gate* stays GREEN (typecheck-with-injection proven), but **value
+resolution of a session reference is new extract/codegen wiring** (B1+B2), not free — Wave 3's first
+tasks are (a) the thin-iface + direct-NVar + ExternalEnv mechanism and (b) the Core-emission spike,
+before any binding-table wiring.
 
 ---
 
