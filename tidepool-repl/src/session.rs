@@ -66,8 +66,7 @@ impl Session {
     /// Open a fresh session rooted at `cfg.root`.
     pub fn open(cfg: SessionConfig) -> std::io::Result<Session> {
         let lib = SessionLib::open(cfg.id, cfg.root.clone(), cfg.module_env.clone())
-            .map_err(|e| std::io::Error::other(e.to_string()))?
-            .with_include(cfg.base_include.clone());
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         Ok(Session {
             cfg,
             lib,

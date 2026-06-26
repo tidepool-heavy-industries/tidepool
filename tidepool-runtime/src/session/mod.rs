@@ -46,10 +46,6 @@ pub struct SessionLib {
     root: PathBuf,
     log: DeclLog,
     env: ModuleEnv,
-    /// Extra GHC include dirs (effects module + prelude/stdlib) so the binder
-    /// extractor can resolve a declaration's imports (its renamer needs them).
-    /// Empty by default; set via [`SessionLib::with_include`].
-    base_include: Vec<PathBuf>,
 }
 
 impl SessionLib {
@@ -64,18 +60,7 @@ impl SessionLib {
             root,
             log: DeclLog::new(),
             env,
-            base_include: Vec::new(),
         })
-    }
-
-    /// Add GHC include dirs (effects module + prelude/stdlib) used when the
-    /// binder extractor resolves a declaration's imports. Without these, a
-    /// `session_def` using a qualified name (e.g. `T.replace`) fails the
-    /// renamer with a not-in-scope error.
-    #[must_use]
-    pub fn with_include(mut self, paths: Vec<PathBuf>) -> SessionLib {
-        self.base_include = paths;
-        self
     }
 
     /// The include directory to place on the GHC search path (highest precedence).
@@ -128,11 +113,7 @@ impl SessionLib {
     /// colliding with a prior class method is an ambiguous-occurrence error rather
     /// than a silent shadow.
     pub fn define(&mut self, decl_text: &str) -> Result<Generation, SessionError> {
-        // The renamer resolves the decl's imports against the session root
-        // (for prior `Lib.G<g>` modules) plus the base include (prelude/stdlib).
-        let mut include: Vec<&Path> = vec![self.root.as_path()];
-        include.extend(self.base_include.iter().map(PathBuf::as_path));
-        let items = binders::extract_binders(decl_text, &include, &self.env.imports)?;
+        let items = binders::extract_binders(decl_text, &[self.root.as_path()])?;
         self.log.push(DeclTurn {
             sources: vec![decl_text.to_string()],
             items,
