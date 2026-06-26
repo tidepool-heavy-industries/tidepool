@@ -275,6 +275,40 @@ before any binding-table wiring.
 
 ---
 
+## 8a. Type-modeling principle (user, 2026-06-25)
+
+Model the domain with the type system — newtypes, sum types, type-state — over bare
+pointers/strings/ints. Make illegal states unrepresentable and force exhaustive handling. The
+load-bearing ones (apply in Wave-1/2/3 impl, not the throwaway spikes):
+
+- **`VarResolution` sum (the kimi-B2 fix, do it as a TYPE):** classify every external Var exhaustively
+  — `Inlinable(Unfolding) | SessionBinding(SessionVarId) | Unresolved` — instead of ad-hoc
+  `tsUnresolvedIds`/`isResolvable` boolean checks. The compiler then forces all three branches at
+  every site (`Resolve.hs`/`Translate.hs`/`emit/expr.rs`). The spike's `Resolve.isResolvable`
+  predicate is the seed; promote it to this sum.
+- **`SessionModule { kind: Val | Lib, gen: Generation }`** — the ONE place the gen-versioned module
+  name string `"Tidepool.Session.{Val|Lib}.G<g>"` is constructed. No bare module-name strings sprinkled
+  around; render through this type. Kills a whole class of "wrong module string" bugs.
+- **Newtypes for the identifiers (never bare):** `Generation(u64)` (monotonic), `SessionId`,
+  `BindingName` (user-facing "x"), `SessionVarId` (the binder's `stableVarId`, with a smart ctor
+  `SessionVarId::of(SessionModule, OccName)` so the hash rule lives in one place).
+- **`VarKind` sum decoding the high-byte tag** — `External(0xFE) | SessionBinding | ErrorSentinel(0x45)
+  | Local` — replace bare byte comparisons in `emit/expr.rs` with a decode-to-enum + match.
+- **`RootSlot(*mut *mut u8)`** newtype encoding the GC-liveness contract (the stable, GC-updated slot
+  the value resolution LOADS through — §2/the spike-codegen GC-safety fix). The unsafe accessor lives
+  on the newtype; callers can't pass a bare pointer by accident.
+- **`BoundValue` sum:** `Tier0Forced(RootSlot) | Tier1Closure(RootSlot)` — models the strict-force vs
+  store-as-is distinction at the type level (Wave-3 bind path).
+- **`BindingEntry { name: BindingName, id: SessionVarId, value: BoundValue, iface: IfaceDecl }`** — the
+  revised binding table (drops the scaffold's `0xFD` `value_id` and `type_string`; the iface is the
+  structured type carrier, not a string — kimi R2/NIT).
+- **`SessionCommand` sum:** `Def(DeclText) | Eval(ExprText) | Cmd(MetaCommand) | Close` — the
+  `tidepool-repl` surface, not stringly-typed dispatch.
+- **Type-state where it pays (Wave 2):** consider a `Session<Open>`/`Session<Closed>` phantom so
+  post-close ops don't typecheck; the eval `Response::{Complete,Stream}` channel is already this shape.
+
+Bias toward these when wiring each wave; flag in spec reviews where a bare type should be a newtype/sum.
+
 ## 8. Critical path
 
 `scaffold(done)` → **Lane A re-spec (ships standalone)** ∥ **Wave 1 (1.A→1.B)** → Wave 2
