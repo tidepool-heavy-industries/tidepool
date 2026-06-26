@@ -31,7 +31,7 @@ use tokio::io::{stdin, stdout};
 use tokio::time::{timeout, Duration};
 
 use crate::ask::{PauseGate, ResumeMsg, WorkerMessage};
-use crate::command::{ExprText, MetaCommand, SessionCommand, DeclText};
+use crate::command::{DeclText, ExprText, MetaCommand, SessionCommand};
 use crate::session::{SessionConfig, DEFAULT_NURSERY_SIZE};
 use crate::worker::{spawn_worker, SessionManager, WorkerHandle, WorkerJob};
 
@@ -209,7 +209,10 @@ impl TidepoolReplServer {
     }
 
     fn next_continuation_id(&self) -> String {
-        format!("scont_{}", self.inner.next_cont_id.fetch_add(1, Ordering::Relaxed))
+        format!(
+            "scont_{}",
+            self.inner.next_cont_id.fetch_add(1, Ordering::Relaxed)
+        )
     }
 
     // -- tool handlers -----------------------------------------------------
@@ -245,7 +248,9 @@ impl TidepoolReplServer {
                     .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
                 let meta = MetaCommand::parse(&req.command)
                     .map_err(|e| McpError::invalid_params(e, None))?;
-                Ok(self.run_command("session_cmd", SessionCommand::Cmd(meta)).await)
+                Ok(self
+                    .run_command("session_cmd", SessionCommand::Cmd(meta))
+                    .await)
             }
             "session_close" => Ok(self.session_close().await),
             "session_resume" => {
@@ -268,7 +273,11 @@ impl TidepoolReplServer {
 
     async fn session_open(&self) -> CallToolResult {
         let sid = SessionId(self.inner.next_session_id.fetch_add(1, Ordering::Relaxed));
-        let root = self.inner.cfg.session_root_base.join(format!("session-{}", sid.0));
+        let root = self
+            .inner
+            .cfg
+            .session_root_base
+            .join(format!("session-{}", sid.0));
         let cfg = SessionConfig {
             id: sid,
             root,
@@ -315,7 +324,8 @@ impl TidepoolReplServer {
         if sender.send(job).is_err() {
             return CallToolResult::error(vec![Content::text("session worker is gone")]);
         }
-        self.drive(op, session_rx, response_tx, gate, captured).await
+        self.drive(op, session_rx, response_tx, gate, captured)
+            .await
     }
 
     async fn session_close(&self) -> CallToolResult {
@@ -349,12 +359,22 @@ impl TidepoolReplServer {
         };
         let Some(cont) = cont else {
             return Err(McpError::invalid_params(
-                format!("Unknown or expired continuation_id: {}", req.continuation_id),
+                format!(
+                    "Unknown or expired continuation_id: {}",
+                    req.continuation_id
+                ),
                 None,
             ));
         };
-        if cont.response_tx.send(ResumeMsg::Answer(req.response)).is_err() {
-            return Err(McpError::internal_error("session worker is no longer running", None));
+        if cont
+            .response_tx
+            .send(ResumeMsg::Answer(req.response))
+            .is_err()
+        {
+            return Err(McpError::internal_error(
+                "session worker is no longer running",
+                None,
+            ));
         }
         Ok(self
             .drive(
@@ -374,13 +394,21 @@ impl TidepoolReplServer {
         };
         let Some(cont) = cont else {
             return Err(McpError::invalid_params(
-                format!("Unknown or expired continuation_id: {}", req.continuation_id),
+                format!(
+                    "Unknown or expired continuation_id: {}",
+                    req.continuation_id
+                ),
                 None,
             ));
         };
-        let reason = req.reason.unwrap_or_else(|| "aborted by caller".to_string());
+        let reason = req
+            .reason
+            .unwrap_or_else(|| "aborted by caller".to_string());
         if cont.response_tx.send(ResumeMsg::Abort(reason)).is_err() {
-            return Err(McpError::internal_error("session worker is no longer running", None));
+            return Err(McpError::internal_error(
+                "session worker is no longer running",
+                None,
+            ));
         }
         Ok(self
             .drive(
@@ -403,19 +431,19 @@ impl TidepoolReplServer {
         gate: Arc<PauseGate>,
         captured: CapturedOutput,
     ) -> CallToolResult {
-        let received = match timeout(Duration::from_secs(TURN_TIMEOUT_SECS), session_rx.recv()).await
-        {
-            Ok(r) => r,
-            Err(_) => {
-                // The worker is still computing; ask it to park at the next
-                // effect boundary (best effort — a pure runaway can't be).
-                gate.request_pause();
-                return CallToolResult::error(vec![Content::text(format!(
-                    "{op} timed out after {TURN_TIMEOUT_SECS}s (the resident session may be \
+        let received =
+            match timeout(Duration::from_secs(TURN_TIMEOUT_SECS), session_rx.recv()).await {
+                Ok(r) => r,
+                Err(_) => {
+                    // The worker is still computing; ask it to park at the next
+                    // effect boundary (best effort — a pure runaway can't be).
+                    gate.request_pause();
+                    return CallToolResult::error(vec![Content::text(format!(
+                        "{op} timed out after {TURN_TIMEOUT_SECS}s (the resident session may be \
                      wedged on a long/pure computation)"
-                ))]);
-            }
-        };
+                    ))]);
+                }
+            };
         match received {
             Some(WorkerMessage::Completed { result }) => {
                 let out = captured.drain();

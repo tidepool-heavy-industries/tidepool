@@ -20,7 +20,7 @@ use tidepool_mcp::CapturedOutput;
 
 use crate::ask::{PauseGate, ReplAskDispatcher, ResumeMsg, WorkerMessage};
 use crate::command::SessionCommand;
-use crate::session::{Closed, Session, SessionConfig, SessionHandle, Open};
+use crate::session::{Closed, Open, Session, SessionConfig, SessionHandle};
 
 /// One unit of work handed to the resident worker. Carries the per-turn
 /// channels: `session_tx` (worker → server: Suspended/Completed/Error/Closed)
@@ -162,7 +162,9 @@ fn drain_with_error(rx: Receiver<WorkerJob>, err: String) {
             let _ = job.session_tx.send(WorkerMessage::Closed);
             break;
         }
-        let _ = job.session_tx.send(WorkerMessage::Error { error: err.clone() });
+        let _ = job
+            .session_tx
+            .send(WorkerMessage::Error { error: err.clone() });
     }
 }
 

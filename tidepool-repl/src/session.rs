@@ -90,9 +90,9 @@ impl Session {
             SessionCommand::Cmd(meta) => self.run_meta(meta),
             // Close is handled by SessionHandle::close (type-state); the worker
             // never routes it here.
-            SessionCommand::Close => {
-                TurnOutcome::Error("internal: Close must be handled via SessionHandle::close".into())
-            }
+            SessionCommand::Close => TurnOutcome::Error(
+                "internal: Close must be handled via SessionHandle::close".into(),
+            ),
         }
     }
 
@@ -154,25 +154,27 @@ impl Session {
         }
         table.populate_siblings_from_expr(&expr);
 
-        // First turn bootstraps the resident machine; later turns re-enter it.
-        let run_result = if self.machine.is_none() {
-            match JitEffectMachine::compile_session(&expr, &table, self.cfg.nursery_size) {
-                Ok(m) => {
-                    self.machine = Some(m);
-                    self.machine
-                        .as_mut()
-                        .expect("just set")
-                        .run(&table, handlers, captured)
+        // First turn bootstraps the resident machine; later turns re-enter it
+        // (a fresh fragment in the SAME live JITModule, heap preserved). The
+        // fragment name is minted unconditionally so it's unique per turn.
+        self.turn_counter += 1;
+        let frag_name = format!("repl_turn_{}", self.turn_counter);
+        let run_result = match self.machine {
+            Some(ref mut machine) => {
+                match machine.add_function(&frag_name, &expr, &table, &ExternalEnv::new()) {
+                    Ok(fid) => machine.run_fragment(fid, &table, handlers, captured),
+                    Err(e) => return TurnOutcome::Error(format!("JIT re-entry error: {e}")),
                 }
-                Err(e) => return TurnOutcome::Error(format!("JIT compile error: {e}")),
             }
-        } else {
-            self.turn_counter += 1;
-            let name = format!("repl_turn_{}", self.turn_counter);
-            let machine = self.machine.as_mut().expect("machine present");
-            match machine.add_function(&name, &expr, &table, &ExternalEnv::new()) {
-                Ok(fid) => machine.run_fragment(fid, &table, handlers, captured),
-                Err(e) => return TurnOutcome::Error(format!("JIT re-entry error: {e}")),
+            None => {
+                let mut m =
+                    match JitEffectMachine::compile_session(&expr, &table, self.cfg.nursery_size) {
+                        Ok(m) => m,
+                        Err(e) => return TurnOutcome::Error(format!("JIT compile error: {e}")),
+                    };
+                let r = m.run(&table, handlers, captured);
+                self.machine = Some(m);
+                r
             }
         };
 

@@ -21,7 +21,7 @@ pub mod session;
 pub mod worker;
 
 pub use command::{DeclText, ExprText, MetaCommand, SessionCommand, TurnOutcome};
-pub use handlers::{ConsoleHandler, default_decls};
+pub use handlers::{default_decls, ConsoleHandler};
 pub use server::{ReplServerConfig, TidepoolReplServer};
 pub use session::{Closed, Open, Session, SessionConfig, SessionHandle, DEFAULT_NURSERY_SIZE};
 pub use worker::{spawn_worker, SessionManager, WorkerHandle, WorkerJob};

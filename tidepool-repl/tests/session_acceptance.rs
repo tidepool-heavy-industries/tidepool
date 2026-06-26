@@ -63,14 +63,21 @@ fn build_server() -> TidepoolReplServer {
 fn obj(pairs: &[(&str, &str)]) -> serde_json::Map<String, serde_json::Value> {
     pairs
         .iter()
-        .map(|(k, v)| ((*k).to_string(), serde_json::Value::String((*v).to_string())))
+        .map(|(k, v)| {
+            (
+                (*k).to_string(),
+                serde_json::Value::String((*v).to_string()),
+            )
+        })
         .collect()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_multi_turn_real_path() {
     if !extract_available() {
-        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT / run in nix develop)");
+        eprintln!(
+            "skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT / run in nix develop)"
+        );
         return;
     }
     let server = build_server();
@@ -85,12 +92,18 @@ async fn session_multi_turn_real_path() {
 
     // 2. define `slug` (Lane A → Tidepool.Session.Lib.G1)
     let r = server
-        .dispatch_tool("session_def", obj(&[("decl", "slug t = T.replace \" \" \"-\" t")]))
+        .dispatch_tool(
+            "session_def",
+            obj(&[("decl", "slug t = T.replace \" \" \"-\" t")]),
+        )
         .await
         .expect("session_def");
     assert_ne!(r.is_error, Some(true), "def errored: {}", text_of(&r));
     let txt = text_of(&r);
-    assert!(txt.contains("\"generation\":1") || txt.contains("\"generation\": 1"), "def: {txt}");
+    assert!(
+        txt.contains("\"generation\":1") || txt.contains("\"generation\": 1"),
+        "def: {txt}"
+    );
 
     // 3. eval `slug "a b"` → "a-b" (bootstraps the resident machine)
     let r = server
@@ -98,7 +111,11 @@ async fn session_multi_turn_real_path() {
         .await
         .expect("session_eval 1");
     assert_ne!(r.is_error, Some(true), "eval 1 errored: {}", text_of(&r));
-    assert!(text_of(&r).contains("a-b"), "eval 1 result: {}", text_of(&r));
+    assert!(
+        text_of(&r).contains("a-b"),
+        "eval 1 result: {}",
+        text_of(&r)
+    );
 
     // 4. a SECOND eval on the SAME machine (re-entry; heap persists)
     let r = server
@@ -106,7 +123,11 @@ async fn session_multi_turn_real_path() {
         .await
         .expect("session_eval 2");
     assert_ne!(r.is_error, Some(true), "eval 2 errored: {}", text_of(&r));
-    assert!(text_of(&r).contains("x-y"), "eval 2 result: {}", text_of(&r));
+    assert!(
+        text_of(&r).contains("x-y"),
+        "eval 2 result: {}",
+        text_of(&r)
+    );
 
     // 5. close (drops the machine / frees the heap)
     let r = server

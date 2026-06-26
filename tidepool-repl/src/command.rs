@@ -87,14 +87,18 @@ impl TurnOutcome {
     /// (so the caller can flag `is_error`); see [`TurnOutcome::is_error`].
     pub fn render(&self) -> String {
         match self {
-            TurnOutcome::Value(v) => serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string()),
+            TurnOutcome::Value(v) => {
+                serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
+            }
             TurnOutcome::Defined { generation, module } => serde_json::json!({
                 "defined": true,
                 "generation": generation,
                 "module": module,
             })
             .to_string(),
-            TurnOutcome::Meta(v) => serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string()),
+            TurnOutcome::Meta(v) => {
+                serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
+            }
             TurnOutcome::Error(e) => e.clone(),
         }
     }
@@ -113,7 +117,10 @@ mod tests {
     fn meta_parse_colon_optional() {
         assert_eq!(MetaCommand::parse(":reset").unwrap(), MetaCommand::Reset);
         assert_eq!(MetaCommand::parse("reset").unwrap(), MetaCommand::Reset);
-        assert_eq!(MetaCommand::parse(" :bindings ").unwrap(), MetaCommand::Bindings);
+        assert_eq!(
+            MetaCommand::parse(" :bindings ").unwrap(),
+            MetaCommand::Bindings
+        );
         assert_eq!(
             MetaCommand::parse(":t slug \"a b\"").unwrap(),
             MetaCommand::Type(ExprText("slug \"a b\"".into()))

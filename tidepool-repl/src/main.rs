@@ -12,7 +12,10 @@ use tidepool_repl::{default_decls, ConsoleHandler, ReplServerConfig, TidepoolRep
 use tidepool_runtime::session::ModuleEnv;
 
 #[derive(clap::Parser)]
-#[command(name = "tidepool-repl", about = "GHCi-style stateful Haskell session MCP server")]
+#[command(
+    name = "tidepool-repl",
+    about = "GHCi-style stateful Haskell session MCP server"
+)]
 struct Args {
     /// Serve streamable HTTP on this socket address instead of stdio.
     #[arg(long)]

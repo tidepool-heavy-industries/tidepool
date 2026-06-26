@@ -187,7 +187,9 @@ impl<H: tidepool_effect::dispatch::DispatchEffect<CapturedOutput>> ReplAskDispat
         if tag == self.ask_tag {
             let (prompt, meta) =
                 extract_ask_request(request, cx.table()).map_err(EffectError::Handler)?;
-            let _ = self.session_tx.send(WorkerMessage::Suspended { prompt, meta });
+            let _ = self
+                .session_tx
+                .send(WorkerMessage::Suspended { prompt, meta });
             let msg = self.response_rx.recv().map_err(|_| {
                 EffectError::Handler("Ask session closed (timeout or client disconnected)".into())
             })?;
@@ -196,9 +198,9 @@ impl<H: tidepool_effect::dispatch::DispatchEffect<CapturedOutput>> ReplAskDispat
                     let core_val = json_val.to_value(cx.table()).map_err(EffectError::Bridge)?;
                     Ok(core_val.into())
                 }
-                ResumeMsg::Abort(reason) => {
-                    Err(EffectError::Handler(format!("ask aborted by caller: {reason}")))
-                }
+                ResumeMsg::Abort(reason) => Err(EffectError::Handler(format!(
+                    "ask aborted by caller: {reason}"
+                ))),
             }
         } else {
             self.inner.dispatch(tag, request, cx)
