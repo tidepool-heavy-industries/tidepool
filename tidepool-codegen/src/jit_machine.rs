@@ -360,6 +360,23 @@ impl JitEffectMachine {
         handlers: &mut H,
         user: &U,
     ) -> Result<Value, JitError> {
+        let func_id = self.func_id;
+        self.run_with_entry(func_id, table, handlers, user)
+    }
+
+    /// Shared effectful-run body, parametrized by the entry `func_id`.
+    ///
+    /// [`Self::run`] passes the machine's original entry; [`Self::run_fragment`]
+    /// passes an [`Self::add_function`]-minted fragment id. The lifecycle is
+    /// identical either way (session vmctx, reclaim arming, effect loop), so the
+    /// one-shot path is byte-identical to the pre-refactor `run`.
+    fn run_with_entry<U, H: DispatchEffect<U>>(
+        &mut self,
+        func_id: FuncId,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+    ) -> Result<Value, JitError> {
         let tags = self.tags.map_err(JitError::MissingConTags)?;
 
         // Ensure signal handlers + this thread's alternate stack are installed:
@@ -374,7 +391,7 @@ impl JitEffectMachine {
         // SAFETY: get_function_ptr returns a finalized JIT code pointer. Transmuting to the
         // expected calling convention (vmctx -> result) is correct per our compilation contract.
         let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
-            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(self.func_id)) };
+            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
         let vmctx = if self.session.is_some() {
             self.make_session_vmctx()
         } else {
@@ -666,6 +683,14 @@ impl JitEffectMachine {
     /// and converts the raw heap result directly to a Value. Use this for programs
     /// that don't use an `Eff` wrapper.
     pub fn run_pure(&mut self) -> Result<Value, JitError> {
+        let func_id = self.func_id;
+        self.run_pure_with_entry(func_id)
+    }
+
+    /// Shared pure-run body, parametrized by the entry `func_id`. [`Self::run_pure`]
+    /// uses the machine's original entry; [`Self::run_fragment_pure`] passes an
+    /// [`Self::add_function`]-minted fragment id. Same session lifecycle either way.
+    fn run_pure_with_entry(&mut self, func_id: FuncId) -> Result<Value, JitError> {
         // Per-thread signal handler + altstack; see `run`. Idempotent.
         crate::signal_safety::install();
 
@@ -675,7 +700,7 @@ impl JitEffectMachine {
         // SAFETY: get_function_ptr returns a finalized JIT code pointer. Transmuting to the
         // expected calling convention (vmctx -> result) is correct per our compilation contract.
         let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
-            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(self.func_id)) };
+            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
         let mut vmctx = if self.session.is_some() {
             self.make_session_vmctx()
         } else {
@@ -731,13 +756,12 @@ impl JitEffectMachine {
     }
 
     // ----------------------------------------------------------------------
-    // GHCi-style session re-entry (Wave 1 — components C, D, K). SCAFFOLD ONLY.
+    // GHCi-style session re-entry (Wave 1 — components C, K).
     //
     // These freeze the codegen contracts the tidepool-repl session manager
-    // (Wave 2) builds on. Bodies land in Wave 1.A (lifecycle/heap ownership)
-    // and 1.B (re-entry/env-seeding); see plans/ghci-swarm-orchestration.md
-    // §1.A/§1.B. Do NOT implement here — these are unreachable stubs that exist
-    // so later waves have a stable, conflict-free surface to code against.
+    // (Wave 2) builds on. Implemented in Wave 1.B atop the 1.A lifecycle seam
+    // (buffer retention, persistent roots, tenuring); see
+    // plans/ghci-implementation-plan.md §4 (1.B).
     // ----------------------------------------------------------------------
 
     /// Compile an additional `CoreExpr` fragment into this machine's *live*
@@ -745,29 +769,46 @@ impl JitEffectMachine {
     /// code or heap. The new fragment may reference session bindings via
     /// `external_env` (Var-miss resolution to seeded heap pointers).
     ///
-    /// Wave 1.B (component C1): declare + define the fragment, re-run
-    /// `finalize_definitions` (verified multi-round-safe in cranelift 0.129.1 —
-    /// a new `FuncId` post-finalize carves a fresh arena segment, leaving
-    /// round-1 code stable), and return the id for a later [`Self::run_fragment`].
-    #[allow(unused_variables)]
+    /// Component C1: declare + define the fragment and re-run
+    /// `finalize_definitions` (multi-round-safe in cranelift 0.129.1 — a new
+    /// `FuncId` post-finalize carves a fresh arena segment, leaving round-1 code
+    /// stable). `table` shapes the fragment exactly like the one-shot entry
+    /// (`normalize` + datacon-env wrap + lit-wrapper tolerance), so re-entry is
+    /// emission-identical to the original compile, only the destination differs.
+    /// Returns the id for a later [`Self::run_fragment`] / [`Self::run_fragment_pure`].
     pub fn add_function(
         &mut self,
         name: &str,
         expr: &CoreExpr,
+        table: &DataConTable,
         external_env: &crate::emit::ExternalEnv,
     ) -> Result<FuncId, JitError> {
-        todo!("Wave 1.B: re-entrant fragment compilation (component C1)")
+        // Mirror compile_inner's tree shaping so the fragment is emitted exactly
+        // like the original entry; only the JITModule destination differs (it is
+        // already finalized — we add a fresh round).
+        let expr = tidepool_repr::normalize(expr, table);
+        let expr = crate::datacon_env::wrap_with_datacon_env(expr, table);
+        // Boxed-literal wrapper tolerance is per-compile; refresh from this
+        // fragment's table (see compile_inner). Runtime-inert — read only during
+        // emission — so refreshing it does not perturb already-compiled code.
+        self.pipeline.lit_wrappers = crate::emit::LitWrapperIds::from_table(table);
+        let func_id =
+            crate::emit::expr::compile_expr(&mut self.pipeline, &expr, name, external_env)
+                .map_err(JitError::Compilation)?;
+        // Multi-round finalize: finalize_definitions is safe to re-run; finalize()
+        // drains only THIS round's pending stack maps and appends them to the
+        // registry (round-1 maps were drained on the first finalize).
+        self.pipeline.finalize()?;
+        Ok(func_id)
     }
 
     /// Run a previously-[`add_function`](Self::add_function)ed fragment against
     /// this machine's live, machine-owned heap, dispatching effects through the
     /// handler HList exactly as [`Self::run`] does for the one-shot entry.
     ///
-    /// Wave 1.B (component C2): like `run`, but targets `func_id` instead of the
-    /// machine's original `self.func_id`, reusing the persistent heap via the
-    /// 1.A buffer-retention contract (must NOT re-implement run-scoped teardown).
-    /// Mirrors `run`'s parameter shape.
-    #[allow(unused_variables)]
+    /// Component C2: like `run`, but targets `func_id` instead of the machine's
+    /// original entry, reusing the persistent heap via the 1.A buffer-retention
+    /// contract (`install_registries` re-points GC state at the retained buffer).
     pub fn run_fragment<U, H: DispatchEffect<U>>(
         &mut self,
         func_id: FuncId,
@@ -775,7 +816,107 @@ impl JitEffectMachine {
         handlers: &mut H,
         user: &U,
     ) -> Result<Value, JitError> {
-        todo!("Wave 1.B: run a fragment against the live heap (component C2)")
+        self.run_with_entry(func_id, table, handlers, user)
+    }
+
+    /// Pure sibling of [`Self::run_fragment`]: run an `add_function`-minted
+    /// fragment whose result is a plain value (no `Eff` wrapper) against the
+    /// retained session heap. Mirrors [`Self::run_pure`]. Used by the converge
+    /// proof, where a reference fragment (`case x of C n -> n`) resolves a
+    /// tenured session value purely.
+    pub fn run_fragment_pure(&mut self, func_id: FuncId) -> Result<Value, JitError> {
+        self.run_pure_with_entry(func_id)
+    }
+
+    /// The value-plane **bind primitive**: run a pure entry, deep-force its
+    /// result to normal form (component K), tenure the NF value into the session
+    /// old-space (component E), register its persistent GC root (component D),
+    /// and return the stable [`RootSlot`](crate::old_space::RootSlot) a later
+    /// fragment resolves through its `ExternalEnv`.
+    ///
+    /// This assembles 1.A's tenure/persistent-root machinery with 1.B's
+    /// `deep_force`. The tenure happens while GC state is still installed and the
+    /// result pointer is live (before the per-run `RegistryGuard` reclaims the
+    /// nursery buffer), so the tenured copy and its slot outlive the run.
+    ///
+    /// # Panics
+    /// Panics if called on a non-session machine (no old-space to tenure into).
+    pub fn run_pure_and_bind(
+        &mut self,
+        func_id: FuncId,
+    ) -> Result<crate::old_space::RootSlot, JitError> {
+        assert!(
+            self.session.is_some(),
+            "run_pure_and_bind requires a session machine (compile_session)"
+        );
+        // Per-thread signal handler + altstack; see `run`. Idempotent.
+        crate::signal_safety::install();
+
+        let mut _guard = self.install_registries();
+
+        // SAFETY: finalized JIT code pointer; calling convention per contract.
+        let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
+            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
+        let mut vmctx = self.make_session_vmctx();
+
+        crate::host_fns::reset_call_depth();
+        crate::host_fns::set_exec_context("running pure computation (bind)");
+        // SAFETY: calling the JIT function through a valid pointer, signal-protected.
+        let result_ptr: *mut u8 =
+            unsafe { crate::signal_safety::with_signal_protection(|| func_ptr(&mut vmctx)) }
+                .map_err(|e| JitError::Yield(runtime_error_or_signal(e.0)))?;
+        // SAFETY: resolves pending tail calls (vmctx tail slots are valid).
+        let result_ptr = unsafe { resolve_tail_calls_protected(&mut vmctx, result_ptr)? };
+
+        if let Some(err) = crate::host_fns::take_runtime_error() {
+            return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+        }
+        if result_ptr.is_null() {
+            return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
+        }
+
+        // K — deep-force the result to NF before tenuring (no thunks survive into
+        // old-space; the no-write-barrier tenuring invariant assumes NF data).
+        // SAFETY: result_ptr is a valid heap object; vmctx is the active context.
+        let nf_ptr = unsafe {
+            crate::signal_safety::with_signal_protection(|| {
+                crate::host_fns::deep_force(&mut vmctx as *mut VMContext, result_ptr)
+            })
+        }
+        .map_err(JitError::Signal)?;
+        if let Some(err) = crate::host_fns::take_runtime_error() {
+            return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+        }
+
+        // E/D — tenure the NF closure out of the nursery into old-space and
+        // register its persistent root. gc_active_range is the nursery from-range
+        // (still installed; the guard has not dropped). The tenured copy lives in
+        // old-space arenas, independent of the buffer the guard reclaims.
+        let from = crate::host_fns::gc_active_range()
+            .expect("GC state installed for the bind run");
+        let from_range = (from.0 as *const u8, unsafe {
+            from.0.add(from.1) as *const u8
+        });
+        // SAFETY: nf_ptr is a live heap object inside the nursery from-range;
+        // tenure evacuates its closure and registers the returned slot as a
+        // persistent root valid for the machine's life.
+        let slot = unsafe {
+            self.session
+                .as_mut()
+                .expect("session machine")
+                .old_space
+                .tenure(nf_ptr, from_range)
+        };
+
+        // Arm reclaim LAST (after all `self.session` access) so the guard's raw
+        // pointer to `self.session` is not aliased by an intervening `&mut`
+        // borrow. On drop the guard recovers the live buffer + high-water cursor
+        // → session.heap/cursor for the next run. SAFETY: &vmctx lives on this
+        // frame; VMContext has no custom Drop so its bytes are valid at drop.
+        unsafe {
+            _guard.arm_reclaim(&mut self.session as *mut _, &vmctx as *const _);
+        }
+        Ok(slot)
     }
 
     /// Register a session-scoped GC root slot that survives across runs (i.e.
@@ -1034,7 +1175,7 @@ mod tests {
     ) -> (tidepool_repr::CoreExpr, tidepool_repr::DataConTable) {
         use tidepool_repr::datacon::DataCon;
         use tidepool_repr::types::{DataConId, Literal, VarId};
-        use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, TreeBuilder};
+        use tidepool_repr::{CoreFrame, DataConTable, TreeBuilder};
 
         let mut bld = TreeBuilder::new();
         let var_x = bld.push(CoreFrame::Var(VarId(0)));

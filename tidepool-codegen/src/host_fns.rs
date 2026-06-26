@@ -932,6 +932,112 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
     }
 }
 
+/// Pointer stride of a `Con` field slot (one machine word). Matches the
+/// `8 * index` field arithmetic in `effect_machine.rs` / `layout` Con reads.
+const CON_FIELD_PTR_STRIDE: usize = 8;
+
+/// Force a heap value to **normal form** (NF), iteratively (Wave 1.B, component K).
+///
+/// Unlike [`heap_force`] (WHNF — stops at the outermost constructor), this drives
+/// the *entire* first-order (Tier-0) data spine to NF: it forces each node to
+/// WHNF, then descends into every `Con` field and forces those too, writing the
+/// forced pointer back into the field so the resulting graph holds no
+/// unevaluated thunks. Closures / PAPs (`TAG_CLOSURE`) are **Tier-1**: forced to
+/// WHNF but NOT descended into — a closure is a legitimate stored value, and
+/// deep-forcing its captured environment has no NF meaning (and could diverge).
+/// `Lit` leaves are already NF.
+///
+/// Iterative with an explicit work stack (no host recursion) — mirrors
+/// `tidepool-eval`'s `deep_force` and the GC's `cheney_copy`, so an arbitrarily
+/// deep structure (long list, deep tree) cannot overflow the host stack.
+///
+/// GC-safety: forcing a thunk runs JIT code that can allocate and trigger a
+/// collection, relocating live objects. Every still-pending work item (a parent
+/// heap pointer) plus the NF root is registered as a Rust GC root across each
+/// [`heap_force`] call, so the copying GC rewrites them in place and no pending
+/// pointer dangles. A field slot is recomputed from its (possibly relocated)
+/// parent *after* the force, never cached across it.
+///
+/// Returns the (possibly relocated) NF root pointer, or the error poison pointer
+/// if forcing raised a runtime error.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn deep_force(vmctx: *mut VMContext, root: *mut u8) -> *mut u8 {
+    if root.is_null() {
+        return root;
+    }
+    // SAFETY: `root` is a valid heap pointer; heap_force + the layout reads below
+    // operate on valid heap objects; the rooting protocol (see doc comment) keeps
+    // every pending pointer live and GC-updated across each collection.
+    unsafe {
+        // Force the root to WHNF first. heap_force roots its own argument across
+        // the call, so a GC here is safe with no pending work items yet.
+        let mut nf_root = heap_force(vmctx, root);
+        if has_runtime_error() {
+            return error_poison_ptr();
+        }
+
+        // Keep the NF root registered for the WHOLE descent: once a child is
+        // popped off the work stack it is reachable only through the root graph,
+        // so the root must stay live (and GC-updated) until we return it.
+        let base_mark = rust_roots_mark();
+        register_rust_root(&mut nf_root as *mut *mut u8);
+
+        // Work items are (parent heap pointer, field index). Parents are exterior
+        // heap-object pointers — GC-relocatable, and rewritten in place because we
+        // register them; the field index is stable, so the field slot is
+        // recomputed from the live parent after each force (never cached across a
+        // collection).
+        let mut work: Vec<(*mut u8, usize)> = Vec::new();
+        push_con_fields(nf_root, &mut work);
+
+        while let Some((mut parent, idx)) = work.pop() {
+            // Register every pending parent + the current parent so a GC inside
+            // the upcoming heap_force rewrites them all in place. (nf_root is
+            // already registered at base_mark and stays so.)
+            let mark = rust_roots_mark();
+            for item in work.iter_mut() {
+                register_rust_root(&mut item.0 as *mut *mut u8);
+            }
+            register_rust_root(&mut parent as *mut *mut u8);
+
+            // Read the child from the live parent, force it, then write the NF
+            // child back into the (possibly relocated) parent's field slot.
+            let field_off = layout::CON_FIELDS_OFFSET as usize + idx * CON_FIELD_PTR_STRIDE;
+            let child = *(parent.add(field_off) as *const *mut u8);
+            let forced_child = heap_force(vmctx, child);
+            truncate_rust_roots(mark);
+            if has_runtime_error() {
+                truncate_rust_roots(base_mark);
+                return error_poison_ptr();
+            }
+            // `parent` may have moved during the force; recompute the slot.
+            *(parent.add(field_off) as *mut *mut u8) = forced_child;
+
+            // Descend into Tier-0 data only; Lits are leaves, Closures are Tier-1.
+            push_con_fields(forced_child, &mut work);
+        }
+
+        truncate_rust_roots(base_mark);
+        nf_root
+    }
+}
+
+/// Push `(obj, i)` for each field index of a `Con` object onto `work`.
+/// No-op for non-`Con` objects (`Lit` leaves; `Closure`/PAP = Tier-1, not
+/// descended).
+///
+/// # Safety
+/// `obj` must be a valid heap-object pointer.
+unsafe fn push_con_fields(obj: *mut u8, work: &mut Vec<(*mut u8, usize)>) {
+    if heap_layout::read_tag(obj) != layout::TAG_CON {
+        return;
+    }
+    let n = *(obj.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) as usize;
+    for i in 0..n {
+        work.push((obj, i));
+    }
+}
+
 /// Resolve pending tail calls from VMContext. Called by non-tail App sites
 /// when the callee returned null (indicating a tail call was stored).
 ///
