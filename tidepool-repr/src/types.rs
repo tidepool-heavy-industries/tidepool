@@ -3,9 +3,43 @@
 /// Tag byte stored in high bits of VarId to mark error-sentinel bindings.
 pub const ERROR_SENTINEL_TAG: u8 = 0x45;
 
+/// High-byte tag marking an external (Option-C session/library) binder id.
+/// A real external under Option C: `stableVarId = 0xFE<<56 | fingerprint`.
+pub const EXTERNAL_TAG: u8 = 0xFE;
+
 /// Variable identifier. Wraps a numeric ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VarId(pub u64);
+
+/// Decoded high-byte tag of a [`VarId`] (domain model §3). Replaces bare byte
+/// comparisons (`v >> 56 == 0x..`) at resolution sites with an exhaustive match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarKind {
+    /// `0xFE` — a real external (library unfolding OR a session binder).
+    External,
+    /// `0x45` — an error/undefined/type-metadata sentinel (`Translate.hs`).
+    ErrorSentinel,
+    /// Any other high byte — an ordinary local binder.
+    Local,
+}
+
+impl VarId {
+    /// The high byte of the id (`self.0 >> 56`).
+    #[must_use]
+    pub fn tag(self) -> u8 {
+        (self.0 >> 56) as u8
+    }
+
+    /// Decode the high-byte tag into a [`VarKind`].
+    #[must_use]
+    pub fn kind(self) -> VarKind {
+        match self.tag() {
+            EXTERNAL_TAG => VarKind::External,
+            ERROR_SENTINEL_TAG => VarKind::ErrorSentinel,
+            _ => VarKind::Local,
+        }
+    }
+}
 
 /// Join point label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

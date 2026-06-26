@@ -24,7 +24,9 @@ pub use datacon::*;
 pub use datacon_table::*;
 pub use frame::*;
 pub use normalize::normalize;
-pub use session_ids::{BindingName, Generation, SessionId, SessionModule, SessionModuleKind};
+pub use session_ids::{
+    BindingName, Generation, SessionId, SessionModule, SessionModuleKind, SessionVarId,
+};
 pub use tree::*;
 pub use types::*;
 pub use varid_check::{check_toplevel_varids, toplevel_binders, BindingSite, VarIdCollision};

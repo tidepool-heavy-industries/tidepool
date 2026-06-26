@@ -2,11 +2,13 @@
 //!
 //! Newtypes — never bare `u64`/`String` — so the invariants (monotonic
 //! generation, the single gen-versioned module-name string) live on the type.
-//! Lane A (declaration accumulation) only needs [`Generation`], [`SessionId`],
-//! [`BindingName`], and [`SessionModule`]; the value-plane ids (`SessionVarId`,
-//! `VarKind`) are Wave-3 and deliberately omitted here.
+//! Lane A (declaration accumulation) needs [`Generation`], [`SessionId`],
+//! [`BindingName`], and [`SessionModule`]; the value-plane id [`SessionVarId`]
+//! is the Wave-3b bridge between the GHC type plane and the JIT value plane.
 
 use std::fmt;
+
+use crate::types::VarId;
 
 /// Monotonic per-session generation counter (= GHCi's `ic_mod_index`).
 ///
@@ -112,9 +114,69 @@ impl fmt::Display for SessionModule {
     }
 }
 
+/// The stable `VarId` of a session value binder — `Tidepool.Session.Val.G<g>.x`.
+///
+/// Always `0xFE`-tagged (a real external under Option C). **The hash is minted
+/// exactly once, in the Haskell extract** (`Translate.stableVarId`, the
+/// `0xFE<<56 | fingerprintString("<module>:<occ>").hi64` rule), and carried to
+/// Rust on the bind turn's `BoundBinder.var_id`. Rust **stores** that id and
+/// re-seeds it into the `ExternalEnv` for later reference turns — it never
+/// recomputes the MD5 fingerprint, so there is no cross-language drift risk
+/// (this is the deliberate single-source refinement of domain model §3's
+/// `SessionVarId::of`: the one place is the Haskell stable-id rule).
+///
+/// Both the bind turn (the binder's `Name` in the synthesized `Val.G<g>` iface)
+/// and every later reference turn (the imported `Name` from that injected iface)
+/// hash `"<module>:<occ>"` identically, so the reference Core's `NVar` matches
+/// the stored id by raw equality — the value-plane key.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct SessionVarId(VarId);
+
+impl SessionVarId {
+    /// Wrap the extract-minted stable id (the `BoundBinder.var_id` raw `u64`).
+    #[must_use]
+    pub fn from_extract(raw: u64) -> SessionVarId {
+        SessionVarId(VarId(raw))
+    }
+
+    /// Wrap an already-built [`VarId`] (e.g. from a fixture).
+    #[must_use]
+    pub fn from_var(var: VarId) -> SessionVarId {
+        SessionVarId(var)
+    }
+
+    /// The underlying [`VarId`] — what seeds the `ExternalEnv` and what a
+    /// reference turn's Core `NVar` carries.
+    #[must_use]
+    pub fn var(self) -> VarId {
+        self.0
+    }
+
+    /// The raw 64-bit id.
+    #[must_use]
+    pub fn raw(self) -> u64 {
+        self.0 .0
+    }
+}
+
+impl fmt::Display for SessionVarId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0x{:016x}", self.raw())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_var_id_is_external_tagged_when_minted_by_extract() {
+        // A faithful extract-minted id (0xFE high byte); Rust stores it verbatim.
+        let raw = (0xFEu64 << 56) | 0x0123456789abcd;
+        let id = SessionVarId::from_extract(raw);
+        assert_eq!(id.raw(), raw);
+        assert_eq!(id.var().kind(), crate::types::VarKind::External);
+    }
 
     #[test]
     fn module_name_is_gen_versioned() {
