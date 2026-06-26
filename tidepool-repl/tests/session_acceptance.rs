@@ -1,0 +1,170 @@
+//! Wave-2 acceptance — the real `tidepool-repl` entry point, multi-turn, on one
+//! resident machine (the standing rule: drive the production tool dispatch over
+//! several real turns, not a bespoke harness).
+//!
+//! Flow: session_open → session_def `slug` → session_eval `slug "a b"` → "a-b"
+//! → a SECOND session_eval on the SAME machine (heap persists, re-entry via
+//! `add_function`/`run_fragment`) → session_close (frees the machine).
+//!
+//! Requires `tidepool-extract` (the GHC→Core extractor) on `$PATH` or via
+//! `TIDEPOOL_EXTRACT`; skips cleanly otherwise.
+
+use std::path::PathBuf;
+
+use rmcp::model::{CallToolResult, RawContent};
+use tidepool_repl::{default_decls, ConsoleHandler, ReplServerConfig, TidepoolReplServer};
+use tidepool_runtime::session::ModuleEnv;
+
+/// True if the extract binary can be spawned (exit code irrelevant — the nix
+/// wrapper supplies GHC internally, so we must NOT gate on `ghc --version`).
+fn extract_available() -> bool {
+    let bin = std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".into());
+    std::process::Command::new(bin)
+        .arg("--numeric-version")
+        .output()
+        .is_ok()
+}
+
+fn text_of(res: &CallToolResult) -> String {
+    match &res.content[0].raw {
+        RawContent::Text(t) => t.text.clone(),
+        other => panic!("expected text content, got {other:?}"),
+    }
+}
+
+fn build_server() -> TidepoolReplServer {
+    let (decls, ask_tag) = default_decls();
+    let effects_dir =
+        tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
+    let prelude_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .join("haskell")
+        .join("lib");
+    let session_root_base = std::env::temp_dir().join(format!(
+        "tidepool-repl-test-{}-{}",
+        std::process::id(),
+        // a per-test-run nonce so reruns don't collide on stale Lib.G<g> files
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let cfg = ReplServerConfig {
+        decls,
+        ask_tag,
+        base_include: vec![effects_dir, prelude_dir],
+        module_env: ModuleEnv::standalone_default(),
+        session_root_base,
+    };
+    TidepoolReplServer::new(frunk::hlist![ConsoleHandler], cfg)
+}
+
+fn obj(pairs: &[(&str, &str)]) -> serde_json::Map<String, serde_json::Value> {
+    pairs
+        .iter()
+        .map(|(k, v)| {
+            (
+                (*k).to_string(),
+                serde_json::Value::String((*v).to_string()),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_multi_turn_real_path() {
+    if !extract_available() {
+        eprintln!(
+            "skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT / run in nix develop)"
+        );
+        return;
+    }
+    let server = build_server();
+
+    // 1. open
+    let r = server
+        .dispatch_tool("session_open", serde_json::Map::new())
+        .await
+        .expect("session_open");
+    assert_ne!(r.is_error, Some(true), "open errored: {}", text_of(&r));
+    assert!(text_of(&r).contains("opened"));
+
+    // 2. define `slug` (Lane A → Tidepool.Session.Lib.G1)
+    let r = server
+        .dispatch_tool(
+            "session_def",
+            obj(&[("decl", "slug t = T.replace \" \" \"-\" t")]),
+        )
+        .await
+        .expect("session_def");
+    assert_ne!(r.is_error, Some(true), "def errored: {}", text_of(&r));
+    let txt = text_of(&r);
+    assert!(
+        txt.contains("\"generation\":1") || txt.contains("\"generation\": 1"),
+        "def: {txt}"
+    );
+
+    // 3. eval `slug "a b"` → "a-b" (bootstraps the resident machine)
+    let r = server
+        .dispatch_tool("session_eval", obj(&[("code", "pure (slug \"a b\")")]))
+        .await
+        .expect("session_eval 1");
+    assert_ne!(r.is_error, Some(true), "eval 1 errored: {}", text_of(&r));
+    assert!(
+        text_of(&r).contains("a-b"),
+        "eval 1 result: {}",
+        text_of(&r)
+    );
+
+    // 4. a SECOND eval on the SAME machine (re-entry; heap persists)
+    let r = server
+        .dispatch_tool("session_eval", obj(&[("code", "pure (slug \"x y\")")]))
+        .await
+        .expect("session_eval 2");
+    assert_ne!(r.is_error, Some(true), "eval 2 errored: {}", text_of(&r));
+    assert!(
+        text_of(&r).contains("x-y"),
+        "eval 2 result: {}",
+        text_of(&r)
+    );
+
+    // 5. close (drops the machine / frees the heap)
+    let r = server
+        .dispatch_tool("session_close", serde_json::Map::new())
+        .await
+        .expect("session_close");
+    assert_ne!(r.is_error, Some(true), "close errored: {}", text_of(&r));
+    assert!(text_of(&r).contains("closed"));
+
+    // after close a new turn must report no open session
+    let r = server
+        .dispatch_tool("session_eval", obj(&[("code", "pure (slug \"a b\")")]))
+        .await
+        .expect("post-close eval");
+    assert_eq!(r.is_error, Some(true), "post-close eval should error");
+    assert!(text_of(&r).contains("no session open"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn double_open_is_capped() {
+    if !extract_available() {
+        return;
+    }
+    let server = build_server();
+    let r = server
+        .dispatch_tool("session_open", serde_json::Map::new())
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true));
+    // MVP cap = 1: a second open without closing the first must error.
+    let r2 = server
+        .dispatch_tool("session_open", serde_json::Map::new())
+        .await
+        .unwrap();
+    assert_eq!(r2.is_error, Some(true));
+    assert!(text_of(&r2).contains("already open"));
+    let _ = server
+        .dispatch_tool("session_close", serde_json::Map::new())
+        .await;
+}

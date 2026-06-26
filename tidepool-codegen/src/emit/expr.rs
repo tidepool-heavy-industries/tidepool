@@ -3172,14 +3172,13 @@ fn emit_lit_bytearray_literal(
     gc_sig: ir::SigRef,
     oom_func: ir::FuncRef,
     bytes: &[u8],
-    counter: &mut u32,
+    _counter: &mut u32,
 ) -> Result<SsaVal, EmitError> {
-    let data_name = format!("__litba_{}", *counter);
-    *counter += 1;
-
+    // Anonymous data: same `add_function` multi-round collision concern as
+    // `emit_lit_string` (a `__litba_<n>` name would clash in the live JITModule).
     let data_id = pipeline
         .module
-        .declare_data(&data_name, Linkage::Local, false, false)
+        .declare_anonymous_data(false, false)
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
 
     let mut data_desc = DataDescription::new();
@@ -3224,15 +3223,15 @@ fn emit_lit_string(
     gc_sig: ir::SigRef,
     oom_func: ir::FuncRef,
     bytes: &[u8],
-    counter: &mut u32,
+    _counter: &mut u32,
 ) -> Result<SsaVal, EmitError> {
-    // Create data object: [len: u64][bytes...]
-    let data_name = format!("__litstr_{}", *counter);
-    *counter += 1;
-
+    // Create data object: [len: u64][bytes...]. Anonymous: a session machine
+    // adds fragments into the SAME live JITModule via `add_function`, so a
+    // per-compile counter name (`__litstr_<n>`) would collide across rounds
+    // ("Duplicate definition of identifier"). The blob needs no stable name.
     let data_id = pipeline
         .module
-        .declare_data(&data_name, Linkage::Local, false, false)
+        .declare_anonymous_data(false, false)
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
 
     let mut data_desc = DataDescription::new();

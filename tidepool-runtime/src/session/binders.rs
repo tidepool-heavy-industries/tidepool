@@ -20,9 +20,9 @@ use super::render::ExportItem;
 use super::SessionError;
 
 /// Wrap raw declaration text into a parseable module. The binder extractor only
-/// *parses* (it does not typecheck), so no imports are needed — a qualified
-/// reference like `T.toLower` parses fine without `import qualified … as T`. The
-/// pragma block matches the eval surface so GADT/where syntax etc. parses.
+/// *parses* (it does not typecheck or rename), so no imports are needed — a
+/// qualified reference like `T.toLower` parses fine without `import qualified … as
+/// T`. The pragma block matches the eval surface so GADT/where syntax etc. parses.
 fn wrap_decls(decl_text: &str) -> String {
     format!(
         "{{-# LANGUAGE GADTs, OverloadedStrings, TypeOperators, DataKinds, \
@@ -33,7 +33,7 @@ fn wrap_decls(decl_text: &str) -> String {
     )
 }
 
-/// Extract the export items a declaration introduces, via GHC.
+/// Extract the export items a declaration introduces, via GHC (parse-only).
 pub fn extract_binders(decl_text: &str, include: &[&Path]) -> Result<Vec<ExportItem>, SessionError> {
     let temp_dir = tempfile::TempDir::new()?;
     let input_path = temp_dir.path().join("SessionDecls.hs");

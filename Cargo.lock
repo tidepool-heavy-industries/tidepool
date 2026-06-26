@@ -3796,6 +3796,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidepool-repl"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "dirs",
+ "frunk",
+ "parking_lot",
+ "rmcp",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "tidepool-bridge",
+ "tidepool-bridge-derive",
+ "tidepool-codegen",
+ "tidepool-effect",
+ "tidepool-eval",
+ "tidepool-mcp",
+ "tidepool-repr",
+ "tidepool-runtime",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tidepool-repr"
 version = "0.1.0"
 dependencies = [
