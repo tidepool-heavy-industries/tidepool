@@ -60,11 +60,14 @@ The spike (`Spike.hs`) proved this path. Wave 3 productionizes it inside the has
 inferred, tidied type), `tyThingToIfaceDecl` → assemble a **THIN** `ModIface` for the session module
 `Tidepool.Session.Val.G<g>`, `writeBinIface` to a session `.hi`. The iface serves the **front-end
 typechecker only** (HPT injection), NOT tidepool's `resolveExternals` back-end. **Critical (kimi B1):**
-it must carry **no `mi_extra_decls` and no `ifIdUnfolding`** — the extractor runs
-`-fwrite-if-simplified-core` (`GhcPipeline.hs:233`) and `resolveExternals` falls through to
-`lookupFatIface` → `mi_extra_decls` (`Resolve.hs:148-172`, `FatIface.hs:56-128`); a fat session iface
-would carry the binder's Core and inline it, defeating the override. Build the iface deliberately thin
-(strip `mi_extra_decls`/unfoldings), and/or exclude session modules from the fat fallback.
+it must carry **no `mi_extra_decls` and no `ifIdUnfolding`**. **(kimi-r2 #3 correction:** production
+`canonicalizeDFlags` does NOT globally set `Opt_WriteIfSimplifiedCore` — the earlier "GhcPipeline.hs:233"
+claim was wrong. The fat-iface fallback (`resolveExternals`→`lookupFatIface`→`mi_extra_decls`,
+`Resolve.hs:148-172`, `FatIface.hs:56-128`) only fires for ifaces that *were* written fat.) So B1 holds
+two ways, both proven in `spike-extract`: (a) we write the session iface **thin** — `gopt_unset
+Opt_WriteIfSimplifiedCore` when writing it (`Spike.hs:126` ⇒ `mi_extra_decls = Nothing`), so there is
+nothing to inline; AND (b) the `isSessionValVar` exclusion in `resolveExternals` (`Resolve.hs:205,222`)
+keeps session binders out of resolution entirely. Independent of any global flag.
 
 **Inject + reference (every later turn):** in the fresh batch `runGhc` extract —
 1. `GHC.Iface.Load.readIface` by **raw path** (NOT `findAndReadIface` — the finder is source-anchored
@@ -125,8 +128,13 @@ gen-versioned by module name** — because `DataConId`/`stableVarId = hash(modul
 `Foo`'s shape in the *same* module yields the same `DataConId` → `insert_checked` collision
 (`datacon_table.rs:73-85`). Gen-versioned module names are what make redefinition coexist safely.
 - **User decls** (Lane A) → module **`Tidepool.Session.Lib.G<g>`** (NOT a single regenerated module —
-  kimi B3). A turn adding/redefining a decl mints `Lib.G<g+1>` (re-exporting `Lib.G<g>` + the change);
-  old gen modules are stable + cached. Redefining `Foo`'s shape → new module → new `DataConId`, so
+  kimi B3). A turn adding/redefining a decl mints `Lib.G<g+1>` that imports `Lib.G<g>` and **re-exports
+  it SELECTIVELY** — `import Tidepool.Session.Lib.G<g> hiding (Foo); ... ; module Lib.G<g+1> (module
+  Lib.G<g>, Foo, …)` where any *redefined* name is `hiding`-excluded from the inherited re-export and
+  re-declared locally (kimi-r2 #2: a blanket `module Lib.G<g>` re-export + a same-name redefinition is a
+  GHC conflicting-export error — two `Foo`s can't both be exported). So each gen re-exports the prior
+  gen MINUS the names it shadows, PLUS its own. Old gen modules are stable + cached. Redefining `Foo`'s
+  shape → new module → new `DataConId`, so
   old `Foo` values stay dispatchable/renderable against `Lib.G<g_old>`'s still-live iface. Functions
   shadow latest-wins (newest gen).
 - **Value binding** `x` at gen `g` → module **`Tidepool.Session.Val.G<g>`**; VarId =
@@ -216,9 +224,14 @@ proof — that's the multi-turn real-entry-point test in Wave 2/3.
   extract (`GhcPipeline.hs`/`FatIface.hs`): capture binder `TyThing` → type-only iface → session `.hi`;
   inject via `readIface`+HPT each turn. Verify a session binder reaches codegen as an *external Var*
   (no inlined unfolding) so the JIT override applies.
-- **Bind** (`x <- action` / `let x = e`): GHC parse→typecheck→`deSugarExpr`→Core (auto-detect via
-  `tcRnStmt`); JIT-run; strict-force (K); tenure + `register_persistent_root`; mint VarId
-  `stableVarId("Tidepool.Session.G<g>:x")`; write the session iface; record in `BindingTable`.
+- **Bind** (`x <- action` / `let x = e`): **template-wrap the turn into a `do`-block in a normal
+  module** (`result = do { x <- action; pure x }`) and compile via the SAME normal pipeline as a
+  reference turn (`summariseFile`→`typecheckModule`→`hscDesugar`→`core2core`) — **NOT `tcRnStmt`**
+  (kimi-r2 #1: `tcRnStmt` reintroduces the `interactive:GhciN` finder-exclusion the spike avoided, and
+  contradicts §2 step 4). The bound name(s) come from `collectLStmtBinders` on the wrapped stmt; the
+  type from the typechecked binder. Then: JIT-run; strict-force (K, §below); tenure +
+  `register_persistent_root`; mint `stableVarId("Tidepool.Session.Val.G<g>:x")`; write the thin session
+  iface; record in `BindingTable`.
 - **Reference** (later turn): inject session ifaces → typechecks; Core `Var` for the session binder →
   JIT resolves via seeded `ExternalEnv` → heap root.
 - **Acceptance (real path, multi-turn, natural GC; correctness sweep, not a demo):** bind an **Int**
@@ -325,3 +338,55 @@ Bias toward these when wiring each wave; flag in spec reviews where a bare type 
 `scaffold(done)` → **Lane A re-spec (ships standalone)** ∥ **Wave 1 (1.A→1.B)** → Wave 2
 (`tidepool-repl` server) → Wave 3 (C port + value binding) → Wave 4. The C gate is already GREEN;
 nothing downstream is research-risk, only engineering.
+
+## 10. Review round 2 (kimi `kimi-review-r2`) — resolutions
+
+Re-review against the MERGED spike code. Cross-checks PASSED: `isSessionValVar` (`Resolve.hs:222`)
+matches + inert for normal evals; `emit/expr.rs:383` checks `external_env` before sentinel;
+`from_external_slot` loads through the GC-updated slot; no locked-decision violation.
+
+**BLOCKING — fixed inline:**
+- **#1 Core-emission contradiction** (`tcRnStmt` at §5.3 vs normal-pipeline at §2) → §5.3 Bind now
+  template-wraps into a `do`-block compiled via the normal pipeline; **`tcRnStmt` removed** everywhere.
+- **#2 Lane A re-export collides on type redef** → §3 Lib.G<g+1> re-exports the prior gen **selectively**
+  (`hiding` the redefined names), avoiding GHC's conflicting-export error.
+- **#3 `-fwrite-if-simplified-core` not set at the claimed site** → §2 corrected: production
+  `canonicalizeDFlags` doesn't set it globally; B1 holds via the **thin iface (flag unset on write,
+  `Spike.hs:126`) + the `isSessionValVar` exclusion**, flag-independent.
+
+**RISK — specifications added (close before Wave 1/3):**
+- **#4 No NF `deep_force` on the JIT side.** Only `heap_force` (WHNF) exists (`host_fns.rs:715`); the
+  tree-walker's iterative `deep_force` (`tidepool-eval`) and the GC `cheney_copy` are the stack-safe
+  templates. Wave-3 K = **new load-bearing code**: an iterative (work-stack, no host recursion) heap-NF
+  forcer, applied at bind to Tier-0 values; Tier-1 closures are NOT forced (stored as-is).
+- **#5 Wave-1 integration seam unbuilt + untested.** `install_registries` (`jit_machine.rs:196-206`)
+  still resets GC state to `nursery.start()`; `clear_run_scratch`/`free_session_heap`
+  (`host_fns.rs:203-227`) are `todo!`. The spikes used single compile+run; `add_function`/`run_fragment`
+  re-entry is unexercised. **Wave 1 builds these AND the first multi-fragment smoke is the integration
+  proof** — the real assembly test, per §6.
+- **#6 Instance/orphan replay mechanism.** `mkThinSessionIface` (domain §7) must carry the binding's
+  needed instances, or the injected session must re-register them. Concretely: collect the instances
+  the binder's type/use depends on, include `mi_insts` in the (otherwise thin) session iface, and on
+  inject `extendInstEnvList`/force-load orphans into the fresh session (`spike-extract Spike.hs:387-401`
+  scoped this). Required even for `show sessionMap`. Add to the domain model's iface types.
+- **#7 Injection set + co-resolution policy.** Each turn inject **all live `Val.G<g>` ifaces** + the
+  **latest `Lib.G<g>`** (the decl modules, on the include path) into the HPT before compiling the wrapped
+  turn; `Lib` modules resolve normally, `Val` ifaces via `readIface`+HPT. Per-turn cost is O(live
+  bindings) (iface loads) — acceptable for one-session MVP; note as a scaling item (a future merged
+  "session image" iface could collapse it).
+- **#8 DataConTable merge (N).** Session holds an accumulated table = union of per-turn tables via
+  `insert_checked` (the loud collision guard, `datacon_table.rs:73`); gen-versioned names make
+  collisions a real-bug signal, not expected churn; lifetime = session; pass the merged table to
+  `run`/`run_fragment` + `value_to_json`.
+- **#9 `BindingTable` scaffold is stale (0xFD/`type_string`).** Wave-3 task: **rewrite
+  `binding_table.rs`** to the domain-model shape (`name → (stableVarId[0xFE], RootSlot, ifaceDecl-ref)`),
+  dropping `0xFD` + `type_string`.
+
+**NIT:** #10 adopt the `RootSlot` newtype for `ExternalEnv` (`emit/mod.rs:188`) in the Wave-1/3 rewrite;
+#11 the `Session<Open/Closed>` type-state is **applied, not "consider"** (per the type-state mandate) —
+§5.5/domain §5; **#12 REJECTED (false positive)** — `canonicalizeDFlags` *does* `gopt_unset Opt_CprAnal`
+(honors the lock); the comment is explanatory, not contradictory.
+
+**Bottom line:** all 3 BLOCKING resolved (contradictions/inaccuracy fixed); the 6 RISK items now carry
+mechanisms to implement against; the merged Option-C mechanism is verified sound. Plan is implementable
+as written; Wave-1 integration is the next real assembly test (not a research unknown).
