@@ -369,19 +369,20 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             Some(v) => Ok(v),
             None => {
                 // Session re-entry (Wave 1, component C): a Var that misses the
-                // local env but is seeded in the ExternalEnv resolves to its
-                // persistent heap pointer — the GHCi-style "reference a value
-                // bound in a prior fragment" path. Checked FIRST, before the
-                // error-sentinel / unresolved-var-trap handling: a session
-                // binder reaches codegen as an external `NVar(stableVarId)`
-                // (0xFE-tagged under Option C), but the override is keyed on
-                // ExternalEnv MEMBERSHIP, not on the tag — the tag is incidental
-                // (plans/ghci-implementation-plan.md §2/§3). Materialize a fresh
-                // iconst per fragment, never a shared SSA value (see
-                // `SsaVal::from_external_pointer`).
-                if let Some(ptr) = args.ctx.external_env.get(vid) {
+                // local env but is seeded in the ExternalEnv resolves to the
+                // value held in its stable, GC-updated root slot — the GHCi-style
+                // "reference a value bound in a prior fragment" path. Checked
+                // FIRST, before the error-sentinel / unresolved-var-trap
+                // handling: a session binder reaches codegen as an external
+                // `NVar(stableVarId)` (0xFE-tagged under Option C), but the
+                // override is keyed on ExternalEnv MEMBERSHIP, not on the tag —
+                // the tag is incidental (plans/ghci-implementation-plan.md
+                // §2/§3). Resolution emits a fresh LOAD from the slot per
+                // fragment (never a baked pointer snapshot — the GC moves the
+                // value and rewrites *slot; see `SsaVal::from_external_slot`).
+                if let Some(slot) = args.ctx.external_env.get(vid) {
                     crate::coverage::hit("var:external_env");
-                    return Ok(SsaVal::from_external_pointer(args.builder, ptr));
+                    return Ok(SsaVal::from_external_slot(args.builder, slot));
                 }
 
                 let tag = (vid.0 >> 56) as u8;

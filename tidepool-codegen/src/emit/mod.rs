@@ -112,30 +112,39 @@ impl SsaVal {
         }
     }
 
-    /// Lower a seeded external heap pointer (from [`ExternalEnv`]) to a
-    /// **fresh `iconst`** `HeapPtr` at the current Var-miss site (Wave 1,
-    /// component C — GHCi-style session re-entry).
+    /// Resolve a seeded session binding (from [`ExternalEnv`]) to a `HeapPtr` at
+    /// the current Var-miss site by **loading the live heap pointer from its
+    /// stable root slot** (Wave 1, component C — GHCi-style session re-entry).
     ///
-    /// A session binding is carried in [`ExternalEnv`] as a **raw heap
-    /// pointer**, not an SSA `Value`. SSA `Value`s are per-function; reusing one
-    /// across separately-compiled fragments would leak an SSA value across a
-    /// function boundary (a miscompile/UB trap). So each Var-miss site that
-    /// resolves to a seeded binding must materialize the pointer as a **fresh
-    /// constant in the current function** — exactly what this does. Never cache
-    /// or share the returned `SsaVal` across fragments.
+    /// A session binding is carried in [`ExternalEnv`] as a stable
+    /// `root_slot: *mut *mut u8` — the GC-updated persistent root the binding
+    /// table registers, NOT a snapshotted heap pointer. The copying GC rewrites
+    /// `*root_slot` in place when a major old-space compaction relocates the
+    /// value, so a baked `iconst` of the pointer *value* would go stale and a
+    /// previously-compiled fragment would dereference freed memory. Instead we
+    /// emit a load from the slot each fragment, reading the current pointer at
+    /// run time. Each Var-miss site materializes its own load (a fresh SSA value
+    /// in the current function) — never cache or share the returned `SsaVal`
+    /// across fragments (SSA `Value`s are per-function).
     ///
-    /// The result is declared stack-map-live like any other `HeapPtr`. The
-    /// pointed-to object is tenured/persistently-rooted in the session machine's
-    /// old space (Wave 1.A), which minor GC skips (`is_in_range` covers the
-    /// nursery only), so the copying collector never relocates it.
-    pub fn from_external_pointer(
+    /// The result is declared stack-map-live like any other `HeapPtr`. This
+    /// `iconst`s the **stable slot ADDRESS** (which never moves — the binding
+    /// table owns it for the session's lifetime) and **loads through it** to get
+    /// the current heap pointer, so the copying GC's in-place rewrite of
+    /// `*root_slot` is observed live by every already-compiled fragment.
+    pub fn from_external_slot(
         builder: &mut cranelift_frontend::FunctionBuilder,
-        ptr: *const u8,
+        slot: *mut *mut u8,
     ) -> Self {
-        use cranelift_codegen::ir::{types, InstBuilder};
-        let v = builder.ins().iconst(types::I64, ptr as i64);
-        builder.declare_value_needs_stack_map(v);
-        SsaVal::HeapPtr(v)
+        use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+        // The slot ADDRESS is stable for the machine's lifetime; baking it as a
+        // constant is sound. The heap pointer it holds is NOT — load it live.
+        let slot_addr = builder.ins().iconst(types::I64, slot as i64);
+        let heap_ptr = builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slot_addr, 0);
+        builder.declare_value_needs_stack_map(heap_ptr);
+        SsaVal::HeapPtr(heap_ptr)
     }
 }
 
@@ -151,24 +160,34 @@ impl TailCtx {
     }
 }
 
-/// Session-scoped external bindings for GHCi-style re-entry: `VarId → raw heap
-/// pointer` (component C; `plans/ghci-swarm-orchestration.md` review item 3).
+/// Session-scoped external bindings for GHCi-style re-entry: `VarId → stable
+/// root slot` (component C; `plans/ghci-swarm-orchestration.md` review item 3).
+///
+/// The value is a `root_slot: *mut *mut u8` — the **stable address** of the
+/// binding table's GC-updated persistent root (`binding_table.rs`,
+/// [`crate::jit_machine::JitEffectMachine::register_persistent_root`]), NOT a
+/// snapshotted heap pointer. The copying GC rewrites `*root_slot` in place on
+/// every collection that relocates the bound value, so resolution must **load
+/// the live pointer from the slot** at run time, not bake the pointer value as a
+/// constant (which goes stale after a major old-space compaction, leaving an
+/// already-compiled fragment pointing at freed memory). The slot address itself
+/// is stable for the machine's lifetime, so it may be `iconst`ed.
 ///
 /// This is deliberately NOT a [`ScopedEnv`]. A `ScopedEnv` maps to `SsaVal`,
 /// i.e. Cranelift `Value`s — which are **per-function** SSA values; reusing one
 /// across separately-compiled fragments would leak an SSA value across a
-/// function boundary (a Wave-1 miscompile/UB trap). Instead a seeded binding is
-/// carried here as a **raw heap pointer** and, in Wave 1.B, lowered to a
-/// **fresh `iconst` at the Var-miss site each fragment** — never a shared SSA
-/// `Value`. Cloning this map across nested function contexts is therefore safe
-/// (raw pointers, not SSA values).
+/// function boundary (a Wave-1 miscompile/UB trap). A seeded binding is instead
+/// carried here as a stable slot address and, at the Var-miss site, lowered to a
+/// **fresh `load` from that slot each fragment** — never a shared SSA `Value`.
+/// Cloning this map across nested function contexts is therefore safe (raw slot
+/// addresses, not SSA values).
 ///
 /// Single-threaded, same-session use (the machine is pinned to one thread), so
 /// no `Send`/`Sync` is required despite the raw pointers.
 ///
 /// SCAFFOLD STATE (Wave 0): always empty; threaded but never read.
 #[derive(Clone, Default)]
-pub struct ExternalEnv(FxHashMap<VarId, *const u8>);
+pub struct ExternalEnv(FxHashMap<VarId, *mut *mut u8>);
 
 impl ExternalEnv {
     /// Create an empty external environment.
@@ -176,21 +195,22 @@ impl ExternalEnv {
         Self::default()
     }
 
-    /// Resolve a session `VarId` to its seeded raw heap pointer, if bound.
-    /// Wave 1.B consults this at the Var-miss site and lowers the pointer to a
-    /// fresh `iconst` (per fragment) — see the type-level invariant above.
-    pub fn get(&self, var: VarId) -> Option<*const u8> {
+    /// Resolve a session `VarId` to its seeded **root slot address**, if bound.
+    /// The Var-miss site consults this and emits a `load` through the slot (per
+    /// fragment) to read the GC-current heap pointer — see the invariant above.
+    pub fn get(&self, var: VarId) -> Option<*mut *mut u8> {
         self.0.get(&var).copied()
     }
 
-    /// Seed a session binding. `insert` itself is safe — it only stores a
-    /// `*const u8` in a map and never dereferences it, so there is no immediate
-    /// UB. The requirement that `ptr` reference a tenured, persistently rooted
-    /// heap value (Wave 1.A) outliving every fragment compiled against this env
-    /// is a **Wave 1.B correctness invariant**, enforced where the pointer is
-    /// lowered and used (the Var-miss `iconst` site), not here.
-    pub fn insert(&mut self, var: VarId, ptr: *const u8) -> Option<*const u8> {
-        self.0.insert(var, ptr)
+    /// Seed a session binding to its stable root slot. `insert` itself is safe —
+    /// it only stores the slot address in a map and never dereferences it, so
+    /// there is no immediate UB. The requirement that `slot` be a non-null,
+    /// persistently-rooted slot (Wave 1.A) whose `*slot` references a tenured
+    /// heap value, and that it outlive every fragment compiled against this env,
+    /// is a **Wave 1.B correctness invariant**, enforced where the slot is loaded
+    /// and used (the Var-miss `load` site), not here.
+    pub fn insert(&mut self, var: VarId, slot: *mut *mut u8) -> Option<*mut *mut u8> {
+        self.0.insert(var, slot)
     }
 
     /// Number of seeded bindings.
