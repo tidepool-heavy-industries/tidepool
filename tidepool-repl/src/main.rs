@@ -77,6 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         base_include,
         module_env: ModuleEnv::standalone_default(),
         session_root_base,
+        nursery_size: None,
     };
 
     let server = TidepoolReplServer::new(frunk::hlist![ConsoleHandler], cfg);

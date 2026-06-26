@@ -73,6 +73,9 @@ pub enum SessionCommand {
 pub enum TurnOutcome {
     /// `session_eval` produced this JSON-rendered value.
     Value(Json),
+    /// `session_eval` bound a value to the live heap (`x <- e` / `let x = e`);
+    /// `name` is now referenceable by later turns, with the captured `type_display`.
+    Bound { name: String, type_display: String },
     /// `session_def` accumulated a declaration; the session advanced to
     /// `generation` and `Tidepool.Session.Lib.G<generation>` now in scope.
     Defined { generation: u64, module: String },
@@ -90,6 +93,11 @@ impl TurnOutcome {
             TurnOutcome::Value(v) => {
                 serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
             }
+            TurnOutcome::Bound { name, type_display } => serde_json::json!({
+                "bound": name,
+                "type": type_display,
+            })
+            .to_string(),
             TurnOutcome::Defined { generation, module } => serde_json::json!({
                 "defined": true,
                 "generation": generation,

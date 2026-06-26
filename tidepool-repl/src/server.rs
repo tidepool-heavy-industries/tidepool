@@ -115,6 +115,9 @@ pub struct ReplServerConfig {
     pub module_env: ModuleEnv,
     /// Parent dir under which per-session include trees are created.
     pub session_root_base: PathBuf,
+    /// Session nursery size in bytes. `None` ⇒ [`DEFAULT_NURSERY_SIZE`] (64 MiB).
+    /// Tests shrink it to force an organic GC between turns.
+    pub nursery_size: Option<usize>,
 }
 
 /// The non-generic server core (H is erased into the `spawn` closure).
@@ -287,7 +290,7 @@ impl TidepoolReplServer {
             effect_stack: self.inner.effect_stack.clone(),
             ask_tag: self.inner.cfg.ask_tag,
             module_env: self.inner.cfg.module_env.clone(),
-            nursery_size: DEFAULT_NURSERY_SIZE,
+            nursery_size: self.inner.cfg.nursery_size.unwrap_or(DEFAULT_NURSERY_SIZE),
         };
         let handle = (self.inner.spawn)(cfg);
         match self.inner.manager.install(handle) {

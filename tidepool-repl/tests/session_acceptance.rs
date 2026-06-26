@@ -56,6 +56,7 @@ fn build_server() -> TidepoolReplServer {
         base_include: vec![effects_dir, prelude_dir],
         module_env: ModuleEnv::standalone_default(),
         session_root_base,
+        nursery_size: None,
     };
     TidepoolReplServer::new(frunk::hlist![ConsoleHandler], cfg)
 }
