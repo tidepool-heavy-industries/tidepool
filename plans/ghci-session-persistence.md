@@ -601,6 +601,127 @@ applies only to decl text. Temporal/Racket give *framing* for the decl(replayabl
 boundary but no mechanism tidepool lacks. The Smalltalk/Lisp image-persistence angle remains
 unverified against primary sources (as round-2 noted) — none of these refinements lean on it.
 
+## Deep research round 4 (2026-06-25): cross-turn TYPES — InteractiveContext, the serialize/reload idea, A/B/C
+
+11-agent code+web workflow on *how a later turn typechecks a reference to a prior value binding*.
+Decision-oriented; **decides Wave 3 typing only — Lane A (decls-as-text) is unaffected.**
+
+**The two-problem framing (locked):** (1) passing *values* across turns is solved by keeping the JIT
+machine alive (values never cross a gap — they sit in the live heap; binding table + GC root). (2)
+passing *types* is the hard one because **types have no persistent home** in our architecture — repr
+strips them, GHC is one-shot. Types are needed *only* to make GHC accept the source (runtime is
+content-addressed, type-free); a *wrong-but-accepted* type is the only soundness risk, so fidelity
+matters. The binding table is the bridge: `name → (heap-root [value], type-rep [the question])`.
+
+**Confirmed: our architecture IS GHCi's, pre-discovered.** `ic_tythings` = types only; the linker's
+`closure_env :: NameEnv (Name, ForeignHValue)` = values, separate, keyed by `Name`. That's our
+binding-table-as-bridge exactly (GHC owns types, JIT owns values). The Ids-shadow / TyCons-coexist
+asymmetry + `ic_mod_index` = our H1/H2 verbatim.
+
+**The stmt→Core mechanism is named (kills the hand-rolled parser):** `tcRnStmt` typechecks
+`foo <- bar` / `(a,b,c) <- foo` *in context* and returns the bound `[Id]` (names+types);
+`deSugarExpr :: HscEnv -> LHsExpr GhcTc -> IO (.., Maybe CoreExpr)` turns that typechecked expr into
+a **`CoreExpr`** — which we feed our Cranelift JIT instead of GHC's `hscCompileCoreExpr` (bytecode).
+Core is a first-class intermediate; bytecode is strictly downstream (`hscParsedStmt` in
+`GHC.Driver.Main`). `collectLStmtBinders` gives the binder names. So Wave-3 auto-detect = GHC's own
+parse+typecheck, never a Rust scanner.
+
+### The A/B/C verdict
+
+- **A — long-lived `InteractiveContext`** (hint/IHaskell): **rejected.** Its only edge is fidelity,
+  and C matches it without a persistent process. Real costs: GHC-session leaks (`hint` #96 ~4KB/run,
+  GHC #698 never returns RAM), session corruption on module move/delete (forced restarts), and it
+  demolishes the one-shot batch pipeline. No honest "do it right" points at A. **Defer indefinitely.**
+- **B — synthetic `x :: <ppr-string>` decl each turn**: works, one-shot-clean, but **lossy** exactly
+  where `ppr ≠ parser` (higher-rank, constraints, type families). It's the lone *ad-hoc seam*
+  (re-render an inferred type to text and hope it re-parses).
+- **C — serialize/reload `ic_tythings` via the iface path**: the **headline Unique fear is DEAD** —
+  `BinIface` writes `(UnitId, ModuleName, OccName)` (a symtab index), reconstructs the Name on read
+  allocating a fresh Unique. Names are content-addressed by `(Module, OccName)` across the boundary —
+  *the same trick as our `stableVarId = hash("module:occ")` (`Translate.hs:1466`)*. Fidelity is
+  perfect (structured `IfaceType`). Write-half: `mkIfaceTc`/`tyThingToIfaceDecl`. Read-half **already
+  ships** (`FatIface.hs`, every eval). **Real blocker:** GHC keeps interactive modules out of the
+  HPT/finder by design, so a synthetic iface can't be `import`ed — it must be **injected
+  programmatically** into the type env + instances replayed. Primitives exist; **no prior art** for
+  this workflow.
+
+### DECISION (user, 2026-06-25): standardize on C — "do it right" — gated by a GO/NO-GO spike
+
+Use the **faithful representation per plane, drop the lossy B**:
+- **Declarations** → source text (Lane A). Text *is* their faithful form; the user's syntax
+  re-parses perfectly. No fidelity problem.
+- **Inferred value-binding types** → structured **`IfaceType` via C** (no source form exists for an
+  inferred type, so the iface is the faithful carrier). Content-addressed both sides — matches
+  tidepool's core.
+- **B is deleted** — it was the only ad-hoc seam (exotic-type detection + ppr round-trip). Removing it
+  makes the model uniform: every binding is `name → (heap-root, serialized IfaceDecl)`, no per-type
+  branching; the type half is crash-durable on disk.
+
+This is *less* mechanism than the B+C hybrid and is the natural expression of the content-addressed
+core. **But C's injection step is unproven (no prior art), so it's gated:**
+
+**Wave-3 GATE spike (first Wave-3 step, before any value-decl wiring):** stand up the C
+write→inject→typecheck round-trip in the *existing batch pipeline* for **two** bindings — one simple
+(`Int -> Int`) and one deliberately exotic (`forall a. (Ord a, Num a) => a -> Map a a`):
+1. turn 1: after `typecheckModule`, `mkIfaceTc`/`tyThingToIfaceDecl` → `writeBinIface` to a session `.hi`.
+2. turn 2 (fresh `runGhc`, no `InteractiveContext`): **inject** the iface programmatically past the
+   HPT/finder exclusion (+ replay instances), compile a module that *references* the binding.
+3. assert: typechecks, reconstructed type **byte-identical** to the original (no ppr), reference
+   resolves to the seeded heap root. Run B on the same exotic type and diff to confirm C's edge is real.
+- **GO** (injection clean + robust across both shapes) → standardize on C; **B is never built.**
+- **NO-GO** (injection gnarly/fragile) → B is the floor (still ships), C the per-binding upgrade.
+
+### SPIKE OUTCOME (2026-06-25): **GO — C is proven, for both simple and exotic types. Standardize on C; B is deleted.**
+
+A reference in a **fresh batch `runGhc`** session typechecked against a faithfully-reconstructed
+type loaded from a serialized fat `.hi` — no `InteractiveContext`, no GhciN modules, no source
+recompile, no `ppr` round-trip — for both `Int -> Int` and `forall a. (Ord a, Num a) => a -> Map a a`.
+Reference impl: `haskell/spike-optionc/Spike.hs` (committed `c044ee6`).
+
+**The working injection path (use this in Wave 3, NOT import/downsweep):**
+1. `GHC.Iface.Load.readIface` by **raw path** — NOT `findAndReadIface` (which routes through the
+   source-anchored finder and fails on a source-less module).
+2. `GHC.IfaceToCore.typecheckIface` inside `initIfaceCheck` → `ModDetails`/`md_types` (the read-half
+   `FatIface.hs` already runs).
+3. Inject: `HomeModInfo iface details emptyHomeModInfoLinkable` → `hscUpdateHPT
+   (addHomeModInfoToHpt hmi)` → `addHomeModuleToFinder fc homeUnit (GWIB modNm NotBoot) modLoc`
+   with `ml_hs_file = Nothing`.
+4. Typecheck the reference via `setContext [IIDecl (simpleImportDecl "Session1"), …]` + `exprType`
+   (generalizes to `tcRnStmt`/`deSugarExpr` for Core). Bypasses downsweep entirely.
+This uses a **normal HPT home module** (e.g. `Tidepool.Session.G1`), which is exactly why it
+sidesteps the documented GhciN/interactive-package finder exclusion. The naive import-of-a-
+source-less-home-module path IS blocked ("Could not find module") — downsweep needs a source target.
+
+**Methodological finding (matters for the regression test):** `eqType` and `IfaceType (==)` report
+**False** across sessions — but it's NOT fidelity loss: the only diff is the `Map` TyCon's Unique
+(separate `NameCache`s per `runGhc` reallocate it). The faithful, cross-session comparison vehicle is
+**`nameStableString` over `tyConsOfType`** (content-addressed), which is **True**. The dead-Unique-
+fear is confirmed dead. Wave-3 fidelity tests must use the content comparison, never `eqType`/`ppr`.
+
+**Adversarial GO check passed:** a negative control (`g2 "not a number"`) is correctly **rejected**
+(String has no `Num`) through the same injection path — proving the injected constraints are
+load-bearing, consumed from the interface, not re-inferred from context.
+
+**Honest B-nuance:** `ppr` actually round-trips type *structure* faithfully even for the exotic
+cases — so B is NOT broken on structure. B's real mechanical break is **name-scope/qualifier
+resolution**: `ppr` renders `Map` unqualified, and a using-module importing `Data.Map` qualified-only
+fails "Not in scope: Map". C has no such seam — it carries the original `Name`+module, exact
+regardless of import style. So C wins on the *name-resolution seam* + do-it-right uniformity (one
+mechanism, structured `IfaceType`, crash-durable on disk), not on structure-mangling as first assumed.
+
+**Knock-on consequences (now locked):**
+- **B is deleted** from the plan. Wave-3 typing = C only.
+- The round-3 "captured-type-as-string fragility" risk (tension #4) is **closed** — we carry
+  structured iface, not a string.
+- `type-capture` (merged, captures a `ppr` *string*) is now only useful for `:t`/`:i` *display*;
+  the typechecking carrier is the serialized `IfaceDecl`. Its role narrows, doesn't disappear.
+- Binding table is uniform: `name → (heap-root [value, Wave 1/2], serialized IfaceDecl [type])`.
+- Value persistence (Wave 1/2) is unchanged and unblocked — C is the type plane only.
+
+**C is the TYPE plane only.** It does NOT reduce value-persistence work (live machine, stable VarIds,
+`PERSISTENT_ROOTS`, tenuring — Wave 1/2, shared by all options). Cracking C makes the type *carrier*
+faithful; the value lives in the JIT heap regardless. Wave 1 proceeds independent of this.
+
 ## Open / next
 
 - [x] ~~Re-run the web `/deep-research`~~ — **done** (2026-06-25). Findings above.
