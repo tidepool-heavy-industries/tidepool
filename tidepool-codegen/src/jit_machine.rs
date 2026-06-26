@@ -622,9 +622,13 @@ impl JitEffectMachine {
     /// until the session ends (the `JitEffectMachine` is dropped) — the copying
     /// GC will read and rewrite `*slot` in place on every collection until then.
     /// A slot freed or moved before machine teardown is a use-after-free.
-    #[allow(unused_variables)]
     pub unsafe fn register_persistent_root(&self, slot: *mut *mut u8) {
-        todo!("Wave 1.A: session-scoped persistent GC root (component D)")
+        // Delegates to the thread-local PERSISTENT_ROOTS registry (component D).
+        // The machine is pinned to one thread for its lifetime, so the
+        // thread-local and the machine share a lifetime; `free_session_heap`
+        // (machine drop) clears the registry. SAFETY: forwarded to the caller's
+        // contract documented above.
+        crate::host_fns::register_persistent_root(slot);
     }
 }
 

@@ -92,6 +92,20 @@ thread_local! {
     /// so GC can update them in-place when objects move during collection.
     static RUST_ROOTS: RefCell<Vec<*mut *mut u8>> = const { RefCell::new(Vec::new()) };
 
+    /// SESSION-SCOPED GC roots (Wave 1.A, component D). Parallel to `RUST_ROOTS`,
+    /// but with a *session* lifetime: registered via [`register_persistent_root`]
+    /// (typically a tenured binding's stable slot), appended to the root set on
+    /// every `perform_gc`, and cleared ONLY at machine drop ([`free_session_heap`])
+    /// — never by the per-run [`clear_run_scratch`].
+    ///
+    /// This is what lets a GHCi-style session's bound values survive across runs:
+    /// a collection fired by run N+1 still traces (and rewrites in place) the
+    /// slots holding run N's persisted heap pointers, so they neither leak nor
+    /// dangle. Slots point into the machine-owned session heap (the migrated
+    /// `active_buffer`) or into `old_space`, valid until the `JitEffectMachine`
+    /// drops.
+    static PERSISTENT_ROOTS: RefCell<Vec<*mut *mut u8>> = const { RefCell::new(Vec::new()) };
+
     /// External cancellation flag. When set, the next GC safepoint will abort the
     /// running program with `RuntimeError::Cancelled`. Cloned from the
     /// `Arc<AtomicBool>` owned by the `JitEffectMachine` before entering JIT code.
@@ -127,6 +141,51 @@ pub fn truncate_rust_roots(mark: usize) {
 /// Remove all registered Rust roots. Call after the GC-unsafe region ends.
 pub fn clear_rust_roots() {
     RUST_ROOTS.with(|r| r.borrow_mut().clear());
+}
+
+/// Register a SESSION-SCOPED GC root slot (Wave 1.A, component D).
+///
+/// Unlike [`register_rust_root`] (run-scoped, cleared every `RegistryGuard`
+/// drop), a persistent root survives across runs and is cleared only by
+/// [`free_session_heap`] at machine drop. `perform_gc` appends these to the
+/// root set on every collection, so the slot's stored pointer is kept live and
+/// rewritten in place when the pointee moves.
+///
+/// # Safety
+/// `slot` must be non-null, point to a valid `*mut u8` heap-pointer location,
+/// and remain valid + dereferenceable until [`free_session_heap`] runs (the
+/// owning `JitEffectMachine` drops). A slot freed or moved before that is a
+/// use-after-free the GC will trip on.
+pub unsafe fn register_persistent_root(slot: *mut *mut u8) {
+    PERSISTENT_ROOTS.with(|r| r.borrow_mut().push(slot));
+}
+
+/// Number of registered persistent roots (test/diagnostic accessor).
+pub fn persistent_roots_count() -> usize {
+    PERSISTENT_ROOTS.with(|r| r.borrow().len())
+}
+
+/// Remove all registered persistent roots. Called by [`free_session_heap`] at
+/// machine drop — NOT per run. After this the slots must not be dereferenced.
+pub fn clear_persistent_roots() {
+    PERSISTENT_ROOTS.with(|r| r.borrow_mut().clear());
+}
+
+/// The current active GC region as `(start, size_bytes)`, or `None` if no GC
+/// state is installed on this thread.
+///
+/// After install this is the nursery (one-shot / session first run) or the
+/// retained session heap (session re-entry); after a collection it is the
+/// surviving `active_buffer`. Used by tenuring (the nursery from-range to
+/// evacuate out of, component E) and by the Wave 1.A seam test (to assert
+/// `install_registries` re-points at the retained heap rather than resetting to
+/// `nursery.start()`).
+pub fn gc_active_range() -> Option<(*mut u8, usize)> {
+    GC_STATE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|s| (s.active_start, s.active_size))
+    })
 }
 
 /// Set the current execution context for JIT code.
