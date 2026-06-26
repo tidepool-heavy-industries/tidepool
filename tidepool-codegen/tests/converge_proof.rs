@@ -28,6 +28,113 @@ use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, TreeBuilder};
 
 use serial_test::serial;
 
+// ─── freer-simple constructor IDs for effectful-bind tests ──────────────────
+// These must match the qualified names that ConTags::from_table looks up.
+const VAL_ID: DataConId = DataConId(10);
+const E_ID: DataConId = DataConId(11);
+const UNION_ID: DataConId = DataConId(12);
+const LEAF_ID: DataConId = DataConId(13);
+const NODE_ID: DataConId = DataConId(14);
+
+/// DataConTable with both the freer-simple effect-machine constructors (so
+/// `ConTags::from_table` succeeds and `machine.step()` can parse `Yield::Done`)
+/// and the test data constructor `C1 :: Int -> T` used as payload.
+fn table_with_freer_and_c1() -> DataConTable {
+    let mut table = DataConTable::new();
+    // Payload constructor (same as in the pure tests).
+    table.insert(DataCon {
+        id: C1,
+        name: "C1".to_string(),
+        tag: 1,
+        rep_arity: 1,
+        field_bangs: vec![],
+        qualified_name: None,
+    });
+    // freer-simple constructors — qualified names are what ConTags resolves.
+    table.insert(DataCon {
+        id: VAL_ID,
+        name: "Val".to_string(),
+        tag: 0,
+        rep_arity: 1,
+        field_bangs: vec![],
+        qualified_name: Some("Control.Monad.Freer.Val".to_string()),
+    });
+    table.insert(DataCon {
+        id: E_ID,
+        name: "E".to_string(),
+        tag: 0,
+        rep_arity: 2,
+        field_bangs: vec![],
+        qualified_name: Some("Control.Monad.Freer.E".to_string()),
+    });
+    table.insert(DataCon {
+        id: UNION_ID,
+        name: "Union".to_string(),
+        tag: 0,
+        rep_arity: 1,
+        field_bangs: vec![],
+        qualified_name: Some("Data.OpenUnion.Union".to_string()),
+    });
+    table.insert(DataCon {
+        id: LEAF_ID,
+        name: "Leaf".to_string(),
+        tag: 0,
+        rep_arity: 1,
+        field_bangs: vec![],
+        qualified_name: Some("Data.FTCQueue.Leaf".to_string()),
+    });
+    table.insert(DataCon {
+        id: NODE_ID,
+        name: "Node".to_string(),
+        tag: 0,
+        rep_arity: 2,
+        field_bangs: vec![],
+        qualified_name: Some("Data.FTCQueue.Node".to_string()),
+    });
+    table
+}
+
+/// Build a fragment that produces `Val (C1 n)` — a no-effect freer-simple
+/// program (`pure (C1 n)`) whose step loop immediately yields `Done(C1_ptr)`.
+fn build_pure_eff_fragment(n: i64) -> CoreExpr {
+    let mut b = TreeBuilder::new();
+    let lit = b.push(CoreFrame::Lit(Literal::LitInt(n)));
+    let c1 = b.push(CoreFrame::Con {
+        tag: C1,
+        fields: vec![lit],
+    });
+    // Val wraps the payload — step() sees Con(VAL_ID, [c1]) → Yield::Done(c1_ptr)
+    b.push(CoreFrame::Con {
+        tag: VAL_ID,
+        fields: vec![c1],
+    });
+    b.build()
+}
+
+/// Build a fragment that produces `Val (\x -> x)` — Val wrapping an identity
+/// lambda. step() yields Done(closure_ptr). Used for the Tier1 smoke.
+fn build_pure_eff_identity_fragment() -> CoreExpr {
+    let mut b = TreeBuilder::new();
+    let binder = VarId(0);
+    let body = b.push(CoreFrame::Var(binder));
+    let lam = b.push(CoreFrame::Lam { binder, body });
+    b.push(CoreFrame::Con {
+        tag: VAL_ID,
+        fields: vec![lam],
+    });
+    b.build()
+}
+
+/// Build a fragment that applies a session-bound closure `f` to a literal `n`.
+/// Used by the Tier1 smoke to exercise the tenured closure after bind.
+fn build_apply_fragment(f: VarId, n: i64) -> CoreExpr {
+    let mut b = TreeBuilder::new();
+    let arg = b.push(CoreFrame::Lit(Literal::LitInt(n)));
+    let fun = b.push(CoreFrame::Var(f));
+    b.push(CoreFrame::App { fun, arg });
+    b.build()
+}
+
 /// High-byte tag a real Option-C session binder carries (`stableVarId`,
 /// 0xFE-tagged external). Resolution is keyed on `ExternalEnv` membership, not
 /// the tag — the tag only makes the fixture faithful.
@@ -279,6 +386,167 @@ fn converge_survives_real_gc_between_runs() {
                 expect_int(&machine.run_fragment_pure(frag2).expect("read 2 (post-GC)")),
                 13,
                 "fragment-2 must still resolve the tenured value after a real GC"
+            );
+
+            drop(machine);
+            assert_eq!(tidepool_codegen::host_fns::persistent_roots_count(), 0);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// Wave 3b — effectful bind (Tier0, forced=true):
+///
+/// A fragment producing `Val (C1 42)` goes through the freer-simple step loop
+/// (`step()` → `Yield::Done(c1_ptr)`) inside `run_fragment_and_bind`. The Done
+/// arm deep-forces `c1_ptr` and tenures it. A second fragment case-matches the
+/// tenured value and returns its inner Int, proving the bind path round-trips
+/// correctly through the effect loop.
+#[test]
+#[serial]
+fn effectful_bind_tier0_second_fragment_resolves_bound_value() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tidepool_codegen::host_fns::clear_persistent_roots();
+            let table = table_with_freer_and_c1();
+
+            // 1. Session machine with a no-effect dummy entry.
+            let dummy = build_pure_eff_fragment(0);
+            let mut machine = JitEffectMachine::compile_session(&dummy, &table, 1 << 16)
+                .expect("compile_session");
+
+            // 2. add_function a fragment that produces Val(C1(99)) — a no-effect
+            //    Eff tree; step() immediately yields Done(c1_ptr).
+            let frag1 = machine
+                .add_function(
+                    "eff_frag1",
+                    &build_pure_eff_fragment(99),
+                    &table,
+                    &ExternalEnv::new(),
+                )
+                .expect("add_function eff_frag1");
+
+            // 3. run_fragment_and_bind (forced=true, Tier0): step loop → Done →
+            //    deep_force → tenure → RootSlot.
+            let slot = machine
+                .run_fragment_and_bind(
+                    frag1,
+                    &table,
+                    &mut frunk::HNil,
+                    &(),
+                    true,
+                )
+                .expect("run_fragment_and_bind");
+
+            assert_eq!(
+                tidepool_codegen::host_fns::persistent_roots_count(),
+                1,
+                "effectful bind must register exactly one persistent root"
+            );
+
+            // 4. Seed ExternalEnv with the tenured slot.
+            let x = external_var_id(0xEF01);
+            let mut env = ExternalEnv::new();
+            env.insert(x, slot.addr());
+
+            // 5/6. Reference fragment: case x of C1 n -> n
+            let frag2 = machine
+                .add_function(
+                    "eff_frag2",
+                    &build_reference_fragment(x),
+                    &table,
+                    &env,
+                )
+                .expect("add_function eff_frag2");
+
+            let result = machine
+                .run_fragment_pure(frag2)
+                .expect("run_fragment_pure eff_frag2");
+            assert_eq!(
+                expect_int(&result),
+                99,
+                "second fragment must resolve the effectfully-bound value (99)"
+            );
+
+            drop(machine);
+            assert_eq!(tidepool_codegen::host_fns::persistent_roots_count(), 0);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// Wave 3b — effectful bind (Tier1, forced=false):
+///
+/// A fragment producing `Val (\x -> x)` goes through the step loop to Done,
+/// and `run_fragment_and_bind(forced=false)` tenures the closure as-is (no
+/// deep_force). A second fragment applies the tenured closure to 7 and returns
+/// the result, proving Tier1 closures are callable after an effectful bind.
+#[test]
+#[serial]
+fn effectful_bind_tier1_closure_is_callable_after_bind() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tidepool_codegen::host_fns::clear_persistent_roots();
+            let table = table_with_freer_and_c1();
+
+            // Session machine with dummy entry.
+            let dummy = build_pure_eff_fragment(0);
+            let mut machine = JitEffectMachine::compile_session(&dummy, &table, 1 << 16)
+                .expect("compile_session");
+
+            // Fragment: Val (\x -> x)
+            let frag_id = machine
+                .add_function(
+                    "eff_identity",
+                    &build_pure_eff_identity_fragment(),
+                    &table,
+                    &ExternalEnv::new(),
+                )
+                .expect("add_function eff_identity");
+
+            // Tier1 bind: forced=false, closure tenured as-is.
+            let slot = machine
+                .run_fragment_and_bind(
+                    frag_id,
+                    &table,
+                    &mut frunk::HNil,
+                    &(),
+                    false,
+                )
+                .expect("run_fragment_and_bind tier1");
+
+            assert_eq!(
+                tidepool_codegen::host_fns::persistent_roots_count(),
+                1,
+                "tier1 bind must register one persistent root"
+            );
+
+            // Seed ExternalEnv: f -> slot
+            let f = external_var_id(0xEF02);
+            let mut env = ExternalEnv::new();
+            env.insert(f, slot.addr());
+
+            // Apply: f 7 — the tenured identity closure applied to 7.
+            let apply_frag = machine
+                .add_function(
+                    "apply_identity",
+                    &build_apply_fragment(f, 7),
+                    &table,
+                    &env,
+                )
+                .expect("add_function apply_identity");
+
+            let result = machine
+                .run_fragment_pure(apply_frag)
+                .expect("run_fragment_pure apply_identity");
+            assert_eq!(
+                expect_int(&result),
+                7,
+                "tenured Tier1 closure must apply correctly (identity(7) = 7)"
             );
 
             drop(machine);
