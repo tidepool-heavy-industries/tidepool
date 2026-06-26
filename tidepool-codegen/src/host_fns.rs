@@ -259,30 +259,83 @@ pub fn clear_gc_state() {
     clear_rust_roots();
 }
 
-/// PER-RUN teardown stub (Wave 1.A, component E′ — body lands in 1.A).
+/// PER-RUN teardown (Wave 1.A, component E′).
 ///
 /// The half of [`clear_gc_state`] that is safe to run on every
-/// `RegistryGuard::drop`: clear run-scoped scratch (the per-run `RUST_ROOTS`,
-/// stream/diagnostic registries) WITHOUT freeing the machine-owned live heap
-/// (`active_buffer`) or the session-scoped `PERSISTENT_ROOTS`. This is what lets
-/// a GC fire between two session fragments without dangling persisted pointers.
-///
-/// SCAFFOLD STATE (Wave 0): not yet wired — `clear_gc_state` remains the active
-/// per-run teardown. Wave 1.A will repoint `RegistryGuard::drop` here.
+/// `RegistryGuard::drop`: takes `GC_STATE` (dropping the `Option<GcState>`
+/// wrapper but NOT the `active_buffer` Vec inside it — that was already
+/// reclaimed back onto the machine by `reclaim_session_heap` before this
+/// runs) and clears the per-run `RUST_ROOTS`. Does NOT touch
+/// `PERSISTENT_ROOTS` — those are session-scoped and survive until
+/// [`free_session_heap`] at machine drop.
 pub fn clear_run_scratch() {
-    todo!("Wave 1.A: per-run teardown that preserves the machine-owned heap (E′)")
+    GC_STATE.with(|c| {
+        c.borrow_mut().take();
+    });
+    clear_rust_roots();
 }
 
-/// MACHINE-DROP teardown stub (Wave 1.A, component E′ — body lands in 1.A).
+/// MACHINE-DROP teardown (Wave 1.A, component E′).
 ///
-/// The other half of [`clear_gc_state`]: free the machine-owned live heap
-/// (`active_buffer`) and the session-scoped `PERSISTENT_ROOTS`. Runs exactly
-/// once, when the `JitEffectMachine` is dropped — NOT per run — so session
-/// bindings outlive the runs that read them.
-///
-/// SCAFFOLD STATE (Wave 0): not yet wired. See [`JitEffectMachine::register_persistent_root`].
+/// Clears the session-scoped `PERSISTENT_ROOTS` registry (whose slots point
+/// into the machine-owned session heap) and takes `GC_STATE`. The session
+/// heap `Vec<u8>` is a field on `JitEffectMachine` and drops with the
+/// struct after this returns — this only clears the thread-local that held
+/// pointers into that buffer so the GC cannot dereference them afterwards.
 pub fn free_session_heap() {
-    todo!("Wave 1.A: machine-drop teardown that frees the session heap + roots (E′)")
+    clear_persistent_roots();
+    GC_STATE.with(|c| {
+        c.borrow_mut().take();
+    });
+}
+
+/// Install a retained session heap buffer as the active GC region.
+///
+/// Called by `install_registries` when a session machine has a previously-
+/// retained `active_buffer` (the live heap after the first GC). The Vec is
+/// moved into `GcState::active_buffer` so `perform_gc` can continue to
+/// swap it in place. `reclaim_session_heap` later moves it back onto the
+/// machine for the next run.
+pub fn install_session_buffer(mut buffer: Vec<u8>) {
+    let start = buffer.as_mut_ptr();
+    let size = buffer.len();
+    GC_STATE.with(|cell| {
+        *cell.borrow_mut() = Some(GcState {
+            active_start: start,
+            active_size: size,
+            active_buffer: Some(buffer),
+        });
+    });
+}
+
+/// Reclaim the live heap buffer (and the current high-water cursor) from
+/// `GC_STATE` back onto the machine, called from `RegistryGuard::drop`
+/// BEFORE `clear_run_scratch` takes the `GcState`.
+///
+/// Returns `(buffer, cursor)` where:
+/// - `buffer` is `Some(Vec<u8>)` if a GC fired this run (the active_buffer
+///   is the surviving to-space) or if a session buffer was installed at
+///   re-entry; `None` only on a session's very first run with no GC (heap
+///   still lives in the machine's `Nursery`).
+/// - `cursor` is the number of bytes live at run end (the high-water mark
+///   relative to the start of the active region), to resume allocation in
+///   the next run.
+///
+/// # Safety
+/// `alloc_ptr` must be the `VMContext::alloc_ptr` value at the end of the
+/// run — the bump cursor after the last allocation.
+pub fn reclaim_session_heap(alloc_ptr: *mut u8) -> (Option<Vec<u8>>, usize) {
+    GC_STATE.with(|cell| {
+        match cell.borrow_mut().as_mut() {
+            Some(state) => {
+                let cursor =
+                    (alloc_ptr as usize).saturating_sub(state.active_start as usize);
+                let buf = state.active_buffer.take();
+                (buf, cursor)
+            }
+            None => (None, 0),
+        }
+    })
 }
 
 /// Install an external cancellation flag for the current thread. The next
@@ -655,6 +708,12 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
 
                     // Append Rust-registered roots (from apply_cont_heap k2_stack, etc.)
                     RUST_ROOTS.with(|r| {
+                        root_slots.extend(r.borrow().iter().copied());
+                    });
+
+                    // Append session-scoped persistent roots (Wave 1.A, component D).
+                    // These survive across runs and are cleared only at machine drop.
+                    PERSISTENT_ROOTS.with(|r| {
                         root_slots.extend(r.borrow().iter().copied());
                     });
 
