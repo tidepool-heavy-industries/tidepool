@@ -9,6 +9,7 @@ executable tidepool-extract-bin
   other-modules:
     Tidepool.Binders
     Tidepool.GhcPipeline
+    Tidepool.Session
     Tidepool.Translate
     Tidepool.Resolve
     Tidepool.FatIface

@@ -1,9 +1,10 @@
-module Tidepool.GhcPipeline (runPipeline, PipelineResult(..), dumpCore) where
+module Tidepool.GhcPipeline
+  ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore ) where
 
 import GHC
 import GHC.Driver.Main (hscDesugar, batchMsg)
-import GHC.Driver.Env (hscUpdateFlags)
-import GHC.Driver.Make (load')
+import GHC.Driver.Env (hscUpdateFlags, hsc_home_unit)
+import GHC.Driver.Make (load', summariseFile)
 import GHC.Types.Error (mkUnknownDiagnostic)
 import GHC.Unit.Module.Graph (mapMG)
 import GHC.Core.Opt.Pipeline (core2core)
@@ -30,6 +31,8 @@ import System.FilePath (takeBaseName)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, when)
 import Data.Char (toUpper)
+import Tidepool.Session
+  ( SessionScope, isSessionScopeActive, injectSessionScope )
 
 data PipelineResult = PipelineResult
   { prBinds  :: [CoreBind]
@@ -48,8 +51,30 @@ data PipelineResult = PipelineResult
   , prCapturedType :: Maybe String
   }
 
+-- | The normal one-shot eval extraction. Byte-identical to its historical
+-- behaviour: it is exactly @runPipelineSession Nothing@, so no session
+-- machinery (iface injection, source-less home modules) ever touches this path.
 runPipeline :: FilePath -> [FilePath] -> IO PipelineResult
-runPipeline path includes = do
+runPipeline = runPipelineSession Nothing
+
+-- | Extraction with optional tidepool-repl SESSION scope (Option-C type plane).
+--
+-- @Nothing@ (or an inert 'SessionScope') → the ordinary @depanal@/@load@
+-- downsweep path, unchanged. @Just@ an ACTIVE scope → inject the live session
+-- @Val.G<g>@ ifaces into the HPT, then compile the (reference) target via
+-- 'summariseFile' + 'hscDesugar' + 'core2core' — the normal MODULE pipeline,
+-- but bypassing downsweep, which would reject the source-less session modules
+-- (plans/ghci-implementation-plan.md §2 step 4 / §5.3 "C GATE").
+--
+-- The gate is the @case@ below: the session arm runs ONLY for an active scope.
+runPipelineSession :: Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult
+runPipelineSession mscope path includes
+  | Just scope <- mscope, isSessionScopeActive scope =
+      runSessionPipeline scope path includes
+  | otherwise = runNormalPipeline path includes
+
+runNormalPipeline :: FilePath -> [FilePath] -> IO PipelineResult
+runNormalPipeline path includes = do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
@@ -70,21 +95,7 @@ runPipeline path includes = do
     -- runs GHC's own expression parser inside the splice; those modules import
     -- GHC.Parser.* / GHC.Types.* etc. Without this, compiling Tidepool.QQ
     -- fails with "member of the hidden package ghc-9.12.2".
-    let dflags' = canonicalizeDFlags dflags
-          { importPaths = importPaths dflags ++ includes
-          , packageFlags = packageFlags dflags
-              ++ [ExposePackage "-package ghc" (PackageArg "ghc")
-                                (ModRenaming True [])]
-          , targetPlatform = genericPlatform
-          , sseVersion = Nothing
-          , bmiVersion = Nothing
-          , avx = False
-          , avx2 = False
-          , avx512cd = False
-          , avx512er = False
-          , avx512f = False
-          , avx512pf = False
-          }
+    let dflags' = extractionDynFlags dflags includes
     setSessionDynFlags dflags'
     target <- guessTarget path Nothing Nothing
     setTargets [target]
@@ -162,6 +173,73 @@ runPipeline path includes = do
 capitalize :: String -> String
 capitalize [] = []
 capitalize (c:cs) = toUpper c : cs
+
+-- | The session-setup DynFlags transform shared by BOTH the normal and the
+-- session paths, so the extracted Core is identical regardless of which entry
+-- point is used: 'canonicalizeDFlags' + the genericPlatform spoof + exposing
+-- the @ghc@ package + clearing host SIMD. Factored out (was inlined in
+-- 'runNormalPipeline') purely to keep the two paths from drifting; the produced
+-- 'DynFlags' is byte-for-byte what the normal path always built. See the long
+-- commentary at the 'runNormalPipeline' call site for the rationale of each field.
+extractionDynFlags :: DynFlags -> [FilePath] -> DynFlags
+extractionDynFlags dflags includes = canonicalizeDFlags dflags
+  { importPaths = importPaths dflags ++ includes
+  , packageFlags = packageFlags dflags
+      ++ [ExposePackage "-package ghc" (PackageArg "ghc")
+                        (ModRenaming True [])]
+  , targetPlatform = genericPlatform
+  , sseVersion = Nothing
+  , bmiVersion = Nothing
+  , avx = False
+  , avx2 = False
+  , avx512cd = False
+  , avx512er = False
+  , avx512f = False
+  , avx512pf = False
+  }
+
+-- | The SESSION extraction path (active 'SessionScope' only). Inject the live
+-- @Val.G<g>@ ifaces into the HPT, then compile the reference target through the
+-- normal module pipeline ('summariseFile' → 'typecheckModule' → 'hscDesugar' →
+-- 'core2core'), bypassing downsweep (which rejects source-less session modules).
+-- Single-module: the wrapped turn imports the session/lib modules + base, so its
+-- own ModGuts hold the JIT-able Core. Returns the same 'PipelineResult' shape as
+-- the normal path so all downstream translation is identical.
+runSessionPipeline :: SessionScope -> FilePath -> [FilePath] -> IO PipelineResult
+runSessionPipeline scope path includes = do
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    dflags <- getSessionDynFlags
+    setSessionDynFlags (extractionDynFlags dflags includes)
+    -- Inject the live session ifaces (readIface raw → typecheckIface → HPT +
+    -- source-less finder entry). NOTE: the gate already guaranteed the scope is
+    -- active; this is where the Option-C type plane enters the compile.
+    hsc0 <- getSession
+    hscInjected <- injectSessionScope scope hsc0
+    setSession hscInjected
+    hsc <- getSession
+    let hscEnv = hscUpdateFlags canonicalizeDFlags hsc
+        homeU  = hsc_home_unit hscEnv
+    esum <- liftIO $ summariseFile hscEnv homeU mempty path Nothing Nothing
+    modSum0 <- case esum of
+      Left _   -> liftIO $ ioError $ userError
+        ("runPipelineSession: summariseFile failed for " ++ path)
+      Right ms -> pure ms
+    let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
+    parsed      <- parseModule modSum
+    typechecked <- typecheckModule parsed
+    let tcGblEnv    = fst (tm_internals_ typechecked)
+        mCapturedTy = capturedUserType tcGblEnv
+    desugared  <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
+    simplified <- liftIO $ core2core hscEnv desugared
+    let guts = externalizeInternalTops simplified
+    hscFinal <- getSession
+    return PipelineResult
+      { prBinds        = mg_binds guts
+      , prTyCons       = mg_tcs guts
+      , prHscEnv       = hscUpdateFlags canonicalizeDFlags hscFinal
+      , prCapturedType = mCapturedTy
+      }
 
 -- | Read the inferred type of the @__user@ binding out of a module's
 -- typechecked type env and render it to a (re-injectable) string.
