@@ -11,7 +11,7 @@ current source of truth for *what to build*. Review target for adversarial revie
 | Piece | State |
 |---|---|
 | Value persistence (live JIT machine, heap roots, re-entry) | **Known-viable** (code-read: JITModule multi-round define/finalize confirmed in cranelift 0.129.1; GC external-root registry exists). Not built. |
-| Type carrying across turns (**Option C**: serialize binder type → fat `.hi` → reload) | **PROVEN** (spike `c044ee6`, `haskell/spike-optionc/Spike.hs`) for simple + exotic types. |
+| Type carrying across turns (**Option C**: serialize binder type → fat `.hi` → reload) | **PROVEN — viability** (`c044ee6`, simple+exotic typecheck) **AND production mechanism end-to-end:** front-half (`spike-extract`, merged `da1c238`: ref→external `NVar(stableVarId)`, thin iface, neg-control) + back-half (`spike-codegen`, `e17aee6`: `ExternalEnv` slot-load → live heap root, GC-live-read proven). |
 | Wave 0 scaffold/contracts | **MERGED** (`scaffold`, `type-capture`, `case-trap-test`, `fix-test-debt`); workspace green (50/0 bin suite). |
 | Lane A (declaration accumulation) | **Parked — needs re-spec** (the hand-rolled `=`-classifier is deleted; see §5.0). |
 | Wave 1–3 | Not started. |
@@ -96,7 +96,16 @@ recognize session-module Names (`Tidepool.Session.Val.*`) in the extract and rou
 reaches codegen intact; the `emit/expr.rs:368` Var-miss site resolves it via `ExternalEnv` → heap
 root. So: **iface = type (front-end only), direct-NVar + ExternalEnv = value, one `stableVarId` key.**
 This is new extract/codegen wiring (a third category beside "resolved" and "unresolved"), not a
-property we get for free — specify and test it explicitly in Wave 3.
+property we get for free. **Both halves are now SPIKE-PROVEN:**
+- *Front* (`spike-extract`, `da1c238`): the `isSessionValVar` exclusion in `resolveExternals`
+  (`Resolve.hs:205,222`) routes session refs to direct `NVar(stableVarId)`; thin iface blocks
+  inlining; Core via `summariseFile`→`hscDesugar`. Negative control: disabling it → `0x45` sentinel.
+- *Back* (`spike-codegen`, `e17aee6`): `ExternalEnv` maps the id → the stable `root_slot`
+  (`*mut *mut u8`); the Var-miss arm (membership-keyed, tag-agnostic, BEFORE the sentinel/trap path)
+  emits `from_external_slot` = `iconst(slot_addr)` + `load [slot]` → **GC-safe live read** (proven by
+  repointing `*slot` between finalize and run). Negative control: absent id → `unresolved_var_trap`.
+Wave 3 productionizes these (promote `isSessionValVar`→the `VarResolution` sum; `ExternalEnv`→`RootSlot`
+per the domain model §4), not re-discover them.
 
 **Fidelity test vehicle:** `nameStableString` over `tyConsOfType` (content-addressed). **NOT**
 `eqType`/`IfaceType (==)`/`ppr` — those report false-negatives across sessions purely from
