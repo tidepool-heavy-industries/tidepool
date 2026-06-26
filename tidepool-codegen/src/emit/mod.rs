@@ -111,6 +111,32 @@ impl SsaVal {
             SsaVal::Raw(v, _) | SsaVal::HeapPtr(v) => v,
         }
     }
+
+    /// Lower a seeded external heap pointer (from [`ExternalEnv`]) to a
+    /// **fresh `iconst`** `HeapPtr` at the current Var-miss site (Wave 1,
+    /// component C — GHCi-style session re-entry).
+    ///
+    /// A session binding is carried in [`ExternalEnv`] as a **raw heap
+    /// pointer**, not an SSA `Value`. SSA `Value`s are per-function; reusing one
+    /// across separately-compiled fragments would leak an SSA value across a
+    /// function boundary (a miscompile/UB trap). So each Var-miss site that
+    /// resolves to a seeded binding must materialize the pointer as a **fresh
+    /// constant in the current function** — exactly what this does. Never cache
+    /// or share the returned `SsaVal` across fragments.
+    ///
+    /// The result is declared stack-map-live like any other `HeapPtr`. The
+    /// pointed-to object is tenured/persistently-rooted in the session machine's
+    /// old space (Wave 1.A), which minor GC skips (`is_in_range` covers the
+    /// nursery only), so the copying collector never relocates it.
+    pub fn from_external_pointer(
+        builder: &mut cranelift_frontend::FunctionBuilder,
+        ptr: *const u8,
+    ) -> Self {
+        use cranelift_codegen::ir::{types, InstBuilder};
+        let v = builder.ins().iconst(types::I64, ptr as i64);
+        builder.declare_value_needs_stack_map(v);
+        SsaVal::HeapPtr(v)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -368,6 +368,22 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
         EmitFrame::Var(vid) => match args.ctx.env.get(&vid).copied() {
             Some(v) => Ok(v),
             None => {
+                // Session re-entry (Wave 1, component C): a Var that misses the
+                // local env but is seeded in the ExternalEnv resolves to its
+                // persistent heap pointer — the GHCi-style "reference a value
+                // bound in a prior fragment" path. Checked FIRST, before the
+                // error-sentinel / unresolved-var-trap handling: a session
+                // binder reaches codegen as an external `NVar(stableVarId)`
+                // (0xFE-tagged under Option C), but the override is keyed on
+                // ExternalEnv MEMBERSHIP, not on the tag — the tag is incidental
+                // (plans/ghci-implementation-plan.md §2/§3). Materialize a fresh
+                // iconst per fragment, never a shared SSA value (see
+                // `SsaVal::from_external_pointer`).
+                if let Some(ptr) = args.ctx.external_env.get(vid) {
+                    crate::coverage::hit("var:external_env");
+                    return Ok(SsaVal::from_external_pointer(args.builder, ptr));
+                }
+
                 let tag = (vid.0 >> 56) as u8;
                 if tag == tidepool_repr::ERROR_SENTINEL_TAG {
                     // Lazy poison: emit a constant pointer to a pre-allocated
