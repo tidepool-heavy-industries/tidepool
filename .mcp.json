@@ -4,7 +4,7 @@
       "args": [
         "node",
         "--papers",
-        "/home/inanna/dev/tidepool/.exo/node/1cfcbe5a-eb6c-4095-a230-98ba00ea265a/root.json"
+        "/home/inanna/dev/tidepool/.exo/worktrees/fix-test-debt/.exo/node.json"
       ],
       "command": "exo",
       "type": "stdio"
