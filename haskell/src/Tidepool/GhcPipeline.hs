@@ -6,6 +6,7 @@ module Tidepool.GhcPipeline
 import GHC
 import GHC.Driver.Main (hscDesugar, batchMsg)
 import GHC.Driver.Env (hscUpdateFlags, hsc_home_unit)
+import GHC.Unit.Home (homeUnitId)
 import GHC.Driver.Make (load', summariseFile)
 import GHC.Types.Error (mkUnknownDiagnostic)
 import GHC.Unit.Module.Graph (mapMG)
@@ -36,7 +37,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, when)
 import Data.Char (toUpper)
 import Tidepool.Session
-  ( SessionScope, isSessionScopeActive, injectSessionScope )
+  ( SessionScope(..), isSessionScopeActive, injectSessionScope, renderSessionModule )
 
 data PipelineResult = PipelineResult
   { prBinds  :: [CoreBind]
@@ -213,31 +214,59 @@ extractionDynFlags dflags includes = canonicalizeDFlags dflags
   }
 
 -- | The SESSION extraction path (active 'SessionScope' only). Inject the live
--- @Val.G<g>@ ifaces into the HPT, then compile the reference target through the
--- normal module pipeline ('summariseFile' → 'typecheckModule' → 'hscDesugar' →
--- 'core2core'), bypassing downsweep (which rejects source-less session modules).
--- Single-module: the wrapped turn imports the session/lib modules + base, so its
--- own ModGuts hold the JIT-able Core. Returns the same 'PipelineResult' shape as
--- the normal path so all downstream translation is identical.
+-- @Val.G<g>@ ifaces into the HPT, THEN run the SAME @depanal@/@load'@ downsweep
+-- as the normal path so the turn's home-package SOURCE dependencies
+-- (@Tidepool.Prelude@, @Tidepool.Effects@, the @Lib.G<g>@ decl modules) are
+-- compiled into the HPT — a reference turn imports @Tidepool.Prelude@ via the
+-- eval preamble, and a bare @summariseFile@ on the target alone leaves it
+-- "not loaded" (GHC-58427).
+--
+-- The source-less @Val.G<g>@ modules are already in the HPT + finder from the
+-- injection, so the downsweep finds their ifaces directly and does NOT try to
+-- summarise their (absent) source. The only difference from 'runNormalPipeline'
+-- is the injection step between 'setSessionDynFlags' and 'depanal'.
 runSessionPipeline :: SessionScope -> FilePath -> [FilePath] -> IO PipelineResult
 runSessionPipeline scope path includes = do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
     setSessionDynFlags (extractionDynFlags dflags includes)
-    -- Inject the live session ifaces (readIface raw → typecheckIface → HPT +
-    -- source-less finder entry). NOTE: the gate already guaranteed the scope is
-    -- active; this is where the Option-C type plane enters the compile.
+    target <- guessTarget path Nothing Nothing
+    setTargets [target]
+    hscPre <- getSession
+    let targetModName = capitalize (takeBaseName path)
+        targetHUM = mkModule (homeUnitId (hsc_home_unit hscPre))
+                             (mkModuleName targetModName)
+        -- The injected source-less @Val.G<g>@ modules: exclude from the
+        -- downsweep (no source to summarise) — the target's @import@ of them
+        -- resolves from the HPT entry the injection registers in phase 2.
+        excludedVal = map renderSessionModule (ssValIfaces scope)
+    modGraphRaw <- depanal excludedVal False
+    let unpoison ms =
+          ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
+    -- PHASE 1 — compile the turn's home-package SOURCE dependencies
+    -- (@Tidepool.Prelude@, @Tidepool.Effects@, @Lib.G<g>@) into the HPT, but NOT
+    -- the turn target itself (@LoadDependenciesOf@): the target imports the
+    -- source-less @Val@ modules, which only exist as injected ifaces, so it
+    -- cannot go through @load'@. A bare @summariseFile@ on the target (the old
+    -- mechanism) left @Tidepool.Prelude@ "not loaded" (GHC-58427).
+    _ <- load' Nothing (LoadDependenciesOf targetHUM)
+               mkUnknownDiagnostic (Just batchMsg) (mapMG unpoison modGraphRaw)
+    -- PHASE 2 — inject the live @Val.G<g>@ ifaces into the now dep-populated
+    -- HPT. AFTER @load'@, so its upsweep does not discard them; the subsequent
+    -- single-module @summariseFile@ compile (no further @load'@) preserves them.
     hsc0 <- getSession
     hscInjected <- injectSessionScope scope hsc0
     setSession hscInjected
+    -- PHASE 3 — compile the turn target as a SINGLE module. Its imports resolve
+    -- from the HPT: home-source deps from phase 1, @Val@ binders from phase 2.
     hsc <- getSession
     let hscEnv = hscUpdateFlags canonicalizeDFlags hsc
         homeU  = hsc_home_unit hscEnv
     esum <- liftIO $ summariseFile hscEnv homeU mempty path Nothing Nothing
     modSum0 <- case esum of
       Left _   -> liftIO $ ioError $ userError
-        ("runPipelineSession: summariseFile failed for " ++ path)
+        ("runSessionPipeline: summariseFile failed for " ++ path)
       Right ms -> pure ms
     let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
     parsed      <- parseModule modSum
