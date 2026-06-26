@@ -18,6 +18,12 @@
 
 pub mod binders;
 pub mod render;
+pub mod turn;
+
+pub use turn::{
+    classify_turn, compile_session_turn, BoundBinder, SessionBind, SessionTurnResult,
+    TurnClassification, ValueTier,
+};
 
 use std::path::{Path, PathBuf};
 

@@ -58,7 +58,7 @@ pub enum RuntimeError {
 }
 
 /// Extract module name from Haskell source (e.g. "module Expr where" -> "Expr").
-fn extract_module_name(source: &str) -> Option<String> {
+pub(crate) fn extract_module_name(source: &str) -> Option<String> {
     for line in source.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("module ") {
