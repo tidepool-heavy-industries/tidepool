@@ -72,6 +72,9 @@ pub struct JitEffectMachine {
     /// GC safepoint observes the flag and aborts execution with
     /// `YieldError::Cancelled` if it has been set. See [`Self::cancel_handle`].
     cancel_flag: Arc<AtomicBool>,
+    /// Session state for GHCi-style persistent machines (Wave 1.A).
+    /// `None` for one-shot machines created by [`Self::compile`].
+    session: Option<SessionState>,
 }
 
 /// External handle for cancelling a running `JitEffectMachine`.
@@ -111,25 +114,81 @@ impl CancelHandle {
     }
 }
 
+/// Session-level heap + cursor retained across runs (Wave 1.A).
+///
+/// `heap` is `None` until the first GC fires and migrates the live set off
+/// the machine's `Nursery` into a `Vec<u8>` owned here. `cursor` is the
+/// bump high-water mark (bytes from the start of `heap`, or from
+/// `nursery.start()` when `heap` is None) at the end of the last run —
+/// the next run resumes allocation from there.
+struct SessionState {
+    heap: Option<Vec<u8>>,
+    cursor: usize,
+    // Wave 1.A (Worker-Tenure): populated at bind time; scaffold only until tenure lands.
+    #[allow(dead_code)]
+    old_space: crate::old_space::OldSpace,
+}
+
 /// Ensures thread-local JIT registries are cleaned up even on early error return.
 ///
-/// LIFECYCLE SEAM (Wave 1.A, review item 2/4 — frozen contract, body unchanged).
-/// This drop is the per-run teardown. For the one-shot eval path that is
-/// correct: the machine dies with the run. For a GHCi-style *session*, the heap
-/// and roots must outlive a single run, so Wave 1.A will:
-///   - move `active_buffer` (the live heap after the first GC) ownership ONTO
-///     `JitEffectMachine`, so dropping `GcState` here no longer frees it;
-///   - retain session-scoped `PERSISTENT_ROOTS` here (only `clear_run_scratch`
-///     run-scoped state is wiped per run; `free_session_heap` runs at machine
-///     drop instead — see the `host_fns` seam stubs).
-///
-/// So a GC fired by `run_fragment` between two fragments cannot strand a
-/// persisted pointer. Until 1.A lands this calls `clear_gc_state` as before.
-struct RegistryGuard;
+/// For one-shot machines (`is_session = false`), Drop behaves as before.
+/// For session machines (`is_session = true`):
+///   - `reclaim` is set by `arm_reclaim` after the vmctx is at its final
+///     location; Drop reads `alloc_ptr` from the vmctx and calls
+///     `reclaim_session_heap` to move `active_buffer` back onto the machine
+///     BEFORE `clear_run_scratch` takes the GcState.
+///   - `clear_run_scratch` (not `clear_gc_state`) runs per-run; it drops
+///     only the GcState shell + RUST_ROOTS, leaving PERSISTENT_ROOTS alone.
+pub(crate) struct RegistryGuard {
+    is_session: bool,
+    /// Raw pointers captured by `arm_reclaim`. Both point into the same
+    /// stack frame as this guard (run / run_pure), which cannot have
+    /// returned by the time Drop runs. VMContext has no custom Drop, so its
+    /// bytes are valid on the stack even after the value is logically dropped.
+    reclaim: Option<(*mut Option<SessionState>, *const crate::context::VMContext)>,
+}
+
+impl RegistryGuard {
+    /// Arm the reclaim step for session machines. Called after the vmctx is
+    /// at its final stable location (local `vmctx` in run_pure, inside
+    /// `CompiledEffectMachine` in run).
+    ///
+    /// # Safety
+    /// - `session` must point to `JitEffectMachine::session` and remain
+    ///   valid until this guard drops (it's in the same call frame).
+    /// - `vmctx` must point to the VMContext used for this run and remain
+    ///   readable until Drop (no custom Drop on VMContext, so the stack
+    ///   bytes persist until the enclosing frame returns).
+    unsafe fn arm_reclaim(
+        &mut self,
+        session: *mut Option<SessionState>,
+        vmctx: *const crate::context::VMContext,
+    ) {
+        if self.is_session {
+            self.reclaim = Some((session, vmctx));
+        }
+    }
+}
 
 impl Drop for RegistryGuard {
     fn drop(&mut self) {
-        crate::host_fns::clear_gc_state();
+        // Reclaim the live heap buffer back onto the machine BEFORE
+        // clear_run_scratch takes GcState (which would free active_buffer).
+        if let Some((sess, vmctx)) = self.reclaim {
+            // SAFETY: vmctx points into the enclosing run/run_pure stack
+            // frame which is still live. VMContext has no custom Drop so its
+            // bytes are intact even after the value is logically dropped.
+            // sess points to JitEffectMachine::session in the same frame.
+            unsafe {
+                let ap = (*vmctx).alloc_ptr;
+                let (buf, cur) = crate::host_fns::reclaim_session_heap(ap);
+                if let Some(s) = (*sess).as_mut() {
+                    s.heap = buf;
+                    s.cursor = cur;
+                }
+            }
+        }
+        crate::host_fns::clear_run_scratch();
         crate::host_fns::clear_stack_map_registry();
         crate::host_fns::clear_cancel_flag();
         crate::host_fns::clear_parked_streams();
@@ -142,13 +201,17 @@ impl Drop for RegistryGuard {
     }
 }
 
+/// The compiled artifacts produced by [`JitEffectMachine::compile_inner`],
+/// shared by the one-shot (`compile`) and session (`compile_session`) ctors.
+type CompiledParts = (CodegenPipeline, Nursery, Result<ConTags, &'static str>, FuncId);
+
 impl JitEffectMachine {
-    /// Compile a CoreExpr for JIT execution.
-    pub fn compile(
+    /// Shared compilation body: normalise, emit, finalise.
+    fn compile_inner(
         expr: &CoreExpr,
         table: &DataConTable,
         nursery_size: usize,
-    ) -> Result<Self, JitError> {
+    ) -> Result<CompiledParts, JitError> {
         crate::debug::init_logging();
         // #313 defense: a duplicate VarId on the top-level Let spine means two
         // distinct top-level bindings silently shadow each other — fail loudly
@@ -164,7 +227,7 @@ impl JitEffectMachine {
         // boxed-literal wrapper constructors (e.g. a Rust-materialized aeson
         // `Number`'s LitDouble reaching `case x of { D# ds -> .. }`).
         pipeline.lit_wrappers = crate::emit::LitWrapperIds::from_table(table);
-        // One-shot path: no session bindings, so the external env is empty.
+        // No session bindings on initial compile, so the external env is empty.
         let func_id = crate::emit::expr::compile_expr(
             &mut pipeline,
             &expr,
@@ -173,16 +236,57 @@ impl JitEffectMachine {
         )
         .map_err(JitError::Compilation)?;
         pipeline.finalize()?;
-
         let tags = ConTags::from_table(table).map_err(|kind| kind.name());
         let nursery = Nursery::new(nursery_size);
+        Ok((pipeline, nursery, tags, func_id))
+    }
 
+    /// Compile a CoreExpr for one-shot JIT execution.
+    ///
+    /// The returned machine has no session state: the heap lives in the
+    /// machine's `Nursery` and is discarded after each run.
+    pub fn compile(
+        expr: &CoreExpr,
+        table: &DataConTable,
+        nursery_size: usize,
+    ) -> Result<Self, JitError> {
+        let (pipeline, nursery, tags, func_id) =
+            Self::compile_inner(expr, table, nursery_size)?;
         Ok(Self {
             pipeline,
             nursery,
             tags,
             func_id,
             cancel_flag: Arc::new(AtomicBool::new(false)),
+            session: None,
+        })
+    }
+
+    /// Compile a CoreExpr for GHCi-style session execution.
+    ///
+    /// The returned machine retains its heap across multiple runs: the live
+    /// heap after the first GC is moved into `SessionState::heap` and
+    /// re-installed on every subsequent `run`/`run_pure` call. Persistent
+    /// GC roots (registered via [`Self::register_persistent_root`]) survive
+    /// across runs and are cleared only when the machine is dropped.
+    pub fn compile_session(
+        expr: &CoreExpr,
+        table: &DataConTable,
+        nursery_size: usize,
+    ) -> Result<Self, JitError> {
+        let (pipeline, nursery, tags, func_id) =
+            Self::compile_inner(expr, table, nursery_size)?;
+        Ok(Self {
+            pipeline,
+            nursery,
+            tags,
+            func_id,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            session: Some(SessionState {
+                heap: None,
+                cursor: 0,
+                old_space: crate::old_space::OldSpace::new(),
+            }),
         })
     }
 
@@ -193,16 +297,60 @@ impl JitEffectMachine {
         CancelHandle(self.cancel_flag.clone())
     }
 
-    // LIFECYCLE SEAM (Wave 1.A): this is the per-run registry install that pairs
-    // with `RegistryGuard::drop`. Wave 1.A moves `active_buffer` (live heap) +
-    // persistent-root retention onto the machine here so `run_fragment` reuses a
-    // persistent heap instead of a per-run nursery view. Unchanged for Wave 0.
-    fn install_registries(&mut self) -> RegistryGuard {
+    /// Install per-run thread-local registries and return a drop guard.
+    ///
+    /// For session machines: re-points the GC state at the retained heap
+    /// buffer (if a GC has already run) OR at `nursery.start()` (first run
+    /// only). For one-shot machines: always points at `nursery.start()`.
+    pub(crate) fn install_registries(&mut self) -> RegistryGuard {
         crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
         crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
-        crate::host_fns::set_gc_state(self.nursery.start() as *mut u8, self.nursery.size());
+        match &mut self.session {
+            Some(s) => match s.heap.take() {
+                Some(buf) => crate::host_fns::install_session_buffer(buf),
+                None => crate::host_fns::set_gc_state(
+                    self.nursery.start() as *mut u8,
+                    self.nursery.size(),
+                ),
+            },
+            None => crate::host_fns::set_gc_state(
+                self.nursery.start() as *mut u8,
+                self.nursery.size(),
+            ),
+        }
         crate::host_fns::set_cancel_flag(self.cancel_flag.clone());
-        RegistryGuard
+        RegistryGuard {
+            is_session: self.session.is_some(),
+            reclaim: None,
+        }
+    }
+
+    /// Build a `VMContext` for a session run, re-pointing alloc_ptr at the
+    /// persistent cursor (component F).
+    ///
+    /// Reads the active GC region from `GC_STATE` (installed by
+    /// `install_registries` immediately before this call) and sets
+    /// `alloc_ptr = start + cursor` so the run resumes from the last
+    /// run's high-water mark rather than overwriting live data.
+    ///
+    /// # Panics
+    /// Panics if called without GC state installed or on a non-session machine.
+    fn make_session_vmctx(&self) -> crate::context::VMContext {
+        let (start, size) = crate::host_fns::gc_active_range()
+            .expect("GC state must be installed before make_session_vmctx");
+        let cursor = self
+            .session
+            .as_ref()
+            .expect("make_session_vmctx called on non-session machine")
+            .cursor;
+        // SAFETY: start..start+size is the session heap installed by
+        // install_registries. cursor <= size is maintained by reclaim_session_heap.
+        let mut vmctx = unsafe {
+            crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
+        };
+        // SAFETY: cursor <= size guaranteed by the reclaim invariant.
+        vmctx.alloc_ptr = unsafe { start.add(cursor) };
+        vmctx
     }
 
     /// Run to completion, dispatching effects through the handler HList.
@@ -221,15 +369,29 @@ impl JitEffectMachine {
         crate::signal_safety::install();
 
         // Install registries
-        let _guard = self.install_registries();
+        let mut _guard = self.install_registries();
 
         // SAFETY: get_function_ptr returns a finalized JIT code pointer. Transmuting to the
         // expected calling convention (vmctx -> result) is correct per our compilation contract.
         let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
             unsafe { std::mem::transmute(self.pipeline.get_function_ptr(self.func_id)) };
-        let vmctx = self.nursery.make_vmctx(crate::host_fns::gc_trigger);
+        let vmctx = if self.session.is_some() {
+            self.make_session_vmctx()
+        } else {
+            self.nursery.make_vmctx(crate::host_fns::gc_trigger)
+        };
 
         let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
+        // Arm reclaim so Drop can recover active_buffer → session.heap.
+        // SAFETY: machine.vmctx_mut() points into `machine` on this stack frame;
+        // CompiledEffectMachine has no custom Drop so the bytes are valid when
+        // _guard drops (machine drops first but the stack frame is still live).
+        unsafe {
+            _guard.arm_reclaim(
+                &mut self.session as *mut _,
+                machine.vmctx_mut() as *const _,
+            );
+        }
         crate::host_fns::reset_call_depth();
         crate::host_fns::set_exec_context("stepping main function");
         // SAFETY: with_signal_protection wraps the JIT call with sigsetjmp for crash recovery.
@@ -508,13 +670,21 @@ impl JitEffectMachine {
         crate::signal_safety::install();
 
         // Install registries
-        let _guard = self.install_registries();
+        let mut _guard = self.install_registries();
 
         // SAFETY: get_function_ptr returns a finalized JIT code pointer. Transmuting to the
         // expected calling convention (vmctx -> result) is correct per our compilation contract.
         let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
             unsafe { std::mem::transmute(self.pipeline.get_function_ptr(self.func_id)) };
-        let mut vmctx = self.nursery.make_vmctx(crate::host_fns::gc_trigger);
+        let mut vmctx = if self.session.is_some() {
+            self.make_session_vmctx()
+        } else {
+            self.nursery.make_vmctx(crate::host_fns::gc_trigger)
+        };
+        // Arm reclaim so Drop can recover active_buffer → session.heap.
+        // SAFETY: &vmctx lives on this stack frame; VMContext has no custom Drop
+        // so its bytes are valid when _guard drops (which is before run_pure returns).
+        unsafe { _guard.arm_reclaim(&mut self.session as *mut _, &vmctx as *const _); }
 
         crate::host_fns::reset_call_depth();
         crate::host_fns::set_exec_context("running pure computation");
@@ -622,9 +792,25 @@ impl JitEffectMachine {
     /// until the session ends (the `JitEffectMachine` is dropped) — the copying
     /// GC will read and rewrite `*slot` in place on every collection until then.
     /// A slot freed or moved before machine teardown is a use-after-free.
-    #[allow(unused_variables)]
     pub unsafe fn register_persistent_root(&self, slot: *mut *mut u8) {
-        todo!("Wave 1.A: session-scoped persistent GC root (component D)")
+        // Delegates to the thread-local PERSISTENT_ROOTS registry (component D).
+        // The machine is pinned to one thread for its lifetime, so the
+        // thread-local and the machine share a lifetime; `free_session_heap`
+        // (machine drop) clears the registry. SAFETY: forwarded to the caller's
+        // contract documented above.
+        crate::host_fns::register_persistent_root(slot);
+    }
+}
+
+impl Drop for JitEffectMachine {
+    fn drop(&mut self) {
+        // Clear session-scoped thread-local roots whose slots point into the
+        // session heap Vec (which drops with self after this). Harmless for
+        // one-shot machines (free_session_heap does nothing if GC state is
+        // already absent, and no persistent roots are registered).
+        if self.session.is_some() {
+            crate::host_fns::free_session_heap();
+        }
     }
 }
 
@@ -761,6 +947,7 @@ fn signal_error_to_yield(e: crate::signal_safety::SignalError) -> Yield {
 mod tests {
     use super::*;
     use crate::yield_type::YieldError;
+    use serial_test::serial;
 
     /// Regression test: when a RuntimeError is pending and a signal fires,
     /// prefer the RuntimeError (more specific) over the raw signal number.
@@ -834,5 +1021,236 @@ mod tests {
             "Kill-switch failed to bypass VarId collision: {:?}",
             res_disabled.err()
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Wave 1.A seam tests
+    // ---------------------------------------------------------------------------
+
+    /// Build a Con-chain expr + DataConTable that forces >=1 GC under a small nursery.
+    /// Mirrors the gc_frame_walker.rs `build_con_chain` + `make_table_with_con` helpers.
+    fn make_gc_forcing_setup(
+        depth: usize,
+    ) -> (tidepool_repr::CoreExpr, tidepool_repr::DataConTable) {
+        use tidepool_repr::datacon::DataCon;
+        use tidepool_repr::types::{DataConId, Literal, VarId};
+        use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, TreeBuilder};
+
+        let mut bld = TreeBuilder::new();
+        let var_x = bld.push(CoreFrame::Var(VarId(0)));
+        let g1_rhs = bld.push(CoreFrame::Con {
+            tag: DataConId(1),
+            fields: vec![var_x],
+        });
+        let var_g1 = bld.push(CoreFrame::Var(VarId(1)));
+        let g2_rhs = bld.push(CoreFrame::Con {
+            tag: DataConId(1),
+            fields: vec![var_g1],
+        });
+        let final_con = bld.push(CoreFrame::Con {
+            tag: DataConId(1),
+            fields: vec![var_x],
+        });
+        let let_g2 = bld.push(CoreFrame::LetNonRec {
+            binder: VarId(2),
+            rhs: g2_rhs,
+            body: final_con,
+        });
+        let let_g1 = bld.push(CoreFrame::LetNonRec {
+            binder: VarId(1),
+            rhs: g1_rhs,
+            body: let_g2,
+        });
+        let lam_x = bld.push(CoreFrame::Lam {
+            binder: VarId(0),
+            body: let_g1,
+        });
+        let mut current = bld.push(CoreFrame::Lit(Literal::LitInt(42)));
+        for _ in 0..depth {
+            let f_var = bld.push(CoreFrame::Var(VarId(99)));
+            current = bld.push(CoreFrame::App {
+                fun: f_var,
+                arg: current,
+            });
+        }
+        bld.push(CoreFrame::LetRec {
+            bindings: vec![(VarId(99), lam_x)],
+            body: current,
+        });
+        let expr = bld.build();
+
+        let mut table = DataConTable::new();
+        table.insert(DataCon {
+            id: DataConId(1),
+            name: "C1".to_string(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![],
+            qualified_name: None,
+        });
+        for (i, kind) in crate::effect_machine::EffContKind::ALL.iter().enumerate() {
+            table.insert(DataCon {
+                id: DataConId(1000 + i as u64),
+                name: kind.name().to_string(),
+                tag: (1000 + i) as u32,
+                rep_arity: if matches!(
+                    kind,
+                    crate::effect_machine::EffContKind::Node
+                        | crate::effect_machine::EffContKind::Union
+                ) {
+                    2
+                } else {
+                    1
+                },
+                field_bangs: vec![],
+                qualified_name: None,
+            });
+        }
+        (expr, table)
+    }
+
+    /// Test (c): persistent roots survive a RegistryGuard drop; per-run rust
+    /// roots and GC state are cleared.
+    #[test]
+    #[serial]
+    fn test_persistent_root_survives_guard_drop() {
+        crate::host_fns::clear_persistent_roots();
+
+        // Register a persistent root (null heap ptr — GC skips null slots)
+        let mut persistent_slot: *mut u8 = std::ptr::null_mut();
+        unsafe {
+            crate::host_fns::register_persistent_root(
+                &mut persistent_slot as *mut *mut u8,
+            );
+        }
+        assert_eq!(crate::host_fns::persistent_roots_count(), 1);
+
+        // Register a per-run rust root
+        let mut rust_slot: *mut u8 = std::ptr::null_mut();
+        unsafe {
+            crate::host_fns::register_rust_root(&mut rust_slot as *mut *mut u8);
+        }
+        assert_eq!(crate::host_fns::rust_roots_mark(), 1);
+
+        // Simulate what RegistryGuard::drop does for the per-run half
+        crate::host_fns::clear_run_scratch();
+
+        // Persistent root must survive; rust roots and GC state must be gone
+        assert_eq!(
+            crate::host_fns::persistent_roots_count(),
+            1,
+            "persistent root must survive clear_run_scratch"
+        );
+        assert_eq!(
+            crate::host_fns::rust_roots_mark(),
+            0,
+            "rust roots must be cleared by clear_run_scratch"
+        );
+        assert!(
+            crate::host_fns::gc_active_range().is_none(),
+            "GC state must be cleared by clear_run_scratch"
+        );
+
+        // Cleanup
+        crate::host_fns::clear_persistent_roots();
+    }
+
+    /// Test (d): THE SEAM TEST — compile_session, run, verify heap retention,
+    /// verify install re-points, verify persistent root survives second run.
+    #[test]
+    #[serial]
+    fn test_session_heap_seam() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                crate::host_fns::clear_persistent_roots();
+                crate::host_fns::reset_test_counters();
+
+                let (expr, table) = make_gc_forcing_setup(40);
+                // 2 KiB nursery: forces >=1 GC for the 40-deep chain
+                let mut machine =
+                    JitEffectMachine::compile_session(&expr, &table, 2048)
+                        .expect("compile_session");
+
+                // --- Run 1 ---
+                let result1 = machine.run_pure().expect("run 1 should succeed");
+
+                assert!(
+                    crate::host_fns::gc_trigger_call_count() > 0,
+                    "GC must have fired during run 1 with 2 KiB nursery"
+                );
+                assert!(
+                    machine.session.as_ref().unwrap().heap.is_some(),
+                    "session.heap must be Some after GC (heap migrated off nursery)"
+                );
+                assert!(
+                    machine.session.as_ref().unwrap().cursor > 0,
+                    "session.cursor must be >0 after run 1"
+                );
+
+                // Capture the retained heap ptr BEFORE install takes it
+                let retained_heap_ptr = machine
+                    .session
+                    .as_ref()
+                    .unwrap()
+                    .heap
+                    .as_ref()
+                    .unwrap()
+                    .as_ptr();
+
+                // install_registries must RE-POINT at the retained buffer (not nursery.start())
+                let guard = machine.install_registries();
+                let (active_start, _) =
+                    crate::host_fns::gc_active_range().expect("GC state installed");
+                assert_eq!(
+                    active_start as *const u8,
+                    retained_heap_ptr,
+                    "install_registries must re-point GC state at the retained heap"
+                );
+                assert_ne!(
+                    active_start as *const u8,
+                    machine.nursery.start(),
+                    "install must NOT reset to nursery.start()"
+                );
+                // Drop the guard so reclaim runs and buffer goes back to session
+                drop(guard);
+
+                // --- Register a persistent root before run 2 ---
+                let mut persistent_slot: *mut u8 = std::ptr::null_mut();
+                unsafe {
+                    crate::host_fns::register_persistent_root(
+                        &mut persistent_slot as *mut *mut u8,
+                    );
+                }
+                assert_eq!(crate::host_fns::persistent_roots_count(), 1);
+
+                // --- Run 2 ---
+                let result2 = machine.run_pure().expect("run 2 should succeed");
+
+                // Results must be structurally equivalent (same program, same heap)
+                assert_eq!(
+                    format!("{:?}", result1),
+                    format!("{:?}", result2),
+                    "second run must produce the same value"
+                );
+
+                // Persistent root must have survived run 2's teardown
+                assert_eq!(
+                    crate::host_fns::persistent_roots_count(),
+                    1,
+                    "persistent root must survive run-2 teardown (clear_run_scratch)"
+                );
+
+                // Drop the machine: free_session_heap clears persistent roots
+                drop(machine);
+                assert_eq!(
+                    crate::host_fns::persistent_roots_count(),
+                    0,
+                    "persistent roots must be cleared by JitEffectMachine::drop"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

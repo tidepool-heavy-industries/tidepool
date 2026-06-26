@@ -17,6 +17,7 @@ pub mod host_fns;
 pub mod jit_machine;
 pub mod layout;
 pub mod nursery;
+pub mod old_space;
 pub mod pipeline;
 pub mod signal_safety;
 pub mod stack_map;
