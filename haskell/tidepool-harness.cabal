@@ -60,6 +60,34 @@ executable spike-extract
   hs-source-dirs:   spike-extract, src
   other-modules:
     Tidepool.GhcPipeline
+    Tidepool.Session
+    Tidepool.Translate
+    Tidepool.Resolve
+    Tidepool.FatIface
+  build-depends:
+    base         >= 4.20 && < 5,
+    ghc          >= 9.12 && < 9.13,
+    ghc-boot     >= 9.12 && < 9.13,
+    bytestring,
+    containers,
+    filepath,
+    directory,
+    process,
+    text,
+    mtl
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+
+-- Wave-3a acceptance test: drives the PRODUCTION Option-C surface
+-- (Tidepool.Session + runPipelineSession + translateModuleClosed) and asserts
+-- a session-binder reference reaches Core as external NVar(stableVarId).
+-- Run: cabal run session-c-test  (needs the nix with-packages GHC on PATH).
+executable session-c-test
+  main-is:          SessionCTest.hs
+  hs-source-dirs:   test-session, src
+  other-modules:
+    Tidepool.GhcPipeline
+    Tidepool.Session
     Tidepool.Translate
     Tidepool.Resolve
     Tidepool.FatIface
