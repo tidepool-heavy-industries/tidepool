@@ -19,6 +19,7 @@ use tidepool_repr::{CoreExpr, DataConTable};
 mod cache;
 pub mod paths;
 mod render;
+pub mod session;
 
 pub use render::{value_to_json, EvalResult};
 
@@ -98,7 +99,21 @@ pub fn compile_haskell(
     target: &str,
     include: &[&Path],
 ) -> Result<CompileResult, CompileError> {
-    let key = cache::cache_key(source, target, include);
+    compile_haskell_salted(source, target, include, None)
+}
+
+/// As [`compile_haskell`], but mixes `cache_salt` into the cache key. The
+/// declaration-accumulation lane ([`session::SessionLib`]) passes its
+/// `(session, generation)` salt so per-session, per-generation compilations
+/// never collide and a generation bump invalidates correctly. With `None` this
+/// is byte-for-byte identical to [`compile_haskell`].
+pub fn compile_haskell_salted(
+    source: &str,
+    target: &str,
+    include: &[&Path],
+    cache_salt: Option<&str>,
+) -> Result<CompileResult, CompileError> {
+    let key = cache::cache_key_salted(source, target, include, cache_salt);
     if let Some((expr_bytes, meta_bytes)) = cache::cache_load(&key) {
         // Attempt to deserialize cached data. If this fails, treat it as a cache
         // miss and fall through to recompilation instead of propagating the error.

@@ -26,6 +26,7 @@ import Data.Word (Word64)
 import Data.Text (Text)
 import qualified Data.Text as T
 
+import Tidepool.Binders (emitBinders)
 import Tidepool.GhcPipeline (runPipeline, PipelineResult(..), dumpCore)
 import Tidepool.Translate (translateBinds, translateModuleClosed, collectDataCons, collectUsedDataCons, collectTransitiveDCons, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO)
 import Tidepool.CborEncode (encodeTree, encodeMetadata)
@@ -34,9 +35,12 @@ main :: IO ()
 main = do
   rawArgs <- getArgs
   let args = parseArgs rawArgs
-  case argFiles args of
-    [] -> putStrLn "Usage: tidepool-harness [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] <file.hs> ..."
-    files -> mapM_ (processFile args) files
+  case (argEmitBinders args, argFiles args) of
+    (_, []) -> putStrLn "Usage: tidepool-harness [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] [--emit-binders <out.json>] <file.hs> ..."
+    -- Lane A: parse-only binder extraction. Emit the JSON contract for the
+    -- FIRST file and skip the Core pipeline entirely.
+    (Just out, file : _) -> emitBinders file (argIncludes args) out
+    (Nothing, files) -> mapM_ (processFile args) files
 
 data Args = Args
   { argOutDir :: Maybe FilePath
@@ -44,18 +48,20 @@ data Args = Args
   , argDumpCore :: Bool
   , argAllClosed :: Bool
   , argTargetModuleOnly :: Bool
+  , argEmitBinders :: Maybe FilePath
   , argIncludes :: [FilePath]
   , argFiles :: [String]
   }
 
 parseArgs :: [String] -> Args
-parseArgs = go (Args Nothing Nothing False False False [] [])
+parseArgs = go (Args Nothing Nothing False False False Nothing [] [])
   where
     go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
     go a ("--target" : name : rest) = go a { argTarget = Just name } rest
     go a ("--dump-core" : rest) = go a { argDumpCore = True } rest
     go a ("--all-closed" : rest) = go a { argAllClosed = True } rest
     go a ("--target-module-only" : rest) = go a { argTargetModuleOnly = True } rest
+    go a ("--emit-binders" : out : rest) = go a { argEmitBinders = Just out } rest
     go a ("--include" : dir : rest) = go a { argIncludes = argIncludes a ++ [dir] } rest
     go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
     go a [] = a

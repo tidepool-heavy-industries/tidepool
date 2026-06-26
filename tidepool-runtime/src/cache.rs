@@ -13,13 +13,37 @@ fn cache_dir() -> Option<PathBuf> {
 /// Computes a unique cache key for a compilation request.
 /// The key includes the source code, the target binder, and a fingerprint of
 /// all include directories to ensure cache invalidation when dependencies change.
+/// The unsalted cache key (the common eval path). Retained as the thin,
+/// named entry point used by the cache tests; production calls go through
+/// [`cache_key_salted`].
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn cache_key(source: &str, target: &str, include: &[&Path]) -> String {
+    cache_key_salted(source, target, include, None)
+}
+
+/// As [`cache_key`], but additionally mixes an optional `salt` into the key.
+/// Lane A passes `Some("session:<id>:gen:<g>")` so two sessions' identical-text
+/// `Lib.G<g>` modules never share an entry and a generation bump invalidates
+/// correctly (plan §3 R6). `None` reproduces the historical key byte-for-byte,
+/// so existing non-session cache entries stay valid.
+pub(crate) fn cache_key_salted(
+    source: &str,
+    target: &str,
+    include: &[&Path],
+    salt: Option<&str>,
+) -> String {
     let mut hasher = blake3::Hasher::new();
     // Length-prefixed framing (proptest_cache_layer F1a/F1b): NUL separators
     // alone let a NUL embedded in one field shift bytes across the boundary
     // (key("a\0b","c") == key("a","b\0c")), serving the wrong artifact.
     frame(&mut hasher, source.as_bytes());
     frame(&mut hasher, target.as_bytes());
+    // Salt is framed only when present, so a None call hashes identically to the
+    // pre-salt key (no mass cache invalidation for ordinary evals).
+    if let Some(s) = salt {
+        frame(&mut hasher, b"session-salt");
+        frame(&mut hasher, s.as_bytes());
+    }
 
     // Fingerprint include directories in their ORIGINAL order
     // (proptest_cache_layer F2): GHC receives `--include` flags in argument
@@ -359,6 +383,25 @@ mod tests {
 
         let k3 = cache_key("main = print 43", target, &[]);
         assert_ne!(k1, k3);
+    }
+
+    #[test]
+    #[serial]
+    fn test_cache_key_salt_isolates_sessions_and_gens() {
+        let (src, tgt) = ("import Tidepool.Session.Lib.G1\nr = 1", "r");
+        // No salt reproduces the historical key exactly (no mass invalidation).
+        assert_eq!(
+            cache_key(src, tgt, &[]),
+            cache_key_salted(src, tgt, &[], None)
+        );
+        // Distinct (session, gen) salts never collide — even on identical text.
+        let a = cache_key_salted(src, tgt, &[], Some("session:1:gen:1"));
+        let b = cache_key_salted(src, tgt, &[], Some("session:2:gen:1"));
+        let c = cache_key_salted(src, tgt, &[], Some("session:1:gen:2"));
+        assert_ne!(a, b, "different sessions must not share a key");
+        assert_ne!(a, c, "a generation bump must invalidate");
+        // A salt always diverges from the unsalted key.
+        assert_ne!(a, cache_key(src, tgt, &[]));
     }
 
     #[test]
