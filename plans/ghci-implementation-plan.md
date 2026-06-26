@@ -265,9 +265,15 @@ Wave-2/3 multi-turn sweeps are the proofs. Fidelity comparisons use `nameStableS
    routing session binders to direct `NVar(stableVarId)`. Negative control: disabling the exclusion
    collapses binders to the `0x45` sentinel (confirms B2). Promote `isSessionValVar` → the
    `VarResolution` sum (domain model §3) in the Wave-3 productionization.
-2. **Instance/orphan replay (kimi R4 — elevated, still open)** — NOT exotic-only: even `show sessionMap`
-   needs the relevant `Show`/`Ord` instances in scope. The injected ifaces (or in-scope session-library
-   modules) must carry/replay `mi_insts`. Real Wave-3 requirement; `spike-extract` noted what's needed.
+2. **Instance/orphan replay (kimi R4)** — REFINED by `spike-extract`'s r4Finding + the Wave-3a
+   productionization (commit `e67c02a`): a reference whose needed instance is a **library/base** instance
+   (`Ord Int`, `Num Int`, `Show (Map …)`, even `show sessionMap` where the elements are library types)
+   resolves at the USE site from the reference module's own imports — **no `mi_insts` replay required**
+   (proven: the thin Val iface carries no instances and the instance-using exotic case still emits Core).
+   Replay is needed ONLY for a **user/orphan** instance whose dfun is DEFINED in an injected session
+   module; manual injection of such a module hits the `if_rec_types` self-knot ("module … not loaded"
+   when the dfun thunk forces), so it is a **Wave-3b** item (arises only with Lane-A session types).
+   See `Tidepool.Session` header + `spike-extract` `r4Finding`.
 3. ~~Core-emission-with-injection (B4)~~ — **PROVEN** (`spike-extract`): Core emitted through the normal
    module pipeline (`summariseFile` → `typecheckModule` → `hscDesugar` → `core2core`) against an
    injected source-less session iface, for both simple and exotic types. Not `tcRnStmt`.
@@ -368,7 +374,11 @@ matches + inert for normal evals; `emit/expr.rs:383` checks `external_env` befor
   needed instances, or the injected session must re-register them. Concretely: collect the instances
   the binder's type/use depends on, include `mi_insts` in the (otherwise thin) session iface, and on
   inject `extendInstEnvList`/force-load orphans into the fresh session (`spike-extract Spike.hs:387-401`
-  scoped this). Required even for `show sessionMap`. Add to the domain model's iface types.
+  scoped this). **REFINED (Wave-3a, `e67c02a`):** this is required ONLY for USER/ORPHAN instances whose
+  dfun is defined in an injected session module — and that hits the `if_rec_types` self-knot, so it is
+  deferred to Wave-3b (it only arises with Lane-A session types). LIBRARY/base instances (incl.
+  `show sessionMap` when the map's elements are library types) resolve at the reference's use site with
+  NO replay — `typecheckIface` still reconstructs any carried `mi_insts` into `md_insts`. See §7.2.
 - **#7 Injection set + co-resolution policy.** Each turn inject **all live `Val.G<g>` ifaces** + the
   **latest `Lib.G<g>`** (the decl modules, on the include path) into the HPT before compiling the wrapped
   turn; `Lib` modules resolve normally, `Val` ifaces via `readIface`+HPT. Per-turn cost is O(live

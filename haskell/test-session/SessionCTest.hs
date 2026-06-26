@@ -162,7 +162,9 @@ checkBinder libdir targetName occ = do
       putStrLn $ "  -> emitted as NVar   : " ++ show found
       putStrLn $ "  -> any 0x45 sentinel : " ++ show sentinelForWant
       putStrLn $ "  -> in unresolved set : " ++ show inUnres
-      let go = found && isExternal && not inUnres
+      -- B2 detector is load-bearing: a collapse to the 0x45 error-sentinel must
+      -- fail the verdict, not merely be reported.
+      let go = found && isExternal && not inUnres && not sentinelForWant
       putStrLn $ "  RESULT: " ++ show (if go then GO else NOGO)
       pure (if go then GO else NOGO)
   where hex w = "0x" ++ showHex w ""
