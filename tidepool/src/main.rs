@@ -2648,7 +2648,7 @@ mod tests {
     }
 
     const EFFECTS_WITH_ROUNDTRIP_TESTS: &[&str] =
-        &["Console", "KV", "Fs", "SG", "Http", "Exec", "Llm", "Ask"];
+        &["Console", "KV", "Fs", "SG", "Http", "Exec", "Lsp", "Llm", "Ask"];
 
     #[test]
     fn all_effects_have_roundtrip_coverage() {
@@ -2671,9 +2671,9 @@ mod tests {
     #[test]
     fn handler_order_matches_standard_decls() {
         let decls = tidepool_mcp::standard_decls();
-        // HList order from main(): Console(0), KV(1), Fs(2), SG(3), Http(4), Exec(5), Llm(6)
-        // Ask(7) is handled by MCP server, not in main HList
-        let expected = ["Console", "KV", "Fs", "SG", "Http", "Exec", "Llm"];
+        // HList order from main(): Console(0), KV(1), Fs(2), SG(3), Http(4), Exec(5), Lsp(6), Llm(7)
+        // Ask(8) is handled by MCP server, not in main HList
+        let expected = ["Console", "KV", "Fs", "SG", "Http", "Exec", "Lsp", "Llm"];
         for (i, name) in expected.iter().enumerate() {
             assert_eq!(
                 decls[i].type_name, *name,
@@ -2856,6 +2856,28 @@ mod tests {
         assert!(matches!(req, ExecReq::RunIn(ref d, ref c) if d == "/tmp" && c == "ls"));
     }
 
+    // === Lsp FromCore tests (query dispatch, no daemon required) ===
+
+    #[test]
+    fn test_lsp_from_core_where() {
+        let table = full_effect_test_table();
+        let con_id = table.get_by_name("LspWhere").unwrap();
+        let sym = "my_function".to_string().to_value(&table).unwrap();
+        let val = Value::Con(con_id, vec![sym]);
+        let req = LspReq::from_value(&val, &table).unwrap();
+        assert!(matches!(req, LspReq::Where(ref s) if s == "my_function"));
+    }
+
+    #[test]
+    fn test_lsp_from_core_diagnostics() {
+        let table = full_effect_test_table();
+        let con_id = table.get_by_name("LspDiagnostics").unwrap();
+        let file = "src/main.rs".to_string().to_value(&table).unwrap();
+        let val = Value::Con(con_id, vec![file]);
+        let req = LspReq::from_value(&val, &table).unwrap();
+        assert!(matches!(req, LspReq::Diagnostics(ref f) if f == "src/main.rs"));
+    }
+
     // === Meta roundtrip tests ===
 
     #[test]
@@ -3034,6 +3056,7 @@ mod tests {
             SgHandler::new(cwd.clone()),
             HttpHandler,
             ExecHandler::new(cwd.clone()),
+            LspHandler::new(cwd.clone()),
             MockLlmHandler {
                 response: mock_response
             }
