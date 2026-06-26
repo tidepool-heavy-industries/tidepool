@@ -243,7 +243,20 @@ pub fn compile_and_run_pure(
     target: &str,
     include: &[&Path],
 ) -> Result<EvalResult, RuntimeError> {
-    let (expr, mut table, warnings) = compile_haskell(source, target, include)?;
+    compile_and_run_pure_salted(source, target, include, None)
+}
+
+/// As [`compile_and_run_pure`], but threads a `(session, generation)` cache salt
+/// (see [`compile_haskell_salted`]). The declaration-accumulation lane passes
+/// [`session::SessionLib::cache_salt`] so per-session, per-generation compiles
+/// of identical-text probes never collide and a generation bump invalidates.
+pub fn compile_and_run_pure_salted(
+    source: &str,
+    target: &str,
+    include: &[&Path],
+    cache_salt: Option<&str>,
+) -> Result<EvalResult, RuntimeError> {
+    let (expr, mut table, warnings) = compile_haskell_salted(source, target, include, cache_salt)?;
     if warnings.has_io {
         return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
     }

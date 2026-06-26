@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use serial_test::serial;
 use tidepool_repr::Generation;
 use tidepool_runtime::session::{ModuleEnv, SessionLib};
-use tidepool_runtime::{compile_and_run_pure, paths};
+use tidepool_runtime::{compile_and_run_pure_salted, paths};
 use tidepool_repr::SessionId;
 
 /// Locate the extract binary (env override, the worktree symlink, or the
@@ -82,10 +82,12 @@ fn probe(gen: Generation, ty: &str, expr: &str) -> String {
     )
 }
 
-/// Compile+run a probe against the session, returning the JSON result.
-fn run_probe(lib_dir: &Path, session_dir: &Path, src: &str) -> serde_json::Value {
+/// Compile+run a probe against the session, returning the JSON result. The
+/// session's `(session, generation)` salt is threaded into the cache key (the
+/// salt is load-bearing, not just plumbing — it isolates sessions/gens).
+fn run_probe(lib_dir: &Path, session_dir: &Path, salt: &str, src: &str) -> serde_json::Value {
     let include = [session_dir, lib_dir];
-    let result = compile_and_run_pure(src, "result", &include)
+    let result = compile_and_run_pure_salted(src, "result", &include, Some(salt))
         .unwrap_or_else(|e| panic!("probe failed to compile/run:\n{src}\n--- error ---\n{e}"));
     (&result).into()
 }
@@ -116,6 +118,7 @@ fn declarations_accumulate_and_types_coexist() {
     let r = run_probe(
         &lib_dir,
         lib.include_dir(),
+        &lib.cache_salt(),
         &probe(g1, "T.Text", "slug \"a b\""),
     );
     assert_eq!(r, serde_json::json!("a-b"), "turn 2: slug lowercases+hyphens");
@@ -128,6 +131,7 @@ fn declarations_accumulate_and_types_coexist() {
     let r = run_probe(
         &lib_dir,
         lib.include_dir(),
+        &lib.cache_salt(),
         &probe(g3, "T.Text", "slug \"a b\""),
     );
     assert_eq!(r, serde_json::json!("A B"), "turn 4: redefined slug wins");
@@ -144,6 +148,7 @@ fn declarations_accumulate_and_types_coexist() {
     let r = run_probe(
         &lib_dir,
         lib.include_dir(),
+        &lib.cache_salt(),
         &probe(
             g_new,
             "Int",
@@ -157,6 +162,7 @@ fn declarations_accumulate_and_types_coexist() {
     let r = run_probe(
         &lib_dir,
         lib.include_dir(),
+        &lib.cache_salt(),
         &probe(g_old, "Int", "case A of { A -> 10; B -> 20 }"),
     );
     assert_eq!(r, serde_json::json!(10), "turn 5: old Foo shape still resolvable");
@@ -165,6 +171,7 @@ fn declarations_accumulate_and_types_coexist() {
     let r = run_probe(
         &lib_dir,
         lib.include_dir(),
+        &lib.cache_salt(),
         &probe(g_new, "T.Text", "slug \"x y\""),
     );
     assert_eq!(r, serde_json::json!("X Y"), "newest gen re-exports `slug`");

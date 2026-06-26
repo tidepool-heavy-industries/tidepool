@@ -102,6 +102,16 @@ impl SessionLib {
     ///
     /// `decl_text` may contain several top-level declarations; their binders are
     /// classified together as this turn's introduced names.
+    ///
+    /// Syntactically-invalid declarations are rejected here (GHC's parser fails →
+    /// `SessionError::BinderExtraction`) and the log is left untouched. Two
+    /// limitations are out of Lane A's standalone scope and surface as *loud* GHC
+    /// errors at the next compile, not at `define`: (a) declarations that parse
+    /// but don't type-check (e.g. a body referencing a not-yet-defined name) poison
+    /// later generations, since the text is accumulated without typechecking; and
+    /// (b) class-method names are not tracked for shadowing — a later free function
+    /// colliding with a prior class method is an ambiguous-occurrence error rather
+    /// than a silent shadow.
     pub fn define(&mut self, decl_text: &str) -> Result<Generation, SessionError> {
         let items = binders::extract_binders(decl_text, &[self.root.as_path()])?;
         self.log.push(DeclTurn {

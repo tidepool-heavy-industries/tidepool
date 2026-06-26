@@ -167,23 +167,26 @@ pub struct RenderedModule {
 }
 
 /// The export items in scope (and re-exported) by `Lib.G<g-1>`, i.e. after
-/// applying shadowing across turns `0..g-1`. A later turn that redefines a name
-/// removes the colliding prior item(s) before adding its own (latest-wins for
-/// functions; reshape-coexistence for types is handled by the gen-versioned
-/// module split, not here).
+/// applying shadowing across turns `0..g-1`. A later turn redefines a prior item
+/// iff their **head names** match (a function redefines a same-named function; a
+/// `data Foo` redefines a prior `data Foo` — the spec's reshape case), removing
+/// the prior item before adding its own (latest-wins).
+///
+/// Matching is deliberately **head-name only**, NOT every introduced identifier:
+/// hiding on any shared constructor name would silently nuke an *unrelated*
+/// prior type that merely reused a constructor name. Cross-type constructor
+/// reuse instead surfaces as a loud GHC conflicting-export error at compile —
+/// the honest outcome for a genuinely ambiguous program (and out of Lane A's
+/// scope). Reshape-coexistence of a redefined type lives in the gen-versioned
+/// module split, not here.
 fn cumulative_exports_before(log: &DeclLog, gen_one_based: usize) -> Vec<ExportItem> {
     let mut acc: Vec<ExportItem> = Vec::new();
     for turn in log.turns.iter().take(gen_one_based.saturating_sub(1)) {
-        let new_names: Vec<&str> = turn.items.iter().flat_map(ExportItem::all_names).collect();
-        acc.retain(|prior| !shares_name(prior, &new_names));
+        let new_heads: Vec<&str> = turn.items.iter().map(ExportItem::head_name).collect();
+        acc.retain(|prior| !new_heads.contains(&prior.head_name()));
         acc.extend(turn.items.iter().cloned());
     }
     acc
-}
-
-/// Does `item` introduce any identifier in `names`?
-fn shares_name(item: &ExportItem, names: &[&str]) -> bool {
-    item.all_names().any(|n| names.contains(&n))
 }
 
 /// Render generation `gen` (1-based; must be `1..=log.turns.len()`) as a
@@ -201,11 +204,11 @@ pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> Rendere
     let this = &log.turns[g - 1];
     let prior = cumulative_exports_before(log, g);
 
-    // Names this turn (re)defines — drives both the `hiding` clause on the
-    // prior-gen import and the dedup of the re-export.
-    let new_names: Vec<&str> = this.items.iter().flat_map(ExportItem::all_names).collect();
+    // Heads this turn (re)defines — drives the `hiding` clause on the prior-gen
+    // import (head-name match only; see `cumulative_exports_before`).
+    let new_heads: Vec<&str> = this.items.iter().map(ExportItem::head_name).collect();
     let hidden_prior: Vec<&ExportItem> =
-        prior.iter().filter(|p| shares_name(p, &new_names)).collect();
+        prior.iter().filter(|p| new_heads.contains(&p.head_name())).collect();
 
     let prev_module = if g >= 2 {
         Some(SessionModule::lib(Generation((g - 1) as u64)))
@@ -342,6 +345,38 @@ mod tests {
         let r1 = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
         assert!(r1.source.contains("data Foo = A | B"));
         assert!(r1.source.contains("    Foo(..)"));
+    }
+
+    #[test]
+    fn unrelated_constructor_reuse_does_not_hide_prior_type() {
+        // Regression: head-name matching only. A later turn reusing a prior
+        // type's CONSTRUCTOR name in a *different* type must NOT hide the prior
+        // type — that would silently drop `Foo` and its sibling `B`.
+        let mut log = DeclLog::new();
+        log.push(turn("data Foo = A | B", vec![ty("Foo", &["A", "B"])]));
+        log.push(turn("data Bar = A | C", vec![ty("Bar", &["A", "C"])]));
+        let r = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
+        // Foo is NOT redefined → no `hiding (Foo(..))`; it stays re-exported.
+        assert!(!r.source.contains("hiding (Foo(..))"));
+        assert!(r.source.contains("import Tidepool.Session.Lib.G1\n"));
+        assert!(r.source.contains("module Tidepool.Session.Lib.G1,"));
+        assert!(r.source.contains("    Bar(..)"));
+    }
+
+    #[test]
+    fn multi_item_turn_hides_only_redefined_heads() {
+        // A turn that both redefines `slug` and adds a fresh `Greeter` type:
+        // only `slug` is hidden from the prior import; the new type is added.
+        let mut log = DeclLog::new();
+        log.push(turn("slug t = t", vec![val("slug")]));
+        log.push(turn(
+            "slug t = T.toUpper t\ndata Greeter = Hi | Yo",
+            vec![val("slug"), ty("Greeter", &["Hi", "Yo"])],
+        ));
+        let r = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
+        assert!(r.source.contains("import Tidepool.Session.Lib.G1 hiding (slug)"));
+        assert!(r.source.contains("    slug,"));
+        assert!(r.source.contains("    Greeter(..)"));
     }
 
     #[test]
