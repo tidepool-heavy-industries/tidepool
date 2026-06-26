@@ -235,18 +235,20 @@ Wave-2/3 multi-turn sweeps are the proofs. Fidelity comparisons use `nameStableS
 
 ---
 
-## 7. Open risks / unknowns (post-C-GO, post-kimi-r1)
+## 7. Open risks / unknowns (post-C-GO, post-kimi-r1, post-spike-extract)
 
-1. **Thin-iface synthesis (was B1)** — confirm we can build a session iface with NO `mi_extra_decls`
-   and NO `ifIdUnfolding` (strip them post-`mkIfaceTc`), and/or exclude `Tidepool.Session.*` from
-   `lookupFatIface`. Wave-3 first task.
-2. **Instance/orphan replay (kimi R4 — elevated)** — NOT exotic-only: even `show sessionMap` needs the
-   relevant `Show`/`Ord` instances in scope. The injected ifaces (or the in-scope session-library
-   modules) must carry/replay `mi_insts` for any instance a binding's type or a reference needs. Treat
-   as a real Wave-3 requirement, scoped in the C-port task.
-3. **Core-emission-with-injection (was B4)** — UNPROVEN; the spike only did `exprType`. Wave-3 first
-   task includes a follow-on micro-spike that emits Core referencing an injected binder via the normal
-   module pipeline (not `tcRnStmt`).
+1. ~~Thin-iface synthesis (B1)~~ — **PROVEN** (`spike-extract`, merged `da1c238`). The thin iface
+   prevents inlining; the production mechanism is the `isSessionValVar` exclusion in `resolveExternals`
+   (`Resolve.hs:206,222` — gated on the `Tidepool.Session.Val.` module prefix, inert for normal evals)
+   routing session binders to direct `NVar(stableVarId)`. Negative control: disabling the exclusion
+   collapses binders to the `0x45` sentinel (confirms B2). Promote `isSessionValVar` → the
+   `VarResolution` sum (domain model §3) in the Wave-3 productionization.
+2. **Instance/orphan replay (kimi R4 — elevated, still open)** — NOT exotic-only: even `show sessionMap`
+   needs the relevant `Show`/`Ord` instances in scope. The injected ifaces (or in-scope session-library
+   modules) must carry/replay `mi_insts`. Real Wave-3 requirement; `spike-extract` noted what's needed.
+3. ~~Core-emission-with-injection (B4)~~ — **PROVEN** (`spike-extract`): Core emitted through the normal
+   module pipeline (`summariseFile` → `typecheckModule` → `hscDesugar` → `core2core`) against an
+   injected source-less session iface, for both simple and exotic types. Not `tcRnStmt`.
 4. **Binder-name extraction coverage (kimi R5)** — verify `collectLStmtBinders`/`collectPatBinders`
    handle the bind forms we accept (`x <-`, `(a,b) <-`, `let x =`, pattern binds) in the extract.
 5. **Session-iface ↔ session-library Name resolution** — `x :: Foo` (Foo a Lane-A type): confirm the
