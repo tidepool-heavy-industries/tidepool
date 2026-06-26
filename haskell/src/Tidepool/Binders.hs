@@ -18,19 +18,32 @@ module Tidepool.Binders
   , extractBinders
   , renderBindersJson
   , emitBinders
+    -- * Statement binders (session-eval bind-vs-expr classification)
+  , StmtBinders(..)
+  , extractStmtBinders
+  , renderStmtBindersJson
+  , emitStmtBinders
   ) where
 
 import GHC
 import GHC.Hs
   ( HsDecl(..), TyClDecl(..), HsDataDefn(..), ConDecl(..)
   , hsmodDecls )
-import GHC.Hs.Utils (collectHsBindBinders, CollectFlag(..))
-import GHC.Driver.Session (importPaths)
+import GHC.Hs.Expr (StmtLR(..))
+import GHC.Hs.Utils (collectHsBindBinders, collectLStmtBinders, CollectFlag(..))
+import GHC.Driver.Session (importPaths, xopt_set)
+import GHC.LanguageExtensions (Extension(..))
+import GHC.Parser (parseStatement)
+import GHC.Parser.Lexer (ParseResult(..), unP, initParserState)
+import GHC.Driver.Config.Parser (initParserOpts)
+import GHC.Data.StringBuffer (stringToStringBuffer)
+import GHC.Data.FastString (mkFastString)
+import GHC.Types.SrcLoc (mkRealSrcLoc)
 import GHC.Types.Name.Reader (RdrName, rdrNameOcc)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.SrcLoc (unLoc)
 import Data.Foldable (toList)
-import Data.List (intercalate)
+import Data.List (intercalate, foldl')
 import System.Environment (lookupEnv)
 import System.Process (readProcess)
 
@@ -130,3 +143,71 @@ getLibdir = do
     Just dir -> pure dir
     Nothing  -> trim <$> readProcess "ghc" ["--print-libdir"] ""
   where trim = reverse . dropWhile (== '\n') . reverse
+
+--------------------------------------------------------------------------------
+-- Statement binders — the session-eval bind-vs-expr signal (Lane VALUE)
+--------------------------------------------------------------------------------
+
+-- | The result of classifying one session-eval turn. @sbKind@ is @"bind"@ when
+-- the turn statement introduces binders (@x <- e@ / @let x = e@), @"expr"@ for
+-- a bare expression (@BodyStmt@). @sbBinders@ are the bound names (GHC-sourced),
+-- empty for an expr turn. The Rust runtime picks the wrap template + the bind
+-- path from this signal — it never parses Haskell itself.
+data StmtBinders = StmtBinders
+  { sbKind    :: String
+  , sbBinders :: [String]
+  } deriving (Eq, Show)
+
+-- | Parse @src@ as a SINGLE do-statement with GHC's own parser (parse-only, no
+-- typecheck) and classify it. @BindStmt@/@LetStmt@ → @"bind"@ with the bound
+-- names ('collectLStmtBinders'); @BodyStmt@ (a bare expression) → @"expr"@ with
+-- no binders. A parse failure is reported as @"expr"@ (the runtime then compiles
+-- it through the bare-expression path, where GHC re-parses and reports any real
+-- syntax error loudly).
+extractStmtBinders :: String -> IO StmtBinders
+extractStmtBinders src = do
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    dflags0 <- getSessionDynFlags
+    let dflags = foldl' xopt_set dflags0 stmtExtensions
+        popts  = initParserOpts dflags
+        loc    = mkRealSrcLoc (mkFastString "<turn>") 1 1
+        buf    = stringToStringBuffer src
+        pstate = initParserState popts buf loc
+    pure $ case unP parseStatement pstate of
+      POk _ lstmt -> classifyStmt lstmt
+      PFailed _   -> StmtBinders "expr" []
+
+-- | Classify a parsed statement: bare expression (@BodyStmt@) is an EXPR turn;
+-- anything that binds (@BindStmt@, @LetStmt@, …) is a BIND turn carrying its
+-- bound names. 'collectLStmtBinders' handles var, tuple and as-patterns.
+classifyStmt :: LStmt GhcPs (LHsExpr GhcPs) -> StmtBinders
+classifyStmt lstmt =
+  let binders = map occStr (collectLStmtBinders CollNoDictBinders lstmt)
+  in case unLoc lstmt of
+       BodyStmt{} -> StmtBinders "expr" []
+       _          -> StmtBinders "bind" binders
+
+-- | Language extensions enabled for the parse-only statement classify. Broad
+-- enough to cover the surface the eval template accepts (lambda-case, tuple
+-- sections, block arguments, …) so a real turn classifies instead of failing to
+-- parse and silently falling back to @"expr"@.
+stmtExtensions :: [Extension]
+stmtExtensions =
+  [ LambdaCase, TupleSections, BlockArguments, MultiWayIf
+  , OverloadedStrings, ScopedTypeVariables, TypeApplications
+  , BangPatterns, ViewPatterns, OverloadedRecordDot
+  ]
+
+renderStmtBindersJson :: StmtBinders -> String
+renderStmtBindersJson (StmtBinders kind binders) =
+  "{\"kind\":" ++ jstr kind
+    ++ ",\"binders\":[" ++ intercalate "," (map jstr binders) ++ "]}"
+
+-- | Read the turn statement from @srcFile@, classify it, and write the JSON
+-- contract to @out@. Mirrors 'emitBinders'.
+emitStmtBinders :: FilePath -> FilePath -> IO ()
+emitStmtBinders srcFile out = do
+  src <- readFile srcFile
+  sb  <- extractStmtBinders src
+  writeFile out (renderStmtBindersJson sb)

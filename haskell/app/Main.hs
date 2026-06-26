@@ -7,40 +7,60 @@ import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Control.Exception (evaluate, try, SomeException, fromException)
-import Data.Char (toUpper)
-import Data.List (isPrefixOf)
-import Control.Monad (foldM)
+import Data.Char (toUpper, isDigit)
+import Data.List (isPrefixOf, stripPrefix)
+import Data.Maybe (fromMaybe, mapMaybe, isJust)
+import Control.Monad (foldM, when)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
 
 import GHC.Types.SourceError (SourceError)
-import GHC (moduleName, moduleNameString)
+import GHC (moduleName, moduleNameString, TyCon)
+import GHC.Driver.Env (HscEnv)
 import GHC.Core (CoreBind, Bind(..))
 import GHC.Core.DataCon (DataCon)
 import GHC.Types.Name (nameOccName, isExternalName, nameModule_maybe)
 import GHC.Types.Id (idName)
-import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.Name.Occurrence (occNameString, mkVarOcc)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Var (varUnique)
 import Data.Word (Word64)
 import Data.Text (Text)
 import qualified Data.Text as T
 
-import Tidepool.Binders (emitBinders)
-import Tidepool.GhcPipeline (runPipeline, PipelineResult(..), dumpCore)
-import Tidepool.Translate (translateBinds, translateModuleClosed, collectDataCons, collectUsedDataCons, collectTransitiveDCons, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO)
+import Tidepool.Binders (emitBinders, emitStmtBinders)
+import Tidepool.GhcPipeline
+  ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
+  , stripMonadHead, isClosureType, renderType )
+import Tidepool.Session
+  ( SessionScope(..), SessionModule(..), SessionModuleKind(..), Generation(..)
+  , sessionModuleString, sessionBinderName
+  , mkThinSessionIface, writeSessionIface )
+import Tidepool.Translate (translateBinds, translateModuleClosed, collectDataCons, collectUsedDataCons, collectTransitiveDCons, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
 import Tidepool.CborEncode (encodeTree, encodeMetadata)
 
 main :: IO ()
 main = do
   rawArgs <- getArgs
   let args = parseArgs rawArgs
-  case (argEmitBinders args, argFiles args) of
-    (_, []) -> putStrLn "Usage: tidepool-harness [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] [--emit-binders <out.json>] <file.hs> ..."
-    -- Lane A: parse-only binder extraction. Emit the JSON contract for the
-    -- FIRST file and skip the Core pipeline entirely.
-    (Just out, file : _) -> emitBinders file (argIncludes args) out
-    (Nothing, files) -> mapM_ (processFile args) files
+  case argFiles args of
+    [] -> putStrLn "Usage: tidepool-harness [--output-dir <dir>] [--target <name>] [--include <dir>] [--dump-core] [--emit-binders <out.json>] [--emit-stmt-binders <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] <file.hs> ..."
+    (file : _)
+      -- Statement binder extraction (parse-only): bind-vs-expr + bound names
+      -- for one session-eval turn. Fast path, no Core pipeline.
+      | Just out <- argEmitStmtBinders args -> emitStmtBinders file out
+      -- Lane A: parse-only declaration binder extraction for the FIRST file.
+      | Just out <- argEmitBinders args     -> emitBinders file (argIncludes args) out
+      -- Session mode (Wave 3b): bind/reference turn with iface injection +
+      -- (for binds) thin-iface write + BoundBinder sidecar.
+      | isSessionMode args                  -> mapM_ (processSessionFile args) (argFiles args)
+      -- Normal one-shot extraction (byte-identical to historical behaviour).
+      | otherwise                           -> mapM_ (processFile args) (argFiles args)
+
+-- | A session-aware turn: any of the @--session-*@ flags are present. Reference
+-- turns set @--session-root@ (+ @--inject-val@); bind turns add @--session-bind@.
+isSessionMode :: Args -> Bool
+isSessionMode args = argSessionBind args || isJust (argSessionRoot args)
 
 data Args = Args
   { argOutDir :: Maybe FilePath
@@ -51,10 +71,19 @@ data Args = Args
   , argEmitBinders :: Maybe FilePath
   , argIncludes :: [FilePath]
   , argFiles :: [String]
+  -- Wave 3b session-eval value binding:
+  , argEmitStmtBinders :: Maybe FilePath
+  , argSessionBind :: Bool
+  , argBindName :: Maybe String
+  , argBindGen :: Maybe Word64
+  , argSessionRoot :: Maybe FilePath
+  , argInjectVals :: [String]
+  , argEmitBoundBinders :: Maybe FilePath
   }
 
 parseArgs :: [String] -> Args
-parseArgs = go (Args Nothing Nothing False False False Nothing [] [])
+parseArgs = go (Args Nothing Nothing False False False Nothing [] []
+                     Nothing False Nothing Nothing Nothing [] Nothing)
   where
     go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
     go a ("--target" : name : rest) = go a { argTarget = Just name } rest
@@ -62,6 +91,13 @@ parseArgs = go (Args Nothing Nothing False False False Nothing [] [])
     go a ("--all-closed" : rest) = go a { argAllClosed = True } rest
     go a ("--target-module-only" : rest) = go a { argTargetModuleOnly = True } rest
     go a ("--emit-binders" : out : rest) = go a { argEmitBinders = Just out } rest
+    go a ("--emit-stmt-binders" : out : rest) = go a { argEmitStmtBinders = Just out } rest
+    go a ("--session-bind" : rest) = go a { argSessionBind = True } rest
+    go a ("--bind-name" : n : rest) = go a { argBindName = Just n } rest
+    go a ("--bind-gen" : g : rest) = go a { argBindGen = Just (read g) } rest
+    go a ("--session-root" : dir : rest) = go a { argSessionRoot = Just dir } rest
+    go a ("--inject-val" : m : rest) = go a { argInjectVals = argInjectVals a ++ [m] } rest
+    go a ("--emit-bound-binders" : out : rest) = go a { argEmitBoundBinders = Just out } rest
     go a ("--include" : dir : rest) = go a { argIncludes = argIncludes a ++ [dir] } rest
     go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
     go a [] = a
@@ -168,36 +204,10 @@ processFile args path = do
         BS.writeFile metaFile metaCbor
         putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
 
-      (Just targetName, False) -> do
-        -- Whole-module mode: serialize all bindings as nested lets around the target
-        (nodes, usedDCs, unresolved, reachBinds) <- translateModuleClosed hscEnv binds targetName
-        if not (null unresolved) then do
-          let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
-          error $ "Unresolved external(s): " ++ unwords names
-            ++ "\nThese functions don't expose their implementation to the GHC API."
-            ++ "\nDefine them in your source or use equivalent inline definitions."
-        else return ()
-        let cbor = encodeTree nodes
-        let outFile = outDir </> targetName ++ ".cbor"
-        BS.writeFile outFile cbor
-        putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
-
-        -- Write metadata: merge TyCon-derived + translation-derived + raw-binding-scan + transitive + wired-in
-        let tyconMeta = collectDataCons tycons
-            usedMeta = map dcToMeta (Map.elems usedDCs)
-            scanMeta = collectUsedDataCons reachBinds
-            transitiveMeta = collectTransitiveDCons reachBinds
-            wiredInMeta = wiredInDataCons
-            -- Highest priority first; mergeMetaPreserving keeps colliding
-            -- (same-varId, different-qualified-name) entries distinct so the
-            -- loader rejects them loudly instead of one silently winning.
-            allMeta = mergeMetaPreserving
-                        [ wiredInMeta, tyconMeta, usedMeta, scanMeta, transitiveMeta ]
-            hasIO = targetBindingHasIO binds targetName
-        let metaCbor = encodeMetadata allMeta hasIO mCapturedTy
-        let metaFile = outDir </> "meta.cbor"
-        BS.writeFile metaFile metaCbor
-        putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
+      (Just targetName, False) ->
+        -- Whole-module mode: serialize all bindings as nested lets around the
+        -- target (shared with the session path; see 'writeWholeModuleClosed').
+        writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy targetName
 
       (Nothing, False) -> do
         -- Per-binding mode (original behavior)
@@ -238,6 +248,139 @@ processFile args path = do
         Nothing -> hPutStrLn stderr $ "Error: " ++ show e
       exitFailure
     Right () -> return ()
+
+-- | Whole-module closed emission: translate all bindings as nested lets around
+-- @targetName@, write its CBOR + the merged DataCon meta. Shared by the normal
+-- whole-module mode ('processFile') and the Wave-3b session modes
+-- ('processSessionFile') so the runtime gets identical JIT-able Core either way.
+writeWholeModuleClosed :: FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> String -> IO ()
+writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy targetName = do
+  (nodes, usedDCs, unresolved, reachBinds) <- translateModuleClosed hscEnv binds targetName
+  if not (null unresolved) then do
+    let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
+    error $ "Unresolved external(s): " ++ unwords names
+      ++ "\nThese functions don't expose their implementation to the GHC API."
+      ++ "\nDefine them in your source or use equivalent inline definitions."
+  else return ()
+  let cbor = encodeTree nodes
+  let outFile = outDir </> targetName ++ ".cbor"
+  BS.writeFile outFile cbor
+  putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
+
+  -- Write metadata: merge TyCon-derived + translation-derived + raw-binding-scan + transitive + wired-in
+  let tyconMeta = collectDataCons tycons
+      usedMeta = map dcToMeta (Map.elems usedDCs)
+      scanMeta = collectUsedDataCons reachBinds
+      transitiveMeta = collectTransitiveDCons reachBinds
+      wiredInMeta = wiredInDataCons
+      -- Highest priority first; mergeMetaPreserving keeps colliding
+      -- (same-varId, different-qualified-name) entries distinct so the
+      -- loader rejects them loudly instead of one silently winning.
+      allMeta = mergeMetaPreserving
+                  [ wiredInMeta, tyconMeta, usedMeta, scanMeta, transitiveMeta ]
+      hasIO = targetBindingHasIO binds targetName
+  let metaCbor = encodeMetadata allMeta hasIO mCapturedTy
+  let metaFile = outDir </> "meta.cbor"
+  BS.writeFile metaFile metaCbor
+  putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
+
+-- | A Wave-3b session-eval turn (reference or bind). Compile through
+-- 'runPipelineSession' with the live @Val.G<g>@ ifaces injected (so refs to
+-- earlier bindings resolve), emit the JIT-able Core for @result@, and — on a
+-- bind turn — capture the bound value's type, write the thin session iface, and
+-- emit the BoundBinder sidecar. Non-session extraction stays on 'processFile'.
+processSessionFile :: Args -> FilePath -> IO ()
+processSessionFile args path = do
+  putStrLn $ "Processing (session): " ++ path
+  let scope = SessionScope
+        { ssRoot      = fromMaybe "" (argSessionRoot args)
+        , ssValIfaces = mapMaybe parseValModule (argInjectVals args)
+        }
+      targetName = fromMaybe "result" (argTarget args)
+  res <- try $ do
+    result <- runPipelineSession (Just scope) path (argIncludes args)
+    let binds  = prBinds result
+        tycons = prTyCons result
+        hscEnv = prHscEnv result
+        mCapturedTy = fmap T.pack (prCapturedType result)
+    putStrLn $ "  Top-level bindings: " ++ show (length binds)
+    if argDumpCore args then putStrLn (dumpCore binds) else return ()
+    let outDir = case argOutDir args of
+          Just dir -> dir
+          Nothing  -> takeDirectory path </> takeBaseName path ++ "_cbor"
+    createDirectoryIfMissing True outDir
+    -- The JIT-able Core for the target (same emission as whole-module mode).
+    writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy targetName
+    -- BIND turn: capture the bound type, mint+write the thin iface, emit sidecar.
+    when (argSessionBind args) (emitBindArtifacts args result)
+  case res of
+    Left (e :: SomeException) -> do
+      case fromException e of
+        Just (_se :: SourceError) -> hPutStrLn stderr "Compilation failed."
+        Nothing -> hPutStrLn stderr $ "Error: " ++ show e
+      exitFailure
+    Right () -> return ()
+
+-- | The BIND-turn artifacts: the bound value's type @T@ (stripped from
+-- @result :: Eff stack T@), the thin @Tidepool.Session.Val.G<g>@ iface carrying
+-- @x :: T@, and the BoundBinder JSON the runtime consumes (the @0xFE@-tagged
+-- 'stableVarId', the tier, the type display). The iface + the id are computed
+-- the SAME way a later reference turn recomputes the id (module:occ hash), so
+-- the value plane and type plane agree on one key.
+emitBindArtifacts :: Args -> PipelineResult -> IO ()
+emitBindArtifacts args result = do
+  bindName <- requireArg "--bind-name" (argBindName args)
+  g        <- requireArg "--bind-gen" (argBindGen args)
+  root     <- requireArg "--session-root" (argSessionRoot args)
+  effTy    <- case prResultType result of
+    Just t  -> return t
+    Nothing -> error "session-bind: could not capture the type of `result` \
+                     \(no such top-level binder typechecked)"
+  let hsc    = prHscEnv result
+      sm      = SessionModule ValMod (Generation g)
+      t       = stripMonadHead effTy           -- Eff stack T -> T
+      tier    = if isClosureType t then "Tier1Closure" else "Tier0Data"
+      tdisp   = renderType t
+      occ     = mkVarOcc bindName
+      varid   = stableVarId (sessionBinderName hsc sm occ)
+      modStr  = sessionModuleString sm
+  iface <- mkThinSessionIface hsc sm [(occ, t)]
+  writeSessionIface hsc root sm iface
+  putStrLn $ "  Wrote session iface: " ++ modStr ++ " (" ++ bindName
+             ++ " :: " ++ tdisp ++ ", " ++ tier ++ ", varId " ++ show varid ++ ")"
+  case argEmitBoundBinders args of
+    Just out -> do
+      writeFile out (renderBoundBinderJson bindName varid modStr tier tdisp)
+      putStrLn $ "  Wrote bound-binder sidecar: " ++ out
+    Nothing -> return ()
+
+-- | Parse a @--inject-val@ module name (@Tidepool.Session.Val.G<n>@) back into a
+-- 'SessionModule'. 'Nothing' for any other string (silently dropped — the
+-- runtime only ever passes well-formed Val module names).
+parseValModule :: String -> Maybe SessionModule
+parseValModule s = case stripPrefix "Tidepool.Session.Val.G" s of
+  Just gs | not (null gs), all isDigit gs ->
+    Just (SessionModule ValMod (Generation (read gs)))
+  _ -> Nothing
+
+requireArg :: String -> Maybe a -> IO a
+requireArg flag = maybe (error ("session-bind requires " ++ flag)) return
+
+-- | The BoundBinder JSON sidecar (single binder; the MVP bind path). @varId@ is
+-- a DECIMAL STRING of the u64 — JSON numbers are f64 and would lose 64-bit
+-- precision, so the runtime parses it with @u64::from_str@.
+renderBoundBinderJson :: String -> Word64 -> String -> String -> String -> String
+renderBoundBinderJson name varid modul tier tdisp =
+  "{\"binders\":[{\"name\":" ++ js name
+    ++ ",\"varId\":" ++ js (show varid)
+    ++ ",\"module\":" ++ js modul
+    ++ ",\"tier\":" ++ js tier
+    ++ ",\"typeDisplay\":" ++ js tdisp ++ "}]}"
+  where
+    js str = '"' : concatMap esc str ++ "\""
+    esc '"'  = "\\\""
+    esc '\\' = "\\\\"
+    esc c    = [c]
 
 -- | Module name from file basename, mirroring GhcPipeline's convention.
 capitalizeMod :: String -> String

@@ -65,6 +65,8 @@ module Tidepool.Session
   , writeSessionIface
   , injectSessionIface
   , injectSessionScope
+    -- * Binder identity (for the value-plane stableVarId)
+  , sessionBinderName
   ) where
 
 import GHC.Driver.Env
@@ -72,7 +74,7 @@ import GHC.Driver.Env
 import GHC.Driver.Session (targetProfile)
 
 import GHC.Types.Avail (AvailInfo(..))
-import GHC.Types.Name (mkExternalName)
+import GHC.Types.Name (Name, mkExternalName)
 import GHC.Types.Name.Occurrence (OccName)
 import GHC.Types.Id (mkVanillaGlobal)
 import GHC.Types.TyThing (TyThing(..))
@@ -199,6 +201,18 @@ mkThinSessionIface hsc sm binders = pure iface
     iface   = set_mi_exports exports
             $ set_mi_decls   decls
             $ emptyFullModIface modl
+
+-- | The external 'Name' a session value binder occupies: module
+-- @Tidepool.Session.Val.G<g>@, the given 'OccName'. Its 'Translate.stableVarId'
+-- (= @0xFE<<56 | fingerprintString("<module>:<occ>").hi64@) is the id a later
+-- reference turn recomputes from the injected iface's external @Var@ — so the
+-- bind turn and every reference turn agree on the same value-plane key. The
+-- 'Unique' is irrelevant to that hash (it keys on module-name + occ strings
+-- only), so a fixed seed is fine.
+sessionBinderName :: HscEnv -> SessionModule -> OccName -> Name
+sessionBinderName hsc sm occ =
+  mkExternalName (mkUniqueGrimily 0) modl occ noSrcSpan
+  where modl = mkModule (homeUnitAsUnit (hsc_home_unit hsc)) (renderSessionModule sm)
 
 -- | A deterministic, collision-free-within-an-iface 'Unique' seed for the
 -- @i@-th binder of session module @sm@. Large base to stay clear of builtin

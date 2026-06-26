@@ -1,5 +1,7 @@
 module Tidepool.GhcPipeline
-  ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore ) where
+  ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
+    -- * Bound-value type analysis (Wave 3b BIND mode)
+  , stripMonadHead, isClosureType, renderType ) where
 
 import GHC
 import GHC.Driver.Main (hscDesugar, batchMsg)
@@ -17,6 +19,8 @@ import GHC.Core (CoreBind, Bind(..), Expr(..), Alt(..))
 import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, ppr)
 import GHC.Types.Id (idName, idType)
+import GHC.Core.Type (Type, splitAppTy_maybe, isFunTy)
+import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Tc.Types (TcGblEnv, tcg_type_env)
 import GHC.Types.Name (nameOccName, nameUnique, mkExternalName)
@@ -49,6 +53,13 @@ data PipelineResult = PipelineResult
   -- but cross-turn typechecking of references (round-3 plan) may need a
   -- structured @IfaceType@ instead of this string. See plans/ghci-swarm-orchestration.md §0.3.
   , prCapturedType :: Maybe String
+  -- | The GHC 'Type' of the target module's @result@ binding, captured for the
+  -- Wave-3b BIND mode (the value-binding turn). For @result = do { x <- action;
+  -- pure x } :: Eff stack T@ this is the FULL @Eff stack T@; 'stripMonadHead'
+  -- recovers the bound value type @T@. 'Nothing' when the module has no @result@
+  -- binder (every non-bind extraction — reference turns, fixtures, one-shot
+  -- evals — so the field is inert off the bind path).
+  , prResultType :: Maybe Type
   }
 
 -- | The normal one-shot eval extraction. Byte-identical to its historical
@@ -148,15 +159,17 @@ runNormalPipeline path includes = do
       -- optimization can inline/rename @__user@ away. Types live on the Id in
       -- the typechecked type env; our CBOR drops them downstream (Translate.hs).
       let mCapturedTy = capturedUserType tcGblEnv
+          mResultTy   = capturedBindingType "result" tcGblEnv
       desugared <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
       simplified <- liftIO $ core2core hscEnv desugared
-      return (externalizeInternalTops simplified, mCapturedTy)
+      return (externalizeInternalTops simplified, mCapturedTy, mResultTy)
     -- Merge: dependency module bindings first, target module last
     let targetModName = capitalize (takeBaseName path)
         isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
-        allGuts = map fst results
-    (targetGuts, depGuts, capturedTy) <- case filter (isTargetMod . fst) results of
-      ((tgt, ty):_) -> return (tgt, [g | g <- allGuts, mg_module g /= mg_module tgt], ty)
+        fst3 (g, _, _) = g
+        allGuts = map fst3 results
+    (targetGuts, depGuts, capturedTy, resultTy) <- case filter (isTargetMod . fst3) results of
+      ((tgt, ty, rty):_) -> return (tgt, [g | g <- allGuts, mg_module g /= mg_module tgt], ty, rty)
       []      -> liftIO $ ioError $ userError $
         "Target module '" ++ targetModName ++ "' not found among compiled modules: "
         ++ show (map (moduleNameString . moduleName . mg_module) allGuts)
@@ -168,6 +181,7 @@ runNormalPipeline path includes = do
       , prTyCons = allTyCons
       , prHscEnv = hscEnv
       , prCapturedType = capturedTy
+      , prResultType   = resultTy
       }
 
 capitalize :: String -> String
@@ -230,6 +244,7 @@ runSessionPipeline scope path includes = do
     typechecked <- typecheckModule parsed
     let tcGblEnv    = fst (tm_internals_ typechecked)
         mCapturedTy = capturedUserType tcGblEnv
+        mResultTy   = capturedBindingType "result" tcGblEnv
     desugared  <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
     simplified <- liftIO $ core2core hscEnv desugared
     let guts = externalizeInternalTops simplified
@@ -239,6 +254,7 @@ runSessionPipeline scope path includes = do
       , prTyCons       = mg_tcs guts
       , prHscEnv       = hscUpdateFlags canonicalizeDFlags hscFinal
       , prCapturedType = mCapturedTy
+      , prResultType   = mResultTy
       }
 
 -- | Read the inferred type of the @__user@ binding out of a module's
@@ -255,6 +271,42 @@ capturedUserType tcg =
            , occNameString (nameOccName (idName i)) == "__user" ] of
     (i:_) -> Just (renderWithContext defaultSDocContext (ppr (idType i)))
     []    -> Nothing
+
+-- | Read the GHC 'Type' (NOT a rendered string) of the named top-level binding
+-- out of a module's typechecked type env. Used by the Wave-3b BIND mode to grab
+-- the @result@ binding's @Eff stack T@ type so 'stripMonadHead' can recover the
+-- bound value's type @T@ for the thin session iface + the BoundBinder sidecar.
+-- 'Nothing' when no such binder exists (every non-bind extraction).
+capturedBindingType :: String -> TcGblEnv -> Maybe Type
+capturedBindingType occ tcg =
+  case [ i | i <- typeEnvIds (tcg_type_env tcg)
+           , occNameString (nameOccName (idName i)) == occ ] of
+    (i:_) -> Just (idType i)
+    []    -> Nothing
+
+-- | Strip a monadic head off a bind target's type: @Eff stack T@ → @T@,
+-- @M a@ → @a@. Drops any leading foralls/constraint context first
+-- ('tcSplitSigmaTy'), then peels the last type application ('splitAppTy_maybe')
+-- — for @Eff es a@ that is @(Eff es) a@, yielding @a@. A non-application body
+-- (a nullary type) is returned unchanged.
+stripMonadHead :: Type -> Type
+stripMonadHead ty =
+  let (_, _, body) = tcSplitSigmaTy ty
+  in case splitAppTy_maybe body of
+       Just (_, res) -> res
+       Nothing       -> body
+
+-- | Is the bound value a CLOSURE (Tier1) rather than first-order data (Tier0)?
+-- True iff @T@ is a function type after stripping its own foralls/context — the
+-- distinction the bind path uses to decide strict-force (Tier0) vs store-as-is
+-- (Tier1).
+isClosureType :: Type -> Bool
+isClosureType ty = let (_, _, body) = tcSplitSigmaTy ty in isFunTy body
+
+-- | Render a 'Type' to a display string (for the @typeDisplay@ field / @:t@),
+-- the same 'ppr' pattern as 'capturedUserType' / 'dumpCore'.
+renderType :: Type -> String
+renderType ty = renderWithContext defaultSDocContext (ppr ty)
 
 -- | The canonical extraction DynFlags transformation, applied to the session
 -- flags at startup AND re-applied per-module before extraction.
