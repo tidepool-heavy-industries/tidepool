@@ -201,13 +201,17 @@ impl Drop for RegistryGuard {
     }
 }
 
+/// The compiled artifacts produced by [`JitEffectMachine::compile_inner`],
+/// shared by the one-shot (`compile`) and session (`compile_session`) ctors.
+type CompiledParts = (CodegenPipeline, Nursery, Result<ConTags, &'static str>, FuncId);
+
 impl JitEffectMachine {
     /// Shared compilation body: normalise, emit, finalise.
     fn compile_inner(
         expr: &CoreExpr,
         table: &DataConTable,
         nursery_size: usize,
-    ) -> Result<(CodegenPipeline, Nursery, Result<ConTags, &'static str>, FuncId), JitError> {
+    ) -> Result<CompiledParts, JitError> {
         crate::debug::init_logging();
         // #313 defense: a duplicate VarId on the top-level Let spine means two
         // distinct top-level bindings silently shadow each other — fail loudly

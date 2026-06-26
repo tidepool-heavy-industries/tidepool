@@ -29,7 +29,7 @@
 
 use std::collections::HashSet;
 use tidepool_heap::gc::raw::{cheney_copy, for_each_pointer_field};
-use tidepool_heap::layout::read_size;
+use tidepool_heap::layout::{read_size, read_tag, TAG_FORWARDED};
 
 /// Default arena size: 1 MiB. Each arena is a contiguous allocation whose
 /// byte-level address is stable for the OldSpace's lifetime.
@@ -105,6 +105,12 @@ pub struct OldSpace {
     /// Freed in OldSpace::drop — must happen AFTER `free_session_heap` clears
     /// PERSISTENT_ROOTS (the correct ordering when OldSpace is a field of the
     /// JitEffectMachine and free_session_heap runs in Drop::drop before fields).
+    ///
+    /// The `Box` is LOAD-BEARING, not redundant (clippy::vec_box fires here):
+    /// the registered persistent root is the address of the *inner cell*. A bare
+    /// `Vec<*mut u8>` would relocate that address on reallocation, dangling every
+    /// already-registered `RootSlot`. The Box pins each cell's address for life.
+    #[allow(clippy::vec_box)]
     slots: Vec<Box<*mut u8>>,
 }
 
@@ -238,6 +244,17 @@ unsafe fn measure_closure_bytes(
 
     while let Some(obj) = work.pop() {
         if !visited.insert(obj) {
+            continue;
+        }
+        // An already-forwarded object (a prior tenure of an overlapping graph,
+        // within the same nursery generation) is copied as ZERO bytes by
+        // `cheney_copy` — it returns the existing forward target and does not
+        // re-scan. Skip it here so `measure` matches `bytes_copied`, honoring
+        // the per-object idempotency the `tenure` doc promises. Without this,
+        // a second tenure that shares substructure over-counts and trips the
+        // `measure == bytes_copied` invariant (latent until the Wave-1.B bind
+        // path tenures multiple values per generation).
+        if read_tag(obj) == TAG_FORWARDED {
             continue;
         }
         let size = read_size(obj) as usize;
@@ -427,6 +444,59 @@ mod tests {
                 "minor GC must not scan old_space: \
                  bytes_1={bytes_1}, bytes_2={bytes_2}"
             );
+        }
+    }
+
+    /// Regression: tenuring two graphs that SHARE substructure within the same
+    /// nursery generation. The first tenure forwards the shared node; the
+    /// second tenure's `measure_closure_bytes` must skip that forwarded node to
+    /// match `cheney_copy`'s copy-once `bytes_copied` (else the
+    /// `measure == bytes_copied` debug_assert in `tenure` fires). Also proves
+    /// sharing is preserved: both tenured roots point at the SAME old-space copy
+    /// of the shared child.
+    #[test]
+    #[serial]
+    fn test_overlapping_tenures_preserve_sharing() {
+        crate::host_fns::clear_persistent_roots();
+
+        unsafe {
+            // Nursery: Lit(99) shared by Con A(tag=1,[Lit]) and Con B(tag=2,[Lit]).
+            let mut nursery = AlignedBuf([0u8; 4096]);
+            let n = &mut nursery.0;
+            let a_off = write_lit(n, 0, 99);
+            let lit_ptr = n.as_mut_ptr();
+            let b_off = write_con(n, a_off, 1, &[lit_ptr]);
+            let a_ptr = n.as_mut_ptr().add(a_off);
+            let _end = write_con(n, b_off, 2, &[lit_ptr]);
+            let b_ptr = n.as_mut_ptr().add(b_off);
+
+            let range = (n.as_ptr(), n.as_ptr().add(n.len()));
+
+            let mut old_space = OldSpace::new();
+
+            // First tenure forwards both A and the shared Lit in the nursery.
+            let slot_a = old_space.tenure(a_ptr, range);
+            let used_after_a = old_space.bytes_used();
+            // Con(32, aligned) + Lit(24) = 56.
+            assert_eq!(used_after_a, 56, "A + shared Lit");
+
+            // Second tenure: B is fresh, its child Lit is already forwarded.
+            // Without the forwarded-skip in measure, this panics on the
+            // measure!=bytes_copied debug_assert.
+            let slot_b = old_space.tenure(b_ptr, range);
+            // Only B's own 32 bytes are newly copied (Lit already in old-space).
+            assert_eq!(old_space.bytes_used(), 56 + 32, "B only; Lit not recopied");
+
+            // Sharing preserved: A and B point at the SAME old-space Lit.
+            let a_copy = slot_a.current();
+            let b_copy = slot_b.current();
+            assert_eq!(*(a_copy.add(CON_TAG_OFFSET) as *const u64), 1);
+            assert_eq!(*(b_copy.add(CON_TAG_OFFSET) as *const u64), 2);
+            let a_child = *(a_copy.add(CON_FIELDS_OFFSET) as *const *mut u8);
+            let b_child = *(b_copy.add(CON_FIELDS_OFFSET) as *const *mut u8);
+            assert_eq!(a_child, b_child, "shared child must be one old-space copy");
+            assert_eq!(read_tag(a_child), TAG_LIT);
+            assert_eq!(*(a_child.add(LIT_VALUE_OFFSET) as *const i64), 99);
         }
     }
 }
