@@ -94,6 +94,16 @@ async fn value_binding_int_json_function_survive_gc() {
         .expect("session_open");
     assert_ne!(r.is_error, Some(true), "open: {}", text_of(&r));
 
+    // 0b. define a custom ADT (Lane A → Tidepool.Session.Lib.G1). A value of this
+    //     user type, bound below, is what proves the DataConTable MERGE: its `Box`
+    //     constructor is registered on the bind turn and must resolve on a LATER
+    //     turn's case-match (gen-versioned module addressing, not a wired-in con).
+    let r = server
+        .dispatch_tool("session_def", s(&[("decl", "data Box = Box Int")]))
+        .await
+        .expect("session_def");
+    assert_ne!(r.is_error, Some(true), "def Box: {}", text_of(&r));
+
     // 1. BIND an Int (Tier-0 scalar) — bootstraps the resident machine.
     let t = eval(&server, "x <- pure (42 :: Int)").await;
     assert!(t.contains("bound"), "bind x: {t}");
@@ -102,14 +112,15 @@ async fn value_binding_int_json_function_survive_gc() {
     let t = eval(&server, "x + 1").await;
     assert!(t.contains("43"), "x + 1: {t}");
 
-    // 3. BIND a JSON Value (Tier-0 structured; aeson cons enter the session table).
-    let t = eval(&server, "v <- pure (object [(\"n\", toJSON (7 :: Int))])").await;
-    assert!(t.contains("bound"), "bind v: {t}");
+    // 3. BIND a custom-ADT value (Tier-0 structured; the `Box` con enters the
+    //    session table on THIS turn).
+    let t = eval(&server, "b <- pure (Box 7)").await;
+    assert!(t.contains("bound"), "bind b: {t}");
 
-    // 4. inspect it a later turn — renderJson traverses the aeson cons (DataConTable
-    //    merge: the Object/Number cons bound earlier must render now).
-    let t = eval(&server, "renderJson v").await;
-    assert!(t.contains('7'), "renderJson v: {t}");
+    // 4. case-match it a later turn — the `Box` con must resolve from the merged
+    //    session DataConTable (bound a turn ago) against the tenured heap value.
+    let t = eval(&server, "case b of Box n -> n + 100").await;
+    assert!(t.contains("107"), "case b: {t}");
 
     // 5. ORGANIC GC: a heavy strict fold allocates ~6 MiB of transient cons into
     //    the 2 MiB nursery → multiple real minor collections.
@@ -130,8 +141,8 @@ async fn value_binding_int_json_function_survive_gc() {
     // 9. AFTER the collections, every binding still resolves/renders correctly.
     let t = eval(&server, "x + 1").await;
     assert!(t.contains("43"), "post-GC x + 1: {t}");
-    let t = eval(&server, "renderJson v").await;
-    assert!(t.contains('7'), "post-GC renderJson v: {t}");
+    let t = eval(&server, "case b of Box n -> n + 100").await;
+    assert!(t.contains("107"), "post-GC case b: {t}");
     let t = eval(&server, "f 10").await;
     assert!(t.contains("11"), "post-GC f 10: {t}");
 
@@ -141,7 +152,7 @@ async fn value_binding_int_json_function_survive_gc() {
         .await
         .expect("session_cmd :bindings");
     let t = text_of(&r);
-    assert!(t.contains("\"x\"") && t.contains("\"v\"") && t.contains("\"f\""), ":bindings: {t}");
+    assert!(t.contains("\"x\"") && t.contains("\"b\"") && t.contains("\"f\""), ":bindings: {t}");
 
     // 11. close.
     let r = server
