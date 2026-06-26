@@ -52,3 +52,25 @@ executable tidepool-extract-bin
   default-language: GHC2024
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
+
+executable spike-extract
+  main-is:          Spike.hs
+  hs-source-dirs:   spike-extract, src
+  other-modules:
+    Tidepool.GhcPipeline
+    Tidepool.Translate
+    Tidepool.Resolve
+    Tidepool.FatIface
+  build-depends:
+    base         >= 4.20 && < 5,
+    ghc          >= 9.12 && < 9.13,
+    ghc-boot     >= 9.12 && < 9.13,
+    bytestring,
+    containers,
+    filepath,
+    directory,
+    process,
+    text,
+    mtl
+  default-language: GHC2024
+  default-extensions: OverloadedStrings

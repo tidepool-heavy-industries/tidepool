@@ -16,6 +16,8 @@ module Tidepool.Translate
   , FlatAltCon(..)
   , LitEnc(..)
   , UnresolvedVar(..)
+  , varId
+  , stableVarId
   ) where
 
 import GHC
