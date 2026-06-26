@@ -101,12 +101,15 @@ fn declarations_accumulate_and_types_coexist() {
     let _ = std::fs::remove_dir_all(paths::cache_dir());
 
     let session_root = tempfile::tempdir().unwrap();
+    // The binder extractor renames declarations, so qualified refs (`T.replace`)
+    // need their import modules on the include path — supply the stdlib dir.
     let mut lib = SessionLib::open(
         SessionId(42),
         session_root.path(),
         ModuleEnv::standalone_default(),
     )
-    .expect("open session");
+    .expect("open session")
+    .with_include(vec![lib_dir.clone()]);
 
     // ---- turn 1: define `slug` ----
     let g1 = lib

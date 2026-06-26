@@ -19,26 +19,44 @@ use std::process::Command;
 use super::render::ExportItem;
 use super::SessionError;
 
-/// Wrap raw declaration text into a parseable module. The binder extractor only
-/// *parses* (it does not typecheck), so no imports are needed — a qualified
-/// reference like `T.toLower` parses fine without `import qualified … as T`. The
-/// pragma block matches the eval surface so GADT/where syntax etc. parses.
-fn wrap_decls(decl_text: &str) -> String {
+/// Wrap raw declaration text into a module for the binder extractor.
+///
+/// The extractor's `--emit-binders` mode runs GHC's RENAMER (not just the
+/// parser), so a qualified reference like `T.replace` needs its
+/// `import qualified … as T` in scope — and the imported modules must be on the
+/// extractor's `--include` path. `imports` are the same full `import …` lines the
+/// generated `Lib.G<g>` module uses (the session's [`super::render::ModuleEnv`]),
+/// so a decl that compiles in the library also resolves here. The pragma block
+/// matches the eval surface so GADT/where syntax etc. parses.
+fn wrap_decls(decl_text: &str, imports: &[String]) -> String {
+    let import_block = if imports.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", imports.join("\n"))
+    };
     format!(
         "{{-# LANGUAGE GADTs, OverloadedStrings, TypeOperators, DataKinds, \
          ScopedTypeVariables, BangPatterns, ViewPatterns, TupleSections, \
          MultiWayIf, LambdaCase, RecordWildCards, NamedFieldPuns, \
          DeriveFunctor, DeriveFoldable, DeriveTraversable, TypeApplications #-}}\n\
-         module SessionDecls where\n{decl_text}\n"
+         module SessionDecls where\n{import_block}{decl_text}\n"
     )
 }
 
 /// Extract the export items a declaration introduces, via GHC.
-pub fn extract_binders(decl_text: &str, include: &[&Path]) -> Result<Vec<ExportItem>, SessionError> {
+///
+/// `imports` are the `import …` lines the declaration is compiled against (so
+/// qualified references resolve under the renamer); the imported modules must be
+/// reachable on the `include` search path.
+pub fn extract_binders(
+    decl_text: &str,
+    include: &[&Path],
+    imports: &[String],
+) -> Result<Vec<ExportItem>, SessionError> {
     let temp_dir = tempfile::TempDir::new()?;
     let input_path = temp_dir.path().join("SessionDecls.hs");
     let out_path = temp_dir.path().join("binders.json");
-    std::fs::write(&input_path, wrap_decls(decl_text))?;
+    std::fs::write(&input_path, wrap_decls(decl_text, imports))?;
 
     let extract_bin =
         std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".to_string());
