@@ -13,7 +13,6 @@ use std::path::PathBuf;
 use rmcp::model::{CallToolResult, RawContent};
 use tidepool_handlers::{base_decls_with_ask, build_base_stack, HandlerConfig, DEFAULT_OPENAI_MODEL};
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
-use tidepool_runtime::session::ModuleEnv;
 
 fn extract_available() -> bool {
     let bin = std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".into());
@@ -67,7 +66,10 @@ fn build_full_server(cwd: PathBuf) -> TidepoolReplServer {
         decls,
         ask_tag,
         base_include: vec![effects_dir, prelude_dir],
-        module_env: ModuleEnv::standalone_default(),
+        // Match production (`main.rs`): the full-stack server gives Lane-A decls
+        // the eval pragmas+imports, so `session_def` helpers share the eval
+        // vocabulary (`M`, the effect verbs, `L.`/`Set.`, the Prelude shadows).
+        module_env: tidepool_mcp::session_decl_module_env(),
         session_root_base,
         nursery_size: None,
     };
@@ -120,6 +122,73 @@ async fn full_stack_effects_reachable_through_session() {
     let _ = eval(&server, "x <- pure (7 :: Int)").await;
     let t = eval(&server, "x + 1").await;
     assert!(t.contains("8"), "bound-value ref under full stack: {t}");
+
+    let _ = server
+        .dispatch_tool("session_close", serde_json::Map::new())
+        .await;
+}
+
+/// `session_def` helpers see the FULL eval vocabulary — `M` + the effect verbs,
+/// the `Tidepool.Prelude` shadows, and the `L.`/`Set.` qualified namespaces —
+/// not just the lens-free `T`/`Map` of `standalone_default`. This is the payoff
+/// of the production `session_decl_module_env`: a decl can be an effectful verb
+/// (`sh :: Text -> M Text`) and use list/set combinators, then be called from a
+/// later `session_eval`. (Regression for the decl/eval preamble asymmetry.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_def_sees_full_eval_vocabulary() {
+    if !extract_available() {
+        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let server = build_full_server(tmp.path().to_path_buf());
+
+    let r = server
+        .dispatch_tool("session_open", serde_json::Map::new())
+        .await
+        .expect("session_open");
+    assert_ne!(r.is_error, Some(true), "open: {}", text_of(&r));
+
+    // A decl that uses `M` + the `run` effect verb (Tidepool.Effects) AND the
+    // `L.`/`Set.` qualified namespaces — all out of scope under the old
+    // T+Map-only decl preamble.
+    let r = server
+        .dispatch_tool(
+            "session_def",
+            obj(&[(
+                "decl",
+                "sh :: Text -> M Text\n\
+                 sh cmd = run cmd <&> \\(_,out,_) -> out\n\
+                 \n\
+                 uniqSorted :: [Int] -> [Int]\n\
+                 uniqSorted = L.sort . Set.toList . Set.fromList",
+            )]),
+        )
+        .await
+        .expect("session_def dispatch");
+    assert_ne!(
+        r.is_error,
+        Some(true),
+        "session_def with full vocabulary should compile: {}",
+        text_of(&r)
+    );
+
+    // Use the effectful decl from a later eval turn.
+    let r = server
+        .dispatch_tool("session_eval", obj(&[("code", "sh \"echo decl-vocab-ok\"")]))
+        .await
+        .expect("session_eval dispatch");
+    assert_ne!(r.is_error, Some(true), "calling `sh`: {}", text_of(&r));
+    assert!(text_of(&r).contains("decl-vocab-ok"), "sh output: {}", text_of(&r));
+
+    // Use the pure decl that needed L./Set.
+    let r = server
+        .dispatch_tool("session_eval", obj(&[("code", "pure (uniqSorted [3,1,2,3,1])")]))
+        .await
+        .expect("session_eval dispatch");
+    assert_ne!(r.is_error, Some(true), "calling `uniqSorted`: {}", text_of(&r));
+    let t = text_of(&r);
+    assert!(t.contains('1') && t.contains('3'), "uniqSorted output: {t}");
 
     let _ = server
         .dispatch_tool("session_close", serde_json::Map::new())

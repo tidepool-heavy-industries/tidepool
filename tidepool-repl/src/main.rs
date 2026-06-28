@@ -15,7 +15,6 @@ use tidepool_handlers::{
     base_decls_with_ask, build_base_stack, HandlerConfig, DEFAULT_OPENAI_MODEL,
 };
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
-use tidepool_runtime::session::ModuleEnv;
 
 #[derive(clap::Parser)]
 #[command(
@@ -102,7 +101,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         decls,
         ask_tag,
         base_include,
-        module_env: ModuleEnv::standalone_default(),
+        // Full effect stack + with-packages GHC: give Lane-A decls the SAME
+        // pragmas/imports an `eval` expression sees, so `session_def` helpers can
+        // use `M`, the effect verbs, the Prelude shadows, and `L.`/`Set.`/… —
+        // not just the lens-free T+Map of `standalone_default`.
+        module_env: tidepool_mcp::session_decl_module_env(),
         session_root_base,
         nursery_size: None,
     };

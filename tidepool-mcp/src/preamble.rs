@@ -12,12 +12,72 @@
 //! original monolithic function.
 
 use crate::EffectDecl;
+use tidepool_runtime::session::ModuleEnv;
 
 /// The `default` declaration emitted after all imports in the preamble.
 /// Exported as the canonical injection-point marker: `insert_imports` in
 /// `tidepool-repl` uses it to locate where session/user imports must go,
 /// avoiding a magic-substring dependency on the literal text (AUDIT-3).
 pub const PREAMBLE_DEFAULT_DECL: &str = "default (Int, Double, Text)\n";
+
+/// The LANGUAGE pragma block shared by the eval `Expr` module and the session
+/// Lane-A declaration modules (`Tidepool.Session.Lib.G<g>`). One dialect
+/// everywhere: a helper written with `session_def` sees exactly the extensions
+/// an `eval`/`session_eval` expression does. No trailing newline — callers that
+/// emit it add their own (the eval preamble and `ModuleEnv::pragmas` both do).
+pub const EVAL_PRAGMAS: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, QuasiQuotes #-}";
+
+/// The canonical ordered import lines shared by the eval `Expr` module and the
+/// session decl modules — the SINGLE source of truth for the eval vocabulary
+/// (`M`, the effect verbs from `Tidepool.Effects`, the `Tidepool.Prelude`
+/// shadows, and the `T.`/`Map.`/`L.`/`Set.`/… qualified namespaces). Excludes
+/// the `module Expr where` header and the `default` decl (those are eval-module
+/// scaffolding, not imports). `user_library` inserts `import Library` — eval
+/// only; the session has no user `Library` module, it accumulates its own
+/// `Tidepool.Session.Lib.G<g>` chain instead.
+pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
+    let mut v = vec![
+        "import Tidepool.Prelude hiding (error)",
+        // Effect GADTs, `M`, the `error` shadow, and the send-wrapper helpers
+        // live in the generated Tidepool.Effects module so library AND session
+        // decl modules can import the SAME types and define effectful verbs.
+        "import Tidepool.Effects",
+        "import qualified Tidepool.Data.Text as T",
+        "import qualified Data.Map.Strict as Map",
+        // Merge/reconcile API (merge, zipWithMatched, …) — strict, matches Map.
+        "import qualified Data.Map.Merge.Strict as MM",
+        "import qualified Data.Set as Set",
+        "import qualified Tidepool.Aeson.KeyMap as KM",
+        "import qualified Data.List as L",
+        "import qualified Tidepool.TextFormat as TF",
+        "import qualified Tidepool.Table as Tab",
+        "import qualified Tidepool.Patch as Patch",
+        "import Control.Monad.Freer hiding (run)",
+    ];
+    if user_library {
+        v.push("import Library");
+    }
+    v.push("import qualified Prelude as P");
+    v
+}
+
+/// The [`ModuleEnv`] for session Lane-A declaration modules under the full
+/// effect stack — the eval pragmas + import surface (via [`EVAL_PRAGMAS`] /
+/// [`eval_import_lines`]) so `session_def` helpers share the eval vocabulary
+/// (e.g. `sh :: Text -> M Text` using `run`, `L.sortBy`, `Set.`, …). The
+/// lens-free [`ModuleEnv::standalone_default`] remains for the plain-toolchain
+/// standalone REPL/tests; this requires the `with-packages` GHC (it imports
+/// `Tidepool.Prelude`, which pulls `Control.Lens`).
+#[must_use]
+pub fn session_decl_module_env() -> ModuleEnv {
+    ModuleEnv {
+        pragmas: EVAL_PRAGMAS.to_string(),
+        imports: eval_import_lines(false)
+            .into_iter()
+            .map(String::from)
+            .collect(),
+    }
+}
 
 /// Emit the LANGUAGE pragma block, the `module Expr` header, and the fixed
 /// import set (plus the conditional `import Library`).
@@ -40,33 +100,13 @@ pub const PREAMBLE_DEFAULT_DECL: &str = "default (Int, Double, Text)\n";
 // Dialect note: with QuasiQuotes on, `[x|x<-xs]` (comprehension with no
 // space before `|`) parses as a quasi-quote — write `[x | x <- xs]`.
 fn pragmas_and_imports(out: &mut String, user_library: bool) {
-    out.push_str("{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, QuasiQuotes #-}\n");
+    out.push_str(EVAL_PRAGMAS);
+    out.push('\n');
     out.push_str("module Expr where\n");
-    out.push_str("import Tidepool.Prelude hiding (error)\n");
-    // Effect GADTs, `M`, the `error` shadow, and the send-wrapper helpers
-    // live in the generated Tidepool.Effects module (see
-    // `effects_module_source`) so .tidepool/lib modules can import the
-    // SAME types and define effectful verbs.
-    out.push_str("import Tidepool.Effects\n");
-    out.push_str("import qualified Tidepool.Data.Text as T\n");
-    out.push_str("import qualified Data.Map.Strict as Map\n");
-    // Merge/reconcile API (merge, zipWithMatched, mapMissing, …) — strict, to
-    // match Map. Needs its own qualifier; not covered by the Map. submodule.
-    out.push_str("import qualified Data.Map.Merge.Strict as MM\n");
-    out.push_str("import qualified Data.Set as Set\n");
-    out.push_str("import qualified Tidepool.Aeson.KeyMap as KM\n");
-    out.push_str("import qualified Data.List as L\n");
-    out.push_str("import qualified Tidepool.TextFormat as TF\n");
-    out.push_str("import qualified Tidepool.Table as Tab\n");
-    // Pure Myers-diff core: `planUpdate` renders its review diff via
-    // `Patch.genPatch`/`Patch.renderPatch`, and it gives eval authors the
-    // diff/patch primitives qualified.
-    out.push_str("import qualified Tidepool.Patch as Patch\n");
-    out.push_str("import Control.Monad.Freer hiding (run)\n");
-    if user_library {
-        out.push_str("import Library\n");
+    for imp in eval_import_lines(user_library) {
+        out.push_str(imp);
+        out.push('\n');
     }
-    out.push_str("import qualified Prelude as P\n");
     out.push_str(PREAMBLE_DEFAULT_DECL);
     out.push('\n');
 }

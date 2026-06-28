@@ -450,6 +450,30 @@ mod tests {
         assert!(preamble.contains("data KV a where"));
     }
 
+    /// Drift guard: the session decl `ModuleEnv` MUST stay a subset of the eval
+    /// preamble's pragmas+imports, so a `session_def` helper sees the same
+    /// vocabulary an `eval`/`session_eval` expression does. If someone adds an
+    /// import to the eval preamble but not `eval_import_lines`, this catches it.
+    #[test]
+    fn session_decl_env_matches_eval_preamble() {
+        let env = session_decl_module_env();
+        let preamble = build_preamble(&[], true); // user_library=true → superset
+        // Every decl import line appears verbatim in the eval preamble.
+        for imp in &env.imports {
+            assert!(
+                preamble.contains(&format!("{imp}\n")),
+                "session decl import `{imp}` missing from eval preamble — drift"
+            );
+        }
+        // Same pragma block (one dialect everywhere).
+        assert!(
+            preamble.contains(&env.pragmas),
+            "session decl pragmas diverged from eval preamble"
+        );
+        // The decl env is imports-only: no `module Expr`/Library/default leakage.
+        assert!(!env.imports.iter().any(|i| i.contains("import Library")));
+    }
+
     #[test]
     fn test_template_haskell() {
         let effects = vec![EffectDecl {

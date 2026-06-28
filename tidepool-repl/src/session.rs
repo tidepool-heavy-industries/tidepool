@@ -81,7 +81,10 @@ impl Session {
     /// Open a fresh session rooted at `cfg.root`.
     pub fn open(cfg: SessionConfig) -> std::io::Result<Session> {
         let lib = SessionLib::open(cfg.id, cfg.root.clone(), cfg.module_env.clone())
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+            // Decl validation must resolve the same imports eval does (notably
+            // the generated `Tidepool.Effects`), so feed it the base include.
+            .with_validation_include(cfg.base_include.clone());
         Ok(Session {
             cfg,
             lib,
@@ -640,7 +643,7 @@ impl Session {
                     self.cfg.module_env.clone(),
                 ) {
                     Ok(lib) => {
-                        self.lib = lib;
+                        self.lib = lib.with_validation_include(self.cfg.base_include.clone());
                         TurnOutcome::Meta(serde_json::json!({"reset": true}))
                     }
                     Err(e) => TurnOutcome::Error(format!("reset failed: {e}")),

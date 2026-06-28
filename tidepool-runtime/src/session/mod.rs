@@ -83,6 +83,14 @@ pub struct SessionLib {
     root: PathBuf,
     log: DeclLog,
     env: ModuleEnv,
+    /// Extra `--include` dirs for decl binder-extraction + candidate validation,
+    /// beyond `root` and the auto-derived stdlib `lib/`. When `env` imports
+    /// modules that live outside the stdlib tree — notably the generated
+    /// `Tidepool.Effects` (so a `session_def` helper can be `M`-typed and call
+    /// effect verbs) — those dirs must be here or validation fails to resolve
+    /// the import. Empty by default (the pure `standalone_default` surface needs
+    /// only the stdlib). Set via [`with_validation_include`](Self::with_validation_include).
+    extra_include: Vec<PathBuf>,
 }
 
 impl SessionLib {
@@ -97,7 +105,19 @@ impl SessionLib {
             root,
             log: DeclLog::new(),
             env,
+            extra_include: Vec::new(),
         })
+    }
+
+    /// Add include dirs used when extracting binders and validating candidate
+    /// gen modules (e.g. the `Tidepool.Effects` dir + stdlib `lib/` when `env`
+    /// is the full-eval [`session_decl_module_env`](crate) surface). Without
+    /// these, a decl importing `Tidepool.Effects` fails validation with
+    /// "Could not find module `Tidepool.Effects'". Chainable on `open`.
+    #[must_use]
+    pub fn with_validation_include(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.extra_include = dirs;
+        self
     }
 
     /// The include directory to place on the GHC search path (highest precedence).
@@ -182,7 +202,9 @@ impl SessionLib {
             return Ok(self.log.generation());
         }
 
-        let items = binders::extract_binders(decl_text, &[self.root.as_path()])?;
+        let mut binder_include: Vec<&Path> = vec![self.root.as_path()];
+        binder_include.extend(self.extra_include.iter().map(PathBuf::as_path));
+        let items = binders::extract_binders(decl_text, &binder_include)?;
 
         // Only validate turns that introduce value binders (functions / values).
         // Type / class / instance turns are skipped — see doc above.
@@ -236,6 +258,13 @@ impl SessionLib {
             .arg("result")
             .arg("--include")
             .arg(&self.root);
+
+        // Caller-supplied include dirs (e.g. the generated `Tidepool.Effects`
+        // dir + stdlib `lib/` under the full-eval decl surface). Required so a
+        // decl importing `Tidepool.Effects` resolves at validation time.
+        for dir in &self.extra_include {
+            cmd.arg("--include").arg(dir);
+        }
 
         // The candidate module imports stdlib sources (e.g. Tidepool.Data.Text)
         // that live next to `dist-newstyle` in the project tree. Auto-discover
