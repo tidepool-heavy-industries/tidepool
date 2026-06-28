@@ -6,10 +6,11 @@ module Tidepool.GhcPipeline
 import GHC
 import GHC.Driver.Main (hscDesugar, batchMsg)
 import GHC.Driver.Env (hscUpdateFlags, hsc_home_unit)
+import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph))
 import GHC.Unit.Home (homeUnitId)
 import GHC.Driver.Make (load', summariseFile)
 import GHC.Types.Error (mkUnknownDiagnostic)
-import GHC.Unit.Module.Graph (mapMG)
+import GHC.Unit.Module.Graph (mapMG, mkModuleGraph, mgModSummaries', ModuleGraphNode(..))
 import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Core.Ppr (pprCoreBindings)
 import GHC.Driver.Session
@@ -244,14 +245,37 @@ runSessionPipeline scope path includes = do
     modGraphRaw <- depanal excludedVal False
     let unpoison ms =
           ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
+        targetModName' = mkModuleName targetModName
+        -- Exclude the target from the load' graph. @load' (LoadDependenciesOf
+        -- targetHUM)@ builds a plan via @createBuildPlan@ that includes ALL
+        -- modules reachable from the root — INCLUDING the target. The upsweep
+        -- then compiles the target BEFORE the Val iface is injected (PHASE 2),
+        -- so its @import Tidepool.Session.Val.G<g>@ fails → GHC error-recovery
+        -- emits "Could not find module" AND inserts a FAKE empty iface into the
+        -- EPS PIT for the Val module. PHASE 3's clean recompile then resolves
+        -- against that fake (empty) iface, so the bound binder is absent → a
+        -- type-metadata ErrorSentinel is baked into the helper → kind=4 at run.
+        -- Filtering the target out makes @load'@ compile ONLY the source deps.
+        depGraph = mkModuleGraph
+          [ node | node <- mgModSummaries' modGraphRaw
+                 , case node of
+                     ModuleNode _ ms -> ms_mod_name ms /= targetModName'
+                     _               -> True ]
     -- PHASE 1 — compile the turn's home-package SOURCE dependencies
     -- (@Tidepool.Prelude@, @Tidepool.Effects@, @Lib.G<g>@) into the HPT, but NOT
-    -- the turn target itself (@LoadDependenciesOf@): the target imports the
-    -- source-less @Val@ modules, which only exist as injected ifaces, so it
-    -- cannot go through @load'@. A bare @summariseFile@ on the target (the old
-    -- mechanism) left @Tidepool.Prelude@ "not loaded" (GHC-58427).
-    _ <- load' Nothing (LoadDependenciesOf targetHUM)
-               mkUnknownDiagnostic (Just batchMsg) (mapMG unpoison modGraphRaw)
+    -- the turn target itself. The target imports the source-less @Val@ modules
+    -- (injected as ifaces in PHASE 2), so it cannot go through @load'@. We use
+    -- LoadAllTargets on depGraph (target filtered out above) — equivalent to the
+    -- old @LoadDependenciesOf@ but without compiling the target prematurely.
+    _ <- load' Nothing LoadAllTargets
+               mkUnknownDiagnostic (Just batchMsg) (mapMG unpoison depGraph)
+    -- Restore the FULL module graph (target included) so PHASE 3's typecheck can
+    -- see HPT instances from dep modules: @hptSomeThingsBelowUs@ walks
+    -- @moduleGraphModulesBelow (hsc_mod_graph) target@, and @load'@ left
+    -- @hsc_mod_graph = depGraph@ (target absent), which would yield an empty HPT
+    -- instance env ("No instance for ToJSON …").
+    do hscMG <- getSession
+       setSession hscMG { hsc_mod_graph = modGraphRaw }
     -- PHASE 2 — inject the live @Val.G<g>@ ifaces into the now dep-populated
     -- HPT. AFTER @load'@, so its upsweep does not discard them; the subsequent
     -- single-module @summariseFile@ compile (no further @load'@) preserves them.
