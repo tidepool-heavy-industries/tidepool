@@ -60,8 +60,16 @@ impl WorkerHandle {
 
 impl Drop for WorkerHandle {
     fn drop(&mut self) {
+        // Drop the command sender FIRST, then join. Struct fields are dropped
+        // only AFTER `Drop::drop` returns, so `cmd_tx` would still be alive
+        // during a naive `join()` — leaving the worker parked in `rx.recv()`
+        // (which returns `Err` only once EVERY sender drops) and deadlocking
+        // teardown forever. Replacing `cmd_tx` with a dead sender drops the real
+        // one now, so `recv()` returns `Err`, the loop exits, and `join()`
+        // completes. (Mirrors `shutdown()`; a no-op if `shutdown` already ran —
+        // `thread` is then `None`.)
+        drop(std::mem::replace(&mut self.cmd_tx, dead_sender()));
         if let Some(t) = self.thread.take() {
-            // cmd_tx drops with self; the worker exits and we reap the thread.
             let _ = t.join();
         }
     }

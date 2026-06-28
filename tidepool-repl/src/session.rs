@@ -114,14 +114,32 @@ impl Session {
         v
     }
 
+    /// The CURRENT (newest) `Val.G<g>` module per still-live name — what a turn
+    /// IMPORTS (unqualified). This EXCLUDES shadowed older gens: a rebound name
+    /// `x` is rooted under both `Val.G1` and `Val.G2`, and importing both
+    /// unqualified makes every later `x` an ambiguous occurrence. Old gens are
+    /// still INJECTED (see [`Self::live_val_modules`]) so already-compiled
+    /// fragments / closure captures keep resolving — they just are not imported.
+    fn current_val_modules(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .bindings
+            .iter_current()
+            .map(|(_, entry)| entry.module.module_name())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
     /// The `imports` block a turn prepends: the current `Lib.G<g>` decl module
-    /// (if any) plus every live `Val.G<g>` value module.
+    /// (if any) plus the current `Val.G<g>` module of each live name (newest
+    /// gen only — shadowed gens are injected but not imported).
     fn session_imports(&self) -> String {
         let mut lines: Vec<String> = Vec::new();
         if let Some(m) = self.lib.current_module() {
             lines.push(m.module_name());
         }
-        lines.extend(self.live_val_modules());
+        lines.extend(self.current_val_modules());
         lines.join("\n")
     }
 
@@ -189,13 +207,26 @@ impl Session {
         };
 
         if classification.is_bind {
-            match classification.binders.first() {
-                Some(name) => {
+            match classification.binders.as_slice() {
+                // A bind statement with no extractable binder — treat as plain.
+                [] => self.run_plain_eval(expr_text, handlers, captured),
+                [name] => {
                     let name = name.clone();
                     self.run_bind(expr_text, name, handlers, captured)
                 }
-                // A bind statement with no extractable binder — treat as plain.
-                None => self.run_plain_eval(expr_text, handlers, captured),
+                // Multi-binder pattern binds (`(a, b) <- …`, `let (x, y) = …`)
+                // bind MORE than one name. The value plane roots one value per
+                // fragment, so binding each component is a feature (tracked), not
+                // yet built. REJECT LOUDLY rather than silently rooting only the
+                // first component and discarding the rest (the old footgun).
+                names => TurnOutcome::Error(format!(
+                    "multi-binder pattern binds are not supported yet: `{}` introduces \
+                     {} names ({}). Bind one name per turn (e.g. `t <- action` then \
+                     project its components in later turns).",
+                    expr_text.lines().next().unwrap_or(expr_text).trim(),
+                    names.len(),
+                    names.join(", "),
+                )),
             }
         } else if !self.bindings.is_empty() {
             self.run_session_reference(expr_text, handlers, captured)
