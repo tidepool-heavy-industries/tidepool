@@ -197,6 +197,20 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                     None => json!("<big-integer>"),
                 },
 
+                // TODO(BUG-8, repl precision): integers > 2^53 lose precision in
+                // the LIVE repl. `pure (9007199254740993 :: Int)` renders
+                // 9007199254740992 and `product [1..25] :: Integer` renders
+                // 1.55…e+25. The repl renders results via Haskell `toJSON` → aeson
+                // `Number`(`Scientific`) → THIS arm: `as_i64()` truncates a
+                // non-i64 coeff to 0, `c * 10i64.pow(e)` overflows for big e>=0,
+                // and the e<0 branch goes through f64. The `int-render-fix`
+                // (the IP/IN arm above) + `render_large_ints.rs` were verified on
+                // `compile_and_run_pure`, which renders the RAW Int/Integer Value
+                // exactly and never hits this aeson-mediated path — so the bug
+                // survived the tests. FIX: emit an exact JSON number for an
+                // integral Scientific (serde arbitrary_precision, or a decimal
+                // string for out-of-i64 range), and add a regression test that
+                // drives `session_eval` (the repl path), NOT compile_and_run_pure.
                 // Scientific (Data.Scientific) — coefficient × 10^exponent
                 ("Scientific", [coeff, exp_val]) => {
                     let c = match value_to_json(coeff, table, d) {
