@@ -249,8 +249,10 @@ impl TidepoolReplServer {
             "session_cmd" => {
                 let req: SessionCmdRequest = serde_json::from_value(parse(args))
                     .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
-                let meta = MetaCommand::parse(&req.command)
-                    .map_err(|e| McpError::invalid_params(e, None))?;
+                let meta = match MetaCommand::parse(&req.command) {
+                    Ok(m) => m,
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+                };
                 Ok(self
                     .run_command("session_cmd", SessionCommand::Cmd(meta))
                     .await)
