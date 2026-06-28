@@ -1296,14 +1296,14 @@ impl JitEffectMachine {
         table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        forced_mask: &[bool],
+        n_fields: usize,
     ) -> Result<Vec<crate::old_space::RootSlot>, JitError> {
         assert!(
             self.session.is_some(),
             "run_fragment_and_bind_projected requires a session machine"
         );
         assert!(
-            !forced_mask.is_empty(),
+            n_fields > 0,
             "run_fragment_and_bind_projected requires at least one field"
         );
 
@@ -1337,64 +1337,61 @@ impl JitEffectMachine {
                         break Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
                     }
 
-                    // Verify the heap object is a Con with the expected field count.
+                    // GC-safe projection protocol:
+                    // 1. deep_force the WHOLE TUPLE first. deep_force internally
+                    //    registers every pending parent as a Rust GC root and
+                    //    re-reads field slots from the live (possibly relocated)
+                    //    parent after each heap_force — so no pointer is cached
+                    //    across a GC. Returns nf_tuple: the post-GC NF address with
+                    //    all field slots updated to live NF children.
+                    //    Closures (TAG_CLOSURE) are forced to WHNF and left as-is.
+                    let nf_tuple = unsafe {
+                        crate::signal_safety::with_signal_protection(|| {
+                            crate::host_fns::deep_force(
+                                machine.vmctx_mut() as *mut VMContext,
+                                tuple_ptr,
+                            )
+                        })
+                    }
+                    .map_err(JitError::Signal)?;
+                    if let Some(err) = crate::host_fns::take_runtime_error() {
+                        break Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                    }
+
+                    // 2. Validate arity from the NF (post-GC) object.
                     let n_actual = unsafe {
-                        *(tuple_ptr.add(crate::layout::CON_NUM_FIELDS_OFFSET as usize)
+                        *(nf_tuple.add(crate::layout::CON_NUM_FIELDS_OFFSET as usize)
                             as *const u16) as usize
                     };
-                    if n_actual != forced_mask.len() {
+                    if n_actual != n_fields {
                         break Err(JitError::Yield(
                             crate::yield_type::YieldError::Runtime(
                                 crate::host_fns::RuntimeError::UserErrorMsg(format!(
                                     "multi-bind: result tuple has {} fields, expected {}",
-                                    n_actual,
-                                    forced_mask.len()
+                                    n_actual, n_fields
                                 )),
                             ),
                         ));
                     }
 
+                    // 3. Capture from_range AFTER deep_force (GC may have changed
+                    //    the active region). tenure() is pure Rust — no JIT GC
+                    //    fires — so this range stays valid for all field tenures.
                     let from = crate::host_fns::gc_active_range()
                         .expect("GC state installed for the bind run");
                     let from_range = (from.0 as *const u8, unsafe {
                         from.0.add(from.1) as *const u8
                     });
 
-                    // Project each field, optionally deep-force, and tenure.
-                    let mut slots = Vec::with_capacity(forced_mask.len());
-                    let mut field_err: Option<JitError> = None;
-                    for i in 0..forced_mask.len() {
-                        let raw_field = unsafe {
-                            *(tuple_ptr.add(
+                    // 4. Project each field from nf_tuple and tenure.
+                    //    nf_tuple stays valid across all tenure() calls (no JIT GC).
+                    //    deep_force already wrote live NF pointers into each slot.
+                    let mut slots = Vec::with_capacity(n_fields);
+                    for i in 0..n_fields {
+                        let field_ptr = unsafe {
+                            *(nf_tuple.add(
                                 crate::layout::CON_FIELDS_OFFSET as usize + 8 * i,
                             ) as *const *mut u8)
-                        };
-                        let field_ptr = if forced_mask[i] {
-                            let force_res = unsafe {
-                                crate::signal_safety::with_signal_protection(|| {
-                                    crate::host_fns::deep_force(
-                                        machine.vmctx_mut() as *mut VMContext,
-                                        raw_field,
-                                    )
-                                })
-                            };
-                            match force_res {
-                                Err(e) => {
-                                    field_err = Some(JitError::Signal(e));
-                                    break;
-                                }
-                                Ok(p) => {
-                                    if let Some(err) = crate::host_fns::take_runtime_error() {
-                                        field_err = Some(JitError::Yield(
-                                            crate::yield_type::YieldError::from(err),
-                                        ));
-                                        break;
-                                    }
-                                    p
-                                }
-                            }
-                        } else {
-                            raw_field
                         };
                         let slot = unsafe {
                             self.session
@@ -1404,9 +1401,6 @@ impl JitEffectMachine {
                                 .tenure(field_ptr, from_range)
                         };
                         slots.push(slot);
-                    }
-                    if let Some(e) = field_err {
-                        break Err(e);
                     }
                     break Ok(slots);
                 }
@@ -1442,7 +1436,8 @@ impl JitEffectMachine {
                         .map(|v| v != "0")
                         .unwrap_or(true);
 
-                    enum Plan {
+                    // Distinct name to avoid shadowing the Plan enum in run_fragment_and_bind.
+                    enum MultibindPlan {
                         Park(crate::host_fns::ParkedStream),
                         Eager(tidepool_eval::value::Value),
                         Ready(*mut u8),
@@ -1451,7 +1446,7 @@ impl JitEffectMachine {
                         tidepool_effect::Response::Stream(s) => {
                             let (mut source, cons_id, nil_id) = s.into_parts();
                             if lazy_enabled {
-                                Plan::Park(crate::host_fns::ParkedStream {
+                                MultibindPlan::Park(crate::host_fns::ParkedStream {
                                     source,
                                     cons_tag: cons_id.0,
                                     nil_tag: nil_id.0,
@@ -1492,7 +1487,7 @@ impl JitEffectMachine {
                                         crate::yield_type::YieldError::from(err),
                                     ));
                                 }
-                                Plan::Ready(p)
+                                MultibindPlan::Ready(p)
                             }
                         }
                         tidepool_effect::Response::Complete(resp_val) => {
@@ -1501,7 +1496,7 @@ impl JitEffectMachine {
                             match spine {
                                 Some((cons_tag, nil_tag, len)) if lazy_enabled => {
                                     let items = dismantle_list_spine(resp_val, len);
-                                    Plan::Park(crate::host_fns::ParkedStream {
+                                    MultibindPlan::Park(crate::host_fns::ParkedStream {
                                         source: Box::new(crate::host_fns::ReadySource::new(items)),
                                         cons_tag,
                                         nil_tag,
@@ -1534,15 +1529,15 @@ impl JitEffectMachine {
                                             crate::yield_type::YieldError::from(err),
                                         ));
                                     }
-                                    Plan::Ready(p)
+                                    MultibindPlan::Ready(p)
                                 }
-                                None => Plan::Eager(resp_val),
+                                None => MultibindPlan::Eager(resp_val),
                             }
                         }
                     };
                     let resp_ptr = match plan {
-                        Plan::Ready(p) => p,
-                        Plan::Park(stream) => {
+                        MultibindPlan::Ready(p) => p,
+                        MultibindPlan::Park(stream) => {
                             let id = crate::host_fns::park_stream(stream);
                             let p = unsafe {
                                 crate::signal_safety::with_signal_protection(|| {
@@ -1561,7 +1556,7 @@ impl JitEffectMachine {
                             }
                             p
                         }
-                        Plan::Eager(resp_val) => {
+                        MultibindPlan::Eager(resp_val) => {
                             let nodes = resp_val.node_count();
                             if nodes > MAX_EFFECT_RESPONSE_NODES {
                                 break Err(JitError::EffectResponseTooLarge {

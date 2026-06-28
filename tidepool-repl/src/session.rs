@@ -466,13 +466,6 @@ impl Session {
         self.turn_counter += 1;
         let frag_name = format!("repl_multi_bind_{}", self.turn_counter);
 
-        // Build forced_mask: Tier0 fields get deep-forced, Tier1 closures don't.
-        let forced_mask: Vec<bool> = turn
-            .binders
-            .iter()
-            .map(|b| matches!(b.tier, ValueTier::Tier0Data))
-            .collect();
-
         let machine = self.machine.as_mut().expect("machine bootstrapped above");
         let fid = match machine.add_function(
             &frag_name,
@@ -483,12 +476,15 @@ impl Session {
             Ok(f) => f,
             Err(e) => return TurnOutcome::Error(format!("JIT multi-bind add_function error: {e}")),
         };
+        // run_fragment_and_bind_projected deep-forces the whole tuple first
+        // (GC-safe: registers all pending parents as Rust roots), then projects
+        // each field from the post-GC NF tuple and tenures each separately.
         let slots = match machine.run_fragment_and_bind_projected(
             fid,
             &self.session_table,
             handlers,
             captured,
-            &forced_mask,
+            names.len(),
         ) {
             Ok(s) => s,
             Err(e) => return TurnOutcome::Error(format!("multi-bind runtime error: {e}")),
@@ -496,6 +492,7 @@ impl Session {
 
         self.val_gen = g;
         // Zip binders with their slots and record each component.
+        // Tier is read from binder metadata (deep_force already handled NF).
         let mut bound_names: Vec<(String, String)> = Vec::new();
         for (binder, slot) in turn.binders.iter().zip(slots.into_iter()) {
             let value = if matches!(binder.tier, ValueTier::Tier0Data) {
