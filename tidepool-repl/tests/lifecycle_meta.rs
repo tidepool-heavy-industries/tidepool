@@ -321,14 +321,10 @@ async fn type_and_info_are_wave4_stubs() {
 }
 
 // ---------------------------------------------------------------------------
-// Case 8 — an unknown meta-command fails gracefully with "unknown session
-// command". NOTE: this is rejected at PARSE time inside `dispatch_tool`
-// (`MetaCommand::parse` → `McpError::invalid_params`), so it surfaces as a
-// transport-level `Err(McpError)`, NOT a `CallToolResult` with is_error=true.
-// The shared harness `cmd()` panics on `Err`, so we bypass it and inspect the
-// `dispatch_tool` Result directly. (See FINDING in the report: meta-parse
-// errors take a different channel than eval/compile errors — a rough edge but
-// still a clean, non-panicking failure.)
+// Case 8 — an unknown meta-command returns CallToolResult{is_error:true} with
+// "unknown session command". MetaCommand::parse failures route through
+// CallToolResult::error (same channel as eval/compile errors), not a
+// transport-level McpError.
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_meta_command_is_clean_error() {
@@ -338,18 +334,12 @@ async fn unknown_meta_command_is_clean_error() {
     let repl = Repl::new();
     repl.open_ok().await;
 
-    let res = repl
-        .server
-        .dispatch_tool("session_cmd", obj(&[("command", ":nope")]))
-        .await;
+    let t = repl.cmd(":nope").await;
+    t.expect_err("unknown :nope should surface as is_error=true");
     assert!(
-        res.is_err(),
-        "unknown :nope should be a transport-level McpError (parse-time reject)"
-    );
-    let msg = format!("{:?}", res.unwrap_err());
-    assert!(
-        msg.contains("unknown session command"),
-        "error should mention 'unknown session command': {msg}"
+        t.contains("unknown session command"),
+        "error should mention 'unknown session command': {}",
+        t.text
     );
 
     repl.close().await.expect_ok("close");

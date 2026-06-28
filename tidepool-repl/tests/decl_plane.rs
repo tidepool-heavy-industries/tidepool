@@ -46,18 +46,13 @@ async fn defs_accumulate_and_interact() {
     repl.close().await.expect_ok("close");
 }
 
-/// CASE 2 — Forward reference ACROSS turns is NOT supported (it POISONS).
+/// CASE 2 — Forward reference ACROSS turns is REJECTED at define-time (BUG-A fix).
 ///
-/// CONFIRMED SEMANTICS (this test pins them): `SessionLib::define` is PARSE-ONLY
-/// (GHC binder extraction, no typecheck — mod.rs `define` doc). So def `f x = g x
-/// + 1` is ACCEPTED at the def turn (a free `g` is a scope concern, not a parse
-/// error) and lands in its OWN gen module `Lib.G1`. A later def `g` lands in
-/// `Lib.G2`, which `import`s G1 — but G1 does NOT import G2. So `g` is never in
-/// scope IN G1, and every later compile loads the whole gen chain (G1→G2→…),
-/// permanently failing with `G1.hs: GHC-88464 Variable not in scope: g`. The
-/// forward-ref def thus POISONS the decl plane (matches the documented
-/// limitation (a) in `define`'s doc — "a body referencing a not-yet-defined name
-/// poisons later generations"). Failure is DEFERRED to first use, then PERMANENT.
+/// NEW SEMANTICS: `SessionLib::define` now validates the candidate gen module via
+/// GHC after binder extraction. `def "f x = g x + 1"` before `g` exists FAILS at
+/// define time (GHC reports `Variable not in scope: g`), the log is rolled back,
+/// and the session remains fully usable. Once `g` is defined first, both `g` and
+/// `f` can be defined and evaluated successfully — no poison.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forward_reference_across_turns_poisons() {
     if !extract_available() {
@@ -66,23 +61,28 @@ async fn forward_reference_across_turns_poisons() {
     let repl = Repl::new();
     repl.open_ok().await;
 
-    // def f before g exists. Parse-only define accepts it (g is a free var).
+    // def f before g exists — define-time validation catches the forward ref.
     let f_turn = repl.def("f x = g x + (1 :: Int)").await;
     eprintln!(
         "[case2] def f (g not yet defined): is_error={} text={}",
         f_turn.is_error, f_turn.text
     );
-    f_turn.expect_ok("def f forward-ref ACCEPTED (parse-only define, no scope check)");
-
-    repl.def("g x = x * (2 :: Int)").await.expect_ok("def g ACCEPTED");
-
-    // ...but the reference never compiles: G1 (carrying f) can't see g (in G2).
-    let out = repl.eval("pure (f 10)").await;
-    eprintln!("[case2] eval (f 10): is_error={} text={}", out.is_error, out.text);
-    let err = out.expect_err("forward ref across turns POISONS — G1 can't see g (GHC-88464)");
+    let err = f_turn.expect_err("def f forward-ref REJECTED at define-time (g not in scope)");
     assert!(
-        err.contains("not in scope") || err.contains("88464") || err.contains('g'),
-        "case2: expected a 'g not in scope' poison error, got: {err}"
+        err.contains("not in scope") || err.contains("g"),
+        "case2: expected a 'g not in scope' error at define-time, got: {err}"
+    );
+
+    // The session is NOT poisoned: subsequent work proceeds normally.
+    repl.def("g x = x * (2 :: Int)").await.expect_ok("def g OK after rejected forward ref");
+    repl.def("f x = g x + (1 :: Int)")
+        .await
+        .expect_ok("def f OK now that g is defined");
+
+    let out = repl.eval_ok("pure (f 10)").await;
+    assert!(
+        out.contains("21"),
+        "case2: session not poisoned — f 10 = g 10 + 1 = 21, got: {out}"
     );
 
     repl.close().await.expect_ok("close");
@@ -311,34 +311,11 @@ async fn record_selector_on_bound_value_via_eff_path() {
     repl.close().await.expect_ok("close");
 }
 
-/// CASE 7 — class + instance: THE most important data point of this dimension.
+/// CASE 7 — class + instance: class exports with `(..)` so methods are visible.
 ///
-/// EXPECTED (per the team brief): the deferred user/orphan-instance replay knot
-/// (GHC `if_rec_types` self-knot for a user dfun in an injected module).
-///
-/// ACTUAL (CONFIRMED here): the failure is EARLIER and DIFFERENT — we never reach
-/// instance *replay* because the instance gen module fails to *compile*:
-///
-///   Tidepool.Session.Lib.G3.hs:11: error: [GHC-54721]
-///     `describe` is not a (visible) method of class `Describe`
-///
-/// ROOT CAUSE — the export-list renderer. A typeclass is classified as
-/// `ExportItem::Type { name: "Describe", cons: [] }` (binder extraction does not
-/// surface class methods), and `render_entry` renders a `Type` with empty `cons`
-/// as a BARE head (`Describe`, NOT `Describe(..)`) — see
-/// tidepool-runtime/src/session/render.rs:56-64 (the `cons.is_empty()` branch,
-/// shared with type synonyms). So `Lib.G1` exports the class WITHOUT its methods;
-/// the gen-chain re-export (`module Lib.G1`) carries the bare class on to G2/G3;
-/// and the later-gen `instance` in G3 can't see `describe` → GHC-54721. The fix
-/// is in the renderer/binder-extractor (export a class as `Class(..)`, or emit
-/// its methods as separate `Value` items) — strictly upstream of the documented
-/// `if_rec_types` dfun-replay work.
-///
-/// SECONDARY FINDING: the broken instance gen POISONS the whole decl plane — once
-/// `Lib.G3` is in the import chain, EVERY later eval (even an unrelated
-/// `pure (1::Int)`) fails to compile. `:reset` is the escape hatch (see below).
-/// The `#[ignore]`d `class_instance_describe` pins the aspirational GREEN.
-#[ignore = "BUG: class methods not re-exported (render.rs bare class head) → GHC-54721; instance gen never compiles"]
+/// FIX (BUG-C): the extractor now emits `EClass name [methods]` (not `EType name
+/// []`), and render.rs renders `Class(..)` (not a bare head). This makes the
+/// class methods visible when the instance gen module compiles.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn class_instance_describe() {
     if !extract_available() {
@@ -366,9 +343,8 @@ async fn class_instance_describe() {
     repl.close().await.expect_ok("close");
 }
 
-/// CASE 7 (live probe) — pins the CONFIRMED current behavior on every run, and
-/// LOCALIZES the poison to the instance (class + data alone are fine), then shows
-/// `:reset` recovers. Asserts only stable invariants; captures exact text.
+/// CASE 7 (no-poison) — class + data + instance all compile; describe works;
+/// an unrelated eval after the instance is NOT poisoned (BUG-C fixed).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn class_instance_poisons_until_reset() {
     if !extract_available() {
@@ -377,53 +353,33 @@ async fn class_instance_poisons_until_reset() {
     let repl = Repl::new();
     repl.open_ok().await;
 
-    // class + data alone do NOT poison: the class gen exports a (bare) head that
-    // is legal Haskell, and an eval that imports the lib still compiles.
     let c = repl
         .def("class Describe a where { describe :: a -> T.Text }")
         .await;
     eprintln!("[case7] def class:    is_error={} text={}", c.is_error, c.text);
-    c.expect_ok("def class Describe (accepted, parse-only)");
+    c.expect_ok("def class Describe");
 
     let d = repl.def("data Animal = Cat | Dog").await;
     eprintln!("[case7] def data:     is_error={} text={}", d.is_error, d.text);
-    d.expect_ok("def data Animal (accepted)");
+    d.expect_ok("def data Animal");
 
-    let pre = repl.eval_ok("pure (1 :: Int)").await;
-    assert!(
-        pre.contains('1'),
-        "class+data alone do NOT poison: eval should work, got: {pre}"
-    );
-
-    // The INSTANCE gen fails to compile (GHC-54721 method not visible) and poisons
-    // the chain: it is accepted at def time (parse-only) but every later eval dies.
     let i = repl
         .def("instance Describe Animal where { describe Cat = T.pack \"cat\"; describe Dog = T.pack \"dog\" }")
         .await;
     eprintln!("[case7] def instance: is_error={} text={}", i.is_error, i.text);
+    i.expect_ok("def instance Describe Animal");
 
-    let e = repl.eval("pure (describe Cat)").await;
-    eprintln!("[case7] eval describe Cat: is_error={} text={}", e.is_error, e.text);
-    let err = e.expect_err("instance gen does not compile (GHC-54721 method not visible)");
+    let out = repl.eval_ok("pure (describe Cat)").await;
     assert!(
-        err.contains("54721") || err.contains("not a (visible) method") || err.contains("not loaded"),
-        "case7: expected the class-method-export compile error, got: {err}"
+        out.contains("cat"),
+        "describe Cat: expected \"cat\", got: {out}"
     );
 
-    // POISON: even an unrelated eval now fails (the broken G3 is in the chain).
-    let poisoned = repl.eval("pure (2 :: Int)").await;
-    eprintln!("[case7] eval (2::Int) post-instance: is_error={} text={}", poisoned.is_error, poisoned.text);
-    poisoned.expect_err("decl plane POISONED by the broken instance gen (unrelated eval fails)");
-
-    // :reset is the escape hatch — it drops the decl log; a fresh def + eval works.
-    repl.cmd(":reset").await.expect_ok(":reset clears the poisoned decl log");
-    repl.def("ok7 x = x + (1 :: Int)")
-        .await
-        .expect_ok("fresh def after :reset");
-    let recovered = repl.eval_ok("pure (ok7 41)").await;
+    // No poison: an unrelated eval still works after the instance.
+    let ok = repl.eval_ok("pure (2 :: Int)").await;
     assert!(
-        recovered.contains("42"),
-        "recovery after :reset: expected 42, got: {recovered}"
+        ok.contains('2'),
+        "unrelated eval after class+instance: expected 2 (no poison), got: {ok}"
     );
 
     repl.close().await.expect_ok("close");
@@ -467,11 +423,11 @@ async fn decl_prelude_collision_is_graceful() {
     repl.close().await.expect_ok("close");
 }
 
-/// CASE 9 — empty / garbage declarations fail cleanly, session survives.
+/// CASE 9 — empty / garbage declarations: empty is a no-op, garbage fails cleanly.
 ///
-/// def `` (empty) and def `@@@ not haskell` → record outcomes (a parse failure
-/// is the clean rejection). The robust invariant asserted: the session SURVIVES
-/// and a following GOOD def + eval works.
+/// RE-1 fix: `def ""` (empty) is a no-op — returns Ok without bumping the gen.
+/// `def "@@@ not haskell"` → parse error, rejected cleanly. The session survives
+/// both and a following good def + eval works.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn empty_and_garbage_decls_survive() {
     if !extract_available() {
@@ -480,8 +436,26 @@ async fn empty_and_garbage_decls_survive() {
     let repl = Repl::new();
     repl.open_ok().await;
 
+    // Capture gen before the empty def so we can assert it is unchanged after.
+    let before = repl.cmd(":bindings").await.expect_ok(":bindings before").to_string();
+
     let empty = repl.def("").await;
     eprintln!("[case9] def \"\":    is_error={} text={}", empty.is_error, empty.text);
+    // RE-1 fix: empty def is a no-op — Ok, does not bump the generation.
+    empty.expect_ok("def \"\" is a no-op (Ok, no gen bump)");
+
+    let after = repl.cmd(":bindings").await.expect_ok(":bindings after").to_string();
+    // Both :bindings responses contain `"generation":N`; they must agree.
+    fn extract_gen(s: &str) -> Option<u64> {
+        let key = "\"generation\":";
+        let start = s.find(key)? + key.len();
+        s[start..].trim_start().split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+    }
+    assert_eq!(
+        extract_gen(&before),
+        extract_gen(&after),
+        "empty def must not bump the generation (before={before}, after={after})"
+    );
 
     let garbage = repl.def("@@@ not haskell").await;
     eprintln!("[case9] def garbage: is_error={} text={}", garbage.is_error, garbage.text);
