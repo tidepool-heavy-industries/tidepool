@@ -96,7 +96,12 @@ struct ReplContinuation {
     session_rx: tokio::sync::mpsc::UnboundedReceiver<WorkerMessage>,
     gate: Arc<PauseGate>,
     captured: CapturedOutput,
-    #[allow(dead_code)]
+    /// The `ask`'s schema (from the `AskWith` meta), used to validate AND
+    /// canonicalize the resume reply before it reaches the continuation — so
+    /// `ask` returns a structured, optic-extractable `Value` (a reply that
+    /// arrives as a JSON string is parsed into the canonical shape). `None` ⇒
+    /// accept any JSON. Mirrors the eval server's `AwaitingAnswer`.
+    expected_schema: Option<serde_json::Value>,
     created_at: Instant,
 }
 
@@ -358,29 +363,61 @@ impl TidepoolReplServer {
     }
 
     async fn session_resume(&self, req: SessionResumeRequest) -> Result<CallToolResult, McpError> {
+        // Validate + canonicalize the reply against the suspension's schema
+        // BEFORE consuming the continuation. This (a) makes `ask` return a
+        // STRUCTURED, optic-extractable Value — a reply that arrived as a JSON
+        // string is parsed into the canonical shape (BUG-9) — and (b) leaves an
+        // invalid reply's continuation un-consumed so the caller can retry.
+        // Mirrors the eval server's resume (tidepool-mcp/src/server.rs).
         let cont = {
             let mut conts = self.inner.continuations.lock();
-            conts.remove(&req.continuation_id)
+            let Some(c) = conts.get(&req.continuation_id) else {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "Unknown or expired continuation_id: {}",
+                        req.continuation_id
+                    ),
+                    None,
+                ));
+            };
+            let schema = c.expected_schema.clone();
+            match tidepool_mcp::validate::validate_response(schema.as_ref(), &req.response) {
+                tidepool_mcp::validate::Outcome::Invalid(violations) => {
+                    // Anti-starvation: a retrying continuation must not become the
+                    // oldest-first eviction victim while its caller fixes the reply.
+                    if let Some(c) = conts.get_mut(&req.continuation_id) {
+                        c.created_at = Instant::now();
+                    }
+                    let body = serde_json::json!({
+                        "validation_failed": true,
+                        "violations": violations
+                            .iter()
+                            .map(tidepool_mcp::validate::Violation::to_json)
+                            .collect::<Vec<_>>(),
+                        "schema": schema,
+                        "continuation_id": req.continuation_id,
+                        "continuation_not_consumed": true,
+                    });
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Response does not match the suspension's schema. Call session_resume \
+                         again with the same continuation_id and a corrected response (or \
+                         session_abort).\n{body}"
+                    ))]));
+                }
+                tidepool_mcp::validate::Outcome::Valid(canonical) => {
+                    let cont = conts
+                        .remove(&req.continuation_id)
+                        .expect("continuation present: checked under the same lock");
+                    if cont.response_tx.send(ResumeMsg::Answer(canonical)).is_err() {
+                        return Err(McpError::internal_error(
+                            "session worker is no longer running",
+                            None,
+                        ));
+                    }
+                    cont
+                }
+            }
         };
-        let Some(cont) = cont else {
-            return Err(McpError::invalid_params(
-                format!(
-                    "Unknown or expired continuation_id: {}",
-                    req.continuation_id
-                ),
-                None,
-            ));
-        };
-        if cont
-            .response_tx
-            .send(ResumeMsg::Answer(req.response))
-            .is_err()
-        {
-            return Err(McpError::internal_error(
-                "session worker is no longer running",
-                None,
-            ));
-        }
         Ok(self
             .drive(
                 "session_resume",
@@ -465,8 +502,12 @@ impl TidepoolReplServer {
                     "continuation_id": cont_id,
                     "prompt": prompt,
                 });
+                let mut expected_schema = None;
                 if let Some(serde_json::Value::Object(mut m)) = meta {
                     if let Some(schema) = m.remove("schema") {
+                        // Keep the schema to validate + canonicalize the reply on
+                        // resume (BUG-9); also surface it to the caller.
+                        expected_schema = Some(schema.clone());
                         if let Some(o) = json_obj.as_object_mut() {
                             o.insert("schema".into(), schema);
                         }
@@ -484,6 +525,7 @@ impl TidepoolReplServer {
                         session_rx,
                         gate,
                         captured,
+                        expected_schema,
                         created_at: Instant::now(),
                     },
                 );
