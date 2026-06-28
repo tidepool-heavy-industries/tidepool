@@ -3835,6 +3835,7 @@ dependencies = [
  "tidepool-codegen",
  "tidepool-effect",
  "tidepool-eval",
+ "tidepool-handlers",
  "tidepool-mcp",
  "tidepool-repr",
  "tidepool-runtime",

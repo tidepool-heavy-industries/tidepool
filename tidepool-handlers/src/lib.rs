@@ -1678,6 +1678,23 @@ pub fn build_base_stack(
     ]
 }
 
+/// Build the MINIMAL effect stack (tag 0: Console only).
+///
+/// For cheap-startup sessions and tests that exercise the session mechanism
+/// rather than the effects — it avoids constructing the heavier handlers (Llm's
+/// genai client, the cwd-bound Fs/SG/Exec/Lsp). Ask (the next tag) is interposed
+/// by each server's `AskDispatcher` wrapper, as with [`build_base_stack`]. Pair
+/// with [`base_decls_with_ask`] (which is generic over any `CollectEffectDecls`
+/// stack) to derive `(decls, ask_tag)`.
+pub fn build_minimal_stack() -> impl tidepool_effect::dispatch::DispatchEffect<CapturedOutput>
+       + CollectEffectDecls
+       + Clone
+       + Send
+       + Sync
+       + 'static {
+    frunk::hlist![ConsoleHandler]
+}
+
 /// Collect effect declarations from a base stack and append the Ask effect.
 ///
 /// Returns `(decls, ask_tag)` where `ask_tag` is the index of the Ask effect

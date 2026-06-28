@@ -24,6 +24,7 @@ tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
 tidepool-codegen = { version = "0.1.0", path = "../tidepool-codegen" }
 tidepool-runtime = { version = "0.1.0", path = "../tidepool-runtime" }
 tidepool-mcp = { version = "0.1.0", path = "../tidepool-mcp" }
+tidepool-handlers = { version = "0.1.0", path = "../tidepool-handlers" }
 tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
 tidepool-bridge-derive = { version = "0.1.0", path = "../tidepool-bridge-derive" }
 rmcp = { version = "0.16", features = ["server", "transport-io", "transport-streamable-http-server"] }

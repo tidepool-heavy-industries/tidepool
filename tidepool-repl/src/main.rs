@@ -1,14 +1,20 @@
 //! The `tidepool-repl` MCP server binary.
 //!
-//! A SEPARATE server from `tidepool` (the eval server). It uses a deliberately
-//! minimal effect stack — `[Console, Ask]` — sufficient for Wave 2: the session
-//! mechanism (resident machine across turns + Lane-A decl accumulation), not
-//! full effect parity. Richer stacks are a later concern.
+//! A SEPARATE server from `tidepool` (the eval server), but it builds the SAME
+//! full effect suite from the shared `tidepool-handlers` crate
+//! (`build_base_stack`): Console, KV, Fs, ast-grep/SG, Http, Exec/run, Lsp, Llm
+//! — plus the `Ask` suspend interposed by the session worker. What makes this a
+//! distinct server is the STATE: a resident JIT machine holds the value heap
+//! across `session_eval` turns and Lane-A declarations accumulate, so the
+//! effects compose over persistent, typed session state.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use tidepool_repl::{default_decls, ConsoleHandler, ReplServerConfig, TidepoolReplServer};
+use tidepool_handlers::{
+    base_decls_with_ask, build_base_stack, HandlerConfig, DEFAULT_OPENAI_MODEL,
+};
+use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
 use tidepool_runtime::session::ModuleEnv;
 
 #[derive(clap::Parser)]
@@ -59,8 +65,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .http
         .or(args.port.map(|p| SocketAddr::from(([0, 0, 0, 0], p))));
 
-    // Minimal effect stack: [Console, Ask]. Ask is tag 1 (its index in decls).
-    let (decls, ask_tag) = default_decls();
+    // Full effect suite, shared with the eval server via `tidepool-handlers`.
+    // HandlerConfig resolution mirrors `tidepool/src/main.rs` (cwd sandbox for
+    // Fs/SG/Exec/Lsp, the KV backing file, the LLM model). NOTE: unlike the eval
+    // binary we don't layer `config.toml` for the model (that `Config` lives in
+    // the `tidepool` binary, not a shared lib) — env + default only; factoring
+    // it out is a follow-up. `build_base_stack` must run in a tokio context (Llm
+    // captures `Handle::current()`), which `#[tokio::main]` provides.
+    let cwd = std::env::current_dir()?;
+    let project_root = tidepool_runtime::paths::find_project_root(&cwd);
+    let kv_path = match &project_root {
+        Some(root) => root.join(".tidepool").join("kv.json"),
+        None => tidepool_runtime::paths::cache_dir().join("kv.json"),
+    };
+    let llm_model =
+        std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| DEFAULT_OPENAI_MODEL.to_string());
+    let handler_cfg = HandlerConfig {
+        cwd,
+        kv_path,
+        llm_model,
+    };
+    let stack = build_base_stack(&handler_cfg);
+    // Decls derive from the stack (in HList/tag order) + Ask appended.
+    let (decls, ask_tag) = base_decls_with_ask(&stack);
 
     // The generated Tidepool.Effects module must be on the include path.
     let effects_dir = tidepool_mcp::ensure_effects_module(&decls)?;
@@ -80,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         nursery_size: None,
     };
 
-    let server = TidepoolReplServer::new(frunk::hlist![ConsoleHandler], cfg);
+    let server = TidepoolReplServer::new(stack, cfg);
     if let Some(addr) = http_addr {
         server.serve_http(addr).await
     } else {

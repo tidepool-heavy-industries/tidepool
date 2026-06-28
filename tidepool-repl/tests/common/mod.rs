@@ -10,7 +10,8 @@
 use std::path::PathBuf;
 
 use rmcp::model::{CallToolResult, RawContent};
-use tidepool_repl::{default_decls, ConsoleHandler, ReplServerConfig, TidepoolReplServer};
+use tidepool_handlers::{base_decls_with_ask, build_minimal_stack};
+use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
 use tidepool_runtime::session::ModuleEnv;
 
 /// True if the session-aware `tidepool-extract` is reachable (else the suite
@@ -42,7 +43,8 @@ pub fn obj(pairs: &[(&str, &str)]) -> serde_json::Map<String, serde_json::Value>
 /// Build a repl server with a deliberately SMALL nursery (2 MiB) so heavy-alloc
 /// turns trigger a real minor GC between bind and read.
 pub fn build_server() -> TidepoolReplServer {
-    let (decls, ask_tag) = default_decls();
+    let stack = build_minimal_stack();
+    let (decls, ask_tag) = base_decls_with_ask(&stack);
     let effects_dir =
         tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
     let prelude_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -66,7 +68,7 @@ pub fn build_server() -> TidepoolReplServer {
         session_root_base,
         nursery_size: Some(1 << 21), // 2 MiB
     };
-    TidepoolReplServer::new(frunk::hlist![ConsoleHandler], cfg)
+    TidepoolReplServer::new(stack, cfg)
 }
 
 /// One turn's result: the rendered text + whether it surfaced as an MCP error.
