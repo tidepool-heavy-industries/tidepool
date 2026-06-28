@@ -186,10 +186,16 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                 // Integer constructors (GHC.Num.Integer)
                 // IS Int# — small integer (fits in machine word)
                 ("IS", [x]) => value_to_json(x, table, d),
-                // IP ByteArray# — positive big integer (not yet supported, show as string)
-                ("IP", _) => json!("<big-integer>"),
-                // IN ByteArray# — negative big integer (not yet supported, show as string)
-                ("IN", _) => json!("<big-integer>"),
+                // IP BigNat# — positive big integer; render as exact decimal string
+                ("IP", fields) => match fields.first() {
+                    Some(ba) => json!(bignat_field_to_decimal(ba, table, d)),
+                    None => json!("<big-integer>"),
+                },
+                // IN BigNat# — negative big integer; render as exact decimal string with '-'
+                ("IN", fields) => match fields.first() {
+                    Some(ba) => json!(format!("-{}", bignat_field_to_decimal(ba, table, d))),
+                    None => json!("<big-integer>"),
+                },
 
                 // Scientific (Data.Scientific) — coefficient × 10^exponent
                 ("Scientific", [coeff, exp_val]) => {
@@ -375,6 +381,96 @@ fn extract_char_inner(val: &Value, table: &DataConTable) -> Option<char> {
     }
 }
 
+/// Convert the BigNat# field of an IP/IN constructor to a decimal string.
+/// The field is a ByteArray of little-endian 64-bit limbs (from `bigNatLitBytes`).
+fn bignat_field_to_decimal(val: &Value, table: &DataConTable, depth: usize) -> String {
+    let bytes: Option<Vec<u8>> = match val {
+        Value::ByteArray(bs) => Some(
+            bs.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        ),
+        Value::Lit(Literal::LitByteArray(bytes)) => Some(bytes.clone()),
+        // Unwrap a Con("ByteArray", [inner]) layer that heap_bridge occasionally emits
+        Value::Con(id, fields)
+            if con_name(*id, table) == "ByteArray" && fields.len() == 1 =>
+        {
+            match &fields[0] {
+                Value::ByteArray(bs) => Some(
+                    bs.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
+                ),
+                Value::Lit(Literal::LitByteArray(bytes)) => Some(bytes.clone()),
+                _ => None,
+            }
+        }
+        _ => {
+            // Unexpected shape — fall back to recursing as a plain value and
+            // rendering whatever comes out (e.g. a wrapped LitInt for IS-shaped
+            // sub-expressions).
+            let j = value_to_json(val, table, depth);
+            return match j {
+                serde_json::Value::Number(ref n) => n.to_string(),
+                serde_json::Value::String(ref s) => s.clone(),
+                _ => "<big-integer>".to_string(),
+            };
+        }
+    };
+    match bytes {
+        Some(b) => bignat_bytes_to_decimal(&b),
+        None => "<big-integer>".to_string(),
+    }
+}
+
+/// Convert little-endian bignat bytes (padded to 8-byte boundary) to a decimal string.
+/// Each 8-byte chunk is one u64 limb; limbs are in little-endian order.
+fn bignat_bytes_to_decimal(bytes: &[u8]) -> String {
+    if bytes.is_empty() || bytes.iter().all(|&b| b == 0) {
+        return "0".to_string();
+    }
+    // Parse as little-endian u64 limbs
+    let mut limbs: Vec<u64> = bytes
+        .chunks(8)
+        .map(|chunk| {
+            let mut arr = [0u8; 8];
+            arr[..chunk.len()].copy_from_slice(chunk);
+            u64::from_le_bytes(arr)
+        })
+        .collect();
+    // Strip trailing zero limbs
+    while limbs.last() == Some(&0) {
+        limbs.pop();
+    }
+    if limbs.is_empty() {
+        return "0".to_string();
+    }
+    if limbs.len() == 1 {
+        return limbs[0].to_string();
+    }
+    if limbs.len() == 2 {
+        let val = (limbs[1] as u128) << 64 | (limbs[0] as u128);
+        return val.to_string();
+    }
+    // General: extract decimal digits via repeated division by 10.
+    // dividend = (rem_u128 << 64) | limb fits comfortably in u128 (rem < 10).
+    let mut digits: Vec<u8> = Vec::new();
+    while !limbs.is_empty() {
+        let mut rem: u128 = 0;
+        for limb in limbs.iter_mut().rev() {
+            let d = (rem << 64) | (*limb as u128);
+            *limb = (d / 10) as u64;
+            rem = d % 10;
+        }
+        digits.push(rem as u8 + b'0');
+        while limbs.last() == Some(&0) {
+            limbs.pop();
+        }
+    }
+    digits.reverse();
+    String::from_utf8(digits).expect("only ascii digits")
+}
+
 fn literal_to_json(lit: &Literal) -> serde_json::Value {
     match lit {
         Literal::LitInt(n) => json!(n),
@@ -516,6 +612,10 @@ mod tests {
             (10, "(,)", 2),
             (11, "(,,)", 3),
             (12, "ByteArray", 1),
+            (13, "W#", 1),
+            (14, "IS", 1),
+            (15, "IP", 1),
+            (16, "IN", 1),
         ];
         for (id, name, arity) in cons {
             t.insert(DataCon {
@@ -670,6 +770,76 @@ mod tests {
 
         assert_eq!(value_to_json(&pair, &table, 0), json!([1, 2]));
         assert_eq!(value_to_json(&triple, &table, 0), json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn test_render_large_lit_int_exact() {
+        let table = test_table();
+        // 2^53 + 1 — first integer that loses precision in f64
+        let n: i64 = 9007199254740993;
+        let val = Value::Lit(Literal::LitInt(n));
+        let j = value_to_json(&val, &table, 0);
+        assert_eq!(j, serde_json::json!(9007199254740993i64));
+        // Confirm the raw number string is exact (not rounded)
+        assert_eq!(j.to_string(), "9007199254740993");
+    }
+
+    #[test]
+    fn test_bignat_bytes_to_decimal_small() {
+        // 1 = 0x01 in little-endian
+        assert_eq!(bignat_bytes_to_decimal(&[1, 0, 0, 0, 0, 0, 0, 0]), "1");
+        // 255 = 0xFF
+        assert_eq!(bignat_bytes_to_decimal(&[255, 0, 0, 0, 0, 0, 0, 0]), "255");
+        // u64::MAX = 18446744073709551615
+        assert_eq!(
+            bignat_bytes_to_decimal(&[255, 255, 255, 255, 255, 255, 255, 255]),
+            "18446744073709551615"
+        );
+    }
+
+    #[test]
+    fn test_bignat_bytes_to_decimal_two_limbs() {
+        // u64::MAX + 1 = 2^64 = two limbs: [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]
+        let mut bytes = vec![0u8; 16];
+        bytes[8] = 1; // second limb = 1 → value = 1 << 64
+        let expected = (1u128 << 64).to_string();
+        assert_eq!(bignat_bytes_to_decimal(&bytes), expected);
+    }
+
+    #[test]
+    fn test_render_ip_constructor_exact() {
+        let table = test_table();
+        let ip_id = table.get_by_name("IP").unwrap();
+        // Encode 25! = 15511210043330985984000000 as little-endian limbs
+        // 25! fits in 2 limbs: lo=9867223490682126336, hi=841
+        // (15511210043330985984000000 = 841 * 2^64 + 9867223490682126336)
+        let val_128: u128 = 15511210043330985984000000_u128;
+        let lo = val_128 as u64;
+        let hi = (val_128 >> 64) as u64;
+        let mut bytes = Vec::with_capacity(16);
+        bytes.extend_from_slice(&lo.to_le_bytes());
+        bytes.extend_from_slice(&hi.to_le_bytes());
+        let ba = Value::ByteArray(std::sync::Arc::new(std::sync::Mutex::new(bytes)));
+        let val = Value::Con(ip_id, vec![ba]);
+        assert_eq!(
+            value_to_json(&val, &table, 0),
+            serde_json::json!("15511210043330985984000000")
+        );
+    }
+
+    #[test]
+    fn test_render_in_constructor_exact() {
+        let table = test_table();
+        let in_id = table.get_by_name("IN").unwrap();
+        // IN BigNat# = negative big integer; test with value 42 → renders "-42"
+        let bytes: Vec<u8> = {
+            let mut v = 42u64.to_le_bytes().to_vec();
+            v.extend_from_slice(&[0u8; 0]); // no padding needed for 1 limb
+            v
+        };
+        let ba = Value::ByteArray(std::sync::Arc::new(std::sync::Mutex::new(bytes)));
+        let val = Value::Con(in_id, vec![ba]);
+        assert_eq!(value_to_json(&val, &table, 0), serde_json::json!("-42"));
     }
 
     #[test]
