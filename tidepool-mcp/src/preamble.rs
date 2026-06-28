@@ -13,6 +13,12 @@
 
 use crate::EffectDecl;
 
+/// The `default` declaration emitted after all imports in the preamble.
+/// Exported as the canonical injection-point marker: `insert_imports` in
+/// `tidepool-repl` uses it to locate where session/user imports must go,
+/// avoiding a magic-substring dependency on the literal text (AUDIT-3).
+pub const PREAMBLE_DEFAULT_DECL: &str = "default (Int, Double, Text)\n";
+
 /// Emit the LANGUAGE pragma block, the `module Expr` header, and the fixed
 /// import set (plus the conditional `import Library`).
 ///
@@ -61,7 +67,7 @@ fn pragmas_and_imports(out: &mut String, user_library: bool) {
         out.push_str("import Library\n");
     }
     out.push_str("import qualified Prelude as P\n");
-    out.push_str("default (Int, Double, Text)\n");
+    out.push_str(PREAMBLE_DEFAULT_DECL);
     out.push('\n');
 }
 

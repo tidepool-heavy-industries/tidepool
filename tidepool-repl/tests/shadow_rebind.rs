@@ -59,15 +59,11 @@ async fn rebind_value_name_newest_wins() {
 /// CASE 2 — Rebind a name at a DIFFERENT type; newest type must win.
 ///
 /// `x <- pure (1 :: Int)` ; `x <- pure (T.pack "hi")` ; `T.length x` => 2.
-/// Was BUG #2: the SECOND bind (`x <- pure (T.pack "hi")`, rebinding the
-/// Int-bound `x` to a Text) crashed AT BIND TIME with:
-///   [JIT] runtime_error kind=4 (TypeMetadata) msg="hi"
-///   bind runtime error: yield error: forced type metadata (should be dead code)
-/// STILL CRASHES after the BUG#1 fix. The `different_name_text_after_int`
-/// diagnostic (also crashing, identical kind=4) localizes it: the trigger is "a
-/// Tier-0 Text bind while ANY prior binding is live" — NOT rebind-same-name.
-/// The control (first/sole Text bind) passes. Repro kept intact.
-#[ignore = "BUG: Tier-0 Text bind with a prior live binding crashes (kind=4 TypeMetadata 'forced type metadata'); not rebind-specific"]
+/// Fixed by BUG-2 (commit caf3f4b: resolve home-library functions in session
+/// extract). Previously crashed with kind=4 TypeMetadata "forced type metadata
+/// (should be dead code)" — the trigger was a Tier-0 Text bind while ANY prior
+/// binding was live. BUG-2 fixed the home-library function resolution that
+/// caused the TypeMetadata forcing. Covered by text_bind.rs green suite.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rebind_value_different_type() {
     if !extract_available() {
@@ -125,21 +121,14 @@ async fn first_bind_text_no_rebind() {
     repl.close().await.expect_ok("close");
 }
 
-/// DIAGNOSTIC for BUG #2 — bind a Text under a DIFFERENT name while an Int
+/// DIAGNOSTIC for CASE 2 — bind a Text under a DIFFERENT name while an Int
 /// binding is already live (no rebind of the same name).
 ///
 /// open; `x <- pure (1 :: Int)`; `y <- pure (T.pack "hi")` ; `T.length y` => 2.
-/// Localizes the BUG #2 crash:
-///   - If THIS crashes (kind=4 TypeMetadata) → the bug is "a Tier-0 Text bind
-///     while ANY prior binding is live" (ExternalEnv-seed / multi-module inject
-///     interferes with deep_force) — NOT rebind-same-name-specific.
-///   - If THIS passes but same-name rebind (CASE 2) still crashes → truly
-///     rebind-same-name-specific.
-///
-/// RESULT (CONFIRMED): THIS crashes with the SAME `kind=4 (TypeMetadata) msg="hi"`
-/// / "forced type metadata (should be dead code)" as CASE 2. So the bug is "a
-/// Tier-0 Text bind while ANY prior binding is live", NOT rebind-specific.
-#[ignore = "BUG: Tier-0 Text bind with a prior live binding crashes (kind=4 TypeMetadata) — diagnostic localizing CASE 2; not rebind-specific"]
+/// This was a BUG-2 diagnostic: both this test and CASE 2 crashed identically
+/// with kind=4 TypeMetadata "forced type metadata (should be dead code)", proving
+/// the bug was "Tier-0 Text bind while ANY prior binding is live" (not
+/// rebind-same-name-specific). Fixed by BUG-2 (commit caf3f4b). Now PASSES.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn different_name_text_after_int() {
     if !extract_available() {
@@ -197,15 +186,38 @@ async fn redefine_function_latest_wins() {
     repl.close().await.expect_ok("close");
 }
 
-/// CASE 4 — Redefine a TYPE: the honest CURRENT CONTRACT (documented limitation).
+/// CASE 4 — Redefine a TYPE: the honest CURRENT CONTRACT (GHCi-correct behavior).
 ///
 /// Each `Lib.G<g>` regenerates `data Color` as a DISTINCT type, so a value bound
 /// against the old gen cannot re-match a redefined `Color`. This test pins the
 /// ACTUAL behavior: (a) the redefine + binding/matching NEW-gen values works;
 /// (b) re-matching an OLD-gen value after the redefine FAILS GRACEFULLY (clean
 /// MCP error, GHC-83865 type mismatch) and the session SURVIVES (later turns
-/// still run). The aspirational "old binding keeps working" lives in the
-/// `#[ignore]`d `redefine_type_cross_gen_coexistence` below.
+/// still run).
+///
+/// # GHCi Parity — this IS the correct contract
+///
+/// This graceful-failure behavior exactly matches GHCi's semantics when a `data`
+/// type is redefined mid-session:
+///
+///   ghci> data Color = Red | Green
+///   ghci> let c = Green          -- c :: Color (v1)
+///   ghci> data Color = Red | Green | Blue
+///   ghci> case c of { Green -> 1; _ -> 0 }
+///   -- type error: `c :: Color` (the v1 type) but `Green` resolves to the v2 `Color`
+///
+/// GHCi makes the old value keep its old type — it is STILL usable through
+/// old-typed code (e.g. code compiled before the redefine). But mixing the old
+/// value with the new constructors is a LOUD TYPE ERROR because the two `Color`
+/// types are distinct nominal types with potentially different runtime
+/// representations. There is no SOUND way to auto-coerce an old-typed value to the
+/// new type. In our gen-versioned module scheme each `Lib.G<g>` is exactly that
+/// generational boundary: `Green` in `Lib.G2` names the new type's constructor,
+/// and `c` (bound against `Lib.G1.Color`) is a different type. GHC surfaces this
+/// correctly as a type mismatch rather than a silent runtime corruption.
+///
+/// Graceful failure = GHCi-correct. No aspirational coexistence test remains
+/// (it was deleted — see git log; it was NOT a bug that warranted fixing).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn redefine_type_old_binding_orphaned_gracefully() {
     if !extract_available() {
@@ -260,42 +272,6 @@ async fn redefine_type_old_binding_orphaned_gracefully() {
             .contains('2'),
         "post-orphan c2: expected 2, got: {}",
         survive.text
-    );
-
-    repl.close().await.expect_ok("close");
-}
-
-/// ASPIRATIONAL — cross-gen type coexistence (NOT yet supported).
-///
-/// The desired behavior: after redefining `data Color`, the OLD binding `c`
-/// (bound as the v1 `Color`) STILL pattern-matches. Currently impossible because
-/// each `Lib.G<g>` mints a distinct `Color` type and the unqualified con
-/// resolves to the newest gen. Captured as an ignored spec, not a bug.
-#[ignore = "FEATURE: cross-gen type coexistence — old-gen value re-match after a type redefine"]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn redefine_type_cross_gen_coexistence() {
-    if !extract_available() {
-        return;
-    }
-    let repl = Repl::new();
-    repl.open_ok().await;
-
-    repl.def("data Color = Red | Green")
-        .await
-        .expect_ok("def Color v1");
-    repl.eval("c <- pure Green").await.expect_ok("bind c=Green");
-    repl.def("data Color = Red | Green | Blue")
-        .await
-        .expect_ok("def Color v2");
-
-    // ASPIRATIONAL: the old binding should still resolve to 1 after the redefine.
-    let out = repl
-        .eval("case c of { Green -> (1 :: Int); _ -> 0 }")
-        .await;
-    assert!(
-        out.expect_ok("old-gen c re-match (aspirational)").contains('1'),
-        "cross-gen coexistence: expected 1, got: {}",
-        out.text
     );
 
     repl.close().await.expect_ok("close");

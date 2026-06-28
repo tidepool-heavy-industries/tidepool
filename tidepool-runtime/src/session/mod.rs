@@ -126,6 +126,27 @@ impl SessionLib {
         self.current_module().map(|m| format!("import {}", m.module_name()))
     }
 
+    /// Names of every value/function binder introduced across all declaration
+    /// turns (all generations, not just the current one). Used by the eval
+    /// assembler to hide session-defined names from the Prelude import so a
+    /// user function named `over`/`view`/etc. resolves unambiguously to the
+    /// session decl rather than the Prelude re-export (BUG-7).
+    #[must_use]
+    pub fn decl_value_names(&self) -> Vec<&str> {
+        self.log
+            .turns
+            .iter()
+            .flat_map(|t| t.items.iter())
+            .filter_map(|item| {
+                if let ExportItem::Value { name } = item {
+                    Some(name.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     /// A cache salt unique to `(session, generation)`. Threaded into
     /// [`crate::compile_haskell_salted`] so two sessions' identical-text modules
     /// don't collide and a generation bump invalidates correctly (plan §3 R6).

@@ -385,13 +385,14 @@ async fn class_instance_poisons_until_reset() {
     repl.close().await.expect_ok("close");
 }
 
-/// CASE 8 — decl/Prelude name collision (KNOWN sharp edge, codified).
+/// CASE 8 — decl/Prelude name collision: user decl shadows Prelude (BUG-7 fixed).
 ///
 /// `over` is a `Control.Lens` re-export in the eval preamble's unqualified
-/// `Tidepool.Prelude`. Defining a session `over` then referencing it bare makes
-/// the reference ambiguous between `Lib.G<g>.over` and `Prelude.over`. EXPECT a
-/// clean "Ambiguous occurrence" compile error; the session must SURVIVE. This
-/// DOCUMENTS the edge — not flagged as a new bug.
+/// `Tidepool.Prelude`. After BUG-7 fix: the session assembler extends the
+/// `import Tidepool.Prelude hiding (error)` line to also hide every value-binder
+/// the session has defined. So when the user defines `over`, the preamble
+/// becomes `import Tidepool.Prelude hiding (error, over)`, and the eval module
+/// resolves `over` unambiguously to the session-defined version. Expected: 6.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn decl_prelude_collision_is_graceful() {
     if !extract_available() {
@@ -400,25 +401,26 @@ async fn decl_prelude_collision_is_graceful() {
     let repl = Repl::new();
     repl.open_ok().await;
 
-    // The def itself may well succeed (the gen module uses the lens-free
-    // standalone surface); the collision bites at the eval site (Prelude in scope).
+    // The gen module uses the lens-free standalone surface, so the def succeeds.
     let def = repl.def("over x = x + (1 :: Int)").await;
     eprintln!("[case8] def over: is_error={} text={}", def.is_error, def.text);
+    def.expect_ok("def over succeeds (gen module is lens-free)");
 
+    // BUG-7 fix: preamble hides `over` from Prelude → user decl wins.
     let used = repl.eval("pure (over 5)").await;
     eprintln!("[case8] eval over: is_error={} text={}", used.is_error, used.text);
-    let err = used.expect_err("over collides with Prelude.over → ambiguous occurrence");
+    let out = used.expect_ok("user `over` shadows Prelude.over — no ambiguous-occurrence");
     assert!(
-        err.to_lowercase().contains("ambiguous") || err.to_lowercase().contains("over"),
-        "decl/Prelude collision: expected an ambiguous-occurrence error mentioning `over`, got: {err}"
+        out.contains('6'),
+        "user decl wins: expected 6 (over 5 = 5 + 1), got: {out}"
     );
 
-    // Session survives the ambiguity error: a fresh, non-colliding def + eval works.
+    // Session stays fully usable after the shadow eval.
     repl.def("noclash x = x + (1 :: Int)")
         .await
-        .expect_ok("session survives collision (def)");
+        .expect_ok("session still usable after shadow eval (def)");
     let ok = repl.eval_ok("pure (noclash 9)").await;
-    assert!(ok.contains("10"), "post-collision: expected 10, got: {ok}");
+    assert!(ok.contains("10"), "post-shadow: expected 10, got: {ok}");
 
     repl.close().await.expect_ok("close");
 }

@@ -19,7 +19,7 @@ use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_mcp::{template_haskell, CapturedOutput, EffectDecl};
+use tidepool_mcp::{template_haskell, CapturedOutput, EffectDecl, PREAMBLE_DEFAULT_DECL};
 use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
 };
@@ -237,13 +237,14 @@ impl Session {
         handlers: &mut H,
         captured: &CapturedOutput,
     ) -> TurnOutcome {
+        let preamble = self.patched_preamble();
         let imports = self
             .lib
             .current_module()
             .map(|m| format!("{}\n", m.module_name()))
             .unwrap_or_default();
         let source = template_haskell(
-            &self.cfg.preamble,
+            &preamble,
             &self.cfg.effect_stack,
             expr_text,
             &imports,
@@ -310,11 +311,12 @@ impl Session {
         handlers: &mut H,
         captured: &CapturedOutput,
     ) -> TurnOutcome {
+        let preamble = self.patched_preamble();
         let g = self.val_gen.next();
         let inject = self.live_val_modules();
         let imports = self.session_imports();
         let wrapped =
-            wrap_bind_source(&self.cfg.preamble, &self.cfg.effect_stack, &imports, turn_text, &name);
+            wrap_bind_source(&preamble, &self.cfg.effect_stack, &imports, turn_text, &name);
 
         let lib_dir = self.lib.include_dir().to_path_buf();
         let mut include: Vec<&Path> = self.cfg.base_include.iter().map(PathBuf::as_path).collect();
@@ -409,11 +411,12 @@ impl Session {
         handlers: &mut H,
         captured: &CapturedOutput,
     ) -> TurnOutcome {
+        let preamble = self.patched_preamble();
         let g = self.val_gen.next();
         let inject = self.live_val_modules();
         let imports = self.session_imports();
         let wrapped = wrap_multi_bind_source(
-            &self.cfg.preamble,
+            &preamble,
             &self.cfg.effect_stack,
             &imports,
             turn_text,
@@ -523,6 +526,7 @@ impl Session {
         handlers: &mut H,
         captured: &CapturedOutput,
     ) -> TurnOutcome {
+        let preamble = self.patched_preamble();
         let inject = self.live_val_modules();
         let imports = self.session_imports();
         let lib_dir = self.lib.include_dir().to_path_buf();
@@ -531,7 +535,7 @@ impl Session {
 
         // Eff-first.
         let eff_src = template_haskell(
-            &self.cfg.preamble,
+            &preamble,
             &self.cfg.effect_stack,
             expr_text,
             &imports,
@@ -543,7 +547,7 @@ impl Session {
             Ok(turn) => self.run_reference_fragment(turn, false, handlers, captured),
             Err(eff_err) => {
                 // Pure fallback.
-                let pure_src = wrap_pure_ref_source(&self.cfg.preamble, &imports, expr_text);
+                let pure_src = wrap_pure_ref_source(&preamble, &imports, expr_text);
                 match compile_session_turn(&pure_src, &include, self.session_root(), &inject, None) {
                     Ok(turn) => self.run_reference_fragment(turn, true, handlers, captured),
                     Err(pure_err) => TurnOutcome::Error(format!(
@@ -648,6 +652,20 @@ impl Session {
         }
     }
 
+    /// The eval preamble with the `import Tidepool.Prelude hiding (…)` line
+    /// extended to also hide every value-binder the session has defined. This
+    /// prevents GHC "Ambiguous occurrence" errors when a user function has the
+    /// same name as a Prelude/lens re-export (e.g. `over`, `view`, `key`) —
+    /// the session-defined name wins because Prelude no longer exports it into
+    /// the eval module's scope (BUG-7).
+    fn patched_preamble(&self) -> String {
+        let names = self.lib.decl_value_names();
+        if names.is_empty() {
+            return self.cfg.preamble.clone();
+        }
+        hide_prelude_names(&self.cfg.preamble, &names)
+    }
+
     /// Drop the resident machine, freeing the session heap. Called from
     /// [`SessionHandle::close`].
     fn free(&mut self) {
@@ -715,14 +733,15 @@ impl SessionHandle<Open> {
 // Turn-wrapping helpers (Wave 3b)
 // ---------------------------------------------------------------------------
 
-/// Insert `import <m>` lines into the eval preamble at the same point
-/// `template_haskell` uses (after the standard imports, before `default (Int`),
-/// so user/session imports are in scope. Mirrors `eval_prep::template_haskell`.
+/// Insert `import <m>` lines into the eval preamble immediately before the
+/// `default` declaration (the canonical injection point, matching where
+/// `template_haskell` places user imports). Uses [`PREAMBLE_DEFAULT_DECL`] as
+/// the injection marker — no magic substring (AUDIT-3).
 fn insert_imports(preamble: &str, imports: &str) -> String {
     if imports.trim().is_empty() {
         return preamble.to_string();
     }
-    let insert_point = preamble.find("default (Int").unwrap_or(preamble.len());
+    let insert_point = preamble.find(PREAMBLE_DEFAULT_DECL).unwrap_or(preamble.len());
     let mut out = String::new();
     out.push_str(&preamble[..insert_point]);
     for imp in imports.lines().map(str::trim).filter(|l| !l.is_empty()) {
@@ -730,6 +749,42 @@ fn insert_imports(preamble: &str, imports: &str) -> String {
     }
     out.push_str(&preamble[insert_point..]);
     out
+}
+
+/// Rewrite `import Tidepool.Prelude hiding (…)` in the preamble to also hide
+/// the given names. Applied per-turn so that user-defined functions named after
+/// Prelude/lens re-exports (e.g. `over`, `view`, `key`) resolve unambiguously
+/// to the session decl rather than the Prelude export (BUG-7).
+///
+/// Names already present in the hiding list are not duplicated. Names that do
+/// not exist in Tidepool.Prelude produce no error (GHC silently ignores
+/// redundant hiding entries in most configurations).
+fn hide_prelude_names(preamble: &str, extra: &[&str]) -> String {
+    const PRELUDE_IMPORT_PREFIX: &str = "import Tidepool.Prelude hiding (";
+    let Some(start) = preamble.find(PRELUDE_IMPORT_PREFIX) else {
+        return preamble.to_string();
+    };
+    let rest = &preamble[start..];
+    let line_len = rest.find('\n').map_or(rest.len(), |i| i + 1);
+    let line = &rest[..line_len];
+
+    // Extract the existing hidden list from "import Tidepool.Prelude hiding (X, Y)\n"
+    let paren_open = line.find('(').unwrap_or(line.len()) + 1;
+    let paren_close = line.rfind(')').unwrap_or(line.len());
+    let existing: Vec<&str> = line[paren_open..paren_close]
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut all = existing;
+    for &n in extra {
+        if !all.contains(&n) {
+            all.push(n);
+        }
+    }
+    let new_line = format!("import Tidepool.Prelude hiding ({})\n", all.join(", "));
+    format!("{}{}{}", &preamble[..start], new_line, &preamble[start + line_len..])
 }
 
 /// Wrap a BIND turn into an `Eff`-typed module whose `result` runs the bind
