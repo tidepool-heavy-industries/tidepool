@@ -28,7 +28,7 @@ module Tidepool.Binders
 import GHC
 import GHC.Hs
   ( HsDecl(..), TyClDecl(..), HsDataDefn(..), ConDecl(..)
-  , hsmodDecls )
+  , Sig(..), LSig, hsmodDecls )
 import GHC.Hs.Expr (StmtLR(..))
 import GHC.Hs.Utils (collectHsBindBinders, collectLStmtBinders, CollectFlag(..))
 import GHC.Driver.Session (importPaths, xopt_set)
@@ -43,18 +43,20 @@ import GHC.Types.Name.Reader (RdrName, rdrNameOcc)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.SrcLoc (unLoc)
 import Data.Foldable (toList)
-import Data.List (intercalate, foldl')
+import Data.List (intercalate, foldl', nub)
 import System.Environment (lookupEnv)
 import System.Process (readProcess)
 
 -- | A binder a declaration introduces.
 --
--- 'EValue' is a function/value binder. 'EType' is a type/class/data head with
--- its data constructor children, so it can render as @Foo(..)@ for both export
--- and @hiding@ (a reshape hides the old type and all its constructors at once).
+-- 'EValue' is a function/value binder. 'EType' is a type/data head with its
+-- data constructor children, so it can render as @Foo(..)@ for both export and
+-- @hiding@. 'EClass' is a typeclass head with its method names, so it renders
+-- as @Class(..)@ (required for instances to see the methods).
 data ExportItem
   = EValue String
   | EType String [String]
+  | EClass String [String]
   deriving (Eq, Show)
 
 -- | Parse @path@ (with @includes@ on the search path) and collect the binders
@@ -94,9 +96,18 @@ tyClItems = \case
   DataDecl { tcdLName = n, tcdDataDefn = defn } ->
     [ EType (occStr (unLoc n)) (conNames defn) ]
   SynDecl  { tcdLName = n } -> [ EType (occStr (unLoc n)) [] ]
-  ClassDecl{ tcdLName = n } -> [ EType (occStr (unLoc n)) [] ]
+  ClassDecl{ tcdLName = n, tcdSigs = sigs } -> [ EClass (occStr (unLoc n)) (classMethodNames sigs) ]
   FamDecl  { tcdFam = FamilyDecl { fdLName = n } } -> [ EType (occStr (unLoc n)) [] ]
   _ -> []
+
+-- | Method names of a class declaration (parse-only: uses 'ClassOpSig' from
+-- 'tcdSigs', not the typechecked 'classMethods').
+classMethodNames :: [LSig GhcPs] -> [String]
+classMethodNames sigs =
+  nub [ occStr (unLoc nm)
+      | lsig <- sigs
+      , ClassOpSig _ _ ns _ <- [unLoc lsig]
+      , nm <- ns ]
 
 -- | Data constructor names of a data/newtype definition.
 conNames :: HsDataDefn GhcPs -> [String]
@@ -126,6 +137,9 @@ renderItem (EValue n) =
 renderItem (EType n cons) =
   "{\"kind\":\"type\",\"name\":" ++ jstr n
     ++ ",\"cons\":[" ++ intercalate "," (map jstr cons) ++ "]}"
+renderItem (EClass n methods) =
+  "{\"kind\":\"class\",\"name\":" ++ jstr n
+    ++ ",\"methods\":[" ++ intercalate "," (map jstr methods) ++ "]}"
 
 -- | Minimal JSON string escaping (identifiers + operator symbols only need
 -- quote/backslash escaping).

@@ -19,53 +19,63 @@ use tidepool_repr::{Generation, SessionModule};
 
 /// A name a declaration turn brings into scope, as classified by GHC.
 ///
-/// `Value` is a function/value binder (`slug`). `Type` is a type/class/data
+/// `Value` is a function/value binder (`slug`). `Type` is a type/data
 /// constructor head plus its data-constructor children (`Foo` with `[A, B]`),
-/// so it can be rendered as `Foo(..)` for both export and `hiding`.
+/// so it can be rendered as `Foo(..)` for both export and `hiding`. `Class`
+/// is a typeclass head with its method names, rendered as `Class(..)` so
+/// that later `instance` declarations can see the methods.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExportItem {
     Value { name: String },
     Type { name: String, cons: Vec<String> },
+    Class { name: String, methods: Vec<String> },
 }
 
 impl ExportItem {
-    /// The head identifier (the value name or the type/class name).
+    /// The head identifier (the value name, the type/class name).
     #[must_use]
     pub fn head_name(&self) -> &str {
         match self {
-            ExportItem::Value { name } | ExportItem::Type { name, .. } => name,
+            ExportItem::Value { name }
+            | ExportItem::Type { name, .. }
+            | ExportItem::Class { name, .. } => name,
         }
     }
 
-    /// Every identifier this item introduces: the head plus any constructors.
+    /// Every identifier this item introduces: the head plus constructors or methods.
     /// Used to decide whether a later turn redefines (shadows) this item.
     pub fn all_names(&self) -> impl Iterator<Item = &str> {
         let head = std::iter::once(self.head_name());
         let cons: Box<dyn Iterator<Item = &str>> = match self {
             ExportItem::Type { cons, .. } => Box::new(cons.iter().map(String::as_str)),
+            ExportItem::Class { methods, .. } => Box::new(methods.iter().map(String::as_str)),
             ExportItem::Value { .. } => Box::new(std::iter::empty()),
         };
         head.chain(cons)
     }
 
     /// Render this item as an export-list / `hiding`-list entry. A value is its
-    /// bare name; a type exports all its constructors via `(..)` so the value
-    /// shape stays usable (and, in `hiding`, the old constructors are hidden
-    /// alongside the type — exactly what a reshape needs).
+    /// bare name; a type with constructors exports via `(..)` so the value shape
+    /// stays usable; a type synonym (no constructors) renders as a bare head
+    /// (GHC rejects `Synonym(..)` for synonyms); a class always renders as
+    /// `Class(..)` so later instances can see its methods.
     #[must_use]
     pub fn render_entry(&self) -> String {
         match self {
             ExportItem::Value { name } => name.clone(),
-            // A type with no data constructors (type synonym, class, family)
-            // renders as a bare head; `(..)` would be rejected for a synonym.
+            // A type synonym or family (empty cons) renders as a bare head;
+            // `(..)` is rejected by GHC for synonyms.
             ExportItem::Type { name, cons } if cons.is_empty() => name.clone(),
             ExportItem::Type { name, .. } => format!("{name}(..)"),
+            // A class always exports with `(..)` so methods are visible to instances.
+            ExportItem::Class { name, .. } => format!("{name}(..)"),
         }
     }
 
     /// Parse one item from the binder-extractor JSON object
     /// (`{"kind":"value","name":"slug"}` / `{"kind":"type","name":"Foo",
-    /// "cons":["A","B"]}`). Returns `None` for a malformed entry.
+    /// "cons":["A","B"]}` / `{"kind":"class","name":"C","methods":["m"]}`).
+    /// Returns `None` for a malformed entry.
     pub(crate) fn from_json(v: &Json) -> Option<ExportItem> {
         let kind = v.get("kind")?.as_str()?;
         let name = v.get("name")?.as_str()?.to_string();
@@ -78,6 +88,14 @@ impl ExportItem {
                     .map(|a| a.iter().filter_map(|c| c.as_str().map(str::to_string)).collect())
                     .unwrap_or_default();
                 Some(ExportItem::Type { name, cons })
+            }
+            "class" => {
+                let methods = v
+                    .get("methods")
+                    .and_then(Json::as_array)
+                    .map(|a| a.iter().filter_map(|c| c.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                Some(ExportItem::Class { name, methods })
             }
             _ => None,
         }

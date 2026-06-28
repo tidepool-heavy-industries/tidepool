@@ -311,34 +311,11 @@ async fn record_selector_on_bound_value_via_eff_path() {
     repl.close().await.expect_ok("close");
 }
 
-/// CASE 7 — class + instance: THE most important data point of this dimension.
+/// CASE 7 — class + instance: class exports with `(..)` so methods are visible.
 ///
-/// EXPECTED (per the team brief): the deferred user/orphan-instance replay knot
-/// (GHC `if_rec_types` self-knot for a user dfun in an injected module).
-///
-/// ACTUAL (CONFIRMED here): the failure is EARLIER and DIFFERENT — we never reach
-/// instance *replay* because the instance gen module fails to *compile*:
-///
-///   Tidepool.Session.Lib.G3.hs:11: error: [GHC-54721]
-///     `describe` is not a (visible) method of class `Describe`
-///
-/// ROOT CAUSE — the export-list renderer. A typeclass is classified as
-/// `ExportItem::Type { name: "Describe", cons: [] }` (binder extraction does not
-/// surface class methods), and `render_entry` renders a `Type` with empty `cons`
-/// as a BARE head (`Describe`, NOT `Describe(..)`) — see
-/// tidepool-runtime/src/session/render.rs:56-64 (the `cons.is_empty()` branch,
-/// shared with type synonyms). So `Lib.G1` exports the class WITHOUT its methods;
-/// the gen-chain re-export (`module Lib.G1`) carries the bare class on to G2/G3;
-/// and the later-gen `instance` in G3 can't see `describe` → GHC-54721. The fix
-/// is in the renderer/binder-extractor (export a class as `Class(..)`, or emit
-/// its methods as separate `Value` items) — strictly upstream of the documented
-/// `if_rec_types` dfun-replay work.
-///
-/// SECONDARY FINDING: the broken instance gen POISONS the whole decl plane — once
-/// `Lib.G3` is in the import chain, EVERY later eval (even an unrelated
-/// `pure (1::Int)`) fails to compile. `:reset` is the escape hatch (see below).
-/// The `#[ignore]`d `class_instance_describe` pins the aspirational GREEN.
-#[ignore = "BUG: class methods not re-exported (render.rs bare class head) → GHC-54721; instance gen never compiles"]
+/// FIX (BUG-C): the extractor now emits `EClass name [methods]` (not `EType name
+/// []`), and render.rs renders `Class(..)` (not a bare head). This makes the
+/// class methods visible when the instance gen module compiles.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn class_instance_describe() {
     if !extract_available() {
@@ -366,9 +343,8 @@ async fn class_instance_describe() {
     repl.close().await.expect_ok("close");
 }
 
-/// CASE 7 (live probe) — pins the CONFIRMED current behavior on every run, and
-/// LOCALIZES the poison to the instance (class + data alone are fine), then shows
-/// `:reset` recovers. Asserts only stable invariants; captures exact text.
+/// CASE 7 (no-poison) — class + data + instance all compile; describe works;
+/// an unrelated eval after the instance is NOT poisoned (BUG-C fixed).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn class_instance_poisons_until_reset() {
     if !extract_available() {
@@ -377,53 +353,33 @@ async fn class_instance_poisons_until_reset() {
     let repl = Repl::new();
     repl.open_ok().await;
 
-    // class + data alone do NOT poison: the class gen exports a (bare) head that
-    // is legal Haskell, and an eval that imports the lib still compiles.
     let c = repl
         .def("class Describe a where { describe :: a -> T.Text }")
         .await;
     eprintln!("[case7] def class:    is_error={} text={}", c.is_error, c.text);
-    c.expect_ok("def class Describe (accepted, parse-only)");
+    c.expect_ok("def class Describe");
 
     let d = repl.def("data Animal = Cat | Dog").await;
     eprintln!("[case7] def data:     is_error={} text={}", d.is_error, d.text);
-    d.expect_ok("def data Animal (accepted)");
+    d.expect_ok("def data Animal");
 
-    let pre = repl.eval_ok("pure (1 :: Int)").await;
-    assert!(
-        pre.contains('1'),
-        "class+data alone do NOT poison: eval should work, got: {pre}"
-    );
-
-    // The INSTANCE gen fails to compile (GHC-54721 method not visible) and poisons
-    // the chain: it is accepted at def time (parse-only) but every later eval dies.
     let i = repl
         .def("instance Describe Animal where { describe Cat = T.pack \"cat\"; describe Dog = T.pack \"dog\" }")
         .await;
     eprintln!("[case7] def instance: is_error={} text={}", i.is_error, i.text);
+    i.expect_ok("def instance Describe Animal");
 
-    let e = repl.eval("pure (describe Cat)").await;
-    eprintln!("[case7] eval describe Cat: is_error={} text={}", e.is_error, e.text);
-    let err = e.expect_err("instance gen does not compile (GHC-54721 method not visible)");
+    let out = repl.eval_ok("pure (describe Cat)").await;
     assert!(
-        err.contains("54721") || err.contains("not a (visible) method") || err.contains("not loaded"),
-        "case7: expected the class-method-export compile error, got: {err}"
+        out.contains("cat"),
+        "describe Cat: expected \"cat\", got: {out}"
     );
 
-    // POISON: even an unrelated eval now fails (the broken G3 is in the chain).
-    let poisoned = repl.eval("pure (2 :: Int)").await;
-    eprintln!("[case7] eval (2::Int) post-instance: is_error={} text={}", poisoned.is_error, poisoned.text);
-    poisoned.expect_err("decl plane POISONED by the broken instance gen (unrelated eval fails)");
-
-    // :reset is the escape hatch — it drops the decl log; a fresh def + eval works.
-    repl.cmd(":reset").await.expect_ok(":reset clears the poisoned decl log");
-    repl.def("ok7 x = x + (1 :: Int)")
-        .await
-        .expect_ok("fresh def after :reset");
-    let recovered = repl.eval_ok("pure (ok7 41)").await;
+    // No poison: an unrelated eval still works after the instance.
+    let ok = repl.eval_ok("pure (2 :: Int)").await;
     assert!(
-        recovered.contains("42"),
-        "recovery after :reset: expected 42, got: {recovered}"
+        ok.contains('2'),
+        "unrelated eval after class+instance: expected 2 (no poison), got: {ok}"
     );
 
     repl.close().await.expect_ok("close");
