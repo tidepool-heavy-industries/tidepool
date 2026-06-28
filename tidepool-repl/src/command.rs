@@ -76,6 +76,10 @@ pub enum TurnOutcome {
     /// `session_eval` bound a value to the live heap (`x <- e` / `let x = e`);
     /// `name` is now referenceable by later turns, with the captured `type_display`.
     Bound { name: String, type_display: String },
+    /// `session_eval` bound multiple values from a flat-tuple pattern
+    /// (`(a, b) <- e` / `let (x, y) = e`). Each component is independently
+    /// referenceable and GC-rooted. `components` is `[(name, type_display)]`.
+    MultiBound { components: Vec<(String, String)> },
     /// `session_def` accumulated a declaration; the session advanced to
     /// `generation` and `Tidepool.Session.Lib.G<generation>` now in scope.
     Defined { generation: u64, module: String },
@@ -96,6 +100,11 @@ impl TurnOutcome {
             TurnOutcome::Bound { name, type_display } => serde_json::json!({
                 "bound": name,
                 "type": type_display,
+            })
+            .to_string(),
+            TurnOutcome::MultiBound { components } => serde_json::json!({
+                "bound": components.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+                "types": components.iter().map(|(_, t)| t).collect::<Vec<_>>(),
             })
             .to_string(),
             TurnOutcome::Defined { generation, module } => serde_json::json!({

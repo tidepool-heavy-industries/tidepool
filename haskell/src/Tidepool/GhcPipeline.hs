@@ -1,7 +1,8 @@
 module Tidepool.GhcPipeline
   ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
     -- * Bound-value type analysis (Wave 3b BIND mode)
-  , stripMonadHead, isClosureType, renderType ) where
+  , stripMonadHead, isClosureType, renderType
+  , splitTupleType ) where
 
 import GHC
 import GHC.Driver.Main (hscDesugar, batchMsg)
@@ -20,7 +21,8 @@ import GHC.Core (CoreBind, Bind(..), Expr(..), Alt(..))
 import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, ppr)
 import GHC.Types.Id (idName, idType)
-import GHC.Core.Type (Type, splitAppTy_maybe, isFunTy)
+import GHC.Core.Type (Type, splitAppTy_maybe, splitTyConApp_maybe, isFunTy)
+import GHC.Core.TyCon (isTupleTyCon)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Tc.Types (TcGblEnv, tcg_type_env)
@@ -331,6 +333,17 @@ stripMonadHead ty =
 -- (Tier1).
 isClosureType :: Type -> Bool
 isClosureType ty = let (_, _, body) = tcSplitSigmaTy ty in isFunTy body
+
+-- | Split a tuple type into its component types. @(T1, T2, ..., Tn)@ → @Just
+-- [T1, T2, ..., Tn]@. Returns @Nothing@ for non-tuple types (constructors,
+-- newtypes, function types, etc.). Used by the multi-binder bind path to verify
+-- that an N-name bind has an N-tuple return type.
+splitTupleType :: Type -> Maybe [Type]
+splitTupleType ty =
+  let (_, _, body) = tcSplitSigmaTy ty
+  in case splitTyConApp_maybe body of
+       Just (tc, args) | isTupleTyCon tc -> Just args
+       _                                  -> Nothing
 
 -- | Render a 'Type' to a display string (for the @typeDisplay@ field / @:t@),
 -- the same 'ppr' pattern as 'capturedUserType' / 'dumpCore'.
