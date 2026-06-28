@@ -214,19 +214,12 @@ impl Session {
                     let name = name.clone();
                     self.run_bind(expr_text, name, handlers, captured)
                 }
-                // Multi-binder pattern binds (`(a, b) <- …`, `let (x, y) = …`)
-                // bind MORE than one name. The value plane roots one value per
-                // fragment, so binding each component is a feature (tracked), not
-                // yet built. REJECT LOUDLY rather than silently rooting only the
-                // first component and discarding the rest (the old footgun).
-                names => TurnOutcome::Error(format!(
-                    "multi-binder pattern binds are not supported yet: `{}` introduces \
-                     {} names ({}). Bind one name per turn (e.g. `t <- action` then \
-                     project its components in later turns).",
-                    expr_text.lines().next().unwrap_or(expr_text).trim(),
-                    names.len(),
-                    names.join(", "),
-                )),
+                // Multi-binder flat-tuple pattern (`(a, b) <- …`, `let (x,y) = …`):
+                // run the action, project each tuple field, root each component.
+                names => {
+                    let names: Vec<String> = names.to_vec();
+                    self.run_multi_bind(expr_text, names, handlers, captured)
+                }
             }
         } else if !self.bindings.is_empty() {
             self.run_session_reference(expr_text, handlers, captured)
@@ -327,12 +320,13 @@ impl Session {
         let mut include: Vec<&Path> = self.cfg.base_include.iter().map(PathBuf::as_path).collect();
         include.push(lib_dir.as_path());
 
+        let single = vec![name.clone()];
         let turn = match compile_session_turn(
             &wrapped,
             &include,
             self.session_root(),
             &inject,
-            Some(SessionBind { name: &name, gen: g.0 }),
+            Some(SessionBind { names: &single, gen: g.0 }),
         ) {
             Ok(t) => t,
             Err(e) => return TurnOutcome::Error(format!("bind compile error: {e}")),
@@ -400,6 +394,125 @@ impl Session {
             name,
             type_display: binder.type_display,
         }
+    }
+
+    /// MULTI-BIND path: `(a, b) <- action` / `let (x, y) = e`. Wraps the turn as
+    /// `result = do { <stmt>; pure (a, b, …) }` so the fragment yields ONE tuple
+    /// Con, then projects each field individually, tenures each as a separate root,
+    /// and records one `BindingEntry` per component. The extract validates that the
+    /// result type is an N-tuple (via `splitTupleType`); non-tuple patterns (e.g.
+    /// constructor patterns with the wrong return type) get a loud compile error.
+    fn run_multi_bind<H: DispatchEffect<CapturedOutput>>(
+        &mut self,
+        turn_text: &str,
+        names: Vec<String>,
+        handlers: &mut H,
+        captured: &CapturedOutput,
+    ) -> TurnOutcome {
+        let g = self.val_gen.next();
+        let inject = self.live_val_modules();
+        let imports = self.session_imports();
+        let wrapped = wrap_multi_bind_source(
+            &self.cfg.preamble,
+            &self.cfg.effect_stack,
+            &imports,
+            turn_text,
+            &names,
+        );
+
+        let lib_dir = self.lib.include_dir().to_path_buf();
+        let mut include: Vec<&Path> =
+            self.cfg.base_include.iter().map(PathBuf::as_path).collect();
+        include.push(lib_dir.as_path());
+
+        let turn = match compile_session_turn(
+            &wrapped,
+            &include,
+            self.session_root(),
+            &inject,
+            Some(SessionBind { names: &names, gen: g.0 }),
+        ) {
+            Ok(t) => t,
+            Err(e) => return TurnOutcome::Error(format!("multi-bind compile error: {e}")),
+        };
+        if turn.warnings.has_io {
+            return TurnOutcome::Error(
+                "IO type detected in bound value. IO operations are not supported.".into(),
+            );
+        }
+        if turn.binders.len() != names.len() {
+            return TurnOutcome::Error(format!(
+                "multi-bind: extract returned {} binders, expected {}",
+                turn.binders.len(),
+                names.len()
+            ));
+        }
+        if let Err(e) = self.merge_table(&turn.table) {
+            return TurnOutcome::Error(e);
+        }
+
+        if self.machine.is_none() {
+            match JitEffectMachine::compile_session(
+                &turn.expr,
+                &turn.table,
+                self.cfg.nursery_size,
+            ) {
+                Ok(m) => self.machine = Some(m),
+                Err(e) => return TurnOutcome::Error(format!("JIT compile error: {e}")),
+            }
+        }
+
+        let env = self.bindings.seed_external_env();
+        self.turn_counter += 1;
+        let frag_name = format!("repl_multi_bind_{}", self.turn_counter);
+
+        // Build forced_mask: Tier0 fields get deep-forced, Tier1 closures don't.
+        let forced_mask: Vec<bool> = turn
+            .binders
+            .iter()
+            .map(|b| matches!(b.tier, ValueTier::Tier0Data))
+            .collect();
+
+        let machine = self.machine.as_mut().expect("machine bootstrapped above");
+        let fid = match machine.add_function(
+            &frag_name,
+            &turn.expr,
+            &self.session_table,
+            &env,
+        ) {
+            Ok(f) => f,
+            Err(e) => return TurnOutcome::Error(format!("JIT multi-bind add_function error: {e}")),
+        };
+        let slots = match machine.run_fragment_and_bind_projected(
+            fid,
+            &self.session_table,
+            handlers,
+            captured,
+            &forced_mask,
+        ) {
+            Ok(s) => s,
+            Err(e) => return TurnOutcome::Error(format!("multi-bind runtime error: {e}")),
+        };
+
+        self.val_gen = g;
+        // Zip binders with their slots and record each component.
+        let mut bound_names: Vec<(String, String)> = Vec::new();
+        for (binder, slot) in turn.binders.iter().zip(slots.into_iter()) {
+            let value = if matches!(binder.tier, ValueTier::Tier0Data) {
+                BoundValue::Tier0Forced(slot)
+            } else {
+                BoundValue::Tier1Closure(slot)
+            };
+            self.bindings.bind(BindingEntry {
+                name: BindingName(binder.name.clone()),
+                id: SessionVarId::from_extract(binder.var_id),
+                module: SessionModule::val(g),
+                value,
+                type_display: Some(binder.type_display.clone()),
+            });
+            bound_names.push((binder.name.clone(), binder.type_display.clone()));
+        }
+        TurnOutcome::MultiBound { components: bound_names }
     }
 
     /// REFERENCE path (a bare expression mentioning session bindings). Try the
@@ -643,6 +756,35 @@ fn wrap_bind_source(
         out.push_str(&format!("  {line}\n"));
     }
     out.push_str(&format!("  pure {binder}\n"));
+    out
+}
+
+/// Wrap a MULTI-BIND turn into an `Eff`-typed module whose `result` runs the
+/// bind statement and yields a tuple of all bound names. For `(a, b) <- action`
+/// with `names = ["a", "b"]` this emits:
+/// ```haskell
+/// result :: Eff <stack> _
+/// result = do
+///   (a, b) <- action
+///   pure (a, b)
+/// ```
+/// The tuple field order matches the binder order in the JSON sidecar.
+fn wrap_multi_bind_source(
+    preamble: &str,
+    effect_stack: &str,
+    imports: &str,
+    turn_text: &str,
+    names: &[String],
+) -> String {
+    let tuple_expr = format!("({})", names.join(", "));
+    let mut out = insert_imports(preamble, imports);
+    out.push_str("-- [user]\n");
+    out.push_str(&format!("result :: Eff {effect_stack} _\n"));
+    out.push_str("result = do\n");
+    for line in turn_text.lines() {
+        out.push_str(&format!("  {line}\n"));
+    }
+    out.push_str(&format!("  pure {tuple_expr}\n"));
     out
 }
 

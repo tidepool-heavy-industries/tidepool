@@ -68,11 +68,12 @@ pub struct SessionTurnResult {
 }
 
 /// Arguments for the bind half of a turn (omit for an EXPR turn).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct SessionBind<'a> {
-    /// The bound name (GHC-sourced, from [`classify_turn`]).
-    pub name: &'a str,
-    /// The generation of the `Val.G<g>` module to mint.
+    /// The bound names (GHC-sourced, from [`classify_turn`]). One name for a
+    /// single-binder turn; N names for a flat-tuple multi-binder turn.
+    pub names: &'a [String],
+    /// The generation of the `Val.G<g>` module to mint (shared by all N names).
     pub gen: u64,
 }
 
@@ -169,14 +170,16 @@ pub fn compile_session_turn(
     for p in include {
         cmd.arg("--include").arg(p);
     }
-    if let Some(b) = bind {
+    let is_bind = bind.is_some();
+    if let Some(ref b) = bind {
         cmd.arg("--session-bind")
-            .arg("--bind-name")
-            .arg(b.name)
             .arg("--bind-gen")
             .arg(b.gen.to_string())
             .arg("--emit-bound-binders")
             .arg(&bb_path);
+        for name in b.names {
+            cmd.arg("--bind-name").arg(name);
+        }
     }
 
     let output = cmd.output().map_err(map_notfound)?;
@@ -199,7 +202,7 @@ pub fn compile_session_turn(
     let expr = read_cbor(&std::fs::read(&expr_path)?)?;
     let (table, warnings) = read_metadata(&std::fs::read(&meta_path)?)?;
 
-    let binders = if bind.is_some() {
+    let binders = if is_bind {
         let json = std::fs::read_to_string(&bb_path).map_err(|e| {
             CompileError::ExtractFailed(format!("bind turn emitted no bound-binder sidecar: {e}"))
         })?;

@@ -5,25 +5,22 @@
 //! bind statement introduces MORE THAN ONE name: a tuple bind `(a, b) <- e`,
 //! a `let`-tuple `let (x, y) = e`, a three-tuple, etc.
 //!
-//! HISTORY: the original dispatcher silently kept only the FIRST binder of a
-//! turn (`binders.first()` / `pure {binder}`), so `(a, b) <- pure (1, 2)` bound
-//! only `a` (=1, the first *component*, not the tuple) and dropped `b` with no
-//! signal. That footgun was replaced (session.rs::run_eval ~L192) with LOUD
-//! REJECTION: a bind introducing >1 name returns a clean error naming the
-//! dropped components, and the session stays usable. Full N-name value-plane
-//! support (root each component) is a tracked FEATURE — captured by the single
-//! `#[ignore]` test below so we don't lose the intent.
+//! BUG-5 SHIPS: flat-tuple multi-binder binds now root EACH component. A bind
+//! `(a, b) <- pure (1, 2)` makes both `a` and `b` independently referenceable
+//! and GC-safe. Nested tuple patterns also work (each variable is bound flat).
+//!
+//! REJECTION guard: patterns whose result type is not a matching tuple
+//! (e.g. type errors, non-tuple constructors) still loudly reject via a GHC
+//! compile error from the extract.
 //!
 //! Each test guards on `extract_available()` and skips cleanly otherwise.
-//! Ignore stderr noise like `Could not find module …Val.G…` (unrelated
-//! reference-path fallback).
 
 mod common;
 use common::*;
 
 /// CASE 1 — `let` single bind (control).
 /// `let x = (5 :: Int)` then `x + 1` => 6. Pins down that the single-binder
-/// `let` path is healthy (the loud-rejection guard must NOT catch single binds).
+/// `let` path is healthy (multi-bind must NOT interfere with single binds).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn let_single_bind() {
     if !extract_available() {
@@ -42,13 +39,11 @@ async fn let_single_bind() {
     repl.close().await;
 }
 
-/// CASE 2 — Tuple bind is LOUDLY REJECTED, and the session survives.
-/// `(a, b) <- pure ((1 :: Int), (2 :: Int))` must ERROR with a message naming
-/// the dropped components (a, b) — NOT silently bind only `a`. A following good
-/// turn must then succeed, proving the rejection left the session usable and
-/// that no partial binding leaked into scope.
+/// CASE 2 — Tuple bind both components (the BUG-5 headline).
+/// `(a, b) <- pure ((1 :: Int), (2 :: Int))` binds both `a` and `b`.
+/// Both are independently referenceable; `a + b == 3`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tuple_bind_rejected_loudly() {
+async fn tuple_bind_both_components() {
     if !extract_available() {
         return;
     }
@@ -57,39 +52,39 @@ async fn tuple_bind_rejected_loudly() {
 
     let bind = repl.eval("(a, b) <- pure ((1 :: Int), (2 :: Int))").await;
     eprintln!("[tuple_bind] bind turn -> is_error={} text={}", bind.is_error, bind.text);
-    let err = bind.expect_err("tuple bind should be rejected loudly");
-    assert!(
-        err.contains("multi-binder"),
-        "rejection should mention multi-binder support, got: {err}"
-    );
-    assert!(
-        err.contains("2 names") && err.contains("a, b"),
-        "rejection should name the dropped components (a, b), got: {err}"
-    );
+    bind.expect_ok("tuple bind should succeed");
 
-    // Neither component leaked into scope.
+    // Both components are in scope.
     let listing = repl.cmd(":bindings").await;
-    let out = listing.expect_ok(":bindings after rejected tuple bind");
-    eprintln!("[tuple_bind] :bindings after reject -> {out}");
+    let out = listing.expect_ok(":bindings after tuple bind");
+    eprintln!("[tuple_bind] :bindings -> {out}");
     assert!(
-        !out.contains("\"a\"") && !out.contains("\"b\""),
-        "rejected tuple bind must leave NOTHING bound, got: {out}"
+        out.contains("\"a\"") && out.contains("\"b\""),
+        "both a and b must be bound, got: {out}"
     );
 
-    // Session survived: a fresh good bind + reference works.
-    repl.eval("let z = (9 :: Int)").await.expect_ok("let z after reject");
-    let t = repl.eval("z").await;
-    let zout = t.expect_ok("z after reject");
-    assert!(zout.contains("9"), "post-reject z: expected 9, got: {zout}");
+    // Components are independently referenceable.
+    let ta = repl.eval("a").await;
+    let aout = ta.expect_ok("a");
+    assert!(aout.contains("1"), "a should be 1, got: {aout}");
+
+    let tb = repl.eval("b").await;
+    let bout = tb.expect_ok("b");
+    assert!(bout.contains("2"), "b should be 2, got: {bout}");
+
+    // Sum is correct.
+    let t = repl.eval("a + b").await;
+    let out = t.expect_ok("a + b");
+    assert!(out.contains("3"), "expected a + b == 3, got: {out}");
 
     repl.close().await;
 }
 
-/// CASE 3 — `let`-tuple is LOUDLY REJECTED, session survives.
-/// `let (x, y) = ((10 :: Int), (20 :: Int))` must error naming x, y (the
-/// `let`-tuple path is NOT exempt from the guard), and a later good turn works.
+/// CASE 3 — `let`-tuple works.
+/// `let (x, y) = ((10 :: Int), (20 :: Int))` binds both x and y;
+/// `x + y == 30`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn let_tuple_rejected_loudly() {
+async fn let_tuple_works() {
     if !extract_available() {
         return;
     }
@@ -98,26 +93,20 @@ async fn let_tuple_rejected_loudly() {
 
     let bind = repl.eval("let (x, y) = ((10 :: Int), (20 :: Int))").await;
     eprintln!("[let_tuple] bind turn -> is_error={} text={}", bind.is_error, bind.text);
-    let err = bind.expect_err("let-tuple should be rejected loudly");
-    assert!(err.contains("multi-binder"), "should mention multi-binder, got: {err}");
-    assert!(
-        err.contains("2 names") && err.contains("x, y"),
-        "should name x, y, got: {err}"
-    );
+    bind.expect_ok("let-tuple bind should succeed");
 
-    // Session survived.
-    repl.eval("let w = (7 :: Int)").await.expect_ok("let w after reject");
-    let t = repl.eval("w").await;
-    assert!(t.expect_ok("w after reject").contains("7"), "post-reject w: {}", t.text);
+    let t = repl.eval("x + y").await;
+    let out = t.expect_ok("x + y");
+    assert!(out.contains("30"), "expected x + y == 30, got: {out}");
 
     repl.close().await;
 }
 
-/// CASE 4 — Three-tuple is LOUDLY REJECTED with all three names, session survives.
-/// `(p, q, r) <- pure ((1::Int),(2::Int),(3::Int))` → error naming p, q, r
-/// ("3 names"). Confirms the guard is arity-independent.
+/// CASE 4 — Three-tuple works.
+/// `(p, q, r) <- pure ((1::Int),(2::Int),(3::Int))` binds all three;
+/// `p + q + r == 6`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn three_tuple_rejected_loudly() {
+async fn three_tuple_works() {
     if !extract_available() {
         return;
     }
@@ -128,26 +117,17 @@ async fn three_tuple_rejected_loudly() {
         .eval("(p, q, r) <- pure ((1::Int),(2::Int),(3::Int))")
         .await;
     eprintln!("[three_tuple] bind turn -> is_error={} text={}", bind.is_error, bind.text);
-    let err = bind.expect_err("three-tuple should be rejected loudly");
-    assert!(err.contains("multi-binder"), "should mention multi-binder, got: {err}");
-    assert!(
-        err.contains("3 names") && err.contains("p, q, r"),
-        "should name all three (p, q, r), got: {err}"
-    );
+    bind.expect_ok("three-tuple bind should succeed");
 
-    // Session survived.
-    repl.eval("let s = (5 :: Int)").await.expect_ok("let s after reject");
-    let t = repl.eval("s").await;
-    assert!(t.expect_ok("s after reject").contains("5"), "post-reject s: {}", t.text);
+    let t = repl.eval("p + q + r").await;
+    let out = t.expect_ok("p + q + r");
+    assert!(out.contains("6"), "expected p + q + r == 6, got: {out}");
 
     repl.close().await;
 }
 
-/// CASE 5 — FEATURE (aspirational, ignored): full multi-binder value-plane
-/// support. When each component is rooted individually, `(a, b) <- pure (1, 2)`
-/// would bind BOTH and `a + b` would yield 3. Captured so the intent isn't lost
-/// behind the current loud rejection. Un-ignore when the feature lands.
-#[ignore = "FEATURE: full multi-binder value-plane support (root each component)"]
+/// CASE 5 — The original feature test (was #[ignore], now active).
+/// `(a, b) <- pure (1, 2)` then `a + b == 3`. Kept as an independent guard.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tuple_bind_both_components_feature() {
     if !extract_available() {
@@ -163,6 +143,42 @@ async fn tuple_bind_both_components_feature() {
     let t = repl.eval("a + b").await;
     let out = t.expect_ok("a + b (feature)");
     assert!(out.contains("3"), "feature: expected a + b == 3, got: {out}");
+
+    repl.close().await;
+}
+
+/// CASE 6 — Type-mismatch multi-bind is LOUDLY REJECTED.
+/// `(a, b) <- pure (42 :: Int)` has 2 binders but the action returns a plain
+/// `Int`, not a 2-tuple. GHC reports a type error at compile time — a loud,
+/// clean rejection. The session must remain usable after the error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mismatched_type_rejected_loudly() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.open_ok().await;
+
+    let bind = repl.eval("(a, b) <- pure (42 :: Int)").await;
+    eprintln!(
+        "[mismatch] bind turn -> is_error={} text={}",
+        bind.is_error, bind.text
+    );
+    // Must error — can't match (a,b) pattern against Int.
+    bind.expect_err("type-mismatch multi-bind should be rejected");
+
+    // Neither variable leaked into scope.
+    let listing = repl.cmd(":bindings").await;
+    let out = listing.expect_ok(":bindings after rejected mismatch bind");
+    assert!(
+        !out.contains("\"a\"") && !out.contains("\"b\""),
+        "rejected bind must leave nothing bound, got: {out}"
+    );
+
+    // Session survived: a fresh bind works.
+    repl.eval("let z = (9 :: Int)").await.expect_ok("let z after reject");
+    let t = repl.eval("z").await;
+    assert!(t.expect_ok("z after reject").contains("9"), "post-reject z: {}", t.text);
 
     repl.close().await;
 }

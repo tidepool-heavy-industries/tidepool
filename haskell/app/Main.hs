@@ -8,9 +8,9 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Control.Exception (evaluate, try, SomeException, fromException)
 import Data.Char (toUpper, isDigit)
-import Data.List (isPrefixOf, stripPrefix)
+import Data.List (isPrefixOf, stripPrefix, intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
-import Control.Monad (foldM, when)
+import Control.Monad (foldM, when, forM_)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
 
@@ -31,7 +31,7 @@ import qualified Data.Text as T
 import Tidepool.Binders (emitBinders, emitStmtBinders)
 import Tidepool.GhcPipeline
   ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
-  , stripMonadHead, isClosureType, renderType )
+  , stripMonadHead, isClosureType, renderType, splitTupleType )
 import Tidepool.Session
   ( SessionScope(..), SessionModule(..), SessionModuleKind(..), Generation(..)
   , sessionModuleString, sessionBinderName
@@ -74,7 +74,7 @@ data Args = Args
   -- Wave 3b session-eval value binding:
   , argEmitStmtBinders :: Maybe FilePath
   , argSessionBind :: Bool
-  , argBindName :: Maybe String
+  , argBindNames :: [String]
   , argBindGen :: Maybe Word64
   , argSessionRoot :: Maybe FilePath
   , argInjectVals :: [String]
@@ -83,7 +83,7 @@ data Args = Args
 
 parseArgs :: [String] -> Args
 parseArgs = go (Args Nothing Nothing False False False Nothing [] []
-                     Nothing False Nothing Nothing Nothing [] Nothing)
+                     Nothing False [] Nothing Nothing [] Nothing)
   where
     go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
     go a ("--target" : name : rest) = go a { argTarget = Just name } rest
@@ -93,7 +93,7 @@ parseArgs = go (Args Nothing Nothing False False False Nothing [] []
     go a ("--emit-binders" : out : rest) = go a { argEmitBinders = Just out } rest
     go a ("--emit-stmt-binders" : out : rest) = go a { argEmitStmtBinders = Just out } rest
     go a ("--session-bind" : rest) = go a { argSessionBind = True } rest
-    go a ("--bind-name" : n : rest) = go a { argBindName = Just n } rest
+    go a ("--bind-name" : n : rest) = go a { argBindNames = argBindNames a ++ [n] } rest
     go a ("--bind-gen" : g : rest) = go a { argBindGen = Just (read g) } rest
     go a ("--session-root" : dir : rest) = go a { argSessionRoot = Just dir } rest
     go a ("--inject-val" : m : rest) = go a { argInjectVals = argInjectVals a ++ [m] } rest
@@ -323,34 +323,50 @@ processSessionFile args path = do
 
 -- | The BIND-turn artifacts: the bound value's type @T@ (stripped from
 -- @result :: Eff stack T@), the thin @Tidepool.Session.Val.G<g>@ iface carrying
--- @x :: T@, and the BoundBinder JSON the runtime consumes (the @0xFE@-tagged
--- 'stableVarId', the tier, the type display). The iface + the id are computed
--- the SAME way a later reference turn recomputes the id (module:occ hash), so
--- the value plane and type plane agree on one key.
+-- all N binders, and the BoundBinder JSON the runtime consumes (N records, one
+-- per binder). For a single name the type @T@ is used directly; for N>1 names
+-- @T@ must be an N-tuple and is split into per-component types via
+-- 'splitTupleType'. The iface + ids are computed the SAME way a later reference
+-- turn recomputes them, so the value plane and type plane agree on one key.
 emitBindArtifacts :: Args -> PipelineResult -> IO ()
 emitBindArtifacts args result = do
-  bindName <- requireArg "--bind-name" (argBindName args)
-  g        <- requireArg "--bind-gen" (argBindGen args)
-  root     <- requireArg "--session-root" (argSessionRoot args)
-  effTy    <- case prResultType result of
+  bindNames <- case argBindNames args of
+    []  -> error "session-bind requires at least one --bind-name"
+    ns  -> return ns
+  g    <- requireArg "--bind-gen"    (argBindGen args)
+  root <- requireArg "--session-root" (argSessionRoot args)
+  effTy <- case prResultType result of
     Just t  -> return t
     Nothing -> error "session-bind: could not capture the type of `result` \
                      \(no such top-level binder typechecked)"
-  let hsc    = prHscEnv result
-      sm      = SessionModule ValMod (Generation g)
-      t       = stripMonadHead effTy           -- Eff stack T -> T
-      tier    = if isClosureType t then "Tier1Closure" else "Tier0Data"
-      tdisp   = renderType t
-      occ     = mkVarOcc bindName
-      varid   = stableVarId (sessionBinderName hsc sm occ)
-      modStr  = sessionModuleString sm
-  iface <- mkThinSessionIface hsc sm [(occ, t)]
+  let hsc   = prHscEnv result
+      sm    = SessionModule ValMod (Generation g)
+      t     = stripMonadHead effTy          -- Eff stack T -> T
+  componentTypes <- case bindNames of
+    [_] -> return [t]
+    _   -> case splitTupleType t of
+      Nothing  -> error $ "multi-binder: bound type is not a tuple: " ++ renderType t
+      Just tys ->
+        if length tys /= length bindNames
+          then error $ "multi-binder: " ++ show (length bindNames) ++ " binders but "
+                     ++ "type is a " ++ show (length tys) ++ "-tuple: " ++ renderType t
+          else return tys
+  let mkEntry name cty =
+        let occ    = mkVarOcc name
+            varid  = stableVarId (sessionBinderName hsc sm occ)
+            modStr = sessionModuleString sm
+            tier   = if isClosureType cty then "Tier1Closure" else "Tier0Data"
+            tdisp  = renderType cty
+        in (name, varid, modStr, tier, tdisp, occ, cty)
+      binders = zipWith mkEntry bindNames componentTypes
+  iface <- mkThinSessionIface hsc sm [(occ, cty) | (_, _, _, _, _, occ, cty) <- binders]
   writeSessionIface hsc root sm iface
-  putStrLn $ "  Wrote session iface: " ++ modStr ++ " (" ++ bindName
+  forM_ binders $ \(name, varid, modStr, tier, tdisp, _, _) ->
+    putStrLn $ "  Wrote session iface: " ++ modStr ++ " (" ++ name
              ++ " :: " ++ tdisp ++ ", " ++ tier ++ ", varId " ++ show varid ++ ")"
   case argEmitBoundBinders args of
     Just out -> do
-      writeFile out (renderBoundBinderJson bindName varid modStr tier tdisp)
+      writeFile out (renderBoundBindersJson binders)
       putStrLn $ "  Wrote bound-binder sidecar: " ++ out
     Nothing -> return ()
 
@@ -366,17 +382,19 @@ parseValModule s = case stripPrefix "Tidepool.Session.Val.G" s of
 requireArg :: String -> Maybe a -> IO a
 requireArg flag = maybe (error ("session-bind requires " ++ flag)) return
 
--- | The BoundBinder JSON sidecar (single binder; the MVP bind path). @varId@ is
--- a DECIMAL STRING of the u64 — JSON numbers are f64 and would lose 64-bit
--- precision, so the runtime parses it with @u64::from_str@.
-renderBoundBinderJson :: String -> Word64 -> String -> String -> String -> String
-renderBoundBinderJson name varid modul tier tdisp =
-  "{\"binders\":[{\"name\":" ++ js name
-    ++ ",\"varId\":" ++ js (show varid)
-    ++ ",\"module\":" ++ js modul
-    ++ ",\"tier\":" ++ js tier
-    ++ ",\"typeDisplay\":" ++ js tdisp ++ "}]}"
+-- | The BoundBinder JSON sidecar — one record per binder. @varId@ is a DECIMAL
+-- STRING of the u64 (JSON f64 would lose 64-bit precision). Handles both single
+-- and multi-binder turns (the runtime always reads a @binders@ array).
+renderBoundBindersJson :: [(String, Word64, String, String, String, a, b)] -> String
+renderBoundBindersJson binders =
+  "{\"binders\":[" ++ intercalate "," (map renderOne binders) ++ "]}"
   where
+    renderOne (name, varid, modul, tier, tdisp, _, _) =
+      "{\"name\":" ++ js name
+        ++ ",\"varId\":" ++ js (show varid)
+        ++ ",\"module\":" ++ js modul
+        ++ ",\"tier\":" ++ js tier
+        ++ ",\"typeDisplay\":" ++ js tdisp ++ "}"
     js str = '"' : concatMap esc str ++ "\""
     esc '"'  = "\\\""
     esc '\\' = "\\\\"

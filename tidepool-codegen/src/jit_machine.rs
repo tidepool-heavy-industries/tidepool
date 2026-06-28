@@ -1269,6 +1269,344 @@ impl JitEffectMachine {
         result
     }
 
+    /// Multi-binder effectful bind: run `func_id` through the effect step loop,
+    /// and at `Yield::Done(tuple_ptr)` project each field of the result tuple,
+    /// optionally deep-force Tier-0 fields, tenure each field into old-space, and
+    /// return one [`RootSlot`](crate::old_space::RootSlot) per component.
+    ///
+    /// `forced_mask[i] = true` → deep-force field `i` before tenuring (Tier-0
+    /// data); `false` → tenure as-is (Tier-1 closure). The caller (session.rs
+    /// `run_multi_bind`) zips the returned slots with the binder metadata.
+    ///
+    /// **Field order invariant**: `forced_mask` must align with the tuple fields in
+    /// source order — the same order as the `pure (a, b, …)` wrapper and the
+    /// binders in the JSON sidecar. The assertion on `n_actual` guards against
+    /// shape mismatches.
+    ///
+    /// **Reclaim ordering** follows `run_fragment_and_bind`: tenure ALL fields
+    /// inside the Done arm (before arm_reclaim), then arm reclaim LAST after the
+    /// loop exits so the `*mut self.session` raw pointer is not aliased by an
+    /// intervening `&mut` borrow.
+    ///
+    /// # Panics
+    /// Panics if called on a non-session machine.
+    pub fn run_fragment_and_bind_projected<U, H: DispatchEffect<U>>(
+        &mut self,
+        func_id: FuncId,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        forced_mask: &[bool],
+    ) -> Result<Vec<crate::old_space::RootSlot>, JitError> {
+        assert!(
+            self.session.is_some(),
+            "run_fragment_and_bind_projected requires a session machine"
+        );
+        assert!(
+            !forced_mask.is_empty(),
+            "run_fragment_and_bind_projected requires at least one field"
+        );
+
+        let tags = self.tags.map_err(JitError::MissingConTags)?;
+
+        crate::signal_safety::install();
+        let mut _guard = self.install_registries();
+
+        let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
+            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
+        let vmctx = self.make_session_vmctx();
+        let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
+        // NOTE: do NOT arm reclaim before the step loop (same ordering as
+        // run_fragment_and_bind — tenure is in the Done arm).
+
+        crate::host_fns::reset_call_depth();
+        crate::host_fns::set_exec_context("stepping effectful computation (multi-bind)");
+        let mut yield_result =
+            match unsafe { crate::signal_safety::with_signal_protection(|| machine.step()) } {
+                Ok(y) => y,
+                Err(e) => signal_error_to_yield(e),
+            };
+
+        let result = loop {
+            match yield_result {
+                Yield::Done(tuple_ptr) => {
+                    if let Some(err) = crate::host_fns::take_runtime_error() {
+                        break Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                    }
+                    if tuple_ptr.is_null() {
+                        break Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
+                    }
+
+                    // Verify the heap object is a Con with the expected field count.
+                    let n_actual = unsafe {
+                        *(tuple_ptr.add(crate::layout::CON_NUM_FIELDS_OFFSET as usize)
+                            as *const u16) as usize
+                    };
+                    if n_actual != forced_mask.len() {
+                        break Err(JitError::Yield(
+                            crate::yield_type::YieldError::Runtime(
+                                crate::host_fns::RuntimeError::UserErrorMsg(format!(
+                                    "multi-bind: result tuple has {} fields, expected {}",
+                                    n_actual,
+                                    forced_mask.len()
+                                )),
+                            ),
+                        ));
+                    }
+
+                    let from = crate::host_fns::gc_active_range()
+                        .expect("GC state installed for the bind run");
+                    let from_range = (from.0 as *const u8, unsafe {
+                        from.0.add(from.1) as *const u8
+                    });
+
+                    // Project each field, optionally deep-force, and tenure.
+                    let mut slots = Vec::with_capacity(forced_mask.len());
+                    let mut field_err: Option<JitError> = None;
+                    for i in 0..forced_mask.len() {
+                        let raw_field = unsafe {
+                            *(tuple_ptr.add(
+                                crate::layout::CON_FIELDS_OFFSET as usize + 8 * i,
+                            ) as *const *mut u8)
+                        };
+                        let field_ptr = if forced_mask[i] {
+                            let force_res = unsafe {
+                                crate::signal_safety::with_signal_protection(|| {
+                                    crate::host_fns::deep_force(
+                                        machine.vmctx_mut() as *mut VMContext,
+                                        raw_field,
+                                    )
+                                })
+                            };
+                            match force_res {
+                                Err(e) => {
+                                    field_err = Some(JitError::Signal(e));
+                                    break;
+                                }
+                                Ok(p) => {
+                                    if let Some(err) = crate::host_fns::take_runtime_error() {
+                                        field_err = Some(JitError::Yield(
+                                            crate::yield_type::YieldError::from(err),
+                                        ));
+                                        break;
+                                    }
+                                    p
+                                }
+                            }
+                        } else {
+                            raw_field
+                        };
+                        let slot = unsafe {
+                            self.session
+                                .as_mut()
+                                .expect("session machine")
+                                .old_space
+                                .tenure(field_ptr, from_range)
+                        };
+                        slots.push(slot);
+                    }
+                    if let Some(e) = field_err {
+                        break Err(e);
+                    }
+                    break Ok(slots);
+                }
+                Yield::Request {
+                    tag,
+                    request,
+                    continuation,
+                } => {
+                    let bridge_res = unsafe {
+                        let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
+                        crate::signal_safety::with_signal_protection(|| {
+                            heap_bridge::heap_to_value_forcing(request, vmctx_ptr)
+                        })
+                    }
+                    .map_err(JitError::Signal)?;
+                    if let Some(err) = crate::host_fns::take_runtime_error() {
+                        break Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                    }
+                    let req_val = bridge_res.map_err(JitError::HeapBridge)?;
+                    log::debug!(target: "tidepool::effects", "effect tag={} request={:?}", tag, req_val);
+                    let cx = EffectContext::with_user(table, user);
+                    let response = handlers.dispatch(tag, &req_val, &cx)?;
+
+                    if self.cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        break Err(JitError::Yield(crate::yield_type::YieldError::Runtime(
+                            crate::host_fns::RuntimeError::Cancelled,
+                        )));
+                    }
+
+                    const LAZY_SPINE_THRESHOLD_NODES: usize = 2_000;
+                    const MAX_EFFECT_RESPONSE_NODES: usize = 100_000;
+                    let lazy_enabled = std::env::var("TIDEPOOL_LAZY_RESULTS")
+                        .map(|v| v != "0")
+                        .unwrap_or(true);
+
+                    enum Plan {
+                        Park(crate::host_fns::ParkedStream),
+                        Eager(tidepool_eval::value::Value),
+                        Ready(*mut u8),
+                    }
+                    let plan = match response {
+                        tidepool_effect::Response::Stream(s) => {
+                            let (mut source, cons_id, nil_id) = s.into_parts();
+                            if lazy_enabled {
+                                Plan::Park(crate::host_fns::ParkedStream {
+                                    source,
+                                    cons_tag: cons_id.0,
+                                    nil_tag: nil_id.0,
+                                    table: table.clone(),
+                                })
+                            } else {
+                                let mut items = Vec::new();
+                                let mut nodes = 0usize;
+                                let mut too_large = false;
+                                while let Some(r) = source.next_value(table) {
+                                    let v = r.map_err(|e| JitError::from(EffectError::Bridge(e)))?;
+                                    nodes += 3 + v.node_count();
+                                    items.push(v);
+                                    if nodes > MAX_EFFECT_RESPONSE_NODES {
+                                        too_large = true;
+                                        break;
+                                    }
+                                }
+                                if too_large {
+                                    break Err(JitError::EffectResponseTooLarge {
+                                        nodes,
+                                        limit: MAX_EFFECT_RESPONSE_NODES,
+                                    });
+                                }
+                                let p = unsafe {
+                                    crate::signal_safety::with_signal_protection(|| {
+                                        crate::host_fns::materialize_cons_list(
+                                            machine.vmctx_mut(),
+                                            cons_id.0,
+                                            nil_id.0,
+                                            &items,
+                                        )
+                                    })
+                                }
+                                .map_err(JitError::Signal)?;
+                                if let Some(err) = crate::host_fns::take_runtime_error() {
+                                    break Err(JitError::Yield(
+                                        crate::yield_type::YieldError::from(err),
+                                    ));
+                                }
+                                Plan::Ready(p)
+                            }
+                        }
+                        tidepool_effect::Response::Complete(resp_val) => {
+                            let spine = probe_list_spine(&resp_val)
+                                .filter(|&(_, _, len)| len > LAZY_SPINE_THRESHOLD_NODES);
+                            match spine {
+                                Some((cons_tag, nil_tag, len)) if lazy_enabled => {
+                                    let items = dismantle_list_spine(resp_val, len);
+                                    Plan::Park(crate::host_fns::ParkedStream {
+                                        source: Box::new(crate::host_fns::ReadySource::new(items)),
+                                        cons_tag,
+                                        nil_tag,
+                                        table: tidepool_repr::DataConTable::new(),
+                                    })
+                                }
+                                Some((cons_tag, nil_tag, len)) => {
+                                    let items = dismantle_list_spine(resp_val, len);
+                                    let nodes = 3 * len
+                                        + items.iter().map(|v| v.node_count()).sum::<usize>();
+                                    if nodes > MAX_EFFECT_RESPONSE_NODES {
+                                        break Err(JitError::EffectResponseTooLarge {
+                                            nodes,
+                                            limit: MAX_EFFECT_RESPONSE_NODES,
+                                        });
+                                    }
+                                    let p = unsafe {
+                                        crate::signal_safety::with_signal_protection(|| {
+                                            crate::host_fns::materialize_cons_list(
+                                                machine.vmctx_mut(),
+                                                cons_tag,
+                                                nil_tag,
+                                                &items,
+                                            )
+                                        })
+                                    }
+                                    .map_err(JitError::Signal)?;
+                                    if let Some(err) = crate::host_fns::take_runtime_error() {
+                                        break Err(JitError::Yield(
+                                            crate::yield_type::YieldError::from(err),
+                                        ));
+                                    }
+                                    Plan::Ready(p)
+                                }
+                                None => Plan::Eager(resp_val),
+                            }
+                        }
+                    };
+                    let resp_ptr = match plan {
+                        Plan::Ready(p) => p,
+                        Plan::Park(stream) => {
+                            let id = crate::host_fns::park_stream(stream);
+                            let p = unsafe {
+                                crate::signal_safety::with_signal_protection(|| {
+                                    crate::host_fns::alloc_stream_tail_thunk(
+                                        machine.vmctx_mut(),
+                                        id,
+                                        0,
+                                    )
+                                })
+                            }
+                            .map_err(JitError::Signal)?;
+                            if p.is_null() {
+                                return Err(JitError::HeapBridge(
+                                    heap_bridge::BridgeError::NurseryExhausted,
+                                ));
+                            }
+                            p
+                        }
+                        Plan::Eager(resp_val) => {
+                            let nodes = resp_val.node_count();
+                            if nodes > MAX_EFFECT_RESPONSE_NODES {
+                                break Err(JitError::EffectResponseTooLarge {
+                                    nodes,
+                                    limit: MAX_EFFECT_RESPONSE_NODES,
+                                });
+                            }
+                            unsafe {
+                                crate::signal_safety::with_signal_protection(|| {
+                                    heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut())
+                                })
+                            }
+                            .map_err(JitError::Signal)?
+                            .map_err(JitError::HeapBridge)?
+                        }
+                    };
+                    crate::host_fns::reset_call_depth();
+                    crate::host_fns::set_exec_context(&format!(
+                        "resuming after effect tag={} (multi-bind)",
+                        tag
+                    ));
+                    yield_result = match unsafe {
+                        crate::signal_safety::with_signal_protection(|| {
+                            machine.resume(continuation, resp_ptr)
+                        })
+                    } {
+                        Ok(y) => y,
+                        Err(e) => signal_error_to_yield(e),
+                    };
+                }
+                Yield::Error(e) => break Err(JitError::Yield(e)),
+            }
+        };
+
+        // Arm reclaim LAST (after all self.session access — tenure is in the
+        // Done arm above). Same UAF ordering as run_fragment_and_bind.
+        unsafe {
+            _guard.arm_reclaim(
+                &mut self.session as *mut _,
+                machine.vmctx_mut() as *const _,
+            );
+        }
+        result
+    }
+
     /// Register a session-scoped GC root slot that survives across runs (i.e.
     /// across `RegistryGuard` drops), unlike the per-run `RUST_ROOTS`.
     ///
