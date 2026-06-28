@@ -1,0 +1,37 @@
+[package]
+name = "tidepool-handlers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Concrete effect handlers for Tidepool (Console/KV/Fs/SG/Http/Exec/Lsp/Llm/Meta)"
+
+[dependencies]
+tidepool-mcp = { version = "0.1.0", path = "../tidepool-mcp" }
+tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
+tidepool-runtime = { version = "0.1.0", path = "../tidepool-runtime" }
+tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
+tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
+tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
+tidepool-bridge-derive = { version = "0.1.0", path = "../tidepool-bridge-derive" }
+frunk = "0.4"
+# Native deps moved from tidepool/Cargo.toml
+ast-grep-config = "0.41"
+ast-grep-core = "0.41"
+ast-grep-language = "0.41"
+glob = "0.3"
+regex = "1"
+genai = "0.5"
+ureq = { version = "2", features = ["json"] }
+url = "2"
+# Direct deps for handler implementations
+serde_json = "1"
+tracing = "0.1"
+# build_base_stack requires a tokio runtime (LlmHandler captures Handle::current())
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+tidepool-testing = { path = "../tidepool-testing" }
+tempfile = "3"

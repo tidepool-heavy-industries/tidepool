@@ -3598,16 +3598,10 @@ dependencies = [
 name = "tidepool"
 version = "0.1.0"
 dependencies = [
- "ast-grep-config",
- "ast-grep-core",
- "ast-grep-language",
  "axum",
  "clap",
  "dirs",
  "frunk",
- "genai",
- "glob",
- "regex",
  "rmcp",
  "serde",
  "serde_json",
@@ -3617,6 +3611,7 @@ dependencies = [
  "tidepool-codegen",
  "tidepool-effect",
  "tidepool-eval",
+ "tidepool-handlers",
  "tidepool-heap",
  "tidepool-macro",
  "tidepool-mcp",
@@ -3628,8 +3623,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "ureq",
- "url",
  "which",
 ]
 
@@ -3726,6 +3719,33 @@ dependencies = [
  "tidepool-eval",
  "tidepool-macro",
  "tidepool-repr",
+]
+
+[[package]]
+name = "tidepool-handlers"
+version = "0.1.0"
+dependencies = [
+ "ast-grep-config",
+ "ast-grep-core",
+ "ast-grep-language",
+ "frunk",
+ "genai",
+ "glob",
+ "regex",
+ "serde_json",
+ "tempfile",
+ "tidepool-bridge",
+ "tidepool-bridge-derive",
+ "tidepool-effect",
+ "tidepool-eval",
+ "tidepool-mcp",
+ "tidepool-repr",
+ "tidepool-runtime",
+ "tidepool-testing",
+ "tokio",
+ "tracing",
+ "ureq",
+ "url",
 ]
 
 [[package]]
