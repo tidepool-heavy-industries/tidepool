@@ -392,35 +392,24 @@ async fn bindings_on_fresh_session() {
 }
 
 // ---------------------------------------------------------------------------
-// Case 11 — CONFIRMED BUG: the REFERENCE path (engaged whenever ANY value
-// binding is live) traps with "forced type metadata (should be dead code)" for
-// certain reference expressions, while structurally-similar ones work.
+// Case 11 — REGRESSION GATE (was BUG-2): the REFERENCE path (engaged whenever
+// ANY value binding is live) used to trap with "forced type metadata (should be
+// dead code)" for `Eff`-wrapped references and decl-function references, while
+// structurally-similar bound-value references worked.
 //
-// TRAP TRIGGERS (both reproduced, both yield `kind=4 (TypeMetadata)` + `[CASE
-// TRAP]` + runtime error "forced type metadata (should be dead code)"):
-//   (A) any `Eff`-wrapped reference — even prelude-only: with a binding live,
-//       `pure (foldl' (+) (0::Int) [1..5])` traps (the bare `foldl' …` does NOT).
-//   (B) referencing a Lane-A decl FUNCTION — `g 1` (for `g x = x + 1`) traps
-//       BOTH bare AND as `pure (g 1)`, with a binding live.
+// ROOT CAUSE (fixed): `runSessionPipeline` (GhcPipeline) extracted ONLY the turn
+// target and resolved every home-library function it called (`object`, `.=`,
+// `$fToJSONInt`, `toText`, the Lane-A decl `g`, …) from their HPT interface
+// unfoldings. `load'` provisions those ifaces without -O2 unfoldings, so
+// `resolveExternals` could not inline them → it baked a poison ErrorSentinel for
+// each, and `translateModuleClosed`'s `trulyUnresolved` filter (keyed on the
+// un-poisoned id, which never appears once replaced by the sentinel) hid the
+// failure → the sentinel fired at run as `kind=4 TypeMetadata`. The fix
+// recompiles every home module to full -O2 guts (the one-shot path's approach),
+// so no library function is ever left unresolved.
 //
-// KNOWN-GOOD on the SAME reference path (from value_binding_acceptance, green):
-//   - bare reference to a BOUND VALUE: `x + 1`, `f 10`
-//   - `case`-match on a bound ADT value: `case b of Box n -> n + 100`
-//   - bare prelude-only expression: `foldl' (+) (0::Int) [1..200000]`
-//
-// OBSERVED vs EXPECTED: `pure (g 1)` should yield 2 (it does on the PLAIN path
-// when NO binding is live — cf. session_acceptance `pure (slug …)`). The
-// reference fragment forces a dead type-metadata thunk instead.
-//
-// ROOT CAUSE (file:line): tidepool-repl/src/session.rs:410–488
-// (`run_session_reference` / `run_reference_fragment`) — the reference fragment
-// is compiled via `compile_session_turn` with injected `Val` ifaces + the merged
-// `session_table`; for triggers (A)/(B) the JIT forces a type-metadata thunk
-// that the slot-load (bound-value) references don't hit.
-//
-// This test asserts the CURRENT (broken) behavior so the suite stays green and a
-// future fixer SEES it flip: when fixed, the `expect_err` below should become
-// `expect_ok` + `contains("2")`.
+// This now asserts the CORRECT behavior (`pure (g 1)` => 2). A regression flips
+// it back to the kind=4 trap.
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reference_path_type_metadata_trap() {
@@ -441,13 +430,19 @@ async fn reference_path_type_metadata_trap() {
         ok.text
     );
 
-    // BUG trigger (B): referencing the decl FUNCTION `g` traps. (Should be 2.)
-    let trap = repl.eval("pure (g 1)").await;
-    trap.expect_err("BUG: `pure (g 1)` traps on the reference path with a live binding");
+    // FIXED (BUG-2): referencing the decl FUNCTION `g` on the Eff reference path
+    // with a binding live now yields the correct value. The kind=4 TypeMetadata
+    // trap was caused by the session extract resolving home-library functions
+    // (here `g` from the Lib.G<g> decl module, plus the JSON/Text helpers it and
+    // the eval wrapper pull in) from -O0 HPT interface unfoldings, which
+    // `resolveExternals` could not inline → poison ErrorSentinels baked into the
+    // fragment. `runSessionPipeline` now recompiles every home module to full
+    // -O2 guts (GhcPipeline), so no library function is left unresolved.
+    let ok = repl.eval("pure (g 1)").await;
     assert!(
-        trap.contains("type metadata"),
-        "BUG repro: `pure (g 1)` should trap with a TypeMetadata yield error: {}",
-        trap.text
+        ok.expect_ok("`pure (g 1)` on the reference path with a live binding").contains("2"),
+        "`pure (g 1)` should be 2: {}",
+        ok.text
     );
 
     repl.close().await.expect_ok("close");

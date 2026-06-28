@@ -143,7 +143,7 @@ module Tidepool.Prelude
   , FromJSON(..), Result(..), fromJSON, resultToEither
   , (.:), (.:?), (.!=), withObject, withText, withArray, withBool, withDouble
     -- * JSON lenses (Tidepool.Aeson.Lens + Control.Lens)
-  , key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double
+  , key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Integer, _Double
   , members, values, _Null
     -- * ALL of Control.Lens, re-exported wholesale (indexed optics ^@.. / itoListOf,
     -- partsOf, _head/_last/_init/_tail, prism/iso/lens builders, the Bifunctor
@@ -228,7 +228,7 @@ import Tidepool.Render (Render(..))
 import Tidepool.QQ.Fmt.Runtime
   (FSign(..), FAlign(..), fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain)
 import Tidepool.Aeson (Value(..), Key, object, (.=), toJSON, ToJSON, fromText, FromJSON(..), Result(..), fromJSON, resultToEither, (.:), (.:?), (.!=), withObject, withText, withArray, withBool, withDouble)
-import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Double, members, values, _Null)
+import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Integer, _Double, members, values, _Null)
 -- Wholesale Control.Lens, hiding only the two genuine clashes: `imap` (Prelude's
 -- list-index map, defined below) and `(.=)` (Aeson's object-pair operator, above).
 -- Hidden from the wholesale import because they clash with names we keep:

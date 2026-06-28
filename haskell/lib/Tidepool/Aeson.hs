@@ -43,6 +43,7 @@ module Tidepool.Aeson
   , _Array
   , _Object
   , _Int
+  , _Integer
   , _Double
   , _Null
   ) where

@@ -1,33 +1,27 @@
-//! Regression + characterization suite for the Tier-0 **Text** value-bind crash.
+//! Regression suite for the Tier-0 **Text** value-bind crash (BUG-2, FIXED).
 //!
-//! ## What the bug actually is (characterized by this suite)
-//! Binding a `Text` value as a SECOND bind (with a prior binding live) crashes:
-//!   `[JIT] runtime_error kind=4 (TypeMetadata) msg="hi"`
-//!   → `bind runtime error: yield error: forced type metadata (should be dead code)`
-//! ALWAYS preceded on stderr by a GHC extract error:
-//!   `Could not find module 'Tidepool.Session.Val.G1'`.
+//! ## What the bug was
+//! With ANY value binding live, the session REFERENCE/bind path crashed with
+//!   `[JIT] runtime_error kind=4 (TypeMetadata)`
+//!   → `yield error: forced type metadata (should be dead code)`
+//! often preceded on stderr by `Could not find module 'Tidepool.Session.Val.G1'`.
 //!
-//! The decisive controls below show it is **library-dependency-specific**, NOT a
-//! generic second-bind problem:
-//!   * `box_second_bind_replica` — def, x<-Int, read, **b<-Box 7** → PASSES.
-//!   * `text_bind_headline_faithful` — IDENTICAL except **y<-T.pack "hi"** → FAILS.
-//! Binding a value whose RHS pulls a library (`Data.Text`) triggers GHC's
-//! depanal/downsweep, which drops the injected *source-less* `Val.G<g>` iface of
-//! the prior binding from the module graph → the wrapped source's
-//! `import Tidepool.Session.Val.G1` can't be found → the bind's Core is built
-//! with a type-metadata ErrorSentinel that is applied at run/force time (kind=4).
+//! ## Root cause (fixed in GhcPipeline.runSessionPipeline)
+//! The session extract compiled ONLY the turn target and resolved every
+//! home-library function it called (`T.pack`/`T.toUpper`, `object`, `.=`,
+//! `$fToJSONInt`, …) from their HPT interface unfoldings. `load'` provisions
+//! those ifaces without -O2 unfoldings, so `resolveExternals` could not inline
+//! them → it baked a poison ErrorSentinel for each, and `translateModuleClosed`'s
+//! `trulyUnresolved` filter hid the failure → the sentinel fired at run as
+//! kind=4. (The separate "Could not find module Val.G" stderr came from `load'`
+//! compiling the target before the Val iface was injected.) The fix recompiles
+//! every home module to full -O2 guts (the one-shot path's approach) and excludes
+//! the target from the phase-1 `load'`; no library function is left unresolved.
 //!
-//! ## Why "Fix A" (deep_force tolerance) does NOT apply
-//! The kind=4 error is raised during the EFFECTFUL fragment's JIT run inside
-//! `run_fragment_and_bind` (the value cannot even be built), NOT while
-//! NF-deep-forcing an already-built value. Tolerating kind=4 in `deep_force`
-//! changes nothing (verified: the crash and stderr are byte-identical with the
-//! tolerance applied). The real fix is in the extract (GhcPipeline / Session
-//! iface injection across a library-dep downsweep). See the agent report.
-//!
-//! The `#[ignore]`d tests are live repros of the open bug — run with
-//! `--ignored` once the extract fix lands; they assert full value correctness
-//! (unpack / toUpper / append), so they double as the acceptance gate for B.
+//! The controls below pin the boundary: `box_second_bind_replica` (no library
+//! deps) always worked; `text_bind_headline_faithful` (Text second bind) and the
+//! Eff-reference repros now pass with full value correctness (length / unpack /
+//! toUpper / append), doubling as the acceptance gate.
 
 mod common;
 use common::*;
@@ -58,8 +52,8 @@ async fn text_bind_alone_control() {
 
 /// DECISIVE CONTROL: byte-for-byte the GREEN headline turn sequence through a
 /// SECOND bind, but of a Box (no library deps) — PASSES. The only difference
-/// from `text_bind_headline_faithful` (which fails) is Box vs `T.pack`, proving
-/// the bug is library-dependency-specific, not a generic second-bind defect.
+/// from `text_bind_headline_faithful` is Box vs `T.pack`; before the fix that
+/// pinned the bug to library-function resolution, not a generic second-bind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn box_second_bind_replica() {
     if !extract_available() {
@@ -82,11 +76,9 @@ async fn box_second_bind_replica() {
     repl.close().await.expect_ok("close");
 }
 
-/// MINIMAL repro of the dominant kind=4 bug (dim-d/f breakthrough): with ANY
-/// binding live, the Eff reference path crashes regardless of the expression —
-/// even one that ignores the binding. Diagnostic-only (ignored by default); run
-/// with `--ignored` + TIDEPOOL_DUMP_CLOSED=result / TIDEPOOL_VARID_AUDIT=1.
-#[ignore = "open bug: Eff reference path traps kind=4 with any binding live (pure(123) ignores the binding)"]
+/// MINIMAL repro of the dominant kind=4 bug (now FIXED): with ANY binding live,
+/// the Eff reference path used to crash regardless of the expression — even one
+/// that ignores the binding. Now yields the value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn eff_ref_pure_const_with_binding_live() {
     if !extract_available() {
@@ -99,7 +91,7 @@ async fn eff_ref_pure_const_with_binding_live() {
     let t = repl.eval("x <- pure (1 :: Int)").await;
     assert!(t.expect_ok("bind x").contains("bound"), "bind x: {}", t.text);
 
-    // Eff reference run that does NOT touch x — should be 123, crashes kind=4.
+    // Eff reference run that does NOT touch x — should be 123 (was kind=4 before the fix).
     let t = repl.eval("pure (123 :: Int)").await;
     assert!(t.expect_ok("pure 123").contains("123"), "pure 123: {}", t.text);
 
@@ -122,11 +114,10 @@ async fn eff_ref_pure_const_no_binding_control() {
     repl.close().await.expect_ok("close");
 }
 
-// ───────────── OPEN-BUG REPROS (ignored until the extract fix lands) ─────────────
+// ───────────── REGRESSION GATES (were the open BUG-2 repros) ─────────────
 
 /// DECISIVE repro: identical to `box_second_bind_replica` except the second
-/// bind is a Text. FAILS today: "Could not find module Val.G1" + kind=4.
-#[ignore = "open bug: Text (library-dep) second-bind drops injected Val.G iface → kind=4 TypeMetadata; fix is in the extract (GhcPipeline), not codegen"]
+/// bind is a Text. Was: "Could not find module Val.G1" + kind=4; now passes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_bind_headline_faithful() {
     if !extract_available() {
@@ -159,8 +150,7 @@ async fn text_bind_headline_faithful() {
     repl.close().await.expect_ok("close");
 }
 
-/// Same-name rebind: `x <- Int` then `x <- Text`. Same root cause.
-#[ignore = "open bug: same as text_bind_headline_faithful (library-dep second bind)"]
+/// Same-name rebind: `x <- Int` then `x <- Text`. Same root cause (fixed).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_rebind_same_name() {
     if !extract_available() {
@@ -186,9 +176,8 @@ async fn text_rebind_same_name() {
     repl.close().await.expect_ok("close");
 }
 
-/// Longer multibyte-capable Text as a second bind — same root cause; the
-/// length/round-trip assertions are the value-correctness gate for the fix.
-#[ignore = "open bug: same as text_bind_headline_faithful (library-dep second bind)"]
+/// Longer multibyte-capable Text as a second bind — same root cause (fixed);
+/// the length/round-trip assertions are the value-correctness gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_bind_longer_with_prior() {
     if !extract_available() {

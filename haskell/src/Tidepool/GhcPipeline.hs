@@ -6,10 +6,10 @@ module Tidepool.GhcPipeline
 
 import GHC
 import GHC.Driver.Main (hscDesugar, batchMsg)
-import GHC.Driver.Env (hscUpdateFlags, hsc_home_unit)
+import GHC.Driver.Env (hscUpdateFlags)
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph))
 import GHC.Unit.Home (homeUnitId)
-import GHC.Driver.Make (load', summariseFile)
+import GHC.Driver.Make (load')
 import GHC.Types.Error (mkUnknownDiagnostic)
 import GHC.Unit.Module.Graph (mapMG, mkModuleGraph, mgModSummaries', ModuleGraphNode(..))
 import GHC.Core.Opt.Pipeline (core2core)
@@ -76,9 +76,10 @@ runPipeline = runPipelineSession Nothing
 --
 -- @Nothing@ (or an inert 'SessionScope') → the ordinary @depanal@/@load@
 -- downsweep path, unchanged. @Just@ an ACTIVE scope → inject the live session
--- @Val.G<g>@ ifaces into the HPT, then compile the (reference) target via
--- 'summariseFile' + 'hscDesugar' + 'core2core' — the normal MODULE pipeline,
--- but bypassing downsweep, which would reject the source-less session modules
+-- @Val.G<g>@ ifaces into the HPT, then compile EVERY home module (deps + target)
+-- to optimized Core exactly like the normal path — the only differences from
+-- 'runNormalPipeline' are excluding the source-less @Val.G<g>@ modules from the
+-- downsweep and injecting their ifaces before compilation
 -- (plans/ghci-implementation-plan.md §2 step 4 / §5.3 "C GATE").
 --
 -- The gate is the @case@ below: the session arm runs ONLY for an active scope.
@@ -216,18 +217,24 @@ extractionDynFlags dflags includes = canonicalizeDFlags dflags
   , avx512pf = False
   }
 
--- | The SESSION extraction path (active 'SessionScope' only). Inject the live
--- @Val.G<g>@ ifaces into the HPT, THEN run the SAME @depanal@/@load'@ downsweep
--- as the normal path so the turn's home-package SOURCE dependencies
--- (@Tidepool.Prelude@, @Tidepool.Effects@, the @Lib.G<g>@ decl modules) are
--- compiled into the HPT — a reference turn imports @Tidepool.Prelude@ via the
--- eval preamble, and a bare @summariseFile@ on the target alone leaves it
--- "not loaded" (GHC-58427).
+-- | The SESSION extraction path (active 'SessionScope' only). It mirrors
+-- 'runNormalPipeline' — @depanal@/@load'@ then a per-module
+-- parse/typecheck/desugar/@core2core@ over every home module, returning all
+-- their guts — with exactly two session-specific additions:
 --
--- The source-less @Val.G<g>@ modules are already in the HPT + finder from the
--- injection, so the downsweep finds their ifaces directly and does NOT try to
--- summarise their (absent) source. The only difference from 'runNormalPipeline'
--- is the injection step between 'setSessionDynFlags' and 'depanal'.
+--   1. The source-less @Val.G<g>@ modules are EXCLUDED from @depanal@ (no source
+--      to summarise) and their thin ifaces are INJECTED into the HPT + finder
+--      ('injectSessionScope') so the turn target's @import Val.G<g>@ resolves.
+--   2. The turn target is excluded from the phase-1 @load'@ (it cannot be
+--      compiled before the Val ifaces are injected; see the body), but it IS
+--      compiled in the phase-3 per-module loop after injection.
+--
+-- Compiling every home module to full -O2 guts (rather than extracting only the
+-- target and resolving its library calls from HPT ifaces) is load-bearing: see
+-- the PHASE 3 comment for why the iface-resolution shortcut bakes kind=4
+-- ErrorSentinels. A reference turn imports @Tidepool.Prelude@ via the eval
+-- preamble; the phase-1 @load'@ also keeps those source deps "loaded"
+-- (GHC-58427).
 runSessionPipeline :: SessionScope -> FilePath -> [FilePath] -> IO PipelineResult
 runSessionPipeline scope path includes = do
   libdir <- getLibdir
@@ -236,10 +243,7 @@ runSessionPipeline scope path includes = do
     setSessionDynFlags (extractionDynFlags dflags includes)
     target <- guessTarget path Nothing Nothing
     setTargets [target]
-    hscPre <- getSession
     let targetModName = capitalize (takeBaseName path)
-        targetHUM = mkModule (homeUnitId (hsc_home_unit hscPre))
-                             (mkModuleName targetModName)
         -- The injected source-less @Val.G<g>@ modules: exclude from the
         -- downsweep (no source to summarise) — the target's @import@ of them
         -- resolves from the HPT entry the injection registers in phase 2.
@@ -248,16 +252,14 @@ runSessionPipeline scope path includes = do
     let unpoison ms =
           ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
         targetModName' = mkModuleName targetModName
-        -- Exclude the target from the load' graph. @load' (LoadDependenciesOf
-        -- targetHUM)@ builds a plan via @createBuildPlan@ that includes ALL
-        -- modules reachable from the root — INCLUDING the target. The upsweep
-        -- then compiles the target BEFORE the Val iface is injected (PHASE 2),
-        -- so its @import Tidepool.Session.Val.G<g>@ fails → GHC error-recovery
-        -- emits "Could not find module" AND inserts a FAKE empty iface into the
-        -- EPS PIT for the Val module. PHASE 3's clean recompile then resolves
-        -- against that fake (empty) iface, so the bound binder is absent → a
-        -- type-metadata ErrorSentinel is baked into the helper → kind=4 at run.
-        -- Filtering the target out makes @load'@ compile ONLY the source deps.
+        -- Exclude the target from the load' graph. A @load'@ that reaches the
+        -- target (e.g. @LoadDependenciesOf targetHUM@, whose @createBuildPlan@
+        -- includes ALL modules reachable from the root — INCLUDING the target)
+        -- compiles the target BEFORE the Val iface is injected (PHASE 2), so its
+        -- @import Tidepool.Session.Val.G<g>@ fails → GHC error-recovery emits
+        -- "Could not find module" AND inserts a FAKE empty iface into the EPS
+        -- PIT for the Val module. Filtering the target out makes @load'@ compile
+        -- ONLY the source deps; the target is compiled in PHASE 3 post-injection.
         depGraph = mkModuleGraph
           [ node | node <- mgModSummaries' modGraphRaw
                  , case node of
@@ -280,36 +282,54 @@ runSessionPipeline scope path includes = do
        setSession hscMG { hsc_mod_graph = modGraphRaw }
     -- PHASE 2 — inject the live @Val.G<g>@ ifaces into the now dep-populated
     -- HPT. AFTER @load'@, so its upsweep does not discard them; the subsequent
-    -- single-module @summariseFile@ compile (no further @load'@) preserves them.
+    -- per-module compile (no further @load'@) preserves them.
     hsc0 <- getSession
     hscInjected <- injectSessionScope scope hsc0
     setSession hscInjected
-    -- PHASE 3 — compile the turn target as a SINGLE module. Its imports resolve
-    -- from the HPT: home-source deps from phase 1, @Val@ binders from phase 2.
-    hsc <- getSession
-    let hscEnv = hscUpdateFlags canonicalizeDFlags hsc
-        homeU  = hsc_home_unit hscEnv
-    esum <- liftIO $ summariseFile hscEnv homeU mempty path Nothing Nothing
-    modSum0 <- case esum of
-      Left _   -> liftIO $ ioError $ userError
-        ("runSessionPipeline: summariseFile failed for " ++ path)
-      Right ms -> pure ms
-    let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
-    parsed      <- parseModule modSum
-    typechecked <- typecheckModule parsed
-    let tcGblEnv    = fst (tm_internals_ typechecked)
-        mCapturedTy = capturedUserType tcGblEnv
-        mResultTy   = capturedBindingType "result" tcGblEnv
-    desugared  <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
-    simplified <- liftIO $ core2core hscEnv desugared
-    let guts = externalizeInternalTops simplified
+    -- PHASE 3 — compile EVERY home-source module (deps + target) to optimized
+    -- Core, exactly like 'runNormalPipeline'. This is load-bearing: extracting
+    -- only the target and resolving the home-library functions it calls
+    -- (@object@, @.=@, @$fToJSONInt@, @toText@, …) from their HPT interface
+    -- unfoldings does NOT work — @load'@ provisions those ifaces without -O2
+    -- unfoldings, so 'resolveExternals' cannot inline them, bakes a poison
+    -- ErrorSentinel for each, and the masking in 'translateModuleClosed'
+    -- (@trulyUnresolved@, keyed on the un-poisoned id which never appears) hides
+    -- it — the sentinel then fires at run as @kind=4 TypeMetadata@. Recompiling
+    -- the deps here as full guts (the normal path's approach) gives their bodies
+    -- directly, so no library function is ever left unresolved. The target's
+    -- @import Val.G<g>@ resolves from the PHASE-2 injection.
+    let summaries = mgModSummaries modGraphRaw
+    when (null summaries) $
+      liftIO $ ioError (userError "runSessionPipeline: empty module graph")
+    results <- forM summaries $ \modSum0 -> do
+      let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
+      parsed      <- parseModule modSum
+      typechecked <- typecheckModule parsed
+      hscEnv0     <- getSession
+      let hscEnv   = hscUpdateFlags canonicalizeDFlags hscEnv0
+          tcGblEnv = fst (tm_internals_ typechecked)
+          mCapTy   = capturedUserType tcGblEnv
+          mResTy   = capturedBindingType "result" tcGblEnv
+      desugared  <- liftIO $ hscDesugar hscEnv modSum tcGblEnv
+      simplified <- liftIO $ core2core hscEnv desugared
+      return (externalizeInternalTops simplified, mCapTy, mResTy)
+    let isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
+        fst3 (g, _, _) = g
+        allGuts = map fst3 results
+    (targetGuts, depGuts, capturedTy, resultTy) <- case filter (isTargetMod . fst3) results of
+      ((tgt, ty, rty):_) -> return (tgt, [g | g <- allGuts, mg_module g /= mg_module tgt], ty, rty)
+      []      -> liftIO $ ioError $ userError $
+        "runSessionPipeline: target module '" ++ targetModName ++ "' not found among: "
+        ++ show (map (moduleNameString . moduleName . mg_module) allGuts)
+    let allBinds  = concatMap mg_binds depGuts ++ mg_binds targetGuts
+        allTyCons = concatMap mg_tcs depGuts ++ mg_tcs targetGuts
     hscFinal <- getSession
     return PipelineResult
-      { prBinds        = mg_binds guts
-      , prTyCons       = mg_tcs guts
+      { prBinds        = allBinds
+      , prTyCons       = allTyCons
       , prHscEnv       = hscUpdateFlags canonicalizeDFlags hscFinal
-      , prCapturedType = mCapturedTy
-      , prResultType   = mResultTy
+      , prCapturedType = capturedTy
+      , prResultType   = resultTy
       }
 
 -- | Read the inferred type of the @__user@ binding out of a module's

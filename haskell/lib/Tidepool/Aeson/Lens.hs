@@ -18,6 +18,7 @@ module Tidepool.Aeson.Lens
   , _Array
   , _Object
   , _Int
+  , _Integer
   , _Double
   , _Null
   ) where
@@ -88,6 +89,15 @@ _Object = prism' Object $ \v -> case v of
 _Int :: Prism' Value Int
 _Int = prism' (Number . fromIntegral) $ \v -> case v of
   Number d -> Just (truncate d)
+  _        -> Nothing
+
+-- | Prism that extracts an Integer from a Number value (truncates). Mirrors
+-- @Data.Aeson.Lens._Integer@. The getter routes through 'Int' (the JIT-safe
+-- @truncate@ target) then widens to 'Integer' via 'fromIntegral' (a small-int
+-- @IS@ construction — no GMP), so it stays clear of the multi-limb FFI.
+_Integer :: Prism' Value Integer
+_Integer = prism' (Number . fromIntegral) $ \v -> case v of
+  Number d -> Just (fromIntegral (truncate d :: Int))
   _        -> Nothing
 
 -- | Prism that extracts a Double from a Number value.
