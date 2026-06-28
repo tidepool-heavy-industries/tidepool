@@ -46,18 +46,13 @@ async fn defs_accumulate_and_interact() {
     repl.close().await.expect_ok("close");
 }
 
-/// CASE 2 — Forward reference ACROSS turns is NOT supported (it POISONS).
+/// CASE 2 — Forward reference ACROSS turns is REJECTED at define-time (BUG-A fix).
 ///
-/// CONFIRMED SEMANTICS (this test pins them): `SessionLib::define` is PARSE-ONLY
-/// (GHC binder extraction, no typecheck — mod.rs `define` doc). So def `f x = g x
-/// + 1` is ACCEPTED at the def turn (a free `g` is a scope concern, not a parse
-/// error) and lands in its OWN gen module `Lib.G1`. A later def `g` lands in
-/// `Lib.G2`, which `import`s G1 — but G1 does NOT import G2. So `g` is never in
-/// scope IN G1, and every later compile loads the whole gen chain (G1→G2→…),
-/// permanently failing with `G1.hs: GHC-88464 Variable not in scope: g`. The
-/// forward-ref def thus POISONS the decl plane (matches the documented
-/// limitation (a) in `define`'s doc — "a body referencing a not-yet-defined name
-/// poisons later generations"). Failure is DEFERRED to first use, then PERMANENT.
+/// NEW SEMANTICS: `SessionLib::define` now validates the candidate gen module via
+/// GHC after binder extraction. `def "f x = g x + 1"` before `g` exists FAILS at
+/// define time (GHC reports `Variable not in scope: g`), the log is rolled back,
+/// and the session remains fully usable. Once `g` is defined first, both `g` and
+/// `f` can be defined and evaluated successfully — no poison.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forward_reference_across_turns_poisons() {
     if !extract_available() {
@@ -66,23 +61,28 @@ async fn forward_reference_across_turns_poisons() {
     let repl = Repl::new();
     repl.open_ok().await;
 
-    // def f before g exists. Parse-only define accepts it (g is a free var).
+    // def f before g exists — define-time validation catches the forward ref.
     let f_turn = repl.def("f x = g x + (1 :: Int)").await;
     eprintln!(
         "[case2] def f (g not yet defined): is_error={} text={}",
         f_turn.is_error, f_turn.text
     );
-    f_turn.expect_ok("def f forward-ref ACCEPTED (parse-only define, no scope check)");
-
-    repl.def("g x = x * (2 :: Int)").await.expect_ok("def g ACCEPTED");
-
-    // ...but the reference never compiles: G1 (carrying f) can't see g (in G2).
-    let out = repl.eval("pure (f 10)").await;
-    eprintln!("[case2] eval (f 10): is_error={} text={}", out.is_error, out.text);
-    let err = out.expect_err("forward ref across turns POISONS — G1 can't see g (GHC-88464)");
+    let err = f_turn.expect_err("def f forward-ref REJECTED at define-time (g not in scope)");
     assert!(
-        err.contains("not in scope") || err.contains("88464") || err.contains('g'),
-        "case2: expected a 'g not in scope' poison error, got: {err}"
+        err.contains("not in scope") || err.contains("g"),
+        "case2: expected a 'g not in scope' error at define-time, got: {err}"
+    );
+
+    // The session is NOT poisoned: subsequent work proceeds normally.
+    repl.def("g x = x * (2 :: Int)").await.expect_ok("def g OK after rejected forward ref");
+    repl.def("f x = g x + (1 :: Int)")
+        .await
+        .expect_ok("def f OK now that g is defined");
+
+    let out = repl.eval_ok("pure (f 10)").await;
+    assert!(
+        out.contains("21"),
+        "case2: session not poisoned — f 10 = g 10 + 1 = 21, got: {out}"
     );
 
     repl.close().await.expect_ok("close");
@@ -423,11 +423,11 @@ async fn decl_prelude_collision_is_graceful() {
     repl.close().await.expect_ok("close");
 }
 
-/// CASE 9 — empty / garbage declarations fail cleanly, session survives.
+/// CASE 9 — empty / garbage declarations: empty is a no-op, garbage fails cleanly.
 ///
-/// def `` (empty) and def `@@@ not haskell` → record outcomes (a parse failure
-/// is the clean rejection). The robust invariant asserted: the session SURVIVES
-/// and a following GOOD def + eval works.
+/// RE-1 fix: `def ""` (empty) is a no-op — returns Ok without bumping the gen.
+/// `def "@@@ not haskell"` → parse error, rejected cleanly. The session survives
+/// both and a following good def + eval works.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn empty_and_garbage_decls_survive() {
     if !extract_available() {
@@ -436,8 +436,26 @@ async fn empty_and_garbage_decls_survive() {
     let repl = Repl::new();
     repl.open_ok().await;
 
+    // Capture gen before the empty def so we can assert it is unchanged after.
+    let before = repl.cmd(":bindings").await.expect_ok(":bindings before").to_string();
+
     let empty = repl.def("").await;
     eprintln!("[case9] def \"\":    is_error={} text={}", empty.is_error, empty.text);
+    // RE-1 fix: empty def is a no-op — Ok, does not bump the generation.
+    empty.expect_ok("def \"\" is a no-op (Ok, no gen bump)");
+
+    let after = repl.cmd(":bindings").await.expect_ok(":bindings after").to_string();
+    // Both :bindings responses contain `"generation":N`; they must agree.
+    fn extract_gen(s: &str) -> Option<u64> {
+        let key = "\"generation\":";
+        let start = s.find(key)? + key.len();
+        s[start..].trim_start().split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+    }
+    assert_eq!(
+        extract_gen(&before),
+        extract_gen(&after),
+        "empty def must not bump the generation (before={before}, after={after})"
+    );
 
     let garbage = repl.def("@@@ not haskell").await;
     eprintln!("[case9] def garbage: is_error={} text={}", garbage.is_error, garbage.text);
