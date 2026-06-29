@@ -1196,9 +1196,19 @@ fn wrap_pure_ref_source(preamble: &str, imports: &str, expr_text: &str) -> Strin
 /// type/scope errors use different phrasing ("Couldn't match", "Not in scope",
 /// "No instance for", …). The check is case-insensitive to tolerate minor GHC
 /// version variation.
+///
+/// We ALSO treat "binder extraction failed" as a not-a-declaration signal:
+/// binder extraction is the parse/scope STAGE (pre-typecheck), so a failure
+/// there — including the extractor throwing an uncaught `SourceError` on a
+/// non-declaration input like `123 :: Int` — means "this isn't a declaration,
+/// try it as an expression." A genuine-but-type-broken declaration parses fine
+/// at this stage and instead fails later as a "declaration type-check failed"
+/// (validation) error, which does NOT match here and so surfaces as a decl error.
 fn is_parse_error(msg: &str) -> bool {
     let lower = msg.to_lowercase();
-    lower.contains("parse error") || lower.contains("lexical error")
+    lower.contains("parse error")
+        || lower.contains("lexical error")
+        || lower.contains("binder extraction failed")
 }
 
 /// Extract the declared head name from a Haskell type declaration string.

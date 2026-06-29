@@ -124,8 +124,11 @@ fn resolve_session(session: Option<String>) -> String {
 /// immediately rather than silently producing a wrong result.
 pub fn classify_item(text: &str) -> Result<BlockItem, String> {
     let s = text.trim();
+    // An empty/whitespace-only item is a NO-OP (RE-1): route it to run_def,
+    // which returns Ok without bumping the generation (matches the legacy
+    // `session_def ""` contract). Erroring here would fail the whole block.
     if s.is_empty() {
-        return Err("empty item".to_string());
+        return Ok(BlockItem::Decl(DeclText(String::new())));
     }
 
     // :commands → Meta (unambiguous)
