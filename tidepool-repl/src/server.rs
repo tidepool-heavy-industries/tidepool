@@ -712,12 +712,24 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
     let names: Vec<&str> = decls.iter().map(|d| d.type_name).collect();
     format!(
         "tidepool-repl — a GHCi-style stateful Haskell session. Each named session holds one \
-         resident JIT machine whose value heap persists across turns; declarations accumulate \
-         across `session_run` blocks. Multiple agents can open distinct named sessions in parallel \
-         (omit `session` to use `\"default\"`). \
+         resident JIT machine whose value heap and module scope persist across turns; \
+         declarations accumulate across `session_run` calls.\n\n\
+         PRIMARY TOOL: session_run\n\
+         Pass a list of items run in sequence: top-level declarations (`data Foo = …`, \
+         `f x = …`), bind statements (`x <- e` / `let x = e`), bare expressions, or \
+         :commands (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`). \
+         Items are classified automatically. Execution stops on the first error. \
+         Returns per-item results and the last expression's value.\n\n\
+         PREFERRED IDIOM — define then call in one block:\n\
+         Put helper definitions and type aliases in the early items, then call them in the \
+         final expression. One block with a clean definition + its caller beats cramming all \
+         logic into a single expression.\n\n\
+         JSON OUTPUT: opt-in — return an `Aeson.Value` to get structured JSON instead of \
+         Show output.\n\n\
+         Available effects: {effects}.\n\n\
          Lifecycle: session_open → session_run* → session_close. \
-         `session_run` takes a list of items (declarations, bind statements, expressions, \
-         :commands) and runs them in sequence (effects: {effects}). \
+         Multiple agents can open distinct named sessions in parallel \
+         (omit `session` to use `\"default\"`). \
          An in-turn `ask` suspends with a continuation_id; answer it with session_resume or \
          drop it with session_abort.",
         effects = names.join(", "),
@@ -790,10 +802,16 @@ impl ServerHandler for TidepoolReplServer {
                 "Run a list of GHCi-capable items in sequence on the resident machine. Each item \
                  is a declaration (`data Foo = …`, `f x = …`), a bind statement (`x <- e` / \
                  `let x = e`), a bare expression, or a `:command` (`:bindings`, `:reset`, \
-                 `:t <expr>`, `:i <name>`, `:vocab`). Items are classified automatically. \
-                 Execution stops on the first error. Returns per-item results and the last \
-                 expression value. An in-turn `ask` suspends with a continuation_id; resume \
-                 with session_resume or drop with session_abort.",
+                 `:t <expr>`, `:i <name>`, `:vocab`). Items are classified automatically; \
+                 execution stops on the first error. Returns per-item results and the last \
+                 expression's value. \
+                 PREFERRED IDIOM: define helpers and types in early items, then invoke them in \
+                 the final expression — one block with a clean definition plus its caller beats \
+                 one cramped expression. \
+                 JSON OUTPUT: return an `Aeson.Value` to get structured JSON instead of Show \
+                 output. \
+                 An in-turn `ask` suspends with a continuation_id; resume with session_resume \
+                 or drop with session_abort.",
                 schema_to_map(schemars::schema_for!(SessionBlockRequest))?,
             ),
             tool(
