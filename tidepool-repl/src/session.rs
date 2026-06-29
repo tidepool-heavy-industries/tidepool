@@ -264,22 +264,30 @@ impl Session {
             None,
         );
 
-        let lib_dir = self.lib.include_dir().to_path_buf();
-        let mut include: Vec<&Path> = self.cfg.base_include.iter().map(PathBuf::as_path).collect();
-        include.push(lib_dir.as_path());
         let salt = self.lib.cache_salt();
-
-        let (expr, mut table, warnings) =
-            match compile_haskell_salted(&source, "result", &include, Some(&salt)) {
-                Ok(triple) => triple,
-                Err(e) => return TurnOutcome::Error(format!("compile error: {e}")),
-            };
+        // Block-scope `include` so the borrow on `self.cfg.base_include` is
+        // released before we call `query_inner_type` (which needs `&mut self`).
+        let compile_result = {
+            let lib_dir = self.lib.include_dir().to_path_buf();
+            let mut include: Vec<&Path> =
+                self.cfg.base_include.iter().map(PathBuf::as_path).collect();
+            include.push(lib_dir.as_path());
+            compile_haskell_salted(&source, "result", &include, Some(&salt))
+        };
+        let (expr, mut table, warnings) = match compile_result {
+            Ok(triple) => triple,
+            Err(e) => return TurnOutcome::Error(format!("compile error: {e}")),
+        };
         if warnings.has_io {
             return TurnOutcome::Error(
                 "IO type detected in result binding. IO operations are not supported.".into(),
             );
         }
         table.populate_siblings_from_expr(&expr);
+
+        // Query the inner value type (`a` in `M a`) via the bind mechanism:
+        // `__t <- <expr>` gives `__t :: a`, not the Eff-wrapped action type.
+        let inner_type = self.query_inner_type(expr_text);
 
         self.turn_counter += 1;
         let frag_name = format!("repl_turn_{}", self.turn_counter);
@@ -305,7 +313,7 @@ impl Session {
         match run_result {
             Ok(value) => TurnOutcome::Value {
                 value: value_to_json(&value, &table, 0),
-                type_display: warnings.captured_type,
+                type_display: inner_type,
             },
             Err(e) => TurnOutcome::Error(format!("runtime error: {e}")),
         }
@@ -543,11 +551,8 @@ impl Session {
         let preamble = self.patched_preamble();
         let inject = self.live_val_modules();
         let imports = self.session_imports();
-        let lib_dir = self.lib.include_dir().to_path_buf();
-        let mut include: Vec<&Path> = self.cfg.base_include.iter().map(PathBuf::as_path).collect();
-        include.push(lib_dir.as_path());
-
         let eval_input = self.eval_input.take();
+
         // Eff-first (show-default: REPL renders via Show/toWire, not toJSON).
         let eff_src = template_haskell_show_default(
             &preamble,
@@ -558,13 +563,38 @@ impl Session {
             eval_input.as_ref(),
             None,
         );
-        match compile_session_turn(&eff_src, &include, self.session_root(), &inject, None) {
-            Ok(turn) => self.run_reference_fragment(turn, false, handlers, captured),
+        // Block-scope `include` so the borrow on `self.cfg.base_include` is
+        // released before we call `query_inner_type` (which needs `&mut self`).
+        let eff_result = {
+            let lib_dir = self.lib.include_dir().to_path_buf();
+            let mut include: Vec<&Path> =
+                self.cfg.base_include.iter().map(PathBuf::as_path).collect();
+            include.push(lib_dir.as_path());
+            compile_session_turn(&eff_src, &include, self.session_root(), &inject, None)
+        };
+        match eff_result {
+            Ok(turn) => {
+                // Eff-first succeeded: `captured_type` is `Eff '[…] a`; query inner `a`.
+                let inner_type = self.query_inner_type(expr_text);
+                self.run_reference_fragment(turn, inner_type, false, handlers, captured)
+            }
             Err(eff_err) => {
                 // Pure fallback (keep the compile attempt; suppress the redundant error text).
                 let pure_src = wrap_pure_ref_source(&preamble, &imports, expr_text);
-                match compile_session_turn(&pure_src, &include, self.session_root(), &inject, None) {
-                    Ok(turn) => self.run_reference_fragment(turn, true, handlers, captured),
+                let pure_result = {
+                    let lib_dir = self.lib.include_dir().to_path_buf();
+                    let mut include: Vec<&Path> =
+                        self.cfg.base_include.iter().map(PathBuf::as_path).collect();
+                    include.push(lib_dir.as_path());
+                    compile_session_turn(&pure_src, &include, self.session_root(), &inject, None)
+                };
+                match pure_result {
+                    Ok(turn) => {
+                        // Pure path: `captured_type` IS the inner type (`result = <expr>`
+                        // has no Eff wrapper, so GHC infers the expression type directly).
+                        let inner_type = turn.warnings.captured_type.clone();
+                        self.run_reference_fragment(turn, inner_type, true, handlers, captured)
+                    }
                     Err(_pure_err) => TurnOutcome::Error(format!(
                         "compile error: {eff_err} (also failed as a pure value)"
                     )),
@@ -575,16 +605,16 @@ impl Session {
 
     /// Run a compiled reference fragment on the resident machine, resolving any
     /// session binders through the seeded `ExternalEnv` (load-through-slot).
+    /// `inner_type` is the caller-resolved inner value type (`a` in `M a`).
+    /// `pure` controls whether to execute via `run_fragment_pure` (no effects).
     fn run_reference_fragment<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         turn: tidepool_runtime::session::SessionTurnResult,
+        inner_type: Option<String>,
         pure: bool,
         handlers: &mut H,
         captured: &CapturedOutput,
     ) -> TurnOutcome {
-        // Save the captured type before any field moves (partial move is safe
-        // because the remaining accesses are borrows or Copy fields).
-        let type_display = turn.warnings.captured_type;
         if turn.warnings.has_io {
             return TurnOutcome::Error(
                 "IO type detected in result binding. IO operations are not supported.".into(),
@@ -616,10 +646,45 @@ impl Session {
         match run_result {
             Ok(value) => TurnOutcome::Value {
                 value: value_to_json(&value, &self.session_table, 0),
-                type_display,
+                type_display: inner_type,
             },
             Err(e) => TurnOutcome::Error(format!("runtime error: {e}")),
         }
+    }
+
+    /// Compile-only type query: returns the inner value type `a` for a monadic
+    /// expression of type `M a` / `Eff '[…] a`. Wraps as `__t <- <expr>` in a do
+    /// block so `__t :: a` (not the Eff-wrapped action type). Consumes a throwaway
+    /// generation to avoid iface collisions with subsequent real binds.
+    /// Returns `None` if the type query compile fails (e.g. non-monadic expression).
+    fn query_inner_type(&mut self, expr_text: &str) -> Option<String> {
+        let g = self.val_gen.next();
+        self.val_gen = g;
+        let preamble = self.patched_preamble();
+        let inject = self.live_val_modules();
+        let imports = self.session_imports();
+        let turn_text = format!("__t <- {expr_text}");
+        let wrapped = wrap_bind_source(
+            &preamble,
+            &self.cfg.effect_stack,
+            &imports,
+            &turn_text,
+            "__t",
+        );
+        let lib_dir = self.lib.include_dir().to_path_buf();
+        let mut include: Vec<&Path> = self.cfg.base_include.iter().map(PathBuf::as_path).collect();
+        include.push(lib_dir.as_path());
+        let names = vec!["__t".to_string()];
+        compile_session_turn(
+            &wrapped,
+            &include,
+            self.session_root(),
+            &inject,
+            Some(SessionBind { names: &names, gen: g.0 }),
+        )
+        .ok()
+        .and_then(|turn| turn.binders.into_iter().next())
+        .map(|b| b.type_display)
     }
 
     /// `session_cmd`: meta-commands — `:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`.
