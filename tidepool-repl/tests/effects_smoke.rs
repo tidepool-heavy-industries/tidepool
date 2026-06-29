@@ -1,5 +1,5 @@
 //! Wave B smoke test: the FULL effect suite (`build_base_stack`) is reachable
-//! through the repl's `session_eval`, composed over persistent session state.
+//! through the repl's `session_run`, composed over persistent session state.
 //!
 //! Exercises the always-available effects — Exec (`run`), Fs (`writeFile`/
 //! `readFile`), and KV (`kvSet`/`kvGet` across turns) — to prove the wider stack
@@ -27,13 +27,6 @@ fn text_of(res: &CallToolResult) -> String {
         RawContent::Text(t) => t.text.clone(),
         other => panic!("expected text content, got {other:?}"),
     }
-}
-
-fn obj(pairs: &[(&str, &str)]) -> serde_json::Map<String, serde_json::Value> {
-    pairs
-        .iter()
-        .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
-        .collect()
 }
 
 /// Build a server with the FULL effect stack (the Wave-B default), rooted at
@@ -84,6 +77,49 @@ fn build_full_server(cwd: PathBuf) -> TidepoolReplServer {
     TidepoolReplServer::new(stack, cfg)
 }
 
+/// Dispatch a 1-item `session_run` block and unwrap `items[0]`.
+/// Returns `(is_error, result_text)` after stripping the block envelope.
+async fn run_single(
+    server: &TidepoolReplServer,
+    item: &str,
+    input: Option<serde_json::Value>,
+) -> (bool, String) {
+    let mut args = serde_json::Map::new();
+    args.insert(
+        "items".into(),
+        serde_json::Value::Array(vec![serde_json::Value::String(item.to_string())]),
+    );
+    if let Some(inp) = input {
+        args.insert("input".into(), inp);
+    }
+    let r = server
+        .dispatch_tool("session_run", args)
+        .await
+        .expect("session_run dispatch");
+    let raw = text_of(&r);
+    let raw_is_error = r.is_error == Some(true);
+    let json_part = if let Some(pos) = raw.rfind("\n## Result\n") {
+        &raw[pos + "\n## Result\n".len()..]
+    } else {
+        &raw
+    };
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_part) {
+        if let Some(item0) = v.get("items").and_then(|arr| arr.get(0)) {
+            let ok = item0
+                .get("ok")
+                .and_then(|o| o.as_bool())
+                .unwrap_or(!raw_is_error);
+            let text = item0
+                .get("result")
+                .and_then(|r| r.as_str())
+                .unwrap_or(&raw)
+                .to_string();
+            return (!ok, text);
+        }
+    }
+    (raw_is_error, raw)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_stack_effects_reachable_through_session() {
     if !extract_available() {
@@ -94,12 +130,9 @@ async fn full_stack_effects_reachable_through_session() {
     let server = build_full_server(tmp.path().to_path_buf());
 
     async fn eval(server: &TidepoolReplServer, code: &str) -> String {
-        let r = server
-            .dispatch_tool("session_eval", obj(&[("code", code)]))
-            .await
-            .expect("session_eval dispatch");
-        assert_ne!(r.is_error, Some(true), "turn `{code}` errored: {}", text_of(&r));
-        text_of(&r)
+        let (is_error, text) = run_single(server, code, None).await;
+        assert!(!is_error, "turn `{code}` errored: {text}");
+        text
     }
 
     let r = server
@@ -144,24 +177,16 @@ async fn full_stack_effects_reachable_through_session() {
     // input payload lane: the `input :: Aeson.Value` binding is in scope and the
     // `Aeson.` qualifier the injection emits resolves (regression for the
     // missing-Aeson-import bug found in live dogfood).
-    let mut m = serde_json::Map::new();
-    m.insert(
-        "code".into(),
-        serde_json::Value::String("pure (input ^? key \"name\" . _String)".into()),
-    );
-    m.insert(
-        "input".into(),
-        serde_json::json!({"name": "from-the-input-lane", "n": 42}),
-    );
-    let r = server
-        .dispatch_tool("session_eval", m)
-        .await
-        .expect("session_eval input");
-    assert_ne!(r.is_error, Some(true), "input lane errored: {}", text_of(&r));
+    let (is_error, text) = run_single(
+        &server,
+        "pure (input ^? key \"name\" . _String)",
+        Some(serde_json::json!({"name": "from-the-input-lane", "n": 42})),
+    )
+    .await;
+    assert!(!is_error, "input lane errored: {text}");
     assert!(
-        text_of(&r).contains("from-the-input-lane"),
-        "input lane value: {}",
-        text_of(&r)
+        text.contains("from-the-input-lane"),
+        "input lane value: {text}",
     );
 
     let _ = server
@@ -169,12 +194,12 @@ async fn full_stack_effects_reachable_through_session() {
         .await;
 }
 
-/// `session_def` helpers see the FULL eval vocabulary — `M` + the effect verbs,
+/// `session_run` items see the FULL eval vocabulary — `M` + the effect verbs,
 /// the `Tidepool.Prelude` shadows, and the `L.`/`Set.` qualified namespaces —
 /// not just the lens-free `T`/`Map` of `standalone_default`. This is the payoff
-/// of the production `session_decl_module_env`: a decl can be an effectful verb
-/// (`sh :: Text -> M Text`) and use list/set combinators, then be called from a
-/// later `session_eval`. (Regression for the decl/eval preamble asymmetry.)
+/// of the production `session_decl_module_env`: a decl item can be an effectful
+/// verb (`sh :: Text -> M Text`) and use list/set combinators, then be called
+/// from a later `session_run`. (Regression for the decl/eval preamble asymmetry.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_def_sees_full_eval_vocabulary() {
     if !extract_available() {
@@ -193,47 +218,34 @@ async fn session_def_sees_full_eval_vocabulary() {
     // A decl that uses `M` + the `run` effect verb (Tidepool.Effects) AND the
     // `L.`/`Set.` qualified namespaces — all out of scope under the old
     // T+Map-only decl preamble.
-    let r = server
-        .dispatch_tool(
-            "session_def",
-            obj(&[(
-                "decl",
-                "sh :: Text -> M Text\n\
-                 sh cmd = run cmd <&> \\(_,out,_) -> out\n\
-                 \n\
-                 uniqSorted :: [Int] -> [Int]\n\
-                 uniqSorted = L.sort . Set.toList . Set.fromList\n\
-                 \n\
-                 -- shell-effect module (Git) must be in DECL scope too\n\
-                 dirtyCount :: M Int\n\
-                 dirtyCount = Git.gitStatus <&> length",
-            )]),
-        )
-        .await
-        .expect("session_def dispatch");
-    assert_ne!(
-        r.is_error,
-        Some(true),
-        "session_def with full vocabulary should compile: {}",
-        text_of(&r)
+    let (is_error, text) = run_single(
+        &server,
+        "sh :: Text -> M Text\n\
+         sh cmd = run cmd <&> \\(_,out,_) -> out\n\
+         \n\
+         uniqSorted :: [Int] -> [Int]\n\
+         uniqSorted = L.sort . Set.toList . Set.fromList\n\
+         \n\
+         -- shell-effect module (Git) must be in DECL scope too\n\
+         dirtyCount :: M Int\n\
+         dirtyCount = Git.gitStatus <&> length",
+        None,
+    )
+    .await;
+    assert!(
+        !is_error,
+        "session_run with full vocabulary should compile: {text}",
     );
 
     // Use the effectful decl from a later eval turn.
-    let r = server
-        .dispatch_tool("session_eval", obj(&[("code", "sh \"echo decl-vocab-ok\"")]))
-        .await
-        .expect("session_eval dispatch");
-    assert_ne!(r.is_error, Some(true), "calling `sh`: {}", text_of(&r));
-    assert!(text_of(&r).contains("decl-vocab-ok"), "sh output: {}", text_of(&r));
+    let (is_error, text) = run_single(&server, "sh \"echo decl-vocab-ok\"", None).await;
+    assert!(!is_error, "calling `sh`: {text}");
+    assert!(text.contains("decl-vocab-ok"), "sh output: {text}");
 
     // Use the pure decl that needed L./Set.
-    let r = server
-        .dispatch_tool("session_eval", obj(&[("code", "pure (uniqSorted [3,1,2,3,1])")]))
-        .await
-        .expect("session_eval dispatch");
-    assert_ne!(r.is_error, Some(true), "calling `uniqSorted`: {}", text_of(&r));
-    let t = text_of(&r);
-    assert!(t.contains('1') && t.contains('3'), "uniqSorted output: {t}");
+    let (is_error, text) = run_single(&server, "pure (uniqSorted [3,1,2,3,1])", None).await;
+    assert!(!is_error, "calling `uniqSorted`: {text}");
+    assert!(text.contains('1') && text.contains('3'), "uniqSorted output: {text}");
 
     let _ = server
         .dispatch_tool("session_close", serde_json::Map::new())
