@@ -165,6 +165,10 @@ pub struct ReplServerConfig {
     pub nursery_size: Option<usize>,
 }
 
+/// Spawns a worker for a `(session_name, SessionConfig)` — the erased,
+/// per-session handler-stack builder (H is hidden behind this boxed closure).
+type SessionSpawn = Box<dyn Fn(&str, SessionConfig) -> WorkerHandle + Send + Sync>;
+
 /// The non-generic server core (H is erased into the `spawn` closure).
 struct ReplServerInner {
     manager: SessionManager,
@@ -174,7 +178,7 @@ struct ReplServerInner {
     next_cont_id: AtomicU64,
     next_session_id: AtomicU64,
     /// Spawns a worker for `(session_name, SessionConfig)` (captures handler builder + ask_tag).
-    spawn: Box<dyn Fn(&str, SessionConfig) -> WorkerHandle + Send + Sync>,
+    spawn: SessionSpawn,
     preamble: String,
     effect_stack: String,
     cfg: ReplServerConfig,
@@ -198,7 +202,7 @@ impl TidepoolReplServer {
         let effect_stack = tidepool_mcp::build_effect_stack_type(&cfg.decls);
         let ask_tag = cfg.ask_tag;
         // Erase H: the spawn closure owns a clone of `base`; session name is ignored (shared stack).
-        let spawn: Box<dyn Fn(&str, SessionConfig) -> WorkerHandle + Send + Sync> =
+        let spawn: SessionSpawn =
             Box::new(move |_: &str, sc| spawn_worker(sc, base.clone(), ask_tag));
         TidepoolReplServer {
             inner: Arc::new(ReplServerInner {
@@ -231,7 +235,7 @@ impl TidepoolReplServer {
         let preamble = tidepool_mcp::build_preamble_non_interactive(&cfg.decls, false);
         let effect_stack = tidepool_mcp::build_effect_stack_type(&cfg.decls);
         let ask_tag = cfg.ask_tag;
-        let spawn: Box<dyn Fn(&str, SessionConfig) -> WorkerHandle + Send + Sync> =
+        let spawn: SessionSpawn =
             Box::new(move |session_name: &str, sc| {
                 let base = builder(session_name);
                 spawn_worker(sc, base, ask_tag)
