@@ -47,6 +47,10 @@ pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
         // Merge/reconcile API (merge, zipWithMatched, …) — strict, matches Map.
         "import qualified Data.Map.Merge.Strict as MM",
         "import qualified Data.Set as Set",
+        // `Aeson` qualifier: the `input` payload-lane injection emits
+        // `input :: Aeson.Value` / `Aeson.String …` (json_to_haskell), so the
+        // qualifier must be in scope for both eval AND session_eval.
+        "import qualified Tidepool.Aeson as Aeson",
         "import qualified Tidepool.Aeson.KeyMap as KM",
         "import qualified Data.List as L",
         "import qualified Tidepool.TextFormat as TF",

@@ -123,6 +123,29 @@ async fn full_stack_effects_reachable_through_session() {
     let t = eval(&server, "x + 1").await;
     assert!(t.contains("8"), "bound-value ref under full stack: {t}");
 
+    // input payload lane: the `input :: Aeson.Value` binding is in scope and the
+    // `Aeson.` qualifier the injection emits resolves (regression for the
+    // missing-Aeson-import bug found in live dogfood).
+    let mut m = serde_json::Map::new();
+    m.insert(
+        "code".into(),
+        serde_json::Value::String("pure (input ^? key \"name\" . _String)".into()),
+    );
+    m.insert(
+        "input".into(),
+        serde_json::json!({"name": "from-the-input-lane", "n": 42}),
+    );
+    let r = server
+        .dispatch_tool("session_eval", m)
+        .await
+        .expect("session_eval input");
+    assert_ne!(r.is_error, Some(true), "input lane errored: {}", text_of(&r));
+    assert!(
+        text_of(&r).contains("from-the-input-lane"),
+        "input lane value: {}",
+        text_of(&r)
+    );
+
     let _ = server
         .dispatch_tool("session_close", serde_json::Map::new())
         .await;
