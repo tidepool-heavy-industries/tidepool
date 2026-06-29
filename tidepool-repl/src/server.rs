@@ -58,10 +58,14 @@ pub struct SessionBlockRequest {
     /// (`x <- e` / `let x = e`), a bare expression, or a `:command`
     /// (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`).
     /// Items are classified automatically; execution stops on the first error.
+    /// Each declaration item is its own module, so a type signature and its
+    /// binding (and all equations of a multi-clause function) must share ONE
+    /// newline-separated item.
     pub items: Vec<String>,
-    /// Optional payload available as `input :: Aeson.Value` in the first
-    /// evaluated expression. Pass large or quote-heavy content here to avoid
-    /// Haskell string escaping. Mirrors the stateless `eval` tool's `input` lane.
+    /// Optional payload available as `input :: Aeson.Value` to every evaluated
+    /// item in the block (binds, `let`s, and bare expressions). Pass large or
+    /// quote-heavy content here to avoid Haskell string escaping. Mirrors the
+    /// stateless `eval` tool's `input` lane.
     #[serde(default)]
     pub input: Option<serde_json::Value>,
     /// Session name (default: `"default"`).
@@ -379,11 +383,16 @@ impl TidepoolReplServer {
                         }
                     }
                 }
+                // MCP clients stringify the `input` param (a JSON object/array
+                // arrives double-encoded as a String); unwrap one level so
+                // `input :: Aeson.Value` is the structured value, matching the
+                // stateless `eval` tool exactly.
+                let input = req.input.as_ref().map(tidepool_mcp::normalize_input);
                 Ok(self
                     .run_command(
                         "session_run",
                         SessionCommand::Block(block_items),
-                        req.input,
+                        input,
                         &sid,
                     )
                     .await)
@@ -727,6 +736,9 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          Put helper definitions and type aliases in the early items, then call them in the \
          final expression. One block with a clean definition + its caller beats cramming all \
          logic into a single expression.\n\n\
+         ONE DECLARATION PER ITEM: each declaration item compiles as its own module, so a \
+         type signature and its binding — and all equations of a multi-clause function — must \
+         live in the SAME item (newline-separated), not split across items.\n\n\
          JSON OUTPUT: opt-in — return an `Aeson.Value` to get structured JSON instead of \
          Show output.\n\n\
          Available effects: {effects}.\n\n\
@@ -810,7 +822,9 @@ impl ServerHandler for TidepoolReplServer {
                  expression's value. \
                  PREFERRED IDIOM: define helpers and types in early items, then invoke them in \
                  the final expression — one block with a clean definition plus its caller beats \
-                 one cramped expression. \
+                 one cramped expression. Each declaration item is its own module, so a type \
+                 signature and its binding (and a multi-clause function's equations) must share \
+                 ONE newline-separated item. \
                  JSON OUTPUT: return an `Aeson.Value` to get structured JSON instead of Show \
                  output. \
                  An in-turn `ask` suspends with a continuation_id; resume with session_resume \

@@ -251,3 +251,92 @@ async fn session_def_sees_full_eval_vocabulary() {
         .dispatch_tool("session_close", serde_json::Map::new())
         .await;
 }
+
+/// Run a multi-item `session_run` block and return the parsed result JSON
+/// (the `{items, value, generation, valGeneration}` envelope), stripping any
+/// `## Output` / `## Result` framing.
+async fn run_block(
+    server: &TidepoolReplServer,
+    items: &[&str],
+    input: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut args = serde_json::Map::new();
+    args.insert(
+        "items".into(),
+        serde_json::Value::Array(
+            items.iter().map(|s| serde_json::Value::String(s.to_string())).collect(),
+        ),
+    );
+    if let Some(inp) = input {
+        args.insert("input".into(), inp);
+    }
+    let r = server
+        .dispatch_tool("session_run", args)
+        .await
+        .expect("session_run dispatch");
+    let raw = text_of(&r);
+    let json_part = match raw.rfind("\n## Result\n") {
+        Some(pos) => &raw[pos + "\n## Result\n".len()..],
+        None => &raw,
+    };
+    serde_json::from_str(json_part).unwrap_or_else(|_| serde_json::json!({"raw": raw}))
+}
+
+/// Block-runner cleanups (dogfood findings, fixed inline):
+///   1. the `input` lane decodes a stringified-JSON payload (MCP clients
+///      double-encode it) — matching the stateless `eval` tool;
+///   2. `input` is in scope for `let`/bind items, not just bare expressions;
+///   3. a bare pure expression reports its inferred `type`, not `null`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn block_runner_input_and_type_cleanups() {
+    if !extract_available() {
+        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let server = build_full_server(tmp.path().to_path_buf());
+    let r = server
+        .dispatch_tool("session_open", serde_json::Map::new())
+        .await
+        .expect("session_open");
+    assert_ne!(r.is_error, Some(true), "open: {}", text_of(&r));
+
+    // (1)+(2): input arrives DOUBLE-ENCODED as a JSON string (the MCP-client
+    // shape); it must decode to a structured Value AND be visible to a `let`
+    // item, then to the final bare-expression reference.
+    let stringified = serde_json::Value::String(r#"{"name": "Inanna", "n": 42}"#.to_string());
+    let v = run_block(
+        &server,
+        &["let who = input ^? key \"name\" . _String", "who"],
+        Some(stringified),
+    )
+    .await;
+    assert_eq!(
+        v.get("value").cloned().unwrap_or(serde_json::Value::Null),
+        serde_json::json!("Inanna"),
+        "input lane should decode + be in `let` scope; got: {v}"
+    );
+
+    // (3): a bare pure expression referencing a binding reports its inferred
+    // type (not null). `doubled :: Int`.
+    let v = run_block(
+        &server,
+        &["n <- pure (21 :: Int)", "let doubled = n * 2", "doubled"],
+        None,
+    )
+    .await;
+    let items = v.get("items").and_then(|i| i.as_array()).expect("items array");
+    let last_item = items.last().expect("at least one item");
+    let result_str = last_item.get("result").and_then(|r| r.as_str()).unwrap_or("");
+    let result_json: serde_json::Value = serde_json::from_str(result_str).unwrap_or_default();
+    assert_eq!(
+        result_json.get("type").and_then(|t| t.as_str()),
+        Some("Int"),
+        "bare pure reference should report its type, not null; got: {result_str}"
+    );
+    assert_eq!(v.get("value"), Some(&serde_json::json!(42)), "value: {v}");
+
+    let _ = server
+        .dispatch_tool("session_close", serde_json::Map::new())
+        .await;
+}

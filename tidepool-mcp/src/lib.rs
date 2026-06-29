@@ -203,7 +203,7 @@ fn fnv1a_hash(bytes: &[u8]) -> u64 {
 }
 
 /// Unwrap double-encoded JSON strings if they contain an object or array.
-pub(crate) fn normalize_input(v: &serde_json::Value) -> serde_json::Value {
+pub fn normalize_input(v: &serde_json::Value) -> serde_json::Value {
     if let serde_json::Value::String(s) = v {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
             // MCP clients stringify the input param. Unwrap one level for

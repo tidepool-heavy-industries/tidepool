@@ -20,7 +20,8 @@ use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_mcp::{
-    library_vocab, template_haskell_show_default, CapturedOutput, EffectDecl, PREAMBLE_DEFAULT_DECL,
+    input_binding_source, library_vocab, template_haskell_show_default, CapturedOutput, EffectDecl,
+    PREAMBLE_DEFAULT_DECL,
 };
 use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
@@ -323,7 +324,10 @@ impl Session {
             .current_module()
             .map(|m| format!("{}\n", m.module_name()))
             .unwrap_or_default();
-        let eval_input = self.eval_input.take();
+        // Clone (not take): `input` stays in scope for EVERY item in the block
+        // — including items that run after an in-block `ask`/resume — and for the
+        // type-probe recompiles below. The worker resets `eval_input` per job.
+        let eval_input = self.eval_input.clone();
         let source = template_haskell_show_default(
             &preamble,
             &self.cfg.effect_stack,
@@ -407,8 +411,15 @@ impl Session {
         let g = self.val_gen.next();
         let inject = self.live_val_modules();
         let imports = self.session_imports();
-        let wrapped =
-            wrap_bind_source(&preamble, &self.cfg.effect_stack, &imports, turn_text, &name);
+        let eval_input = self.eval_input.clone();
+        let wrapped = wrap_bind_source(
+            &preamble,
+            &self.cfg.effect_stack,
+            &imports,
+            turn_text,
+            &name,
+            eval_input.as_ref(),
+        );
 
         let lib_dir = self.lib.include_dir().to_path_buf();
         let mut include: Vec<&Path> = self.cfg.base_include.iter().map(PathBuf::as_path).collect();
@@ -507,12 +518,14 @@ impl Session {
         let g = self.val_gen.next();
         let inject = self.live_val_modules();
         let imports = self.session_imports();
+        let eval_input = self.eval_input.clone();
         let wrapped = wrap_multi_bind_source(
             &preamble,
             &self.cfg.effect_stack,
             &imports,
             turn_text,
             &names,
+            eval_input.as_ref(),
         );
 
         let lib_dir = self.lib.include_dir().to_path_buf();
@@ -621,7 +634,10 @@ impl Session {
         let preamble = self.patched_preamble();
         let inject = self.live_val_modules();
         let imports = self.session_imports();
-        let eval_input = self.eval_input.take();
+        // Clone (not take): `input` stays in scope for EVERY item in the block
+        // — including items that run after an in-block `ask`/resume — and for the
+        // type-probe recompiles below. The worker resets `eval_input` per job.
+        let eval_input = self.eval_input.clone();
 
         // Eff-first (show-default: REPL renders via Show/toWire, not toJSON).
         let eff_src = template_haskell_show_default(
@@ -650,7 +666,8 @@ impl Session {
             }
             Err(eff_err) => {
                 // Pure fallback (keep the compile attempt; suppress the redundant error text).
-                let pure_src = wrap_pure_ref_source(&preamble, &imports, expr_text);
+                let pure_src =
+                    wrap_pure_ref_source(&preamble, &imports, expr_text, eval_input.as_ref());
                 let pure_result = {
                     let lib_dir = self.lib.include_dir().to_path_buf();
                     let mut include: Vec<&Path> =
@@ -733,6 +750,7 @@ impl Session {
         let preamble = self.patched_preamble();
         let inject = self.live_val_modules();
         let imports = self.session_imports();
+        let eval_input = self.eval_input.clone();
         let turn_text = format!("__t <- {expr_text}");
         let wrapped = wrap_bind_source(
             &preamble,
@@ -740,6 +758,7 @@ impl Session {
             &imports,
             &turn_text,
             "__t",
+            eval_input.as_ref(),
         );
         let lib_dir = self.lib.include_dir().to_path_buf();
         let mut include: Vec<&Path> = self.cfg.base_include.iter().map(PathBuf::as_path).collect();
@@ -815,6 +834,7 @@ impl Session {
                 self.val_gen = throwaway_gen;
                 let inject = self.live_val_modules();
                 let imports = self.session_imports();
+                let eval_input = self.eval_input.clone();
                 let turn_text = format!("let __t = {expr}");
                 let wrapped = wrap_bind_source(
                     &preamble,
@@ -822,6 +842,7 @@ impl Session {
                     &imports,
                     &turn_text,
                     "__t",
+                    eval_input.as_ref(),
                 );
                 let lib_dir = self.lib.include_dir().to_path_buf();
                 let mut include: Vec<&Path> =
@@ -1134,9 +1155,11 @@ fn wrap_bind_source(
     imports: &str,
     turn_text: &str,
     binder: &str,
+    input: Option<&serde_json::Value>,
 ) -> String {
     let mut out = insert_imports(preamble, imports);
     out.push_str("-- [user]\n");
+    out.push_str(&input_binding_source(input));
     out.push_str(&format!("result :: Eff {effect_stack} _\n"));
     out.push_str("result = do\n");
     for line in turn_text.lines() {
@@ -1162,10 +1185,12 @@ fn wrap_multi_bind_source(
     imports: &str,
     turn_text: &str,
     names: &[String],
+    input: Option<&serde_json::Value>,
 ) -> String {
     let tuple_expr = format!("({})", names.join(", "));
     let mut out = insert_imports(preamble, imports);
     out.push_str("-- [user]\n");
+    out.push_str(&input_binding_source(input));
     out.push_str(&format!("result :: Eff {effect_stack} _\n"));
     out.push_str("result = do\n");
     for line in turn_text.lines() {
@@ -1178,9 +1203,26 @@ fn wrap_multi_bind_source(
 /// Wrap a PURE reference turn as `result = <expr>` (no `Eff`), run via
 /// `run_fragment_pure`. For bare value references like `x + 1` / `f 10` /
 /// `v ^? key …` that are not monadic.
-fn wrap_pure_ref_source(preamble: &str, imports: &str, expr_text: &str) -> String {
+///
+/// Emits a SECOND `__user = <expr>` binding whose sole purpose is type capture:
+/// the extractor reads the inferred type off the `__user` binder
+/// (`capturedUserType`), so the reference turn can report `{type, value}` for a
+/// bare pure expression instead of `type: null`. `__user` is unused at runtime
+/// (only `result` is executed) and harmless — session compiles are not `-Werror`.
+fn wrap_pure_ref_source(
+    preamble: &str,
+    imports: &str,
+    expr_text: &str,
+    input: Option<&serde_json::Value>,
+) -> String {
     let mut out = insert_imports(preamble, imports);
     out.push_str("-- [user]\n");
+    out.push_str(&input_binding_source(input));
+    out.push_str("__user =\n");
+    for line in expr_text.lines() {
+        out.push_str(&format!("  {line}\n"));
+    }
+    out.push('\n');
     out.push_str("result =\n");
     for line in expr_text.lines() {
         out.push_str(&format!("  {line}\n"));

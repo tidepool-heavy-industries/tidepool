@@ -207,10 +207,7 @@ fn template_haskell_impl(
     }
 
     // Inject input binding if provided
-    if let Some(val) = input {
-        out.push_str("input :: Aeson.Value\n");
-        out.push_str(&format!("input = {}\n\n", json_to_haskell(val)));
-    }
+    out.push_str(&input_binding_source(input));
 
     // User code is a real top-level binding: a single EXPRESSION (explicit
     // `do` required for sequencing), so trailing `where`-clauses are legal
@@ -262,6 +259,17 @@ fn escape_haskell_string(s: &str) -> String {
         }
     }
     out
+}
+
+/// Render the `input :: Aeson.Value` top-level binding for injection into a
+/// generated module, or the empty string when there is no payload. Shared by
+/// the eval template here and the `tidepool-repl` session wraps so every code
+/// path that can reference `input` injects it identically.
+pub fn input_binding_source(input: Option<&serde_json::Value>) -> String {
+    match input {
+        Some(val) => format!("input :: Aeson.Value\ninput = {}\n\n", json_to_haskell(val)),
+        None => String::new(),
+    }
 }
 
 /// Render a serde_json::Value as a Haskell aeson literal expression.
