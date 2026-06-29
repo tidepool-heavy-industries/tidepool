@@ -46,7 +46,7 @@ const TURN_TIMEOUT_SECS: u64 = 120;
 pub struct SessionOpenRequest {
     /// Session name. Omit to use `"default"` (back-compat). Multiple agents
     /// can each open a distinct named session; the name is used as the key for
-    /// subsequent session_def/eval/cmd/close/resume/abort calls.
+    /// subsequent session_run/close/resume/abort calls.
     #[serde(default)]
     pub session: Option<String>,
 }
@@ -112,16 +112,15 @@ fn resolve_session(session: Option<String>) -> String {
 
 /// Classify one `session_run` item string into a [`BlockItem`].
 ///
-/// Classification strategy (syntactic; approach (a) from the scaffold spec):
+/// Classification strategy (try-cascade, approach (a) from the plan):
 /// - `:` prefix → [`BlockItem::Meta`] via `MetaCommand::parse`.
 /// - Keyword-initiated declarations (`data`, `newtype`, `type`, `class`,
-///   `instance`, …) → [`BlockItem::Decl`].
-/// - Function/value equations (`f x = e`, `x = e` — first word is a lowercase
-///   identifier or `_`, first line contains a bare `=`) → [`BlockItem::Decl`].
-/// - Everything else → [`BlockItem::Stmt`]; `run_eval` classifies bind vs expr
-///   internally via `classify_turn`.
+///   `instance`, …) → [`BlockItem::Decl`] (unambiguous; skip cascade).
+/// - Everything else → [`BlockItem::Auto`]: `run_block` will attempt the item
+///   as a declaration via `run_def` first; on a GHC parse error it falls back
+///   to [`BlockItem::Stmt`]/`run_eval`.
 ///
-/// Misclassification fails LOUD: the wrong handler's GHC error surfaces
+/// Misclassification fails LOUD — the wrong handler's GHC error surfaces
 /// immediately rather than silently producing a wrong result.
 pub fn classify_item(text: &str) -> Result<BlockItem, String> {
     let s = text.trim();
@@ -129,12 +128,12 @@ pub fn classify_item(text: &str) -> Result<BlockItem, String> {
         return Err("empty item".to_string());
     }
 
-    // :commands → Meta
+    // :commands → Meta (unambiguous)
     if s.starts_with(':') {
         return MetaCommand::parse(s).map(BlockItem::Meta);
     }
 
-    // Keyword-initiated declarations (unambiguous)
+    // Keyword-initiated declarations are unambiguous — skip the cascade.
     const DECL_KEYWORDS: &[&str] = &[
         "data ", "newtype ", "type ", "class ", "instance ",
         "infixl ", "infixr ", "infix ", "foreign ", "import ",
@@ -146,64 +145,9 @@ pub fn classify_item(text: &str) -> Result<BlockItem, String> {
         }
     }
 
-    // Function/value equations: first-line heuristic
-    if is_function_or_value_binding(s) {
-        return Ok(BlockItem::Decl(DeclText(s.to_string())));
-    }
-
-    // Bind statement or bare expression — run_eval classifies internally
-    Ok(BlockItem::Stmt(ExprText(s.to_string())))
-}
-
-/// Return `true` when the first line of `s` looks like a Haskell function or
-/// value binding (`f args… = rhs` / `x = rhs`).
-///
-/// Heuristic (syntactic, no GHC involved):
-/// 1. First character is lowercase or `_` (function/value name start).
-/// 2. First word is not an expression keyword (`do`, `if`, `case`, …).
-/// 3. The first line contains a bare `=` that is not part of `==`, `<=`, `>=`,
-///    `/=`, `!=`, or `=>`.
-/// 4. No `<-` appears before that `=` (would indicate a do-block item).
-fn is_function_or_value_binding(s: &str) -> bool {
-    let first_line = s.lines().next().unwrap_or(s);
-    let trimmed = first_line.trim_start();
-
-    let first_char = trimmed.chars().next().unwrap_or(' ');
-    if !first_char.is_lowercase() && first_char != '_' {
-        return false;
-    }
-
-    let first_word = trimmed.split_whitespace().next().unwrap_or("");
-    matches!(first_word, "do" | "if" | "let" | "case" | "where" | "in" | "then" | "else")
-        .then_some(())
-        .map(|_| false)
-        .unwrap_or_else(|| {
-            // Find the first bare `=` in the first line
-            let bytes = first_line.as_bytes();
-            let mut eq_pos: Option<usize> = None;
-            let mut i = 0;
-            while i < bytes.len() {
-                if bytes[i] == b'=' {
-                    let prev = if i > 0 { bytes[i - 1] } else { b' ' };
-                    let next = if i + 1 < bytes.len() { bytes[i + 1] } else { b' ' };
-                    // Exclude ==, =>, <=, >=, /=, !=
-                    if !matches!(prev, b'=' | b'<' | b'>' | b'/' | b'!')
-                        && !matches!(next, b'=' | b'>')
-                    {
-                        eq_pos = Some(i);
-                        break;
-                    }
-                }
-                i += 1;
-            }
-            match eq_pos {
-                None => false,
-                Some(pos) => {
-                    // No `<-` before the `=` (that would make it a do-block)
-                    !first_line[..pos].contains("<-")
-                }
-            }
-        })
+    // Everything else needs the try-cascade (function equations, type sigs,
+    // bind stmts, bare expressions — all routed through run_def first).
+    Ok(BlockItem::Auto(ExprText(s.to_string())))
 }
 
 // ---------------------------------------------------------------------------
@@ -501,7 +445,7 @@ impl TidepoolReplServer {
 
     /// Send a `SessionCommand` to the named session worker and await its reply.
     /// `eval_input` is forwarded to the worker so `input :: Aeson.Value` is in
-    /// scope for `session_eval` turns; pass `None` for `session_def`/`session_cmd`.
+    /// scope for the first eval item in a `session_run` block.
     async fn run_command(
         &self,
         op: &str,

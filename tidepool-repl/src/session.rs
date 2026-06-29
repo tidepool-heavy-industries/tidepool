@@ -191,9 +191,14 @@ impl Session {
     /// reusing `run_def`/`run_eval`/`run_meta` as the per-item handlers.
     ///
     /// Execution stops on the first error; the failing item is included in the
-    /// `items` array with `ok = false`. An in-turn `ask` inside a `Stmt` item
-    /// just works: the worker thread blocks inside `run_eval` (same stack),
-    /// `session_resume` unblocks it, and the loop continues with item k+1.
+    /// `items` array with `ok = false`. An in-turn `ask` inside a `Stmt` or
+    /// `Auto` item just works: the worker thread blocks inside `run_eval`
+    /// (same stack), `session_resume` unblocks it, and the loop continues.
+    ///
+    /// `Auto` items use the try-cascade: `run_def` is attempted first; on a
+    /// GHC parse error (not a type/scope error) the item falls back to
+    /// `run_eval`. Non-parse errors from `run_def` surface as-is — the item
+    /// is a declaration, just a broken one.
     fn run_block<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         items: &[BlockItem],
@@ -208,6 +213,20 @@ impl Session {
                 BlockItem::Decl(decl) => ("decl", self.run_def(&decl.0)),
                 BlockItem::Stmt(expr) => ("stmt", self.run_eval(&expr.0, handlers, captured)),
                 BlockItem::Meta(meta) => ("meta", self.run_meta(meta)),
+                BlockItem::Auto(expr) => {
+                    // Try-cascade: attempt as declaration first. On a GHC
+                    // parse error the item is not a decl → fall back to
+                    // run_eval (which handles bind vs expr internally).
+                    // A non-parse failure (type error, scope error) means it
+                    // IS a declaration, just broken — surface the error.
+                    let def_result = self.run_def(&expr.0);
+                    match def_result {
+                        TurnOutcome::Error(ref msg) if is_parse_error(msg) => {
+                            ("stmt", self.run_eval(&expr.0, handlers, captured))
+                        }
+                        other => ("decl", other),
+                    }
+                }
             };
 
             let ok = !outcome.is_error();
@@ -1102,6 +1121,19 @@ fn wrap_pure_ref_source(preamble: &str, imports: &str, expr_text: &str) -> Strin
         out.push_str(&format!("  {line}\n"));
     }
     out
+}
+
+/// Return `true` when a `run_def` error message indicates a GHC parse (not
+/// type or scope) error, so the try-cascade in `run_block` can fall back from
+/// `run_def` to `run_eval` for items that are expressions, not declarations.
+///
+/// GHC parse errors always contain the text "parse error" or "lexical error";
+/// type/scope errors use different phrasing ("Couldn't match", "Not in scope",
+/// "No instance for", …). The check is case-insensitive to tolerate minor GHC
+/// version variation.
+fn is_parse_error(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    lower.contains("parse error") || lower.contains("lexical error")
 }
 
 /// Extract the declared head name from a Haskell type declaration string.

@@ -34,11 +34,17 @@ pub enum MetaCommand {
 /// One item in a `session_run` block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlockItem {
-    /// A top-level Haskell declaration — routed to `run_def`.
+    /// A top-level Haskell declaration (keyword-initiated, unambiguous) —
+    /// routed directly to `run_def` with no cascade.
     Decl(DeclText),
     /// A bind statement (`x <- e` / `let x = e`) or bare expression — routed
     /// to `run_eval`, which classifies bind vs expr internally via `classify_turn`.
     Stmt(ExprText),
+    /// An ambiguous item that needs the try-cascade: `run_block` attempts it
+    /// as a declaration via `run_def` first; on a GHC parse error it falls
+    /// back to `run_eval`. A non-parse error (type error, scope error, …) is
+    /// returned as-is — the item IS a declaration, just a broken one.
+    Auto(ExprText),
     /// A meta-command (`:reset`, `:t`, …) — routed to `run_meta`.
     Meta(MetaCommand),
 }
