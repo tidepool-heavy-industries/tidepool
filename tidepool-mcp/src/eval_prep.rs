@@ -168,6 +168,7 @@ pub fn template_haskell_show_default(
     template_haskell_impl(preamble, effect_stack, code, imports, helpers, input, budget, true)
 }
 
+#[allow(clippy::too_many_arguments)] // shared impl behind template_haskell / _show_default
 fn template_haskell_impl(
     preamble: &str,
     effect_stack: &str,
