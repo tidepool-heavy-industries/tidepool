@@ -740,10 +740,13 @@ impl Session {
     }
 
     /// Compile-only type query: returns the inner value type `a` for a monadic
-    /// expression of type `M a` / `Eff '[…] a`. Wraps as `__t <- <expr>` in a do
-    /// block so `__t :: a` (not the Eff-wrapped action type). Consumes a throwaway
-    /// generation to avoid iface collisions with subsequent real binds.
-    /// Returns `None` if the type query compile fails (e.g. non-monadic expression).
+    /// expression of type `M a` / `Eff '[…] a`. Hoists the expr to a module-level
+    /// `__probe` binding then binds `__t <- __probe` so `__t :: a` (the monadic
+    /// bind peels the Eff head) — see `wrap_probe_source` for why the module-level
+    /// binding matters (a trailing `where` can attach there but not on a
+    /// do-statement). Consumes a throwaway generation to avoid iface collisions
+    /// with subsequent real binds. Returns `None` if the compile fails (e.g. a
+    /// non-monadic expression, which has no inner type to peel).
     fn query_inner_type(&mut self, expr_text: &str) -> Option<String> {
         let g = self.val_gen.next();
         self.val_gen = g;
@@ -751,13 +754,11 @@ impl Session {
         let inject = self.live_val_modules();
         let imports = self.session_imports();
         let eval_input = self.eval_input.clone();
-        let turn_text = format!("__t <- {expr_text}");
-        let wrapped = wrap_bind_source(
+        let wrapped = wrap_probe_source(
             &preamble,
             &self.cfg.effect_stack,
             &imports,
-            &turn_text,
-            "__t",
+            expr_text,
             eval_input.as_ref(),
         );
         let lib_dir = self.lib.include_dir().to_path_buf();
@@ -1227,6 +1228,35 @@ fn wrap_pure_ref_source(
     for line in expr_text.lines() {
         out.push_str(&format!("  {line}\n"));
     }
+    out
+}
+
+/// Wrap an expression for the INNER-TYPE probe. Hoists the whole expression to a
+/// module-level `__probe = <expr>` binding (where a trailing `where` attaches
+/// legally — a do-statement `__t <- expr where …` does NOT parse), then binds
+/// `__t <- __probe` so GHC's monadic bind peels `Eff es a` to the inner `a`. That
+/// is the same type-directed peel the `x <- e` bind path uses — no TyCon
+/// name-matching. `__probe` is typecheck scaffolding only: the compile targets
+/// `result`, so it is never serialized into the turn.
+fn wrap_probe_source(
+    preamble: &str,
+    effect_stack: &str,
+    imports: &str,
+    expr_text: &str,
+    input: Option<&serde_json::Value>,
+) -> String {
+    let mut out = insert_imports(preamble, imports);
+    out.push_str("-- [user]\n");
+    out.push_str(&input_binding_source(input));
+    out.push_str("__probe =\n");
+    for line in expr_text.lines() {
+        out.push_str(&format!("  {line}\n"));
+    }
+    out.push('\n');
+    out.push_str(&format!("result :: Eff {effect_stack} _\n"));
+    out.push_str("result = do\n");
+    out.push_str("  __t <- __probe\n");
+    out.push_str("  pure __t\n");
     out
 }
 

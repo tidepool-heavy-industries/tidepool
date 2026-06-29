@@ -230,6 +230,36 @@ pub fn is_glob(p: &str) -> bool {
     p.contains('*') || p.contains('?') || p.contains('[')
 }
 
+/// Build the `grepGlob` regex-compile error, always surfacing the underlying
+/// regex error and appending the hint that applies to the two common footguns:
+/// (a) arg-order — a path glob passed as the (regex, glob) first arg; (b)
+/// under-escaping — regex metachars need double-escaping (JSON x Haskell).
+/// Loss-less: the real error is always shown, so a heuristic misfire can't hide
+/// it. Mirrors the `checked_pattern` diagnose-at-the-boundary precedent.
+fn grep_regex_error(regex_str: &str, e: &regex::Error) -> EffectError {
+    let mut msg = format!("invalid regex {:?}: {}", regex_str, e);
+    // (a) Looks like a path glob in arg 1. Gate on path-shape so a regex
+    // char-class like `[abc]` doesn't misfire; the real error shows regardless.
+    if is_glob(regex_str)
+        && (regex_str.starts_with('*')
+            || regex_str.contains("*/")
+            || regex_str.contains("*.")
+            || regex_str.contains('/'))
+    {
+        msg.push_str(
+            "\nhint: grepGlob is (regex, glob) — this looks like a path glob; \
+             pass it as the SECOND argument, e.g. grepGlob \"fn \" \"**/*.rs\".",
+        );
+    } else {
+        // (b) Most other compile failures here are under-escaped metachars.
+        msg.push_str(
+            "\nhint: regex backslashes are escaped twice on the way here \
+             (JSON x Haskell) — write a literal dot as four backslashes then a dot.",
+        );
+    }
+    EffectError::Handler(msg)
+}
+
 /// Expand a glob pattern relative to `root` with sandbox and component filtering.
 ///
 /// Shared by [`FsHandler`] and [`SgHandler`] so both benefit from the same
@@ -373,7 +403,7 @@ impl EffectHandler<CapturedOutput> for FsHandler {
             }
             FsReq::Grep(regex_str, pattern) => {
                 let re = regex::Regex::new(&regex_str)
-                    .map_err(|e| EffectError::Handler(format!("invalid regex: {}", e)))?;
+                    .map_err(|e| grep_regex_error(&regex_str, &e))?;
                 let paths = self.expand_glob(&pattern)?;
                 let mut results: Vec<(String, i64, String)> = Vec::new();
                 let mut more_matches = 0;

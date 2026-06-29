@@ -151,7 +151,7 @@ pub fn fs_decl() -> EffectDecl {
             "getCurrentDirectory :: M FilePath\ngetCurrentDirectory = do { (_, d, _) <- run \"pwd\"; pure (T.strip d) }",
             "glob :: FilePath -> M [FilePath]\nglob = send . FsGlob",
             "-- | Alias of `glob` — expand a glob to matching paths.\nfsGlob :: FilePath -> M [FilePath]\nfsGlob = send . FsGlob",
-            "-- | Search for a regex pattern in files matching a glob.\ngrepGlob :: Text -> FilePath -> M [(FilePath, Int, Text)]\ngrepGlob pat g = send (FsGrep pat g)",
+            "-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob\n-- SECOND — a path glob like \"*.rs\" goes in arg 2, not arg 1. Returns\n-- [(file, 1-based line, matched line)] (same shape as sgFind's matchLocs, so it\n-- composes with hitsByFile/refs). NB regex metachars are double-escaped here\n-- (JSON x Haskell), so a literal dot needs four backslashes; the handler error\n-- shows the exact form if you get it wrong.\ngrepGlob :: Text -> FilePath -> M [(FilePath, Int, Text)]\ngrepGlob pat g = send (FsGrep pat g)",
             // --- Editing: exact str-replace (the common case; mirrors the Edit tool) ---
             "-- | Exact str-replace, EXACTLY-ONCE: applies, or errors with a precise\n-- reason (not-found / ambiguous). The trained Edit-tool shape: no news is\n-- good news. Pass enough surrounding text that `old` is unique. Use planUpdate\n-- to review the diff first; the full editing surface is in tidepool://edits.\nupdate :: FilePath -> Text -> Text -> M ()\nupdate path old new\n  | T.null old = error \"update: 'old' must be non-empty\"\n  | otherwise = do\n      src <- readFile path\n      case len (T.splitOn old src) - 1 of\n        0 -> error (\"update: 'old' not found in \" <> path)\n        1 -> writeFile path (replace old new src)\n        n -> error (\"update: 'old' matches \" <> show n <> \" places in \" <> path <> \" (add surrounding context to disambiguate)\")",
             "-- | Replace EVERY occurrence of `old`; returns the count. Errors if zero.\nupdateAll :: FilePath -> Text -> Text -> M Int\nupdateAll path old new\n  | T.null old = error \"updateAll: 'old' must be non-empty\"\n  | otherwise = do\n      src <- readFile path\n      let n = len (T.splitOn old src) - 1\n      if n == 0 then error (\"updateAll: 'old' not found in \" <> path)\n                else writeFile path (replace old new src) >> pure n",
@@ -187,6 +187,12 @@ pub fn sg_decl() -> EffectDecl {
             "instance ToJSON Match where\n  toJSON m@(Match t f l _ r) = object ([\"text\" .= t, \"file\" .= f, \"line\" .= l] ++ (let vs = matchVars m in if Map.null vs then [] else [\"vars\" .= toJSON vs]) ++ (if T.null r then [] else [\"replacement\" .= r]))",
             "var :: Match -> Text -> Text",
             "var m k = Map.findWithDefault \"\" k (matchVars m)",
+            // Compact projectors: a survey shape that mirrors grepGlob's
+            // [(FilePath, Int, Text)] so it composes with hitsByFile/refs and
+            // does NOT flood context with full match bodies. The [Match] stays
+            // live in the same eval, so drilling into a chosen match is free.
+            "-- | Compact location of one match: (file, line, first line of the match).\nmatchLoc :: Match -> (FilePath, Int, Text)\nmatchLoc m = (matchFile m, matchLine m, T.takeWhile (/= '\\n') (matchText m))",
+            "-- | Compact survey of matches: [(file, line, header)] — same shape as\n-- grepGlob. Browse with this, then index back into the [Match] for full detail.\nmatchLocs :: [Match] -> [(FilePath, Int, Text)]\nmatchLocs = map matchLoc",
         ],
         constructors: &[
             "SgFind    :: Lang -> Text -> [Text] -> SG [Match]",

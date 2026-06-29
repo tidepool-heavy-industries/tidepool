@@ -336,6 +336,37 @@ async fn block_runner_input_and_type_cleanups() {
     );
     assert_eq!(v.get("value"), Some(&serde_json::json!(42)), "value: {v}");
 
+    // (4): a MONADIC expression carrying a trailing `where` reports its INNER
+    // type (the eff-first path's type probe must tolerate `where` — it hoists the
+    // expr to a module-level `__probe` binding where `where` attaches legally).
+    // Regression for the `type: null` wart on `<expr> where …`.
+    let v = run_block(
+        &server,
+        &["pure (take 2 ys) where ys = [10, 20, 30] :: [Int]"],
+        None,
+    )
+    .await;
+    let items = v.get("items").and_then(|i| i.as_array()).expect("items array");
+    let result_str = items
+        .last()
+        .and_then(|it| it.get("result"))
+        .and_then(|r| r.as_str())
+        .unwrap_or("");
+    let result_json: serde_json::Value = serde_json::from_str(result_str).unwrap_or_default();
+    assert_eq!(
+        result_json.get("type").and_then(|t| t.as_str()),
+        Some("[Int]"),
+        "monadic expr with trailing `where` should report its inner type, not null; got: {result_str}"
+    );
+    // The eff path renders via Show-default (toWire), so a [Int] comes back as the
+    // Show string "[10,20]" — the fix under test is the non-null TYPE above; here
+    // we only confirm the value carries both elements.
+    let val_str = v.get("value").and_then(|x| x.as_str()).unwrap_or("");
+    assert!(
+        val_str.contains("10") && val_str.contains("20"),
+        "where-expr value should contain both elements; got: {v}"
+    );
+
     let _ = server
         .dispatch_tool("session_close", serde_json::Map::new())
         .await;
