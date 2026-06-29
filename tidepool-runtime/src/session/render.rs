@@ -31,6 +31,18 @@ pub enum ExportItem {
     Class { name: String, methods: Vec<String> },
 }
 
+/// Parenthesize an operator name for an export/`hiding` list (`.+` → `(.+)`).
+/// Normal identifiers (alphanumeric/`_`-leading) and already-parenthesized names
+/// pass through unchanged. Without this, a `session_def`'d operator like `(.+)`
+/// emits `module …Lib.G1 (.+) where` with the operator UNPARENTHESIZED in the
+/// export list — a GHC parse error that broke the whole session.
+fn op_wrap(name: &str) -> String {
+    match name.chars().next() {
+        Some(c) if c.is_alphanumeric() || c == '_' || c == '(' => name.to_string(),
+        _ => format!("({name})"),
+    }
+}
+
 impl ExportItem {
     /// The head identifier (the value name, the type/class name).
     #[must_use]
@@ -62,13 +74,13 @@ impl ExportItem {
     #[must_use]
     pub fn render_entry(&self) -> String {
         match self {
-            ExportItem::Value { name } => name.clone(),
+            ExportItem::Value { name } => op_wrap(name),
             // A type synonym or family (empty cons) renders as a bare head;
             // `(..)` is rejected by GHC for synonyms.
-            ExportItem::Type { name, cons } if cons.is_empty() => name.clone(),
-            ExportItem::Type { name, .. } => format!("{name}(..)"),
+            ExportItem::Type { name, cons } if cons.is_empty() => op_wrap(name),
+            ExportItem::Type { name, .. } => format!("{}(..)", op_wrap(name)),
             // A class always exports with `(..)` so methods are visible to instances.
-            ExportItem::Class { name, .. } => format!("{name}(..)"),
+            ExportItem::Class { name, .. } => format!("{}(..)", op_wrap(name)),
         }
     }
 
@@ -387,6 +399,21 @@ mod tests {
     }
     fn turn(src: &str, items: Vec<ExportItem>) -> DeclTurn {
         DeclTurn { sources: vec![src.into()], items }
+    }
+
+    #[test]
+    fn operator_value_is_parenthesized_in_exports() {
+        // A session_def'd operator like `(.+)` must export as `(.+)`, not a bare
+        // `.+` (which is a GHC parse error in an export list).
+        let mut log = DeclLog::new();
+        log.push(turn("a .+ b = a + b", vec![val(".+")]));
+        let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
+        assert!(r.source.contains("(.+)"), "operator export must be parenthesized:\n{}", r.source);
+        assert!(!r.source.contains("\n    .+\n"), "bare operator in export list:\n{}", r.source);
+        // And the prior-gen `hiding` clause must parenthesize too (redefine `.+`).
+        log.push(turn("a .+ b = a - b", vec![val(".+")]));
+        let r2 = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
+        assert!(r2.source.contains("hiding ((.+))"), "hiding clause must parenthesize:\n{}", r2.source);
     }
 
     #[test]
