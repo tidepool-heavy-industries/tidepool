@@ -73,8 +73,11 @@ pub enum SessionCommand {
 /// the channel layer, not here).
 #[derive(Clone, Debug)]
 pub enum TurnOutcome {
-    /// `session_eval` produced this JSON-rendered value.
-    Value(Json),
+    /// `session_eval` produced this JSON-rendered value alongside its inferred
+    /// Haskell type (GHC `ppr` of the `__user` binding). `type_display` is
+    /// `None` only when the extractor is older than the feature or the compiled
+    /// module had no `__user` binding (e.g. a pure-reference fallback).
+    Value { value: Json, type_display: Option<String> },
     /// `session_eval` bound a value to the live heap (`x <- e` / `let x = e`);
     /// `name` is now referenceable by later turns, with the captured `type_display`.
     Bound { name: String, type_display: String },
@@ -96,9 +99,11 @@ impl TurnOutcome {
     /// (so the caller can flag `is_error`); see [`TurnOutcome::is_error`].
     pub fn render(&self) -> String {
         match self {
-            TurnOutcome::Value(v) => {
-                serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
-            }
+            TurnOutcome::Value { value, type_display } => serde_json::json!({
+                "type": type_display,
+                "value": value,
+            })
+            .to_string(),
             TurnOutcome::Bound { name, type_display } => serde_json::json!({
                 "bound": name,
                 "type": type_display,
@@ -150,11 +155,40 @@ mod tests {
 
     #[test]
     fn outcome_render_and_error_flag() {
-        let v = TurnOutcome::Value(serde_json::json!("a-b"));
+        let v = TurnOutcome::Value {
+            value: serde_json::json!("a-b"),
+            type_display: Some("Text".into()),
+        };
         assert!(v.render().contains("a-b"));
         assert!(!v.is_error());
         let e = TurnOutcome::Error("boom".into());
         assert_eq!(e.render(), "boom");
         assert!(e.is_error());
+    }
+
+    #[test]
+    fn value_outcome_render_includes_type_and_value() {
+        let v = TurnOutcome::Value {
+            value: serde_json::json!(42),
+            type_display: Some("M Int".into()),
+        };
+        let rendered = v.render();
+        assert!(rendered.contains("M Int"), "type field missing: {rendered}");
+        assert!(rendered.contains("42"), "value field missing: {rendered}");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).expect("render is valid JSON");
+        assert_eq!(parsed["type"], "M Int");
+        assert_eq!(parsed["value"], 42);
+    }
+
+    #[test]
+    fn value_outcome_render_null_type_when_absent() {
+        let v = TurnOutcome::Value { value: serde_json::json!(true), type_display: None };
+        let rendered = v.render();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).expect("render is valid JSON");
+        assert!(parsed["type"].is_null(), "expected null type: {rendered}");
+        assert_eq!(parsed["value"], true);
     }
 }

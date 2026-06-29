@@ -94,12 +94,12 @@ async fn object_reply_is_extractable_value() {
     let t = resume(&repl, &cont_id, json!({"n": 5})).await;
     assert!(!t.is_error, "resume errored: {}", t.text);
 
-    // Parse the rendered Double and assert it is 5.0 (not -1.0).
-    let result: f64 = t
-        .text
-        .trim()
-        .parse()
+    // Parse the rendered {type, value} envelope and extract the Double.
+    let envelope: serde_json::Value = serde_json::from_str(t.text.trim())
         .unwrap_or_else(|_| panic!("BUG-9: result should be a Double, got: {}", t.text));
+    let result = envelope["value"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("BUG-9: result should be a Double, got: {}", t.text));
     assert!(
         (result - 5.0).abs() < 1e-9,
         "BUG-9: expected 5.0 from optic extraction (structured Value), got {} \
@@ -136,11 +136,11 @@ async fn scalar_reply_extracts_via_double() {
     let t = resume(&repl, &cont_id, json!(7.0)).await;
     assert!(!t.is_error, "resume errored: {}", t.text);
 
-    let result: f64 = t
-        .text
-        .trim()
-        .parse()
+    let envelope: serde_json::Value = serde_json::from_str(t.text.trim())
         .unwrap_or_else(|_| panic!("scalar result should be a Double, got: {}", t.text));
+    let result = envelope["value"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("scalar result should be a Double, got: {}", t.text));
     assert!(
         (result - 7.0).abs() < 1e-9,
         "expected 7.0 from scalar extraction, got {}",
@@ -196,11 +196,11 @@ async fn invalid_reply_does_not_consume_continuation() {
         "retry with valid reply should succeed, got error: {}",
         t.text
     );
-    let result: f64 = t
-        .text
-        .trim()
-        .parse()
+    let envelope: serde_json::Value = serde_json::from_str(t.text.trim())
         .unwrap_or_else(|_| panic!("retry result should be a Double, got: {}", t.text));
+    let result = envelope["value"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("retry result should be a Double, got: {}", t.text));
     assert!(
         (result - 42.0).abs() < 1e-9,
         "expected 42.0 from retry resume, got {}",
