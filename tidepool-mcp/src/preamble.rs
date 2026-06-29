@@ -52,6 +52,9 @@ pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
         "import qualified Tidepool.TextFormat as TF",
         "import qualified Tidepool.Table as Tab",
         "import qualified Tidepool.Patch as Patch",
+        "import qualified Tidepool.Shell as Shell",
+        "import qualified Tidepool.Git as Git",
+        "import qualified Tidepool.Cargo as Cargo",
         "import Control.Monad.Freer hiding (run)",
     ];
     if user_library {

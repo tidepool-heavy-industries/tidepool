@@ -336,6 +336,8 @@ pub fn exec_decl() -> EffectDecl {
             // nonzero is Right (code, out, err) — the eval inspects the code.
             "TryRun :: Text -> Exec (Either Text (Int, Text, Text))",
             "TryRunIn :: Text -> Text -> Exec (Either Text (Int, Text, Text))",
+            // Shell-free exec: argv list, no sh -c. Safe with metachars ($1, globs).
+            "RunArgv :: [Text] -> Exec (Int, Text, Text)",
         ],
         type_defs: &[],
         helpers: &[
@@ -349,6 +351,8 @@ pub fn exec_decl() -> EffectDecl {
             // (readProcess on nonzero exit) is avoided by inspecting the code.
             "tryRun :: Text -> M (Either Text (Int, Text, Text))\ntryRun = send . TryRun",
             "tryRunIn :: Text -> Text -> M (Either Text (Int, Text, Text))\ntryRunIn dir cmd = send (TryRunIn dir cmd)",
+            // Shell-free: argv list, no sh -c. $1/$VAR/globs are literal — safe.
+            "runArgv :: [Text] -> M (Int, Text, Text)\nrunArgv = send . RunArgv",
         ],
     }
 }
