@@ -15,18 +15,19 @@ pub struct DeclText(pub String);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExprText(pub String);
 
-/// A `session_cmd` meta-command (`:bindings` / `:reset`; `:t` / `:i` are
-/// Wave-4 stubs here — they report "not yet implemented").
+/// A `session_cmd` meta-command (`:bindings` / `:reset` / `:t` / `:i` / `:vocab`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MetaCommand {
-    /// `:t <expr>` — show the inferred type (Wave 4; stubbed).
+    /// `:t <expr>` — show the inferred type of an expression.
     Type(ExprText),
-    /// `:i <name>` — show info for a name (Wave 4; stubbed).
+    /// `:i <name>` — show info for a bound name.
     Info(String),
-    /// `:bindings` — list the session's value bindings (none until Wave 3b).
+    /// `:bindings` — list the session's value bindings.
     Bindings,
     /// `:reset` — clear the declaration log and drop the resident machine.
     Reset,
+    /// `:vocab` — list verb signatures from the user library dirs.
+    Vocab,
 }
 
 impl MetaCommand {
@@ -44,8 +45,9 @@ impl MetaCommand {
             "reset" => Ok(MetaCommand::Reset),
             "t" | "type" => Ok(MetaCommand::Type(ExprText(rest.to_string()))),
             "i" | "info" => Ok(MetaCommand::Info(rest.to_string())),
+            "vocab" => Ok(MetaCommand::Vocab),
             other => Err(format!(
-                "unknown session command ':{other}' (known: :bindings, :reset, :t, :i)"
+                "unknown session command ':{other}' (known: :bindings, :reset, :t, :i, :vocab)"
             )),
         }
     }
@@ -143,6 +145,7 @@ mod tests {
             MetaCommand::Type(ExprText("slug \"a b\"".into()))
         );
         assert!(MetaCommand::parse(":nope").is_err());
+        assert_eq!(MetaCommand::parse(":vocab").unwrap(), MetaCommand::Vocab);
     }
 
     #[test]

@@ -19,7 +19,7 @@ use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_mcp::{template_haskell, CapturedOutput, EffectDecl, PREAMBLE_DEFAULT_DECL};
+use tidepool_mcp::{library_vocab, template_haskell, CapturedOutput, EffectDecl, PREAMBLE_DEFAULT_DECL};
 use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
 };
@@ -28,7 +28,7 @@ use tidepool_runtime::session::{
 };
 use tidepool_runtime::{compile_haskell_salted, value_to_json};
 
-use crate::command::{MetaCommand, SessionCommand, TurnOutcome};
+use crate::command::{ExprText, MetaCommand, SessionCommand, TurnOutcome};
 
 /// Default session nursery: 64 MiB (matches the eval runtime default).
 pub const DEFAULT_NURSERY_SIZE: usize = 1 << 26;
@@ -604,8 +604,7 @@ impl Session {
         }
     }
 
-    /// `session_cmd`: meta-commands. `:bindings` / `:reset` work; `:t` / `:i`
-    /// are Wave-4 stubs (no captured-type plane yet).
+    /// `session_cmd`: meta-commands — `:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`.
     fn run_meta(&mut self, meta: &MetaCommand) -> TurnOutcome {
         match meta {
             MetaCommand::Bindings => {
@@ -649,9 +648,88 @@ impl Session {
                     Err(e) => TurnOutcome::Error(format!("reset failed: {e}")),
                 }
             }
-            MetaCommand::Type(_) | MetaCommand::Info(_) => TurnOutcome::Meta(serde_json::json!({
-                "note": ":t / :i are not yet implemented (Wave 4 — captured-type plane)",
-            })),
+            MetaCommand::Type(ExprText(expr)) => {
+                if expr.is_empty() {
+                    return TurnOutcome::Meta(serde_json::json!({
+                        "error": ":t requires an expression"
+                    }));
+                }
+                let preamble = self.patched_preamble();
+                // Consume a throwaway generation to prevent an iface collision
+                // with the next real bind (compile_session_turn writes a Val.G<g>.hi
+                // even for the discard path). We do NOT add to self.bindings.
+                let throwaway_gen = self.val_gen.next();
+                self.val_gen = throwaway_gen;
+                let inject = self.live_val_modules();
+                let imports = self.session_imports();
+                let turn_text = format!("let __t = {expr}");
+                let wrapped = wrap_bind_source(
+                    &preamble,
+                    &self.cfg.effect_stack,
+                    &imports,
+                    &turn_text,
+                    "__t",
+                );
+                let lib_dir = self.lib.include_dir().to_path_buf();
+                let mut include: Vec<&Path> =
+                    self.cfg.base_include.iter().map(PathBuf::as_path).collect();
+                include.push(lib_dir.as_path());
+                let names: Vec<String> = vec!["__t".to_string()];
+                let turn = match compile_session_turn(
+                    &wrapped,
+                    &include,
+                    self.session_root(),
+                    &inject,
+                    Some(SessionBind { names: &names, gen: throwaway_gen.0 }),
+                ) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return TurnOutcome::Meta(serde_json::json!({
+                            "error": format!("compile error: {e}")
+                        }))
+                    }
+                };
+                match turn.binders.into_iter().next() {
+                    Some(binder) => TurnOutcome::Meta(serde_json::json!({
+                        "type": binder.type_display
+                    })),
+                    None => TurnOutcome::Meta(serde_json::json!({
+                        "error": "no type information captured"
+                    })),
+                }
+            }
+            MetaCommand::Info(name) => {
+                let entry = self
+                    .bindings
+                    .iter_current()
+                    .find(|(n, _)| n.0 == *name);
+                match entry {
+                    Some((_, entry)) => TurnOutcome::Meta(serde_json::json!({
+                        "name": name,
+                        "type": entry.type_display.clone().unwrap_or_default(),
+                        "tier": if entry.value.is_forced() { "Tier0Data" } else { "Tier1Closure" },
+                        "module": entry.module.module_name(),
+                    })),
+                    None => TurnOutcome::Meta(serde_json::json!({
+                        "error": "not bound",
+                        "name": name,
+                    })),
+                }
+            }
+            MetaCommand::Vocab => {
+                let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+                if let Ok(cwd) = std::env::current_dir() {
+                    if let Some(root) = tidepool_runtime::paths::find_project_root(&cwd) {
+                        let lib = root.join(".tidepool").join("lib");
+                        if lib.is_dir() {
+                            dirs.push(lib);
+                        }
+                    }
+                }
+                dirs.extend(tidepool_runtime::paths::global_lib_dirs());
+                let vocab = library_vocab(&dirs);
+                TurnOutcome::Meta(serde_json::json!({ "vocab": vocab }))
+            }
         }
     }
 

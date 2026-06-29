@@ -522,7 +522,7 @@ pub(crate) fn extract_sigs(src: &str) -> Vec<String> {
 /// code shape-first: the combinators a user would otherwise re-invent
 /// are visible at every call site instead of requiring a read of the
 /// lib sources. Snapshot at server start; restart to refresh.
-pub(crate) fn library_vocab(dirs: &[std::path::PathBuf]) -> String {
+pub fn library_vocab(dirs: &[std::path::PathBuf]) -> String {
     // Diagnostic modules, not vocabulary.
     const SKIP: &[&str] = &["Probe", "SelfTest"];
     const SIG_MAX: usize = 120;
