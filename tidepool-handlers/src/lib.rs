@@ -2296,6 +2296,51 @@ mod tests {
         assert_is_haskell_list(&result, &table);
     }
 
+    /// Two `KvHandler` instances backed by different paths must not share keys.
+    /// This is the unit-level guard for per-session KV isolation (no live extract needed).
+    #[test]
+    fn kv_handlers_with_different_paths_are_isolated() {
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+
+        let pid = std::process::id();
+        let path_a = std::env::temp_dir()
+            .join(format!("tidepool_kv_iso_a_{pid}.json"));
+        let path_b = std::env::temp_dir()
+            .join(format!("tidepool_kv_iso_b_{pid}.json"));
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+
+        let mut ha = frunk::hlist![KvHandler::new(path_a.clone())];
+        let mut hb = frunk::hlist![KvHandler::new(path_b.clone())];
+
+        // Set a key in handler A (session A).
+        let set_id = table.get_by_name("KvSet").unwrap();
+        let keys_id = table.get_by_name("KvKeys").unwrap();
+        let key_val = "isolation-test-key".to_string().to_value(&table).unwrap();
+        let lit_val = Value::Lit(tidepool_repr::Literal::LitInt(99));
+        let set_req = Value::Con(set_id, vec![key_val, lit_val]);
+        ha.dispatch(0, &set_req, &cx).unwrap();
+
+        // kvKeys on handler B (session B) must be empty — no bleed from A.
+        let keys_req = Value::Con(keys_id, vec![]);
+        let keys_b = response_value(hb.dispatch(0, &keys_req, &cx).unwrap(), &table);
+        match &keys_b {
+            Value::Con(id, args) => {
+                let name = table.name_of(*id).unwrap();
+                assert_eq!(
+                    name, "[]",
+                    "session B should have no keys after session A kvSet; got fields: {args:?}"
+                );
+            }
+            other => panic!("expected empty list (\"[]\"), got {:?}", other),
+        }
+
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+    }
+
     // === Fs roundtrip tests ===
 
     #[test]

@@ -173,8 +173,8 @@ struct ReplServerInner {
     continuations: Mutex<HashMap<(String, String), ReplContinuation>>,
     next_cont_id: AtomicU64,
     next_session_id: AtomicU64,
-    /// Spawns a worker for a `SessionConfig` (captures the base handler + ask_tag).
-    spawn: Box<dyn Fn(SessionConfig) -> WorkerHandle + Send + Sync>,
+    /// Spawns a worker for `(session_name, SessionConfig)` (captures handler builder + ask_tag).
+    spawn: Box<dyn Fn(&str, SessionConfig) -> WorkerHandle + Send + Sync>,
     preamble: String,
     effect_stack: String,
     cfg: ReplServerConfig,
@@ -197,9 +197,45 @@ impl TidepoolReplServer {
         let preamble = tidepool_mcp::build_preamble_non_interactive(&cfg.decls, false);
         let effect_stack = tidepool_mcp::build_effect_stack_type(&cfg.decls);
         let ask_tag = cfg.ask_tag;
-        // Erase H: the spawn closure owns a clone of `base`.
-        let spawn: Box<dyn Fn(SessionConfig) -> WorkerHandle + Send + Sync> =
-            Box::new(move |sc| spawn_worker(sc, base.clone(), ask_tag));
+        // Erase H: the spawn closure owns a clone of `base`; session name is ignored (shared stack).
+        let spawn: Box<dyn Fn(&str, SessionConfig) -> WorkerHandle + Send + Sync> =
+            Box::new(move |_: &str, sc| spawn_worker(sc, base.clone(), ask_tag));
+        TidepoolReplServer {
+            inner: Arc::new(ReplServerInner {
+                manager: SessionManager::new(),
+                continuations: Mutex::new(HashMap::new()),
+                next_cont_id: AtomicU64::new(1),
+                next_session_id: AtomicU64::new(1),
+                spawn,
+                preamble,
+                effect_stack,
+                tool_description: build_tool_description(&cfg.decls),
+                cfg,
+            }),
+        }
+    }
+
+    /// Build a server where each named session gets its own handler stack from `builder`.
+    ///
+    /// `builder` is invoked once per `session_open` with the session name, producing a
+    /// fresh base stack for that session. Use this to give each session an isolated KV
+    /// namespace (e.g. a per-session backing file) while sharing all other construction.
+    ///
+    /// The `cfg` must already carry the correct `decls` and `ask_tag` (derived from a
+    /// representative stack before calling this constructor).
+    pub fn new_with_session_builder<H, F>(builder: F, cfg: ReplServerConfig) -> TidepoolReplServer
+    where
+        H: DispatchEffect<CapturedOutput> + Clone + Send + Sync + 'static,
+        F: Fn(&str) -> H + Send + Sync + 'static,
+    {
+        let preamble = tidepool_mcp::build_preamble_non_interactive(&cfg.decls, false);
+        let effect_stack = tidepool_mcp::build_effect_stack_type(&cfg.decls);
+        let ask_tag = cfg.ask_tag;
+        let spawn: Box<dyn Fn(&str, SessionConfig) -> WorkerHandle + Send + Sync> =
+            Box::new(move |session_name: &str, sc| {
+                let base = builder(session_name);
+                spawn_worker(sc, base, ask_tag)
+            });
         TidepoolReplServer {
             inner: Arc::new(ReplServerInner {
                 manager: SessionManager::new(),
@@ -364,7 +400,7 @@ impl TidepoolReplServer {
             module_env: self.inner.cfg.module_env.clone(),
             nursery_size: self.inner.cfg.nursery_size.unwrap_or(DEFAULT_NURSERY_SIZE),
         };
-        let handle = (self.inner.spawn)(cfg);
+        let handle = (self.inner.spawn)(session_name, cfg);
         match self.inner.manager.install(session_name, handle) {
             Ok(()) => CallToolResult::success(vec![Content::text(
                 serde_json::json!({"opened": true, "session_id": sid.0, "session": session_name})
