@@ -25,7 +25,7 @@ pub const PREAMBLE_DEFAULT_DECL: &str = "default (Int, Double, Text)\n";
 /// everywhere: a helper written with `session_def` sees exactly the extensions
 /// an `eval`/`session_eval` expression does. No trailing newline — callers that
 /// emit it add their own (the eval preamble and `ModuleEnv::pragmas` both do).
-pub const EVAL_PRAGMAS: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, QuasiQuotes #-}";
+pub const EVAL_PRAGMAS: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, QuasiQuotes #-}";
 
 /// The canonical ordered import lines shared by the eval `Expr` module and the
 /// session decl modules — the SINGLE source of truth for the eval vocabulary
