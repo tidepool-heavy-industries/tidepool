@@ -301,7 +301,10 @@ impl Session {
         };
 
         match run_result {
-            Ok(value) => TurnOutcome::Value(value_to_json(&value, &table, 0)),
+            Ok(value) => TurnOutcome::Value {
+                value: value_to_json(&value, &table, 0),
+                type_display: warnings.captured_type,
+            },
             Err(e) => TurnOutcome::Error(format!("runtime error: {e}")),
         }
     }
@@ -577,6 +580,9 @@ impl Session {
         handlers: &mut H,
         captured: &CapturedOutput,
     ) -> TurnOutcome {
+        // Save the captured type before any field moves (partial move is safe
+        // because the remaining accesses are borrows or Copy fields).
+        let type_display = turn.warnings.captured_type;
         if turn.warnings.has_io {
             return TurnOutcome::Error(
                 "IO type detected in result binding. IO operations are not supported.".into(),
@@ -606,7 +612,10 @@ impl Session {
             machine.run_fragment(fid, &self.session_table, handlers, captured)
         };
         match run_result {
-            Ok(value) => TurnOutcome::Value(value_to_json(&value, &self.session_table, 0)),
+            Ok(value) => TurnOutcome::Value {
+                value: value_to_json(&value, &self.session_table, 0),
+                type_display,
+            },
             Err(e) => TurnOutcome::Error(format!("runtime error: {e}")),
         }
     }
