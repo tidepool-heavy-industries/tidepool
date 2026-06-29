@@ -1183,6 +1183,8 @@ pub enum ExecReq {
     TryRun(String),
     #[core(name = "TryRunIn")]
     TryRunIn(String, String),
+    #[core(name = "RunArgv")]
+    RunArgv(Vec<String>),
 }
 
 #[derive(Clone)]
@@ -1280,6 +1282,38 @@ impl EffectHandler<CapturedOutput> for ExecHandler {
                 self.resolve_dir(&dir)
                     .and_then(|target| self.run_command(&cmd, &target)),
             ),
+            ExecReq::RunArgv(argv) => {
+                if argv.is_empty() {
+                    return Err(EffectError::Handler("runArgv: empty argv".to_string()));
+                }
+                let output = std::process::Command::new(&argv[0])
+                    .args(&argv[1..])
+                    .current_dir(&self.root)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .output()
+                    .map_err(|e| EffectError::Handler(format!("runArgv exec failed: {}", e)))?;
+                let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                if stdout.len() > Self::MAX_EXEC_OUTPUT_BYTES {
+                    let mut end = Self::MAX_EXEC_OUTPUT_BYTES;
+                    while !stdout.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    stdout.truncate(end);
+                    stdout.push_str("\n...[truncated at 2MB]");
+                }
+                if stderr.len() > Self::MAX_EXEC_OUTPUT_BYTES {
+                    let mut end = Self::MAX_EXEC_OUTPUT_BYTES;
+                    while !stderr.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    stderr.truncate(end);
+                    stderr.push_str("\n...[truncated at 2MB]");
+                }
+                let code = output.status.code().unwrap_or(-1) as i64;
+                cx.respond((code, stdout, stderr))
+            }
         }
     }
 }
