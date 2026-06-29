@@ -65,18 +65,6 @@ fn build_server() -> TidepoolReplServer {
     TidepoolReplServer::new(stack, cfg)
 }
 
-fn obj(pairs: &[(&str, &str)]) -> serde_json::Map<String, serde_json::Value> {
-    pairs
-        .iter()
-        .map(|(k, v)| {
-            (
-                (*k).to_string(),
-                serde_json::Value::String((*v).to_string()),
-            )
-        })
-        .collect()
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_multi_turn_real_path() {
     if !extract_available() {
