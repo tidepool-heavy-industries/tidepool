@@ -4,9 +4,7 @@
 //!
 //! Tools:
 //! - `session_open` — spawn a named session worker (N concurrent sessions supported).
-//! - `session_def` — append a declaration (Lane A).
-//! - `session_eval` — run an `M a` expression on the resident machine.
-//! - `session_cmd` — `:bindings` / `:reset` (and stubbed `:t` / `:i`).
+//! - `session_run` — run a list of GHCi-capable items (decls, binds, exprs, :commands).
 //! - `session_close` — drop the machine, free the heap.
 //! - `session_resume` / `session_abort` — answer/abort an in-turn `ask`
 //!   (the parked-thread mechanism reused from the eval server).
@@ -31,7 +29,7 @@ use tokio::io::{stdin, stdout};
 use tokio::time::{timeout, Duration};
 
 use crate::ask::{PauseGate, ResumeMsg, WorkerMessage};
-use crate::command::{DeclText, ExprText, MetaCommand, SessionCommand};
+use crate::command::{BlockItem, DeclText, ExprText, MetaCommand, SessionCommand};
 use crate::session::{SessionConfig, DEFAULT_NURSERY_SIZE};
 use crate::worker::{spawn_worker, SessionManager, WorkerHandle, WorkerJob};
 
@@ -54,35 +52,18 @@ pub struct SessionOpenRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SessionDefRequest {
-    /// One or more top-level Haskell declarations (functions, types, classes).
-    pub decl: String,
-    /// Session name (default: `"default"`).
-    #[serde(default)]
-    pub session: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SessionEvalRequest {
-    /// A single Haskell expression of type `M a` (as in the `eval` tool). Its
-    /// value is the turn's result. Declarations from prior `session_def` turns
-    /// are in scope.
-    pub code: String,
-    /// Optional payload available as `input :: Aeson.Value` in the evaluated
-    /// code. Pass large or quote-heavy content here instead of escaping it
-    /// inside `code`. Mirrors the stateless `eval` tool's `input` lane.
+pub struct SessionBlockRequest {
+    /// List of GHCi-capable items to run in sequence. Each item is one of:
+    /// a top-level declaration (`data Foo = …`, `f x = …`), a bind statement
+    /// (`x <- e` / `let x = e`), a bare expression, or a `:command`
+    /// (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`).
+    /// Items are classified automatically; execution stops on the first error.
+    pub items: Vec<String>,
+    /// Optional payload available as `input :: Aeson.Value` in the first
+    /// evaluated expression. Pass large or quote-heavy content here to avoid
+    /// Haskell string escaping. Mirrors the stateless `eval` tool's `input` lane.
     #[serde(default)]
     pub input: Option<serde_json::Value>,
-    /// Session name (default: `"default"`).
-    #[serde(default)]
-    pub session: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SessionCmdRequest {
-    /// A meta-command: `:bindings`, `:reset`, `:t <expr>`, `:i <name>` (leading
-    /// colon optional).
-    pub command: String,
     /// Session name (default: `"default"`).
     #[serde(default)]
     pub session: Option<String>,
@@ -123,6 +104,106 @@ pub struct SessionAbortRequest {
 /// `"default"` for back-compat with single-session callers.
 fn resolve_session(session: Option<String>) -> String {
     session.unwrap_or_else(|| "default".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Item classifier
+// ---------------------------------------------------------------------------
+
+/// Classify one `session_run` item string into a [`BlockItem`].
+///
+/// Classification strategy (syntactic; approach (a) from the scaffold spec):
+/// - `:` prefix → [`BlockItem::Meta`] via `MetaCommand::parse`.
+/// - Keyword-initiated declarations (`data`, `newtype`, `type`, `class`,
+///   `instance`, …) → [`BlockItem::Decl`].
+/// - Function/value equations (`f x = e`, `x = e` — first word is a lowercase
+///   identifier or `_`, first line contains a bare `=`) → [`BlockItem::Decl`].
+/// - Everything else → [`BlockItem::Stmt`]; `run_eval` classifies bind vs expr
+///   internally via `classify_turn`.
+///
+/// Misclassification fails LOUD: the wrong handler's GHC error surfaces
+/// immediately rather than silently producing a wrong result.
+pub fn classify_item(text: &str) -> Result<BlockItem, String> {
+    let s = text.trim();
+    if s.is_empty() {
+        return Err("empty item".to_string());
+    }
+
+    // :commands → Meta
+    if s.starts_with(':') {
+        return MetaCommand::parse(s).map(BlockItem::Meta);
+    }
+
+    // Keyword-initiated declarations (unambiguous)
+    const DECL_KEYWORDS: &[&str] = &[
+        "data ", "newtype ", "type ", "class ", "instance ",
+        "infixl ", "infixr ", "infix ", "foreign ", "import ",
+        "default ", "{-# ",
+    ];
+    for kw in DECL_KEYWORDS {
+        if s.starts_with(kw) {
+            return Ok(BlockItem::Decl(DeclText(s.to_string())));
+        }
+    }
+
+    // Function/value equations: first-line heuristic
+    if is_function_or_value_binding(s) {
+        return Ok(BlockItem::Decl(DeclText(s.to_string())));
+    }
+
+    // Bind statement or bare expression — run_eval classifies internally
+    Ok(BlockItem::Stmt(ExprText(s.to_string())))
+}
+
+/// Return `true` when the first line of `s` looks like a Haskell function or
+/// value binding (`f args… = rhs` / `x = rhs`).
+///
+/// Heuristic (syntactic, no GHC involved):
+/// 1. First character is lowercase or `_` (function/value name start).
+/// 2. First word is not an expression keyword (`do`, `if`, `case`, …).
+/// 3. The first line contains a bare `=` that is not part of `==`, `<=`, `>=`,
+///    `/=`, `!=`, or `=>`.
+/// 4. No `<-` appears before that `=` (would indicate a do-block item).
+fn is_function_or_value_binding(s: &str) -> bool {
+    let first_line = s.lines().next().unwrap_or(s);
+    let trimmed = first_line.trim_start();
+
+    let first_char = trimmed.chars().next().unwrap_or(' ');
+    if !first_char.is_lowercase() && first_char != '_' {
+        return false;
+    }
+
+    let first_word = trimmed.split_whitespace().next().unwrap_or("");
+    matches!(first_word, "do" | "if" | "let" | "case" | "where" | "in" | "then" | "else")
+        .then_some(())
+        .map(|_| false)
+        .unwrap_or_else(|| {
+            // Find the first bare `=` in the first line
+            let bytes = first_line.as_bytes();
+            let mut eq_pos: Option<usize> = None;
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'=' {
+                    let prev = if i > 0 { bytes[i - 1] } else { b' ' };
+                    let next = if i + 1 < bytes.len() { bytes[i + 1] } else { b' ' };
+                    // Exclude ==, =>, <=, >=, /=, !=
+                    if !matches!(prev, b'=' | b'<' | b'>' | b'/' | b'!')
+                        && !matches!(next, b'=' | b'>')
+                    {
+                        eq_pos = Some(i);
+                        break;
+                    }
+                }
+                i += 1;
+            }
+            match eq_pos {
+                None => false,
+                Some(pos) => {
+                    // No `<-` before the `=` (that would make it a do-block)
+                    !first_line[..pos].contains("<-")
+                }
+            }
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -336,42 +417,28 @@ impl TidepoolReplServer {
                 let sid = resolve_session(req.session);
                 Ok(self.session_open(&sid).await)
             }
-            "session_def" => {
-                let req: SessionDefRequest = serde_json::from_value(parse(args))
+            "session_run" => {
+                let req: SessionBlockRequest = serde_json::from_value(parse(args))
                     .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
                 let sid = resolve_session(req.session);
+                let mut block_items: Vec<BlockItem> = Vec::with_capacity(req.items.len());
+                for item_text in &req.items {
+                    match classify_item(item_text) {
+                        Ok(item) => block_items.push(item),
+                        Err(e) => {
+                            return Ok(CallToolResult::error(vec![Content::text(format!(
+                                "session_run: failed to classify item {item_text:?}: {e}"
+                            ))]))
+                        }
+                    }
+                }
                 Ok(self
                     .run_command(
-                        "session_def",
-                        SessionCommand::Def(DeclText(req.decl)),
-                        None,
-                        &sid,
-                    )
-                    .await)
-            }
-            "session_eval" => {
-                let req: SessionEvalRequest = serde_json::from_value(parse(args))
-                    .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
-                let sid = resolve_session(req.session);
-                Ok(self
-                    .run_command(
-                        "session_eval",
-                        SessionCommand::Eval(ExprText(req.code)),
+                        "session_run",
+                        SessionCommand::Block(block_items),
                         req.input,
                         &sid,
                     )
-                    .await)
-            }
-            "session_cmd" => {
-                let req: SessionCmdRequest = serde_json::from_value(parse(args))
-                    .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
-                let sid = resolve_session(req.session);
-                let meta = match MetaCommand::parse(&req.command) {
-                    Ok(m) => m,
-                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-                };
-                Ok(self
-                    .run_command("session_cmd", SessionCommand::Cmd(meta), None, &sid)
                     .await)
             }
             "session_close" => {
@@ -701,13 +768,14 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
     let names: Vec<&str> = decls.iter().map(|d| d.type_name).collect();
     format!(
         "tidepool-repl — a GHCi-style stateful Haskell session. Each named session holds one \
-         resident JIT machine whose value heap persists across `session_eval` turns; \
-         `session_def` accumulates declarations. Multiple agents can open distinct named sessions \
-         in parallel (omit `session` to use `\"default\"`). \
-         Lifecycle: session_open → (session_def | session_eval | session_cmd)* → session_close. \
-         `session_eval` code is a single `M a` expression (effects: {effects}). Prior \
-         declarations are in scope. An in-turn `ask` suspends with a continuation_id; answer it \
-         with session_resume or drop it with session_abort.",
+         resident JIT machine whose value heap persists across turns; declarations accumulate \
+         across `session_run` blocks. Multiple agents can open distinct named sessions in parallel \
+         (omit `session` to use `\"default\"`). \
+         Lifecycle: session_open → session_run* → session_close. \
+         `session_run` takes a list of items (declarations, bind statements, expressions, \
+         :commands) and runs them in sequence (effects: {effects}). \
+         An in-turn `ask` suspends with a continuation_id; answer it with session_resume or \
+         drop it with session_abort.",
         effects = names.join(", "),
     )
 }
@@ -770,26 +838,19 @@ impl ServerHandler for TidepoolReplServer {
             tool(
                 "session_open",
                 "Open a named session (one live JIT machine per name). Omit `session` to use the \
-                 default session. Call before any session_def/eval/cmd.",
+                 default session. Call before session_run.",
                 schema_to_map(schemars::schema_for!(SessionOpenRequest))?,
             ),
             tool(
-                "session_def",
-                "Append one or more top-level Haskell declarations to the session library. They \
-                 stay in scope for later session_eval turns.",
-                schema_to_map(schemars::schema_for!(SessionDefRequest))?,
-            ),
-            tool(
-                "session_eval",
-                "Evaluate a Haskell expression of type `M a` on the resident machine (the heap \
-                 persists across turns). Prior session_def declarations are in scope.",
-                schema_to_map(schemars::schema_for!(SessionEvalRequest))?,
-            ),
-            tool(
-                "session_cmd",
-                "Run a session meta-command: :bindings, :reset (:t / :i are stubbed). Leading \
-                 colon optional.",
-                schema_to_map(schemars::schema_for!(SessionCmdRequest))?,
+                "session_run",
+                "Run a list of GHCi-capable items in sequence on the resident machine. Each item \
+                 is a declaration (`data Foo = …`, `f x = …`), a bind statement (`x <- e` / \
+                 `let x = e`), a bare expression, or a `:command` (`:bindings`, `:reset`, \
+                 `:t <expr>`, `:i <name>`, `:vocab`). Items are classified automatically. \
+                 Execution stops on the first error. Returns per-item results and the last \
+                 expression value. An in-turn `ask` suspends with a continuation_id; resume \
+                 with session_resume or drop with session_abort.",
+                schema_to_map(schemars::schema_for!(SessionBlockRequest))?,
             ),
             tool(
                 "session_close",

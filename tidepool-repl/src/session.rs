@@ -30,7 +30,7 @@ use tidepool_runtime::session::{
 };
 use tidepool_runtime::{compile_haskell_salted, value_to_json};
 
-use crate::command::{ExprText, MetaCommand, SessionCommand, TurnOutcome};
+use crate::command::{BlockItem, BlockItemResult, ExprText, MetaCommand, SessionCommand, TurnOutcome};
 
 /// Default session nursery: 64 MiB (matches the eval runtime default).
 pub const DEFAULT_NURSERY_SIZE: usize = 1 << 26;
@@ -178,11 +178,62 @@ impl Session {
             SessionCommand::Def(decl) => self.run_def(&decl.0),
             SessionCommand::Eval(expr) => self.run_eval(&expr.0, handlers, captured),
             SessionCommand::Cmd(meta) => self.run_meta(meta),
+            SessionCommand::Block(items) => self.run_block(items, handlers, captured),
             // Close is handled by SessionHandle::close (type-state); the worker
             // never routes it here.
             SessionCommand::Close => TurnOutcome::Error(
                 "internal: Close must be handled via SessionHandle::close".into(),
             ),
+        }
+    }
+
+    /// `session_run`: run a list of classified [`BlockItem`]s in sequence,
+    /// reusing `run_def`/`run_eval`/`run_meta` as the per-item handlers.
+    ///
+    /// Execution stops on the first error; the failing item is included in the
+    /// `items` array with `ok = false`. An in-turn `ask` inside a `Stmt` item
+    /// just works: the worker thread blocks inside `run_eval` (same stack),
+    /// `session_resume` unblocks it, and the loop continues with item k+1.
+    fn run_block<H: DispatchEffect<CapturedOutput>>(
+        &mut self,
+        items: &[BlockItem],
+        handlers: &mut H,
+        captured: &CapturedOutput,
+    ) -> TurnOutcome {
+        let mut results: Vec<BlockItemResult> = Vec::with_capacity(items.len());
+        let mut last_value: Option<serde_json::Value> = None;
+
+        for (index, item) in items.iter().enumerate() {
+            let (kind, outcome) = match item {
+                BlockItem::Decl(decl) => ("decl", self.run_def(&decl.0)),
+                BlockItem::Stmt(expr) => ("stmt", self.run_eval(&expr.0, handlers, captured)),
+                BlockItem::Meta(meta) => ("meta", self.run_meta(meta)),
+            };
+
+            let ok = !outcome.is_error();
+
+            // Track the last value-producing expression result.
+            if let TurnOutcome::Value { ref value, .. } = outcome {
+                last_value = Some(value.clone());
+            }
+
+            results.push(BlockItemResult {
+                index,
+                kind: kind.to_string(),
+                ok,
+                result: outcome.render(),
+            });
+
+            if !ok {
+                break; // stop on first error
+            }
+        }
+
+        TurnOutcome::Block {
+            items: results,
+            value: last_value,
+            generation: self.lib.generation().0,
+            val_gen: self.val_gen.0,
         }
     }
 
