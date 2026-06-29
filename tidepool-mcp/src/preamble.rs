@@ -584,17 +584,68 @@ pub(crate) fn extract_sigs(src: &str) -> Vec<String> {
     sigs
 }
 
+/// Parse the `module Library ( module A, module B, … ) where` re-export list
+/// to learn which verb modules are actually IN SCOPE bare (the auto-imported
+/// `Library` facade re-exports a curated subset — sibling modules like
+/// `RustAudit`/`MechDemo` are excluded, usually because their names would clash).
+/// Returns the set of re-exported module stems, or `None` if no `Library.hs` is
+/// found / its export list can't be parsed (callers fall back to listing all).
+fn library_inscope_modules(dirs: &[std::path::PathBuf]) -> Option<std::collections::HashSet<String>> {
+    for dir in dirs {
+        let path = dir.join("Library.hs");
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let mods = parse_library_exports(&src);
+        if !mods.is_empty() {
+            return Some(mods);
+        }
+    }
+    None
+}
+
+/// Pure parse of a `module Library ( module A, module B, … ) where` header into
+/// the set of re-exported module stems. Returns empty if the header is absent.
+fn parse_library_exports(src: &str) -> std::collections::HashSet<String> {
+    let mut mods = std::collections::HashSet::new();
+    // The export list runs from `module Library` to the closing `)`.
+    let Some(after) = src.split_once("module Library").map(|(_, r)| r) else {
+        return mods;
+    };
+    let list = after.split_once(')').map(|(l, _)| l).unwrap_or(after);
+    for raw in list.split(',') {
+        // Each entry looks like `module Schemes` (the FIRST also carries the
+        // opening `(`, e.g. `( module Schemes`); strip the paren, then take the
+        // token after `module`.
+        let entry = raw.trim().trim_start_matches('(').trim();
+        if let Some(rest) = entry.strip_prefix("module ") {
+            if let Some(name) = rest.split_whitespace().next() {
+                mods.insert(name.to_string());
+            }
+        }
+    }
+    mods
+}
+
 /// Scan a user-library directory for top-level type signatures (plus
 /// `data`/`type` heads) and render a per-module vocabulary digest for
 /// the eval tool description. This is the affordance that keeps eval
 /// code shape-first: the combinators a user would otherwise re-invent
 /// are visible at every call site instead of requiring a read of the
 /// lib sources. Snapshot at server start; restart to refresh.
+///
+/// Only modules actually re-exported by the `Library` facade (hence in scope
+/// bare) are listed — otherwise the digest would advertise verbs that fail with
+/// "not in scope" (e.g. `RustAudit.panicSites`). Falls back to listing every
+/// module when no parseable `Library.hs` is present.
 pub fn library_vocab(dirs: &[std::path::PathBuf]) -> String {
     // Diagnostic modules, not vocabulary.
     const SKIP: &[&str] = &["Probe", "SelfTest"];
     const SIG_MAX: usize = 120;
     const TOTAL_MAX: usize = 8000;
+
+    // Modules in scope bare (re-exported by `Library`); `None` ⇒ list all.
+    let inscope = library_inscope_modules(dirs);
 
     // Layered across dirs (project first, then global): a module name seen in an
     // earlier dir shadows the same name later, so a project module overrides a
@@ -618,6 +669,13 @@ pub fn library_vocab(dirs: &[std::path::PathBuf]) -> String {
             if SKIP.contains(&stem) || !seen.insert(stem.to_string()) {
                 continue;
             }
+            // Only list modules the `Library` facade re-exports (in scope bare).
+            // `Library` itself has no sigs of its own, so it's naturally absent.
+            if let Some(ref ins) = inscope {
+                if stem != "Library" && !ins.contains(stem) {
+                    continue;
+                }
+            }
             let Ok(src) = std::fs::read_to_string(&path) else {
                 continue;
             };
@@ -638,4 +696,40 @@ pub fn library_vocab(dirs: &[std::path::PathBuf]) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod vocab_tests {
+    use super::parse_library_exports;
+
+    #[test]
+    fn parses_reexport_list_and_excludes_siblings() {
+        // Mirrors the real `.tidepool/lib/Library.hs` header shape.
+        let src = "\
+-- | Re-export facade.
+module Library
+  ( module Schemes
+  , module Explore
+  , module Lsp
+  ) where
+
+import Schemes
+import Explore
+import Lsp
+";
+        let mods = parse_library_exports(src);
+        assert!(mods.contains("Schemes"), "Schemes should be in scope");
+        assert!(mods.contains("Explore"));
+        assert!(mods.contains("Lsp"));
+        // A sibling module that exists on disk but is NOT re-exported (the
+        // `RustAudit.panicSites`-not-in-scope friction) must be absent.
+        assert!(!mods.contains("RustAudit"), "RustAudit is not re-exported");
+        assert_eq!(mods.len(), 3);
+    }
+
+    #[test]
+    fn absent_header_yields_empty_set() {
+        // No `module Library` header ⇒ empty ⇒ library_vocab falls back to all.
+        assert!(parse_library_exports("module Schemes where\nfoo :: Int\n").is_empty());
+    }
 }
