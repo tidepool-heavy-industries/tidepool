@@ -751,7 +751,12 @@ impl Session {
         if names.is_empty() {
             return self.cfg.preamble.clone();
         }
-        hide_prelude_names(&self.cfg.preamble, &names)
+        // Hide session-defined names from BOTH Prelude and the project `Library`
+        // (when imported) so a `session_def`'d name shadows a same-named verb in
+        // either (e.g. a user `sh` wins over `Dev.sh`) instead of an ambiguous
+        // occurrence.
+        let p = hide_prelude_names(&self.cfg.preamble, &names);
+        hide_library_names(&p, &names)
     }
 
     /// Drop the resident machine, freeing the session heap. Called from
@@ -885,6 +890,61 @@ fn hide_prelude_names(preamble: &str, extra: &[&str]) -> String {
     }
     let new_line = format!("import Tidepool.Prelude hiding ({})\n", all.join(", "));
     format!("{}{}{}", &preamble[..start], new_line, &preamble[start + line_len..])
+}
+
+/// Parenthesize an operator name for a `hiding` list (`.+` → `(.+)`); plain
+/// identifiers pass through. (Operators are invalid bare in an import list.)
+fn hiding_entry(name: &str) -> String {
+    match name.chars().next() {
+        Some(c) if c.is_alphanumeric() || c == '_' || c == '(' => name.to_string(),
+        _ => format!("({name})"),
+    }
+}
+
+/// Like [`hide_prelude_names`] but for the project `import Library` line, which
+/// starts with NO `hiding` clause. Rewrites `import Library` →
+/// `import Library hiding (<session names>)` so a session-defined binder shadows
+/// a same-named Library re-export. No-op when `Library` isn't imported (minimal
+/// stack / no project lib). GHC tolerates hiding a name Library doesn't export
+/// (a dodgy-import warning, same as the Prelude path).
+fn hide_library_names(preamble: &str, extra: &[&str]) -> String {
+    if extra.is_empty() {
+        return preamble.to_string();
+    }
+    const NEEDLE: &str = "import Library";
+    let mut from = 0;
+    loop {
+        let Some(rel) = preamble[from..].find(NEEDLE) else {
+            return preamble.to_string(); // Library not imported
+        };
+        let start = from + rel;
+        let at_line_start = start == 0 || preamble.as_bytes()[start - 1] == b'\n';
+        let after = &preamble[start + NEEDLE.len()..];
+        // Exact module: next char ends the word (newline) or opens a clause (space).
+        if at_line_start && (after.starts_with('\n') || after.starts_with(' ')) {
+            let rest = &preamble[start..];
+            let line_len = rest.find('\n').map_or(rest.len(), |i| i + 1);
+            let line = &rest[..line_len];
+            let mut all: Vec<String> = match (line.find('('), line.rfind(')')) {
+                (Some(po), Some(pc)) if po < pc => line[po + 1..pc]
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            for &n in extra {
+                let e = hiding_entry(n);
+                if !all.contains(&e) {
+                    all.push(e);
+                }
+            }
+            let new_line = format!("import Library hiding ({})\n", all.join(", "));
+            return format!("{}{}{}", &preamble[..start], new_line, &preamble[start + line_len..]);
+        }
+        from = start + NEEDLE.len();
+    }
 }
 
 /// Wrap a BIND turn into an `Eff`-typed module whose `result` runs the bind

@@ -49,11 +49,19 @@ fn build_full_server(cwd: PathBuf) -> TidepoolReplServer {
     let (decls, ask_tag) = base_decls_with_ask(&stack);
     let effects_dir =
         tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
-    let prelude_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("repo root")
-        .join("haskell")
-        .join("lib");
+        .to_path_buf();
+    let prelude_dir = repo_root.join("haskell").join("lib");
+    // Project verb library (parity with production): puts `Library` on the
+    // include path so the preamble auto-imports it and `.tidepool/lib` verbs are
+    // in scope.
+    let project_lib = repo_root.join(".tidepool").join("lib");
+    let mut base_include = vec![effects_dir, prelude_dir];
+    if project_lib.is_dir() {
+        base_include.push(project_lib);
+    }
     let session_root_base = std::env::temp_dir().join(format!(
         "tidepool-repl-fx-{}-{}",
         std::process::id(),
@@ -65,7 +73,7 @@ fn build_full_server(cwd: PathBuf) -> TidepoolReplServer {
     let cfg = ReplServerConfig {
         decls,
         ask_tag,
-        base_include: vec![effects_dir, prelude_dir],
+        base_include,
         // Match production (`main.rs`): the full-stack server gives Lane-A decls
         // the eval pragmas+imports, so `session_def` helpers share the eval
         // vocabulary (`M`, the effect verbs, `L.`/`Set.`, the Prelude shadows).
@@ -122,6 +130,16 @@ async fn full_stack_effects_reachable_through_session() {
     let _ = eval(&server, "x <- pure (7 :: Int)").await;
     let t = eval(&server, "x + 1").await;
     assert!(t.contains("8"), "bound-value ref under full stack: {t}");
+
+    // Project `Library` is auto-imported (parity with eval): a `.tidepool/lib`
+    // verb is in scope bare. `chunksOf` is a pure Schemes verb re-exported by
+    // Library. (Regression for: REPL listed lib verbs in :vocab but couldn't
+    // call them.)
+    let t = eval(&server, "pure (chunksOf 2 [1,2,3,4,5 :: Int])").await;
+    assert!(
+        t.contains("[\n      1") || t.contains("[1") || t.contains('5'),
+        "Library verb chunksOf should be in scope + return chunks: {t}"
+    );
 
     // input payload lane: the `input :: Aeson.Value` binding is in scope and the
     // `Aeson.` qualifier the injection emits resolves (regression for the

@@ -169,6 +169,16 @@ pub struct ReplServerConfig {
 /// per-session handler-stack builder (H is hidden behind this boxed closure).
 type SessionSpawn = Box<dyn Fn(&str, SessionConfig) -> WorkerHandle + Send + Sync>;
 
+/// Whether a project/global `Library` facade is on the include path. When true
+/// the preamble emits `import Library` so `.tidepool/lib` verbs are in scope
+/// (parity with the eval server). Derived from `base_include` so no extra config
+/// field / test-harness churn: `main.rs` puts the lib dirs on `base_include`.
+fn has_user_library(cfg: &ReplServerConfig) -> bool {
+    cfg.base_include
+        .iter()
+        .any(|d| d.join("Library.hs").exists())
+}
+
 /// The non-generic server core (H is erased into the `spawn` closure).
 struct ReplServerInner {
     manager: SessionManager,
@@ -198,7 +208,8 @@ impl TidepoolReplServer {
     where
         H: DispatchEffect<CapturedOutput> + Clone + Send + Sync + 'static,
     {
-        let preamble = tidepool_mcp::build_preamble_non_interactive(&cfg.decls, false);
+        let preamble =
+            tidepool_mcp::build_preamble_non_interactive(&cfg.decls, has_user_library(&cfg));
         let effect_stack = tidepool_mcp::build_effect_stack_type(&cfg.decls);
         let ask_tag = cfg.ask_tag;
         // Erase H: the spawn closure owns a clone of `base`; session name is ignored (shared stack).
@@ -232,7 +243,8 @@ impl TidepoolReplServer {
         H: DispatchEffect<CapturedOutput> + Clone + Send + Sync + 'static,
         F: Fn(&str) -> H + Send + Sync + 'static,
     {
-        let preamble = tidepool_mcp::build_preamble_non_interactive(&cfg.decls, false);
+        let preamble =
+            tidepool_mcp::build_preamble_non_interactive(&cfg.decls, has_user_library(&cfg));
         let effect_stack = tidepool_mcp::build_effect_stack_type(&cfg.decls);
         let ask_tag = cfg.ask_tag;
         let spawn: SessionSpawn =

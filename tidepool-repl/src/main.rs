@@ -115,7 +115,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The generated Tidepool.Effects module must be on the include path.
     let effects_dir = tidepool_mcp::ensure_effects_module(&decls)?;
     let prelude_dir = resolve_prelude_dir();
-    let base_include = vec![effects_dir, prelude_dir];
+    let mut base_include = vec![effects_dir, prelude_dir];
+
+    // Verb libraries (parity with the eval server): project `.tidepool/lib`
+    // first, then user-global, AFTER the stdlib so `Tidepool.*` still resolves
+    // from the bundle and a project `Library` shadows the global one. With these
+    // on the include path, the preamble auto-imports `Library` (see
+    // `has_user_library`) so `.tidepool/lib` verbs (vocab/gitS/census/…) are in
+    // scope — previously the REPL listed them in `:vocab` but couldn't call them.
+    if let Some(root) = &project_root {
+        let project_lib = root.join(".tidepool").join("lib");
+        if project_lib.is_dir() {
+            base_include.push(project_lib);
+        }
+    }
+    base_include.extend(tidepool_runtime::paths::global_lib_dirs());
 
     // Per-session include trees live under a process-scoped temp dir.
     let session_root_base =
