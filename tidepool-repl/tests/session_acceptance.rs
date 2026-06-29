@@ -146,7 +146,9 @@ async fn session_multi_turn_real_path() {
         .await
         .expect("post-close eval");
     assert_eq!(r.is_error, Some(true), "post-close eval should error");
-    assert!(text_of(&r).contains("no session open"));
+    // Multi-session: the message now names the session ("no session 'default' open").
+    let msg = text_of(&r);
+    assert!(msg.contains("no session") && msg.contains("open"), "unexpected: {msg}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

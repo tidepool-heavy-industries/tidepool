@@ -52,9 +52,10 @@ pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
         "import qualified Tidepool.TextFormat as TF",
         "import qualified Tidepool.Table as Tab",
         "import qualified Tidepool.Patch as Patch",
-        "import qualified Tidepool.Shell as Shell",
-        "import qualified Tidepool.Git as Git",
-        "import qualified Tidepool.Cargo as Cargo",
+        // NOTE: Tidepool.Shell/Git/Cargo are NOT here — they depend on the Exec
+        // (`runArgv`) + Http (`parseJson`) effect helpers, so they're imported
+        // conditionally in `pragmas_and_imports` only when those effects are in
+        // the stack (else they fail to load on a minimal/Console-only stack).
         "import Control.Monad.Freer hiding (run)",
     ];
     if user_library {
@@ -102,13 +103,24 @@ pub fn session_decl_module_env() -> ModuleEnv {
 // (see 71d77fb, reverted) or upstream lazy provisioning.
 // Dialect note: with QuasiQuotes on, `[x|x<-xs]` (comprehension with no
 // space before `|`) parses as a quasi-quote — write `[x | x <- xs]`.
-fn pragmas_and_imports(out: &mut String, user_library: bool) {
+fn pragmas_and_imports(out: &mut String, effects: &[EffectDecl], user_library: bool) {
     out.push_str(EVAL_PRAGMAS);
     out.push('\n');
     out.push_str("module Expr where\n");
     for imp in eval_import_lines(user_library) {
         out.push_str(imp);
         out.push('\n');
+    }
+    // Shell-effect stdlib modules depend on the Exec (`runArgv`) + Http
+    // (`parseJson`) helpers in the generated Tidepool.Effects — import them only
+    // when both effects are present, else they fail to load (e.g. on a minimal
+    // Console-only stack).
+    let has_exec = effects.iter().any(|e| e.type_name == "Exec");
+    let has_http = effects.iter().any(|e| e.type_name == "Http");
+    if has_exec && has_http {
+        out.push_str("import qualified Tidepool.Shell as Shell\n");
+        out.push_str("import qualified Tidepool.Git as Git\n");
+        out.push_str("import qualified Tidepool.Cargo as Cargo\n");
     }
     out.push_str(PREAMBLE_DEFAULT_DECL);
     out.push('\n');
@@ -389,7 +401,7 @@ fn orchestration_helpers(out: &mut String, effects: &[EffectDecl], user_library:
 /// helper set. The emitted string is concatenated from the section builders.
 pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
     let mut out = String::new();
-    pragmas_and_imports(&mut out, user_library);
+    pragmas_and_imports(&mut out, effects, user_library);
     pagination_helpers(&mut out, effects, true);
     orchestration_helpers(&mut out, effects, user_library);
     out
@@ -401,7 +413,7 @@ pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
 /// the caller can re-query a truncated result by its bound name.
 pub fn build_preamble_non_interactive(effects: &[EffectDecl], user_library: bool) -> String {
     let mut out = String::new();
-    pragmas_and_imports(&mut out, user_library);
+    pragmas_and_imports(&mut out, effects, user_library);
     pagination_helpers(&mut out, effects, false);
     orchestration_helpers(&mut out, effects, user_library);
     out
