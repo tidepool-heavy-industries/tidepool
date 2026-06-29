@@ -9,8 +9,9 @@
 //! awaits the reply over the job's channels (the same suspend/resume shape as
 //! the eval server, reused for an in-turn `ask`).
 //!
-//! The [`SessionManager`] holds the single active worker (MVP cap = 1).
+//! The [`SessionManager`] holds the active workers keyed by session name.
 
+use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -176,44 +177,80 @@ fn drain_with_error(rx: Receiver<WorkerJob>, err: String) {
     }
 }
 
-/// The single active session (MVP cap = 1). Distinct from the eval server's
-/// continuation registry — a session is one resident worker, not a permit slot.
+/// Named-session manager: holds one resident worker per session id. Sessions
+/// are keyed by user-supplied name strings (arbitrary, e.g. "default",
+/// "agent-1"). Distinct from the eval server's continuation registry — a
+/// session is one resident worker, not a permit slot.
 #[derive(Default)]
 pub struct SessionManager {
-    current: parking_lot::Mutex<Option<WorkerHandle>>,
+    sessions: parking_lot::Mutex<HashMap<String, WorkerHandle>>,
 }
 
 impl SessionManager {
     pub fn new() -> SessionManager {
         SessionManager {
-            current: parking_lot::Mutex::new(None),
+            sessions: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
-    /// Whether a session is currently open.
-    pub fn is_open(&self) -> bool {
-        self.current.lock().is_some()
-    }
-
-    /// Install a freshly-spawned worker as the active session. Errors (and drops
-    /// the new worker) if one is already open — MVP cap = 1.
-    pub fn install(&self, handle: WorkerHandle) -> Result<(), WorkerHandle> {
-        let mut cur = self.current.lock();
-        if cur.is_some() {
+    /// Install a freshly-spawned worker under `id`. Errors (and drops the new
+    /// worker) if a session with that id is already open.
+    pub fn install(&self, id: &str, handle: WorkerHandle) -> Result<(), WorkerHandle> {
+        let mut sessions = self.sessions.lock();
+        if sessions.contains_key(id) {
             return Err(handle);
         }
-        *cur = Some(handle);
+        sessions.insert(id.to_string(), handle);
         Ok(())
     }
 
-    /// Clone the active worker's command sender, if a session is open.
-    pub fn current_sender(&self) -> Option<Sender<WorkerJob>> {
-        self.current.lock().as_ref().map(WorkerHandle::sender)
+    /// Clone the command sender for the named session, if it is open.
+    pub fn get_sender(&self, id: &str) -> Option<Sender<WorkerJob>> {
+        self.sessions.lock().get(id).map(WorkerHandle::sender)
     }
 
-    /// Remove the active worker (e.g. for `session_close`), returning it so the
-    /// caller can `shutdown` it after the final `Closed` reply.
-    pub fn take(&self) -> Option<WorkerHandle> {
-        self.current.lock().take()
+    /// Remove the named session (e.g. for `session_close`), returning the
+    /// handle so the caller can `shutdown` it after the final `Closed` reply.
+    pub fn remove(&self, id: &str) -> Option<WorkerHandle> {
+        self.sessions.lock().remove(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_handle() -> WorkerHandle {
+        let (cmd_tx, _rx) = std::sync::mpsc::channel::<WorkerJob>();
+        WorkerHandle {
+            cmd_tx,
+            thread: None,
+        }
+    }
+
+    #[test]
+    fn session_manager_keying() {
+        let mgr = SessionManager::new();
+
+        // Install two distinct sessions.
+        assert!(mgr.install("a", make_handle()).is_ok());
+        assert!(mgr.install("b", make_handle()).is_ok());
+
+        // Both senders are retrievable.
+        assert!(mgr.get_sender("a").is_some());
+        assert!(mgr.get_sender("b").is_some());
+        assert!(mgr.get_sender("nonexistent").is_none());
+
+        // Duplicate id is rejected.
+        assert!(mgr.install("a", make_handle()).is_err());
+
+        // Remove one; the other persists.
+        let removed = mgr.remove("a");
+        assert!(removed.is_some());
+        assert!(mgr.get_sender("a").is_none());
+        assert!(mgr.get_sender("b").is_some());
+
+        // Clean up.
+        let _ = mgr.remove("b");
     }
 }
