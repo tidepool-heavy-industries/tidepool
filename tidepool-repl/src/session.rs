@@ -715,22 +715,48 @@ impl Session {
                 }
             }
             MetaCommand::Info(name) => {
-                let entry = self
-                    .bindings
-                    .iter_current()
-                    .find(|(n, _)| n.0 == *name);
-                match entry {
-                    Some((_, entry)) => TurnOutcome::Meta(serde_json::json!({
+                // 1. Bound value lookup (highest priority — a session binding shadows types).
+                if let Some((_, entry)) = self.bindings.iter_current().find(|(n, _)| n.0 == *name) {
+                    return TurnOutcome::Meta(serde_json::json!({
                         "name": name,
                         "type": entry.type_display.clone().unwrap_or_default(),
                         "tier": if entry.value.is_forced() { "Tier0Data" } else { "Tier1Closure" },
                         "module": entry.module.module_name(),
-                    })),
-                    None => TurnOutcome::Meta(serde_json::json!({
-                        "error": "not bound",
-                        "name": name,
-                    })),
+                    }));
                 }
+                // 2. Built-in effect decl type_defs (data/newtype/type) and GADT constructors.
+                for decl in &self.cfg.decls {
+                    for type_def in decl.type_defs {
+                        if type_def_head(type_def) == Some(name.as_str()) {
+                            return TurnOutcome::Meta(serde_json::json!({
+                                "name": name,
+                                "shape": *type_def,
+                            }));
+                        }
+                    }
+                    for con in decl.constructors {
+                        if con.split("::").next().map(str::trim) == Some(name.as_str()) {
+                            return TurnOutcome::Meta(serde_json::json!({
+                                "name": name,
+                                "shape": *con,
+                                "effect": decl.type_name,
+                            }));
+                        }
+                    }
+                }
+                // 3. Session-defined types (data/newtype/type/class from session_def turns).
+                if let Some(src) = self.lib.decl_type_source(name) {
+                    return TurnOutcome::Meta(serde_json::json!({
+                        "name": name,
+                        "shape": src,
+                        "source": "session",
+                    }));
+                }
+                // 4. Total miss.
+                TurnOutcome::Meta(serde_json::json!({
+                    "error": "not a bound value or known type",
+                    "name": name,
+                }))
             }
             MetaCommand::Vocab => {
                 let mut dirs: Vec<std::path::PathBuf> = Vec::new();
@@ -1023,6 +1049,50 @@ fn wrap_pure_ref_source(preamble: &str, imports: &str, expr_text: &str) -> Strin
         out.push_str(&format!("  {line}\n"));
     }
     out
+}
+
+/// Extract the declared head name from a Haskell type declaration string.
+/// Returns `Some(name)` when the string starts with `data`/`newtype`/`type`
+/// and the next token is the type name; `None` for functions, instances, etc.
+fn type_def_head(src: &str) -> Option<&str> {
+    let s = src.trim();
+    let rest = s
+        .strip_prefix("data ")
+        .or_else(|| s.strip_prefix("newtype "))
+        .or_else(|| s.strip_prefix("type "))?;
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '(' || c == '=')
+        .unwrap_or(rest.len());
+    let head = &rest[..end];
+    if head.is_empty() { None } else { Some(head) }
+}
+
+#[cfg(test)]
+mod info_tests {
+    use super::type_def_head;
+    use tidepool_mcp::lsp_decl;
+
+    #[test]
+    fn type_def_head_recognizes_data_newtype_type() {
+        assert_eq!(type_def_head("data Node = Node { nodeName :: Text }"), Some("Node"));
+        assert_eq!(type_def_head("data Position = Position { posLine :: Int }"), Some("Position"));
+        assert_eq!(type_def_head("data Lang = Rust | Python"), Some("Lang"));
+        assert_eq!(type_def_head("newtype Foo = Foo Int"), Some("Foo"));
+        assert_eq!(type_def_head("type Name = Text"), Some("Name"));
+        // Non-type-decl strings return None.
+        assert_eq!(type_def_head("matchVars :: Match -> Map Text Text"), None);
+        assert_eq!(type_def_head("instance ToJSON Node where"), None);
+        assert_eq!(type_def_head("nodeLine :: Node -> Int"), None);
+    }
+
+    #[test]
+    fn decl_scan_finds_node_in_lsp_decl() {
+        let decl = lsp_decl();
+        let found = decl.type_defs.iter().any(|td| type_def_head(td) == Some("Node"));
+        assert!(found, "Node must be discoverable in lsp_decl type_defs");
+        let pos_found = decl.type_defs.iter().any(|td| type_def_head(td) == Some("Position"));
+        assert!(pos_found, "Position must be discoverable in lsp_decl type_defs");
+    }
 }
 
 #[cfg(test)]

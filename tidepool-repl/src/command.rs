@@ -20,7 +20,7 @@ pub struct ExprText(pub String);
 pub enum MetaCommand {
     /// `:t <expr>` — show the inferred type of an expression.
     Type(ExprText),
-    /// `:i <name>` — show info for a bound name.
+    /// `:i <name>` — show info for a bound name or type/constructor definition.
     Info(String),
     /// `:bindings` — list the session's value bindings.
     Bindings,

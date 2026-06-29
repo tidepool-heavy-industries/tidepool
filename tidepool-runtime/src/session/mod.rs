@@ -146,6 +146,28 @@ impl SessionLib {
         self.current_module().map(|m| format!("import {}", m.module_name()))
     }
 
+    /// Source text of the most recent declaration turn that introduces a type or
+    /// class named `name` (via `ExportItem::Type` or `ExportItem::Class`).
+    /// Returns `None` if no such declaration exists in the session. Used by
+    /// `:i <Type>` to surface session-defined type shapes.
+    #[must_use]
+    pub fn decl_type_source(&self, name: &str) -> Option<&str> {
+        self.log
+            .turns
+            .iter()
+            .rev()
+            .find(|t| {
+                t.items.iter().any(|item| match item {
+                    ExportItem::Type { name: n, .. } | ExportItem::Class { name: n, .. } => {
+                        n == name
+                    }
+                    ExportItem::Value { .. } => false,
+                })
+            })
+            .and_then(|t| t.sources.first())
+            .map(String::as_str)
+    }
+
     /// Names of every value/function binder introduced across all declaration
     /// turns (all generations, not just the current one). Used by the eval
     /// assembler to hide session-defined names from the Prelude import so a
