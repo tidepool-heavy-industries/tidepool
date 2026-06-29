@@ -355,13 +355,30 @@ pub(crate) fn format_error_with_source(
         .map(|pos| source[..pos + MARKER.len()].matches('\n').count())
         .unwrap_or(0);
     let remapped = remap_expr_lines(error, offset);
-    format!(
+    let mut out = format!(
         "## {}\n**failure-class:** `{}`\n\n{}\n\n## User Code\n```haskell\n{}\n```",
         title,
         class.tag(),
         remapped,
         user_section
-    )
+    );
+    // When GHC can't infer the concrete type of the eval result (e.g. `pure 42`
+    // without a type sig), it reports an "Ambiguous type variable" error at the
+    // `toJSON _r` call site. Surface a targeted hint so the caller knows what to fix.
+    if ambiguous_tojson_result(error) {
+        out.push_str(
+            "\n\n**Hint:** the result type is ambiguous — GHC cannot choose a concrete type to serialize. \
+Add a type annotation to your expression, e.g. `pure (x :: Int)` or `pure (x :: Text)`.",
+        );
+    }
+    out
+}
+
+/// Returns true when the GHC error is an ambiguous-type-variable failure
+/// at the `toJSON _r` call that wraps the user's result.
+fn ambiguous_tojson_result(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("ambiguous type") && lower.contains("tojson")
 }
 
 /// Subtract `offset` from each `Expr.hs:<n>` line number in a GHC diagnostic so
@@ -684,6 +701,35 @@ mod tests {
         assert!(formatted.contains("## Error"));
         assert!(formatted.contains("msg"));
         assert!(formatted.contains("## User Code"));
+    }
+
+    #[test]
+    fn test_format_error_ambiguous_type_hint() {
+        // GHC reports this when the user's result has a polymorphic type that
+        // `toJSON _r` can't resolve (e.g. `pure 42` with no annotation).
+        let ghc_error = "Expr.hs:3:3: error:\n    \
+            • Ambiguous type variable 'a0' arising from a use of 'toJSON'\n    \
+              prevents the constraint '(ToJSON a0)' from being solved.\n";
+        let formatted =
+            format_error_with_source(FailureClass::HaskellError, "Compile Error", ghc_error, "");
+        assert!(
+            formatted.contains("Hint:"),
+            "expected ambiguous-type hint in output"
+        );
+        assert!(formatted.contains("type annotation"));
+    }
+
+    #[test]
+    fn test_format_error_no_hint_for_unrelated_ambiguous() {
+        // An ambiguous type error NOT involving toJSON should not append the hint.
+        let ghc_error = "Expr.hs:3:3: error:\n    \
+            • Ambiguous type variable 'a0' arising from a use of 'show'\n";
+        let formatted =
+            format_error_with_source(FailureClass::HaskellError, "Compile Error", ghc_error, "");
+        assert!(
+            !formatted.contains("Hint:"),
+            "should not hint for non-toJSON ambiguous type"
+        );
     }
 
     #[test]
