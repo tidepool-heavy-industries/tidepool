@@ -473,7 +473,10 @@ mod tests {
     #[test]
     fn session_decl_env_matches_eval_preamble() {
         let env = session_decl_module_env();
-        let preamble = build_preamble(&[], true); // user_library=true → superset
+        // Eval preamble with Exec+Http present so it emits the qualified
+        // Tidepool.Shell/Git/Cargo imports the decl env also carries (the full
+        // stack the repl always runs under).
+        let preamble = build_preamble(&[exec_decl(), http_decl()], false);
         // Every decl import line appears verbatim in the eval preamble.
         for imp in &env.imports {
             assert!(
@@ -486,8 +489,10 @@ mod tests {
             preamble.contains(&env.pragmas),
             "session decl pragmas diverged from eval preamble"
         );
-        // The decl env is imports-only: no `module Expr`/Library/default leakage.
-        assert!(!env.imports.iter().any(|i| i.contains("import Library")));
+        // The decl env is qualified-imports-only: no unqualified `import Library`
+        // (it would clash with decl-defined names — see hide_library_names; the
+        // shell modules are safe because they're imported qualified).
+        assert!(!env.imports.iter().any(|i| i == "import Library"));
     }
 
     #[test]

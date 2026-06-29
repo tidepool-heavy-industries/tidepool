@@ -202,7 +202,11 @@ async fn session_def_sees_full_eval_vocabulary() {
                  sh cmd = run cmd <&> \\(_,out,_) -> out\n\
                  \n\
                  uniqSorted :: [Int] -> [Int]\n\
-                 uniqSorted = L.sort . Set.toList . Set.fromList",
+                 uniqSorted = L.sort . Set.toList . Set.fromList\n\
+                 \n\
+                 -- shell-effect module (Git) must be in DECL scope too\n\
+                 dirtyCount :: M Int\n\
+                 dirtyCount = Git.gitStatus <&> length",
             )]),
         )
         .await

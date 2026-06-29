@@ -78,12 +78,20 @@ pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
 /// `Tidepool.Prelude`, which pulls `Control.Lens`).
 #[must_use]
 pub fn session_decl_module_env() -> ModuleEnv {
+    let mut imports: Vec<String> =
+        eval_import_lines(false).into_iter().map(String::from).collect();
+    // Full-stack repl decl surface: also import the shell-effect modules so
+    // `session_def` helpers can use Git/Shell/Cargo verbs (the eval module gets
+    // them via `pragmas_and_imports`, but the decl `ModuleEnv` needs them too,
+    // else a decl like `dirty = Git.gitStatus` fails to resolve). Safe here
+    // because this env is only used under the full stack (Exec+Http present);
+    // the lens-free `standalone_default` minimal env deliberately omits them.
+    imports.push("import qualified Tidepool.Shell as Shell".into());
+    imports.push("import qualified Tidepool.Git as Git".into());
+    imports.push("import qualified Tidepool.Cargo as Cargo".into());
     ModuleEnv {
         pragmas: EVAL_PRAGMAS.to_string(),
-        imports: eval_import_lines(false)
-            .into_iter()
-            .map(String::from)
-            .collect(),
+        imports,
     }
 }
 
