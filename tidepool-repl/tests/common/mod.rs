@@ -126,18 +126,57 @@ impl Repl {
         }
     }
 
+    /// Route a single item through `session_run` and unwrap `items[0]` back to
+    /// the legacy `Turn` shape (`text = items[0].result`, `is_error = !items[0].ok`).
+    /// Falls back to the raw `Turn` when the block envelope can't be parsed
+    /// (e.g. "no session open" — the error text is not a JSON block envelope).
+    async fn run_block_single(&self, item: &str) -> Turn {
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "items".to_string(),
+            serde_json::Value::Array(vec![serde_json::Value::String(item.to_string())]),
+        );
+        let raw = self.dispatch("session_run", args).await;
+
+        // Strip the "## Output\n...\n## Result\n" prefix if captured output is present.
+        let json_part = if let Some(pos) = raw.text.rfind("\n## Result\n") {
+            &raw.text[pos + "\n## Result\n".len()..]
+        } else {
+            &raw.text
+        };
+
+        // Extract items[0] from the block envelope JSON.
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_part) {
+            if let Some(item0) = v.get("items").and_then(|arr| arr.get(0)) {
+                let text = item0
+                    .get("result")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or(&raw.text)
+                    .to_string();
+                let is_error = item0
+                    .get("ok")
+                    .and_then(|o| o.as_bool())
+                    .map(|ok| !ok)
+                    .unwrap_or(raw.is_error);
+                return Turn { text, is_error };
+            }
+        }
+
+        // Not a block envelope (e.g. "no session open" plain error) — return as-is.
+        raw
+    }
+
     pub async fn open(&self) -> Turn {
         self.dispatch("session_open", serde_json::Map::new()).await
     }
     pub async fn def(&self, decl: &str) -> Turn {
-        self.dispatch("session_def", obj(&[("decl", decl)])).await
+        self.run_block_single(decl).await
     }
     pub async fn eval(&self, code: &str) -> Turn {
-        self.dispatch("session_eval", obj(&[("code", code)])).await
+        self.run_block_single(code).await
     }
     pub async fn cmd(&self, command: &str) -> Turn {
-        self.dispatch("session_cmd", obj(&[("command", command)]))
-            .await
+        self.run_block_single(command).await
     }
     pub async fn close(&self) -> Turn {
         self.dispatch("session_close", serde_json::Map::new()).await
