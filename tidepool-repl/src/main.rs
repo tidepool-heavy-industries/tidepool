@@ -16,6 +16,26 @@ use tidepool_handlers::{
 };
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
 
+/// Derive the KV backing path for a given session name.
+///
+/// `tidepool_dir` is the project's `.tidepool/` directory (or the fallback cache dir).
+///
+/// - `"default"` maps to `<tidepool_dir>/kv.json` (unchanged from the pre-multi-session
+///   path) so existing callers and tests keep working without migration.
+/// - Any other name maps to `<tidepool_dir>/kv/<safe_name>.json` in a dedicated
+///   sub-directory, isolating each session's KV namespace.
+fn kv_path_for_session(tidepool_dir: &std::path::Path, session_name: &str) -> std::path::PathBuf {
+    if session_name == "default" {
+        tidepool_dir.join("kv.json")
+    } else {
+        let safe: String = session_name
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        tidepool_dir.join("kv").join(format!("{}.json", safe))
+    }
+}
+
 #[derive(clap::Parser)]
 #[command(
     name = "tidepool-repl",
@@ -73,20 +93,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // captures `Handle::current()`), which `#[tokio::main]` provides.
     let cwd = std::env::current_dir()?;
     let project_root = tidepool_runtime::paths::find_project_root(&cwd);
-    let kv_path = match &project_root {
-        Some(root) => root.join(".tidepool").join("kv.json"),
-        None => tidepool_runtime::paths::cache_dir().join("kv.json"),
+    let tidepool_dir = match &project_root {
+        Some(root) => root.join(".tidepool"),
+        None => tidepool_runtime::paths::cache_dir(),
     };
     let llm_model =
         std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| DEFAULT_OPENAI_MODEL.to_string());
-    let handler_cfg = HandlerConfig {
-        cwd,
-        kv_path,
-        llm_model,
+
+    // Build a representative stack to derive effect declarations and ask_tag.
+    // The kv_path here doesn't matter for decls (they depend only on handler types).
+    let sample_cfg = HandlerConfig {
+        cwd: cwd.clone(),
+        kv_path: tidepool_dir.join("kv.json"),
+        llm_model: llm_model.clone(),
     };
-    let stack = build_base_stack(&handler_cfg);
+    let stack = build_base_stack(&sample_cfg);
     // Decls derive from the stack (in HList/tag order) + Ask appended.
     let (decls, ask_tag) = base_decls_with_ask(&stack);
+    drop(stack); // the per-session builder owns each session's stack
 
     // The generated Tidepool.Effects module must be on the include path.
     let effects_dir = tidepool_mcp::ensure_effects_module(&decls)?;
@@ -110,7 +134,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         nursery_size: None,
     };
 
-    let server = TidepoolReplServer::new(stack, cfg);
+    // Per-session builder: each session_open gets its own KvHandler backed by a
+    // session-scoped file so kvKeys/kvGet/kvSet in session X cannot see session Y's keys.
+    let cwd_b = cwd.clone();
+    let llm_b = llm_model.clone();
+    let tidepool_dir_b = tidepool_dir.clone();
+    let builder = move |session_name: &str| {
+        let kv_path = kv_path_for_session(&tidepool_dir_b, session_name);
+        let hcfg = HandlerConfig {
+            cwd: cwd_b.clone(),
+            kv_path,
+            llm_model: llm_b.clone(),
+        };
+        build_base_stack(&hcfg)
+    };
+    let server = TidepoolReplServer::new_with_session_builder(builder, cfg);
     if let Some(addr) = http_addr {
         server.serve_http(addr).await
     } else {
