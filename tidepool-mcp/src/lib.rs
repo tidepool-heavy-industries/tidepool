@@ -172,18 +172,34 @@ pub fn ensure_effects_module(effects: &[EffectDecl]) -> std::io::Result<PathBuf>
 /// cache root (`tidepool_runtime::paths::effects_dir`), NOT `$TMPDIR`, which
 /// macOS reaps out from under a long-running server.
 pub(crate) fn write_effects_module_src(src: &str) -> std::io::Result<PathBuf> {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    src.hash(&mut hasher);
+    // FNV-1a: deterministic across processes (no per-process SipHash seed).
+    // DefaultHasher is randomly seeded, causing identical source to hash to
+    // different paths in each process → "Could not find module Tidepool.Effects"
+    // when a second process picks a different cache dir than the one that wrote it.
+    let hash = fnv1a_hash(src.as_bytes());
     let root = tidepool_runtime::paths::effects_dir()
-        .join(format!("tidepool-effects-{:016x}", hasher.finish()));
+        .join(format!("tidepool-effects-{:016x}", hash));
     let module_dir = root.join("Tidepool");
     let module_path = module_dir.join("Effects.hs");
     if !module_path.exists() {
         std::fs::create_dir_all(&module_dir)?;
-        std::fs::write(&module_path, src)?;
+        // Atomic write: write to a temp file then rename so a concurrent GHC
+        // process never sees a partial module (the rename is atomic on POSIX).
+        let tmp_path = module_dir.join("Effects.hs.tmp");
+        std::fs::write(&tmp_path, src)?;
+        std::fs::rename(&tmp_path, &module_path)?;
     }
     Ok(root)
+}
+
+/// FNV-1a 64-bit hash — deterministic, no external dependency.
+fn fnv1a_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 14_695_981_039_346_656_037;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(1_099_511_628_211);
+    }
+    h
 }
 
 /// Unwrap double-encoded JSON strings if they contain an object or array.
@@ -1635,6 +1651,27 @@ data Console a where
             orphaned_threads: Arc::new(AtomicUsize::new(0)),
             effects_source: String::new(),
         }
+    }
+
+    /// Snapshot test: FNV-1a of a fixed string must produce the same hash
+    /// in every process. If DefaultHasher (randomly seeded) is accidentally
+    /// reintroduced, this assertion fails because the computed hash won't
+    /// match the stable FNV-1a value baked into the expected dir name.
+    #[test]
+    fn test_effects_hash_is_deterministic_across_calls() {
+        let src = "module Tidepool.Effects where\n-- sentinel\n";
+        let dir1 = write_effects_module_src(src).unwrap();
+        let dir2 = write_effects_module_src(src).unwrap();
+        assert_eq!(dir1, dir2, "same source must yield same content-addressed dir");
+        // Verify the dir name encodes the known FNV-1a hash of `src`.
+        let expected_hash = fnv1a_hash(src.as_bytes());
+        let expected_suffix = format!("tidepool-effects-{:016x}", expected_hash);
+        let dir_name = dir1.file_name().unwrap().to_str().unwrap();
+        assert_eq!(
+            dir_name, expected_suffix,
+            "dir name must be the stable FNV-1a hash of source; got {dir_name}"
+        );
+        let _ = std::fs::remove_dir_all(&dir1);
     }
 
     #[test]
