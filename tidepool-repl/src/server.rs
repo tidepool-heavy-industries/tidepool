@@ -3,7 +3,7 @@
 //! surface and routes each tool to a [`SessionCommand`] on the resident worker.
 //!
 //! Tools:
-//! - `session_open` — spawn the resident session worker (MVP cap = 1).
+//! - `session_open` — spawn a named session worker (N concurrent sessions supported).
 //! - `session_def` — append a declaration (Lane A).
 //! - `session_eval` — run an `M a` expression on the resident machine.
 //! - `session_cmd` — `:bindings` / `:reset` (and stubbed `:t` / `:i`).
@@ -45,12 +45,21 @@ const TURN_TIMEOUT_SECS: u64 = 120;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct SessionOpenRequest {}
+pub struct SessionOpenRequest {
+    /// Session name. Omit to use `"default"` (back-compat). Multiple agents
+    /// can each open a distinct named session; the name is used as the key for
+    /// subsequent session_def/eval/cmd/close/resume/abort calls.
+    #[serde(default)]
+    pub session: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionDefRequest {
     /// One or more top-level Haskell declarations (functions, types, classes).
     pub decl: String,
+    /// Session name (default: `"default"`).
+    #[serde(default)]
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -64,6 +73,9 @@ pub struct SessionEvalRequest {
     /// inside `code`. Mirrors the stateless `eval` tool's `input` lane.
     #[serde(default)]
     pub input: Option<serde_json::Value>,
+    /// Session name (default: `"default"`).
+    #[serde(default)]
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -71,16 +83,26 @@ pub struct SessionCmdRequest {
     /// A meta-command: `:bindings`, `:reset`, `:t <expr>`, `:i <name>` (leading
     /// colon optional).
     pub command: String,
+    /// Session name (default: `"default"`).
+    #[serde(default)]
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct SessionCloseRequest {}
+pub struct SessionCloseRequest {
+    /// Session name (default: `"default"`).
+    #[serde(default)]
+    pub session: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionResumeRequest {
     pub continuation_id: String,
     #[serde(default)]
     pub response: serde_json::Value,
+    /// Session name (default: `"default"`).
+    #[serde(default)]
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -88,6 +110,19 @@ pub struct SessionAbortRequest {
     pub continuation_id: String,
     #[serde(default)]
     pub reason: Option<String>,
+    /// Session name (default: `"default"`).
+    #[serde(default)]
+    pub session: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Session name helpers
+// ---------------------------------------------------------------------------
+
+/// Resolve an optional session name to its canonical form. `None` yields
+/// `"default"` for back-compat with single-session callers.
+fn resolve_session(session: Option<String>) -> String {
+    session.unwrap_or_else(|| "default".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +168,9 @@ pub struct ReplServerConfig {
 /// The non-generic server core (H is erased into the `spawn` closure).
 struct ReplServerInner {
     manager: SessionManager,
-    continuations: Mutex<HashMap<String, ReplContinuation>>,
+    /// Keyed by (session_id, continuation_id) so resume/abort route to the
+    /// right session's continuation.
+    continuations: Mutex<HashMap<(String, String), ReplContinuation>>,
     next_cont_id: AtomicU64,
     next_session_id: AtomicU64,
     /// Spawns a worker for a `SessionConfig` (captures the base handler + ask_tag).
@@ -241,37 +278,56 @@ impl TidepoolReplServer {
         let parse =
             |args: serde_json::Map<String, serde_json::Value>| serde_json::Value::Object(args);
         match name {
-            "session_open" => Ok(self.session_open().await),
+            "session_open" => {
+                let req: SessionOpenRequest = serde_json::from_value(parse(args))
+                    .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
+                let sid = resolve_session(req.session);
+                Ok(self.session_open(&sid).await)
+            }
             "session_def" => {
                 let req: SessionDefRequest = serde_json::from_value(parse(args))
                     .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
+                let sid = resolve_session(req.session);
                 Ok(self
-                    .run_command("session_def", SessionCommand::Def(DeclText(req.decl)), None)
+                    .run_command(
+                        "session_def",
+                        SessionCommand::Def(DeclText(req.decl)),
+                        None,
+                        &sid,
+                    )
                     .await)
             }
             "session_eval" => {
                 let req: SessionEvalRequest = serde_json::from_value(parse(args))
                     .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
+                let sid = resolve_session(req.session);
                 Ok(self
                     .run_command(
                         "session_eval",
                         SessionCommand::Eval(ExprText(req.code)),
                         req.input,
+                        &sid,
                     )
                     .await)
             }
             "session_cmd" => {
                 let req: SessionCmdRequest = serde_json::from_value(parse(args))
                     .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
+                let sid = resolve_session(req.session);
                 let meta = match MetaCommand::parse(&req.command) {
                     Ok(m) => m,
                     Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
                 };
                 Ok(self
-                    .run_command("session_cmd", SessionCommand::Cmd(meta), None)
+                    .run_command("session_cmd", SessionCommand::Cmd(meta), None, &sid)
                     .await)
             }
-            "session_close" => Ok(self.session_close().await),
+            "session_close" => {
+                let req: SessionCloseRequest = serde_json::from_value(parse(args))
+                    .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
+                let sid = resolve_session(req.session);
+                Ok(self.session_close(&sid).await)
+            }
             "session_resume" => {
                 let req: SessionResumeRequest = serde_json::from_value(parse(args))
                     .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
@@ -290,7 +346,7 @@ impl TidepoolReplServer {
         }
     }
 
-    async fn session_open(&self) -> CallToolResult {
+    async fn session_open(&self, session_name: &str) -> CallToolResult {
         let sid = SessionId(self.inner.next_session_id.fetch_add(1, Ordering::Relaxed));
         let root = self
             .inner
@@ -309,20 +365,22 @@ impl TidepoolReplServer {
             nursery_size: self.inner.cfg.nursery_size.unwrap_or(DEFAULT_NURSERY_SIZE),
         };
         let handle = (self.inner.spawn)(cfg);
-        match self.inner.manager.install(handle) {
+        match self.inner.manager.install(session_name, handle) {
             Ok(()) => CallToolResult::success(vec![Content::text(
-                serde_json::json!({"opened": true, "session_id": sid.0}).to_string(),
+                serde_json::json!({"opened": true, "session_id": sid.0, "session": session_name})
+                    .to_string(),
             )]),
             Err(rejected) => {
                 rejected.shutdown();
-                CallToolResult::error(vec![Content::text(
-                    "a session is already open; call session_close first (MVP cap = 1)",
-                )])
+                CallToolResult::error(vec![Content::text(format!(
+                    "session '{}' is already open; call session_close first",
+                    session_name
+                ))])
             }
         }
     }
 
-    /// Send a `SessionCommand` to the resident worker and await its reply.
+    /// Send a `SessionCommand` to the named session worker and await its reply.
     /// `eval_input` is forwarded to the worker so `input :: Aeson.Value` is in
     /// scope for `session_eval` turns; pass `None` for `session_def`/`session_cmd`.
     async fn run_command(
@@ -330,11 +388,13 @@ impl TidepoolReplServer {
         op: &str,
         cmd: SessionCommand,
         eval_input: Option<serde_json::Value>,
+        session_name: &str,
     ) -> CallToolResult {
-        let Some(sender) = self.inner.manager.current_sender() else {
-            return CallToolResult::error(vec![Content::text(
-                "no session open; call session_open first",
-            )]);
+        let Some(sender) = self.inner.manager.get_sender(session_name) else {
+            return CallToolResult::error(vec![Content::text(format!(
+                "no session '{}' open; call session_open first",
+                session_name
+            ))]);
         };
         let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerMessage>();
         let (response_tx, response_rx) = std::sync::mpsc::channel::<ResumeMsg>();
@@ -351,13 +411,16 @@ impl TidepoolReplServer {
         if sender.send(job).is_err() {
             return CallToolResult::error(vec![Content::text("session worker is gone")]);
         }
-        self.drive(op, session_rx, response_tx, gate, captured)
+        self.drive(op, session_rx, response_tx, gate, captured, session_name)
             .await
     }
 
-    async fn session_close(&self) -> CallToolResult {
-        let Some(handle) = self.inner.manager.take() else {
-            return CallToolResult::error(vec![Content::text("no session open")]);
+    async fn session_close(&self, session_name: &str) -> CallToolResult {
+        let Some(handle) = self.inner.manager.remove(session_name) else {
+            return CallToolResult::error(vec![Content::text(format!(
+                "no session '{}' open",
+                session_name
+            ))]);
         };
         let (session_tx, mut session_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerMessage>();
         let (_response_tx, response_rx) = std::sync::mpsc::channel::<ResumeMsg>();
@@ -376,7 +439,7 @@ impl TidepoolReplServer {
         let _ = timeout(Duration::from_secs(30), session_rx.recv()).await;
         handle.shutdown();
         CallToolResult::success(vec![Content::text(
-            serde_json::json!({"closed": true}).to_string(),
+            serde_json::json!({"closed": true, "session": session_name}).to_string(),
         )])
     }
 
@@ -387,13 +450,15 @@ impl TidepoolReplServer {
         // string is parsed into the canonical shape (BUG-9) — and (b) leaves an
         // invalid reply's continuation un-consumed so the caller can retry.
         // Mirrors the eval server's resume (tidepool-mcp/src/server.rs).
+        let session_name = resolve_session(req.session);
+        let cont_key = (session_name.clone(), req.continuation_id.clone());
         let cont = {
             let mut conts = self.inner.continuations.lock();
-            let Some(c) = conts.get(&req.continuation_id) else {
+            let Some(c) = conts.get(&cont_key) else {
                 return Err(McpError::invalid_params(
                     format!(
-                        "Unknown or expired continuation_id: {}",
-                        req.continuation_id
+                        "Unknown or expired continuation_id: {} (session '{}')",
+                        req.continuation_id, session_name
                     ),
                     None,
                 ));
@@ -403,7 +468,7 @@ impl TidepoolReplServer {
                 tidepool_mcp::validate::Outcome::Invalid(violations) => {
                     // Anti-starvation: a retrying continuation must not become the
                     // oldest-first eviction victim while its caller fixes the reply.
-                    if let Some(c) = conts.get_mut(&req.continuation_id) {
+                    if let Some(c) = conts.get_mut(&cont_key) {
                         c.created_at = Instant::now();
                     }
                     let body = serde_json::json!({
@@ -424,7 +489,7 @@ impl TidepoolReplServer {
                 }
                 tidepool_mcp::validate::Outcome::Valid(canonical) => {
                     let cont = conts
-                        .remove(&req.continuation_id)
+                        .remove(&cont_key)
                         .expect("continuation present: checked under the same lock");
                     if cont.response_tx.send(ResumeMsg::Answer(canonical)).is_err() {
                         return Err(McpError::internal_error(
@@ -443,20 +508,23 @@ impl TidepoolReplServer {
                 cont.response_tx,
                 cont.gate,
                 cont.captured,
+                &session_name,
             )
             .await)
     }
 
     async fn session_abort(&self, req: SessionAbortRequest) -> Result<CallToolResult, McpError> {
+        let session_name = resolve_session(req.session);
+        let cont_key = (session_name.clone(), req.continuation_id.clone());
         let cont = {
             let mut conts = self.inner.continuations.lock();
-            conts.remove(&req.continuation_id)
+            conts.remove(&cont_key)
         };
         let Some(cont) = cont else {
             return Err(McpError::invalid_params(
                 format!(
-                    "Unknown or expired continuation_id: {}",
-                    req.continuation_id
+                    "Unknown or expired continuation_id: {} (session '{}')",
+                    req.continuation_id, session_name
                 ),
                 None,
             ));
@@ -477,6 +545,7 @@ impl TidepoolReplServer {
                 cont.response_tx,
                 cont.gate,
                 cont.captured,
+                &session_name,
             )
             .await)
     }
@@ -490,6 +559,7 @@ impl TidepoolReplServer {
         response_tx: std::sync::mpsc::Sender<ResumeMsg>,
         gate: Arc<PauseGate>,
         captured: CapturedOutput,
+        session_name: &str,
     ) -> CallToolResult {
         let received =
             match timeout(Duration::from_secs(TURN_TIMEOUT_SECS), session_rx.recv()).await {
@@ -537,7 +607,7 @@ impl TidepoolReplServer {
                     }
                 }
                 self.inner.continuations.lock().insert(
-                    cont_id,
+                    (session_name.to_string(), cont_id),
                     ReplContinuation {
                         response_tx,
                         session_rx,
@@ -578,8 +648,10 @@ fn with_output(output: &[String], body: &str) -> String {
 fn build_tool_description(decls: &[EffectDecl]) -> String {
     let names: Vec<&str> = decls.iter().map(|d| d.type_name).collect();
     format!(
-        "tidepool-repl — a GHCi-style stateful Haskell session. ONE resident JIT machine holds \
-         the value heap across `session_eval` turns; `session_def` accumulates declarations. \
+        "tidepool-repl — a GHCi-style stateful Haskell session. Each named session holds one \
+         resident JIT machine whose value heap persists across `session_eval` turns; \
+         `session_def` accumulates declarations. Multiple agents can open distinct named sessions \
+         in parallel (omit `session` to use `\"default\"`). \
          Lifecycle: session_open → (session_def | session_eval | session_cmd)* → session_close. \
          `session_eval` code is a single `M a` expression (effects: {effects}). Prior \
          declarations are in scope. An in-turn `ask` suspends with a continuation_id; answer it \
@@ -645,8 +717,8 @@ impl ServerHandler for TidepoolReplServer {
         let tools = vec![
             tool(
                 "session_open",
-                "Open the resident session (one live JIT machine; MVP cap = 1). Call before any \
-                 session_def/eval/cmd.",
+                "Open a named session (one live JIT machine per name). Omit `session` to use the \
+                 default session. Call before any session_def/eval/cmd.",
                 schema_to_map(schemars::schema_for!(SessionOpenRequest))?,
             ),
             tool(
