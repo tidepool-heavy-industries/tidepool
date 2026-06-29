@@ -1,9 +1,10 @@
 //! The `tidepool-repl` session surface — the `SessionCommand` sum (domain §5)
 //! and the per-turn outcome it produces.
 //!
-//! The tool NAME classifies a turn (no decl-vs-expr heuristic, plan §5.0): each
-//! MCP tool maps to exactly one [`SessionCommand`] variant. Stringly-typed
-//! dispatch is replaced by this sum so a turn's kind is a closed set.
+//! `session_run` classifies each item in a block into a [`BlockItem`] (decl /
+//! stmt / meta) and runs them via the existing `run_def`/`run_eval`/`run_meta`
+//! handlers. `SessionCommand::{Def,Eval,Cmd}` are kept as the per-item handler
+//! targets; `Block` is the new composite variant.
 
 use serde_json::Value as Json;
 
@@ -28,6 +29,39 @@ pub enum MetaCommand {
     Reset,
     /// `:vocab` — list verb signatures from the user library dirs.
     Vocab,
+}
+
+/// One item in a `session_run` block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockItem {
+    /// A top-level Haskell declaration (keyword-initiated, unambiguous) —
+    /// routed directly to `run_def` with no cascade.
+    Decl(DeclText),
+    /// A bind statement (`x <- e` / `let x = e`) or bare expression — routed
+    /// to `run_eval`, which classifies bind vs expr internally via `classify_turn`.
+    Stmt(ExprText),
+    /// An ambiguous item that needs the try-cascade: `run_block` attempts it
+    /// as a declaration via `run_def` first; on a GHC parse error it falls
+    /// back to `run_eval`. A non-parse error (type error, scope error, …) is
+    /// returned as-is — the item IS a declaration, just a broken one.
+    Auto(ExprText),
+    /// A meta-command (`:reset`, `:t`, …) — routed to `run_meta`.
+    Meta(MetaCommand),
+}
+
+/// The outcome of one item in a `session_run` block (serialised into the
+/// aggregate `TurnOutcome::Block.items` array).
+#[derive(Clone, Debug)]
+pub struct BlockItemResult {
+    /// Zero-based position in the block.
+    pub index: usize,
+    /// Item kind string: `"decl"`, `"stmt"`, or `"meta"`.
+    pub kind: String,
+    /// Whether the item succeeded.
+    pub ok: bool,
+    /// Verbatim `TurnOutcome::render()` of this item's outcome — identical to
+    /// the legacy per-tool render so a 1-item block unwraps to the old shape.
+    pub result: String,
 }
 
 impl MetaCommand {
@@ -64,6 +98,9 @@ pub enum SessionCommand {
     Eval(ExprText),
     /// `session_cmd`: a meta-command.
     Cmd(MetaCommand),
+    /// `session_run`: run a list of classified items in sequence on the resident
+    /// machine. Each item is dispatched to `run_def`/`run_eval`/`run_meta`.
+    Block(Vec<BlockItem>),
     /// `session_close`: drop the resident machine and free the session heap.
     Close,
 }
@@ -90,6 +127,18 @@ pub enum TurnOutcome {
     Defined { generation: u64, module: String },
     /// `session_cmd` produced this structured result.
     Meta(Json),
+    /// `session_run` block result: per-item outcomes + the last expression value.
+    Block {
+        items: Vec<BlockItemResult>,
+        /// The value produced by the last value-yielding `Stmt` in the block
+        /// (`None` if no expression was evaluated or the block errored before
+        /// any expression ran).
+        value: Option<Json>,
+        /// Declaration generation at block completion.
+        generation: u64,
+        /// Value-binding generation at block completion.
+        val_gen: u64,
+    },
     /// The turn failed (compile error, GHC error, runtime yield, …).
     Error(String),
 }
@@ -123,13 +172,39 @@ impl TurnOutcome {
             TurnOutcome::Meta(v) => {
                 serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
             }
+            TurnOutcome::Block { items, value, generation, val_gen } => {
+                let items_json: Vec<serde_json::Value> = items
+                    .iter()
+                    .map(|i| {
+                        serde_json::json!({
+                            "index": i.index,
+                            "kind": i.kind,
+                            "ok": i.ok,
+                            "result": i.result,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "items": items_json,
+                    "value": value,
+                    "generation": generation,
+                    "valGeneration": val_gen,
+                })
+                .to_string()
+            }
             TurnOutcome::Error(e) => e.clone(),
         }
     }
 
     /// Whether this outcome should surface as an MCP error result.
     pub fn is_error(&self) -> bool {
-        matches!(self, TurnOutcome::Error(_))
+        match self {
+            TurnOutcome::Error(_) => true,
+            // A block is an error when the last recorded item failed (we stop
+            // on first error and include the failing item in `items`).
+            TurnOutcome::Block { items, .. } => items.last().map_or(false, |i| !i.ok),
+            _ => false,
+        }
     }
 }
 

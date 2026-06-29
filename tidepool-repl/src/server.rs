@@ -4,9 +4,7 @@
 //!
 //! Tools:
 //! - `session_open` — spawn a named session worker (N concurrent sessions supported).
-//! - `session_def` — append a declaration (Lane A).
-//! - `session_eval` — run an `M a` expression on the resident machine.
-//! - `session_cmd` — `:bindings` / `:reset` (and stubbed `:t` / `:i`).
+//! - `session_run` — run a list of GHCi-capable items (decls, binds, exprs, :commands).
 //! - `session_close` — drop the machine, free the heap.
 //! - `session_resume` / `session_abort` — answer/abort an in-turn `ask`
 //!   (the parked-thread mechanism reused from the eval server).
@@ -31,7 +29,7 @@ use tokio::io::{stdin, stdout};
 use tokio::time::{timeout, Duration};
 
 use crate::ask::{PauseGate, ResumeMsg, WorkerMessage};
-use crate::command::{DeclText, ExprText, MetaCommand, SessionCommand};
+use crate::command::{BlockItem, DeclText, ExprText, MetaCommand, SessionCommand};
 use crate::session::{SessionConfig, DEFAULT_NURSERY_SIZE};
 use crate::worker::{spawn_worker, SessionManager, WorkerHandle, WorkerJob};
 
@@ -48,41 +46,24 @@ const TURN_TIMEOUT_SECS: u64 = 120;
 pub struct SessionOpenRequest {
     /// Session name. Omit to use `"default"` (back-compat). Multiple agents
     /// can each open a distinct named session; the name is used as the key for
-    /// subsequent session_def/eval/cmd/close/resume/abort calls.
+    /// subsequent session_run/close/resume/abort calls.
     #[serde(default)]
     pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SessionDefRequest {
-    /// One or more top-level Haskell declarations (functions, types, classes).
-    pub decl: String,
-    /// Session name (default: `"default"`).
-    #[serde(default)]
-    pub session: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SessionEvalRequest {
-    /// A single Haskell expression of type `M a` (as in the `eval` tool). Its
-    /// value is the turn's result. Declarations from prior `session_def` turns
-    /// are in scope.
-    pub code: String,
-    /// Optional payload available as `input :: Aeson.Value` in the evaluated
-    /// code. Pass large or quote-heavy content here instead of escaping it
-    /// inside `code`. Mirrors the stateless `eval` tool's `input` lane.
+pub struct SessionBlockRequest {
+    /// List of GHCi-capable items to run in sequence. Each item is one of:
+    /// a top-level declaration (`data Foo = …`, `f x = …`), a bind statement
+    /// (`x <- e` / `let x = e`), a bare expression, or a `:command`
+    /// (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`).
+    /// Items are classified automatically; execution stops on the first error.
+    pub items: Vec<String>,
+    /// Optional payload available as `input :: Aeson.Value` in the first
+    /// evaluated expression. Pass large or quote-heavy content here to avoid
+    /// Haskell string escaping. Mirrors the stateless `eval` tool's `input` lane.
     #[serde(default)]
     pub input: Option<serde_json::Value>,
-    /// Session name (default: `"default"`).
-    #[serde(default)]
-    pub session: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SessionCmdRequest {
-    /// A meta-command: `:bindings`, `:reset`, `:t <expr>`, `:i <name>` (leading
-    /// colon optional).
-    pub command: String,
     /// Session name (default: `"default"`).
     #[serde(default)]
     pub session: Option<String>,
@@ -123,6 +104,50 @@ pub struct SessionAbortRequest {
 /// `"default"` for back-compat with single-session callers.
 fn resolve_session(session: Option<String>) -> String {
     session.unwrap_or_else(|| "default".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Item classifier
+// ---------------------------------------------------------------------------
+
+/// Classify one `session_run` item string into a [`BlockItem`].
+///
+/// Classification strategy (try-cascade, approach (a) from the plan):
+/// - `:` prefix → [`BlockItem::Meta`] via `MetaCommand::parse`.
+/// - Keyword-initiated declarations (`data`, `newtype`, `type`, `class`,
+///   `instance`, …) → [`BlockItem::Decl`] (unambiguous; skip cascade).
+/// - Everything else → [`BlockItem::Auto`]: `run_block` will attempt the item
+///   as a declaration via `run_def` first; on a GHC parse error it falls back
+///   to [`BlockItem::Stmt`]/`run_eval`.
+///
+/// Misclassification fails LOUD — the wrong handler's GHC error surfaces
+/// immediately rather than silently producing a wrong result.
+pub fn classify_item(text: &str) -> Result<BlockItem, String> {
+    let s = text.trim();
+    if s.is_empty() {
+        return Err("empty item".to_string());
+    }
+
+    // :commands → Meta (unambiguous)
+    if s.starts_with(':') {
+        return MetaCommand::parse(s).map(BlockItem::Meta);
+    }
+
+    // Keyword-initiated declarations are unambiguous — skip the cascade.
+    const DECL_KEYWORDS: &[&str] = &[
+        "data ", "newtype ", "type ", "class ", "instance ",
+        "infixl ", "infixr ", "infix ", "foreign ", "import ",
+        "default ", "{-# ",
+    ];
+    for kw in DECL_KEYWORDS {
+        if s.starts_with(kw) {
+            return Ok(BlockItem::Decl(DeclText(s.to_string())));
+        }
+    }
+
+    // Everything else needs the try-cascade (function equations, type sigs,
+    // bind stmts, bare expressions — all routed through run_def first).
+    Ok(BlockItem::Auto(ExprText(s.to_string())))
 }
 
 // ---------------------------------------------------------------------------
@@ -336,42 +361,28 @@ impl TidepoolReplServer {
                 let sid = resolve_session(req.session);
                 Ok(self.session_open(&sid).await)
             }
-            "session_def" => {
-                let req: SessionDefRequest = serde_json::from_value(parse(args))
+            "session_run" => {
+                let req: SessionBlockRequest = serde_json::from_value(parse(args))
                     .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
                 let sid = resolve_session(req.session);
+                let mut block_items: Vec<BlockItem> = Vec::with_capacity(req.items.len());
+                for item_text in &req.items {
+                    match classify_item(item_text) {
+                        Ok(item) => block_items.push(item),
+                        Err(e) => {
+                            return Ok(CallToolResult::error(vec![Content::text(format!(
+                                "session_run: failed to classify item {item_text:?}: {e}"
+                            ))]))
+                        }
+                    }
+                }
                 Ok(self
                     .run_command(
-                        "session_def",
-                        SessionCommand::Def(DeclText(req.decl)),
-                        None,
-                        &sid,
-                    )
-                    .await)
-            }
-            "session_eval" => {
-                let req: SessionEvalRequest = serde_json::from_value(parse(args))
-                    .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
-                let sid = resolve_session(req.session);
-                Ok(self
-                    .run_command(
-                        "session_eval",
-                        SessionCommand::Eval(ExprText(req.code)),
+                        "session_run",
+                        SessionCommand::Block(block_items),
                         req.input,
                         &sid,
                     )
-                    .await)
-            }
-            "session_cmd" => {
-                let req: SessionCmdRequest = serde_json::from_value(parse(args))
-                    .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
-                let sid = resolve_session(req.session);
-                let meta = match MetaCommand::parse(&req.command) {
-                    Ok(m) => m,
-                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-                };
-                Ok(self
-                    .run_command("session_cmd", SessionCommand::Cmd(meta), None, &sid)
                     .await)
             }
             "session_close" => {
@@ -434,7 +445,7 @@ impl TidepoolReplServer {
 
     /// Send a `SessionCommand` to the named session worker and await its reply.
     /// `eval_input` is forwarded to the worker so `input :: Aeson.Value` is in
-    /// scope for `session_eval` turns; pass `None` for `session_def`/`session_cmd`.
+    /// scope for the first eval item in a `session_run` block.
     async fn run_command(
         &self,
         op: &str,
@@ -701,13 +712,14 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
     let names: Vec<&str> = decls.iter().map(|d| d.type_name).collect();
     format!(
         "tidepool-repl — a GHCi-style stateful Haskell session. Each named session holds one \
-         resident JIT machine whose value heap persists across `session_eval` turns; \
-         `session_def` accumulates declarations. Multiple agents can open distinct named sessions \
-         in parallel (omit `session` to use `\"default\"`). \
-         Lifecycle: session_open → (session_def | session_eval | session_cmd)* → session_close. \
-         `session_eval` code is a single `M a` expression (effects: {effects}). Prior \
-         declarations are in scope. An in-turn `ask` suspends with a continuation_id; answer it \
-         with session_resume or drop it with session_abort.",
+         resident JIT machine whose value heap persists across turns; declarations accumulate \
+         across `session_run` blocks. Multiple agents can open distinct named sessions in parallel \
+         (omit `session` to use `\"default\"`). \
+         Lifecycle: session_open → session_run* → session_close. \
+         `session_run` takes a list of items (declarations, bind statements, expressions, \
+         :commands) and runs them in sequence (effects: {effects}). \
+         An in-turn `ask` suspends with a continuation_id; answer it with session_resume or \
+         drop it with session_abort.",
         effects = names.join(", "),
     )
 }
@@ -770,26 +782,19 @@ impl ServerHandler for TidepoolReplServer {
             tool(
                 "session_open",
                 "Open a named session (one live JIT machine per name). Omit `session` to use the \
-                 default session. Call before any session_def/eval/cmd.",
+                 default session. Call before session_run.",
                 schema_to_map(schemars::schema_for!(SessionOpenRequest))?,
             ),
             tool(
-                "session_def",
-                "Append one or more top-level Haskell declarations to the session library. They \
-                 stay in scope for later session_eval turns.",
-                schema_to_map(schemars::schema_for!(SessionDefRequest))?,
-            ),
-            tool(
-                "session_eval",
-                "Evaluate a Haskell expression of type `M a` on the resident machine (the heap \
-                 persists across turns). Prior session_def declarations are in scope.",
-                schema_to_map(schemars::schema_for!(SessionEvalRequest))?,
-            ),
-            tool(
-                "session_cmd",
-                "Run a session meta-command: :bindings, :reset (:t / :i are stubbed). Leading \
-                 colon optional.",
-                schema_to_map(schemars::schema_for!(SessionCmdRequest))?,
+                "session_run",
+                "Run a list of GHCi-capable items in sequence on the resident machine. Each item \
+                 is a declaration (`data Foo = …`, `f x = …`), a bind statement (`x <- e` / \
+                 `let x = e`), a bare expression, or a `:command` (`:bindings`, `:reset`, \
+                 `:t <expr>`, `:i <name>`, `:vocab`). Items are classified automatically. \
+                 Execution stops on the first error. Returns per-item results and the last \
+                 expression value. An in-turn `ask` suspends with a continuation_id; resume \
+                 with session_resume or drop with session_abort.",
+                schema_to_map(schemars::schema_for!(SessionBlockRequest))?,
             ),
             tool(
                 "session_close",
