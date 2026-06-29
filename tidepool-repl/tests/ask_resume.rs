@@ -37,6 +37,14 @@ async fn resume(repl: &Repl, continuation_id: &str, response: serde_json::Value)
     }
 }
 
+/// Extract a number from a `{type,value}` envelope's `value`, tolerant of either
+/// a JSON number or a Show-rendered numeric string (`"7.0"`) — Show-default
+/// rendering returns the latter for a scalar `Double`.
+fn as_num(v: &serde_json::Value) -> Option<f64> {
+    v.as_f64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+}
+
 /// Parse the `{"suspended":true,"continuation_id":"scont_N",...}` JSON returned
 /// by a suspended `session_eval` turn; assert the shape is correct and return
 /// the continuation id.
@@ -97,8 +105,7 @@ async fn object_reply_is_extractable_value() {
     // Parse the rendered {type, value} envelope and extract the Double.
     let envelope: serde_json::Value = serde_json::from_str(t.text.trim())
         .unwrap_or_else(|_| panic!("BUG-9: result should be a Double, got: {}", t.text));
-    let result = envelope["value"]
-        .as_f64()
+    let result = as_num(&envelope["value"])
         .unwrap_or_else(|| panic!("BUG-9: result should be a Double, got: {}", t.text));
     assert!(
         (result - 5.0).abs() < 1e-9,
@@ -138,8 +145,7 @@ async fn scalar_reply_extracts_via_double() {
 
     let envelope: serde_json::Value = serde_json::from_str(t.text.trim())
         .unwrap_or_else(|_| panic!("scalar result should be a Double, got: {}", t.text));
-    let result = envelope["value"]
-        .as_f64()
+    let result = as_num(&envelope["value"])
         .unwrap_or_else(|| panic!("scalar result should be a Double, got: {}", t.text));
     assert!(
         (result - 7.0).abs() < 1e-9,
@@ -198,8 +204,7 @@ async fn invalid_reply_does_not_consume_continuation() {
     );
     let envelope: serde_json::Value = serde_json::from_str(t.text.trim())
         .unwrap_or_else(|_| panic!("retry result should be a Double, got: {}", t.text));
-    let result = envelope["value"]
-        .as_f64()
+    let result = as_num(&envelope["value"])
         .unwrap_or_else(|| panic!("retry result should be a Double, got: {}", t.text));
     assert!(
         (result - 42.0).abs() < 1e-9,
