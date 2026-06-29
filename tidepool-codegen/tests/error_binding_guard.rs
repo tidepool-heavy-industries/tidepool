@@ -112,3 +112,27 @@ fn direct_error_reports_message() {
     let _ = error_boom_rhs(&mut b);
     assert_clean_boom("direct", &run(b.build()));
 }
+
+/// `let f = error in f "boom"` — exercises `poison_trampoline_lazy` directly.
+///
+/// When `error_sentinel` appears as a plain Var (not in App head), the emit
+/// stores a lazy poison closure as `f`. The subsequent `App(Var(f), "boom")`
+/// is an ordinary closure call; `poison_trampoline_lazy` fires at runtime,
+/// calls `materialize_message`, and routes through `runtime_error_with_msg`.
+#[test]
+fn lazy_poison_applied_at_runtime_reports_message() {
+    let f = VarId(1);
+    let mut b = TreeBuilder::new();
+    // RHS: bare error_sentinel var (NOT in App position — no static-msg extraction)
+    let sent = b.push(CoreFrame::Var(VarId(SENTINEL_USERERROR)));
+    // Body: apply f (the lazy poison) to "boom" at a separate App site
+    let boom = b.push(CoreFrame::Lit(Literal::LitString(b"boom".to_vec())));
+    let f_var = b.push(CoreFrame::Var(f));
+    let body = b.push(CoreFrame::App { fun: f_var, arg: boom });
+    b.push(CoreFrame::LetNonRec {
+        binder: f,
+        rhs: sent,
+        body,
+    });
+    assert_clean_boom("lazy-poison-applied", &run(b.build()));
+}
