@@ -176,8 +176,8 @@ impl SessionLib {
     }
 
     /// Append a declaration turn. Extracts binder names from GHC, regenerates the
-    /// gen-versioned module, writes it atomically, validates it type-checks via GHC
-    /// (for turns that introduce value binders), and returns the new generation.
+    /// gen-versioned module, writes it atomically, validates it type-checks via GHC,
+    /// and returns the new generation.
     ///
     /// `decl_text` may contain several top-level declarations; their binders are
     /// classified together as this turn's introduced names.
@@ -188,14 +188,11 @@ impl SessionLib {
     /// Syntactically-invalid declarations are rejected here (GHC's parser fails →
     /// `SessionError::BinderExtraction`) and the log is left untouched.
     ///
-    /// Declarations that parse but fail to type-check (e.g. a body referencing a
-    /// not-yet-defined name) are also rejected: when the turn introduces value
-    /// binders, the candidate gen module is compiled via a thin wrapper; on failure
-    /// the log is rolled back and `SessionError::ValidationFailed` is returned
-    /// (BUG-A fix). Turns that introduce only type/class/instance binders (no
-    /// `ExportItem::Value` entries) skip this validation step so the existing
-    /// class-method-export behaviour (GHC-54721) is left to surface at eval time
-    /// rather than at define time.
+    /// Declarations that parse but fail to type-check are also rejected: the
+    /// candidate gen module is compiled via a thin wrapper; on failure the log is
+    /// rolled back and the gen module file deleted so subsequent turns cannot pick
+    /// up a stale poisoned module (`SessionError::ValidationFailed`). This covers
+    /// ALL declaration kinds — `data`, `class`, `instance`, `type`, and values.
     pub fn define(&mut self, decl_text: &str) -> Result<Generation, SessionError> {
         // RE-1: empty / whitespace declaration is a no-op — don't bump the gen.
         if decl_text.trim().is_empty() {
@@ -206,10 +203,6 @@ impl SessionLib {
         binder_include.extend(self.extra_include.iter().map(PathBuf::as_path));
         let items = binders::extract_binders(decl_text, &binder_include)?;
 
-        // Only validate turns that introduce value binders (functions / values).
-        // Type / class / instance turns are skipped — see doc above.
-        let has_value_binder = items.iter().any(|i| matches!(i, ExportItem::Value { .. }));
-
         self.log.push(DeclTurn {
             sources: vec![decl_text.to_string()],
             items,
@@ -218,14 +211,13 @@ impl SessionLib {
         let rendered = render::render_module(&self.log, gen, &self.env);
         self.write_module(&rendered)?;
 
-        // BUG-A fix: validate the candidate module type-checks via GHC.
-        // On failure, roll back the log to the prior generation so the session
-        // remains usable for subsequent turns.
-        if has_value_binder {
-            if let Err(e) = self.validate_candidate(&rendered) {
-                self.log.turns.pop();
-                return Err(e);
-            }
+        // Validate ALL turns via GHC. On failure, roll back the log and delete
+        // the gen module file so later turns don't import a poisoned module.
+        if let Err(e) = self.validate_candidate(&rendered) {
+            self.log.turns.pop();
+            let gen_path = self.root.join(rendered.module.relative_hs_path());
+            let _ = std::fs::remove_file(&gen_path);
+            return Err(e);
         }
 
         Ok(gen)

@@ -184,6 +184,56 @@ pub struct RenderedModule {
     pub source: String,
 }
 
+/// Parse `{-# LANGUAGE Ext1, Ext2 #-}` (single pragma block, one or more lines)
+/// into the list of extension names. Returns an empty vec for absent or malformed input.
+fn parse_pragma_extensions(pragma_block: &str) -> Vec<String> {
+    let mut exts = Vec::new();
+    for line in pragma_block.lines() {
+        let line = line.trim();
+        if line.starts_with("{-# LANGUAGE") && line.contains("#-}") {
+            if let Some(inner) = line
+                .strip_prefix("{-# LANGUAGE")
+                .and_then(|s| s.rfind("#-}").map(|i| s[..i].trim()))
+            {
+                for e in inner.split(',') {
+                    let e = e.trim().to_string();
+                    if !e.is_empty() {
+                        exts.push(e);
+                    }
+                }
+            }
+        }
+    }
+    exts
+}
+
+/// Scan `src` line by line for `{-# LANGUAGE … #-}` pragmas (line-anchored),
+/// collect their extension names, strip those lines, and return
+/// `(stripped_source, extensions)`.
+fn extract_language_pragmas(src: &str) -> (String, Vec<String>) {
+    let mut exts = Vec::new();
+    let mut kept: Vec<&str> = Vec::new();
+    for line in src.lines() {
+        let t = line.trim();
+        if t.starts_with("{-# LANGUAGE") && t.contains("#-}") {
+            if let Some(inner) = t
+                .strip_prefix("{-# LANGUAGE")
+                .and_then(|s| s.rfind("#-}").map(|i| s[..i].trim()))
+            {
+                for e in inner.split(',') {
+                    let e = e.trim().to_string();
+                    if !e.is_empty() {
+                        exts.push(e);
+                    }
+                }
+            }
+        } else {
+            kept.push(line);
+        }
+    }
+    (kept.join("\n"), exts)
+}
+
 /// The export items in scope (and re-exported) by `Lib.G<g-1>`, i.e. after
 /// applying shadowing across turns `0..g-1`. A later turn redefines a prior item
 /// iff their **head names** match (a function redefines a same-named function; a
@@ -222,6 +272,33 @@ pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> Rendere
     let this = &log.turns[g - 1];
     let prior = cumulative_exports_before(log, g);
 
+    // Hoist LANGUAGE pragmas from user source: collect extension names and
+    // strip those lines so they don't reappear after the module header.
+    let mut hoisted_exts: Vec<String> = Vec::new();
+    let stripped_sources: Vec<String> = this
+        .sources
+        .iter()
+        .map(|src| {
+            let (stripped, exts) = extract_language_pragmas(src);
+            hoisted_exts.extend(exts);
+            stripped
+        })
+        .collect();
+
+    // Build merged pragma block: env extensions first, then any new user
+    // extensions not already present (dedupe, order-preserving).
+    let mut merged_exts = parse_pragma_extensions(&env.pragmas);
+    for ext in &hoisted_exts {
+        if !merged_exts.contains(ext) {
+            merged_exts.push(ext.clone());
+        }
+    }
+    let merged_pragmas = if merged_exts.is_empty() {
+        env.pragmas.clone()
+    } else {
+        format!("{{-# LANGUAGE {} #-}}", merged_exts.join(", "))
+    };
+
     // Heads this turn (re)defines — drives the `hiding` clause on the prior-gen
     // import (head-name match only; see `cumulative_exports_before`).
     let new_heads: Vec<&str> = this.items.iter().map(ExportItem::head_name).collect();
@@ -235,7 +312,7 @@ pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> Rendere
     };
 
     let mut out = String::new();
-    out.push_str(&env.pragmas);
+    out.push_str(&merged_pragmas);
     out.push('\n');
     out.push_str(
         "-- GENERATED (Lane A) — accumulated session declarations. Do not edit;\n\
@@ -282,10 +359,14 @@ pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> Rendere
     }
     out.push('\n');
 
-    // The accumulated declaration source for this turn, verbatim.
-    for src in &this.sources {
-        out.push_str(src.trim_end());
-        out.push_str("\n\n");
+    // The accumulated declaration source for this turn, with LANGUAGE pragmas
+    // already hoisted into the merged pragma block above.
+    for src in &stripped_sources {
+        let body = src.trim_end();
+        if !body.is_empty() {
+            out.push_str(body);
+            out.push_str("\n\n");
+        }
     }
 
     RenderedModule { module, source: out }
@@ -404,6 +485,55 @@ mod tests {
         let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
         assert!(r.source.contains("    Name\n"));
         assert!(!r.source.contains("Name(..)"));
+    }
+
+    #[test]
+    fn user_language_pragma_hoisted_above_module_header() {
+        let mut log = DeclLog::new();
+        log.push(turn(
+            "{-# LANGUAGE DeriveAnyClass #-}\ndata Foo = Foo deriving (Eq, Show)",
+            vec![ty("Foo", &["Foo"])],
+        ));
+        let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
+        let pragma_pos = r.source.find("{-# LANGUAGE").expect("pragma block present");
+        let module_pos = r
+            .source
+            .find("module Tidepool.Session.Lib.G1")
+            .expect("module header present");
+        assert!(pragma_pos < module_pos, "LANGUAGE pragma must precede module header");
+        // DeriveAnyClass must appear in the merged pragma block (before the module line).
+        assert!(
+            r.source[..module_pos].contains("DeriveAnyClass"),
+            "DeriveAnyClass must be in merged pragma block"
+        );
+        // The original pragma line must NOT appear in the body (after module header).
+        let body = &r.source[module_pos..];
+        assert!(
+            !body.contains("{-# LANGUAGE DeriveAnyClass #-}"),
+            "LANGUAGE pragma must be stripped from body"
+        );
+        // The declaration body must still be present.
+        assert!(r.source.contains("data Foo = Foo deriving (Eq, Show)"));
+    }
+
+    #[test]
+    fn multiple_user_language_pragmas_deduplicated() {
+        let mut log = DeclLog::new();
+        // OverloadedStrings already in standalone_default — must not appear twice.
+        log.push(turn(
+            "{-# LANGUAGE DeriveGeneric #-}\n{-# LANGUAGE OverloadedStrings #-}\ndata Bar = Bar",
+            vec![ty("Bar", &["Bar"])],
+        ));
+        let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
+        let module_pos = r
+            .source
+            .find("module Tidepool.Session.Lib.G1")
+            .expect("module header present");
+        let preamble = &r.source[..module_pos];
+        // DeriveGeneric added; OverloadedStrings already present → no duplicate.
+        assert!(preamble.contains("DeriveGeneric"));
+        let count = preamble.matches("OverloadedStrings").count();
+        assert_eq!(count, 1, "OverloadedStrings must appear exactly once");
     }
 
     #[test]
