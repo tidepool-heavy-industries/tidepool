@@ -9,6 +9,8 @@
 //! Requires `tidepool-extract` (the GHC→Core extractor) on `$PATH` or via
 //! `TIDEPOOL_EXTRACT`; skips cleanly otherwise.
 
+mod common;
+
 use std::path::PathBuf;
 
 use rmcp::model::{CallToolResult, RawContent};
@@ -83,10 +85,11 @@ async fn session_multi_turn_real_path() {
         );
         return;
     }
-    let server = build_server();
+    let repl = common::Repl { server: build_server() };
 
     // 1. open
-    let r = server
+    let r = repl
+        .server
         .dispatch_tool("session_open", serde_json::Map::new())
         .await
         .expect("session_open");
@@ -94,46 +97,27 @@ async fn session_multi_turn_real_path() {
     assert!(text_of(&r).contains("opened"));
 
     // 2. define `slug` (Lane A → Tidepool.Session.Lib.G1)
-    let r = server
-        .dispatch_tool(
-            "session_def",
-            obj(&[("decl", "slug t = T.replace \" \" \"-\" t")]),
-        )
-        .await
-        .expect("session_def");
-    assert_ne!(r.is_error, Some(true), "def errored: {}", text_of(&r));
-    let txt = text_of(&r);
+    let turn = repl.def("slug t = T.replace \" \" \"-\" t").await;
+    assert!(!turn.is_error, "def errored: {}", turn.text);
+    let txt = &turn.text;
     assert!(
         txt.contains("\"generation\":1") || txt.contains("\"generation\": 1"),
         "def: {txt}"
     );
 
     // 3. eval `slug "a b"` → "a-b" (bootstraps the resident machine)
-    let r = server
-        .dispatch_tool("session_eval", obj(&[("code", "pure (slug \"a b\")")]))
-        .await
-        .expect("session_eval 1");
-    assert_ne!(r.is_error, Some(true), "eval 1 errored: {}", text_of(&r));
-    assert!(
-        text_of(&r).contains("a-b"),
-        "eval 1 result: {}",
-        text_of(&r)
-    );
+    let turn = repl.eval("pure (slug \"a b\")").await;
+    assert!(!turn.is_error, "eval 1 errored: {}", turn.text);
+    assert!(turn.text.contains("a-b"), "eval 1 result: {}", turn.text);
 
     // 4. a SECOND eval on the SAME machine (re-entry; heap persists)
-    let r = server
-        .dispatch_tool("session_eval", obj(&[("code", "pure (slug \"x y\")")]))
-        .await
-        .expect("session_eval 2");
-    assert_ne!(r.is_error, Some(true), "eval 2 errored: {}", text_of(&r));
-    assert!(
-        text_of(&r).contains("x-y"),
-        "eval 2 result: {}",
-        text_of(&r)
-    );
+    let turn = repl.eval("pure (slug \"x y\")").await;
+    assert!(!turn.is_error, "eval 2 errored: {}", turn.text);
+    assert!(turn.text.contains("x-y"), "eval 2 result: {}", turn.text);
 
     // 5. close (drops the machine / frees the heap)
-    let r = server
+    let r = repl
+        .server
         .dispatch_tool("session_close", serde_json::Map::new())
         .await
         .expect("session_close");
@@ -141,13 +125,10 @@ async fn session_multi_turn_real_path() {
     assert!(text_of(&r).contains("closed"));
 
     // after close a new turn must report no open session
-    let r = server
-        .dispatch_tool("session_eval", obj(&[("code", "pure (slug \"a b\")")]))
-        .await
-        .expect("post-close eval");
-    assert_eq!(r.is_error, Some(true), "post-close eval should error");
+    let turn = repl.eval("pure (slug \"a b\")").await;
+    assert_eq!(turn.is_error, true, "post-close eval should error");
     // Multi-session: the message now names the session ("no session 'default' open").
-    let msg = text_of(&r);
+    let msg = &turn.text;
     assert!(msg.contains("no session") && msg.contains("open"), "unexpected: {msg}");
 }
 
