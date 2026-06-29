@@ -59,6 +59,11 @@ pub struct SessionEvalRequest {
     /// value is the turn's result. Declarations from prior `session_def` turns
     /// are in scope.
     pub code: String,
+    /// Optional payload available as `input :: Aeson.Value` in the evaluated
+    /// code. Pass large or quote-heavy content here instead of escaping it
+    /// inside `code`. Mirrors the stateless `eval` tool's `input` lane.
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -152,7 +157,7 @@ impl TidepoolReplServer {
     where
         H: DispatchEffect<CapturedOutput> + Clone + Send + Sync + 'static,
     {
-        let preamble = tidepool_mcp::build_preamble(&cfg.decls, false);
+        let preamble = tidepool_mcp::build_preamble_non_interactive(&cfg.decls, false);
         let effect_stack = tidepool_mcp::build_effect_stack_type(&cfg.decls);
         let ask_tag = cfg.ask_tag;
         // Erase H: the spawn closure owns a clone of `base`.
@@ -241,14 +246,18 @@ impl TidepoolReplServer {
                 let req: SessionDefRequest = serde_json::from_value(parse(args))
                     .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
                 Ok(self
-                    .run_command("session_def", SessionCommand::Def(DeclText(req.decl)))
+                    .run_command("session_def", SessionCommand::Def(DeclText(req.decl)), None)
                     .await)
             }
             "session_eval" => {
                 let req: SessionEvalRequest = serde_json::from_value(parse(args))
                     .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
                 Ok(self
-                    .run_command("session_eval", SessionCommand::Eval(ExprText(req.code)))
+                    .run_command(
+                        "session_eval",
+                        SessionCommand::Eval(ExprText(req.code)),
+                        req.input,
+                    )
                     .await)
             }
             "session_cmd" => {
@@ -259,7 +268,7 @@ impl TidepoolReplServer {
                     Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
                 };
                 Ok(self
-                    .run_command("session_cmd", SessionCommand::Cmd(meta))
+                    .run_command("session_cmd", SessionCommand::Cmd(meta), None)
                     .await)
             }
             "session_close" => Ok(self.session_close().await),
@@ -314,7 +323,14 @@ impl TidepoolReplServer {
     }
 
     /// Send a `SessionCommand` to the resident worker and await its reply.
-    async fn run_command(&self, op: &str, cmd: SessionCommand) -> CallToolResult {
+    /// `eval_input` is forwarded to the worker so `input :: Aeson.Value` is in
+    /// scope for `session_eval` turns; pass `None` for `session_def`/`session_cmd`.
+    async fn run_command(
+        &self,
+        op: &str,
+        cmd: SessionCommand,
+        eval_input: Option<serde_json::Value>,
+    ) -> CallToolResult {
         let Some(sender) = self.inner.manager.current_sender() else {
             return CallToolResult::error(vec![Content::text(
                 "no session open; call session_open first",
@@ -330,6 +346,7 @@ impl TidepoolReplServer {
             response_rx,
             gate: Arc::clone(&gate),
             captured: captured.clone(),
+            eval_input,
         };
         if sender.send(job).is_err() {
             return CallToolResult::error(vec![Content::text("session worker is gone")]);
@@ -352,6 +369,7 @@ impl TidepoolReplServer {
             response_rx,
             gate,
             captured,
+            eval_input: None,
         };
         let _ = handle.sender().send(job);
         // Await the Closed ack, then reap the worker thread.

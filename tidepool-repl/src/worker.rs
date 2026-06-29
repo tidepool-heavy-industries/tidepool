@@ -31,6 +31,10 @@ pub struct WorkerJob {
     pub response_rx: Receiver<ResumeMsg>,
     pub gate: Arc<PauseGate>,
     pub captured: CapturedOutput,
+    /// Optional `input` payload from `SessionEvalRequest` — injected into
+    /// `template_haskell` so `input :: Aeson.Value` is in scope for `session_eval`.
+    /// `None` for `session_def` / `session_cmd` turns.
+    pub eval_input: Option<serde_json::Value>,
 }
 
 /// A handle to the resident worker thread: the command channel + its join
@@ -148,6 +152,7 @@ where
             gate: job.gate,
         };
 
+        handle.set_eval_input(job.eval_input);
         let outcome = handle.run(&job.cmd, &mut dispatcher, &job.captured);
         let msg = if outcome.is_error() {
             WorkerMessage::Error {

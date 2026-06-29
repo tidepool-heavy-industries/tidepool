@@ -75,6 +75,10 @@ pub struct Session {
     /// The DataConTable accumulated across turns (union via `insert_checked`), so
     /// a custom-ADT value bound earlier renders with real con names later.
     session_table: DataConTable,
+    /// Per-turn input payload from `SessionEvalRequest.input`. Injected into
+    /// `template_haskell` so `input :: Aeson.Value` is in scope. Taken (cleared)
+    /// by `run_plain_eval` / `run_session_reference` after use.
+    eval_input: Option<serde_json::Value>,
 }
 
 impl Session {
@@ -93,6 +97,7 @@ impl Session {
             bindings: BindingTable::new(),
             val_gen: Generation(0),
             session_table: DataConTable::new(),
+            eval_input: None,
         })
     }
 
@@ -246,13 +251,14 @@ impl Session {
             .current_module()
             .map(|m| format!("{}\n", m.module_name()))
             .unwrap_or_default();
+        let eval_input = self.eval_input.take();
         let source = template_haskell(
             &preamble,
             &self.cfg.effect_stack,
             expr_text,
             &imports,
             "",
-            None,
+            eval_input.as_ref(),
             None,
         );
 
@@ -536,6 +542,7 @@ impl Session {
         let mut include: Vec<&Path> = self.cfg.base_include.iter().map(PathBuf::as_path).collect();
         include.push(lib_dir.as_path());
 
+        let eval_input = self.eval_input.take();
         // Eff-first.
         let eff_src = template_haskell(
             &preamble,
@@ -543,18 +550,18 @@ impl Session {
             expr_text,
             &imports,
             "",
-            None,
+            eval_input.as_ref(),
             None,
         );
         match compile_session_turn(&eff_src, &include, self.session_root(), &inject, None) {
             Ok(turn) => self.run_reference_fragment(turn, false, handlers, captured),
             Err(eff_err) => {
-                // Pure fallback.
+                // Pure fallback (keep the compile attempt; suppress the redundant error text).
                 let pure_src = wrap_pure_ref_source(&preamble, &imports, expr_text);
                 match compile_session_turn(&pure_src, &include, self.session_root(), &inject, None) {
                     Ok(turn) => self.run_reference_fragment(turn, true, handlers, captured),
-                    Err(pure_err) => TurnOutcome::Error(format!(
-                        "reference compile error (as Eff: {eff_err}) (as pure value: {pure_err})"
+                    Err(_pure_err) => TurnOutcome::Error(format!(
+                        "compile error: {eff_err} (also failed as a pure value)"
                     )),
                 }
             }
@@ -675,6 +682,12 @@ impl Session {
         // JitEffectMachine::drop calls free_session_heap for session machines.
         self.machine = None;
     }
+
+    /// Store the per-turn input payload so `run_plain_eval` / `run_session_reference`
+    /// can inject it into `template_haskell`. Called by the worker before each turn.
+    fn set_eval_input(&mut self, input: Option<serde_json::Value>) {
+        self.eval_input = input;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -711,6 +724,12 @@ impl SessionHandle<Open> {
         captured: &CapturedOutput,
     ) -> TurnOutcome {
         self.inner.run_turn(cmd, handlers, captured)
+    }
+
+    /// Store the per-turn input payload before a `session_eval` turn runs.
+    /// The worker calls this so `input :: Aeson.Value` is in scope during eval.
+    pub fn set_eval_input(&mut self, input: Option<serde_json::Value>) {
+        self.inner.set_eval_input(input);
     }
 
     /// The current declaration generation (0 until the first `session_def`).

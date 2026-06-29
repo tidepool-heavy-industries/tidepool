@@ -114,7 +114,7 @@ fn pragmas_and_imports(out: &mut String, user_library: bool) {
 /// Emit the pagination / auto-truncation helper bodies (`putStrLn`, `valSize`,
 /// the `trunc*` family, `renderJson`, `paginateResult`). Console/KV/Ask
 /// presence selects the `putStrLn` and `paginateResult` variants.
-fn pagination_helpers(out: &mut String, effects: &[EffectDecl]) {
+fn pagination_helpers(out: &mut String, effects: &[EffectDecl], interactive_pagination: bool) {
     if effects.is_empty() {
         return;
     }
@@ -224,7 +224,7 @@ fn pagination_helpers(out: &mut String, effects: &[EffectDecl]) {
         "  Null -> \"null\"\n",
     ));
 
-    if has_ask {
+    if has_ask && interactive_pagination {
         out.push_str(concat!(
             "paginateResult :: Int -> Value -> M Value\n",
             "paginateResult budget val\n",
@@ -243,6 +243,18 @@ fn pagination_helpers(out: &mut String, effects: &[EffectDecl]) {
             "                Nothing -> pure truncated\n",
             "              Nothing -> pure truncated\n",
             "            _ -> pure truncated\n",
+        ));
+    } else if !interactive_pagination && has_console {
+        // Repl variant: truncate in-place, emit a note via Console, no ask/suspend.
+        // The repl persists bindings across turns so the caller can re-query by name.
+        out.push_str(concat!(
+            "paginateResult :: Int -> Value -> M Value\n",
+            "paginateResult budget val\n",
+            "  | valSize val <= budget = pure val\n",
+            "  | otherwise = do\n",
+            "      let (truncated, _) = truncVal budget val\n",
+            "      putStrLn \"[truncated \u{2014} bind the result and re-query]\"\n",
+            "      pure truncated\n",
         ));
     } else {
         out.push_str(concat!(
@@ -375,7 +387,19 @@ fn orchestration_helpers(out: &mut String, effects: &[EffectDecl], user_library:
 pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
     let mut out = String::new();
     pragmas_and_imports(&mut out, user_library);
-    pagination_helpers(&mut out, effects);
+    pagination_helpers(&mut out, effects, true);
+    orchestration_helpers(&mut out, effects, user_library);
+    out
+}
+
+/// Like [`build_preamble`] but with non-interactive (truncate-only) pagination:
+/// oversized results are truncated in-place with a marker instead of suspending
+/// via `ask`. Used by `tidepool-repl` where bindings persist across turns and
+/// the caller can re-query a truncated result by its bound name.
+pub fn build_preamble_non_interactive(effects: &[EffectDecl], user_library: bool) -> String {
+    let mut out = String::new();
+    pragmas_and_imports(&mut out, user_library);
+    pagination_helpers(&mut out, effects, false);
     orchestration_helpers(&mut out, effects, user_library);
     out
 }
