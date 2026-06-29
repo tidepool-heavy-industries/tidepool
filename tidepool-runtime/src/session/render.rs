@@ -246,6 +246,30 @@ fn extract_language_pragmas(src: &str) -> (String, Vec<String>) {
     (kept.join("\n"), exts)
 }
 
+/// Scan `src` line by line for top-level `import …` lines (line-anchored),
+/// collect them verbatim, strip those lines, and return
+/// `(stripped_source, import_lines)`.
+///
+/// Handles the common single-line case: `import [qualified] Mod [as X]
+/// [(list)] [hiding (list)]`. Multi-line import lists (a line ending with `(`
+/// and no closing `)` on the same line) are not currently hoisted — they stay
+/// in the body where they are a parse error if before declarations. Multi-line
+/// imports in session_def bodies are rare enough that single-line coverage
+/// handles the practical cases.
+fn extract_user_imports(src: &str) -> (String, Vec<String>) {
+    let mut imports = Vec::new();
+    let mut kept: Vec<&str> = Vec::new();
+    for line in src.lines() {
+        let t = line.trim();
+        if t.starts_with("import ") || t.starts_with("import\t") {
+            imports.push(t.to_string());
+        } else {
+            kept.push(line);
+        }
+    }
+    (kept.join("\n"), imports)
+}
+
 /// The export items in scope (and re-exported) by `Lib.G<g-1>`, i.e. after
 /// applying shadowing across turns `0..g-1`. A later turn redefines a prior item
 /// iff their **head names** match (a function redefines a same-named function; a
@@ -284,15 +308,18 @@ pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> Rendere
     let this = &log.turns[g - 1];
     let prior = cumulative_exports_before(log, g);
 
-    // Hoist LANGUAGE pragmas from user source: collect extension names and
-    // strip those lines so they don't reappear after the module header.
+    // Hoist LANGUAGE pragmas and import lines from user source: strip them so
+    // they don't reappear after the module header / in the declaration body.
     let mut hoisted_exts: Vec<String> = Vec::new();
+    let mut hoisted_imports: Vec<String> = Vec::new();
     let stripped_sources: Vec<String> = this
         .sources
         .iter()
         .map(|src| {
             let (stripped, exts) = extract_language_pragmas(src);
             hoisted_exts.extend(exts);
+            let (stripped, imps) = extract_user_imports(&stripped);
+            hoisted_imports.extend(imps);
             stripped
         })
         .collect();
@@ -352,7 +379,8 @@ pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> Rendere
         out.push_str("  ) where\n");
     }
 
-    // Standard imports, then the selective prior-gen import.
+    // Standard imports, then the selective prior-gen import, then any user
+    // imports hoisted from decl sources (deduped against the standard set).
     for imp in &env.imports {
         out.push_str(imp);
         out.push('\n');
@@ -367,6 +395,12 @@ pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> Rendere
                 prev.module_name(),
                 hides.join(", ")
             ));
+        }
+    }
+    for imp in &hoisted_imports {
+        if !env.imports.contains(imp) {
+            out.push_str(imp);
+            out.push('\n');
         }
     }
     out.push('\n');
@@ -561,6 +595,37 @@ mod tests {
         assert!(preamble.contains("DeriveGeneric"));
         let count = preamble.matches("OverloadedStrings").count();
         assert_eq!(count, 1, "OverloadedStrings must appear exactly once");
+    }
+
+    #[test]
+    fn user_import_hoisted_to_import_section() {
+        // An `import` inside a session_def body must be lifted into the module
+        // header (import section), not left in the declaration body — a
+        // body-position import is a GHC parse error.
+        let mut log = DeclLog::new();
+        log.push(turn(
+            "import Data.Char (toUpper)\ntoUpper' c = toUpper c",
+            vec![val("toUpper'")],
+        ));
+        let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
+        let module_pos = r
+            .source
+            .find("module Tidepool.Session.Lib.G1")
+            .expect("module header present");
+        let import_pos = r
+            .source
+            .find("import Data.Char (toUpper)")
+            .expect("import must appear in output");
+        let decl_pos = r.source.find("toUpper' c = toUpper c").expect("decl body present");
+        // Import must be in the header region (after module line, before decl body).
+        assert!(import_pos > module_pos, "import must appear after module header:\n{}", r.source);
+        assert!(import_pos < decl_pos, "import must appear before declaration body:\n{}", r.source);
+        // The import must NOT reappear inside the declaration body.
+        assert!(
+            !r.source[decl_pos..].contains("import Data.Char"),
+            "import must be stripped from declaration body:\n{}",
+            r.source
+        );
     }
 
     #[test]
