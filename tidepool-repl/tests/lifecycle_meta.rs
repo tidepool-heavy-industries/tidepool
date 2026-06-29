@@ -74,12 +74,13 @@ async fn eval_after_close_no_session() {
     repl.eval("pure (1 :: Int)").await.expect_ok("good eval");
     repl.close().await.expect_ok("close");
 
-    // post-close: the session manager is empty → clean "no session open".
+    // post-close: the session manager is empty → clean no-session error.
+    // (Multi-session names the session: "no session 'default' open".)
     let t = repl.eval("pure (2 :: Int)").await;
     t.expect_err("eval after close");
     assert!(
-        t.contains("no session open"),
-        "post-close eval should report 'no session open': {}",
+        t.contains("no session") && t.contains("open"),
+        "post-close eval should report no open session: {}",
         t.text
     );
 }
@@ -291,29 +292,35 @@ async fn bindings_shape() {
 }
 
 // ---------------------------------------------------------------------------
-// Case 7 — `:t` / `:i` are KNOWN Wave-4 stubs (codify the current contract).
-// When Wave 4 lands these will need to flip to real type/info output.
+// Case 7 — `:t` / `:i` are IMPLEMENTED: `:t` reports an expression's inferred
+// type (via the throwaway-bind → type_display path); `:i` reports a bound
+// name's type/tier. (Formerly Wave-4 stubs.)
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn type_and_info_are_wave4_stubs() {
+async fn type_and_info_are_implemented() {
     if !extract_available() {
         return;
     }
     let repl = Repl::new();
     repl.open_ok().await;
 
-    // `:t` and `:i` are NOT errors today — they return a "not yet implemented"
-    // note (TurnOutcome::Meta). This is a tracked Wave-4 gap, not a bug.
-    let t = repl.cmd(":t foo").await;
+    // `:t` returns the inferred type — no longer a stub.
+    let t = repl.cmd(":t (1 :: Int)").await;
+    let out = t.expect_ok(":t");
     assert!(
-        t.expect_ok(":t stub").contains("not yet implemented"),
-        ":t should return the Wave-4 stub note: {}",
+        out.contains("Int") && !out.contains("not yet implemented"),
+        ":t should report the type Int: {}",
         t.text
     );
-    let t = repl.cmd(":i foo").await;
+
+    // `:i` on a bound name reports its type.
+    repl.eval("b <- pure (True :: Bool)")
+        .await
+        .expect_ok("bind b");
+    let t = repl.cmd(":i b").await;
     assert!(
-        t.expect_ok(":i stub").contains("not yet implemented"),
-        ":i should return the Wave-4 stub note: {}",
+        t.expect_ok(":i").contains("Bool"),
+        ":i b should report Bool: {}",
         t.text
     );
 
