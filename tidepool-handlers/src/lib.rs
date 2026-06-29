@@ -225,6 +225,55 @@ pub fn component_filter(pattern: &str, rel_path: &std::path::Path) -> bool {
     true
 }
 
+/// Returns true if `p` contains glob metacharacters (`*`, `?`, `[`).
+pub fn is_glob(p: &str) -> bool {
+    p.contains('*') || p.contains('?') || p.contains('[')
+}
+
+/// Expand a glob pattern relative to `root` with sandbox and component filtering.
+///
+/// Shared by [`FsHandler`] and [`SgHandler`] so both benefit from the same
+/// `**`-normalisation, sandbox check, and hidden-dir filter.
+pub fn expand_glob(root: &std::path::Path, pattern: &str) -> Result<Vec<PathBuf>, EffectError> {
+    if pattern.contains("..") {
+        return Ok(Vec::new());
+    }
+    if pattern.starts_with('/') || pattern.starts_with('\\') {
+        return Err(EffectError::Handler(
+            "absolute glob patterns not allowed".to_string(),
+        ));
+    }
+    // The glob crate's `**` matches DIRECTORIES only, so a bare trailing
+    // `/**` silently returns dirs and no files — never what the caller
+    // meant. Normalize to `/**/*` (everything, any depth).
+    let normalized;
+    let pattern = if pattern == "**" || pattern.ends_with("/**") {
+        normalized = format!("{}/*", pattern);
+        normalized.as_str()
+    } else {
+        pattern
+    };
+    let full_pattern = root.join(pattern).to_string_lossy().to_string();
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|e| EffectError::Handler(e.to_string()))?;
+
+    let paths: Vec<PathBuf> = glob::glob(&full_pattern)
+        .map_err(|e| EffectError::Handler(format!("invalid glob: {}", e)))?
+        .filter_map(std::result::Result::ok)
+        .filter(|p| {
+            p.canonicalize()
+                .map(|cp| cp.starts_with(&canonical_root))
+                .unwrap_or(false)
+        })
+        .filter(|p| {
+            let rel_path = p.strip_prefix(root).unwrap_or(p);
+            component_filter(pattern, rel_path)
+        })
+        .collect();
+    Ok(paths)
+}
+
 #[derive(Clone)]
 pub struct FsHandler {
     root: PathBuf,
@@ -236,44 +285,7 @@ impl FsHandler {
     }
 
     pub fn expand_glob(&self, pattern: &str) -> Result<Vec<PathBuf>, EffectError> {
-        if pattern.contains("..") {
-            return Ok(Vec::new());
-        }
-        if pattern.starts_with('/') || pattern.starts_with('\\') {
-            return Err(EffectError::Handler(
-                "absolute glob patterns not allowed".to_string(),
-            ));
-        }
-        // The glob crate's `**` matches DIRECTORIES only, so a bare trailing
-        // `/**` silently returns dirs and no files — never what the caller
-        // meant. Normalize to `/**/*` (everything, any depth).
-        let normalized;
-        let pattern = if pattern == "**" || pattern.ends_with("/**") {
-            normalized = format!("{}/*", pattern);
-            normalized.as_str()
-        } else {
-            pattern
-        };
-        let full_pattern = self.root.join(pattern).to_string_lossy().to_string();
-        let canonical_root = self
-            .root
-            .canonicalize()
-            .map_err(|e| EffectError::Handler(e.to_string()))?;
-
-        let paths: Vec<PathBuf> = glob::glob(&full_pattern)
-            .map_err(|e| EffectError::Handler(format!("invalid glob: {}", e)))?
-            .filter_map(std::result::Result::ok)
-            .filter(|p| {
-                p.canonicalize()
-                    .map(|cp| cp.starts_with(&canonical_root))
-                    .unwrap_or(false)
-            })
-            .filter(|p| {
-                let rel_path = p.strip_prefix(&self.root).unwrap_or(p);
-                component_filter(pattern, rel_path)
-            })
-            .collect();
-        Ok(paths)
+        expand_glob(&self.root, pattern)
     }
 
     pub fn resolve(&self, path: &str) -> Result<PathBuf, EffectError> {
@@ -503,6 +515,21 @@ pub enum SgReq {
     Apply(Lang, String, String, Vec<String>),
 }
 
+const MATCH_TEXT_LIMIT: usize = 500;
+
+/// Clamp match text to [`MATCH_TEXT_LIMIT`] chars so a single `[Match]` list
+/// doesn't overflow the eval context with whole-function bodies.
+fn truncate_match_text(text: String) -> String {
+    if text.len() <= MATCH_TEXT_LIMIT {
+        return text;
+    }
+    let mut end = MATCH_TEXT_LIMIT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
 /// Rust-side Match value returned to Haskell.
 /// Field order must match the Haskell data constructor:
 ///   Match { mText, mFile, mLine, mVars, mReplacement }
@@ -540,17 +567,33 @@ impl SgHandler {
             self.walk_dir(&canonical_root, lang, &mut files)?;
         } else {
             for p in paths {
-                let full = self.root.join(p);
-                let canonical = full
-                    .canonicalize()
-                    .map_err(|e| EffectError::Handler(format!("Bad path {}: {}", p, e)))?;
-                if !canonical.starts_with(&canonical_root) {
-                    return Err(EffectError::Handler(format!("Path escapes sandbox: {}", p)));
-                }
-                if canonical.is_file() {
-                    files.push(canonical);
-                } else if canonical.is_dir() {
-                    self.walk_dir(&canonical, lang, &mut files)?;
+                if is_glob(p) {
+                    // Glob path: expand then filter to language-matching files.
+                    for expanded in expand_glob(&self.root, p)? {
+                        if expanded.is_file() {
+                            if SupportLang::from_path(&expanded) == Some(lang) {
+                                files.push(expanded);
+                            }
+                        } else if expanded.is_dir() {
+                            self.walk_dir(&expanded, lang, &mut files)?;
+                        }
+                    }
+                } else {
+                    let full = self.root.join(p);
+                    let canonical = full
+                        .canonicalize()
+                        .map_err(|e| EffectError::Handler(format!("Bad path {}: {}", p, e)))?;
+                    if !canonical.starts_with(&canonical_root) {
+                        return Err(EffectError::Handler(format!(
+                            "Path escapes sandbox: {}",
+                            p
+                        )));
+                    }
+                    if canonical.is_file() {
+                        files.push(canonical);
+                    } else if canonical.is_dir() {
+                        self.walk_dir(&canonical, lang, &mut files)?;
+                    }
                 }
             }
         }
@@ -645,7 +688,7 @@ impl SgHandler {
                 .to_string();
 
             for m in grep.root().find_all(&pat) {
-                let text = m.text().to_string();
+                let text = truncate_match_text(m.text().to_string());
                 let line = m.start_pos().line() as i64 + 1;
                 let env: HashMap<String, String> = m.get_env().clone().into();
                 let mut vars: Vec<(String, String)> = env.into_iter().collect();
@@ -746,7 +789,7 @@ impl SgHandler {
                 .to_string();
 
             for m in grep.root().find_all(&rule) {
-                let text = m.text().to_string();
+                let text = truncate_match_text(m.text().to_string());
                 let line = m.start_pos().line() as i64 + 1;
                 let env: HashMap<String, String> = m.get_env().clone().into();
                 let mut vars: Vec<(String, String)> = env.into_iter().collect();
@@ -1952,6 +1995,43 @@ mod tests {
             }
             other => panic!("Expected Con (list), got {:?}", other),
         }
+    }
+
+    // === SgHandler glob + truncation tests ===
+
+    #[test]
+    fn test_sg_collect_files_glob() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.rs"), "fn a() {}").unwrap();
+        std::fs::write(root.join("sub/b.rs"), "fn b() {}").unwrap();
+        std::fs::write(root.join("ignore.hs"), "x = 1").unwrap();
+
+        let handler = SgHandler::new(root.clone());
+        let files = handler
+            .collect_files(SupportLang::Rust, &["**/*.rs".to_string()])
+            .unwrap();
+        assert!(files.len() >= 2, "expected .rs files from glob, got {files:?}");
+        assert!(
+            files.iter().all(|f| f.extension().map(|e| e == "rs").unwrap_or(false)),
+            "non-.rs file slipped through: {files:?}"
+        );
+    }
+
+    #[test]
+    fn test_truncate_match_text_short() {
+        let s = "hello".to_string();
+        assert_eq!(truncate_match_text(s.clone()), s);
+    }
+
+    #[test]
+    fn test_truncate_match_text_long() {
+        let long = "x".repeat(600);
+        let result = truncate_match_text(long);
+        assert!(result.len() <= MATCH_TEXT_LIMIT + 4, "too long: {}", result.len());
+        assert!(result.ends_with('…'));
     }
 
     // === Structural guard tests ===
