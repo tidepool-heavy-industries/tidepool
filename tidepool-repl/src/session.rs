@@ -876,16 +876,19 @@ fn hide_prelude_names(preamble: &str, extra: &[&str]) -> String {
     // Extract the existing hidden list from "import Tidepool.Prelude hiding (X, Y)\n"
     let paren_open = line.find('(').unwrap_or(line.len()) + 1;
     let paren_close = line.rfind(')').unwrap_or(line.len());
-    let existing: Vec<&str> = line[paren_open..paren_close]
+    let mut all: Vec<String> = line[paren_open..paren_close]
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
+        .map(str::to_string)
         .collect();
 
-    let mut all = existing;
     for &n in extra {
-        if !all.contains(&n) {
-            all.push(n);
+        // Parenthesize operator names (`.+` → `(.+)`) — a bare operator in a
+        // hiding list is a parse error.
+        let e = hiding_entry(n);
+        if !all.contains(&e) {
+            all.push(e);
         }
     }
     let new_line = format!("import Tidepool.Prelude hiding ({})\n", all.join(", "));
@@ -1011,4 +1014,33 @@ fn wrap_pure_ref_source(preamble: &str, imports: &str, expr_text: &str) -> Strin
         out.push_str(&format!("  {line}\n"));
     }
     out
+}
+
+#[cfg(test)]
+mod hiding_tests {
+    use super::{hide_library_names, hide_prelude_names};
+
+    #[test]
+    fn prelude_hiding_parenthesizes_operators() {
+        let pre = "import Tidepool.Prelude hiding (error)\n";
+        let out = hide_prelude_names(pre, &[".+", "slug"]);
+        // operator parenthesized, plain name bare; no bare `.+` (parse error)
+        assert!(out.contains("(.+)"), "op must be parenthesized: {out}");
+        assert!(out.contains("slug"), "plain name present: {out}");
+        assert!(!out.contains(" .+,") && !out.contains(", .+)"), "bare operator leaked: {out}");
+    }
+
+    #[test]
+    fn library_hiding_added_with_operators() {
+        let pre = "import Library\nimport qualified Prelude as P\n";
+        let out = hide_library_names(pre, &[".+", "sh"]);
+        assert!(out.contains("import Library hiding ("), "Library gets a hiding clause: {out}");
+        assert!(out.contains("(.+)") && out.contains("sh"), "names hidden: {out}");
+    }
+
+    #[test]
+    fn library_hiding_noop_without_import() {
+        let pre = "import Tidepool.Prelude hiding (error)\n";
+        assert_eq!(hide_library_names(pre, &["sh"]), pre, "no Library import → unchanged");
+    }
 }
