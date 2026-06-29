@@ -19,7 +19,9 @@ use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_mcp::{library_vocab, template_haskell, CapturedOutput, EffectDecl, PREAMBLE_DEFAULT_DECL};
+use tidepool_mcp::{
+    library_vocab, template_haskell_show_default, CapturedOutput, EffectDecl, PREAMBLE_DEFAULT_DECL,
+};
 use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
 };
@@ -252,7 +254,7 @@ impl Session {
             .map(|m| format!("{}\n", m.module_name()))
             .unwrap_or_default();
         let eval_input = self.eval_input.take();
-        let source = template_haskell(
+        let source = template_haskell_show_default(
             &preamble,
             &self.cfg.effect_stack,
             expr_text,
@@ -546,8 +548,8 @@ impl Session {
         include.push(lib_dir.as_path());
 
         let eval_input = self.eval_input.take();
-        // Eff-first.
-        let eff_src = template_haskell(
+        // Eff-first (show-default: REPL renders via Show/toWire, not toJSON).
+        let eff_src = template_haskell_show_default(
             &preamble,
             &self.cfg.effect_stack,
             expr_text,

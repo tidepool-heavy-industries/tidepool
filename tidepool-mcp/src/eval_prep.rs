@@ -145,6 +145,39 @@ pub fn template_haskell(
     input: Option<&serde_json::Value>,
     budget: Option<u32>,
 ) -> String {
+    template_haskell_impl(preamble, effect_stack, code, imports, helpers, input, budget, false)
+}
+
+/// Like [`template_haskell`] but uses `toWire` instead of `toJSON` for the
+/// result — enabling Show-default rendering (REPL mode). `Text` renders bare
+/// (not show-quoted); `Value` passes through as structured JSON; any other
+/// `Show a` renders via `show`. The `ToWire` class is always emitted by
+/// [`crate::build_preamble`] / [`crate::build_preamble_non_interactive`].
+///
+/// Used by `tidepool-repl` `session_eval` turns; the stateless eval server
+/// uses [`template_haskell`] (preserves the toJSON contract for machine callers).
+pub fn template_haskell_show_default(
+    preamble: &str,
+    effect_stack: &str,
+    code: &str,
+    imports: &str,
+    helpers: &str,
+    input: Option<&serde_json::Value>,
+    budget: Option<u32>,
+) -> String {
+    template_haskell_impl(preamble, effect_stack, code, imports, helpers, input, budget, true)
+}
+
+fn template_haskell_impl(
+    preamble: &str,
+    effect_stack: &str,
+    code: &str,
+    imports: &str,
+    helpers: &str,
+    input: Option<&serde_json::Value>,
+    budget: Option<u32>,
+    show_default: bool,
+) -> String {
     let mut out = String::new();
 
     // Preamble contains: pragmas, module header, standard imports, default decl,
@@ -187,6 +220,9 @@ pub fn template_haskell(
     }
     out.push('\n');
 
+    // render_call: toWire in REPL (Show-default), toJSON in stateless server.
+    let render_call = if show_default { "toWire" } else { "toJSON" };
+
     out.push_str(&format!("result :: Eff {} Value\n", effect_stack));
     out.push_str("result = do\n");
     if budget.is_some() {
@@ -197,11 +233,11 @@ pub fn template_haskell(
         out.push_str("  _scV <- kvGet \"__sayChars\"\n");
         out.push_str("  let _sayC = case _scV of { Just b -> case b ^? _Number of { Just n -> round n; _ -> 0 }; Nothing -> 0 }\n");
         out.push_str(&format!(
-            "  paginateResult (max' 100 ({} - _sayC)) (toJSON _r)\n",
+            "  paginateResult (max' 100 ({} - _sayC)) ({render_call} _r)\n",
             b
         ));
     } else {
-        out.push_str("  paginateResult 4096 (toJSON _r)\n");
+        out.push_str(&format!("  paginateResult 4096 ({render_call} _r)\n"));
     }
 
     out
@@ -730,6 +766,34 @@ mod tests {
             !formatted.contains("Hint:"),
             "should not hint for non-toJSON ambiguous type"
         );
+    }
+
+    #[test]
+    fn preamble_emits_towire_class() {
+        let pre = crate::build_preamble(&[], false);
+        assert!(pre.contains("class ToWire a"), "ToWire class missing from preamble");
+        assert!(
+            pre.contains("instance {-# OVERLAPPABLE #-} Show a => ToWire a"),
+            "Show fallback instance missing from preamble"
+        );
+        assert!(pre.contains("instance ToWire Text"), "Text instance missing from preamble");
+        assert!(pre.contains("instance ToWire Value"), "Value instance missing from preamble");
+    }
+
+    #[test]
+    fn template_haskell_show_default_uses_towire() {
+        let pre = crate::build_preamble(&[], false);
+        let src = template_haskell_show_default(&pre, "'[]", "pure (42 :: Int)", "", "", None, None);
+        assert!(src.contains("toWire _r"), "show_default must use toWire _r");
+        assert!(!src.contains("toJSON _r"), "show_default must not use toJSON _r");
+    }
+
+    #[test]
+    fn template_haskell_default_uses_tojson() {
+        let pre = crate::build_preamble(&[], false);
+        let src = template_haskell(&pre, "'[]", "pure (42 :: Int)", "", "", None, None);
+        assert!(src.contains("toJSON _r"), "default must use toJSON _r");
+        assert!(!src.contains("toWire _r"), "default must not use toWire _r");
     }
 
     #[test]

@@ -134,6 +134,17 @@ fn pragmas_and_imports(out: &mut String, effects: &[EffectDecl], user_library: b
 /// the `trunc*` family, `renderJson`, `paginateResult`). Console/KV/Ask
 /// presence selects the `putStrLn` and `paginateResult` variants.
 fn pagination_helpers(out: &mut String, effects: &[EffectDecl], interactive_pagination: bool) {
+    // ToWire: result-rendering class for show-default mode (tidepool-repl).
+    // Always emitted so template_haskell_show_default's `toWire _r` resolves.
+    // Text renders bare; Value passes through as JSON; any Show type via show.
+    out.push_str(concat!(
+        "class ToWire a where toWire :: a -> Value\n",
+        "instance {-# OVERLAPPABLE #-} Show a => ToWire a where toWire = String . show\n",
+        "instance ToWire Text where toWire = String\n",
+        "instance ToWire Value where toWire = id\n",
+        "\n",
+    ));
+
     if effects.is_empty() {
         return;
     }
@@ -452,8 +463,10 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         "the JIT-safe versions).\n",
         "The final value of `code` is rendered to JSON for the caller \u{2014} Int → ",
         "number, [Char] → string, Bool → true/false, lists → arrays, and a ",
-        "`Value` → that JSON directly. RETURN a `Value` for structured output (via ",
-        "`object`/`toJSON`/`parseJson`/`llm`/`tryHttpGet`, …), e.g. ",
+        "`Value` → that JSON directly. In the REPL (`session_eval`), results render ",
+        "via `Show` by default — `Text` is bare, custom ADTs work without `ToJSON`. ",
+        "JSON is opt-in: return a `Value` (via `object`/`toJSON`/`parseJson`/`llm`/",
+        "`tryHttpGet`, …) for structured output, e.g. ",
         "`tryHttpGet \"https://api.github.com/repos/o/r\"`; use `putStrLn`/`say` only ",
         "for human-readable debug traces, not to stringify results. Extract from a ",
         "`Value` with optics: `v ^? key \"f\" . _String` (also `_Int`, `_Double`, ",
@@ -468,9 +481,13 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
     ));
 
     if !effects.is_empty() {
-        desc.push_str(
-            "\nEffects (invoke via the helper verbs; read tidepool://effect/{name} for each one's constructors + helpers):\n",
-        );
+        desc.push_str(concat!(
+            "\nPrefer typed effects for common operations: `glob`/`grepGlob` (Fs) for ",
+            "filesystem search, `sgFind` (SG) for structural code search, `lspWhere`/",
+            "`lspDefs` (Lsp) for symbol navigation. Use `run \"...\"` only as a shell ",
+            "fallback for things the typed effects don\u{2019}t cover.\n",
+            "Effects (invoke via the helper verbs; read tidepool://effect/{name} for each one\u{2019}s constructors + helpers):\n",
+        ));
         for eff in effects {
             desc.push_str(&format!("  {}: {}\n", eff.type_name, eff.description));
         }
