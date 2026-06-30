@@ -86,6 +86,11 @@ pub struct Session {
     /// taken) by every evaluated item so it is visible to all items in the block
     /// (and after an in-block `ask`/resume); the worker resets it per job.
     eval_input: Option<serde_json::Value>,
+    /// Shared slot the server reads to abort a runaway turn at a JIT safepoint.
+    /// `None` until the worker wires it via [`Session::set_cancel_slot`]; the
+    /// session publishes the machine's [`CancelHandle`] into it the moment the
+    /// machine bootstraps, so even a session's FIRST turn is cancellable.
+    cancel_slot: Option<crate::worker::CancelSlot>,
 }
 
 impl Session {
@@ -105,6 +110,7 @@ impl Session {
             val_gen: Generation(0),
             session_table: DataConTable::new(),
             eval_input: None,
+            cancel_slot: None,
         })
     }
 
@@ -189,6 +195,9 @@ impl Session {
         handlers: &mut H,
         captured: &CapturedOutput,
     ) -> TurnOutcome {
+        // Clear any cancellation left from a prior timed-out turn so this turn
+        // starts clean (no-op until the machine bootstraps).
+        self.reset_cancel();
         match cmd {
             SessionCommand::Def(decl) => self.run_def(&decl.0),
             SessionCommand::Eval(expr) => self.run_eval(&expr.0, handlers, captured),
@@ -384,14 +393,18 @@ impl Session {
                 }
             }
             None => {
-                let mut m =
+                let m =
                     match JitEffectMachine::compile_session(&expr, &table, self.cfg.nursery_size) {
                         Ok(m) => m,
                         Err(e) => return TurnOutcome::Error(format!("JIT compile error: {e}")),
                     };
-                let r = m.run(&table, handlers, captured);
-                self.machine = Some(m);
-                r
+                // Store + publish the cancel handle BEFORE running, so a runaway
+                // on this bare-expression path is cancellable from the start.
+                self.bootstrap_machine(m);
+                self.machine
+                    .as_mut()
+                    .expect("just bootstrapped")
+                    .run(&table, handlers, captured)
             }
         };
 
@@ -467,7 +480,7 @@ impl Session {
         if self.machine.is_none() {
             match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
             {
-                Ok(m) => self.machine = Some(m),
+                Ok(m) => self.bootstrap_machine(m),
                 Err(e) => return TurnOutcome::Error(format!("JIT compile error: {e}")),
             }
         }
@@ -575,7 +588,7 @@ impl Session {
         if self.machine.is_none() {
             match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
             {
-                Ok(m) => self.machine = Some(m),
+                Ok(m) => self.bootstrap_machine(m),
                 Err(e) => return TurnOutcome::Error(format!("JIT compile error: {e}")),
             }
         }
@@ -714,7 +727,7 @@ impl Session {
         if self.machine.is_none() {
             match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
             {
-                Ok(m) => self.machine = Some(m),
+                Ok(m) => self.bootstrap_machine(m),
                 Err(e) => return TurnOutcome::Error(format!("JIT compile error: {e}")),
             }
         }
@@ -967,6 +980,39 @@ impl Session {
     /// can inject it into `template_haskell`. Called by the worker before each turn.
     fn set_eval_input(&mut self, input: Option<serde_json::Value>) {
         self.eval_input = input;
+    }
+
+    /// Wire the shared cancel slot the server reads on timeout. Called once by
+    /// the worker before the command loop. If the machine has already
+    /// bootstrapped, publish its handle immediately.
+    pub fn set_cancel_slot(&mut self, slot: crate::worker::CancelSlot) {
+        self.cancel_slot = Some(slot);
+        self.publish_cancel();
+    }
+
+    /// Bootstrap the resident machine AND publish its cancel handle to the
+    /// shared slot in one step — so a turn is cancellable from the instant the
+    /// machine exists (including a session's first turn, before its runaway
+    /// loop starts). All machine-bootstrap sites go through here.
+    fn bootstrap_machine(&mut self, m: JitEffectMachine) {
+        self.machine = Some(m);
+        self.publish_cancel();
+    }
+
+    /// Publish the machine's cancel handle into the shared slot (no-op if no
+    /// slot is wired or the machine hasn't bootstrapped).
+    fn publish_cancel(&mut self) {
+        if let Some(slot) = &self.cancel_slot {
+            *slot.lock() = self.machine.as_ref().map(|m| m.cancel_handle());
+        }
+    }
+
+    /// Clear a prior cancellation so the next turn starts clean. The cancel flag
+    /// is per-machine and shared, so this resets it via the live handle.
+    fn reset_cancel(&mut self) {
+        if let Some(m) = &self.machine {
+            m.cancel_handle().reset();
+        }
     }
 }
 

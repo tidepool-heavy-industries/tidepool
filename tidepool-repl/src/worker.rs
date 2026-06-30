@@ -16,6 +16,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+use parking_lot::Mutex;
+use tidepool_codegen::jit_machine::CancelHandle;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_mcp::CapturedOutput;
 
@@ -23,6 +25,19 @@ use crate::ask::{PauseGate, ReplAskDispatcher, ResumeMsg, WorkerMessage};
 use crate::command::SessionCommand;
 use crate::session::{Closed, Open, Session, SessionConfig, SessionHandle};
 use crate::state::{shared, SessionState, SharedState};
+
+/// A slot holding the resident machine's [`CancelHandle`], readable from the
+/// async server side. `None` until the machine bootstraps on the session's first
+/// expression turn. The [`Session`] publishes its handle here the instant the
+/// machine bootstraps (via `set_cancel_slot`/`bootstrap_machine`) and `reset()`s
+/// the flag at each turn start, so a timeout can `cancel()` an in-flight runaway
+/// and the next turn starts clean.
+pub type CancelSlot = Arc<Mutex<Option<CancelHandle>>>;
+
+/// A fresh, empty cancel slot.
+pub fn empty_cancel_slot() -> CancelSlot {
+    Arc::new(Mutex::new(None))
+}
 
 /// One unit of work handed to the resident worker. Carries the per-turn
 /// channels: `session_tx` (worker → server: Suspended/Completed/Error/Closed)
@@ -44,12 +59,22 @@ pub struct WorkerJob {
 pub struct WorkerHandle {
     cmd_tx: Sender<WorkerJob>,
     thread: Option<JoinHandle<()>>,
+    /// The resident machine's cancel handle, published by the [`Session`] at
+    /// bootstrap. Shared with the worker thread; the server reads it on timeout
+    /// to abort a runaway turn at a JIT safepoint.
+    cancel_slot: CancelSlot,
 }
 
 impl WorkerHandle {
     /// A clonable sender for enqueuing a job onto the worker's single channel.
     pub fn sender(&self) -> Sender<WorkerJob> {
         self.cmd_tx.clone()
+    }
+
+    /// The shared cancel slot — the server reads the resident machine's
+    /// [`CancelHandle`] from here to abort a timed-out turn at a JIT safepoint.
+    pub fn cancel_slot(&self) -> CancelSlot {
+        self.cancel_slot.clone()
     }
 
     /// Drop the command channel and join the worker thread. The worker observes
@@ -109,6 +134,8 @@ where
     H: DispatchEffect<CapturedOutput> + Clone + Send + 'static,
 {
     let (cmd_tx, rx) = std::sync::mpsc::channel::<WorkerJob>();
+    let cancel_slot = empty_cancel_slot();
+    let slot_for_thread = cancel_slot.clone();
     let thread = std::thread::Builder::new()
         .name("tidepool-repl-session".into())
         .stack_size(tidepool_runtime::EVAL_STACK_SIZE)
@@ -117,7 +144,13 @@ where
             // error instead of killing the process.
             tidepool_codegen::signal_safety::install();
             match Session::open(cfg) {
-                Ok(session) => worker_loop(session, base, ask_tag, rx),
+                Ok(mut session) => {
+                    // Wire the shared cancel slot: the session publishes the
+                    // resident machine's handle into it at bootstrap, so the
+                    // server can abort a runaway turn at a JIT safepoint.
+                    session.set_cancel_slot(slot_for_thread);
+                    worker_loop(session, base, ask_tag, rx)
+                }
                 Err(e) => drain_with_error(rx, format!("session open failed: {e}")),
             }
         })
@@ -125,6 +158,7 @@ where
     WorkerHandle {
         cmd_tx,
         thread: Some(thread),
+        cancel_slot,
     }
 }
 
@@ -241,6 +275,13 @@ impl SessionManager {
         self.sessions.lock().get(id).map(|e| e.handle.sender())
     }
 
+    /// Clone the shared cancel slot for the named session, if it is open. The
+    /// server reads the resident machine's [`CancelHandle`] from it on timeout
+    /// to abort a runaway turn at a JIT safepoint.
+    pub fn cancel_slot(&self, id: &str) -> Option<CancelSlot> {
+        self.sessions.lock().get(id).map(|e| e.handle.cancel_slot())
+    }
+
     /// Clone the shared lifecycle state for the named session, if it is open.
     /// The server locks this (briefly, never across an `.await`) to read/drive
     /// transitions.
@@ -273,6 +314,7 @@ mod tests {
         WorkerHandle {
             cmd_tx,
             thread: None,
+            cancel_slot: empty_cancel_slot(),
         }
     }
 

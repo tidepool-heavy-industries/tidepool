@@ -63,6 +63,7 @@ fn build_server() -> TidepoolReplServer {
         session_root_base,
         nursery_size: None,
         continuation_ttl: None,
+        turn_timeout: None,
     };
     TidepoolReplServer::new(stack, cfg)
 }

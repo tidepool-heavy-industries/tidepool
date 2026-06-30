@@ -30,12 +30,30 @@ use crate::ask::{PauseGate, ResumeMsg, WorkerMessage};
 use crate::command::{BlockItem, DeclText, ExprText, MetaCommand, SessionCommand};
 use crate::session::{SessionConfig, DEFAULT_NURSERY_SIZE};
 use crate::state::{SessionState, SharedState, Suspension};
-use crate::worker::{spawn_worker, SessionManager, WorkerHandle, WorkerJob};
+use crate::worker::{
+    empty_cancel_slot, spawn_worker, CancelSlot, SessionManager, WorkerHandle, WorkerJob,
+};
 
 /// Per-turn window before a turn is declared timed out. A session is one
 /// resident thread, so a runaway wedges the session (MVP); the window keeps a
 /// single MCP call from hanging forever.
 const TURN_TIMEOUT_SECS: u64 = 120;
+
+/// After a turn times out and is cancelled, how long to wait for the worker to
+/// abort at a JIT safepoint before declaring the session `Wedged`. Allocating /
+/// tail-recursive runaways abort within milliseconds of `cancel()`; this margin
+/// only covers scheduling. A turn that doesn't abort in this window is treated
+/// as genuinely uninterruptible (the reaper reclaims it).
+const ABORT_GRACE_SECS: u64 = 3;
+
+/// The manager-side handles for the session whose turn [`TidepoolReplServer::drive`]
+/// awaits: its lifecycle [`SharedState`] and the [`CancelSlot`] read on timeout to
+/// abort a runaway at a JIT safepoint. Bundled so `drive` stays within the
+/// argument-count budget.
+struct DriveCtl {
+    state: SharedState,
+    cancel: CancelSlot,
+}
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -188,6 +206,10 @@ pub struct ReplServerConfig {
     /// it. `None` ⇒ no reaper (the historical behavior). `main.rs` sets a sane
     /// default (~30 min); tests shrink it to exercise reaping fast.
     pub continuation_ttl: Option<Duration>,
+    /// Wall-clock budget for a single turn before it is cancelled at a JIT
+    /// safepoint (see [`drive`]). `None` ⇒ [`TURN_TIMEOUT_SECS`] (120 s). Tests
+    /// shrink it to exercise the timeout/self-heal path fast.
+    pub turn_timeout: Option<Duration>,
 }
 
 /// Spawns a worker for a `(session_name, SessionConfig)` — the erased,
@@ -530,8 +552,20 @@ impl TidepoolReplServer {
             *state.lock() = SessionState::Idle;
             return CallToolResult::error(vec![Content::text("session worker is gone")]);
         }
-        self.drive(op, session_rx, response_tx, gate, captured, state)
-            .await
+        let cancel = self
+            .inner
+            .manager
+            .cancel_slot(session_name)
+            .unwrap_or_else(empty_cancel_slot);
+        self.drive(
+            op,
+            session_rx,
+            response_tx,
+            gate,
+            captured,
+            DriveCtl { state, cancel },
+        )
+        .await
     }
 
     async fn session_close(&self, session_name: &str) -> CallToolResult {
@@ -655,6 +689,11 @@ impl TidepoolReplServer {
                 }
             }
         };
+        let cancel = self
+            .inner
+            .manager
+            .cancel_slot(&session_name)
+            .unwrap_or_else(empty_cancel_slot);
         Ok(self
             .drive(
                 "session_resume",
@@ -662,7 +701,7 @@ impl TidepoolReplServer {
                 suspension.response_tx,
                 suspension.gate,
                 suspension.captured,
-                state,
+                DriveCtl { state, cancel },
             )
             .await)
     }
@@ -703,6 +742,11 @@ impl TidepoolReplServer {
             }
             s
         };
+        let cancel = self
+            .inner
+            .manager
+            .cancel_slot(&session_name)
+            .unwrap_or_else(empty_cancel_slot);
         Ok(self
             .drive(
                 "session_abort",
@@ -710,7 +754,7 @@ impl TidepoolReplServer {
                 suspension.response_tx,
                 suspension.gate,
                 suspension.captured,
-                state,
+                DriveCtl { state, cancel },
             )
             .await)
     }
@@ -727,27 +771,57 @@ impl TidepoolReplServer {
         response_tx: std::sync::mpsc::Sender<ResumeMsg>,
         gate: Arc<PauseGate>,
         captured: CapturedOutput,
-        state: SharedState,
+        ctl: DriveCtl,
     ) -> CallToolResult {
-        let received =
-            match timeout(Duration::from_secs(TURN_TIMEOUT_SECS), session_rx.recv()).await {
-                Ok(r) => r,
-                Err(_) => {
-                    // H3: the worker is still computing. Ask it to ABORT at its
-                    // next effect checkpoint (a pure runaway is uninterruptible),
-                    // and mark the session Wedged so a follow-up op errors clearly
-                    // and the reaper reclaims it. `session_rx`/`response_tx` drop
-                    // here — the worker's eventual message is harmlessly discarded.
-                    gate.request_abort(format!("{op} timed out after {TURN_TIMEOUT_SECS}s"));
-                    *state.lock() = SessionState::Wedged {
-                        since: Instant::now(),
-                    };
-                    return CallToolResult::error(vec![Content::text(format!(
-                        "{op} timed out after {TURN_TIMEOUT_SECS}s (the resident session is \
-                         wedged on a long/pure computation; close it)"
-                    ))]);
+        let DriveCtl { state, cancel } = ctl;
+        let turn_timeout = self
+            .inner
+            .cfg
+            .turn_timeout
+            .unwrap_or(Duration::from_secs(TURN_TIMEOUT_SECS));
+        let to_secs = turn_timeout.as_secs();
+        let received = match timeout(turn_timeout, session_rx.recv()).await {
+            Ok(r) => r,
+            Err(_) => {
+                // H3: the worker is still computing past the budget. Abort it
+                // cooperatively on two fronts:
+                //   (1) `request_abort` unwinds an `ask`-parked turn at the
+                //       effect boundary;
+                //   (2) the resident machine's `CancelHandle` aborts an
+                //       allocating / tail-recursive runaway at its next JIT
+                //       safepoint (`YieldError::Cancelled`).
+                // Then a bounded grace re-wait: if the worker aborts promptly
+                // the session SELF-HEALS back to `Idle` (handle reset, ready
+                // for the next turn); only a genuinely-uninterruptible turn
+                // (or a session whose first-ever turn ran away before any
+                // machine was published) stays `Wedged` for the reaper.
+                gate.request_abort(format!("{op} timed out after {to_secs}s"));
+                let handle = cancel.lock().as_ref().cloned();
+                if let Some(h) = handle {
+                    h.cancel();
+                    if let Ok(Some(_)) =
+                        timeout(Duration::from_secs(ABORT_GRACE_SECS), session_rx.recv()).await
+                    {
+                        // Worker aborted at a safepoint — clear the flag and
+                        // return the session to Idle (self-healed).
+                        h.reset();
+                        *state.lock() = SessionState::Idle;
+                        return CallToolResult::error(vec![Content::text(format!(
+                            "{op} timed out after {to_secs}s and was aborted; the \
+                                 session recovered and is ready for the next turn"
+                        ))]);
+                    }
                 }
-            };
+                // No handle (first-turn runaway) or no prompt abort → wedged.
+                *state.lock() = SessionState::Wedged {
+                    since: Instant::now(),
+                };
+                return CallToolResult::error(vec![Content::text(format!(
+                    "{op} timed out after {to_secs}s (the resident session is \
+                         wedged on an uninterruptible computation; close it)"
+                ))]);
+            }
+        };
         match received {
             Some(WorkerMessage::Completed { result }) => {
                 *state.lock() = SessionState::Idle;

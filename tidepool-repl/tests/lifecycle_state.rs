@@ -139,6 +139,67 @@ async fn run_on_suspended_session_is_rejected() {
     repl.close().await;
 }
 
+/// H3 (self-healing): a turn that runs away past the turn budget is cancelled at
+/// a JIT safepoint, and the session RECOVERS to `Idle` — a follow-up `session_run`
+/// succeeds instead of being busy-rejected on a stuck `Wedged`. This guards the
+/// cooperative-cancel wiring (the resident machine's `CancelHandle`, published by
+/// the worker, fired on timeout). Before it, an allocating/tail runaway wedged the
+/// session until close/reap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn timed_out_runaway_self_heals_to_idle() {
+    if !extract_available() {
+        eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+        return;
+    }
+    // Turn budget must exceed the per-eval GHC compile (~13s for a novel
+    // expression) so the timeout fires during the LOOP, not compilation; a
+    // generous reaper TTL ensures recovery comes from cancel alone, not reaping.
+    let repl = Repl::with_timeout(Duration::from_secs(20), Duration::from_secs(300));
+    repl.open_ok().await;
+
+    // A pure allocating runaway — `sum` over an infinite `[Int]` never returns
+    // and allocates cons cells, so it polls the JIT gc safepoint. The bare-expr
+    // lane wants an `Eff … a`; the result is forced by the render INSIDE the
+    // do-block (during the run), so this loops where the cancel flag is polled.
+    // It is the session's FIRST turn: the machine publishes its cancel handle
+    // the instant it bootstraps (before the loop), so even a first-turn runaway
+    // is abortable.
+    let runaway = repl.eval("pure (sum [1 :: Int ..])").await;
+    assert!(
+        runaway.is_error,
+        "runaway should time out, not return: {}",
+        runaway.text
+    );
+    assert!(
+        runaway.text.contains("timed out"),
+        "expected a timeout error, got: {}",
+        runaway.text
+    );
+    assert!(
+        runaway.text.contains("recovered"),
+        "H3 REGRESSION: the runaway timed out but the session did NOT self-heal \
+         (cancel safepoint never fired): {}",
+        runaway.text
+    );
+
+    // The session recovered to Idle: a fresh run is ACCEPTED (not busy-rejected on
+    // a stuck Wedged) and returns its value.
+    let after = repl.eval("pure (42 :: Int)").await;
+    assert!(
+        !after.is_error,
+        "H3: after a cancelled runaway the session should be Idle and accept a fresh \
+         run, got: {}",
+        after.text
+    );
+    assert!(
+        after.text.contains("42"),
+        "post-recovery value: {}",
+        after.text
+    );
+
+    repl.close().await;
+}
+
 /// H2: an abandoned suspension (never resumed/aborted) is reaped back to `Idle`
 /// after the TTL, freeing the worker for reuse (no thread/heap leak). We build a
 /// server with a tiny TTL, suspend, wait past it, and confirm a fresh run

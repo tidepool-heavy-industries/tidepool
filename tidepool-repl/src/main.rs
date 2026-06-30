@@ -155,6 +155,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Reap a parked `ask` (or a wedged turn) abandoned for 30 min, so an
         // agent that suspends and disconnects doesn't leak a worker thread.
         continuation_ttl: Some(std::time::Duration::from_secs(30 * 60)),
+        // Default 120 s turn budget (see `TURN_TIMEOUT_SECS`).
+        turn_timeout: None,
     };
 
     // Per-session builder: each session_open gets its own KvHandler backed by a

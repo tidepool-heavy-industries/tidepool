@@ -49,6 +49,16 @@ pub fn build_server() -> TidepoolReplServer {
 /// As [`build_server`], but with an explicit continuation/wedge reaper TTL
 /// (`Some(tiny)` to exercise reaping fast in a test; `None` to disable it).
 pub fn build_server_with_ttl(continuation_ttl: Option<std::time::Duration>) -> TidepoolReplServer {
+    build_server_full(continuation_ttl, None)
+}
+
+/// As [`build_server`], with explicit reaper TTL AND per-turn timeout. A short
+/// `turn_timeout` lets a test exercise the timeout/self-heal path without the
+/// 120 s production budget.
+pub fn build_server_full(
+    continuation_ttl: Option<std::time::Duration>,
+    turn_timeout: Option<std::time::Duration>,
+) -> TidepoolReplServer {
     let stack = build_minimal_stack();
     let (decls, ask_tag) = base_decls_with_ask(&stack);
     let effects_dir =
@@ -74,6 +84,7 @@ pub fn build_server_with_ttl(continuation_ttl: Option<std::time::Duration>) -> T
         session_root_base,
         nursery_size: Some(1 << 21), // 2 MiB
         continuation_ttl,
+        turn_timeout,
     };
     TidepoolReplServer::new(stack, cfg)
 }
@@ -125,6 +136,14 @@ impl Repl {
     pub fn with_ttl(ttl: std::time::Duration) -> Repl {
         Repl {
             server: build_server_with_ttl(Some(ttl)),
+        }
+    }
+
+    /// Build a server with a short per-turn timeout AND reaper TTL (for the
+    /// timeout / self-healing-Wedged tests).
+    pub fn with_timeout(turn_timeout: std::time::Duration, ttl: std::time::Duration) -> Repl {
+        Repl {
+            server: build_server_full(Some(ttl), Some(turn_timeout)),
         }
     }
 

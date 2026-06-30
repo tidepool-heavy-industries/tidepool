@@ -10,7 +10,7 @@ use tempfile::TempDir;
 use thiserror::Error;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
 use tidepool_codegen::jit_machine::JitEffectMachine;
-pub use tidepool_codegen::jit_machine::JitError;
+pub use tidepool_codegen::jit_machine::{CancelHandle, JitError};
 pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_eval::value::Value;
 use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings, ReadError};
@@ -190,7 +190,7 @@ pub fn compile_haskell_salted(
     Ok((expr, table, warnings))
 }
 
-const DEFAULT_NURSERY_SIZE: usize = 1 << 26; // 64 MiB
+pub const DEFAULT_NURSERY_SIZE: usize = 1 << 26; // 64 MiB
 
 /// Stack size for eval threads. The JIT's clean recursion-overflow guard needs
 /// stack headroom; too small a stack lets a deep non-tail recursion blow the
@@ -221,6 +221,35 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
     user: &U,
     nursery_size: usize,
 ) -> Result<EvalResult, RuntimeError> {
+    compile_and_run_cancellable(
+        source,
+        target,
+        include,
+        handlers,
+        user,
+        nursery_size,
+        |_| {},
+    )
+}
+
+/// As [`compile_and_run_with_nursery_size`], but hands the freshly-built machine's
+/// [`CancelHandle`] to `on_ready` BEFORE the (blocking) run begins.
+///
+/// The handle is `Send + Sync + Clone`, so a caller running this on a worker
+/// thread can ship a clone to a watchdog/timeout task that flips it; the running
+/// program then aborts at its next GC/tail-call safepoint with
+/// `YieldError::Cancelled`, freeing the thread (and any resources it pins). This
+/// is how the eval/repl servers turn a turn timeout into an actual abort instead
+/// of a permanently-parked thread.
+pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
+    source: &str,
+    target: &str,
+    include: &[&Path],
+    handlers: &mut H,
+    user: &U,
+    nursery_size: usize,
+    on_ready: impl FnOnce(CancelHandle),
+) -> Result<EvalResult, RuntimeError> {
     let (expr, mut table, warnings) = compile_haskell(source, target, include)?;
     if warnings.has_io {
         return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
@@ -230,6 +259,7 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
     // from Data.Map vs Data.Set).
     table.populate_siblings_from_expr(&expr);
     let mut machine = JitEffectMachine::compile(&expr, &table, nursery_size)?;
+    on_ready(machine.cancel_handle());
     let value = machine.run(&table, handlers, user)?;
     Ok(EvalResult::new(value, table))
 }

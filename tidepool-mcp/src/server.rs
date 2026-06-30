@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use tidepool_runtime::DispatchEffect;
+use tidepool_runtime::{CancelHandle, DispatchEffect};
 use tokio::io::{stdin, stdout};
 use tokio::time::{timeout, Duration};
 
@@ -132,6 +132,9 @@ impl TidepoolMcpServerImpl {
         handle: Option<JoinHandle<()>>,
         gate: Arc<PauseGate>,
     ) -> Result<CallToolResult, McpError> {
+        // Resume/abort/test path: no JIT cancel handle to forward (the original
+        // eval thread already holds its own; a resumed-runaway falls back to the
+        // detach path). The initial-eval path below threads a populated slot.
         self.handle_session_result_with_timeout(
             op,
             session_rx,
@@ -141,6 +144,7 @@ impl TidepoolMcpServerImpl {
             handle,
             gate,
             EVAL_TIMEOUT_SECS,
+            Arc::new(Mutex::new(None)),
         )
         .await
     }
@@ -161,6 +165,11 @@ impl TidepoolMcpServerImpl {
         mut handle: Option<JoinHandle<()>>,
         gate: Arc<PauseGate>,
         timeout_secs: u64,
+        // The eval thread's JIT `CancelHandle`, populated by `on_ready` once the
+        // machine is built (empty for the resume/abort/test path). On a
+        // pure-runaway timeout we flip it so the thread aborts at its next
+        // GC/tail-call safepoint and exits — freeing its semaphore permit.
+        cancel_slot: Arc<Mutex<Option<CancelHandle>>>,
     ) -> Result<CallToolResult, McpError> {
         let eval_timeout = Duration::from_secs(timeout_secs);
         let received = match timeout(eval_timeout, session_rx.recv()).await {
@@ -241,6 +250,16 @@ impl TidepoolMcpServerImpl {
                         gate.request_abort(
                             "detached after timeout (no yield point reached)".into(),
                         );
+                        // Flip the JIT cancel flag too: unlike the effect-only
+                        // `gate`, this is polled at allocation + tail-call
+                        // safepoints, so a PURE runaway (which never reaches an
+                        // effect boundary) aborts at its next safepoint and the
+                        // thread EXITS — releasing its semaphore permit instead of
+                        // pinning it forever. Without this, MAX_CONCURRENT_EVALS
+                        // pure runaways permanently brick the server.
+                        if let Some(cancel) = cancel_slot.lock().as_ref() {
+                            cancel.cancel();
+                        }
                         self.reap_detached(handle.take());
                         let mut detail = format!(
                             "{} timed out after {}s WITHOUT reaching an effect boundary — \
@@ -513,6 +532,12 @@ impl TidepoolMcpServerImpl {
         let gate = PauseGate::new();
         let gate_for_thread = Arc::clone(&gate);
 
+        // The eval thread fills this with the machine's JIT cancel handle once
+        // built (see `on_ready` below); the timeout path reads it to abort a
+        // pure runaway at a safepoint.
+        let cancel_slot: Arc<Mutex<Option<CancelHandle>>> = Arc::new(Mutex::new(None));
+        let cancel_slot_thread = Arc::clone(&cancel_slot);
+
         let permit = match self.eval_semaphore.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => {
@@ -557,12 +582,14 @@ impl TidepoolMcpServerImpl {
                 };
 
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    tidepool_runtime::compile_and_run(
+                    tidepool_runtime::compile_and_run_cancellable(
                         &source_for_blocking,
                         "result",
                         &include_paths,
                         &mut ask_dispatcher,
                         &captured_for_blocking,
+                        tidepool_runtime::DEFAULT_NURSERY_SIZE,
+                        |h| *cancel_slot_thread.lock() = Some(h),
                     )
                 }));
 
@@ -637,6 +664,7 @@ impl TidepoolMcpServerImpl {
             Some(handle),
             gate,
             timeout_secs,
+            cancel_slot,
         )
         .await
     }
