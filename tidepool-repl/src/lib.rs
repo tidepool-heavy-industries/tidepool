@@ -23,6 +23,7 @@ pub mod ask;
 pub mod command;
 pub mod server;
 pub mod session;
+pub mod state;
 pub mod worker;
 
 pub use command::{DeclText, ExprText, MetaCommand, SessionCommand, TurnOutcome};

@@ -62,6 +62,7 @@ fn build_server() -> TidepoolReplServer {
         module_env: ModuleEnv::standalone_default(),
         session_root_base,
         nursery_size: None,
+        continuation_ttl: None,
     };
     TidepoolReplServer::new(stack, cfg)
 }

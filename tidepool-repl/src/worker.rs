@@ -22,6 +22,7 @@ use tidepool_mcp::CapturedOutput;
 use crate::ask::{PauseGate, ReplAskDispatcher, ResumeMsg, WorkerMessage};
 use crate::command::SessionCommand;
 use crate::session::{Closed, Open, Session, SessionConfig, SessionHandle};
+use crate::state::{shared, SessionState, SharedState};
 
 /// One unit of work handed to the resident worker. Carries the per-turn
 /// channels: `session_tx` (worker → server: Suspended/Completed/Error/Closed)
@@ -60,6 +61,18 @@ impl WorkerHandle {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+    }
+
+    /// Drop the handle WITHOUT joining the worker thread. For a worker that may
+    /// be stuck in an uninterruptible PURE computation (a runaway with no effect
+    /// checkpoint) — `join()` would hang forever. The thread is detached (and
+    /// leaked if it never exits), but the caller (and the session slot) is freed.
+    /// Used when a `Wedged` session is reclaimed or a `Close` ack times out.
+    pub fn detach(mut self) {
+        // Drop cmd_tx now; then take (and drop) the JoinHandle WITHOUT joining,
+        // so the implicit `Drop` below also does not join (`thread` is None).
+        drop(std::mem::replace(&mut self.cmd_tx, dead_sender()));
+        let _ = self.thread.take();
     }
 }
 
@@ -182,13 +195,21 @@ fn drain_with_error(rx: Receiver<WorkerJob>, err: String) {
     }
 }
 
+/// One manager entry: the worker handle plus the session's lifecycle state.
+/// State lives here (not smeared across the server's maps) so it is owned in one
+/// place and transitioned atomically — see [`crate::state`].
+struct SessionEntry {
+    handle: WorkerHandle,
+    state: SharedState,
+}
+
 /// Named-session manager: holds one resident worker per session id. Sessions
 /// are keyed by user-supplied name strings (arbitrary, e.g. "default",
 /// "agent-1"). Distinct from the eval server's continuation registry — a
 /// session is one resident worker, not a permit slot.
 #[derive(Default)]
 pub struct SessionManager {
-    sessions: parking_lot::Mutex<HashMap<String, WorkerHandle>>,
+    sessions: parking_lot::Mutex<HashMap<String, SessionEntry>>,
 }
 
 impl SessionManager {
@@ -198,26 +219,48 @@ impl SessionManager {
         }
     }
 
-    /// Install a freshly-spawned worker under `id`. Errors (and drops the new
-    /// worker) if a session with that id is already open.
+    /// Install a freshly-spawned worker under `id`, seeded `Idle`. Errors (and
+    /// drops the new worker) if a session with that id is already open.
     pub fn install(&self, id: &str, handle: WorkerHandle) -> Result<(), WorkerHandle> {
         let mut sessions = self.sessions.lock();
         if sessions.contains_key(id) {
             return Err(handle);
         }
-        sessions.insert(id.to_string(), handle);
+        sessions.insert(
+            id.to_string(),
+            SessionEntry {
+                handle,
+                state: shared(SessionState::Idle),
+            },
+        );
         Ok(())
     }
 
     /// Clone the command sender for the named session, if it is open.
     pub fn get_sender(&self, id: &str) -> Option<Sender<WorkerJob>> {
-        self.sessions.lock().get(id).map(WorkerHandle::sender)
+        self.sessions.lock().get(id).map(|e| e.handle.sender())
+    }
+
+    /// Clone the shared lifecycle state for the named session, if it is open.
+    /// The server locks this (briefly, never across an `.await`) to read/drive
+    /// transitions.
+    pub fn state(&self, id: &str) -> Option<SharedState> {
+        self.sessions.lock().get(id).map(|e| e.state.clone())
+    }
+
+    /// Snapshot every open session's `(id, state)` — for the reaper's sweep.
+    pub fn snapshot_states(&self) -> Vec<(String, SharedState)> {
+        self.sessions
+            .lock()
+            .iter()
+            .map(|(id, e)| (id.clone(), e.state.clone()))
+            .collect()
     }
 
     /// Remove the named session (e.g. for `session_close`), returning the
     /// handle so the caller can `shutdown` it after the final `Closed` reply.
     pub fn remove(&self, id: &str) -> Option<WorkerHandle> {
-        self.sessions.lock().remove(id)
+        self.sessions.lock().remove(id).map(|e| e.handle)
     }
 }
 

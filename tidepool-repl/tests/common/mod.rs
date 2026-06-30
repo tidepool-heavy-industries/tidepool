@@ -41,8 +41,14 @@ pub fn obj(pairs: &[(&str, &str)]) -> serde_json::Map<String, serde_json::Value>
 }
 
 /// Build a repl server with a deliberately SMALL nursery (2 MiB) so heavy-alloc
-/// turns trigger a real minor GC between bind and read.
+/// turns trigger a real minor GC between bind and read. No continuation reaper.
 pub fn build_server() -> TidepoolReplServer {
+    build_server_with_ttl(None)
+}
+
+/// As [`build_server`], but with an explicit continuation/wedge reaper TTL
+/// (`Some(tiny)` to exercise reaping fast in a test; `None` to disable it).
+pub fn build_server_with_ttl(continuation_ttl: Option<std::time::Duration>) -> TidepoolReplServer {
     let stack = build_minimal_stack();
     let (decls, ask_tag) = base_decls_with_ask(&stack);
     let effects_dir =
@@ -67,6 +73,7 @@ pub fn build_server() -> TidepoolReplServer {
         module_env: ModuleEnv::standalone_default(),
         session_root_base,
         nursery_size: Some(1 << 21), // 2 MiB
+        continuation_ttl,
     };
     TidepoolReplServer::new(stack, cfg)
 }
@@ -111,6 +118,13 @@ impl Repl {
     pub fn new() -> Repl {
         Repl {
             server: build_server(),
+        }
+    }
+
+    /// Build a server with an explicit reaper TTL (for lifecycle/reaper tests).
+    pub fn with_ttl(ttl: std::time::Duration) -> Repl {
+        Repl {
+            server: build_server_with_ttl(Some(ttl)),
         }
     }
 

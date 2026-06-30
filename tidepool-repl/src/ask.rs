@@ -45,105 +45,43 @@ pub enum ResumeMsg {
     Abort(String),
 }
 
-/// Timeout-as-yield latch. A turn only computes during an MCP call; when the
-/// caller's window expires the server requests a pause and the worker parks at
-/// its next effect dispatch (every effect is a yield point). Pure JIT stretches
-/// can't be interrupted — a worker reaching no effect within the grace period
-/// is a runaway (the resident session is then wedged; MVP accepts this).
+/// Abort latch. A turn only computes during an MCP call; when the call's window
+/// expires (timeout), the server requests an abort and the worker unwinds at its
+/// next effect dispatch (every effect is a checkpoint). A pure JIT stretch that
+/// reaches no effect can't be interrupted — that turn is a runaway and the
+/// session is marked `Wedged` (the reaper / `session_close` reclaims it).
 pub struct PauseGate {
-    inner: parking_lot::Mutex<GateInner>,
-    cv: parking_lot::Condvar,
-}
-
-struct GateInner {
-    state: GateState,
-    in_effect: bool,
+    state: parking_lot::Mutex<GateState>,
 }
 
 #[derive(Clone, PartialEq)]
 enum GateState {
     Run,
-    PauseRequested,
-    Paused,
     AbortRequested(String),
 }
 
 impl PauseGate {
     pub fn new() -> Arc<Self> {
         Arc::new(PauseGate {
-            inner: parking_lot::Mutex::new(GateInner {
-                state: GateState::Run,
-                in_effect: false,
-            }),
-            cv: parking_lot::Condvar::new(),
+            state: parking_lot::Mutex::new(GateState::Run),
         })
     }
 
-    /// Worker side, at every effect dispatch entry: park while paused, return
-    /// `Err` on abort. On `Ok`, marks `in_effect` (pair with [`Self::exit_effect`]).
+    /// Worker side, at every effect dispatch entry: return `Err(reason)` if an
+    /// abort was requested (the turn then unwinds), else `Ok` to proceed.
     pub fn checkpoint(&self) -> Result<(), String> {
-        let mut g = self.inner.lock();
-        loop {
-            match &g.state {
-                GateState::Run => {
-                    g.in_effect = true;
-                    return Ok(());
-                }
-                GateState::AbortRequested(r) => {
-                    let r = r.clone();
-                    g.state = GateState::Run;
-                    return Err(r);
-                }
-                GateState::PauseRequested => {
-                    g.state = GateState::Paused;
-                    self.cv.notify_all();
-                }
-                GateState::Paused => {
-                    self.cv.wait(&mut g);
-                }
-            }
+        let mut g = self.state.lock();
+        if let GateState::AbortRequested(r) = &*g {
+            let r = r.clone();
+            *g = GateState::Run;
+            return Err(r);
         }
+        Ok(())
     }
 
-    pub fn exit_effect(&self) {
-        self.inner.lock().in_effect = false;
-    }
-
-    pub fn request_pause(&self) {
-        let mut g = self.inner.lock();
-        if g.state == GateState::Run {
-            g.state = GateState::PauseRequested;
-        }
-    }
-
-    pub fn resume_run(&self) {
-        let mut g = self.inner.lock();
-        g.state = GateState::Run;
-        self.cv.notify_all();
-    }
-
+    /// Server side (on turn timeout): ask the worker to unwind at its next effect.
     pub fn request_abort(&self, reason: String) {
-        let mut g = self.inner.lock();
-        g.state = GateState::AbortRequested(reason);
-        self.cv.notify_all();
-    }
-
-    /// Server side, after `request_pause`: wait up to `grace` for the worker to
-    /// park. Returns true if parked OR mid-effect (will park at the next
-    /// boundary); false = pure-compute runaway.
-    pub fn parked_or_in_effect(&self, grace: std::time::Duration) -> bool {
-        let deadline = std::time::Instant::now() + grace;
-        let mut g = self.inner.lock();
-        loop {
-            if g.state == GateState::Paused {
-                return true;
-            }
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                return g.in_effect;
-            }
-            self.cv.wait_for(&mut g, deadline - now);
-        }
+        *self.state.lock() = GateState::AbortRequested(reason);
     }
 }
 
@@ -169,11 +107,9 @@ impl<H: tidepool_effect::dispatch::DispatchEffect<CapturedOutput>>
         request: &Value,
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<Response, EffectError> {
-        // Yield point: park here while paused; error out on abort.
+        // Checkpoint: unwind here (Err) if the turn was aborted (timeout).
         self.gate.checkpoint().map_err(EffectError::Handler)?;
-        let result = self.dispatch_inner(tag, request, cx);
-        self.gate.exit_effect();
-        result
+        self.dispatch_inner(tag, request, cx)
     }
 }
 

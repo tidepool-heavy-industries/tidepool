@@ -152,6 +152,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         module_env: tidepool_mcp::session_decl_module_env(),
         session_root_base,
         nursery_size: None,
+        // Reap a parked `ask` (or a wedged turn) abandoned for 30 min, so an
+        // agent that suspends and disconnects doesn't leak a worker thread.
+        continuation_ttl: Some(std::time::Duration::from_secs(30 * 60)),
     };
 
     // Per-session builder: each session_open gets its own KvHandler backed by a

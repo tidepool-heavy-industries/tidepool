@@ -75,6 +75,7 @@ fn build_full_server(cwd: PathBuf) -> TidepoolReplServer {
         module_env: tidepool_mcp::session_decl_module_env(),
         session_root_base,
         nursery_size: None,
+        continuation_ttl: None,
     };
     TidepoolReplServer::new(stack, cfg)
 }
