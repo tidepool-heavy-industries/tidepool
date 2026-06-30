@@ -194,6 +194,26 @@ impl SessionLib {
             .collect()
     }
 
+    /// Names of every type/class introduced across declaration turns. Hidden
+    /// from the Prelude/Library/effect-verb imports (alongside
+    /// [`Self::decl_value_names`]) so a session `data Foo`/`class Foo` shadows a
+    /// same-named library type instead of becoming an ambiguous occurrence
+    /// (e.g. a session `data Hit` vs the `Library` `Hit`).
+    #[must_use]
+    pub fn decl_type_names(&self) -> Vec<&str> {
+        self.log
+            .turns
+            .iter()
+            .flat_map(|t| t.items.iter())
+            .filter_map(|item| match item {
+                ExportItem::Type { name, .. } | ExportItem::Class { name, .. } => {
+                    Some(name.as_str())
+                }
+                ExportItem::Value { .. } => None,
+            })
+            .collect()
+    }
+
     /// A cache salt unique to `(session, generation)`. Threaded into
     /// [`crate::compile_haskell_salted`] so two sessions' identical-text modules
     /// don't collide and a generation bump invalidates correctly (plan §3 R6).

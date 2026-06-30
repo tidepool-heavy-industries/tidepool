@@ -950,23 +950,35 @@ impl Session {
         }
     }
 
-    /// The eval preamble with the `import Tidepool.Prelude hiding (…)` line
-    /// extended to also hide every value-binder the session has defined. This
-    /// prevents GHC "Ambiguous occurrence" errors when a user function has the
-    /// same name as a Prelude/lens re-export (e.g. `over`, `view`, `key`) —
-    /// the session-defined name wins because Prelude no longer exports it into
-    /// the eval module's scope (BUG-7).
+    /// The eval preamble with every import the session can collide with
+    /// (`Tidepool.Prelude`, the project `Library`, and the generated
+    /// `Tidepool.Effects` effect verbs) extended with a `hiding (…)` clause
+    /// covering EVERY name the session owns across BOTH planes:
+    ///   - declaration value binders (`f x = …`),
+    ///   - declaration types/classes (`data Hit`),
+    ///   - live value-plane binds (`let glob = …` / `x <- …`).
+    ///
+    /// Without this, a session name that happens to match a Prelude re-export, a
+    /// `Library` verb, or an effect verb becomes a GHC "Ambiguous occurrence"
+    /// that not only fails the current turn but POISONS every later turn (the
+    /// colliding import is regenerated each turn) — a hard-to-debug footgun hit
+    /// in practice by `let glob = …` (vs the `Fs` `glob` verb) and `data Hit`
+    /// (vs the `Library` `Hit`). Hiding makes the session definition win, the
+    /// way GHCi shadowing would. (BUG-7 + the verb/value-plane collision class.)
     fn patched_preamble(&self) -> String {
-        let names = self.lib.decl_value_names();
+        let mut names: Vec<String> = Vec::new();
+        names.extend(self.lib.decl_value_names().into_iter().map(str::to_string));
+        names.extend(self.lib.decl_type_names().into_iter().map(str::to_string));
+        names.extend(self.bindings.iter_current().map(|(n, _)| n.0.clone()));
+        names.sort();
+        names.dedup();
         if names.is_empty() {
             return self.cfg.preamble.clone();
         }
-        // Hide session-defined names from BOTH Prelude and the project `Library`
-        // (when imported) so a session-declared name shadows a same-named verb in
-        // either (e.g. a user `sh` wins over `Dev.sh`) instead of an ambiguous
-        // occurrence.
-        let p = hide_prelude_names(&self.cfg.preamble, &names);
-        hide_library_names(&p, &names)
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let p = hide_prelude_names(&self.cfg.preamble, &refs);
+        let p = hide_module_names(&p, "Library", &refs);
+        hide_module_names(&p, "Tidepool.Effects", &refs)
     }
 
     /// Drop the resident machine, freeing the session heap. Called from
@@ -1154,25 +1166,26 @@ fn hiding_entry(name: &str) -> String {
     }
 }
 
-/// Like [`hide_prelude_names`] but for the project `import Library` line, which
-/// starts with NO `hiding` clause. Rewrites `import Library` →
-/// `import Library hiding (<session names>)` so a session-defined binder shadows
-/// a same-named Library re-export. No-op when `Library` isn't imported (minimal
-/// stack / no project lib). GHC tolerates hiding a name Library doesn't export
-/// (a dodgy-import warning, same as the Prelude path).
-fn hide_library_names(preamble: &str, extra: &[&str]) -> String {
+/// Like [`hide_prelude_names`] but for a clause-less `import <module>` line
+/// (e.g. the project `import Library` or the generated `import Tidepool.Effects`).
+/// Rewrites `import <module>` → `import <module> hiding (<session names>)` so a
+/// session-defined name shadows a same-named re-export / effect verb instead of
+/// becoming an ambiguous occurrence. No-op when `<module>` isn't imported. GHC
+/// tolerates hiding a name the module doesn't export (a dodgy-import warning,
+/// same as the Prelude path).
+fn hide_module_names(preamble: &str, module: &str, extra: &[&str]) -> String {
     if extra.is_empty() {
         return preamble.to_string();
     }
-    const NEEDLE: &str = "import Library";
+    let needle = format!("import {module}");
     let mut from = 0;
     loop {
-        let Some(rel) = preamble[from..].find(NEEDLE) else {
-            return preamble.to_string(); // Library not imported
+        let Some(rel) = preamble[from..].find(&needle) else {
+            return preamble.to_string(); // module not imported
         };
         let start = from + rel;
         let at_line_start = start == 0 || preamble.as_bytes()[start - 1] == b'\n';
-        let after = &preamble[start + NEEDLE.len()..];
+        let after = &preamble[start + needle.len()..];
         // Exact module: next char ends the word (newline) or opens a clause (space).
         if at_line_start && (after.starts_with('\n') || after.starts_with(' ')) {
             let rest = &preamble[start..];
@@ -1193,7 +1206,7 @@ fn hide_library_names(preamble: &str, extra: &[&str]) -> String {
                     all.push(e);
                 }
             }
-            let new_line = format!("import Library hiding ({})\n", all.join(", "));
+            let new_line = format!("import {module} hiding ({})\n", all.join(", "));
             return format!(
                 "{}{}{}",
                 &preamble[..start],
@@ -1201,7 +1214,7 @@ fn hide_library_names(preamble: &str, extra: &[&str]) -> String {
                 &preamble[start + line_len..]
             );
         }
-        from = start + NEEDLE.len();
+        from = start + needle.len();
     }
 }
 
@@ -1409,7 +1422,7 @@ mod info_tests {
 
 #[cfg(test)]
 mod hiding_tests {
-    use super::{hide_library_names, hide_prelude_names};
+    use super::{hide_module_names, hide_prelude_names};
 
     #[test]
     fn prelude_hiding_parenthesizes_operators() {
@@ -1427,7 +1440,7 @@ mod hiding_tests {
     #[test]
     fn library_hiding_added_with_operators() {
         let pre = "import Library\nimport qualified Prelude as P\n";
-        let out = hide_library_names(pre, &[".+", "sh"]);
+        let out = hide_module_names(pre, "Library", &[".+", "sh"]);
         assert!(
             out.contains("import Library hiding ("),
             "Library gets a hiding clause: {out}"
@@ -1442,9 +1455,22 @@ mod hiding_tests {
     fn library_hiding_noop_without_import() {
         let pre = "import Tidepool.Prelude hiding (error)\n";
         assert_eq!(
-            hide_library_names(pre, &["sh"]),
+            hide_module_names(pre, "Library", &["sh"]),
             pre,
             "no Library import → unchanged"
+        );
+    }
+
+    #[test]
+    fn effects_hiding_shadows_verbs() {
+        // A session-owned name (e.g. a `let glob = …` value bind) must shadow the
+        // generated `Tidepool.Effects` verb of the same name instead of an
+        // ambiguous occurrence — the verb/value-plane collision footgun.
+        let pre = "import Tidepool.Effects\nimport qualified Prelude as P\n";
+        let out = hide_module_names(pre, "Tidepool.Effects", &["glob"]);
+        assert!(
+            out.contains("import Tidepool.Effects hiding (glob)"),
+            "Effects verb shadowed by a session name: {out}"
         );
     }
 }
