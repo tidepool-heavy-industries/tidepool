@@ -255,6 +255,6 @@ async fn drop_without_close_does_not_hang() {
         // NO close(): `repl` drops HERE → server → WorkerHandle::drop. Before the
         // fix this deadlocked; now it must return promptly.
     }
-    // Reaching this line proves teardown did not hang.
-    assert!(true, "server dropped without close and teardown returned");
+    // Reaching this line proves teardown did not hang — the test completing
+    // (no deadlock, no panic) IS the assertion; no explicit check needed.
 }

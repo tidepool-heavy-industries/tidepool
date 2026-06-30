@@ -23,12 +23,14 @@
 //!   - a Text bind with ANY prior binding live (`text_bind_with_prior_live_binding_diagnostic`)
 //!   - a reference that materializes a Text (`T.toUpper s` in `text_first_class…`)
 //!   - referencing a bound list (`length xs`), nested ADT (`sumT t`), or JSON `Value` (`renderJson v`)
+//!
 //! It does NOT fire for Int bindings, closures, or shallow Maybe/Either matched
 //! inline to an Int (those 5 tests pass). These failing tests are kept as LIVE
 //! assertions (regression gates): they flip GREEN when the kind=4 defect is fixed.
 //! Each carries a `// BUG:` marker at the failing turn. (Run did not abort — every
 //! crash surfaced as a clean MCP error, so per the suite rules these stay live,
 //! not `#[ignore]`d.)
+//!
 //! ============================================================================
 
 mod common;

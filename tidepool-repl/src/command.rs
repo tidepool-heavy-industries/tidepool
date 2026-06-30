@@ -213,7 +213,7 @@ impl TurnOutcome {
             TurnOutcome::Error(_) => true,
             // A block is an error when the last recorded item failed (we stop
             // on first error and include the failing item in `items`).
-            TurnOutcome::Block { items, .. } => items.last().map_or(false, |i| !i.ok),
+            TurnOutcome::Block { items, .. } => items.last().is_some_and(|i| !i.ok),
             _ => false,
         }
     }

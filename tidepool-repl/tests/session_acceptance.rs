@@ -116,7 +116,7 @@ async fn session_multi_turn_real_path() {
 
     // after close a new turn must report no open session
     let turn = repl.eval("pure (slug \"a b\")").await;
-    assert_eq!(turn.is_error, true, "post-close eval should error");
+    assert!(turn.is_error, "post-close eval should error");
     // Multi-session: the message now names the session ("no session 'default' open").
     let msg = &turn.text;
     assert!(
