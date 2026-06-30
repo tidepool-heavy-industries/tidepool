@@ -54,7 +54,7 @@ in that directory):
 - `haskell/CLAUDE.md` — rebuilding the toolchain, regenerating fixtures,
   extract diagnostics, the eval stdlib map + structured Ask/Llm surface, Known
   Limits, adding Prelude functions.
-- `tidepool-codegen/CLAUDE.md` — JIT/effect/cache diagnostics, SIGILL = case trap.
+- `tidepool-codegen/CLAUDE.md` — JIT/effect/cache diagnostics, case-trap → `runtime_case_trap` (poison + breadcrumb, not SIGILL).
 - `tidepool-mcp/CLAUDE.md` — eval-authoring patterns (aperture/census/diff verbs),
   structural search, how to add an effect.
 

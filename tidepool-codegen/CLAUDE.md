@@ -28,8 +28,16 @@ Always-on breadcrumbs (`[CASE TRAP]`, `[BUG]` bad-pointer lines on stderr) stay
 unconditional: they fire only on actual compiler bugs, which must be loud. If you
 see one, that's a reportable codegen bug, not user error.
 
-**SIGILL = case trap, not a missing primop.** All `PrimOpKind` variants are
-implemented (the `_ =>` catch-all is unreachable). SIGILL crashes come from
-Cranelift `trap user2` instructions emitted for exhausted/empty case branches:
-when a case encounters a value matching no branch it hits the trap → `ud2` →
-SIGILL. Root cause varies (constructor tag mismatch, unexpected value shape).
+**Case trap = a value matched no branch, not a missing primop.** All `PrimOpKind`
+variants are implemented (the `_ =>` catch-all is unreachable). An exhausted/empty
+case no longer emits a bare Cranelift `trap user2` (→ `ud2` → SIGILL): `emit_case_trap`
+(`src/emit/case.rs`) now emits a CALL to the `runtime_case_trap` host fn
+(`src/host_fns.rs`), uses its return value, and continues. That host fn prints the
+always-on `[CASE TRAP] in compiled fn: <name>` breadcrumb, then returns
+`error_poison_ptr()` — surfacing a clean runtime error (detected when
+`with_signal_protection` returns) instead of crashing. If a poison/error already
+cascaded into the case it returns poison immediately; a lazy poison-closure
+scrutinee is triggered to set the error flag. Root cause still varies (constructor
+tag mismatch, unexpected value shape) — the breadcrumb names the enclosing fn and
+dumps the scrutinee tag + expected alt tags. (A genuine SIGILL/SIGSEGV now points
+at heap corruption or a bad pointer, not the case trap.)

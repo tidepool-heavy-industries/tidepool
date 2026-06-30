@@ -6,8 +6,9 @@ server, assembled from the `*_decl()` functions here). The eval stdlib lives in
 `haskell/lib/Tidepool/`. See the repo-root `CLAUDE.md` for the project map.
 
 Adding an effect = a `*_decl()` here (Haskell-facing constructors + helpers) + a
-`*Req` handler in `tidepool/src/main.rs` (using `cx.respond`/`respond_caught`/
-`respond_stream`); the `tidepool-bridge` marshals `Value` ↔ `serde_json::Value`.
+`*Req` handler arm in `tidepool-handlers/src/lib.rs` (using `cx.respond`/
+`respond_caught`/`respond_stream`); `tidepool/src/main.rs` only wires the handler
+stack (`build_base_stack`). The `tidepool-bridge` marshals `Value` ↔ `serde_json::Value`.
 The cheap path is a new constructor on an existing effect (e.g. `ParseJson` on
 `Http`); a wholly new effect type needs a positional union-tag slot.
 
