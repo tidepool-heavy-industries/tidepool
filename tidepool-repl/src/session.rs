@@ -1,16 +1,17 @@
 //! The resident session: ONE live [`JitEffectMachine`] + the Lane-A decl
-//! library, driven turn-by-turn. The value plane (heap) persists across
-//! `session_eval` turns via the Wave-1 re-entry APIs (`compile_session` for the
-//! first turn, then `add_function` + `run_fragment` for each later turn on the
-//! SAME machine).
+//! library + the value-plane [`BindingTable`], driven turn-by-turn. Both planes
+//! persist across `session_run` items via the re-entry APIs (`compile_session`
+//! for the first turn, then `add_function` + `run_fragment` for each later turn
+//! on the SAME machine).
 //!
 //! The `Session<Open>` / `Session<Closed>` type-state (domain §5) is applied
 //! through [`SessionHandle`]: `close` consumes the open handle and returns a
 //! `Closed` one with no `run` method, so post-close turns don't typecheck.
 //!
-//! No value binding here (`x <- e` / the BindingTable / the C iface) — that is
-//! Wave 3. A `session_eval` turn compiles a fresh `M a` against the session
-//! include and runs it; the heap persisting is the mechanism Wave 3b builds on.
+//! `run_block` drives a `session_run` block by classifying each item and
+//! reusing the per-item handlers: `run_def` (declaration → Lane-A decl log),
+//! `run_eval` (bind `x <- e` / `let x = e` → `BindingTable`, or a bare
+//! expression → value), and `run_meta` (`:commands`).
 
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -65,13 +66,13 @@ pub struct SessionConfig {
 pub struct Session {
     cfg: SessionConfig,
     lib: SessionLib,
-    /// The live machine. `None` until the first `session_eval` bootstraps it
+    /// The live machine. `None` until the first expression item bootstraps it
     /// (via `compile_session`); later turns re-enter it via `add_function`.
     machine: Option<JitEffectMachine>,
     /// Monotonic per-turn counter, for unique fragment function names.
     turn_counter: u64,
-    /// The value-plane bridge: `name → (SessionVarId, RootSlot, Val.G<g>)`
-    /// (Wave 3b). Empty until the first `x <- e` / `let x = e`.
+    /// The value-plane bridge: `name → (SessionVarId, RootSlot, Val.G<g>)`.
+    /// Empty until the first `x <- e` / `let x = e`.
     bindings: BindingTable,
     /// Monotonic value-binding generation. Each bind mints a fresh
     /// `Tidepool.Session.Val.G<g>` so its `stableVarId` is collision-free and a
@@ -80,9 +81,10 @@ pub struct Session {
     /// The DataConTable accumulated across turns (union via `insert_checked`), so
     /// a custom-ADT value bound earlier renders with real con names later.
     session_table: DataConTable,
-    /// Per-turn input payload from `SessionEvalRequest.input`. Injected into
-    /// `template_haskell` so `input :: Aeson.Value` is in scope. Taken (cleared)
-    /// by `run_plain_eval` / `run_session_reference` after use.
+    /// Per-block `input` payload from the `session_run` request. Injected into
+    /// the generated module so `input :: Aeson.Value` is in scope. CLONED (not
+    /// taken) by every evaluated item so it is visible to all items in the block
+    /// (and after an in-block `ask`/resume); the worker resets it per job.
     eval_input: Option<serde_json::Value>,
 }
 
@@ -112,6 +114,16 @@ impl Session {
     /// injected HPT and the `.hi` path lines up with `writeSessionIface`.
     fn session_root(&self) -> &Path {
         &self.cfg.root
+    }
+
+    /// The GHC include path for a turn: the session's base includes (generated
+    /// `Tidepool.Effects` + prelude/stdlib) plus the live `Lib.G<g>` dir. Borrows
+    /// `&self`, so block-scope the result before any `&mut self` call (e.g.
+    /// `query_inner_type`) — same constraint the inlined copies had.
+    fn turn_include(&self) -> Vec<&Path> {
+        let mut include: Vec<&Path> = self.cfg.base_include.iter().map(PathBuf::as_path).collect();
+        include.push(self.lib.include_dir());
+        include
     }
 
     /// Module names of every live value binding — what a turn injects
@@ -259,19 +271,19 @@ impl Session {
         }
     }
 
-    /// `session_def`: append the declaration to the Lane-A log + regenerate the
-    /// gen-versioned `Lib.G<g>` module.
+    /// Declaration handler: append the declaration to the Lane-A log + regenerate
+    /// the gen-versioned `Lib.G<g>` module.
     fn run_def(&mut self, decl_text: &str) -> TurnOutcome {
         match self.lib.define(decl_text) {
             Ok(gen) => TurnOutcome::Defined {
                 generation: gen.0,
                 module: tidepool_repr::SessionModule::lib(gen).module_name(),
             },
-            Err(e) => TurnOutcome::Error(format!("session_def failed: {e}")),
+            Err(e) => TurnOutcome::Error(format!("declaration failed: {e}")),
         }
     }
 
-    /// `session_eval`: the Wave-3b dispatcher. GHC's parser classifies the turn
+    /// Expression/bind handler. GHC's parser classifies the turn
     /// (bind vs expr); a BIND (`x <- e` / `let x = e`) roots a value on the live
     /// heap, a reference-with-live-bindings injects the session ifaces, and a
     /// plain expression (no bindings) stays on the proven Wave-2 path.
@@ -344,10 +356,7 @@ impl Session {
         // Block-scope `include` so the borrow on `self.cfg.base_include` is
         // released before we call `query_inner_type` (which needs `&mut self`).
         let compile_result = {
-            let lib_dir = self.lib.include_dir().to_path_buf();
-            let mut include: Vec<&Path> =
-                self.cfg.base_include.iter().map(PathBuf::as_path).collect();
-            include.push(lib_dir.as_path());
+            let include = self.turn_include();
             compile_haskell_salted(&source, "result", &include, Some(&salt))
         };
         let (expr, mut table, warnings) = match compile_result {
@@ -423,9 +432,7 @@ impl Session {
             eval_input.as_ref(),
         );
 
-        let lib_dir = self.lib.include_dir().to_path_buf();
-        let mut include: Vec<&Path> = self.cfg.base_include.iter().map(PathBuf::as_path).collect();
-        include.push(lib_dir.as_path());
+        let include = self.turn_include();
 
         let single = vec![name.clone()];
         let turn = match compile_session_turn(
@@ -534,9 +541,7 @@ impl Session {
             eval_input.as_ref(),
         );
 
-        let lib_dir = self.lib.include_dir().to_path_buf();
-        let mut include: Vec<&Path> = self.cfg.base_include.iter().map(PathBuf::as_path).collect();
-        include.push(lib_dir.as_path());
+        let include = self.turn_include();
 
         let turn = match compile_session_turn(
             &wrapped,
@@ -654,10 +659,7 @@ impl Session {
         // Block-scope `include` so the borrow on `self.cfg.base_include` is
         // released before we call `query_inner_type` (which needs `&mut self`).
         let eff_result = {
-            let lib_dir = self.lib.include_dir().to_path_buf();
-            let mut include: Vec<&Path> =
-                self.cfg.base_include.iter().map(PathBuf::as_path).collect();
-            include.push(lib_dir.as_path());
+            let include = self.turn_include();
             compile_session_turn(&eff_src, &include, self.session_root(), &inject, None)
         };
         match eff_result {
@@ -671,10 +673,7 @@ impl Session {
                 let pure_src =
                     wrap_pure_ref_source(&preamble, &imports, expr_text, eval_input.as_ref());
                 let pure_result = {
-                    let lib_dir = self.lib.include_dir().to_path_buf();
-                    let mut include: Vec<&Path> =
-                        self.cfg.base_include.iter().map(PathBuf::as_path).collect();
-                    include.push(lib_dir.as_path());
+                    let include = self.turn_include();
                     compile_session_turn(&pure_src, &include, self.session_root(), &inject, None)
                 };
                 match pure_result {
@@ -764,9 +763,7 @@ impl Session {
             expr_text,
             eval_input.as_ref(),
         );
-        let lib_dir = self.lib.include_dir().to_path_buf();
-        let mut include: Vec<&Path> = self.cfg.base_include.iter().map(PathBuf::as_path).collect();
-        include.push(lib_dir.as_path());
+        let include = self.turn_include();
         let names = vec!["__t".to_string()];
         compile_session_turn(
             &wrapped,
@@ -783,7 +780,7 @@ impl Session {
         .map(|b| b.type_display)
     }
 
-    /// `session_cmd`: meta-commands — `:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`.
+    /// Meta-command handler — `:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`.
     fn run_meta(&mut self, meta: &MetaCommand) -> TurnOutcome {
         match meta {
             MetaCommand::Bindings => {
@@ -851,10 +848,7 @@ impl Session {
                     "__t",
                     eval_input.as_ref(),
                 );
-                let lib_dir = self.lib.include_dir().to_path_buf();
-                let mut include: Vec<&Path> =
-                    self.cfg.base_include.iter().map(PathBuf::as_path).collect();
-                include.push(lib_dir.as_path());
+                let include = self.turn_include();
                 let names: Vec<String> = vec!["__t".to_string()];
                 let turn = match compile_session_turn(
                     &wrapped,
@@ -912,7 +906,7 @@ impl Session {
                         }
                     }
                 }
-                // 3. Session-defined types (data/newtype/type/class from session_def turns).
+                // 3. Session-defined types (data/newtype/type/class from declaration items).
                 if let Some(src) = self.lib.decl_type_source(name) {
                     return TurnOutcome::Meta(serde_json::json!({
                         "name": name,
@@ -955,7 +949,7 @@ impl Session {
             return self.cfg.preamble.clone();
         }
         // Hide session-defined names from BOTH Prelude and the project `Library`
-        // (when imported) so a `session_def`'d name shadows a same-named verb in
+        // (when imported) so a session-declared name shadows a same-named verb in
         // either (e.g. a user `sh` wins over `Dev.sh`) instead of an ambiguous
         // occurrence.
         let p = hide_prelude_names(&self.cfg.preamble, &names);
@@ -1012,13 +1006,13 @@ impl SessionHandle<Open> {
         self.inner.run_turn(cmd, handlers, captured)
     }
 
-    /// Store the per-turn input payload before a `session_eval` turn runs.
+    /// Store the `input` payload before a `session_run` block runs.
     /// The worker calls this so `input :: Aeson.Value` is in scope during eval.
     pub fn set_eval_input(&mut self, input: Option<serde_json::Value>) {
         self.inner.set_eval_input(input);
     }
 
-    /// The current declaration generation (0 until the first `session_def`).
+    /// The current declaration generation (0 until the first declaration item).
     pub fn generation(&self) -> u64 {
         self.inner.lib.generation().0
     }
@@ -1038,7 +1032,7 @@ impl SessionHandle<Open> {
 // typecheck. (It is otherwise inert; the worker drops it after close.)
 
 // ---------------------------------------------------------------------------
-// Turn-wrapping helpers (Wave 3b)
+// Turn-wrapping helpers
 // ---------------------------------------------------------------------------
 
 /// Insert `import <m>` lines into the eval preamble immediately before the
@@ -1165,6 +1159,24 @@ fn hide_library_names(preamble: &str, extra: &[&str]) -> String {
     }
 }
 
+/// Start a user-code module: the imports-injected preamble, the `-- [user]`
+/// marker, and the optional `input :: Aeson.Value` binding. The shared prefix of
+/// every `wrap_*` source builder.
+fn begin_user_module(preamble: &str, imports: &str, input: Option<&serde_json::Value>) -> String {
+    let mut out = insert_imports(preamble, imports);
+    out.push_str("-- [user]\n");
+    out.push_str(&input_binding_source(input));
+    out
+}
+
+/// Append each line of `text` to `out`, indented two spaces (the do-block /
+/// binding-RHS body layout the wrappers use).
+fn push_indented(out: &mut String, text: &str) {
+    for line in text.lines() {
+        out.push_str(&format!("  {line}\n"));
+    }
+}
+
 /// Wrap a BIND turn into an `Eff`-typed module whose `result` runs the bind
 /// statement and yields the bound value, so `run_fragment_and_bind` reduces the
 /// effect tree and roots that value. The monad is pinned to the session effect
@@ -1179,14 +1191,10 @@ fn wrap_bind_source(
     binder: &str,
     input: Option<&serde_json::Value>,
 ) -> String {
-    let mut out = insert_imports(preamble, imports);
-    out.push_str("-- [user]\n");
-    out.push_str(&input_binding_source(input));
+    let mut out = begin_user_module(preamble, imports, input);
     out.push_str(&format!("result :: Eff {effect_stack} _\n"));
     out.push_str("result = do\n");
-    for line in turn_text.lines() {
-        out.push_str(&format!("  {line}\n"));
-    }
+    push_indented(&mut out, turn_text);
     out.push_str(&format!("  pure {binder}\n"));
     out
 }
@@ -1210,14 +1218,10 @@ fn wrap_multi_bind_source(
     input: Option<&serde_json::Value>,
 ) -> String {
     let tuple_expr = format!("({})", names.join(", "));
-    let mut out = insert_imports(preamble, imports);
-    out.push_str("-- [user]\n");
-    out.push_str(&input_binding_source(input));
+    let mut out = begin_user_module(preamble, imports, input);
     out.push_str(&format!("result :: Eff {effect_stack} _\n"));
     out.push_str("result = do\n");
-    for line in turn_text.lines() {
-        out.push_str(&format!("  {line}\n"));
-    }
+    push_indented(&mut out, turn_text);
     out.push_str(&format!("  pure {tuple_expr}\n"));
     out
 }
@@ -1237,18 +1241,12 @@ fn wrap_pure_ref_source(
     expr_text: &str,
     input: Option<&serde_json::Value>,
 ) -> String {
-    let mut out = insert_imports(preamble, imports);
-    out.push_str("-- [user]\n");
-    out.push_str(&input_binding_source(input));
+    let mut out = begin_user_module(preamble, imports, input);
     out.push_str("__user =\n");
-    for line in expr_text.lines() {
-        out.push_str(&format!("  {line}\n"));
-    }
+    push_indented(&mut out, expr_text);
     out.push('\n');
     out.push_str("result =\n");
-    for line in expr_text.lines() {
-        out.push_str(&format!("  {line}\n"));
-    }
+    push_indented(&mut out, expr_text);
     out
 }
 
@@ -1266,13 +1264,9 @@ fn wrap_probe_source(
     expr_text: &str,
     input: Option<&serde_json::Value>,
 ) -> String {
-    let mut out = insert_imports(preamble, imports);
-    out.push_str("-- [user]\n");
-    out.push_str(&input_binding_source(input));
+    let mut out = begin_user_module(preamble, imports, input);
     out.push_str("__probe =\n");
-    for line in expr_text.lines() {
-        out.push_str(&format!("  {line}\n"));
-    }
+    push_indented(&mut out, expr_text);
     out.push('\n');
     out.push_str(&format!("result :: Eff {effect_stack} _\n"));
     out.push_str("result = do\n");

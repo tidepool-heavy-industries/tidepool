@@ -46,7 +46,7 @@ fn as_num(v: &serde_json::Value) -> Option<f64> {
 }
 
 /// Parse the `{"suspended":true,"continuation_id":"scont_N",...}` JSON returned
-/// by a suspended `session_eval` turn; assert the shape is correct and return
+/// by a suspended `session_run` turn; assert the shape is correct and return
 /// the continuation id.
 fn parse_suspended(text: &str) -> String {
     let v: serde_json::Value = serde_json::from_str(text)

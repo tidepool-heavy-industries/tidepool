@@ -747,6 +747,10 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          ONE DECLARATION PER ITEM: each declaration item compiles as its own module, so a \
          type signature and its binding — and all equations of a multi-clause function — must \
          live in the SAME item (newline-separated), not split across items.\n\n\
+         BINDS vs VALUE: end a block with a bare EXPRESSION to populate the top-level `value` \
+         — a block ending in a bind (`x <- e` / `let x = e`) leaves `value` null (read \
+         `items[].result`). A bare `x = 5` (no `let`) is a top-level DECLARATION; use \
+         `let x = 5` to bind a value into the heap.\n\n\
          JSON OUTPUT: opt-in — return an `Aeson.Value` to get structured JSON instead of \
          Show output.\n\n\
          Available effects: {effects}.\n\n\

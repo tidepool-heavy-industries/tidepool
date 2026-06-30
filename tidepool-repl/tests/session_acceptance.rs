@@ -2,9 +2,10 @@
 //! resident machine (the standing rule: drive the production tool dispatch over
 //! several real turns, not a bespoke harness).
 //!
-//! Flow: session_open → session_def `slug` → session_eval `slug "a b"` → "a-b"
-//! → a SECOND session_eval on the SAME machine (heap persists, re-entry via
-//! `add_function`/`run_fragment`) → session_close (frees the machine).
+//! Flow: session_open → session_run (def `slug`) → session_run (eval
+//! `slug "a b"`) → "a-b" → a SECOND session_run on the SAME machine (heap
+//! persists, re-entry via `add_function`/`run_fragment`) → session_close
+//! (frees the machine).
 //!
 //! Requires `tidepool-extract` (the GHC→Core extractor) on `$PATH` or via
 //! `TIDEPOOL_EXTRACT`; skips cleanly otherwise.
@@ -136,7 +137,7 @@ async fn double_open_is_capped() {
         .await
         .unwrap();
     assert_ne!(r.is_error, Some(true));
-    // MVP cap = 1: a second open without closing the first must error.
+    // Same-name re-open is rejected: a second open for the same session name without closing the first must error.
     let r2 = server
         .dispatch_tool("session_open", serde_json::Map::new())
         .await

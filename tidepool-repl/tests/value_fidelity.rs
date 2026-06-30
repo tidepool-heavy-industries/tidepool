@@ -1,37 +1,24 @@
 //! Wave 3b hardening — DIMENSION E: value-plane fidelity.
 //!
 //! Adversarial integration tests driving the REAL `tidepool-repl` entry point
-//! (session_open / session_def / session_eval / session_cmd / session_close)
-//! over multiple turns, per the standing rule (production tool dispatch over real
-//! turns, organic GC on the 2 MiB nursery — never a bespoke harness or forced GC).
+//! (session_open / session_run / session_close — the harness `def`/`eval`/`cmd`
+//! helpers are thin 1-item `session_run` wrappers) over multiple turns, per the
+//! standing rule (production tool dispatch over real turns, organic GC on the
+//! 2 MiB nursery — never a bespoke harness or forced GC).
 //!
 //! Focus: do bound values of every interesting SHAPE round-trip with fidelity —
-//! Text (first-class + the kind=4 TypeMetadata diagnostic), values that reference
-//! earlier bindings at bind time, Tier-1 closures capturing a session value that
-//! must survive GC, nested/recursive ADTs (real con names, not `<unknown>`),
-//! Maybe/Either, structured JSON `Value` (Tier-0 + DataConTable), and lists.
+//! Text (first-class), values that reference earlier bindings at bind time,
+//! Tier-1 closures capturing a session value that must survive GC,
+//! nested/recursive ADTs (real con names, not `<unknown>`), Maybe/Either,
+//! structured JSON `Value` (Tier-0 + DataConTable), and lists.
 //!
 //! Each test skips cleanly when the session-aware extract is unavailable, and
 //! ALWAYS ends with `repl.close().await` (teardown discipline).
 //!
-//! ============================================================================
-//! CONFIRMED BUG (this run): 5 of 10 tests fail with ONE shared signature —
-//!   `[JIT] runtime_error kind=4 (TypeMetadata)` →
-//!   `yield error: forced type metadata (should be dead code)`
-//! whenever a non-trivial / deep bound value is FORCED — either deep_force at
-//! Tier-0 bind time, or spine traversal at a later reference. It fires for:
-//!   - a Text bind with ANY prior binding live (`text_bind_with_prior_live_binding_diagnostic`)
-//!   - a reference that materializes a Text (`T.toUpper s` in `text_first_class…`)
-//!   - referencing a bound list (`length xs`), nested ADT (`sumT t`), or JSON `Value` (`renderJson v`)
-//!
-//! It does NOT fire for Int bindings, closures, or shallow Maybe/Either matched
-//! inline to an Int (those 5 tests pass). These failing tests are kept as LIVE
-//! assertions (regression gates): they flip GREEN when the kind=4 defect is fixed.
-//! Each carries a `// BUG:` marker at the failing turn. (Run did not abort — every
-//! crash surfaced as a clean MCP error, so per the suite rules these stay live,
-//! not `#[ignore]`d.)
-//!
-//! ============================================================================
+//! Regression gate: these tests guard the now-fixed kind=4 TypeMetadata force bug
+//! (fixed in GhcPipeline.runSessionPipeline — see text_bind.rs header for the
+//! root cause). All tests assert SUCCESS; inline regression-witness comments mark
+//! the turns that previously fired the kind=4 crash.
 
 mod common;
 use common::*;
@@ -66,12 +53,10 @@ async fn text_first_class_bind_and_reference() {
         unpacked.text
     );
 
-    // BUG (CONFIRMED): materializing a Text RESULT crashes with
-    // `kind=4 TypeMetadata` / "forced type metadata (should be dead code)" —
-    // even though `T.length s` (Int) and `T.unpack s` (String) above round-trip
-    // fine off the SAME bound `s`. So binding/reading a Text is fine until a turn
-    // forces a Text *value*; then the kind=4 yield fires (CASE TRAP in
-    // repl_ref_*_lambda observed alongside).
+    // Regression witness: was the kind=4 TypeMetadata crash (now fixed). Previously
+    // materializing a Text result fired "forced type metadata (should be dead code)"
+    // even with a valid bound `s`; the fix in GhcPipeline.runSessionPipeline
+    // resolved it. Now asserts success.
     let upper = repl.eval("pure (T.toUpper s)").await;
     assert!(
         upper.expect_ok("T.toUpper s").contains("HI"),
@@ -124,8 +109,8 @@ async fn text_bind_with_prior_live_binding_diagnostic() {
     // where `kind=4 TypeMetadata` / "forced type metadata (should be dead code)"
     // surfaces.
     let bind = repl.eval("y <- pure (T.pack \"hi\")").await;
-    // BUG (CONFIRMED — see doc comment): a Tier-0 Text bind with ANY prior live
-    // binding crashes here (`kind=4 TypeMetadata`). General, not same-name rebind.
+    // Regression witness: was the kind=4 TypeMetadata crash (now fixed). A Tier-0
+    // Text bind with a prior live binding used to fire here; now asserts success.
     bind.expect_ok("bind y :: Text with prior Int live (KEY DIAGNOSTIC)");
 
     let out = repl.eval("T.length y").await;
@@ -232,11 +217,8 @@ async fn nested_recursive_adt_bind_and_sum() {
         .await
         .expect_ok("def sumT");
 
-    // BUG (CONFIRMED): referencing the bound NESTED tree crashes with
-    // `kind=4 TypeMetadata` / "forced type metadata (should be dead code)". The
-    // bind of `t` and the `def sumT` both succeed; the spine traversal of the
-    // bound deep ADT at reference time is what trips the kind=4 yield. (Contrast
-    // the shallow `Just 7` / `Left 1` matches, which pass.)
+    // Regression witness: was the kind=4 TypeMetadata crash (now fixed). Spine
+    // traversal of a deep bound ADT used to fire here; now asserts success.
     let out = repl.eval("pure (sumT t)").await;
     assert!(
         out.expect_ok("sumT t").contains('6'),
@@ -313,9 +295,8 @@ async fn structured_json_value_bind_and_read() {
         .await
         .expect_ok("bind v = object {a:1,b:2}");
 
-    // BUG (CONFIRMED): referencing the bound JSON `Value` crashes with
-    // `kind=4 TypeMetadata`. The `v <- pure (object [...])` bind succeeds; reading
-    // it back (renderJson) forces the nested Value spine → kind=4 yield.
+    // Regression witness: was the kind=4 TypeMetadata crash (now fixed). Reading
+    // back a bound JSON `Value` used to fire here; now asserts success.
     let rendered = repl.eval("renderJson v").await;
     let r = rendered.expect_ok("renderJson v");
     assert!(
@@ -363,10 +344,9 @@ async fn list_bind_survives_gc() {
         fold.text
     );
 
-    // BUG (CONFIRMED): referencing the bound list crashes with
-    // `kind=4 TypeMetadata` — note the RESULT here is an Int (`length`), so the
-    // crash is in forcing the bound LIST spine, not the result type. (Int/closure
-    // bindings reference fine; the long cons spine of `xs` does not.)
+    // Regression witness: was the kind=4 TypeMetadata crash (now fixed). Forcing
+    // the bound list spine used to fire here even though the result is an Int;
+    // now asserts success.
     let len = repl.eval("pure (length xs)").await;
     assert!(
         len.expect_ok("length xs after GC").contains("1000"),

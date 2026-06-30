@@ -8,15 +8,15 @@
 
 use serde_json::Value as Json;
 
-/// A user-written declaration (the payload of `session_def`).
+/// A user-written top-level declaration (a decl/`Auto` `BlockItem`'s payload).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeclText(pub String);
 
-/// A user-written expression of type `M a` (the payload of `session_eval`).
+/// A user-written bind statement or expression (a `Stmt`/`Auto` `BlockItem`'s payload).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExprText(pub String);
 
-/// A `session_cmd` meta-command (`:bindings` / `:reset` / `:t` / `:i` / `:vocab`).
+/// A meta-command item (`:bindings` / `:reset` / `:t` / `:i` / `:vocab`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MetaCommand {
     /// `:t <expr>` — show the inferred type of an expression.
@@ -65,7 +65,7 @@ pub struct BlockItemResult {
 }
 
 impl MetaCommand {
-    /// Parse a `session_cmd` argument string (`":reset"`, `"reset"`, `":t foo"`,
+    /// Parse a `:command` item string (`":reset"`, `"reset"`, `":t foo"`,
     /// …) into a [`MetaCommand`]. The leading colon is optional.
     pub fn parse(raw: &str) -> Result<MetaCommand, String> {
         let s = raw.trim();
@@ -87,16 +87,19 @@ impl MetaCommand {
     }
 }
 
-/// The `tidepool-repl` tool surface as a closed sum (domain model §5).
+/// The internal session command sum (domain model §5). The production tool is
+/// `session_run` → [`SessionCommand::Block`]; `Def`/`Eval`/`Cmd` are the
+/// per-item handler targets a block dispatches to (and the standalone paths the
+/// `Repl::{def,eval,cmd}` test helpers exercise via a 1-item block).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionCommand {
-    /// `session_def`: append a declaration to the Lane-A decl log and
-    /// regenerate `Tidepool.Session.Lib.G<g>`.
+    /// Append a declaration to the Lane-A decl log and regenerate
+    /// `Tidepool.Session.Lib.G<g>` (per-item handler: `run_def`).
     Def(DeclText),
-    /// `session_eval`: compile an `M a` expression against the current session
-    /// include and run it on the resident machine.
+    /// Compile an `M a` expression against the current session include and run
+    /// it on the resident machine (per-item handler: `run_eval`).
     Eval(ExprText),
-    /// `session_cmd`: a meta-command.
+    /// A meta-command (per-item handler: `run_meta`).
     Cmd(MetaCommand),
     /// `session_run`: run a list of classified items in sequence on the resident
     /// machine. Each item is dispatched to `run_def`/`run_eval`/`run_meta`.
@@ -105,30 +108,29 @@ pub enum SessionCommand {
     Close,
 }
 
-/// The result of running a non-`Close` turn (domain §5, adapted for Wave 2 —
-/// value binding / `Suspended` are Wave 3b; an in-turn `ask` suspends through
-/// the channel layer, not here).
+/// The result of running a non-`Close` turn (domain §5). An in-turn `ask`
+/// suspends through the channel layer (see [`crate::ask`]), not here.
 #[derive(Clone, Debug)]
 pub enum TurnOutcome {
-    /// `session_eval` produced this JSON-rendered value alongside its inferred
-    /// Haskell type (GHC `ppr` of the `__user` binding). `type_display` is
-    /// `None` only when the extractor is older than the feature or the compiled
-    /// module had no `__user` binding (e.g. a pure-reference fallback).
+    /// An expression item produced this JSON-rendered value alongside its
+    /// inferred Haskell type (GHC `ppr` of the `__user` binding). `type_display`
+    /// is `None` only when the compiled module had no `__user` binding (e.g. a
+    /// pure-reference fallback) or an older extractor didn't emit it.
     Value {
         value: Json,
         type_display: Option<String>,
     },
-    /// `session_eval` bound a value to the live heap (`x <- e` / `let x = e`);
+    /// A bind item bound a value to the live heap (`x <- e` / `let x = e`);
     /// `name` is now referenceable by later turns, with the captured `type_display`.
     Bound { name: String, type_display: String },
-    /// `session_eval` bound multiple values from a flat-tuple pattern
+    /// A bind item bound multiple values from a flat-tuple pattern
     /// (`(a, b) <- e` / `let (x, y) = e`). Each component is independently
     /// referenceable and GC-rooted. `components` is `[(name, type_display)]`.
     MultiBound { components: Vec<(String, String)> },
-    /// `session_def` accumulated a declaration; the session advanced to
+    /// A declaration item accumulated a decl; the session advanced to
     /// `generation` and `Tidepool.Session.Lib.G<generation>` now in scope.
     Defined { generation: u64, module: String },
-    /// `session_cmd` produced this structured result.
+    /// A meta-command item produced this structured result.
     Meta(Json),
     /// `session_run` block result: per-item outcomes + the last expression value.
     Block {

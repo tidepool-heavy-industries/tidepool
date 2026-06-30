@@ -5,7 +5,7 @@
 //! (`build_base_stack`): Console, KV, Fs, ast-grep/SG, Http, Exec/run, Lsp, Llm
 //! — plus the `Ask` suspend interposed by the session worker. What makes this a
 //! distinct server is the STATE: a resident JIT machine holds the value heap
-//! across `session_eval` turns and Lane-A declarations accumulate, so the
+//! across `session_run` turns and Lane-A declarations accumulate, so the
 //! effects compose over persistent, typed session state.
 
 use std::net::SocketAddr;
@@ -146,8 +146,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ask_tag,
         base_include,
         // Full effect stack + with-packages GHC: give Lane-A decls the SAME
-        // pragmas/imports an `eval` expression sees, so `session_def` helpers can
-        // use `M`, the effect verbs, the Prelude shadows, and `L.`/`Set.`/… —
+        // pragmas/imports an `eval` expression sees, so declaration-item helpers
+        // can use `M`, the effect verbs, the Prelude shadows, and `L.`/`Set.`/… —
         // not just the lens-free T+Map of `standalone_default`.
         module_env: tidepool_mcp::session_decl_module_env(),
         session_root_base,

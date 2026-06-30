@@ -1,10 +1,11 @@
 //! Wave 3b hardening — DIMENSION: declaration plane (Lane A) depth.
 //!
 //! Adversarial integration tests driving the REAL `tidepool-repl` entry point
-//! (session_open / session_def / session_eval / session_cmd / session_close)
-//! over multiple turns. Focus: the gen-versioned `Tidepool.Session.Lib.G<g>`
-//! declaration module that `session_def` regenerates each turn (selective
-//! re-export `import G<g-1> hiding (<redefined>)`), and how user declarations of
+//! (session_open / session_run / session_close — the harness `def`/`eval`/`cmd`
+//! helpers are thin 1-item `session_run` wrappers) over multiple turns. Focus:
+//! the gen-versioned `Tidepool.Session.Lib.G<g>` declaration module that the
+//! `def` block-runner item regenerates each turn (selective re-export
+//! `import G<g-1> hiding (<redefined>)`), and how user declarations of
 //! every shape (functions, ADTs, type aliases, newtypes, records, classes +
 //! instances) accumulate and interact across turns.
 //!

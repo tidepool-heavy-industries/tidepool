@@ -1,9 +1,10 @@
 //! Wave 3b hardening — DIMENSION: shadowing & generations.
 //!
 //! Adversarial integration tests driving the REAL `tidepool-repl` entry point
-//! (session_open / session_def / session_eval / session_cmd / session_close)
-//! over multiple turns. Focus: what happens when a NAME is rebound (value or
-//! function) or a TYPE is redefined across generations.
+//! (session_open / session_run / session_close — the harness `def`/`eval`/`cmd`
+//! helpers are thin 1-item `session_run` wrappers) over multiple turns.
+//! Focus: what happens when a NAME is rebound (value or function) or a TYPE is
+//! redefined across generations.
 //!
 //! THE KEY HYPOTHESIS (case 1): `Session::live_val_modules()` collects EVERY
 //! still-live `Val.G<g>` module (binding_table.rs `live_modules()` iterates the

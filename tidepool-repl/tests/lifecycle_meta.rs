@@ -1,17 +1,17 @@
 //! Wave-3b hardening — DIMENSION: lifecycle & meta-commands.
 //!
 //! THE CONTRACT under test: the session lifecycle (open / close / reopen) and
-//! the `session_cmd` meta surface (`:bindings`, `:reset`, the `:t` / `:i`
-//! Wave-4 stubs, and malformed commands) behave predictably:
-//!   - cap = 1 (a second open without close is rejected),
+//! the meta-command surface (`:bindings`, `:reset`, `:t`, `:i`, and malformed
+//! commands — all sent as `:command` items via `session_run`) behave predictably:
+//!   - same-name re-open is rejected (a second open for the same session name
+//!     without closing the first must error),
 //!   - post-close turns report "no session open",
 //!   - reopen gives a FRESH session (no leaked bindings),
 //!   - `:reset` clears BOTH planes (decl log + value bindings) yet leaves the
 //!     session reusable,
 //!   - `:bindings` reports the documented JSON shape (name/type/module/tier),
-//!   - `:t` / `:i` are KNOWN Wave-4 stubs (codified so a future implementer
-//!     flips the assertion), and malformed / unopened commands fail gracefully
-//!     (clean error, never a panic).
+//!   - `:t` / `:i` are IMPLEMENTED (inferred type and binding info respectively),
+//!     and malformed / unopened commands fail gracefully (clean error, never a panic).
 //!
 //! Each test drives the REAL `tidepool-repl` MCP entry point (`dispatch_tool`)
 //! through the shared harness (`common::*`), multi-turn. Requires the Wave-3b
@@ -40,7 +40,7 @@ fn binding_entry<'a>(meta: &'a serde_json::Value, name: &str) -> Option<&'a serd
 }
 
 // ---------------------------------------------------------------------------
-// Case 1 — double open is capped (MVP cap = 1).
+// Case 1 — same-name re-open is rejected.
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn double_open_is_capped() {
@@ -49,7 +49,7 @@ async fn double_open_is_capped() {
     }
     let repl = Repl::new();
     repl.open().await.expect_ok("first open");
-    // A second open without closing the first must error (cap = 1).
+    // Same-name re-open is rejected: a second open without closing the first must error.
     let t = repl.open().await;
     t.expect_err("second open");
     assert!(

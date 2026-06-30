@@ -32,9 +32,9 @@ pub struct WorkerJob {
     pub response_rx: Receiver<ResumeMsg>,
     pub gate: Arc<PauseGate>,
     pub captured: CapturedOutput,
-    /// Optional `input` payload from `SessionEvalRequest` — injected into
-    /// `template_haskell` so `input :: Aeson.Value` is in scope for `session_eval`.
-    /// `None` for `session_def` / `session_cmd` turns.
+    /// Optional `input` payload from the `session_run` request — injected into
+    /// the generated module so `input :: Aeson.Value` is in scope for the
+    /// block's evaluated items. `None` for blocks sent without an `input`.
     pub eval_input: Option<serde_json::Value>,
 }
 
