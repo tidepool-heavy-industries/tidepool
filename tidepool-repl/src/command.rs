@@ -114,7 +114,10 @@ pub enum TurnOutcome {
     /// Haskell type (GHC `ppr` of the `__user` binding). `type_display` is
     /// `None` only when the extractor is older than the feature or the compiled
     /// module had no `__user` binding (e.g. a pure-reference fallback).
-    Value { value: Json, type_display: Option<String> },
+    Value {
+        value: Json,
+        type_display: Option<String>,
+    },
     /// `session_eval` bound a value to the live heap (`x <- e` / `let x = e`);
     /// `name` is now referenceable by later turns, with the captured `type_display`.
     Bound { name: String, type_display: String },
@@ -148,7 +151,10 @@ impl TurnOutcome {
     /// (so the caller can flag `is_error`); see [`TurnOutcome::is_error`].
     pub fn render(&self) -> String {
         match self {
-            TurnOutcome::Value { value, type_display } => serde_json::json!({
+            TurnOutcome::Value {
+                value,
+                type_display,
+            } => serde_json::json!({
                 "type": type_display,
                 "value": value,
             })
@@ -172,7 +178,12 @@ impl TurnOutcome {
             TurnOutcome::Meta(v) => {
                 serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
             }
-            TurnOutcome::Block { items, value, generation, val_gen } => {
+            TurnOutcome::Block {
+                items,
+                value,
+                generation,
+                val_gen,
+            } => {
                 let items_json: Vec<serde_json::Value> = items
                     .iter()
                     .map(|i| {
@@ -259,7 +270,10 @@ mod tests {
 
     #[test]
     fn value_outcome_render_null_type_when_absent() {
-        let v = TurnOutcome::Value { value: serde_json::json!(true), type_display: None };
+        let v = TurnOutcome::Value {
+            value: serde_json::json!(true),
+            type_display: None,
+        };
         let rendered = v.render();
         let parsed: serde_json::Value =
             serde_json::from_str(&rendered).expect("render is valid JSON");

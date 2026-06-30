@@ -21,7 +21,8 @@ struct TestResult {
 
 fn compile_and_run(tree: &CoreExpr) -> TestResult {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
-    let func_id = compile_expr(&mut pipeline, tree, "test_fn", &ExternalEnv::new()).expect("compile_expr failed");
+    let func_id = compile_expr(&mut pipeline, tree, "test_fn", &ExternalEnv::new())
+        .expect("compile_expr failed");
     pipeline.finalize().expect("failed to finalize");
 
     let mut nursery = vec![0u8; 65536];

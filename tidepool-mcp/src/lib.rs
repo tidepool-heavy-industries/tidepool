@@ -177,8 +177,8 @@ pub(crate) fn write_effects_module_src(src: &str) -> std::io::Result<PathBuf> {
     // different paths in each process → "Could not find module Tidepool.Effects"
     // when a second process picks a different cache dir than the one that wrote it.
     let hash = fnv1a_hash(src.as_bytes());
-    let root = tidepool_runtime::paths::effects_dir()
-        .join(format!("tidepool-effects-{:016x}", hash));
+    let root =
+        tidepool_runtime::paths::effects_dir().join(format!("tidepool-effects-{:016x}", hash));
     let module_dir = root.join("Tidepool");
     let module_path = module_dir.join("Effects.hs");
     if !module_path.exists() {
@@ -1667,7 +1667,10 @@ data Console a where
         let src = "module Tidepool.Effects where\n-- sentinel\n";
         let dir1 = write_effects_module_src(src).unwrap();
         let dir2 = write_effects_module_src(src).unwrap();
-        assert_eq!(dir1, dir2, "same source must yield same content-addressed dir");
+        assert_eq!(
+            dir1, dir2,
+            "same source must yield same content-addressed dir"
+        );
         // Verify the dir name encodes the known FNV-1a hash of `src`.
         let expected_hash = fnv1a_hash(src.as_bytes());
         let expected_suffix = format!("tidepool-effects-{:016x}", expected_hash);

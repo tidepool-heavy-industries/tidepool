@@ -11,7 +11,9 @@
 use std::path::PathBuf;
 
 use rmcp::model::{CallToolResult, RawContent};
-use tidepool_handlers::{base_decls_with_ask, build_base_stack, HandlerConfig, DEFAULT_OPENAI_MODEL};
+use tidepool_handlers::{
+    base_decls_with_ask, build_base_stack, HandlerConfig, DEFAULT_OPENAI_MODEL,
+};
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
 
 fn extract_available() -> bool {
@@ -245,7 +247,10 @@ async fn session_def_sees_full_eval_vocabulary() {
     // Use the pure decl that needed L./Set.
     let (is_error, text) = run_single(&server, "pure (uniqSorted [3,1,2,3,1])", None).await;
     assert!(!is_error, "calling `uniqSorted`: {text}");
-    assert!(text.contains('1') && text.contains('3'), "uniqSorted output: {text}");
+    assert!(
+        text.contains('1') && text.contains('3'),
+        "uniqSorted output: {text}"
+    );
 
     let _ = server
         .dispatch_tool("session_close", serde_json::Map::new())
@@ -264,7 +269,10 @@ async fn run_block(
     args.insert(
         "items".into(),
         serde_json::Value::Array(
-            items.iter().map(|s| serde_json::Value::String(s.to_string())).collect(),
+            items
+                .iter()
+                .map(|s| serde_json::Value::String(s.to_string()))
+                .collect(),
         ),
     );
     if let Some(inp) = input {
@@ -325,9 +333,15 @@ async fn block_runner_input_and_type_cleanups() {
         None,
     )
     .await;
-    let items = v.get("items").and_then(|i| i.as_array()).expect("items array");
+    let items = v
+        .get("items")
+        .and_then(|i| i.as_array())
+        .expect("items array");
     let last_item = items.last().expect("at least one item");
-    let result_str = last_item.get("result").and_then(|r| r.as_str()).unwrap_or("");
+    let result_str = last_item
+        .get("result")
+        .and_then(|r| r.as_str())
+        .unwrap_or("");
     let result_json: serde_json::Value = serde_json::from_str(result_str).unwrap_or_default();
     assert_eq!(
         result_json.get("type").and_then(|t| t.as_str()),
@@ -346,7 +360,10 @@ async fn block_runner_input_and_type_cleanups() {
         None,
     )
     .await;
-    let items = v.get("items").and_then(|i| i.as_array()).expect("items array");
+    let items = v
+        .get("items")
+        .and_then(|i| i.as_array())
+        .expect("items array");
     let result_str = items
         .last()
         .and_then(|it| it.get("result"))

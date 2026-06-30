@@ -133,9 +133,7 @@ async fn scalar_reply_extracts_via_double() {
     repl.open_ok().await;
 
     let t = repl
-        .eval(
-            r#"ask SNum "enter a number" <&> (\v -> fromMaybe (-1.0 :: Double) (v ^? _Double))"#,
-        )
+        .eval(r#"ask SNum "enter a number" <&> (\v -> fromMaybe (-1.0 :: Double) (v ^? _Double))"#)
         .await;
     assert!(!t.is_error, "eval should suspend: {}", t.text);
     let cont_id = parse_suspended(&t.text);
@@ -175,9 +173,7 @@ async fn invalid_reply_does_not_consume_continuation() {
     repl.open_ok().await;
 
     let t = repl
-        .eval(
-            r#"ask SNum "enter a number" <&> (\v -> fromMaybe (-1.0 :: Double) (v ^? _Double))"#,
-        )
+        .eval(r#"ask SNum "enter a number" <&> (\v -> fromMaybe (-1.0 :: Double) (v ^? _Double))"#)
         .await;
     assert!(!t.is_error, "eval should suspend: {}", t.text);
     let cont_id = parse_suspended(&t.text);

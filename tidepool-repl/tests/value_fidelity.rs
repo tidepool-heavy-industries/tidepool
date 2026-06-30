@@ -188,7 +188,8 @@ async fn closure_captures_binding_survives_gc() {
     // ORGANIC GC: ~6 MiB of transient cons into the 2 MiB nursery.
     let fold = repl.eval("foldl' (+) (0 :: Int) [1..200000]").await;
     assert!(
-        fold.expect_ok("heavy fold (force GC)").contains("20000100000"),
+        fold.expect_ok("heavy fold (force GC)")
+            .contains("20000100000"),
         "fold: got {}",
         fold.text
     );
@@ -258,9 +259,7 @@ async fn maybe_bind_and_case() {
     repl.eval("mb <- pure (Just (7 :: Int))")
         .await
         .expect_ok("bind mb = Just 7");
-    let out = repl
-        .eval("case mb of { Just n -> n; Nothing -> 0 }")
-        .await;
+    let out = repl.eval("case mb of { Just n -> n; Nothing -> 0 }").await;
     assert!(
         out.expect_ok("case mb").contains('7'),
         "Maybe case: expected 7, got: {}",
@@ -285,9 +284,7 @@ async fn either_bind_and_case() {
     repl.eval("e <- pure (Left (1 :: Int) :: Either Int Int)")
         .await
         .expect_ok("bind e = Left 1");
-    let out = repl
-        .eval("case e of { Left a -> a; Right b -> b }")
-        .await;
+    let out = repl.eval("case e of { Left a -> a; Right b -> b }").await;
     assert!(
         out.expect_ok("case e").contains('1'),
         "Either case: expected 1, got: {}",
@@ -323,7 +320,10 @@ async fn structured_json_value_bind_and_read() {
         r.contains("\\\"a\\\"") || r.contains("\"a\"") || r.contains('a'),
         "renderJson v: expected to mention field a, got: {r}"
     );
-    assert!(r.contains('1') && r.contains('2'), "renderJson v: expected 1 and 2, got: {r}");
+    assert!(
+        r.contains('1') && r.contains('2'),
+        "renderJson v: expected 1 and 2, got: {r}"
+    );
 
     // Optics read of a single field — should be 1.
     let field = repl.eval("v ^? key \"a\" . _Integer").await;
@@ -355,7 +355,8 @@ async fn list_bind_survives_gc() {
     // ORGANIC GC.
     let fold = repl.eval("foldl' (+) (0 :: Int) [1..200000]").await;
     assert!(
-        fold.expect_ok("heavy fold (force GC)").contains("20000100000"),
+        fold.expect_ok("heavy fold (force GC)")
+            .contains("20000100000"),
         "fold: got {}",
         fold.text
     );

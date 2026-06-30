@@ -142,9 +142,18 @@ pub fn classify_item(text: &str) -> Result<BlockItem, String> {
 
     // Keyword-initiated declarations are unambiguous — skip the cascade.
     const DECL_KEYWORDS: &[&str] = &[
-        "data ", "newtype ", "type ", "class ", "instance ",
-        "infixl ", "infixr ", "infix ", "foreign ", "import ",
-        "default ", "{-# ",
+        "data ",
+        "newtype ",
+        "type ",
+        "class ",
+        "instance ",
+        "infixl ",
+        "infixr ",
+        "infix ",
+        "foreign ",
+        "import ",
+        "default ",
+        "{-# ",
     ];
     for kw in DECL_KEYWORDS {
         if s.starts_with(kw) {
@@ -279,11 +288,10 @@ impl TidepoolReplServer {
             tidepool_mcp::build_preamble_non_interactive(&cfg.decls, has_user_library(&cfg));
         let effect_stack = tidepool_mcp::build_effect_stack_type(&cfg.decls);
         let ask_tag = cfg.ask_tag;
-        let spawn: SessionSpawn =
-            Box::new(move |session_name: &str, sc| {
-                let base = builder(session_name);
-                spawn_worker(sc, base, ask_tag)
-            });
+        let spawn: SessionSpawn = Box::new(move |session_name: &str, sc| {
+            let base = builder(session_name);
+            spawn_worker(sc, base, ask_tag)
+        });
         TidepoolReplServer {
             inner: Arc::new(ReplServerInner {
                 manager: SessionManager::new(),

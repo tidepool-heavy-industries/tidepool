@@ -30,7 +30,13 @@ fn kv_path_for_session(tidepool_dir: &std::path::Path, session_name: &str) -> st
     } else {
         let safe: String = session_name
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         tidepool_dir.join("kv").join(format!("{}.json", safe))
     }

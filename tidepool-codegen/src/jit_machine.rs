@@ -203,7 +203,12 @@ impl Drop for RegistryGuard {
 
 /// The compiled artifacts produced by [`JitEffectMachine::compile_inner`],
 /// shared by the one-shot (`compile`) and session (`compile_session`) ctors.
-type CompiledParts = (CodegenPipeline, Nursery, Result<ConTags, &'static str>, FuncId);
+type CompiledParts = (
+    CodegenPipeline,
+    Nursery,
+    Result<ConTags, &'static str>,
+    FuncId,
+);
 
 impl JitEffectMachine {
     /// Shared compilation body: normalise, emit, finalise.
@@ -250,8 +255,7 @@ impl JitEffectMachine {
         table: &DataConTable,
         nursery_size: usize,
     ) -> Result<Self, JitError> {
-        let (pipeline, nursery, tags, func_id) =
-            Self::compile_inner(expr, table, nursery_size)?;
+        let (pipeline, nursery, tags, func_id) = Self::compile_inner(expr, table, nursery_size)?;
         Ok(Self {
             pipeline,
             nursery,
@@ -274,8 +278,7 @@ impl JitEffectMachine {
         table: &DataConTable,
         nursery_size: usize,
     ) -> Result<Self, JitError> {
-        let (pipeline, nursery, tags, func_id) =
-            Self::compile_inner(expr, table, nursery_size)?;
+        let (pipeline, nursery, tags, func_id) = Self::compile_inner(expr, table, nursery_size)?;
         Ok(Self {
             pipeline,
             nursery,
@@ -313,10 +316,9 @@ impl JitEffectMachine {
                     self.nursery.size(),
                 ),
             },
-            None => crate::host_fns::set_gc_state(
-                self.nursery.start() as *mut u8,
-                self.nursery.size(),
-            ),
+            None => {
+                crate::host_fns::set_gc_state(self.nursery.start() as *mut u8, self.nursery.size())
+            }
         }
         crate::host_fns::set_cancel_flag(self.cancel_flag.clone());
         RegistryGuard {
@@ -404,10 +406,7 @@ impl JitEffectMachine {
         // CompiledEffectMachine has no custom Drop so the bytes are valid when
         // _guard drops (machine drops first but the stack frame is still live).
         unsafe {
-            _guard.arm_reclaim(
-                &mut self.session as *mut _,
-                machine.vmctx_mut() as *const _,
-            );
+            _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
         }
         crate::host_fns::reset_call_depth();
         crate::host_fns::set_exec_context("stepping main function");
@@ -709,7 +708,9 @@ impl JitEffectMachine {
         // Arm reclaim so Drop can recover active_buffer → session.heap.
         // SAFETY: &vmctx lives on this stack frame; VMContext has no custom Drop
         // so its bytes are valid when _guard drops (which is before run_pure returns).
-        unsafe { _guard.arm_reclaim(&mut self.session as *mut _, &vmctx as *const _); }
+        unsafe {
+            _guard.arm_reclaim(&mut self.session as *mut _, &vmctx as *const _);
+        }
 
         crate::host_fns::reset_call_depth();
         crate::host_fns::set_exec_context("running pure computation");
@@ -892,8 +893,7 @@ impl JitEffectMachine {
         // register its persistent root. gc_active_range is the nursery from-range
         // (still installed; the guard has not dropped). The tenured copy lives in
         // old-space arenas, independent of the buffer the guard reclaims.
-        let from = crate::host_fns::gc_active_range()
-            .expect("GC state installed for the bind run");
+        let from = crate::host_fns::gc_active_range().expect("GC state installed for the bind run");
         let from_range = (from.0 as *const u8, unsafe {
             from.0.add(from.1) as *const u8
         });
@@ -994,9 +994,7 @@ impl JitEffectMachine {
                         break Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
                     }
                     if ptr.is_null() {
-                        break Err(JitError::Yield(
-                            crate::yield_type::YieldError::NullPointer,
-                        ));
+                        break Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
                     }
 
                     // K — optionally deep-force to NF before tenuring (Tier0).
@@ -1019,9 +1017,7 @@ impl JitEffectMachine {
                         // Forcing may have triggered a gc_trigger cancel observation;
                         // prefer that over a symptomatic bridge error.
                         if let Some(err) = crate::host_fns::take_runtime_error() {
-                            break Err(JitError::Yield(
-                                crate::yield_type::YieldError::from(err),
-                            ));
+                            break Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
                         }
                         nf
                     } else {
@@ -1105,9 +1101,8 @@ impl JitEffectMachine {
                                 let mut nodes = 0usize;
                                 let mut too_large = false;
                                 while let Some(r) = source.next_value(table) {
-                                    let v = r.map_err(|e| {
-                                        JitError::from(EffectError::Bridge(e))
-                                    })?;
+                                    let v =
+                                        r.map_err(|e| JitError::from(EffectError::Bridge(e)))?;
                                     nodes += 3 + v.node_count();
                                     items.push(v);
                                     if nodes > MAX_EFFECT_RESPONSE_NODES {
@@ -1147,9 +1142,7 @@ impl JitEffectMachine {
                                 Some((cons_tag, nil_tag, len)) if lazy_enabled => {
                                     let items = dismantle_list_spine(resp_val, len);
                                     Plan::Park(crate::host_fns::ParkedStream {
-                                        source: Box::new(
-                                            crate::host_fns::ReadySource::new(items),
-                                        ),
+                                        source: Box::new(crate::host_fns::ReadySource::new(items)),
                                         cons_tag,
                                         nil_tag,
                                         table: tidepool_repr::DataConTable::new(),
@@ -1158,10 +1151,7 @@ impl JitEffectMachine {
                                 Some((cons_tag, nil_tag, len)) => {
                                     let items = dismantle_list_spine(resp_val, len);
                                     let nodes = 3 * len
-                                        + items
-                                            .iter()
-                                            .map(|v| v.node_count())
-                                            .sum::<usize>();
+                                        + items.iter().map(|v| v.node_count()).sum::<usize>();
                                     if nodes > MAX_EFFECT_RESPONSE_NODES {
                                         break Err(JitError::EffectResponseTooLarge {
                                             nodes,
@@ -1261,10 +1251,7 @@ impl JitEffectMachine {
         // are valid when _guard drops (machine drops first but the stack frame
         // is still live).
         unsafe {
-            _guard.arm_reclaim(
-                &mut self.session as *mut _,
-                machine.vmctx_mut() as *const _,
-            );
+            _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
         }
         result
     }
@@ -1360,18 +1347,16 @@ impl JitEffectMachine {
 
                     // 2. Validate arity from the NF (post-GC) object.
                     let n_actual = unsafe {
-                        *(nf_tuple.add(crate::layout::CON_NUM_FIELDS_OFFSET as usize)
-                            as *const u16) as usize
+                        *(nf_tuple.add(crate::layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16)
+                            as usize
                     };
                     if n_actual != n_fields {
-                        break Err(JitError::Yield(
-                            crate::yield_type::YieldError::Runtime(
-                                crate::host_fns::RuntimeError::UserErrorMsg(format!(
-                                    "multi-bind: result tuple has {} fields, expected {}",
-                                    n_actual, n_fields
-                                )),
-                            ),
-                        ));
+                        break Err(JitError::Yield(crate::yield_type::YieldError::Runtime(
+                            crate::host_fns::RuntimeError::UserErrorMsg(format!(
+                                "multi-bind: result tuple has {} fields, expected {}",
+                                n_actual, n_fields
+                            )),
+                        )));
                     }
 
                     // 3. Capture from_range AFTER deep_force (GC may have changed
@@ -1389,9 +1374,8 @@ impl JitEffectMachine {
                     let mut slots = Vec::with_capacity(n_fields);
                     for i in 0..n_fields {
                         let field_ptr = unsafe {
-                            *(nf_tuple.add(
-                                crate::layout::CON_FIELDS_OFFSET as usize + 8 * i,
-                            ) as *const *mut u8)
+                            *(nf_tuple.add(crate::layout::CON_FIELDS_OFFSET as usize + 8 * i)
+                                as *const *mut u8)
                         };
                         let slot = unsafe {
                             self.session
@@ -1457,7 +1441,8 @@ impl JitEffectMachine {
                                 let mut nodes = 0usize;
                                 let mut too_large = false;
                                 while let Some(r) = source.next_value(table) {
-                                    let v = r.map_err(|e| JitError::from(EffectError::Bridge(e)))?;
+                                    let v =
+                                        r.map_err(|e| JitError::from(EffectError::Bridge(e)))?;
                                     nodes += 3 + v.node_count();
                                     items.push(v);
                                     if nodes > MAX_EFFECT_RESPONSE_NODES {
@@ -1594,10 +1579,7 @@ impl JitEffectMachine {
         // Arm reclaim LAST (after all self.session access — tenure is in the
         // Done arm above). Same UAF ordering as run_fragment_and_bind.
         unsafe {
-            _guard.arm_reclaim(
-                &mut self.session as *mut _,
-                machine.vmctx_mut() as *const _,
-            );
+            _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
         }
         result
     }
@@ -1943,9 +1925,7 @@ mod tests {
         // Register a persistent root (null heap ptr — GC skips null slots)
         let mut persistent_slot: *mut u8 = std::ptr::null_mut();
         unsafe {
-            crate::host_fns::register_persistent_root(
-                &mut persistent_slot as *mut *mut u8,
-            );
+            crate::host_fns::register_persistent_root(&mut persistent_slot as *mut *mut u8);
         }
         assert_eq!(crate::host_fns::persistent_roots_count(), 1);
 
@@ -1992,9 +1972,8 @@ mod tests {
 
                 let (expr, table) = make_gc_forcing_setup(40);
                 // 2 KiB nursery: forces >=1 GC for the 40-deep chain
-                let mut machine =
-                    JitEffectMachine::compile_session(&expr, &table, 2048)
-                        .expect("compile_session");
+                let mut machine = JitEffectMachine::compile_session(&expr, &table, 2048)
+                    .expect("compile_session");
 
                 // --- Run 1 ---
                 let result1 = machine.run_pure().expect("run 1 should succeed");
@@ -2027,8 +2006,7 @@ mod tests {
                 let (active_start, _) =
                     crate::host_fns::gc_active_range().expect("GC state installed");
                 assert_eq!(
-                    active_start as *const u8,
-                    retained_heap_ptr,
+                    active_start as *const u8, retained_heap_ptr,
                     "install_registries must re-point GC state at the retained heap"
                 );
                 assert_ne!(
@@ -2042,9 +2020,7 @@ mod tests {
                 // --- Register a persistent root before run 2 ---
                 let mut persistent_slot: *mut u8 = std::ptr::null_mut();
                 unsafe {
-                    crate::host_fns::register_persistent_root(
-                        &mut persistent_slot as *mut *mut u8,
-                    );
+                    crate::host_fns::register_persistent_root(&mut persistent_slot as *mut *mut u8);
                 }
                 assert_eq!(crate::host_fns::persistent_roots_count(), 1);
 

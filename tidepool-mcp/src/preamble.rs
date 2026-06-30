@@ -78,8 +78,10 @@ pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
 /// `Tidepool.Prelude`, which pulls `Control.Lens`).
 #[must_use]
 pub fn session_decl_module_env() -> ModuleEnv {
-    let mut imports: Vec<String> =
-        eval_import_lines(false).into_iter().map(String::from).collect();
+    let mut imports: Vec<String> = eval_import_lines(false)
+        .into_iter()
+        .map(String::from)
+        .collect();
     // Full-stack repl decl surface: also import the shell-effect modules so
     // `session_def` helpers can use Git/Shell/Cargo verbs (the eval module gets
     // them via `pragmas_and_imports`, but the decl `ModuleEnv` needs them too,
@@ -590,7 +592,9 @@ pub(crate) fn extract_sigs(src: &str) -> Vec<String> {
 /// `RustAudit`/`MechDemo` are excluded, usually because their names would clash).
 /// Returns the set of re-exported module stems, or `None` if no `Library.hs` is
 /// found / its export list can't be parsed (callers fall back to listing all).
-fn library_inscope_modules(dirs: &[std::path::PathBuf]) -> Option<std::collections::HashSet<String>> {
+fn library_inscope_modules(
+    dirs: &[std::path::PathBuf],
+) -> Option<std::collections::HashSet<String>> {
     for dir in dirs {
         let path = dir.join("Library.hs");
         let Ok(src) = std::fs::read_to_string(&path) else {

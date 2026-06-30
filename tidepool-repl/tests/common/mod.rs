@@ -89,7 +89,11 @@ impl Turn {
     }
     /// Assert this turn errored (graceful failure), returning the text.
     pub fn expect_err(&self, ctx: &str) -> &str {
-        assert!(self.is_error, "{ctx}: expected an error, got ok: {}", self.text);
+        assert!(
+            self.is_error,
+            "{ctx}: expected an error, got ok: {}",
+            self.text
+        );
         &self.text
     }
     pub fn contains(&self, needle: &str) -> bool {
@@ -110,11 +114,7 @@ impl Repl {
         }
     }
 
-    async fn dispatch(
-        &self,
-        tool: &str,
-        args: serde_json::Map<String, serde_json::Value>,
-    ) -> Turn {
+    async fn dispatch(&self, tool: &str, args: serde_json::Map<String, serde_json::Value>) -> Turn {
         let r = self
             .server
             .dispatch_tool(tool, args)

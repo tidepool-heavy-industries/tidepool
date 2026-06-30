@@ -32,7 +32,9 @@ async fn defs_accumulate_and_interact() {
     let repl = Repl::new();
     repl.open_ok().await;
 
-    repl.def("inc x = x + (1 :: Int)").await.expect_ok("def inc");
+    repl.def("inc x = x + (1 :: Int)")
+        .await
+        .expect_ok("def inc");
     repl.def("twice x = inc (inc x)")
         .await
         .expect_ok("def twice (references inc)");
@@ -74,7 +76,9 @@ async fn forward_reference_across_turns_poisons() {
     );
 
     // The session is NOT poisoned: subsequent work proceeds normally.
-    repl.def("g x = x * (2 :: Int)").await.expect_ok("def g OK after rejected forward ref");
+    repl.def("g x = x * (2 :: Int)")
+        .await
+        .expect_ok("def g OK after rejected forward ref");
     repl.def("f x = g x + (1 :: Int)")
         .await
         .expect_ok("def f OK now that g is defined");
@@ -202,9 +206,7 @@ async fn type_alias_and_newtype() {
         .expect_ok("def newtype Age");
 
     // Use the newtype (unwrap via case).
-    let out = repl
-        .eval_ok("pure (case Age 7 of { Age n -> n })")
-        .await;
+    let out = repl.eval_ok("pure (case Age 7 of { Age n -> n })").await;
     assert!(out.contains('7'), "newtype unwrap: expected 7, got: {out}");
 
     // Exercise the alias too: a Name value round-trips through T.length.
@@ -249,7 +251,10 @@ async fn record_syntax_selectors_localized() {
 
     // Fresh value, plain-eval path: selector works.
     let out = repl.eval_ok("pure (px (P 3 4))").await;
-    assert!(out.contains('3'), "px (P 3 4) fresh: expected 3, got: {out}");
+    assert!(
+        out.contains('3'),
+        "px (P 3 4) fresh: expected 3, got: {out}"
+    );
 
     // Bind a P value (positional, to isolate the reference path from record-ctor).
     repl.eval("p <- pure (P 1 2)")
@@ -258,15 +263,24 @@ async fn record_syntax_selectors_localized() {
 
     // Ref A — PURE fallback path (bare case): expected to WORK (cf. case 4).
     let ref_a = repl.eval("case p of { P a b -> b }").await;
-    eprintln!("[case6] ref A (pure-path case):  is_error={} text={}", ref_a.is_error, ref_a.text);
+    eprintln!(
+        "[case6] ref A (pure-path case):  is_error={} text={}",
+        ref_a.is_error, ref_a.text
+    );
 
     // Ref B' — Eff path with a case (not a selector): localizes selector vs path.
     let ref_b2 = repl.eval("pure (case p of { P a b -> b })").await;
-    eprintln!("[case6] ref B' (Eff-path case):  is_error={} text={}", ref_b2.is_error, ref_b2.text);
+    eprintln!(
+        "[case6] ref B' (Eff-path case):  is_error={} text={}",
+        ref_b2.is_error, ref_b2.text
+    );
 
     // Ref B — Eff path with the record SELECTOR: the crashing case.
     let ref_b = repl.eval("pure (py p)").await;
-    eprintln!("[case6] ref B  (Eff-path sel):   is_error={} text={}", ref_b.is_error, ref_b.text);
+    eprintln!(
+        "[case6] ref B  (Eff-path sel):   is_error={} text={}",
+        ref_b.is_error, ref_b.text
+    );
 
     // WIDER SCOPE (confirmed): the crash is NOT selector-specific — BOTH the
     // Eff-path case (ref B') and the Eff-path selector (ref B) crash with the
@@ -276,7 +290,10 @@ async fn record_syntax_selectors_localized() {
     // through that path). The crash is GRACEFUL (clean MCP error, no hang), and
     // the PURE path is still usable — the session is not fully dead.
     let survive = repl.eval("123 :: Int").await; // bare → pure-fallback path
-    eprintln!("[case6] survive (bare/pure path): is_error={} text={}", survive.is_error, survive.text);
+    eprintln!(
+        "[case6] survive (bare/pure path): is_error={} text={}",
+        survive.is_error, survive.text
+    );
     let survive = survive.expect_ok("pure path still works after the Eff-path crash");
     assert!(
         survive.contains("123"),
@@ -356,17 +373,26 @@ async fn class_instance_poisons_until_reset() {
     let c = repl
         .def("class Describe a where { describe :: a -> T.Text }")
         .await;
-    eprintln!("[case7] def class:    is_error={} text={}", c.is_error, c.text);
+    eprintln!(
+        "[case7] def class:    is_error={} text={}",
+        c.is_error, c.text
+    );
     c.expect_ok("def class Describe");
 
     let d = repl.def("data Animal = Cat | Dog").await;
-    eprintln!("[case7] def data:     is_error={} text={}", d.is_error, d.text);
+    eprintln!(
+        "[case7] def data:     is_error={} text={}",
+        d.is_error, d.text
+    );
     d.expect_ok("def data Animal");
 
     let i = repl
         .def("instance Describe Animal where { describe Cat = T.pack \"cat\"; describe Dog = T.pack \"dog\" }")
         .await;
-    eprintln!("[case7] def instance: is_error={} text={}", i.is_error, i.text);
+    eprintln!(
+        "[case7] def instance: is_error={} text={}",
+        i.is_error, i.text
+    );
     i.expect_ok("def instance Describe Animal");
 
     let out = repl.eval_ok("pure (describe Cat)").await;
@@ -403,12 +429,18 @@ async fn decl_prelude_collision_is_graceful() {
 
     // The gen module uses the lens-free standalone surface, so the def succeeds.
     let def = repl.def("over x = x + (1 :: Int)").await;
-    eprintln!("[case8] def over: is_error={} text={}", def.is_error, def.text);
+    eprintln!(
+        "[case8] def over: is_error={} text={}",
+        def.is_error, def.text
+    );
     def.expect_ok("def over succeeds (gen module is lens-free)");
 
     // BUG-7 fix: preamble hides `over` from Prelude → user decl wins.
     let used = repl.eval("pure (over 5)").await;
-    eprintln!("[case8] eval over: is_error={} text={}", used.is_error, used.text);
+    eprintln!(
+        "[case8] eval over: is_error={} text={}",
+        used.is_error, used.text
+    );
     let out = used.expect_ok("user `over` shadows Prelude.over — no ambiguous-occurrence");
     assert!(
         out.contains('6'),
@@ -439,19 +471,35 @@ async fn empty_and_garbage_decls_survive() {
     repl.open_ok().await;
 
     // Capture gen before the empty def so we can assert it is unchanged after.
-    let before = repl.cmd(":bindings").await.expect_ok(":bindings before").to_string();
+    let before = repl
+        .cmd(":bindings")
+        .await
+        .expect_ok(":bindings before")
+        .to_string();
 
     let empty = repl.def("").await;
-    eprintln!("[case9] def \"\":    is_error={} text={}", empty.is_error, empty.text);
+    eprintln!(
+        "[case9] def \"\":    is_error={} text={}",
+        empty.is_error, empty.text
+    );
     // RE-1 fix: empty def is a no-op — Ok, does not bump the generation.
     empty.expect_ok("def \"\" is a no-op (Ok, no gen bump)");
 
-    let after = repl.cmd(":bindings").await.expect_ok(":bindings after").to_string();
+    let after = repl
+        .cmd(":bindings")
+        .await
+        .expect_ok(":bindings after")
+        .to_string();
     // Both :bindings responses contain `"generation":N`; they must agree.
     fn extract_gen(s: &str) -> Option<u64> {
         let key = "\"generation\":";
         let start = s.find(key)? + key.len();
-        s[start..].trim_start().split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+        s[start..]
+            .trim_start()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
     }
     assert_eq!(
         extract_gen(&before),
@@ -460,13 +508,21 @@ async fn empty_and_garbage_decls_survive() {
     );
 
     let garbage = repl.def("@@@ not haskell").await;
-    eprintln!("[case9] def garbage: is_error={} text={}", garbage.is_error, garbage.text);
+    eprintln!(
+        "[case9] def garbage: is_error={} text={}",
+        garbage.is_error, garbage.text
+    );
     garbage.expect_err("garbage decl `@@@ not haskell` must be rejected cleanly");
 
     // The session survives: a following good def + eval works.
-    repl.def("good x = x").await.expect_ok("good def after bad decls");
+    repl.def("good x = x")
+        .await
+        .expect_ok("good def after bad decls");
     let out = repl.eval_ok("pure (good (7 :: Int))").await;
-    assert!(out.contains('7'), "post-garbage good def: expected 7, got: {out}");
+    assert!(
+        out.contains('7'),
+        "post-garbage good def: expected 7, got: {out}"
+    );
 
     repl.close().await.expect_ok("close");
 }
@@ -485,7 +541,10 @@ async fn bad_decl_does_not_poison_log() {
     repl.open_ok().await;
 
     let bad = repl.def("data = oops").await;
-    eprintln!("[case10] def `data = oops`: is_error={} text={}", bad.is_error, bad.text);
+    eprintln!(
+        "[case10] def `data = oops`: is_error={} text={}",
+        bad.is_error, bad.text
+    );
     bad.expect_err("`data = oops` is a parse error → rejected, log untouched");
 
     repl.def("good2 x = x * (3 :: Int)")

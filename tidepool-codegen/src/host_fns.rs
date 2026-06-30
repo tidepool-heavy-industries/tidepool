@@ -325,16 +325,13 @@ pub fn install_session_buffer(mut buffer: Vec<u8>) {
 /// `alloc_ptr` must be the `VMContext::alloc_ptr` value at the end of the
 /// run — the bump cursor after the last allocation.
 pub fn reclaim_session_heap(alloc_ptr: *mut u8) -> (Option<Vec<u8>>, usize) {
-    GC_STATE.with(|cell| {
-        match cell.borrow_mut().as_mut() {
-            Some(state) => {
-                let cursor =
-                    (alloc_ptr as usize).saturating_sub(state.active_start as usize);
-                let buf = state.active_buffer.take();
-                (buf, cursor)
-            }
-            None => (None, 0),
+    GC_STATE.with(|cell| match cell.borrow_mut().as_mut() {
+        Some(state) => {
+            let cursor = (alloc_ptr as usize).saturating_sub(state.active_start as usize);
+            let buf = state.active_buffer.take();
+            (buf, cursor)
         }
+        None => (None, 0),
     })
 }
 

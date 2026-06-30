@@ -866,7 +866,13 @@ fn test_resume_node_with_effect_result() {
 
     // Identity to use as g
 
-    let func_id_identity = compile_expr(&mut pipeline, &tree_identity, "identity", &ExternalEnv::new()).unwrap();
+    let func_id_identity = compile_expr(
+        &mut pipeline,
+        &tree_identity,
+        "identity",
+        &ExternalEnv::new(),
+    )
+    .unwrap();
 
     pipeline.finalize().unwrap();
 
@@ -924,7 +930,13 @@ fn test_resume_node_with_effect_result() {
 
     let mut pipeline2 = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
 
-    let f_id = compile_expr(&mut pipeline2, &tree_returns_e, "returns_e", &ExternalEnv::new()).unwrap();
+    let f_id = compile_expr(
+        &mut pipeline2,
+        &tree_returns_e,
+        "returns_e",
+        &ExternalEnv::new(),
+    )
+    .unwrap();
 
     pipeline2.finalize().unwrap();
 

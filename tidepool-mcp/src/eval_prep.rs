@@ -145,7 +145,16 @@ pub fn template_haskell(
     input: Option<&serde_json::Value>,
     budget: Option<u32>,
 ) -> String {
-    template_haskell_impl(preamble, effect_stack, code, imports, helpers, input, budget, false)
+    template_haskell_impl(
+        preamble,
+        effect_stack,
+        code,
+        imports,
+        helpers,
+        input,
+        budget,
+        false,
+    )
 }
 
 /// Like [`template_haskell`] but uses `toWire` instead of `toJSON` for the
@@ -165,7 +174,16 @@ pub fn template_haskell_show_default(
     input: Option<&serde_json::Value>,
     budget: Option<u32>,
 ) -> String {
-    template_haskell_impl(preamble, effect_stack, code, imports, helpers, input, budget, true)
+    template_haskell_impl(
+        preamble,
+        effect_stack,
+        code,
+        imports,
+        helpers,
+        input,
+        budget,
+        true,
+    )
 }
 
 #[allow(clippy::too_many_arguments)] // shared impl behind template_haskell / _show_default
@@ -780,21 +798,34 @@ mod tests {
     #[test]
     fn preamble_emits_towire_class() {
         let pre = crate::build_preamble(&[], false);
-        assert!(pre.contains("class ToWire a"), "ToWire class missing from preamble");
+        assert!(
+            pre.contains("class ToWire a"),
+            "ToWire class missing from preamble"
+        );
         assert!(
             pre.contains("instance {-# OVERLAPPABLE #-} Show a => ToWire a"),
             "Show fallback instance missing from preamble"
         );
-        assert!(pre.contains("instance ToWire Text"), "Text instance missing from preamble");
-        assert!(pre.contains("instance ToWire Value"), "Value instance missing from preamble");
+        assert!(
+            pre.contains("instance ToWire Text"),
+            "Text instance missing from preamble"
+        );
+        assert!(
+            pre.contains("instance ToWire Value"),
+            "Value instance missing from preamble"
+        );
     }
 
     #[test]
     fn template_haskell_show_default_uses_towire() {
         let pre = crate::build_preamble(&[], false);
-        let src = template_haskell_show_default(&pre, "'[]", "pure (42 :: Int)", "", "", None, None);
+        let src =
+            template_haskell_show_default(&pre, "'[]", "pure (42 :: Int)", "", "", None, None);
         assert!(src.contains("toWire _r"), "show_default must use toWire _r");
-        assert!(!src.contains("toJSON _r"), "show_default must not use toJSON _r");
+        assert!(
+            !src.contains("toJSON _r"),
+            "show_default must not use toJSON _r"
+        );
     }
 
     #[test]

@@ -182,12 +182,7 @@ impl OldSpace {
             let arena = self.arenas.last_mut().unwrap();
             let to_slice = &mut arena[self.cursor..self.cursor + needed];
 
-            let res = cheney_copy(
-                &[&mut root as *mut *mut u8],
-                from_start,
-                from_end,
-                to_slice,
-            );
+            let res = cheney_copy(&[&mut root as *mut *mut u8], from_start, from_end, to_slice);
 
             debug_assert_eq!(
                 res.bytes_copied, needed,
@@ -225,11 +220,7 @@ impl OldSpace {
 /// deep) and a visited set to count each object exactly once. The alignment
 /// formula `(size + 7) & !7` matches Cheney's, so the result equals the number
 /// of bytes `cheney_copy` will write for the same root.
-unsafe fn measure_closure_bytes(
-    ptr: *mut u8,
-    from_start: *const u8,
-    from_end: *const u8,
-) -> usize {
+unsafe fn measure_closure_bytes(ptr: *mut u8, from_start: *const u8, from_end: *const u8) -> usize {
     let in_range = |p: *const u8| -> bool {
         (p as usize) >= (from_start as usize) && (p as usize) < (from_end as usize)
     };
@@ -293,12 +284,7 @@ mod tests {
         offset + LIT_SIZE
     }
 
-    unsafe fn write_con(
-        buf: &mut [u8],
-        offset: usize,
-        con_tag: u64,
-        fields: &[*mut u8],
-    ) -> usize {
+    unsafe fn write_con(buf: &mut [u8], offset: usize, con_tag: u64, fields: &[*mut u8]) -> usize {
         let ptr = buf.as_mut_ptr().add(offset);
         let size = (CON_FIELDS_OFFSET + fields.len() * FIELD_STRIDE) as u16;
         let aligned = ((size as usize) + 7) & !7;
@@ -439,8 +425,7 @@ mod tests {
             };
 
             assert_eq!(
-                bytes_1,
-                bytes_2,
+                bytes_1, bytes_2,
                 "minor GC must not scan old_space: \
                  bytes_1={bytes_1}, bytes_2={bytes_2}"
             );

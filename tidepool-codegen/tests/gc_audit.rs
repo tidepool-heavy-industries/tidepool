@@ -89,7 +89,13 @@ fn test_stack_map_case_safepoints() {
     });
 
     let tree = CoreExpr { nodes };
-    let _ = compile_expr(&mut pipeline, &tree, "test_case_safepoint", &ExternalEnv::new()).unwrap();
+    let _ = compile_expr(
+        &mut pipeline,
+        &tree,
+        "test_case_safepoint",
+        &ExternalEnv::new(),
+    )
+    .unwrap();
     pipeline.finalize().expect("failed to finalize");
 
     // App(0, 1) inside Case alt is a safepoint.
@@ -130,7 +136,13 @@ fn test_stack_map_join_safepoints() {
 
     let tree = CoreExpr { nodes };
 
-    let _ = compile_expr(&mut pipeline, &tree, "test_join_safepoint", &ExternalEnv::new()).unwrap();
+    let _ = compile_expr(
+        &mut pipeline,
+        &tree,
+        "test_join_safepoint",
+        &ExternalEnv::new(),
+    )
+    .unwrap();
     pipeline.finalize().expect("failed to finalize");
 
     // App(0, 1) in RHS is a safepoint.

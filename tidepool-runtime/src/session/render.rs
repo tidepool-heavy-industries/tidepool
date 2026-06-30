@@ -97,7 +97,11 @@ impl ExportItem {
                 let cons = v
                     .get("cons")
                     .and_then(Json::as_array)
-                    .map(|a| a.iter().filter_map(|c| c.as_str().map(str::to_string)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|c| c.as_str().map(str::to_string))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 Some(ExportItem::Type { name, cons })
             }
@@ -105,7 +109,11 @@ impl ExportItem {
                 let methods = v
                     .get("methods")
                     .and_then(Json::as_array)
-                    .map(|a| a.iter().filter_map(|c| c.as_str().map(str::to_string)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|c| c.as_str().map(str::to_string))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 Some(ExportItem::Class { name, methods })
             }
@@ -341,8 +349,10 @@ pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> Rendere
     // Heads this turn (re)defines — drives the `hiding` clause on the prior-gen
     // import (head-name match only; see `cumulative_exports_before`).
     let new_heads: Vec<&str> = this.items.iter().map(ExportItem::head_name).collect();
-    let hidden_prior: Vec<&ExportItem> =
-        prior.iter().filter(|p| new_heads.contains(&p.head_name())).collect();
+    let hidden_prior: Vec<&ExportItem> = prior
+        .iter()
+        .filter(|p| new_heads.contains(&p.head_name()))
+        .collect();
 
     let prev_module = if g >= 2 {
         Some(SessionModule::lib(Generation((g - 1) as u64)))
@@ -415,7 +425,10 @@ pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> Rendere
         }
     }
 
-    RenderedModule { module, source: out }
+    RenderedModule {
+        module,
+        source: out,
+    }
 }
 
 #[cfg(test)]
@@ -432,7 +445,10 @@ mod tests {
         }
     }
     fn turn(src: &str, items: Vec<ExportItem>) -> DeclTurn {
-        DeclTurn { sources: vec![src.into()], items }
+        DeclTurn {
+            sources: vec![src.into()],
+            items,
+        }
     }
 
     #[test]
@@ -442,12 +458,24 @@ mod tests {
         let mut log = DeclLog::new();
         log.push(turn("a .+ b = a + b", vec![val(".+")]));
         let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
-        assert!(r.source.contains("(.+)"), "operator export must be parenthesized:\n{}", r.source);
-        assert!(!r.source.contains("\n    .+\n"), "bare operator in export list:\n{}", r.source);
+        assert!(
+            r.source.contains("(.+)"),
+            "operator export must be parenthesized:\n{}",
+            r.source
+        );
+        assert!(
+            !r.source.contains("\n    .+\n"),
+            "bare operator in export list:\n{}",
+            r.source
+        );
         // And the prior-gen `hiding` clause must parenthesize too (redefine `.+`).
         log.push(turn("a .+ b = a - b", vec![val(".+")]));
         let r2 = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
-        assert!(r2.source.contains("hiding ((.+))"), "hiding clause must parenthesize:\n{}", r2.source);
+        assert!(
+            r2.source.contains("hiding ((.+))"),
+            "hiding clause must parenthesize:\n{}",
+            r2.source
+        );
     }
 
     #[test]
@@ -484,7 +512,9 @@ mod tests {
         log.push(turn("slug t = T.replace \" \" \"-\" t", vec![val("slug")]));
         let r = render_module(&log, Generation(3), &ModuleEnv::standalone_default());
         // G3 redefines slug → hide it from G2's re-export (latest-wins).
-        assert!(r.source.contains("import Tidepool.Session.Lib.G2 hiding (slug)"));
+        assert!(r
+            .source
+            .contains("import Tidepool.Session.Lib.G2 hiding (slug)"));
         assert!(r.source.contains("module Tidepool.Session.Lib.G2,"));
         // `other` (defined at G2, not redefined) stays re-exported transitively.
         assert!(!r.source.contains("    other"));
@@ -494,11 +524,16 @@ mod tests {
     fn redefined_data_type_hides_with_dotdot_no_conflict() {
         let mut log = DeclLog::new();
         log.push(turn("data Foo = A | B", vec![ty("Foo", &["A", "B"])]));
-        log.push(turn("data Foo = X | A | B", vec![ty("Foo", &["X", "A", "B"])]));
+        log.push(turn(
+            "data Foo = X | A | B",
+            vec![ty("Foo", &["X", "A", "B"])],
+        ));
         let r2 = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
         // The reshape hides the OLD Foo and its constructors, avoiding GHC's
         // conflicting-export error, and re-declares + exports the new shape.
-        assert!(r2.source.contains("import Tidepool.Session.Lib.G1 hiding (Foo(..))"));
+        assert!(r2
+            .source
+            .contains("import Tidepool.Session.Lib.G1 hiding (Foo(..))"));
         assert!(r2.source.contains("    Foo(..)"));
         assert!(r2.source.contains("data Foo = X | A | B"));
         // G1 still renders standalone (old shape stays compilable / resolvable).
@@ -534,7 +569,9 @@ mod tests {
             vec![val("slug"), ty("Greeter", &["Hi", "Yo"])],
         ));
         let r = render_module(&log, Generation(2), &ModuleEnv::standalone_default());
-        assert!(r.source.contains("import Tidepool.Session.Lib.G1 hiding (slug)"));
+        assert!(r
+            .source
+            .contains("import Tidepool.Session.Lib.G1 hiding (slug)"));
         assert!(r.source.contains("    slug,"));
         assert!(r.source.contains("    Greeter(..)"));
     }
@@ -561,7 +598,10 @@ mod tests {
             .source
             .find("module Tidepool.Session.Lib.G1")
             .expect("module header present");
-        assert!(pragma_pos < module_pos, "LANGUAGE pragma must precede module header");
+        assert!(
+            pragma_pos < module_pos,
+            "LANGUAGE pragma must precede module header"
+        );
         // DeriveAnyClass must appear in the merged pragma block (before the module line).
         assert!(
             r.source[..module_pos].contains("DeriveAnyClass"),
@@ -616,10 +656,21 @@ mod tests {
             .source
             .find("import Data.Char (toUpper)")
             .expect("import must appear in output");
-        let decl_pos = r.source.find("toUpper' c = toUpper c").expect("decl body present");
+        let decl_pos = r
+            .source
+            .find("toUpper' c = toUpper c")
+            .expect("decl body present");
         // Import must be in the header region (after module line, before decl body).
-        assert!(import_pos > module_pos, "import must appear after module header:\n{}", r.source);
-        assert!(import_pos < decl_pos, "import must appear before declaration body:\n{}", r.source);
+        assert!(
+            import_pos > module_pos,
+            "import must appear after module header:\n{}",
+            r.source
+        );
+        assert!(
+            import_pos < decl_pos,
+            "import must appear before declaration body:\n{}",
+            r.source
+        );
         // The import must NOT reappear inside the declaration body.
         assert!(
             !r.source[decl_pos..].contains("import Data.Char"),

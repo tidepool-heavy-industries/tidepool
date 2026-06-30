@@ -39,13 +39,25 @@ async fn text_bind_alone_control() {
     repl.open_ok().await;
 
     let t = repl.eval("s <- pure (T.pack \"hi\")").await;
-    assert!(t.expect_ok("bind s").contains("bound"), "bind s: {}", t.text);
+    assert!(
+        t.expect_ok("bind s").contains("bound"),
+        "bind s: {}",
+        t.text
+    );
 
     let t = repl.eval("T.length s").await;
-    assert!(t.expect_ok("T.length s").contains("2"), "T.length s: {}", t.text);
+    assert!(
+        t.expect_ok("T.length s").contains("2"),
+        "T.length s: {}",
+        t.text
+    );
 
     let t = repl.eval("T.unpack s").await;
-    assert!(t.expect_ok("T.unpack s").contains("hi"), "T.unpack s: {}", t.text);
+    assert!(
+        t.expect_ok("T.unpack s").contains("hi"),
+        "T.unpack s: {}",
+        t.text
+    );
 
     repl.close().await.expect_ok("close");
 }
@@ -65,11 +77,19 @@ async fn box_second_bind_replica() {
     repl.def("data Box = Box Int").await.expect_ok("def Box");
 
     let t = repl.eval("x <- pure (42 :: Int)").await;
-    assert!(t.expect_ok("bind x").contains("bound"), "bind x: {}", t.text);
+    assert!(
+        t.expect_ok("bind x").contains("bound"),
+        "bind x: {}",
+        t.text
+    );
     let t = repl.eval("x + 1").await;
     assert!(t.expect_ok("read x").contains("43"), "read x: {}", t.text);
     let t = repl.eval("b <- pure (Box 7)").await;
-    assert!(t.expect_ok("bind b").contains("bound"), "bind b: {}", t.text);
+    assert!(
+        t.expect_ok("bind b").contains("bound"),
+        "bind b: {}",
+        t.text
+    );
     let t = repl.eval("case b of Box n -> n + 100").await;
     assert!(t.expect_ok("case b").contains("107"), "case b: {}", t.text);
 
@@ -89,11 +109,19 @@ async fn eff_ref_pure_const_with_binding_live() {
     repl.open_ok().await;
 
     let t = repl.eval("x <- pure (1 :: Int)").await;
-    assert!(t.expect_ok("bind x").contains("bound"), "bind x: {}", t.text);
+    assert!(
+        t.expect_ok("bind x").contains("bound"),
+        "bind x: {}",
+        t.text
+    );
 
     // Eff reference run that does NOT touch x — should be 123 (was kind=4 before the fix).
     let t = repl.eval("pure (123 :: Int)").await;
-    assert!(t.expect_ok("pure 123").contains("123"), "pure 123: {}", t.text);
+    assert!(
+        t.expect_ok("pure 123").contains("123"),
+        "pure 123: {}",
+        t.text
+    );
 
     repl.close().await.expect_ok("close");
 }
@@ -109,7 +137,11 @@ async fn eff_ref_pure_const_no_binding_control() {
     repl.open_ok().await;
 
     let t = repl.eval("pure (123 :: Int)").await;
-    assert!(t.expect_ok("pure 123").contains("123"), "pure 123: {}", t.text);
+    assert!(
+        t.expect_ok("pure 123").contains("123"),
+        "pure 123: {}",
+        t.text
+    );
 
     repl.close().await.expect_ok("close");
 }
@@ -129,23 +161,47 @@ async fn text_bind_headline_faithful() {
     repl.def("data Box = Box Int").await.expect_ok("def Box");
 
     let t = repl.eval("x <- pure (42 :: Int)").await;
-    assert!(t.expect_ok("bind x").contains("bound"), "bind x: {}", t.text);
+    assert!(
+        t.expect_ok("bind x").contains("bound"),
+        "bind x: {}",
+        t.text
+    );
     let t = repl.eval("x + 1").await;
     assert!(t.expect_ok("read x").contains("43"), "read x: {}", t.text);
 
     // The library-dep (Data.Text) second bind that triggers the downsweep loss.
     let t = repl.eval("y <- pure (T.pack \"hi\")").await;
-    assert!(t.expect_ok("bind y").contains("bound"), "bind y: {}", t.text);
+    assert!(
+        t.expect_ok("bind y").contains("bound"),
+        "bind y: {}",
+        t.text
+    );
 
     // Full VALUE-CORRECTNESS gate for the eventual fix (length/unpack/toUpper/append).
     let t = repl.eval("T.length y").await;
-    assert!(t.expect_ok("T.length y").contains("2"), "T.length y: {}", t.text);
+    assert!(
+        t.expect_ok("T.length y").contains("2"),
+        "T.length y: {}",
+        t.text
+    );
     let t = repl.eval("T.unpack y").await;
-    assert!(t.expect_ok("T.unpack y").contains("hi"), "T.unpack y: {}", t.text);
+    assert!(
+        t.expect_ok("T.unpack y").contains("hi"),
+        "T.unpack y: {}",
+        t.text
+    );
     let t = repl.eval("pure (T.unpack (T.toUpper y))").await;
-    assert!(t.expect_ok("toUpper y").contains("HI"), "toUpper y: {}", t.text);
+    assert!(
+        t.expect_ok("toUpper y").contains("HI"),
+        "toUpper y: {}",
+        t.text
+    );
     let t = repl.eval("T.unpack (T.append y (T.pack \"!\"))").await;
-    assert!(t.expect_ok("append y").contains("hi!"), "append y: {}", t.text);
+    assert!(
+        t.expect_ok("append y").contains("hi!"),
+        "append y: {}",
+        t.text
+    );
 
     repl.close().await.expect_ok("close");
 }
@@ -161,17 +217,33 @@ async fn text_rebind_same_name() {
     repl.open_ok().await;
 
     let t = repl.eval("x <- pure (1 :: Int)").await;
-    assert!(t.expect_ok("bind x int").contains("bound"), "bind x int: {}", t.text);
+    assert!(
+        t.expect_ok("bind x int").contains("bound"),
+        "bind x int: {}",
+        t.text
+    );
     let t = repl.eval("x + 1").await; // read between (headline-style)
     assert!(t.expect_ok("read x").contains("2"), "read x: {}", t.text);
 
     let t = repl.eval("x <- pure (T.pack \"hi\")").await;
-    assert!(t.expect_ok("rebind x text").contains("bound"), "rebind x: {}", t.text);
+    assert!(
+        t.expect_ok("rebind x text").contains("bound"),
+        "rebind x: {}",
+        t.text
+    );
 
     let t = repl.eval("T.length x").await;
-    assert!(t.expect_ok("T.length x").contains("2"), "T.length x: {}", t.text);
+    assert!(
+        t.expect_ok("T.length x").contains("2"),
+        "T.length x: {}",
+        t.text
+    );
     let t = repl.eval("T.unpack x").await;
-    assert!(t.expect_ok("T.unpack x").contains("hi"), "T.unpack x: {}", t.text);
+    assert!(
+        t.expect_ok("T.unpack x").contains("hi"),
+        "T.unpack x: {}",
+        t.text
+    );
 
     repl.close().await.expect_ok("close");
 }
@@ -188,15 +260,27 @@ async fn text_bind_longer_with_prior() {
     repl.open_ok().await;
 
     let t = repl.eval("n <- pure (0 :: Int)").await;
-    assert!(t.expect_ok("bind n").contains("bound"), "bind n: {}", t.text);
+    assert!(
+        t.expect_ok("bind n").contains("bound"),
+        "bind n: {}",
+        t.text
+    );
     let t = repl.eval("n + 1").await;
     assert!(t.expect_ok("read n").contains("1"), "read n: {}", t.text);
 
     let t = repl.eval("y <- pure (T.pack \"hello world\")").await;
-    assert!(t.expect_ok("bind y").contains("bound"), "bind y: {}", t.text);
+    assert!(
+        t.expect_ok("bind y").contains("bound"),
+        "bind y: {}",
+        t.text
+    );
 
     let t = repl.eval("T.length y").await;
-    assert!(t.expect_ok("T.length y").contains("11"), "T.length y: {}", t.text);
+    assert!(
+        t.expect_ok("T.length y").contains("11"),
+        "T.length y: {}",
+        t.text
+    );
     let t = repl.eval("T.unpack y").await;
     assert!(
         t.expect_ok("T.unpack y").contains("hello world"),

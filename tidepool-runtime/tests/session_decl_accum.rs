@@ -22,9 +22,9 @@ use std::path::{Path, PathBuf};
 
 use serial_test::serial;
 use tidepool_repr::Generation;
+use tidepool_repr::SessionId;
 use tidepool_runtime::session::{ModuleEnv, SessionLib};
 use tidepool_runtime::{compile_and_run_pure_salted, paths};
-use tidepool_repr::SessionId;
 
 /// Locate the extract binary (env override, the worktree symlink, or the
 /// dist-newstyle build) and confirm GHC is on PATH. Returns the lib include dir
@@ -121,7 +121,11 @@ fn declarations_accumulate_and_types_coexist() {
         &lib.cache_salt(),
         &probe(g1, "T.Text", "slug \"a b\""),
     );
-    assert_eq!(r, serde_json::json!("a-b"), "turn 2: slug lowercases+hyphens");
+    assert_eq!(
+        r,
+        serde_json::json!("a-b"),
+        "turn 2: slug lowercases+hyphens"
+    );
 
     // ---- turn 3: redefine `slug` (latest-wins shadowing) ----
     let g3 = lib.define("slug t = T.toUpper t").expect("redefine slug");
@@ -149,11 +153,7 @@ fn declarations_accumulate_and_types_coexist() {
         &lib_dir,
         lib.include_dir(),
         &lib.cache_salt(),
-        &probe(
-            g_new,
-            "Int",
-            "case X of { X -> 1; A -> 2; B -> 3 }",
-        ),
+        &probe(g_new, "Int", "case X of { X -> 1; A -> 2; B -> 3 }"),
     );
     assert_eq!(r, serde_json::json!(1), "turn 5: reshaped Foo is in scope");
 
@@ -165,7 +165,11 @@ fn declarations_accumulate_and_types_coexist() {
         &lib.cache_salt(),
         &probe(g_old, "Int", "case A of { A -> 10; B -> 20 }"),
     );
-    assert_eq!(r, serde_json::json!(10), "turn 5: old Foo shape still resolvable");
+    assert_eq!(
+        r,
+        serde_json::json!(10),
+        "turn 5: old Foo shape still resolvable"
+    );
 
     // The accumulated functions are still reachable from the newest gen too.
     let r = run_probe(

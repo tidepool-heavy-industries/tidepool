@@ -119,7 +119,10 @@ pub fn classify_turn(turn_text: &str) -> Result<TurnClassification, CompileError
 fn parse_stmt_json(json: &str) -> Result<TurnClassification, CompileError> {
     let v: serde_json::Value = serde_json::from_str(json)
         .map_err(|e| CompileError::ExtractFailed(format!("invalid stmt-binder JSON: {e}")))?;
-    let kind = v.get("kind").and_then(serde_json::Value::as_str).unwrap_or("expr");
+    let kind = v
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("expr");
     let binders = v
         .get("binders")
         .and_then(serde_json::Value::as_array)

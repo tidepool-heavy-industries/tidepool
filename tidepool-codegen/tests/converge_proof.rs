@@ -23,7 +23,7 @@
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_repr::datacon::DataCon;
-use tidepool_repr::types::{AltCon, Alt, DataConId, Literal, VarId};
+use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, TreeBuilder};
 
 use serial_test::serial;
@@ -268,7 +268,12 @@ fn converge_second_fragment_resolves_first_fragments_tenured_value() {
 
             // 2/3. add_function fragment-1, bind it (run → deep_force → tenure → root).
             let frag1 = machine
-                .add_function("frag1", &build_value_fragment(7), &table, &ExternalEnv::new())
+                .add_function(
+                    "frag1",
+                    &build_value_fragment(7),
+                    &table,
+                    &ExternalEnv::new(),
+                )
                 .expect("add_function frag1");
             let slot = machine
                 .run_pure_and_bind(frag1)
@@ -333,7 +338,12 @@ fn converge_survives_real_gc_between_runs() {
 
             // Bind x = C1 13.
             let frag1 = machine
-                .add_function("frag1", &build_value_fragment(13), &table, &ExternalEnv::new())
+                .add_function(
+                    "frag1",
+                    &build_value_fragment(13),
+                    &table,
+                    &ExternalEnv::new(),
+                )
                 .expect("add_function frag1");
             let slot = machine.run_pure_and_bind(frag1).expect("bind frag1");
             assert_eq!(tidepool_codegen::host_fns::persistent_roots_count(), 1);
@@ -358,7 +368,12 @@ fn converge_survives_real_gc_between_runs() {
             // --- Force a REAL GC: a heavy filler fragment over the 2 KiB nursery. ---
             let gc_before = tidepool_codegen::host_fns::gc_trigger_call_count();
             let filler = machine
-                .add_function("filler", &build_gc_forcing_fragment(80), &table, &ExternalEnv::new())
+                .add_function(
+                    "filler",
+                    &build_gc_forcing_fragment(80),
+                    &table,
+                    &ExternalEnv::new(),
+                )
                 .expect("add_function filler");
             let _ = machine.run_fragment_pure(filler).expect("run filler");
             let gc_after = tidepool_codegen::host_fns::gc_trigger_call_count();
@@ -431,13 +446,7 @@ fn effectful_bind_tier0_second_fragment_resolves_bound_value() {
             // 3. run_fragment_and_bind (forced=true, Tier0): step loop → Done →
             //    deep_force → tenure → RootSlot.
             let slot = machine
-                .run_fragment_and_bind(
-                    frag1,
-                    &table,
-                    &mut frunk::HNil,
-                    &(),
-                    true,
-                )
+                .run_fragment_and_bind(frag1, &table, &mut frunk::HNil, &(), true)
                 .expect("run_fragment_and_bind");
 
             assert_eq!(
@@ -453,12 +462,7 @@ fn effectful_bind_tier0_second_fragment_resolves_bound_value() {
 
             // 5/6. Reference fragment: case x of C1 n -> n
             let frag2 = machine
-                .add_function(
-                    "eff_frag2",
-                    &build_reference_fragment(x),
-                    &table,
-                    &env,
-                )
+                .add_function("eff_frag2", &build_reference_fragment(x), &table, &env)
                 .expect("add_function eff_frag2");
 
             let result = machine
@@ -510,13 +514,7 @@ fn effectful_bind_tier1_closure_is_callable_after_bind() {
 
             // Tier1 bind: forced=false, closure tenured as-is.
             let slot = machine
-                .run_fragment_and_bind(
-                    frag_id,
-                    &table,
-                    &mut frunk::HNil,
-                    &(),
-                    false,
-                )
+                .run_fragment_and_bind(frag_id, &table, &mut frunk::HNil, &(), false)
                 .expect("run_fragment_and_bind tier1");
 
             assert_eq!(
@@ -532,12 +530,7 @@ fn effectful_bind_tier1_closure_is_callable_after_bind() {
 
             // Apply: f 7 — the tenured identity closure applied to 7.
             let apply_frag = machine
-                .add_function(
-                    "apply_identity",
-                    &build_apply_fragment(f, 7),
-                    &table,
-                    &env,
-                )
+                .add_function("apply_identity", &build_apply_fragment(f, 7), &table, &env)
                 .expect("add_function apply_identity");
 
             let result = machine

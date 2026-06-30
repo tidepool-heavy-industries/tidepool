@@ -406,9 +406,7 @@ fn bignat_field_to_decimal(val: &Value, table: &DataConTable, depth: usize) -> S
         ),
         Value::Lit(Literal::LitByteArray(bytes)) => Some(bytes.clone()),
         // Unwrap a Con("ByteArray", [inner]) layer that heap_bridge occasionally emits
-        Value::Con(id, fields)
-            if con_name(*id, table) == "ByteArray" && fields.len() == 1 =>
-        {
+        Value::Con(id, fields) if con_name(*id, table) == "ByteArray" && fields.len() == 1 => {
             match &fields[0] {
                 Value::ByteArray(bs) => Some(
                     bs.lock()

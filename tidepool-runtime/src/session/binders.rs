@@ -34,7 +34,10 @@ fn wrap_decls(decl_text: &str) -> String {
 }
 
 /// Extract the export items a declaration introduces, via GHC (parse-only).
-pub fn extract_binders(decl_text: &str, include: &[&Path]) -> Result<Vec<ExportItem>, SessionError> {
+pub fn extract_binders(
+    decl_text: &str,
+    include: &[&Path],
+) -> Result<Vec<ExportItem>, SessionError> {
     let temp_dir = tempfile::TempDir::new()?;
     let input_path = temp_dir.path().join("SessionDecls.hs");
     let out_path = temp_dir.path().join("binders.json");
@@ -78,7 +81,9 @@ pub(crate) fn parse_binders_json(json_text: &str) -> Result<Vec<ExportItem>, Ses
     let items = v
         .get("items")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| SessionError::BinderExtraction("binder JSON missing `items` array".into()))?;
+        .ok_or_else(|| {
+            SessionError::BinderExtraction("binder JSON missing `items` array".into())
+        })?;
     Ok(items.iter().filter_map(ExportItem::from_json).collect())
 }
 

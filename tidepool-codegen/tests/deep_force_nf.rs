@@ -101,11 +101,18 @@ fn deep_force_traverses_deep_chain_without_host_recursion() {
         }
         assert_eq!(steps, DEPTH, "every Con link preserved after deep_force");
         assert_eq!(heap_layout::read_tag(cur), layout::TAG_LIT);
-        assert_eq!(*(cur.add(layout::LIT_VALUE_OFFSET as usize) as *const i64), 0xABCD);
+        assert_eq!(
+            *(cur.add(layout::LIT_VALUE_OFFSET as usize) as *const i64),
+            0xABCD
+        );
     }
 
     // Rust roots fully unwound (base_mark restored).
-    assert_eq!(host_fns::rust_roots_mark(), 0, "deep_force must unwind all roots");
+    assert_eq!(
+        host_fns::rust_roots_mark(),
+        0,
+        "deep_force must unwind all roots"
+    );
     host_fns::clear_persistent_roots();
 }
 
@@ -151,13 +158,19 @@ fn deep_force_descends_con_but_not_closure() {
         assert_eq!(f0, leaf_lit);
         assert_eq!(heap_layout::read_tag(f0), layout::TAG_LIT);
         assert_eq!(f1, clo);
-        assert_eq!(heap_layout::read_tag(f1), layout::TAG_CLOSURE, "closure left as-is");
+        assert_eq!(
+            heap_layout::read_tag(f1),
+            layout::TAG_CLOSURE,
+            "closure left as-is"
+        );
         assert_eq!(f2, inner_con);
         // Nested Con's field forced/preserved.
-        let nested =
-            *(inner_con.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8);
+        let nested = *(inner_con.add(layout::CON_FIELDS_OFFSET as usize) as *const *mut u8);
         assert_eq!(heap_layout::read_tag(nested), layout::TAG_LIT);
-        assert_eq!(*(nested.add(layout::LIT_VALUE_OFFSET as usize) as *const i64), 7);
+        assert_eq!(
+            *(nested.add(layout::LIT_VALUE_OFFSET as usize) as *const i64),
+            7
+        );
     }
 
     assert_eq!(host_fns::rust_roots_mark(), 0);

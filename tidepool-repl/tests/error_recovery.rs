@@ -27,9 +27,7 @@ async fn undefined_var_then_recover() {
     repl.open_ok().await;
 
     // root a real binding first so the session has live state to survive with.
-    repl.eval("x <- pure (1 :: Int)")
-        .await
-        .expect_ok("bind x");
+    repl.eval("x <- pure (1 :: Int)").await.expect_ok("bind x");
 
     // reference an undefined var — GHC scope error, folded into a clean MCP error.
     let t = repl.eval("y + 1").await;

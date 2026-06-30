@@ -402,8 +402,8 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                 cx.respond_list(rel_paths)
             }
             FsReq::Grep(regex_str, pattern) => {
-                let re = regex::Regex::new(&regex_str)
-                    .map_err(|e| grep_regex_error(&regex_str, &e))?;
+                let re =
+                    regex::Regex::new(&regex_str).map_err(|e| grep_regex_error(&regex_str, &e))?;
                 let paths = self.expand_glob(&pattern)?;
                 let mut results: Vec<(String, i64, String)> = Vec::new();
                 let mut more_matches = 0;
@@ -614,10 +614,7 @@ impl SgHandler {
                         .canonicalize()
                         .map_err(|e| EffectError::Handler(format!("Bad path {}: {}", p, e)))?;
                     if !canonical.starts_with(&canonical_root) {
-                        return Err(EffectError::Handler(format!(
-                            "Path escapes sandbox: {}",
-                            p
-                        )));
+                        return Err(EffectError::Handler(format!("Path escapes sandbox: {}", p)));
                     }
                     if canonical.is_file() {
                         files.push(canonical);
@@ -1178,9 +1175,7 @@ impl HttpHandler {
     }
 
     fn parse_response(_url_str: &str, body: &str) -> Result<serde_json::Value, EffectError> {
-        serde_json::from_str(body).or_else(|_| {
-            Ok(serde_json::Value::String(body.to_string()))
-        })
+        serde_json::from_str(body).or_else(|_| Ok(serde_json::Value::String(body.to_string())))
     }
 
     pub fn get(&self, url_str: &str) -> Result<serde_json::Value, EffectError> {
@@ -1828,10 +1823,7 @@ mod tests {
 
     /// Unwrap a handler Response: Complete passes through; Stream drains into
     /// the equivalent cons-list Value.
-    fn response_value(
-        r: tidepool_effect::Response,
-        table: &DataConTable,
-    ) -> Value {
+    fn response_value(r: tidepool_effect::Response, table: &DataConTable) -> Value {
         match r {
             tidepool_effect::Response::Complete(v) => v,
             tidepool_effect::Response::Stream(s) => {
@@ -2043,9 +2035,14 @@ mod tests {
         let files = handler
             .collect_files(SupportLang::Rust, &["**/*.rs".to_string()])
             .unwrap();
-        assert!(files.len() >= 2, "expected .rs files from glob, got {files:?}");
         assert!(
-            files.iter().all(|f| f.extension().map(|e| e == "rs").unwrap_or(false)),
+            files.len() >= 2,
+            "expected .rs files from glob, got {files:?}"
+        );
+        assert!(
+            files
+                .iter()
+                .all(|f| f.extension().map(|e| e == "rs").unwrap_or(false)),
             "non-.rs file slipped through: {files:?}"
         );
     }
@@ -2060,7 +2057,11 @@ mod tests {
     fn test_truncate_match_text_long() {
         let long = "x".repeat(600);
         let result = truncate_match_text(long);
-        assert!(result.len() <= MATCH_TEXT_LIMIT + 4, "too long: {}", result.len());
+        assert!(
+            result.len() <= MATCH_TEXT_LIMIT + 4,
+            "too long: {}",
+            result.len()
+        );
         assert!(result.ends_with('…'));
     }
 
@@ -2077,14 +2078,29 @@ mod tests {
     #[test]
     fn test_component_filter_hidden_dirs() {
         use std::path::Path;
-        assert!(!component_filter("**/*.rs", Path::new(".exo/w1/src/lib.rs")));
+        assert!(!component_filter(
+            "**/*.rs",
+            Path::new(".exo/w1/src/lib.rs")
+        ));
         assert!(!component_filter("**/*.rs", Path::new(".jj/store/x.rs")));
         assert!(!component_filter("**/*.rs", Path::new("a/.cache/x.rs")));
-        assert!(component_filter(".tidepool/lib/*.hs", Path::new(".tidepool/lib/Std.hs")));
-        assert!(component_filter(".exo/**/*.rs", Path::new(".exo/w1/src/lib.rs")));
+        assert!(component_filter(
+            ".tidepool/lib/*.hs",
+            Path::new(".tidepool/lib/Std.hs")
+        ));
+        assert!(component_filter(
+            ".exo/**/*.rs",
+            Path::new(".exo/w1/src/lib.rs")
+        ));
         assert!(!component_filter("**/*.rs", Path::new("target/debug/x.rs")));
-        assert!(component_filter("target/**/*.rs", Path::new("target/debug/x.rs")));
-        assert!(component_filter("**/*.rs", Path::new("tidepool-repr/src/lib.rs")));
+        assert!(component_filter(
+            "target/**/*.rs",
+            Path::new("target/debug/x.rs")
+        ));
+        assert!(component_filter(
+            "**/*.rs",
+            Path::new("tidepool-repr/src/lib.rs")
+        ));
         assert!(!component_filter("**/*", Path::new("src/.hidden")));
         assert!(component_filter(".gitignore", Path::new(".gitignore")));
     }
@@ -2213,8 +2229,14 @@ mod tests {
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let results: Vec<(String, i64, String)> = FromCore::from_value(&res, &table).unwrap();
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0], ("test.txt".to_string(), 1, "hello world".to_string()));
-        assert_eq!(results[1], ("test.txt".to_string(), 3, "hello rust".to_string()));
+        assert_eq!(
+            results[0],
+            ("test.txt".to_string(), 1, "hello world".to_string())
+        );
+        assert_eq!(
+            results[1],
+            ("test.txt".to_string(), 3, "hello rust".to_string())
+        );
 
         let req = FsReq::Grep("hello".to_string(), "**/*".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
@@ -2326,8 +2348,9 @@ mod tests {
         }
     }
 
-    const EFFECTS_WITH_ROUNDTRIP_TESTS: &[&str] =
-        &["Console", "KV", "Fs", "SG", "Http", "Exec", "Lsp", "Llm", "Ask"];
+    const EFFECTS_WITH_ROUNDTRIP_TESTS: &[&str] = &[
+        "Console", "KV", "Fs", "SG", "Http", "Exec", "Lsp", "Llm", "Ask",
+    ];
 
     #[test]
     fn all_effects_have_roundtrip_coverage() {
@@ -2415,10 +2438,8 @@ mod tests {
         let cx = EffectContext::with_user(&table, &captured);
 
         let pid = std::process::id();
-        let path_a = std::env::temp_dir()
-            .join(format!("tidepool_kv_iso_a_{pid}.json"));
-        let path_b = std::env::temp_dir()
-            .join(format!("tidepool_kv_iso_b_{pid}.json"));
+        let path_a = std::env::temp_dir().join(format!("tidepool_kv_iso_a_{pid}.json"));
+        let path_b = std::env::temp_dir().join(format!("tidepool_kv_iso_b_{pid}.json"));
         let _ = std::fs::remove_file(&path_a);
         let _ = std::fs::remove_file(&path_b);
 

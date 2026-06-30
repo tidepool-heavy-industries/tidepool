@@ -42,7 +42,8 @@ fn is_whitelisted_jit_error(err: &RuntimeError) -> bool {
 fn jit_compile_and_run(tree: &CoreExpr) -> (*const u8, VMContext, Vec<u8>, CodegenPipeline) {
     let mut pipeline =
         CodegenPipeline::new(&host_fns::host_fn_symbols()).expect("pipeline creation failed");
-    let func_id = compile_expr(&mut pipeline, tree, "diff_test", &ExternalEnv::new()).expect("compile_expr failed");
+    let func_id = compile_expr(&mut pipeline, tree, "diff_test", &ExternalEnv::new())
+        .expect("compile_expr failed");
     pipeline.finalize().expect("pipeline finalization failed");
 
     let mut nursery = vec![0u8; 65536];

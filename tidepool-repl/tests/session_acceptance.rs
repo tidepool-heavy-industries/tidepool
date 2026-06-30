@@ -73,7 +73,9 @@ async fn session_multi_turn_real_path() {
         );
         return;
     }
-    let repl = common::Repl { server: build_server() };
+    let repl = common::Repl {
+        server: build_server(),
+    };
 
     // 1. open
     let r = repl
@@ -117,7 +119,10 @@ async fn session_multi_turn_real_path() {
     assert_eq!(turn.is_error, true, "post-close eval should error");
     // Multi-session: the message now names the session ("no session 'default' open").
     let msg = &turn.text;
-    assert!(msg.contains("no session") && msg.contains("open"), "unexpected: {msg}");
+    assert!(
+        msg.contains("no session") && msg.contains("open"),
+        "unexpected: {msg}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

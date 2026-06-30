@@ -128,7 +128,10 @@ fn lazy_poison_applied_at_runtime_reports_message() {
     // Body: apply f (the lazy poison) to "boom" at a separate App site
     let boom = b.push(CoreFrame::Lit(Literal::LitString(b"boom".to_vec())));
     let f_var = b.push(CoreFrame::Var(f));
-    let body = b.push(CoreFrame::App { fun: f_var, arg: boom });
+    let body = b.push(CoreFrame::App {
+        fun: f_var,
+        arg: boom,
+    });
     b.push(CoreFrame::LetNonRec {
         binder: f,
         rhs: sent,

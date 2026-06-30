@@ -51,7 +51,10 @@ async fn tuple_bind_both_components() {
     repl.open_ok().await;
 
     let bind = repl.eval("(a, b) <- pure ((1 :: Int), (2 :: Int))").await;
-    eprintln!("[tuple_bind] bind turn -> is_error={} text={}", bind.is_error, bind.text);
+    eprintln!(
+        "[tuple_bind] bind turn -> is_error={} text={}",
+        bind.is_error, bind.text
+    );
     bind.expect_ok("tuple bind should succeed");
 
     // Both components are in scope.
@@ -92,7 +95,10 @@ async fn let_tuple_works() {
     repl.open_ok().await;
 
     let bind = repl.eval("let (x, y) = ((10 :: Int), (20 :: Int))").await;
-    eprintln!("[let_tuple] bind turn -> is_error={} text={}", bind.is_error, bind.text);
+    eprintln!(
+        "[let_tuple] bind turn -> is_error={} text={}",
+        bind.is_error, bind.text
+    );
     bind.expect_ok("let-tuple bind should succeed");
 
     let t = repl.eval("x + y").await;
@@ -116,7 +122,10 @@ async fn three_tuple_works() {
     let bind = repl
         .eval("(p, q, r) <- pure ((1::Int),(2::Int),(3::Int))")
         .await;
-    eprintln!("[three_tuple] bind turn -> is_error={} text={}", bind.is_error, bind.text);
+    eprintln!(
+        "[three_tuple] bind turn -> is_error={} text={}",
+        bind.is_error, bind.text
+    );
     bind.expect_ok("three-tuple bind should succeed");
 
     let t = repl.eval("p + q + r").await;
@@ -142,7 +151,10 @@ async fn tuple_bind_both_components_feature() {
 
     let t = repl.eval("a + b").await;
     let out = t.expect_ok("a + b (feature)");
-    assert!(out.contains("3"), "feature: expected a + b == 3, got: {out}");
+    assert!(
+        out.contains("3"),
+        "feature: expected a + b == 3, got: {out}"
+    );
 
     repl.close().await;
 }
@@ -224,9 +236,15 @@ async fn mismatched_type_rejected_loudly() {
     );
 
     // Session survived: a fresh bind works.
-    repl.eval("let z = (9 :: Int)").await.expect_ok("let z after reject");
+    repl.eval("let z = (9 :: Int)")
+        .await
+        .expect_ok("let z after reject");
     let t = repl.eval("z").await;
-    assert!(t.expect_ok("z after reject").contains("9"), "post-reject z: {}", t.text);
+    assert!(
+        t.expect_ok("z after reject").contains("9"),
+        "post-reject z: {}",
+        t.text
+    );
 
     repl.close().await;
 }

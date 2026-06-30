@@ -25,7 +25,8 @@ fn jit_compile_never_panics() {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let mut pipeline =
                             CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
-                        let _ = compile_expr(&mut pipeline, &expr, "proptest_fn", &ExternalEnv::new());
+                        let _ =
+                            compile_expr(&mut pipeline, &expr, "proptest_fn", &ExternalEnv::new());
                         // Don't finalize or run — just test compilation
                     }));
                     // The test passes if compile_expr returns Ok or Err —

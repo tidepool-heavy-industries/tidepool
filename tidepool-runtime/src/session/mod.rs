@@ -97,7 +97,11 @@ impl SessionLib {
     /// Open a session rooted at `root` (created if absent). `env` controls the
     /// generated modules' pragma/import surface; pass
     /// [`ModuleEnv::standalone_default`] for the pure Lane-A surface.
-    pub fn open(id: SessionId, root: impl Into<PathBuf>, env: ModuleEnv) -> Result<SessionLib, SessionError> {
+    pub fn open(
+        id: SessionId,
+        root: impl Into<PathBuf>,
+        env: ModuleEnv,
+    ) -> Result<SessionLib, SessionError> {
         let root = root.into();
         std::fs::create_dir_all(&root)?;
         Ok(SessionLib {
@@ -143,7 +147,8 @@ impl SessionLib {
     /// the accumulated declarations, or `None` if the session is empty.
     #[must_use]
     pub fn import_line(&self) -> Option<String> {
-        self.current_module().map(|m| format!("import {}", m.module_name()))
+        self.current_module()
+            .map(|m| format!("import {}", m.module_name()))
     }
 
     /// Source text of the most recent declaration turn that introduces a type or
@@ -318,8 +323,7 @@ impl SessionLib {
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
         use std::io::Write;
         tmp.write_all(rendered.source.as_bytes())?;
-        tmp.persist(&path)
-            .map_err(|e| SessionError::Io(e.error))?;
+        tmp.persist(&path).map_err(|e| SessionError::Io(e.error))?;
         Ok(())
     }
 }
@@ -331,7 +335,8 @@ mod tests {
     #[test]
     fn empty_session_has_no_module() {
         let dir = tempfile::tempdir().unwrap();
-        let lib = SessionLib::open(SessionId(1), dir.path(), ModuleEnv::standalone_default()).unwrap();
+        let lib =
+            SessionLib::open(SessionId(1), dir.path(), ModuleEnv::standalone_default()).unwrap();
         assert_eq!(lib.generation(), Generation(0));
         assert!(lib.current_module().is_none());
         assert!(lib.import_line().is_none());
@@ -340,8 +345,10 @@ mod tests {
     #[test]
     fn cache_salt_changes_with_generation_and_session() {
         let dir = tempfile::tempdir().unwrap();
-        let lib1 = SessionLib::open(SessionId(1), dir.path(), ModuleEnv::standalone_default()).unwrap();
-        let lib2 = SessionLib::open(SessionId(2), dir.path(), ModuleEnv::standalone_default()).unwrap();
+        let lib1 =
+            SessionLib::open(SessionId(1), dir.path(), ModuleEnv::standalone_default()).unwrap();
+        let lib2 =
+            SessionLib::open(SessionId(2), dir.path(), ModuleEnv::standalone_default()).unwrap();
         assert_ne!(lib1.cache_salt(), lib2.cache_salt());
     }
 }

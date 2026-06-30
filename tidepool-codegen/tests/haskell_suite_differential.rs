@@ -84,7 +84,9 @@ fn haskell_suite_differential() {
                 // JIT (catch panics)
                 let jit_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).ok()?;
-                    let func_id = compile_expr(&mut pipeline, &expr, "suite_test", &ExternalEnv::new()).ok()?;
+                    let func_id =
+                        compile_expr(&mut pipeline, &expr, "suite_test", &ExternalEnv::new())
+                            .ok()?;
                     pipeline.finalize().ok()?;
 
                     let mut nursery = vec![0u8; 1 << 20]; // 1MB nursery for real programs

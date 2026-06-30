@@ -230,9 +230,7 @@ async fn redefine_type_old_binding_orphaned_gracefully() {
         .await
         .expect_ok("def Color v1");
     repl.eval("c <- pure Green").await.expect_ok("bind c=Green");
-    let out = repl
-        .eval("case c of { Green -> (1 :: Int); _ -> 0 }")
-        .await;
+    let out = repl.eval("case c of { Green -> (1 :: Int); _ -> 0 }").await;
     assert!(
         out.expect_ok("case c (Color v1)").contains('1'),
         "case c: expected 1, got: {}",
@@ -244,9 +242,7 @@ async fn redefine_type_old_binding_orphaned_gracefully() {
         .await
         .expect_ok("def Color v2");
     repl.eval("c2 <- pure Blue").await.expect_ok("bind c2=Blue");
-    let out2 = repl
-        .eval("case c2 of { Blue -> (2 :: Int); _ -> 0 }")
-        .await;
+    let out2 = repl.eval("case c2 of { Blue -> (2 :: Int); _ -> 0 }").await;
     assert!(
         out2.expect_ok("case c2 (Color v2)").contains('2'),
         "case c2: expected 2 (Blue), got: {}",
@@ -256,16 +252,12 @@ async fn redefine_type_old_binding_orphaned_gracefully() {
     // Re-matching the OLD `c` after the redefine FAILS GRACEFULLY: `Green`
     // resolves to Color(G2) but `c :: Color(G1)` → GHC-83865 mismatch, surfaced
     // as a clean MCP error (NOT a crash/hang).
-    let orphan = repl
-        .eval("case c of { Green -> (1 :: Int); _ -> 0 }")
-        .await;
+    let orphan = repl.eval("case c of { Green -> (1 :: Int); _ -> 0 }").await;
     orphan.expect_err("old-gen c re-match after redefine should fail gracefully");
 
     // The session SURVIVES the orphaned-reference error — a later turn still runs
     // and the new-gen binding still resolves.
-    let survive = repl
-        .eval("case c2 of { Blue -> (2 :: Int); _ -> 0 }")
-        .await;
+    let survive = repl.eval("case c2 of { Blue -> (2 :: Int); _ -> 0 }").await;
     assert!(
         survive
             .expect_ok("session survives orphan error (c2 still matches)")

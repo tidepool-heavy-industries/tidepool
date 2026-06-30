@@ -58,11 +58,7 @@ fn boxed_int(n: i64) -> (Vec<u64>, *mut u8) {
 /// then run once and return the raw result pointer. Mirrors the
 /// `emit_expr.rs::compile_and_run` harness, threading a non-empty env + the
 /// post-finalize mutation hook.
-fn compile_then_run(
-    tree: &CoreExpr,
-    env: &ExternalEnv,
-    between: impl FnOnce(),
-) -> *const u8 {
+fn compile_then_run(tree: &CoreExpr, env: &ExternalEnv, between: impl FnOnce()) -> *const u8 {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
     let func_id = compile_expr(&mut pipeline, tree, "spike_fn", env).expect("compile_expr failed");
     pipeline.finalize().expect("failed to finalize");
@@ -167,7 +163,11 @@ fn slot_is_read_live_not_snapshotted() {
         "a stale snapshot of A would be a GC use-after-free — must not happen"
     );
     unsafe {
-        assert_eq!(read_lit_int(result), 99, "live-read sees the post-relocation value");
+        assert_eq!(
+            read_lit_int(result),
+            99,
+            "live-read sees the post-relocation value"
+        );
     }
 
     drop(storage_a);

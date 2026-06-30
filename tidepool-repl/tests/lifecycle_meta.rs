@@ -156,7 +156,11 @@ async fn reset_clears_both_planes_and_is_reusable() {
     );
 
     // both planes cleared: empty bindings AND decl generation back to 0.
-    let meta = parse_meta(repl.cmd(":bindings").await.expect_ok(":bindings post-reset"));
+    let meta = parse_meta(
+        repl.cmd(":bindings")
+            .await
+            .expect_ok(":bindings post-reset"),
+    );
     assert_eq!(
         meta["bindings"].as_array().map(|a| a.len()),
         Some(0),
@@ -178,7 +182,9 @@ async fn reset_clears_both_planes_and_is_reusable() {
 
     // REUSABLE post-reset: a fresh decl + plain eval + bind + read all work.
     // `pure (h 5)` runs on the PLAIN path here (no binding live yet) → works.
-    repl.def("h x = x * (2 :: Int)").await.expect_ok("def h post-reset");
+    repl.def("h x = x * (2 :: Int)")
+        .await
+        .expect_ok("def h post-reset");
     let t = repl.eval("pure (h 5)").await;
     assert!(
         t.contains("10"),
@@ -212,9 +218,7 @@ async fn reset_after_gc_rebuilds() {
     // `pure (...)`): with `a` live this takes the reference pure-fallback path,
     // which is the known-good route (the `pure (...)` Eff form traps — see the
     // BUG case below).
-    let t = repl
-        .eval("foldl' (+) (0 :: Int) [1..200000]")
-        .await;
+    let t = repl.eval("foldl' (+) (0 :: Int) [1..200000]").await;
     assert!(
         t.expect_ok("heavy foldl'").contains("20000100000"),
         "heavy foldl' sum should be 20000100000: {}",
@@ -261,10 +265,7 @@ async fn bindings_shape() {
     // Every entry carries the documented keys.
     for (label, e) in [("x", x), ("f", f)] {
         for k in ["name", "type", "module", "tier"] {
-            assert!(
-                e.get(k).is_some(),
-                "binding {label} missing key `{k}`: {e}"
-            );
+            assert!(e.get(k).is_some(), "binding {label} missing key `{k}`: {e}");
         }
         // both rooted under a Tidepool.Session.Val.G<g> module.
         assert!(
@@ -447,7 +448,8 @@ async fn reference_path_type_metadata_trap() {
     // -O2 guts (GhcPipeline), so no library function is left unresolved.
     let ok = repl.eval("pure (g 1)").await;
     assert!(
-        ok.expect_ok("`pure (g 1)` on the reference path with a live binding").contains("2"),
+        ok.expect_ok("`pure (g 1)` on the reference path with a live binding")
+            .contains("2"),
         "`pure (g 1)` should be 2: {}",
         ok.text
     );

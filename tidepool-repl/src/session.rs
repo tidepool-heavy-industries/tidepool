@@ -31,7 +31,9 @@ use tidepool_runtime::session::{
 };
 use tidepool_runtime::{compile_haskell_salted, value_to_json};
 
-use crate::command::{BlockItem, BlockItemResult, ExprText, MetaCommand, SessionCommand, TurnOutcome};
+use crate::command::{
+    BlockItem, BlockItemResult, ExprText, MetaCommand, SessionCommand, TurnOutcome,
+};
 
 /// Default session nursery: 64 MiB (matches the eval runtime default).
 pub const DEFAULT_NURSERY_SIZE: usize = 1 << 26;
@@ -431,7 +433,10 @@ impl Session {
             &include,
             self.session_root(),
             &inject,
-            Some(SessionBind { names: &single, gen: g.0 }),
+            Some(SessionBind {
+                names: &single,
+                gen: g.0,
+            }),
         ) {
             Ok(t) => t,
             Err(e) => return TurnOutcome::Error(format!("bind compile error: {e}")),
@@ -453,7 +458,8 @@ impl Session {
         // (an Eff module → carries the effect ConTags the machine's dispatch
         // needs). Later binds re-enter the live machine.
         if self.machine.is_none() {
-            match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size) {
+            match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
+            {
                 Ok(m) => self.machine = Some(m),
                 Err(e) => return TurnOutcome::Error(format!("JIT compile error: {e}")),
             }
@@ -529,8 +535,7 @@ impl Session {
         );
 
         let lib_dir = self.lib.include_dir().to_path_buf();
-        let mut include: Vec<&Path> =
-            self.cfg.base_include.iter().map(PathBuf::as_path).collect();
+        let mut include: Vec<&Path> = self.cfg.base_include.iter().map(PathBuf::as_path).collect();
         include.push(lib_dir.as_path());
 
         let turn = match compile_session_turn(
@@ -538,7 +543,10 @@ impl Session {
             &include,
             self.session_root(),
             &inject,
-            Some(SessionBind { names: &names, gen: g.0 }),
+            Some(SessionBind {
+                names: &names,
+                gen: g.0,
+            }),
         ) {
             Ok(t) => t,
             Err(e) => return TurnOutcome::Error(format!("multi-bind compile error: {e}")),
@@ -560,11 +568,8 @@ impl Session {
         }
 
         if self.machine.is_none() {
-            match JitEffectMachine::compile_session(
-                &turn.expr,
-                &turn.table,
-                self.cfg.nursery_size,
-            ) {
+            match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
+            {
                 Ok(m) => self.machine = Some(m),
                 Err(e) => return TurnOutcome::Error(format!("JIT compile error: {e}")),
             }
@@ -575,12 +580,7 @@ impl Session {
         let frag_name = format!("repl_multi_bind_{}", self.turn_counter);
 
         let machine = self.machine.as_mut().expect("machine bootstrapped above");
-        let fid = match machine.add_function(
-            &frag_name,
-            &turn.expr,
-            &self.session_table,
-            &env,
-        ) {
+        let fid = match machine.add_function(&frag_name, &turn.expr, &self.session_table, &env) {
             Ok(f) => f,
             Err(e) => return TurnOutcome::Error(format!("JIT multi-bind add_function error: {e}")),
         };
@@ -617,7 +617,9 @@ impl Session {
             });
             bound_names.push((binder.name.clone(), binder.type_display.clone()));
         }
-        TurnOutcome::MultiBound { components: bound_names }
+        TurnOutcome::MultiBound {
+            components: bound_names,
+        }
     }
 
     /// REFERENCE path (a bare expression mentioning session bindings). Try the
@@ -711,7 +713,8 @@ impl Session {
             return TurnOutcome::Error(e);
         }
         if self.machine.is_none() {
-            match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size) {
+            match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
+            {
                 Ok(m) => self.machine = Some(m),
                 Err(e) => return TurnOutcome::Error(format!("JIT compile error: {e}")),
             }
@@ -770,7 +773,10 @@ impl Session {
             &include,
             self.session_root(),
             &inject,
-            Some(SessionBind { names: &names, gen: g.0 }),
+            Some(SessionBind {
+                names: &names,
+                gen: g.0,
+            }),
         )
         .ok()
         .and_then(|turn| turn.binders.into_iter().next())
@@ -855,7 +861,10 @@ impl Session {
                     &include,
                     self.session_root(),
                     &inject,
-                    Some(SessionBind { names: &names, gen: throwaway_gen.0 }),
+                    Some(SessionBind {
+                        names: &names,
+                        gen: throwaway_gen.0,
+                    }),
                 ) {
                     Ok(t) => t,
                     Err(e) => {
@@ -1040,7 +1049,9 @@ fn insert_imports(preamble: &str, imports: &str) -> String {
     if imports.trim().is_empty() {
         return preamble.to_string();
     }
-    let insert_point = preamble.find(PREAMBLE_DEFAULT_DECL).unwrap_or(preamble.len());
+    let insert_point = preamble
+        .find(PREAMBLE_DEFAULT_DECL)
+        .unwrap_or(preamble.len());
     let mut out = String::new();
     out.push_str(&preamble[..insert_point]);
     for imp in imports.lines().map(str::trim).filter(|l| !l.is_empty()) {
@@ -1086,7 +1097,12 @@ fn hide_prelude_names(preamble: &str, extra: &[&str]) -> String {
         }
     }
     let new_line = format!("import Tidepool.Prelude hiding ({})\n", all.join(", "));
-    format!("{}{}{}", &preamble[..start], new_line, &preamble[start + line_len..])
+    format!(
+        "{}{}{}",
+        &preamble[..start],
+        new_line,
+        &preamble[start + line_len..]
+    )
 }
 
 /// Parenthesize an operator name for a `hiding` list (`.+` → `(.+)`); plain
@@ -1138,7 +1154,12 @@ fn hide_library_names(preamble: &str, extra: &[&str]) -> String {
                 }
             }
             let new_line = format!("import Library hiding ({})\n", all.join(", "));
-            return format!("{}{}{}", &preamble[..start], new_line, &preamble[start + line_len..]);
+            return format!(
+                "{}{}{}",
+                &preamble[..start],
+                new_line,
+                &preamble[start + line_len..]
+            );
         }
         from = start + NEEDLE.len();
     }
@@ -1296,7 +1317,11 @@ fn type_def_head(src: &str) -> Option<&str> {
         .find(|c: char| c.is_whitespace() || c == '(' || c == '=')
         .unwrap_or(rest.len());
     let head = &rest[..end];
-    if head.is_empty() { None } else { Some(head) }
+    if head.is_empty() {
+        None
+    } else {
+        Some(head)
+    }
 }
 
 #[cfg(test)]
@@ -1306,8 +1331,14 @@ mod info_tests {
 
     #[test]
     fn type_def_head_recognizes_data_newtype_type() {
-        assert_eq!(type_def_head("data Node = Node { nodeName :: Text }"), Some("Node"));
-        assert_eq!(type_def_head("data Position = Position { posLine :: Int }"), Some("Position"));
+        assert_eq!(
+            type_def_head("data Node = Node { nodeName :: Text }"),
+            Some("Node")
+        );
+        assert_eq!(
+            type_def_head("data Position = Position { posLine :: Int }"),
+            Some("Position")
+        );
         assert_eq!(type_def_head("data Lang = Rust | Python"), Some("Lang"));
         assert_eq!(type_def_head("newtype Foo = Foo Int"), Some("Foo"));
         assert_eq!(type_def_head("type Name = Text"), Some("Name"));
@@ -1320,10 +1351,19 @@ mod info_tests {
     #[test]
     fn decl_scan_finds_node_in_lsp_decl() {
         let decl = lsp_decl();
-        let found = decl.type_defs.iter().any(|td| type_def_head(td) == Some("Node"));
+        let found = decl
+            .type_defs
+            .iter()
+            .any(|td| type_def_head(td) == Some("Node"));
         assert!(found, "Node must be discoverable in lsp_decl type_defs");
-        let pos_found = decl.type_defs.iter().any(|td| type_def_head(td) == Some("Position"));
-        assert!(pos_found, "Position must be discoverable in lsp_decl type_defs");
+        let pos_found = decl
+            .type_defs
+            .iter()
+            .any(|td| type_def_head(td) == Some("Position"));
+        assert!(
+            pos_found,
+            "Position must be discoverable in lsp_decl type_defs"
+        );
     }
 }
 
@@ -1338,20 +1378,33 @@ mod hiding_tests {
         // operator parenthesized, plain name bare; no bare `.+` (parse error)
         assert!(out.contains("(.+)"), "op must be parenthesized: {out}");
         assert!(out.contains("slug"), "plain name present: {out}");
-        assert!(!out.contains(" .+,") && !out.contains(", .+)"), "bare operator leaked: {out}");
+        assert!(
+            !out.contains(" .+,") && !out.contains(", .+)"),
+            "bare operator leaked: {out}"
+        );
     }
 
     #[test]
     fn library_hiding_added_with_operators() {
         let pre = "import Library\nimport qualified Prelude as P\n";
         let out = hide_library_names(pre, &[".+", "sh"]);
-        assert!(out.contains("import Library hiding ("), "Library gets a hiding clause: {out}");
-        assert!(out.contains("(.+)") && out.contains("sh"), "names hidden: {out}");
+        assert!(
+            out.contains("import Library hiding ("),
+            "Library gets a hiding clause: {out}"
+        );
+        assert!(
+            out.contains("(.+)") && out.contains("sh"),
+            "names hidden: {out}"
+        );
     }
 
     #[test]
     fn library_hiding_noop_without_import() {
         let pre = "import Tidepool.Prelude hiding (error)\n";
-        assert_eq!(hide_library_names(pre, &["sh"]), pre, "no Library import → unchanged");
+        assert_eq!(
+            hide_library_names(pre, &["sh"]),
+            pre,
+            "no Library import → unchanged"
+        );
     }
 }
