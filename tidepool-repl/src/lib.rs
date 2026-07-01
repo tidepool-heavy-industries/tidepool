@@ -18,12 +18,16 @@
 //! - [`worker`] — the resident worker thread + single-consumer channel + manager.
 //! - [`server`] — the MCP `ServerHandler` and the five session tools.
 //! - [`ask`] — the parked-thread suspend/resume mechanism for an in-turn `ask`.
+//! - [`introspect`] — `:i` source-scan resolution for stdlib/preamble types.
+//! - [`truncate`] — Rust-side result truncation + the `:stub <n>` fetch lane.
 
 pub mod ask;
 pub mod command;
+pub mod introspect;
 pub mod server;
 pub mod session;
 pub mod state;
+pub mod truncate;
 pub mod worker;
 
 pub use command::{DeclText, ExprText, MetaCommand, SessionCommand, TurnOutcome};

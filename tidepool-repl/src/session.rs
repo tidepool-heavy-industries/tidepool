@@ -91,6 +91,10 @@ pub struct Session {
     /// session publishes the machine's [`CancelHandle`] into it the moment the
     /// machine bootstraps, so even a session's FIRST turn is cancellable.
     cancel_slot: Option<crate::worker::CancelSlot>,
+    /// Subtrees elided from the last truncated result, indexed by stub id
+    /// (`stub_0` ⇒ index 0) — fetched via `:stub <n>`, REPLACED each time a
+    /// new truncating result lands. See [`crate::truncate`].
+    last_stubs: Vec<serde_json::Value>,
 }
 
 impl Session {
@@ -111,6 +115,7 @@ impl Session {
             session_table: DataConTable::new(),
             eval_input: None,
             cancel_slot: None,
+            last_stubs: Vec::new(),
         })
     }
 
@@ -409,11 +414,28 @@ impl Session {
         };
 
         match run_result {
-            Ok(value) => TurnOutcome::Value {
-                value: value_to_json(&value, &table, 0),
-                type_display: inner_type,
-            },
+            Ok(value) => self.value_outcome(value_to_json(&value, &table, 0), inner_type),
             Err(e) => TurnOutcome::Error(format!("runtime error: {e}")),
+        }
+    }
+
+    /// Assemble a [`TurnOutcome::Value`], truncating an oversized rendered
+    /// value to the result budget and stashing the elided subtrees for
+    /// `:stub <n>` (see [`crate::truncate`]). Shared by the plain-eval and
+    /// reference paths — the two that render a value.
+    fn value_outcome(
+        &mut self,
+        rendered: serde_json::Value,
+        type_display: Option<String>,
+    ) -> TurnOutcome {
+        let (value, stubs, truncated) = crate::truncate::truncate_result(rendered);
+        if !stubs.is_empty() {
+            self.last_stubs = stubs;
+        }
+        TurnOutcome::Value {
+            value,
+            type_display,
+            truncated,
         }
     }
 
@@ -746,10 +768,10 @@ impl Session {
             machine.run_fragment(fid, &self.session_table, handlers, captured)
         };
         match run_result {
-            Ok(value) => TurnOutcome::Value {
-                value: value_to_json(&value, &self.session_table, 0),
-                type_display: inner_type,
-            },
+            Ok(value) => {
+                let rendered = value_to_json(&value, &self.session_table, 0);
+                self.value_outcome(rendered, inner_type)
+            }
             Err(e) => TurnOutcome::Error(format!("runtime error: {e}")),
         }
     }
@@ -825,6 +847,7 @@ impl Session {
                 self.bindings = BindingTable::new();
                 self.val_gen = Generation(0);
                 self.session_table = DataConTable::new();
+                self.last_stubs = Vec::new();
                 match SessionLib::open(
                     self.cfg.id,
                     self.cfg.root.clone(),
@@ -927,11 +950,22 @@ impl Session {
                         "source": "session",
                     }));
                 }
-                // 4. Total miss.
+                // 4. Stdlib/preamble types (`Proc`, `Hit`, `Doc`, … — source-scanned
+                // from the same include dirs the session compiles against).
+                if let Some(info) = crate::introspect::stdlib_info(&self.cfg.base_include, name) {
+                    return TurnOutcome::Meta(info);
+                }
+                // 5. Total miss.
                 TurnOutcome::Meta(serde_json::json!({
                     "error": "not a bound value or known type",
                     "name": name,
+                    "hint": "searched session bindings, effect types, session declarations, \
+                             and the stdlib/library sources; for an expression's type use \
+                             `:t <expr>`",
                 }))
+            }
+            MetaCommand::Stub(n, page) => {
+                TurnOutcome::Meta(crate::truncate::stub_fetch(&self.last_stubs, *n, *page))
             }
             MetaCommand::Vocab(only) => {
                 let mut dirs: Vec<std::path::PathBuf> = Vec::new();
@@ -1412,8 +1446,8 @@ mod info_tests {
         let found = decl
             .type_defs
             .iter()
-            .any(|td| type_def_head(td) == Some("Node"));
-        assert!(found, "Node must be discoverable in lsp_decl type_defs");
+            .any(|td| type_def_head(td) == Some("LspNode"));
+        assert!(found, "LspNode must be discoverable in lsp_decl type_defs");
         let pos_found = decl
             .type_defs
             .iter()
