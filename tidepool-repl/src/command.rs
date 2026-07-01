@@ -30,6 +30,10 @@ pub enum MetaCommand {
     /// `:vocab` / `:vocab <module>` — list verb signatures from the user
     /// library dirs, optionally scoped to one module.
     Vocab(Option<String>),
+    /// `:stub <n> [page]` — fetch the full content of a truncation stub
+    /// (`stub_<n>` markers in an oversized result), optionally one page of a
+    /// very large stub. See [`crate::truncate`].
+    Stub(usize, Option<usize>),
 }
 
 /// One item in a `session_run` block.
@@ -85,8 +89,30 @@ impl MetaCommand {
             } else {
                 Some(rest.to_string())
             })),
+            "stub" => {
+                let mut parts = rest.split_whitespace();
+                let Some(id) = parts.next() else {
+                    return Err(
+                        ":stub requires a stub id (e.g. `:stub 0` — the truncation hint \
+                         names the available ids)"
+                            .to_string(),
+                    );
+                };
+                // Tolerate the marker spelling (`:stub stub_0`).
+                let id = id.strip_prefix("stub_").unwrap_or(id);
+                let n: usize = id.parse().map_err(|_| {
+                    format!(":stub: invalid stub id '{id}' (expected a number, e.g. `:stub 0`)")
+                })?;
+                let page: Option<usize> = match parts.next() {
+                    None => None,
+                    Some(p) => Some(p.parse().map_err(|_| {
+                        format!(":stub: invalid page '{p}' (expected a number, e.g. `:stub 0 1`)")
+                    })?),
+                };
+                Ok(MetaCommand::Stub(n, page))
+            }
             other => Err(format!(
-                "unknown session command ':{other}' (known: :bindings, :reset, :t, :i, :vocab)"
+                "unknown session command ':{other}' (known: :bindings, :reset, :t, :i, :vocab, :stub)"
             )),
         }
     }
@@ -124,6 +150,11 @@ pub enum TurnOutcome {
     Value {
         value: Json,
         type_display: Option<String>,
+        /// `Some(hint)` when the value was truncated to the result budget —
+        /// the hint names the `:stub <n>` fetch affordance (see
+        /// [`crate::truncate`]). Rendered as an ADDITIVE `"truncated"` key, so
+        /// existing `{type, value}` consumers are unaffected.
+        truncated: Option<String>,
     },
     /// A bind item bound a value to the live heap (`x <- e` / `let x = e`);
     /// `name` is now referenceable by later turns, with the captured `type_display`.
@@ -161,11 +192,17 @@ impl TurnOutcome {
             TurnOutcome::Value {
                 value,
                 type_display,
-            } => serde_json::json!({
-                "type": type_display,
-                "value": value,
-            })
-            .to_string(),
+                truncated,
+            } => {
+                let mut obj = serde_json::json!({
+                    "type": type_display,
+                    "value": value,
+                });
+                if let Some(hint) = truncated {
+                    obj["truncated"] = serde_json::json!(hint);
+                }
+                obj.to_string()
+            }
             TurnOutcome::Bound { name, type_display } => serde_json::json!({
                 "bound": name,
                 "type": type_display,
@@ -258,6 +295,7 @@ mod tests {
         let v = TurnOutcome::Value {
             value: serde_json::json!("a-b"),
             type_display: Some("Text".into()),
+            truncated: None,
         };
         assert!(v.render().contains("a-b"));
         assert!(!v.is_error());
@@ -271,6 +309,7 @@ mod tests {
         let v = TurnOutcome::Value {
             value: serde_json::json!(42),
             type_display: Some("M Int".into()),
+            truncated: None,
         };
         let rendered = v.render();
         assert!(rendered.contains("M Int"), "type field missing: {rendered}");
@@ -287,6 +326,7 @@ mod tests {
         let v = TurnOutcome::Value {
             value: serde_json::json!(true),
             type_display: None,
+            truncated: None,
         };
         let rendered = v.render();
         let parsed: serde_json::Value =

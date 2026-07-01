@@ -73,7 +73,7 @@ pub struct SessionBlockRequest {
     /// List of GHCi-capable items to run in sequence. Each item is one of:
     /// a top-level declaration (`data Foo = …`, `f x = …`), a bind statement
     /// (`x <- e` / `let x = e`), a bare expression, or a `:command`
-    /// (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`).
+    /// (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`, `:stub <n>`).
     /// Items are classified automatically; execution stops on the first error.
     /// Each declaration item is its own module, so a type signature and its
     /// binding (and all equations of a multi-clause function) must share ONE
@@ -226,6 +226,18 @@ fn has_user_library(cfg: &ReplServerConfig) -> bool {
         .any(|d| d.join("Library.hs").exists())
 }
 
+/// The repl's eval preamble: non-interactive pagination, with the Haskell-side
+/// `paginateResult` truncation patched to a pass-through so oversized results
+/// reach Rust in full and are truncated by [`crate::truncate::truncate_result`]
+/// instead — which can stash the elided subtrees for `:stub <n>` (the Haskell
+/// truncation discarded them, leaving `stub_N` markers nothing could fetch).
+fn repl_preamble(cfg: &ReplServerConfig) -> String {
+    crate::truncate::passthrough_paginate(&tidepool_mcp::build_preamble_non_interactive(
+        &cfg.decls,
+        has_user_library(cfg),
+    ))
+}
+
 /// The non-generic server core (H is erased into the `spawn` closure).
 struct ReplServerInner {
     manager: SessionManager,
@@ -237,6 +249,11 @@ struct ReplServerInner {
     effect_stack: String,
     cfg: ReplServerConfig,
     tool_description: String,
+    /// Every session name `session_open`ed in THIS process, open or since
+    /// closed — lets the "no session" error distinguish a session closed here
+    /// from one that never existed in this process (typo, or the server
+    /// restarted and its process-scoped sessions died with it).
+    ever_opened: parking_lot::Mutex<std::collections::HashSet<String>>,
 }
 
 /// The `tidepool-repl` MCP server. `Clone` is cheap (Arc); the HTTP transport
@@ -252,8 +269,7 @@ impl TidepoolReplServer {
     where
         H: DispatchEffect<CapturedOutput> + Clone + Send + Sync + 'static,
     {
-        let preamble =
-            tidepool_mcp::build_preamble_non_interactive(&cfg.decls, has_user_library(&cfg));
+        let preamble = repl_preamble(&cfg);
         let effect_stack = tidepool_mcp::build_effect_stack_type(&cfg.decls);
         let ask_tag = cfg.ask_tag;
         // Erase H: the spawn closure owns a clone of `base`; session name is ignored (shared stack).
@@ -269,6 +285,7 @@ impl TidepoolReplServer {
                 effect_stack,
                 tool_description: build_tool_description(&cfg.decls),
                 cfg,
+                ever_opened: parking_lot::Mutex::new(std::collections::HashSet::new()),
             }),
         };
         server.spawn_reaper();
@@ -288,8 +305,7 @@ impl TidepoolReplServer {
         H: DispatchEffect<CapturedOutput> + Clone + Send + Sync + 'static,
         F: Fn(&str) -> H + Send + Sync + 'static,
     {
-        let preamble =
-            tidepool_mcp::build_preamble_non_interactive(&cfg.decls, has_user_library(&cfg));
+        let preamble = repl_preamble(&cfg);
         let effect_stack = tidepool_mcp::build_effect_stack_type(&cfg.decls);
         let ask_tag = cfg.ask_tag;
         let spawn: SessionSpawn = Box::new(move |session_name: &str, sc| {
@@ -306,6 +322,7 @@ impl TidepoolReplServer {
                 effect_stack,
                 tool_description: build_tool_description(&cfg.decls),
                 cfg,
+                ever_opened: parking_lot::Mutex::new(std::collections::HashSet::new()),
             }),
         };
         server.spawn_reaper();
@@ -383,6 +400,32 @@ impl TidepoolReplServer {
             })
             .await?;
         Ok(())
+    }
+
+
+    /// The self-explaining "no session" error (the bare "no session 'x' open"
+    /// was correct but unexplaining after a server restart). Distinguishes a
+    /// session closed in THIS process from one this process never opened —
+    /// the latter is either a typo or the common dead end: the MCP server
+    /// restarted, and sessions are PROCESS-SCOPED (the resident machine and
+    /// every heap value died with the old process; only declarations are
+    /// cheap to replay).
+    fn lost_session_error(&self, session_name: &str) -> String {
+        if self.inner.ever_opened.lock().contains(session_name) {
+            format!(
+                "no session '{session_name}' open — it was closed earlier in this server \
+                 process. Reopen it with session_open and redeclare what you need \
+                 (declarations replay cheaply; heap values are gone)."
+            )
+        } else {
+            format!(
+                "no session '{session_name}' open in this server process. If you opened it \
+                 earlier, the MCP server has since restarted: sessions are process-scoped, \
+                 and the resident machine — including every bound heap value — died with \
+                 the old process. Reopen with session_open and redeclare (declarations \
+                 replay cheaply; heap values are gone). Otherwise call session_open first."
+            )
+        }
     }
 
     fn next_continuation_id(&self) -> String {
@@ -483,6 +526,10 @@ impl TidepoolReplServer {
             nursery_size: self.inner.cfg.nursery_size.unwrap_or(DEFAULT_NURSERY_SIZE),
         };
         let handle = (self.inner.spawn)(session_name, cfg);
+        self.inner
+            .ever_opened
+            .lock()
+            .insert(session_name.to_string());
         match self.inner.manager.install(session_name, handle) {
             Ok(()) => CallToolResult::success(vec![Content::text(
                 serde_json::json!({"opened": true, "session_id": sid.0, "session": session_name})
@@ -509,10 +556,9 @@ impl TidepoolReplServer {
         session_name: &str,
     ) -> CallToolResult {
         let Some(state) = self.inner.manager.state(session_name) else {
-            return CallToolResult::error(vec![Content::text(format!(
-                "no session '{}' open; call session_open first",
-                session_name
-            ))]);
+            return CallToolResult::error(vec![Content::text(
+                self.lost_session_error(session_name),
+            )]);
         };
         // Busy-guard (M5): only an Idle session accepts a new turn. A turn that
         // is running, suspended on an `ask`, wedged, or closing must be resolved
@@ -531,10 +577,9 @@ impl TidepoolReplServer {
         }
         let Some(sender) = self.inner.manager.get_sender(session_name) else {
             *state.lock() = SessionState::Idle;
-            return CallToolResult::error(vec![Content::text(format!(
-                "no session '{}' open; call session_open first",
-                session_name
-            ))]);
+            return CallToolResult::error(vec![Content::text(
+                self.lost_session_error(session_name),
+            )]);
         };
         let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerMessage>();
         let (response_tx, response_rx) = std::sync::mpsc::channel::<ResumeMsg>();
@@ -580,10 +625,9 @@ impl TidepoolReplServer {
             *state.lock() = SessionState::Closing;
         }
         let Some(handle) = self.inner.manager.remove(session_name) else {
-            return CallToolResult::error(vec![Content::text(format!(
-                "no session '{}' open",
-                session_name
-            ))]);
+            return CallToolResult::error(vec![Content::text(
+                self.lost_session_error(session_name),
+            )]);
         };
         let (session_tx, mut session_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerMessage>();
         let (_response_tx, response_rx) = std::sync::mpsc::channel::<ResumeMsg>();
@@ -988,7 +1032,7 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          PRIMARY TOOL: session_run\n\
          Pass a list of items run in sequence: top-level declarations (`data Foo = …`, \
          `f x = …`), bind statements (`x <- e` / `let x = e`), bare expressions, or \
-         :commands (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`). \
+         :commands (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`, `:stub <n>`). \
          Items are classified automatically. Execution stops on the first error. \
          Returns per-item results and the last expression's value.\n\n\
          PREFERRED IDIOM — define then call in one block:\n\
@@ -1080,7 +1124,7 @@ impl ServerHandler for TidepoolReplServer {
                 "Run a list of GHCi-capable items in sequence on the resident machine. Each item \
                  is a declaration (`data Foo = …`, `f x = …`), a bind statement (`x <- e` / \
                  `let x = e`), a bare expression, or a `:command` (`:bindings`, `:reset`, \
-                 `:t <expr>`, `:i <name>`, `:vocab`). Items are classified automatically; \
+                 `:t <expr>`, `:i <name>`, `:vocab`, `:stub <n>`). Items are classified automatically; \
                  execution stops on the first error. Returns per-item results and the last \
                  expression's value. \
                  PREFERRED IDIOM: define helpers and types in early items, then invoke them in \
