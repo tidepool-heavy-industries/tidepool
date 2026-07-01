@@ -33,7 +33,7 @@ fn run_dangling_probe(code: &str) -> Result<serde_json::Value, String> {
         &pre,
         &stack,
         &tidepool_mcp::wrap_do(code),
-        "Probe",
+        "",
         "",
         None,
         None,
