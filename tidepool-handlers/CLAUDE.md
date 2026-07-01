@@ -51,7 +51,12 @@ checks `starts_with` — any path resolving outside the root is a loud
 `"path escape: ... is outside sandbox"` / `"Path escapes sandbox: ..."`
 error, not a silent clamp. This is enforced per-call at the handler, not once
 at startup — a symlink or `..` component escaping the sandbox is caught
-after canonicalization, not before. **Lsp is NOT part of this
+after canonicalization, not before.
+
+`FsReq::Write` has **mkdir-p semantics**: missing parent directories are
+created automatically (`std::fs::create_dir_all`) before writing. Parent
+creation is subject to the same sandbox check — the check validates the target
+path first, and any ancestor inside the sandbox root is safe by construction. **Lsp is NOT part of this
 canonicalize+`starts_with` check** — it forwards node/file addressing to the
 `tidepool-lsp-daemon` sidecar, which gates access through its own
 `registry::server_for` workspace-root binding instead (see `tidepool-lsp`'s

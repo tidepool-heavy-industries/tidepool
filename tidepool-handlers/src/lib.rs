@@ -329,17 +329,25 @@ impl FsHandler {
                 .canonicalize()
                 .map_err(|e| EffectError::Handler(e.to_string()))?
         } else {
-            let parent = resolved
-                .parent()
-                .ok_or_else(|| EffectError::Handler("no parent dir".into()))?;
-            let canonical_parent = parent
+            // Walk up to the deepest existing ancestor, canonicalize it, then
+            // reconstruct. Handles paths like "a/b/c.txt" when "a/b/" doesn't
+            // exist yet while still catching `..`-based escapes via the
+            // canonicalize call on the existing prefix.
+            let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+            let mut cur = resolved.as_path();
+            while let Some(parent) = cur.parent() {
+                if let Some(name) = cur.file_name() {
+                    suffix.push(name.to_owned());
+                }
+                cur = parent;
+                if cur.exists() {
+                    break;
+                }
+            }
+            let canonical_ancestor = cur
                 .canonicalize()
                 .map_err(|e| EffectError::Handler(e.to_string()))?;
-            canonical_parent.join(
-                resolved
-                    .file_name()
-                    .ok_or_else(|| EffectError::Handler("invalid filename".into()))?,
-            )
+            suffix.iter().rev().fold(canonical_ancestor, |p, c| p.join(c))
         };
         if !check_path.starts_with(&canonical_root) {
             return Err(EffectError::Handler(format!(
@@ -375,6 +383,10 @@ impl EffectHandler<CapturedOutput> for FsHandler {
             FsReq::TryRead(path) => cx.respond_caught(self.read_core(&path)),
             FsReq::Write(path, contents) => {
                 let resolved = self.resolve(&path)?;
+                if let Some(parent) = resolved.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| EffectError::Handler(e.to_string()))?;
+                }
                 std::fs::write(&resolved, &contents)
                     .map_err(|e| EffectError::Handler(e.to_string()))?;
                 cx.respond(())
@@ -2514,6 +2526,38 @@ mod tests {
         let request = Value::Con(con_id, vec![path]);
         let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
         assert_is_cons_list(&result, &table);
+    }
+
+    #[test]
+    fn test_fs_write_creates_parent_dirs() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        // a/b/ does not exist — write must create it
+        let mut handler = FsHandler::new(root.clone());
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+        let req = FsReq::Write("a/b/c.txt".into(), "hello mkdir-p".into());
+        handler.handle(req, &cx).expect("write into missing subtree must succeed");
+        let actual = std::fs::read_to_string(root.join("a/b/c.txt")).unwrap();
+        assert_eq!(actual, "hello mkdir-p");
+    }
+
+    #[test]
+    fn test_fs_write_sandbox_escape_with_missing_parents() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mut handler = FsHandler::new(root.clone());
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+        // Attempt to escape via `..` into a sibling directory that doesn't exist
+        let req = FsReq::Write("../../escape/evil.txt".into(), "bad".into());
+        let err = handler.handle(req, &cx).expect_err("sandbox escape must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("outside sandbox") || msg.contains("escape"), "{msg}");
     }
 
     // === SG FromCore tests ===
