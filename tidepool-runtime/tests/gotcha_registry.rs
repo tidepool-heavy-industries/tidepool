@@ -476,12 +476,17 @@ fn works_lens_last_on_text() {
 /// Asserts the documented repro: `treeDepth` over a depth-3 tree returns 3.
 #[test]
 fn works_data_tree_node_no_freer_collision() {
+    // Data.Tree's `Node` constructor now collides with BOTH the freer
+    // continuation `Node` AND the Lsp effect's `Tidepool.Effects.Node` (both in
+    // scope in every eval), so an unqualified `Node` is a legitimate ambiguity.
+    // Qualify Data.Tree — the point is its `Node` resolves + `treeDepth` runs
+    // (the freer/effect `Node`s must not shadow the qualified constructor).
     works_with_imports(
-        "Data.Tree (Tree(..))",
+        "qualified Data.Tree as DTree",
         "pure (treeDepth t) where { \
-         t = Node (1::Int) [Node 2 [], Node 3 [Node 4 []]]; \
-         treeDepth (Node _ []) = 1::Int; \
-         treeDepth (Node _ cs) = 1 + maximum (map treeDepth cs) }",
+         t = DTree.Node (1::Int) [DTree.Node 2 [], DTree.Node 3 [DTree.Node 4 []]]; \
+         treeDepth (DTree.Node _ []) = 1::Int; \
+         treeDepth (DTree.Node _ cs) = 1 + maximum (map treeDepth cs) }",
         serde_json::json!(3),
     );
 }
