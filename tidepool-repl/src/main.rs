@@ -157,9 +157,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         module_env: tidepool_mcp::session_decl_module_env(user_library),
         session_root_base,
         nursery_size: None,
-        // Reap a parked `ask` (or a wedged turn) abandoned for 30 min, so an
-        // agent that suspends and disconnects doesn't leak a worker thread.
-        continuation_ttl: Some(std::time::Duration::from_secs(30 * 60)),
+        // Parked `ask` suspensions never expire: a long-parked knot holding one
+        // worker thread + JIT machine is an acceptable cost, and a silently
+        // reaped continuation kills the ask/resume pattern for slow callers.
+        continuation_ttl: None,
+        // Wedged sessions (timed-out turns) ARE dead weight — sweep at 30 min.
+        wedged_ttl: Some(std::time::Duration::from_secs(30 * 60)),
         // Default 120 s turn budget (see `TURN_TIMEOUT_SECS`).
         turn_timeout: None,
     };

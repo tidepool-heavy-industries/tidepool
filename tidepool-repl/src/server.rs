@@ -201,11 +201,16 @@ pub struct ReplServerConfig {
     /// Session nursery size in bytes. `None` ⇒ [`DEFAULT_NURSERY_SIZE`] (64 MiB).
     /// Tests shrink it to force an organic GC between turns.
     pub nursery_size: Option<usize>,
-    /// How long an abandoned suspension (a parked `ask` that is never resumed or
-    /// aborted) — or a `Wedged` session — may linger before the reaper reclaims
-    /// it. `None` ⇒ no reaper (the historical behavior). `main.rs` sets a sane
-    /// default (~30 min); tests shrink it to exercise reaping fast.
+    /// How long a parked `ask` suspension may linger before the reaper flips it
+    /// back to `Idle`. `None` ⇒ parked continuations never expire — the
+    /// production default (`main.rs`): a parked ask holds one worker thread +
+    /// JIT machine, an acceptable cost for long-parked knots. Tests set it
+    /// small to exercise the reap path (H2).
     pub continuation_ttl: Option<Duration>,
+    /// How long a `Wedged` session (a timed-out turn, H3) may linger before the
+    /// reaper closes and removes it. `None` ⇒ no wedged sweep. `main.rs` keeps
+    /// ~30 min — a wedged session is dead weight, unlike a parked ask.
+    pub wedged_ttl: Option<Duration>,
     /// Wall-clock budget for a single turn before it is cancelled at a JIT
     /// safepoint (see [`drive`]). `None` ⇒ [`TURN_TIMEOUT_SECS`] (120 s). Tests
     /// shrink it to exercise the timeout/self-heal path fast.
@@ -313,12 +318,14 @@ impl TidepoolReplServer {
     }
 
     /// Spawn the background reaper: periodically reclaim abandoned suspensions
-    /// (a parked `ask` never resumed/aborted, H2) and `Wedged` sessions (a
-    /// timed-out turn, H3), so neither leaks a worker thread + JIT machine
-    /// indefinitely. No-op when `continuation_ttl` is `None` or there is no
+    /// (a parked `ask` never resumed/aborted, H2 — only if `continuation_ttl`
+    /// is set) and `Wedged` sessions (a timed-out turn, H3 — only if
+    /// `wedged_ttl` is set). No-op when both TTLs are `None` or there is no
     /// tokio runtime (e.g. a unit test that constructs the server off-runtime).
     fn spawn_reaper(&self) {
-        let Some(ttl) = self.inner.cfg.continuation_ttl else {
+        let suspended_ttl = self.inner.cfg.continuation_ttl;
+        let wedged_ttl = self.inner.cfg.wedged_ttl;
+        let Some(min_ttl) = [suspended_ttl, wedged_ttl].into_iter().flatten().min() else {
             return;
         };
         if tokio::runtime::Handle::try_current().is_err() {
@@ -327,8 +334,8 @@ impl TidepoolReplServer {
         // Weak so the reaper does not keep the server alive — it exits the first
         // tick after the last `TidepoolReplServer` is dropped.
         let weak = Arc::downgrade(&self.inner);
-        // Sweep several times per TTL so effective lateness is ≤ ~TTL.
-        let tick = (ttl / 4).max(Duration::from_millis(50));
+        // Sweep several times per (shortest) TTL so effective lateness is ≤ ~TTL.
+        let tick = (min_ttl / 4).max(Duration::from_millis(50));
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tick);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -337,7 +344,7 @@ impl TidepoolReplServer {
                 let Some(inner) = weak.upgrade() else {
                     break;
                 };
-                reap_once(&inner, ttl);
+                reap_once(&inner, suspended_ttl, wedged_ttl);
             }
         });
     }
@@ -939,17 +946,25 @@ impl TidepoolReplServer {
 /// - A stale `Wedged` (timed-out turn) → removed, freeing the session name.
 ///   The worker is DETACHED, not joined: a pure-compute runaway can't be joined
 ///   without hanging.
-fn reap_once(inner: &ReplServerInner, ttl: Duration) {
+fn reap_once(
+    inner: &ReplServerInner,
+    suspended_ttl: Option<Duration>,
+    wedged_ttl: Option<Duration>,
+) {
     let now = Instant::now();
     for (id, state) in inner.manager.snapshot_states() {
         let remove_wedged = {
             let mut st = state.lock();
             match &*st {
-                SessionState::Suspended(s) if now.duration_since(s.since) >= ttl => {
+                SessionState::Suspended(s)
+                    if suspended_ttl.is_some_and(|ttl| now.duration_since(s.since) >= ttl) =>
+                {
                     *st = SessionState::Idle;
                     false
                 }
-                SessionState::Wedged { since } if now.duration_since(*since) >= ttl => {
+                SessionState::Wedged { since }
+                    if wedged_ttl.is_some_and(|ttl| now.duration_since(*since) >= ttl) =>
+                {
                     *st = SessionState::Closing;
                     true
                 }

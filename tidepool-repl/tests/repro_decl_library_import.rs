@@ -88,6 +88,7 @@ fn build_server_with_real_library(cwd: PathBuf) -> Option<TidepoolReplServer> {
         session_root_base,
         nursery_size: None,
         continuation_ttl: None,
+        wedged_ttl: None,
         turn_timeout: None,
     };
     Some(TidepoolReplServer::new(stack, cfg))

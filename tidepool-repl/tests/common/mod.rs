@@ -84,6 +84,9 @@ pub fn build_server_full(
         session_root_base,
         nursery_size: Some(1 << 21), // 2 MiB
         continuation_ttl,
+        // Mirror the suspended TTL so tests exercising either reap arm (H2
+        // suspended, H3 wedged) keep the historical one-knob behavior.
+        wedged_ttl: continuation_ttl,
         turn_timeout,
     };
     TidepoolReplServer::new(stack, cfg)
