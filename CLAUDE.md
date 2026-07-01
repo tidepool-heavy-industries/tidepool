@@ -30,9 +30,10 @@ The Key Decisions Reference section below is the source of truth for all archite
 ```
 tidepool/
 ├── tidepool/              ← Facade crate + MCP server binary (`cargo install tidepool`)
-├── tidepool-repr/         ← Core IR types: CoreExpr, DataConTable, CBOR serial
-├── tidepool-eval/         ← Tree-walking interpreter: Value, Env, lazy eval
+├── tidepool-repr/         ← Core IR types: CoreExpr, DataConTable, CBOR serial  [CLAUDE.md]
+├── tidepool-eval/         ← Tree-walking interpreter (oracle): Value, Env, lazy eval  [CLAUDE.md]
 ├── tidepool-heap/         ← Manual heap + copying GC for JIT runtime
+├── tidepool-bignum/       ← Native ghc-bignum shims (Integer arith without GMP)
 ├── tidepool-optimize/     ← Optimization passes: beta, DCE, inline, case reduce
 ├── tidepool-bridge/       ← FromCore/ToCore traits + derive macros
 ├── tidepool-bridge-derive/← Proc-macro for bridge derives
@@ -41,6 +42,9 @@ tidepool/
 ├── tidepool-codegen/      ← Cranelift JIT compiler + effect machine  [CLAUDE.md]
 ├── tidepool-runtime/      ← High-level API: compile_haskell, compile_and_run, cache
 ├── tidepool-mcp/          ← MCP server library (generic over effect handlers)  [CLAUDE.md]
+├── tidepool-handlers/     ← Central effect-request handler arms (`<Eff>Req` matches)  [CLAUDE.md]
+├── tidepool-repl/         ← GHCi-style resident-session MCP server  [CLAUDE.md]
+├── tidepool-lsp/          ← LSP client + workspace daemon (call graph, hover, refs)  [CLAUDE.md]
 ├── tidepool-testing/      ← Test utilities + property-based generators (internal)
 ├── examples/{guess,tide}/ ← Demos: number-guessing game, REPL
 ├── haskell/               ← Haskell harness (tidepool-extract) + test suite + stdlib  [CLAUDE.md]
@@ -54,9 +58,22 @@ in that directory):
 - `haskell/CLAUDE.md` — rebuilding the toolchain, regenerating fixtures,
   extract diagnostics, the eval stdlib map + structured Ask/Llm surface, Known
   Limits, adding Prelude functions.
+- `tidepool-repr/CLAUDE.md` — the self-rolled flat-vector `RecursiveTree` scheme,
+  `DataConTable` hygiene (`insert_checked`, sibling-group disambiguation),
+  session-id newtypes, CBOR wire-format versioning.
+- `tidepool-eval/CLAUDE.md` — the JIT's differential oracle: trampoline
+  join-point evaluation, WHNF-only `Value`, thunk lifecycle, how it's actually
+  tested (differential harnesses, not its own unit suite).
 - `tidepool-codegen/CLAUDE.md` — JIT/effect/cache diagnostics, case-trap → `runtime_case_trap` (poison + breadcrumb, not SIGILL).
 - `tidepool-mcp/CLAUDE.md` — eval-authoring patterns (aperture/census/diff verbs),
   structural search, how to add an effect.
+- `tidepool-handlers/CLAUDE.md` — the Rust side of the effect contract: adding a
+  handler arm, the four `cx.respond*` variants, sandbox enforcement.
+- `tidepool-repl/CLAUDE.md` — resident-session block-runner (decl/stmt/meta item
+  classification), the single-owned `SessionState` lifecycle machine, ask/suspend
+  mechanism, known repl-specific friction.
+- `tidepool-lsp/CLAUDE.md` — the `tidepool-lsp-daemon` sidecar: socket
+  resolution, name/path-only protocol design, verified-current known limits.
 
 The live **eval API reference** (what eval users can call) is the MCP `eval` tool
 description emitted by the server — not duplicated in these files (it drifts).

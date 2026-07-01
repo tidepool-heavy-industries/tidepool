@@ -7,7 +7,8 @@ import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Control.Exception (evaluate, try, SomeException, fromException)
-import Data.Char (toUpper, isDigit)
+import Data.Char (toUpper, isDigit, ord)
+import Numeric (showHex)
 import Data.List (isPrefixOf, stripPrefix, intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Control.Monad (foldM, when, forM_)
@@ -398,7 +399,13 @@ renderBoundBindersJson binders =
     js str = '"' : concatMap esc str ++ "\""
     esc '"'  = "\\\""
     esc '\\' = "\\\\"
-    esc c    = [c]
+    esc '\n' = "\\n"
+    esc '\r' = "\\r"
+    esc '\t' = "\\t"
+    esc c
+      | c < '\x20' = "\\u" ++ pad4 (showHex (ord c) "")
+      | otherwise  = [c]
+    pad4 s = replicate (4 - length s) '0' ++ s
 
 -- | Module name from file basename, mirroring GhcPipeline's convention.
 capitalizeMod :: String -> String

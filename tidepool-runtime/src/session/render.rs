@@ -354,6 +354,16 @@ pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> Rendere
         .filter(|p| new_heads.contains(&p.head_name()))
         .collect();
 
+    // Every head this session has ever (re)defined, prior gens + this turn —
+    // guards an `import Library` line (env.imports, below) against colliding
+    // with a session's own decls. Without this, a decl defining a name the
+    // project `Library` facade also re-exports (e.g. `data Hit`) becomes an
+    // "ambiguous occurrence" — the same collision class `hide_module_names`
+    // (tidepool-repl) already guards on the stmt-preamble side (BUG-7);
+    // this ports the same guard to the decl-module import path now that decl
+    // modules can import `Library` too (see `session_decl_module_env`).
+    let all_session_heads: Vec<&ExportItem> = prior.iter().chain(this.items.iter()).collect();
+
     let prev_module = if g >= 2 {
         Some(SessionModule::lib(Generation((g - 1) as u64)))
     } else {
@@ -392,8 +402,16 @@ pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> Rendere
     // Standard imports, then the selective prior-gen import, then any user
     // imports hoisted from decl sources (deduped against the standard set).
     for imp in &env.imports {
-        out.push_str(imp);
-        out.push('\n');
+        if imp == "import Library" && !all_session_heads.is_empty() {
+            let mut hides: Vec<String> =
+                all_session_heads.iter().map(|p| p.render_entry()).collect();
+            hides.sort();
+            hides.dedup();
+            out.push_str(&format!("import Library hiding ({})\n", hides.join(", ")));
+        } else {
+            out.push_str(imp);
+            out.push('\n');
+        }
     }
     if let Some(prev) = prev_module {
         if hidden_prior.is_empty() {

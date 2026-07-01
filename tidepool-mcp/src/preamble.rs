@@ -80,9 +80,23 @@ pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
 /// lens-free [`ModuleEnv::standalone_default`] remains for the plain-toolchain
 /// standalone REPL/tests; this requires the `with-packages` GHC (it imports
 /// `Tidepool.Prelude`, which pulls `Control.Lens`).
+///
+/// `user_library`: whether a project/global `Library` facade is on the
+/// include path (mirrors the `stmt`-path flag in `has_user_library`, passed
+/// by the caller since this module has no filesystem access to check
+/// `base_include` itself). When `true`, decl items get `import Library` —
+/// previously ALWAYS omitted here regardless of the flag (a decl referencing
+/// a Library-re-exported type like `EditOutcome` needed its own explicit
+/// import even though `:vocab` listed it as available). The caller
+/// (`render_module`) is responsible for adding a `hiding (...)` clause
+/// against a session's own decl heads, the same guard the `stmt` path already
+/// applies via `hide_module_names` — importing `Library` unqualified here
+/// without it would reintroduce the ambiguous-occurrence class BUG-7 fixed
+/// for statements (a decl defining e.g. `data Hit`, which `Library`
+/// re-exports, would collide).
 #[must_use]
-pub fn session_decl_module_env() -> ModuleEnv {
-    let mut imports: Vec<String> = eval_import_lines(false)
+pub fn session_decl_module_env(user_library: bool) -> ModuleEnv {
+    let mut imports: Vec<String> = eval_import_lines(user_library)
         .into_iter()
         .map(String::from)
         .collect();
@@ -198,6 +212,24 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     // Always emitted (no effect dep) so template_haskell_show_default's
     // `toWire _r` resolves. Text renders bare; Value passes through as JSON;
     // any Show type via show.
+    //
+    // INVESTIGATED (2026-07-01): tried adding `instance {-# OVERLAPPING #-}
+    // ToJSON a => ToWire a where toWire = toJSON` to prefer ToJSON over Show
+    // when both are available. Does NOT work — GHC rejects it as "duplicate
+    // instance declarations", because both instances have the IDENTICAL head
+    // `ToWire a` (fully polymorphic) and differ only in their CONSTRAINT
+    // (`Show a` vs `ToJSON a`), not in type structure. GHC's
+    // OVERLAPPING/OVERLAPPABLE resolution only orders instances whose heads
+    // differ structurally (e.g. `C [a]` vs `C a`) — it cannot pick between
+    // two equally-general heads based on which constraint happens to be
+    // satisfiable. That would need constraint-based backtracking Haskell's
+    // instance resolution doesn't do (the closest real mechanisms —
+    // `IncoherentInstances`, `Data.Reflection`-style dictionary reflection —
+    // don't give the desired "prefer X if satisfiable, else Y" semantics
+    // safely/deterministically). Do not re-attempt this exact approach
+    // without a fundamentally different mechanism (e.g. a closed type family
+    // computing a type-level `Bool` for "has ToJSON", dispatched via a
+    // separate class hierarchy) — treat as a design question, not a quick fix.
     out.push_str(concat!(
         "class ToWire a where toWire :: a -> Value\n",
         "instance {-# OVERLAPPABLE #-} Show a => ToWire a where toWire = String . show\n",
@@ -547,9 +579,10 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         "the JIT-safe versions).\n",
         "The final value of `code` is rendered to JSON for the caller \u{2014} Int → ",
         "number, [Char] → string, Bool → true/false, lists → arrays, and a ",
-        "`Value` → that JSON directly. In the REPL (`session_eval`), results render ",
+        "`Value` → that JSON directly. In the REPL (`session_run`), results render ",
         "via `Show` by default — `Text` is bare, custom ADTs work without `ToJSON`. ",
-        "JSON is opt-in: return a `Value` (via `object`/`toJSON`/`parseJson`/`llm`/",
+        "JSON is opt-in: return a `Value` (via ",
+        "`object`/`toJSON`/`parseJson`/`llm`/",
         "`tryHttpGet`, …) for structured output, e.g. ",
         "`tryHttpGet \"https://api.github.com/repos/o/r\"`; use `putStrLn`/`say` only ",
         "for human-readable debug traces, not to stringify results. Extract from a ",
@@ -716,7 +749,12 @@ fn parse_library_exports(src: &str) -> std::collections::HashSet<String> {
 /// bare) are listed — otherwise the digest would advertise verbs that fail with
 /// "not in scope" (e.g. `RustAudit.panicSites`). Falls back to listing every
 /// module when no parseable `Library.hs` is present.
-pub fn library_vocab(dirs: &[std::path::PathBuf]) -> String {
+///
+/// `only`, when `Some(module)`, scopes the digest to that one module — a
+/// deliberate `:vocab <module>` ask bypasses the in-scope gate (the caller
+/// explicitly named it, so "not auto-imported" isn't a reason to hide it) and
+/// returns an explicit "no module" note on no match instead of an empty blob.
+pub fn library_vocab(dirs: &[std::path::PathBuf], only: Option<&str>) -> String {
     // Diagnostic modules, not vocabulary.
     const SKIP: &[&str] = &["Probe", "SelfTest"];
     const SIG_MAX: usize = 120;
@@ -729,6 +767,7 @@ pub fn library_vocab(dirs: &[std::path::PathBuf]) -> String {
     // earlier dir shadows the same name later, so a project module overrides a
     // global one — matching GHC's first-match-wins include search.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut found = false;
     let mut out = String::new();
     for dir in dirs {
         let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
@@ -747,9 +786,14 @@ pub fn library_vocab(dirs: &[std::path::PathBuf]) -> String {
             if SKIP.contains(&stem) || !seen.insert(stem.to_string()) {
                 continue;
             }
-            // Only list modules the `Library` facade re-exports (in scope bare).
-            // `Library` itself has no sigs of its own, so it's naturally absent.
-            if let Some(ref ins) = inscope {
+            if let Some(m) = only {
+                if stem != m {
+                    continue;
+                }
+            } else if let Some(ref ins) = inscope {
+                // Only list modules the `Library` facade re-exports (in scope
+                // bare). `Library` itself has no sigs of its own, so it's
+                // naturally absent. An explicit `only` bypasses this gate.
                 if stem != "Library" && !ins.contains(stem) {
                     continue;
                 }
@@ -761,6 +805,7 @@ pub fn library_vocab(dirs: &[std::path::PathBuf]) -> String {
             if sigs.is_empty() {
                 continue;
             }
+            found = true;
             out.push_str(&format!("  {stem}:\n"));
             for s in sigs {
                 let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -771,6 +816,11 @@ pub fn library_vocab(dirs: &[std::path::PathBuf]) -> String {
                     return out;
                 }
             }
+        }
+    }
+    if let Some(m) = only {
+        if !found {
+            return format!("  no module '{m}' found in the library search path\n");
         }
     }
     out
@@ -809,5 +859,67 @@ import Lsp
     fn absent_header_yields_empty_set() {
         // No `module Library` header ⇒ empty ⇒ library_vocab falls back to all.
         assert!(parse_library_exports("module Schemes where\nfoo :: Int\n").is_empty());
+    }
+
+    /// A self-contained lib dir (no repo dependency) for `library_vocab` scoping tests.
+    struct FixtureDir(std::path::PathBuf);
+    impl FixtureDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "tidepool-vocab-fixture-{name}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::create_dir_all(&dir).expect("create fixture dir");
+            std::fs::write(
+                dir.join("Alpha.hs"),
+                "module Alpha where\n\nfooAlpha :: Int -> Int\n",
+            )
+            .unwrap();
+            std::fs::write(
+                dir.join("Beta.hs"),
+                "module Beta where\n\nfooBeta :: Text -> Text\n",
+            )
+            .unwrap();
+            // No `Library.hs` here ⇒ `inscope` is `None` ⇒ unscoped `:vocab` lists all.
+            FixtureDir(dir)
+        }
+    }
+    impl Drop for FixtureDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn library_vocab_scoped_to_one_module() {
+        let fixture = FixtureDir::new("scoped");
+        let dirs = vec![fixture.0.clone()];
+
+        let all = super::library_vocab(&dirs, None);
+        assert!(all.contains("Alpha:"), "unscoped should list Alpha: {all}");
+        assert!(all.contains("Beta:"), "unscoped should list Beta: {all}");
+
+        let alpha_only = super::library_vocab(&dirs, Some("Alpha"));
+        assert!(
+            alpha_only.contains("fooAlpha"),
+            "scoped to Alpha should show fooAlpha: {alpha_only}"
+        );
+        assert!(
+            !alpha_only.contains("Beta") && !alpha_only.contains("fooBeta"),
+            "scoped to Alpha must NOT show Beta: {alpha_only}"
+        );
+    }
+
+    #[test]
+    fn library_vocab_scoped_to_missing_module_reports_not_found() {
+        let fixture = FixtureDir::new("missing");
+        let dirs = vec![fixture.0.clone()];
+
+        let out = super::library_vocab(&dirs, Some("NoSuchModule"));
+        assert!(
+            out.contains("no module 'NoSuchModule' found"),
+            "missing module should report clearly, not silently return empty: {out}"
+        );
     }
 }

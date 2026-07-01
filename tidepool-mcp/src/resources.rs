@@ -364,7 +364,7 @@ fn vocab_md(ctx: &ResourceCtx) -> String {
             s.push('\n');
         }
     }
-    let digest = crate::library_vocab(ctx.lib_dirs);
+    let digest = crate::library_vocab(ctx.lib_dirs, None);
     if digest.trim().is_empty() {
         s.push_str("\n## Project library\n\n(none — no .tidepool/lib in scope)\n");
     } else {

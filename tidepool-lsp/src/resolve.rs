@@ -4,8 +4,9 @@
 //! hierarchy) is resolved here so the tidepool effect surface never sees it.
 //!
 //! Addressing: `where` takes a name (the seed). Every other op takes a whole
-//! **node** `{name, file, line, …}` and re-resolves it to an LSP position by
-//! finding `name` on `line` of `file` — exact, so there is no name ambiguity.
+//! **node** `{name, file, line, char, …}` and re-resolves it to an LSP
+//! position by reading the node's exact `pos` (0-based UTF-16 line/char)
+//! directly — not a substring search, so there is no wrong-column ambiguity.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -505,7 +505,7 @@ mod tests {
     /// import to the eval preamble but not `eval_import_lines`, this catches it.
     #[test]
     fn session_decl_env_matches_eval_preamble() {
-        let env = session_decl_module_env();
+        let env = session_decl_module_env(false);
         // Eval preamble with Exec+Http present so it emits the qualified
         // Tidepool.Shell/Git/Cargo imports the decl env also carries (the full
         // stack the repl always runs under).

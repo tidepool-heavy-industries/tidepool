@@ -137,6 +137,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     base_include.extend(tidepool_runtime::paths::global_lib_dirs());
 
+    // Mirrors `has_user_library` (server.rs) — computed here too since
+    // `base_include` is about to move into `cfg` and `session_decl_module_env`
+    // needs the flag before that.
+    let user_library = base_include.iter().any(|d| d.join("Library.hs").exists());
+
     // Per-session include trees live under a process-scoped temp dir.
     let session_root_base =
         std::env::temp_dir().join(format!("tidepool-repl-{}", std::process::id()));
@@ -149,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // pragmas/imports an `eval` expression sees, so declaration-item helpers
         // can use `M`, the effect verbs, the Prelude shadows, and `L.`/`Set.`/… —
         // not just the lens-free T+Map of `standalone_default`.
-        module_env: tidepool_mcp::session_decl_module_env(),
+        module_env: tidepool_mcp::session_decl_module_env(user_library),
         session_root_base,
         nursery_size: None,
         // Reap a parked `ask` (or a wedged turn) abandoned for 30 min, so an

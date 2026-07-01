@@ -933,7 +933,7 @@ impl Session {
                     "name": name,
                 }))
             }
-            MetaCommand::Vocab => {
+            MetaCommand::Vocab(only) => {
                 let mut dirs: Vec<std::path::PathBuf> = Vec::new();
                 if let Ok(cwd) = std::env::current_dir() {
                     if let Some(root) = tidepool_runtime::paths::find_project_root(&cwd) {
@@ -944,7 +944,7 @@ impl Session {
                     }
                 }
                 dirs.extend(tidepool_runtime::paths::global_lib_dirs());
-                let vocab = library_vocab(&dirs);
+                let vocab = library_vocab(&dirs, only.as_deref());
                 TurnOutcome::Meta(serde_json::json!({ "vocab": vocab }))
             }
         }

@@ -27,8 +27,9 @@ pub enum MetaCommand {
     Bindings,
     /// `:reset` — clear the declaration log and drop the resident machine.
     Reset,
-    /// `:vocab` — list verb signatures from the user library dirs.
-    Vocab,
+    /// `:vocab` / `:vocab <module>` — list verb signatures from the user
+    /// library dirs, optionally scoped to one module.
+    Vocab(Option<String>),
 }
 
 /// One item in a `session_run` block.
@@ -79,7 +80,11 @@ impl MetaCommand {
             "reset" => Ok(MetaCommand::Reset),
             "t" | "type" => Ok(MetaCommand::Type(ExprText(rest.to_string()))),
             "i" | "info" => Ok(MetaCommand::Info(rest.to_string())),
-            "vocab" => Ok(MetaCommand::Vocab),
+            "vocab" => Ok(MetaCommand::Vocab(if rest.is_empty() {
+                None
+            } else {
+                Some(rest.to_string())
+            })),
             other => Err(format!(
                 "unknown session command ':{other}' (known: :bindings, :reset, :t, :i, :vocab)"
             )),
@@ -238,7 +243,14 @@ mod tests {
             MetaCommand::Type(ExprText("slug \"a b\"".into()))
         );
         assert!(MetaCommand::parse(":nope").is_err());
-        assert_eq!(MetaCommand::parse(":vocab").unwrap(), MetaCommand::Vocab);
+        assert_eq!(
+            MetaCommand::parse(":vocab").unwrap(),
+            MetaCommand::Vocab(None)
+        );
+        assert_eq!(
+            MetaCommand::parse(":vocab Diff").unwrap(),
+            MetaCommand::Vocab(Some("Diff".to_string()))
+        );
     }
 
     #[test]

@@ -623,28 +623,49 @@ impl TidepoolReplServer {
         // invalid reply's continuation un-consumed so the caller can retry.
         // Mirrors the eval server's resume (tidepool-mcp/src/server.rs).
         let session_name = resolve_session(req.session);
-        let unknown = || {
-            McpError::invalid_params(
+        let Some(state) = self.inner.manager.state(&session_name) else {
+            return Err(McpError::invalid_params(
                 format!(
-                    "Unknown or expired continuation_id: {} (session '{}')",
-                    req.continuation_id, session_name
+                    "No open session '{session_name}' (never opened, already closed, or \
+                     reaped); continuation_id {} cannot be resumed",
+                    req.continuation_id
                 ),
                 None,
-            )
-        };
-        let Some(state) = self.inner.manager.state(&session_name) else {
-            return Err(unknown());
+            ));
         };
         // All under the per-session state lock; we extract the owned `Suspension`
         // and DROP the lock before `drive().await` (never hold it across await).
         let suspension = {
             let mut st = state.lock();
-            // Must be Suspended on the matching continuation.
+            // Must be Suspended on the matching continuation. Three distinguishable
+            // causes on mismatch (was one collapsed "unknown or expired" message,
+            // which made a same-process footgun — e.g. resuming without echoing a
+            // non-default `session` — indistinguishable from a real flake).
             let schema = match &*st {
                 SessionState::Suspended(s) if s.cont_id == req.continuation_id => {
                     s.expected_schema.clone()
                 }
-                _ => return Err(unknown()),
+                SessionState::Suspended(s) => {
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "Session '{session_name}' is suspended on continuation {}, not \
+                             {}; resume the pending one (or abort it first)",
+                            s.cont_id, req.continuation_id
+                        ),
+                        None,
+                    ));
+                }
+                other => {
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "Session '{session_name}' is not awaiting a resume (state: {}); \
+                             continuation_id {} is already spent or never existed",
+                            other.busy_label(),
+                            req.continuation_id
+                        ),
+                        None,
+                    ));
+                }
             };
             match tidepool_mcp::validate::validate_response(schema.as_ref(), &req.response) {
                 tidepool_mcp::validate::Outcome::Invalid(violations) => {
@@ -708,17 +729,15 @@ impl TidepoolReplServer {
 
     async fn session_abort(&self, req: SessionAbortRequest) -> Result<CallToolResult, McpError> {
         let session_name = resolve_session(req.session);
-        let unknown = || {
-            McpError::invalid_params(
+        let Some(state) = self.inner.manager.state(&session_name) else {
+            return Err(McpError::invalid_params(
                 format!(
-                    "Unknown or expired continuation_id: {} (session '{}')",
-                    req.continuation_id, session_name
+                    "No open session '{session_name}' (never opened, already closed, or \
+                     reaped); continuation_id {} cannot be aborted",
+                    req.continuation_id
                 ),
                 None,
-            )
-        };
-        let Some(state) = self.inner.manager.state(&session_name) else {
-            return Err(unknown());
+            ));
         };
         let reason = req
             .reason
@@ -727,7 +746,27 @@ impl TidepoolReplServer {
             let mut st = state.lock();
             match &*st {
                 SessionState::Suspended(s) if s.cont_id == req.continuation_id => {}
-                _ => return Err(unknown()),
+                SessionState::Suspended(s) => {
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "Session '{session_name}' is suspended on continuation {}, not \
+                             {}; abort the pending one instead",
+                            s.cont_id, req.continuation_id
+                        ),
+                        None,
+                    ));
+                }
+                other => {
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "Session '{session_name}' is not awaiting a resume (state: {}); \
+                             continuation_id {} is already spent or never existed",
+                            other.busy_label(),
+                            req.continuation_id
+                        ),
+                        None,
+                    ));
+                }
             }
             let SessionState::Suspended(s) = std::mem::replace(&mut *st, SessionState::Busy) else {
                 unreachable!("checked Suspended under the same lock")
