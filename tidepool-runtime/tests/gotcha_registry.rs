@@ -34,6 +34,7 @@ use std::path::Path;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
+use std::io::Write;
 
 /// Never invoked — every probe is pure (no effect is `send`ed). Present only so
 /// the full effectful preamble compiles.
@@ -525,5 +526,88 @@ fn works_dup_record_fields_shared_selector() {
         "pure (object [\"hp\" .= (Hit \"a\" 1 \"b\").path, \"dp\" .= (Doc \"p\" \"body\").path, \
          \"hl\" .= (Hit \"a\" 1 \"b\").line, \"db\" .= (Doc \"p\" \"body\").body])",
         serde_json::json!({"hp":"a","dp":"p","hl":1,"db":"body"}),
+    );
+}
+
+/// CANARY (not a regression pin) — dup-field record selectors stay at 0 audit
+/// collisions through the production extract path. Two records sharing a field
+/// label (`color` on both `Foo` and `Bar`, legal under `DuplicateRecordFields`)
+/// must not hash to one VarId, or the JIT's flat emit env would alias one
+/// selector onto the other (wrong field / case trap).
+///
+/// HONEST SCOPE: this exercises the HOME-MODULE path only — the selectors are
+/// compiled from source in this extraction, so they carry `RecSelId` details.
+/// BOTH the current `FldName`-namespace disambiguator AND b4e0f8c's older
+/// `idDetails`-based one handle that case, so this test PASSES PRE-FIX too and
+/// does NOT by itself pin the b4e0f8c→FldName change. It is a stays-green canary:
+/// it goes red if a future varId-scheme change reintroduces field-name
+/// collisions wholesale. The mechanism contract of the current fix
+/// (`fieldParentDisamb`: distinct parents → distinct disambiguators; non-field →
+/// empty) is pinned directly in `haskell/test-varid/VarIdMechanismTest.hs`.
+///
+/// The originally-reported collision (0xfea90eccc07baa0f, two TOP `path` sites in
+/// Tidepool.Records) came from a stale deployed extract binary predating b4e0f8c;
+/// it could not be reproduced on current source in any configuration (home
+/// source, or records as a compiled-package dependency with fat Core / no
+/// unfoldings). The module below does NOT import `Tidepool.Prelude`, keeping the
+/// audit small and the two `color` selectors unambiguously its own TOP binders.
+#[test]
+fn varid_audit_dup_record_fields_zero_collisions() {
+    // Probe: two records, one shared field name.
+    let probe_src = r#"
+{-# LANGUAGE NoImplicitPrelude, DuplicateRecordFields, OverloadedRecordDot #-}
+module DupFieldAudit where
+
+import Prelude (String, (++))
+
+data Foo = Foo { color :: String }
+data Bar = Bar { color :: String }
+
+target :: String
+target = (Foo "red").color ++ (Bar "blue").color
+"#;
+
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let probe_path = tmp.path().join("DupFieldAudit.hs");
+    {
+        let mut f = std::fs::File::create(&probe_path).expect("write probe");
+        f.write_all(probe_src.as_bytes()).expect("write probe bytes");
+    }
+    let out_dir = tmp.path().join("out");
+    std::fs::create_dir_all(&out_dir).expect("out dir");
+
+    let extract_bin =
+        std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".to_string());
+
+    let output = std::process::Command::new(&extract_bin)
+        .arg(probe_path.to_str().unwrap())
+        .args(["--target", "target"])
+        .args(["--output-dir", out_dir.to_str().unwrap()])
+        .env("TIDEPOOL_VARID_AUDIT", "1")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run {extract_bin}: {e}"));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Extract the [VARID AUDIT] summary line.
+    let audit_line = stderr
+        .lines()
+        .find(|l| l.starts_with("[VARID AUDIT]"))
+        .unwrap_or_else(|| panic!("no [VARID AUDIT] line in stderr:\n{stderr}"));
+
+    // Assert 0 collisions — the two `color` selectors get distinct VarIds
+    // (pre-fix via b4e0f8c's RecSelId key, post-fix via the FldName namespace).
+    assert!(
+        audit_line.ends_with("0 collisions"),
+        "expected 0 collisions from [VARID AUDIT], got: {audit_line}\nfull stderr:\n{stderr}"
+    );
+
+    // Belt-and-suspenders: no [VARID COLLISION] line naming two TOP sites.
+    let collision_line = stderr
+        .lines()
+        .find(|l| l.starts_with("[VARID COLLISION]") && l.contains("sites=2"));
+    assert!(
+        collision_line.is_none(),
+        "unexpected collision: {}\nfull stderr:\n{stderr}",
+        collision_line.unwrap_or("")
     );
 }
