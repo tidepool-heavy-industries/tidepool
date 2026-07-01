@@ -475,6 +475,26 @@ translateModuleClosed hscEnv allBinds targetName = do
       -- Debug: find dangling NVar references (referenced but not bound by any Let/Lam/Case)
       boundIds = foldl' collectBound Set.empty nodes
       danglingIds = Set.filter (\v -> not (Set.member v boundIds) && (v `shiftR` 56) /= 0x45) referencedIds
+  -- TIDEPOOL_DANGLING_DEBUG=1: name dangling NVar references — ids the emitted
+  -- program references but nothing binds (and no 0x45 poison covers). These
+  -- surface at runtime as unresolved_var_trap ONLY when forced; naming them at
+  -- extract time is the difference between a symbol and a bare hex id.
+  danglingEnv <- System.Environment.lookupEnv "TIDEPOOL_DANGLING_DEBUG"
+  case danglingEnv of
+    Just _ -> do
+      let refNames = Map.fromListWith (++)
+            [ (varId v, [describeRef v]) | cb <- closedBinds, v <- deepVarRefsOfCB cb ]
+          describeRef v = occNameString (nameOccName (varName v))
+            ++ (case nameModule_maybe (varName v) of
+                  Just m  -> " [" ++ moduleNameString (moduleName m) ++ "]"
+                  Nothing -> "")
+      mapM_ (\vid -> hPutStrLn stderr
+               ("[DANGLING NVAR] 0x" ++ Numeric.showHex vid "" ++ " = "
+                ++ maybe "<no reference site in closed graph>"
+                         (Data.List.intercalate " | " . Data.List.nub)
+                         (Map.lookup vid refNames)))
+            (Set.toList danglingIds)
+    Nothing -> pure ()
   -- Return the REACHABLE binds (what 'translateModule' actually compiled), not
   -- the full closed graph. The meta walks (collectUsedDataCons /
   -- collectTransitiveDCons) run over this, so they harvest only constructors
