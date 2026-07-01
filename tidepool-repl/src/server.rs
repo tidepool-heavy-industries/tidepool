@@ -1009,7 +1009,12 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          Multiple agents can open distinct named sessions in parallel \
          (omit `session` to use `\"default\"`). \
          An in-turn `ask` suspends with a continuation_id; answer it with session_resume or \
-         drop it with session_abort.",
+         drop it with session_abort.\n\n\
+         RECORDS — effect results are named records, not tuples. Use record-dot syntax: \
+         `run cmd` → `Proc` (access `p.stdout`, `p.exitCode`, `p.stderr`; `ok p` = zero exit); \
+         `grepGlob`/`searchFiles` → `[Hit]` (access `h.path`, `h.line`, `h.text`); \
+         `readGlob` → `[Doc]` (access `d.path`, `d.body`). \
+         Bare selectors like `stdout p` are ambiguous — always use dot syntax.",
         effects = names.join(", "),
     )
 }

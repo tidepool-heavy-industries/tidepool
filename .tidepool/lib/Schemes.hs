@@ -157,12 +157,26 @@ windows n xs
 (_:xs) !? n = if n < 0 then Nothing else xs !? (n - 1)
 infixl 9 !?
 
--- | Group consecutive equal elements and count them
--- e.g., histogram [1,1,2,3,3,3] = [(1,2),(2,1),(3,3)]
+-- | Run-length encode a list: group CONSECUTIVE equal elements only.
+-- Each separated run produces its own entry — non-adjacent duplicates are NOT merged.
+-- e.g., rle [2,1,2,2,1] = [(2,1),(1,1),(2,2),(1,1)]   (unsorted: 4 entries)
+-- e.g., rle [1,1,2,3,3,3] = [(1,2),(2,1),(3,3)]        (pre-sorted: same as histogram)
+rle :: Eq a => [a] -> [(a, Int)]
+rle [] = []
+rle (x:xs) =
+  let (same, rest) = Prelude.span (== x) xs
+  in  (x, 1 + Prelude.length same) : rle rest
+
+-- | Frequency histogram: count ALL occurrences of each element, merging non-adjacent runs.
+-- Result is in first-seen key order.
+-- e.g., histogram [2,1,2,2,1] = [(2,3),(1,2)]          (unsorted: 2 entries, counts merged)
+-- e.g., histogram [1,1,2,3,3,3] = [(1,2),(2,1),(3,3)]  (pre-sorted: same as rle)
+-- (contrast with rle, which keeps a separate entry per consecutive run)
 histogram :: Eq a => [a] -> [(a, Int)]
 histogram [] = []
 histogram (x:xs) =
-  let (same, rest) = Prelude.span (== x) xs
+  let same = filter (== x) xs
+      rest = filter (/= x) xs
   in  (x, 1 + Prelude.length same) : histogram rest
 
 -- | Remove elements at specified indices

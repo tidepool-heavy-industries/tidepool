@@ -95,6 +95,25 @@ Changed `haskell/`? See `haskell/CLAUDE.md` for the rebuild + deploy steps.
 
 ---
 
+## Eval Records API
+
+Effect verbs return named records, not positional tuples. Use **record-dot syntax**
+(`p.stdout`, `h.path`) — bare selectors (`stdout p`) are ambiguous when duplicate
+field names exist across record types.
+
+| Record | Fields | Access example |
+|--------|--------|----------------|
+| `Proc` | `exitCode :: Int`, `stdout`, `stderr :: Text` | `p <- run cmd; p.stdout` |
+| `Hit`  | `path`, `text :: Text`, `line :: Int` | `h.path`, `h.line` |
+| `Doc`  | `path`, `body :: Text` | `d.path`, `d.body` |
+
+Key helpers: `ok :: Proc -> Bool` (true when `exitCode == 0`); `run :: Text -> M Proc`;
+`grepGlob :: Text -> FilePath -> M [Hit]`; `readGlob :: Text -> M [Doc]`.
+`tryRun :: Text -> M (Either Text Proc)` — `Left` only on spawn failure; non-zero exit
+is `Right proc`, inspect `proc.exitCode`.
+
+---
+
 ## Key Decisions Reference
 
 Critical architectural decisions for daily work (the Locked Decisions source of truth):

@@ -225,7 +225,16 @@ fn guide_md(ctx: &ResourceCtx) -> String {
         "do { src <- readFile \"CLAUDE.md\"; pure (stake 5 (lines src)) }  -- explicit do when sequencing\n",
         "```\n\n",
         "Per-effect helper signatures live in `tidepool://effect/{name}`; library verbs in ",
-        "`tidepool://vocab`; structured ask/llm in `tidepool://schema`.\n",
+        "`tidepool://vocab`; structured ask/llm in `tidepool://schema`.\n\n",
+        "## Effect result records\n",
+        "Verbs return named records — use **record-dot** (`p.stdout`, `h.path`); bare selectors ",
+        "are ambiguous across record types:\n",
+        "- `run cmd :: M Proc` — fields `exitCode`, `stdout`, `stderr`; `ok p` = zero exit\n",
+        "- `grepGlob`/`searchFiles` → `[Hit]` — fields `path`, `line`, `text`\n",
+        "- `readGlob` → `[Doc]` — fields `path`, `body`\n",
+        "- `fsMeta` → `Maybe FileMeta` — fields `size`, `isFile`, `isDir`\n",
+        "`tryRun :: Text -> M (Either Text Proc)` — `Left` only on spawn failure; non-zero exit ",
+        "is `Right proc`, inspect `proc.exitCode`.\n",
     ));
     if ctx
         .effects
@@ -238,7 +247,7 @@ fn guide_md(ctx: &ResourceCtx) -> String {
             "EXTERNAL failure — bad URL, 404/network error, LLM API error/refusal, exec spawn failure, ",
             "unreadable file — becomes `Left err` and the eval continues:\n",
             "```\n",
-            "tryRun, tryRunIn        :: ... -> M (Either Text (Int, Text, Text))\n",
+            "tryRun, tryRunIn        :: ... -> M (Either Text Proc)\n",
             "tryHttpGet, tryHttpPost :: ... -> M (Either Text Value)\n",
             "tryLlm                  :: Schema -> Text -> M (Either Text Value)\n",
             "tryReadFile             :: Text -> M (Either Text Text)\n",
@@ -246,7 +255,7 @@ fn guide_md(ctx: &ResourceCtx) -> String {
             "They do NOT catch: Haskell `error`/partial functions (including readProcess/callCommand on ",
             "a nonzero exit), other runtime faults, eval cancellation/timeout, or the LLM call-budget ",
             "limit — those still abort. A command that RUNS but exits nonzero is NOT a failure: ",
-            "`tryRun` returns `Right (code, out, err)`; inspect `code` yourself.\n",
+            "`tryRun` returns `Right proc`; inspect `proc.exitCode` (record-dot).\n",
         ));
     }
     s

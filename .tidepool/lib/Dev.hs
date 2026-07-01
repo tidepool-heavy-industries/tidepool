@@ -18,10 +18,13 @@ sh cmd = do
 shLines :: Text -> M [Text]
 shLines cmd = lines <$> sh cmd
 
--- | grep -n equivalent: regex hits in files matching a glob, "line| text".
+-- | grep -rn equivalent: search all files under a directory for a regex.
+-- @grepIn pat dir@ — content regex FIRST, directory path SECOND (same order as grepGlob).
+-- Returns "path:line| text" lines. Searches recursively via dir\/\*\*.
+-- Example: grepIn "unresolved variable" "tidepool-codegen\/src"
 grepIn :: Text -> Text -> M [Text]
-grepIn pat g = do
-  hits <- grepGlob pat g
+grepIn pat dir = do
+  hits <- grepGlob pat (dir <> "/**")
   pure (map (\h -> h.path <> ":" <> pack (show h.line) <> "| " <> strip h.text) hits)
 
 -- | sed -n 'lo,hi p' equivalent with line numbers.

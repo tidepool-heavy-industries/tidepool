@@ -356,8 +356,8 @@ pub fn exec_decl() -> EffectDecl {
             // aborting the eval. A nonzero exit is NOT a failure here — it
             // arrives as `Right (code, out, err)`, so the common eval-killer
             // (readProcess on nonzero exit) is avoided by inspecting the code.
-            "tryRun :: Text -> M (Either Text (Int, Text, Text))\ntryRun = send . TryRun",
-            "tryRunIn :: Text -> Text -> M (Either Text (Int, Text, Text))\ntryRunIn dir cmd = send (TryRunIn dir cmd)",
+            "tryRun :: Text -> M (Either Text Proc)\ntryRun cmd = send (TryRun cmd) <&> fmap (\\(ec, o, e) -> Proc ec o e)",
+            "tryRunIn :: Text -> Text -> M (Either Text Proc)\ntryRunIn dir cmd = send (TryRunIn dir cmd) <&> fmap (\\(ec, o, e) -> Proc ec o e)",
             // Shell-free: argv list, no sh -c. $1/$VAR/globs are literal — safe.
             "runArgv :: [Text] -> M Proc\nrunArgv argv = (\\(ec, o, e) -> Proc ec o e) <$> send (RunArgv argv)",
         ],
