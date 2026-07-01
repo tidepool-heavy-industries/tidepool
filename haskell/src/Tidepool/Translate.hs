@@ -18,13 +18,12 @@ module Tidepool.Translate
   , UnresolvedVar(..)
   , varId
   , stableVarId
+  , fieldParentDisamb
   ) where
 
 import GHC
 import GHC.Core
 import GHC.Types.Id
-import GHC.Types.Id.Info (IdDetails(..), RecSelParent(..))
-import GHC.Core.PatSyn (patSynName)
 import GHC.Types.Var (isTyVar, isCoVar, varUnique, varName, setVarUnique)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
@@ -36,7 +35,8 @@ import GHC.Builtin.Names (ioTyConKey)
 import GHC.Builtin.PrimOps
 import GHC.Types.Literal
 import GHC.Types.Name (nameOccName, isExternalName, isSystemName, nameModule_maybe)
-import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.Name.Occurrence (occNameString, fieldOcc_maybe)
+import GHC.Data.FastString (unpackFS)
 import GHC.Unit.Module (moduleName, moduleNameString)
 import GHC.Unit.Types (moduleUnitId, unitIdString)
 import GHC.Utils.Fingerprint (fingerprintString, Fingerprint(..))
@@ -1560,37 +1560,8 @@ varId :: Var -> Word64
 varId v = case isDataConId_maybe v of
   Just dc -> stableVarId (varName (dataConWorkId dc))
   Nothing
-    | isExternalName (varName v) ->
-        -- Record-field selectors under DuplicateRecordFields (GHC ≥9.2) keep the
-        -- BARE field occ name (e.g. `path`) in the record-field namespace — no
-        -- `$sel:path:Hit` mangling. So `Hit`'s and `Doc`'s `path` selectors share
-        -- module + occ name and hash to ONE stableVarId, coalescing two distinct
-        -- selectors in the DataConTable / external resolver → the wrong selector
-        -- pattern-matches the wrong constructor → runtime CASE TRAP. Fold the
-        -- selector's PARENT (the record TyCon / PatSyn qualified name) into the id
-        -- so `path`@Hit ≠ `path`@Doc. Only record selectors are disambiguated;
-        -- every other Id keeps a byte-identical id (empty disambiguator), so the
-        -- DataConTable / fixture meta is unperturbed.
-        case recSelParentKey v of
-          Just k  -> stableVarIdWith ("@" ++ k) (varName v)
-          Nothing -> stableVarId (varName v)
-    | otherwise -> localVarId v
-
--- | For a record-field selector 'Id', the qualified name of its parent record
--- (a 'TyCon' or a pattern synonym). 'Nothing' for anything that is not a record
--- selector. This is a pure function of the 'Id''s own 'idDetails', so the SAME
--- selector yields the SAME key at every reference site (the field's own
--- @ToJSON@ use, the @getField@ desugaring at a call site, …).
-recSelParentKey :: Var -> Maybe String
-recSelParentKey v = case idDetails v of
-  RecSelId { sel_tycon = parent } -> Just (qualNameStr (recSelParentName parent))
-  _                               -> Nothing
-  where
-    recSelParentName (RecSelData tc)   = tyConName tc
-    recSelParentName (RecSelPatSyn ps) = patSynName ps
-    qualNameStr n = case nameModule_maybe n of
-      Just m  -> normalizeMod (moduleNameString (moduleName m)) ++ "." ++ occNameString (nameOccName n)
-      Nothing -> occNameString (nameOccName n)
+    | isExternalName (varName v) -> stableVarId (varName v)
+    | otherwise                  -> localVarId v
 
 -- | For local (non-external) variables, hash the OccName together with the
 -- GHC unique to produce a disambiguated ID. Raw GHC uniques collide across
@@ -1621,14 +1592,36 @@ qualifiedName name = case nameModule_maybe name of
   Nothing -> T.pack (occNameString (nameOccName name))
 
 stableVarId :: Name -> Word64
-stableVarId = stableVarIdWith ""
+stableVarId name = stableVarIdWith (fieldParentDisamb name) name
 
--- | 'stableVarId' with an extra disambiguator folded into the fingerprinted
--- string. With @disamb == ""@ this is byte-identical to the original
--- 'stableVarId' — so passing @""@ everywhere except record selectors leaves the
--- whole DataConTable / fixture meta unperturbed. Record selectors pass their
--- parent record's qualified name so shared field labels (DuplicateRecordFields)
--- get DISTINCT ids.
+-- | Record fields live in their own 'NameSpace' ('FldName', GHC ≥9.6) carrying
+-- the parent type/constructor; fold it into the fingerprint so two records
+-- sharing a field label ('DuplicateRecordFields') get DISTINCT ids.
+--
+-- Supersedes b4e0f8c's @recSelParentKey@, which read 'idDetails' to find the
+-- 'RecSelId' parent. Deriving the disambiguator from the 'Name' makes it a pure
+-- function of the reference, independent of how the 'Id' was reconstructed: it
+-- cannot silently degrade to 'Nothing' on a binder that has lost its 'RecSelId'
+-- details (anything rebuilt from fat-interface Core via 'tcTopIfaceBindings'
+-- gets vanilla 'idDetails'). This is a simplification-plus-hardening, NOT a fix
+-- for a collision reproduced on current source: every dup-field configuration
+-- constructible in-tree (home source, and records as a compiled-package
+-- dependency, with or without exposed unfoldings) already carried 'RecSelId', so
+-- b4e0f8c and this mechanism agree on all of them. The historically-observed
+-- collision (0xfea90eccc07baa0f, two TOP @path@ sites in Tidepool.Records) came
+-- from a STALE deployed extract binary predating b4e0f8c, not from current
+-- source. Contract pinned by @test-varid/VarIdMechanismTest.hs@. Non-field names
+-- get @""@ (byte-identical to the original 'stableVarId'), so the DataConTable \/
+-- fixture meta is unperturbed.
+fieldParentDisamb :: Name -> String
+fieldParentDisamb n = case fieldOcc_maybe (nameOccName n) of
+  Just parent -> '@' : unpackFS parent
+  Nothing     -> ""
+
+-- | 'stableVarId' with an explicit disambiguator folded into the fingerprinted
+-- string.  @'stableVarIdWith' "" name@ is byte-identical to the original scheme.
+-- Callers outside 'varId' (e.g. 'sessionBinderName') are in the 'VarName'
+-- namespace so 'fieldParentDisamb' returns @""@ for them — no change.
 stableVarIdWith :: String -> Name -> Word64
 stableVarIdWith disamb name =
   let modStr = case nameModule_maybe name of

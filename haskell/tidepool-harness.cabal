@@ -104,3 +104,31 @@ executable session-c-test
     mtl
   default-language: GHC2024
   default-extensions: OverloadedStrings
+
+-- Contract pin for the record-selector varId disambiguator (fieldParentDisamb):
+-- shared field label under different parent types => distinct disambiguators;
+-- non-field Name => empty disambiguator. Pins the mechanism directly (the
+-- gotcha_registry canary passes pre-fix, so it does not).
+-- Run: cabal run varid-mechanism-test  (needs the nix with-packages GHC on PATH).
+executable varid-mechanism-test
+  main-is:          VarIdMechanismTest.hs
+  hs-source-dirs:   test-varid, src
+  other-modules:
+    Tidepool.Translate
+    Tidepool.Resolve
+    Tidepool.FatIface
+    Tidepool.GhcPipeline
+    Tidepool.Session
+  build-depends:
+    base         >= 4.20 && < 5,
+    ghc          >= 9.12 && < 9.13,
+    ghc-boot     >= 9.12 && < 9.13,
+    bytestring,
+    containers,
+    filepath,
+    directory,
+    process,
+    text,
+    mtl
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
