@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns, NoImplicitPrelude, FlexibleInstances #-}
+{-# LANGUAGE BangPatterns, NoImplicitPrelude, FlexibleInstances, DuplicateRecordFields #-}
 -- | Self-contained prelude for Tidepool user code.
 --
 -- With NoImplicitPrelude in the MCP template, this is the single import.
@@ -168,6 +168,8 @@ module Tidepool.Prelude
     -- * Prelude workhorses
   , sortOn, Down(..), swap
   , partitionEithers, rights, lefts, fromLeft, fromRight
+    -- * Shared record vocabulary (Tidepool.Records)
+  , Proc(..), ok, Hit(..), Doc(..)
   ) where
 
 import Prelude
@@ -224,6 +226,7 @@ import Control.Monad
   , (=<<), (>=>), (<=<)
   , foldM, foldM_
   )
+import Tidepool.Records (Proc(..), ok, Hit(..), Doc(..))
 import Tidepool.Render (Render(..))
 import Tidepool.QQ.Fmt.Runtime
   (FSign(..), FAlign(..), fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain)

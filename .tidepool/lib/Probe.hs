@@ -1,4 +1,4 @@
-{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, OverloadedRecordDot #-}
 module Probe where
 
 import Tidepool.Prelude hiding (error)
@@ -7,36 +7,36 @@ import qualified Tidepool.Data.Text as T
 
 t1 :: M [Text]
 t1 = do
-  (_, _, e) <- run "echo hi 1>&2"
-  pure (lines e)
+  p <- run "echo hi 1>&2"
+  pure (lines p.stderr)
 
 t2 :: M [Text]
 t2 = do
-  (_, _, e) <- run "echo hi 1>&2"
-  pure (filter (\l -> "h" `isPrefixOf` l) (lines e))
+  p <- run "echo hi 1>&2"
+  pure (filter (\l -> "h" `isPrefixOf` l) (lines p.stderr))
 
 t3 :: M [Text]
 t3 = do
-  (_, _, e) <- run "echo hi 1>&2"
-  pure (filter (\l -> "h" `isPrefixOf` l || "w" `isPrefixOf` l) (lines e))
+  p <- run "echo hi 1>&2"
+  pure (filter (\l -> "h" `isPrefixOf` l || "w" `isPrefixOf` l) (lines p.stderr))
 
 t4 :: [Text]
 t4 = filter (\l -> "h" `isPrefixOf` l) ["hi", "wo"]
 
 t5 :: M [Text]
 t5 = do
-  (_, _, e) <- run "echo hi 1>&2"
-  pure (filter (\l -> len l > 1) (lines e))
+  p <- run "echo hi 1>&2"
+  pure (filter (\l -> len l > 1) (lines p.stderr))
 
 t6 :: M [Bool]
 t6 = do
-  (_, _, e) <- run "echo hi 1>&2"
-  pure (map (\l -> "h" `isPrefixOf` l) (lines e))
+  p <- run "echo hi 1>&2"
+  pure (map (\l -> "h" `isPrefixOf` l) (lines p.stderr))
 
 t7 :: M [Text]
 t7 = do
-  (c, o, e) <- run "echo hi 1>&2"
-  pure (filter (\l -> len l > 1) (lines e) <> [pack (show c), o])
+  p <- run "echo hi 1>&2"
+  pure (filter (\l -> len l > 1) (lines p.stderr) <> [pack (show p.exitCode), p.stdout])
 
 t8 :: M [Text]
 t8 = do

@@ -29,7 +29,7 @@ pub const PREAMBLE_DEFAULT_DECL: &str = "default (Int, Double, Text)\n";
 /// everywhere: a helper written with `session_def` sees exactly the extensions
 /// an `eval`/`session_eval` expression does. No trailing newline — callers that
 /// emit it add their own (the eval preamble and `ModuleEnv::pragmas` both do).
-pub const EVAL_PRAGMAS: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, QuasiQuotes #-}";
+pub const EVAL_PRAGMAS: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot #-}";
 
 /// The canonical ordered import lines shared by the eval `Expr` module and the
 /// session decl modules — the SINGLE source of truth for the eval vocabulary
@@ -426,8 +426,8 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
             "  pure p) paths\n",
         ));
         out.push_str(concat!(
-            "readGlob :: Text -> M [(Text, Text)]\n",
-            "readGlob pat = glob pat >>= mapM (\\p -> (,) p <$> readFile p)\n",
+            "readGlob :: Text -> M [Doc]\n",
+            "readGlob pat = glob pat >>= mapM (\\p -> Doc p <$> readFile p)\n",
         ));
         out.push_str(concat!(
             "mapFile :: Text -> (Text -> Text) -> M ()\n",
@@ -438,13 +438,13 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
             "mapFileM path f = readFile path >>= f >>= writeFile path\n",
         ));
         out.push_str(concat!(
-            "searchFiles :: Text -> Text -> M [(Text, Int, Text)]\n",
+            "searchFiles :: Text -> Text -> M [Hit]\n",
             "searchFiles pat needle = do\n",
             "  files <- glob pat\n",
-            "  fmap concat $ forM files $ \\path -> do\n",
-            "    content <- readFile path\n",
+            "  fmap concat $ forM files $ \\p -> do\n",
+            "    content <- readFile p\n",
             "    let ls = zip [(1::Int)..] (T.lines content)\n",
-            "    pure [(path, n, l) | (n, l) <- ls, T.isInfixOf needle l]\n",
+            "    pure [Hit p n l | (n, l) <- ls, T.isInfixOf needle l]\n",
         ));
         out.push_str(concat!(
             "lineCount :: Text -> M Int\n",
@@ -466,7 +466,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     if has_exec {
         out.push_str("runChecked :: Text -> M Text\nrunChecked = readProcess\n");
         out.push_str(concat!(
-            "runAll :: [Text] -> M [(Int, Text, Text)]\n",
+            "runAll :: [Text] -> M [Proc]\n",
             "runAll = mapM run\n",
         ));
     }

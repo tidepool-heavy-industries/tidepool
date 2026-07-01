@@ -391,7 +391,7 @@ mod tests {
         assert!(preamble.contains("rsFn :: Text -> [Text] -> M [Match]"));
 
         // Verify grepGlob exists in Fs section
-        assert!(preamble.contains("grepGlob :: Text -> FilePath -> M [(FilePath, Int, Text)]"));
+        assert!(preamble.contains("grepGlob :: Text -> FilePath -> M [Hit]"));
 
         // Verify Match record syntax + the Map-typed matchVars accessor
         assert!(preamble.contains("data Match = Match {"));
@@ -759,7 +759,9 @@ data Console a where
         let preamble = generated_sources(&decls, false);
         assert!(preamble.contains("import Control.Monad.Freer hiding (run)"));
         // Our run helper should still be present
-        assert!(preamble.contains("run :: Text -> M (Int, Text, Text)\nrun = send . Run"));
+        assert!(preamble.contains(
+            "run :: Text -> M Proc\nrun cmd = (\\(ec, o, e) -> Proc ec o e) <$> send (Run cmd)"
+        ));
     }
 
     #[test]
@@ -802,13 +804,13 @@ data Console a where
         // File manipulation helpers
         assert!(orch.contains("mapFile :: Text -> (Text -> Text) -> M ()"));
         assert!(orch.contains("mapFileM :: Text -> (Text -> M Text) -> M ()"));
-        assert!(orch.contains("searchFiles :: Text -> Text -> M [(Text, Int, Text)]"));
+        assert!(orch.contains("searchFiles :: Text -> Text -> M [Hit]"));
         assert!(orch.contains("lineCount :: Text -> M Int"));
         assert!(orch.contains("fileContains :: Text -> Text -> M Bool"));
         // KV batch helpers
         assert!(orch.contains("kvAll :: M [(Text, Value)]"));
         assert!(orch.contains("kvClear :: M ()"));
-        assert!(orch.contains("runAll :: [Text] -> M [(Int, Text, Text)]"));
+        assert!(orch.contains("runAll :: [Text] -> M [Proc]"));
         // The expr-module preamble no longer splices these bodies — it imports
         // the module and only emits the paginateResult alias.
         let preamble = build_preamble(&decls, true);

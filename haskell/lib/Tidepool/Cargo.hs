@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, ScopedTypeVariables #-}
+{-# LANGUAGE OverloadedStrings, ScopedTypeVariables, OverloadedRecordDot #-}
 
 -- | Cargo effect module: typed wrappers over 'runArgv' that parse
 -- @--message-format=json@ line-delimited output into 'Value' lists.
@@ -20,6 +20,7 @@ import Prelude
 import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson.Value (Value)
+import Tidepool.Records (Proc(..))
 import Tidepool.Effects (M, runArgv, tryParseJson)
 import qualified Tidepool.Shell as Shell
 
@@ -56,8 +57,8 @@ cargoMetadata = Shell.shJson ["cargo", "metadata", "--format-version=1"]
 -- progress messages in some terminal configurations) are silently skipped.
 runCargoJson :: [Text] -> M [Value]
 runCargoJson subArgs = do
-  (_, out, _) <- runArgv ("cargo" : subArgs)
-  let ls = filter (not . T.null) (T.lines out)
+  p <- runArgv ("cargo" : subArgs)
+  let ls = filter (not . T.null) (T.lines p.stdout)
   vs <- mapM parseLine ls
   pure (concat vs)
   where

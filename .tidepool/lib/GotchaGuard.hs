@@ -1,4 +1,4 @@
-{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, OverloadedRecordDot #-}
 -- | Dogfood: Core-translation gotcha coverage map.
 --
 -- The gotchas are documented in docs/core-shapes/audit-translate.md. This module
@@ -24,13 +24,6 @@ data Gotcha = Gotcha
 -- | Constructor with no doc aliases (the common case).
 gotcha :: Text -> Text -> [Text] -> Gotcha
 gotcha n d p = Gotcha n d p []
-
--- | Where a pattern matched.
-data Hit = Hit
-  { hFile :: Text
-  , hLine :: Int
-  , hText :: Text
-  }
 
 -- | Catalog copied from docs/core-shapes/audit-translate.md.
 -- Names are stable ids; descriptions are short reminders; patterns are the
@@ -159,9 +152,7 @@ catalog =
 
 -- | Search for one pattern; return matches in source files.
 searchPattern :: Text -> Text -> M [Hit]
-searchPattern glob pat = do
-  hits <- grepGlob pat glob
-  pure [ Hit f l t | (f, l, t) <- hits ]
+searchPattern glob pat = grepGlob pat glob
 
 -- | Find handlers for one gotcha across both Haskell and Rust source.
 -- Each pattern is searched separately and hits are unioned.
@@ -172,7 +163,7 @@ findHandlers g = do
   let allHits = nubBy sameLoc (rsHits ++ hsHits)
   pure (g, allHits)
   where
-    sameLoc a b = hFile a == hFile b && hLine a == hLine b
+    sameLoc a b = a.path == b.path && a.line == b.line
 
 -- | Deterministic report: gotcha -> handler count + sample locations.
 gotchaReport :: M Value
@@ -183,7 +174,7 @@ gotchaReport = do
         [ "name"        .= gName g
         , "description" .= gDescription g
         , "handlers"    .= len hits
-        , "samples"     .= map (\h -> object ["file" .= hFile h, "line" .= hLine h, "text" .= T.strip (hText h)]) (take 3 hits)
+        , "samples"     .= map (\h -> object ["file" .= h.path, "line" .= h.line, "text" .= T.strip h.text]) (take 3 hits)
         , "gap"         .= (len hits == 0)
         ]
       gaps = filter (\v -> Just True == (v ^? key "gap" . _Bool)) entries

@@ -1,4 +1,4 @@
-{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, OverloadedRecordDot #-}
 -- | Mech v2: a rubric-filling crate-walk — gated, evidence-fed, checkpointed.
 --
 --   GATE (encoded judgment): surface only the top-3 production-loudest crates.
@@ -27,8 +27,8 @@ isTest f t = isInfixOf "/tests/" f || isInfixOf "#[test]" t || isInfixOf "#[cfg(
 crateDash :: Text -> M Dash
 crateDash crate = do
   hits <- grepGlob "\\.unwrap\\(\\)|panic!|\\.expect\\(" (crate <> "/**/*.rs")
-  let prod = [ (f, l, t) | (f, l, t) <- hits, not (isTest f t) ]
-      fmt (f, l, t) = f <> ":" <> pack (show l) <> "  " <> T.strip t
+  let prod = [ h | h <- hits, not (isTest h.path h.text) ]
+      fmt h = h.path <> ":" <> pack (show h.line) <> "  " <> T.strip h.text
   pure (Dash crate (len prod) (take 6 (map fmt prod)))
 
 -- the cockpit: pause, hand over evidence + a rubric, checkpoint the answer.

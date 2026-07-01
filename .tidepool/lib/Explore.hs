@@ -1,4 +1,4 @@
-{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, OverloadedRecordDot #-}
 -- | Task-shaped exploration verbs: pure result-shapers for the
 -- effect ops (glob, grepGlob, sg finds, readFile). Effectful
 -- plumbing stays at the call site; these shape the answers.
@@ -20,11 +20,11 @@ extHisto paths = sortBy (\a b -> compare (snd b) (snd a)) (foldl' bump [] paths)
 sizeRank :: Int -> [(Text, Int)] -> [(Text, Int)]
 sizeRank n = take n . sortBy (\a b -> compare (snd b) (snd a))
 
--- | Group grep hits (file, line, text) into per-file counts, densest first.
-hitsByFile :: [(Text, Int, Text)] -> [(Text, Int)]
+-- | Group grep hits into per-file counts, densest first.
+hitsByFile :: [Hit] -> [(Text, Int)]
 hitsByFile hs = sortBy (\a b -> compare (snd b) (snd a)) (foldl' bump [] hs)
   where
-    bump acc (f, _, _) = ins f acc
+    bump acc h = ins h.path acc
     ins k [] = [(k, 1)]
     ins k ((k', n) : rest) = if k == k' then (k', n + 1) : rest else (k', n) : ins k rest
 

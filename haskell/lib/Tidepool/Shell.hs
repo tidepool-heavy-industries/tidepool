@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, OverloadedRecordDot #-}
 
 -- | Shell-effect affordance: typed combinators over 'runArgv'.
 --
@@ -22,15 +22,16 @@ import Prelude
 import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson.Value (Value)
+import Tidepool.Records (Proc(..), ok)
 import Tidepool.Effects (M, runArgv, parseJson)
 
 -- | Run a command (argv, no shell), strip stdout, throw on nonzero exit.
 sh1 :: [Text] -> M Text
 sh1 argv = do
-  (ec, out, err) <- runArgv argv
-  if ec == 0
-    then pure (T.strip out)
-    else Prelude.error ("sh: exit " ++ show ec ++ ": " ++ T.unpack (T.strip err))
+  p <- runArgv argv
+  if ok p
+    then pure (T.strip p.stdout)
+    else Prelude.error ("sh: exit " ++ show p.exitCode ++ ": " ++ T.unpack (T.strip p.stderr))
 
 -- | Run and split stdout into non-empty lines.
 shLines :: [Text] -> M [Text]
@@ -46,10 +47,10 @@ shJson argv = sh1 argv >>= parseJson
 -- | Run; return @Right stdout@ on zero exit, @Left stderr@ on nonzero.
 shTry :: [Text] -> M (Either Text Text)
 shTry argv = do
-  (ec, out, err) <- runArgv argv
-  if ec == 0
-    then pure (Right (T.strip out))
-    else pure (Left (T.strip err))
+  p <- runArgv argv
+  if ok p
+    then pure (Right (T.strip p.stdout))
+    else pure (Left (T.strip p.stderr))
 
 -- | Split a text line on ASCII whitespace, discarding empty segments.
 -- Useful for parsing fixed-column porcelain output (e.g. @git status --porcelain@).

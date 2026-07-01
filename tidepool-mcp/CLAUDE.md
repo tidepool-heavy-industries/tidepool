@@ -111,6 +111,6 @@ matched. See the `qq_patch_pat_*` Suite fixtures for canonical shapes.
   bindings and bare type sigs.)
 - `rHas`/`rInside` are deep by default (`stopBy: end`); use `rHasChild`/
   `rInsideParent` for direct children.
-- `grepGlob :: Text -> FilePath -> M [(FilePath, Int, Text)]` — structured
-  text-level search with regex + filename globbing. (Returns tuples, whereas
-  `hsDef`/`rsFn` return `[Match]` records — shapes differ.)
+- `grepGlob :: Text -> FilePath -> M [Hit]` — structured text-level search with
+  regex + filename globbing. Returns `[Hit]` {path, line, text} (the shared
+  record; `matchLocs` over `hsDef`/`rsFn` `[Match]` yields the same `[Hit]` shape).

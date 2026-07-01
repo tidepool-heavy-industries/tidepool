@@ -1,4 +1,4 @@
-{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, OverloadedRecordDot #-}
 -- | The dev inner loop as verbs: run-and-fail-loudly, file slicing,
 -- in-file grep, build diagnostics, session memoization.
 module Dev where
@@ -9,10 +9,10 @@ import Tidepool.Effects
 -- | Run a command; return stdout. Non-zero exit = loud error with stderr.
 sh :: Text -> M Text
 sh cmd = do
-  (code, out, err) <- run cmd
-  if code == 0
-    then pure out
-    else error ("sh: exit " <> pack (show code) <> ": " <> cmd <> "\n" <> err)
+  p <- run cmd
+  if ok p
+    then pure p.stdout
+    else error ("sh: exit " <> pack (show p.exitCode) <> ": " <> cmd <> "\n" <> p.stderr)
 
 -- | sh, split into lines.
 shLines :: Text -> M [Text]
@@ -22,7 +22,7 @@ shLines cmd = lines <$> sh cmd
 grepIn :: Text -> Text -> M [Text]
 grepIn pat g = do
   hits <- grepGlob pat g
-  pure (map (\(f, l, t) -> f <> ":" <> pack (show l) <> "| " <> strip t) hits)
+  pure (map (\h -> h.path <> ":" <> pack (show h.line) <> "| " <> strip h.text) hits)
 
 -- | sed -n 'lo,hi p' equivalent with line numbers.
 slice :: Text -> Int -> Int -> M [Text]

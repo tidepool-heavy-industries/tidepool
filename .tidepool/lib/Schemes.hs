@@ -287,14 +287,3 @@ mapMaybeM f (x:xs) = do
     Nothing -> pure rest
 
 -- mapMaybe: use the one from Tidepool.Prelude (re-exported from Data.Maybe)
-
--- § Tuple-3 projections (grepGlob et al. return 3-tuples)
-
-fst3 :: (a, b, c) -> a
-fst3 (x, _, _) = x
-
-snd3 :: (a, b, c) -> b
-snd3 (_, y, _) = y
-
-thd3 :: (a, b, c) -> c
-thd3 (_, _, z) = z

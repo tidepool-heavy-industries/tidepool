@@ -148,10 +148,10 @@ pub fn fs_decl() -> EffectDecl {
             "-- | File size in bytes, or `Nothing` if the path is missing.\ngetFileSize :: FilePath -> M (Maybe Int)\ngetFileSize p = send (FsMetadata p) <&> (^? key \"size\" . _Int)",
             "-- | Raw metadata as a Value: `{size, is_file, is_dir}`, or `Null` if missing.\nfsMeta :: FilePath -> M Value\nfsMeta = send . FsMetadata",
             "-- | Alias of `fsMeta` — metadata as a Value, lens in with `^? key \"size\" . _Int`.\nfsMetadata :: FilePath -> M Value\nfsMetadata = send . FsMetadata",
-            "getCurrentDirectory :: M FilePath\ngetCurrentDirectory = do { (_, d, _) <- run \"pwd\"; pure (T.strip d) }",
+            "getCurrentDirectory :: M FilePath\ngetCurrentDirectory = do { p <- run \"pwd\"; pure (T.strip p.stdout) }",
             "glob :: FilePath -> M [FilePath]\nglob = send . FsGlob",
             "-- | Alias of `glob` — expand a glob to matching paths.\nfsGlob :: FilePath -> M [FilePath]\nfsGlob = send . FsGlob",
-            "-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob\n-- SECOND — a path glob like \"*.rs\" goes in arg 2, not arg 1. Returns\n-- [(file, 1-based line, matched line)] (same shape as sgFind's matchLocs, so it\n-- composes with hitsByFile/refs). NB regex metachars are double-escaped here\n-- (JSON x Haskell), so a literal dot needs four backslashes; the handler error\n-- shows the exact form if you get it wrong.\ngrepGlob :: Text -> FilePath -> M [(FilePath, Int, Text)]\ngrepGlob pat g = send (FsGrep pat g)",
+            "-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob\n-- SECOND — a path glob like \"*.rs\" goes in arg 2, not arg 1. Returns [Hit]\n-- {path, line, text} (same shape as sgFind's matchLocs, so it composes with\n-- hitsByFile/refs). NB regex metachars are double-escaped here (JSON x Haskell),\n-- so a literal dot needs four backslashes; the handler error shows the exact\n-- form if you get it wrong.\ngrepGlob :: Text -> FilePath -> M [Hit]\ngrepGlob pat g = map (\\(f, l, t) -> Hit f l t) <$> send (FsGrep pat g)",
             // --- Editing: exact str-replace (the common case; mirrors the Edit tool) ---
             "-- | Exact str-replace, EXACTLY-ONCE: applies, or errors with a precise\n-- reason (not-found / ambiguous). The trained Edit-tool shape: no news is\n-- good news. Pass enough surrounding text that `old` is unique. Use planUpdate\n-- to review the diff first; the full editing surface is in tidepool://edits.\nupdate :: FilePath -> Text -> Text -> M ()\nupdate path old new\n  | T.null old = error \"update: 'old' must be non-empty\"\n  | otherwise = do\n      src <- readFile path\n      case len (T.splitOn old src) - 1 of\n        0 -> error (\"update: 'old' not found in \" <> path)\n        1 -> writeFile path (replace old new src)\n        n -> error (\"update: 'old' matches \" <> show n <> \" places in \" <> path <> \" (add surrounding context to disambiguate)\")",
             "-- | Replace EVERY occurrence of `old`; returns the count. Errors if zero.\nupdateAll :: FilePath -> Text -> Text -> M Int\nupdateAll path old new\n  | T.null old = error \"updateAll: 'old' must be non-empty\"\n  | otherwise = do\n      src <- readFile path\n      let n = len (T.splitOn old src) - 1\n      if n == 0 then error (\"updateAll: 'old' not found in \" <> path)\n                else writeFile path (replace old new src) >> pure n",
@@ -187,12 +187,12 @@ pub fn sg_decl() -> EffectDecl {
             "instance ToJSON Match where\n  toJSON m@(Match t f l _ r) = object ([\"text\" .= t, \"file\" .= f, \"line\" .= l] ++ (let vs = matchVars m in if Map.null vs then [] else [\"vars\" .= toJSON vs]) ++ (if T.null r then [] else [\"replacement\" .= r]))",
             "var :: Match -> Text -> Text",
             "var m k = Map.findWithDefault \"\" k (matchVars m)",
-            // Compact projectors: a survey shape that mirrors grepGlob's
-            // [(FilePath, Int, Text)] so it composes with hitsByFile/refs and
-            // does NOT flood context with full match bodies. The [Match] stays
-            // live in the same eval, so drilling into a chosen match is free.
-            "-- | Compact location of one match: (file, line, first line of the match).\nmatchLoc :: Match -> (FilePath, Int, Text)\nmatchLoc m = (matchFile m, matchLine m, T.takeWhile (/= '\\n') (matchText m))",
-            "-- | Compact survey of matches: [(file, line, header)] — same shape as\n-- grepGlob. Browse with this, then index back into the [Match] for full detail.\nmatchLocs :: [Match] -> [(FilePath, Int, Text)]\nmatchLocs = map matchLoc",
+            // Compact projectors: a survey shape that mirrors grepGlob's [Hit]
+            // so it composes with hitsByFile/refs and does NOT flood context with
+            // full match bodies. The [Match] stays live in the same eval, so
+            // drilling into a chosen match is free.
+            "-- | Compact location of one match as a `Hit` {path, line, text}\n-- (text = first line of the match).\nmatchLoc :: Match -> Hit\nmatchLoc m = Hit (matchFile m) (matchLine m) (T.takeWhile (/= '\\n') (matchText m))",
+            "-- | Compact survey of matches: [Hit] — same shape as grepGlob. Browse with\n-- this, then index back into the [Match] for full detail.\nmatchLocs :: [Match] -> [Hit]\nmatchLocs = map matchLoc",
         ],
         constructors: &[
             "SgFind    :: Lang -> Text -> [Text] -> SG [Match]",
@@ -347,10 +347,10 @@ pub fn exec_decl() -> EffectDecl {
         ],
         type_defs: &[],
         helpers: &[
-            "callCommand :: Text -> M ()\ncallCommand cmd = do { (ec, _, err) <- send (Run cmd); when (ec /= 0) (error (\"command failed (\" <> show ec <> \"): \" <> err)) }",
-            "readProcess :: Text -> M Text\nreadProcess cmd = do { (ec, out, err) <- send (Run cmd); if ec == 0 then pure out else error (\"command failed (\" <> show ec <> \"): \" <> err) }",
-            "run :: Text -> M (Int, Text, Text)\nrun = send . Run",
-            "runIn :: Text -> Text -> M (Int, Text, Text)\nrunIn dir cmd = send (RunIn dir cmd)",
+            "callCommand :: Text -> M ()\ncallCommand cmd = do { p <- run cmd; when (not (ok p)) (error (\"command failed (\" <> show p.exitCode <> \"): \" <> p.stderr)) }",
+            "readProcess :: Text -> M Text\nreadProcess cmd = do { p <- run cmd; if ok p then pure p.stdout else error (\"command failed (\" <> show p.exitCode <> \"): \" <> p.stderr) }",
+            "-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}\n-- (use `ok p` for the zero-exit check).\nrun :: Text -> M Proc\nrun cmd = (\\(ec, o, e) -> Proc ec o e) <$> send (Run cmd)",
+            "runIn :: Text -> Text -> M Proc\nrunIn dir cmd = (\\(ec, o, e) -> Proc ec o e) <$> send (RunIn dir cmd)",
             // Isolating variants: spawn failure becomes `Left err` instead of
             // aborting the eval. A nonzero exit is NOT a failure here — it
             // arrives as `Right (code, out, err)`, so the common eval-killer
@@ -358,7 +358,7 @@ pub fn exec_decl() -> EffectDecl {
             "tryRun :: Text -> M (Either Text (Int, Text, Text))\ntryRun = send . TryRun",
             "tryRunIn :: Text -> Text -> M (Either Text (Int, Text, Text))\ntryRunIn dir cmd = send (TryRunIn dir cmd)",
             // Shell-free: argv list, no sh -c. $1/$VAR/globs are literal — safe.
-            "runArgv :: [Text] -> M (Int, Text, Text)\nrunArgv = send . RunArgv",
+            "runArgv :: [Text] -> M Proc\nrunArgv argv = (\\(ec, o, e) -> Proc ec o e) <$> send (RunArgv argv)",
         ],
     }
 }

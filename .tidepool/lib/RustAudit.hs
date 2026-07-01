@@ -1,4 +1,4 @@
-{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, OverloadedRecordDot #-}
 -- | Dogfood: Rust panic-site audit. Deterministic census now; the
 -- ration-attention judgment layer (safe-by-invariant vs risky) comes later.
 -- Core lives here; eval is a thin shell (`panicReport`).
@@ -46,7 +46,7 @@ rankDesc = sortBy (\a b -> compare (snd b) (snd a))
 panicSites :: M [Site]
 panicSites = do
   hits <- grepGlob "\\.unwrap\\(\\)|\\.expect\\(|panic!|unreachable!|unimplemented!|todo!" "**/*.rs"
-  pure [ Site f l k t | (f, l, t) <- hits, Just k <- [kindOf t] ]
+  pure [ Site h.path h.line k h.text | h <- hits, Just k <- [kindOf h.text] ]
 
 -- numbered context window around a 1-based line.
 contextAround :: Int -> Int -> Text -> Text
