@@ -36,7 +36,8 @@ The tool-description vocab digest merges both dirs (project overrides global).
 **Config** (`config.toml`) layers default < global < project < env; keys:
 `llm_model`, `eval_timeout_secs`. Env knobs: `TIDEPOOL_PRELUDE_DIR`,
 `TIDEPOOL_CONFIG_DIR`, `TIDEPOOL_LLM_MODEL`, `TIDEPOOL_EVAL_TIMEOUT_SECS`,
-`TIDEPOOL_EXTRACT`. In-repo, `ensure_prelude` short-circuits to `haskell/lib`.
+`TIDEPOOL_EXTRACT`. In-repo, `ServerBuilder::with_prelude`'s fallback points the
+include path at `haskell/lib` directly.
 
 ## Eval-authoring patterns (know-how, not in the tool description)
 
@@ -62,7 +63,7 @@ in `fs_decl` helpers, not project-lib): `update path old new :: M ()` is exact
 str-replace, exactly-once, and THROWS a precise error on not-found/ambiguous —
 the MCP Edit-tool shape. `updateAll` returns a count; `planUpdate :: M Value` is the
 dry-run that returns `{changed,diff}` as DATA (never throws — the branch-before-commit
-path); `updateJ` rides the input lane; `insertAfter`/`writeChecked` migrated here too.
+path); `updateJ` rides the input lane; `insertAfter`/`writeChecked` also live here.
 The tiers below (`Edit` DSL, `[patch|]`/Diff, ast-grep) are power tools for
 batch / diff-shaped / syntax-aware work; `tidepool://edits` documents all four,
 common-case first.

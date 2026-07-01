@@ -73,7 +73,7 @@ in that directory):
   classification), the single-owned `SessionState` lifecycle machine, ask/suspend
   mechanism, known repl-specific friction.
 - `tidepool-lsp/CLAUDE.md` — the `tidepool-lsp-daemon` sidecar: socket
-  resolution, name/path-only protocol design, verified-current known limits.
+  resolution, name/path-only protocol design, known limits.
 
 The live **eval API reference** (what eval users can call) is the MCP `eval` tool
 description emitted by the server — not duplicated in these files (it drifts).

@@ -32,7 +32,9 @@ declaration), **stmt** (a bind `x <- e` / `let x = e`, or a bare expression),
 or **meta** (a `:command` — `:bindings`, `:reset`, `:t`, `:i`, `:vocab`).
 Execution stops on the first error. A block ending in a bind leaves the
 top-level `value` null (read `items[].result` instead); end with a bare
-expression to populate `value`.
+expression to populate `value`. `:vocab` takes an optional module argument
+(`:vocab Diff`) to scope the digest to one module instead of the full blob;
+an unknown module name reports clearly rather than returning empty.
 
 **A 4th internal category, `Auto`, backs the decl/stmt split for anything
 without a leading keyword.** Only `:`-prefixed items are unambiguously Meta;
@@ -44,16 +46,18 @@ parse error, falls back to Stmt. The reported `kind` still comes back as
 "decl" or "stmt" — this is invisible from the outside — but it means a
 function definition takes a try-then-fallback path, not a direct one.
 
-**decl items compile as their own module and have a NARROWER import scope
-than stmt items.** A signature and its binding — and all clauses of a
-multi-clause function — must be in the SAME item. Statements run inside a
-do-block preamble that brings the eval's imports (the session's configured
-`imports`, same idea as the sibling stateless `tidepool` eval server) into
-scope; a `decl` item does NOT inherit that preamble, so a function signature
-referencing an eval-only imported type needs its own explicit `import` even
-though `:vocab` lists the type as available.
+**decl items compile as their own module.** A signature and its binding —
+and all clauses of a multi-clause function — must be in the SAME item.
+decl and stmt items share the same base import set (Prelude, effect verbs,
+`T.`/`Map.`/`Set.`/`L.`/etc., `Aeson`); when a project `Library` facade is on
+the include path, both also get `import Library` (guarded by a
+`hiding (...)` clause over the session's own cumulative decl heads, so a
+decl redefining a name Library also re-exports doesn't become an ambiguous
+occurrence). A decl referencing a type from a verb module that `Library`
+does NOT re-export still needs its own explicit `import`, same as a stmt
+would.
 
-## Known friction (live, verified against the block-runner surface)
+## Known friction
 
 - **Default render is `Show`, not `ToJSON`.** A function returning a plain
   ADT (e.g. `checkDiff :: Text -> ParseResult`) renders as derived `Show`
@@ -66,10 +70,6 @@ though `:vocab` lists the type as available.
   `import` even though `:vocab` shows them.
 - **`writeFile` does not create parent directories** — fails loud on a
   missing subdirectory rather than `mkdir -p`.
-- **`:t` fails on a multi-line type signature with trailing `-- ^` Haddock
-  comments per argument** (raw-newline-into-JSON-string bug, reproduced,
-  unresolved). Single-line signatures are unaffected; `:i` degrades
-  gracefully instead of crashing.
 - **`grepGlob regex glob`** — content regex FIRST, path glob SECOND (reversed
   order is a common mistake). Regex escaping is quad-backslash (JSON escape ×
   Haskell escape) — e.g. `grepGlob "\\\\.unwrap\\\\(\\\\)" "**/*.rs"`.
@@ -85,6 +85,28 @@ though `:vocab` lists the type as available.
   metavar; extract only the fields you need rather than returning whole
   matches.
 
+## Launcher shim (`.tidepool-repl-mcp.sh`)
+
+The MCP client (`~/.claude.json` project section — NOT `.mcp.json`, which is
+inert here) launches the repl via a **dev-tracking wrapper** at repo root,
+`.tidepool-repl-mcp.sh`. It is **untracked (gitignored) and easily lost** — an
+ENOENT "failed to reconnect" for `tidepool-repl` means it's gone. It does three
+things a bare `exec tidepool-repl` cannot:
+
+1. Prepends the with-packages GHC to `PATH` (reused from the nix-profile
+   `tidepool-extract` wrapper) — the extract shells out to `ghc` and needs
+   `lens` on the DB.
+2. Sets `TIDEPOOL_EXTRACT` to the latest `haskell/dist-newstyle` cabal build,
+   so the bind classifier (`x <- e` → `tidepool-extract --emit-stmt-binders`,
+   a working-tree flag) tracks your build instead of the lagging nix profile.
+   **Without this, every bind fails** with `parse error on input '<-'` (classify
+   errors → `run_eval` falls back to the bare-expression path).
+3. `exec`s `~/.cargo/bin/tidepool-repl` (re-`cargo install --path tidepool-repl`
+   to update the server itself).
+
+Recreate it if lost; then `cargo build tidepool-extract-bin` in `haskell/` so a
+dev extract exists to point at.
+
 ## Env knobs
 
 - `TIDEPOOL_PRELUDE_DIR` — override the stdlib dir (falls back to in-repo
@@ -99,6 +121,11 @@ Hitting the `Ask` effect mid-block suspends the turn: `session_run` returns a
 the rest of the block) or `session_abort` (to drop it). A response that
 doesn't match the suspension's schema is rejected without consuming the
 continuation, so a bad `session_resume` payload can be retried.
+`session_resume`/`session_abort` distinguish three failure causes rather than
+one generic "unknown or expired continuation_id": no such session, the
+session is suspended on a DIFFERENT continuation (names the pending one —
+this is what a resume that forgets to echo a non-default `session` name
+looks like), or the session isn't suspended at all.
 
 ## Internals: session lifecycle (read if modifying `state.rs`/`server.rs`, skip otherwise)
 
@@ -108,8 +135,8 @@ representations (the `SessionManager` map, the server's `continuations` map,
 the worker-local `Option<SessionHandle>`) plus an implicit fourth (which
 channel the worker thread is blocked on) — composite states like "Suspended ∧
 Closing" had no representation, causing deadlock-on-close-while-suspended,
-leak-on-abandon, wedge-on-timeout, and stale-mutation-on-concurrent-run.
-Fixed (commit 203548e) by making the lifecycle one owned `SessionState` enum
+leak-on-abandon, wedge-on-timeout, and stale-mutation-on-concurrent-run. The
+lifecycle is now one owned `SessionState` enum
 (Idle/Busy/Suspended/Wedged/Closing), transitioned atomically by the server at
 the dispatch boundary; the ask suspension payload lives INSIDE
 `SessionState::Suspended`, not a side map.
@@ -128,6 +155,6 @@ point latch: cancels a runaway turn at the next JIT safepoint rather than
 killing the thread.
 
 **Effects are handled in `tidepool-handlers/src/lib.rs`**, not
-`tidepool/src/main.rs` (a doc-drift the exploration notes caught — main.rs
-only wires the handler stack via `build_base_stack`). Live stack: Console, KV,
-Fs, SG, Http, Exec, Lsp, Llm, Ask (Meta is `--debug`-gated).
+`tidepool/src/main.rs` — main.rs only wires the handler stack via
+`build_base_stack`. Live stack: Console, KV, Fs, SG, Http, Exec, Lsp, Llm,
+Ask (Meta is `--debug`-gated).

@@ -10,8 +10,8 @@ After changing `haskell/` code (Translate.hs, GhcPipeline.hs, Prelude, etc.).
 
 **How the extract binary is resolved.** `tidepool-extract` is the GHC→Core
 extractor. The Rust runtime invokes it via the `TIDEPOOL_EXTRACT` env var if set,
-else `tidepool-extract` on `$PATH` (`tidepool-runtime/src/lib.rs:123`,
-`cache.rs:52`). On `$PATH` that resolves to `~/.nix-profile/bin/tidepool-extract`
+else `tidepool-extract` on `$PATH` (`tidepool-runtime/src/lib.rs`, `cache.rs`).
+On `$PATH` that resolves to `~/.nix-profile/bin/tidepool-extract`
 — a **nix wrapper** that prepends the with-packages GHC (supplies `lens`) to PATH
 and `exec`s the `tidepool-harness` binary **in the nix store**. It does NOT exec
 anything under `~/.local/bin` or `~/.cargo/bin`, so a `cp … ~/.local/bin/…` does
@@ -22,8 +22,8 @@ are stale cruft shadowed by the nix-profile entry, which is earlier on PATH.)
 
 ```bash
 cd haskell && cabal build tidepool-extract-bin      # build in dist-newstyle
-# Point tests/evals at it; with-packages GHC on PATH supplies lens (see
-# repro-test-libdir-gotcha memory). A new binary fingerprint forces a cache miss.
+# Point tests/evals at it; with-packages GHC on PATH supplies lens.
+# A new binary fingerprint forces a cache miss.
 TIDEPOOL_EXTRACT=$(cabal list-bin tidepool-extract-bin) \
   PATH=/nix/store/<hash>-ghc-native-bignum-9.12.2-with-packages/bin:$PATH \
   cargo test -p tidepool-runtime ...
@@ -53,8 +53,7 @@ cd haskell && cabal run tidepool-extract-bin -- test/Suite.hs --all-closed \
 ```
 
 > `*.cbor` fixtures are gitignored — new ones must be `git add -f`'d or a
-> `suite_*!` test won't compile on a fresh checkout (see `repro-test-libdir-gotcha`
-> memory).
+> `suite_*!` test won't compile on a fresh checkout.
 
 ## Diagnostics — Haskell-extract knobs (separate process)
 
@@ -118,13 +117,11 @@ extract with optics:
 - Orchestration: let the LLM DECIDE (`SEnum`/`SBool`) and let deterministic code
   EMIT syntax (regex/AST) — models are unreliable at generating domain syntax.
 
-> **Removed (2026-06-23, structured-Ask collapse):** the unstructured `llm :: Text
-> -> M Text` / `ask :: Text -> M Value`, the `Q` mini-DSL (`askQ`/`llmQ`/`pick`/
-> `yn`/`obj`/`txt`/`num`/`bar`), and `llmJson`/`tryLlmJson` (now just `llm`/`tryLlm`).
-> Every `Q` builder was a `Schema` shape in disguise (`pick`=`SEnum`, `yn`=`SBool`,
-> …) — collapsed to the one vocabulary above. Also removed earlier: `??`/`?!`,
-> `triage`/`survey`/`sift` (hidden-LLM-call token-burn footguns). The `.tidepool/lib`
-> `Asks`/`Seek`/`Flow` verb modules (free-form-ask sugar) were cut in the same pass.
+> **Removed, do not hunt for these:** the unstructured `llm :: Text -> M Text` /
+> `ask :: Text -> M Value`, the `Q` mini-DSL (`askQ`/`llmQ`/`pick`/`yn`/`obj`/
+> `txt`/`num`/`bar`), `llmJson`/`tryLlmJson`, `??`/`?!`, `triage`/`survey`/`sift`,
+> and the `.tidepool/lib` `Asks`/`Seek`/`Flow` modules — all superseded by the
+> `Schema`/`ask`/`llm`/`tryLlm` vocabulary above.
 
 ## Known Limits (the JIT runs a strict Haskell subset; failures are LOUD)
 

@@ -46,7 +46,7 @@ declare or handle the Haskell-facing constructors itself — see
 `tidepool-handlers/src/lib.rs`'s Lsp section (handling); this doc only covers
 what happens on the daemon side of the socket call.
 
-## Known limits (verified against current source — some older friction notes are stale, see below)
+## Known limits
 
 - **No trait/impl-dispatch operation exists.** The op set above is exhaustive
   — there's no "go to implementations" or trait-dispatch query. If you need
@@ -61,10 +61,3 @@ what happens on the daemon side of the socket call.
   propagates as a normal effect error, not a catchable `Either`. Wrap at the
   `tidepool-handlers` `respond_caught` layer if isolation is needed for a
   specific op (not currently wired for Lsp).
-
-**Superseded — do not trust without re-verifying:** an earlier note claimed
-"callee re-resolution is brittle because `Node` carries no column." Current
-`Node`/`LspNode` DOES carry an exact `pos.char` (0-based UTF-16 column,
-`resolve.rs`'s `node()` builder), and re-resolution reads it back directly
-rather than searching by substring. If a re-resolution bug resurfaces, it is
-NOT this — look elsewhere first.

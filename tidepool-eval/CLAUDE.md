@@ -56,9 +56,3 @@ by agreeing with the JIT. The differential harnesses live in
 eval.rs change should be checked against these, not just `cargo test -p
 tidepool-eval`** — a primop added to eval but not codegen (or vice versa)
 won't fail eval's own test suite, only the differential ones.
-
-Historical divergences found via this oracle are fixed as of the current
-tree: `PopCnt`/`Ctz` primops landed in eval (commit e5e5b39) after being
-JIT-unresolved; check `git log --oneline -- tidepool-eval/src/` before
-assuming an older bug note (root memory or elsewhere) still applies — this
-crate has had steady primop-coverage churn.
