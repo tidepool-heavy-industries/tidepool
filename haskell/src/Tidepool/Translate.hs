@@ -45,7 +45,6 @@ import GHC.Core.Type (splitTyConApp_maybe, splitFunTy_maybe, isCoercionTy)
 import GHC.Builtin.Types.Prim (statePrimTyCon)
 import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Core.TyCo.FVs (tyConsOfType)
-import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Types.Var.Set (VarSet, emptyVarSet, extendVarSet, elemVarSet)
 import GHC.Types.Unique.Set as USet (nonDetEltsUniqSet)
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet, nonDetEltsUniqSet)
@@ -350,11 +349,46 @@ translateModule allBinds targetName unresolvedIds =
           reachablePairs = [(b, rhs) | (i, ((b, rhs), _, _)) <- zip [0..] pairInfo, Set.member i reachable]
       in if null reachablePairs then [] else [Rec reachablePairs]
 
-    -- | Extract free variable keys (as Word64) from a Core expression.
+    -- | Free variable keys (as 'varId' Word64s) of a Core expression, computed
+    -- SYNTACTICALLY over the same tree 'translate' emits NVars from, with
+    -- scoping keyed by varId (the id space of the serialized program and the
+    -- JIT emit env). GHC's own FV machinery ('exprSomeFreeVars') is wrong for
+    -- reachability on two axes: (1) it also walks let-binders' IdInfo
+    -- (unfolding templates, RULES), which the translator never emits — and
+    -- 'externalizeInternalTops' renames occurrences only in expression bodies,
+    -- so IdInfo still holds the PRE-RENAME vars; (2) its result set dedups by
+    -- unique, so such a stale IdInfo var (same unique, different name ⇒
+    -- different varId) can EVICT the renamed tree var from the free-var set.
+    -- The reachability walk then misses the binding while the emitted program
+    -- still references it: a dangling NVar that traps at runtime only when
+    -- forced (the @$sunion@ class — a module-local SPEC binding referenced by
+    -- a 'Map.fromListWith' combine that only fires on key collision).
     exprFreeVarKeys :: CoreExpr -> Set.Set Word64
-    exprFreeVarKeys expr =
-      let fvs = exprSomeFreeVars (const True) expr
-      in Set.fromList [varId v | v <- nonDetEltsUniqSet fvs]
+    exprFreeVarKeys = go Set.empty
+      where
+        bindV b bound | isTyVar b || isCoVar b = bound
+                      | otherwise = Set.insert (varId b) bound
+        go bound expr = case expr of
+          Var v | isTyVar v || isCoVar v -> Set.empty
+                | varId v `Set.member` bound -> Set.empty
+                | otherwise -> Set.singleton (varId v)
+          Lit{} -> Set.empty
+          App f a -> go bound f `Set.union` go bound a
+          Lam b e -> go (bindV b bound) e
+          Let (NonRec b rhs) e -> go bound rhs `Set.union` go (bindV b bound) e
+          Let (Rec ps) e ->
+            let bound' = foldr (bindV . fst) bound ps
+            in foldr (Set.union . go bound' . snd) (go bound' e) ps
+          Case s b _ alts ->
+            let boundB = bindV b bound
+            in go bound s `Set.union`
+               foldr (\(Alt _ bs rhs) acc ->
+                        go (foldr bindV boundB bs) rhs `Set.union` acc)
+                     Set.empty alts
+          Cast e _ -> go bound e
+          Tick _ e -> go bound e
+          Type{} -> Set.empty
+          Coercion{} -> Set.empty
 
     wrapAllBinds :: [CoreBind] -> Id -> TransM Int
     wrapAllBinds [] target = emitNode (NVar (varId target))
@@ -475,26 +509,52 @@ translateModuleClosed hscEnv allBinds targetName = do
       -- Debug: find dangling NVar references (referenced but not bound by any Let/Lam/Case)
       boundIds = foldl' collectBound Set.empty nodes
       danglingIds = Set.filter (\v -> not (Set.member v boundIds) && (v `shiftR` 56) /= 0x45) referencedIds
-  -- TIDEPOOL_DANGLING_DEBUG=1: name dangling NVar references — ids the emitted
-  -- program references but nothing binds (and no 0x45 poison covers). These
-  -- surface at runtime as unresolved_var_trap ONLY when forced; naming them at
-  -- extract time is the difference between a symbol and a bare hex id.
+  -- Dangling NVar check — ids the emitted program references but nothing
+  -- binds (and no 0x45 poison covers). These surface at runtime as an
+  -- unresolved_var_trap ONLY when forced, so the class hides behind
+  -- rarely-taken branches (a fromListWith combine that only fires on key
+  -- collision). Fail LOUDLY at extract time, naming the symbols.
+  --
+  -- The one LEGIT dangling class: tidepool-repl session values
+  -- (Tidepool.Session.Val.*). Their values live in the resident JIT machine's
+  -- heap, bound at codegen via the ExternalEnv override keyed on stableVarId
+  -- (see Resolve.isSessionValVar) — subtract them before judging.
+  --
+  -- TIDEPOOL_DANGLING_DEBUG=1 additionally prints EVERY dangling id
+  -- (session-val ones included) for forensics.
+  let refVars = Map.fromListWith (++)
+        [ (varId v, [v]) | cb <- closedBinds, v <- deepVarRefsOfCB cb ]
+      describeRef v = occNameString (nameOccName (varName v))
+        ++ (case nameModule_maybe (varName v) of
+              Just m  -> " [" ++ moduleNameString (moduleName m) ++ "]"
+              Nothing -> "")
+      isSessionValRef v = case nameModule_maybe (varName v) of
+        Just m  -> "Tidepool.Session.Val." `isPrefixOf` moduleNameString (moduleName m)
+        Nothing -> False
+      nameDangling vid = case Map.findWithDefault [] vid refVars of
+        [] -> "<no reference site in closed graph>"
+        vs -> Data.List.intercalate " | " (Data.List.nub (map describeRef vs))
+      hardDangling =
+        [ vid | vid <- Set.toList danglingIds
+              , not (any isSessionValRef (Map.findWithDefault [] vid refVars)) ]
   danglingEnv <- System.Environment.lookupEnv "TIDEPOOL_DANGLING_DEBUG"
   case danglingEnv of
-    Just _ -> do
-      let refNames = Map.fromListWith (++)
-            [ (varId v, [describeRef v]) | cb <- closedBinds, v <- deepVarRefsOfCB cb ]
-          describeRef v = occNameString (nameOccName (varName v))
-            ++ (case nameModule_maybe (varName v) of
-                  Just m  -> " [" ++ moduleNameString (moduleName m) ++ "]"
-                  Nothing -> "")
+    Just _ ->
       mapM_ (\vid -> hPutStrLn stderr
                ("[DANGLING NVAR] 0x" ++ Numeric.showHex vid "" ++ " = "
-                ++ maybe "<no reference site in closed graph>"
-                         (Data.List.intercalate " | " . Data.List.nub)
-                         (Map.lookup vid refNames)))
+                ++ nameDangling vid))
             (Set.toList danglingIds)
     Nothing -> pure ()
+  case hardDangling of
+    [] -> pure ()
+    vids -> error $
+      "Dangling NVar reference(s) — the emitted program references these but "
+      ++ "nothing binds them; forcing one at runtime would trap as an "
+      ++ "unresolved variable:\n"
+      ++ unlines [ "  0x" ++ Numeric.showHex vid "" ++ " = " ++ nameDangling vid
+                 | vid <- vids ]
+      ++ "This is an extract-pipeline bug (a binding was renamed, culled, or "
+      ++ "missed by reachability) — not a user error."
   -- Return the REACHABLE binds (what 'translateModule' actually compiled), not
   -- the full closed graph. The meta walks (collectUsedDataCons /
   -- collectTransitiveDCons) run over this, so they harvest only constructors
@@ -959,6 +1019,50 @@ translate expr =
             fCharIdx <- emitNode $ NApp fIdx charIdx
             emitNode $ NApp fCharIdx acc
           ) zIdx (reverse bytes)
+
+    -- Partial application of unpackFoldrCString# (2 args: lit + f).
+    -- GHC.CString's rules produce these under build/augment
+    -- (unpackCString# a = build (unpackFoldrCString# a), matchers can leave
+    -- the f-applied form). Eta-expand the missing z and expand statically.
+    -- Without this the head falls through to a bare NVar that nothing can
+    -- ever bind (Resolve skips magic unpack vars) — a dangling reference
+    -- that traps at runtime only when the (usually dead, e.g. error-message)
+    -- branch is forced.
+    Var v | isUnpackFoldrCStringVar v
+          , [litArg, fArg] <- args
+          , Just bytes <- extractAddrLitBytes litArg -> do
+        fIdx <- translate fArg
+        zId <- freshSynthVarId
+        zRef <- emitNode $ NVar zId
+        let charId = varId (dataConWorkId charDataCon)
+        recordDC charDataCon
+        bodyIdx <- foldM (\acc byte -> do
+            unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral byte))
+            charIdx <- emitNode $ NCon charId [unboxedCharIdx]
+            fCharIdx <- emitNode $ NApp fIdx charIdx
+            emitNode $ NApp fCharIdx acc
+          ) zRef (reverse bytes)
+        emitNode $ NLam zId bodyIdx
+
+    -- Partial application of unpackFoldrCString# (1 arg: lit only, the
+    -- build/augment argument shape). Eta-expand f and z.
+    Var v | isUnpackFoldrCStringVar v
+          , [litArg] <- args
+          , Just bytes <- extractAddrLitBytes litArg -> do
+        fId <- freshSynthVarId
+        zId <- freshSynthVarId
+        fRef <- emitNode $ NVar fId
+        zRef <- emitNode $ NVar zId
+        let charId = varId (dataConWorkId charDataCon)
+        recordDC charDataCon
+        bodyIdx <- foldM (\acc byte -> do
+            unboxedCharIdx <- emitNode $ NLit (LEChar (fromIntegral byte))
+            charIdx <- emitNode $ NCon charId [unboxedCharIdx]
+            fCharIdx <- emitNode $ NApp fRef charIdx
+            emitNode $ NApp fCharIdx acc
+          ) zRef (reverse bytes)
+        lamZ <- emitNode $ NLam zId bodyIdx
+        emitNode $ NLam fId lamZ
 
     -- Desugar (++) xs ys → letrec go = \a -> case a of { [] -> ys; (:) x rest -> (:) x (go rest) } in go xs
     -- GHC.Internal.Base.++ has no unfolding available from the .hi file.
