@@ -670,8 +670,8 @@ impl TidepoolReplServer {
         let Some(state) = self.inner.manager.state(&session_name) else {
             return Err(McpError::invalid_params(
                 format!(
-                    "No open session '{session_name}' (never opened, already closed, or \
-                     reaped); continuation_id {} cannot be resumed",
+                    "{}; continuation_id {} cannot be resumed",
+                    self.lost_session_error(&session_name),
                     req.continuation_id
                 ),
                 None,
@@ -776,8 +776,8 @@ impl TidepoolReplServer {
         let Some(state) = self.inner.manager.state(&session_name) else {
             return Err(McpError::invalid_params(
                 format!(
-                    "No open session '{session_name}' (never opened, already closed, or \
-                     reaped); continuation_id {} cannot be aborted",
+                    "{}; continuation_id {} cannot be aborted",
+                    self.lost_session_error(&session_name),
                     req.continuation_id
                 ),
                 None,
