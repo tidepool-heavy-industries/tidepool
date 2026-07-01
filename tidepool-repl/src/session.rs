@@ -978,7 +978,12 @@ impl Session {
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let p = hide_prelude_names(&self.cfg.preamble, &refs);
         let p = hide_module_names(&p, "Library", &refs);
-        hide_module_names(&p, "Tidepool.Effects", &refs)
+        let p = hide_module_names(&p, "Tidepool.Effects", &refs);
+        // The pagination / orchestration helpers (`memo`, `readGlob`, …) live in
+        // the generated Tidepool.Orchestrate module, imported unqualified by the
+        // eval expr module. A session bind that collides with one (e.g. `let memo
+        // = …`) must shadow the import, not become an ambiguous occurrence.
+        hide_module_names(&p, "Tidepool.Orchestrate", &refs)
     }
 
     /// Drop the resident machine, freeing the session heap. Called from
@@ -1471,6 +1476,19 @@ mod hiding_tests {
         assert!(
             out.contains("import Tidepool.Effects hiding (glob)"),
             "Effects verb shadowed by a session name: {out}"
+        );
+    }
+
+    #[test]
+    fn orchestrate_hiding_shadows_helpers() {
+        // A session-owned name (e.g. a `let memo = …` value bind) must shadow the
+        // generated `Tidepool.Orchestrate` helper of the same name instead of an
+        // ambiguous occurrence — the namespace-poison bug class this fix targets.
+        let pre = "import Tidepool.Orchestrate\nimport qualified Prelude as P\n";
+        let out = hide_module_names(pre, "Tidepool.Orchestrate", &["memo"]);
+        assert!(
+            out.contains("import Tidepool.Orchestrate hiding (memo)"),
+            "Orchestrate helper shadowed by a session name: {out}"
         );
     }
 }

@@ -796,23 +796,25 @@ mod tests {
     }
 
     #[test]
-    fn preamble_emits_towire_class() {
-        let pre = crate::build_preamble(&[], false);
+    fn orchestrate_emits_towire_class() {
+        // ToWire moved into the generated Tidepool.Orchestrate module (always
+        // emitted, no effect dependency); the expr-module preamble imports it.
+        let orch = crate::orchestrate_module_source(&[]);
         assert!(
-            pre.contains("class ToWire a"),
-            "ToWire class missing from preamble"
+            orch.contains("class ToWire a"),
+            "ToWire class missing from orchestrate module"
         );
         assert!(
-            pre.contains("instance {-# OVERLAPPABLE #-} Show a => ToWire a"),
-            "Show fallback instance missing from preamble"
+            orch.contains("instance {-# OVERLAPPABLE #-} Show a => ToWire a"),
+            "Show fallback instance missing from orchestrate module"
         );
         assert!(
-            pre.contains("instance ToWire Text"),
-            "Text instance missing from preamble"
+            orch.contains("instance ToWire Text"),
+            "Text instance missing from orchestrate module"
         );
         assert!(
-            pre.contains("instance ToWire Value"),
-            "Value instance missing from preamble"
+            orch.contains("instance ToWire Value"),
+            "Value instance missing from orchestrate module"
         );
     }
 

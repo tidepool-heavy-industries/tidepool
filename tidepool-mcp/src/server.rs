@@ -52,6 +52,10 @@ pub struct TidepoolMcpServerImpl {
     /// Generated `Tidepool/Effects.hs` source, kept so the eval path can
     /// re-materialize its staging dir if it is reaped mid-session.
     pub(crate) effects_source: String,
+    /// Generated `Tidepool/Orchestrate.hs` source, co-located with the effects
+    /// module in the same content-addressed staging dir (re-materialized
+    /// together on self-heal).
+    pub(crate) orchestrate_source: String,
     pub(crate) haskell_preamble: String,
     pub(crate) effect_stack_type: String,
     pub(crate) eval_tool_description: String,
@@ -513,11 +517,11 @@ impl TidepoolMcpServerImpl {
         .into();
 
         let handlers = dyn_clone::clone_box(&*self.handler_factory);
-        // Self-heal: re-materialize Tidepool.Effects if its staging dir was
-        // reaped mid-session (macOS purges $TMPDIR / cache). Cheap stat when
-        // intact; rewrites only if the file is missing.
-        if let Err(e) = write_effects_module_src(&self.effects_source) {
-            eprintln!("[tidepool] failed to refresh Tidepool.Effects module: {e}");
+        // Self-heal: re-materialize Tidepool.Effects + Tidepool.Orchestrate if
+        // their staging dir was reaped mid-session (macOS purges $TMPDIR /
+        // cache). Cheap stats when intact; rewrites only missing files.
+        if let Err(e) = write_generated_modules(&self.effects_source, &self.orchestrate_source) {
+            eprintln!("[tidepool] failed to refresh generated Tidepool modules: {e}");
         }
         let include_refs: Vec<PathBuf> = self.include.clone();
         let source_for_blocking = Arc::clone(&source);
@@ -1103,16 +1107,18 @@ where
         // session (macOS purges $TMPDIR / cache). Failure is survivable here —
         // evals will fail with a clear missing-module error.
         let effects_source = effects_module_source(&decls);
+        let orchestrate_source = orchestrate_module_source(&decls);
         let mut include = Vec::new();
-        match write_effects_module_src(&effects_source) {
+        match write_generated_modules(&effects_source, &orchestrate_source) {
             Ok(dir) => include.push(dir),
-            Err(e) => eprintln!("[tidepool] failed to write Tidepool.Effects module: {e}"),
+            Err(e) => eprintln!("[tidepool] failed to write generated Tidepool modules: {e}"),
         }
         Self {
             inner: TidepoolMcpServerImpl {
                 handler_factory: Arc::new(handler),
                 include,
                 effects_source,
+                orchestrate_source,
                 haskell_preamble: build_preamble(&decls, false),
                 effect_stack_type: build_effect_stack_type(&decls),
                 eval_tool_description: build_eval_tool_description(&decls),

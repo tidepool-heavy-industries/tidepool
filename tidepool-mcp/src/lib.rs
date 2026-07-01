@@ -156,40 +156,71 @@ pub struct HelpRequest {
 // Templating
 // ---------------------------------------------------------------------------
 
-/// Write the generated `Tidepool/Effects.hs` into a content-addressed
-/// directory and return that directory (an include root). Idempotent:
-/// the path is keyed on the module source, so distinct effect stacks
-/// coexist and repeat startups reuse the same dir. Re-callable per eval
-/// (see [`write_effects_module_src`]) to self-heal if the dir is reaped.
+/// Write the generated `Tidepool/Effects.hs` + `Tidepool/Orchestrate.hs` into a
+/// content-addressed directory and return that directory (an include root).
+/// Idempotent: the path is keyed on both module sources, so distinct effect
+/// stacks coexist and repeat startups reuse the same dir. Re-callable per eval
+/// (see [`write_generated_modules`]) to self-heal if the dir is reaped.
 pub fn ensure_effects_module(effects: &[EffectDecl]) -> std::io::Result<PathBuf> {
-    write_effects_module_src(&effects_module_source(effects))
+    write_generated_modules(
+        &effects_module_source(effects),
+        &orchestrate_module_source(effects),
+    )
 }
 
-/// Materialize the effects module from a pre-generated source string, writing
-/// it into its content-addressed staging dir if absent, and returning the dir.
+/// Materialize the generated `Tidepool.Effects` AND `Tidepool.Orchestrate`
+/// modules from pre-generated source strings, writing each into the SAME
+/// content-addressed staging dir if absent, and returning the dir (an include
+/// root). The dir hash covers BOTH sources, so a change to either busts the
+/// cache dir — co-location means every `ensure_effects_module` caller picks up
+/// the orchestrate module for free, no extra include path to thread through.
+///
 /// Lets the server self-heal each eval without re-deriving the source from
-/// decls — the cheap path is a single `exists()` stat. Staged under the stable
+/// decls — the cheap path is two `exists()` stats. Staged under the stable
 /// cache root (`tidepool_runtime::paths::effects_dir`), NOT `$TMPDIR`, which
 /// macOS reaps out from under a long-running server.
-pub(crate) fn write_effects_module_src(src: &str) -> std::io::Result<PathBuf> {
+pub(crate) fn write_generated_modules(
+    effects_src: &str,
+    orchestrate_src: &str,
+) -> std::io::Result<PathBuf> {
     // FNV-1a: deterministic across processes (no per-process SipHash seed).
     // DefaultHasher is randomly seeded, causing identical source to hash to
     // different paths in each process → "Could not find module Tidepool.Effects"
     // when a second process picks a different cache dir than the one that wrote it.
-    let hash = fnv1a_hash(src.as_bytes());
+    // Hash both sources together so either changing busts the dir.
+    let combined = format!("{effects_src}\n--ORCH--\n{orchestrate_src}");
+    let hash = fnv1a_hash(combined.as_bytes());
     let root =
         tidepool_runtime::paths::effects_dir().join(format!("tidepool-effects-{:016x}", hash));
     let module_dir = root.join("Tidepool");
-    let module_path = module_dir.join("Effects.hs");
+    write_module_file(&module_dir, "Effects.hs", effects_src)?;
+    write_module_file(&module_dir, "Orchestrate.hs", orchestrate_src)?;
+    Ok(root)
+}
+
+/// Atomically write `<module_dir>/<name>` with `src` if it does not already
+/// exist (write to a temp file then rename, so a concurrent GHC process never
+/// sees a partial module — the rename is atomic on POSIX).
+///
+/// The temp filename is UNIQUE per writer (pid + monotonic counter): two
+/// processes/threads racing on the same fresh content-addressed dir must not
+/// share one `*.tmp` path, or the slower writer's `rename` source can vanish
+/// (the faster writer already renamed it) → spurious `NotFound`. The rename
+/// target is the same for all, and POSIX rename-onto-existing is atomic, so a
+/// double write just no-ops the loser.
+fn write_module_file(module_dir: &Path, name: &str, src: &str) -> std::io::Result<()> {
+    let module_path = module_dir.join(name);
     if !module_path.exists() {
-        std::fs::create_dir_all(&module_dir)?;
-        // Atomic write: write to a temp file then rename so a concurrent GHC
-        // process never sees a partial module (the rename is atomic on POSIX).
-        let tmp_path = module_dir.join("Effects.hs.tmp");
+        std::fs::create_dir_all(module_dir)?;
+        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let uniq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp_path = module_dir.join(format!("{name}.{}.{uniq}.tmp", std::process::id()));
         std::fs::write(&tmp_path, src)?;
+        // rename overwrites an existing destination atomically; a concurrent
+        // writer that already created `module_path` is harmless.
         std::fs::rename(&tmp_path, &module_path)?;
     }
-    Ok(root)
+    Ok(())
 }
 
 /// FNV-1a 64-bit hash — deterministic, no external dependency.
@@ -333,10 +364,12 @@ mod tests {
         assert_eq!(req.imports, "Data.List (sort)\nData.Char");
     }
 
-    /// Effects module + preamble concatenated: content assertions that
-    /// predate the importable-effects split check against the union.
+    /// Effects module + orchestrate module + preamble concatenated: content
+    /// assertions that predate the importable-module split check against the
+    /// union of all generated sources the eval sees.
     fn generated_sources(effects: &[EffectDecl], user_library: bool) -> String {
         let mut s = effects_module_source(effects);
+        s.push_str(&orchestrate_module_source(effects));
         s.push_str(&build_preamble(effects, user_library));
         s
     }
@@ -759,20 +792,29 @@ data Console a where
     #[test]
     fn test_preamble_orchestration_helpers() {
         let decls = standard_decls();
-        let preamble = build_preamble(&decls, true);
+        // The orchestration helpers moved OUT of the expr-module preamble into
+        // the generated Tidepool.Orchestrate module (the namespace-poison fix);
+        // assert their signatures there instead.
+        let orch = orchestrate_module_source(&decls);
         // runChecked is now an alias for readProcess (assert the signature;
         // the alias body is volatile).
-        assert!(preamble.contains("runChecked :: Text -> M Text"));
+        assert!(orch.contains("runChecked :: Text -> M Text"));
         // File manipulation helpers
-        assert!(preamble.contains("mapFile :: Text -> (Text -> Text) -> M ()"));
-        assert!(preamble.contains("mapFileM :: Text -> (Text -> M Text) -> M ()"));
-        assert!(preamble.contains("searchFiles :: Text -> Text -> M [(Text, Int, Text)]"));
-        assert!(preamble.contains("lineCount :: Text -> M Int"));
-        assert!(preamble.contains("fileContains :: Text -> Text -> M Bool"));
+        assert!(orch.contains("mapFile :: Text -> (Text -> Text) -> M ()"));
+        assert!(orch.contains("mapFileM :: Text -> (Text -> M Text) -> M ()"));
+        assert!(orch.contains("searchFiles :: Text -> Text -> M [(Text, Int, Text)]"));
+        assert!(orch.contains("lineCount :: Text -> M Int"));
+        assert!(orch.contains("fileContains :: Text -> Text -> M Bool"));
         // KV batch helpers
-        assert!(preamble.contains("kvAll :: M [(Text, Value)]"));
-        assert!(preamble.contains("kvClear :: M ()"));
-        assert!(preamble.contains("runAll :: [Text] -> M [(Int, Text, Text)]"));
+        assert!(orch.contains("kvAll :: M [(Text, Value)]"));
+        assert!(orch.contains("kvClear :: M ()"));
+        assert!(orch.contains("runAll :: [Text] -> M [(Int, Text, Text)]"));
+        // The expr-module preamble no longer splices these bodies — it imports
+        // the module and only emits the paginateResult alias.
+        let preamble = build_preamble(&decls, true);
+        assert!(preamble.contains("import Tidepool.Orchestrate"));
+        assert!(!preamble.contains("runChecked :: Text -> M Text"));
+        assert!(!preamble.contains("searchFiles :: Text -> Text -> M [(Text, Int, Text)]"));
         // The structured Ask/Llm surface lives in the generated Tidepool.Effects
         // module — one Schema vocabulary, extract with optics. The Q-builder DSL
         // and the `??`/`?!`/triage/survey/sift sugar are removed.
@@ -809,11 +851,23 @@ data Console a where
     }
 
     #[test]
-    fn test_preamble_no_orchestration_without_library() {
+    fn test_orchestration_is_pure_fn_of_effects() {
+        // The orchestration helpers no longer depend on the user_library flag —
+        // Tidepool.Orchestrate is a PURE function of the effect set (so it can be
+        // co-located + hashed with Tidepool.Effects). The bodies never appear in
+        // the expr-module preamble (imported, not spliced), regardless of library.
         let decls = standard_decls();
-        let preamble = build_preamble(&decls, false);
-        // Orchestration helpers only appear with user_library=true
-        assert!(!preamble.contains("runChecked"));
+        assert!(!build_preamble(&decls, false).contains("runChecked"));
+        assert!(!build_preamble(&decls, true).contains("runChecked"));
+        // The module carries them based on effects alone (Exec present here).
+        let orch = orchestrate_module_source(&decls);
+        assert!(orch.contains("runChecked :: Text -> M Text"));
+        // An Exec-less stack omits the Exec-gated helpers.
+        let no_exec: Vec<EffectDecl> = standard_decls()
+            .into_iter()
+            .filter(|d| d.type_name != "Exec")
+            .collect();
+        assert!(!orchestrate_module_source(&no_exec).contains("runChecked"));
     }
 
     #[test]
@@ -1655,6 +1709,7 @@ data Console a where
             eval_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_EVALS)),
             orphaned_threads: Arc::new(AtomicUsize::new(0)),
             effects_source: String::new(),
+            orchestrate_source: String::new(),
         }
     }
 
@@ -1664,35 +1719,52 @@ data Console a where
     /// match the stable FNV-1a value baked into the expected dir name.
     #[test]
     fn test_effects_hash_is_deterministic_across_calls() {
-        let src = "module Tidepool.Effects where\n-- sentinel\n";
-        let dir1 = write_effects_module_src(src).unwrap();
-        let dir2 = write_effects_module_src(src).unwrap();
+        let eff = "module Tidepool.Effects where\n-- sentinel\n";
+        let orch = "module Tidepool.Orchestrate where\n-- sentinel\n";
+        let dir1 = write_generated_modules(eff, orch).unwrap();
+        let dir2 = write_generated_modules(eff, orch).unwrap();
         assert_eq!(
             dir1, dir2,
             "same source must yield same content-addressed dir"
         );
-        // Verify the dir name encodes the known FNV-1a hash of `src`.
-        let expected_hash = fnv1a_hash(src.as_bytes());
+        // Verify the dir name encodes the known FNV-1a hash of BOTH sources
+        // combined (changing either busts the dir).
+        let combined = format!("{eff}\n--ORCH--\n{orch}");
+        let expected_hash = fnv1a_hash(combined.as_bytes());
         let expected_suffix = format!("tidepool-effects-{:016x}", expected_hash);
         let dir_name = dir1.file_name().unwrap().to_str().unwrap();
         assert_eq!(
             dir_name, expected_suffix,
-            "dir name must be the stable FNV-1a hash of source; got {dir_name}"
+            "dir name must be the stable FNV-1a hash of both sources; got {dir_name}"
         );
+        // A change to the orchestrate source alone busts the dir.
+        let dir3 =
+            write_generated_modules(eff, "module Tidepool.Orchestrate where\n-- other\n").unwrap();
+        assert_ne!(dir1, dir3, "orchestrate change must bust the dir");
         let _ = std::fs::remove_dir_all(&dir1);
+        let _ = std::fs::remove_dir_all(&dir3);
     }
 
     #[test]
     fn test_effects_module_self_heals_after_reap() {
         // Unique source → unique content-addressed dir, so this can't collide
         // with a real effect stack or a parallel test. Cleans up after.
-        let src = format!(
+        let eff = format!(
             "module Tidepool.Effects where\n-- probe {}\n",
             std::process::id()
         );
-        let dir = write_effects_module_src(&src).unwrap();
+        let orch = format!(
+            "module Tidepool.Orchestrate where\n-- probe {}\n",
+            std::process::id()
+        );
+        let dir = write_generated_modules(&eff, &orch).unwrap();
         let module = dir.join("Tidepool").join("Effects.hs");
-        assert!(module.exists(), "module written on first call");
+        let orch_module = dir.join("Tidepool").join("Orchestrate.hs");
+        assert!(module.exists(), "effects module written on first call");
+        assert!(
+            orch_module.exists(),
+            "orchestrate module written on first call"
+        );
         // Staged off $TMPDIR — the macOS-reaped location we moved away from
         // (unless neither XDG_CACHE_HOME nor HOME is set, the last-resort case).
         if std::env::var_os("HOME").is_some() || std::env::var_os("XDG_CACHE_HOME").is_some() {
@@ -1704,11 +1776,13 @@ data Console a where
         // Simulate the OS reaping the staging dir mid-session.
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(!module.exists());
-        // The per-eval self-heal recreates it at the same content-addressed path.
-        let dir2 = write_effects_module_src(&src).unwrap();
+        // The per-eval self-heal recreates both at the same content-addressed path.
+        let dir2 = write_generated_modules(&eff, &orch).unwrap();
         assert_eq!(dir, dir2, "content-addressed path is stable across calls");
-        assert!(module.exists(), "self-healed after reap");
-        assert_eq!(std::fs::read_to_string(&module).unwrap(), src);
+        assert!(module.exists(), "effects self-healed after reap");
+        assert!(orch_module.exists(), "orchestrate self-healed after reap");
+        assert_eq!(std::fs::read_to_string(&module).unwrap(), eff);
+        assert_eq!(std::fs::read_to_string(&orch_module).unwrap(), orch);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1751,8 +1825,11 @@ mod ergonomics_tests {
         let preamble = build_preamble(&decls, false);
         assert!(preamble.contains("ExtendedDefaultRules"));
         assert!(preamble.contains("default (Int, Double, Text)"));
-        assert!(preamble.contains("renderJson :: Value -> Text"));
-        assert!(preamble.contains("| Reply with a stub id (e.g. stub_0) to fetch that chunk"));
+        // renderJson + the interactive-pagination prompt moved into the generated
+        // Tidepool.Orchestrate module (imported by the preamble, not spliced).
+        let orch = orchestrate_module_source(&decls);
+        assert!(orch.contains("renderJson :: Value -> Text"));
+        assert!(orch.contains("| Reply with a stub id (e.g. stub_0) to fetch that chunk"));
     }
 
     #[test]
