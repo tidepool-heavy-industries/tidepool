@@ -225,7 +225,7 @@ async fn session_def_sees_full_eval_vocabulary() {
     let (is_error, text) = run_single(
         &server,
         "sh :: Text -> M Text\n\
-         sh cmd = run cmd <&> \\(_,out,_) -> out\n\
+         sh cmd = run cmd <&> \\p -> p.stdout\n\
          \n\
          uniqSorted :: [Int] -> [Int]\n\
          uniqSorted = L.sort . Set.toList . Set.fromList\n\

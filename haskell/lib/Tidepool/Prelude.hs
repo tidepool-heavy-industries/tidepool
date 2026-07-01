@@ -170,6 +170,7 @@ module Tidepool.Prelude
   , partitionEithers, rights, lefts, fromLeft, fromRight
     -- * Shared record vocabulary (Tidepool.Records)
   , Proc(..), ok, Hit(..), Doc(..)
+  , FileMeta(..), UpdateOutcome(..), WriteOutcome(..)
   ) where
 
 import Prelude
@@ -226,7 +227,7 @@ import Control.Monad
   , (=<<), (>=>), (<=<)
   , foldM, foldM_
   )
-import Tidepool.Records (Proc(..), ok, Hit(..), Doc(..))
+import Tidepool.Records (Proc(..), ok, Hit(..), Doc(..), FileMeta(..), UpdateOutcome(..), WriteOutcome(..))
 import Tidepool.Render (Render(..))
 import Tidepool.QQ.Fmt.Runtime
   (FSign(..), FAlign(..), fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain)

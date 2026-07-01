@@ -476,11 +476,12 @@ fn works_lens_last_on_text() {
 /// Asserts the documented repro: `treeDepth` over a depth-3 tree returns 3.
 #[test]
 fn works_data_tree_node_no_freer_collision() {
-    // Data.Tree's `Node` constructor now collides with BOTH the freer
-    // continuation `Node` AND the Lsp effect's `Tidepool.Effects.Node` (both in
-    // scope in every eval), so an unqualified `Node` is a legitimate ambiguity.
-    // Qualify Data.Tree — the point is its `Node` resolves + `treeDepth` runs
-    // (the freer/effect `Node`s must not shadow the qualified constructor).
+    // Data.Tree's `Node` constructor collides with the freer continuation
+    // `Node` (both in scope in every eval), so an unqualified `Node` is a
+    // legitimate ambiguity. (The Lsp effect's node type is `LspNode`, so it no
+    // longer contributes to this collision.) Qualify Data.Tree — the point is
+    // its `Node` resolves + `treeDepth` runs (the freer `Node` must not shadow
+    // the qualified constructor).
     works_with_imports(
         "qualified Data.Tree as DTree",
         "pure (treeDepth t) where { \

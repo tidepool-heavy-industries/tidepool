@@ -41,6 +41,8 @@ module Tidepool.Patch
   , creationPatch
     -- * Introspect
   , checkDiff
+  , CheckResult (..)
+  , FileInfo (..)
   ) where
 
 import Prelude
@@ -99,14 +101,14 @@ data ConflictKind
   | NoMatch [Text] [Text]     -- ^ the hunk's old side was not found; carries (expected, actual-window)
   | Ambiguous [Int]           -- ^ the old side matched at 2+ places; carries the candidate 1-based lines
   | AlreadyApplied Int        -- ^ the old side was absent but the new side is already present, at this line
-  deriving Eq
+  deriving (Eq, Show)
 
 -- | A located conflict: which file, which hunk (0-based), and the kind.
 data Conflict = Conflict
   { cFile   :: Text
   , cHunkIx :: Int
   , cKind   :: ConflictKind
-  } deriving Eq
+  } deriving (Eq, Show)
 
 -- ---------------------------------------------------------------------------
 -- ToJSON (Conflict) — the wire shape the Diff verbs surface
@@ -902,19 +904,48 @@ editToHunkLine (EIns s)  = Ins (T.pack s)
 -- Introspect  (checkDiff :: parse-vs-match first responder)
 -- ---------------------------------------------------------------------------
 
+-- | One file's summary in a 'Parsed' 'checkDiff' result.
+data FileInfo = FileInfo
+  { fiPath     :: Text
+  , fiCreate   :: Bool
+  , fiHunks    :: Int
+  , fiOldLines :: Int
+  , fiNewLines :: Int
+  } deriving (Eq, Show)
+
+instance ToJSON FileInfo where
+  toJSON fi = object
+    [ "path"     .= fiPath fi
+    , "create"   .= fiCreate fi
+    , "hunks"    .= fiHunks fi
+    , "oldLines" .= fiOldLines fi
+    , "newLines" .= fiNewLines fi ]
+
+-- | What a diff is, as data: it either failed to parse (carrying the message)
+-- or parsed into a per-file summary.  Documents the two shapes 'checkDiff'
+-- used to hand back as an opaque 'Value'.
+data CheckResult
+  = Unparsable Text      -- ^ @{"parses": false, "error": <message>}@
+  | Parsed [FileInfo]    -- ^ @{"parses": true, "files": [...]}@
+  deriving (Eq, Show)
+
+instance ToJSON CheckResult where
+  toJSON (Unparsable e) = object [ "parses" .= False, "error" .= e ]
+  toJSON (Parsed fis)   = object [ "parses" .= True, "files" .= map toJSON fis ]
+
 -- | Parse a diff and report what it is, as data — the first stop when a
 -- @[patch|…|]@ pattern silently fails to match: it separates \"the text does not
 -- parse\" from \"it parses but the pattern shape is wrong\".  On a parse error:
 -- @{"parses": false, "error": <message>}@.  On success:
 -- @{"parses": true, "files": [{"path","create","hunks","oldLines","newLines"}…]}@.
-checkDiff :: Text -> Value
+checkDiff :: Text -> CheckResult
 checkDiff t = case parsePatch t of
-  Left e    -> object [ "parses" .= False, "error" .= e ]
-  Right fps -> object [ "parses" .= True, "files" .= map fileInfo fps ]
+  Left e    -> Unparsable e
+  Right fps -> Parsed (map fileInfo fps)
   where
-    fileInfo fp = object
-      [ "path"     .= fpPath fp
-      , "create"   .= fpCreate fp
-      , "hunks"    .= length (fpHunks fp)
-      , "oldLines" .= sum (map hunkOldLen (fpHunks fp))
-      , "newLines" .= sum (map hunkNewLen (fpHunks fp)) ]
+    fileInfo fp = FileInfo
+      (fpPath fp)
+      (fpCreate fp)
+      (length (fpHunks fp))
+      (sum (map hunkOldLen (fpHunks fp)))
+      (sum (map hunkNewLen (fpHunks fp)))

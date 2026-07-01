@@ -258,9 +258,11 @@ fn planedits_then_applydiff_roundtrips() {
         // commits it, and the file becomes what an in-eval applyEdits would have
         // produced. One write — applyDiff's; planEdits only reads.
         let mut d = preload(&[("f.txt", F3)]);
+        // planEdits now returns an `EditOutcome` sum; match the `Applied True`
+        // arm for the review diff, then commit it through applyDiff.
         let code = "planEdits \"f.txt\" [ReplaceLines 2 2 [\"BETA\"]] \
-                    >>= \\r -> case r ?. \"diff\" of \
-                    { Just (String dd) -> applyDiff dd; _ -> pure (object [\"err\" .= (\"no diff\" :: Text)]) }";
+                    >>= \\r -> case r of \
+                    { Applied True dd -> toJSON <$> applyDiff dd; _ -> pure (object [\"err\" .= (\"no diff\" :: Text)]) }";
         let json = run_eval(code, "", &mut d);
         assert_eq!(
             json["applied"],

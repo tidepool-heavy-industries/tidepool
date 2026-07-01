@@ -1,4 +1,4 @@
-{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DuplicateRecordFields, OverloadedRecordDot #-}
 -- | Declarative small edits (line-range + anchor) that LOWER to a
 -- "Tidepool.Patch" 'FilePatch' and ride the shipped atomic apply. This is the
 -- non-pattern half of "apply this edit to this file": where a unified diff is
@@ -40,6 +40,8 @@
 module Edit
   ( Edit (..)
   , EditConflict (..)
+  , EditOutcome (..)
+  , ApplyOutcome (..)
   , resolveEdits
   , planEdits
   , applyEdits
@@ -50,7 +52,7 @@ module Edit
 import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
 import Tidepool.Patch (Patch, FilePatch, genPatch, renderPatch)
-import Diff (apply)
+import Diff (apply, DiffOutcome)
 
 -- ---------------------------------------------------------------------------
 -- Edit language
@@ -72,6 +74,37 @@ data EditConflict
   | AnchorAmbiguous Text [Int]     -- ^ anchor matched 2+ lines (1-based line numbers)
   | RangeOutOfBounds Int Int Int   -- ^ @lo hi lineCount@: a line range outside @[1..lineCount]@
   | EditsOverlap Int Int Int Int   -- ^ two resolved spans @lo1 hi1 lo2 hi2@ touch
+  deriving (Eq, Show)
+
+-- | Outcome of 'planEdits' (dry run). Documents the shapes the verb surfaced as
+-- an opaque Value; ToJSON reproduces them exactly.
+data EditOutcome
+  = Applied { changed :: Bool, diff :: Text }  -- ^ resolves; @changed=False@ = no-op, else carries the review diff
+  | Conflicts { conflicts :: [EditConflict] }  -- ^ resolution conflicts (nothing to apply)
+  | NotFound { reason :: Text }                -- ^ the target file does not exist
+  deriving (Eq, Show)
+
+instance ToJSON EditOutcome where
+  toJSON (Applied False _) = object [ "ok" .= True, "changed" .= False ]
+  toJSON (Applied True d)  = object [ "ok" .= True, "changed" .= True, "diff" .= d ]
+  toJSON (Conflicts cs)    = object [ "ok" .= False, "conflicts" .= map ecToValue cs ]
+  toJSON (NotFound e)      = object [ "ok" .= False, "error" .= e ]
+
+-- | Outcome of 'applyEdits'. The @changed=True@ branch delegates to
+-- 'Diff.apply', so its shape is that verb's 'DiffOutcome' verbatim (surfaced
+-- via 'ApplyDelegated'); the other branches use the @applied@ key.
+data ApplyOutcome
+  = ApplyNotFound Text            -- ^ @{applied:false,error}@
+  | ApplyConflicts [EditConflict] -- ^ @{applied:false,conflicts}@
+  | ApplyNoChange                 -- ^ @{applied:true,changed:false}@
+  | ApplyDelegated DiffOutcome    -- ^ 'Diff.apply' result verbatim
+  deriving (Eq, Show)
+
+instance ToJSON ApplyOutcome where
+  toJSON (ApplyNotFound e)   = object [ "applied" .= False, "error" .= e ]
+  toJSON (ApplyConflicts cs) = object [ "applied" .= False, "conflicts" .= map ecToValue cs ]
+  toJSON ApplyNoChange       = object [ "applied" .= True, "changed" .= False ]
+  toJSON (ApplyDelegated d)  = toJSON d
 
 -- | A resolved edit: replace 1-based old lines @[lo..hi]@ with @new@. A pure
 -- insertion before line @k@ is the empty range @(k, k-1)@ (consumes no old
@@ -207,29 +240,29 @@ lowerEdits path src edits = case resolveEdits src edits of
 -- | Dry run: report resolution conflicts, or the rendered review diff. No
 -- writes. The @diff@ field is exactly the text 'applyEdits' would apply — feed
 -- it to @Diff.applyDiff@ to commit a pre-approved edit.
-planEdits :: Text -> [Edit] -> M Value
+planEdits :: Text -> [Edit] -> M EditOutcome
 planEdits path edits = do
   mc <- readTarget path
   case mc of
-    Nothing  -> pure (object [ "ok" .= False, "error" .= ("file not found: " <> path) ])
+    Nothing  -> pure (NotFound ("file not found: " <> path))
     Just src -> case lowerEdits path src edits of
-      Left cs            -> pure (object [ "ok" .= False, "conflicts" .= map ecToValue cs ])
-      Right (Left _)     -> pure (object [ "ok" .= True, "changed" .= False ])
-      Right (Right fp)   -> pure (object [ "ok" .= True, "changed" .= True, "diff" .= renderPatch [fp] ])
+      Left cs            -> pure (Conflicts cs)
+      Right (Left _)     -> pure (Applied False "")
+      Right (Right fp)   -> pure (Applied True (renderPatch [fp]))
 
 -- | Resolve the edits and apply them ATOMICALLY: any resolution conflict (or a
 -- conflict in the shipped apply) writes nothing. Delegates to 'Diff.apply', so
 -- the success report is apply's (@{"applied":true,"files":[…]}@) and rollback
 -- composes via the existing inverse machinery.
-applyEdits :: Text -> [Edit] -> M Value
+applyEdits :: Text -> [Edit] -> M ApplyOutcome
 applyEdits path edits = do
   mc <- readTarget path
   case mc of
-    Nothing  -> pure (object [ "applied" .= False, "error" .= ("file not found: " <> path) ])
+    Nothing  -> pure (ApplyNotFound ("file not found: " <> path))
     Just src -> case lowerEdits path src edits of
-      Left cs           -> pure (object [ "applied" .= False, "conflicts" .= map ecToValue cs ])
-      Right (Left _)    -> pure (object [ "applied" .= True, "changed" .= False ])
-      Right (Right fp)  -> apply [fp]
+      Left cs           -> pure (ApplyConflicts cs)
+      Right (Left _)    -> pure ApplyNoChange
+      Right (Right fp)  -> ApplyDelegated <$> apply [fp]
 
 ecToValue :: EditConflict -> Value
 ecToValue (AnchorMissing a)          = object [ "kind" .= ("anchor-missing" :: Text), "anchor" .= a ]
@@ -246,14 +279,14 @@ ecToValue (EditsOverlap a b c d)     = object [ "kind" .= ("edits-overlap" :: Te
 -- Ops: @replaceLines@ (@lo@,@hi@,@lines@), @insertAt@ (@line@,@lines@),
 -- @replaceAnchor@\/@insertAfterAnchor@\/@insertBeforeAnchor@ (@anchor@,@lines@).
 -- A malformed payload is loud (caller bug); resolution conflicts are data.
-editsJ :: Value -> M Value
+editsJ :: Value -> M ApplyOutcome
 editsJ v = withFileEdits v applyEdits
 
 -- | 'planEdits' from the same JSON payload (dry run).
-planEditsJ :: Value -> M Value
+planEditsJ :: Value -> M EditOutcome
 planEditsJ v = withFileEdits v planEdits
 
-withFileEdits :: Value -> (Text -> [Edit] -> M Value) -> M Value
+withFileEdits :: Value -> (Text -> [Edit] -> M a) -> M a
 withFileEdits v k = case getTxt v "file" of
   Nothing   -> error "editsJ: need a string 'file' field"
   Just path -> case parseEdits v of

@@ -146,8 +146,9 @@ pub fn fs_decl() -> EffectDecl {
             "doesFileExist :: FilePath -> M Bool\ndoesFileExist = send . FsExists",
             "doesDirectoryExist :: FilePath -> M Bool\ndoesDirectoryExist p = send (FsMetadata p) <&> (== Just True) . (^? key \"is_dir\" . _Bool)",
             "-- | File size in bytes, or `Nothing` if the path is missing.\ngetFileSize :: FilePath -> M (Maybe Int)\ngetFileSize p = send (FsMetadata p) <&> (^? key \"size\" . _Int)",
-            "-- | Raw metadata as a Value: `{size, is_file, is_dir}`, or `Null` if missing.\nfsMeta :: FilePath -> M Value\nfsMeta = send . FsMetadata",
-            "-- | Alias of `fsMeta` — metadata as a Value, lens in with `^? key \"size\" . _Int`.\nfsMetadata :: FilePath -> M Value\nfsMetadata = send . FsMetadata",
+            "-- | Parse the raw metadata Value into a `FileMeta`, or `Nothing` for a\n-- missing/unreadable path.\nparseFileMeta :: Value -> Maybe FileMeta\nparseFileMeta v = case (v ^? key \"size\" . _Int, v ^? key \"is_file\" . _Bool, v ^? key \"is_dir\" . _Bool) of\n  (Just s, Just f, Just d) -> Just (FileMeta s f d)\n  _ -> Nothing",
+            "-- | File metadata as a `FileMeta` record {size, isFile, isDir}, or `Nothing`\n-- if the path is missing/unreadable (use record-dot: `m.size`, `m.isDir`).\nfsMeta :: FilePath -> M (Maybe FileMeta)\nfsMeta p = send (FsMetadata p) <&> parseFileMeta",
+            "-- | Alias of `fsMeta` — metadata as a `Maybe FileMeta`.\nfsMetadata :: FilePath -> M (Maybe FileMeta)\nfsMetadata = fsMeta",
             "getCurrentDirectory :: M FilePath\ngetCurrentDirectory = do { p <- run \"pwd\"; pure (T.strip p.stdout) }",
             "glob :: FilePath -> M [FilePath]\nglob = send . FsGlob",
             "-- | Alias of `glob` — expand a glob to matching paths.\nfsGlob :: FilePath -> M [FilePath]\nfsGlob = send . FsGlob",
@@ -155,10 +156,10 @@ pub fn fs_decl() -> EffectDecl {
             // --- Editing: exact str-replace (the common case; mirrors the Edit tool) ---
             "-- | Exact str-replace, EXACTLY-ONCE: applies, or errors with a precise\n-- reason (not-found / ambiguous). The trained Edit-tool shape: no news is\n-- good news. Pass enough surrounding text that `old` is unique. Use planUpdate\n-- to review the diff first; the full editing surface is in tidepool://edits.\nupdate :: FilePath -> Text -> Text -> M ()\nupdate path old new\n  | T.null old = error \"update: 'old' must be non-empty\"\n  | otherwise = do\n      src <- readFile path\n      case len (T.splitOn old src) - 1 of\n        0 -> error (\"update: 'old' not found in \" <> path)\n        1 -> writeFile path (replace old new src)\n        n -> error (\"update: 'old' matches \" <> show n <> \" places in \" <> path <> \" (add surrounding context to disambiguate)\")",
             "-- | Replace EVERY occurrence of `old`; returns the count. Errors if zero.\nupdateAll :: FilePath -> Text -> Text -> M Int\nupdateAll path old new\n  | T.null old = error \"updateAll: 'old' must be non-empty\"\n  | otherwise = do\n      src <- readFile path\n      let n = len (T.splitOn old src) - 1\n      if n == 0 then error (\"updateAll: 'old' not found in \" <> path)\n                else writeFile path (replace old new src) >> pure n",
-            "-- | Dry-run `update`: returns the review diff, writes NOTHING. Never errors —\n-- the conflict comes back as data so you can branch before committing.\nplanUpdate :: FilePath -> Text -> Text -> M Value\nplanUpdate path old new = do\n  er <- tryReadFile path\n  case er of\n    Left e -> pure (object [\"ok\" .= False, \"reason\" .= (\"file not found: \" <> e)])\n    Right src ->\n      let n = if T.null old then 0 else len (T.splitOn old src) - 1\n      in if T.null old then pure (object [\"ok\" .= False, \"reason\" .= (\"'old' must be non-empty\" :: Text)])\n         else if n == 0 then pure (object [\"ok\" .= False, \"reason\" .= (\"not found\" :: Text)])\n         else if n > 1 then pure (object [\"ok\" .= False, \"reason\" .= (\"ambiguous\" :: Text), \"count\" .= n])\n         else case Patch.genPatch path src (replace old new src) of\n                Left _ -> pure (object [\"ok\" .= True, \"changed\" .= False])\n                Right fp -> pure (object [\"ok\" .= True, \"changed\" .= True, \"diff\" .= Patch.renderPatch [fp]])",
+            "-- | Dry-run `update`: returns an `UpdateOutcome` (the review diff, or the\n-- reason it can't apply), writes NOTHING. Never errors — the conflict comes\n-- back as data so you can branch before committing.\nplanUpdate :: FilePath -> Text -> Text -> M UpdateOutcome\nplanUpdate path old new = do\n  er <- tryReadFile path\n  case er of\n    Left e -> pure (UpdateRejected (\"file not found: \" <> e) Nothing)\n    Right src ->\n      let n = if T.null old then 0 else len (T.splitOn old src) - 1\n      in if T.null old then pure (UpdateRejected \"'old' must be non-empty\" Nothing)\n         else if n == 0 then pure (UpdateRejected \"not found\" Nothing)\n         else if n > 1 then pure (UpdateRejected \"ambiguous\" (Just n))\n         else case Patch.genPatch path src (replace old new src) of\n                Left _ -> pure UpdateNoChange\n                Right fp -> pure (UpdateDiff (Patch.renderPatch [fp]))",
             "-- | `update` from the input lane: {file, old, new} (for big/quote-heavy fragments).\nupdateJ :: Value -> M ()\nupdateJ v = case (v ^? key \"file\" . _String, v ^? key \"old\" . _String, v ^? key \"new\" . _String) of\n  (Just f, Just o, Just n) -> update f o n\n  _ -> error \"updateJ: need {file, old, new} strings in input\"",
             "-- | Insert a block after the unique line containing `anchor`. Errors on 0 or 2+.\ninsertAfter :: FilePath -> Text -> Text -> M ()\ninsertAfter path anchor block = do\n  src <- readFile path\n  let ls = lines src\n  case len (filter (isInfixOf anchor) ls) of\n    1 -> writeFile path (unlines (concatMap (\\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))\n    n -> error (\"insertAfter: anchor matched \" <> show n <> \" lines in \" <> path)",
-            "-- | Compute-check-commit: write only if every named check holds; failures are data.\nwriteChecked :: FilePath -> [(Text, Bool)] -> Text -> M Value\nwriteChecked path checks content = do\n  let failed = [name | (name, ok) <- checks, not ok]\n  if null failed\n    then writeFile path content >> pure (object [\"file\" .= path, \"written\" .= True, \"checks\" .= length checks])\n    else pure (object [\"file\" .= path, \"written\" .= False, \"failed\" .= failed])",
+            "-- | Compute-check-commit: write only if every named check holds; failures\n-- come back as a `WriteOutcome` (nothing written on failure).\nwriteChecked :: FilePath -> [(Text, Bool)] -> Text -> M WriteOutcome\nwriteChecked path checks content = do\n  let failed = [name | (name, ok) <- checks, not ok]\n  if null failed\n    then writeFile path content >> pure (Written path (length checks))\n    else pure (WriteBlocked path failed)",
         ],
     }
 }
@@ -237,11 +238,11 @@ pub fn sg_decl() -> EffectDecl {
 
 /// LSP effect: a node-addressed semantic code graph via the `tidepool-lsp-daemon`.
 ///
-/// `Node` is the composition currency — both the output of one op and the input
+/// `LspNode` is the composition currency — both the output of one op and the input
 /// of the next, so navigation chains without destructuring. `lspWhere name`
-/// seeds from a name; every other op takes a `Node` and the daemon re-resolves
+/// seeds from a name; every other op takes a `LspNode` and the daemon re-resolves
 /// it by position (so there is no name ambiguity). Graph edges
-/// (`lspCallers`/`lspCallees`/`lspDef`) return `Node`s, so you fold them with
+/// (`lspCallers`/`lspCallees`/`lspDef`) return `LspNode`s, so you fold them with
 /// `concatMapM`/`loopM`. All LSP detail (positions, UTF-16, `WorkspaceEdit`,
 /// call hierarchy) lives in the daemon. The `Lsp` lib module adds the `steer`
 /// cascade + ready-made explorers (`explore`/`the`/`saferRename`/`chart`).
@@ -250,42 +251,42 @@ pub fn lsp_decl() -> EffectDecl {
         type_name: "Lsp",
         description: concat!(
             "Semantic code-graph navigation via a language server (rust-analyzer, .rs). ",
-            "Everything is a Node {name, container, kind, file, line, text} — the currency you thread. ",
+            "Everything is a LspNode {name, container, kind, file, line, text} — the currency you thread. ",
             "`lspWhere name` → all definitions of NAME (the seed). Then walk the graph: ",
             "`lspCallers n` / `lspCallees n` (incoming/outgoing calls), `lspRefs n` (use sites), ",
             "`lspDef n` (any node → its definition), `lspHover n` (type/sig/docs), ",
-            "`lspRename n new` (→ unified diff; review then `applyDiff`). Each returns Nodes you feed ",
+            "`lspRename n new` (→ unified diff; review then `applyDiff`). Each returns LspNodes you feed ",
             "back in (e.g. `lspWhere \"x\" >>= concatMapM lspCallers`). `lspDiags file` for a file's errors. ",
             "Needs the `tidepool-lsp-daemon` running in the workspace; queries error cleanly if not.",
         ),
         type_defs: &[
             "data Position = Position { posLine :: Int, posChar :: Int }",
-            "data Node = Node { nodeName :: Text, nodeContainer :: Text, nodeKind :: Text, nodeFile :: Text, nodePos :: Position, nodeText :: Text }",
+            "data LspNode = LspNode { nodeName :: Text, nodeContainer :: Text, nodeKind :: Text, nodeFile :: Text, nodePos :: Position, nodeText :: Text }",
             "data Diag = Diag { diagFile :: Text, diagLine :: Int, diagSeverity :: Text, diagMessage :: Text }",
             // nodeLine: the human-facing 1-based line, derived from the exact pos.
-            "nodeLine :: Node -> Int\nnodeLine = posLine . nodePos",
+            "nodeLine :: LspNode -> Int\nnodeLine = posLine . nodePos",
             "instance ToJSON Position where\n  toJSON (Position l c) = object [\"line\" .= l, \"char\" .= c]",
-            "instance ToJSON Node where\n  toJSON nd@(Node n c k f _ t) = object [\"name\" .= n, \"container\" .= c, \"kind\" .= k, \"file\" .= f, \"line\" .= nodeLine nd, \"text\" .= t]",
+            "instance ToJSON LspNode where\n  toJSON nd@(LspNode n c k f _ t) = object [\"name\" .= n, \"container\" .= c, \"kind\" .= k, \"file\" .= f, \"line\" .= nodeLine nd, \"text\" .= t]",
             "instance ToJSON Diag where\n  toJSON (Diag f l s m) = object [\"file\" .= f, \"line\" .= l, \"severity\" .= s, \"message\" .= m]",
         ],
         constructors: &[
-            "LspWhere       :: Text -> Lsp [Node]",
-            "LspCallers     :: Node -> Lsp (Maybe [Node])",
-            "LspCallees     :: Node -> Lsp (Maybe [Node])",
-            "LspRefs        :: Node -> Lsp (Maybe [Node])",
-            "LspDef         :: Node -> Lsp (Maybe Node)",
-            "LspHover       :: Node -> Lsp (Maybe Text)",
-            "LspRename      :: Node -> Text -> Lsp (Maybe Text)",
+            "LspWhere       :: Text -> Lsp [LspNode]",
+            "LspCallers     :: LspNode -> Lsp (Maybe [LspNode])",
+            "LspCallees     :: LspNode -> Lsp (Maybe [LspNode])",
+            "LspRefs        :: LspNode -> Lsp (Maybe [LspNode])",
+            "LspDef         :: LspNode -> Lsp (Maybe LspNode)",
+            "LspHover       :: LspNode -> Lsp (Maybe Text)",
+            "LspRename      :: LspNode -> Text -> Lsp (Maybe Text)",
             "LspDiagnostics :: Text -> Lsp [Diag]",
         ],
         helpers: &[
-            "-- | Seed: every workspace definition named X (each a Node with container/file/line/source line).\nlspWhere :: Text -> M [Node]\nlspWhere = send . LspWhere",
-            "-- | Incoming calls. Nothing = node not callable; Just [] = callable, none. Unwrap with callersOf for plain chaining.\nlspCallers :: Node -> M (Maybe [Node])\nlspCallers = send . LspCallers",
-            "-- | Outgoing calls. Nothing = node not callable; Just [] = callable, none.\nlspCallees :: Node -> M (Maybe [Node])\nlspCallees = send . LspCallees",
-            "-- | Use sites of this node's symbol (kind = \"reference\"). Nothing = not a symbol.\nlspRefs :: Node -> M (Maybe [Node])\nlspRefs = send . LspRefs",
-            "-- | Resolve any node (e.g. a use site) to its definition node.\nlspDef :: Node -> M (Maybe Node)\nlspDef = send . LspDef",
-            "-- | Type / signature / docs for a node.\nlspHover :: Node -> M (Maybe Text)\nlspHover = send . LspHover",
-            "-- | Rename a node's symbol to NEW; returns a unified diff (apply with applyDiff). Nothing = can't rename.\nlspRename :: Node -> Text -> M (Maybe Text)\nlspRename n new = send (LspRename n new)",
+            "-- | Seed: every workspace definition named X (each a LspNode with container/file/line/source line).\nlspWhere :: Text -> M [LspNode]\nlspWhere = send . LspWhere",
+            "-- | Incoming calls. Nothing = node not callable; Just [] = callable, none. Unwrap with callersOf for plain chaining.\nlspCallers :: LspNode -> M (Maybe [LspNode])\nlspCallers = send . LspCallers",
+            "-- | Outgoing calls. Nothing = node not callable; Just [] = callable, none.\nlspCallees :: LspNode -> M (Maybe [LspNode])\nlspCallees = send . LspCallees",
+            "-- | Use sites of this node's symbol (kind = \"reference\"). Nothing = not a symbol.\nlspRefs :: LspNode -> M (Maybe [LspNode])\nlspRefs = send . LspRefs",
+            "-- | Resolve any node (e.g. a use site) to its definition node.\nlspDef :: LspNode -> M (Maybe LspNode)\nlspDef = send . LspDef",
+            "-- | Type / signature / docs for a node.\nlspHover :: LspNode -> M (Maybe Text)\nlspHover = send . LspHover",
+            "-- | Rename a node's symbol to NEW; returns a unified diff (apply with applyDiff). Nothing = can't rename.\nlspRename :: LspNode -> Text -> M (Maybe Text)\nlspRename n new = send (LspRename n new)",
             "-- | Diagnostics (errors / warnings) for FILE.\nlspDiags :: FilePath -> M [Diag]\nlspDiags = send . LspDiagnostics",
         ],
     }

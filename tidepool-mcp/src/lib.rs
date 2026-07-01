@@ -660,12 +660,12 @@ data Console a where
         assert!(preamble.contains("listDirectory :: FilePath -> M [FilePath]"));
         assert!(preamble.contains("doesFileExist :: FilePath -> M Bool"));
         assert!(preamble.contains("getFileSize :: FilePath -> M (Maybe Int)"));
-        assert!(preamble.contains("fsMeta :: FilePath -> M Value"));
+        assert!(preamble.contains("fsMeta :: FilePath -> M (Maybe FileMeta)"));
         assert!(preamble.contains("glob :: FilePath -> M [FilePath]"));
         // Core editing verbs (the str-replace common case + dry-run).
         assert!(preamble.contains("update :: FilePath -> Text -> Text -> M ()"));
         assert!(preamble.contains("updateAll :: FilePath -> Text -> Text -> M Int"));
-        assert!(preamble.contains("planUpdate :: FilePath -> Text -> Text -> M Value"));
+        assert!(preamble.contains("planUpdate :: FilePath -> Text -> Text -> M UpdateOutcome"));
         assert!(preamble.contains("insertAfter :: FilePath -> Text -> Text -> M ()"));
         assert!(preamble.contains("callCommand :: Text -> M ()"));
         assert!(preamble.contains("readProcess :: Text -> M Text"));

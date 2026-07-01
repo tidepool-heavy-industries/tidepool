@@ -2,8 +2,8 @@
 -- | LSP-driven exploration: a bounded, type-resolved code graph you walk in
 -- Haskell and steer with a heuristic → local-LLM → human cascade.
 --
--- The currency is `Node` (from Tidepool.Effects); every nav op is
--- `Node -> M [Node]`, so frontiers fold with `concatMapM`/`loopM` and the
+-- The currency is `LspNode` (from Tidepool.Effects); every nav op is
+-- `LspNode -> M [LspNode]`, so frontiers fold with `concatMapM`/`loopM` and the
 -- `steer` cascade prunes each one. Because a whole walk is one `M` value, a
 -- single human escalation parks the entire exploration in the JIT heap and
 -- resumes — the discover/explore loop is itself a resumable coroutine.
@@ -23,19 +23,19 @@ atMay xs i
   | otherwise = case drop i xs of { (x : _) -> Just x; _ -> Nothing }
 
 -- | First path segment — a crate/dir name, for the cheap same-crate rule.
-crateOf :: Node -> Text
+crateOf :: LspNode -> Text
 crateOf n = case splitOn "/" (nodeFile n) of { (c : _) -> c; _ -> "" }
 
 -- | Crude test-path heuristic (a cheap rule-tier predicate).
-isTest :: Node -> Bool
+isTest :: LspNode -> Bool
 isTest n = isInfixOf "tests/" f || isInfixOf "/test" f || isInfixOf "_test" f
   where f = nodeFile n
 
--- | Unwrapping helpers: the effect ops return `Maybe [Node]` (Nothing = the
+-- | Unwrapping helpers: the effect ops return `Maybe [LspNode]` (Nothing = the
 -- node isn't analyzable). For plain graph-walking you usually want "[] = stop",
 -- so these collapse Nothing → []. The honest `lsp*` primitives stay available
 -- when you want to distinguish "not a function" from "no callers".
-callersOf, calleesOf, refsOf :: Node -> M [Node]
+callersOf, calleesOf, refsOf :: LspNode -> M [LspNode]
 callersOf = fmap (fromMaybe []) . lspCallers
 calleesOf = fmap (fromMaybe []) . lspCallees
 refsOf    = fmap (fromMaybe []) . lspRefs
@@ -77,7 +77,7 @@ askBool prompt = do
 
 -- | BFS `edge` outward from `root` up to `depth`, keeping frontier nodes that
 -- pass `keep`. The shared engine behind `explore`/`chart`.
-walk :: (Node -> M [Node]) -> (Node -> M Bool) -> Int -> Node -> M [Node]
+walk :: (LspNode -> M [LspNode]) -> (LspNode -> M Bool) -> Int -> LspNode -> M [LspNode]
 walk edge keep depth root = loopM step (depth, [root], [])
   where
     step (d, frontier, acc) =
@@ -92,7 +92,7 @@ walk edge keep depth root = loopM step (depth, [root], [])
 
 -- | Walk the caller graph, pruning each frontier with the cascade: skip tests
 -- by rule, else the local model judges "on the path to GOAL?", else ask.
-explore :: Int -> Text -> Node -> M [Node]
+explore :: Int -> Text -> LspNode -> M [LspNode]
 explore depth goal = walk callersOf onPath depth
   where
     onPath = steer
@@ -101,8 +101,8 @@ explore depth goal = walk callersOf onPath depth
       (\n -> askBool ("Follow " <> nodeName n <> "?  " <> nodeText n))
 
 -- | Resolve a name to its one intended definition: unique-after-rule, else the
--- local model ranks, else the human chooses. Returns a `Node` to navigate from.
-the :: Text -> Text -> M (Maybe Node)
+-- local model ranks, else the human chooses. Returns a `LspNode` to navigate from.
+the :: Text -> Text -> M (Maybe LspNode)
 the name intent = do
   defs <- lspWhere name
   case filter (not . isTest) defs of
@@ -126,7 +126,7 @@ the name intent = do
 -- | Impact-assessed rename: classify each reference (in-crate=safe rule → local
 -- model judges cross-crate → human confirms), mutate only on approval, apply
 -- via the existing diff path. Returns a structured outcome.
-saferRename :: Node -> Text -> M Value
+saferRename :: LspNode -> Text -> M Value
 saferRename sym new = do
   refs  <- refsOf sym
   risky <- filterM (steer
@@ -148,7 +148,7 @@ saferRename sym new = do
 
 -- | Subsystem cartographer: BFS the callee graph, hover each node, have the
 -- local model write a one-line role (escalating unclear ones), emit a map.
-chart :: Int -> Node -> M Value
+chart :: Int -> LspNode -> M Value
 chart depth entry = do
   ns   <- walk calleesOf (\_ -> pure True) depth entry
   rows <- mapM describe ns

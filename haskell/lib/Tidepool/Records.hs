@@ -15,9 +15,14 @@
 --
 -- NB: this module must NOT import 'Tidepool.Prelude' (that would create an
 -- import cycle — Prelude re-exports this module).
-module Tidepool.Records (Proc(..), ok, Hit(..), Doc(..)) where
+module Tidepool.Records
+  ( Proc(..), ok, Hit(..), Doc(..)
+  , FileMeta(..)
+  , UpdateOutcome(..)
+  , WriteOutcome(..)
+  ) where
 
-import Prelude (Int, Bool, Eq, Show, (==))
+import Prelude (Int, Bool(..), Eq, Show, Maybe(..), (==))
 import Data.Text (Text)
 import Tidepool.Aeson.Value (ToJSON(..), object, (.=))
 
@@ -43,3 +48,44 @@ data Doc = Doc { path :: Text, body :: Text } deriving (Show, Eq)
 
 instance ToJSON Doc where
   toJSON d = object ["path" .= d.path, "body" .= d.body]
+
+-- | Filesystem metadata for a path. Replaces the opaque @{size, is_file,
+-- is_dir}@ Value that @fsMeta@\/@fsMetadata@ used to return; a missing path is
+-- 'Nothing' at the @M (Maybe FileMeta)@ level (JSON @null@). The JSON keys stay
+-- snake_case for back-compat with @^? key "size" . _Int@ style consumers.
+data FileMeta = FileMeta { size :: Int, isFile :: Bool, isDir :: Bool } deriving (Show, Eq)
+
+instance ToJSON FileMeta where
+  toJSON m = object ["size" .= m.size, "is_file" .= m.isFile, "is_dir" .= m.isDir]
+
+-- | Outcome of @planUpdate@ (the dry-run str-replace). Documents the four
+-- shapes the verb used to hand back as an opaque Value:
+--
+--   * 'UpdateRejected' — the replace cannot proceed (file missing, empty
+--     @old@, not found, or ambiguous). The 'Maybe' 'Int' carries the match
+--     count for the ambiguous case only.
+--   * 'UpdateNoChange' — it would apply, but produces identical content.
+--   * 'UpdateDiff' — the rendered review diff.
+data UpdateOutcome
+  = UpdateRejected { reason :: Text, ambiguousCount :: Maybe Int }
+  | UpdateNoChange
+  | UpdateDiff { diff :: Text }
+  deriving (Show, Eq)
+
+instance ToJSON UpdateOutcome where
+  toJSON (UpdateRejected r Nothing)  = object ["ok" .= False, "reason" .= r]
+  toJSON (UpdateRejected r (Just c)) = object ["ok" .= False, "reason" .= r, "count" .= c]
+  toJSON UpdateNoChange              = object ["ok" .= True, "changed" .= False]
+  toJSON (UpdateDiff d)              = object ["ok" .= True, "changed" .= True, "diff" .= d]
+
+-- | Outcome of @writeChecked@ (compute-check-commit). 'Written' carries the
+-- file and the number of checks that held; 'WriteBlocked' carries the file and
+-- the names of the failed checks (nothing was written).
+data WriteOutcome
+  = Written { file :: Text, checks :: Int }
+  | WriteBlocked { file :: Text, failed :: [Text] }
+  deriving (Show, Eq)
+
+instance ToJSON WriteOutcome where
+  toJSON (Written f c)       = object ["file" .= f, "written" .= True, "checks" .= c]
+  toJSON (WriteBlocked f xs) = object ["file" .= f, "written" .= False, "failed" .= xs]
