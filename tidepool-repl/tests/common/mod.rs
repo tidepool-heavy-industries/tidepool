@@ -162,8 +162,13 @@ impl Repl {
         }
     }
 
-    /// Route a single item through `session_run` and unwrap `items[0]` back to
-    /// the legacy `Turn` shape (`text = items[0].result`, `is_error = !items[0].ok`).
+    /// Route a single item through `session_run` and assemble a `Turn` from the
+    /// slim block envelope:
+    /// - `is_error` from `items[0].ok`
+    /// - `text` = the JSON of the item's inline result fields, with the top-level
+    ///   `value`/`type`/`truncated` merged in (so expression results carry both
+    ///   type and value, matching the legacy Turn shape callers expect).
+    ///
     /// Falls back to the raw `Turn` when the block envelope can't be parsed
     /// (e.g. "no session open" — the error text is not a JSON block envelope).
     async fn run_block_single(&self, item: &str) -> Turn {
@@ -181,19 +186,40 @@ impl Repl {
             &raw.text
         };
 
-        // Extract items[0] from the block envelope JSON.
+        // Extract items[0] from the slim block envelope JSON.
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_part) {
             if let Some(item0) = v.get("items").and_then(|arr| arr.get(0)) {
-                let text = item0
-                    .get("result")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or(&raw.text)
-                    .to_string();
-                let is_error = item0
+                let ok = item0
                     .get("ok")
                     .and_then(|o| o.as_bool())
-                    .map(|ok| !ok)
-                    .unwrap_or(raw.is_error);
+                    .unwrap_or(!raw.is_error);
+                let is_error = !ok;
+
+                // Assemble Turn.text: item's inline result fields (excluding
+                // kind/ok) merged with top-level value/type/truncated so that
+                // expression results are fully represented in a single object.
+                let mut result = serde_json::Map::new();
+                if let Some(obj) = item0.as_object() {
+                    for (k, val) in obj {
+                        if k != "kind" && k != "ok" {
+                            result.insert(k.clone(), val.clone());
+                        }
+                    }
+                }
+                // Merge top-level value/type/truncated (final-expr fields that
+                // are not in the item itself in the slim shape).
+                for key in &["value", "type", "truncated"] {
+                    if let Some(val) = v.get(*key) {
+                        if !val.is_null() && !result.contains_key(*key) {
+                            result.insert(key.to_string(), val.clone());
+                        }
+                    }
+                }
+                let text = if result.is_empty() {
+                    raw.text.clone()
+                } else {
+                    serde_json::Value::Object(result).to_string()
+                };
                 return Turn { text, is_error };
             }
         }

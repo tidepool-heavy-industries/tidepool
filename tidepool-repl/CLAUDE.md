@@ -11,8 +11,8 @@ accumulate turn over turn. See the repo-root `CLAUDE.md` for the project map;
 - **`session_open { session? }`** — spawn a named session worker (default
   name `"default"`; multiple concurrent sessions supported). Call before
   `session_run`.
-- **`session_run { items: [String], input?: Value, session? }`** — run a
-  block of GHCi-capable items in order; see Item classification below.
+- **`session_run { items: [String], input?: Value, session?, verbose?: bool }`** — run a
+  block of GHCi-capable items in order; see Item classification and Response shape below.
 - **`session_resume { continuation_id, response }`** / **`session_abort {
   continuation_id }`** — answer or drop an in-turn `ask` suspension (see
   Suspension below). A session with a pending suspension will not accept a
@@ -56,6 +56,35 @@ decl redefining a name Library also re-exports doesn't become an ambiguous
 occurrence). A decl referencing a type from a verb module that `Library`
 does NOT re-export still needs its own explicit `import`, same as a stmt
 would.
+
+## Response shape (session_run / session_resume)
+
+Default (slim) shape — no generation counters, no double-encoding:
+
+```json
+{
+  "items": [
+    {"kind":"stmt", "ok":true, "bound":"vs", "type":"[Text]"},
+    {"kind":"decl", "ok":true, "decl":"slug"},
+    {"kind":"stmt", "ok":true, "type":"Int"}
+  ],
+  "value": 42,
+  "type": "Int"
+}
+```
+
+- Each item has `kind` + `ok` + inline result fields (no nested `result` string).
+- Bind: `bound` + `type`. Multi-bind: `bound: [names]` + `types: [types]`.
+- Decl: `decl` (the declared identifier head: `slug`, `MyData`, `MyClass`, …).
+- Non-final expression: `type` (+ `value` for non-last exprs if more items follow).
+- Final expression: `type` in the item; `value` and `type` at top-level only.
+- Error item: `{"kind":"...", "ok":false, "error":"..."}`.
+- Truncated value: `"truncated": "hint"` at top-level alongside `value`.
+
+`verbose: true` — full diagnostic shape for debugging:
+`{items:[{index,kind,ok,result:"<JSON string>"}], value, generation, valGeneration}`.
+The `result` field is the old double-encoded format. Use this only when you need
+generation counters or the raw GHC module name for a declaration.
 
 ## Known friction
 

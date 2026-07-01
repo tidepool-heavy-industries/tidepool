@@ -64,9 +64,15 @@ pub struct BlockItemResult {
     pub kind: String,
     /// Whether the item succeeded.
     pub ok: bool,
-    /// Verbatim `TurnOutcome::render()` of this item's outcome — identical to
-    /// the legacy per-tool render so a 1-item block unwraps to the old shape.
-    pub result: String,
+    /// Slim result for the default response shape: an inline JSON object whose
+    /// fields are merged directly into the item (no double-encoding). The
+    /// `value` key is absent for the final expression item (it goes to
+    /// the top-level `value` field instead).
+    pub result: serde_json::Value,
+    /// Full result string for verbose mode (`verbose: true`): the old
+    /// `TurnOutcome::render()` output (a JSON string, double-encoded when
+    /// embedded in the items array).
+    pub result_full: String,
 }
 
 impl MetaCommand {
@@ -134,7 +140,8 @@ pub enum SessionCommand {
     Cmd(MetaCommand),
     /// `session_run`: run a list of classified items in sequence on the resident
     /// machine. Each item is dispatched to `run_def`/`run_eval`/`run_meta`.
-    Block(Vec<BlockItem>),
+    /// `verbose: true` returns the full diagnostic shape instead of the slim default.
+    Block { items: Vec<BlockItem>, verbose: bool },
     /// `session_close`: drop the resident machine and free the session heap.
     Close,
 }
@@ -165,7 +172,8 @@ pub enum TurnOutcome {
     MultiBound { components: Vec<(String, String)> },
     /// A declaration item accumulated a decl; the session advanced to
     /// `generation` and `Tidepool.Session.Lib.G<generation>` now in scope.
-    Defined { generation: u64, module: String },
+    /// `head` is the declared identifier (for slim result display).
+    Defined { generation: u64, module: String, head: String },
     /// A meta-command item produced this structured result.
     Meta(Json),
     /// `session_run` block result: per-item outcomes + the last expression value.
@@ -175,10 +183,18 @@ pub enum TurnOutcome {
         /// (`None` if no expression was evaluated or the block errored before
         /// any expression ran).
         value: Option<Json>,
-        /// Declaration generation at block completion.
+        /// Inferred type of the last expression (`None` when the block ends in
+        /// a bind or declaration, or when the type probe failed).
+        last_type: Option<String>,
+        /// Truncation hint when the last expression's value was elided to stubs.
+        last_truncated: Option<String>,
+        /// Declaration generation at block completion (verbose mode only).
         generation: u64,
-        /// Value-binding generation at block completion.
+        /// Value-binding generation at block completion (verbose mode only).
         val_gen: u64,
+        /// When `true`, emit the full diagnostic shape (index, generation,
+        /// double-encoded result string) instead of the slim default.
+        verbose: bool,
     },
     /// The turn failed (compile error, GHC error, runtime yield, …).
     Error(String),
@@ -213,7 +229,7 @@ impl TurnOutcome {
                 "types": components.iter().map(|(_, t)| t).collect::<Vec<_>>(),
             })
             .to_string(),
-            TurnOutcome::Defined { generation, module } => serde_json::json!({
+            TurnOutcome::Defined { generation, module, .. } => serde_json::json!({
                 "defined": true,
                 "generation": generation,
                 "module": module,
@@ -225,27 +241,63 @@ impl TurnOutcome {
             TurnOutcome::Block {
                 items,
                 value,
+                last_type,
+                last_truncated,
                 generation,
                 val_gen,
+                verbose,
             } => {
-                let items_json: Vec<serde_json::Value> = items
-                    .iter()
-                    .map(|i| {
-                        serde_json::json!({
-                            "index": i.index,
-                            "kind": i.kind,
-                            "ok": i.ok,
-                            "result": i.result,
+                if *verbose {
+                    // Old full shape: index, kind, ok, result (double-encoded string).
+                    let items_json: Vec<serde_json::Value> = items
+                        .iter()
+                        .map(|i| {
+                            serde_json::json!({
+                                "index": i.index,
+                                "kind": i.kind,
+                                "ok": i.ok,
+                                "result": i.result_full,
+                            })
                         })
+                        .collect();
+                    serde_json::json!({
+                        "items": items_json,
+                        "value": value,
+                        "generation": generation,
+                        "valGeneration": val_gen,
                     })
-                    .collect();
-                serde_json::json!({
-                    "items": items_json,
-                    "value": value,
-                    "generation": generation,
-                    "valGeneration": val_gen,
-                })
-                .to_string()
+                    .to_string()
+                } else {
+                    // Slim shape: no index/generation, result fields inlined,
+                    // final-expression value at top level only (not in items[]).
+                    let items_json: Vec<serde_json::Value> = items
+                        .iter()
+                        .map(|i| {
+                            let mut obj = serde_json::Map::new();
+                            obj.insert("kind".into(), serde_json::json!(i.kind));
+                            obj.insert("ok".into(), serde_json::json!(i.ok));
+                            if let serde_json::Value::Object(ref r) = i.result {
+                                for (k, v) in r {
+                                    obj.insert(k.clone(), v.clone());
+                                }
+                            }
+                            serde_json::Value::Object(obj)
+                        })
+                        .collect();
+                    let mut top = serde_json::Map::new();
+                    top.insert("items".into(), serde_json::Value::Array(items_json));
+                    top.insert(
+                        "value".into(),
+                        value.clone().unwrap_or(serde_json::Value::Null),
+                    );
+                    if let Some(t) = last_type {
+                        top.insert("type".into(), serde_json::json!(t));
+                    }
+                    if let Some(hint) = last_truncated {
+                        top.insert("truncated".into(), serde_json::json!(hint));
+                    }
+                    serde_json::Value::Object(top).to_string()
+                }
             }
             TurnOutcome::Error(e) => e.clone(),
         }

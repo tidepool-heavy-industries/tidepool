@@ -95,8 +95,8 @@ async fn session_multi_turn_real_path() {
     assert!(!turn.is_error, "def errored: {}", turn.text);
     let txt = &turn.text;
     assert!(
-        txt.contains("\"generation\":1") || txt.contains("\"generation\": 1"),
-        "def: {txt}"
+        txt.contains("\"decl\""),
+        "def: expected slim decl field in: {txt}"
     );
 
     // 3. eval `slug "a b"` → "a-b" (bootstraps the resident machine)
