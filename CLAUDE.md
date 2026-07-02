@@ -93,6 +93,8 @@ cargo install --path tidepool            # Install the MCP server binary (`tidep
 
 Changed `haskell/`? See `haskell/CLAUDE.md` for the rebuild + deploy steps.
 
+`scripts/redeploy.sh` — deploy extract + both servers + cache clear; see `haskell/CLAUDE.md` for what each step does
+
 ---
 
 ## Eval Records API

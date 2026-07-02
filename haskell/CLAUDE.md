@@ -31,6 +31,8 @@ TIDEPOOL_EXTRACT=$(cabal list-bin tidepool-extract-bin) \
 
 **Deploy to the live MCP server (nix profile):**
 
+`scripts/redeploy.sh` encapsulates this full dance (extract + both Rust servers + cache clear) — prefer it over running these steps by hand.
+
 ```bash
 git add haskell/...                          # nix flake builds see only TRACKED files
 nix profile upgrade tidepool-extract         # rebuild + install the wrapper+harness
