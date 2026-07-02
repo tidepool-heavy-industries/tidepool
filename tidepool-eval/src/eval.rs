@@ -435,6 +435,51 @@ fn eval_at(
                     bytes.push(0); // null terminator for IndexCharOffAddr
                     Ok(Value::Lit(Literal::LitString(bytes)))
                 }
+                PrimOpKind::ShowSignedDoubleAddr => {
+                    // (prec :: Int, d :: Double) — precedence-aware show; must
+                    // match the JIT host fn `runtime_show_signed_double_addr`.
+                    if arg_vals.len() != 2 {
+                        return Err(EvalError::ArityMismatch {
+                            context: "arguments",
+                            expected: 2,
+                            got: arg_vals.len(),
+                        });
+                    }
+                    let prec = match &arg_vals[0] {
+                        Value::Lit(Literal::LitInt(n)) => *n,
+                        Value::Con(_, fields) if fields.len() == 1 => {
+                            expect_int(&force(fields[0].clone(), heap)?)?
+                        }
+                        other => {
+                            return Err(EvalError::TypeMismatch {
+                                expected: "Int# or I# Int#",
+                                got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                            })
+                        }
+                    };
+                    let d = match &arg_vals[1] {
+                        Value::Lit(Literal::LitDouble(bits)) => f64::from_bits(*bits),
+                        Value::Con(_, fields) if fields.len() == 1 => {
+                            expect_double(&force(fields[0].clone(), heap)?)?
+                        }
+                        other => {
+                            return Err(EvalError::TypeMismatch {
+                                expected: "Double# or D# Double#",
+                                got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                            })
+                        }
+                    };
+                    let body = eval_haskell_show_double(d);
+                    // `showSignedFloat`'s `x < 0` test (so -0.0 does NOT parenthesize).
+                    let s = if prec > 6 && d < 0.0 {
+                        format!("({body})")
+                    } else {
+                        body
+                    };
+                    let mut bytes = s.into_bytes();
+                    bytes.push(0);
+                    Ok(Value::Lit(Literal::LitString(bytes)))
+                }
                 _ => dispatch_primop(*op, arg_vals),
             }
         }
@@ -1115,6 +1160,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::ShowDoubleAddr => {
             // Handled in eval_at PrimOp arm (needs heap for deep forcing)
             unreachable!("ShowDoubleAddr should be intercepted in eval_at")
+        }
+        PrimOpKind::ShowSignedDoubleAddr => {
+            // Handled in eval_at PrimOp arm (needs heap for deep forcing)
+            unreachable!("ShowSignedDoubleAddr should be intercepted in eval_at")
         }
         PrimOpKind::Int2Float => {
             if args.len() != 1 {

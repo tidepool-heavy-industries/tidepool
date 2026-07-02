@@ -2543,6 +2543,36 @@ pub extern "C" fn runtime_show_double_addr(bits: i64) -> i64 {
     ptr as i64
 }
 
+/// Precedence-aware Double show — the `showSignedFloat` behavior the JIT-safe
+/// replacement drops. Parenthesizes a NEGATIVE Double when `prec > 6` (the
+/// constructor-argument precedence), matching GHC: `show (Just (-2.5))` is
+/// `Just (-2.5)`, but top-level `show (-2.5)` (prec 0) is `-2.5`. The magnitude
+/// string already carries the sign (`haskell_show_double`), so only the parens
+/// are added here. Leaked CString, same contract as `runtime_show_double_addr`.
+pub extern "C" fn runtime_show_signed_double_addr(prec: i64, bits: i64) -> i64 {
+    let d = f64::from_bits(bits as u64);
+    let body = haskell_show_double(d);
+    // Match `showSignedFloat` EXACTLY: it parenthesizes on `x < 0` (not "renders
+    // with a minus"). `-0.0 < 0` is False (IEEE), so GHC shows `Just -0.0`
+    // WITHOUT parens; NaN (`NaN < 0` False) and +Inf never parenthesize; only
+    // -Inf and negative normals (`< 0` True) do, at prec > 6.
+    let s = if prec > 6 && d < 0.0 {
+        format!("({body})")
+    } else {
+        body
+    };
+    let c_str = match std::ffi::CString::new(s) {
+        Ok(c) => c,
+        Err(_) => {
+            RUNTIME_ERROR.with(|cell| {
+                *cell.borrow_mut() = Some(RuntimeError::Undefined);
+            });
+            return error_poison_ptr() as i64;
+        }
+    };
+    c_str.into_raw() as i64
+}
+
 /// Format a Double matching Haskell's `show` output.
 /// Decimal notation for 0.1 <= |x| < 1e7, scientific notation otherwise.
 /// Always includes a decimal point.
@@ -3226,6 +3256,10 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
         (
             "runtime_show_double_addr",
             runtime_show_double_addr as *const u8,
+        ),
+        (
+            "runtime_show_signed_double_addr",
+            runtime_show_signed_double_addr as *const u8,
         ),
         // Double math (libm wrappers)
         ("runtime_double_exp", runtime_double_exp as *const u8),

@@ -364,6 +364,11 @@ define_primops! {
     Ctz64 => "Ctz64", "ctz64#";
     CasSmallArray => "CasSmallArray", "casSmallArray#";
     ShowDoubleAddr => "ShowDoubleAddr", "showDoubleAddr";
+    // Precedence-aware Double show: (Int prec, Double d) -> C-string addr.
+    // Parenthesizes a negative Double when prec > 6 (the `showParen` that the
+    // real `showSignedFloat` applies; the JIT-safe replacement drops it, so
+    // this primop restores it in Rust — no hand-emitted Core comparison).
+    ShowSignedDoubleAddr => "ShowSignedDoubleAddr", "showSignedDoubleAddr";
     // Sized Word8/Int8/Word32 (on 64-bit these are masked Int#/Word#).
     Word8Gt => "Word8Gt", "gtWord8#";
     Word8Quot => "Word8Quot", "quotWord8#";

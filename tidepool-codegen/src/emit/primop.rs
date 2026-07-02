@@ -577,6 +577,24 @@ pub fn emit_primop(
             )?;
             Ok(SsaVal::Raw(result, LIT_TAG_ADDR))
         }
+        PrimOpKind::ShowSignedDoubleAddr => {
+            // (prec :: Int, d :: Double) -> C-string addr, parenthesized when
+            // `d < 0 && prec > 6` (the `showParen` the JIT-safe showSignedFloat
+            // replacement drops). All logic is in the host fn — no Core compare.
+            check_arity(op, 2, args.len())?;
+            let prec = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
+            let d = unbox_double(sess.pipeline, builder, sess.vmctx, args[1]);
+            let bits = builder.ins().bitcast(types::I64, MemFlags::new(), d);
+            let result = emit_runtime_call(
+                sess.pipeline,
+                builder,
+                "runtime_show_signed_double_addr",
+                &[AbiParam::new(types::I64), AbiParam::new(types::I64)],
+                &[AbiParam::new(types::I64)],
+                &[prec, bits],
+            )?;
+            Ok(SsaVal::Raw(result, LIT_TAG_ADDR))
+        }
         PrimOpKind::Int2Float => {
             check_arity(op, 1, args.len())?;
             let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);

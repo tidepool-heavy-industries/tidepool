@@ -229,19 +229,25 @@ emitRuntimeUnpackAppendCString addrIdx suffixIdx = do
 --   \fmt -> \minExpt -> \d -> \rest -> unpackAppendCString# (ShowDoubleAddr d) rest
 -- This preserves the ShowS continuation (rest) for correct behavior in
 -- composed show expressions like derived Show instances.
+-- The second binder (@precId@) is the PRECEDENCE @p@ that @showSignedFloat@
+-- takes; feeding it + the Double to @ShowSignedDoubleAddr@ restores the
+-- @showParen (p > 6)@ on negatives that this JIT-safe replacement otherwise
+-- drops (`show (Just (-2.5))` → `Just (-2.5)`). The parens decision is made in
+-- the Rust host fn, so no Core comparison is hand-emitted here.
 emitShowDoubleSpecBody :: Id -> TransM Int
 emitShowDoubleSpecBody binder = do
     fmtId      <- freshSynthVarId
-    minExptId  <- freshSynthVarId
+    precId     <- freshSynthVarId
     dId        <- freshSynthVarId
     restId     <- freshSynthVarId
+    precRef    <- emitNode $ NVar precId
     dRef       <- emitNode $ NVar dId
-    addrIdx    <- emitNode $ NPrimOp (T.pack "ShowDoubleAddr") [dRef]
+    addrIdx    <- emitNode $ NPrimOp (T.pack "ShowSignedDoubleAddr") [precRef, dRef]
     restRef    <- emitNode $ NVar restId
     resultIdx  <- emitRuntimeUnpackAppendCString addrIdx restRef
     lam4       <- emitNode $ NLam restId resultIdx
     lam3       <- emitNode $ NLam dId lam4
-    lam2       <- emitNode $ NLam minExptId lam3
+    lam2       <- emitNode $ NLam precId lam3
     emitNode $ NLam fmtId lam2
 
 translateBinds :: [CoreBind] -> [(String, Seq FlatNode)]
@@ -884,19 +890,25 @@ translate expr =
         emitNode $ NLam paramVarId resultIdx
 
     -- Intercept $fShowDouble_$sshowSignedFloat (GHC's specialized show for Double).
-    -- Takes 4 args: (fmt, minExpt, d :: Double, rest :: String).
-    -- We use ShowDoubleAddr for the Double, and append rest via unpackAppendCString.
+    -- Args: (fmt, p :: Int PRECEDENCE, d :: Double, rest :: String) — the 2nd is
+    -- `showSignedFloat`'s Int arg (verified from -O2 Core: `showsPrec 11` passes
+    -- `I# 11#`, `show (Just x)` passes `appPrec1`=11, top-level `show` passes
+    -- `minExpt`=0). Feed p + d to ShowSignedDoubleAddr so a negative d is
+    -- parenthesized when p > 6 (the `showParen` this replacement used to drop).
+    -- args !! 1 is p (safe: a non-empty `drop 2 args` means length args >= 3).
     Var v | isShowDoubleSpecVar v -> do
-        case drop 2 args of  -- skip fmt, minExpt → [d, rest, ...]
+        case drop 2 args of  -- skip fmt, p → [d, rest, ...]
           (dArg : restArg : _) -> do
+            precIdx <- translate (args !! 1)
             argIdx <- translate dArg
-            addrIdx <- emitNode $ NPrimOp (T.pack "ShowDoubleAddr") [argIdx]
+            addrIdx <- emitNode $ NPrimOp (T.pack "ShowSignedDoubleAddr") [precIdx, argIdx]
             restIdx <- translate restArg
             emitRuntimeUnpackAppendCString addrIdx restIdx
           [dArg] -> do
-            -- 3 args applied (fmt, minExpt, d); returns ShowS = String -> String
+            -- 3 args applied (fmt, p, d); returns ShowS = String -> String
+            precIdx <- translate (args !! 1)
             argIdx <- translate dArg
-            addrIdx <- emitNode $ NPrimOp (T.pack "ShowDoubleAddr") [argIdx]
+            addrIdx <- emitNode $ NPrimOp (T.pack "ShowSignedDoubleAddr") [precIdx, argIdx]
             restParamId <- freshSynthVarId
             restRef <- emitNode $ NVar restParamId
             resultIdx <- emitRuntimeUnpackAppendCString addrIdx restRef

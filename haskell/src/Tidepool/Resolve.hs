@@ -313,7 +313,12 @@ resolveExternals varIdFn hscEnv binds = do
          -- Translate.hs intercepts the call and emits ShowDoubleAddr.
          || "$fShowDouble_$s" `isPrefixOf` name
          || name == "$fShowDouble2"
-         || name == "minExpt"
+         -- NB: `minExpt` (GHC.Internal.Float) is NOT blocked. GHC's CSE shares
+         -- it (its body is the bare CAF `minExpt = 0`) as the precedence `0`
+         -- that top-level `show @Double` passes to showSignedFloat; the
+         -- ShowSignedDoubleAddr intercept needs that precedence to resolve.
+         -- Resolving `minExpt` yields `I# 0#` — no floatToDigits (that lives in
+         -- separate bindings that merely USE minExpt, and are never referenced).
 
 -- | Attempt to resolve a specialized Id by deriving its generic parent.
 -- Parses the OccName for $s markers, strips them to get the generic name,

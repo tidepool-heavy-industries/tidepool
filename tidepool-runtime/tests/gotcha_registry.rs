@@ -195,6 +195,32 @@ fn works_round_bankers() {
     );
 }
 
+/// SHOW precedence (ledger #30, FIXED): a NEGATIVE Double in constructor-arg
+/// position is parenthesized (`Just (-2.5)`) — the `showParen (p > 6)` that the
+/// JIT-safe `showSignedFloat` replacement used to drop, now restored via the
+/// `ShowSignedDoubleAddr` primop (parens decided in the Rust host, no Core
+/// compare; the precedence — `appPrec1`=11 nested, `minExpt`=0 top-level —
+/// resolves after unblocking `minExpt` in Resolve.hs). Top-level (prec 0) and
+/// positive values are NOT parenthesized; the Int path is unaffected; nesting
+/// inside a list threads the precedence too.
+#[test]
+fn works_show_negative_double_parens() {
+    works(
+        "pure (object [ \"nested\" .= (show (Just (-2.5 :: Double)) :: Text) \
+         , \"top\" .= (show (-2.5 :: Double) :: Text) \
+         , \"pos\" .= (show (Just (1.5 :: Double)) :: Text) \
+         , \"int\" .= (show (Just (-1 :: Int)) :: Text) \
+         , \"list\" .= (show [Just (-2.5 :: Double), Nothing] :: Text) ])",
+        serde_json::json!({
+            "nested": "Just (-2.5)",
+            "top": "-2.5",
+            "pos": "Just 1.5",
+            "int": "Just (-1)",
+            "list": "[Just (-2.5),Nothing]"
+        }),
+    );
+}
+
 /// `even`/`odd` — GHC specialization removed the need for the old monomorphic
 /// shadows; the Integral dictionary is specialized away.
 #[test]
