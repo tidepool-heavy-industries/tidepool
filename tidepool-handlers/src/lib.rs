@@ -273,11 +273,32 @@ pub fn expand_glob(root: &std::path::Path, pattern: &str) -> Result<Vec<PathBuf>
             "absolute glob patterns not allowed".to_string(),
         ));
     }
-    // The glob crate's `**` matches DIRECTORIES only, so a bare trailing
-    // `/**` silently returns dirs and no files — never what the caller
-    // meant. Normalize to `/**/*` (everything, any depth).
+    // rg-style root semantics (friction #20): a metachar-free pattern names a
+    // concrete path, not a glob. If it's a directory, recurse into it
+    // (`dir/**/*`) — a bare dir silently returned `[]` before. If it names
+    // nothing, that's a LOUD error, not an empty result (a typo'd root looked
+    // identical to a clean no-match). An existing file passes through as-is.
     let normalized;
-    let pattern = if pattern == "**" || pattern.ends_with("/**") {
+    let pattern = if !is_glob(pattern) {
+        let target = root.join(pattern);
+        if target.is_dir() {
+            normalized = if pattern.is_empty() || pattern == "." {
+                "**/*".to_string()
+            } else {
+                format!("{}/**/*", pattern.trim_end_matches('/'))
+            };
+            normalized.as_str()
+        } else if target.exists() {
+            pattern
+        } else {
+            return Err(EffectError::Handler(format!(
+                "no such file or directory: {pattern:?} (search root does not exist; \
+                 a zero-match glob returns [] — a missing root is an error)"
+            )));
+        }
+    } else if pattern == "**" || pattern.ends_with("/**") {
+        // The glob crate's `**` matches DIRECTORIES only, so a bare trailing
+        // `/**` silently returns dirs and no files — normalize to `/**/*`.
         normalized = format!("{}/*", pattern);
         normalized.as_str()
     } else {
@@ -402,9 +423,14 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                 cx.respond_list(entries)
             }
             FsReq::Glob(pattern) => {
+                // Files only: `glob` feeds `readGlob`/`grepGlob`, which read
+                // file contents — a matched DIRECTORY (from a `dir/**/*`
+                // recursion or a `*/`-shaped pattern) would make `readGlob`
+                // die "Is a directory" (friction #20). Use `listDir` for dirs.
                 let paths = self.expand_glob(&pattern)?;
                 let rel_paths: Vec<String> = paths
                     .into_iter()
+                    .filter(|p| p.is_file())
                     .filter_map(|p| {
                         p.strip_prefix(&self.root)
                             .ok()
@@ -2395,6 +2421,45 @@ mod tests {
         ));
         assert!(!component_filter("**/*", Path::new("src/.hidden")));
         assert!(component_filter(".gitignore", Path::new(".gitignore")));
+    }
+
+    #[test]
+    fn test_glob_bare_dir_recurses_and_missing_root_errors() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join("src/inner")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "x").unwrap();
+        std::fs::write(root.join("src/inner/b.rs"), "y").unwrap();
+        let handler = FsHandler::new(root.clone());
+
+        // rg-style: a bare directory (no metachars) recurses (friction #20 —
+        // previously returned []).
+        let names: Vec<String> = handler
+            .expand_glob("src")
+            .unwrap()
+            .iter()
+            .filter(|p| p.is_file())
+            .filter_map(|p| p.strip_prefix(&root).ok())
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert!(names.iter().any(|n| n.ends_with("a.rs")), "{names:?}");
+        assert!(names.iter().any(|n| n.ends_with("b.rs")), "{names:?}");
+
+        // A nonexistent root is a LOUD error, not a silent empty result.
+        let err = handler.expand_glob("does/not/exist").unwrap_err();
+        assert!(
+            format!("{err}").contains("no such file or directory"),
+            "{err}"
+        );
+
+        // A concrete existing file passes through.
+        let one = handler.expand_glob("src/a.rs").unwrap();
+        assert_eq!(one.len(), 1);
+        assert!(one[0].ends_with("a.rs"));
+
+        // A real glob that matches nothing still returns [] (not an error).
+        assert!(handler.expand_glob("src/*.nope").unwrap().is_empty());
     }
 
     #[test]
