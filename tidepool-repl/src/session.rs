@@ -1433,12 +1433,52 @@ fn remap_item_err(err: &str, source: &str) -> String {
     // Session-lib generation warnings are dependency noise on the stmt plane
     // (a gen-25 -Wx-partial otherwise rides every later item's errors).
     let deduped = drop_foreign_gen_warnings(&dedupe_diagnostics(err), None);
-    match user_code_offset(source) {
+    let remapped = match user_code_offset(source) {
         Some((offset, indent)) => {
             remap_generated_coords(&deduped, "Expr.hs", "<item>", offset, indent)
         }
         None => deduped,
+    };
+    prepend_lib_brick_hint(remapped)
+}
+
+/// If EVERY error location in a failed compile points at a project-lib module
+/// (`.tidepool/lib/…` / global `…/tidepool/lib/…`) rather than the user's
+/// `<item>`, the user's item is fine — a library module is broken and the
+/// auto-imported `Library` re-exports it, so it fails to compile for every
+/// eval (friction #24, the "bricked lib module" class). Say so and name the
+/// culprit(s) instead of leaving a baffling error against code the user
+/// didn't just write.
+fn prepend_lib_brick_hint(err: String) -> String {
+    // A `<item>:` coordinate means the user's own code is implicated — never
+    // reframe then.
+    if err.contains("<item>:") {
+        return err;
     }
+    let mut culprits: Vec<String> = err
+        .lines()
+        .filter_map(|l| {
+            let hs = l.find(".hs:")?;
+            let seg = &l[..hs + 3];
+            let start = seg.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+            let path = &seg[start..];
+            (path.contains(".tidepool/lib/") || path.contains("/tidepool/lib/"))
+                .then(|| path.to_string())
+        })
+        .collect();
+    if culprits.is_empty() {
+        return err;
+    }
+    culprits.sort_unstable();
+    culprits.dedup();
+    format!(
+        "your item is fine — a project library module is broken and `Library` \
+         auto-imports it, so it won't compile for ANY eval until fixed: {}\n\
+         (fix or remove the module; if the break also blocks a `writeFile` repair, \
+         edit it host-side — the session can't compile its own fix while `Library` \
+         is broken)\n\n{err}",
+        culprits.join(", ")
+    )
 }
 
 fn begin_user_module(preamble: &str, imports: &str, input: Option<&serde_json::Value>) -> String {
@@ -1723,6 +1763,20 @@ fn type_def_head(src: &str) -> Option<&str> {
 mod slim_tests {
     use super::{decl_head, slim_item_result};
     use crate::command::TurnOutcome;
+
+    #[test]
+    fn lib_brick_hint_reframes_lib_only_errors() {
+        let lib_err = "/home/u/proj/.tidepool/lib/Repo.hs:31:12: error: [GHC-88464]\n    Variable not in scope: readGlob\nCompilation failed.\n";
+        let out = super::prepend_lib_brick_hint(lib_err.to_string());
+        assert!(out.starts_with("your item is fine"), "{out}");
+        assert!(out.contains(".tidepool/lib/Repo.hs"), "{out}");
+        // A user-item error is never reframed.
+        let user_err = "<item>:2:1: error: not in scope: foo\n";
+        assert_eq!(super::prepend_lib_brick_hint(user_err.to_string()), user_err);
+        // A base/non-lib error is not reframed.
+        let base_err = "Expr.hs:5:1: error: whatever\n";
+        assert_eq!(super::prepend_lib_brick_hint(base_err.to_string()), base_err);
+    }
 
     #[test]
     fn decl_head_extracts_names() {
