@@ -120,6 +120,7 @@ pub fn compile_haskell_salted(
         if let (Ok(expr), Ok((table, warnings))) =
             (read_cbor(&expr_bytes), read_metadata(&meta_bytes))
         {
+            tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
             return Ok((expr, table, warnings));
         }
     }
@@ -183,6 +184,10 @@ pub fn compile_haskell_salted(
 
     let expr = read_cbor(&expr_bytes)?;
     let (table, warnings) = read_metadata(&meta_bytes)?;
+    // Register varId → name pairs so runtime unresolved-variable errors can
+    // name the symbol (friction #12); same on the cache-hit path above and the
+    // session-turn reader (session/turn.rs).
+    tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
 
     // Only store in cache if deserialization succeeded
     cache::cache_store(&key, &expr_bytes, &meta_bytes);

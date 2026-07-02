@@ -2,6 +2,7 @@ module Tidepool.Translate
   ( translateBinds
   , translateModule
   , translateModuleClosed
+  , ClosedModule(..)
   , collectDataCons
   , collectUsedDataCons
   , collectTransitiveDCons
@@ -434,7 +435,22 @@ translateModule allBinds targetName unresolvedIds =
 -- actually compiled (the target's transitive closure, NOT the full closed
 -- graph) — the meta walks consume this so the DataConTable only ever sees
 -- constructors the emitted program references.
-translateModuleClosed :: HscEnv -> [CoreBind] -> String -> IO (Seq FlatNode, Map.Map (Word64, Text) DataCon, [UnresolvedVar], [CoreBind])
+-- | Result of resolving + translating a module closed around one target
+-- binding — the unit `writeWholeModuleClosed` serializes.
+data ClosedModule = ClosedModule
+  { cmNodes      :: Seq FlatNode
+    -- ^ The emitted flat node tree (the JIT-able program).
+  , cmUsedDCs    :: Map.Map (Word64, Text) DataCon
+    -- ^ DataCons the translation actually used, keyed (varId, qualified name).
+  , cmUnresolved :: [UnresolvedVar]
+    -- ^ Referenced-but-unresolvable externals (emitted as 0x45 lazy poison).
+  , cmReachBinds :: [CoreBind]
+    -- ^ The reachable binds actually compiled — the meta walks run over this.
+  , cmVarNames   :: [(Word64, Text)]
+    -- ^ varId → human name for runtime unresolved-error naming (friction #12).
+  }
+
+translateModuleClosed :: HscEnv -> [CoreBind] -> String -> IO ClosedModule
 translateModuleClosed hscEnv allBinds targetName = do
   (closedBinds0, unresolved) <- resolveExternals varId hscEnv allBinds
   closedBinds <- uniquifyDuplicateBinders closedBinds0
@@ -563,7 +579,21 @@ translateModuleClosed hscEnv allBinds targetName = do
   -- (The TIDEPOOL_DUMP_CLOSED / TIDEPOOL_VARID_AUDIT diagnostics above keep
   -- scanning the FULL closedBinds: they are forensics over the whole compiled
   -- graph, independent of what reaches the table.)
-  return (nodes, usedDCs, trulyUnresolved, reachBinds)
+  -- varId → human name map for RUNTIME error naming (friction #12): every id
+  -- that can surface as a runtime "unresolved variable" — the 0x45-poisoned
+  -- unresolved externals plus any dangling reference (session vals are the
+  -- legit class) — shipped in meta.cbor so the JIT names the symbol instead
+  -- of a bare hex.
+  let varNames =
+        [ (uvKey uv, T.pack (uvModule uv ++ "." ++ uvName uv)) | uv <- unresolved ]
+        ++ [ (vid, T.pack (nameDangling vid)) | vid <- Set.toList danglingIds ]
+  return ClosedModule
+    { cmNodes      = nodes
+    , cmUsedDCs    = usedDCs
+    , cmUnresolved = trulyUnresolved
+    , cmReachBinds = reachBinds
+    , cmVarNames   = varNames
+    }
   where
     collectBound :: Set.Set Word64 -> FlatNode -> Set.Set Word64
     collectBound acc (NLam b _) = Set.insert b acc

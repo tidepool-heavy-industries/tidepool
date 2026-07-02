@@ -45,8 +45,8 @@ pub enum RuntimeError {
     BadPointer,
     #[error("forced type metadata (should be dead code)")]
     TypeMetadata,
-    #[error("unresolved variable VarId({0:#x}) [tag='{tag}', key={key}]", tag=(*.0 >> 56) as u8 as char, key=(*.0 & ((1u64 << 56) - 1)))]
-    UnresolvedVar(u64),
+    #[error("unresolved variable VarId({0:#x}){name} — a compiler bug, not a user error; report it (TIDEPOOL_VARID_AUDIT={0:x} on the extract names it too)", name = .1.as_deref().map(|n| format!(" = {n}")).unwrap_or_default())]
+    UnresolvedVar(u64, Option<String>),
     #[error("application of null function pointer")]
     NullFunPtr,
     #[error("application of non-closure (tag={0})")]
@@ -1133,20 +1133,72 @@ pub fn gc_trigger_last_vmctx() -> usize {
     GC_TRIGGER_LAST_VMCTX.load(Ordering::SeqCst)
 }
 
+/// varId → human name, registered from meta.cbor's `var_names` at load time
+/// so runtime unresolved-variable errors can NAME the symbol (friction #12).
+/// Process-global and append-only: ids are content-addressed (stableVarId /
+/// disambiguated local hashes), so cross-session collisions mean identical
+/// names anyway.
+static VAR_NAMES: std::sync::OnceLock<std::sync::RwLock<std::collections::HashMap<u64, String>>> =
+    std::sync::OnceLock::new();
+
+/// Register varId → name pairs (from `MetaWarnings::var_names`).
+pub fn register_var_names(pairs: &[(u64, String)]) {
+    if pairs.is_empty() {
+        return;
+    }
+    let map = VAR_NAMES.get_or_init(Default::default);
+    let mut w = map.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (id, name) in pairs {
+        w.insert(*id, name.clone());
+    }
+}
+
+fn lookup_var_name(id: u64) -> Option<String> {
+    let map = VAR_NAMES.get()?;
+    let r = map.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    r.get(&id).cloned()
+}
+
+#[cfg(test)]
+mod var_name_tests {
+    use super::*;
+
+    #[test]
+    fn unresolved_error_names_registered_symbol() {
+        register_var_names(&[(0xfe00_0000_0000_1234, "GHC.Internal.List.cycle".into())]);
+        let e = RuntimeError::UnresolvedVar(
+            0xfe00_0000_0000_1234,
+            lookup_var_name(0xfe00_0000_0000_1234),
+        );
+        let msg = e.to_string();
+        assert!(msg.contains("= GHC.Internal.List.cycle"), "{msg}");
+        // unregistered ids still render (hex only, no name segment)
+        let bare = RuntimeError::UnresolvedVar(0xfe99, lookup_var_name(0xfe99));
+        assert!(bare.to_string().contains("VarId(0xfe99)"), "{bare}");
+    }
+}
+
 /// Called by JIT code when an unresolved external variable is forced.
 /// Returns null to allow execution to continue (will likely segfault later).
 /// In debug mode (TIDEPOOL_TRACE), logs and returns null.
 pub extern "C" fn unresolved_var_trap(var_id: u64) -> *mut u8 {
     let tag_char = (var_id >> 56) as u8 as char;
     let key = var_id & ((1u64 << 56) - 1);
+    let name = lookup_var_name(var_id);
+    let named = name
+        .as_deref()
+        .map(|n| format!(" = {n}"))
+        .unwrap_or_default();
     let msg = format!(
-        "[JIT] Forced unresolved external variable: VarId({:#x}) [tag='{}', key={}]",
+        "[JIT] Forced unresolved external variable: VarId({:#x}){named} [tag='{}', key={}] — \
+         a compiler bug, not a user error (the extract should have failed loudly); \
+         report it",
         var_id, tag_char, key
     );
     eprintln!("{}", msg);
     push_diagnostic(msg);
     RUNTIME_ERROR.with(|cell| {
-        *cell.borrow_mut() = Some(RuntimeError::UnresolvedVar(var_id));
+        *cell.borrow_mut() = Some(RuntimeError::UnresolvedVar(var_id, name));
     });
     error_poison_ptr()
 }

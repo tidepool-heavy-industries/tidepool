@@ -83,6 +83,12 @@ pub fn read_cbor(bytes: &[u8]) -> Result<RecursiveTree<CoreFrame<usize>>, ReadEr
 pub struct MetaWarnings {
     /// Whether the extracted code contains IO operations.
     pub has_io: bool,
+    /// varId → human name for ids that can surface as runtime "unresolved
+    /// variable" errors (0x45-poisoned unresolved externals + dangling refs,
+    /// session values included). The JIT registers these so the error names
+    /// the symbol instead of a bare hex (friction #12). Empty from older
+    /// extractors (the key is optional).
+    pub var_names: Vec<(u64, String)>,
     /// The GHC-inferred type of the eval's top-level expression (the `__user`
     /// binding), rendered to a string by `ppr` on the Haskell side. `None` when
     /// the extraction had no `__user` binding (fixture/Suite builds) or used an
@@ -233,6 +239,21 @@ fn parse_warnings(val: &Value) -> MetaWarnings {
                     "captured_type" => {
                         if let Value::Text(t) = v {
                             warnings.captured_type = Some(t.clone());
+                        }
+                    }
+                    "var_names" => {
+                        if let Value::Array(items) = v {
+                            for item in items {
+                                if let Value::Array(kv) = item {
+                                    if let (Some(Value::Integer(id)), Some(Value::Text(nm))) =
+                                        (kv.first(), kv.get(1))
+                                    {
+                                        if let Ok(id) = u64::try_from(*id) {
+                                            warnings.var_names.push((id, nm.clone()));
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     _ => {}
@@ -702,6 +723,41 @@ mod tests {
         ]);
         let (table, _) = read_metadata(&bytes).expect("distinct ids load cleanly");
         assert_eq!(table.len(), 2);
+    }
+
+    /// The optional `var_names` warnings key decodes into
+    /// `MetaWarnings::var_names` (runtime unresolved-error naming, #12);
+    /// absent key = empty vec (older extractors).
+    #[test]
+    fn read_metadata_parses_var_names() {
+        use ciborium::value::Value as Cbor;
+        let root = Cbor::Array(vec![
+            Cbor::Array(vec![]),
+            Cbor::Map(vec![
+                (Cbor::Text("has_io".into()), Cbor::Bool(false)),
+                (
+                    Cbor::Text("var_names".into()),
+                    Cbor::Array(vec![Cbor::Array(vec![
+                        Cbor::Integer(0xfe00_0000_0000_1234_u64.into()),
+                        Cbor::Text("GHC.Internal.List.cycle".into()),
+                    ])]),
+                ),
+            ]),
+        ]);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&super::super::HEADER_MAGIC);
+        bytes.extend_from_slice(&super::super::VERSION_MAJOR.to_be_bytes());
+        bytes.extend_from_slice(&super::super::VERSION_MINOR.to_be_bytes());
+        ciborium::ser::into_writer(&root, &mut bytes).unwrap();
+        let (_, warnings) = read_metadata(&bytes).expect("var_names meta loads");
+        assert_eq!(
+            warnings.var_names,
+            vec![(0xfe00_0000_0000_1234_u64, "GHC.Internal.List.cycle".to_string())]
+        );
+        // absent key → empty (backward compat)
+        let old = meta_bytes(vec![]);
+        let (_, w2) = read_metadata(&old).expect("old meta loads");
+        assert!(w2.var_names.is_empty());
     }
 
     // ---- type capture: the warnings map carries the eval's captured type ----

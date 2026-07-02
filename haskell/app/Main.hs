@@ -37,7 +37,7 @@ import Tidepool.Session
   ( SessionScope(..), SessionModule(..), SessionModuleKind(..), Generation(..)
   , sessionModuleString, sessionBinderName
   , mkThinSessionIface, writeSessionIface )
-import Tidepool.Translate (translateBinds, translateModuleClosed, collectDataCons, collectUsedDataCons, collectTransitiveDCons, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
+import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), collectDataCons, collectUsedDataCons, collectTransitiveDCons, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId)
 import Tidepool.CborEncode (encodeTree, encodeMetadata)
 
 main :: IO ()
@@ -161,7 +161,9 @@ processFile args path = do
               , not ("$" `isPrefixOf` n)]
         (allMetaMap, allReachBinds) <- foldM (\(acc, reachAcc) name -> do
           result <- try $ do
-            (nodes, usedDCs, unresolved, reachBinds) <- translateModuleClosed hscEnv binds name
+            ClosedModule { cmNodes = nodes, cmUsedDCs = usedDCs
+                         , cmUnresolved = unresolved, cmReachBinds = reachBinds
+                         } <- translateModuleClosed hscEnv binds name
             if not (null unresolved) then do
               let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
               putStrLn $ "  SKIPPED (" ++ name ++ "): unresolved external(s): " ++ unwords names
@@ -200,7 +202,7 @@ processFile args path = do
                         [ wiredInMeta, tyconMeta, Map.elems allMetaMap
                         , scanMeta, transitiveMeta ]
             hasIO = any (targetBindingHasIO binds) uniqueNames
-        let metaCbor = encodeMetadata allMeta hasIO mCapturedTy
+        let metaCbor = encodeMetadata allMeta hasIO mCapturedTy []
         let metaFile = outDir </> "meta.cbor"
         BS.writeFile metaFile metaCbor
         putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
@@ -231,7 +233,7 @@ processFile args path = do
             -- loader rejects them loudly instead of one silently winning.
             allMeta = mergeMetaPreserving
                         [ wiredInMeta, tyconMeta, usedMeta, transitiveMeta ]
-        let metaCbor = encodeMetadata allMeta False mCapturedTy
+        let metaCbor = encodeMetadata allMeta False mCapturedTy []
         let metaFile = outDir </> "meta.cbor"
         BS.writeFile metaFile metaCbor
         putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
@@ -262,7 +264,9 @@ processFile args path = do
 -- ('processSessionFile') so the runtime gets identical JIT-able Core either way.
 writeWholeModuleClosed :: FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> String -> IO ()
 writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy targetName = do
-  (nodes, usedDCs, unresolved, reachBinds) <- translateModuleClosed hscEnv binds targetName
+  ClosedModule { cmNodes = nodes, cmUsedDCs = usedDCs, cmUnresolved = unresolved
+               , cmReachBinds = reachBinds, cmVarNames = varNames
+               } <- translateModuleClosed hscEnv binds targetName
   if not (null unresolved) then do
     let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
     error $ "Unresolved external(s): " ++ unwords names
@@ -286,7 +290,7 @@ writeWholeModuleClosed outDir hscEnv binds tycons mCapturedTy targetName = do
       allMeta = mergeMetaPreserving
                   [ wiredInMeta, tyconMeta, usedMeta, scanMeta, transitiveMeta ]
       hasIO = targetBindingHasIO binds targetName
-  let metaCbor = encodeMetadata allMeta hasIO mCapturedTy
+  let metaCbor = encodeMetadata allMeta hasIO mCapturedTy varNames
   let metaFile = outDir </> "meta.cbor"
   BS.writeFile metaFile metaCbor
   putStrLn $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"

@@ -33,14 +33,15 @@ module Tidepool.Data.Text
   , span, break, filter, partition
   , find, findIndex, all, any
   , split, groupBy
+  , lines, words
   ) where
 
-import Prelude hiding (takeWhile, dropWhile, span, break, filter, all, any, null)
+import Prelude hiding (takeWhile, dropWhile, span, break, filter, all, any, null, lines, words)
 import Data.Text hiding
   ( takeWhile, takeWhileEnd, dropWhile, dropWhileEnd, dropAround
   , span, break, filter, partition
   , find, findIndex, all, any
-  , split, groupBy, pack )
+  , split, groupBy, pack, lines, words )
 import Data.Text (null, empty)
 import qualified Data.Text as DT (pack)
 import Data.Text.Internal (Text(..), text)
@@ -48,6 +49,7 @@ import Data.Text.Unsafe (Iter(..), iter, reverseIter, unsafeTail)
 import qualified Data.Text.Array as A
 import Data.Text.Internal.Encoding.Utf8 (utf8LengthByLeader, chr2, chr3, chr4)
 import Data.Text.Internal.Unsafe.Char (unsafeChr8)
+import Data.Char (isSpace)
 import Control.Monad.ST (ST, runST)
 
 -- | Polymorphic @pack@: identity on 'Text', 'Data.Text.pack' on 'String'.
@@ -266,3 +268,35 @@ findAIndexOrEnd q t@(Text _arr _off len) = go 0
     where go !i | i >= len || q c = i
                 | otherwise       = go (i+d)
                 where Iter c d    = iter t i
+
+-- ---------------------------------------------------------------------------
+-- lines / words — HOME guarded corecursion.
+--
+-- The external Data.Text bodies overflow the JIT stack when the list is built
+-- WITHOUT a fused consumer: `xs <- pure (lines big)` at a session bind forces
+-- the whole spine and the -O2 unfolding's recursion is not constructor-guarded
+-- after inlining (found live 2026-07-02: 20k-line `shLines` output died at
+-- bind while `length (lines o)` in one fused expression returned 20000).
+-- These bodies keep the recursive call directly under a cons cell, which the
+-- JIT thunks (friction #10).
+-- ---------------------------------------------------------------------------
+
+lines :: Text -> [Text]
+lines t0
+  | null t0   = []
+  | otherwise = go t0
+  where
+    go s = case break (== '\n') s of
+      (l, rest) -> case uncons rest of
+        Nothing -> [l]
+        Just (_, rest')
+          | null rest' -> [l]   -- trailing newline: no empty final segment
+          | otherwise  -> l : go rest'
+
+words :: Text -> [Text]
+words = go
+  where
+    go s = case dropWhile isSpace s of
+      s' | null s'   -> []
+         | otherwise -> case break isSpace s' of
+             (w, rest) -> w : go rest

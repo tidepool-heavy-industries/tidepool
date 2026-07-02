@@ -136,7 +136,7 @@ pub fn check_jit_vs_eval(expr: CoreExpr, nursery_size: usize) -> Result<(), Test
             // for a very small nursery. Skip these rather than failing.
             prop_assume!(false, "HeapOverflow with tiny nursery");
         }
-        (Ok(_), Err(JitError::Yield(YieldError::Runtime(RuntimeError::UnresolvedVar(_))))) => {
+        (Ok(_), Err(JitError::Yield(YieldError::Runtime(RuntimeError::UnresolvedVar(..))))) => {
             // UnresolvedVar in synthetic IR: LetRec simple bindings with
             // inter-dependencies are thunked by the interpreter but evaluated
             // sequentially by the JIT. GHC Core LetRec always has Lam/Con RHS.

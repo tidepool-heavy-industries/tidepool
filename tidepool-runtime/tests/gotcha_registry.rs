@@ -354,6 +354,18 @@ fn works_cycle_value_knot() {
     );
 }
 
+/// Vendored `lines`/`words` (friction #10, 2026-07-02): guarded corecursion.
+/// The external Data.Text bodies overflowed the JIT stack when the list was
+/// built without a fused consumer; semantics must stay Data.Text-exact
+/// (`lines "a\nb\n" == ["a","b"]` — no empty final segment).
+#[test]
+fn works_lines_words_vendored() {
+    works(
+        "pure (object [\"n\" .= length (lines (T.replicate 20000 \"x\\n\")), \"trail\" .= lines \"a\\nb\\n\", \"mid\" .= lines \"a\\n\\nb\", \"ws\" .= words \" a b\\tc \"])",
+        serde_json::json!({"n": 20000, "trail": ["a","b"], "mid": ["a","","b"], "ws": ["a","b","c"]}),
+    );
+}
+
 /// NON-tail recursion overflows (~10-20K frames) with a CLEAN "stack overflow"
 /// yield error — never SIGSEGV. (500k non-tail frames here.) Contrast
 /// `works_tco_deep_tail_recursion`.

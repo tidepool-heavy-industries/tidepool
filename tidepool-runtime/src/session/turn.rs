@@ -204,6 +204,8 @@ pub fn compile_session_turn(
     }
     let expr = read_cbor(&std::fs::read(&expr_path)?)?;
     let (table, warnings) = read_metadata(&std::fs::read(&meta_path)?)?;
+    // Runtime unresolved-error naming (friction #12) — see lib.rs twin sites.
+    tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
 
     let binders = if is_bind {
         let json = std::fs::read_to_string(&bb_path).map_err(|e| {

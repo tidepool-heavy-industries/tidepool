@@ -95,18 +95,23 @@ encodeFlatAltCon = \case
 -- (the eval's @__user@ binding type — see GhcPipeline.capturedUserType) it also
 -- carries @captured_type@. The Rust reader (serial/read.rs parse_warnings)
 -- tolerates either map shape, so omitting the key on Nothing is backward-safe.
-encodeMetadata :: [(Word64, Text, Int, Int, [Text], Text)] -> Bool -> Maybe Text -> ByteString
-encodeMetadata entries hasIO mCapturedType = tplrHeader <> toStrictByteString (
+encodeMetadata :: [(Word64, Text, Int, Int, [Text], Text)] -> Bool -> Maybe Text -> [(Word64, Text)] -> ByteString
+encodeMetadata entries hasIO mCapturedType varNames = tplrHeader <> toStrictByteString (
   encodeListLen 2
   <> (encodeListLen (fromIntegral (length entries)) <> foldMap encodeMetaEntry entries)
   <> warningsMap)
   where
-    warningsMap = case mCapturedType of
-      Nothing -> encodeMapLen 1
-                 <> encodeString "has_io" <> encodeBool hasIO
-      Just ty -> encodeMapLen 2
-                 <> encodeString "has_io" <> encodeBool hasIO
-                 <> encodeString "captured_type" <> encodeString ty
+    -- Optional keys are simply omitted; the Rust reader skips unknown keys,
+    -- so both directions are version-tolerant.
+    warningsMap =
+      encodeMapLen (1 + maybe 0 (const 1) mCapturedType
+                      + (if null varNames then 0 else 1))
+      <> encodeString "has_io" <> encodeBool hasIO
+      <> maybe mempty (\ty -> encodeString "captured_type" <> encodeString ty) mCapturedType
+      <> (if null varNames then mempty else
+            encodeString "var_names"
+            <> encodeListLen (fromIntegral (length varNames))
+            <> foldMap (\(k, v) -> encodeListLen 2 <> encodeWord64 k <> encodeString v) varNames)
 
 encodeMetaEntry :: (Word64, Text, Int, Int, [Text], Text) -> Encoding
 encodeMetaEntry (dcid, name, tag, arity, bangs, qualName) =

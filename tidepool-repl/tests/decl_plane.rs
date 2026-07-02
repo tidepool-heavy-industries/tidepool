@@ -222,22 +222,11 @@ async fn type_alias_and_newtype() {
     repl.close().await.expect_ok("close");
 }
 
-/// CASE 6 — record syntax: selectors on FRESH values work; a field selector on a
-/// SESSION-BOUND record value through the Eff reference path CRASHES (kind=4).
-///
-/// CONFIRMED current behavior (this test pins + localizes it):
-///   * `px (P 3 4)` on a fresh value (plain-eval path) => 3. WORKS.
-///   * bind `p <- pure (P 1 2)`; then referencing it:
-///       - `case p of { P a b -> b }` (bare → PURE fallback path) => 2. WORKS.
-///       - `pure (py p)` (Eff path, record selector) → CRASHES with
-///         `[JIT] runtime_error kind=4 (TypeMetadata)` / `[CASE TRAP]` /
-///         "forced type metadata (should be dead code)" — surfaced as a clean
-///         MCP error (no hang).
-/// The diagnostic refs below LOCALIZE whether the crash is the record SELECTOR
-/// or the Eff `run_fragment` path over a session-bound custom ADT. Same crash
-/// SIGNATURE as the known kind=4/TypeMetadata class, but here with NO rebind and
-/// NO type-redefine — a fresh manifestation worth the integrator's eyes.
-/// Aspirational correct result (`py p` => 2) is the ignored `record_selector_*`.
+/// CASE 6 — record syntax on session-bound values, ALL PATHS. Historically the
+/// Eff reference path over a live session-bound custom ADT crashed kind=4
+/// TypeMetadata (selector AND case alike; pure-fallback path worked). Fixed
+/// collaterally 2026-07-02 (verbatim-wrapper + LetRec-knot emit work); this
+/// test now ASSERTS correct values on every path it previously only logged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn record_syntax_selectors_localized() {
     if !extract_available() {
@@ -262,34 +251,17 @@ async fn record_syntax_selectors_localized() {
         .await
         .expect_ok("bind p = P 1 2");
 
-    // Ref A — PURE fallback path (bare case): expected to WORK (cf. case 4).
-    let ref_a = repl.eval("case p of { P a b -> b }").await;
-    eprintln!(
-        "[case6] ref A (pure-path case):  is_error={} text={}",
-        ref_a.is_error, ref_a.text
-    );
+    // Ref A — PURE fallback path (bare case).
+    let ref_a = repl.eval_ok("case p of { P a b -> b }").await;
+    assert!(ref_a.contains('2'), "pure-path case: expected 2, got: {ref_a}");
 
-    // Ref B' — Eff path with a case (not a selector): localizes selector vs path.
-    let ref_b2 = repl.eval("pure (case p of { P a b -> b })").await;
-    eprintln!(
-        "[case6] ref B' (Eff-path case):  is_error={} text={}",
-        ref_b2.is_error, ref_b2.text
-    );
+    // Ref B' — Eff path with a case (not a selector).
+    let ref_b2 = repl.eval_ok("pure (case p of { P a b -> b })").await;
+    assert!(ref_b2.contains('2'), "Eff-path case: expected 2, got: {ref_b2}");
 
-    // Ref B — Eff path with the record SELECTOR: the crashing case.
-    let ref_b = repl.eval("pure (py p)").await;
-    eprintln!(
-        "[case6] ref B  (Eff-path sel):   is_error={} text={}",
-        ref_b.is_error, ref_b.text
-    );
-
-    // WIDER SCOPE (confirmed): the crash is NOT selector-specific — BOTH the
-    // Eff-path case (ref B') and the Eff-path selector (ref B) crash with the
-    // SAME kind=4 TypeMetadata signature, while the PURE-path case (ref A) works.
-    // So the fault is the Eff `run_fragment` REFERENCE path while a session-bound
-    // CUSTOM-ADT value is live (even a `pure (123::Int)` that ignores `p` crashes
-    // through that path). The crash is GRACEFUL (clean MCP error, no hang), and
-    // the PURE path is still usable — the session is not fully dead.
+    // Ref B — Eff path with the record SELECTOR (the historical kind=4 crash).
+    let ref_b = repl.eval_ok("pure (py p)").await;
+    assert!(ref_b.contains('2'), "Eff-path selector: expected 2, got: {ref_b}");
     let survive = repl.eval("123 :: Int").await; // bare → pure-fallback path
     eprintln!(
         "[case6] survive (bare/pure path): is_error={} text={}",
@@ -304,11 +276,11 @@ async fn record_syntax_selectors_localized() {
     repl.close().await.expect_ok("close");
 }
 
-/// ASPIRATIONAL — record field selector on a session-bound value via the Eff path.
-/// Currently CRASHES (kind=4 TypeMetadata / CASE TRAP); see
-/// `record_syntax_selectors_localized`. Un-ignore when the Eff-path force of a
-/// session-bound custom ADT through a selector is fixed.
-#[ignore = "BUG: record selector on session-bound value via Eff path crashes (kind=4 TypeMetadata)"]
+/// Record field selector on a session-bound value via the Eff path — was the
+/// last standing kind=4 TypeMetadata crash, fixed collaterally 2026-07-02 by
+/// the verbatim-wrapper + LetRec-knot emit work (verified live: bare selector,
+/// record-dot, and a mapped section `(.py)` over two session binds all
+/// return correct values). Un-ignored the same day.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn record_selector_on_bound_value_via_eff_path() {
     if !extract_available() {
