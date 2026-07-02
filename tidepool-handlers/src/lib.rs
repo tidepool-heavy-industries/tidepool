@@ -3638,13 +3638,32 @@ file_c.txt\n\
         assert!(result.is_err(), "gitShow with bad revspec should error");
     }
 
-    /// Full JIT end-to-end: `gitLog 1` on the real repo returns a Commit with a non-empty sha.
+    fn extract_available() -> bool {
+        let bin =
+            std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".to_string());
+        std::process::Command::new(&bin)
+            .arg("--help")
+            .output()
+            .is_ok()
+    }
+
+    /// Full JIT end-to-end: `gitLog 1` on the real repo returns a Commit record
+    /// with a 40-character sha field, exercising the generated Tidepool.Effects
+    /// wiring + Records visibility + con-name/arity agreement through the JIT.
+    /// Skips cleanly when TIDEPOOL_EXTRACT is unavailable.
     #[tokio::test]
     async fn test_jit_git_log_returns_commit() {
+        if !extract_available() {
+            eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+            return;
+        }
         let decls = tidepool_mcp::standard_decls();
+        // Two assertions: list has exactly 1 element, and sha field is 40 chars.
         let source = jit_test_source(&[
             "commits <- gitLog 1",
-            "case commits of { (c:_) -> pure (toJSON (c.sha /= \"\")); _ -> pure (toJSON False) }",
+            "let n = length commits",
+            "let shaLen = case commits of { (c:_) -> T.length c.sha; _ -> 0 }",
+            "pure (toJSON (n == 1 && shaLen == 40))",
         ]);
         let include = prelude_include();
         let effects_dir = tidepool_mcp::ensure_effects_module(&decls).unwrap();
@@ -3675,7 +3694,7 @@ file_c.txt\n\
             Ok(v) => assert_eq!(
                 v.to_json(),
                 serde_json::json!(true),
-                "gitLog 1 should return a Commit with non-empty sha"
+                "gitLog 1 should return exactly 1 Commit with a 40-char sha"
             ),
             Err(e) => panic!("JIT gitLog eval failed: {:?}", e),
         }
