@@ -13,6 +13,8 @@ import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
 import Schemes (loopM)
 import Diff (applyDiff)
+import qualified Data.Map.Strict as Map
+import qualified Tidepool.Data.Text as T
 
 -- ===== small generic helpers =====
 -- (`concatMapM` comes from Tidepool.Prelude)
@@ -169,3 +171,73 @@ chart depth entry = do
         Left _ -> Nothing)
     roleHuman n = ask (SObj [("role", SStr)]) ("Role of " <> nodeName n <> "?  " <> nodeText n)
                     <&> \v -> maybe "" id (v ^? key "role" . _String)
+
+-- ===== workspace scoping (2026-07-01, from the chart-noise finding) =====
+
+-- | In-workspace test: the daemon reports workspace files path-RELATIVE and
+-- external ones (rustup stdlib, registry deps) absolute.
+isLocal :: LspNode -> Bool
+isLocal n = not (T.isPrefixOf "/" (nodeFile n))
+
+-- | Edge variants that stay inside the workspace — the right default for
+-- charts and walks (stdlib Option/Vec noise otherwise dominates every frontier).
+localCallees, localCallers, localRefs :: LspNode -> M [LspNode]
+localCallees = fmap (filter isLocal) . calleesOf
+localCallers = fmap (filter isLocal) . callersOf
+localRefs    = fmap (filter isLocal) . refsOf
+
+-- | `the`, loud: resolve a symbol name to its ONE definition or error with
+-- the reason. For flows where absence means a typo, not a branch.
+findDef :: Text -> Text -> M LspNode
+findDef name intent =
+  the name intent >>= maybe (error ("no workspace definition found for '" <> name <> "'")) pure
+
+-- | Fully-autonomous subsystem chart: workspace-only callee walk, one-line
+-- roles from the local model with a hover-first-line fallback — NEVER
+-- suspends (bulk maps shouldn't park on a human). Junk-guard: filler roles
+-- ("function description", "summary") fall back to the hover line too.
+chartAuto :: Int -> LspNode -> M Value
+chartAuto depth entry = do
+  ns   <- walk localCallees (\_ -> pure True) depth entry
+  rows <- mapM describe (dedupeOn nodeKey ns)
+  pure (toJSON rows)
+  where
+    nodeKey n = nodeFile n <> ":" <> nodeName n
+    describe n = do
+      sig <- lspHover n
+      let fallback = firstUseful (maybe (nodeText n) id sig)
+      r <- tryLlm (SObj [("role", SStr), ("confidence", SNum)])
+             ("One short specific line: what does " <> nodeName n <> " do? If unsure, confidence 0.\n"
+              <> maybe (nodeText n) id sig)
+      let role = case r of
+            Right v -> case (v ^? key "confidence" . _Double, v ^? key "role" . _String) of
+              (Just c, Just s) | c >= 0.6 && not (junkRole s) -> s
+              _ -> fallback
+            Left _ -> fallback
+      pure (object ["sym" .= nodeName n, "file" .= nodeFile n, "line" .= nodeLine n, "role" .= role])
+    junkRole s = let l = T.toLower s
+                 in T.isInfixOf "description" l || l == "summary" || l == "function" || T.length l < 8
+    -- Hover text is fenced markdown ("```rust\n<sig>\n```\n\ndocs…"): the
+    -- useful fallback line is the first non-fence, non-blank one.
+    firstUseful t = case filter useful (lines t) of { (x : _) -> T.strip x; _ -> t }
+      where useful l = not (T.isPrefixOf "```" (T.strip l)) && not (T.null (T.strip l))
+
+-- | Order-preserving dedupe by key (frontiers revisit nodes via diamond edges).
+dedupeOn :: Eq b => (a -> b) -> [a] -> [a]
+dedupeOn f = go []
+  where
+    go _ [] = []
+    go seen (x : xs)
+      | f x `elem` seen = go seen xs
+      | otherwise       = x : go (f x : seen) xs
+
+-- | One-verb blast radius: the definition + every use site, grouped per file.
+-- @blastRadius "remap_generated_coords" "the coordinate remapper"@
+blastRadius :: Text -> Text -> M Value
+blastRadius name intent = do
+  d  <- findDef name intent
+  rs <- refsOf d
+  let byFile = sortOn (negate . snd) (Map.toList (Map.fromListWith (+) [ (nodeFile r, 1 :: Int) | r <- rs ]))
+  pure (object [ "def" .= (nodeFile d <> ":" <> showT (nodeLine d))
+               , "totalRefs" .= length rs
+               , "byFile" .= toJSON byFile ])
