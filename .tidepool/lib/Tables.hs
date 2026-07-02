@@ -1,4 +1,5 @@
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+-- | Tabular rendering utilities: aligned text tables from key/count pairs.
 module Tables where
 
 import Tidepool.Prelude

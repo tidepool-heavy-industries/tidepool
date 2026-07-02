@@ -17,6 +17,7 @@ import Diff (applyDiff)
 -- ===== small generic helpers =====
 -- (`concatMapM` comes from Tidepool.Prelude)
 
+-- | Safe index into a list; Nothing when the index is out of bounds.
 atMay :: [a] -> Int -> Maybe a
 atMay xs i
   | i < 0     = Nothing

@@ -14,9 +14,14 @@ sh cmd = do
     then pure p.stdout
     else error ("sh: exit " <> pack (show p.exitCode) <> ": " <> cmd <> "\n" <> p.stderr)
 
--- | sh, split into lines.
+-- | sh split into lines; inherits sh's loud-error on non-zero exit.
 shLines :: Text -> M [Text]
 shLines cmd = lines <$> sh cmd
+
+-- | Run a command; return the full Proc record (exitCode, stdout, stderr).
+-- Escape hatch when the caller needs the exit code or raw stderr without erroring.
+shProc :: Text -> M Proc
+shProc = run
 
 -- | grep -rn equivalent: search all files under a directory for a regex.
 -- @grepIn pat dir@ — content regex FIRST, directory path SECOND (same order as grepGlob).

@@ -22,20 +22,23 @@ loopM f = go
 -- § Recursion Schemes
 -- ===========================================================================
 
+-- | Hylomorphism: unfold 'g' to produce values, fold 'f' to consume them; 'z' is the base.
 hylo :: (b -> c -> c) -> c -> (a -> Maybe (b, a)) -> a -> c
 hylo f z g seed = case g seed of
   Nothing      -> z
   Just (b, a') -> f b (hylo f z g a')
 
+-- | Anamorphism: unfold a seed into a list via 'f' until it returns Nothing.
 ana :: (a -> Maybe (b, a)) -> a -> [b]
 ana f seed = case f seed of
   Nothing      -> []
   Just (b, a') -> b : ana f a'
 
+-- | Catamorphism: fold alias, same as 'foldr'.
 cata :: (a -> b -> b) -> b -> [a] -> b
 cata = foldr
 
--- Monadic variants
+-- | Monadic hylomorphism: unfold with 'g' and fold with 'f' inside any Monad.
 hyloM :: Monad m => (b -> c -> m c) -> c -> (a -> m (Maybe (b, a))) -> a -> m c
 hyloM f z g seed = do
   r <- g seed
@@ -43,6 +46,7 @@ hyloM f z g seed = do
     Nothing      -> pure z
     Just (b, a') -> hyloM f z g a' >>= f b
 
+-- | Monadic anamorphism: unfold a list with an effectful step until Nothing.
 anaM :: Monad m => (a -> m (Maybe (b, a))) -> a -> m [b]
 anaM f seed = do
   r <- f seed
@@ -54,21 +58,26 @@ anaM f seed = do
 -- § Bounded Iteration
 -- ===========================================================================
 
+-- | Apply 'f' n times from 'x', collecting each intermediate value (n=0 returns []).
 iterateN :: Int -> (a -> a) -> a -> [a]
 iterateN 0 f x = []
 iterateN n f x = x : iterateN (n - 1) f (f x)
 
+-- | Apply 'f' until the result is unchanged (fixed point), up to 1000 iterations.
 converge :: Eq a => (a -> a) -> a -> a
 converge = convergeN 1000
 
+-- | Apply 'f' until the result is unchanged, up to 'n' iterations.
 convergeN :: Eq a => Int -> (a -> a) -> a -> a
 convergeN n _ x | n <= 0 = x
 convergeN n f x = let x' = f x in if x == x' then x else convergeN (n - 1) f x'
 
+-- | Strict left scan: like Prelude.scanl but forces the accumulator at each step.
 scanl' :: (b -> a -> b) -> b -> [a] -> [b]
 scanl' f z []     = [z]
 scanl' f z (x:xs) = z : scanl' f (f z x) xs
 
+-- | Monadic left scan: collect each intermediate accumulator via an effectful step.
 scanlM :: Monad m => (b -> a -> m b) -> b -> [a] -> m [b]
 scanlM f z []     = pure [z]
 scanlM f z (x:xs) = do
@@ -76,17 +85,21 @@ scanlM f z (x:xs) = do
   rest <- scanlM f z' xs
   pure (z : rest)
 
+-- | Apply 'f' repeatedly while 'p' holds on the current value; collect all values.
 iterateWhile :: (a -> Bool) -> (a -> a) -> a -> [a]
 iterateWhile p f x = if p x then x : iterateWhile p f (f x) else []
 
+-- | Monadic iterateWhile: collect while 'p' holds, stepping with effectful 'f'.
 iterateWhileM :: Monad m => (a -> Bool) -> (a -> m a) -> a -> m [a]
 iterateWhileM p f x = if p x
   then do { x' <- f x; rest <- iterateWhileM p f x'; pure (x : rest) }
   else pure []
 
+-- | Apply 'f' until 'p' holds (like Prelude.until but name-conflict-free).
 until' :: (a -> Bool) -> (a -> a) -> a -> a
 until' p f x = if p x then x else until' p f (f x)
 
+-- | Monadic until: apply 'f' in any Monad until 'p' holds on the result.
 untilM :: Monad m => (a -> Bool) -> (a -> m a) -> a -> m a
 untilM p f x = if p x then pure x else f x >>= untilM p f
 
@@ -237,27 +250,35 @@ report fmt groups =
 -- § Rose Trees
 -- ===========================================================================
 
+-- | Rose tree: a node holds a value and zero or more child trees.
 data Rose a = Rose a [Rose a]
 
+-- | Extract the value at the root of a rose tree.
 roseVal :: Rose a -> a
 roseVal (Rose x _) = x
 
+-- | Extract the direct children of a rose tree node.
 roseChildren :: Rose a -> [Rose a]
 roseChildren (Rose _ cs) = cs
 
+-- | Bottom-up fold: fold children first, then combine with the node value via 'f'.
 foldRose :: (a -> [b] -> b) -> Rose a -> b
 foldRose f (Rose x cs) = f x (map (foldRose f) cs)
 
+-- | Map a function over every node value in the tree.
 mapRose :: (a -> b) -> Rose a -> Rose b
 mapRose f (Rose x cs) = Rose (f x) (map (mapRose f) cs)
 
+-- | Collect all node values depth-first (root first, then children left-to-right).
 flattenRose :: Rose a -> [a]
 flattenRose (Rose x cs) = x : concatMap flattenRose cs
 
+-- | Depth of the deepest leaf (a root-only tree has depth 0).
 roseDepth :: Rose a -> Int
 roseDepth (Rose _ []) = 0
 roseDepth (Rose _ cs) = 1 + foldl' (\acc c -> max acc (roseDepth c)) 0 cs
 
+-- | Total number of nodes in the tree.
 roseSize :: Rose a -> Int
 roseSize = foldRose (\_ cs -> 1 + foldl' (+) 0 cs)
 
@@ -291,6 +312,7 @@ pruneRoseM p (Rose x cs) = do
       pure (Just (Rose x cs'))
     else pure Nothing
 
+-- | Monadic mapMaybe: apply 'f' to each element, collecting Just results and discarding Nothing.
 mapMaybeM :: Monad m => (a -> m (Maybe b)) -> [a] -> m [b]
 mapMaybeM _ [] = pure []
 mapMaybeM f (x:xs) = do
