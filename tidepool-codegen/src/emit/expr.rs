@@ -1141,14 +1141,27 @@ fn compute_captures(
     exclude: Option<VarId>,
     label: &str,
 ) -> (CoreExpr, Vec<VarId>) {
+    compute_captures_promised(ctx, tree, body_idx, exclude, label, None)
+}
+
+/// [`compute_captures`] with a `promised` set: free vars in it are KEPT in the
+/// capture list even though they are not (yet) in env — the caller emits their
+/// slots as placeholders and patches them once the awaited binder lands (the
+/// LetRec value-knot case; see the Phase 3c knot-tying comment).
+fn compute_captures_promised(
+    ctx: &EmitContext,
+    tree: &CoreExpr,
+    body_idx: usize,
+    exclude: Option<VarId>,
+    label: &str,
+    promised: Option<&FxHashSet<VarId>>,
+) -> (CoreExpr, Vec<VarId>) {
     let body_tree = tree.extract_subtree(body_idx);
     let fvs = tidepool_repr::free_vars::free_vars(&body_tree);
+    let keep =
+        |v: &VarId| ctx.env.contains_key(v) || promised.is_some_and(|p| p.contains(v));
 
-    let dropped: Vec<VarId> = fvs
-        .iter()
-        .filter(|v| !ctx.env.contains_key(v))
-        .copied()
-        .collect();
+    let dropped: Vec<VarId> = fvs.iter().filter(|v| !keep(v)).copied().collect();
     if !dropped.is_empty() {
         ctx.trace_scope(&format!(
             "{} capture: dropped {} free vars not in scope: {:?}",
@@ -1157,10 +1170,7 @@ fn compute_captures(
             dropped
         ));
     }
-    let mut sorted_fvs: Vec<VarId> = fvs
-        .into_iter()
-        .filter(|v| ctx.env.contains_key(v))
-        .collect();
+    let mut sorted_fvs: Vec<VarId> = fvs.into_iter().filter(|v| keep(v)).collect();
 
     if let Some(binder) = exclude {
         if let Ok(idx) = sorted_fvs.binary_search(&binder) {
@@ -1388,23 +1398,39 @@ fn emit_lam(args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, Em
 /// The thunk entry function is a pure computation \u2014 `heap_force` handles the
 /// state machine (blackhole, call entry, write indirection, set evaluated).
 fn emit_thunk(args: EmitArgs, body_idx: usize) -> Result<SsaVal, EmitError> {
+    Ok(emit_thunk_promised(args, body_idx, None)?.0)
+}
+
+/// [`emit_thunk`] with a `promised` capture set for LetRec value knots: each
+/// promised var (a letrec binder not yet in env — self or a later sibling)
+/// gets a real capture SLOT holding a null placeholder, and its
+/// `(var, slot offset)` is returned so the caller can register it in
+/// `pending_capture_updates` for patching when the binder lands. Null is safe
+/// meanwhile: the GC's slot walker skips null (`!ptr.is_null()` guard), and
+/// nothing can force the thunk before the letrec completes.
+fn emit_thunk_promised(
+    args: EmitArgs,
+    body_idx: usize,
+    promised: Option<&FxHashSet<VarId>>,
+) -> Result<(SsaVal, Vec<(VarId, i32)>), EmitError> {
     // Extract the sub-expression and compute free variables
     let (body_tree, sorted_fvs) =
-        compute_captures(args.ctx, args.sess.tree, body_idx, None, "thunk");
+        compute_captures_promised(args.ctx, args.sess.tree, body_idx, None, "thunk", promised);
 
-    let captures: Vec<(VarId, SsaVal)> = sorted_fvs
+    let captures: Vec<(VarId, Option<SsaVal>)> = sorted_fvs
         .iter()
         .map(|v| {
-            let val = args.ctx.env.get(v).ok_or_else(|| {
-                EmitError::MissingCaptureVar(
+            match args.ctx.env.get(v) {
+                Some(val) => Ok((*v, Some(*val))),
+                None if promised.is_some_and(|p| p.contains(v)) => Ok((*v, None)),
+                None => Err(EmitError::MissingCaptureVar(
                     *v,
                     format!(
                         "Thunk capture: not in env (env has {} vars)",
                         args.ctx.env.len()
                     ),
-                )
-            })?;
-            Ok::<_, EmitError>((*v, *val))
+                )),
+            }
         })
         .collect::<Result<Vec<_>, EmitError>>()?;
 
@@ -1515,8 +1541,9 @@ fn emit_thunk(args: EmitArgs, body_idx: usize) -> Result<SsaVal, EmitError> {
         eprintln!("=== CLIF {} ({} captures) ===", thunk_name, captures.len());
         for (i, (var_id, ssaval)) in captures.iter().enumerate() {
             let kind = match ssaval {
-                SsaVal::HeapPtr(_) => "HeapPtr",
-                SsaVal::Raw(_, tag) => &format!("Raw(tag={})", tag),
+                Some(SsaVal::HeapPtr(_)) => "HeapPtr",
+                Some(SsaVal::Raw(_, tag)) => &format!("Raw(tag={})", tag),
+                None => "PENDING (letrec knot placeholder)",
             };
             eprintln!("  capture[{}]: VarId({:#x}) = {}", i, var_id.0, kind);
         }
@@ -1580,23 +1607,36 @@ fn emit_thunk(args: EmitArgs, body_idx: usize) -> Result<SsaVal, EmitError> {
         THUNK_CODE_PTR_OFFSET,
     );
 
-    // Store captures
-    for (i, (_, ssaval)) in captures.iter().enumerate() {
-        let cap_val = ensure_heap_ptr(
-            args.builder,
-            args.sess.vmctx,
-            args.sess.gc_sig,
-            args.sess.oom_func,
-            *ssaval,
-        );
+    // Store captures; promised (knot) slots get a null placeholder and are
+    // reported back for pending_capture_updates patching.
+    let mut pending_slots: Vec<(VarId, i32)> = Vec::new();
+    for (i, (var_id, maybe_val)) in captures.iter().enumerate() {
         let offset = THUNK_CAPTURED_OFFSET + 8 * i as i32;
-        args.builder
-            .ins()
-            .store(MemFlags::trusted(), cap_val, thunk_ptr, offset);
+        match maybe_val {
+            Some(ssaval) => {
+                let cap_val = ensure_heap_ptr(
+                    args.builder,
+                    args.sess.vmctx,
+                    args.sess.gc_sig,
+                    args.sess.oom_func,
+                    *ssaval,
+                );
+                args.builder
+                    .ins()
+                    .store(MemFlags::trusted(), cap_val, thunk_ptr, offset);
+            }
+            None => {
+                let null = args.builder.ins().iconst(types::I64, 0);
+                args.builder
+                    .ins()
+                    .store(MemFlags::trusted(), null, thunk_ptr, offset);
+                pending_slots.push((*var_id, offset));
+            }
+        }
     }
 
     args.builder.declare_value_needs_stack_map(thunk_ptr);
-    Ok(SsaVal::HeapPtr(thunk_ptr))
+    Ok((SsaVal::HeapPtr(thunk_ptr), pending_slots))
 }
 
 // ---------------------------------------------------------------------------
@@ -2318,13 +2358,14 @@ impl EmitContext {
                 simple_bindings.iter().map(|(b, r)| (*b, *r)).collect();
             let deferred_simple =
                 topo_sort_deferred_simple(deferred_simple, bindings, args.sess.tree);
+            let letrec_binders: FxHashSet<VarId> =
+                bindings.iter().map(|(b, _)| *b).collect();
             for (binder, rhs_idx) in deferred_simple.iter() {
+                let fvs = tidepool_repr::free_vars::free_vars(
+                    &args.sess.tree.extract_subtree(*rhs_idx),
+                );
                 let resolvable_now = is_trivial_field(*rhs_idx, args.sess.tree)
-                    && tidepool_repr::free_vars::free_vars(
-                        &args.sess.tree.extract_subtree(*rhs_idx),
-                    )
-                    .iter()
-                    .all(|v| args.ctx.env.contains_key(v));
+                    && fvs.iter().all(|v| args.ctx.env.contains_key(v));
                 let sv = if resolvable_now {
                     emit_subtree(
                         EmitArgs {
@@ -2336,7 +2377,18 @@ impl EmitContext {
                         *rhs_idx,
                     )?
                 } else {
-                    emit_thunk(
+                    // Value-knot support (see the rec-present Phase 3c twin):
+                    // cyclic simple bindings capture not-yet-bound letrec
+                    // binders via null placeholder slots, patched by
+                    // letrec_post_simple_step below.
+                    let promised: FxHashSet<VarId> = fvs
+                        .iter()
+                        .filter(|v| {
+                            !args.ctx.env.contains_key(v) && letrec_binders.contains(v)
+                        })
+                        .copied()
+                        .collect();
+                    let (sv, pending) = emit_thunk_promised(
                         EmitArgs {
                             ctx: args.ctx,
                             sess: args.sess,
@@ -2344,9 +2396,41 @@ impl EmitContext {
                             tail: TailCtx::NonTail,
                         },
                         *rhs_idx,
-                    )?
+                        if promised.is_empty() {
+                            None
+                        } else {
+                            Some(&promised)
+                        },
+                    )?;
+                    if !pending.is_empty() {
+                        let SsaVal::HeapPtr(thunk_ptr) = sv else {
+                            unreachable!("emit_thunk_promised returns a heap ptr")
+                        };
+                        let state = args.ctx.letrec_state_mut(state_idx);
+                        for (awaited, offset) in pending {
+                            state
+                                .pending_capture_updates
+                                .entry(awaited)
+                                .or_default()
+                                .push(ClosureCaptureSlot {
+                                    closure_ptr: thunk_ptr,
+                                    offset,
+                                });
+                        }
+                    }
+                    sv
                 };
                 args.ctx.env.insert(*binder, sv);
+                Self::letrec_post_simple_step(
+                    EmitArgs {
+                        ctx: args.ctx,
+                        sess: args.sess,
+                        builder: args.builder,
+                        tail: TailCtx::NonTail,
+                    },
+                    binder,
+                    state_idx,
+                )?;
             }
             return Ok(());
         }
@@ -2810,11 +2894,12 @@ impl EmitContext {
         // resolves to unresolved-on-force, unchanged. The post-step then fills
         // any closure captures / deferred Con fields that depended on this
         // binder with its (thunk or eager) value. Errors were poisoned in 2.5.
+        let letrec_binders: FxHashSet<VarId> = bindings.iter().map(|(b, _)| *b).collect();
         for (binder, rhs_idx) in deferred_simple.iter() {
+            let fvs =
+                tidepool_repr::free_vars::free_vars(&args.sess.tree.extract_subtree(*rhs_idx));
             let resolvable_now = is_trivial_field(*rhs_idx, args.sess.tree)
-                && tidepool_repr::free_vars::free_vars(&args.sess.tree.extract_subtree(*rhs_idx))
-                    .iter()
-                    .all(|v| args.ctx.env.contains_key(v));
+                && fvs.iter().all(|v| args.ctx.env.contains_key(v));
             let sv = if resolvable_now {
                 emit_subtree(
                     EmitArgs {
@@ -2826,7 +2911,23 @@ impl EmitContext {
                     *rhs_idx,
                 )?
             } else {
-                emit_thunk(
+                // Knot-tying for recursive VALUE bindings (corecursive knots
+                // like base `cycle`'s floated `xs' = xs ++ xs'`): captures
+                // naming letrec binders not yet in env — self included — are
+                // emitted as null placeholder slots and patched by
+                // `letrec_post_simple_step` when the awaited binder lands
+                // (the same pending-capture machinery the Lam pre-alloc knot
+                // uses). Previously these were silently DROPPED by the
+                // capture filter → unresolved_var_trap on force (the `cycle`
+                // Known-Limit, now fixed).
+                let promised: FxHashSet<VarId> = fvs
+                    .iter()
+                    .filter(|v| {
+                        !args.ctx.env.contains_key(v) && letrec_binders.contains(v)
+                    })
+                    .copied()
+                    .collect();
+                let (sv, pending) = emit_thunk_promised(
                     EmitArgs {
                         ctx: args.ctx,
                         sess: args.sess,
@@ -2834,7 +2935,29 @@ impl EmitContext {
                         tail: TailCtx::NonTail,
                     },
                     *rhs_idx,
-                )?
+                    if promised.is_empty() {
+                        None
+                    } else {
+                        Some(&promised)
+                    },
+                )?;
+                if !pending.is_empty() {
+                    let SsaVal::HeapPtr(thunk_ptr) = sv else {
+                        unreachable!("emit_thunk_promised returns a heap ptr")
+                    };
+                    let state = args.ctx.letrec_state_mut(state_idx);
+                    for (awaited, offset) in pending {
+                        state
+                            .pending_capture_updates
+                            .entry(awaited)
+                            .or_default()
+                            .push(ClosureCaptureSlot {
+                                closure_ptr: thunk_ptr,
+                                offset,
+                            });
+                    }
+                }
+                sv
             };
             args.ctx.trace_scope(&format!(
                 "{} LetRec(simple) {:?}",

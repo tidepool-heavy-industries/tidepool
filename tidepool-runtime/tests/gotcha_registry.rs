@@ -340,12 +340,18 @@ fn stale_doc_large_double_literal_now_works() {
     works("pure (1.79e308 :: Double)", serde_json::json!(1.79e308));
 }
 
-/// `cycle` is an unresolved external — clean yield error ("unresolved
-/// variable"), NOT the silent SIGSEGV the style-guide table implies. Use manual
-/// recursion / `replicate`.
+/// `cycle` WORKS (fixed 2026-07-01): base's inlined body floats its
+/// corecursive knot (`xs' = xs ++ xs'`) to a top-level self-recursive simple
+/// binding, which the LetRec emit now knot-ties (promised captures → null
+/// placeholder slot → pending_capture_updates patch) instead of silently
+/// dropping the self-capture → unresolved_var_trap on force. Pins BOTH the
+/// re-exported name and the qualified base path.
 #[test]
-fn loud_fail_cycle_unresolved_external() {
-    loud_fail("pure (take 3 (cycle [1,2,3]) :: [Int])", "unresolved");
+fn works_cycle_value_knot() {
+    works(
+        "pure (object [\"cyc\" .= (take 5 (cycle [1,2,3]) :: [Int]), \"qual\" .= (take 4 (P.cycle \"ab\") :: String)])",
+        serde_json::json!({"cyc": [1,2,3,1,2], "qual": "abab"}),
+    );
 }
 
 /// NON-tail recursion overflows (~10-20K frames) with a CLEAN "stack overflow"
