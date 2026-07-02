@@ -185,11 +185,24 @@ impl ModuleEnv {
         ModuleEnv {
             // NoMonomorphismRestriction: pure binds routed as decls must
             // generalize (see EVAL_PRAGMAS note in tidepool-mcp).
+            //
+            // MUST track the production decl module's extension set
+            // (`tidepool_mcp::decl_pragmas` = EVAL_PRAGMAS + NMR) so this
+            // test/standalone default is FAITHFUL — else a decl valid in
+            // production fails here (or vice-versa). The layer boundary
+            // (runtime can't see mcp) blocks sharing the list, so it is
+            // mirrored here; the sole intentional divergence is
+            // `NoImplicitPrelude` (standalone relies on the implicit Prelude,
+            // via its plain-toolchain imports below). `OverloadedRecordDot` +
+            // `DuplicateRecordFields` were MISSING — record-dot (`h.path`, a
+            // core idiom) compiled live but not here (friction #28).
             pragmas: "{-# LANGUAGE OverloadedStrings, NoMonomorphismRestriction, DataKinds, TypeOperators, \
-                      FlexibleContexts, FlexibleInstances, GADTs, ScopedTypeVariables, \
+                      FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, \
+                      PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, \
                       LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, \
                       ViewPatterns, BangPatterns, TypeApplications, BlockArguments, \
-                      NumericUnderscores, DeriveFunctor, DeriveFoldable, DeriveTraversable #-}"
+                      NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, \
+                      DeriveTraversable, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot #-}"
                 .to_string(),
             imports: vec![
                 "import qualified Tidepool.Data.Text as T".to_string(),

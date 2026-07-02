@@ -671,6 +671,29 @@ async fn pure_numeric_bind_type_generalizes_in_display() {
     repl.close().await.expect_ok("close");
 }
 
+/// Record-dot (`h.path`) is a core idiom that compiles in production; the
+/// standalone test ModuleEnv must be FAITHFUL to that (friction #28: it lacked
+/// `OverloadedRecordDot`, so a record-dot helper compiled live but not in
+/// tests). A pure helper using record-dot must bind (decl plane), and — under
+/// the NMR probe — show its constrained-polymorphic type, not empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_dot_helper_binds_and_shows_type() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.open_ok().await;
+    // Result type pinned by usage (`T.toUpper` → Text); the type stays
+    // constrained on the record (`HasField "path" r Text`).
+    let out = repl.run(&["let upPath h = T.toUpper h.path"]).await;
+    let text = out.expect_ok("record-dot helper binds");
+    assert!(
+        text.contains("HasField") || text.contains("path"),
+        "record-dot helper should show its constrained type, got: {text}"
+    );
+    repl.close().await.expect_ok("close");
+}
+
 /// PURE-BIND-AS-DECL (M2): a polymorphic empty-list bind stays polymorphic and
 /// instantiates per use — the case that used to throw an interface error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
