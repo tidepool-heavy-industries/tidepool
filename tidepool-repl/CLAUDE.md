@@ -102,12 +102,6 @@ generation counters or the raw GHC module name for a declaration.
   Haskell escape) — e.g. `grepGlob "\\\\.unwrap\\\\(\\\\)" "**/*.rs"`.
 - **LSP graph verbs** (`the`/`chart`/`explore`) need `tidepool-lsp-daemon`
   running on the workspace socket; they error cleanly without it.
-- **A trailing `where` on a bare top-level expression breaks the type-probe
-  envelope** — the expression runs fine but `{type, value}` reports
-  `type: null` (the probe wraps `__t <- <expr>`; a `where` can't attach to a
-  single do-statement).
-- **Bind names shadowing Prelude** (`head`, `tail`, …) produce an ambiguous-
-  occurrence error on reference — use non-colliding bind names.
 - **`Match` records** (from `sgFind`) carry the full matched text + every
   metavar; extract only the fields you need rather than returning whole
   matches.

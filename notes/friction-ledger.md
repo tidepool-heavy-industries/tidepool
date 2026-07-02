@@ -106,4 +106,3 @@ Inanna's theory ("accumulated gotcha memory is stale scar tissue around since-fi
 ## Wontfix / accepted for now
 
 - Heap durability across server restarts — out of scope by design; sessions are process-scoped, declarations are the replayable skeleton (#6 makes the error say so).
-- Multi-line quasiquotes corrupt under the +2 indent — known; route multi-line payloads via the `input` lane (memory: eval-code-indent-and-quoter-names).

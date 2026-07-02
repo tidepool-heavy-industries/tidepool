@@ -132,7 +132,6 @@ Compile errors name the unsupported symbol, runtime errors carry the Haskell
 message, unbounded recursion is a clean "stack overflow" yield error — not
 SIGSEGV. The true standing list:
 
-- **`cycle`**: unresolved external (clean yield error) — use manual recursion.
 - **Non-tail recursion** overflows ~10–20K frames with a clean yield error; tail
   recursion is unbounded (TCO). Caveat: a *no-base-case* non-tail recursion
   (`go n = n + go (n+1)`) is loopified by GHC into a non-stack-growing spin — it

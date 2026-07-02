@@ -26,14 +26,21 @@ pub fn remap_generated_coords(
     col_indent: usize,
 ) -> String {
     let mut out: Vec<String> = Vec::new();
-    // True between a header rewritten into user coordinates and the next blank
-    // line: gutter line numbers in that region get the same offset.
+    // True between a DIAGNOSTIC-HEADER line (`…: error:` / `…: warning:`)
+    // rewritten into user coordinates and the next blank line: gutter line
+    // numbers in that region get the same offset. Inline coordinate mentions
+    // (`(bound at <decl>:2:1)`, hole-fit provenance) are rewritten too but do
+    // NOT touch the gutter state — a preamble-region provenance ref inside a
+    // hole-fits list must not disarm renumbering of the snippet below it.
     let mut in_user_block = false;
     for line in err.lines() {
+        let is_diag_header = line.contains(": error") || line.contains(": warning");
         if let Some((rewritten, user_region)) =
             rewrite_header(line, anchor, label, line_offset, col_indent)
         {
-            in_user_block = user_region;
+            if is_diag_header {
+                in_user_block = user_region;
+            }
             out.push(rewritten);
         } else if line.trim().is_empty() {
             in_user_block = false;
@@ -280,6 +287,17 @@ mod tests {
             0,
         );
         assert_eq!(got, "<decl>:2:17: error: [GHC-88464]\n");
+    }
+
+    #[test]
+    fn inline_preamble_ref_does_not_disarm_gutter() {
+        // Hole-fits provenance cites a preamble-region location mid-block;
+        // the snippet gutter after it must still renumber (found live: the
+        // `pick = _` fits list left `28 |` raw).
+        let err = "/tmp/x/Expr.hs:28:8: error: [GHC-88464]\n    Found hole\n      Valid hole fits include\n        (imported at Expr.hs:21:1-29)\n   |\n28 | pick = _\n   |        ^\n";
+        let got = remap_generated_coords(err, "Expr.hs", "<item>", 26, 0);
+        assert!(got.contains("<item>:2:8: error"), "{got}");
+        assert!(got.contains("\n 2 | pick = _"), "{got}");
     }
 
     #[test]
