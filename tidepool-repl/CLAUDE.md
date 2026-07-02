@@ -97,8 +97,6 @@ generation counters or the raw GHC module name for a declaration.
 - **`:vocab` lists modules that are NOT auto-imported.** Only `Library`
   re-exports are in scope bare; other listed verb modules need an explicit
   `import` even though `:vocab` shows them.
-- **`writeFile` does not create parent directories** — fails loud on a
-  missing subdirectory rather than `mkdir -p`.
 - **`grepGlob regex glob`** — content regex FIRST, path glob SECOND (reversed
   order is a common mistake). Regex escaping is quad-backslash (JSON escape ×
   Haskell escape) — e.g. `grepGlob "\\\\.unwrap\\\\(\\\\)" "**/*.rs"`.
