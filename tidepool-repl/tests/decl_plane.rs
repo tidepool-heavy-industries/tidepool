@@ -253,15 +253,24 @@ async fn record_syntax_selectors_localized() {
 
     // Ref A — PURE fallback path (bare case).
     let ref_a = repl.eval_ok("case p of { P a b -> b }").await;
-    assert!(ref_a.contains('2'), "pure-path case: expected 2, got: {ref_a}");
+    assert!(
+        ref_a.contains('2'),
+        "pure-path case: expected 2, got: {ref_a}"
+    );
 
     // Ref B' — Eff path with a case (not a selector).
     let ref_b2 = repl.eval_ok("pure (case p of { P a b -> b })").await;
-    assert!(ref_b2.contains('2'), "Eff-path case: expected 2, got: {ref_b2}");
+    assert!(
+        ref_b2.contains('2'),
+        "Eff-path case: expected 2, got: {ref_b2}"
+    );
 
     // Ref B — Eff path with the record SELECTOR (the historical kind=4 crash).
     let ref_b = repl.eval_ok("pure (py p)").await;
-    assert!(ref_b.contains('2'), "Eff-path selector: expected 2, got: {ref_b}");
+    assert!(
+        ref_b.contains('2'),
+        "Eff-path selector: expected 2, got: {ref_b}"
+    );
     let survive = repl.eval("123 :: Int").await; // bare → pure-fallback path
     eprintln!(
         "[case6] survive (bare/pure path): is_error={} text={}",

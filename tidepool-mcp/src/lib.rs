@@ -745,14 +745,18 @@ data Console a where
         let preamble = generated_sources(&decls, false);
         assert!(preamble.contains("data Ask a where"));
         assert!(preamble.contains("  AskWith :: Text -> Value -> Ask Value"));
-        assert!(preamble.contains("type M = Eff '[Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Git, Time, Ask]"));
+        assert!(preamble
+            .contains("type M = Eff '[Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Git, Time, Ask]"));
     }
 
     #[test]
     fn test_ask_in_effect_stack_type() {
         let decls = standard_decls();
         let stack = build_effect_stack_type(&decls);
-        assert_eq!(stack, "'[Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Git, Time, Ask]");
+        assert_eq!(
+            stack,
+            "'[Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Git, Time, Ask]"
+        );
     }
 
     #[test]
@@ -979,9 +983,7 @@ data Console a where
         let result = template_haskell(&preamble, &stack, source, "", "", Some(&input), None);
 
         assert!(result.contains("input :: Aeson.Value"));
-        assert!(
-            result.contains("input = object [\"val\" .= Aeson.NumberI (123 :: Int)]")
-        );
+        assert!(result.contains("input = object [\"val\" .= Aeson.NumberI (123 :: Int)]"));
     }
 
     #[test]

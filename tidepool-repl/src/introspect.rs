@@ -60,7 +60,11 @@ fn scan_dir(dir: &Path, name: &str, visited: &mut HashSet<PathBuf>) -> Option<se
     if !visited.insert(canon) {
         return None;
     }
-    let mut entries: Vec<PathBuf> = fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).collect();
+    let mut entries: Vec<PathBuf> = fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .collect();
     entries.sort();
     entries
         .iter()
@@ -386,10 +390,7 @@ data Gadt where
 
     #[test]
     fn adjacent_column_zero_decl_ends_block() {
-        let d = dir_with(&[(
-            "A.hs",
-            "module A where\n\ndata A = A Int\ndata B = B Int\n",
-        )]);
+        let d = dir_with(&[("A.hs", "module A where\n\ndata A = A Int\ndata B = B Int\n")]);
         let v = lookup(&[&d], "A").unwrap();
         assert_eq!(v["shape"], "data A = A Int", "next col-0 line ends block");
     }

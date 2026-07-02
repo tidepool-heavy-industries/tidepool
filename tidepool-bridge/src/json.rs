@@ -44,9 +44,9 @@ impl ToCore for serde_json::Value {
                 // Number loses integers past 2^53. Fall back to Number for
                 // genuine floats (and u64 > i64::MAX, matching serde's view).
                 if let Some(i) = n.as_i64() {
-                    let id = table.get_by_name_arity("NumberI", 1).ok_or_else(|| {
-                        BridgeError::UnknownDataConName("NumberI".into())
-                    })?;
+                    let id = table
+                        .get_by_name_arity("NumberI", 1)
+                        .ok_or_else(|| BridgeError::UnknownDataConName("NumberI".into()))?;
                     return Ok(Value::Con(id, vec![Value::Lit(Literal::LitInt(i))]));
                 }
                 let id = table

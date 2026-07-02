@@ -368,7 +368,10 @@ impl FsHandler {
             let canonical_ancestor = cur
                 .canonicalize()
                 .map_err(|e| EffectError::Handler(e.to_string()))?;
-            suffix.iter().rev().fold(canonical_ancestor, |p, c| p.join(c))
+            suffix
+                .iter()
+                .rev()
+                .fold(canonical_ancestor, |p, c| p.join(c))
         };
         if !check_path.starts_with(&canonical_root) {
             return Err(EffectError::Handler(format!(
@@ -1846,10 +1849,7 @@ impl GitHandler {
             .map_err(|e| EffectError::Handler(format!("git exec failed: {}", e)))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(EffectError::Handler(format!(
-                "git: {}",
-                stderr.trim()
-            )));
+            return Err(EffectError::Handler(format!("git: {}", stderr.trim())));
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
@@ -2884,7 +2884,9 @@ mod tests {
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
         let req = FsReq::Write("a/b/c.txt".into(), "hello mkdir-p".into());
-        handler.handle(req, &cx).expect("write into missing subtree must succeed");
+        handler
+            .handle(req, &cx)
+            .expect("write into missing subtree must succeed");
         let actual = std::fs::read_to_string(root.join("a/b/c.txt")).unwrap();
         assert_eq!(actual, "hello mkdir-p");
     }
@@ -2900,9 +2902,14 @@ mod tests {
         let cx = EffectContext::with_user(&table, &captured);
         // Attempt to escape via `..` into a sibling directory that doesn't exist
         let req = FsReq::Write("../../escape/evil.txt".into(), "bad".into());
-        let err = handler.handle(req, &cx).expect_err("sandbox escape must be rejected");
+        let err = handler
+            .handle(req, &cx)
+            .expect_err("sandbox escape must be rejected");
         let msg = format!("{err}");
-        assert!(msg.contains("outside sandbox") || msg.contains("escape"), "{msg}");
+        assert!(
+            msg.contains("outside sandbox") || msg.contains("escape"),
+            "{msg}"
+        );
     }
 
     // === SG FromCore tests ===
@@ -3686,7 +3693,9 @@ file_c.txt\n\
         let mut handler = GitHandler::new(dir.path().to_path_buf());
 
         let result = response_value(
-            handler.handle(GitReq::DiffStat("HEAD~1".to_string()), &cx).unwrap(),
+            handler
+                .handle(GitReq::DiffStat("HEAD~1".to_string()), &cx)
+                .unwrap(),
             &table,
         );
         // HEAD~1 introduces beta.txt; should return at least 1 FileDelta
@@ -3709,7 +3718,10 @@ file_c.txt\n\
                 other => panic!("unexpected: {:?}", other),
             }
         }
-        assert!(count >= 1, "gitDiffStat HEAD~1 should return at least 1 delta");
+        assert!(
+            count >= 1,
+            "gitDiffStat HEAD~1 should return at least 1 delta"
+        );
     }
 
     #[test]
@@ -3721,13 +3733,19 @@ file_c.txt\n\
         let mut handler = GitHandler::new(dir.path().to_path_buf());
 
         let result = response_value(
-            handler.handle(GitReq::Show("HEAD".to_string()), &cx).unwrap(),
+            handler
+                .handle(GitReq::Show("HEAD".to_string()), &cx)
+                .unwrap(),
             &table,
         );
         match &result {
             Value::Con(id, fields) => {
                 assert_eq!(table.name_of(*id).unwrap(), "Commit");
-                assert_eq!(fields.len(), 5, "Commit must have 5 fields (sha/subject/author/date/files)");
+                assert_eq!(
+                    fields.len(),
+                    5,
+                    "Commit must have 5 fields (sha/subject/author/date/files)"
+                );
             }
             other => panic!("gitShow HEAD should return a Commit, got {:?}", other),
         }
@@ -3775,8 +3793,7 @@ file_c.txt\n\
         ]);
         let include = prelude_include();
         let effects_dir = tidepool_mcp::ensure_effects_module(&decls).unwrap();
-        let include_paths: Vec<&std::path::Path> =
-            vec![include.as_path(), effects_dir.as_path()];
+        let include_paths: Vec<&std::path::Path> = vec![include.as_path(), effects_dir.as_path()];
         let kv_path = std::env::temp_dir().join("tidepool_git_jit_kv.json");
         let cwd = repo_root();
         let captured = CapturedOutput::new();
@@ -3881,8 +3898,7 @@ file_c.txt\n\
         let kv_path = std::env::temp_dir().join("tidepool_time_golden_kv.json");
         let cwd = repo_root();
         let captured = CapturedOutput::new();
-        let mut handlers =
-            time_jit_handlers(cwd, kv_path);
+        let mut handlers = time_jit_handlers(cwd, kv_path);
         let result = tidepool_runtime::compile_and_run(
             &source,
             "result",
@@ -3907,10 +3923,7 @@ file_c.txt\n\
             return;
         }
         let decls = tidepool_mcp::standard_decls();
-        let source = jit_test_source(&[
-            "t <- getCurrentTime",
-            "pure (toJSON (epochMillis t))",
-        ]);
+        let source = jit_test_source(&["t <- getCurrentTime", "pure (toJSON (epochMillis t))"]);
         let include = prelude_include();
         let effects_dir = tidepool_mcp::ensure_effects_module(&decls).unwrap();
         let include_paths: Vec<&std::path::Path> = vec![include.as_path(), effects_dir.as_path()];

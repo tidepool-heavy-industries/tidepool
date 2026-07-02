@@ -14,8 +14,8 @@
 
 use crate::EffectDecl;
 use crate::{
-    ask_decl, console_decl, exec_decl, fs_decl, git_decl, http_decl, kv_decl, llm_decl,
-    lsp_decl, sg_decl, time_decl,
+    ask_decl, console_decl, exec_decl, fs_decl, git_decl, http_decl, kv_decl, llm_decl, lsp_decl,
+    sg_decl, time_decl,
 };
 
 /// All standard effects in canonical order.
@@ -716,10 +716,9 @@ mod tests {
         assert!(haskell.contains("\"bool\" .= Aeson.Bool True"));
         assert!(haskell.contains("\"null\" .= Aeson.Null"));
         assert!(haskell.contains("\"num\" .= Aeson.NumberI (42 :: Int)"));
-        assert!(haskell.contains("\"arr\" .= toJSON [Aeson.NumberI (1 :: Int), Aeson.NumberI (2 :: Int)]"));
-        assert!(
-            haskell.contains("\"obj\" .= object [\"a\" .= Aeson.NumberI (1 :: Int)]")
-        );
+        assert!(haskell
+            .contains("\"arr\" .= toJSON [Aeson.NumberI (1 :: Int), Aeson.NumberI (2 :: Int)]"));
+        assert!(haskell.contains("\"obj\" .= object [\"a\" .= Aeson.NumberI (1 :: Int)]"));
     }
 
     #[test]

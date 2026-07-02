@@ -1418,12 +1418,9 @@ fn user_code_offset(source: &str) -> Option<(usize, usize)> {
     // Bind wrappers: verbatim inside `result = do {`. (A `let` bind's first
     // line gains 2 columns from the decl-brace boundary edit — accepted.)
     const RESULT_DO: &str = "\nresult = do {\n";
-    source.find(RESULT_DO).map(|pos| {
-        (
-            source[..pos + RESULT_DO.len()].matches('\n').count(),
-            0,
-        )
-    })
+    source
+        .find(RESULT_DO)
+        .map(|pos| (source[..pos + RESULT_DO.len()].matches('\n').count(), 0))
 }
 
 /// Remap `Expr.hs:<L>:<C>` GHC coordinates in a compile error to item-relative
@@ -1644,8 +1641,7 @@ fn mentions_word(text: &str, word: &str) -> bool {
         let i = start + rel;
         let before_ok = i == 0 || !text[..i].chars().next_back().is_some_and(ident);
         let after = i + word.len();
-        let after_ok = after >= bytes.len()
-            || !text[after..].chars().next().is_some_and(ident);
+        let after_ok = after >= bytes.len() || !text[after..].chars().next().is_some_and(ident);
         if before_ok && after_ok {
             return true;
         }
@@ -1772,17 +1768,26 @@ mod slim_tests {
         assert!(out.contains(".tidepool/lib/Repo.hs"), "{out}");
         // A user-item error is never reframed.
         let user_err = "<item>:2:1: error: not in scope: foo\n";
-        assert_eq!(super::prepend_lib_brick_hint(user_err.to_string()), user_err);
+        assert_eq!(
+            super::prepend_lib_brick_hint(user_err.to_string()),
+            user_err
+        );
         // A base/non-lib error is not reframed.
         let base_err = "Expr.hs:5:1: error: whatever\n";
-        assert_eq!(super::prepend_lib_brick_hint(base_err.to_string()), base_err);
+        assert_eq!(
+            super::prepend_lib_brick_hint(base_err.to_string()),
+            base_err
+        );
     }
 
     #[test]
     fn decl_head_extracts_names() {
         assert_eq!(decl_head("slug t = T.replace \" \" \"-\" t"), "slug");
         assert_eq!(decl_head("data Foo = Bar | Baz"), "Foo");
-        assert_eq!(decl_head("newtype Wrapper a = Wrapper { unwrap :: a }"), "Wrapper");
+        assert_eq!(
+            decl_head("newtype Wrapper a = Wrapper { unwrap :: a }"),
+            "Wrapper"
+        );
         assert_eq!(decl_head("type Name = Text"), "Name");
         assert_eq!(decl_head("class MyClass a where"), "MyClass");
         assert_eq!(decl_head("  f x = x + 1"), "f");

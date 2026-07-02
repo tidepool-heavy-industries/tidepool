@@ -469,20 +469,31 @@ async fn program_repaint_round_trips() {
     let repl = Repl::new();
     repl.open_ok().await;
 
-    repl.def("dbl x = x * (2 :: Int)").await.expect_ok("def dbl");
+    repl.def("dbl x = x * (2 :: Int)")
+        .await
+        .expect_ok("def dbl");
     repl.eval("x <- pure (dbl 21)").await.expect_ok("bind x");
 
     let prog = repl.cmd(":program").await;
     let text = prog.expect_ok(":program");
     // Contains the decl and the bind's defining text.
-    assert!(text.contains("dbl x = x * (2 :: Int)"), "decl missing: {text}");
+    assert!(
+        text.contains("dbl x = x * (2 :: Int)"),
+        "decl missing: {text}"
+    );
     assert!(text.contains("x <- pure (dbl 21)"), "bind missing: {text}");
 
     // Replay into a fresh session reproduces the value.
     let fresh = Repl::new();
     fresh.open_ok().await;
-    fresh.def("dbl x = x * (2 :: Int)").await.expect_ok("replay def");
-    fresh.eval("x <- pure (dbl 21)").await.expect_ok("replay bind");
+    fresh
+        .def("dbl x = x * (2 :: Int)")
+        .await
+        .expect_ok("replay def");
+    fresh
+        .eval("x <- pure (dbl 21)")
+        .await
+        .expect_ok("replay bind");
     let out = fresh.eval_ok("pure x").await;
     assert!(out.contains("42"), "replay value: expected 42, got {out}");
 
@@ -500,8 +511,12 @@ async fn redefine_reports_stale_binds() {
     let repl = Repl::new();
     repl.open_ok().await;
 
-    repl.def("factor x = x * (2 :: Int)").await.expect_ok("def factor");
-    repl.eval("y <- pure (factor 10)").await.expect_ok("bind y = factor 10");
+    repl.def("factor x = x * (2 :: Int)")
+        .await
+        .expect_ok("def factor");
+    repl.eval("y <- pure (factor 10)")
+        .await
+        .expect_ok("bind y = factor 10");
 
     // Redefine factor — y still holds the OLD value; the response must say so.
     let redef = repl.def("factor x = x * (100 :: Int)").await;
@@ -512,7 +527,10 @@ async fn redefine_reports_stale_binds() {
     // A redefine touching nothing bound reports no stale key.
     let unrelated = repl.def("other x = x + (1 :: Int)").await;
     let ut = unrelated.expect_ok("def other");
-    assert!(!ut.contains("stale"), "unrelated redefine should not be stale: {ut}");
+    assert!(
+        !ut.contains("stale"),
+        "unrelated redefine should not be stale: {ut}"
+    );
 
     repl.close().await.expect_ok("close");
 }

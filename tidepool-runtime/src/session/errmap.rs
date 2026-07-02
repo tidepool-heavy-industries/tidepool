@@ -191,7 +191,9 @@ pub fn dedupe_diagnostics(err: &str) -> String {
             .iter()
             .filter(|l| {
                 let t = l.trim_start();
-                !(t.starts_with('|') || leading_digits(t).len() > 0 && t[leading_digits(t).len()..].starts_with(" |"))
+                !(t.starts_with('|')
+                    || leading_digits(t).len() > 0
+                        && t[leading_digits(t).len()..].starts_with(" |"))
             })
             .flat_map(|l| l.chars())
             .filter(char::is_ascii_alphanumeric)
@@ -247,8 +249,12 @@ pub fn drop_foreign_gen_warnings(err: &str, keep_rel: Option<&str>) -> String {
                 && keep_rel.is_none_or(|k| !header.contains(k));
             !is_gen_warning
         })
-        .map(|b| b.join("
-"))
+        .map(|b| {
+            b.join(
+                "
+",
+            )
+        })
         .collect();
     let mut joined = kept.join("\n");
     if err.ends_with('\n') {
@@ -283,19 +289,13 @@ mod tests {
     #[test]
     fn foreign_paths_pass_through() {
         let err = "panic! at compiler/GHC/Utils/Panic.hs:23:1 in ghc:GHC.Utils.Panic\n";
-        assert_eq!(
-            remap_generated_coords(err, "Expr.hs", "<item>", 33, 2),
-            err
-        );
+        assert_eq!(remap_generated_coords(err, "Expr.hs", "<item>", 33, 2), err);
     }
 
     #[test]
     fn embedded_suffix_is_not_ours() {
         let err = "SomeExpr.hs:3:1: error: whatever\n";
-        assert_eq!(
-            remap_generated_coords(err, "Expr.hs", "<item>", 33, 2),
-            err
-        );
+        assert_eq!(remap_generated_coords(err, "Expr.hs", "<item>", 33, 2), err);
     }
 
     #[test]
@@ -315,13 +315,7 @@ mod tests {
     #[test]
     fn decl_plane_absolute_path() {
         let err = "/tmp/tidepool-repl-4178942/session-1/Tidepool/Session/Lib/G2.hs:29:17: error: [GHC-88464]\n";
-        let got = remap_generated_coords(
-            err,
-            "Tidepool/Session/Lib/G2.hs",
-            "<decl>",
-            27,
-            0,
-        );
+        let got = remap_generated_coords(err, "Tidepool/Session/Lib/G2.hs", "<decl>", 27, 0);
         assert_eq!(got, "<decl>:2:17: error: [GHC-88464]\n");
     }
 
@@ -355,7 +349,10 @@ mod tests {
         assert!(!got2.contains("partial head"), "{got2}");
         // current-gen WARNINGS survive when keep_rel matches
         let own = "Tidepool/Session/Lib/G26.hs:3:1: warning: [GHC-2]\n    user warning\n";
-        assert!(drop_foreign_gen_warnings(own, Some("Tidepool/Session/Lib/G26.hs")).contains("user warning"));
+        assert!(
+            drop_foreign_gen_warnings(own, Some("Tidepool/Session/Lib/G26.hs"))
+                .contains("user warning")
+        );
     }
 
     #[test]

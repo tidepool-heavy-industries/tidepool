@@ -147,7 +147,10 @@ pub enum SessionCommand {
     /// `session_run`: run a list of classified items in sequence on the resident
     /// machine. Each item is dispatched to `run_def`/`run_eval`/`run_meta`.
     /// `verbose: true` returns the full diagnostic shape instead of the slim default.
-    Block { items: Vec<BlockItem>, verbose: bool },
+    Block {
+        items: Vec<BlockItem>,
+        verbose: bool,
+    },
     /// `session_close`: drop the resident machine and free the session heap.
     Close,
 }
@@ -242,7 +245,12 @@ impl TurnOutcome {
                 "types": components.iter().map(|(_, t)| t).collect::<Vec<_>>(),
             })
             .to_string(),
-            TurnOutcome::Defined { generation, module, stale, .. } => serde_json::json!({
+            TurnOutcome::Defined {
+                generation,
+                module,
+                stale,
+                ..
+            } => serde_json::json!({
                 "defined": true,
                 "generation": generation,
                 "module": module,

@@ -1158,8 +1158,7 @@ fn compute_captures_promised(
 ) -> (CoreExpr, Vec<VarId>) {
     let body_tree = tree.extract_subtree(body_idx);
     let fvs = tidepool_repr::free_vars::free_vars(&body_tree);
-    let keep =
-        |v: &VarId| ctx.env.contains_key(v) || promised.is_some_and(|p| p.contains(v));
+    let keep = |v: &VarId| ctx.env.contains_key(v) || promised.is_some_and(|p| p.contains(v));
 
     let dropped: Vec<VarId> = fvs.iter().filter(|v| !keep(v)).copied().collect();
     if !dropped.is_empty() {
@@ -1419,18 +1418,16 @@ fn emit_thunk_promised(
 
     let captures: Vec<(VarId, Option<SsaVal>)> = sorted_fvs
         .iter()
-        .map(|v| {
-            match args.ctx.env.get(v) {
-                Some(val) => Ok((*v, Some(*val))),
-                None if promised.is_some_and(|p| p.contains(v)) => Ok((*v, None)),
-                None => Err(EmitError::MissingCaptureVar(
-                    *v,
-                    format!(
-                        "Thunk capture: not in env (env has {} vars)",
-                        args.ctx.env.len()
-                    ),
-                )),
-            }
+        .map(|v| match args.ctx.env.get(v) {
+            Some(val) => Ok((*v, Some(*val))),
+            None if promised.is_some_and(|p| p.contains(v)) => Ok((*v, None)),
+            None => Err(EmitError::MissingCaptureVar(
+                *v,
+                format!(
+                    "Thunk capture: not in env (env has {} vars)",
+                    args.ctx.env.len()
+                ),
+            )),
         })
         .collect::<Result<Vec<_>, EmitError>>()?;
 
@@ -2358,12 +2355,10 @@ impl EmitContext {
                 simple_bindings.iter().map(|(b, r)| (*b, *r)).collect();
             let deferred_simple =
                 topo_sort_deferred_simple(deferred_simple, bindings, args.sess.tree);
-            let letrec_binders: FxHashSet<VarId> =
-                bindings.iter().map(|(b, _)| *b).collect();
+            let letrec_binders: FxHashSet<VarId> = bindings.iter().map(|(b, _)| *b).collect();
             for (binder, rhs_idx) in deferred_simple.iter() {
-                let fvs = tidepool_repr::free_vars::free_vars(
-                    &args.sess.tree.extract_subtree(*rhs_idx),
-                );
+                let fvs =
+                    tidepool_repr::free_vars::free_vars(&args.sess.tree.extract_subtree(*rhs_idx));
                 let resolvable_now = is_trivial_field(*rhs_idx, args.sess.tree)
                     && fvs.iter().all(|v| args.ctx.env.contains_key(v));
                 let sv = if resolvable_now {
@@ -2383,9 +2378,7 @@ impl EmitContext {
                     // letrec_post_simple_step below.
                     let promised: FxHashSet<VarId> = fvs
                         .iter()
-                        .filter(|v| {
-                            !args.ctx.env.contains_key(v) && letrec_binders.contains(v)
-                        })
+                        .filter(|v| !args.ctx.env.contains_key(v) && letrec_binders.contains(v))
                         .copied()
                         .collect();
                     let (sv, pending) = emit_thunk_promised(
@@ -2922,9 +2915,7 @@ impl EmitContext {
                 // Known-Limit, now fixed).
                 let promised: FxHashSet<VarId> = fvs
                     .iter()
-                    .filter(|v| {
-                        !args.ctx.env.contains_key(v) && letrec_binders.contains(v)
-                    })
+                    .filter(|v| !args.ctx.env.contains_key(v) && letrec_binders.contains(v))
                     .copied()
                     .collect();
                 let (sv, pending) = emit_thunk_promised(

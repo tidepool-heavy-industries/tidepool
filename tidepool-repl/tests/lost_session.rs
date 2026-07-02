@@ -36,7 +36,9 @@ fn assert_recovery_guidance(msg: &str, ctx: &str) {
 /// that sessions are process-scoped (the machine + heap died with the process).
 fn assert_never_opened_flavor(msg: &str, session: &str, ctx: &str) {
     assert!(
-        msg.contains(&format!("no session '{session}' open in this server process")),
+        msg.contains(&format!(
+            "no session '{session}' open in this server process"
+        )),
         "{ctx}: should name the session + this process: {msg}"
     );
     assert!(
@@ -125,7 +127,10 @@ async fn resume_err(repl: &Repl, session: &str, continuation_id: &str) -> String
     args.insert("session".into(), json!(session));
     match repl.server.dispatch_tool("session_resume", args).await {
         Err(e) => e.message.to_string(),
-        Ok(r) => panic!("expected McpError from session_resume, got: {}", text_of(&r)),
+        Ok(r) => panic!(
+            "expected McpError from session_resume, got: {}",
+            text_of(&r)
+        ),
     }
 }
 

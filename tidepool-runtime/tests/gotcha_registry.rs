@@ -30,11 +30,11 @@
 // constants — assert them verbatim.
 #![allow(clippy::approx_constant)]
 
+use std::io::Write;
 use std::path::Path;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
 use tidepool_runtime::compile_and_run;
-use std::io::Write;
 
 /// Never invoked — every probe is pure (no effect is `send`ed). Present only so
 /// the full effectful preamble compiles.
@@ -613,7 +613,8 @@ target = (Foo "red").color ++ (Bar "blue").color
     let probe_path = tmp.path().join("DupFieldAudit.hs");
     {
         let mut f = std::fs::File::create(&probe_path).expect("write probe");
-        f.write_all(probe_src.as_bytes()).expect("write probe bytes");
+        f.write_all(probe_src.as_bytes())
+            .expect("write probe bytes");
     }
     let out_dir = tmp.path().join("out");
     std::fs::create_dir_all(&out_dir).expect("out dir");
@@ -718,15 +719,12 @@ fn works_empty_text_ops() {
 /// exits). This is acceptable; the CPU burn terminates with the binary.
 #[test]
 fn claims_nobase_nontail_loopifies_not_overflows() {
-    let (tx, rx) =
-        std::sync::mpsc::channel::<Result<serde_json::Value, String>>();
+    let (tx, rx) = std::sync::mpsc::channel::<Result<serde_json::Value, String>>();
     let _ = std::thread::Builder::new()
         .stack_size(tidepool_runtime::EVAL_STACK_SIZE)
         .spawn(move || {
             tidepool_codegen::signal_safety::install();
-            let _ = tx.send(eval_raw(
-                "pure (go 0 :: Int) where { go n = n + go (n+1) }",
-            ));
+            let _ = tx.send(eval_raw("pure (go 0 :: Int) where { go n = n + go (n+1) }"));
         })
         .unwrap();
     // 3s is long enough for a real non-tail stack-overflow to manifest (~10-20K frames).
@@ -749,9 +747,7 @@ fn claims_nobase_nontail_loopifies_not_overflows() {
             );
         }
         Ok(other) => {
-            panic!(
-                "Unexpected outcome (expected timeout-spin or stack-overflow): {other:?}"
-            );
+            panic!("Unexpected outcome (expected timeout-spin or stack-overflow): {other:?}");
         }
     }
 }

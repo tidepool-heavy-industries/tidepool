@@ -752,7 +752,10 @@ mod tests {
         let (_, warnings) = read_metadata(&bytes).expect("var_names meta loads");
         assert_eq!(
             warnings.var_names,
-            vec![(0xfe00_0000_0000_1234_u64, "GHC.Internal.List.cycle".to_string())]
+            vec![(
+                0xfe00_0000_0000_1234_u64,
+                "GHC.Internal.List.cycle".to_string()
+            )]
         );
         // absent key → empty (backward compat)
         let old = meta_bytes(vec![]);

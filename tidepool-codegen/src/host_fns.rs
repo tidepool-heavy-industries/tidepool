@@ -1147,7 +1147,9 @@ pub fn register_var_names(pairs: &[(u64, String)]) {
         return;
     }
     let map = VAR_NAMES.get_or_init(Default::default);
-    let mut w = map.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut w = map
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for (id, name) in pairs {
         w.insert(*id, name.clone());
     }
@@ -1155,7 +1157,9 @@ pub fn register_var_names(pairs: &[(u64, String)]) {
 
 fn lookup_var_name(id: u64) -> Option<String> {
     let map = VAR_NAMES.get()?;
-    let r = map.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let r = map
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     r.get(&id).cloned()
 }
 

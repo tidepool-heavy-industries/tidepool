@@ -70,9 +70,11 @@ fn val_size(v: &Value) -> usize {
         }
         Value::Null => 4,
         Value::Array(xs) => arr_sz(xs) + 2,
-        Value::Object(m) => m.iter().map(|(k, v)| pair_size(k, v)).sum::<usize>()
-            + 2 * m.len().saturating_sub(1)
-            + 2,
+        Value::Object(m) => {
+            m.iter().map(|(k, v)| pair_size(k, v)).sum::<usize>()
+                + 2 * m.len().saturating_sub(1)
+                + 2
+        }
     }
 }
 
@@ -357,10 +359,7 @@ mod tests {
             "expected tail marker, got: {tail}"
         );
         // Kept elements + elements inside stubs account for all 100.
-        let kept = out_arr
-            .iter()
-            .filter(|v| elems.contains(v))
-            .count();
+        let kept = out_arr.iter().filter(|v| elems.contains(v)).count();
         let stubbed: usize = stubs
             .iter()
             .map(|s| match s {

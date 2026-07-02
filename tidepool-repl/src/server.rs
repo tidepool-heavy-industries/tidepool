@@ -415,7 +415,6 @@ impl TidepoolReplServer {
         Ok(())
     }
 
-
     /// The self-explaining "no session" error (the bare "no session 'x' open"
     /// was correct but unexplaining after a server restart). Distinguishes a
     /// session closed in THIS process from one this process never opened —

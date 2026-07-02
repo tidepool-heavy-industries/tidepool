@@ -22,7 +22,10 @@ fn bridge_core_names_appear_in_effect_decls() {
     }
     // Also generic wire types declared outside effect decls (Proc etc. live in
     // records/type_defs already; the preamble's fixed decls cover the rest).
-    corpus.push_str(&tidepool_mcp::build_preamble(&tidepool_mcp::standard_decls(), false));
+    corpus.push_str(&tidepool_mcp::build_preamble(
+        &tidepool_mcp::standard_decls(),
+        false,
+    ));
 
     const NEEDLE: &str = "#[core(name = \"";
     let mut missing = Vec::new();

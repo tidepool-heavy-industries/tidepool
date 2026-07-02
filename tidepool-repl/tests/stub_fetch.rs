@@ -66,7 +66,10 @@ async fn stub_roundtrip_replace_and_unknown() {
         .eval("pure (object [(\"other\", toJSON (T.replicate 5000 \"y\"))])")
         .await;
     let res = parse_result(t.expect_ok("second oversized eval"));
-    assert_eq!(res["value"]["other"], serde_json::json!("[~5002 chars -> stub_0]"));
+    assert_eq!(
+        res["value"]["other"],
+        serde_json::json!("[~5002 chars -> stub_0]")
+    );
     let t = repl.cmd(":stub 0").await;
     let fetched = parse_result(t.expect_ok(":stub 0 after replace"));
     assert_eq!(
