@@ -11,7 +11,7 @@ branch — commit cited), **STANDING** (still real — precise boundary given).
 
 | # | Item | Probe | Verdict | Evidence |
 |---|------|-------|---------|----------|
-| 1 | `read`/`reads` crash (SIGILL) | `read "42" :: Int`, `:: Double` | STANDING (by design), UX fixed | Fails at COMPILE time now: "Unsupported FFI call: ghc-bignum:__gmpn_add_1" — no runtime SIGILL. GMP hint added to `mapFfiCall` (this branch). `parseInt`/`parseDouble` remain the answer. |
+| 1 | `read`/`reads` crash (SIGILL) | `read "42" :: Int`, `:: Double` | ~~STANDING~~ FIXED (2026-06-22, native ghc-bignum) | SUPERSEDED: both `:: Int` and `:: Double` now WORK — pinned by `stale_doc_read_now_works` + `stale_doc_read_double_now_works` (gotcha_registry). The __gmpn_add_1 compile failure was the GMP-era boundary; native bignum removed it. (False-claim report: gotcha-claims-sweep, 2026-07-01.) |
 | 2 | `last`/`init`/`head`/`tail` partial errors on computed lists | `last (filter even (enumFromTo 1 10))` | FIXED | Correct values; empty-list case yields clean "Haskell error: last: empty list" (error-sentinel family, 4273c51). |
 | 3 | `maximum`/`minimum`/`sum`/`product` | computed-list probes | FIXED | Correct; clean errors on empty (4273c51 + lazy poison closures). |
 | 4 | `foldr1` | computed-list probe | FIXED | 52 on non-empty; clean error empty. |
