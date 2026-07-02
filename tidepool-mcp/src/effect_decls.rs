@@ -400,6 +400,30 @@ pub fn git_decl() -> EffectDecl {
     }
 }
 
+/// Time effect: UTC wall-clock access.
+pub fn time_decl() -> EffectDecl {
+    EffectDecl {
+        type_name: "Time",
+        description: concat!(
+            "UTC wall-clock access (epoch milliseconds). ",
+            "`getCurrentTime` returns an opaque `UTCTime` value. ",
+            "`formatISO8601` renders it as ISO-8601 (e.g. \"2024-02-29T00:00:00Z\"). ",
+            "`diffUTCTime a b` gives seconds between two times; `addUTCTime secs t` adds seconds. ",
+            "`epochMillis t` exposes the raw epoch-millisecond integer.",
+        ),
+        // UTCTime and its helpers live in Tidepool.Data.Time, re-exported by
+        // Tidepool.Prelude, so the generated Effects module sees them without
+        // type_defs here.
+        type_defs: &[],
+        constructors: &[
+            "TimeNow :: Time Int",
+        ],
+        helpers: &[
+            "-- | Current UTC time as an opaque UTCTime (epoch-millisecond resolution).\ngetCurrentTime :: M UTCTime\ngetCurrentTime = UTCTime <$> send TimeNow",
+        ],
+    }
+}
+
 /// Meta effect: self-mirror for querying runtime metadata.
 pub fn meta_decl() -> EffectDecl {
     EffectDecl {

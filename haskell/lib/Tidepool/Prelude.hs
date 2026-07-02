@@ -172,6 +172,8 @@ module Tidepool.Prelude
   , Proc(..), ok, Hit(..), Doc(..)
   , FileMeta(..), UpdateOutcome(..), WriteOutcome(..)
   , Commit(..), StatusEntry(..), FileDelta(..)
+    -- * UTC time (Tidepool.Data.Time)
+  , UTCTime(..), formatISO8601, diffUTCTime, addUTCTime, epochMillis
   ) where
 
 import Prelude
@@ -229,6 +231,7 @@ import Control.Monad
   , foldM, foldM_
   )
 import Tidepool.Records (Proc(..), ok, Hit(..), Doc(..), FileMeta(..), UpdateOutcome(..), WriteOutcome(..), Commit(..), StatusEntry(..), FileDelta(..))
+import Tidepool.Data.Time (UTCTime(..), formatISO8601, diffUTCTime, addUTCTime, epochMillis)
 import Tidepool.Render (Render(..))
 import Tidepool.QQ.Fmt.Runtime
   (FSign(..), FAlign(..), fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain)

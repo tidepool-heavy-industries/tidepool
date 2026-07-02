@@ -1985,6 +1985,45 @@ impl EffectHandler<CapturedOutput> for GitHandler {
 }
 
 // ============================================================================
+// Tag 9: Time (UTC wall clock)
+// ============================================================================
+
+#[derive(FromCore)]
+pub enum TimeReq {
+    #[core(name = "TimeNow")]
+    Now,
+}
+
+#[derive(Clone)]
+pub struct TimeHandler;
+
+impl DescribeEffect for TimeHandler {
+    fn effect_decl() -> EffectDecl {
+        tidepool_mcp::time_decl()
+    }
+}
+
+impl EffectHandler<CapturedOutput> for TimeHandler {
+    type Request = TimeReq;
+
+    fn handle(
+        &mut self,
+        req: TimeReq,
+        cx: &EffectContext<'_, CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        match req {
+            TimeReq::Now => {
+                let millis = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| EffectError::Handler(format!("system time error: {}", e)))?
+                    .as_millis() as i64;
+                cx.respond(millis)
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Stack assembly
 // ============================================================================
 
@@ -1998,12 +2037,12 @@ pub struct HandlerConfig {
     pub llm_model: String,
 }
 
-/// Build the base effect stack (tags 0–8: Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Git).
+/// Build the base effect stack (tags 0–9: Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Git, Time).
 ///
 /// **Must be called inside a tokio runtime** — `LlmHandler` captures
 /// `tokio::runtime::Handle::current()` at construction time.
 ///
-/// Ask (tag 8) is **not** included here; it is interposed by each server's
+/// Ask (tag 10) is **not** included here; it is interposed by each server's
 /// `AskDispatcher` wrapper (see `TidepoolMcpServer::new`).
 pub fn build_base_stack(
     cfg: &HandlerConfig,
@@ -2023,6 +2062,7 @@ pub fn build_base_stack(
         LspHandler::new(cfg.cwd.clone()),
         LlmHandler::new(cfg.llm_model.clone()),
         GitHandler::new(cfg.cwd.clone()),
+        TimeHandler,
     ]
 }
 
@@ -2202,6 +2242,8 @@ mod tests {
             ("Commit", 5),
             ("StatusEntry", 2),
             ("FileDelta", 4),
+            // Time effect response types
+            ("UTCTime", 1),
         ];
         for &(name, arity) in response_extras {
             if t.get_by_name(name).is_some() {
@@ -2599,7 +2641,7 @@ mod tests {
     }
 
     const EFFECTS_WITH_ROUNDTRIP_TESTS: &[&str] = &[
-        "Console", "KV", "Fs", "SG", "Http", "Exec", "Lsp", "Llm", "Git", "Ask",
+        "Console", "KV", "Fs", "SG", "Http", "Exec", "Lsp", "Llm", "Git", "Time", "Ask",
     ];
 
     #[test]
@@ -3683,6 +3725,7 @@ file_c.txt\n\
             LspHandler::new(cwd.clone()),
             LlmHandler::new("ollama:llama3.2".to_string()),
             GitHandler::new(cwd.clone()),
+            TimeHandler,
         ];
         let result = tidepool_runtime::compile_and_run(
             &source,
@@ -3698,6 +3741,151 @@ file_c.txt\n\
                 "gitLog 1 should return exactly 1 Commit ([n, shaLen] observed)"
             ),
             Err(e) => panic!("JIT gitLog eval failed: {:?}", e),
+        }
+    }
+
+    // === Time FromCore roundtrip tests ===
+
+    #[test]
+    fn test_time_from_core_now() {
+        let table = full_effect_test_table();
+        let con_id = table.get_by_name("TimeNow").unwrap();
+        let val = Value::Con(con_id, vec![]);
+        let req = TimeReq::from_value(&val, &table).unwrap();
+        assert!(matches!(req, TimeReq::Now));
+    }
+
+    #[test]
+    fn test_time_dispatch_now() {
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+        let mut handlers = frunk::hlist![TimeHandler];
+        let con_id = table.get_by_name("TimeNow").unwrap();
+        let request = Value::Con(con_id, vec![]);
+        let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
+        // i64::to_value boxes as Con(I#, [LitInt(n)]).
+        let ms = match &result {
+            Value::Con(_, fields) if fields.len() == 1 => match &fields[0] {
+                Value::Lit(tidepool_repr::Literal::LitInt(n)) => *n,
+                _ => panic!("Expected Con(_, [LitInt]), got {:?}", result),
+            },
+            _ => panic!("Expected Con(I#, [LitInt(ms)]), got {:?}", result),
+        };
+        assert!(ms > 0, "epoch millis should be positive, got {}", ms);
+    }
+
+    // === Time JIT e2e tests ===
+
+    fn time_jit_handlers(
+        cwd: std::path::PathBuf,
+        kv_path: std::path::PathBuf,
+    ) -> impl tidepool_effect::dispatch::DispatchEffect<CapturedOutput> {
+        frunk::hlist![
+            ConsoleHandler,
+            KvHandler::new(kv_path),
+            FsHandler::new(cwd.clone()),
+            SgHandler::new(cwd.clone()),
+            HttpHandler,
+            ExecHandler::new(cwd.clone()),
+            LspHandler::new(cwd.clone()),
+            LlmHandler::new("ollama:llama3.2".to_string()),
+            GitHandler::new(cwd.clone()),
+            TimeHandler,
+        ]
+    }
+
+    #[tokio::test]
+    async fn test_jit_time_format_golden() {
+        if !extract_available() {
+            eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+            return;
+        }
+        let decls = tidepool_mcp::standard_decls();
+        // Pure computation — no Time effect dispatch; tests civil_from_days + formatting.
+        let source = jit_test_source(&[
+            "let t0 = UTCTime 0",
+            "let t1 = UTCTime 1709164800000",
+            "let s0 = formatISO8601 t0",
+            "let s1 = formatISO8601 t1",
+            "pure (toJSON [s0, s1])",
+        ]);
+        let include = prelude_include();
+        let effects_dir = tidepool_mcp::ensure_effects_module(&decls).unwrap();
+        let include_paths: Vec<&std::path::Path> = vec![include.as_path(), effects_dir.as_path()];
+        let kv_path = std::env::temp_dir().join("tidepool_time_golden_kv.json");
+        let cwd = repo_root();
+        let captured = CapturedOutput::new();
+        let mut handlers =
+            time_jit_handlers(cwd, kv_path);
+        let result = tidepool_runtime::compile_and_run(
+            &source,
+            "result",
+            &include_paths,
+            &mut handlers,
+            &captured,
+        );
+        match result {
+            Ok(v) => assert_eq!(
+                v.to_json(),
+                serde_json::json!(["1970-01-01T00:00:00Z", "2024-02-29T00:00:00Z"]),
+                "golden ISO-8601 timestamps ([epoch, leap-day] observed)"
+            ),
+            Err(e) => panic!("JIT time golden eval failed: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_jit_time_now_e2e() {
+        if !extract_available() {
+            eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+            return;
+        }
+        let decls = tidepool_mcp::standard_decls();
+        let source = jit_test_source(&[
+            "t <- getCurrentTime",
+            "pure (toJSON (epochMillis t))",
+        ]);
+        let include = prelude_include();
+        let effects_dir = tidepool_mcp::ensure_effects_module(&decls).unwrap();
+        let include_paths: Vec<&std::path::Path> = vec![include.as_path(), effects_dir.as_path()];
+        let kv_path = std::env::temp_dir().join("tidepool_time_now_kv.json");
+        let cwd = repo_root();
+        let captured = CapturedOutput::new();
+        let mut handlers = time_jit_handlers(cwd, kv_path);
+        let rust_before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let result = tidepool_runtime::compile_and_run(
+            &source,
+            "result",
+            &include_paths,
+            &mut handlers,
+            &captured,
+        );
+        let rust_after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        match result {
+            Ok(v) => {
+                // Return observed [ms, rust_before, rust_after] on failure so we can see
+                // the actual values rather than just a collapsed bool.
+                let ms = v
+                    .to_json()
+                    .as_i64()
+                    .unwrap_or_else(|| panic!("expected i64 epoch millis, got {:?}", v.to_json()));
+                let five_min_ms = 5 * 60 * 1000_i64;
+                assert!(
+                    ms >= rust_before - five_min_ms && ms <= rust_after + five_min_ms,
+                    "getCurrentTime returned {} ms; expected in [{}, {}] (±5 min of Rust wall clock)",
+                    ms,
+                    rust_before - five_min_ms,
+                    rust_after + five_min_ms
+                );
+            }
+            Err(e) => panic!("JIT getCurrentTime eval failed: {:?}", e),
         }
     }
 }

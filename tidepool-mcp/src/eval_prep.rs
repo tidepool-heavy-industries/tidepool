@@ -15,7 +15,7 @@
 use crate::EffectDecl;
 use crate::{
     ask_decl, console_decl, exec_decl, fs_decl, git_decl, http_decl, kv_decl, llm_decl,
-    lsp_decl, sg_decl,
+    lsp_decl, sg_decl, time_decl,
 };
 
 /// All standard effects in canonical order.
@@ -30,6 +30,7 @@ pub fn standard_decls() -> Vec<EffectDecl> {
         lsp_decl(),
         llm_decl(),
         git_decl(),
+        time_decl(),
         ask_decl(),
     ]
 }
