@@ -67,9 +67,9 @@ Inanna's theory ("accumulated gotcha memory is stale scar tissue around since-fi
 | Integer→Double / big literals broken | **STALE** (±2^100 and 1e308 live-correct; the review-branch fixes landed via integration) | memory rewritten |
 | bind names shadowing Prelude (`tail`) error | **STALE** (live: works) | drop from repl CLAUDE.md friction list when next touched |
 | `pub fn $NAME($$$ARGS)` silently unreliable | **HEALED INTO UX**: handler now rejects signature-shaped patterns with a teaching error | memory note |
-| `cycle` unresolved | **REAL** — and the error is still hex-only (`VarId(0xfe…)`), compounding #12 | bug list: resolve cycle (it IS exported; failure is at Resolve level) |
-| multi-line QQ +2 indent corrupts payload | **REAL** (live: `[fmt\|`-payload gained 2 spaces) | moved from Wontfix → bug list: make the wrapper's indent QQ-aware |
-| `[fmt\|]`/`[j\|]` not in repl scope at all | **NEW parity divergence** (oneshot-only; possibly deliberate given +3s QQ cost per item) | decision for Inanna |
+| `cycle` unresolved | **WAS REAL — FIXED 2026-07-02** (ebc3be0): not Resolve — the LetRec emit dropped self-captures of floated corecursive value knots; now knot-tied via promised captures + pending_capture_updates. Registry re-pinned `works_cycle_value_knot` | Known-Limit deleted; the diagnosis chain (differential probe → hex instability → DUMP_CLOSED → VARID_AUDIT) took ~40 min |
+| multi-line QQ +2 indent corrupts payload | **WAS REAL — FIXED 2026-07-02** (73bf2c6): wrappers now embed user text BYTE-VERBATIM inside explicit-layout brackets (no indent transform exists to corrupt anything); error columns became exact as a side effect | principled fix per Inanna's push against the lexer-lite scanner |
+| `[fmt\|]`/`[j\|]` not in repl scope at all | **FIXED 2026-07-02** (73bf2c6): per-turn token-gated Tidepool.QQ import in the repl stmt plane, same gating as oneshot | |
 | assoc-list over Data.Map in lib code (closed-Core bloat) | unprobed (compile-size claim, needs measurement) | keep, low priority |
 
 ## Measured (2026-07-01, interface metrology trial)
