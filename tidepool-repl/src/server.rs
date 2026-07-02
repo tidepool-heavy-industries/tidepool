@@ -73,7 +73,7 @@ pub struct SessionBlockRequest {
     /// List of GHCi-capable items to run in sequence. Each item is one of:
     /// a top-level declaration (`data Foo = …`, `f x = …`), a bind statement
     /// (`x <- e` / `let x = e`), a bare expression, or a `:command`
-    /// (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`, `:stub <n>`).
+    /// (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`, `:stub <n>`, `:program`).
     /// Items are classified automatically; execution stops on the first error.
     /// Each declaration item is its own module, so a type signature and its
     /// binding (and all equations of a multi-clause function) must share ONE
@@ -1057,7 +1057,7 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          PRIMARY TOOL: session_run\n\
          Pass a list of items run in sequence: top-level declarations (`data Foo = …`, \
          `f x = …`), bind statements (`x <- e` / `let x = e`), bare expressions, or \
-         :commands (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`, `:stub <n>`). \
+         :commands (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`, `:stub <n>`, `:program`). \
          Items are classified automatically. Execution stops on the first error. \
          Returns per-item results and the last expression's value.\n\n\
          PREFERRED IDIOM — define then call in one block:\n\
@@ -1159,7 +1159,7 @@ impl ServerHandler for TidepoolReplServer {
                 "Run a list of GHCi-capable items in sequence on the resident machine. Each item \
                  is a declaration (`data Foo = …`, `f x = …`), a bind statement (`x <- e` / \
                  `let x = e`), a bare expression, or a `:command` (`:bindings`, `:reset`, \
-                 `:t <expr>`, `:i <name>`, `:vocab`, `:stub <n>`). Items are classified automatically; \
+                 `:t <expr>`, `:i <name>`, `:vocab`, `:stub <n>`, `:program`). Items are classified automatically; \
                  execution stops on the first error. Returns slim per-item inline JSON plus the \
                  last expression's `value` and `type` at the top level. \
                  PREFERRED IDIOM: define helpers and types in early items, then invoke them in \

@@ -606,6 +606,7 @@ impl Session {
             module: SessionModule::val(g),
             value,
             type_display: Some(binder.type_display.clone()),
+            defining_expr: Some(turn_text.to_string()),
         });
         TurnOutcome::Bound {
             name,
@@ -723,6 +724,8 @@ impl Session {
                 module: SessionModule::val(g),
                 value,
                 type_display: Some(binder.type_display.clone()),
+                // The whole multi-bind turn defines each component (`(a,b) <- e`).
+                defining_expr: Some(turn_text.to_string()),
             });
             bound_names.push((binder.name.clone(), binder.type_display.clone()));
         }
@@ -1039,6 +1042,45 @@ impl Session {
             }
             MetaCommand::Stub(n, page) => {
                 TurnOutcome::Meta(crate::truncate::stub_fetch(&self.last_stubs, *n, *page))
+            }
+            MetaCommand::Program => {
+                // Repaint the session as a replayable notebook: declarations
+                // first (in log order — they never depend on binds), then each
+                // live bind's defining text (val-gen order). Effectful binds
+                // re-RUN their effect on replay; that's honest — the heap is a
+                // cache of this document, not the source of truth.
+                let decls: Vec<&str> = self.lib.decl_sources();
+                let mut binds: Vec<(&BindingName, &BindingEntry)> =
+                    self.bindings.iter_current().collect();
+                binds.sort_by_key(|(_, e)| e.module.gen.0);
+
+                let mut program = String::new();
+                for d in &decls {
+                    program.push_str(d.trim_end());
+                    program.push_str("\n\n");
+                }
+                if !binds.is_empty() {
+                    program.push_str("-- binds (re-run to restore heap values):\n");
+                    for (name, e) in &binds {
+                        match &e.defining_expr {
+                            Some(src) => {
+                                program.push_str(src.trim_end());
+                                program.push('\n');
+                            }
+                            None => program.push_str(&format!(
+                                "-- {} :: {} (defining text unavailable)\n",
+                                name.0,
+                                e.type_display.clone().unwrap_or_default()
+                            )),
+                        }
+                    }
+                }
+                TurnOutcome::Meta(serde_json::json!({
+                    "program": program,
+                    "decls": decls.len(),
+                    "binds": binds.len(),
+                    "generation": self.lib.generation().0,
+                }))
             }
             MetaCommand::Vocab(only) => {
                 let mut dirs: Vec<std::path::PathBuf> = Vec::new();

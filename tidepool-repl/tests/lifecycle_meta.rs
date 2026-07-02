@@ -456,3 +456,36 @@ async fn reference_path_type_metadata_trap() {
 
     repl.close().await.expect_ok("close");
 }
+
+/// `:program` repaints the session as a replayable notebook — declarations
+/// in order, then binds with their defining text (the compaction-seam
+/// primitive). The emitted program must round-trip: replaying it into a fresh
+/// session reproduces the same value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn program_repaint_round_trips() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.open_ok().await;
+
+    repl.def("dbl x = x * (2 :: Int)").await.expect_ok("def dbl");
+    repl.eval("x <- pure (dbl 21)").await.expect_ok("bind x");
+
+    let prog = repl.cmd(":program").await;
+    let text = prog.expect_ok(":program");
+    // Contains the decl and the bind's defining text.
+    assert!(text.contains("dbl x = x * (2 :: Int)"), "decl missing: {text}");
+    assert!(text.contains("x <- pure (dbl 21)"), "bind missing: {text}");
+
+    // Replay into a fresh session reproduces the value.
+    let fresh = Repl::new();
+    fresh.open_ok().await;
+    fresh.def("dbl x = x * (2 :: Int)").await.expect_ok("replay def");
+    fresh.eval("x <- pure (dbl 21)").await.expect_ok("replay bind");
+    let out = fresh.eval_ok("pure x").await;
+    assert!(out.contains("42"), "replay value: expected 42, got {out}");
+
+    repl.close().await.expect_ok("close");
+    fresh.close().await.expect_ok("close fresh");
+}

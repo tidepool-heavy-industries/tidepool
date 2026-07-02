@@ -174,6 +174,17 @@ impl SessionLib {
             .map(String::as_str)
     }
 
+    /// Every declaration turn's source text, in order — the replayable decl
+    /// half of a `:program` notebook repaint.
+    #[must_use]
+    pub fn decl_sources(&self) -> Vec<&str> {
+        self.log
+            .turns
+            .iter()
+            .flat_map(|t| t.sources.iter().map(String::as_str))
+            .collect()
+    }
+
     /// Names of every value/function binder introduced across all declaration
     /// turns (all generations, not just the current one). Used by the eval
     /// assembler to hide session-defined names from the Prelude import so a

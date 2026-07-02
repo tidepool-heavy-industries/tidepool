@@ -73,6 +73,10 @@ pub struct BindingEntry {
     /// `ppr` of the binding's type, for `:t` only. The STRUCTURED type carrier
     /// is the thin iface on disk, not this string.
     pub type_display: Option<String>,
+    /// The bind's defining turn text (`x <- action` / `let x = e`) — so
+    /// `:program` can re-emit the session as a replayable notebook. `None` for
+    /// bindings minted outside a normal bind turn (tests).
+    pub defining_expr: Option<String>,
 }
 
 /// The `name → (SessionVarId, RootSlot, SessionModule)` bridge (domain §4).
@@ -189,6 +193,7 @@ mod tests {
 
     fn entry(name: &str, gen: u64, raw: u64, slot: RootSlot) -> BindingEntry {
         BindingEntry {
+            defining_expr: None,
             name: BindingName(name.to_string()),
             id: SessionVarId::from_extract(raw),
             module: SessionModule::val(Generation(gen)),

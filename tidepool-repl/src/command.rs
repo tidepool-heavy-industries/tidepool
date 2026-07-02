@@ -34,6 +34,11 @@ pub enum MetaCommand {
     /// (`stub_<n>` markers in an oversized result), optionally one page of a
     /// very large stub. See [`crate::truncate`].
     Stub(usize, Option<usize>),
+    /// `:program` — repaint the session as a replayable notebook document
+    /// (declarations in order, then binds with their defining text). The
+    /// compaction-seam primitive: when the caller's context is truncated, one
+    /// `:program` redraws the whole session onto the new context.
+    Program,
 }
 
 /// One item in a `session_run` block.
@@ -88,6 +93,7 @@ impl MetaCommand {
         match head {
             "bindings" | "b" => Ok(MetaCommand::Bindings),
             "reset" => Ok(MetaCommand::Reset),
+            "program" | "prog" => Ok(MetaCommand::Program),
             "t" | "type" => Ok(MetaCommand::Type(ExprText(rest.to_string()))),
             "i" | "info" => Ok(MetaCommand::Info(rest.to_string())),
             "vocab" => Ok(MetaCommand::Vocab(if rest.is_empty() {
@@ -118,7 +124,7 @@ impl MetaCommand {
                 Ok(MetaCommand::Stub(n, page))
             }
             other => Err(format!(
-                "unknown session command ':{other}' (known: :bindings, :reset, :t, :i, :vocab, :stub)"
+                "unknown session command ':{other}' (known: :bindings, :reset, :t, :i, :vocab, :stub, :program)"
             )),
         }
     }
