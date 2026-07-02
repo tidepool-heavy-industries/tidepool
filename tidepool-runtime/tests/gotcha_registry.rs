@@ -321,6 +321,16 @@ fn stale_doc_read_now_works() {
     works("pure (P.read \"42\" :: Int)", serde_json::json!(42));
 }
 
+/// `read :: Double` also WORKS on the native-bignum toolchain. Root CLAUDE.md
+/// item 0 claimed BOTH `:: Int` AND `:: Double` die at compile time with
+/// "__gmpn_add_1". The `:: Int` case was already flipped (stale_doc_read_now_works);
+/// this probe pins the `:: Double` variant. The Read lexer for Double goes through
+/// the same native-bignum integer path so the __gmpn_* wall is gone for both.
+#[test]
+fn stale_doc_read_double_now_works() {
+    works("pure (P.read \"42.5\" :: Double)", serde_json::json!(42.5));
+}
+
 /// A near-DBL_MAX Double LITERAL now WORKS on the native-bignum toolchain (was a
 /// clean gmp COMPILE error via the integerAdd/integerSub shims). Flipped from
 /// loud_fail 2026-06-22. Moderate literals were always fine (see
@@ -610,4 +620,106 @@ target = (Foo "red").color ++ (Bar "blue").color
         "unexpected collision: {}\nfull stderr:\n{stderr}",
         collision_line.unwrap_or("")
     );
+}
+
+// =========================================================================
+// NEWLY ADDED (2026-07-01 gotcha-claims-sweep): claims from root CLAUDE.md
+// "Monomorphic Shadows (Prelude)" and haskell/CLAUDE.md "Known Limits" that
+// were testable but had no probe in this registry.
+// =========================================================================
+
+/// `showDouble` monomorphic shadow: `Translate.hs` intercepts `showDouble` /
+/// `$fShowDouble_$sshowSignedFloat` and emits the `ShowDoubleAddr` primop
+/// (avoids `floatToDigits`/Integer, which are unsupported FFI). `show ::
+/// Show a => a -> Text` in the MCP preamble calls through this shadow for
+/// `Double`. Decimal notation for 0.1 ≤ |x| < 1e7, scientific notation
+/// otherwise; Haskell-style mantissa always includes ".".
+///
+/// Doc claim: "intercepted at binding level by Translate.hs, emits
+/// `ShowDoubleAddr` primop (avoids `floatToDigits`/Integer)" (root CLAUDE.md
+/// "Monomorphic Shadows (Prelude)"). Regression guard: if the interception
+/// breaks, `show (3.14 :: Double)` raises a runtime error (the fallback body
+/// is `error "showDouble: should be intercepted by Translate"`).
+#[test]
+fn works_show_double_monomorphic_shadow() {
+    works(
+        "pure (object [\"pi\" .= show (3.14 :: Double), \"one\" .= show (1.0 :: Double), \
+         \"big\" .= show (1.0e10 :: Double), \"neg\" .= show (-2.5 :: Double)])",
+        serde_json::json!({"pi":"3.14","one":"1.0","big":"1.0e10","neg":"-2.5"}),
+    );
+}
+
+/// Empty `Text` operations work correctly on the JIT. The memory entry
+/// `empty-text-interp-string-space.md` notes these were verified 2026-06-22 —
+/// the `LitString([])` choke is oracle-only, not a JIT issue. Regression
+/// guard: the `LetRec` sibling-capture fix (`emit_letrec_phases`) touched
+/// these paths and originally manifested as `T.split` on empty text returning
+/// `<closure>` instead of `[""]`.
+///
+/// Doc claim: "JIT handles empty Text correctly (verified live:
+/// null/uncons/unpack/Eq/length)" (memory `empty-text-interp-string-space`).
+#[test]
+fn works_empty_text_ops() {
+    works(
+        "pure (object [\"isnull\" .= isNull (\"\" :: Text), \
+         \"len\" .= len (\"\" :: Text), \
+         \"eq\" .= (\"\" == (\"\" :: Text)), \
+         \"split\" .= splitOn \"/\" \"\"])",
+        serde_json::json!({"isnull":true,"len":0,"eq":true,"split":[""]}),
+    );
+}
+
+/// GHC -O2 loopifies a no-base-case non-tail recursion (`go n = n + go
+/// (n+1)`) into a tight spin — it runs until the eval *timeout*, NOT until
+/// "stack overflow". Contrast `loud_fail_nontail_recursion_overflow` where
+/// a base-case 500k-frame `1 + go(n-1)` does overflow.
+///
+/// Doc claim: "a no-base-case non-tail recursion (`go n = n + go (n+1)`) is
+/// loopified by GHC into a non-stack-growing spin — it runs until the eval
+/// timeout fires, not an overflow" (haskell/CLAUDE.md "Known Limits").
+///
+/// Verification: start the eval and wait 3 seconds. "stack overflow" within
+/// that window means GHC didn't loopify → CLAIM FALSE. Timeout (still
+/// spinning) or any other outcome → claim confirmed.
+///
+/// NOTE: the spawned thread leaks (keeps spinning until the test binary
+/// exits). This is acceptable; the CPU burn terminates with the binary.
+#[test]
+fn claims_nobase_nontail_loopifies_not_overflows() {
+    let (tx, rx) =
+        std::sync::mpsc::channel::<Result<serde_json::Value, String>>();
+    let _ = std::thread::Builder::new()
+        .stack_size(tidepool_runtime::EVAL_STACK_SIZE)
+        .spawn(move || {
+            tidepool_codegen::signal_safety::install();
+            let _ = tx.send(eval_raw(
+                "pure (go 0 :: Int) where { go n = n + go (n+1) }",
+            ));
+        })
+        .unwrap();
+    // 3s is long enough for a real non-tail stack-overflow to manifest (~10-20K frames).
+    match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+        Ok(Err(e)) if e.contains("stack overflow") => {
+            panic!(
+                "CLAIM FALSE: no-base-case non-tail should loopify (GHC -O2 spin), \
+                 not produce a stack overflow.\n\
+                 haskell/CLAUDE.md 'Known Limits' claims this becomes a non-stack-growing spin.\n\
+                 actual error: {e}"
+            );
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            // Still spinning → GHC loopified it, claim confirmed.
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!(
+                "Thread exited without sending (panicked before eval_raw returned). \
+                 Cannot confirm loopification claim."
+            );
+        }
+        Ok(other) => {
+            panic!(
+                "Unexpected outcome (expected timeout-spin or stack-overflow): {other:?}"
+            );
+        }
+    }
 }
