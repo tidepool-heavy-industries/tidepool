@@ -84,6 +84,8 @@ fn build_full_server(cwd: PathBuf) -> TidepoolReplServer {
 
 /// Dispatch a 1-item `session_run` block and unwrap `items[0]`.
 /// Returns `(is_error, result_text)` after stripping the block envelope.
+/// `result_text` is the inline item fields (excluding `kind`/`ok`) merged
+/// with the top-level `value`/`type`/`truncated` from the slim shape.
 async fn run_single(
     server: &TidepoolReplServer,
     item: &str,
@@ -114,11 +116,28 @@ async fn run_single(
                 .get("ok")
                 .and_then(|o| o.as_bool())
                 .unwrap_or(!raw_is_error);
-            let text = item0
-                .get("result")
-                .and_then(|r| r.as_str())
-                .unwrap_or(&raw)
-                .to_string();
+            // Assemble result from inline item fields (excluding kind/ok)
+            // merged with top-level value/type/truncated.
+            let mut result = serde_json::Map::new();
+            if let Some(obj) = item0.as_object() {
+                for (k, val) in obj {
+                    if k != "kind" && k != "ok" {
+                        result.insert(k.clone(), val.clone());
+                    }
+                }
+            }
+            for key in &["value", "type", "truncated"] {
+                if let Some(val) = v.get(*key) {
+                    if !val.is_null() && !result.contains_key(*key) {
+                        result.insert(key.to_string(), val.clone());
+                    }
+                }
+            }
+            let text = if result.is_empty() {
+                raw.clone()
+            } else {
+                serde_json::Value::Object(result).to_string()
+            };
             return (!ok, text);
         }
     }
@@ -261,7 +280,7 @@ async fn session_def_sees_full_eval_vocabulary() {
 }
 
 /// Run a multi-item `session_run` block and return the parsed result JSON
-/// (the `{items, value, generation, valGeneration}` envelope), stripping any
+/// (the `{items, value, type?, truncated?}` envelope), stripping any
 /// `## Output` / `## Result` framing.
 async fn run_block(
     server: &TidepoolReplServer,
@@ -341,15 +360,10 @@ async fn block_runner_input_and_type_cleanups() {
         .and_then(|i| i.as_array())
         .expect("items array");
     let last_item = items.last().expect("at least one item");
-    let result_str = last_item
-        .get("result")
-        .and_then(|r| r.as_str())
-        .unwrap_or("");
-    let result_json: serde_json::Value = serde_json::from_str(result_str).unwrap_or_default();
     assert_eq!(
-        result_json.get("type").and_then(|t| t.as_str()),
+        last_item.get("type").and_then(|t| t.as_str()),
         Some("Int"),
-        "bare pure reference should report its type, not null; got: {result_str}"
+        "bare pure reference should report its type, not null; got: {last_item}"
     );
     assert_eq!(v.get("value"), Some(&serde_json::json!(42)), "value: {v}");
 
@@ -367,16 +381,11 @@ async fn block_runner_input_and_type_cleanups() {
         .get("items")
         .and_then(|i| i.as_array())
         .expect("items array");
-    let result_str = items
-        .last()
-        .and_then(|it| it.get("result"))
-        .and_then(|r| r.as_str())
-        .unwrap_or("");
-    let result_json: serde_json::Value = serde_json::from_str(result_str).unwrap_or_default();
+    let last_item = items.last().expect("at least one item");
     assert_eq!(
-        result_json.get("type").and_then(|t| t.as_str()),
+        last_item.get("type").and_then(|t| t.as_str()),
         Some("[Int]"),
-        "monadic expr with trailing `where` should report its inner type, not null; got: {result_str}"
+        "monadic expr with trailing `where` should report its inner type, not null; got: {last_item}"
     );
     // The eff path renders via Show-default (toWire), so a [Int] comes back as the
     // Show string "[10,20]" — the fix under test is the non-null TYPE above; here

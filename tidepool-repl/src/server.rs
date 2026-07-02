@@ -88,6 +88,12 @@ pub struct SessionBlockRequest {
     /// Session name (default: `"default"`).
     #[serde(default)]
     pub session: Option<String>,
+    /// Set `true` to get the full diagnostic shape: per-item `index` and
+    /// double-encoded `result` string, plus top-level `generation` /
+    /// `valGeneration` counters. Default (`false`): the slim shape with inline
+    /// JSON, no generation counters, and final-expression value at top level only.
+    #[serde(default)]
+    pub verbose: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -481,10 +487,14 @@ impl TidepoolReplServer {
                 // `input :: Aeson.Value` is the structured value, matching the
                 // stateless `eval` tool exactly.
                 let input = req.input.as_ref().map(tidepool_mcp::normalize_input);
+                let verbose = req.verbose.unwrap_or(false);
                 Ok(self
                     .run_command(
                         "session_run",
-                        SessionCommand::Block(block_items),
+                        SessionCommand::Block {
+                            items: block_items,
+                            verbose,
+                        },
                         input,
                         &sid,
                     )
@@ -1058,9 +1068,14 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          type signature and its binding — and all equations of a multi-clause function — must \
          live in the SAME item (newline-separated), not split across items.\n\n\
          BINDS vs VALUE: end a block with a bare EXPRESSION to populate the top-level `value` \
-         — a block ending in a bind (`x <- e` / `let x = e`) leaves `value` null (read \
-         `items[].result`). A bare `x = 5` (no `let`) is a top-level DECLARATION; use \
-         `let x = 5` to bind a value into the heap.\n\n\
+         and `type` — a block ending in a bind (`x <- e` / `let x = e`) leaves `value` null. \
+         A bare `x = 5` (no `let`) is a top-level DECLARATION; use `let x = 5` to bind.\n\n\
+         RESPONSE SHAPE: slim by default — per-item inline objects (`kind`, `ok`, plus result \
+         fields merged in), final-expression value at top-level `value`/`type` only. \
+         Example bind: {{\"kind\":\"stmt\",\"ok\":true,\"bound\":\"vs\",\"type\":\"[Text]\"}}. \
+         Example decl: {{\"kind\":\"decl\",\"ok\":true,\"decl\":\"slug\"}}. \
+         Pass `verbose: true` to get the full diagnostic shape \
+         (per-item `index`, `generation` counters, double-encoded `result` string).\n\n\
          JSON OUTPUT: opt-in — return an `Aeson.Value` to get structured JSON instead of \
          Show output.\n\n\
          Available effects: {effects}.\n\n\
@@ -1145,15 +1160,16 @@ impl ServerHandler for TidepoolReplServer {
                  is a declaration (`data Foo = …`, `f x = …`), a bind statement (`x <- e` / \
                  `let x = e`), a bare expression, or a `:command` (`:bindings`, `:reset`, \
                  `:t <expr>`, `:i <name>`, `:vocab`, `:stub <n>`). Items are classified automatically; \
-                 execution stops on the first error. Returns per-item results and the last \
-                 expression's value. \
+                 execution stops on the first error. Returns slim per-item inline JSON plus the \
+                 last expression's `value` and `type` at the top level. \
                  PREFERRED IDIOM: define helpers and types in early items, then invoke them in \
                  the final expression — one block with a clean definition plus its caller beats \
                  one cramped expression. Each declaration item is its own module, so a type \
                  signature and its binding (and a multi-clause function's equations) must share \
                  ONE newline-separated item. \
                  JSON OUTPUT: return an `Aeson.Value` to get structured JSON instead of Show \
-                 output. \
+                 output. Pass `verbose: true` for the full diagnostic shape (generation counters, \
+                 double-encoded result strings). \
                  An in-turn `ask` suspends with a continuation_id; resume with session_resume \
                  or drop with session_abort.",
                 schema_to_map(schemars::schema_for!(SessionBlockRequest))?,

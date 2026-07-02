@@ -207,7 +207,9 @@ impl Session {
             SessionCommand::Def(decl) => self.run_def(&decl.0),
             SessionCommand::Eval(expr) => self.run_eval(&expr.0, handlers, captured),
             SessionCommand::Cmd(meta) => self.run_meta(meta),
-            SessionCommand::Block(items) => self.run_block(items, handlers, captured),
+            SessionCommand::Block { items, verbose } => {
+                self.run_block(items, handlers, captured, *verbose)
+            }
             // Close is handled by SessionHandle::close (type-state); the worker
             // never routes it here.
             SessionCommand::Close => TurnOutcome::Error(
@@ -233,9 +235,12 @@ impl Session {
         items: &[BlockItem],
         handlers: &mut H,
         captured: &CapturedOutput,
+        verbose: bool,
     ) -> TurnOutcome {
         let mut results: Vec<BlockItemResult> = Vec::with_capacity(items.len());
         let mut last_value: Option<serde_json::Value> = None;
+        let mut last_type: Option<String> = None;
+        let mut last_truncated: Option<String> = None;
 
         for (index, item) in items.iter().enumerate() {
             let (kind, outcome) = match item {
@@ -261,15 +266,23 @@ impl Session {
             let ok = !outcome.is_error();
 
             // Track the last value-producing expression result.
-            if let TurnOutcome::Value { ref value, .. } = outcome {
+            if let TurnOutcome::Value {
+                ref value,
+                ref type_display,
+                ref truncated,
+            } = outcome
+            {
                 last_value = Some(value.clone());
+                last_type = type_display.clone();
+                last_truncated = truncated.clone();
             }
 
             results.push(BlockItemResult {
                 index,
                 kind: kind.to_string(),
                 ok,
-                result: outcome.render(),
+                result: slim_item_result(&outcome),
+                result_full: outcome.render(),
             });
 
             if !ok {
@@ -277,11 +290,29 @@ impl Session {
             }
         }
 
+        // Suppress `value` (and `truncated`) from the last ok value item's slim
+        // result — those fields go to the top-level `value`/`truncated` only,
+        // eliminating the duplication between items[].value and the top-level value.
+        if last_value.is_some() {
+            for r in results.iter_mut().rev() {
+                if r.ok {
+                    if let serde_json::Value::Object(ref mut obj) = r.result {
+                        obj.remove("value");
+                        obj.remove("truncated");
+                    }
+                    break;
+                }
+            }
+        }
+
         TurnOutcome::Block {
             items: results,
             value: last_value,
+            last_type,
+            last_truncated,
             generation: self.lib.generation().0,
             val_gen: self.val_gen.0,
+            verbose,
         }
     }
 
@@ -292,6 +323,7 @@ impl Session {
             Ok(gen) => TurnOutcome::Defined {
                 generation: gen.0,
                 module: tidepool_repr::SessionModule::lib(gen).module_name(),
+                head: decl_head(decl_text).to_string(),
             },
             Err(e) => TurnOutcome::Error(format!("declaration failed: {e}")),
         }
@@ -1373,6 +1405,64 @@ fn wrap_probe_source(
     out
 }
 
+/// Extract the declared head identifier from a Haskell declaration string,
+/// for the slim `{"decl":"name"}` block item result. Strips keyword prefixes
+/// for type/class/instance declarations; for function definitions returns the
+/// first identifier. Returns `""` for empty or unrecognised text.
+fn decl_head(text: &str) -> &str {
+    let s = text.trim();
+    for kw in &["data ", "newtype ", "type ", "class ", "instance "] {
+        if let Some(rest) = s.strip_prefix(kw) {
+            let end = rest
+                .find(|c: char| c.is_whitespace() || c == '(' || c == '=')
+                .unwrap_or(rest.len());
+            return rest[..end].trim_end();
+        }
+    }
+    let end = s
+        .find(|c: char| c.is_whitespace() || c == '(' || c == ':' || c == '=')
+        .unwrap_or(s.len());
+    &s[..end]
+}
+
+/// Compute the slim inline JSON result for one block item (the default shape).
+/// Fields are merged directly into the item object in `Block::render()`.
+/// The `value` key is present here but stripped for the final expression item
+/// (see `run_block` — `obj.remove("value")` after the loop).
+fn slim_item_result(outcome: &TurnOutcome) -> serde_json::Value {
+    match outcome {
+        TurnOutcome::Bound { name, type_display } => serde_json::json!({
+            "bound": name,
+            "type": type_display,
+        }),
+        TurnOutcome::MultiBound { components } => serde_json::json!({
+            "bound": components.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+            "types": components.iter().map(|(_, t)| t).collect::<Vec<_>>(),
+        }),
+        TurnOutcome::Defined { head, .. } => serde_json::json!({
+            "decl": head,
+        }),
+        TurnOutcome::Value {
+            value,
+            type_display,
+            truncated,
+        } => {
+            let mut obj = serde_json::Map::new();
+            if let Some(t) = type_display {
+                obj.insert("type".into(), serde_json::json!(t));
+            }
+            obj.insert("value".into(), value.clone());
+            if let Some(hint) = truncated {
+                obj.insert("truncated".into(), serde_json::json!(hint));
+            }
+            serde_json::Value::Object(obj)
+        }
+        TurnOutcome::Meta(v) => v.clone(),
+        TurnOutcome::Error(e) => serde_json::json!({ "error": e }),
+        TurnOutcome::Block { .. } => serde_json::json!({ "error": "nested block" }),
+    }
+}
+
 /// Return `true` when a `run_def` error message indicates a GHC parse (not
 /// type or scope) error, so the try-cascade in `run_block` can fall back from
 /// `run_def` to `run_eval` for items that are expressions, not declarations.
@@ -1413,6 +1503,44 @@ fn type_def_head(src: &str) -> Option<&str> {
         None
     } else {
         Some(head)
+    }
+}
+
+#[cfg(test)]
+mod slim_tests {
+    use super::{decl_head, slim_item_result};
+    use crate::command::TurnOutcome;
+
+    #[test]
+    fn decl_head_extracts_names() {
+        assert_eq!(decl_head("slug t = T.replace \" \" \"-\" t"), "slug");
+        assert_eq!(decl_head("data Foo = Bar | Baz"), "Foo");
+        assert_eq!(decl_head("newtype Wrapper a = Wrapper { unwrap :: a }"), "Wrapper");
+        assert_eq!(decl_head("type Name = Text"), "Name");
+        assert_eq!(decl_head("class MyClass a where"), "MyClass");
+        assert_eq!(decl_head("  f x = x + 1"), "f");
+        assert_eq!(decl_head(""), "");
+    }
+
+    #[test]
+    fn slim_item_result_shapes() {
+        let bound = TurnOutcome::Bound {
+            name: "vs".into(),
+            type_display: "[Text]".into(),
+        };
+        let r = slim_item_result(&bound);
+        assert_eq!(r["bound"], "vs");
+        assert_eq!(r["type"], "[Text]");
+
+        let defined = TurnOutcome::Defined {
+            generation: 1,
+            module: "Tidepool.Session.Lib.G1".into(),
+            head: "slug".into(),
+        };
+        let r = slim_item_result(&defined);
+        assert_eq!(r["decl"], "slug");
+        assert!(r.get("generation").is_none(), "no generation in slim decl");
+        assert!(r.get("module").is_none(), "no module in slim decl");
     }
 }
 
