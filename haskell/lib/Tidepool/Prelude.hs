@@ -59,7 +59,9 @@ module Tidepool.Prelude
   , any, all, and, or
   , sum, product, minimum, maximum
   , concat, iterate, repeat, cycle
-  , scanl, scanr
+  , scanl, scanr, scanl1, scanr1
+  , foldr1, foldl1
+  , (!!)
     -- * Self-contained list operations
   , reverse
   , splitAt
@@ -104,7 +106,8 @@ module Tidepool.Prelude
   , on
   , comparing
     -- * Monadic combinators
-  , mapM, mapM_, sequence, sequence_
+  , mapM, mapM_, sequence, sequence_, sequenceA
+  , traverse_, for_
   , when, unless, void, join, guard
   , forM, forM_
   , (=<<), (>=>), (<=<)  -- (<&>) comes via module Control.Lens
@@ -204,12 +207,15 @@ import Prelude
   , any, all, and, or
   , sum, product, minimum, maximum
   , concat, iterate, repeat, cycle
-  , scanl, scanr
+  , scanl, scanr, scanl1, scanr1
+  , foldr1, foldl1
+  , (!!)
   , negate, quot, rem, subtract
   , compare
   , fromEnum, succ, pred, toEnum
-  , mapM, mapM_, sequence, sequence_
+  , mapM, mapM_, sequence, sequence_, sequenceA
   )
+import Data.Foldable (traverse_, for_)
 import qualified Prelude as P (show, drop, length, null, dropWhile, round)
 import Data.Text (Text)
 -- Vendored drop-in for Data.Text: re-exports all of Data.Text but overrides the
