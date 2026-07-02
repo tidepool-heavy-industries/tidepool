@@ -694,6 +694,46 @@ async fn record_dot_helper_binds_and_shows_type() {
     repl.close().await.expect_ok("close");
 }
 
+/// PURE-BIND collision must fail LOUD, not silently materialize a broken
+/// binding. A pure `let` whose name collides with an in-scope import (`reverse`
+/// from the Prelude — used recursively so the call is an ambiguous occurrence)
+/// fails the decl route. Previously that fell back to materialize, producing a
+/// polymorphic `Tier1Closure` whose thin iface has a free type var → a cryptic
+/// "Iface type variable out of scope: a" only on LATER reference. Now the decl
+/// error is surfaced immediately (the RHS references no materialized value, so
+/// materialize is not the right fallback), and the session stays usable.
+///
+/// (`reverse` collides in BOTH the standalone test ModuleEnv — implicit base
+/// Prelude — and production; `toList` collides only in production, since
+/// `standalone_default`'s imports differ — a separate test/prod divergence.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn colliding_pure_bind_fails_loud_not_broken() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.open_ok().await;
+    repl.def("data Tree a = Leaf | Node (Tree a) a (Tree a)")
+        .await
+        .expect_ok("data Tree");
+    // `reverse` collides with the in-scope Prelude `reverse` → the pure bind
+    // must ERROR at bind time (not silently materialize into an unreferenceable
+    // binding).
+    let t = repl
+        .eval("let reverse Leaf = []; reverse (Node l x r) = reverse r ++ [x] ++ reverse l")
+        .await;
+    t.expect_err("colliding pure bind must fail loud");
+    // Session survives: a NON-colliding name binds and is usable across a turn.
+    repl.eval("let treeList Leaf = []; treeList (Node l x r) = treeList l ++ [x] ++ treeList r")
+        .await
+        .expect_ok("non-colliding recursive polymorphic bind");
+    let v = repl
+        .eval_ok("pure (treeList (Node Leaf (7 :: Int) Leaf))")
+        .await;
+    assert!(v.contains('7'), "treeList usable after: {v}");
+    repl.close().await.expect_ok("close");
+}
+
 /// PURE-BIND-AS-DECL (M2): a polymorphic empty-list bind stays polymorphic and
 /// instantiates per use — the case that used to throw an interface error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -436,9 +436,20 @@ impl Session {
 
     /// If `expr_text` is a PURE bind of `name`, route it as the top-level decl
     /// `name = <rhs>` (so GHC generalizes it — GHCi parity) and return a `Bound`
-    /// outcome. Returns `None` when it is not a pure bind, or when it fails to
-    /// compile as a decl (its RHS references a materialized/effectful value, out
-    /// of decl scope) — the caller then falls back to the materialize path.
+    /// outcome. Returns `None` when it is not a pure bind, or when the decl
+    /// route fails BECAUSE the RHS references a materialized/effectful value
+    /// (out of decl scope) — the caller then falls back to the materialize path.
+    ///
+    /// When the decl route fails for ANY OTHER reason (a name collision with an
+    /// imported name — `let toList …` clashes with `Tidepool.Prelude.toList` —
+    /// or a plain type error), we return that error as `Some(Error)` instead of
+    /// `None`, so the caller does NOT materialize. Materializing such a case
+    /// papers over a real error with a broken binding: a polymorphic value
+    /// (`toList :: Tree a -> [a]`) materialized as a monomorphic `Tier1Closure`
+    /// gets a thin iface with a FREE type variable, which then fails cryptically
+    /// ("Iface type variable out of scope: a") only when later referenced.
+    /// Surfacing the decl error (e.g. the clean "Ambiguous occurrence") is the
+    /// same actionable message the bare-decl form already gives.
     fn try_pure_bind_as_decl(&mut self, expr_text: &str, name: &str) -> Option<TurnOutcome> {
         let decl = pure_bind_to_decl(expr_text, name)?;
         match self.lib.define(&decl) {
@@ -461,7 +472,22 @@ impl Session {
                     type_display,
                 })
             }
-            Err(_) => None,
+            Err(e) => {
+                // Materialize is the right fallback ONLY when the RHS references
+                // a materialized value binding (which genuinely can't live in
+                // the decl plane). If it references no such value, the decl
+                // failure is a real error (collision / type) — surface it rather
+                // than materialize a broken binding (see the doc comment).
+                let refs_materialized_value = self
+                    .bindings
+                    .iter_current()
+                    .any(|(n, _)| mentions_word(expr_text, &n.0));
+                if refs_materialized_value {
+                    None
+                } else {
+                    Some(TurnOutcome::Error(format!("bind compile error: {e}")))
+                }
+            }
         }
     }
 
