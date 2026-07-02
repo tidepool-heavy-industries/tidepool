@@ -228,6 +228,41 @@ impl Repl {
         raw
     }
 
+    /// Run a MULTI-ITEM block. `ok` is true iff every item ok; `text` is the
+    /// raw envelope (assert on substrings across all items). Used for
+    /// whole-block decl elaboration tests (sig+binding, mutual recursion).
+    pub async fn run(&self, items: &[&str]) -> Turn {
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "items".to_string(),
+            serde_json::Value::Array(
+                items
+                    .iter()
+                    .map(|s| serde_json::Value::String((*s).to_string()))
+                    .collect(),
+            ),
+        );
+        let raw = self.dispatch("session_run", args).await;
+        let json_part = if let Some(pos) = raw.text.rfind("\n## Result\n") {
+            &raw.text[pos + "\n## Result\n".len()..]
+        } else {
+            &raw.text
+        };
+        let all_ok = serde_json::from_str::<serde_json::Value>(json_part)
+            .ok()
+            .and_then(|v| {
+                v.get("items").and_then(|a| a.as_array()).map(|arr| {
+                    arr.iter()
+                        .all(|it| it.get("ok").and_then(|o| o.as_bool()).unwrap_or(false))
+                })
+            })
+            .unwrap_or(!raw.is_error);
+        Turn {
+            text: raw.text,
+            is_error: !all_ok,
+        }
+    }
+
     pub async fn open(&self) -> Turn {
         self.dispatch("session_open", serde_json::Map::new()).await
     }

@@ -183,7 +183,9 @@ impl ModuleEnv {
     #[must_use]
     pub fn standalone_default() -> ModuleEnv {
         ModuleEnv {
-            pragmas: "{-# LANGUAGE OverloadedStrings, DataKinds, TypeOperators, \
+            // NoMonomorphismRestriction: pure binds routed as decls must
+            // generalize (see EVAL_PRAGMAS note in tidepool-mcp).
+            pragmas: "{-# LANGUAGE OverloadedStrings, NoMonomorphismRestriction, DataKinds, TypeOperators, \
                       FlexibleContexts, FlexibleInstances, GADTs, ScopedTypeVariables, \
                       LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, \
                       ViewPatterns, BangPatterns, TypeApplications, BlockArguments, \

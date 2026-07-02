@@ -56,6 +56,37 @@ Every ergonomic wart hit during real tidepool/tidepool-repl use lands here — s
 
 | 26 | Kata-sweep finds (2026-07-02 night): vendored FilePath lacks `normalise`; decl-plane compile errors re-print WARNINGS from earlier generations' decls (noise leak, e.g. a `P.head -Wx-partial` from gen-25 glued to every later failure); README.md links a nonexistent LICENSE (needs Inanna: add license or drop link) | normalise: add to Tidepool.FilePath next stdlib pass; warning leak: filter warnings to the CURRENT decl's span in validate_candidate; LICENSE: decision | 2026-07-02 |
 
+## Whole-block / GHCi-environment (2026-07-02 — "The session IS a GHCi environment")
+
+The session now behaves like a GHCi environment, within a block AND across
+tool-call turns. Principle: **a pure binding is a declaration**; only effects
+are values.
+
+- **M1 decl-batch**: consecutive decl items elaborate as ONE generation
+  (`SessionLib::define_batch`) → a sig+binding pair or a mutual-recursion SCC
+  split across items typecheck together. Reused the multi-source-per-turn
+  render; `run_block` segments consecutive decl/auto runs and optimistically
+  batches (falls back to per-item on failure).
+- **M2 pure-bind-as-decl**: `let x = e` / `x <- pure e` / `x <- return e` route
+  into the decl plane as `x = e`, so GHC generalizes them — `xs <- pure []`
+  stays polymorphic (instantiates `[Int]` here, `[Char]` there); `n <- pure 5`
+  then `n + 1.5` = 6.5. Falls back to materialize when the RHS references an
+  effectful value. Effectful binds materialize once, unchanged.
+- **M3 NoMonomorphismRestriction** on the DECL module only (`decl_pragmas()`;
+  NOT the eval expr module — there NMR+ExtendedDefaultRules mis-defaults
+  `__user = pure …`) so nullary constrained binds (`n = 5`) generalize.
+- **Routing fix**: bare expressions take the reference path (Eff-first/pure
+  fallback) whenever there's ANY session state — value bindings OR decls.
+
+Follow-ups: type-probe cost (pure-bind-as-decl = define + a separate
+`probe_pure_type` compile for `{bound,type}`; fold into `validate_candidate`
+to drop the extra extract call — perf wart, not a kludge); cross-plane
+shadowing (pure-decl `x` then effectful-value `x`) is the known edge.
+Observables UNIFIED (chose "unify" over split): `:bindings`, `:program`,
+stale-tracking, and `:i` all surface pure binds (tier `DeclBacked`, module
+`Session.Lib.G<g>`) alongside materialized value binds — one coherent
+environment view. STATUS: SHIPPED (repl suite 139/0, fmt+clippy clean).
+
 ## Scar-tissue audit (2026-07-01 — live probes on the deployed server)
 
 Inanna's theory ("accumulated gotcha memory is stale scar tissue around since-fixed bugs; what's real is a bug list") — verdict: **mostly correct**. Every behavioral flinch in the memory corpus probed live:

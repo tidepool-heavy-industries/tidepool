@@ -126,21 +126,18 @@ async fn reset_clears_both_planes_and_is_reusable() {
     let repl = Repl::new();
     repl.open_ok().await;
 
-    // decl plane: define g; value plane: bind v.
+    // Environment: define g; bind v (a pure bind → also lands in the decl
+    // plane under the GHCi-environment model, so two generations: g, v).
     repl.def("g x = x + (1 :: Int)").await.expect_ok("def g");
     repl.eval("v <- pure (10 :: Int)").await.expect_ok("bind v");
 
-    // Both planes live. We confirm this via `:bindings` (decl `generation` == 1
-    // AND value binding `v` listed) rather than by EVALUATING `g 1`: with a
-    // binding live, referencing the Lane-A decl FUNCTION `g` traps with
-    // "forced type metadata" — a CONFIRMED BUG codified in
-    // `eff_wrapped_reference_traps_with_live_binding` below. Using the meta-plane
-    // keeps this lifecycle test focused on :reset rather than tripping that bug.
+    // Both live. Confirm via `:bindings` (decl `generation` == 2 for g+v, AND
+    // v listed in the unified environment view).
     let meta = parse_meta(repl.cmd(":bindings").await.expect_ok(":bindings pre-reset"));
     assert_eq!(
         meta["generation"].as_u64(),
-        Some(1),
-        "pre-reset decl generation should be 1 (def g): {meta}"
+        Some(2),
+        "pre-reset decl generation should be 2 (def g + pure bind v): {meta}"
     );
     assert!(
         binding_entry(&meta, "v").is_some(),
@@ -251,6 +248,8 @@ async fn bindings_shape() {
     let repl = Repl::new();
     repl.open_ok().await;
 
+    // Pure binds under the GHCi-environment model: routed into the decl plane
+    // (so they generalize) but STILL surfaced in the unified `:bindings` view.
     repl.eval("x <- pure (1 :: Int)").await.expect_ok("bind x");
     repl.eval("f <- pure (\\n -> n + (1 :: Int))")
         .await
@@ -262,32 +261,27 @@ async fn bindings_shape() {
     let x = binding_entry(&meta, "x").unwrap_or_else(|| panic!("x missing: {meta}"));
     let f = binding_entry(&meta, "f").unwrap_or_else(|| panic!("f missing: {meta}"));
 
-    // Every entry carries the documented keys.
+    // Every entry carries the documented keys, and pure binds are decl-backed
+    // (module = the Lib.G<g> decl module, tier = DeclBacked — no heap root).
     for (label, e) in [("x", x), ("f", f)] {
         for k in ["name", "type", "module", "tier"] {
             assert!(e.get(k).is_some(), "binding {label} missing key `{k}`: {e}");
         }
-        // both rooted under a Tidepool.Session.Val.G<g> module.
         assert!(
             e["module"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("Tidepool.Session.Val.G"),
-            "binding {label} module should be a Val.G<g>: {e}"
+                .contains("Tidepool.Session.Lib.G"),
+            "pure bind {label} lives in the Lib decl module: {e}"
+        );
+        assert_eq!(
+            e["tier"].as_str(),
+            Some("DeclBacked"),
+            "pure bind {label} is decl-backed: {e}"
         );
     }
-
-    // tier classification: a forced data value vs a closure.
-    assert_eq!(
-        x["tier"].as_str(),
-        Some("Tier0Data"),
-        "x (pure Int) should be Tier0Data: {x}"
-    );
-    assert_eq!(
-        f["tier"].as_str(),
-        Some("Tier1Closure"),
-        "f (a lambda) should be Tier1Closure: {f}"
-    );
+    // The generalized type is reported (x :: Int here).
+    assert_eq!(x["type"].as_str(), Some("Int"), "x type: {x}");
 
     repl.close().await.expect_ok("close");
 }
@@ -476,12 +470,16 @@ async fn program_repaint_round_trips() {
 
     let prog = repl.cmd(":program").await;
     let text = prog.expect_ok(":program");
-    // Contains the decl and the bind's defining text.
+    // Contains the function decl and the pure bind (which lives in the decl
+    // plane now, so it appears as `x = (dbl 21)` — the GHCi-environment form).
     assert!(
         text.contains("dbl x = x * (2 :: Int)"),
         "decl missing: {text}"
     );
-    assert!(text.contains("x <- pure (dbl 21)"), "bind missing: {text}");
+    assert!(
+        text.contains("x =") && text.contains("dbl 21"),
+        "pure bind missing from program: {text}"
+    );
 
     // Replay into a fresh session reproduces the value.
     let fresh = Repl::new();

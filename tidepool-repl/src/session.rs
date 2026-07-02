@@ -98,6 +98,21 @@ pub struct Session {
     /// (`stub_0` ⇒ index 0) — fetched via `:stub <n>`, REPLACED each time a
     /// new truncating result lands. See [`crate::truncate`].
     last_stubs: Vec<serde_json::Value>,
+    /// PURE binds routed into the decl plane (`x <- pure e` / `let x = e` → the
+    /// decl `x = e`, which generalizes). They have no heap value — they resolve
+    /// via the decl-module import — but they ARE part of the session
+    /// environment, so this registry surfaces them in `:bindings`/stale/etc.
+    /// alongside effectful (materialized) binds. Latest-wins per name; a
+    /// cross-plane rebind removes the name from the other plane.
+    pure_binds: std::collections::BTreeMap<String, PureBind>,
+}
+
+/// A pure bind that lives in the decl plane (GHCi-environment model): its value
+/// is its source (`defining_expr`), re-instantiated per use by GHC. No root.
+struct PureBind {
+    type_display: String,
+    defining_expr: String,
+    gen: Generation,
 }
 
 impl Session {
@@ -119,6 +134,7 @@ impl Session {
             eval_input: None,
             cancel_slot: None,
             last_stubs: Vec::new(),
+            pure_binds: std::collections::BTreeMap::new(),
         })
     }
 
@@ -259,51 +275,104 @@ impl Session {
         let mut last_type: Option<String> = None;
         let mut last_truncated: Option<String> = None;
 
-        for (index, item) in items.iter().enumerate() {
-            let (kind, outcome) = match item {
-                BlockItem::Decl(decl) => ("decl", self.run_def(&decl.0)),
-                BlockItem::Stmt(expr) => ("stmt", self.run_eval(&expr.0, handlers, captured)),
-                BlockItem::Meta(meta) => ("meta", self.run_meta(meta)),
-                BlockItem::Auto(expr) => {
-                    // Try-cascade: attempt as declaration first. On a GHC
-                    // parse error the item is not a decl → fall back to
-                    // run_eval (which handles bind vs expr internally).
-                    // A non-parse failure (type error, scope error) means it
-                    // IS a declaration, just broken — surface the error.
-                    let def_result = self.run_def(&expr.0);
-                    match def_result {
-                        TurnOutcome::Error(ref msg) if is_parse_error(msg) => {
-                            ("stmt", self.run_eval(&expr.0, handlers, captured))
-                        }
-                        other => ("decl", other),
+        // Process items, batching maximal runs of consecutive decl-shaped
+        // items (Decl/Auto) so a sig+binding pair or a mutual-recursion SCC
+        // split across items typecheck TOGETHER (whole-block decl elaboration).
+        // Optimistic: try `define_batch` on the whole run; on success emit a
+        // per-source decl result, else fall back to processing each item
+        // individually (the exact prior behavior — a stmt-shaped Auto item, or
+        // a genuinely broken decl, lands here). Stmt/Meta items are singletons.
+        let mut index = 0;
+        'outer: while index < items.len() {
+            // Collect this segment's (index, kind, outcome) tuples.
+            let segment: Vec<(usize, &'static str, TurnOutcome)> = match &items[index] {
+                BlockItem::Decl(_) | BlockItem::Auto(_) => {
+                    let start = index;
+                    let mut end = index;
+                    while end < items.len()
+                        && matches!(items[end], BlockItem::Decl(_) | BlockItem::Auto(_))
+                    {
+                        end += 1;
                     }
+                    let texts: Vec<String> = items[start..end]
+                        .iter()
+                        .map(|it| match it {
+                            BlockItem::Decl(d) => d.0.clone(),
+                            BlockItem::Auto(e) => e.0.clone(),
+                            _ => unreachable!("segment is Decl/Auto only"),
+                        })
+                        .collect();
+
+                    // Try to elaborate the whole run as one generation.
+                    let batched = if texts.len() >= 2 {
+                        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+                        self.lib.define_batch(&refs).ok()
+                    } else {
+                        None
+                    };
+
+                    index = end;
+                    match batched {
+                        Some(gen) => texts
+                            .iter()
+                            .enumerate()
+                            .map(|(k, t)| {
+                                (
+                                    start + k,
+                                    "decl",
+                                    self.defined_outcome(decl_head(t).to_string(), gen),
+                                )
+                            })
+                            .collect(),
+                        None => {
+                            // Fallback: per-item, stopping the whole block on
+                            // the first error (matched by the outer break).
+                            let mut out = Vec::with_capacity(texts.len());
+                            for (k, it) in items[start..end].iter().enumerate() {
+                                let (kind, outcome) = self.run_one_item(it, handlers, captured);
+                                let err = outcome.is_error();
+                                out.push((start + k, kind, outcome));
+                                if err {
+                                    break;
+                                }
+                            }
+                            out
+                        }
+                    }
+                }
+                stmt_or_meta => {
+                    let (kind, outcome) = self.run_one_item(stmt_or_meta, handlers, captured);
+                    index += 1;
+                    vec![(index - 1, kind, outcome)]
                 }
             };
 
-            let ok = !outcome.is_error();
+            for (idx, kind, outcome) in segment {
+                let ok = !outcome.is_error();
 
-            // Track the last value-producing expression result.
-            if let TurnOutcome::Value {
-                ref value,
-                ref type_display,
-                ref truncated,
-            } = outcome
-            {
-                last_value = Some(value.clone());
-                last_type = type_display.clone();
-                last_truncated = truncated.clone();
-            }
+                // Track the last value-producing expression result.
+                if let TurnOutcome::Value {
+                    ref value,
+                    ref type_display,
+                    ref truncated,
+                } = outcome
+                {
+                    last_value = Some(value.clone());
+                    last_type = type_display.clone();
+                    last_truncated = truncated.clone();
+                }
 
-            results.push(BlockItemResult {
-                index,
-                kind: kind.to_string(),
-                ok,
-                result: slim_item_result(&outcome),
-                result_full: outcome.render(),
-            });
+                results.push(BlockItemResult {
+                    index: idx,
+                    kind: kind.to_string(),
+                    ok,
+                    result: slim_item_result(&outcome),
+                    result_full: outcome.render(),
+                });
 
-            if !ok {
-                break; // stop on first error
+                if !ok {
+                    break 'outer; // stop on first error
+                }
             }
         }
 
@@ -338,30 +407,113 @@ impl Session {
     fn run_def(&mut self, decl_text: &str) -> TurnOutcome {
         let head = decl_head(decl_text).to_string();
         match self.lib.define(decl_text) {
+            Ok(gen) => self.defined_outcome(head, gen),
+            Err(e) => TurnOutcome::Error(format!("declaration failed: {e}")),
+        }
+    }
+
+    /// If `expr_text` is a PURE bind of `name`, route it as the top-level decl
+    /// `name = <rhs>` (so GHC generalizes it — GHCi parity) and return a `Bound`
+    /// outcome. Returns `None` when it is not a pure bind, or when it fails to
+    /// compile as a decl (its RHS references a materialized/effectful value, out
+    /// of decl scope) — the caller then falls back to the materialize path.
+    fn try_pure_bind_as_decl(&mut self, expr_text: &str, name: &str) -> Option<TurnOutcome> {
+        let decl = pure_bind_to_decl(expr_text, name)?;
+        match self.lib.define(&decl) {
             Ok(gen) => {
-                // Display truthfulness (notebook-frame): a bind whose defining
-                // expression references the redefined name still holds its OLD
-                // value (REPL values don't retroactively recompute). Name them
-                // so the caller knows to re-run rather than silently trust a
-                // stale binding. Word-boundary match on the head name.
-                let stale: Vec<String> = self
-                    .bindings
-                    .iter_current()
-                    .filter(|(_, e)| {
-                        e.defining_expr
-                            .as_deref()
-                            .is_some_and(|src| mentions_word(src, &head))
-                    })
-                    .map(|(n, _)| n.0.clone())
-                    .collect();
-                TurnOutcome::Defined {
-                    generation: gen.0,
-                    module: tidepool_repr::SessionModule::lib(gen).module_name(),
-                    head,
-                    stale,
+                let type_display = self.probe_pure_type(name).unwrap_or_default();
+                // Register in the environment so :bindings/stale/etc. see it.
+                self.pure_binds.insert(
+                    name.to_string(),
+                    PureBind {
+                        type_display: type_display.clone(),
+                        defining_expr: expr_text.to_string(),
+                        gen,
+                    },
+                );
+                // Cross-plane shadow: a pure decl of `name` supersedes any
+                // materialized value binding of the same name.
+                self.bindings.remove_current(name);
+                Some(TurnOutcome::Bound {
+                    name: name.to_string(),
+                    type_display,
+                })
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Read the (generalized) type of a pure session name by compiling it as a
+    /// pure reference and reading the captured type. Best-effort — `None` if it
+    /// doesn't typecheck as a bare pure value.
+    fn probe_pure_type(&mut self, name: &str) -> Option<String> {
+        let preamble = self.patched_preamble();
+        let imports = self.session_imports();
+        let inject = self.live_val_modules();
+        let eval_input = self.eval_input.clone();
+        let src = wrap_pure_ref_source(&preamble, &imports, name, eval_input.as_ref());
+        let include = self.turn_include();
+        compile_session_turn(&src, &include, self.session_root(), &inject, None)
+            .ok()
+            .and_then(|turn| turn.warnings.captured_type)
+    }
+
+    /// Build the `Defined` outcome for one decl head at generation `gen`,
+    /// computing the `stale` set (live binds whose defining expression
+    /// references this (re)defined name — notebook display truthfulness).
+    /// Shared by `run_def` and the whole-block decl-batch path.
+    fn defined_outcome(&self, head: String, gen: Generation) -> TurnOutcome {
+        let mut stale: Vec<String> = self
+            .bindings
+            .iter_current()
+            .filter(|(_, e)| {
+                e.defining_expr
+                    .as_deref()
+                    .is_some_and(|src| mentions_word(src, &head))
+            })
+            .map(|(n, _)| n.0.clone())
+            .collect();
+        // Pure binds (decl-backed) that reference the redefined head are also
+        // stale (they hold their old generalized value until re-run).
+        stale.extend(
+            self.pure_binds
+                .iter()
+                .filter(|(_, pb)| mentions_word(&pb.defining_expr, &head))
+                .map(|(n, _)| n.clone()),
+        );
+        TurnOutcome::Defined {
+            generation: gen.0,
+            module: tidepool_repr::SessionModule::lib(gen).module_name(),
+            head,
+            stale,
+        }
+    }
+
+    /// Run a single block item (no batching): the per-item dispatch used both
+    /// for stmt/meta items and as the fallback when a decl batch fails.
+    fn run_one_item<H: DispatchEffect<CapturedOutput>>(
+        &mut self,
+        item: &BlockItem,
+        handlers: &mut H,
+        captured: &CapturedOutput,
+    ) -> (&'static str, TurnOutcome) {
+        match item {
+            BlockItem::Decl(decl) => ("decl", self.run_def(&decl.0)),
+            BlockItem::Stmt(expr) => ("stmt", self.run_eval(&expr.0, handlers, captured)),
+            BlockItem::Meta(meta) => ("meta", self.run_meta(meta)),
+            BlockItem::Auto(expr) => {
+                // Try-cascade: attempt as declaration first. On a GHC parse
+                // error the item is not a decl → fall back to run_eval (bind
+                // vs expr internally). A non-parse failure (type/scope error)
+                // means it IS a declaration, just broken — surface the error.
+                let def_result = self.run_def(&expr.0);
+                match def_result {
+                    TurnOutcome::Error(ref msg) if is_parse_error(msg) => {
+                        ("stmt", self.run_eval(&expr.0, handlers, captured))
+                    }
+                    other => ("decl", other),
                 }
             }
-            Err(e) => TurnOutcome::Error(format!("declaration failed: {e}")),
         }
     }
 
@@ -389,6 +541,17 @@ impl Session {
                 [] => self.run_plain_eval(expr_text, handlers, captured),
                 [name] => {
                     let name = name.clone();
+                    // "A pure binding is a declaration": a PURE bind (`let x = e`,
+                    // `x <- pure e`, `x <- return e`) is routed into the decl
+                    // plane as the top-level binding `x = e`, so it GENERALIZES
+                    // (GHCi parity — `xs <- pure []` stays polymorphic, `n <-
+                    // pure 5` instantiates at Double later) instead of freezing
+                    // to a monomorphic heap value. If it fails to compile as a
+                    // decl (its RHS references a materialized/effectful value, so
+                    // it's out of decl scope), fall back to the materialize path.
+                    if let Some(outcome) = self.try_pure_bind_as_decl(expr_text, &name) {
+                        return outcome;
+                    }
                     self.run_bind(expr_text, name, handlers, captured)
                 }
                 // Multi-binder flat-tuple pattern (`(a, b) <- …`, `let (x,y) = …`):
@@ -398,7 +561,14 @@ impl Session {
                     self.run_multi_bind(expr_text, names, handlers, captured)
                 }
             }
-        } else if !self.bindings.is_empty() {
+        } else if !self.bindings.is_empty() || self.lib.generation().0 > 0 {
+            // Any session state — value bindings OR decls (pure binds now land
+            // as decls) — takes the reference path, which imports the decl
+            // module + seeds the value external-env AND has the Eff-first /
+            // pure-value fallback. `run_plain_eval` (no pure fallback) is only
+            // for a pristine session, where a bare pure expression like
+            // `case sh of …` referencing a decl would otherwise fail to match
+            // `Eff _ a` with no fallback.
             self.run_session_reference(expr_text, handlers, captured)
         } else {
             self.run_plain_eval(expr_text, handlers, captured)
@@ -619,6 +789,9 @@ impl Session {
         } else {
             BoundValue::Tier1Closure(slot)
         };
+        // Cross-plane shadow: a materialized value binding supersedes any pure
+        // decl of the same name in the environment view.
+        self.pure_binds.remove(&name);
         self.bindings.bind(BindingEntry {
             name: BindingName(name.clone()),
             id: SessionVarId::from_extract(binder.var_id),
@@ -737,6 +910,7 @@ impl Session {
             } else {
                 BoundValue::Tier1Closure(slot)
             };
+            self.pure_binds.remove(&binder.name);
             self.bindings.bind(BindingEntry {
                 name: BindingName(binder.name.clone()),
                 id: SessionVarId::from_extract(binder.var_id),
@@ -838,6 +1012,10 @@ impl Session {
         if let Err(e) = self.merge_table(&turn.table) {
             return TurnOutcome::Error(e);
         }
+        // Seed the machine from an Eff fragment first, so its table has the
+        // freer cons even when THIS fragment is pure (a pure fragment omits
+        // `Val` etc.; a later Eff fragment would then fail).
+        self.ensure_effect_machine();
         if self.machine.is_none() {
             match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
             {
@@ -911,6 +1089,8 @@ impl Session {
     fn run_meta(&mut self, meta: &MetaCommand) -> TurnOutcome {
         match meta {
             MetaCommand::Bindings => {
+                // The unified environment view: materialized (effectful) value
+                // binds AND pure binds (decl-backed, GHCi-environment model).
                 let mut bindings: Vec<serde_json::Value> = self
                     .bindings
                     .iter_current()
@@ -923,6 +1103,15 @@ impl Session {
                         })
                     })
                     .collect();
+                bindings.extend(self.pure_binds.iter().map(|(name, pb)| {
+                    serde_json::json!({
+                        "name": name,
+                        "type": pb.type_display,
+                        "module": tidepool_repr::SessionModule::lib(pb.gen).module_name(),
+                        // A pure bind is a lazy decl, not a materialized value.
+                        "tier": "DeclBacked",
+                    })
+                }));
                 bindings.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
                 TurnOutcome::Meta(serde_json::json!({
                     "bindings": bindings,
@@ -940,6 +1129,7 @@ impl Session {
                 self.val_gen = Generation(0);
                 self.session_table = DataConTable::new();
                 self.last_stubs = Vec::new();
+                self.pure_binds.clear();
                 match SessionLib::open(
                     self.cfg.id,
                     self.cfg.root.clone(),
@@ -1015,6 +1205,15 @@ impl Session {
                         "type": entry.type_display.clone().unwrap_or_default(),
                         "tier": if entry.value.is_forced() { "Tier0Data" } else { "Tier1Closure" },
                         "module": entry.module.module_name(),
+                    }));
+                }
+                // 1b. Pure bind (decl-backed) — part of the environment too.
+                if let Some(pb) = self.pure_binds.get(name) {
+                    return TurnOutcome::Meta(serde_json::json!({
+                        "name": name,
+                        "type": pb.type_display,
+                        "tier": "DeclBacked",
+                        "module": tidepool_repr::SessionModule::lib(pb.gen).module_name(),
                     }));
                 }
                 // 2. Built-in effect decl type_defs (data/newtype/type) and GADT constructors.
@@ -1182,6 +1381,44 @@ impl Session {
     fn bootstrap_machine(&mut self, m: JitEffectMachine) {
         self.machine = Some(m);
         self.publish_cancel();
+    }
+
+    /// Ensure the resident machine exists AND its DataConTable carries the freer
+    /// `Eff` constructors (`Val`/`Leaf`/`Node`/…), by bootstrapping from a
+    /// trivial Eff fragment (`pure ()`) if the machine hasn't started. A PURE
+    /// fragment's table omits those cons, so a session whose FIRST machine-using
+    /// op is a pure reference — common now that pure binds are decls that don't
+    /// bootstrap — would otherwise fail a later Eff fragment with "missing
+    /// freer-simple constructor 'Val'". No-op once the machine is up.
+    fn ensure_effect_machine(&mut self) {
+        if self.machine.is_some() {
+            return;
+        }
+        let preamble = self.patched_preamble();
+        let imports = self.session_imports();
+        let inject = self.live_val_modules();
+        let eval_input = self.eval_input.clone();
+        let src = template_haskell_show_default(
+            &preamble,
+            &self.cfg.effect_stack,
+            "pure ()",
+            &imports,
+            "",
+            eval_input.as_ref(),
+            None,
+        );
+        let compiled = {
+            let include = self.turn_include();
+            compile_session_turn(&src, &include, self.session_root(), &inject, None)
+        };
+        if let Ok(turn) = compiled {
+            let _ = self.merge_table(&turn.table);
+            if let Ok(m) =
+                JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
+            {
+                self.bootstrap_machine(m);
+            }
+        }
     }
 
     /// Publish the machine's cancel handle into the shared slot (no-op if no
@@ -1627,6 +1864,34 @@ fn wrap_probe_source(
     out
 }
 
+/// Normalize a PURE bind of `name` to its equivalent top-level declaration
+/// `name = <rhs>`. `let name = e` → `name = e`; `name <- pure e` /
+/// `name <- return e` → `name = e`. Returns `None` for effectful binds or
+/// shapes we don't confidently normalize (which then take the materialize
+/// path). `pure`/`return` of a value is semantically pure, so unwrapping one
+/// layer is exact.
+fn pure_bind_to_decl(expr_text: &str, name: &str) -> Option<String> {
+    let t = expr_text.trim();
+    // `let name = e` (single binder — classify already gave one binder `name`).
+    if let Some(rest) = t.strip_prefix("let ") {
+        let rest = rest.trim_start();
+        // Guard against `let { … }` explicit-brace / pattern shapes.
+        if rest.starts_with(name) {
+            return Some(rest.trim().to_string());
+        }
+        return None;
+    }
+    // `name <- pure e` / `name <- return e`.
+    let after_name = t.strip_prefix(name)?.trim_start();
+    let rhs = after_name.strip_prefix("<-")?.trim_start();
+    for kw in ["pure ", "return "] {
+        if let Some(e) = rhs.strip_prefix(kw) {
+            return Some(format!("{name} = {}", e.trim()));
+        }
+    }
+    None
+}
+
 /// Whether `text` contains `word` as a whole identifier (Haskell ident
 /// boundaries: alnum, `_`, `'`). Used to find binds that reference a
 /// redefined decl (the `stale:` field).
@@ -1757,7 +2022,33 @@ fn type_def_head(src: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod slim_tests {
-    use super::{decl_head, slim_item_result};
+    use super::{decl_head, pure_bind_to_decl, slim_item_result};
+
+    #[test]
+    fn pure_bind_to_decl_normalizes() {
+        // let x = e  ->  x = e
+        assert_eq!(
+            pure_bind_to_decl("let n = 5", "n").as_deref(),
+            Some("n = 5")
+        );
+        // x <- pure e  ->  x = e
+        assert_eq!(
+            pure_bind_to_decl("xs <- pure []", "xs").as_deref(),
+            Some("xs = []")
+        );
+        // x <- return e  ->  x = e
+        assert_eq!(
+            pure_bind_to_decl("y <- return (foo bar)", "y").as_deref(),
+            Some("y = (foo bar)")
+        );
+        // effectful bind: not normalized (falls back to materialize)
+        assert_eq!(pure_bind_to_decl("p <- run \"ls\"", "p"), None);
+        // let with a type annotation on the RHS survives
+        assert_eq!(
+            pure_bind_to_decl("let d = 5 :: Double", "d").as_deref(),
+            Some("d = 5 :: Double")
+        );
+    }
     use crate::command::TurnOutcome;
 
     #[test]

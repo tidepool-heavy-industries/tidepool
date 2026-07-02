@@ -540,3 +540,87 @@ async fn bad_decl_does_not_poison_log() {
 
     repl.close().await.expect_ok("close");
 }
+
+/// WHOLE-BLOCK DECL ELABORATION (M1): a type signature and its binding in
+/// SEPARATE items of one block now typecheck together (batched as one
+/// generation) — previously "the type signature lacks an accompanying binding".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sig_and_binding_split_across_items() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.open_ok().await;
+    // Two items: a bare signature, then the binding. Batched → one module.
+    let out = repl.run(&["sig1 :: Int -> Int", "sig1 x = x + 1"]).await;
+    let text = out.expect_ok("sig + binding split across items");
+    assert!(text.contains("sig1"), "expected decl sig1: {text}");
+    let val = repl.eval_ok("pure (sig1 41)").await;
+    assert!(val.contains("42"), "sig1 41: expected 42, got {val}");
+    repl.close().await.expect_ok("close");
+}
+
+/// WHOLE-BLOCK DECL ELABORATION (M1): mutually-recursive functions defined in
+/// SEPARATE items of one block now resolve (batched together) — previously
+/// "Variable not in scope: isOdd".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mutual_recursion_across_items() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.open_ok().await;
+    let out = repl
+        .run(&[
+            "isEven n = if n == (0 :: Int) then True else isOdd (n - 1)",
+            "isOdd n = if n == (0 :: Int) then False else isEven (n - 1)",
+        ])
+        .await;
+    out.expect_ok("mutual recursion across items");
+    let val = repl.eval_ok("pure (isEven 10, isOdd 7)").await;
+    assert!(
+        val.contains("True"),
+        "isEven 10 / isOdd 7 should be True: {val}"
+    );
+    repl.close().await.expect_ok("close");
+}
+
+/// PURE-BIND-AS-DECL (M2): a numeric bind generalizes instead of freezing to
+/// Int — `n <- pure 5` then `n + 1.5` instantiates n at Double. Both within
+/// one block AND across calls.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pure_numeric_bind_generalizes() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.open_ok().await;
+    // Within one block:
+    let out = repl.run(&["n <- pure 5", "pure (n + 1.5)"]).await;
+    let text = out.expect_ok("pure numeric bind within block");
+    assert!(text.contains("6.5"), "n + 1.5 should be 6.5: {text}");
+    // Across calls: bind in one call, use in the next.
+    repl.eval("m <- pure 10").await.expect_ok("bind m");
+    let val = repl.eval_ok("pure (m * 2.5)").await;
+    assert!(val.contains("25"), "m * 2.5 should be 25.0: {val}");
+    repl.close().await.expect_ok("close");
+}
+
+/// PURE-BIND-AS-DECL (M2): a polymorphic empty-list bind stays polymorphic and
+/// instantiates per use — the case that used to throw an interface error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pure_polymorphic_bind_instantiates_per_use() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.open_ok().await;
+    repl.eval("xs <- pure []").await.expect_ok("bind xs = []");
+    // Use at [Int]:
+    let a = repl.eval_ok("pure (filter (> (3 :: Int)) xs)").await;
+    assert!(a.contains("[]"), "filter over xs: {a}");
+    // Use at another type in a later call — polymorphism preserved:
+    let b = repl.eval_ok("pure (map (\\c -> [c]) xs :: [[Char]])").await;
+    assert!(b.contains("[]"), "map over xs at [Char]: {b}");
+    repl.close().await.expect_ok("close");
+}

@@ -105,28 +105,31 @@ async fn bad_decl_then_recover() {
 }
 
 /// Case 4 — Bind of bottom (KEY robustness).
-/// `x <- pure (error "boom" :: Int)` — a Tier-0 Int bind deep-forces to NF and
-/// hits the `error` thunk. EXPECT a clean MCP error, NOT a crash/SIGILL/hang.
-/// Then the session must survive a good turn. Isolated as its own test so that
-/// IF it crashes/hangs the binary, the other cases still run.
+/// `x <- pure (error "boom" :: Int)` is a PURE bind → a lazy top-level decl
+/// (`x = error "boom"`, GHCi parity). It therefore binds CLEANLY (the thunk is
+/// not forced at bind time); forcing it later (`pure x`) yields the clean error
+/// — no crash/SIGILL/hang. Then the session survives a good turn. Isolated so
+/// that IF forcing crashes the binary, the other cases still run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bind_of_bottom_is_clean() {
+async fn bind_of_bottom_is_lazy_then_clean_on_force() {
     if !extract_available() {
         return;
     }
     let repl = Repl::new();
     repl.open_ok().await;
 
-    // Tier-0 strict-force of an `error` thunk: must yield a clean error.
-    // Observed clean error: `bind runtime error: yield error: Haskell error: boom`
-    // (the `error` message propagates as a yield — no SIGILL, no deep_force
-    // sentinel crash).
-    let t = repl.eval("x <- pure (error \"boom\" :: Int)").await;
-    t.expect_err("bind of bottom");
+    // Lazy bind: no error at bind (the decl `x = error "boom"` isn't forced).
+    repl.eval("x <- pure (error \"boom\" :: Int)")
+        .await
+        .expect_ok("lazy bind of bottom (no force at bind)");
 
-    // session survives.
+    // Forcing it yields the clean error (no SIGILL / deep_force crash).
+    let t = repl.eval("pure x").await;
+    t.expect_err("forcing bottom yields a clean error");
+
+    // Session survives.
     let t = repl.eval("pure (1 :: Int)").await;
-    assert!(t.contains("1"), "post-bottom-bind pure 1: {}", t.text);
+    assert!(t.contains("1"), "post-bottom-force pure 1: {}", t.text);
 
     repl.close().await.expect_ok("close");
 }
@@ -193,36 +196,35 @@ async fn empty_and_whitespace_eval() {
     repl.close().await.expect_ok("close");
 }
 
-/// Case 7 — Reference after a failed bind.
-/// A bind that throws while forcing (`z <- pure (error "x" :: Int)`) must NOT
-/// root `z`; `:bindings` must not list it, and the session must stay usable.
+/// Case 7 — A bind that genuinely FAILS (to typecheck) must leave NO state:
+/// nothing bound/decl'd, prior binds intact, the session usable. (A bottom
+/// *pure* bind is lazy and does NOT fail at bind — see
+/// `bind_of_bottom_is_lazy_then_clean_on_force`; here the failure is a real
+/// scope error so neither the decl route nor the materialize fallback roots
+/// anything.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn no_root_after_failed_bind() {
+async fn failed_bind_leaves_no_state() {
     if !extract_available() {
         return;
     }
     let repl = Repl::new();
     repl.open_ok().await;
 
-    // Bind a real value first so :bindings is non-trivially populated.
+    // A good pure bind first (a lazy decl `k = 5`).
     repl.eval("k <- pure (5 :: Int)").await.expect_ok("bind k");
 
-    // Failed bind — forcing the error thunk aborts before the value is rooted.
-    let t = repl.eval("z <- pure (error \"x\" :: Int)").await;
-    t.expect_err("failed bind z");
+    // A bind that fails to typecheck (unbound name) — decl route fails, the
+    // materialize fallback fails too, so nothing is created.
+    let t = repl.eval("z <- pure (thisNameDoesNotExist :: Int)").await;
+    t.expect_err("failed bind z (scope error)");
 
-    // :bindings must NOT list z (it never rooted); k must remain.
-    let b = repl.cmd(":bindings").await;
-    let b = b.expect_ok(":bindings after failed bind");
-    assert!(
-        !b.contains("\"z\""),
-        "BUG: :bindings lists z after a failed bind: {b}"
-    );
-    assert!(b.contains("\"k\""), ":bindings should still list k: {b}");
+    // k survives and is usable by reference.
+    let t = repl.eval("pure (k + 1)").await;
+    assert!(t.contains("6"), "k usable after failed bind: {}", t.text);
 
-    // session usable.
-    let t = repl.eval("k + 1").await;
-    assert!(t.contains("6"), "post-failed-bind k + 1: {}", t.text);
+    // z was never created — referencing it errors (not in scope).
+    let t = repl.eval("pure z").await;
+    t.expect_err("z not in scope after failed bind");
 
     repl.close().await.expect_ok("close");
 }

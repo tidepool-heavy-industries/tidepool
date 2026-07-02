@@ -118,6 +118,15 @@ impl BindingTable {
         id
     }
 
+    /// Drop `name` from the CURRENT map so `iter_current`/`resolve` no longer
+    /// see it (its `live` entry + root are retained for fragments compiled
+    /// against the old gen). Used when a pure decl of the same name supersedes
+    /// a materialized value binding (cross-plane shadow, GHCi-environment
+    /// model). No-op if `name` isn't current.
+    pub fn remove_current(&mut self, name: &str) {
+        self.current.remove(&BindingName(name.to_string()));
+    }
+
     /// Resolve a name to its CURRENT binding (newest gen), or `None` if the name
     /// is not session-bound (the caller then falls through to normal Var
     /// resolution / the unresolved-var trap).

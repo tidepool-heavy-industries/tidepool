@@ -253,19 +253,35 @@ impl SessionLib {
     /// up a stale poisoned module (`SessionError::ValidationFailed`). This covers
     /// ALL declaration kinds — `data`, `class`, `instance`, `type`, and values.
     pub fn define(&mut self, decl_text: &str) -> Result<Generation, SessionError> {
-        // RE-1: empty / whitespace declaration is a no-op — don't bump the gen.
-        if decl_text.trim().is_empty() {
+        self.define_batch(&[decl_text])
+    }
+
+    /// Define SEVERAL declarations as ONE generation — they land in one module
+    /// and GHC typechecks them together, so a type signature and its binding,
+    /// or a mutual-recursion SCC, split across separate block items still work
+    /// (whole-block decl elaboration). `define` is the single-decl case.
+    ///
+    /// Binders are extracted from the concatenation (one parse), the sources
+    /// ride as one `DeclTurn` (`render_module` already emits every source of a
+    /// turn into one module), and validation/rollback are identical to
+    /// `define`. Empty/whitespace sources are dropped; an all-empty batch is a
+    /// no-op.
+    pub fn define_batch(&mut self, decl_texts: &[&str]) -> Result<Generation, SessionError> {
+        let sources: Vec<String> = decl_texts
+            .iter()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| (*s).to_string())
+            .collect();
+        if sources.is_empty() {
             return Ok(self.log.generation());
         }
 
+        let combined = sources.join("\n\n");
         let mut binder_include: Vec<&Path> = vec![self.root.as_path()];
         binder_include.extend(self.extra_include.iter().map(PathBuf::as_path));
-        let items = binders::extract_binders(decl_text, &binder_include)?;
+        let items = binders::extract_binders(&combined, &binder_include)?;
 
-        self.log.push(DeclTurn {
-            sources: vec![decl_text.to_string()],
-            items,
-        });
+        self.log.push(DeclTurn { sources, items });
         let gen = self.log.generation();
         let rendered = render::render_module(&self.log, gen, &self.env);
         self.write_module(&rendered)?;

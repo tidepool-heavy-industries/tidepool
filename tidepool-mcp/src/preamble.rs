@@ -29,7 +29,24 @@ pub const PREAMBLE_DEFAULT_DECL: &str = "default (Int, Double, Text)\n";
 /// everywhere: a helper written with `session_def` sees exactly the extensions
 /// an `eval`/`session_eval` expression does. No trailing newline — callers that
 /// emit it add their own (the eval preamble and `ModuleEnv::pragmas` both do).
+// NB: NoMonomorphismRestriction is NOT in EVAL_PRAGMAS — the eval EXPRESSION
+// module needs the MR so `__user = pure (…)` monomorphizes against its do-block
+// context (with NMR + ExtendedDefaultRules it generalizes the `Applicative`
+// constraint and mis-defaults). NMR is added ONLY to the session DECL module
+// env (`session_decl_module_env`), where pure binds land as decls and MUST
+// generalize (`n = 5` → `Num a => a`). See that fn and render.rs `ModuleEnv`.
 pub const EVAL_PRAGMAS: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot #-}";
+
+/// EVAL_PRAGMAS with `NoMonomorphismRestriction` inserted — the pragma block
+/// for the session DECLARATION module, where pure binds land as top-level
+/// bindings that must generalize (see `session_decl_module_env`).
+pub fn decl_pragmas() -> String {
+    EVAL_PRAGMAS.replacen(
+        "NoImplicitPrelude,",
+        "NoImplicitPrelude, NoMonomorphismRestriction,",
+        1,
+    )
+}
 
 /// The canonical ordered import lines shared by the eval `Expr` module and the
 /// session decl modules — the SINGLE source of truth for the eval vocabulary
@@ -115,7 +132,7 @@ pub fn session_decl_module_env(user_library: bool) -> ModuleEnv {
     // "not in scope" with no hint (friction #23, found live 2026-07-01).
     imports.push("import Tidepool.Orchestrate".into());
     ModuleEnv {
-        pragmas: EVAL_PRAGMAS.to_string(),
+        pragmas: decl_pragmas(),
         imports,
     }
 }
