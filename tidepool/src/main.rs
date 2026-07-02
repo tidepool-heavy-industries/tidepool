@@ -89,58 +89,16 @@ fn find_tidepool_extract() -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// Secrets loader
+// Secrets loader — shared with tidepool-repl via tidepool_runtime::paths
 // ---------------------------------------------------------------------------
 
-fn load_secrets_from(dir: &std::path::Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return; // no secrets dir — nothing to do
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let valid_name = name.ends_with("_API_KEY")
-            && name
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
-        if !valid_name {
-            tracing::warn!(
-                "{}/{}: ignored (filename must be an env-var name ending in _API_KEY)",
-                dir.display(),
-                name
-            );
-            continue;
-        }
-        if std::env::var_os(&name).is_some_and(|v| !v.is_empty()) {
-            tracing::info!("{name} already set in environment; secrets file ignored");
-            continue;
-        }
-        match std::fs::read_to_string(entry.path()) {
-            Ok(contents) => {
-                let key = contents.trim();
-                if key.is_empty() {
-                    tracing::warn!("{}/{}: empty; ignored", dir.display(), name);
-                } else {
-                    std::env::set_var(&name, key);
-                    tracing::info!("loaded {name} from {}", dir.display());
-                }
-            }
-            Err(e) => tracing::warn!("{}/{}: unreadable: {e}", dir.display(), name),
-        }
-    }
-}
-
 fn load_secrets() {
-    // Project-local first (walk up from CWD for `.tidepool/secrets`), then
-    // user-global (`~/.config/tidepool/secrets`, legacy `~/.tidepool/secrets`).
-    // `load_secrets_from` lets an already-set var win, so the FIRST source to
-    // provide a key takes precedence — project overrides global.
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Some(root) = tidepool_runtime::paths::find_project_root(&cwd) {
-            load_secrets_from(&root.join(".tidepool").join("secrets"));
-        }
+    let report = tidepool_runtime::paths::load_secrets();
+    for name in &report.loaded {
+        tracing::info!("loaded {name} from secrets dir");
     }
-    for dir in tidepool_runtime::paths::global_secrets_dirs() {
-        load_secrets_from(&dir);
+    for skipped in &report.ignored {
+        tracing::info!("secrets: {skipped} ignored (bad name, empty, or already set)");
     }
 }
 

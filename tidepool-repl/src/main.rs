@@ -84,6 +84,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tidepool_codegen::debug::init_logging();
     tidepool_codegen::signal_safety::install();
 
+    // Same secrets surface as the oneshot server: .tidepool/secrets/*_API_KEY
+    // (project, then global) into env, so the Llm/Http handlers find keys.
+    let secrets = tidepool_runtime::paths::load_secrets();
+    for name in &secrets.loaded {
+        tracing::info!("loaded {name} from secrets dir");
+    }
+
     use clap::Parser;
     let args = Args::parse();
     let http_addr = args

@@ -5,6 +5,7 @@ module Dev where
 
 import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
+import qualified Tidepool.Data.Text as T
 
 -- | Run a command; return stdout. Non-zero exit = loud error with stderr.
 sh :: Text -> M Text
@@ -63,3 +64,16 @@ vocab = do
       let name = replace ".hs" "" (last (splitOn "/" m))
       let topSig l = " :: " `isInfixOf` l && not (" " `isPrefixOf` l) && not ("--" `isPrefixOf` l)
       pure (map (\s -> name <> "." <> s) (filter topSig (lines src)))
+
+-- | Look up a GHC error code (e.g. "GHC-39999") on errors.haskell.org and
+-- return its one-line title. Born from the error-plane work: every GHC
+-- diagnostic carries a [GHC-nnnnn] code; this fetches what it means.
+explainGhc :: Text -> M Text
+explainGhc code = do
+  r <- tryHttpGet ("https://errors.haskell.org/messages/" <> code <> "/")
+  pure (case r of
+    Left e -> "fetch failed: " <> e
+    Right (String html) -> T.strip (between "<title>" "</title>" html)
+    Right _ -> "unexpected non-text body")
+  where
+    between a b t = fst (T.breakOn b (T.drop (T.length a) (snd (T.breakOn a t))))

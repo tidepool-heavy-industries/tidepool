@@ -105,6 +105,59 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// What [`load_secrets`] did — callers log with their own subscriber
+/// (this crate has no tracing dependency).
+#[derive(Debug, Default)]
+pub struct SecretsReport {
+    /// Env-var names set from secrets files.
+    pub loaded: Vec<String>,
+    /// Files skipped: bad name, empty contents, or the var was already set.
+    pub ignored: Vec<String>,
+}
+
+/// Load `*_API_KEY` secrets files into the process environment: project-local
+/// `.tidepool/secrets/` (walk-up from CWD) first, then the user-global dirs.
+/// An already-set env var wins, so the FIRST source to provide a key takes
+/// precedence — project overrides global. Shared by BOTH server binaries
+/// (`tidepool` and `tidepool-repl`) so the effect stacks see the same keys.
+pub fn load_secrets() -> SecretsReport {
+    let mut report = SecretsReport::default();
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(root) = find_project_root(&cwd) {
+            load_secrets_from(&root.join(".tidepool").join("secrets"), &mut report);
+        }
+    }
+    for dir in global_secrets_dirs() {
+        load_secrets_from(&dir, &mut report);
+    }
+    report
+}
+
+fn load_secrets_from(dir: &Path, report: &mut SecretsReport) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return; // no secrets dir — nothing to do
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let valid_name = name.ends_with("_API_KEY")
+            && name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+        let already_set = std::env::var_os(&name).is_some_and(|v| !v.is_empty());
+        if !valid_name || already_set {
+            report.ignored.push(format!("{}/{name}", dir.display()));
+            continue;
+        }
+        match std::fs::read_to_string(entry.path()) {
+            Ok(contents) if !contents.trim().is_empty() => {
+                std::env::set_var(&name, contents.trim());
+                report.loaded.push(name);
+            }
+            _ => report.ignored.push(format!("{}/{name}", dir.display())),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
