@@ -74,7 +74,7 @@ import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, ppr)
 import GHC.Types.Id (Id)
 
 import Tidepool.Translate
-  ( translateModuleClosed, FlatNode(..), UnresolvedVar(..), varId, stableVarId )
+  ( translateModuleClosed, ClosedModule(..), FlatNode(..), UnresolvedVar(..), varId, stableVarId )
 
 import Control.Monad.IO.Class (liftIO)
 import Control.Exception (try, SomeException)
@@ -264,7 +264,7 @@ runForBinder libdir occ targetName = do
     let mExpected = (\i -> (varId i, stableVarId (varName i), nameStableString (varName i)))
                       <$> sessionId details occ
     (hsc, binds) <- compileUseToCore
-    (nodes, _usedDCs, unresolved, _reach) <-
+    ClosedModule { cmNodes = nodes, cmUnresolved = unresolved } <-
       liftIO $ translateModuleClosed hsc binds targetName
     pure (mExpected, toList nodes, unresolved)
   case r of

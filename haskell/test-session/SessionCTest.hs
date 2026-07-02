@@ -49,7 +49,7 @@ import Tidepool.Session
   , mkThinSessionIface, writeSessionIface )
 import Tidepool.GhcPipeline (runPipelineSession, PipelineResult(..))
 import Tidepool.Translate
-  ( translateModuleClosed, FlatNode(..), UnresolvedVar(..), stableVarId )
+  ( translateModuleClosed, ClosedModule(..), FlatNode(..), UnresolvedVar(..), stableVarId )
 
 import Control.Monad.IO.Class (liftIO)
 import Control.Exception (try, SomeException)
@@ -142,7 +142,8 @@ checkBinder libdir targetName occ = do
     let hsc   = prHscEnv res
         binds = prBinds res
         want  = expectedId hsc g1 occ
-    (nodes, _dcs, unresolved, _reach) <- translateModuleClosed hsc binds targetName
+    ClosedModule { cmNodes = nodes, cmUnresolved = unresolved } <-
+      translateModuleClosed hsc binds targetName
     pure (want, toList nodes, unresolved)
   case r of
     Left (e :: SomeException) -> do
