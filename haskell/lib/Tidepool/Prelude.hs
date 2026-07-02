@@ -29,11 +29,13 @@ module Tidepool.Prelude
   , words, lines, unwords, unlines
     -- * Typeclasses (re-exported from base)
   , Eq(..), Ord(..), Num(..), Integral(..), Real, Fractional(..), Floating(..), Show
+  , Bounded(minBound, maxBound)
   , Semigroup(..), Monoid(..)
     -- * Monoid / Semigroup aggregation newtypes
   , Sum(..), Product(..), Any(..), All(..), First(..), Last(..), Endo(..)
   , Max(..), Min(..), Arg(..)
   , fromIntegral, realToFrac, truncate, ceiling, floor, round
+  , (^), (^^)
   , Functor(..), Applicative(..), Monad(..)
   , (<$>)
     -- * show (Text-returning shadow)
@@ -184,9 +186,11 @@ import Prelude
   ( Int, Integer, Word, Char, Bool(..), Double, Float
   , String, Ordering(..), Maybe(..), Either(..)
   , Eq(..), Ord(..), Num(..), Integral(..), Real, Fractional(..), Floating(..), Show
+  , Bounded(minBound, maxBound)
   , Read, read
   , Semigroup(..), Monoid(..)
   , fromIntegral, realToFrac, truncate, ceiling, floor, even, odd
+  , (^), (^^)
   , Functor(..), Applicative(..), Monad(..)
   , (<$>)
   , id, const, flip, (.), ($), ($!)
