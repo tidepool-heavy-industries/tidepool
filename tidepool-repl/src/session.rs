@@ -251,6 +251,22 @@ impl Session {
         }
     }
 
+    /// Whether an item is a top-level DECLARATION (batches into a decl run) as
+    /// opposed to a bind/expression/meta (a singleton). A keyword decl is one
+    /// lexically; an `Auto` item is one iff GHC's parser — the single authority
+    /// (`Tidepool.Binders.classifyTurn`, decl+stmt contexts) — classifies it as
+    /// a declaration. This parse verdict, not the coarse `Auto` tag, is what
+    /// excludes a trailing call from a decl batch. On a classify failure
+    /// (extractor unavailable), fall back to NOT decl-shaped so the item takes
+    /// the resilient per-item path.
+    fn is_decl_shaped(&self, item: &BlockItem) -> bool {
+        match item {
+            BlockItem::Decl(_) => true,
+            BlockItem::Auto(e) => classify_turn(&e.0).is_ok_and(|c| c.is_decl),
+            BlockItem::Stmt(_) | BlockItem::Meta(_) => false,
+        }
+    }
+
     /// `session_run`: run a list of classified [`BlockItem`]s in sequence,
     /// reusing `run_def`/`run_eval`/`run_meta` as the per-item handlers.
     ///
@@ -284,14 +300,19 @@ impl Session {
         // a genuinely broken decl, lands here). Stmt/Meta items are singletons.
         let mut index = 0;
         'outer: while index < items.len() {
-            // Collect this segment's (index, kind, outcome) tuples.
-            let segment: Vec<(usize, &'static str, TurnOutcome)> = match &items[index] {
-                BlockItem::Decl(_) | BlockItem::Auto(_) => {
+            // Collect this segment's (index, kind, outcome) tuples. A DECL-shaped
+            // item (a keyword decl, or an `Auto` the GHC parser classifies as a
+            // top-level declaration) starts a batch run; a stmt/meta/expression
+            // is a singleton. The parse verdict — not the lexical `Auto` tag — is
+            // what keeps a trailing call (`sq 7` after `sq :: T` / `sq x = …`)
+            // OUT of the decl batch: it classifies as an expression, ends the run,
+            // and lands on the stmt path (the tool's "define then call in one
+            // block" idiom).
+            let segment: Vec<(usize, &'static str, TurnOutcome)> =
+                if self.is_decl_shaped(&items[index]) {
                     let start = index;
-                    let mut end = index;
-                    while end < items.len()
-                        && matches!(items[end], BlockItem::Decl(_) | BlockItem::Auto(_))
-                    {
+                    let mut end = index + 1;
+                    while end < items.len() && self.is_decl_shaped(&items[end]) {
                         end += 1;
                     }
                     let texts: Vec<String> = items[start..end]
@@ -299,11 +320,14 @@ impl Session {
                         .map(|it| match it {
                             BlockItem::Decl(d) => d.0.clone(),
                             BlockItem::Auto(e) => e.0.clone(),
-                            _ => unreachable!("segment is Decl/Auto only"),
+                            _ => unreachable!("a decl-shaped segment is Decl/Auto only"),
                         })
                         .collect();
 
-                    // Try to elaborate the whole run as one generation.
+                    // Try to elaborate the whole run as one generation. Every item is
+                    // parser-confirmed a declaration, so the batch is not poisoned by
+                    // a stray expression; a failure here is a genuine type/scope error
+                    // and falls to the per-item path for a precise, per-item message.
                     let batched = if texts.len() >= 2 {
                         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
                         self.lib.define_batch(&refs).ok()
@@ -339,13 +363,11 @@ impl Session {
                             out
                         }
                     }
-                }
-                stmt_or_meta => {
-                    let (kind, outcome) = self.run_one_item(stmt_or_meta, handlers, captured);
+                } else {
+                    let (kind, outcome) = self.run_one_item(&items[index], handlers, captured);
                     index += 1;
                     vec![(index - 1, kind, outcome)]
-                }
-            };
+                };
 
             for (idx, kind, outcome) in segment {
                 let ok = !outcome.is_error();
@@ -968,8 +990,17 @@ impl Session {
                 let inner_type = self.query_inner_type(expr_text);
                 self.run_reference_fragment(turn, inner_type, false, handlers, captured)
             }
-            Err(eff_err) => {
-                // Pure fallback (keep the compile attempt; suppress the redundant error text).
+            Err(_eff_err) => {
+                // Pure fallback. The Eff-first wrap is an internal routing detail
+                // (§run_session_reference): for a pure expression it ALWAYS fails
+                // with `Couldn't match … with Eff …` noise against the internal
+                // `do _r <- __user; paginateResult …` scaffold. When the pure
+                // wrap ALSO fails, its error is the faithful one — `result =
+                // <expr>` is the minimal framing, so the genuine cause (scope /
+                // type error) maps straight to the user's `<item>` with no Eff
+                // wrapper leaking through. So we surface `pure_err`, never
+                // `_eff_err`, and drop the old "(also failed as a pure value)"
+                // suffix (which itself leaked the dual-wrap detail).
                 let pure_src =
                     wrap_pure_ref_source(&preamble, &imports, expr_text, eval_input.as_ref());
                 let pure_result = {
@@ -983,9 +1014,9 @@ impl Session {
                         let inner_type = turn.warnings.captured_type.clone();
                         self.run_reference_fragment(turn, inner_type, true, handlers, captured)
                     }
-                    Err(_pure_err) => TurnOutcome::Error(format!(
-                        "compile error: {} (also failed as a pure value)",
-                        remap_item_err(&eff_err.to_string(), &eff_src)
+                    Err(pure_err) => TurnOutcome::Error(format!(
+                        "compile error: {}",
+                        remap_item_err(&pure_err.to_string(), &pure_src)
                     )),
                 }
             }

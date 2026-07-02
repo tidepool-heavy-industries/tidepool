@@ -121,7 +121,7 @@ module Tidepool.Prelude
     -- * Text-to-number parsing
   , parseIntM, parseInt, parseDoubleM, parseDouble
     -- * Char predicates & conversions
-  , ord, chr, fromEnum
+  , ord, chr, fromEnum, succ, pred, toEnum
   , isDigit, isAlpha, isAlphaNum, isSpace, isUpper, isLower
   , digitToInt, toLowerChar, toUpperChar
     -- * Indexed list operations (safe alternatives to [0..])
@@ -203,7 +203,7 @@ import Prelude
   , scanl, scanr
   , negate, quot, rem, subtract
   , compare
-  , fromEnum
+  , fromEnum, succ, pred, toEnum
   , mapM, mapM_, sequence, sequence_
   )
 import qualified Prelude as P (show, drop, length, null, dropWhile, round)

@@ -585,6 +585,49 @@ async fn mutual_recursion_across_items() {
     repl.close().await.expect_ok("close");
 }
 
+/// DEFINE-THEN-CALL IN ONE BLOCK (the tool's own recommended idiom): a
+/// signature, its binding, AND a call, all in one `session_run`. The trailing
+/// call is a bare expression — GHC's parser classifies it as such, so it does
+/// NOT join the decl batch (which would otherwise fail to compile `sq 7` as a
+/// top-level declaration and, on fallback, fail the lone signature). Regression:
+/// the decl run must batch [sig, binding] and evaluate the call as a stmt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn define_then_call_in_one_block() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.open_ok().await;
+    // sig + binding (batched decls) + a trailing call (a stmt, NOT batched).
+    let out = repl
+        .run(&["sq :: Int -> Int", "sq x = x * x", "pure (sq 7)"])
+        .await;
+    let text = out.expect_ok("define then call in one block");
+    assert!(text.contains("49"), "sq 7 should be 49: {text}");
+    repl.close().await.expect_ok("close");
+}
+
+/// Mutual recursion AND a call, all in one block — the trailing call must not
+/// poison the mutual-recursion decl batch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mutual_recursion_and_call_in_one_block() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.open_ok().await;
+    let out = repl
+        .run(&[
+            "isEvn n = if n == (0 :: Int) then True else isOdd (n - 1)",
+            "isOdd n = if n == (0 :: Int) then False else isEvn (n - 1)",
+            "pure (isEvn 10)",
+        ])
+        .await;
+    let text = out.expect_ok("mutual recursion and call in one block");
+    assert!(text.contains("True"), "isEvn 10 should be True: {text}");
+    repl.close().await.expect_ok("close");
+}
+
 /// PURE-BIND-AS-DECL (M2): a numeric bind generalizes instead of freezing to
 /// Int — `n <- pure 5` then `n + 1.5` instantiates n at Double. Both within
 /// one block AND across calls.

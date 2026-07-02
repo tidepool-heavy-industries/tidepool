@@ -33,7 +33,7 @@ import GHC.Hs.Expr (StmtLR(..))
 import GHC.Hs.Utils (collectHsBindBinders, collectLStmtBinders, CollectFlag(..))
 import GHC.Driver.Session (importPaths, xopt_set)
 import GHC.LanguageExtensions (Extension(..))
-import GHC.Parser (parseStatement)
+import GHC.Parser (parseStatement, parseDeclaration)
 import GHC.Parser.Lexer (ParseResult(..), unP, initParserState)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Data.StringBuffer (stringToStringBuffer)
@@ -172,12 +172,24 @@ data StmtBinders = StmtBinders
   , sbBinders :: [String]
   } deriving (Eq, Show)
 
--- | Parse @src@ as a SINGLE do-statement with GHC's own parser (parse-only, no
--- typecheck) and classify it. @BindStmt@/@LetStmt@ → @"bind"@ with the bound
--- names ('collectLStmtBinders'); @BodyStmt@ (a bare expression) → @"expr"@ with
--- no binders. A parse failure is reported as @"expr"@ (the runtime then compiles
--- it through the bare-expression path, where GHC re-parses and reports any real
--- syntax error loudly).
+-- | Classify @src@ with GHC's own parser (parse-only, no typecheck) into one of
+-- three kinds, letting GHC be the single authority for the decl/bind/expr split
+-- (the Rust runtime never parses Haskell itself).
+--
+-- DECLARATION CONTEXT FIRST, then statement context. A top-level declaration
+-- (@f x = e@, a signature @f :: T@, a bare @x = 5@) parses as a decl but FAILS
+-- as a statement, so a statement-only parse would misreport it as @"expr"@
+-- (the old behavior — the ambiguity then leaked into Rust, where a trailing
+-- call in a "define then call" block poisoned the decl batch). Trying the decl
+-- parse first also disambiguates the genuinely two-faced @f :: T@: in decl
+-- context GHC reads it as a signature (@"decl"@), not an annotated expression.
+-- Order of precedence:
+--
+--   * parses as a top-level declaration → @"decl"@ + the declared name(s).
+--   * else parses as a statement: @BindStmt@/@LetStmt@ → @"bind"@ + bound
+--     names ('collectLStmtBinders'); @BodyStmt@ (a bare expression) → @"expr"@.
+--   * else (both fail) → @"expr"@ (the runtime recompiles through the
+--     bare-expression path, where GHC re-parses and reports the real error).
 extractStmtBinders :: String -> IO StmtBinders
 extractStmtBinders src = do
   libdir <- getLibdir
@@ -187,20 +199,70 @@ extractStmtBinders src = do
         popts  = initParserOpts dflags
         loc    = mkRealSrcLoc (mkFastString "<turn>") 1 1
         buf    = stringToStringBuffer src
-        pstate = initParserState popts buf loc
-    pure $ case unP parseStatement pstate of
-      POk _ lstmt -> classifyStmt lstmt
-      PFailed _   -> StmtBinders "expr" []
+        -- Fresh parser state per attempt (the StringBuffer is immutable, so it
+        -- is safe to reuse; the mutable lexer state is not).
+        declRes = unP parseDeclaration (initParserState popts buf loc)
+        stmtRes = unP parseStatement   (initParserState popts buf loc)
+    pure (classifyTurn declRes stmtRes)
 
--- | Classify a parsed statement: bare expression (@BodyStmt@) is an EXPR turn;
--- anything that binds (@BindStmt@, @LetStmt@, …) is a BIND turn carrying its
--- bound names. 'collectLStmtBinders' handles var, tuple and as-patterns.
-classifyStmt :: LStmt GhcPs (LHsExpr GhcPs) -> StmtBinders
-classifyStmt lstmt =
-  let binders = map occStr (collectLStmtBinders CollNoDictBinders lstmt)
-  in case unLoc lstmt of
-       BodyStmt{} -> StmtBinders "expr" []
-       _          -> StmtBinders "bind" binders
+-- | Combine the declaration- and statement-context parses into one verdict.
+-- Neither context alone is sufficient: a bare @sq 7@ parses (spuriously) as a
+-- top-level declaration — an implicit expression-splice, no binder — and a bare
+-- signature @sq :: T@ parses as BOTH a signature-declaration and an annotated
+-- expression. The precedence below is grounded in the syntax that is actually
+-- unambiguous:
+--
+--   1. @<-@ / top-level @let@ are bind-only markers → @"bind"@.
+--   2. A signature (@SigD@) is a declaration (this is how the two-faced
+--      @sq :: T@ is resolved — decl, not annotated expr).
+--   3. A value/function binding that actually BINDS A NAME (@ValD@ with ≥1
+--      harvested binder) → @"decl"@ (@sq x = e@, @x = 5@, @(a,b) = p@).
+--   4. A VALID BARE EXPRESSION (@BodyStmt@) → @"expr"@. This runs BEFORE the
+--      other-decl catch-all so that @sq 7@ / @filter p xs@ / @pure e@ — which
+--      @parseDeclaration@ spuriously accepts as a binder-less splice — classify
+--      as expressions, not declarations.
+--   5. Any remaining parsed declaration (a non-expression decl the lexical
+--      classifier upstream didn't catch, e.g. @deriving instance …@) → @"decl"@.
+--   6. Both parses failed → @"expr"@; the runtime recompiles through the
+--      bare-expression path and GHC reports the real error loudly.
+classifyTurn
+  :: ParseResult (LHsDecl GhcPs)
+  -> ParseResult (LStmt GhcPs (LHsExpr GhcPs))
+  -> StmtBinders
+classifyTurn declRes stmtRes
+  | POk _ lstmt <- stmtRes, isBindStmt lstmt =
+      StmtBinders "bind" (map occStr (collectLStmtBinders CollNoDictBinders lstmt))
+  | POk _ ldecl <- declRes, Just sb <- declNameVerdict ldecl = sb
+  | POk _ _ <- stmtRes = StmtBinders "expr" []
+  | POk _ _ <- declRes = StmtBinders "decl" []
+  | otherwise = StmtBinders "expr" []
+
+-- | Whether a parsed statement introduces binders (@BindStmt@/@LetStmt@) rather
+-- than being a bare expression (@BodyStmt@).
+isBindStmt :: LStmt GhcPs (LHsExpr GhcPs) -> Bool
+isBindStmt lstmt = case unLoc lstmt of
+  BodyStmt{} -> False
+  _          -> True
+
+-- | A NAME-DECLARING declaration's verdict, or 'Nothing' if this parsed
+-- \"declaration\" declares no name (a zero-binder @ValD@ — a bare application
+-- @parseDeclaration@ over-accepts as an implicit splice). A signature (@SigD@)
+-- always qualifies. Everything else defers to the caller's expr/other-decl
+-- precedence.
+declNameVerdict :: LHsDecl GhcPs -> Maybe StmtBinders
+declNameVerdict ldecl = case unLoc ldecl of
+  SigD _ sig  -> Just (StmtBinders "decl" (sigBinders sig))
+  ValD _ bind -> case map occStr (collectHsBindBinders CollNoDictBinders bind) of
+    []    -> Nothing
+    names -> Just (StmtBinders "decl" names)
+  _           -> Nothing
+
+-- | The names a signature declares (@f, g :: T@ → @["f","g"]@). Only the
+-- name-bearing signature forms matter for a session turn.
+sigBinders :: Sig GhcPs -> [String]
+sigBinders (TypeSig _ names _)      = map (occStr . unLoc) names
+sigBinders (ClassOpSig _ _ names _) = map (occStr . unLoc) names
+sigBinders _                        = []
 
 -- | Language extensions enabled for the parse-only statement classify. Broad
 -- enough to cover the surface the eval template accepts (lambda-case, tuple
