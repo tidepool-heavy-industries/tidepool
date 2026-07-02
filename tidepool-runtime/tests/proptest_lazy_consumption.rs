@@ -390,33 +390,34 @@ fn result_type_and_body(case: &Case) -> (&'static str, String) {
             "[Text]",
             format!("s <- readFile \"x\"\npure (take {k} (lines s))"),
         ),
-        // ---- TupleStringList: (c,o,e) via `run`, then `lines e` — #313 -------
+        // ---- TupleStringList: Proc via `run` (wire tuple -> Proc in the helper),
+        // then `lines pr.stderr` — #313. Records-era rewrite of the (c,o,e) shape.
         (Producer::TupleStringList, Consumer::Full) => (
             "Int",
-            "(_, _, e) <- run \"x\"\npure (length (lines e))".into(),
+            "pr <- run \"x\"\npure (length (lines pr.stderr))".into(),
         ),
         (Producer::TupleStringList, Consumer::LinesOfPartial(_)) => (
             "[Text]",
-            format!("(_, _, e) <- run \"x\"\npure (take {k} (lines e))"),
+            format!("pr <- run \"x\"\npure (take {k} (lines pr.stderr))"),
         ),
         (Producer::TupleStringList, Consumer::MapFilterPrefix(_)) => (
             "[Text]",
             format!(
-                "(_, _, e) <- run \"x\"\npure (take {k} (filter (\\l -> \"item-1\" `isPrefixOf` l) (lines e)))"
+                "pr <- run \"x\"\npure (take {k} (filter (\\l -> \"item-1\" `isPrefixOf` l) (lines pr.stderr)))"
             ),
         ),
         // #313 bisection: t7 inline + the field-isolating sub-cases.
         (Producer::TupleStringList, Consumer::TupleAllFields) => (
             "[Text]",
-            "(c, o, e) <- run \"x\"\npure (filter (\\l -> len l > 1) (lines e) <> [pack (show c), o])".into(),
+            "pr <- run \"x\"\npure (filter (\\l -> len l > 1) (lines pr.stderr) <> [pack (show pr.exitCode), pr.stdout])".into(),
         ),
         (Producer::TupleStringList, Consumer::TupleAppendStdout) => (
             "[Text]",
-            "(_, o, e) <- run \"x\"\npure (lines e <> [o])".into(),
+            "pr <- run \"x\"\npure (lines pr.stderr <> [pr.stdout])".into(),
         ),
         (Producer::TupleStringList, Consumer::TupleShowCode) => (
             "[Text]",
-            "(c, _, _) <- run \"x\"\npure [pack (show c)]".into(),
+            "pr <- run \"x\"\npure [pack (show pr.exitCode)]".into(),
         ),
         // ---- TwoList: xs, ys :: [Text] via two `glob`s -----------------------
         (Producer::TwoList(_), Consumer::Full) => (
@@ -506,8 +507,16 @@ fn root() -> &'static Path {
 fn prelude_dir() -> &'static Path {
     root().join("haskell/lib").leak()
 }
+/// The live project verb library — the preamble emits `import Library`, so
+/// this must stay on the include path for EVERY compiled source.
 fn user_lib_dir() -> &'static Path {
     root().join(".tidepool/lib").leak()
+}
+/// Probe.hs (t1..t11, the #313 cross-module probes) is a TEST FIXTURE, not a
+/// live session verb — it lives in the test tree so vocab curation of
+/// .tidepool/lib can't break the regression suite (it did once, 2026-07-01).
+fn probe_lib_dir() -> &'static Path {
+    root().join("tidepool-runtime/tests/haskell").leak()
 }
 
 /// Run ONE case in-process (called by the worker). Reads no env beyond what the
@@ -518,7 +527,7 @@ fn run_case_inproc(case: &Case) -> Result<serde_json::Value, String> {
     let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
         .expect("write effects module")
         .leak() as &Path;
-    let include = [prelude_dir(), user_lib_dir(), effects_dir];
+    let include = [prelude_dir(), user_lib_dir(), probe_lib_dir(), effects_dir];
     let nursery = if case.tiny_nursery {
         TINY_NURSERY_SIZE
     } else {
@@ -650,7 +659,7 @@ fn worker_lib_probe() {
     let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
         .expect("write effects module")
         .leak() as &Path;
-    let include = [prelude_dir(), user_lib_dir(), effects_dir];
+    let include = [prelude_dir(), user_lib_dir(), probe_lib_dir(), effects_dir];
     let mut dispatcher = WorkerDispatcher { producer, n };
     let r = compile_and_run_with_nursery_size(
         &source,

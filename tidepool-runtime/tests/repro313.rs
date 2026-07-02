@@ -65,8 +65,12 @@ fn repro_313_patch_class() {
         .leak() as &Path;
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let hs = root.join("haskell/lib").leak() as &Path;
+    // .tidepool/lib supplies `Library` (the preamble imports it); the test
+    // fixture dir supplies `Probe` (t1..t11 — relocated out of the live verb
+    // library 2026-07-01 so vocab curation can't break this guard).
     let lib = root.join(".tidepool/lib").leak() as &Path;
-    let include = [hs, lib, effects_dir];
+    let probes = root.join("tidepool-runtime/tests/haskell").leak() as &Path;
+    let include = [hs, lib, probes, effects_dir];
     let mut d = PatchDispatcher;
     let r = compile_and_run(&src, "result", &include, &mut d, &());
     match r {
@@ -108,8 +112,12 @@ fn repro_313() {
         .leak() as &Path;
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let hs = root.join("haskell/lib").leak() as &Path;
+    // .tidepool/lib supplies `Library` (the preamble imports it); the test
+    // fixture dir supplies `Probe` (t1..t11 — relocated out of the live verb
+    // library 2026-07-01 so vocab curation can't break this guard).
     let lib = root.join(".tidepool/lib").leak() as &Path;
-    let include = [hs, lib, effects_dir];
+    let probes = root.join("tidepool-runtime/tests/haskell").leak() as &Path;
+    let include = [hs, lib, probes, effects_dir];
     let mut d = TupleDispatcher;
     let r = compile_and_run(&src, "result", &include, &mut d, &());
     // Regression gate (#313 t11): two occurrences → 2 (FORCE=1 → 3). The
