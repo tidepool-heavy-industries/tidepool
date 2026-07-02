@@ -96,6 +96,7 @@ surface here — it drifts. Module map:
   `TextFormat` (`TF.`) — case/format/slugify/pad utilities (NOT the canonical
   surface). `Table` (`Tab.`) — CSV/TSV parse + render.
 - `FilePath` — System.FilePath over Text (`FilePath = Text`); the file-IO interface.
+- `Data/Time` — `UTCTime` newtype (epoch-millisecond, opaque); `formatISO8601` (ISO-8601, pure civil_from_days); `diffUTCTime`/`addUTCTime` (seconds); `epochMillis` escape hatch. `getCurrentTime :: M UTCTime` lives in the generated `Tidepool.Effects` (via `time_decl()` helpers).
 - `Aeson/*` — `Value`, `FromJSON`/`.:`/`withObject`, KeyMap, aeson-lens.
 - `QQ/*` — `[fmt|]`/`[j|]`/`[patch|]` quasiquoters.
 
