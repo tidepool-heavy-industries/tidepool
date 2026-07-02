@@ -35,7 +35,7 @@ module Tidepool.Prelude
   , Sum(..), Product(..), Any(..), All(..), First(..), Last(..), Endo(..)
   , Max(..), Min(..), Arg(..)
   , fromIntegral, realToFrac, truncate, ceiling, floor, round
-  , (^), (^^)
+  , (^), (^^), atan2
   , Functor(..), Applicative(..), Monad(..)
   , (<$>)
     -- * show (Text-returning shadow)
@@ -115,7 +115,7 @@ module Tidepool.Prelude
   , foldM, foldM_
   , filterM, replicateM, zipWithM
     -- * Maybe/Either utilities
-  , maybe, fromMaybe, isJust, isNothing, catMaybes, mapMaybe, listToMaybe, maybeToList
+  , maybe, fromMaybe, fromJust, isJust, isNothing, catMaybes, mapMaybe, listToMaybe, maybeToList
   , either
     -- * Partial functions (use with care)
   , head
@@ -193,7 +193,7 @@ import Prelude
   , Read, read
   , Semigroup(..), Monoid(..)
   , fromIntegral, realToFrac, truncate, ceiling, floor, even, odd
-  , (^), (^^)
+  , (^), (^^), atan2
   , Functor(..), Applicative(..), Monad(..)
   , (<$>)
   , id, const, flip, (.), ($), ($!)
@@ -227,7 +227,7 @@ import qualified Tidepool.Data.Text as T
 import Tidepool.Data.Text (Pack(..), pack)
 import Tidepool.FilePath
 import Data.Char (ord, chr)
-import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe, listToMaybe, maybeToList)
+import Data.Maybe (fromMaybe, fromJust, isJust, isNothing, catMaybes, mapMaybe, listToMaybe, maybeToList)
 import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, sortOn, maximumBy, minimumBy)
 -- Bifunctor first/second (polymorphic — tuples AND Either). Control.Lens
 -- re-exports `bimap` but NOT first/second, so import those two from the library.
