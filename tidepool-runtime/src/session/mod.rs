@@ -325,7 +325,7 @@ impl SessionLib {
         })?;
 
         if !output.status.success() {
-            let raw = String::from_utf8_lossy(&output.stderr).into_owned();
+            let raw = errmap::dedupe_diagnostics(&String::from_utf8_lossy(&output.stderr));
             // Speak item-relative coordinates: GHC's line numbers point into
             // the rendered G<g>.hs (header + imports before the user's text).
             // Anchored to the generated module's own path suffix only, so

@@ -245,7 +245,13 @@ processFile args path = do
         -- whose whole point is token economy. Emit only a terse marker; the
         -- formatted diagnostics above are what callers (tidepool-runtime
         -- ExtractFailed) surface.
-        Just (_ :: SourceError) -> hPutStrLn stderr "Compilation failed."
+        -- Print `show se` even though GHC's logger usually already printed the
+        -- diagnostics during `load`: PARSE errors (raised before the logger
+        -- runs) reach stderr ONLY through this line — dropping it made them
+        -- invisible ("Compilation failed." with no detail). The duplication
+        -- for logger-printed classes is collapsed Rust-side
+        -- (tidepool_runtime::session::errmap::dedupe_diagnostics).
+        Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
         Nothing -> hPutStrLn stderr $ "Error: " ++ show e
       exitFailure
     Right () -> return ()
@@ -317,7 +323,13 @@ processSessionFile args path = do
   case res of
     Left (e :: SomeException) -> do
       case fromException e of
-        Just (_ :: SourceError) -> hPutStrLn stderr "Compilation failed."
+        -- Print `show se` even though GHC's logger usually already printed the
+        -- diagnostics during `load`: PARSE errors (raised before the logger
+        -- runs) reach stderr ONLY through this line — dropping it made them
+        -- invisible ("Compilation failed." with no detail). The duplication
+        -- for logger-printed classes is collapsed Rust-side
+        -- (tidepool_runtime::session::errmap::dedupe_diagnostics).
+        Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
         Nothing -> hPutStrLn stderr $ "Error: " ++ show e
       exitFailure
     Right () -> return ()

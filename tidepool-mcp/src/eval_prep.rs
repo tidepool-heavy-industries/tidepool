@@ -420,7 +420,10 @@ pub(crate) fn format_error_with_source(
     let offset = marker_pos
         .map(|pos| source[..pos + MARKER.len()].matches('\n').count())
         .unwrap_or(0);
-    let remapped = remap_expr_lines(error, offset);
+    // Collapse the logger/`show se` double-print server-side (the extract must
+    // keep printing `show se`: parse errors reach stderr ONLY through it).
+    let deduped = tidepool_runtime::session::errmap::dedupe_diagnostics(error);
+    let remapped = remap_expr_lines(&deduped, offset);
     let mut out = format!(
         "## {}\n**failure-class:** `{}`\n\n{}\n\n## User Code\n```haskell\n{}\n```",
         title,

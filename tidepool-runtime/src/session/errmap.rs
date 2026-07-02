@@ -164,6 +164,45 @@ fn rewrite_gutter(line: &str, line_offset: usize) -> String {
     }
 }
 
+/// Collapse duplicate GHC diagnostic blocks in an extract stderr. The extract
+/// emits most diagnostics TWICE: once via GHC's logger during `load` (unicode
+/// quotes) and once via `show se` after the catch (ASCII quotes) — but parse
+/// errors arrive ONLY via `show se`, so the extract must keep printing it and
+/// the dedup lives here. Blocks are keyed on their alphanumeric content only,
+/// so quote-style and whitespace differences between the two copies vanish.
+#[must_use]
+pub fn dedupe_diagnostics(err: &str) -> String {
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    for line in err.lines() {
+        let is_header = (line.contains(".hs:")
+            && (line.contains(": error") || line.contains(": warning")))
+            || line.trim() == "Compilation failed."
+            || blocks.is_empty();
+        if is_header {
+            blocks.push(vec![line]);
+        } else if let Some(last) = blocks.last_mut() {
+            last.push(line);
+        }
+    }
+    let mut seen: Vec<String> = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    for block in blocks {
+        let text = block.join("\n");
+        let key: String = text.chars().filter(char::is_ascii_alphanumeric).collect();
+        if key.is_empty() || !seen.contains(&key) {
+            if !key.is_empty() {
+                seen.push(key);
+            }
+            out.push(text);
+        }
+    }
+    let mut joined = out.join("\n");
+    if err.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
 fn leading_digits(s: &str) -> &str {
     let end = s
         .char_indices()
@@ -238,6 +277,23 @@ mod tests {
         let got = remap_generated_coords(err, "Expr.hs", "<item>", 33, 2);
         assert!(got.contains("\n 2 | x\n"), "{got}");
         assert!(got.contains("\n40 | unrelated"), "{got}");
+    }
+
+    #[test]
+    fn dedupe_collapses_logger_and_show_se_copies() {
+        // Logger copy (unicode quotes) then the `show se` copy (ASCII quotes)
+        // behind the marker — the second block must vanish, the marker stays.
+        let err = "Expr.hs:3:1: error: [GHC-39999]\n    \u{2022} No instance for \u{2018}Foo\u{2019}\n\nCompilation failed.\nExpr.hs:3:1: error: [GHC-39999]\n    * No instance for `Foo'\n";
+        let got = dedupe_diagnostics(err);
+        assert_eq!(got.matches("No instance").count(), 1, "{got}");
+        assert!(got.contains("Compilation failed."), "{got}");
+    }
+
+    #[test]
+    fn dedupe_keeps_parse_error_only_copy() {
+        // Parse errors are printed ONLY by `show se` — nothing to collapse.
+        let err = "Compilation failed.\nExpr.hs:41:5: error: [GHC-58481]\n    parse error on input `let'\n";
+        assert_eq!(dedupe_diagnostics(err), err);
     }
 
     #[test]
