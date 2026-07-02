@@ -87,6 +87,39 @@ stale-tracking, and `:i` all surface pure binds (tier `DeclBacked`, module
 `Session.Lib.G<g>`) alongside materialized value binds — one coherent
 environment view. STATUS: SHIPPED (repl suite 139/0, fmt+clippy clean).
 
+## Whole-block follow-ons (2026-07-02 reload-gate live probes → fixes, commit 4da461a)
+
+Live acceptance after reconnect surfaced three warts, all FIXED principled (not
+routed around):
+
+- **define-then-call idiom broke** (`["sq :: T", "sq x = …", "sq 7"]`): the
+  batcher segmented on the coarse lexical `Auto` tag, so the trailing bare call
+  got swept into the decl batch (`sq 7` is no valid top-level decl → batch
+  fails → per-item fallback fails the lone signature). ROOT: `--emit-stmt-binders`
+  parsed statement-context ONLY and reported a decl as `"expr"` on parse-failure,
+  leaking the decl/expr ambiguity into Rust. FIX: `Binders.classifyTurn` now
+  parses BOTH decl + stmt contexts and combines by precedence (bind markers →
+  bind; `SigD` → decl [resolves two-faced `sq :: T`]; name-binding `ValD` →
+  decl; valid bare expr → expr BEFORE the other-decl catch-all, rejecting the
+  binder-less splice `parseDeclaration` over-accepts for `sq 7`/`filter p xs`).
+  `TurnClassification.is_decl` drives `run_block` segmentation (`is_decl_shaped`)
+  — trailing expr ends the run, no lexical `=`-scan, no compile-shrink-retry.
+  GHC's parser is the single authority (same invariant as the bind-vs-expr split).
+- **noisy pure-fallback error**: a bare-expr compile failure dumped the Eff-first
+  wrap's `Couldn't match … Eff …` scaffold noise (internal `do _r <- __user;
+  paginateResult …`) instead of the real cause. FIX: surface the pure-wrap
+  (`result = <expr>`) error; drop the `(also failed as a pure value)` suffix
+  (both leaked the dual-wrap routing detail — an impl detail users shouldn't see).
+- **`succ`/`pred`/`toEnum` unexported**: `map succ "abc"` failed "Variable not in
+  scope: succ" (only `P.succ` was reachable). FIX: re-export from `Tidepool.Prelude`
+  (JIT-safe — lazy poison closure defuses the `succ maxBound` error branch;
+  verified `map succ "abc"` → "bcd" live).
+
+Deploy note: repl uses the dev cabal extract (shim), rebuilt + live after
+reconnect; the nix-profile extract (oneshot `tidepool` server) is now behind on
+Binders.hs but the oneshot path never classifies, so no functional gap — a
+`nix profile upgrade tidepool-extract` is hygiene-only, deferred.
+
 ## Scar-tissue audit (2026-07-01 — live probes on the deployed server)
 
 Inanna's theory ("accumulated gotcha memory is stale scar tissue around since-fixed bugs; what's real is a bug list") — verdict: **mostly correct**. Every behavioral flinch in the memory corpus probed live:
