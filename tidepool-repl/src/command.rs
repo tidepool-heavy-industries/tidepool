@@ -179,7 +179,14 @@ pub enum TurnOutcome {
     /// A declaration item accumulated a decl; the session advanced to
     /// `generation` and `Tidepool.Session.Lib.G<generation>` now in scope.
     /// `head` is the declared identifier (for slim result display).
-    Defined { generation: u64, module: String, head: String },
+    Defined {
+        generation: u64,
+        module: String,
+        head: String,
+        /// Live binds whose defining expression references this (re)defined
+        /// name — they still hold their OLD value (notebook-frame staleness).
+        stale: Vec<String>,
+    },
     /// A meta-command item produced this structured result.
     Meta(Json),
     /// `session_run` block result: per-item outcomes + the last expression value.
@@ -235,10 +242,11 @@ impl TurnOutcome {
                 "types": components.iter().map(|(_, t)| t).collect::<Vec<_>>(),
             })
             .to_string(),
-            TurnOutcome::Defined { generation, module, .. } => serde_json::json!({
+            TurnOutcome::Defined { generation, module, stale, .. } => serde_json::json!({
                 "defined": true,
                 "generation": generation,
                 "module": module,
+                "stale": stale,
             })
             .to_string(),
             TurnOutcome::Meta(v) => {

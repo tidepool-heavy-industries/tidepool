@@ -489,3 +489,30 @@ async fn program_repaint_round_trips() {
     repl.close().await.expect_ok("close");
     fresh.close().await.expect_ok("close fresh");
 }
+
+/// Redefining a decl that a live bind referenced reports the bind as `stale`
+/// (notebook-frame display truthfulness — the value doesn't recompute).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn redefine_reports_stale_binds() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.open_ok().await;
+
+    repl.def("factor x = x * (2 :: Int)").await.expect_ok("def factor");
+    repl.eval("y <- pure (factor 10)").await.expect_ok("bind y = factor 10");
+
+    // Redefine factor — y still holds the OLD value; the response must say so.
+    let redef = repl.def("factor x = x * (100 :: Int)").await;
+    let text = redef.expect_ok("redefine factor");
+    assert!(text.contains("stale"), "expected stale marker: {text}");
+    assert!(text.contains('y'), "expected bind y named stale: {text}");
+
+    // A redefine touching nothing bound reports no stale key.
+    let unrelated = repl.def("other x = x + (1 :: Int)").await;
+    let ut = unrelated.expect_ok("def other");
+    assert!(!ut.contains("stale"), "unrelated redefine should not be stale: {ut}");
+
+    repl.close().await.expect_ok("close");
+}

@@ -336,12 +336,31 @@ impl Session {
     /// Declaration handler: append the declaration to the Lane-A log + regenerate
     /// the gen-versioned `Lib.G<g>` module.
     fn run_def(&mut self, decl_text: &str) -> TurnOutcome {
+        let head = decl_head(decl_text).to_string();
         match self.lib.define(decl_text) {
-            Ok(gen) => TurnOutcome::Defined {
-                generation: gen.0,
-                module: tidepool_repr::SessionModule::lib(gen).module_name(),
-                head: decl_head(decl_text).to_string(),
-            },
+            Ok(gen) => {
+                // Display truthfulness (notebook-frame): a bind whose defining
+                // expression references the redefined name still holds its OLD
+                // value (REPL values don't retroactively recompute). Name them
+                // so the caller knows to re-run rather than silently trust a
+                // stale binding. Word-boundary match on the head name.
+                let stale: Vec<String> = self
+                    .bindings
+                    .iter_current()
+                    .filter(|(_, e)| {
+                        e.defining_expr
+                            .as_deref()
+                            .is_some_and(|src| mentions_word(src, &head))
+                    })
+                    .map(|(n, _)| n.0.clone())
+                    .collect();
+                TurnOutcome::Defined {
+                    generation: gen.0,
+                    module: tidepool_repr::SessionModule::lib(gen).module_name(),
+                    head,
+                    stale,
+                }
+            }
             Err(e) => TurnOutcome::Error(format!("declaration failed: {e}")),
         }
     }
@@ -1571,6 +1590,30 @@ fn wrap_probe_source(
     out
 }
 
+/// Whether `text` contains `word` as a whole identifier (Haskell ident
+/// boundaries: alnum, `_`, `'`). Used to find binds that reference a
+/// redefined decl (the `stale:` field).
+fn mentions_word(text: &str, word: &str) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '\'';
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = text[start..].find(word) {
+        let i = start + rel;
+        let before_ok = i == 0 || !text[..i].chars().next_back().is_some_and(ident);
+        let after = i + word.len();
+        let after_ok = after >= bytes.len()
+            || !text[after..].chars().next().is_some_and(ident);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = i + 1;
+    }
+    false
+}
+
 /// Extract the declared head identifier from a Haskell declaration string,
 /// for the slim `{"decl":"name"}` block item result. Strips keyword prefixes
 /// for type/class/instance declarations; for function definitions returns the
@@ -1605,9 +1648,13 @@ fn slim_item_result(outcome: &TurnOutcome) -> serde_json::Value {
             "bound": components.iter().map(|(n, _)| n).collect::<Vec<_>>(),
             "types": components.iter().map(|(_, t)| t).collect::<Vec<_>>(),
         }),
-        TurnOutcome::Defined { head, .. } => serde_json::json!({
-            "decl": head,
-        }),
+        TurnOutcome::Defined { head, stale, .. } => {
+            let mut obj = serde_json::json!({ "decl": head });
+            if !stale.is_empty() {
+                obj["stale"] = serde_json::json!(stale);
+            }
+            obj
+        }
         TurnOutcome::Value {
             value,
             type_display,
@@ -1702,9 +1749,11 @@ mod slim_tests {
             generation: 1,
             module: "Tidepool.Session.Lib.G1".into(),
             head: "slug".into(),
+            stale: Vec::new(),
         };
         let r = slim_item_result(&defined);
         assert_eq!(r["decl"], "slug");
+        assert!(r.get("stale").is_none(), "no stale key when nothing stale");
         assert!(r.get("generation").is_none(), "no generation in slim decl");
         assert!(r.get("module").is_none(), "no module in slim decl");
     }
