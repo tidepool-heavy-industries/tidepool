@@ -239,6 +239,31 @@ fn works_map_fromlistwith_default_resolves() {
     );
 }
 
+/// FOOTGUN (ledger #34): `Map.fromList` on a LARGE ASCENDING list hits GHC's
+/// `fromDistinctAscList` fast-path — a non-tail balanced-tree build that
+/// overflows the JIT's ~10-20k non-tail limit. Counterintuitive: the sorted
+/// case (GHC's *fast* path) is the one that breaks. Must fail CLEAN (a named
+/// yield), never a silent SIGSEGV. Unsorted input takes the tail-safe
+/// `foldl' insert` path — covered by the WORKS probe below.
+#[test]
+fn loud_fail_map_fromlist_large_sorted_overflows() {
+    loud_fail(
+        "pure (Map.size (Map.fromList [(i, i) | i <- [1..12000 :: Int]]))",
+        "stack overflow",
+    );
+}
+
+/// The #34 WORKAROUND is safe at scale: `Map.fromListWith` uses an `insertWith`
+/// fold (no ascending fast-path), so a large SORTED input is fine — and
+/// `Map.fromList` on UNSORTED input takes the same tail-safe path.
+#[test]
+fn works_map_fromlistwith_large_sorted_safe() {
+    works(
+        "pure (Map.size (Map.fromListWith const [(i, i) | i <- [1..12000 :: Int]]))",
+        serde_json::json!(12000),
+    );
+}
+
 /// `takeWhile`/`span` are lazy-safe (jit-eager-argument-position memo). Bounded
 /// inputs here; the infinite-input laziness is covered by the STALE-DOC class.
 #[test]
