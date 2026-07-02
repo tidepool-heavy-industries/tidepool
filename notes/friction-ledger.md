@@ -80,6 +80,21 @@ Inanna's theory ("accumulated gotcha memory is stale scar tissue around since-fi
 - Remap coverage gap (by design, v1): an item whose decl contains hoisted imports/pragmas skips coordinate remap (`hoisted_lines` guard) — raw `G<n>.hs` path shows. Exact mapping through hoist positions is possible if it bites often. Combined with #23 (imports often needed in decls), it bites more than expected — bump priority if #23 resolves toward explicit imports.
 | 14 | `session_run` return shape is debug-noisy: `generation`/`valGeneration` counters, `index`, decl internals (`module: Tidepool.Session.Lib.G<n>`, `defined:true`), and `items[].result` is DOUBLE-ENCODED (a JSON string containing JSON); last item's result duplicates top-level `value` | spawn after repl-stubs merges (same rendering code). Slim shape: per-item just `{bound,type}` / `{decl}` / `{error}` inline (no string-encoding); top-level `{value, type}`; internals behind `--debug` or a `verbose` param | 2026-07-01 |
 
+## Night-shift wave (2026-07-02, autonomous)
+
+Shipped (all installed, need ONE /mcp reconnect to go live):
+- #20 Fs rg-semantics: bare dir recurses, missing root is LOUD, `glob` files-only. Handler test.
+- normalise → Tidepool.FilePath (+Prelude); #26 partial.
+- Foreign-gen WARNING filter: a gen-K `-Wx-partial` no longer rides every later item's errors (block-level, shared splitter). errmap 14/14.
+- Diagnostic dedupe now keys by CONTAINMENT (subset show-se copies collapse even with extra Suggested-fix/gutter lines).
+- Repl effects-dir SELF-HEAL per turn (rm -rf ~/.cache/tidepool mid-session no longer bricks until restart; oneshot parity).
+- `:program` — replayable-notebook repaint (decls + binds-with-defining-text; round-trips live). The compaction-seam primitive.
+- `stale:` field on redefine — names live binds holding the OLD value (notebook display truthfulness). BindingEntry gains defining_expr.
+
+Verified live (kata hunt, pre-reconnect binary):
+- Continuation machinery under REPEATED resume: a 5-suspension git-bisect knot, heap-persistent lo/hi bounds + accumulating step history across every resume — the capability no other tool has. Zero issues.
+- Map/Set/deep-recursion (Kahn topological build-order over the real crate graph): solid. The "cycle" it reports is dev-dependencies (Cargo allows those) — a true workspace property, not a bug.
+
 ## Filled at the verb layer (stdlib promotion candidates)
 
 | # | Gap | Interim fill | Found |
