@@ -18,8 +18,7 @@ sh cmd = do
 shLines :: Text -> M [Text]
 shLines cmd = lines <$> sh cmd
 
--- | Run a command; return the full Proc record (exitCode, stdout, stderr).
--- Escape hatch when the caller needs the exit code or raw stderr without erroring.
+-- | Run a command and return the full Proc record (exitCode, stdout, stderr) without erroring on failure.
 shProc :: Text -> M Proc
 shProc = run
 

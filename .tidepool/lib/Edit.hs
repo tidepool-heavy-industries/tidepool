@@ -117,6 +117,7 @@ type Span = (Int, Int, [Text])
 -- never build an empty Text the tree-walker mis-represents).
 -- ---------------------------------------------------------------------------
 
+-- | Split Text on newlines; exact round-trip with joinNL (no phantom trailing entry).
 splitNL :: Text -> [Text]
 splitNL t = map pack (go (unpack t))
   where
@@ -124,6 +125,7 @@ splitNL t = map pack (go (unpack t))
       (a, [])       -> [a]
       (a, _ : rest) -> a : go rest
 
+-- | Join lines with newlines; exact round-trip with splitNL.
 joinNL :: [Text] -> Text
 joinNL ts = pack (go (map unpack ts))
   where
@@ -148,6 +150,7 @@ resolveEdits src edits =
          (o : os) -> Left (o : os)
          []       -> Right (spliceLines srcLines (sortSpans spans))
 
+-- | Resolve all edits in order, accumulating conflicts and resolved spans (both lists reversed).
 resolveAll :: [Text] -> [Edit] -> ([EditConflict], [Span])
 resolveAll srcLines = go [] []
   where
@@ -156,6 +159,7 @@ resolveAll srcLines = go [] []
       Left c  -> go (c : cs) sp es
       Right s -> go cs (s : sp) es
 
+-- | Resolve one Edit against the source lines; Left = per-edit conflict, Right = Span.
 resolveEdit :: [Text] -> Edit -> Either EditConflict Span
 resolveEdit srcLines e = case e of
   ReplaceLines lo hi new
@@ -190,6 +194,7 @@ overlapConflicts spans =
   where
     idx xs = zip [0 .. length xs - 1] xs
 
+-- | True when two (lo,hi) spans conflict: overlapping ranges or inserts in the same gap.
 spansConflict :: Int -> Int -> Int -> Int -> Bool
 spansConflict lo1 hi1 lo2 hi2
   | ins1 && ins2 = lo1 == lo2                 -- two inserts in the same gap
@@ -200,6 +205,7 @@ spansConflict lo1 hi1 lo2 hi2
     ins1 = hi1 < lo1
     ins2 = hi2 < lo2
 
+-- | Sort spans by lo then hi; required ordering for spliceLines.
 sortSpans :: [Span] -> [Span]
 sortSpans = sortBy cmpSpan
   where
@@ -264,6 +270,7 @@ applyEdits path edits = do
       Right (Left _)    -> pure ApplyNoChange
       Right (Right fp)  -> ApplyDelegated <$> apply [fp]
 
+-- | Serialize an EditConflict to a JSON Value for the wire format.
 ecToValue :: EditConflict -> Value
 ecToValue (AnchorMissing a)          = object [ "kind" .= ("anchor-missing" :: Text), "anchor" .= a ]
 ecToValue (AnchorAmbiguous a is)     = object [ "kind" .= ("anchor-ambiguous" :: Text), "anchor" .= a, "lines" .= is ]
@@ -286,6 +293,7 @@ editsJ v = withFileEdits v applyEdits
 planEditsJ :: Value -> M EditOutcome
 planEditsJ v = withFileEdits v planEdits
 
+-- | Parse the file path and edit list from a JSON payload, then call the continuation.
 withFileEdits :: Value -> (Text -> [Edit] -> M a) -> M a
 withFileEdits v k = case getTxt v "file" of
   Nothing   -> error "editsJ: need a string 'file' field"
@@ -293,11 +301,13 @@ withFileEdits v k = case getTxt v "file" of
     Left e      -> error e
     Right edits -> k path edits
 
+-- | Parse the 'edits' array from an editsJ JSON payload; Left on missing or malformed array.
 parseEdits :: Value -> Either Text [Edit]
 parseEdits v = case getArr v "edits" of
   Nothing  -> Left "editsJ: need an array 'edits' field"
   Just arr -> mapEitherList parseEdit arr
 
+-- | Parse one edit object from its 'op' field; Left on unknown op or missing fields.
 parseEdit :: Value -> Either Text Edit
 parseEdit v = txtField "op" `bindE` \op -> case op of
   "replaceLines"       -> intField "lo" `bindE` \lo -> intField "hi" `bindE` \hi -> linesField `bindE` \ls -> Right (ReplaceLines lo hi ls)
@@ -314,13 +324,15 @@ parseEdit v = txtField "op" `bindE` \op -> case op of
       Just ls -> mapEitherList asTextE ls
     asTextE x = case asText x of { Just t -> Right t; Nothing -> Left "editsJ: 'lines' entries must be strings" }
 
--- Maybe extraction without leaning on the Maybe Monad instance on the JIT.
+-- | Extract a Text field from a JSON object; Nothing when absent or not a string.
 getTxt :: Value -> Text -> Maybe Text
 getTxt v k = case v ?. k of { Just x -> asText x; Nothing -> Nothing }
 
+-- | Extract an Int field from a JSON object; Nothing when absent or not a number.
 getInt :: Value -> Text -> Maybe Int
 getInt v k = case v ?. k of { Just x -> asInt x; Nothing -> Nothing }
 
+-- | Extract an array field from a JSON object; Nothing when absent or not an array.
 getArr :: Value -> Text -> Maybe [Value]
 getArr v k = case v ?. k of { Just x -> asArray x; Nothing -> Nothing }
 
@@ -330,6 +342,7 @@ bindE :: Either Text a -> (a -> Either Text b) -> Either Text b
 bindE (Left e)  _ = Left e
 bindE (Right a) f = f a
 
+-- | Map a fallible function over a list, stopping at the first Left.
 mapEitherList :: (a -> Either Text b) -> [a] -> Either Text [b]
 mapEitherList f = go []
   where
