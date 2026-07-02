@@ -21,16 +21,14 @@ use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_mcp::{
-    decl_module_basename, decl_user_offset, eval_user_offset, input_binding_source, library_vocab,
-    rewrite_ghc_errors, template_haskell_show_default, CapturedOutput, EffectDecl,
+    input_binding_source, library_vocab, template_haskell_show_default, CapturedOutput, EffectDecl,
     PREAMBLE_DEFAULT_DECL,
 };
 use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
 };
 use tidepool_runtime::session::{
-    classify_turn, compile_session_turn, ModuleEnv, SessionBind, SessionError, SessionLib,
-    ValueTier,
+    classify_turn, compile_session_turn, ModuleEnv, SessionBind, SessionLib, ValueTier,
 };
 use tidepool_runtime::{compile_haskell_salted, value_to_json};
 
@@ -327,18 +325,6 @@ impl Session {
                 module: tidepool_repr::SessionModule::lib(gen).module_name(),
                 head: decl_head(decl_text).to_string(),
             },
-            Err(SessionError::ValidationFailed { ghc_stderr, module_source }) => {
-                let basename = decl_module_basename(&module_source);
-                let offset = decl_user_offset(&module_source);
-                let rewritten = rewrite_ghc_errors(&ghc_stderr, &basename, offset);
-                TurnOutcome::Error(format!("declaration failed: {rewritten}"))
-            }
-            Err(SessionError::BinderExtraction(ghc_text)) => {
-                // Parse error on the declaration text; user content = entire file.
-                // The extractor uses "SessionDecls.hs" as the temp filename.
-                let rewritten = rewrite_ghc_errors(&ghc_text, "SessionDecls.hs", 2);
-                TurnOutcome::Error(format!("declaration failed: {rewritten}"))
-            }
             Err(e) => TurnOutcome::Error(format!("declaration failed: {e}")),
         }
     }
@@ -421,11 +407,7 @@ impl Session {
         };
         let (expr, mut table, warnings) = match compile_result {
             Ok(triple) => triple,
-            Err(e) => {
-                let offset = eval_user_offset(&source);
-                let rewritten = rewrite_ghc_errors(&e.to_string(), "Expr.hs", offset);
-                return TurnOutcome::Error(format!("compile error: {rewritten}"));
-            }
+            Err(e) => return TurnOutcome::Error(format!("compile error: {e}")),
         };
         if warnings.has_io {
             return TurnOutcome::Error(
@@ -531,11 +513,7 @@ impl Session {
             }),
         ) {
             Ok(t) => t,
-            Err(e) => {
-                let offset = eval_user_offset(&wrapped);
-                let rewritten = rewrite_ghc_errors(&e.to_string(), "Expr.hs", offset);
-                return TurnOutcome::Error(format!("bind compile error: {rewritten}"));
-            }
+            Err(e) => return TurnOutcome::Error(format!("bind compile error: {e}")),
         };
         if turn.warnings.has_io {
             return TurnOutcome::Error(
@@ -643,11 +621,7 @@ impl Session {
             }),
         ) {
             Ok(t) => t,
-            Err(e) => {
-                let offset = eval_user_offset(&wrapped);
-                let rewritten = rewrite_ghc_errors(&e.to_string(), "Expr.hs", offset);
-                return TurnOutcome::Error(format!("multi-bind compile error: {rewritten}"));
-            }
+            Err(e) => return TurnOutcome::Error(format!("multi-bind compile error: {e}")),
         };
         if turn.warnings.has_io {
             return TurnOutcome::Error(
@@ -776,14 +750,9 @@ impl Session {
                         let inner_type = turn.warnings.captured_type.clone();
                         self.run_reference_fragment(turn, inner_type, true, handlers, captured)
                     }
-                    Err(_pure_err) => {
-                        let offset = eval_user_offset(&eff_src);
-                        let rewritten =
-                            rewrite_ghc_errors(&eff_err.to_string(), "Expr.hs", offset);
-                        TurnOutcome::Error(format!(
-                            "compile error: {rewritten} (also failed as a pure value)"
-                        ))
-                    }
+                    Err(_pure_err) => TurnOutcome::Error(format!(
+                        "compile error: {eff_err} (also failed as a pure value)"
+                    )),
                 }
             }
         }
@@ -961,11 +930,9 @@ impl Session {
                 ) {
                     Ok(t) => t,
                     Err(e) => {
-                        let offset = eval_user_offset(&wrapped);
-                        let rewritten = rewrite_ghc_errors(&e.to_string(), "Expr.hs", offset);
                         return TurnOutcome::Meta(serde_json::json!({
-                            "error": format!("compile error: {rewritten}")
-                        }));
+                            "error": format!("compile error: {e}")
+                        }))
                     }
                 };
                 match turn.binders.into_iter().next() {
