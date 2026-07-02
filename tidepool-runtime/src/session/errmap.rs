@@ -207,7 +207,10 @@ pub fn dedupe_diagnostics(err: &str) -> String {
             .flat_map(|l| l.chars())
             .filter(char::is_ascii_alphanumeric)
             .collect();
-        if key.is_empty() || !seen.contains(&key) {
+        // Containment, not equality: the `show se` copy can be a strict
+        // SUBSET of the logger copy (no gutter, no "Suggested fix" lines —
+        // found live on a not-in-scope error with a similar-name hint).
+        if key.is_empty() || !seen.iter().any(|s| s.contains(key.as_str())) {
             if !key.is_empty() {
                 seen.push(key);
             }
@@ -327,6 +330,16 @@ mod tests {
         assert_eq!(got.matches("Couldn't match").count(), 1, "{got}");
         // the richer (gutter-bearing) first copy is the one kept
         assert!(got.contains("^^^^"), "{got}");
+    }
+
+    #[test]
+    fn dedupe_drops_subset_copy_without_fix_lines() {
+        // The show-se copy lacks the "Suggested fix" paragraph the logger
+        // copy carries — containment keying still collapses it.
+        let err = "Expr.hs:4:11: error: [GHC-88464]\n    Variable not in scope: (!!)\n    Suggested fix: use P.!!\n   |\n 4 | s !! n\n   |   ^^\n\nCompilation failed.\nExpr.hs:4:11: error: [GHC-88464]\n    Variable not in scope: (!!)\n";
+        let got = dedupe_diagnostics(err);
+        assert_eq!(got.matches("not in scope").count(), 1, "{got}");
+        assert!(got.contains("Suggested fix"), "{got}");
     }
 
     #[test]

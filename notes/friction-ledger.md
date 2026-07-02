@@ -54,6 +54,8 @@ Every ergonomic wart hit during real tidepool/tidepool-repl use lands here — s
 | 23 | Decl plane's import surface ≠ stmt plane's: `readGlob` (Tidepool.Orchestrate) and friends are bare in stmt items but need explicit `import Tidepool.Effects` + `import Tidepool.Orchestrate` in decls — docs claim the planes share the base import set. Cost two failed round-trips ×2 tasks | either give decl ModuleEnv the same two imports (check collision story) or fix the docs + add a not-in-scope hint naming the module (the stmt plane KNOWS where the name lives) | 2026-07-01 |
 | 24 | Bricking a lib module (appended `explainGhc` using `T.` to Dev.hs, which lacked the import) kills ALL evals incl. the `writeFile` that could fix it — host-side edit is the only unbrick. Known class (memory), now hit live | consider: lib-module writes via a `writeChecked`-style verb that compile-probes the module before landing it; or at minimum the brick error should name the broken lib module first | 2026-07-01 |
 
+| 26 | Kata-sweep finds (2026-07-02 night): vendored FilePath lacks `normalise`; decl-plane compile errors re-print WARNINGS from earlier generations' decls (noise leak, e.g. a `P.head -Wx-partial` from gen-25 glued to every later failure); README.md links a nonexistent LICENSE (needs Inanna: add license or drop link) | normalise: add to Tidepool.FilePath next stdlib pass; warning leak: filter warnings to the CURRENT decl's span in validate_candidate; LICENSE: decision | 2026-07-02 |
+
 ## Scar-tissue audit (2026-07-01 — live probes on the deployed server)
 
 Inanna's theory ("accumulated gotcha memory is stale scar tissue around since-fixed bugs; what's real is a bug list") — verdict: **mostly correct**. Every behavioral flinch in the memory corpus probed live:
