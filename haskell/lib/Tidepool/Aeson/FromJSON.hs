@@ -71,6 +71,7 @@ kindOf v = case v of
   Array _  -> "array"
   String _ -> "string"
   Number _ -> "number"
+  NumberI _ -> "number"
   Bool _   -> "bool"
   Null     -> "null"
 
@@ -87,13 +88,15 @@ instance FromJSON Text where
   parseJSON v          = mismatch "string" v
 
 instance FromJSON Double where
-  parseJSON (Number n) = Success n
-  parseJSON v          = mismatch "number" v
+  parseJSON (Number n)  = Success n
+  parseJSON (NumberI n) = Success (fromIntegral n)
+  parseJSON v           = mismatch "number" v
 
 -- Truncates toward zero, matching the `_Int` prism (Tidepool.Aeson.Lens).
 instance FromJSON Int where
-  parseJSON (Number n) = Success (truncate n)
-  parseJSON v          = mismatch "number" v
+  parseJSON (NumberI n) = Success n
+  parseJSON (Number n)  = Success (truncate n)
+  parseJSON v           = mismatch "number" v
 
 instance FromJSON a => FromJSON [a] where
   parseJSON (Array xs) = traverse parseJSON xs
@@ -158,6 +161,7 @@ withBool name _ v        = typeMismatch name "bool" v
 -- not 'Scientific').
 withDouble :: String -> (Double -> Result a) -> Value -> Result a
 withDouble _    f (Number n) = f n
+withDouble _    f (NumberI n) = f (fromIntegral n)
 withDouble name _ v          = typeMismatch name "number" v
 
 typeMismatch :: String -> String -> Value -> Result a

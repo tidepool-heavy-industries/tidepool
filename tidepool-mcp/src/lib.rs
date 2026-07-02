@@ -980,7 +980,7 @@ data Console a where
 
         assert!(result.contains("input :: Aeson.Value"));
         assert!(
-            result.contains("input = object [\"val\" .= Aeson.Number (fromIntegral (123 :: Int))]")
+            result.contains("input = object [\"val\" .= Aeson.NumberI (123 :: Int)]")
         );
     }
 

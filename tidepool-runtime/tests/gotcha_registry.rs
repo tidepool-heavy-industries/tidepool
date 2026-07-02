@@ -354,6 +354,20 @@ fn works_cycle_value_knot() {
     );
 }
 
+/// BUG-8 dead (2026-07-02): integers survive the JSON path exactly. The
+/// vendored aeson `Number` is Double-backed, so `toJSON` on Int/Integer
+/// LOST precision past 2^53 at CONSTRUCTION (silent wrong DATA — found by
+/// the kata debt-ledger sweep). Ints now ride the exact `NumberI` carrier
+/// end-to-end (ToJSON instances, [j|] integral literals, serde bridge,
+/// render arm, optics `_Int`).
+#[test]
+fn works_exact_int_json() {
+    works(
+        "pure (object [\"a\" .= (912345678901234567 :: Int), \"b\" .= (9007199254740993 :: Int), \"neg\" .= (-42 :: Int), \"rt\" .= (toJSON (9007199254740993 :: Int) ^? _Int)])",
+        serde_json::json!({"a": 912345678901234567_i64, "b": 9007199254740993_i64, "neg": -42, "rt": 9007199254740993_i64}),
+    );
+}
+
 /// Vendored `lines`/`words` (friction #10, 2026-07-02): guarded corecursion.
 /// The external Data.Text bodies overflowed the JIT stack when the list was
 /// built without a fused consumer; semantics must stay Data.Text-exact

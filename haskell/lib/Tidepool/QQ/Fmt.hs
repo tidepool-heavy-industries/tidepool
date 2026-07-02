@@ -52,7 +52,11 @@
 -- at the first occurrence of that token.
 module Tidepool.QQ.Fmt (fmt) where
 
-import Language.Haskell.TH        (Exp (..), Lit (..), Q, mkName)
+import Language.Haskell.TH        (Exp (..), Lit (..), Name, Q)
+import Tidepool.Render            (render)
+import Tidepool.QQ.Fmt.Runtime
+  ( FSign (..), FAlign (..)
+  , fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain )
 import Language.Haskell.TH.Quote  (QuasiQuoter (..))
 import Data.Char                  (isSpace, isAlphaNum)
 import Data.Maybe                 (fromMaybe)
@@ -216,7 +220,10 @@ renderHole :: String -> Q Exp
 renderHole raw
   | null t    = fail "fmt: empty antiquote '{}' — provide an expression"
   | otherwise = do e <- parseHoleExpr t
-                   return (AppE (VarE (mkName "render")) e)
+                   -- 'render (original-name quote): immune to a user
+                   -- session binding named `render` shadowing the class
+                   -- method (capture bug found live 2026-07-02).
+                   return (AppE (VarE 'render) e)
   where t = trim raw
 
 -- | Spec'd hole: parse the spec, interpret it, emit a helper call.
@@ -274,25 +281,25 @@ rejectExp specText flag desc =
 
 emitInt :: SignMode -> Int -> Bool -> Bool -> Maybe Char -> Int -> Char -> Maybe Align -> Exp -> Q Exp
 emitInt sign base upper alt grp width fill mAlign x =
-  return $ applyN "fmtInt"
+  return $ applyN 'fmtInt
     [ signE sign, intE base, boolE upper, boolE alt, maybeCharE grp
     , intE width, charE fill, alignE (fromMaybe AlignRight mAlign), x ]
 
 emitFrac :: SignMode -> Bool -> Int -> Int -> Char -> Maybe Align -> Exp -> Q Exp
 emitFrac sign percent prec width fill mAlign x =
-  return $ applyN "fmtFrac"
+  return $ applyN 'fmtFrac
     [ signE sign, boolE percent, intE prec
     , intE width, charE fill, alignE (fromMaybe AlignRight mAlign), x ]
 
 emitStr :: Maybe Int -> Int -> Char -> Maybe Align -> Exp -> Q Exp
 emitStr mprec width fill mAlign x =
-  return $ applyN "fmtStr"
+  return $ applyN 'fmtStr
     [ maybeIntE mprec, intE width, charE fill
     , alignE (fromMaybe AlignLeft mAlign), renderE x ]
 
 emitChar :: Int -> Char -> Maybe Align -> Exp -> Q Exp
 emitChar width fill mAlign x =
-  return $ applyN "fmtChar"
+  return $ applyN 'fmtChar
     [ intE width, charE fill, alignE (fromMaybe AlignLeft mAlign), x ]
 
 -- | Type-less hole.  An explicit @+@\/space sign routes through 'fmtSigned'
@@ -300,9 +307,9 @@ emitChar width fill mAlign x =
 -- rendered text is just padded.  Both paths render via 'Render'.
 emitDefault :: SignMode -> Int -> Char -> Maybe Align -> Exp -> Q Exp
 emitDefault sign width fill mAlign x = case sign of
-  Minus -> return $ applyN "fmtPlain"
+  Minus -> return $ applyN 'fmtPlain
              [ intE width, charE fill, alignE (fromMaybe AlignLeft mAlign), renderE x ]
-  _     -> return $ applyN "fmtSigned"
+  _     -> return $ applyN 'fmtSigned
              [ signE sign, intE width, charE fill
              , alignE (fromMaybe AlignRight mAlign), renderE x ]
 
@@ -328,11 +335,11 @@ precMaybe :: Precision -> Maybe Int
 precMaybe PrecisionDefault = Nothing
 precMaybe (Precision n)    = Just n
 
-applyN :: String -> [Exp] -> Exp
-applyN fn = foldl AppE (VarE (mkName fn))
+applyN :: Name -> [Exp] -> Exp
+applyN fn = foldl AppE (VarE fn)
 
 renderE :: Exp -> Exp
-renderE = AppE (VarE (mkName "render"))
+renderE = AppE (VarE 'render)
 
 intE :: Int -> Exp
 intE n = LitE (IntegerL (fromIntegral n))
@@ -341,26 +348,26 @@ charE :: Char -> Exp
 charE = LitE . CharL
 
 boolE :: Bool -> Exp
-boolE b = ConE (mkName (if b then "True" else "False"))
+boolE b = ConE (if b then 'True else 'False)
 
 signE :: SignMode -> Exp
-signE Plus  = ConE (mkName "FPlus")
-signE Minus = ConE (mkName "FMinus")
-signE Space = ConE (mkName "FSpace")
+signE Plus  = ConE 'FPlus
+signE Minus = ConE 'FMinus
+signE Space = ConE 'FSpace
 
 alignE :: Align -> Exp
-alignE AlignLeft   = ConE (mkName "FLeft")
-alignE AlignRight  = ConE (mkName "FRight")
-alignE AlignCenter = ConE (mkName "FCenter")
-alignE AlignInside = ConE (mkName "FInside")
+alignE AlignLeft   = ConE 'FLeft
+alignE AlignRight  = ConE 'FRight
+alignE AlignCenter = ConE 'FCenter
+alignE AlignInside = ConE 'FInside
 
 maybeCharE :: Maybe Char -> Exp
-maybeCharE Nothing  = ConE (mkName "Nothing")
-maybeCharE (Just c) = AppE (ConE (mkName "Just")) (charE c)
+maybeCharE Nothing  = ConE 'Nothing
+maybeCharE (Just c) = AppE (ConE 'Just) (charE c)
 
 maybeIntE :: Maybe Int -> Exp
-maybeIntE Nothing  = ConE (mkName "Nothing")
-maybeIntE (Just n) = AppE (ConE (mkName "Just")) (intE n)
+maybeIntE Nothing  = ConE 'Nothing
+maybeIntE (Just n) = AppE (ConE 'Just) (intE n)
 
 ------------------------------------------------------------------------
 -- Utilities

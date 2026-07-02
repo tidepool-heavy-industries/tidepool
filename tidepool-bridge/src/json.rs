@@ -40,6 +40,15 @@ impl ToCore for serde_json::Value {
             }
 
             serde_json::Value::Number(n) => {
+                // Exact machine ints ride NumberI (BUG-8): the Double-backed
+                // Number loses integers past 2^53. Fall back to Number for
+                // genuine floats (and u64 > i64::MAX, matching serde's view).
+                if let Some(i) = n.as_i64() {
+                    let id = table.get_by_name_arity("NumberI", 1).ok_or_else(|| {
+                        BridgeError::UnknownDataConName("NumberI".into())
+                    })?;
+                    return Ok(Value::Con(id, vec![Value::Lit(Literal::LitInt(i))]));
+                }
                 let id = table
                     .get_by_name_arity("Number", 1)
                     .ok_or_else(|| BridgeError::UnknownDataConName("Number".into()))?;
@@ -174,6 +183,8 @@ mod tests {
             // List
             ("[]", 10, 0),
             (":", 11, 2),
+            // Exact-int JSON number (BUG-8)
+            ("NumberI", 12, 1),
             // Text
             ("Text", 12, 3),
             // Int boxing
@@ -256,17 +267,33 @@ mod tests {
         let val = json.to_value(&table).unwrap();
         match &val {
             Value::Con(id, fields) => {
-                assert_eq!(table.name_of(*id), Some("Number"));
+                assert_eq!(table.name_of(*id), Some("NumberI"));
                 assert_eq!(fields.len(), 1);
-                // Inner should be LitDouble
                 match &fields[0] {
-                    Value::Lit(Literal::LitDouble(bits)) => {
-                        assert_eq!(f64::from_bits(*bits), 42.0);
-                    }
-                    _ => panic!("Expected Lit(LitDouble), got {:?}", fields[0]),
+                    Value::Lit(Literal::LitInt(i)) => assert_eq!(*i, 42),
+                    _ => panic!("Expected Lit(LitInt), got {:?}", fields[0]),
                 }
             }
-            _ => panic!("Expected Con(Number)"),
+            _ => panic!("Expected Con(NumberI)"),
+        }
+    }
+
+    /// BUG-8 regression: an integer past 2^53 must survive the wire exactly
+    /// (the Double-backed Number arm would flatten it).
+    #[test]
+    fn test_number_exact_past_2_53() {
+        let table = json_test_table();
+        let json = serde_json::json!(9007199254740993_i64);
+        let val = json.to_value(&table).unwrap();
+        match &val {
+            Value::Con(id, fields) => {
+                assert_eq!(table.name_of(*id), Some("NumberI"));
+                match &fields[0] {
+                    Value::Lit(Literal::LitInt(i)) => assert_eq!(*i, 9007199254740993),
+                    other => panic!("Expected exact LitInt, got {other:?}"),
+                }
+            }
+            _ => panic!("Expected Con(NumberI)"),
         }
     }
 
@@ -364,12 +391,12 @@ mod tests {
         let val = serde_json::json!(-1).to_value(&table).unwrap();
         match &val {
             Value::Con(id, fields) => {
-                assert_eq!(table.name_of(*id), Some("Number"));
+                assert_eq!(table.name_of(*id), Some("NumberI"));
                 match &fields[0] {
-                    Value::Lit(Literal::LitDouble(bits)) => {
-                        assert_eq!(f64::from_bits(*bits), -1.0);
+                    Value::Lit(Literal::LitInt(i)) => {
+                        assert_eq!(*i, -1);
                     }
-                    _ => panic!("Expected LitDouble"),
+                    _ => panic!("Expected LitInt"),
                 }
             }
             _ => panic!("Expected Con(Number)"),
@@ -382,10 +409,10 @@ mod tests {
         let val = serde_json::json!(0).to_value(&table).unwrap();
         match &val {
             Value::Con(id, fields) => {
-                assert_eq!(table.name_of(*id), Some("Number"));
+                assert_eq!(table.name_of(*id), Some("NumberI"));
                 match &fields[0] {
-                    Value::Lit(Literal::LitDouble(bits)) => {
-                        assert_eq!(f64::from_bits(*bits), 0.0);
+                    Value::Lit(Literal::LitInt(i)) => {
+                        assert_eq!(*i, 0);
                     }
                     _ => panic!("Expected LitDouble"),
                 }
@@ -459,12 +486,12 @@ mod tests {
                     Value::Con(cons_id, cons_fields) => {
                         assert_eq!(table.name_of(*cons_id), Some(":"));
                         assert_eq!(cons_fields.len(), 2);
-                        // Head should be Number(1)
+                        // Head should be NumberI(1) — ints ride exact (BUG-8)
                         match &cons_fields[0] {
                             Value::Con(num_id, _) => {
-                                assert_eq!(table.name_of(*num_id), Some("Number"));
+                                assert_eq!(table.name_of(*num_id), Some("NumberI"));
                             }
-                            _ => panic!("Expected Con(Number)"),
+                            _ => panic!("Expected Con(NumberI)"),
                         }
                         // Tail should be []
                         match &cons_fields[1] {
@@ -702,6 +729,8 @@ mod tests {
             ("False", 9, 0),
             ("[]", 10, 0),
             (":", 11, 2),
+            // Exact-int JSON number (BUG-8)
+            ("NumberI", 12, 1),
             ("Text", 12, 3),
             ("I#", 13, 1),
         ];

@@ -703,12 +703,14 @@ asText _          = Nothing
 
 -- | Extract Int from a Number Value (truncates), or Nothing.
 asInt :: Value -> Maybe Int
+asInt (NumberI n) = Just n
 asInt (Number d) = Just (truncate d)
 asInt _          = Nothing
 {-# INLINE asInt #-}
 
 -- | Extract Double from a Number Value, or Nothing.
 asDouble :: Value -> Maybe Double
+asDouble (NumberI n) = Just (fromIntegral n)
 asDouble (Number d) = Just d
 asDouble _          = Nothing
 {-# INLINE asDouble #-}

@@ -306,7 +306,7 @@ fn json_to_haskell(val: &serde_json::Value) -> String {
             format!("Aeson.Bool {}", if *b { "True" } else { "False" })
         }
         serde_json::Value::Number(n) => {
-            format!("Aeson.Number (fromIntegral ({} :: Int))", n)
+            format!("Aeson.NumberI ({} :: Int)", n)
         }
         serde_json::Value::String(s) => {
             format!("Aeson.String \"{}\"", escape_haskell_string(s))
@@ -715,10 +715,10 @@ mod tests {
         assert!(haskell.contains("\"str\" .= Aeson.String \"hello\""));
         assert!(haskell.contains("\"bool\" .= Aeson.Bool True"));
         assert!(haskell.contains("\"null\" .= Aeson.Null"));
-        assert!(haskell.contains("\"num\" .= Aeson.Number (fromIntegral (42 :: Int))"));
-        assert!(haskell.contains("\"arr\" .= toJSON [Aeson.Number (fromIntegral (1 :: Int)), Aeson.Number (fromIntegral (2 :: Int))]"));
+        assert!(haskell.contains("\"num\" .= Aeson.NumberI (42 :: Int)"));
+        assert!(haskell.contains("\"arr\" .= toJSON [Aeson.NumberI (1 :: Int), Aeson.NumberI (2 :: Int)]"));
         assert!(
-            haskell.contains("\"obj\" .= object [\"a\" .= Aeson.Number (fromIntegral (1 :: Int))]")
+            haskell.contains("\"obj\" .= object [\"a\" .= Aeson.NumberI (1 :: Int)]")
         );
     }
 

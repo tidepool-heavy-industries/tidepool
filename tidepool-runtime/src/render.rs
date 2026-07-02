@@ -197,20 +197,15 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                     None => json!("<big-integer>"),
                 },
 
-                // TODO(BUG-8, repl precision): integers > 2^53 lose precision in
-                // the LIVE repl. `pure (9007199254740993 :: Int)` renders
-                // 9007199254740992 and `product [1..25] :: Integer` renders
-                // 1.55…e+25. The repl renders results via Haskell `toJSON` → aeson
-                // `Number`(`Scientific`) → THIS arm: `as_i64()` truncates a
-                // non-i64 coeff to 0, `c * 10i64.pow(e)` overflows for big e>=0,
-                // and the e<0 branch goes through f64. The `int-render-fix`
-                // (the IP/IN arm above) + `render_large_ints.rs` were verified on
-                // `compile_and_run_pure`, which renders the RAW Int/Integer Value
-                // exactly and never hits this aeson-mediated path — so the bug
-                // survived the tests. FIX: emit an exact JSON number for an
-                // integral Scientific (serde arbitrary_precision, or a decimal
-                // string for out-of-i64 range), and add a regression test that
-                // drives `session_eval` (the repl path), NOT compile_and_run_pure.
+                // BUG-8 (int precision through toJSON) FIXED 2026-07-02: the
+                // real culprit was the VENDORED aeson `Number !Double` — ints
+                // lost precision at CONSTRUCTION, Haskell-side (this arm was a
+                // red herring; the vendored Value never builds Scientific).
+                // Int-range integers now ride the exact `NumberI` carrier
+                // (see the arm below + gotcha works_exact_int_json). Residual
+                // documented loss: Integer beyond Int range falls back to the
+                // Double-backed Number (exact bignum JSON needs a decimal-
+                // string carrier — a design decision, not an oversight).
                 // Scientific (Data.Scientific) — coefficient × 10^exponent
                 ("Scientific", [coeff, exp_val]) => {
                     let c = match value_to_json(coeff, table, d) {
@@ -232,6 +227,8 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                 }
 
                 // Aeson Value constructors
+                // Exact-int JSON number (vendored Value's NumberI; BUG-8).
+                ("NumberI", [x]) => value_to_json(x, table, d),
                 ("Null", []) => json!(null),
                 ("Bool", [x]) => value_to_json(x, table, d),
                 ("Number", [x]) => value_to_json(x, table, d),

@@ -211,6 +211,12 @@ stmtExtensions =
   [ LambdaCase, TupleSections, BlockArguments, MultiWayIf
   , OverloadedStrings, ScopedTypeVariables, TypeApplications
   , BangPatterns, ViewPatterns, OverloadedRecordDot
+  -- QuasiQuotes: parse-only — a `[fmt|…|]` splice inside a bind turn must
+  -- CLASSIFY as a bind (the quote is one token to the parser; nothing runs).
+  -- Without it, `x <- … [fmt|…|] …` failed classification and fell through
+  -- to the expression path ("parse error on input `<-'") — found live in the
+  -- kata sweep, 2026-07-02.
+  , QuasiQuotes
   ]
 
 renderStmtBindersJson :: StmtBinders -> String

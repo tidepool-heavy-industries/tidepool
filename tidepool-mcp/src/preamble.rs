@@ -275,6 +275,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         "valSize v = case v of\n",
         "  String t -> T.length t + 2\n",
         "  Number _ -> 8\n",
+        "  NumberI _ -> 8\n",
         "  Bool b -> if b then 4 else 5\n",
         "  Null -> 4\n",
         "  Array xs -> arrSz xs 2\n",
@@ -349,6 +350,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         "  Array xs -> \"[\" <> T.intercalate \",\" (map renderJson xs) <> \"]\"\n",
         "  String t -> \"\\\"\" <> T.concatMap (\\c -> case c of { '\\\\' -> \"\\\\\\\\\"; '\"' -> \"\\\\\\\"\"; '\\n' -> \"\\\\n\"; '\\t' -> \"\\\\t\"; '\\r' -> \"\\\\r\"; _ -> T.singleton c }) t <> \"\\\"\"\n",
         "  Number n -> show n\n",
+        "  NumberI n -> show n\n",
         "  Bool b -> if b then \"true\" else \"false\"\n",
         "  Null -> \"null\"\n",
     ));

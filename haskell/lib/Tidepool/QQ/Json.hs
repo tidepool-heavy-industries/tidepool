@@ -555,7 +555,12 @@ expCodegen node = case node of
   NBool True   -> [| Bool True |]
   NBool False  -> [| Bool False |]
   NString t    -> [| String (T.pack $(litE (stringL (T.unpack t)))) |]
-  NNumber d    -> [| Number $(litE (rationalL (toRational d))) |]
+  NNumber d
+    -- Integral literals stay exact (BUG-8): a Double-backed `Number` loses
+    -- ints past 2^53. (Parse still rides Double, so >2^53 literals in [j|]
+    -- source text remain lossy — rare; the builder path is the common one.)
+    | d == fromIntegral (round d :: Int) -> [| NumberI $(litE (integerL (toInteger (round d :: Int)))) |]
+    | otherwise -> [| Number $(litE (rationalL (toRational d))) |]
   NArray es _  -> [| Array $(listE (map expCodegen es)) |]
   NObject kvs  -> [| Object (KM.fromList $(listE (map pairE kvs))) |]
   NAntiVar v   -> [| toJSON $(varE (mkName v)) |]

@@ -64,8 +64,9 @@ _String = prism' String $ \v -> case v of
 -- | Prism into a Double number.
 _Number :: Prism' Value Double
 _Number = prism' Number $ \v -> case v of
-  Number n -> Just n
-  _        -> Nothing
+  Number n  -> Just n
+  NumberI n -> Just (fromIntegral n)
+  _         -> Nothing
 
 -- | Prism into a Bool value.
 _Bool :: Prism' Value Bool
@@ -87,24 +88,27 @@ _Object = prism' Object $ \v -> case v of
 
 -- | Prism that extracts an Int from a Number value (truncates).
 _Int :: Prism' Value Int
-_Int = prism' (Number . fromIntegral) $ \v -> case v of
-  Number d -> Just (truncate d)
-  _        -> Nothing
+_Int = prism' NumberI $ \v -> case v of
+  NumberI n -> Just n
+  Number d  -> Just (truncate d)
+  _         -> Nothing
 
 -- | Prism that extracts an Integer from a Number value (truncates). Mirrors
 -- @Data.Aeson.Lens._Integer@. The getter routes through 'Int' (the JIT-safe
 -- @truncate@ target) then widens to 'Integer' via 'fromIntegral' (a small-int
 -- @IS@ construction — no GMP), so it stays clear of the multi-limb FFI.
 _Integer :: Prism' Value Integer
-_Integer = prism' (Number . fromIntegral) $ \v -> case v of
-  Number d -> Just (fromIntegral (truncate d :: Int))
-  _        -> Nothing
+_Integer = prism' (NumberI . fromIntegral) $ \v -> case v of
+  NumberI n -> Just (fromIntegral n)
+  Number d  -> Just (fromIntegral (truncate d :: Int))
+  _         -> Nothing
 
 -- | Prism that extracts a Double from a Number value.
 _Double :: Prism' Value Double
 _Double = prism' Number $ \v -> case v of
-  Number d -> Just d
-  _        -> Nothing
+  Number d  -> Just d
+  NumberI n -> Just (fromIntegral n)
+  _         -> Nothing
 
 -- | Prism into a Null value.
 _Null :: Prism' Value ()

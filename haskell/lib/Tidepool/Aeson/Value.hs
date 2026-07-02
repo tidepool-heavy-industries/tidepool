@@ -64,6 +64,12 @@ data Value
   | Number !Double
   | Bool !Bool
   | Null
+  | NumberI !Int
+    -- ^ Exact machine-int JSON number (BUG-8 fix, 2026-07-02): `Number` is
+    -- Double-backed, so every Int/Integer rode through an f64 and values
+    -- past 2^53 silently lost precision AT CONSTRUCTION. Integral encoders
+    -- build this instead; consumers treat @NumberI n@ ≡ @Number (fromIntegral
+    -- n)@ minus the loss. Declared LAST to keep sibling ConTags stable.
   deriving (Eq, Ord, Show)
 
 -- | Construct a JSON object from key-value pairs.
@@ -94,7 +100,7 @@ instance ToJSON Text where
   toJSON = String
 
 instance ToJSON Int where
-  toJSON n = Number (fromIntegral n)
+  toJSON = NumberI
 
 instance ToJSON Double where
   toJSON = Number
@@ -119,10 +125,15 @@ instance ToJSON () where
   toJSON () = Null
 
 instance ToJSON Integer where
-  toJSON n = Number (fromIntegral n)
+  -- Int-range integers stay exact; beyond that the Double fallback keeps the
+  -- old (lossy) behavior — exact bignum JSON needs a decimal-string carrier.
+  toJSON n
+    | n >= fromIntegral (minBound :: Int) && n <= fromIntegral (maxBound :: Int) =
+        NumberI (fromIntegral n)
+    | otherwise = Number (fromIntegral n)
 
 instance ToJSON Word where
-  toJSON n = Number (fromIntegral n)
+  toJSON n = NumberI (fromIntegral n)
 
 instance ToJSON Char where
   toJSON c = String (T.singleton c)
