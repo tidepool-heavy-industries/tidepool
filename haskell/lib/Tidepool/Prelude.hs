@@ -136,7 +136,7 @@ module Tidepool.Prelude
     -- * Map/Set types
   , Map, Set
     -- * File paths (Tidepool.FilePath — System.FilePath over Text)
-  , FilePath, pathSeparator, (</>), joinPath, splitFileName, splitDirectories
+  , FilePath, pathSeparator, (</>), joinPath, splitFileName, splitDirectories, normalise
   , takeFileName, takeBaseName, takeDirectory
   , (<.>), (-<.>), takeExtension, takeExtensions, dropExtension, dropExtensions
   , addExtension, replaceExtension, splitExtension, hasExtension, isExtensionOf

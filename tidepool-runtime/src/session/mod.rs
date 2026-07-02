@@ -325,7 +325,11 @@ impl SessionLib {
         })?;
 
         if !output.status.success() {
-            let raw = errmap::dedupe_diagnostics(&String::from_utf8_lossy(&output.stderr));
+            let rel = rendered.module.relative_hs_path();
+            let raw = errmap::drop_foreign_gen_warnings(
+                &errmap::dedupe_diagnostics(&String::from_utf8_lossy(&output.stderr)),
+                Some(&rel),
+            );
             // Speak item-relative coordinates: GHC's line numbers point into
             // the rendered G<g>.hs (header + imports before the user's text).
             // Anchored to the generated module's own path suffix only, so

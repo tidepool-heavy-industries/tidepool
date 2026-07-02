@@ -179,18 +179,7 @@ fn rewrite_gutter(line: &str, line_offset: usize) -> String {
 /// so quote-style and whitespace differences between the two copies vanish.
 #[must_use]
 pub fn dedupe_diagnostics(err: &str) -> String {
-    let mut blocks: Vec<Vec<&str>> = Vec::new();
-    for line in err.lines() {
-        let is_header = (line.contains(".hs:")
-            && (line.contains(": error") || line.contains(": warning")))
-            || line.trim() == "Compilation failed."
-            || blocks.is_empty();
-        if is_header {
-            blocks.push(vec![line]);
-        } else if let Some(last) = blocks.last_mut() {
-            last.push(line);
-        }
-    }
+    let blocks = split_diag_blocks(err);
     let mut seen: Vec<String> = Vec::new();
     let mut out: Vec<String> = Vec::new();
     for block in blocks {
@@ -218,6 +207,50 @@ pub fn dedupe_diagnostics(err: &str) -> String {
         }
     }
     let mut joined = out.join("\n");
+    if err.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
+/// Split an extract stderr into diagnostic blocks (a block starts at a
+/// `path.hs:L:C: error/warning` header or the `Compilation failed.` marker).
+fn split_diag_blocks(err: &str) -> Vec<Vec<&str>> {
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    for line in err.lines() {
+        let is_header = (line.contains(".hs:")
+            && (line.contains(": error") || line.contains(": warning")))
+            || line.trim() == "Compilation failed."
+            || blocks.is_empty();
+        if is_header {
+            blocks.push(vec![line]);
+        } else if let Some(last) = blocks.last_mut() {
+            last.push(line);
+        }
+    }
+    blocks
+}
+
+/// Drop WARNING blocks that cite a `Tidepool/Session/Lib/G<k>.hs` generation
+/// module other than `keep_rel` (None ⇒ drop them all). GHC re-emits
+/// dependency-module warnings on every downstream recompile, so a gen-25
+/// `-Wx-partial` warning otherwise rides EVERY later item's error output
+/// (noise-leak, friction #26). Errors are never dropped.
+#[must_use]
+pub fn drop_foreign_gen_warnings(err: &str, keep_rel: Option<&str>) -> String {
+    let kept: Vec<String> = split_diag_blocks(err)
+        .into_iter()
+        .filter(|block| {
+            let header = block.first().copied().unwrap_or("");
+            let is_gen_warning = header.contains(": warning")
+                && header.contains("Tidepool/Session/Lib/G")
+                && keep_rel.is_none_or(|k| !header.contains(k));
+            !is_gen_warning
+        })
+        .map(|b| b.join("
+"))
+        .collect();
+    let mut joined = kept.join("\n");
     if err.ends_with('\n') {
         joined.push('\n');
     }
@@ -309,6 +342,20 @@ mod tests {
         let got = remap_generated_coords(err, "Expr.hs", "<item>", 33, 2);
         assert!(got.contains("\n 2 | x\n"), "{got}");
         assert!(got.contains("\n40 | unrelated"), "{got}");
+    }
+
+    #[test]
+    fn foreign_gen_warnings_dropped_errors_kept() {
+        let err = "Tidepool/Session/Lib/G25.hs:33:35: warning: [GHC-63394]\n    partial head\n\nTidepool/Session/Lib/G26.hs:2:1: error: [GHC-1]\n    real error\n\nCompilation failed.\n";
+        let got = drop_foreign_gen_warnings(err, Some("Tidepool/Session/Lib/G26.hs"));
+        assert!(!got.contains("partial head"), "{got}");
+        assert!(got.contains("real error"), "{got}");
+        // keep_rel=None drops all gen warnings
+        let got2 = drop_foreign_gen_warnings(err, None);
+        assert!(!got2.contains("partial head"), "{got2}");
+        // current-gen WARNINGS survive when keep_rel matches
+        let own = "Tidepool/Session/Lib/G26.hs:3:1: warning: [GHC-2]\n    user warning\n";
+        assert!(drop_foreign_gen_warnings(own, Some("Tidepool/Session/Lib/G26.hs")).contains("user warning"));
     }
 
     #[test]

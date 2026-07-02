@@ -15,7 +15,7 @@ module Tidepool.FilePath
     -- * Separator
   , pathSeparator
     -- * Combine / split
-  , (</>), joinPath, splitFileName, splitDirectories
+  , (</>), joinPath, splitFileName, splitDirectories, normalise
     -- * Filename / directory
   , takeFileName, takeBaseName, takeDirectory
     -- * Extensions
@@ -85,6 +85,24 @@ splitDirectories :: FilePath -> [FilePath]
 splitDirectories p =
   let parts = filter (not . T.null) (T.splitOn "/" p)
   in if isAbsolute p then "/" : parts else parts
+
+-- | Normalise a path: collapse @.@ and empty segments, resolve @..@ against
+-- preceding components (leading @..@s are preserved), keep absolute-ness.
+-- Mirrors the System.FilePath name (the kata link-checker reached for it and
+-- found it missing — friction #26).
+--
+-- >>> normalise "a/./b/../c" == "a/c"
+normalise :: FilePath -> FilePath
+normalise p =
+  let go acc seg
+        | seg == "."  = acc
+        | seg == ".." = case acc of
+            (top : rest) | top /= ".." -> rest
+            _                          -> ".." : acc
+        | otherwise   = seg : acc
+      parts = reverse (foldl go [] (filter (not . T.null) (T.splitOn "/" p)))
+      body  = T.intercalate "/" parts
+  in if isAbsolute p then "/" <> body else if T.null body then "." else body
 
 -- | The component after the final separator.
 --

@@ -27,7 +27,9 @@ use tidepool_mcp::{
 use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
 };
-use tidepool_runtime::session::errmap::{dedupe_diagnostics, remap_generated_coords};
+use tidepool_runtime::session::errmap::{
+    dedupe_diagnostics, drop_foreign_gen_warnings, remap_generated_coords,
+};
 use tidepool_runtime::session::{
     classify_turn, compile_session_turn, ModuleEnv, SessionBind, SessionLib, ValueTier,
 };
@@ -1367,7 +1369,9 @@ fn user_code_offset(source: &str) -> Option<(usize, usize)> {
 /// ones (`<item>:l:c`), using the wrapped source the error was produced from.
 /// Foreign paths pass through; unknown wrappers return the error untouched.
 fn remap_item_err(err: &str, source: &str) -> String {
-    let deduped = dedupe_diagnostics(err);
+    // Session-lib generation warnings are dependency noise on the stmt plane
+    // (a gen-25 -Wx-partial otherwise rides every later item's errors).
+    let deduped = drop_foreign_gen_warnings(&dedupe_diagnostics(err), None);
     match user_code_offset(source) {
         Some((offset, indent)) => {
             remap_generated_coords(&deduped, "Expr.hs", "<item>", offset, indent)
