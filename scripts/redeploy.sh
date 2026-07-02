@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Always operate from the repo root — every path below (git status haskell/,
+# the shim check, cargo --path) assumes it.
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
 DRY=0
 NO_EXTRACT=0
 NO_SERVERS=0
