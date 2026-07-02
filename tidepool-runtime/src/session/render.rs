@@ -202,6 +202,13 @@ impl ModuleEnv {
 pub struct RenderedModule {
     pub module: SessionModule,
     pub source: String,
+    /// Number of generated lines (pragmas, header, imports) before the user's
+    /// declaration text — the offset for mapping GHC's line numbers back to
+    /// item-relative ones (see [`super::errmap`]).
+    pub body_line: usize,
+    /// True when pragma/import hoisting REMOVED lines from the user's source,
+    /// making the offset mapping inexact — coordinate remapping is skipped.
+    pub hoisted_lines: bool,
 }
 
 /// Parse `{-# LANGUAGE Ext1, Ext2 #-}` (single pragma block, one or more lines)
@@ -433,6 +440,15 @@ pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> Rendere
     }
     out.push('\n');
 
+    // Lines emitted before the user's declaration text — the coordinate-remap
+    // offset. Hoisting that DELETED lines from the user source breaks the
+    // 1:1 line mapping; flag it so the remap is skipped rather than wrong.
+    let body_line = out.matches('\n').count();
+    let hoisted_lines = stripped_sources
+        .iter()
+        .zip(&this.sources)
+        .any(|(stripped, original)| stripped.lines().count() != original.lines().count());
+
     // The accumulated declaration source for this turn, with LANGUAGE pragmas
     // already hoisted into the merged pragma block above.
     for src in &stripped_sources {
@@ -446,6 +462,8 @@ pub fn render_module(log: &DeclLog, gen: Generation, env: &ModuleEnv) -> Rendere
     RenderedModule {
         module,
         source: out,
+        body_line,
+        hoisted_lines,
     }
 }
 

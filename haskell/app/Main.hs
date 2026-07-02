@@ -245,7 +245,7 @@ processFile args path = do
         -- whose whole point is token economy. Emit only a terse marker; the
         -- formatted diagnostics above are what callers (tidepool-runtime
         -- ExtractFailed) surface.
-        Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
+        Just (_ :: SourceError) -> hPutStrLn stderr "Compilation failed."
         Nothing -> hPutStrLn stderr $ "Error: " ++ show e
       exitFailure
     Right () -> return ()
@@ -317,7 +317,7 @@ processSessionFile args path = do
   case res of
     Left (e :: SomeException) -> do
       case fromException e of
-        Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
+        Just (_ :: SourceError) -> hPutStrLn stderr "Compilation failed."
         Nothing -> hPutStrLn stderr $ "Error: " ++ show e
       exitFailure
     Right () -> return ()

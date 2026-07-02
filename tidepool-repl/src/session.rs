@@ -27,6 +27,7 @@ use tidepool_mcp::{
 use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
 };
+use tidepool_runtime::session::errmap::remap_generated_coords;
 use tidepool_runtime::session::{
     classify_turn, compile_session_turn, ModuleEnv, SessionBind, SessionLib, ValueTier,
 };
@@ -407,7 +408,12 @@ impl Session {
         };
         let (expr, mut table, warnings) = match compile_result {
             Ok(triple) => triple,
-            Err(e) => return TurnOutcome::Error(format!("compile error: {e}")),
+            Err(e) => {
+                return TurnOutcome::Error(format!(
+                    "compile error: {}",
+                    remap_item_err(&e.to_string(), &source)
+                ))
+            }
         };
         if warnings.has_io {
             return TurnOutcome::Error(
@@ -513,7 +519,12 @@ impl Session {
             }),
         ) {
             Ok(t) => t,
-            Err(e) => return TurnOutcome::Error(format!("bind compile error: {e}")),
+            Err(e) => {
+                return TurnOutcome::Error(format!(
+                    "bind compile error: {}",
+                    remap_item_err(&e.to_string(), &wrapped)
+                ))
+            }
         };
         if turn.warnings.has_io {
             return TurnOutcome::Error(
@@ -621,7 +632,12 @@ impl Session {
             }),
         ) {
             Ok(t) => t,
-            Err(e) => return TurnOutcome::Error(format!("multi-bind compile error: {e}")),
+            Err(e) => {
+                return TurnOutcome::Error(format!(
+                    "multi-bind compile error: {}",
+                    remap_item_err(&e.to_string(), &wrapped)
+                ))
+            }
         };
         if turn.warnings.has_io {
             return TurnOutcome::Error(
@@ -751,7 +767,8 @@ impl Session {
                         self.run_reference_fragment(turn, inner_type, true, handlers, captured)
                     }
                     Err(_pure_err) => TurnOutcome::Error(format!(
-                        "compile error: {eff_err} (also failed as a pure value)"
+                        "compile error: {} (also failed as a pure value)",
+                        remap_item_err(&eff_err.to_string(), &eff_src)
                     )),
                 }
             }
@@ -931,7 +948,10 @@ impl Session {
                     Ok(t) => t,
                     Err(e) => {
                         return TurnOutcome::Meta(serde_json::json!({
-                            "error": format!("compile error: {e}")
+                            "error": format!(
+                                "compile error: {}",
+                                remap_item_err(&e.to_string(), &wrapped)
+                            )
                         }))
                     }
                 };
@@ -1292,6 +1312,44 @@ fn hide_module_names(preamble: &str, module: &str, extra: &[&str]) -> String {
 /// Start a user-code module: the imports-injected preamble, the `-- [user]`
 /// marker, and the optional `input :: Aeson.Value` binding. The shared prefix of
 /// every `wrap_*` source builder.
+/// Locate the user's code inside a wrapped module source by the markers the
+/// wrappers emit, returning `(line_offset, col_indent)` for coordinate remap.
+/// `__user =` (pure-ref / shared eval template, optionally `do`-wrapped) is
+/// checked FIRST — those templates also contain a `result` binding, but the
+/// user text lives under `__user`. Bind wrappers emit no `__user`, so their
+/// `result = do` is the marker.
+fn user_code_offset(source: &str) -> Option<(usize, usize)> {
+    const USER: &str = "__user =\n";
+    if let Some(pos) = source.find(USER) {
+        let mut offset = source[..pos + USER.len()].matches('\n').count();
+        let mut indent = 2;
+        if source[pos..].starts_with("__user =\n  do\n") {
+            offset += 1;
+            indent = 4;
+        }
+        return Some((offset, indent));
+    }
+    const RESULT_DO: &str = "\nresult = do\n";
+    source.find(RESULT_DO).map(|pos| {
+        (
+            source[..pos + RESULT_DO.len()].matches('\n').count(),
+            2,
+        )
+    })
+}
+
+/// Remap `Expr.hs:<L>:<C>` GHC coordinates in a compile error to item-relative
+/// ones (`<item>:l:c`), using the wrapped source the error was produced from.
+/// Foreign paths pass through; unknown wrappers return the error untouched.
+fn remap_item_err(err: &str, source: &str) -> String {
+    match user_code_offset(source) {
+        Some((offset, indent)) => {
+            remap_generated_coords(err, "Expr.hs", "<item>", offset, indent)
+        }
+        None => err.to_string(),
+    }
+}
+
 fn begin_user_module(preamble: &str, imports: &str, input: Option<&serde_json::Value>) -> String {
     let mut out = insert_imports(preamble, imports);
     out.push_str("-- [user]\n");

@@ -18,6 +18,8 @@ executable tidepool-extract-bin
     Tidepool.FilePath
     Tidepool.Render
     Tidepool.Data.Text
+    Tidepool.Data.Time
+    Tidepool.Records
     Tidepool.TextFormat
     Tidepool.Table
     Tidepool.Internal.DataTextProbe

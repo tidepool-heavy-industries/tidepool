@@ -17,6 +17,7 @@
 //! as a usable declaration REPL.
 
 pub mod binders;
+pub mod errmap;
 pub mod render;
 pub mod turn;
 
@@ -324,7 +325,22 @@ impl SessionLib {
         })?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            let raw = String::from_utf8_lossy(&output.stderr).into_owned();
+            // Speak item-relative coordinates: GHC's line numbers point into
+            // the rendered G<g>.hs (header + imports before the user's text).
+            // Anchored to the generated module's own path suffix only, so
+            // foreign .hs:L:C tokens (panic backtraces) pass through.
+            let stderr = if rendered.body_line > 0 && !rendered.hoisted_lines {
+                errmap::remap_generated_coords(
+                    &raw,
+                    &rendered.module.relative_hs_path(),
+                    "<decl>",
+                    rendered.body_line,
+                    0,
+                )
+            } else {
+                raw
+            };
             return Err(SessionError::ValidationFailed(stderr));
         }
 

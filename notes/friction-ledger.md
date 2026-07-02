@@ -24,6 +24,9 @@ Every ergonomic wart hit during real tidepool/tidepool-repl use lands here — s
 > rebuild + MCP reconnect. Deferred until the remaining repl threads merge (one
 > restart instead of three; restart kills live sessions).
 
+| 18 | Compile errors doubled on the wire: extract printed GHC's log-action diagnostics AND `show se` (the fix was already described in a comment at Main.hs:242 but never landed) | root direct — `Compilation failed.` terse marker only (haskell/app/Main.hs, both sites); verified live | 2026-07-01 |
+| 19 | Error coordinates lie: `Expr.hs:35:8` / `G2.hs:29:17` for item line 2 — every error taxed a mental remap; tmp paths leaked | root direct — `tidepool_runtime::session::errmap::remap_generated_coords`, anchored to the generated module's path suffix ONLY (per decl-error-mapping revert spec; panic-backtrace + embedded-suffix fixtures). Bind/expr/multi-bind/ref/`:t` planes via marker offsets (`__user =`/`result = do`) → `<item>:l:c`; decl plane via `RenderedModule.body_line` (+`hoisted_lines` skip-guard) → `<decl>:l:c`; gutter renumbering width-padded so carets stay aligned. 130/130 repl suite green | 2026-07-01 |
+
 ## Spawned (fix thread in flight)
 
 | # | Friction | Thread | Found |
@@ -43,6 +46,8 @@ Every ergonomic wart hit during real tidepool/tidepool-repl use lands here — s
 | 12 | Runtime `unresolved variable` error carries hex VarId only — could name the symbol via the meta table | partially mooted if #1 makes dangling loud at compile; keep for other unresolved classes (`cycle`) | 2026-07-01 |
 | 13 | Reaped continuations lie: resume after TTL says "already spent or never existed" — should say "expired"; suspend response should carry `expires_at` when a TTL is set | mostly mooted by TTL removal (continuation_ttl now None in prod); honest message still right if anyone re-enables it | 2026-07-01 |
 | 15 | `writeFile` fails loud on a missing parent directory instead of creating it — agents nearly always want mkdir-p semantics | spawned `fs-writefile-parents` 2026-07-01 | 2026-07-01 |
+| 20 | `grepGlob pat "dir"` (bare directory) → silent `[]` — the #8 fix landed in the `grepIn` wrapper, not the underlying verb; same class: `readGlob "dir/**"` matches directories and dies `Is a directory` | Design settled with Inanna (2026-07-01): rg semantics — root arg may be file/dir/glob, dir recurses, NONEXISTENT root = loud error, zero hits = clean `[]`; `Entry {path, kind :: File\|Dir\|Link, size}` record for `glob`; `readGlob` files-only by construction; ONE shared root-resolution fn at the handler so the contract can't drift per-verb | 2026-07-01 |
+| 21 | Decl responses under-paint: `{decl:"heatOf"}` omits the inferred type the server had at compile time — cost a `:t` round-trip. Notebook-frame criterion: render every mutation fully, once, at mutation time | audit the response shapes against render-once (with `stale:` field + `:program` repaint, per the coupled-context design conversation) | 2026-07-01 |
 | 14 | `session_run` return shape is debug-noisy: `generation`/`valGeneration` counters, `index`, decl internals (`module: Tidepool.Session.Lib.G<n>`, `defined:true`), and `items[].result` is DOUBLE-ENCODED (a JSON string containing JSON); last item's result duplicates top-level `value` | spawn after repl-stubs merges (same rendering code). Slim shape: per-item just `{bound,type}` / `{decl}` / `{error}` inline (no string-encoding); top-level `{value, type}`; internals behind `--debug` or a `verbose` param | 2026-07-01 |
 
 ## Filled at the verb layer (stdlib promotion candidates)
