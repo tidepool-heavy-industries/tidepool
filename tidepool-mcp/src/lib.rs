@@ -549,7 +549,7 @@ mod tests {
         assert!(result.contains("import Tidepool.Effects"));
         assert!(effects_module_source(&effects).contains("data Console a where"));
         // User code is a real top-level binding (expression-first contract).
-        assert!(result.contains("__user =\n  do\n    let x = 42\n    pure x"));
+        assert!(result.contains("__user = let {\n __b =\ndo\n  let x = 42\n  pure x\n } in __b"));
         assert!(result.contains("result :: Eff '[Console] Value"));
         assert!(result.contains("result = do"));
         assert!(result.contains("  _r <- __user"));
@@ -567,18 +567,18 @@ mod tests {
         let preamble = build_preamble(&effects, false);
         let stack = build_effect_stack_type(&effects);
 
-        // Multi-line composition expression: continuation indentation rides
-        // through verbatim under the 2-space binding indent.
+        // Multi-line composition expression rides through VERBATIM (explicit
+        // let-brackets suspend layout; no indent transform).
         let pipeline = "glob \"**/*.rs\"\n  >>= mapM getFileSize\n  <&> sizeRank 9";
         let r = template_haskell(&preamble, &stack, pipeline, "", "", None, None);
         assert!(r.contains(
-            "__user =\n  glob \"**/*.rs\"\n    >>= mapM getFileSize\n    <&> sizeRank 9"
+            "__user = let {\n __b =\nglob \"**/*.rs\"\n  >>= mapM getFileSize\n  <&> sizeRank 9\n } in __b"
         ));
 
         // Trailing where-clause is legal: __user is a genuine declaration.
         let with_where = "sizeRank 9 <$> sized\n  where\n    sized = mapM go =<< glob \"**/*.rs\"";
         let r = template_haskell(&preamble, &stack, with_where, "", "", None, None);
-        assert!(r.contains("__user =\n  sizeRank 9 <$> sized\n    where\n      sized ="));
+        assert!(r.contains("__user = let {\n __b =\nsizeRank 9 <$> sized\n  where\n    sized ="));
     }
 
     #[test]
@@ -718,12 +718,14 @@ data Console a where
     #[test]
     fn test_standard_decls_includes_ask() {
         let decls = standard_decls();
-        assert_eq!(decls.len(), 9);
+        assert_eq!(decls.len(), 11);
         assert_eq!(decls[4].type_name, "Http");
         assert_eq!(decls[5].type_name, "Exec");
         assert_eq!(decls[6].type_name, "Lsp");
         assert_eq!(decls[7].type_name, "Llm");
-        assert_eq!(decls[8].type_name, "Ask");
+        assert_eq!(decls[8].type_name, "Git");
+        assert_eq!(decls[9].type_name, "Time");
+        assert_eq!(decls[10].type_name, "Ask");
     }
 
     #[test]
@@ -743,14 +745,14 @@ data Console a where
         let preamble = generated_sources(&decls, false);
         assert!(preamble.contains("data Ask a where"));
         assert!(preamble.contains("  AskWith :: Text -> Value -> Ask Value"));
-        assert!(preamble.contains("type M = Eff '[Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Ask]"));
+        assert!(preamble.contains("type M = Eff '[Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Git, Time, Ask]"));
     }
 
     #[test]
     fn test_ask_in_effect_stack_type() {
         let decls = standard_decls();
         let stack = build_effect_stack_type(&decls);
-        assert_eq!(stack, "'[Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Ask]");
+        assert_eq!(stack, "'[Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Git, Time, Ask]");
     }
 
     #[test]

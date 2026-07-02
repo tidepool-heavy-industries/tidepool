@@ -180,6 +180,20 @@ impl Session {
         lines.join("\n")
     }
 
+    /// [`Self::session_imports`] plus the quasi-quoter import when the turn's
+    /// text splices one — the same per-request gating the oneshot eval does
+    /// (`[fmt|]`/`[j|]`/… cost the quoter-module import only when used).
+    fn turn_imports(&self, turn_text: &str) -> String {
+        let mut imports = self.session_imports();
+        if tidepool_mcp::uses_qq(turn_text) {
+            if !imports.is_empty() {
+                imports.push('\n');
+            }
+            imports.push_str("Tidepool.QQ (fmt, j, patch, sg, uri)");
+        }
+        imports
+    }
+
     /// Merge a turn's DataCons into the session-accumulated table (loud on a
     /// genuine `stableVarId` collision — gen-versioned names make that a real
     /// bug, not churn).
@@ -380,11 +394,16 @@ impl Session {
         captured: &CapturedOutput,
     ) -> TurnOutcome {
         let preamble = self.patched_preamble();
-        let imports = self
+        let mut imports = self
             .lib
             .current_module()
             .map(|m| format!("{}\n", m.module_name()))
             .unwrap_or_default();
+        // Same per-turn quasi-quoter gating as `turn_imports` (this path
+        // assembles its imports independently of session_imports).
+        if tidepool_mcp::uses_qq(expr_text) {
+            imports.push_str("Tidepool.QQ (fmt, j, patch, sg, uri)\n");
+        }
         // Clone (not take): `input` stays in scope for EVERY item in the block
         // — including items that run after an in-block `ask`/resume — and for the
         // type-probe recompiles below. The worker resets `eval_input` per job.
@@ -494,7 +513,7 @@ impl Session {
         let preamble = self.patched_preamble();
         let g = self.val_gen.next();
         let inject = self.live_val_modules();
-        let imports = self.session_imports();
+        let imports = self.turn_imports(turn_text);
         let eval_input = self.eval_input.clone();
         let wrapped = wrap_bind_source(
             &preamble,
@@ -608,7 +627,7 @@ impl Session {
         let preamble = self.patched_preamble();
         let g = self.val_gen.next();
         let inject = self.live_val_modules();
-        let imports = self.session_imports();
+        let imports = self.turn_imports(turn_text);
         let eval_input = self.eval_input.clone();
         let wrapped = wrap_multi_bind_source(
             &preamble,
@@ -723,7 +742,7 @@ impl Session {
     ) -> TurnOutcome {
         let preamble = self.patched_preamble();
         let inject = self.live_val_modules();
-        let imports = self.session_imports();
+        let imports = self.turn_imports(expr_text);
         // Clone (not take): `input` stays in scope for EVERY item in the block
         // — including items that run after an in-block `ask`/resume — and for the
         // type-probe recompiles below. The worker resets `eval_input` per job.
@@ -838,7 +857,7 @@ impl Session {
         self.val_gen = g;
         let preamble = self.patched_preamble();
         let inject = self.live_val_modules();
-        let imports = self.session_imports();
+        let imports = self.turn_imports(expr_text);
         let eval_input = self.eval_input.clone();
         let wrapped = wrap_probe_source(
             &preamble,
@@ -922,7 +941,7 @@ impl Session {
                 let throwaway_gen = self.val_gen.next();
                 self.val_gen = throwaway_gen;
                 let inject = self.live_val_modules();
-                let imports = self.session_imports();
+                let imports = self.turn_imports(expr);
                 let eval_input = self.eval_input.clone();
                 let turn_text = format!("let __t = {expr}");
                 let wrapped = wrap_bind_source(
@@ -1319,21 +1338,21 @@ fn hide_module_names(preamble: &str, module: &str, extra: &[&str]) -> String {
 /// user text lives under `__user`. Bind wrappers emit no `__user`, so their
 /// `result = do` is the marker.
 fn user_code_offset(source: &str) -> Option<(usize, usize)> {
-    const USER: &str = "__user =\n";
-    if let Some(pos) = source.find(USER) {
-        let mut offset = source[..pos + USER.len()].matches('\n').count();
-        let mut indent = 2;
-        if source[pos..].starts_with("__user =\n  do\n") {
-            offset += 1;
-            indent = 4;
+    // Verbatim embeddings (pure-ref / probe / shared eval template): user
+    // text starts right after the bracket, at its ORIGINAL columns — line
+    // offset only, no column indent.
+    for marker in ["__user = let {\n __b =\n", "__probe = let {\n __b =\n"] {
+        if let Some(pos) = source.find(marker) {
+            return Some((source[..pos + marker.len()].matches('\n').count(), 0));
         }
-        return Some((offset, indent));
     }
-    const RESULT_DO: &str = "\nresult = do\n";
+    // Bind wrappers: verbatim inside `result = do {`. (A `let` bind's first
+    // line gains 2 columns from the decl-brace boundary edit — accepted.)
+    const RESULT_DO: &str = "\nresult = do {\n";
     source.find(RESULT_DO).map(|pos| {
         (
             source[..pos + RESULT_DO.len()].matches('\n').count(),
-            2,
+            0,
         )
     })
 }
@@ -1358,11 +1377,47 @@ fn begin_user_module(preamble: &str, imports: &str, input: Option<&serde_json::V
     out
 }
 
-/// Append each line of `text` to `out`, indented two spaces (the do-block /
-/// binding-RHS body layout the wrappers use).
-fn push_indented(out: &mut String, text: &str) {
-    for line in text.lines() {
-        out.push_str(&format!("  {line}\n"));
+/// Append `name = <text>` with the user text embedded VERBATIM — no
+/// indentation transform. Explicit `let { }` brackets suspend the layout
+/// algorithm (Report rule L, explicit context), so unindented user lines are
+/// legal and quasiquote payloads keep byte-exact fidelity (per-line indenting
+/// was the "+2 corrupts multi-line QQ" bug class). `__b` is local to each RHS.
+fn push_verbatim_binding(out: &mut String, name: &str, text: &str) {
+    out.push_str(name);
+    out.push_str(" = let {\n __b =\n");
+    out.push_str(text);
+    if !text.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(" } in __b\n");
+}
+
+/// Emit a turn's statement VERBATIM inside an explicit `do { }` block. `let`
+/// statements need explicit decl braces there (a layout `let` swallows the
+/// following `;` — pinned by gotcha_registry's
+/// `loud_fail_let_in_braced_do_parse_error`): two boundary edits at known
+/// positions, never interior transformation, so payloads and columns survive
+/// byte-exact (modulo +2 on the `let`'s own first line).
+fn push_braced_stmt(out: &mut String, turn_text: &str) {
+    let trimmed = turn_text.trim_start();
+    let let_rest = trimmed
+        .strip_prefix("let")
+        .filter(|r| r.starts_with(|c: char| c.is_whitespace()));
+    match let_rest {
+        Some(rest) if !rest.trim_start().starts_with('{') => {
+            out.push_str("let {");
+            out.push_str(rest);
+            if !rest.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(" }\n");
+        }
+        _ => {
+            out.push_str(turn_text);
+            if !turn_text.ends_with('\n') {
+                out.push('\n');
+            }
+        }
     }
 }
 
@@ -1382,9 +1437,12 @@ fn wrap_bind_source(
 ) -> String {
     let mut out = begin_user_module(preamble, imports, input);
     out.push_str(&format!("result :: Eff {effect_stack} _\n"));
-    out.push_str("result = do\n");
-    push_indented(&mut out, turn_text);
-    out.push_str(&format!("  pure {binder}\n"));
+    out.push_str("result = do {\n");
+    push_braced_stmt(&mut out, turn_text);
+    // Column-1 closer: closes any user implicit contexts (n < m) down to the
+    // explicit brace context. (Edge: a user inner block aligned at exactly
+    // column 1 would receive a layout `;` here — vanishingly rare, loud.)
+    out.push_str(&format!(" ; pure {binder}\n }}\n"));
     out
 }
 
@@ -1409,9 +1467,9 @@ fn wrap_multi_bind_source(
     let tuple_expr = format!("({})", names.join(", "));
     let mut out = begin_user_module(preamble, imports, input);
     out.push_str(&format!("result :: Eff {effect_stack} _\n"));
-    out.push_str("result = do\n");
-    push_indented(&mut out, turn_text);
-    out.push_str(&format!("  pure {tuple_expr}\n"));
+    out.push_str("result = do {\n");
+    push_braced_stmt(&mut out, turn_text);
+    out.push_str(&format!(" ; pure {tuple_expr}\n }}\n"));
     out
 }
 
@@ -1431,11 +1489,9 @@ fn wrap_pure_ref_source(
     input: Option<&serde_json::Value>,
 ) -> String {
     let mut out = begin_user_module(preamble, imports, input);
-    out.push_str("__user =\n");
-    push_indented(&mut out, expr_text);
+    push_verbatim_binding(&mut out, "__user", expr_text);
     out.push('\n');
-    out.push_str("result =\n");
-    push_indented(&mut out, expr_text);
+    push_verbatim_binding(&mut out, "result", expr_text);
     out
 }
 
@@ -1454,8 +1510,7 @@ fn wrap_probe_source(
     input: Option<&serde_json::Value>,
 ) -> String {
     let mut out = begin_user_module(preamble, imports, input);
-    out.push_str("__probe =\n");
-    push_indented(&mut out, expr_text);
+    push_verbatim_binding(&mut out, "__probe", expr_text);
     out.push('\n');
     out.push_str(&format!("result :: Eff {effect_stack} _\n"));
     out.push_str("result = do\n");

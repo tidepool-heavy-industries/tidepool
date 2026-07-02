@@ -109,6 +109,11 @@ pub fn session_decl_module_env(user_library: bool) -> ModuleEnv {
     imports.push("import qualified Tidepool.Shell as Shell".into());
     imports.push("import qualified Tidepool.Git as Git".into());
     imports.push("import qualified Tidepool.Cargo as Cargo".into());
+    // Orchestration helpers (readGlob/searchFiles/memo/renderJson/…): the
+    // stmt plane gets these via the expr module's imports; without this the
+    // decl plane's import surface diverges — a decl using `readGlob` failed
+    // "not in scope" with no hint (friction #23, found live 2026-07-01).
+    imports.push("import Tidepool.Orchestrate".into());
     ModuleEnv {
         pragmas: EVAL_PRAGMAS.to_string(),
         imports,

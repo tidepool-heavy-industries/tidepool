@@ -441,7 +441,10 @@ canonicalizeDFlags dflags =
   -- splices run host-agnostically. (Was the aarch64-darwin assembler failure
   -- that broke every eval on Apple Silicon.)
   (`gopt_set` Opt_UseBytecodeRatherThanObjects) $
-  (`gopt_unset` Opt_ShowValidHoleFits) $
+  -- Valid-hole-fits stay ON: with ~200 stdlib/verb names in scope, "fits"
+  -- on a typed hole is the interface's vocabulary-discovery engine (an LLM
+  -- writes `_` to ask "what goes here"). The search only runs on hole
+  -- errors, never on clean compiles.
   gopt_set (gopt_set (gopt_unset (gopt_unset (updOptLevel 2 $ dflags
         { backend = noBackend
         , ghcLink = NoLink

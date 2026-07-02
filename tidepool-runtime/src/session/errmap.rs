@@ -188,7 +188,18 @@ pub fn dedupe_diagnostics(err: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     for block in blocks {
         let text = block.join("\n");
-        let key: String = text.chars().filter(char::is_ascii_alphanumeric).collect();
+        // Key on header + message lines only: the logger copy carries source
+        // gutter/caret snippet lines the `show se` copy lacks — including them
+        // would make the two copies key differently and defeat the dedup.
+        let key: String = block
+            .iter()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with('|') || leading_digits(t).len() > 0 && t[leading_digits(t).len()..].starts_with(" |"))
+            })
+            .flat_map(|l| l.chars())
+            .filter(char::is_ascii_alphanumeric)
+            .collect();
         if key.is_empty() || !seen.contains(&key) {
             if !key.is_empty() {
                 seen.push(key);
@@ -287,6 +298,17 @@ mod tests {
         let got = dedupe_diagnostics(err);
         assert_eq!(got.matches("No instance").count(), 1, "{got}");
         assert!(got.contains("Compilation failed."), "{got}");
+    }
+
+    #[test]
+    fn dedupe_ignores_snippet_lines_in_key() {
+        // The logger copy carries gutter/caret lines; `show se` doesn't. They
+        // must still collapse (found live 2026-07-01: both copies survived).
+        let err = "Expr.hs:1:52: error: [GHC-83865]\n    \u{2022} Couldn't match \u{2018}[Char]\u{2019} with \u{2018}Text\u{2019}\n   |\n 1 | pure (read x)\n   |       ^^^^\n\nExpr.hs:1:52: error: [GHC-83865]\n    * Couldn't match `[Char]' with `Text'\n";
+        let got = dedupe_diagnostics(err);
+        assert_eq!(got.matches("Couldn't match").count(), 1, "{got}");
+        // the richer (gutter-bearing) first copy is the one kept
+        assert!(got.contains("^^^^"), "{got}");
     }
 
     #[test]

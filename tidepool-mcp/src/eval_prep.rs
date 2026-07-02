@@ -230,13 +230,18 @@ fn template_haskell_impl(
     // Inject input binding if provided
     out.push_str(&input_binding_source(input));
 
-    // User code is a real top-level binding: a single EXPRESSION (explicit
-    // `do` required for sequencing), so trailing `where`-clauses are legal
-    // and the inferred type rides into the wrapper below.
-    out.push_str("__user =\n");
-    for line in code.lines() {
-        out.push_str(&format!("  {}\n", line));
+    // User code is a real binding (single EXPRESSION; explicit `do` for
+    // sequencing; trailing `where` legal) embedded VERBATIM — no indentation
+    // transform. Explicit `let { }` brackets suspend the layout algorithm
+    // (Report rule L, explicit context), so unindented user lines are legal
+    // and quasiquote payloads keep byte-exact fidelity (indenting them was
+    // the "+2 corrupts multi-line QQ" bug class). `__b` is local to this RHS.
+    out.push_str("__user = let {\n __b =\n");
+    out.push_str(code);
+    if !code.ends_with('\n') {
+        out.push('\n');
     }
+    out.push_str(" } in __b\n");
     out.push('\n');
 
     // render_call: toWire in REPL (Show-default), toJSON in stateless server.
@@ -402,16 +407,16 @@ pub(crate) fn format_error_with_source(
     error: &str,
     source: &str,
 ) -> String {
-    // Anchor on the `__user =` binding line — the user's `code` starts on the
-    // very next line, so offsets/echo align with the snippet the caller wrote
-    // (anchoring on the earlier `-- [user]` marker was off by the `__user =`
-    // line itself). The generated `result ::` wrapper below the code is dropped:
-    // echoing the budget plumbing teaches callers the wrong dialect.
-    const MARKER: &str = "__user =\n";
+    // Anchor on the verbatim-embedding bracket — the user's `code` starts on
+    // the very next line (byte-exact; see the `__user = let {` emission), so
+    // offsets/echo align with the snippet the caller wrote. The closing
+    // bracket and the `result ::` wrapper below are dropped from the echo:
+    // teaching callers the generated plumbing is the wrong dialect.
+    const MARKER: &str = "__user = let {\n __b =\n";
     let marker_pos = source.find(MARKER);
     let user_section = marker_pos.map_or(source, |pos| &source[pos + MARKER.len()..]);
     let user_section = user_section
-        .find("\nresult ::")
+        .find("\n } in __b")
         .map_or(user_section, |pos| &user_section[..pos])
         .trim_end();
     // Remap `Expr.hs:<n>` line numbers so they count from the user's first code
@@ -540,15 +545,14 @@ mod tests {
             prop_assert_eq!(a, b);
         }
 
-        /// The user code rides into the rendered module verbatim under the
-        /// `__user` binding, indented two spaces.
+        /// The user code rides into the rendered module BYTE-VERBATIM inside
+        /// the explicit let-bracket embedding (no indent transform).
         #[test]
         fn prop_template_haskell_embeds_user_code(code in "[a-zA-Z0-9 ]{1,40}") {
             let pre = "module Expr where\ndefault (Int)\n";
             let src = template_haskell(pre, "'[Console]", &code, "", "", None, None);
-            let indented = format!("  {code}\n");
-            prop_assert!(src.contains("__user =\n"));
-            prop_assert!(src.contains(&indented));
+            let verbatim = format!("__user = let {{\n __b =\n{code}\n }} in __b");
+            prop_assert!(src.contains(&verbatim));
         }
 
         /// `wrap_do` prefixes a `do`, indents every line two spaces, and keeps
@@ -635,7 +639,7 @@ mod tests {
         // Canonical order is load-bearing: handlers are tag-indexed by it.
         assert_eq!(a.first(), Some(&"Console"));
         assert_eq!(a.last(), Some(&"Ask"));
-        assert_eq!(a.len(), 10);
+        assert_eq!(a.len(), 11);
     }
 
     #[test]
@@ -722,7 +726,7 @@ mod tests {
     fn test_format_error_with_source() {
         let title = "Error";
         let error = "Type mismatch";
-        let source = "preamble stuff\n-- [user]\nhelper :: Int\nhelper = 7\n\n__user =\n  pure helper\n\nresult :: Eff '[] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON _r)\n";
+        let source = "preamble stuff\n-- [user]\nhelper :: Int\nhelper = 7\n\n__user = let {\n __b =\npure helper\n } in __b\n\nresult :: Eff '[] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON _r)\n";
         let formatted = format_error_with_source(FailureClass::HaskellError, title, error, source);
 
         assert!(formatted.contains("## Error"));
@@ -751,7 +755,7 @@ mod tests {
     fn test_format_error_with_source_multiline() {
         let title = "Compile Error";
         let error = "Variable not in scope: x";
-        let source = "module Test where\n-- [user]\n__user =\n  go x y z\n  where go a b c = print [a,b,c]\n\nresult :: Eff '[] Value\nresult = do\n  _r <- __user\n";
+        let source = "module Test where\n-- [user]\n__user = let {\n __b =\ngo x y z\n  where go a b c = print [a,b,c]\n } in __b\n\nresult :: Eff '[] Value\nresult = do\n  _r <- __user\n";
         let formatted = format_error_with_source(FailureClass::HaskellError, title, error, source);
 
         assert!(formatted.contains("## Compile Error"));
