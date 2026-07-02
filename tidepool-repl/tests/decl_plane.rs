@@ -649,6 +649,28 @@ async fn pure_numeric_bind_generalizes() {
     repl.close().await.expect_ok("close");
 }
 
+/// PURE-BIND-AS-DECL type display (NMR probe): a polymorphic numeric bind reads
+/// its GENERALIZED type (GHCi parity — `n <- pure 5` is `Num a => a`), not a
+/// defaulted monotype. The probe compiles in the decl module's NMR context, so
+/// the bind generalizes instead of the eval preamble's monomorphism restriction
+/// freezing/failing it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pure_numeric_bind_type_generalizes_in_display() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.open_ok().await;
+    let out = repl.run(&["n <- pure 5"]).await;
+    let text = out.expect_ok("numeric bind type display");
+    // Generalized: a constrained type variable, not a bare `Int` monotype.
+    assert!(
+        text.contains("Num") || text.contains("=>"),
+        "numeric bind should show a generalized type, got: {text}"
+    );
+    repl.close().await.expect_ok("close");
+}
+
 /// PURE-BIND-AS-DECL (M2): a polymorphic empty-list bind stays polymorphic and
 /// instantiates per use — the case that used to throw an interface error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

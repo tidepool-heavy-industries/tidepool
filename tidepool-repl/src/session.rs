@@ -468,8 +468,16 @@ impl Session {
     /// Read the (generalized) type of a pure session name by compiling it as a
     /// pure reference and reading the captured type. Best-effort — `None` if it
     /// doesn't typecheck as a bare pure value.
+    ///
+    /// Probes in an NMR context (mirroring the decl module the bind actually
+    /// lives in), NOT the eval preamble's monomorphism restriction. A pure bind
+    /// generalizes under NMR, so its true type shows — GHCi parity: `n <- pure
+    /// 5` reads `Num a => a`, `xs <- pure []` reads `[a]`. Under MR a
+    /// constrained bind (`f h = h.path :: HasField "path" r a => r -> a`, the
+    /// core record-dot idiom) can't monomorphize the unresolved constraint and
+    /// the probe FAILS — an empty type display; NMR reports it faithfully.
     fn probe_pure_type(&mut self, name: &str) -> Option<String> {
-        let preamble = self.patched_preamble();
+        let preamble = to_nmr_pragmas(&self.patched_preamble());
         let imports = self.session_imports();
         let inject = self.live_val_modules();
         let eval_input = self.eval_input.clone();
@@ -1858,6 +1866,21 @@ fn wrap_multi_bind_source(
 /// (`capturedUserType`), so the reference turn can report `{type, value}` for a
 /// bare pure expression instead of `type: null`. `__user` is unused at runtime
 /// (only `result` is executed) and harmless — session compiles are not `-Werror`.
+/// Insert `NoMonomorphismRestriction` into a preamble's `LANGUAGE` pragma (the
+/// same edit [`tidepool_mcp::decl_pragmas`] makes), so a probe compile
+/// generalizes a constrained pure bind instead of failing to monomorphize it.
+/// Idempotent — a no-op if NMR is already present.
+fn to_nmr_pragmas(preamble: &str) -> String {
+    if preamble.contains("NoMonomorphismRestriction") {
+        return preamble.to_string();
+    }
+    preamble.replacen(
+        "NoImplicitPrelude,",
+        "NoImplicitPrelude, NoMonomorphismRestriction,",
+        1,
+    )
+}
+
 fn wrap_pure_ref_source(
     preamble: &str,
     imports: &str,
