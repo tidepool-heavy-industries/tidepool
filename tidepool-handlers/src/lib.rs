@@ -920,7 +920,7 @@ pub struct LspPosition {
 }
 
 #[derive(FromCore, ToCore, Clone)]
-#[core(name = "Node")]
+#[core(name = "LspNode")]
 pub struct LspNode {
     pub name: String,
     pub container: String,
