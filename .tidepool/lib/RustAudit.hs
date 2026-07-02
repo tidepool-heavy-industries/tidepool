@@ -8,10 +8,10 @@ import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
 import qualified Data.Text as T
 
--- A panic-ish site: file, 1-based line, kind, raw line text.
+-- | A panic-ish site: file, 1-based line, kind (unwrap/expect/panic/…), raw line text.
 data Site = Site { sFile :: Text, sLine :: Int, sKind :: Text, sText :: Text }
 
--- Most-specific kind for a matched line, or Nothing if it's a false hit.
+-- | Most-specific panic kind for a line, or Nothing if none match.
 kindOf :: Text -> Maybe Text
 kindOf t
   | isInfixOf "unreachable!"   t = Just "unreachable"
@@ -22,17 +22,20 @@ kindOf t
   | isInfixOf ".unwrap()"      t = Just "unwrap"
   | otherwise                    = Nothing
 
+-- | First slash-delimited segment of a path; the crate name.
 crateOf :: Text -> Text
 crateOf f = case splitOn "/" f of
   (c : _) -> c
   []      -> "?"
 
+-- | True when the site lives in a test module or is tagged with a test attribute.
 isTestSite :: Site -> Bool
 isTestSite s =
   isInfixOf "/tests/" (sFile s)
     || isInfixOf "#[test]" (sText s)
     || isInfixOf "#[cfg(test" (sText s)
 
+-- | Count occurrences of each Text key, preserving first-seen order.
 tally :: [Text] -> [(Text, Int)]
 tally = foldl' bump []
   where
@@ -40,22 +43,24 @@ tally = foldl' bump []
     ins k [] = [(k, 1)]
     ins k ((k', n) : rest) = if k == k' then (k', n + 1) : rest else (k', n) : ins k rest
 
+-- | Sort (key, count) pairs by descending count.
 rankDesc :: [(Text, Int)] -> [(Text, Int)]
 rankDesc = sortBy (\a b -> compare (snd b) (snd a))
 
+-- | Grep all Rust sources for panic-site patterns and classify each hit.
 panicSites :: M [Site]
 panicSites = do
   hits <- grepGlob "\\.unwrap\\(\\)|\\.expect\\(|panic!|unreachable!|unimplemented!|todo!" "**/*.rs"
   pure [ Site h.path h.line k h.text | h <- hits, Just k <- [kindOf h.text] ]
 
--- numbered context window around a 1-based line.
+-- | Numbered context window of 'radius' lines either side of a 1-based target line.
 contextAround :: Int -> Int -> Text -> Text
 contextAround target radius content =
   let keep (i, _) = i + 1 >= target - radius && i + 1 <= target + radius
       num (i, l) = pack (show (i + 1)) <> "| " <> l
   in unlines (map num (filter keep (zipWithIndex (lines content))))
 
--- The ration-attention layer: deterministic site-finding, LLM judgment per site.
+-- | LLM-based per-site risk triage for one file: low/medium/high rating per panic site.
 auditFile :: Text -> M Value
 auditFile file = do
   content <- readFile file
@@ -70,9 +75,7 @@ auditFile file = do
   llm (SArr (SObj [ ("line", SNum), ("kind", SStr)
                   , ("risk", SEnum ["low", "medium", "high"]), ("reason", SStr) ])) prompt
 
--- Cheap, line-local risk bucket. The point: shrink the LLM-judged residue to a
--- small ABSOLUTE number. If "unknown" stays huge, line-local heuristics aren't
--- enough and the tool isn't economical without context-reading.
+-- | Cheap line-local risk bucket; pre-classifies sites to shrink the LLM-judged residue.
 bucket :: Site -> Text
 bucket s =
   let t = sText s
@@ -87,9 +90,11 @@ bucket s =
           || has ".pop(" || has ".next("                         then "option-access"
      else "unknown"
 
+-- | True when the bucket label is ambiguous enough to warrant LLM judgment.
 needsJudgment :: Text -> Bool
 needsJudgment b = b == "parse-fallible" || b == "option-access" || b == "unknown"
 
+-- | Production sites with bucket summary and a sample of those needing LLM attention.
 triageReport :: M Value
 triageReport = do
   sites <- panicSites
@@ -103,9 +108,7 @@ triageReport = do
                         ["f" .= sFile s, "l" .= sLine s, "b" .= bucket s, "t" .= sText s]) needs)
     ])
 
--- Iteration 2: cluster the ambiguous residue by the fallible OP just before the
--- unwrap/expect (next/get/lock/pop/parse/...). One judgment per op-cluster, not
--- per site. Measures whether clustering collapses the residue to something cheap.
+-- | Extract the identifier of the fallible operation preceding an unwrap/expect call.
 opKey :: Site -> Text
 opKey s =
   let line   = sText s
@@ -118,6 +121,7 @@ opKey s =
     isIdentChar c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
                  || (c >= '0' && c <= '9') || c == '_'
 
+-- | Cluster ambiguous sites by op key; shows whether one LLM judgment covers many sites.
 clusterReport :: M Value
 clusterReport = do
   sites <- panicSites
@@ -131,6 +135,7 @@ clusterReport = do
     , "top_ops"          .= take 20 byOp
     ])
 
+-- | Summary of all Rust panic sites: total, prod count, by-kind, by-crate, top hotspots.
 panicReport :: M Value
 panicReport = do
   sites <- panicSites

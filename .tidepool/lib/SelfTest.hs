@@ -1,4 +1,5 @@
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+-- | Parse cargo test output: extract pass/fail/ignore counts from raw text blocks.
 module SelfTest where
 
 import Tidepool.Prelude

@@ -13,7 +13,7 @@ import Tidepool.Effects
 import qualified Data.Text as T
 import qualified Data.Set as Set
 
--- | A documented translation gotcha.
+-- | A documented GHC Core translation gotcha: name, description, source search terms, and doc aliases.
 data Gotcha = Gotcha
   { gName        :: Text
   , gDescription :: Text
@@ -21,7 +21,7 @@ data Gotcha = Gotcha
   , gDocAliases  :: [Text]   -- matching headings in audit-translate.md
   }
 
--- | Constructor with no doc aliases (the common case).
+-- | Build a Gotcha with no doc aliases (the common case); see 'catalog' for examples.
 gotcha :: Text -> Text -> [Text] -> Gotcha
 gotcha n d p = Gotcha n d p []
 
