@@ -69,8 +69,15 @@ pub enum SessionError {
     BinderExtraction(String),
     /// The candidate gen module failed to type-check via GHC. The declaration
     /// log has been rolled back; the session remains usable.
-    #[error("declaration type-check failed: {0}")]
-    ValidationFailed(String),
+    ///
+    /// `module_source` carries the full rendered module text so the caller can
+    /// compute the user-content line offset for error-location rewriting
+    /// (see `tidepool_mcp::decl_user_offset`).
+    #[error("declaration type-check failed: {ghc_stderr}")]
+    ValidationFailed {
+        ghc_stderr: String,
+        module_source: String,
+    },
 }
 
 /// A resident session's declaration library. Owns the ordered decl log, the
@@ -324,8 +331,11 @@ impl SessionLib {
         })?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            return Err(SessionError::ValidationFailed(stderr));
+            let ghc_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            return Err(SessionError::ValidationFailed {
+                ghc_stderr,
+                module_source: rendered.source.clone(),
+            });
         }
 
         Ok(())
