@@ -103,9 +103,12 @@ field names exist across record types.
 
 | Record | Fields | Access example |
 |--------|--------|----------------|
-| `Proc` | `exitCode :: Int`, `stdout`, `stderr :: Text` | `p <- run cmd; p.stdout` |
-| `Hit`  | `path`, `text :: Text`, `line :: Int` | `h.path`, `h.line` |
-| `Doc`  | `path`, `body :: Text` | `d.path`, `d.body` |
+| `Proc`        | `exitCode :: Int`, `stdout`, `stderr :: Text` | `p <- run cmd; p.stdout` |
+| `Hit`         | `path`, `text :: Text`, `line :: Int` | `h.path`, `h.line` |
+| `Doc`         | `path`, `body :: Text` | `d.path`, `d.body` |
+| `Commit`      | `sha`, `subject`, `author`, `date`, `files :: [Text]` | `c <- gitShow "HEAD"; c.sha`, `c.files` |
+| `StatusEntry` | `path`, `state :: Text` | `es <- gitStatus; map (.state) es` |
+| `FileDelta`   | `path :: Text`, `adds`, `dels :: Int`, `binary :: Bool` | `ds <- gitDiffStat "HEAD~1"; ds` |
 
 Key helpers: `ok :: Proc -> Bool` (true when `exitCode == 0`); `run :: Text -> M Proc`;
 `grepGlob :: Text -> FilePath -> M [Hit]`; `readGlob :: Text -> M [Doc]`.

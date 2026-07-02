@@ -1,6 +1,6 @@
 # tidepool-handlers — concrete effect handlers (`src/lib.rs`, single file)
 
-The Rust side of every `<Eff>Req` — Console, KV, Fs, SG, Http, Exec, Lsp, Llm,
+The Rust side of every `<Eff>Req` — Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Git,
 plus the debug-only Meta handler. `build_base_stack`/`base_decls_with_ask`
 assemble the fully-wired server. See root `CLAUDE.md` for the project map;
 `tidepool-mcp/CLAUDE.md` for the Haskell-facing half of the effect contract

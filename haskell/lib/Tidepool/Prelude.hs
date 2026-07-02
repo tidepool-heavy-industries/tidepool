@@ -171,6 +171,7 @@ module Tidepool.Prelude
     -- * Shared record vocabulary (Tidepool.Records)
   , Proc(..), ok, Hit(..), Doc(..)
   , FileMeta(..), UpdateOutcome(..), WriteOutcome(..)
+  , Commit(..), StatusEntry(..), FileDelta(..)
   ) where
 
 import Prelude
@@ -227,7 +228,7 @@ import Control.Monad
   , (=<<), (>=>), (<=<)
   , foldM, foldM_
   )
-import Tidepool.Records (Proc(..), ok, Hit(..), Doc(..), FileMeta(..), UpdateOutcome(..), WriteOutcome(..))
+import Tidepool.Records (Proc(..), ok, Hit(..), Doc(..), FileMeta(..), UpdateOutcome(..), WriteOutcome(..), Commit(..), StatusEntry(..), FileDelta(..))
 import Tidepool.Render (Render(..))
 import Tidepool.QQ.Fmt.Runtime
   (FSign(..), FAlign(..), fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain)

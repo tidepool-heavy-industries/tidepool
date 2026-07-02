@@ -364,6 +364,42 @@ pub fn exec_decl() -> EffectDecl {
     }
 }
 
+/// Git effect: typed read-only repository queries.
+///
+/// Returns typed records parsed Rust-side from machine-format git output.
+/// `Commit`, `StatusEntry`, and `FileDelta` come from `Tidepool.Records` and
+/// are available via `Tidepool.Prelude` without an explicit import.
+pub fn git_decl() -> EffectDecl {
+    EffectDecl {
+        type_name: "Git",
+        description: concat!(
+            "Read-only git repository queries. Returns typed records parsed Rust-side ",
+            "from machine-format git output — no text-splitting needed. ",
+            "`gitLog n` → last N commits newest-first; `gitStatus` → working-tree status; ",
+            "`gitDiffStat rev` → per-file diff stats vs a revspec; `gitShow rev` → one commit. ",
+            "All three list verbs return typed records: `Commit {sha,subject,author,date,files}`, ",
+            "`StatusEntry {path,state}` (state = 2-char XY porcelain code), ",
+            "`FileDelta {path,adds,dels,binary}`.",
+        ),
+        // Commit/StatusEntry/FileDelta are defined in Tidepool.Records and
+        // re-exported by Tidepool.Prelude, so the generated Effects module
+        // (which imports Tidepool.Prelude) sees them without type_defs here.
+        type_defs: &[],
+        constructors: &[
+            "GitLog      :: Int  -> Git [Commit]",
+            "GitStatus   ::         Git [StatusEntry]",
+            "GitDiffStat :: Text -> Git [FileDelta]",
+            "GitShow     :: Text -> Git Commit",
+        ],
+        helpers: &[
+            "-- | Last N commits, newest-first. Each 'Commit' carries sha/subject/author/date/files.\ngitLog :: Int -> M [Commit]\ngitLog = send . GitLog",
+            "-- | Working-tree status. Each 'StatusEntry' has path and 2-char XY state code\n-- (e.g. \"M \", \"??\", \"A \").\ngitStatus :: M [StatusEntry]\ngitStatus = send GitStatus",
+            "-- | Per-file diff stats vs a revspec (\"HEAD~1\", \"main\", \"HEAD~3..HEAD\", etc.).\n-- 'FileDelta' carries path/adds/dels/binary.\ngitDiffStat :: Text -> M [FileDelta]\ngitDiffStat = send . GitDiffStat",
+            "-- | Single commit by revspec. Fails the eval on an unknown or ambiguous revspec.\ngitShow :: Text -> M Commit\ngitShow = send . GitShow",
+        ],
+    }
+}
+
 /// Meta effect: self-mirror for querying runtime metadata.
 pub fn meta_decl() -> EffectDecl {
     EffectDecl {
