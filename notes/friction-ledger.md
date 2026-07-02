@@ -91,7 +91,14 @@ Shipped (all installed, need ONE /mcp reconnect to go live):
 - `:program` — replayable-notebook repaint (decls + binds-with-defining-text; round-trips live). The compaction-seam primitive.
 - `stale:` field on redefine — names live binds holding the OLD value (notebook display truthfulness). BindingEntry gains defining_expr.
 
+Re-confirmed live (worth the queued fixes):
+- #24 (bricking a lib module) hit again: a failed first write left `import Repo` in Library.hs pointing at a broken Repo.hs; the preamble's Library auto-import then failed to compile EVERY eval, including the writeFile that would fix it. Unbrick was host-side (bash). The `writeChecked`-before-landing fix (compile-probe a lib module before splicing its Library re-export) would prevent this whole class — promote from ledger note to a real thread.
+- #23 cousin: a `.tidepool/lib` MODULE (not just the decl plane) can't see `readGlob` (it lives in Tidepool.Orchestrate, imported by the eval preamble, NOT re-exported to lib modules). Worked around by using the Fs primitives glob/readFile directly. Fix: either re-export Orchestrate helpers to lib modules or document the split.
+- Session bind shadows a lib verb of the same name (correct Haskell scoping, but a footgun when you reuse a name across a session): `buildOrder <- ...` then a lib `buildOrder` verb resolves to the stale tuple. Expected; worth a one-line doc note.
+- Test-infra race (NOT a product bug): `rm -rf ~/.cache/tidepool` + parallel `cargo test` processes race on the shared content-addressed effects dir → transient effects_smoke failures (pass in isolation). The self-heal fix hardens the PRODUCT against this exact wipe; the TEST harness should stop sharing / stop wiping mid-run.
+
 Verified live (kata hunt, pre-reconnect binary):
+- Grow-your-own-verb loop WITH a self-test gate: wrote `.tidepool/lib/Repo.hs` (crateGraph/topoOrder/buildOrder + embedded `buildOrderT` acceptance check) live; the verb runs on the 17-crate workspace while its own self-test returns True. The "evolving tools over a GHCi session" thesis, made concrete + verified.
 - Continuation machinery under REPEATED resume: a 5-suspension git-bisect knot, heap-persistent lo/hi bounds + accumulating step history across every resume — the capability no other tool has. Zero issues.
 - Map/Set/deep-recursion (Kahn topological build-order over the real crate graph): solid. The "cycle" it reports is dev-dependencies (Cargo allows those) — a true workspace property, not a bug.
 

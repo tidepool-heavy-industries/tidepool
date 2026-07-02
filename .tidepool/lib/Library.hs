@@ -21,6 +21,7 @@ module Library
   , module SelfTest
   , module Lsp
   , module Churn
+  , module Repo
   ) where
 
 import Schemes
@@ -34,3 +35,4 @@ import GotchaGuard
 import SelfTest
 import Lsp
 import Churn
+import Repo
