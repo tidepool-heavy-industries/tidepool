@@ -52,7 +52,7 @@ fn err_short(e: &JitError) -> String {
 fn jit_is_gap(e: &JitError) -> bool {
     matches!(
         e,
-        JitError::Yield(YieldError::Runtime(RuntimeError::UnresolvedVar(_)))
+        JitError::Yield(YieldError::Runtime(RuntimeError::UnresolvedVar(..)))
     )
 }
 

@@ -32,7 +32,7 @@ use tidepool_testing::gen::arb_ground_expr;
 fn is_whitelisted_jit_error(err: &RuntimeError) -> bool {
     matches!(
         err,
-        RuntimeError::UnresolvedVar(_) | RuntimeError::HeapOverflow | RuntimeError::StackOverflow
+        RuntimeError::UnresolvedVar(..) | RuntimeError::HeapOverflow | RuntimeError::StackOverflow
     )
 }
 

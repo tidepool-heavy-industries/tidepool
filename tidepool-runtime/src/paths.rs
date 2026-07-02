@@ -162,6 +162,43 @@ fn load_secrets_from(dir: &Path, report: &mut SecretsReport) {
 mod tests {
     use super::*;
 
+    /// `load_secrets_from` loads valid `*_API_KEY` files (trimmed), ignores
+    /// bad names / non-key files, and lets an already-set env var win.
+    /// (Relocated from tidepool/src/main.rs when the loader was hoisted here.)
+    #[test]
+    fn load_secrets_from_loads_and_respects_precedence() {
+        let dir = std::env::temp_dir().join(format!("tp-secrets-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::remove_var("TIDEPOOL_TEST_DUMMY_API_KEY");
+        std::fs::write(dir.join("TIDEPOOL_TEST_DUMMY_API_KEY"), "sk-test-123\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "not a key").unwrap();
+        std::fs::write(dir.join("lower_api_key"), "nope").unwrap();
+        std::env::set_var("TIDEPOOL_TEST_PRESET_API_KEY", "from-env");
+        std::fs::write(dir.join("TIDEPOOL_TEST_PRESET_API_KEY"), "from-file").unwrap();
+
+        let mut report = SecretsReport::default();
+        load_secrets_from(&dir, &mut report);
+
+        assert_eq!(
+            std::env::var("TIDEPOOL_TEST_DUMMY_API_KEY").unwrap(),
+            "sk-test-123"
+        );
+        // already-set var wins over the file
+        assert_eq!(
+            std::env::var("TIDEPOOL_TEST_PRESET_API_KEY").unwrap(),
+            "from-env"
+        );
+        assert!(std::env::var("notes.txt").is_err());
+        assert!(report
+            .loaded
+            .iter()
+            .any(|n| n == "TIDEPOOL_TEST_DUMMY_API_KEY"));
+
+        std::env::remove_var("TIDEPOOL_TEST_DUMMY_API_KEY");
+        std::env::remove_var("TIDEPOOL_TEST_PRESET_API_KEY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn find_project_root_walks_up() {
         let tmp = std::env::temp_dir().join(format!("tp-paths-{}", std::process::id()));

@@ -191,9 +191,8 @@ pub fn dedupe_diagnostics(err: &str) -> String {
             .iter()
             .filter(|l| {
                 let t = l.trim_start();
-                !(t.starts_with('|')
-                    || leading_digits(t).len() > 0
-                        && t[leading_digits(t).len()..].starts_with(" |"))
+                let digits = leading_digits(t);
+                !(t.starts_with('|') || (!digits.is_empty() && t[digits.len()..].starts_with(" |")))
             })
             .flat_map(|l| l.chars())
             .filter(char::is_ascii_alphanumeric)

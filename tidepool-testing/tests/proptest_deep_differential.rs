@@ -132,7 +132,7 @@ fn classify_jit_error(err: &JitError) -> JitErrClass {
         }
         JitError::HeapBridge(_) => JitErrClass::Skip,
         JitError::Yield(y) => match y {
-            YieldError::Runtime(RuntimeError::UnresolvedVar(_))
+            YieldError::Runtime(RuntimeError::UnresolvedVar(..))
             | YieldError::Runtime(RuntimeError::HeapOverflow)
             | YieldError::Runtime(RuntimeError::StackOverflow) => JitErrClass::Skip,
             YieldError::Signal(sig) => JitErrClass::B3(*sig),

@@ -187,7 +187,7 @@ fn run_gc_oracle(expr: CoreExpr) -> Result<(), TestCaseError> {
         match JitEffectMachine::compile(&expr, &table, n).and_then(|mut m| m.run_pure()) {
             Ok(v) => jit_results.push((n, v)),
             Err(JitError::Yield(YieldError::Runtime(RuntimeError::HeapOverflow)))
-            | Err(JitError::Yield(YieldError::Runtime(RuntimeError::UnresolvedVar(_))))
+            | Err(JitError::Yield(YieldError::Runtime(RuntimeError::UnresolvedVar(..))))
             | Err(JitError::HeapBridge(_)) => {
                 tolerated_smallest = Some(n);
             }
