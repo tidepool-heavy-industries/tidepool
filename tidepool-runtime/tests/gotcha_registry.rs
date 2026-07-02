@@ -321,6 +321,16 @@ fn stale_doc_read_now_works() {
     works("pure (P.read \"42\" :: Int)", serde_json::json!(42));
 }
 
+/// `read :: Double` also WORKS on the native-bignum toolchain. Root CLAUDE.md
+/// item 0 claimed BOTH `:: Int` AND `:: Double` die at compile time with
+/// "__gmpn_add_1". The `:: Int` case was already flipped (stale_doc_read_now_works);
+/// this probe pins the `:: Double` variant. The Read lexer for Double goes through
+/// the same native-bignum integer path so the __gmpn_* wall is gone for both.
+#[test]
+fn stale_doc_read_double_now_works() {
+    works("pure (P.read \"42.5\" :: Double)", serde_json::json!(42.5));
+}
+
 /// A near-DBL_MAX Double LITERAL now WORKS on the native-bignum toolchain (was a
 /// clean gmp COMPILE error via the integerAdd/integerSub shims). Flipped from
 /// loud_fail 2026-06-22. Moderate literals were always fine (see
@@ -697,8 +707,19 @@ fn claims_nobase_nontail_loopifies_not_overflows() {
                  actual error: {e}"
             );
         }
-        _ => {
-            // Timeout (still spinning → loopified, claim confirmed) or other outcome.
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            // Still spinning → GHC loopified it, claim confirmed.
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!(
+                "Thread exited without sending (panicked before eval_raw returned). \
+                 Cannot confirm loopification claim."
+            );
+        }
+        Ok(other) => {
+            panic!(
+                "Unexpected outcome (expected timeout-spin or stack-overflow): {other:?}"
+            );
         }
     }
 }
