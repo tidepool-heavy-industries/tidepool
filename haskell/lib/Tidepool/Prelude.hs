@@ -39,6 +39,10 @@ module Tidepool.Prelude
     -- * show (Text-returning shadow)
   , show, showT
   , showDouble
+    -- * read (String-based, works on the JIT since native bignum — see
+    -- gotcha_registry stale_doc_read_now_works; parseInt/parseDouble are the
+    -- Text-first equivalents)
+  , Read, read
     -- * Basic functions (re-exported from base)
   , id, const, flip, (.), ($), ($!)
   , not, (&&), (||), otherwise, seq
@@ -180,6 +184,7 @@ import Prelude
   ( Int, Integer, Word, Char, Bool(..), Double, Float
   , String, Ordering(..), Maybe(..), Either(..)
   , Eq(..), Ord(..), Num(..), Integral(..), Real, Fractional(..), Floating(..), Show
+  , Read, read
   , Semigroup(..), Monoid(..)
   , fromIntegral, realToFrac, truncate, ceiling, floor, even, odd
   , Functor(..), Applicative(..), Monad(..)

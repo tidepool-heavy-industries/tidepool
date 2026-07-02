@@ -54,6 +54,24 @@ Every ergonomic wart hit during real tidepool/tidepool-repl use lands here — s
 | 23 | Decl plane's import surface ≠ stmt plane's: `readGlob` (Tidepool.Orchestrate) and friends are bare in stmt items but need explicit `import Tidepool.Effects` + `import Tidepool.Orchestrate` in decls — docs claim the planes share the base import set. Cost two failed round-trips ×2 tasks | either give decl ModuleEnv the same two imports (check collision story) or fix the docs + add a not-in-scope hint naming the module (the stmt plane KNOWS where the name lives) | 2026-07-01 |
 | 24 | Bricking a lib module (appended `explainGhc` using `T.` to Dev.hs, which lacked the import) kills ALL evals incl. the `writeFile` that could fix it — host-side edit is the only unbrick. Known class (memory), now hit live | consider: lib-module writes via a `writeChecked`-style verb that compile-probes the module before landing it; or at minimum the brick error should name the broken lib module first | 2026-07-01 |
 
+## Scar-tissue audit (2026-07-01 — live probes on the deployed server)
+
+Inanna's theory ("accumulated gotcha memory is stale scar tissue around since-fixed bugs; what's real is a bug list") — verdict: **mostly correct**. Every behavioral flinch in the memory corpus probed live:
+
+| Scar | Verdict | Action |
+|------|---------|--------|
+| `read` unsupported → parseInt crutch | **STALE-ish**: JIT works (registry-pinned, golden un-ignored); Prelude just never re-exported it | Fixed #26: `read`/`Read` exported from Tidepool.Prelude |
+| `zip [1..]`/`[0..]` → zipWithIndex crutch | **STALE** (live: works) | memory rewritten |
+| infinite `filter`/transforms diverge | **STALE** (live: `take 4 (filter even [1..])` works) | memory rewritten |
+| `T.takeWhile` section predicates corrupt | **STALE for usage** (direct + session-decl wrapper live-green); Prelude-shadow retirement still guarded | memory rewritten |
+| Integer→Double / big literals broken | **STALE** (±2^100 and 1e308 live-correct; the review-branch fixes landed via integration) | memory rewritten |
+| bind names shadowing Prelude (`tail`) error | **STALE** (live: works) | drop from repl CLAUDE.md friction list when next touched |
+| `pub fn $NAME($$$ARGS)` silently unreliable | **HEALED INTO UX**: handler now rejects signature-shaped patterns with a teaching error | memory note |
+| `cycle` unresolved | **REAL** — and the error is still hex-only (`VarId(0xfe…)`), compounding #12 | bug list: resolve cycle (it IS exported; failure is at Resolve level) |
+| multi-line QQ +2 indent corrupts payload | **REAL** (live: `[fmt\|`-payload gained 2 spaces) | moved from Wontfix → bug list: make the wrapper's indent QQ-aware |
+| `[fmt\|]`/`[j\|]` not in repl scope at all | **NEW parity divergence** (oneshot-only; possibly deliberate given +3s QQ cost per item) | decision for Inanna |
+| assoc-list over Data.Map in lib code (closed-Core bloat) | unprobed (compile-size claim, needs measurement) | keep, low priority |
+
 ## Measured (2026-07-01, interface metrology trial)
 
 - **~6.0s floor per session item** (`tb <- getCurrentTime` alone = 6.1s; decl+timestamp pair = 11.8s). Each item shells the extract (bind = classify + compile + inner-type probe); the per-(session,generation) cache salt means in-session items can never cache-hit. Inanna's call: acceptable while leverage is high (one census item replaces ~6-8 read/grep round-trips + inference); optimize when leverage is proven. Direction when we do: resident GHC service in the extract, and/or drop the salt for pure re-references.
