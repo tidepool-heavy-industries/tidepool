@@ -20,6 +20,7 @@ module Library
   , module GotchaGuard
   , module SelfTest
   , module Lsp
+  , module Churn
   ) where
 
 import Schemes
@@ -32,3 +33,4 @@ import Optics
 import GotchaGuard
 import SelfTest
 import Lsp
+import Churn

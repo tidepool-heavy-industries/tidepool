@@ -45,6 +45,17 @@ Every ergonomic wart hit during real tidepool/tidepool-repl use lands here — s
 | 15 | `writeFile` fails loud on a missing parent directory instead of creating it — agents nearly always want mkdir-p semantics | spawned `fs-writefile-parents` 2026-07-01 | 2026-07-01 |
 | 14 | `session_run` return shape is debug-noisy: `generation`/`valGeneration` counters, `index`, decl internals (`module: Tidepool.Session.Lib.G<n>`, `defined:true`), and `items[].result` is DOUBLE-ENCODED (a JSON string containing JSON); last item's result duplicates top-level `value` | spawn after repl-stubs merges (same rendering code). Slim shape: per-item just `{bound,type}` / `{decl}` / `{error}` inline (no string-encoding); top-level `{value, type}`; internals behind `--debug` or a `verbose` param | 2026-07-01 |
 
+## Filled at the verb layer (stdlib promotion candidates)
+
+| # | Gap | Interim fill | Found |
+|---|-----|--------------|-------|
+| 17 | Time mirror round-trip asymmetry: `formatISO8601` shipped without `parseISO8601`, but `Commit.date` is ISO-8601 text (git `%cI`) — any recency math needs the parse direction | `.tidepool/lib/Churn.hs` — `parseISO8601` + `daysFromCivil` (Hinnant inverse) + `hotspots n k` verb; verified round-trip incl. pre-1970. Promote parse+inverse into `Tidepool.Data.Time` with golden tests next stdlib pass | 2026-07-01 |
+
+## Notes from live use (not defects)
+
+- Two-plane inference asymmetry (diagnosed live 2026-07-01, Inanna prompted the correction): `let` binds MATERIALIZE heap values via a synthetic `pure x`, so they must be monomorphic — a record-dot lambda (`let heat = \c -> c.date…`) fails with an opaque `HasField r0` error regardless of MR. Bare DECLS generalize normally: `heatOf now c = … c.date …` (no signature) compiles polymorphic and resolves at the use site, GHCi-style — and can reference session binds (`now`) across the plane boundary. Idiom: polymorphic helpers → decl plane; `let` → concrete values only. **Fix worth a thread**: bind-plane error hint — unsolved constraint arising at the synthetic `pure` should say "session binds are materialized values (monomorphic); drop the `let` to make this a declaration, which generalizes — or annotate."
+- **WIN**: `.tidepool/lib` live-reloads mid-session — a running session wrote `Churn.hs` + spliced the `Library.hs` re-export via `writeFile`/`T.replace`, then called `hotspots` in the next item. No reset, no reconnect. The grow-your-own-vocabulary loop is real.
+
 ## Design questions (need Inanna)
 
 - ~~**Continuation TTL vs the knot thesis**~~ RESOLVED 2026-07-01 (Inanna: "cut the 30m TTL"): parked asks never expire in prod (`continuation_ttl: None`); wedged sweep kept at 30 min via new `wedged_ttl` (commit e01c07e). Knots may park indefinitely.
