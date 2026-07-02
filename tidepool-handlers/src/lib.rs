@@ -1752,12 +1752,245 @@ impl EffectHandler<CapturedOutput> for MetaHandler {
 }
 
 // ============================================================================
+// Tag 8: Git (read-only repository queries)
+// ============================================================================
+
+#[derive(FromCore)]
+pub enum GitReq {
+    #[core(name = "GitLog")]
+    Log(i64),
+    #[core(name = "GitStatus")]
+    Status,
+    #[core(name = "GitDiffStat")]
+    DiffStat(String),
+    #[core(name = "GitShow")]
+    Show(String),
+}
+
+/// Haskell `Commit` record: sha / subject / author / date / files.
+#[derive(ToCore, Clone)]
+#[core(name = "Commit")]
+pub struct GitCommit {
+    pub sha: String,
+    pub subject: String,
+    pub author: String,
+    pub date: String,
+    pub files: Vec<String>,
+}
+
+/// Haskell `StatusEntry` record: path / state (2-char XY code).
+#[derive(ToCore, Clone)]
+#[core(name = "StatusEntry")]
+pub struct GitStatusEntry {
+    pub path: String,
+    pub state: String,
+}
+
+/// Haskell `FileDelta` record: path / adds / dels / binary.
+#[derive(ToCore, Clone)]
+#[core(name = "FileDelta")]
+pub struct GitFileDelta {
+    pub path: String,
+    pub adds: i64,
+    pub dels: i64,
+    pub binary: bool,
+}
+
+#[derive(Clone)]
+pub struct GitHandler {
+    root: PathBuf,
+}
+
+impl GitHandler {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    /// Run a git command in the sandbox root; propagate non-zero exit as
+    /// `EffectError::Handler` (clean eval failure, no panic).
+    fn run_git(&self, args: &[&str]) -> Result<String, EffectError> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&self.root)
+            // Read-only ops; suppress optional index locks.
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|e| EffectError::Handler(format!("git exec failed: {}", e)))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(EffectError::Handler(format!(
+                "git: {}",
+                stderr.trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// Parse `git log --format="%H%x00%s%x00%an%x00%cI" --name-only` output.
+    ///
+    /// Each commit block is separated by a blank line (`\n\n`).  The first
+    /// line of each block is NUL-delimited metadata; subsequent non-empty
+    /// lines are changed files.
+    fn parse_log_output(output: &str) -> Vec<GitCommit> {
+        // git log --format=... --name-only produces:
+        //   sha\x00subject\x00author\x00date\n
+        //   \n                           <- blank separator between header and files
+        //   file1\n
+        //   file2\n
+        //   sha2\x00...                 <- next header follows files directly (no blank)
+        //
+        // Scan line by line: lines with 4+ NUL-separated fields are headers; blank
+        // lines are separators (skip); all other non-empty lines are file paths.
+        let mut commits = Vec::new();
+        let mut current: Option<GitCommit> = None;
+
+        for line in output.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.splitn(4, '\x00').collect();
+            if parts.len() >= 4 {
+                // Header line: sha\x00subject\x00author\x00date
+                if let Some(commit) = current.take() {
+                    commits.push(commit);
+                }
+                current = Some(GitCommit {
+                    sha: parts[0].to_string(),
+                    subject: parts[1].to_string(),
+                    author: parts[2].to_string(),
+                    date: parts[3].to_string(),
+                    files: Vec::new(),
+                });
+            } else if let Some(ref mut commit) = current {
+                commit.files.push(line.to_string());
+            }
+        }
+        if let Some(commit) = current {
+            commits.push(commit);
+        }
+        commits
+    }
+
+    /// Parse one commit from log output; error if missing.
+    fn parse_single_commit(output: &str, revspec: &str) -> Result<GitCommit, EffectError> {
+        let commits = Self::parse_log_output(output);
+        commits.into_iter().next().ok_or_else(|| {
+            EffectError::Handler(format!("gitShow: no commit found for '{}'", revspec))
+        })
+    }
+
+    /// Parse `git status --porcelain=v1` output.
+    fn parse_status_output(output: &str) -> Vec<GitStatusEntry> {
+        output
+            .lines()
+            .filter(|l| l.len() >= 3)
+            .map(|line| {
+                let state = line[..2].to_string();
+                let rest = line[3..].trim();
+                // For renames "XY old -> new", take the destination path.
+                let path = if let Some(idx) = rest.find(" -> ") {
+                    rest[idx + 4..].to_string()
+                } else {
+                    rest.to_string()
+                };
+                GitStatusEntry { path, state }
+            })
+            .collect()
+    }
+
+    /// Parse `git diff --numstat <rev>` output.
+    fn parse_numstat_output(output: &str) -> Vec<GitFileDelta> {
+        output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.splitn(3, '\t').collect();
+                if parts.len() < 3 {
+                    return None;
+                }
+                let (adds_s, dels_s, path) = (parts[0], parts[1], parts[2].trim());
+                // Binary files show "-" instead of counts.
+                let binary = adds_s == "-" || dels_s == "-";
+                let adds = if binary {
+                    0
+                } else {
+                    adds_s.parse::<i64>().unwrap_or(0)
+                };
+                let dels = if binary {
+                    0
+                } else {
+                    dels_s.parse::<i64>().unwrap_or(0)
+                };
+                Some(GitFileDelta {
+                    path: path.to_string(),
+                    adds,
+                    dels,
+                    binary,
+                })
+            })
+            .collect()
+    }
+}
+
+impl DescribeEffect for GitHandler {
+    fn effect_decl() -> EffectDecl {
+        tidepool_mcp::git_decl()
+    }
+}
+
+impl EffectHandler<CapturedOutput> for GitHandler {
+    type Request = GitReq;
+
+    fn handle(
+        &mut self,
+        req: GitReq,
+        cx: &EffectContext<'_, CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        match req {
+            GitReq::Log(n) => {
+                let n_str = n.to_string();
+                let output = self.run_git(&[
+                    "log",
+                    "-n",
+                    &n_str,
+                    "--format=%H%x00%s%x00%an%x00%cI",
+                    "--name-only",
+                ])?;
+                cx.respond_list(Self::parse_log_output(&output))
+            }
+            GitReq::Status => {
+                let output = self.run_git(&["status", "--porcelain=v1"])?;
+                cx.respond_list(Self::parse_status_output(&output))
+            }
+            GitReq::DiffStat(rev) => {
+                let output = self.run_git(&["diff", "--numstat", &rev])?;
+                cx.respond_list(Self::parse_numstat_output(&output))
+            }
+            GitReq::Show(rev) => {
+                let output = self.run_git(&[
+                    "log",
+                    "-n",
+                    "1",
+                    &rev,
+                    "--format=%H%x00%s%x00%an%x00%cI",
+                    "--name-only",
+                ])?;
+                let commit = Self::parse_single_commit(&output, &rev)?;
+                cx.respond(commit)
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Stack assembly
 // ============================================================================
 
 /// Configuration for building the base effect handler stack.
 pub struct HandlerConfig {
-    /// Working directory (sandbox root for Fs, Sg, Exec, Lsp).
+    /// Working directory (sandbox root for Fs, Sg, Exec, Lsp, Git).
     pub cwd: PathBuf,
     /// Path for the KV store's JSON backing file.
     pub kv_path: PathBuf,
@@ -1765,7 +1998,7 @@ pub struct HandlerConfig {
     pub llm_model: String,
 }
 
-/// Build the base effect stack (tags 0–7: Console, KV, Fs, SG, Http, Exec, Lsp, Llm).
+/// Build the base effect stack (tags 0–8: Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Git).
 ///
 /// **Must be called inside a tokio runtime** — `LlmHandler` captures
 /// `tokio::runtime::Handle::current()` at construction time.
@@ -1789,6 +2022,7 @@ pub fn build_base_stack(
         ExecHandler::new(cfg.cwd.clone()),
         LspHandler::new(cfg.cwd.clone()),
         LlmHandler::new(cfg.llm_model.clone()),
+        GitHandler::new(cfg.cwd.clone()),
     ]
 }
 
@@ -1964,6 +2198,10 @@ mod tests {
             ("Json", 0),
             ("Yaml", 0),
             ("Toml", 0),
+            // Git effect response types
+            ("Commit", 5),
+            ("StatusEntry", 2),
+            ("FileDelta", 4),
         ];
         for &(name, arity) in response_extras {
             if t.get_by_name(name).is_some() {
@@ -2361,7 +2599,7 @@ mod tests {
     }
 
     const EFFECTS_WITH_ROUNDTRIP_TESTS: &[&str] = &[
-        "Console", "KV", "Fs", "SG", "Http", "Exec", "Lsp", "Llm", "Ask",
+        "Console", "KV", "Fs", "SG", "Http", "Exec", "Lsp", "Llm", "Git", "Ask",
     ];
 
     #[test]
@@ -3102,5 +3340,363 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(resp.first_text().unwrap_or("null")).unwrap();
         assert_eq!(parsed["n"], serde_json::json!(7));
+    }
+
+    // === Git FromCore roundtrip tests ===
+
+    #[test]
+    fn test_git_from_core_log() {
+        let table = full_effect_test_table();
+        let con_id = table.get_by_name("GitLog").unwrap();
+        let n = (5i64).to_value(&table).unwrap();
+        let val = Value::Con(con_id, vec![n]);
+        let req = GitReq::from_value(&val, &table).unwrap();
+        assert!(matches!(req, GitReq::Log(5)));
+    }
+
+    #[test]
+    fn test_git_from_core_status() {
+        let table = full_effect_test_table();
+        let con_id = table.get_by_name("GitStatus").unwrap();
+        let val = Value::Con(con_id, vec![]);
+        let req = GitReq::from_value(&val, &table).unwrap();
+        assert!(matches!(req, GitReq::Status));
+    }
+
+    #[test]
+    fn test_git_from_core_diffstat() {
+        let table = full_effect_test_table();
+        let con_id = table.get_by_name("GitDiffStat").unwrap();
+        let rev = "HEAD~1".to_string().to_value(&table).unwrap();
+        let val = Value::Con(con_id, vec![rev]);
+        let req = GitReq::from_value(&val, &table).unwrap();
+        assert!(matches!(req, GitReq::DiffStat(ref r) if r == "HEAD~1"));
+    }
+
+    #[test]
+    fn test_git_from_core_show() {
+        let table = full_effect_test_table();
+        let con_id = table.get_by_name("GitShow").unwrap();
+        let rev = "HEAD".to_string().to_value(&table).unwrap();
+        let val = Value::Con(con_id, vec![rev]);
+        let req = GitReq::from_value(&val, &table).unwrap();
+        assert!(matches!(req, GitReq::Show(ref r) if r == "HEAD"));
+    }
+
+    // =========================================================================
+    // Git handler tests — unit (parse functions) + integration (scratch repo)
+    // =========================================================================
+
+    #[test]
+    fn test_git_parse_log_output_two_commits() {
+        // Simulate `git log -n 2 --format="%H%x00%s%x00%an%x00%cI" --name-only`
+        let output = "\
+abc123\x00First commit\x00Alice\x002024-01-01T00:00:00+00:00\n\
+\n\
+file_a.txt\n\
+file_b.rs\n\
+\n\
+def456\x00Second commit\x00Bob\x002024-01-02T00:00:00+00:00\n\
+\n\
+file_c.txt\n\
+\n";
+        let commits = GitHandler::parse_log_output(output);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].sha, "abc123");
+        assert_eq!(commits[0].subject, "First commit");
+        assert_eq!(commits[0].author, "Alice");
+        assert_eq!(commits[0].date, "2024-01-01T00:00:00+00:00");
+        assert_eq!(commits[0].files, vec!["file_a.txt", "file_b.rs"]);
+        assert_eq!(commits[1].sha, "def456");
+        assert_eq!(commits[1].subject, "Second commit");
+        assert_eq!(commits[1].files, vec!["file_c.txt"]);
+    }
+
+    #[test]
+    fn test_git_parse_status_renames() {
+        let output = "M  src/lib.rs\n?? untracked.txt\nR  old.rs -> new.rs\n";
+        let entries = GitHandler::parse_status_output(output);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].state, "M ");
+        assert_eq!(entries[0].path, "src/lib.rs");
+        assert_eq!(entries[1].state, "??");
+        assert_eq!(entries[1].path, "untracked.txt");
+        // Rename: destination path only
+        assert_eq!(entries[2].path, "new.rs");
+    }
+
+    #[test]
+    fn test_git_parse_numstat_with_binary() {
+        let output = "10\t5\tsrc/lib.rs\n-\t-\timage.png\n3\t0\tdocs/README.md\n";
+        let deltas = GitHandler::parse_numstat_output(output);
+        assert_eq!(deltas.len(), 3);
+        assert_eq!(deltas[0].path, "src/lib.rs");
+        assert_eq!(deltas[0].adds, 10);
+        assert_eq!(deltas[0].dels, 5);
+        assert!(!deltas[0].binary);
+        assert_eq!(deltas[1].path, "image.png");
+        assert!(deltas[1].binary);
+        assert_eq!(deltas[1].adds, 0);
+        assert_eq!(deltas[2].path, "docs/README.md");
+        assert_eq!(deltas[2].adds, 3);
+        assert_eq!(deltas[2].dels, 0);
+    }
+
+    // Build a scratch git repo with 2 commits, a staged file, and an untracked file.
+    fn make_scratch_repo() -> tempfile::TempDir {
+        use std::fs;
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+
+        let run = |args: &[&str]| {
+            Command::new(args[0])
+                .args(&args[1..])
+                .current_dir(p)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .env("GIT_AUTHOR_DATE", "2024-01-01T00:00:00+00:00")
+                .env("GIT_COMMITTER_DATE", "2024-01-01T00:00:00+00:00")
+                .output()
+                .expect("git command failed")
+        };
+
+        run(&["git", "init", "--initial-branch=main"]);
+        run(&["git", "config", "user.email", "test@test.com"]);
+        run(&["git", "config", "user.name", "Test"]);
+
+        // First commit
+        fs::write(p.join("alpha.txt"), "alpha content").unwrap();
+        run(&["git", "add", "alpha.txt"]);
+        run(&["git", "commit", "-m", "first: add alpha"]);
+
+        // Second commit
+        fs::write(p.join("beta.txt"), "beta content").unwrap();
+        run(&["git", "add", "beta.txt"]);
+        run(&["git", "commit", "-m", "second: add beta"]);
+
+        // Staged change
+        fs::write(p.join("alpha.txt"), "alpha modified").unwrap();
+        run(&["git", "add", "alpha.txt"]);
+
+        // Untracked file
+        fs::write(p.join("untracked.txt"), "untracked").unwrap();
+
+        dir
+    }
+
+    #[test]
+    fn test_git_handler_log_two_commits_newest_first() {
+        let dir = make_scratch_repo();
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+        let mut handler = GitHandler::new(dir.path().to_path_buf());
+
+        let n = (2i64).to_value(&table).unwrap();
+        let con_id = table.get_by_name("GitLog").unwrap();
+        let request = Value::Con(con_id, vec![n]);
+        let result = response_value(handler.handle(GitReq::Log(2), &cx).unwrap(), &table);
+
+        // Should be a cons list with 2 Commit cells
+        let mut node = &result;
+        let mut count = 0;
+        loop {
+            match node {
+                Value::Con(id, fields) => {
+                    let name = table.name_of(*id).unwrap();
+                    match name {
+                        "[]" => break,
+                        ":" => {
+                            assert_eq!(fields.len(), 2);
+                            // head is a Commit (5 fields)
+                            match &fields[0] {
+                                Value::Con(cid, cfields) => {
+                                    assert_eq!(table.name_of(*cid).unwrap(), "Commit");
+                                    assert_eq!(cfields.len(), 5, "Commit must have 5 fields");
+                                }
+                                other => panic!("expected Commit Con, got {:?}", other),
+                            }
+                            count += 1;
+                            node = &fields[1];
+                        }
+                        other => panic!("unexpected list constructor: {}", other),
+                    }
+                }
+                other => panic!("expected Con, got {:?}", other),
+            }
+        }
+        assert_eq!(count, 2, "gitLog 2 should return exactly 2 commits");
+        // Suppress unused warning from the FromCore round-trip test above
+        let _ = request;
+    }
+
+    #[test]
+    fn test_git_handler_status_sees_staged_and_untracked() {
+        let dir = make_scratch_repo();
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+        let mut handler = GitHandler::new(dir.path().to_path_buf());
+
+        let result = response_value(handler.handle(GitReq::Status, &cx).unwrap(), &table);
+
+        // Collect all StatusEntry names from the cons list
+        let mut paths_and_states: Vec<(String, String)> = Vec::new();
+        let mut node = &result;
+        loop {
+            match node {
+                Value::Con(id, fields) if table.name_of(*id).unwrap() == ":" => {
+                    if let Value::Con(eid, efields) = &fields[0] {
+                        assert_eq!(table.name_of(*eid).unwrap(), "StatusEntry");
+                        assert_eq!(efields.len(), 2);
+                        // path is efields[0], state is efields[1]
+                        // Extract Text from Con("Text", [ByteArray, off, len])
+                        paths_and_states.push(("?".into(), "?".into()));
+                    }
+                    node = &fields[1];
+                }
+                Value::Con(id, _) if table.name_of(*id).unwrap() == "[]" => break,
+                other => panic!("unexpected: {:?}", other),
+            }
+        }
+        // At minimum we should see 2 entries (staged alpha.txt + untracked.txt)
+        assert!(
+            paths_and_states.len() >= 2,
+            "gitStatus should return at least 2 entries, got {}",
+            paths_and_states.len()
+        );
+    }
+
+    #[test]
+    fn test_git_handler_diffstat_head_tilde1() {
+        let dir = make_scratch_repo();
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+        let mut handler = GitHandler::new(dir.path().to_path_buf());
+
+        let result = response_value(
+            handler.handle(GitReq::DiffStat("HEAD~1".to_string()), &cx).unwrap(),
+            &table,
+        );
+        // HEAD~1 introduces beta.txt; should return at least 1 FileDelta
+        let mut count = 0;
+        let mut node = &result;
+        loop {
+            match node {
+                Value::Con(id, fields) if table.name_of(*id).unwrap() == ":" => {
+                    match &fields[0] {
+                        Value::Con(did, dfields) => {
+                            assert_eq!(table.name_of(*did).unwrap(), "FileDelta");
+                            assert_eq!(dfields.len(), 4, "FileDelta must have 4 fields");
+                        }
+                        other => panic!("expected FileDelta Con, got {:?}", other),
+                    }
+                    count += 1;
+                    node = &fields[1];
+                }
+                Value::Con(id, _) if table.name_of(*id).unwrap() == "[]" => break,
+                other => panic!("unexpected: {:?}", other),
+            }
+        }
+        assert!(count >= 1, "gitDiffStat HEAD~1 should return at least 1 delta");
+    }
+
+    #[test]
+    fn test_git_handler_show_head() {
+        let dir = make_scratch_repo();
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+        let mut handler = GitHandler::new(dir.path().to_path_buf());
+
+        let result = response_value(
+            handler.handle(GitReq::Show("HEAD".to_string()), &cx).unwrap(),
+            &table,
+        );
+        match &result {
+            Value::Con(id, fields) => {
+                assert_eq!(table.name_of(*id).unwrap(), "Commit");
+                assert_eq!(fields.len(), 5, "Commit must have 5 fields (sha/subject/author/date/files)");
+            }
+            other => panic!("gitShow HEAD should return a Commit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_git_handler_show_bad_revspec_errors() {
+        let dir = make_scratch_repo();
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+        let mut handler = GitHandler::new(dir.path().to_path_buf());
+
+        let result = handler.handle(GitReq::Show("notaref_zzzzzz".to_string()), &cx);
+        assert!(result.is_err(), "gitShow with bad revspec should error");
+    }
+
+    fn extract_available() -> bool {
+        let bin =
+            std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".to_string());
+        std::process::Command::new(&bin)
+            .arg("--help")
+            .output()
+            .is_ok()
+    }
+
+    /// Full JIT end-to-end: `gitLog 1` on the real repo returns a Commit record
+    /// with a 40-character sha field, exercising the generated Tidepool.Effects
+    /// wiring + Records visibility + con-name/arity agreement through the JIT.
+    /// Skips cleanly when TIDEPOOL_EXTRACT is unavailable.
+    #[tokio::test]
+    async fn test_jit_git_log_returns_commit() {
+        if !extract_available() {
+            eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+            return;
+        }
+        let decls = tidepool_mcp::standard_decls();
+        // Two assertions: list has exactly 1 element, and sha field is 40 chars.
+        let source = jit_test_source(&[
+            "commits <- gitLog 1",
+            "let n = length commits",
+            "let shaLen = case commits of { (c:_) -> T.length c.sha; _ -> 0 }",
+            "pure (toJSON (n == 1 && shaLen == 40))",
+        ]);
+        let include = prelude_include();
+        let effects_dir = tidepool_mcp::ensure_effects_module(&decls).unwrap();
+        let include_paths: Vec<&std::path::Path> =
+            vec![include.as_path(), effects_dir.as_path()];
+        let kv_path = std::env::temp_dir().join("tidepool_git_jit_kv.json");
+        let cwd = repo_root();
+        let captured = CapturedOutput::new();
+        let mut handlers = frunk::hlist![
+            ConsoleHandler,
+            KvHandler::new(kv_path),
+            FsHandler::new(cwd.clone()),
+            SgHandler::new(cwd.clone()),
+            HttpHandler,
+            ExecHandler::new(cwd.clone()),
+            LspHandler::new(cwd.clone()),
+            LlmHandler::new("ollama:llama3.2".to_string()),
+            GitHandler::new(cwd.clone()),
+        ];
+        let result = tidepool_runtime::compile_and_run(
+            &source,
+            "result",
+            &include_paths,
+            &mut handlers,
+            &captured,
+        );
+        match result {
+            Ok(v) => assert_eq!(
+                v.to_json(),
+                serde_json::json!(true),
+                "gitLog 1 should return exactly 1 Commit with a 40-char sha"
+            ),
+            Err(e) => panic!("JIT gitLog eval failed: {:?}", e),
+        }
     }
 }

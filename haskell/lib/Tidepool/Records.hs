@@ -20,6 +20,9 @@ module Tidepool.Records
   , FileMeta(..)
   , UpdateOutcome(..)
   , WriteOutcome(..)
+  , Commit(..)
+  , StatusEntry(..)
+  , FileDelta(..)
   ) where
 
 import Prelude (Int, Bool(..), Eq, Show, Maybe(..), (==))
@@ -89,3 +92,48 @@ data WriteOutcome
 instance ToJSON WriteOutcome where
   toJSON (Written f c)       = object ["file" .= f, "written" .= True, "checks" .= c]
   toJSON (WriteBlocked f xs) = object ["file" .= f, "written" .= False, "failed" .= xs]
+
+-- | A git commit returned by 'gitLog' or 'gitShow'.
+data Commit = Commit
+  { sha     :: Text
+  , subject :: Text
+  , author  :: Text
+  , date    :: Text
+  , files   :: [Text]
+  } deriving (Show, Eq)
+
+instance ToJSON Commit where
+  toJSON c = object
+    [ "sha"     .= c.sha
+    , "subject" .= c.subject
+    , "author"  .= c.author
+    , "date"    .= c.date
+    , "files"   .= c.files
+    ]
+
+-- | A single entry from 'gitStatus' (porcelain v1).
+-- 'state' is the two-character XY code (e.g. \"M \", \"??\", \"A \").
+data StatusEntry = StatusEntry
+  { path  :: Text
+  , state :: Text
+  } deriving (Show, Eq)
+
+instance ToJSON StatusEntry where
+  toJSON e = object ["path" .= e.path, "state" .= e.state]
+
+-- | Per-file diff statistics from 'gitDiffStat'.
+-- 'binary' is True when git reports @-/@- instead of line counts.
+data FileDelta = FileDelta
+  { path   :: Text
+  , adds   :: Int
+  , dels   :: Int
+  , binary :: Bool
+  } deriving (Show, Eq)
+
+instance ToJSON FileDelta where
+  toJSON d = object
+    [ "path"   .= d.path
+    , "adds"   .= d.adds
+    , "dels"   .= d.dels
+    , "binary" .= d.binary
+    ]
