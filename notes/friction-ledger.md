@@ -44,8 +44,8 @@ Every ergonomic wart hit during real tidepool/tidepool-repl use lands here — s
 
 | # | Friction | Notes | Found |
 |---|----------|-------|-------|
-| 10 | `shLines` stack-overflows on ~4.6k-line command output (`git log` 3-month window) — low ceiling for a line-splitting verb; suspect non-tail split/marshal | held until `contract-truing` merges (Dev.hs boundary overlap) | 2026-07-01 |
-| 11 | Runtime overflow hint says "use zipWithIndex/imap instead of [0..]" even when the recursion is inside a lib verb — misdirects the repair | minor; bundle with next repl-errors thread | 2026-07-01 |
+| 10 | `shLines` stack-overflows on large output — ROOT-CAUSED 2026-07-02: not the verb; Tier-0 `deep_force` at BIND time walks the result spine with host recursion → ~15k-element ceiling (20k fails at bind; identical processing INSIDE one expression returns 20000 fine). Fix: iterative deep_force (explicit worklist), plans/stack-safety.md allocation | mechanism scoped; hint text fixed meanwhile (#11) | 2026-07-01 |
+| 11 | Overflow hint misdirected ("use zipWithIndex instead of [0..]" — a dead scar's advice) | FIXED 2026-07-02: hint now names the real classes (non-tail recursion, or long-list strict-force at bind) with the honest workaround | 2026-07-01 |
 | 12 | Runtime `unresolved variable` error carries hex VarId only — could name the symbol via the meta table | partially mooted if #1 makes dangling loud at compile; keep for other unresolved classes (`cycle`) | 2026-07-01 |
 | 13 | Reaped continuations lie: resume after TTL says "already spent or never existed" — should say "expired"; suspend response should carry `expires_at` when a TTL is set | mostly mooted by TTL removal (continuation_ttl now None in prod); honest message still right if anyone re-enables it | 2026-07-01 |
 | 15 | `writeFile` fails loud on a missing parent directory instead of creating it — agents nearly always want mkdir-p semantics | spawned `fs-writefile-parents` 2026-07-01 | 2026-07-01 |

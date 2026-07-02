@@ -119,3 +119,24 @@ pure (toJSON (map (\m -> matchFile m <> ":" <> pack (show (matchLine m))) ms))
   intent in the prompt, and end every `case (v ^? …) of` with a safe default arm.
 - **LLM-emits-syntax**: never ask the model for a regex/AST pattern directly;
   have it pick a strategy (`SEnum`) and emit the syntax in code.
+
+## Doc-drift audit (recipe, 2026-07-02)
+
+Backtick-mentioned identifiers in docs, checked against real signatures —
+four items, ~zero-drift result pinned the day it was written:
+
+```haskell
+codeSpans body = [ s | (i, s) <- zip [0 :: Int ..] (T.splitOn "`" body), odd i ]
+-- isVerbish: lowercase-alpha head, alnum, 3..30 chars
+-- sigNames docs: column-0 `name :: …` lines from readGlob'd sources
+drift <- do
+  defined  <- sigNames <$> readGlob ".tidepool/lib/*.hs"   -- + stdlib glob
+  docs     <- readGlob ".tidepool/PATTERNS.md"             -- + CLAUDE.mds
+  pure [ (d.path, t) | d <- docs, t <- filter isVerbish (codeSpans d.body)
+       , not (Set.member t defined) ]
+```
+
+Caveats: generated-module helpers (Effects/Orchestrate) need harvesting from
+the Rust decl strings or a whitelist; expect ~20 English-token false
+positives per audit. Verify survivors with `:t` (the oracle) before calling
+anything drift.

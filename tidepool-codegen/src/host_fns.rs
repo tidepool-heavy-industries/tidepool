@@ -53,7 +53,7 @@ pub enum RuntimeError {
     BadFunPtrTag(u8),
     #[error("heap overflow (nursery exhausted after GC)")]
     HeapOverflow,
-    #[error("stack overflow (likely infinite list or unbounded recursion — use zipWithIndex/imap/enumFromTo instead of [0..])")]
+    #[error("stack overflow — likely unbounded/non-tail recursion, or a very long list strict-forced at a bind (`x <- e` deep-forces its result; >~15k elements overflows — process inside one expression or bind an aggregate instead)")]
     StackOverflow,
     #[error("blackhole detected (infinite loop: thunk forced itself)")]
     BlackHole,
