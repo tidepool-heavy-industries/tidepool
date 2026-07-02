@@ -3658,12 +3658,13 @@ file_c.txt\n\
             return;
         }
         let decls = tidepool_mcp::standard_decls();
-        // Two assertions: list has exactly 1 element, and sha field is 40 chars.
+        // Return the observed values (not a collapsed Bool) so a failure names
+        // which invariant broke and what we actually saw.
         let source = jit_test_source(&[
             "commits <- gitLog 1",
             "let n = length commits",
             "let shaLen = case commits of { (c:_) -> T.length c.sha; _ -> 0 }",
-            "pure (toJSON (n == 1 && shaLen == 40))",
+            "pure (toJSON [n, shaLen])",
         ]);
         let include = prelude_include();
         let effects_dir = tidepool_mcp::ensure_effects_module(&decls).unwrap();
@@ -3693,8 +3694,8 @@ file_c.txt\n\
         match result {
             Ok(v) => assert_eq!(
                 v.to_json(),
-                serde_json::json!(true),
-                "gitLog 1 should return exactly 1 Commit with a 40-char sha"
+                serde_json::json!([1, 40]),
+                "gitLog 1 should return exactly 1 Commit ([n, shaLen] observed)"
             ),
             Err(e) => panic!("JIT gitLog eval failed: {:?}", e),
         }
