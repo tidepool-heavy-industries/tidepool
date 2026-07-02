@@ -102,6 +102,14 @@ Verified live (kata hunt, pre-reconnect binary):
 - Continuation machinery under REPEATED resume: a 5-suspension git-bisect knot, heap-persistent lo/hi bounds + accumulating step history across every resume — the capability no other tool has. Zero issues.
 - Map/Set/deep-recursion (Kahn topological build-order over the real crate graph): solid. The "cycle" it reports is dev-dependencies (Cargo allows those) — a true workspace property, not a bug.
 
+## Open (needs a thread) — night-shift adds
+
+| # | Friction | Notes | Found |
+|---|----------|-------|-------|
+| 27 | No PURE JSON parser in eval: `parseJson`/`tryParseJson` are both effectful (Rust-side serde). JSONL analytics (parse-per-line in a pure fold) can't be pure — you `mapM parseJson` (an effect call per line, slow at scale) or hand-parse. A pure `decodeJson :: Text -> Maybe Value` would unlock JSONL-as-pure-fold. The aeson-on-jit spike concluded "hand-roll a pure JSON parser (proven on JIT)"; either it was never landed or never exported. | land/export a pure JSON decoder in Tidepool.Aeson; check the spike's hand-rolled parser first | 2026-07-02 |
+| 24 | Bricking a lib module bricks ALL evals (Library auto-import) — now DIAGNOSED (lib-brick hint reframes lib-only errors) but not PREVENTED | the real fix is compile-probe-before-land (`writeChecked` for lib modules); diagnosis shipped 2026-07-02 | 2026-06-10 |
+| 23c | A `.tidepool/lib` MODULE can't see `readGlob` etc. (Orchestrate-only, not re-exported to lib modules) | re-export Orchestrate helpers to lib modules, or document; use glob/readFile directly meanwhile | 2026-07-02 |
+
 ## Filled at the verb layer (stdlib promotion candidates)
 
 | # | Gap | Interim fill | Found |
