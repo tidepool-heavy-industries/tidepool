@@ -1174,6 +1174,12 @@ impl SessionHandle<Open> {
         self.inner.run_turn(cmd, handlers, captured)
     }
 
+    /// The server's effect decls — the worker re-ensures the generated
+    /// Tidepool.Effects staging dir from these before each turn (self-heal).
+    pub fn decls(&self) -> &[EffectDecl] {
+        &self.inner.cfg.decls
+    }
+
     /// Store the `input` payload before a `session_run` block runs.
     /// The worker calls this so `input :: Aeson.Value` is in scope during eval.
     pub fn set_eval_input(&mut self, input: Option<serde_json::Value>) {

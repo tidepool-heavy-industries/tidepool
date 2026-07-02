@@ -200,6 +200,15 @@ where
             gate: job.gate,
         };
 
+        // Self-heal the generated Tidepool.Effects/Orchestrate staging dir
+        // before every turn (two exists() stats when healthy) — an external
+        // `rm -rf ~/.cache/tidepool` mid-session otherwise breaks every
+        // subsequent compile with "Could not find module Tidepool.Effects"
+        // until a server restart (found live 2026-07-02; the oneshot server
+        // already self-heals per eval, this is repl parity).
+        if let Err(e) = tidepool_mcp::ensure_effects_module(handle.decls()) {
+            tracing::warn!("effects-module self-heal failed: {e}");
+        }
         handle.set_eval_input(job.eval_input);
         let outcome = handle.run(&job.cmd, &mut dispatcher, &job.captured);
         let msg = if outcome.is_error() {
