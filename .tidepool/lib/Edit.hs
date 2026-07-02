@@ -325,6 +325,8 @@ parseEdit v = txtField "op" `bindE` \op -> case op of
     asTextE x = case asText x of { Just t -> Right t; Nothing -> Left "editsJ: 'lines' entries must be strings" }
 
 -- | Extract a Text field from a JSON object; Nothing when absent or not a string.
+-- (getTxt/getInt/getArr use explicit case chains, not the Maybe monad —
+-- do-notation over Maybe pulls dictionary paths that are riskier on the JIT.)
 getTxt :: Value -> Text -> Maybe Text
 getTxt v k = case v ?. k of { Just x -> asText x; Nothing -> Nothing }
 
