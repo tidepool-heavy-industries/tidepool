@@ -37,7 +37,9 @@ instance Show UTCTime where
 civilFromDays :: Int -> (Int, Int, Int)
 civilFromDays z0 =
   let z   = z0 + 719468
-      era = (if z >= 0 then z else z - 146096) `div` 146097
+      -- Hinnant's C version writes `(z >= 0 ? z : z - 146096) / 146097` to
+      -- emulate floor with truncating division; Haskell `div` already floors.
+      era = z `div` 146097
       doe = z - era * 146097
       yoe = (doe - doe `div` 1460 + doe `div` 36524 - doe `div` 146096) `div` 365
       y   = yoe + era * 400
@@ -87,10 +89,11 @@ pad4 n
 formatISO8601 :: UTCTime -> Text
 formatISO8601 (UTCTime ms) =
   let totalSecs  = ms `div` 1000
-      daysSince  = if totalSecs >= 0
-                   then totalSecs `div` 86400
-                   else (totalSecs - 86399) `div` 86400
-      secsInDay  = totalSecs - daysSince * 86400
+      -- Haskell `div` is FLOOR division (unlike C's truncation), so no
+      -- negative-branch adjustment: floor is exactly what civil-date math
+      -- needs, and `mod`'s always-non-negative remainder gives secsInDay.
+      daysSince  = totalSecs `div` 86400
+      secsInDay  = totalSecs `mod` 86400
       (y, mo, d) = civilFromDays daysSince
       hh         = secsInDay `div` 3600
       mm         = (secsInDay `mod` 3600) `div` 60
