@@ -4,8 +4,8 @@
 //! interception + the stdlib stub (build with `cabal build tidepool-extract-bin`
 //! and point `TIDEPOOL_EXTRACT` at it), so it is `#[ignore]` by default.
 
-mod common;
 use serde_json::json;
+use tidepool_testing::eval_harness::EvalHarness;
 
 fn run(body: &str) -> serde_json::Value {
     let src = format!(
@@ -19,20 +19,32 @@ result :: _
 result = {body}
 "#
     );
-    let pp = common::prelude_path();
-    let include = [pp.as_path()];
-    let val = tidepool_runtime::compile_and_run_pure(&src, "result", &include)
-        .expect("compile_and_run_pure failed");
-    val.to_json()
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(&src, "result")
+        .expect("compile_and_run_pure failed")
+        .to_json()
 }
 
 #[test]
 #[ignore = "needs worktree extract binary (TIDEPOOL_EXTRACT) with JsonDecode interception"]
 fn decode_scalars() {
-    assert_eq!(run(r#"case decodeJson "42" of { Just v -> v; Nothing -> Null }"#), json!(42));
-    assert_eq!(run(r#"case decodeJson "true" of { Just v -> v; Nothing -> Null }"#), json!(true));
-    assert_eq!(run(r#"case decodeJson "\"hi\"" of { Just v -> v; Nothing -> Null }"#), json!("hi"));
-    assert_eq!(run(r#"case decodeJson "null" of { Just v -> v; Nothing -> Null }"#), json!(null));
+    assert_eq!(
+        run(r#"case decodeJson "42" of { Just v -> v; Nothing -> Null }"#),
+        json!(42)
+    );
+    assert_eq!(
+        run(r#"case decodeJson "true" of { Just v -> v; Nothing -> Null }"#),
+        json!(true)
+    );
+    assert_eq!(
+        run(r#"case decodeJson "\"hi\"" of { Just v -> v; Nothing -> Null }"#),
+        json!("hi")
+    );
+    assert_eq!(
+        run(r#"case decodeJson "null" of { Just v -> v; Nothing -> Null }"#),
+        json!(null)
+    );
 }
 
 #[test]
@@ -52,7 +64,9 @@ fn decode_array_and_object() {
 #[ignore = "needs worktree extract binary (TIDEPOOL_EXTRACT) with JsonDecode interception"]
 fn decode_malformed_is_nothing() {
     assert_eq!(
-        run(r#"case decodeJson "{oops" of { Just _ -> String "just"; Nothing -> String "nothing" }"#),
+        run(
+            r#"case decodeJson "{oops" of { Just _ -> String "just"; Nothing -> String "nothing" }"#
+        ),
         json!("nothing")
     );
 }

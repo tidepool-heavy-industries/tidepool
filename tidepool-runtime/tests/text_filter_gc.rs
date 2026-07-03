@@ -5,11 +5,7 @@
 //! The same pattern on `[Int]` works fine, implicating Text's inner
 //! ByteArray# pointer during GC copying.
 
-mod common;
-
-fn prelude_path() -> std::path::PathBuf {
-    common::prelude_path()
-}
+use tidepool_testing::eval_harness::EvalHarness;
 
 fn run(body: &str) -> serde_json::Value {
     let src = format!(
@@ -22,18 +18,11 @@ result :: _
 result = {body}
 "#
     );
-    let pp = prelude_path();
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let include = [pp.as_path()];
-            tidepool_runtime::compile_and_run_pure(&src, "result", &include)
-                .expect("compile_and_run_pure failed")
-                .to_json()
-        })
-        .unwrap()
-        .join()
-        .expect("thread panicked")
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(&src, "result")
+        .expect("compile_and_run_pure failed")
+        .to_json()
 }
 
 // --- Int baseline (should pass) ---

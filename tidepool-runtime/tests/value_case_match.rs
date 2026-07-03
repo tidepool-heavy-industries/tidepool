@@ -10,31 +10,21 @@
 // Variant names intentionally mirror Haskell GADT constructors.
 #![allow(dead_code, clippy::enum_variant_names)]
 
-mod common;
-
 use tidepool_repr::Literal;
-use tidepool_runtime::{compile_and_run_pure, Value};
+use tidepool_runtime::Value;
+use tidepool_testing::eval_harness::EvalHarness;
 
-fn prelude_path() -> std::path::PathBuf {
-    common::prelude_path()
+/// The stdlib-included harness these tests share.
+fn harness() -> EvalHarness {
+    EvalHarness::new().with_stdlib()
 }
 
 /// Compile Haskell source and run a target binding through the JIT.
 fn run(src: &str, target: &str) -> Value {
-    let pp = prelude_path();
-    let src = src.to_owned();
-    let target = target.to_owned();
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let include = [pp.as_path()];
-            compile_and_run_pure(&src, &target, &include)
-                .expect("compile_and_run_pure failed")
-                .into_value()
-        })
-        .unwrap()
-        .join()
-        .unwrap()
+    harness()
+        .run_pure(src, target)
+        .expect("compile_and_run_pure failed")
+        .into_value()
 }
 
 /// Extract an Int from either a raw LitInt or a boxed I# constructor.
@@ -1008,7 +998,6 @@ result =
 fn show_double_effectful_paginate() {
     use tidepool_bridge_derive::FromCore;
     use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-    use tidepool_runtime::compile_and_run;
 
     #[derive(FromCore)]
     enum ConsoleReq {
@@ -1111,19 +1100,9 @@ result = do
   let sz = valSize (toJSON _r)
   pure (toJSON sz)
 "#;
-    let pp = prelude_path();
-    let src_owned = src.to_owned();
-    let result = std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let include = [pp.as_path()];
-            let mut handlers = frunk::hlist![MockConsole, MockKv];
-            compile_and_run(&src_owned, "result", &include, &mut handlers, &())
-                .expect("compile_and_run with effects failed")
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    let result = harness()
+        .run(src, "result", frunk::hlist![MockConsole, MockKv])
+        .expect("compile_and_run with effects failed");
     // Just verify it doesn't crash
     let _ = result.to_json();
 }
@@ -1144,20 +1123,12 @@ fn show_double_exact_mcp_repro() {
         return;
     }
     let src = std::fs::read_to_string(&repro_src).unwrap();
-    let pp = prelude_path();
     let user_lib = manifest.parent().unwrap().join(".tidepool").join("lib");
-    let result = std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let mut includes: Vec<&std::path::Path> = vec![pp.as_path()];
-            if user_lib.exists() {
-                includes.push(user_lib.as_path());
-            }
-            compile_and_run_pure(&src, "result", &includes)
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    let mut h = harness();
+    if user_lib.exists() {
+        h = h.with_include(user_lib);
+    }
+    let result = h.run_pure(&src, "result").into_result();
     assert!(
         result.is_ok(),
         "MCP repro should not crash: {:?}",
@@ -1229,24 +1200,16 @@ result = do
     pure (pack (showDouble d))
   paginateResult 4096 (toJSON _r)
 "#;
-    let pp = prelude_path();
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let user_lib = manifest.parent().unwrap().join(".tidepool").join("lib");
     if !user_lib.join("Library.hs").exists() {
         eprintln!("Skipping: .tidepool/lib/Library.hs not found");
         return;
     }
-    let src_owned = src.to_owned();
-    let pp2 = pp.clone();
-    let result = std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let include: Vec<&std::path::Path> = vec![pp2.as_path(), user_lib.as_path()];
-            compile_and_run_pure(&src_owned, "result", &include)
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    let result = harness()
+        .with_include(user_lib)
+        .run_pure(src, "result")
+        .into_result();
     assert!(
         result.is_ok(),
         "Eff+Library showDouble should not crash: {:?}",

@@ -7,8 +7,6 @@
 
 #![allow(dead_code)]
 
-use std::path::PathBuf;
-
 use rmcp::model::{CallToolResult, RawContent};
 use tidepool_handlers::{base_decls_with_ask, build_minimal_stack};
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
@@ -16,12 +14,12 @@ use tidepool_runtime::session::ModuleEnv;
 
 /// True if the session-aware `tidepool-extract` is reachable (else the suite
 /// skips cleanly — CI without the nix shell / `TIDEPOOL_EXTRACT` set).
+///
+/// Delegates to the shared harness helper, which also derives + installs
+/// `TIDEPOOL_EXTRACT` (via `cabal list-bin`) when it isn't already set — so the
+/// repl suites stop depending on the caller having exported it by hand.
 pub fn extract_available() -> bool {
-    let bin = std::env::var("TIDEPOOL_EXTRACT").unwrap_or_else(|_| "tidepool-extract".into());
-    std::process::Command::new(bin)
-        .arg("--numeric-version")
-        .output()
-        .is_ok()
+    tidepool_testing::eval_harness::extract_available()
 }
 
 /// The first text content block of a tool result.
@@ -63,11 +61,8 @@ pub fn build_server_full(
     let (decls, ask_tag) = base_decls_with_ask(&stack);
     let effects_dir =
         tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
-    let prelude_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("repo root")
-        .join("haskell")
-        .join("lib");
+    // Shared harness helper: the one place the `haskell/lib` stdlib dir is derived.
+    let prelude_dir = tidepool_testing::eval_harness::prelude_path();
     let session_root_base = std::env::temp_dir().join(format!(
         "tidepool-repl-harden-{}-{}",
         std::process::id(),

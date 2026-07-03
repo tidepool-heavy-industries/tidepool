@@ -1,23 +1,9 @@
-mod common;
-
-use tidepool_runtime::compile_and_run_pure;
-
-fn prelude_path() -> std::path::PathBuf {
-    common::prelude_path()
-}
+use tidepool_testing::eval_harness::EvalHarness;
 
 fn run(src: &str, target: &str) -> tidepool_runtime::EvalResult {
-    let pp = prelude_path();
-    let src = src.to_owned();
-    let target = target.to_owned();
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let include = [pp.as_path()];
-            compile_and_run_pure(&src, &target, &include).unwrap()
-        })
-        .unwrap()
-        .join()
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(src, target)
         .unwrap()
 }
 

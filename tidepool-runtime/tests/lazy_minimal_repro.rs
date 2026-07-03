@@ -6,11 +6,9 @@
 //! stack → SIGSEGV outside signal protection → silent thread exit → hang).
 //! Kept as the minimal-stack half of that bisect.
 
-mod common;
-
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_runtime::compile_and_run;
+use tidepool_testing::eval_harness::EvalHarness;
 
 #[derive(FromCore)]
 enum ListingReq {
@@ -56,19 +54,11 @@ result = do
 "#
     );
     std::env::set_var("TIDEPOOL_LAZY_RESULTS", "1");
-    let pp = common::prelude_path();
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let include = [pp.as_path()];
-            let mut handlers = frunk::hlist![BigListing { n }];
-            compile_and_run(&src, "result", &include, &mut handlers, &())
-                .expect("compile_and_run failed")
-                .to_json()
-        })
-        .unwrap()
-        .join()
-        .unwrap()
+    EvalHarness::new()
+        .with_stdlib()
+        .run(&src, "result", frunk::hlist![BigListing { n }])
+        .expect("compile_and_run failed")
+        .to_json()
 }
 
 #[test]
