@@ -9,9 +9,11 @@ pub mod dce;
 pub mod inline;
 pub mod occ;
 pub mod partial;
+pub mod pass;
 pub mod pipeline;
 mod rewrite;
 
+pub use pass::{Changed, Pass};
 pub use pipeline::{default_passes, optimize, run_pipeline, PipelineStats};
 
 /// Shared body of every `Pass::run`: skip an empty tree, run the pass's rewrite,
@@ -20,7 +22,7 @@ pub use pipeline::{default_passes, optimize, run_pipeline, PipelineStats};
 pub(crate) fn apply_rewrite(
     expr: &mut tidepool_repr::CoreExpr,
     rewrite: impl FnOnce(&tidepool_repr::CoreExpr) -> Option<tidepool_repr::CoreExpr>,
-) -> tidepool_eval::Changed {
+) -> Changed {
     if expr.nodes.is_empty() {
         return false;
     }

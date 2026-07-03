@@ -1,6 +1,6 @@
 //! Beta reduction pass for Core expressions.
 
-use tidepool_eval::{Changed, Pass};
+use crate::{Changed, Pass};
 use tidepool_repr::{replace_subtree, CoreExpr, CoreFrame};
 
 /// Optimization pass: beta reduction.

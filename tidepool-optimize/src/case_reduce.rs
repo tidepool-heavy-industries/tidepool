@@ -1,6 +1,6 @@
 //! Case reduction pass for Core expressions.
 
-use tidepool_eval::{Changed, Pass};
+use crate::{Changed, Pass};
 use tidepool_repr::{replace_subtree, AltCon, CoreExpr, CoreFrame};
 
 /// A pass that performs case-of-known-constructor and case-of-known-literal reductions.

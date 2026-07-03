@@ -37,11 +37,6 @@ with `tidepool-codegen/src/emit/primop.rs` and `define_primops!` in
 - **`Heap` is a trait**, not just `VecHeap` — the interpreter is written
   against `&mut dyn Heap` throughout, decoupling it from memory strategy on
   purpose, even though `VecHeap` is currently the only implementation.
-- **`Pass` (`pass.rs`) is declared here but not exercised in this crate** —
-  its only in-crate impl is `#[cfg(test)] NoOpPass`, with zero non-test call
-  sites. The real implementations (`BetaReduce`/`Dce`/`Inline`/`CaseReduce`/
-  `PartialEval`) live in `tidepool-optimize`, not here. If you're looking for
-  where a `Pass` actually runs, look there.
 
 ## Differential testing — how this crate is actually exercised
 
