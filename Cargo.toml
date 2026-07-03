@@ -31,3 +31,26 @@ homepage = "https://github.com/tidepool-heavy-industries/tidepool"
 documentation = "https://docs.rs/tidepool"
 authors = ["Inanna Malick <inanna@recursion.wtf>"]
 rust-version = "1.89"
+
+# Optimize DEPENDENCIES (Cranelift, regalloc2, …) even in dev/test builds.
+# The JIT differential suites JIT-compile hundreds of fixtures per run (738 and
+# growing) via cranelift-codegen; at opt-level 0 each of those compiles runs
+# unoptimized Cranelift and the suite takes many minutes. Workspace crates stay
+# at opt-level 0 for fast incremental compile — only the deps (built once and
+# cached) are optimized. This cuts the differential/eval test wall-clock sharply
+# without slowing the edit→compile loop on our own crates.
+[profile.dev.package."*"]
+opt-level = 2
+
+# Also optimize the JIT/interpreter hot crates for `cargo test` specifically,
+# where their RUNTIME dominates (Cranelift emit + tree-walk over the corpus).
+# Kept out of plain `[profile.dev]` so a normal `cargo build`/edit loop on these
+# crates stays fast; `cargo test` pays a one-time optimized rebuild of just these.
+[profile.test.package.tidepool-codegen]
+opt-level = 2
+[profile.test.package.tidepool-eval]
+opt-level = 2
+[profile.test.package.tidepool-heap]
+opt-level = 2
+[profile.test.package.tidepool-optimize]
+opt-level = 2
