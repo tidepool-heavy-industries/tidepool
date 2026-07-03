@@ -75,6 +75,10 @@ pub enum MetaCommand {
     /// `:vocab` / `:vocab <module>` — list verb signatures from the user
     /// library dirs, optionally scoped to one module.
     Vocab(Option<String>),
+    /// `:browse` / `:browse <Effect>` — the effect-verb index. Bare: every
+    /// effect with its one-line description. `<Effect>` (case-insensitive):
+    /// that effect's helper verbs (`name :: signature`) plus its constructors.
+    Browse(Option<String>),
     /// `:stub <n> [page]` — fetch the full content of a truncation stub
     /// (`stub_<n>` markers in an oversized result), optionally one page of a
     /// very large stub. See [`crate::truncate`].
@@ -146,6 +150,11 @@ impl MetaCommand {
             } else {
                 Some(rest.to_string())
             })),
+            "browse" => Ok(MetaCommand::Browse(if rest.is_empty() {
+                None
+            } else {
+                Some(rest.to_string())
+            })),
             "stub" => {
                 let mut parts = rest.split_whitespace();
                 let Some(id) = parts.next() else {
@@ -169,7 +178,7 @@ impl MetaCommand {
                 Ok(MetaCommand::Stub(n, page))
             }
             other => Err(format!(
-                "unknown session command ':{other}' (known: :bindings, :reset, :t, :i, :vocab, :stub, :program)"
+                "unknown session command ':{other}' (known: :bindings, :reset, :t, :i, :vocab, :browse, :stub, :program)"
             )),
         }
     }
@@ -404,6 +413,14 @@ mod tests {
         assert_eq!(
             MetaCommand::parse(":vocab Diff").unwrap(),
             MetaCommand::Vocab(Some("Diff".to_string()))
+        );
+        assert_eq!(
+            MetaCommand::parse(":browse").unwrap(),
+            MetaCommand::Browse(None)
+        );
+        assert_eq!(
+            MetaCommand::parse(":browse Git").unwrap(),
+            MetaCommand::Browse(Some("Git".to_string()))
         );
     }
 
