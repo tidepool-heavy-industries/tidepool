@@ -46,19 +46,25 @@ pub struct BoundBinder {
     pub type_display: String,
 }
 
+/// The three mutually-exclusive shapes a turn can take (GHC-sourced).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnKind {
+    /// A top-level declaration (`f x = e`, `f :: T`, `x = 5`, `(a,b) = p`).
+    Decl,
+    /// A bind (`x <- e` / `let x = e`).
+    Bind,
+    /// A bare expression.
+    Expr,
+}
+
 /// Decl-vs-bind-vs-expr classification of a turn (GHC-sourced, parse-only).
 ///
 /// GHC's parser is the single authority (both declaration and statement
-/// contexts are tried; see `Tidepool.Binders.classifyTurn`). Exactly one of
-/// `is_decl` / `is_bind` is true, or both false for a bare expression.
+/// contexts are tried; see `Tidepool.Binders.classifyTurn`).
 #[derive(Clone, Debug)]
 pub struct TurnClassification {
-    /// Whether the turn is a top-level declaration (`f x = e`, `f :: T`,
-    /// `x = 5`, `(a,b) = p`). Mutually exclusive with `is_bind`.
-    pub is_decl: bool,
-    /// Whether the turn binds (`x <- e` / `let x = e`). False ⇒ a decl or a
-    /// bare expr (disambiguated by `is_decl`).
-    pub is_bind: bool,
+    /// Which of the three mutually-exclusive turn shapes GHC parsed.
+    pub kind: TurnKind,
     /// The bound/declared names (GHC-sourced). Empty for a bare expr.
     pub binders: Vec<String>,
 }
@@ -140,11 +146,12 @@ fn parse_stmt_json(json: &str) -> Result<TurnClassification, CompileError> {
                 .collect()
         })
         .unwrap_or_default();
-    Ok(TurnClassification {
-        is_decl: kind == "decl",
-        is_bind: kind == "bind",
-        binders,
-    })
+    let kind = match kind {
+        "decl" => TurnKind::Decl,
+        "bind" => TurnKind::Bind,
+        _ => TurnKind::Expr,
+    };
+    Ok(TurnClassification { kind, binders })
 }
 
 /// Compile one session-eval turn through the session-aware extract path.
@@ -282,24 +289,21 @@ mod tests {
     #[test]
     fn parses_bind_classification() {
         let c = parse_stmt_json(r#"{"kind":"bind","binders":["x"]}"#).unwrap();
-        assert!(c.is_bind);
-        assert!(!c.is_decl);
+        assert_eq!(c.kind, TurnKind::Bind);
         assert_eq!(c.binders, vec!["x".to_string()]);
     }
 
     #[test]
     fn parses_expr_classification() {
         let c = parse_stmt_json(r#"{"kind":"expr","binders":[]}"#).unwrap();
-        assert!(!c.is_bind);
-        assert!(!c.is_decl);
+        assert_eq!(c.kind, TurnKind::Expr);
         assert!(c.binders.is_empty());
     }
 
     #[test]
     fn parses_decl_classification() {
         let c = parse_stmt_json(r#"{"kind":"decl","binders":["sq"]}"#).unwrap();
-        assert!(c.is_decl);
-        assert!(!c.is_bind);
+        assert_eq!(c.kind, TurnKind::Decl);
         assert_eq!(c.binders, vec!["sq".to_string()]);
     }
 

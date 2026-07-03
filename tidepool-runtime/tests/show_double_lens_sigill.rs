@@ -17,7 +17,7 @@
 mod common;
 
 use tidepool_eval::{deep_force, env_from_datacon_table, eval, VecHeap};
-use tidepool_runtime::{compile_and_run_pure, compile_haskell, value_to_json};
+use tidepool_runtime::{compile_and_run_pure, compile_haskell, value_to_json, CompileResult};
 
 fn prelude_path() -> std::path::PathBuf {
     common::prelude_path()
@@ -42,7 +42,7 @@ fn run(src: &str) -> serde_json::Value {
 fn dump_core(src: &str) -> String {
     let pp = prelude_path();
     let include = [pp.as_path()];
-    let (expr, _table, _warnings) =
+    let CompileResult { expr, .. } =
         compile_haskell(src, "result", &include).expect("compile_haskell failed");
     tidepool_repr::pretty::pretty_print(&expr)
 }
@@ -390,7 +390,7 @@ result =
 fn run_interp(src: &str) -> Result<serde_json::Value, tidepool_eval::EvalError> {
     let pp = prelude_path();
     let include = [pp.as_path()];
-    let (expr, table, _warnings) =
+    let CompileResult { expr, table, .. } =
         compile_haskell(src, "result", &include).expect("compile_haskell failed");
     let env = env_from_datacon_table(&table);
     let mut heap = VecHeap::new();
@@ -419,7 +419,7 @@ result =
       b = case mkMaybe False of { Just True -> 1.0; _ -> 0.0 :: Double }
   in show (a + b)
 "#;
-    let (expr, table, _warnings) =
+    let CompileResult { expr, table, .. } =
         compile_haskell(src, "result", &include).expect("compile_haskell failed");
     let env = env_from_datacon_table(&table);
     let mut heap = VecHeap::new();

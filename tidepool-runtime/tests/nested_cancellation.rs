@@ -19,7 +19,7 @@ use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{CancelHandle, JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_runtime::compile_haskell;
+use tidepool_runtime::{compile_haskell, CompileResult};
 
 #[derive(FromCore)]
 enum TickReq {
@@ -74,8 +74,9 @@ fn cancel_from_inside_effect_handler_unwinds() {
     let pp = common::prelude_path();
     let include: Vec<&Path> = vec![pp.as_path()];
 
-    let (expr, mut table, _warnings) =
-        compile_haskell(LOOP_SOURCE, "tickLoop", &include).expect("compile tickLoop fixture");
+    let CompileResult {
+        expr, mut table, ..
+    } = compile_haskell(LOOP_SOURCE, "tickLoop", &include).expect("compile tickLoop fixture");
     table.populate_siblings_from_expr(&expr);
 
     let mut machine =

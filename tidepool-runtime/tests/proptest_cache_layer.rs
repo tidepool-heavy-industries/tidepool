@@ -334,11 +334,11 @@ proptest! {
 
         let first = h.compile(&src, "t", &[]).unwrap();
         prop_assert_eq!(h.runs(), 1);
-        prop_assert_eq!(&first.0, &expected, "MISS path must yield the stored payload");
+        prop_assert_eq!(&first.expr, &expected, "MISS path must yield the stored payload");
 
         let second = h.compile(&src, "t", &[]).unwrap();
         prop_assert_eq!(h.runs(), 1, "second compile must HIT");
-        prop_assert_eq!(&second.0, &expected, "HIT must yield identical payload");
+        prop_assert_eq!(&second.expr, &expected, "HIT must yield identical payload");
     }
 }
 
@@ -357,11 +357,11 @@ fn load_after_store_identity_huge_payload() {
 
     let first = h.compile(&src, "t", &[]).unwrap();
     assert_eq!(h.runs(), 1);
-    assert_eq!(first.0, expected);
+    assert_eq!(first.expr, expected);
 
     let second = h.compile(&src, "t", &[]).unwrap();
     assert_eq!(h.runs(), 1, "must HIT");
-    assert_eq!(second.0, expected);
+    assert_eq!(second.expr, expected);
 }
 
 // ---------------------------------------------------------------------------
@@ -683,7 +683,7 @@ fn corruption_matrix_no_panic_no_silent_divergence() {
             let reran = h.runs() == 2;
             match res {
                 Ok(r) => assert!(
-                    reran || r.0 == original.0,
+                    reran || r.expr == original.expr,
                     "corrupted {:?} via {:?} served DIVERGENT data as a cache hit",
                     target.file_name(),
                     op
@@ -738,7 +738,7 @@ fn partial_write_states_are_misses() {
             2,
             "partial state ({keep_cbor},{keep_meta},{keep_ok}) must be a MISS"
         );
-        assert_eq!(res.0, original.0, "recompile must restore the artifact");
+        assert_eq!(res.expr, original.expr, "recompile must restore the artifact");
     }
 }
 
@@ -759,7 +759,7 @@ fn sentinel_content_is_ignored() {
         1,
         "entry still HITs with garbage sentinel content"
     );
-    assert_eq!(res.0, original.0);
+    assert_eq!(res.expr, original.expr);
 }
 
 // ---------------------------------------------------------------------------
@@ -790,7 +790,7 @@ fn corruption_bitflip_served_as_valid_different_program() {
             let mut m = bytes.clone();
             m[i] ^= 1 << bit;
             if let Ok(t) = read_cbor(&m) {
-                if t != original.0 {
+                if t != original.expr {
                     corrupted = Some(m);
                     break 'outer;
                 }
@@ -808,7 +808,7 @@ fn corruption_bitflip_served_as_valid_different_program() {
         "BUG F6: bit-flipped entry was served as a HIT (no integrity check)"
     );
     assert_ne!(
-        served.0, original.0,
+        served.expr, original.expr,
         "BUG F6: corrupted payload decoded to a DIFFERENT program and was served as valid"
     );
 }
@@ -828,7 +828,7 @@ fn corrupted_payload_should_be_rejected_or_recompiled() {
             let mut m = bytes.clone();
             m[i] ^= 1 << bit;
             if let Ok(t) = read_cbor(&m) {
-                if t != original.0 {
+                if t != original.expr {
                     found = Some(m);
                     break 'outer;
                 }
@@ -839,7 +839,7 @@ fn corrupted_payload_should_be_rejected_or_recompiled() {
         fs::write(&cbor, m).unwrap();
         let served = h.compile(&src, "t", &[]).unwrap();
         assert!(
-            h.runs() == 2 || served.0 == original.0,
+            h.runs() == 2 || served.expr == original.expr,
             "corrupted cache payload must never be served as a different program"
         );
     }
