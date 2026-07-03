@@ -1,9 +1,4 @@
-use std::path::Path;
-
-fn prelude_path() -> std::path::PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest.parent().unwrap().join("haskell").join("lib")
-}
+use tidepool_testing::eval_harness::EvalHarness;
 
 #[test]
 fn test_error_message() {
@@ -18,9 +13,10 @@ f x = if x == 0 then error "head: empty list" else x
 result :: Int
 result = f 0
 "#;
-    let pp = prelude_path();
-    let include = [pp.as_path()];
-    let res = tidepool_runtime::compile_and_run_pure(src, "result", &include);
+    let res = EvalHarness::new()
+        .with_stdlib()
+        .run_pure(src, "result")
+        .into_result();
 
     match res {
         Err(e) => {
@@ -48,9 +44,10 @@ f 0 = 1
 result :: Int
 result = f 1
 "#;
-    let pp = prelude_path();
-    let include = [pp.as_path()];
-    let res = tidepool_runtime::compile_and_run_pure(src, "result", &include);
+    let res = EvalHarness::new()
+        .with_stdlib()
+        .run_pure(src, "result")
+        .into_result();
 
     match res {
         Err(e) => {

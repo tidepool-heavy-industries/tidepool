@@ -23,7 +23,7 @@
 
 #![allow(clippy::needless_range_loop)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 // ============================================================================
@@ -1165,64 +1165,28 @@ fn reference_json(body: &HExpr) -> serde_json::Value {
 // Pipeline drivers.
 // ============================================================================
 
-fn prelude_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("haskell")
-        .join("lib")
-}
-
-/// Stack size for the JIT-compile worker thread.
-///
-/// DO NOT "simplify" the compile path back onto the libtest thread. JIT
-/// compilation is a recursive-descent emit over GHC's -O2 Core; `emit_node`'s
-/// Let-spine is trampolined but case-alt bodies still recurse natively (bounded
-/// by case nesting). With cross-module specialization on (EPS unpoison), prelude
-/// ops like `toUpper` / `strip` / `words` inline into deeply-nested Core, so
-/// emitting a single *small* program legitimately consumes ~2 MiB of native
-/// stack. Measured threshold (smallest stack that compiles `toUpper (strip ...)`):
-/// ~2033 KiB on the pre-merge baseline — already over libtest's default 2 MiB
-/// thread once the proptest runner's own frames are on the stack. So this
-/// property was flaky-by-entropy on EVERY revision (it crashed only when a random
-/// seed happened to draw a deep-enough program); the lit-tolerance merge added a
-/// further ~12 KiB and merely raised the hit rate.
-///
-/// The real MCP server runs every eval — compilation included — on a 256 MiB
-/// thread (`tidepool-mcp/src/lib.rs`, `stack_size(256 * 1024 * 1024)`), so a
-/// 2 MiB-compile budget is an invariant production neither has nor needs.
-/// Routing the proptest's compiles through a generously-sized worker thread (the
-/// same mechanism production uses) makes the property faithful to production and
-/// deterministic regardless of which program a seed generates. The durable cost-
-/// model fix (stack-safe alt-body emit) is tracked in plans/stack-safety.md.
-const COMPILE_STACK_BYTES: usize = 64 * 1024 * 1024;
-
-/// Run `f` on a worker thread with a production-sized stack (see
-/// [`COMPILE_STACK_BYTES`]). Joins and propagates the result; a thread that
-/// panics or overflows surfaces as an `Err` instead of aborting the suite.
-fn on_compile_stack<T, F>(f: F) -> Result<T, String>
-where
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-    T: Send + 'static,
-{
-    std::thread::Builder::new()
-        .stack_size(COMPILE_STACK_BYTES)
-        .spawn(f)
-        .expect("spawn compile thread")
-        .join()
-        .unwrap_or_else(|_| Err("compile thread panicked / overflowed".to_string()))
-}
-
 /// Compile + run a pure program; returns the JSON result or an error string.
+///
+/// DO NOT "simplify" this back onto the libtest thread. JIT compilation is a
+/// recursive-descent emit over GHC's -O2 Core; `emit_node`'s Let-spine is
+/// trampolined but case-alt bodies still recurse natively (bounded by case
+/// nesting). With cross-module specialization on (EPS unpoison), prelude ops
+/// like `toUpper` / `strip` / `words` inline into deeply-nested Core, so
+/// emitting a single *small* program legitimately consumes ~2 MiB of native
+/// stack — already over libtest's default 2 MiB thread once the proptest
+/// runner's own frames are on the stack. This property was flaky-by-entropy on
+/// EVERY revision (it crashed only when a random seed happened to draw a
+/// deep-enough program) until routed through [`EvalHarness::run_pure`], which
+/// drives every compile on the same 256 MiB thread the MCP server uses for
+/// every eval (`tidepool-mcp/src/lib.rs`, `EVAL_STACK_SIZE`) — faithful to
+/// production and deterministic regardless of which program a seed generates.
 fn run_pure(source: &str) -> Result<serde_json::Value, String> {
-    let source = source.to_string();
-    on_compile_stack(move || {
-        let pp = prelude_path();
-        let include = [pp.as_path()];
-        tidepool_runtime::compile_and_run_pure(&source, "result", &include)
-            .map(|r| r.to_json())
-            .map_err(|e| format!("{e}"))
-    })
+    tidepool_testing::eval_harness::EvalHarness::new()
+        .with_stdlib()
+        .run_pure(source, "result")
+        .into_result()
+        .map(|r| r.to_json())
+        .map_err(|e| format!("{e}"))
 }
 
 /// Outcome classification of one pure case.
@@ -1465,8 +1429,8 @@ mod committed {
 // at libtest's default 2 MiB thread. The committed properties above were
 // flaky-crashing (a compile-time SIGSEGV outside JIT protection that hung the
 // suite) whenever a random seed produced such a program. They now drive every
-// compile through `run_pure`, which runs on a 64 MiB thread (COMPILE_STACK_BYTES)
-// matching the MCP server's 256 MiB eval thread, so production was never
+// compile through `run_pure` (`EvalHarness::run_pure`), which runs on the same
+// 256 MiB thread the MCP server uses for every eval, so production was never
 // affected. This pins a couple of the witnessed deep programs as a fast,
 // deterministic gate that they compile+run correctly on that stack.
 // ============================================================================
@@ -1752,12 +1716,10 @@ fn pipeline_effect_worker() {
             return;
         }
     };
-    let pp = prelude_path();
     let user_lib = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .join(".tidepool/lib");
-    let include = [pp.as_path(), user_lib.as_path(), effects_dir.as_path()];
 
     struct BigList {
         n: usize,
@@ -1774,17 +1736,17 @@ fn pipeline_effect_worker() {
         }
     }
 
-    // Compile on a production-sized stack (see COMPILE_STACK_BYTES): the MCP
-    // preamble is large, and emit is recursive-descent over deep specialized
-    // Core. Own the paths/source so they can move onto the worker thread.
-    let include_owned: Vec<PathBuf> = include.iter().map(|p| p.to_path_buf()).collect();
-    let result = on_compile_stack(move || {
-        let inc: Vec<&Path> = include_owned.iter().map(|p| p.as_path()).collect();
-        let mut d = BigList { n };
-        tidepool_runtime::compile_and_run(&source, "result", &inc, &mut d, &())
-            .map(|r| r.to_json())
-            .map_err(|e| format!("{e}"))
-    });
+    // Compile on a production-sized stack: the MCP preamble is large, and emit
+    // is recursive-descent over deep specialized Core. `EvalHarness::run`
+    // drives it on the same 256 MiB thread the MCP server uses for every eval.
+    let result = tidepool_testing::eval_harness::EvalHarness::new()
+        .with_stdlib()
+        .with_include(user_lib)
+        .with_include(effects_dir)
+        .run(&source, "result", BigList { n })
+        .into_result()
+        .map(|r| r.to_json())
+        .map_err(|e| format!("{e}"));
     // Leading newline so the marker starts its own line even under libtest's
     // newline-less "test <name> ... " preamble (parser also substring-matches).
     match result {
