@@ -265,12 +265,22 @@ impl TidepoolMcpServerImpl {
                             cancel.cancel();
                         }
                         self.reap_detached(handle.take());
-                        let mut detail = format!(
-                            "{} timed out after {}s WITHOUT reaching an effect boundary — \
-                             likely a pure infinite loop or unbounded pure recursion. The \
-                             thread was detached.",
-                            op, timeout_secs
-                        );
+                        let mut detail = if gate.is_compiling() {
+                            format!(
+                                "{} timed out after {}s during COMPILATION — the first \
+                                 eval of a new expression pays a GHC compile (~2-6s cold; \
+                                 the result is cached). Not a fault in your code: retry, \
+                                 or raise timeout_secs.",
+                                op, timeout_secs
+                            )
+                        } else {
+                            format!(
+                                "{} timed out after {}s WITHOUT reaching an effect boundary — \
+                                 likely a pure infinite loop or unbounded pure recursion. The \
+                                 thread was detached.",
+                                op, timeout_secs
+                            )
+                        };
                         if !output.is_empty() {
                             detail.push_str("\n\n## Output Before Timeout\n");
                             for line in &output {
@@ -604,6 +614,7 @@ impl TidepoolMcpServerImpl {
                     .iter()
                     .map(std::path::PathBuf::as_path)
                     .collect();
+                let gate_phase = Arc::clone(&gate_for_thread);
                 let mut ask_dispatcher = AskDispatcher {
                     inner: handlers,
                     ask_tag,
@@ -612,6 +623,11 @@ impl TidepoolMcpServerImpl {
                     gate: gate_for_thread,
                 };
 
+                // Compile phase starts now; the cancel-handle installer fires
+                // at machine creation — exactly the compile→run boundary —
+                // so a timeout before it is a slow compile, not a runaway. (#324)
+                gate_phase.set_compiling(true);
+                let gate_run = Arc::clone(&gate_phase);
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     tidepool_runtime::compile_and_run_cancellable(
                         &source_for_blocking,
@@ -620,9 +636,13 @@ impl TidepoolMcpServerImpl {
                         &mut ask_dispatcher,
                         &captured_for_blocking,
                         tidepool_runtime::DEFAULT_NURSERY_SIZE,
-                        |h| *cancel_slot_thread.lock() = Some(h),
+                        |h| {
+                            gate_run.set_compiling(false);
+                            *cancel_slot_thread.lock() = Some(h);
+                        },
                     )
                 }));
+                gate_phase.set_compiling(false);
 
                 match result {
                     Ok(Ok(eval_result)) => {

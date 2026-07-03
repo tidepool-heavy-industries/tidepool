@@ -71,6 +71,11 @@ pub(crate) struct GateInner {
     /// on an ask). Used at the grace deadline to distinguish "will park
     /// at the next boundary" from "pure compute runaway".
     pub(crate) in_effect: bool,
+    /// True from eval-thread start until the JIT machine is created (the
+    /// cancel-handle installer callback fires at exactly that boundary).
+    /// A timeout during this phase is a slow GHC COMPILE, not a pure
+    /// runaway — the message must not blame user code for a cold cache. (#324)
+    pub(crate) compiling: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -87,6 +92,7 @@ impl PauseGate {
             inner: parking_lot::Mutex::new(GateInner {
                 state: GateState::Run,
                 in_effect: false,
+                compiling: false,
             }),
             cv: parking_lot::Condvar::new(),
         })
@@ -121,6 +127,18 @@ impl PauseGate {
 
     pub(crate) fn exit_effect(&self) {
         self.inner.lock().in_effect = false;
+    }
+
+    /// Mark the compile phase (eval-thread start → JIT machine creation).
+    pub(crate) fn set_compiling(&self, on: bool) {
+        self.inner.lock().compiling = on;
+    }
+
+    /// Whether the eval thread was still in the compile phase (never
+    /// reached execution) — consulted by the timeout path to avoid
+    /// misdiagnosing a slow cold-cache compile as a pure infinite loop.
+    pub(crate) fn is_compiling(&self) -> bool {
+        self.inner.lock().compiling
     }
 
     pub(crate) fn request_pause(&self) {
