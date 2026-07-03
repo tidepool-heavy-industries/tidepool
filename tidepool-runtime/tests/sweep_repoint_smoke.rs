@@ -95,15 +95,3 @@ fn uri_quoter_reject() {
         "invalid [uri|…|] must be REJECTED at splice time, got Ok: {r:?}"
     );
 }
-
-#[test]
-fn sg_quoter_accept() {
-    // ast-grep metavar pattern with balanced parens — accepted by sgCheck.
-    let got = run_src(
-        ", QuasiQuotes",
-        "import Tidepool.QQ (sg)",
-        r#"[sg|fn $NAME($$$ARGS)|]"#,
-    )
-    .expect("valid [sg|…|] must compile");
-    assert_eq!(got, json!("fn $NAME($$$ARGS)"));
-}

@@ -1,6 +1,6 @@
 //! Concrete effect handlers for the Tidepool eval server.
 //!
-//! Provides the 8 base handlers (Console, KV, Fs, SG, Http, Exec, Lsp, Llm),
+//! Provides the base handlers (Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time),
 //! the debug-only MetaHandler, and the [`build_base_stack`] / [`base_decls_with_ask`]
 //! convenience functions for assembling a fully-wired eval server.
 //!
@@ -24,9 +24,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use ast_grep_config::{DeserializeEnv, SerializableRule};
-use ast_grep_core::{Language as _, Pattern};
-use ast_grep_language::{LanguageExt, SupportLang};
 use tidepool_bridge_derive::{CoreRecord, FromCore, ToCore};
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
@@ -262,8 +259,8 @@ fn grep_regex_error(regex_str: &str, e: &regex::Error) -> EffectError {
 
 /// Expand a glob pattern relative to `root` with sandbox and component filtering.
 ///
-/// Shared by [`FsHandler`] and [`SgHandler`] so both benefit from the same
-/// `**`-normalisation, sandbox check, and hidden-dir filter.
+/// Used by [`FsHandler`] (glob/grep) for `**`-normalisation, sandbox check,
+/// and hidden-dir filter.
 pub fn expand_glob(root: &std::path::Path, pattern: &str) -> Result<Vec<PathBuf>, EffectError> {
     if pattern.contains("..") {
         return Ok(Vec::new());
@@ -507,416 +504,6 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                     })),
                     Err(_) => cx.respond(serde_json::Value::Null),
                 }
-            }
-        }
-    }
-}
-
-// ============================================================================
-// Tag 3: Structural Grep (ast-grep)
-// ============================================================================
-
-#[derive(Clone, Copy, FromCore)]
-pub enum Lang {
-    #[core(name = "Rust")]
-    Rust,
-    #[core(name = "Python")]
-    Python,
-    #[core(name = "TypeScript")]
-    TypeScript,
-    #[core(name = "JavaScript")]
-    JavaScript,
-    #[core(name = "Go")]
-    Go,
-    #[core(name = "Java")]
-    Java,
-    #[core(name = "C")]
-    C,
-    #[core(name = "Cpp")]
-    Cpp,
-    #[core(name = "Haskell")]
-    Haskell,
-    #[core(name = "Nix")]
-    Nix,
-    #[core(name = "Html")]
-    Html,
-    #[core(name = "Css")]
-    Css,
-    #[core(name = "Json")]
-    Json,
-    #[core(name = "Yaml")]
-    Yaml,
-    #[core(name = "Toml")]
-    Toml,
-}
-
-impl Lang {
-    pub fn to_support_lang(self) -> Result<SupportLang, EffectError> {
-        match self {
-            Lang::Rust => Ok(SupportLang::Rust),
-            Lang::Python => Ok(SupportLang::Python),
-            Lang::TypeScript => Ok(SupportLang::TypeScript),
-            Lang::JavaScript => Ok(SupportLang::JavaScript),
-            Lang::Go => Ok(SupportLang::Go),
-            Lang::Java => Ok(SupportLang::Java),
-            Lang::C => Ok(SupportLang::C),
-            Lang::Cpp => Ok(SupportLang::Cpp),
-            Lang::Haskell => Ok(SupportLang::Haskell),
-            Lang::Nix => Ok(SupportLang::Nix),
-            Lang::Html => Ok(SupportLang::Html),
-            Lang::Css => Ok(SupportLang::Css),
-            Lang::Json => Ok(SupportLang::Json),
-            Lang::Yaml => Ok(SupportLang::Yaml),
-            Lang::Toml => Err(EffectError::Handler(
-                "Toml is not supported by ast-grep".into(),
-            )),
-        }
-    }
-}
-
-#[derive(FromCore)]
-pub enum SgReq {
-    #[core(name = "SgFind")]
-    Find(Lang, String, Vec<String>),
-    #[core(name = "SgRuleFind")]
-    RuleFind(Lang, Value, Vec<String>),
-    #[core(name = "SgPlan")]
-    Plan(Lang, String, String, Vec<String>),
-    #[core(name = "SgApply")]
-    Apply(Lang, String, String, Vec<String>),
-}
-
-const MATCH_TEXT_LIMIT: usize = 500;
-
-/// Clamp match text to [`MATCH_TEXT_LIMIT`] chars so a single `[Match]` list
-/// doesn't overflow the eval context with whole-function bodies.
-fn truncate_match_text(text: String) -> String {
-    if text.len() <= MATCH_TEXT_LIMIT {
-        return text;
-    }
-    let mut end = MATCH_TEXT_LIMIT;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &text[..end])
-}
-
-/// Rust-side Match value returned to Haskell.
-/// Field order must match the Haskell data constructor:
-///   Match { mText, mFile, mLine, mVars, mReplacement }
-#[derive(ToCore, CoreRecord)]
-#[core(name = "Match")]
-pub struct SgMatch {
-    #[core(hs = "matchText")]
-    pub text: String,
-    #[core(hs = "matchFile")]
-    pub file: String,
-    #[core(hs = "matchLine")]
-    pub line: i64,
-    #[core(hs = "matchVarsList")]
-    pub vars: Vec<(String, String)>,
-    #[core(hs = "matchReplacement")]
-    pub replacement: String,
-}
-
-#[derive(Clone)]
-pub struct SgHandler {
-    root: PathBuf,
-}
-
-impl SgHandler {
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
-    }
-
-    fn collect_files(
-        &self,
-        lang: SupportLang,
-        paths: &[String],
-    ) -> Result<Vec<PathBuf>, EffectError> {
-        let mut files = Vec::new();
-        let canonical_root = self
-            .root
-            .canonicalize()
-            .map_err(|e| EffectError::Handler(e.to_string()))?;
-        if paths.is_empty() {
-            self.walk_dir(&canonical_root, lang, &mut files)?;
-        } else {
-            for p in paths {
-                if is_glob(p) {
-                    // Glob path: expand then filter to language-matching files.
-                    for expanded in expand_glob(&self.root, p)? {
-                        if expanded.is_file() {
-                            if SupportLang::from_path(&expanded) == Some(lang) {
-                                files.push(expanded);
-                            }
-                        } else if expanded.is_dir() {
-                            self.walk_dir(&expanded, lang, &mut files)?;
-                        }
-                    }
-                } else {
-                    let full = self.root.join(p);
-                    let canonical = full
-                        .canonicalize()
-                        .map_err(|e| EffectError::Handler(format!("Bad path {}: {}", p, e)))?;
-                    if !canonical.starts_with(&canonical_root) {
-                        return Err(EffectError::Handler(format!("Path escapes sandbox: {}", p)));
-                    }
-                    if canonical.is_file() {
-                        files.push(canonical);
-                    } else if canonical.is_dir() {
-                        self.walk_dir(&canonical, lang, &mut files)?;
-                    }
-                }
-            }
-        }
-        Ok(files)
-    }
-
-    fn walk_dir(
-        &self,
-        dir: &std::path::Path,
-        lang: SupportLang,
-        files: &mut Vec<PathBuf>,
-    ) -> Result<(), EffectError> {
-        let entries = std::fs::read_dir(dir)
-            .map_err(|e| EffectError::Handler(format!("read_dir {}: {}", dir.display(), e)))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| EffectError::Handler(e.to_string()))?;
-            let path = entry.path();
-            if path.is_dir() {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy())
-                    .unwrap_or_default();
-                if name.starts_with('.') || matches!(name.as_ref(), "target" | "node_modules") {
-                    continue;
-                }
-                self.walk_dir(&path, lang, files)?;
-            } else if SupportLang::from_path(&path) == Some(lang) {
-                files.push(path);
-            }
-        }
-        Ok(())
-    }
-
-    /// Build a pattern, rejecting ones that parse with syntax errors —
-    /// those "succeed" and then silently match nothing (the classic
-    /// `pub fn $NAME($$ARGS)` footgun: a signature without a body is not
-    /// a valid parse).
-    pub fn checked_pattern(pattern: &str, sl: SupportLang) -> Result<Pattern, EffectError> {
-        let pat = Pattern::try_new(pattern, sl)
-            .map_err(|e| EffectError::Handler(format!("invalid pattern: {}", e)))?;
-        if pat.has_error() {
-            return Err(EffectError::Handler(format!(
-                "pattern `{}` parses with syntax errors as {:?} and would likely match \
-                 nothing. Patterns must be valid code fragments — e.g. a bare fn \
-                 signature needs a body (`{} {{ $$$BODY }}`). For definition lookup, \
-                 the rsFn/hsDef recipes (kind + name regex) are the robust path.",
-                pattern, sl, pattern
-            )));
-        }
-        // The OTHER footgun parses cleanly: a bare Rust fn signature is a
-        // valid `function_signature_item` (trait/extern item) — which never
-        // occurs in normal code, so the pattern silently matches nothing.
-        if matches!(sl, SupportLang::Rust) {
-            use ast_grep_core::Matcher as _;
-            let sig_kind = sl.kind_to_id("function_signature_item");
-            if sig_kind != 0 {
-                if let Some(kinds) = pat.potential_kinds() {
-                    if kinds.contains(sig_kind as usize) {
-                        return Err(EffectError::Handler(format!(
-                            "pattern `{}` parses as a fn SIGNATURE (trait/extern item) and \
-                             will not match function definitions. Append a body — \
-                             `{} {{ $$$BODY }}` — or use the rsFn recipe.",
-                            pattern, pattern
-                        )));
-                    }
-                }
-            }
-        }
-        Ok(pat)
-    }
-
-    pub fn run_find(
-        &self,
-        lang: Lang,
-        pattern: &str,
-        paths: &[String],
-        rewrite: Option<&str>,
-    ) -> Result<Vec<SgMatch>, EffectError> {
-        let sl = lang.to_support_lang()?;
-        let pat = Self::checked_pattern(pattern, sl)?;
-        let files = self.collect_files(sl, paths)?;
-        let mut results = Vec::new();
-
-        for file_path in files {
-            let source = std::fs::read_to_string(&file_path)
-                .map_err(|e| EffectError::Handler(e.to_string()))?;
-            let grep = sl.ast_grep(&source);
-            let relative = file_path
-                .strip_prefix(&self.root)
-                .unwrap_or(&file_path)
-                .to_string_lossy()
-                .to_string();
-
-            for m in grep.root().find_all(&pat) {
-                let text = truncate_match_text(m.text().to_string());
-                let line = m.start_pos().line() as i64 + 1;
-                let env: HashMap<String, String> = m.get_env().clone().into();
-                let mut vars: Vec<(String, String)> = env.into_iter().collect();
-                vars.sort_by(|a, b| a.0.cmp(&b.0));
-
-                let replacement = if let Some(rw) = rewrite {
-                    let edit = m.replace_by(rw);
-                    String::from_utf8_lossy(&edit.inserted_text).to_string()
-                } else {
-                    String::new()
-                };
-
-                results.push(SgMatch {
-                    text,
-                    file: relative.clone(),
-                    line,
-                    vars,
-                    replacement,
-                });
-            }
-        }
-        Ok(results)
-    }
-
-    fn run_replace(
-        &self,
-        lang: Lang,
-        pattern: &str,
-        rewrite: &str,
-        paths: &[String],
-    ) -> Result<i64, EffectError> {
-        let sl = lang.to_support_lang()?;
-        let files = self.collect_files(sl, paths)?;
-        let mut total = 0i64;
-
-        for file_path in files {
-            let source = std::fs::read_to_string(&file_path)
-                .map_err(|e| EffectError::Handler(e.to_string()))?;
-            let mut grep = sl.ast_grep(&source);
-            let mut file_count = 0i64;
-
-            loop {
-                let pat = Self::checked_pattern(pattern, sl)?;
-                match grep.replace(pat, rewrite) {
-                    Ok(true) => file_count += 1,
-                    Ok(false) => break,
-                    Err(e) => return Err(EffectError::Handler(e)),
-                }
-            }
-
-            if file_count > 0 {
-                let modified = grep.generate();
-                std::fs::write(&file_path, &modified)
-                    .map_err(|e| EffectError::Handler(e.to_string()))?;
-                total += file_count;
-            }
-        }
-        Ok(total)
-    }
-
-    fn deserialize_rule(
-        &self,
-        lang: Lang,
-        rule_json: &Value,
-        table: &tidepool_repr::DataConTable,
-    ) -> Result<(SupportLang, ast_grep_config::Rule), EffectError> {
-        let sl = lang.to_support_lang()?;
-        let json_val = tidepool_runtime::value_to_json(rule_json, table, 0);
-        let serializable: SerializableRule = serde_json::from_value(json_val)
-            .map_err(|e| EffectError::Handler(format!("invalid rule JSON: {}", e)))?;
-        let env = DeserializeEnv::new(sl);
-        let rule = env
-            .deserialize_rule(serializable)
-            .map_err(|e| EffectError::Handler(format!("invalid rule: {}", e)))?;
-        Ok((sl, rule))
-    }
-
-    fn run_rule_find(
-        &self,
-        lang: Lang,
-        rule_json: &Value,
-        paths: &[String],
-        rewrite: Option<&str>,
-        table: &tidepool_repr::DataConTable,
-    ) -> Result<Vec<SgMatch>, EffectError> {
-        let (sl, rule) = self.deserialize_rule(lang, rule_json, table)?;
-        let files = self.collect_files(sl, paths)?;
-        let mut results = Vec::new();
-
-        for file_path in files {
-            let source = std::fs::read_to_string(&file_path)
-                .map_err(|e| EffectError::Handler(e.to_string()))?;
-            let grep = sl.ast_grep(&source);
-            let relative = file_path
-                .strip_prefix(&self.root)
-                .unwrap_or(&file_path)
-                .to_string_lossy()
-                .to_string();
-
-            for m in grep.root().find_all(&rule) {
-                let text = truncate_match_text(m.text().to_string());
-                let line = m.start_pos().line() as i64 + 1;
-                let env: HashMap<String, String> = m.get_env().clone().into();
-                let mut vars: Vec<(String, String)> = env.into_iter().collect();
-                vars.sort_by(|a, b| a.0.cmp(&b.0));
-
-                let replacement = if let Some(rw) = rewrite {
-                    let edit = m.replace_by(rw);
-                    String::from_utf8_lossy(&edit.inserted_text).to_string()
-                } else {
-                    String::new()
-                };
-
-                results.push(SgMatch {
-                    text,
-                    file: relative.clone(),
-                    line,
-                    vars,
-                    replacement,
-                });
-            }
-        }
-        Ok(results)
-    }
-}
-
-impl DescribeEffect for SgHandler {
-    fn effect_decl() -> EffectDecl {
-        tidepool_mcp::sg_decl()
-    }
-}
-
-impl EffectHandler<CapturedOutput> for SgHandler {
-    type Request = SgReq;
-    fn handle(
-        &mut self,
-        req: SgReq,
-        cx: &EffectContext<'_, CapturedOutput>,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        match req {
-            SgReq::Find(lang, pattern, paths) => {
-                let matches = self.run_find(lang, &pattern, &paths, None)?;
-                cx.respond_list(matches)
-            }
-            SgReq::RuleFind(lang, rule_json, paths) => {
-                let matches = self.run_rule_find(lang, &rule_json, &paths, None, cx.table())?;
-                cx.respond_list(matches)
-            }
-            SgReq::Plan(lang, pattern, rewrite, paths) => {
-                let matches = self.run_find(lang, &pattern, &paths, Some(&rewrite))?;
-                cx.respond_list(matches)
-            }
-            SgReq::Apply(lang, pattern, rewrite, paths) => {
-                let n = self.run_replace(lang, &pattern, &rewrite, &paths)?;
-                cx.respond(n)
             }
         }
     }
@@ -2122,7 +1709,23 @@ pub struct HandlerConfig {
     pub llm_model: String,
 }
 
-/// Build the base effect stack (tags 0–9: Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Git, Time).
+/// Map an effect name (as listed in `tidepool_mcp::base_effects!`) to its
+/// handler-construction expression. This is a NAME-keyed lookup (arm order is
+/// irrelevant); the load-bearing ORDER lives solely in `base_effects!`, so this
+/// map stays in lockstep with the decl list by construction.
+macro_rules! handler_for {
+    (Console, $cfg:ident) => { ConsoleHandler };
+    (KV,      $cfg:ident) => { KvHandler::new($cfg.kv_path.clone()) };
+    (Fs,      $cfg:ident) => { FsHandler::new($cfg.cwd.clone()) };
+    (Http,    $cfg:ident) => { HttpHandler };
+    (Exec,    $cfg:ident) => { ExecHandler::new($cfg.cwd.clone()) };
+    (Lsp,     $cfg:ident) => { LspHandler::new($cfg.cwd.clone()) };
+    (Llm,     $cfg:ident) => { LlmHandler::new($cfg.llm_model.clone()) };
+    (Git,     $cfg:ident) => { GitHandler::new($cfg.cwd.clone()) };
+    (Time,    $cfg:ident) => { TimeHandler };
+}
+
+/// Build the base effect stack (tags 0–8: Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time).
 ///
 /// **Must be called inside a tokio runtime** — `LlmHandler` captures
 /// `tokio::runtime::Handle::current()` at construction time.
@@ -2137,25 +1740,25 @@ pub fn build_base_stack(
        + Send
        + Sync
        + 'static {
-    frunk::hlist![
-        ConsoleHandler,
-        KvHandler::new(cfg.kv_path.clone()),
-        FsHandler::new(cfg.cwd.clone()),
-        SgHandler::new(cfg.cwd.clone()),
-        HttpHandler,
-        ExecHandler::new(cfg.cwd.clone()),
-        LspHandler::new(cfg.cwd.clone()),
-        LlmHandler::new(cfg.llm_model.clone()),
-        GitHandler::new(cfg.cwd.clone()),
-        TimeHandler,
-    ]
+    // The handler HList is generated from the single-source `base_effects!`
+    // list in `tidepool-mcp` (the SAME sequence that drives `standard_decls`,
+    // the `type M = Eff '[…]` string, and the union-tag positions). Reordering
+    // or cutting an effect is a single edit THERE — this fn just maps each
+    // effect name to its handler constructor (`handler_for!`), so the two
+    // orders cannot desync.
+    macro_rules! build_stack_rows {
+        ($(($name:ident, $decl:ident)),* $(,)?) => {
+            frunk::hlist![ $( handler_for!($name, cfg) ),* ]
+        };
+    }
+    tidepool_mcp::base_effects!(build_stack_rows)
 }
 
 /// Build the MINIMAL effect stack (tag 0: Console only).
 ///
 /// For cheap-startup sessions and tests that exercise the session mechanism
 /// rather than the effects — it avoids constructing the heavier handlers (Llm's
-/// genai client, the cwd-bound Fs/SG/Exec/Lsp). Ask (the next tag) is interposed
+/// genai client, the cwd-bound Fs/Exec/Lsp). Ask (the next tag) is interposed
 /// by each server's `AskDispatcher` wrapper, as with [`build_base_stack`]. Pair
 /// with [`base_decls_with_ask`] (which is generic over any `CollectEffectDecls`
 /// stack) to derive `(decls, ask_tag)`.
@@ -2252,7 +1855,6 @@ mod tests {
             ConsoleHandler,
             KvHandler::new(kv_path),
             FsHandler::new(cwd.clone()),
-            SgHandler::new(cwd.clone()),
             HttpHandler,
             ExecHandler::new(cwd.clone()),
             LlmHandler::new("ollama:llama3.2".to_string())
@@ -2396,52 +1998,6 @@ mod tests {
         }
     }
 
-    // === SgHandler glob + truncation tests ===
-
-    #[test]
-    fn test_sg_collect_files_glob() {
-        use tempfile::tempdir;
-        let dir = tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        std::fs::create_dir_all(root.join("sub")).unwrap();
-        std::fs::write(root.join("a.rs"), "fn a() {}").unwrap();
-        std::fs::write(root.join("sub/b.rs"), "fn b() {}").unwrap();
-        std::fs::write(root.join("ignore.hs"), "x = 1").unwrap();
-
-        let handler = SgHandler::new(root.clone());
-        let files = handler
-            .collect_files(SupportLang::Rust, &["**/*.rs".to_string()])
-            .unwrap();
-        assert!(
-            files.len() >= 2,
-            "expected .rs files from glob, got {files:?}"
-        );
-        assert!(
-            files
-                .iter()
-                .all(|f| f.extension().map(|e| e == "rs").unwrap_or(false)),
-            "non-.rs file slipped through: {files:?}"
-        );
-    }
-
-    #[test]
-    fn test_truncate_match_text_short() {
-        let s = "hello".to_string();
-        assert_eq!(truncate_match_text(s.clone()), s);
-    }
-
-    #[test]
-    fn test_truncate_match_text_long() {
-        let long = "x".repeat(600);
-        let result = truncate_match_text(long);
-        assert!(
-            result.len() <= MATCH_TEXT_LIMIT + 4,
-            "too long: {}",
-            result.len()
-        );
-        assert!(result.ends_with('…'));
-    }
-
     // === Structural guard tests ===
 
     #[test]
@@ -2539,86 +2095,6 @@ mod tests {
             .collect();
         assert!(names.iter().any(|n| n.ends_with("top.txt")), "{names:?}");
         assert!(names.iter().any(|n| n.ends_with("deep.txt")), "{names:?}");
-    }
-
-    #[test]
-    fn test_sg_bare_signature_pattern_rejected() {
-        use tempfile::tempdir;
-        let dir = tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        std::fs::write(root.join("t.rs"), "pub fn run_find(x: i64) -> i64 { x }\n").unwrap();
-
-        let mut handler = SgHandler::new(root);
-        let table = full_effect_test_table();
-        let captured = CapturedOutput::new();
-        let cx = EffectContext::with_user(&table, &captured);
-
-        let req = SgReq::Find(
-            Lang::Rust,
-            "pub fn $NAME($$ARGS)".into(),
-            vec!["t.rs".into()],
-        );
-        let err = handler
-            .handle(req, &cx)
-            .expect_err("bare signature must be rejected");
-        let msg = format!("{err}");
-        assert!(msg.contains("SIGNATURE"), "{msg}");
-        assert!(msg.contains("rsFn"), "{msg}");
-
-        let req = SgReq::Find(
-            Lang::Rust,
-            "pub fn $NAME($$ARGS) -> $RET { $$$BODY }".into(),
-            vec!["t.rs".into()],
-        );
-        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let n = res.node_count();
-        assert!(n > 1, "expected a match, got {res:?}");
-    }
-
-    #[test]
-    fn test_sg_plan_apply() {
-        use tempfile::tempdir;
-        let dir = tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let f = root.join("t.rs");
-        std::fs::write(&f, "fn main() { foo(1); foo(2); }\n").unwrap();
-
-        let mut handler = SgHandler::new(root.clone());
-        let table = full_effect_test_table();
-        let captured = CapturedOutput::new();
-        let cx = EffectContext::with_user(&table, &captured);
-
-        let req = SgReq::Plan(
-            Lang::Rust,
-            "foo($A)".into(),
-            "bar($A)".into(),
-            vec!["t.rs".into()],
-        );
-        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let _ = res;
-        assert!(
-            std::fs::read_to_string(&f).unwrap().contains("foo(1)"),
-            "plan must not write"
-        );
-
-        let req = SgReq::Apply(
-            Lang::Rust,
-            "foo($A)".into(),
-            "bar($A)".into(),
-            vec!["t.rs".into()],
-        );
-        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let n = match &res {
-            Value::Con(_, fields) => match fields.as_slice() {
-                [Value::Lit(tidepool_repr::Literal::LitInt(n))] => *n,
-                other => panic!("expected boxed Int, got {:?}", other),
-            },
-            Value::Lit(tidepool_repr::Literal::LitInt(n)) => *n,
-            other => panic!("expected Int count, got {:?}", other),
-        };
-        assert_eq!(n, 2);
-        let after = std::fs::read_to_string(&f).unwrap();
-        assert!(after.contains("bar(1)") && after.contains("bar(2)"));
     }
 
     #[test]
@@ -2765,7 +2241,7 @@ mod tests {
     }
 
     const EFFECTS_WITH_ROUNDTRIP_TESTS: &[&str] = &[
-        "Console", "KV", "Fs", "SG", "Http", "Exec", "Lsp", "Llm", "Git", "Time", "Ask",
+        "Console", "KV", "Fs", "Http", "Exec", "Lsp", "Llm", "Git", "Time", "Ask",
     ];
 
     #[test]
@@ -2969,22 +2445,6 @@ mod tests {
             msg.contains("outside sandbox") || msg.contains("escape"),
             "{msg}"
         );
-    }
-
-    // === SG FromCore tests ===
-
-    #[test]
-    fn test_sg_from_core_find() {
-        let table = full_effect_test_table();
-        let con_id = table.get_by_name("SgFind").unwrap();
-        let lang_id = table.get_by_name("Rust").unwrap();
-        let lang = Value::Con(lang_id, vec![]);
-        let pattern = "fn $NAME".to_string().to_value(&table).unwrap();
-        let nil_id = table.get_by_name("[]").unwrap();
-        let files = Value::Con(nil_id, vec![]);
-        let val = Value::Con(con_id, vec![lang, pattern, files]);
-        let req = SgReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, SgReq::Find(_, ref p, ref f) if p == "fn $NAME" && f.is_empty()));
     }
 
     // === Http FromCore tests ===
@@ -3207,7 +2667,6 @@ mod tests {
             ConsoleHandler,
             KvHandler::new(kv_path),
             FsHandler::new(cwd.clone()),
-            SgHandler::new(cwd.clone()),
             HttpHandler,
             ExecHandler::new(cwd.clone()),
             LspHandler::new(cwd.clone()),
@@ -3860,7 +3319,6 @@ file_c.txt\n\
             ConsoleHandler,
             KvHandler::new(kv_path),
             FsHandler::new(cwd.clone()),
-            SgHandler::new(cwd.clone()),
             HttpHandler,
             ExecHandler::new(cwd.clone()),
             LspHandler::new(cwd.clone()),
@@ -3926,7 +3384,6 @@ file_c.txt\n\
             ConsoleHandler,
             KvHandler::new(kv_path),
             FsHandler::new(cwd.clone()),
-            SgHandler::new(cwd.clone()),
             HttpHandler,
             ExecHandler::new(cwd.clone()),
             LspHandler::new(cwd.clone()),

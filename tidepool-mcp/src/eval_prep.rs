@@ -13,26 +13,52 @@
 //! dir — IO, not pure — and only wraps the pure `effects_module_source` here).
 
 use crate::EffectDecl;
-use crate::{
-    ask_decl, console_decl, exec_decl, fs_decl, git_decl, http_decl, kv_decl, llm_decl, lsp_decl,
-    sg_decl, time_decl,
-};
 
-/// All standard effects in canonical order.
+/// THE single ordered source of the base effect stack (Ask excluded here — it
+/// is interposed separately by each server's `AskDispatcher`). Each row pairs
+/// the Haskell effect type name with its [`EffectDecl`] builder, in the ONE
+/// canonical order.
+///
+/// Both [`standard_decls`] (which derives the decl list, the `type M = Eff
+/// '[…]` string, and the `:vocab`/discoverability surface) and
+/// `tidepool_handlers::build_base_stack` (which builds the handler HList)
+/// expand THIS macro. Because the effect-list order and the handler-dispatch
+/// order come from the SAME sequence, they cannot desync — the freer-simple
+/// union-tag ↔ handler correspondence (a Locked Decision: tags index the
+/// effect list positionally) holds by construction, not by convention.
+///
+/// Invoke as `base_effects!(callback)`; the callback macro receives the rows
+/// `(Name, decl_fn), …` and expands them into whatever it needs — a
+/// `vec![…]` of decls, a `frunk::hlist![…]` of handlers, etc.
+///
+/// **Cutting / adding / reordering an effect is a single edit to THIS list.**
+#[macro_export]
+macro_rules! base_effects {
+    ($callback:ident) => {
+        $callback! {
+            (Console, console_decl),
+            (KV,      kv_decl),
+            (Fs,      fs_decl),
+            (Http,    http_decl),
+            (Exec,    exec_decl),
+            (Lsp,     lsp_decl),
+            (Llm,     llm_decl),
+            (Git,     git_decl),
+            (Time,    time_decl),
+        }
+    };
+}
+
+/// All standard effects in canonical order (the base stack + the interposed
+/// `Ask` effect appended last). Derived from the single-source [`base_effects!`]
+/// list — do not hand-maintain a parallel order here.
 pub fn standard_decls() -> Vec<EffectDecl> {
-    vec![
-        console_decl(),
-        kv_decl(),
-        fs_decl(),
-        sg_decl(),
-        http_decl(),
-        exec_decl(),
-        lsp_decl(),
-        llm_decl(),
-        git_decl(),
-        time_decl(),
-        ask_decl(),
-    ]
+    macro_rules! std_decls_rows {
+        ($(($name:ident, $decl:ident)),* $(,)?) => {
+            vec![ $( $crate::$decl() ),*, $crate::ask_decl() ]
+        };
+    }
+    crate::base_effects!(std_decls_rows)
 }
 
 /// Generate the Haskell module preamble that wraps user code in `eval` calls.
@@ -111,7 +137,6 @@ pub fn uses_qq(src: &str) -> bool {
     src.contains("[fmt|")
         || src.contains("[j|")
         || src.contains("[patch|")
-        || src.contains("[sg|")
         || src.contains("[uri|")
 }
 
@@ -494,8 +519,8 @@ mod tests {
     // can be hit directly: determinism, structural invariants, and the
     // failure-class ordering rule.
 
-    /// The five quasi-quoter open-tokens `uses_qq` must recognize.
-    const QQ_TOKENS: &[&str] = &["[fmt|", "[j|", "[patch|", "[sg|", "[uri|"];
+    /// The four quasi-quoter open-tokens `uses_qq` must recognize.
+    const QQ_TOKENS: &[&str] = &["[fmt|", "[j|", "[patch|", "[uri|"];
 
     /// Signal/yield marker pools mirroring the private `const`s inside
     /// `classify_error_text` — kept here so the property checks the same
@@ -520,7 +545,7 @@ mod tests {
         /// what surrounds it.
         #[test]
         fn prop_uses_qq_detects_every_token(
-            tok in 0usize..5,
+            tok in 0usize..4,
             prefix in "[a-zA-Z0-9 ]{0,40}",
             suffix in "[a-zA-Z0-9 ]{0,40}",
         ) {
@@ -639,7 +664,9 @@ mod tests {
         // Canonical order is load-bearing: handlers are tag-indexed by it.
         assert_eq!(a.first(), Some(&"Console"));
         assert_eq!(a.last(), Some(&"Ask"));
-        assert_eq!(a.len(), 11);
+        assert_eq!(a.len(), 10);
+        // SG was cut (friction #37); the stack must NOT contain it.
+        assert!(!a.contains(&"SG"), "SG should have been removed from the stack");
     }
 
     #[test]
@@ -649,10 +676,11 @@ mod tests {
         assert!(uses_qq("case v of [j|{\"k\": $x}|] -> pure x"));
         // wave-4 quoters: patch + the validators (glob omitted — see Validate.hs)
         assert!(uses_qq("apply [patch|--- a/x|]"));
-        assert!(uses_qq("pure [sg|fn $NAME|]"));
         assert!(uses_qq("pure [uri|https://x|]"));
-        // a glob-quoter token is NOT special (the quoter was dropped)
+        // dropped quoters are NOT special: glob (removed) and sg (cut with the
+        // SG effect) must both classify as non-QQ.
         assert!(!uses_qq("pure [glob|src/*.rs|]"));
+        assert!(!uses_qq("pure [sg|fn $NAME|]"));
         // list comprehensions with conventional spacing are NOT tokens
         assert!(!uses_qq("pure [x | x <- xs]"));
         assert!(!uses_qq("pure [ fmt | fmt <- fs ]"));

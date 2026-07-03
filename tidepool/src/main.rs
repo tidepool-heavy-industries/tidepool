@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rmcp::{model::*, service::RequestContext, ErrorData as McpError, RoleServer, ServerHandler};
 use tidepool_handlers::{
     ConsoleHandler, ExecHandler, FsHandler, HandlerConfig, HttpHandler, KvHandler, LlmHandler,
-    LspHandler, MetaHandler, SgHandler,
+    LspHandler, MetaHandler,
 };
 use tidepool_mcp::TidepoolMcpServer;
 
@@ -381,7 +381,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ConsoleHandler,
             KvHandler::new(handler_cfg.kv_path.clone()),
             FsHandler::new(handler_cfg.cwd.clone()),
-            SgHandler::new(handler_cfg.cwd.clone()),
             HttpHandler,
             ExecHandler::new(handler_cfg.cwd.clone()),
             LspHandler::new(handler_cfg.cwd.clone()),

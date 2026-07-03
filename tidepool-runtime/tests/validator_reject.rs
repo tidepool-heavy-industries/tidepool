@@ -1,6 +1,6 @@
-//! Validator quasi-quoter rejections: `[sg|]` and `[uri|]` move a class of
-//! silent runtime traps (ast-grep's `$$NAME` no-match, scheme-less URIs) to
-//! COMPILE-time splice errors. A rejected body fails the GHC splice, so
+//! Validator quasi-quoter rejections: `[uri|]` moves a class of silent runtime
+//! traps (scheme-less URIs) to COMPILE-time splice errors. A rejected body
+//! fails the GHC splice, so
 //! `compile_and_run` returns `Err` whose text carries the message. Reject cases
 //! cannot be CBOR fixtures (they never compile), so they are asserted here; the
 //! accept cases live in the Suite fixtures.
@@ -38,7 +38,7 @@ fn try_compile(hole: &str) -> Result<(), String> {
         &pre,
         &stack,
         &tidepool_mcp::wrap_do(&code),
-        "Tidepool.QQ (fmt, j, patch, sg, uri)",
+        "Tidepool.QQ (fmt, j, patch, uri)",
         "",
         None,
         None,
@@ -70,24 +70,6 @@ fn validator_rejects() {
 }
 
 fn run() {
-    // --- sg: the documented $$NAME silent-no-match trap ---
-    let err =
-        try_compile("[sg|fn $$NAME|]").expect_err("[sg|$$NAME|] must be rejected at compile time");
-    assert!(
-        err.contains("$$$NAME") && err.contains("$NAME"),
-        "sg '$$' rejection should suggest both $$$NAME (multi) and $NAME (single); got:\n{err}"
-    );
-    // sg: lowercase metavariable name.
-    let err = try_compile("[sg|fn $name|]").expect_err("[sg|$name|] (lowercase) must be rejected");
-    assert!(
-        err.to_lowercase().contains("uppercase"),
-        "sg lowercase rejection should mention UPPERCASE; got:\n{err}"
-    );
-    // sg: unbalanced bracket.
-    try_compile("[sg|foo($BAR|]").expect_err("[sg|] with an unbalanced bracket must be rejected");
-    // sg: a valid pattern compiles and runs.
-    try_compile("[sg|fn $NAME($$$ARGS)|]").expect("a valid ast-grep pattern should compile");
-
     // --- uri: scheme + host + no whitespace ---
     let err = try_compile("[uri|example.com/x|]").expect_err("a scheme-less URI must be rejected");
     assert!(

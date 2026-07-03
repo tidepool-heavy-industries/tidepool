@@ -152,7 +152,7 @@ pub fn fs_decl() -> EffectDecl {
             "getCurrentDirectory :: M FilePath\ngetCurrentDirectory = do { p <- run \"pwd\"; pure (T.strip p.stdout) }",
             "glob :: FilePath -> M [FilePath]\nglob = send . FsGlob",
             "-- | Alias of `glob` — expand a glob to matching paths.\nfsGlob :: FilePath -> M [FilePath]\nfsGlob = send . FsGlob",
-            "-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob\n-- SECOND — a path glob like \"*.rs\" goes in arg 2, not arg 1. Returns [Hit]\n-- {path, line, text} (same shape as sgFind's matchLocs, so it composes with\n-- hitsByFile/refs). NB regex metachars are double-escaped here (JSON x Haskell),\n-- so a literal dot needs four backslashes; the handler error shows the exact\n-- form if you get it wrong.\ngrepGlob :: Text -> FilePath -> M [Hit]\ngrepGlob pat g = map (\\(f, l, t) -> Hit f l t) <$> send (FsGrep pat g)",
+            "-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob\n-- SECOND — a path glob like \"*.rs\" goes in arg 2, not arg 1. Returns [Hit]\n-- {path, line, text} (the shared Hit shape, so it composes with\n-- hitsByFile/refs). NB regex metachars are double-escaped here (JSON x Haskell),\n-- so a literal dot needs four backslashes; the handler error shows the exact\n-- form if you get it wrong.\ngrepGlob :: Text -> FilePath -> M [Hit]\ngrepGlob pat g = map (\\(f, l, t) -> Hit f l t) <$> send (FsGrep pat g)",
             // --- Editing: exact str-replace (the common case; mirrors the Edit tool) ---
             "-- | Exact str-replace, EXACTLY-ONCE: applies, or errors with a precise\n-- reason (not-found / ambiguous). The trained Edit-tool shape: no news is\n-- good news. Pass enough surrounding text that `old` is unique. Use planUpdate\n-- to review the diff first; the full editing surface is in tidepool://edits.\nupdate :: FilePath -> Text -> Text -> M ()\nupdate path old new\n  | T.null old = error \"update: 'old' must be non-empty\"\n  | otherwise = do\n      src <- readFile path\n      case len (T.splitOn old src) - 1 of\n        0 -> error (\"update: 'old' not found in \" <> path)\n        1 -> writeFile path (replace old new src)\n        n -> error (\"update: 'old' matches \" <> show n <> \" places in \" <> path <> \" (add surrounding context to disambiguate)\")",
             "-- | Replace EVERY occurrence of `old`; returns the count. Errors if zero.\nupdateAll :: FilePath -> Text -> Text -> M Int\nupdateAll path old new\n  | T.null old = error \"updateAll: 'old' must be non-empty\"\n  | otherwise = do\n      src <- readFile path\n      let n = len (T.splitOn old src) - 1\n      if n == 0 then error (\"updateAll: 'old' not found in \" <> path)\n                else writeFile path (replace old new src) >> pure n",
@@ -164,77 +164,6 @@ pub fn fs_decl() -> EffectDecl {
     }
 }
 
-/// Structural grep (ast-grep) effect.
-pub fn sg_decl() -> EffectDecl {
-    EffectDecl {
-        type_name: "SG",
-        description: concat!(
-            "Structural code search via ast-grep. ",
-            "Use patterns with $VAR for single-node captures and $$$VAR for multi-node. ",
-            "Pass the language as a Lang DATA CONSTRUCTOR (e.g. `Rust`, `Python`), not a string. ",
-            "Supported: Rust | Python | TypeScript | JavaScript | Go | Java | C | Cpp | Haskell | Nix | Html | Css | Json | Yaml | Toml. ",
-            "Example: hsDef \"filter\" [\"haskell/lib\"] returns the definition of filter with file/line. ",
-            "Use grepGlob for structured text-level search with regex and filename globbing.",
-        ),
-        type_defs: &[
-            "data Lang = Rust | Python | TypeScript | JavaScript | Go | Java | C | Cpp | Haskell | Nix | Html | Css | Json | Yaml | Toml",
-            // matchVarsList is the wire field the bridge fills (a list of pairs);
-            // matchVars is the Map-typed accessor models actually reach for
-            // (`Map.lookup \"NAME\" (matchVars m)`). Map.fromList reuses Data.Map's
-            // own balancing in the JIT — no Rust-side tree build needed.
-            "data Match = Match { matchText :: Text, matchFile :: Text, matchLine :: Int, matchVarsList :: [(Text, Text)], matchReplacement :: Text }",
-            "matchVars :: Match -> Map Text Text",
-            "matchVars = Map.fromList . matchVarsList",
-            "instance ToJSON Match where\n  toJSON m@(Match t f l _ r) = object ([\"text\" .= t, \"file\" .= f, \"line\" .= l] ++ (let vs = matchVars m in if Map.null vs then [] else [\"vars\" .= toJSON vs]) ++ (if T.null r then [] else [\"replacement\" .= r]))",
-            "var :: Match -> Text -> Text",
-            "var m k = Map.findWithDefault \"\" k (matchVars m)",
-            // Compact projectors: a survey shape that mirrors grepGlob's [Hit]
-            // so it composes with hitsByFile/refs and does NOT flood context with
-            // full match bodies. The [Match] stays live in the same eval, so
-            // drilling into a chosen match is free.
-            "-- | Compact location of one match as a `Hit` {path, line, text}\n-- (text = first line of the match).\nmatchLoc :: Match -> Hit\nmatchLoc m = Hit (matchFile m) (matchLine m) (T.takeWhile (/= '\\n') (matchText m))",
-            "-- | Compact survey of matches: [Hit] — same shape as grepGlob. Browse with\n-- this, then index back into the [Match] for full detail.\nmatchLocs :: [Match] -> [Hit]\nmatchLocs = map matchLoc",
-        ],
-        constructors: &[
-            "SgFind    :: Lang -> Text -> [Text] -> SG [Match]",
-            "SgRuleFind    :: Lang -> Value -> [Text] -> SG [Match]",
-            "SgPlan    :: Lang -> Text -> Text -> [Text] -> SG [Match]",
-            "SgApply    :: Lang -> Text -> Text -> [Text] -> SG Int",
-        ],
-        helpers: &[
-            "sgFind :: Lang -> Text -> [Text] -> M [Match]\nsgFind l p fs = send (SgFind l p fs)",
-            "-- | Dry-run structural rewrite: matches with replacements, NO writes.\nplanRw :: Lang -> Text -> Text -> [Text] -> M [Match]\nplanRw l p r fs = send (SgPlan l p r fs)",
-            "-- | Apply a structural rewrite in place. Run planRw first to preview the matches.\napplyRw :: Lang -> Text -> Text -> [Text] -> M Int\napplyRw l p r fs = send (SgApply l p r fs)",
-            "sgRuleFind :: Lang -> Value -> [Text] -> M [Match]\nsgRuleFind l r fs = send (SgRuleFind l r fs)",
-            "rPat :: Text -> Value\nrPat p = object [\"pattern\" .= p]",
-            "rKind :: Text -> Value\nrKind k = object [\"kind\" .= k]",
-            "rRegex :: Text -> Value\nrRegex r = object [\"regex\" .= r]",
-            "rHas :: Value -> Value\nrHas r = object [\"has\" .= (r .+. object [\"stopBy\" .= (\"end\" :: Text)])]",
-            "rHasChild :: Value -> Value\nrHasChild r = object [\"has\" .= r]",
-            "rInside :: Value -> Value\nrInside r = object [\"inside\" .= (r .+. object [\"stopBy\" .= (\"end\" :: Text)])]",
-            "rInsideParent :: Value -> Value\nrInsideParent r = object [\"inside\" .= r]",
-            "rFollows :: Value -> Value\nrFollows r = object [\"follows\" .= r]",
-            "rPrecedes :: Value -> Value\nrPrecedes r = object [\"precedes\" .= r]",
-            "rAll :: [Value] -> Value\nrAll rs = object [\"all\" .= rs]",
-            "rAny :: [Value] -> Value\nrAny rs = object [\"any\" .= rs]",
-            "rNot :: Value -> Value\nrNot r = object [\"not\" .= r]",
-            // Object merge (primary combinator) — left-biased key union
-            "infixr 6 .+.\n(.+.) :: Value -> Value -> Value\n(.+.) (Object a) (Object b) = Object (KM.unionWith const a b)\n(.+.) a _ = a",
-            // Conjunction / Disjunction
-            "infixr 5 .&.\n(.&.) :: Value -> Value -> Value\na .&. b = object [\"all\" .= [a, b]]",
-            "infixr 4 .|.\n(.|.) :: Value -> Value -> Value\na .|. b = object [\"any\" .= [a, b]]",
-            // Relational operators
-            "infixl 7 ?>\n(?>) :: Value -> Value -> Value\nparent ?> child = parent .+. rHas child",
-            "infixl 7 <?\n(<?) :: Value -> Value -> Value\nchild <? ancestor = child .+. rInside ancestor",
-            // Extra field helpers
-            "rField :: Text -> Value\nrField name = object [\"field\" .= name]",
-            // Recipes
-            "-- | Find a Haskell function definition by name.\nhsDef :: Text -> [Text] -> M [Match]\nhsDef name paths = sgRuleFind Haskell (rAll [rKind \"function\", rHas (rField \"name\" .+. rRegex (\"^\" <> name <> \"$\"))]) paths",
-            "-- | Find a Haskell function signature by name.\nhsSig :: Text -> [Text] -> M [Match]\nhsSig name paths = sgRuleFind Haskell (rAll [rKind \"signature\", rHas (rField \"name\" .+. rRegex (\"^\" <> name <> \"$\"))]) paths",
-            "-- | Find a Rust function definition by name.\nrsFn :: Text -> [Text] -> M [Match]\nrsFn name paths = sgRuleFind Rust (rAll [rKind \"function_item\", rHas (rField \"name\" .+. rRegex (\"^\" <> name <> \"$\"))]) paths",
-        ],
-    }
-}
 
 /// LSP effect: a node-addressed semantic code graph via the `tidepool-lsp-daemon`.
 ///

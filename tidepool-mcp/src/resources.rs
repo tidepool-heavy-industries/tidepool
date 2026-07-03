@@ -180,7 +180,7 @@ fn help_index(ctx: &ResourceCtx) -> String {
         "# help topics\n\nCall `help` with one of:\n\
          - `guide`     — how to write eval code (the M-a model, returning JSON, the input lane)\n\
          - `schema`    — the Schema grammar + ask/llm/tryLlm\n\
-         - `edits`     — editing verbs (update, planUpdate, the Edit DSL, diffs, ast-grep)\n\
+         - `edits`     — editing verbs (update, planUpdate, the Edit DSL, diffs)\n\
          - `vocab`     — every verb signature in scope (effects + project library)\n\
          - `patterns`  — worked examples\n\
          - `effect <Name>`   — one effect's constructors + helpers\n\
@@ -318,9 +318,9 @@ fn edits_md() -> String {
         "conflicts as data). The `[patch|...|]` quasiquoter builds one inline, but quoted bodies must be ",
         "LEFT-ALIGNED and can't contain `|]` — so ride the `input` lane for any non-trivial diff: ",
         "`applyDiff (case input of { String s -> s; _ -> \"\" })`. `genPatchTo path newContent` generates the diff for you.\n\n",
-        "## 4. Syntax-aware (AST) — rename across scopes, structural rewrite\n",
-        "When you need to match CODE STRUCTURE rather than text (rename only the real identifier, not ",
-        "strings/comments), use ast-grep: see `tidepool://effect/SG` (`hsDef`/`rsFn`/`sgRuleFind`/`planRw`).\n",
+        "## 4. Semantic (LSP) — rename across scopes\n",
+        "When you need to rename the real symbol across scopes (not a text match that also hits ",
+        "strings/comments), use the Lsp effect: `lspWhere`/`lspRename` — see `tidepool://effect/Lsp`.\n",
     ))
 }
 

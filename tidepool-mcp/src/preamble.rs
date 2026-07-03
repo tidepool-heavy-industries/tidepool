@@ -264,7 +264,6 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     let has_console = effects.iter().any(|e| e.type_name == "Console");
     let has_kv = effects.iter().any(|e| e.type_name == "KV");
     let has_fs = effects.iter().any(|e| e.type_name == "Fs");
-    let has_sg = effects.iter().any(|e| e.type_name == "SG");
 
     out.push_str("-- Pagination\n");
     out.push_str(concat!("showI :: Int -> Text\n", "showI n = show n\n",));
@@ -511,14 +510,6 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
             "fileContains path needle = T.isInfixOf needle <$> readFile path\n",
         ));
     }
-    if has_sg {
-        out.push_str(concat!(
-            "searchProcess :: Lang -> Text -> [Text] -> (Match -> M a) -> M [a]\n",
-            "searchProcess lang pat paths process = do\n",
-            "  matches <- sgFind lang pat paths\n",
-            "  mapM process matches\n",
-        ));
-    }
     if has_exec {
         out.push_str("runChecked :: Text -> M Text\nrunChecked = readProcess\n");
         out.push_str(concat!(
@@ -624,7 +615,7 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
     if !effects.is_empty() {
         desc.push_str(concat!(
             "\nPrefer typed effects for common operations: `glob`/`grepGlob` (Fs) for ",
-            "filesystem search, `sgFind` (SG) for structural code search, `lspWhere`/",
+            "filesystem and structured text search, `lspWhere`/",
             "`lspDefs` (Lsp) for symbol navigation. Use `run \"...\"` only as a shell ",
             "fallback for things the typed effects don\u{2019}t cover.\n",
             "Effects (invoke via the helper verbs; read tidepool://effect/{name} for each one\u{2019}s constructors + helpers):\n",
@@ -648,7 +639,7 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         desc.push_str(concat!(
             "\nEdit files: `update path old new` — exact str-replace, errors if the text is ",
             "not-found or ambiguous (add surrounding context); `planUpdate` previews the diff. ",
-            "The full editing surface (Edit DSL, diffs, ast-grep) is in tidepool://edits.\n",
+            "The full editing surface (Edit DSL, diffs) is in tidepool://edits.\n",
         ));
 
         desc.push_str(concat!(
