@@ -1419,6 +1419,16 @@ impl Session {
                         "source": "session",
                     }));
                 }
+                // 3b. Session-defined values/functions (`f x = …`). These are
+                // decls, not bindings or types, so they fell through to a total
+                // miss before — the exact place a caller reaches for `:i`. (#318)
+                if let Some(src) = self.lib.decl_value_source(name) {
+                    return TurnOutcome::Meta(serde_json::json!({
+                        "name": name,
+                        "shape": src,
+                        "source": "session",
+                    }));
+                }
                 // 4. Stdlib/preamble types (`Proc`, `Hit`, `Doc`, … — source-scanned
                 // from the same include dirs the session compiles against).
                 if let Some(info) = crate::introspect::stdlib_info(&self.cfg.base_include, name) {

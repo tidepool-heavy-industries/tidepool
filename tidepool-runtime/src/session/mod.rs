@@ -174,6 +174,25 @@ impl SessionLib {
             .map(String::as_str)
     }
 
+    /// Source text of the most recent declaration turn that introduces a
+    /// value/function named `name` (via `ExportItem::Value`). Returns `None` if
+    /// no such declaration exists. Used by `:i <name>` to surface
+    /// session-defined function/value definitions (#318).
+    #[must_use]
+    pub fn decl_value_source(&self, name: &str) -> Option<&str> {
+        self.log
+            .turns
+            .iter()
+            .rev()
+            .find(|t| {
+                t.items
+                    .iter()
+                    .any(|item| matches!(item, ExportItem::Value { name: n } if n == name))
+            })
+            .and_then(|t| t.sources.first())
+            .map(String::as_str)
+    }
+
     /// Every declaration turn's source text, in order — the replayable decl
     /// half of a `:program` notebook repaint.
     #[must_use]
