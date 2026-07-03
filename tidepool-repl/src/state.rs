@@ -18,9 +18,24 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use tidepool_mcp::CapturedOutput;
 
 use crate::ask::{PauseGate, ResumeMsg, WorkerMessage};
+
+/// An in-turn `ask` continuation id (`scont_<n>`). A minted-once identity, not a
+/// free-form string: it is compared and routed as this newtype rather than a
+/// bare `String`. `#[serde(transparent)]` keeps the wire form a plain string, so
+/// `continuation_id` request/response JSON is byte-identical.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(transparent)]
+pub struct ContinuationId(pub String);
+
+impl std::fmt::Display for ContinuationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// Shared, lockable per-session state. One per session, owned by the
 /// `SessionManager` entry; the server clones the `Arc` out and transitions under
@@ -59,7 +74,7 @@ pub enum SessionState {
 /// [`SessionState::Suspended`]; this is exactly the payload the retired
 /// `ReplContinuation` carried.
 pub struct Suspension {
-    pub cont_id: String,
+    pub cont_id: ContinuationId,
     pub response_tx: std::sync::mpsc::Sender<ResumeMsg>,
     pub session_rx: tokio::sync::mpsc::UnboundedReceiver<WorkerMessage>,
     pub gate: Arc<PauseGate>,
@@ -85,6 +100,24 @@ impl SessionState {
             SessionState::Suspended(s) => format!("suspended (continuation {})", s.cont_id),
             SessionState::Wedged { .. } => "wedged (a turn timed out)".into(),
             SessionState::Closing => "closing".into(),
+        }
+    }
+}
+
+/// If `state` is `Suspended`, transition it to `Busy` and return the owned
+/// [`Suspension`]; otherwise leave it untouched and return `None`.
+///
+/// The resume/abort paths call this AFTER confirming `Suspended` under the same
+/// lock, so the `None` case is unreachable there — but returning an `Option`
+/// (rather than a re-`match` + `unreachable!`) makes "already checked" a type
+/// guarantee at the call site instead of a panic waiting to fire.
+pub fn take_suspension(state: &mut SessionState) -> Option<Box<Suspension>> {
+    match std::mem::replace(state, SessionState::Busy) {
+        SessionState::Suspended(s) => Some(s),
+        other => {
+            // Not suspended — restore what we displaced and report the miss.
+            *state = other;
+            None
         }
     }
 }

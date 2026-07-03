@@ -29,7 +29,7 @@ use tokio::time::{timeout, Duration};
 use crate::ask::{PauseGate, ResumeMsg, WorkerMessage};
 use crate::command::{BlockItem, DeclText, ExprText, MetaCommand, SessionCommand};
 use crate::session::{SessionConfig, DEFAULT_NURSERY_SIZE};
-use crate::state::{SessionState, SharedState, Suspension};
+use crate::state::{take_suspension, ContinuationId, SessionState, SharedState, Suspension};
 use crate::worker::{
     empty_cancel_slot, spawn_worker, CancelSlot, SessionManager, WorkerHandle, WorkerJob,
 };
@@ -105,7 +105,7 @@ pub struct SessionCloseRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionResumeRequest {
-    pub continuation_id: String,
+    pub continuation_id: ContinuationId,
     #[serde(default)]
     pub response: serde_json::Value,
     /// Session name (default: `"default"`).
@@ -115,7 +115,7 @@ pub struct SessionResumeRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionAbortRequest {
-    pub continuation_id: String,
+    pub continuation_id: ContinuationId,
     #[serde(default)]
     pub reason: Option<String>,
     /// Session name (default: `"default"`).
@@ -440,11 +440,11 @@ impl TidepoolReplServer {
         }
     }
 
-    fn next_continuation_id(&self) -> String {
-        format!(
+    fn next_continuation_id(&self) -> ContinuationId {
+        ContinuationId(format!(
             "scont_{}",
             self.inner.next_cont_id.fetch_add(1, Ordering::Relaxed)
-        )
+        ))
     }
 
     // -- tool handlers -----------------------------------------------------
@@ -753,10 +753,13 @@ impl TidepoolReplServer {
                 }
                 tidepool_mcp::validate::Outcome::Valid(canonical) => {
                     // Take the suspension out → Busy (the turn is resuming).
-                    let SessionState::Suspended(s) =
-                        std::mem::replace(&mut *st, SessionState::Busy)
-                    else {
-                        unreachable!("checked Suspended under the same lock")
+                    // Suspended was confirmed under this same lock above, so this
+                    // yields the payload without a re-match-and-panic.
+                    let Some(s) = take_suspension(&mut st) else {
+                        return Err(McpError::internal_error(
+                            "session state changed under lock (expected Suspended)",
+                            None,
+                        ));
                     };
                     let s = *s;
                     if s.response_tx.send(ResumeMsg::Answer(canonical)).is_err() {
@@ -828,8 +831,12 @@ impl TidepoolReplServer {
                     ));
                 }
             }
-            let SessionState::Suspended(s) = std::mem::replace(&mut *st, SessionState::Busy) else {
-                unreachable!("checked Suspended under the same lock")
+            // Suspended was confirmed under this same lock above.
+            let Some(s) = take_suspension(&mut st) else {
+                return Err(McpError::internal_error(
+                    "session state changed under lock (expected Suspended)",
+                    None,
+                ));
             };
             let s = *s;
             if s.response_tx.send(ResumeMsg::Abort(reason)).is_err() {

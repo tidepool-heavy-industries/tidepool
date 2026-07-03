@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::JitEffectMachine;
+use tidepool_codegen::old_space::RootSlot;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_mcp::{
     input_binding_source, library_vocab, template_haskell_show_default, CapturedOutput, EffectDecl,
@@ -36,7 +37,8 @@ use tidepool_runtime::session::{
 use tidepool_runtime::{compile_haskell_salted, value_to_json};
 
 use crate::command::{
-    BlockItem, BlockItemResult, ExprText, MetaCommand, SessionCommand, TurnOutcome,
+    BlockItem, BlockItemResult, BoundComponent, ExprText, ItemKind, MetaCommand, ResponseShape,
+    SessionCommand, TurnOutcome,
 };
 
 /// Default session nursery: 64 MiB (matches the eval runtime default).
@@ -113,6 +115,34 @@ struct PureBind {
     type_display: String,
     defining_expr: String,
     gen: Generation,
+}
+
+/// One run item's outcome inside `run_block`: its position, classified kind, and
+/// the [`TurnOutcome`] it produced. Replaces the positional
+/// `(usize, &'static str, TurnOutcome)` tuple the block-runner used to carry.
+struct ItemRun {
+    index: usize,
+    kind: ItemKind,
+    outcome: TurnOutcome,
+}
+
+/// How a reference fragment is executed: `Effectful` runs the effect tree via
+/// `run_fragment`; `Pure` runs it with no effects via `run_fragment_pure`.
+/// Replaces the `pure: bool` flag `run_reference_fragment` used to take.
+#[derive(Clone, Copy)]
+enum EvalMode {
+    Effectful,
+    Pure,
+}
+
+/// Map a binder's [`ValueTier`] to the [`BoundValue`] wrapping its root slot —
+/// the single source of truth for the tier → bound-value expansion (was a bool
+/// round-trip at each bind site).
+fn bound_value(tier: ValueTier, slot: RootSlot) -> BoundValue {
+    match tier {
+        ValueTier::Tier0Data => BoundValue::Tier0Forced(slot),
+        ValueTier::Tier1Closure => BoundValue::Tier1Closure(slot),
+    }
 }
 
 impl Session {
@@ -224,6 +254,27 @@ impl Session {
         Ok(())
     }
 
+    /// Bind `entry` on the value (materialized) plane, EVICTING any pure
+    /// decl-plane binding of the same name in the same step. The live
+    /// environment is split across two planes — `bindings` (value) and
+    /// `pure_binds` (decl) — with the invariant that a name lives in AT MOST
+    /// one. That invariant is enforced HERE (and in [`Self::bind_pure`]) so the
+    /// bind sites can't smear a name across both planes by forgetting the paired
+    /// cross-plane removal.
+    fn bind_materialized(&mut self, entry: BindingEntry) {
+        self.pure_binds.remove(&entry.name.0);
+        self.bindings.bind(entry);
+    }
+
+    /// Register `pb` on the decl (pure) plane under `name`, EVICTING any
+    /// materialized value-plane binding of the same name from the current view.
+    /// The dual of [`Self::bind_materialized`] — the single site that upholds
+    /// the one-name-one-plane invariant for pure binds.
+    fn bind_pure(&mut self, name: &str, pb: PureBind) {
+        self.bindings.remove_current(name);
+        self.pure_binds.insert(name.to_string(), pb);
+    }
+
     /// Run one non-`Close` turn. Errors are folded into [`TurnOutcome::Error`]
     /// (the worker maps that to an MCP error result); an in-turn `ask` suspends
     /// through `handlers` (the [`crate::ask::ReplAskDispatcher`]), not here.
@@ -251,19 +302,23 @@ impl Session {
         }
     }
 
-    /// Whether an item is a top-level DECLARATION (batches into a decl run) as
-    /// opposed to a bind/expression/meta (a singleton). A keyword decl is one
-    /// lexically; an `Auto` item is one iff GHC's parser — the single authority
-    /// (`Tidepool.Binders.classifyTurn`, decl+stmt contexts) — classifies it as
-    /// a declaration. This parse verdict, not the coarse `Auto` tag, is what
-    /// excludes a trailing call from a decl batch. On a classify failure
-    /// (extractor unavailable), fall back to NOT decl-shaped so the item takes
-    /// the resilient per-item path.
-    fn is_decl_shaped(&self, item: &BlockItem) -> bool {
+    /// The declaration text of an item that is a top-level DECLARATION (and so
+    /// batches into a decl run), or `None` for a bind/expression/meta (a
+    /// singleton). A keyword decl is one lexically; an `Auto` item is one iff
+    /// GHC's parser — the single authority (`Tidepool.Binders.classifyTurn`,
+    /// decl+stmt contexts) — classifies it as a declaration. This parse verdict,
+    /// not the coarse `Auto` tag, is what excludes a trailing call from a decl
+    /// batch. On a classify failure (extractor unavailable), the `Auto` item is
+    /// NOT decl-shaped so it takes the resilient per-item path.
+    ///
+    /// Returning the text (rather than a bool) lets the segment scan CARRY the
+    /// decl sources as it walks, so the batch path never re-derives "this is a
+    /// Decl/Auto" with a panicking match.
+    fn decl_shaped_text<'a>(&self, item: &'a BlockItem) -> Option<&'a str> {
         match item {
-            BlockItem::Decl(_) => true,
-            BlockItem::Auto(e) => classify_turn(&e.0).is_ok_and(|c| c.is_decl),
-            BlockItem::Stmt(_) | BlockItem::Meta(_) => false,
+            BlockItem::Decl(d) => Some(&d.0),
+            BlockItem::Auto(e) if classify_turn(&e.0).is_ok_and(|c| c.is_decl) => Some(&e.0),
+            BlockItem::Auto(_) | BlockItem::Stmt(_) | BlockItem::Meta(_) => None,
         }
     }
 
@@ -308,68 +363,79 @@ impl Session {
             // OUT of the decl batch: it classifies as an expression, ends the run,
             // and lands on the stmt path (the tool's "define then call in one
             // block" idiom).
-            let segment: Vec<(usize, &'static str, TurnOutcome)> =
-                if self.is_decl_shaped(&items[index]) {
-                    let start = index;
-                    let mut end = index + 1;
-                    while end < items.len() && self.is_decl_shaped(&items[end]) {
-                        end += 1;
-                    }
-                    let texts: Vec<String> = items[start..end]
-                        .iter()
-                        .map(|it| match it {
-                            BlockItem::Decl(d) => d.0.clone(),
-                            BlockItem::Auto(e) => e.0.clone(),
-                            _ => unreachable!("a decl-shaped segment is Decl/Auto only"),
-                        })
-                        .collect();
-
-                    // Try to elaborate the whole run as one generation. Every item is
-                    // parser-confirmed a declaration, so the batch is not poisoned by
-                    // a stray expression; a failure here is a genuine type/scope error
-                    // and falls to the per-item path for a precise, per-item message.
-                    let batched = if texts.len() >= 2 {
-                        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-                        self.lib.define_batch(&refs).ok()
-                    } else {
-                        None
-                    };
-
-                    index = end;
-                    match batched {
-                        Some(gen) => texts
-                            .iter()
-                            .enumerate()
-                            .map(|(k, t)| {
-                                (
-                                    start + k,
-                                    "decl",
-                                    self.defined_outcome(decl_head(t).to_string(), gen),
-                                )
-                            })
-                            .collect(),
-                        None => {
-                            // Fallback: per-item, stopping the whole block on
-                            // the first error (matched by the outer break).
-                            let mut out = Vec::with_capacity(texts.len());
-                            for (k, it) in items[start..end].iter().enumerate() {
-                                let (kind, outcome) = self.run_one_item(it, handlers, captured);
-                                let err = outcome.is_error();
-                                out.push((start + k, kind, outcome));
-                                if err {
-                                    break;
-                                }
-                            }
-                            out
+            let segment: Vec<ItemRun> = if let Some(first) = self.decl_shaped_text(&items[index]) {
+                // Carry the decl sources as we scan the maximal decl-shaped run,
+                // so the batch path never re-matches items to recover their text.
+                let start = index;
+                let mut texts: Vec<String> = vec![first.to_string()];
+                let mut end = index + 1;
+                while end < items.len() {
+                    match self.decl_shaped_text(&items[end]) {
+                        Some(t) => {
+                            texts.push(t.to_string());
+                            end += 1;
                         }
+                        None => break,
                     }
+                }
+
+                // Try to elaborate the whole run as one generation. Every item is
+                // parser-confirmed a declaration, so the batch is not poisoned by
+                // a stray expression; a failure here is a genuine type/scope error
+                // and falls to the per-item path for a precise, per-item message.
+                let batched = if texts.len() >= 2 {
+                    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+                    self.lib.define_batch(&refs).ok()
                 } else {
-                    let (kind, outcome) = self.run_one_item(&items[index], handlers, captured);
-                    index += 1;
-                    vec![(index - 1, kind, outcome)]
+                    None
                 };
 
-            for (idx, kind, outcome) in segment {
+                index = end;
+                match batched {
+                    Some(gen) => texts
+                        .iter()
+                        .enumerate()
+                        .map(|(k, t)| ItemRun {
+                            index: start + k,
+                            kind: ItemKind::Decl,
+                            outcome: self.defined_outcome(decl_head(t).to_string(), gen),
+                        })
+                        .collect(),
+                    None => {
+                        // Fallback: per-item, stopping the whole block on
+                        // the first error (matched by the outer break).
+                        let mut out = Vec::with_capacity(texts.len());
+                        for (k, it) in items[start..end].iter().enumerate() {
+                            let (kind, outcome) = self.run_one_item(it, handlers, captured);
+                            let err = outcome.is_error();
+                            out.push(ItemRun {
+                                index: start + k,
+                                kind,
+                                outcome,
+                            });
+                            if err {
+                                break;
+                            }
+                        }
+                        out
+                    }
+                }
+            } else {
+                let (kind, outcome) = self.run_one_item(&items[index], handlers, captured);
+                index += 1;
+                vec![ItemRun {
+                    index: index - 1,
+                    kind,
+                    outcome,
+                }]
+            };
+
+            for ItemRun {
+                index: idx,
+                kind,
+                outcome,
+            } in segment
+            {
                 let ok = !outcome.is_error();
 
                 // Track the last value-producing expression result.
@@ -386,7 +452,7 @@ impl Session {
 
                 results.push(BlockItemResult {
                     index: idx,
-                    kind: kind.to_string(),
+                    kind,
                     ok,
                     result: slim_item_result(&outcome),
                     result_full: outcome.render(),
@@ -413,14 +479,20 @@ impl Session {
             }
         }
 
+        let shape = if verbose {
+            ResponseShape::Verbose {
+                generation: self.lib.generation().0,
+                val_gen: self.val_gen.0,
+            }
+        } else {
+            ResponseShape::Slim
+        };
         TurnOutcome::Block {
             items: results,
             value: last_value,
             last_type,
             last_truncated,
-            generation: self.lib.generation().0,
-            val_gen: self.val_gen.0,
-            verbose,
+            shape,
         }
     }
 
@@ -455,18 +527,17 @@ impl Session {
         match self.lib.define(&decl) {
             Ok(gen) => {
                 let type_display = self.probe_pure_type(name).unwrap_or_default();
-                // Register in the environment so :bindings/stale/etc. see it.
-                self.pure_binds.insert(
-                    name.to_string(),
+                // Register in the environment (decl plane) so :bindings/stale/etc.
+                // see it; `bind_pure` evicts any materialized binding of `name`
+                // from the value plane (cross-plane shadow, one-plane invariant).
+                self.bind_pure(
+                    name,
                     PureBind {
                         type_display: type_display.clone(),
                         defining_expr: expr_text.to_string(),
                         gen,
                     },
                 );
-                // Cross-plane shadow: a pure decl of `name` supersedes any
-                // materialized value binding of the same name.
-                self.bindings.remove_current(name);
                 Some(TurnOutcome::Bound {
                     name: name.to_string(),
                     type_display,
@@ -552,11 +623,11 @@ impl Session {
         item: &BlockItem,
         handlers: &mut H,
         captured: &CapturedOutput,
-    ) -> (&'static str, TurnOutcome) {
+    ) -> (ItemKind, TurnOutcome) {
         match item {
-            BlockItem::Decl(decl) => ("decl", self.run_def(&decl.0)),
-            BlockItem::Stmt(expr) => ("stmt", self.run_eval(&expr.0, handlers, captured)),
-            BlockItem::Meta(meta) => ("meta", self.run_meta(meta)),
+            BlockItem::Decl(decl) => (ItemKind::Decl, self.run_def(&decl.0)),
+            BlockItem::Stmt(expr) => (ItemKind::Stmt, self.run_eval(&expr.0, handlers, captured)),
+            BlockItem::Meta(meta) => (ItemKind::Meta, self.run_meta(meta)),
             BlockItem::Auto(expr) => {
                 // Try-cascade: attempt as declaration first. On a GHC parse
                 // error the item is not a decl → fall back to run_eval (bind
@@ -565,9 +636,9 @@ impl Session {
                 let def_result = self.run_def(&expr.0);
                 match def_result {
                     TurnOutcome::Error(ref msg) if is_parse_error(msg) => {
-                        ("stmt", self.run_eval(&expr.0, handlers, captured))
+                        (ItemKind::Stmt, self.run_eval(&expr.0, handlers, captured))
                     }
-                    other => ("decl", other),
+                    other => (ItemKind::Decl, other),
                 }
             }
         }
@@ -821,34 +892,31 @@ impl Session {
         let env = self.bindings.seed_external_env();
         self.turn_counter += 1;
         let frag_name = format!("repl_bind_{}", self.turn_counter);
-        let forced = matches!(binder.tier, ValueTier::Tier0Data);
 
         let machine = self.machine.as_mut().expect("machine bootstrapped above");
         let fid = match machine.add_function(&frag_name, &turn.expr, &self.session_table, &env) {
             Ok(f) => f,
             Err(e) => return TurnOutcome::Error(format!("JIT bind add_function error: {e}")),
         };
+        // `run_fragment_and_bind` still takes a `forced: bool` (a codegen API);
+        // the tier is the single source of truth — derive the flag at the call
+        // and expand the same tier back to a `BoundValue` via `bound_value`.
         let slot = match machine.run_fragment_and_bind(
             fid,
             &self.session_table,
             handlers,
             captured,
-            forced,
+            matches!(binder.tier, ValueTier::Tier0Data),
         ) {
             Ok(s) => s,
             Err(e) => return TurnOutcome::Error(format!("bind runtime error: {e}")),
         };
 
         self.val_gen = g;
-        let value = if forced {
-            BoundValue::Tier0Forced(slot)
-        } else {
-            BoundValue::Tier1Closure(slot)
-        };
-        // Cross-plane shadow: a materialized value binding supersedes any pure
-        // decl of the same name in the environment view.
-        self.pure_binds.remove(&name);
-        self.bindings.bind(BindingEntry {
+        let value = bound_value(binder.tier, slot);
+        // `bind_materialized` records the value binding AND evicts any pure decl
+        // of the same name (cross-plane shadow, one-plane invariant).
+        self.bind_materialized(BindingEntry {
             name: BindingName(name.clone()),
             id: SessionVarId::from_extract(binder.var_id),
             module: SessionModule::val(g),
@@ -959,15 +1027,10 @@ impl Session {
         self.val_gen = g;
         // Zip binders with their slots and record each component.
         // Tier is read from binder metadata (deep_force already handled NF).
-        let mut bound_names: Vec<(String, String)> = Vec::new();
+        let mut components: Vec<BoundComponent> = Vec::new();
         for (binder, slot) in turn.binders.iter().zip(slots.into_iter()) {
-            let value = if matches!(binder.tier, ValueTier::Tier0Data) {
-                BoundValue::Tier0Forced(slot)
-            } else {
-                BoundValue::Tier1Closure(slot)
-            };
-            self.pure_binds.remove(&binder.name);
-            self.bindings.bind(BindingEntry {
+            let value = bound_value(binder.tier, slot);
+            self.bind_materialized(BindingEntry {
                 name: BindingName(binder.name.clone()),
                 id: SessionVarId::from_extract(binder.var_id),
                 module: SessionModule::val(g),
@@ -976,11 +1039,12 @@ impl Session {
                 // The whole multi-bind turn defines each component (`(a,b) <- e`).
                 defining_expr: Some(turn_text.to_string()),
             });
-            bound_names.push((binder.name.clone(), binder.type_display.clone()));
+            components.push(BoundComponent {
+                name: binder.name.clone(),
+                type_display: binder.type_display.clone(),
+            });
         }
-        TurnOutcome::MultiBound {
-            components: bound_names,
-        }
+        TurnOutcome::MultiBound { components }
     }
 
     /// REFERENCE path (a bare expression mentioning session bindings). Try the
@@ -1022,7 +1086,13 @@ impl Session {
             Ok(turn) => {
                 // Eff-first succeeded: `captured_type` is `Eff '[…] a`; query inner `a`.
                 let inner_type = self.query_inner_type(expr_text);
-                self.run_reference_fragment(turn, inner_type, false, handlers, captured)
+                self.run_reference_fragment(
+                    turn,
+                    inner_type,
+                    EvalMode::Effectful,
+                    handlers,
+                    captured,
+                )
             }
             Err(_eff_err) => {
                 // Pure fallback. The Eff-first wrap is an internal routing detail
@@ -1046,7 +1116,13 @@ impl Session {
                         // Pure path: `captured_type` IS the inner type (`result = <expr>`
                         // has no Eff wrapper, so GHC infers the expression type directly).
                         let inner_type = turn.warnings.captured_type.clone();
-                        self.run_reference_fragment(turn, inner_type, true, handlers, captured)
+                        self.run_reference_fragment(
+                            turn,
+                            inner_type,
+                            EvalMode::Pure,
+                            handlers,
+                            captured,
+                        )
                     }
                     Err(pure_err) => TurnOutcome::Error(format!(
                         "compile error: {}",
@@ -1060,12 +1136,12 @@ impl Session {
     /// Run a compiled reference fragment on the resident machine, resolving any
     /// session binders through the seeded `ExternalEnv` (load-through-slot).
     /// `inner_type` is the caller-resolved inner value type (`a` in `M a`).
-    /// `pure` controls whether to execute via `run_fragment_pure` (no effects).
+    /// `mode` selects effectful (`run_fragment`) vs pure (`run_fragment_pure`).
     fn run_reference_fragment<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         turn: tidepool_runtime::session::SessionTurnResult,
         inner_type: Option<String>,
-        pure: bool,
+        mode: EvalMode,
         handlers: &mut H,
         captured: &CapturedOutput,
     ) -> TurnOutcome {
@@ -1097,10 +1173,11 @@ impl Session {
             Ok(f) => f,
             Err(e) => return TurnOutcome::Error(format!("JIT reference add_function error: {e}")),
         };
-        let run_result = if pure {
-            machine.run_fragment_pure(fid)
-        } else {
-            machine.run_fragment(fid, &self.session_table, handlers, captured)
+        let run_result = match mode {
+            EvalMode::Pure => machine.run_fragment_pure(fid),
+            EvalMode::Effectful => {
+                machine.run_fragment(fid, &self.session_table, handlers, captured)
+            }
         };
         match run_result {
             Ok(value) => {
@@ -2026,8 +2103,8 @@ fn slim_item_result(outcome: &TurnOutcome) -> serde_json::Value {
             "type": type_display,
         }),
         TurnOutcome::MultiBound { components } => serde_json::json!({
-            "bound": components.iter().map(|(n, _)| n).collect::<Vec<_>>(),
-            "types": components.iter().map(|(_, t)| t).collect::<Vec<_>>(),
+            "bound": components.iter().map(|c| &c.name).collect::<Vec<_>>(),
+            "types": components.iter().map(|c| &c.type_display).collect::<Vec<_>>(),
         }),
         TurnOutcome::Defined { head, stale, .. } => {
             let mut obj = serde_json::json!({ "decl": head });

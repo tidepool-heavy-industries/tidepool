@@ -6,7 +6,52 @@
 //! handlers. `SessionCommand::{Def,Eval,Cmd}` are kept as the per-item handler
 //! targets; `Block` is the new composite variant.
 
+use serde::Serialize;
 use serde_json::Value as Json;
+
+/// The classified kind of a block item, as reported in the per-item result
+/// (`kind` field). The wire strings are a user-visible contract; `serde` renders
+/// each variant to the exact lowercase spelling the slim/verbose shapes emit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ItemKind {
+    Decl,
+    Stmt,
+    Meta,
+}
+
+impl ItemKind {
+    /// The exact wire string for this kind (`"decl"` / `"stmt"` / `"meta"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ItemKind::Decl => "decl",
+            ItemKind::Stmt => "stmt",
+            ItemKind::Meta => "meta",
+        }
+    }
+}
+
+/// One component of a flat-tuple multi-bind (`(a, b) <- e` / `let (x, y) = e`):
+/// a bound name paired with its inferred type. Replaces the transposable
+/// `(String, String)` pair so name/type can't be read positionally at the two
+/// render sites.
+#[derive(Clone, Debug)]
+pub struct BoundComponent {
+    pub name: String,
+    pub type_display: String,
+}
+
+/// The response shape a `session_run` block renders to. The verbose diagnostic
+/// shape carries the generation counters it needs; the slim (default) shape does
+/// not — so the counters live INSIDE `Verbose`, never alongside a slim result.
+#[derive(Clone, Debug)]
+pub enum ResponseShape {
+    /// Slim default: inline per-item fields, no generation counters.
+    Slim,
+    /// Full diagnostic shape: per-item `index` + double-encoded `result` string,
+    /// plus the declaration / value-binding generation counters at completion.
+    Verbose { generation: u64, val_gen: u64 },
+}
 
 /// A user-written top-level declaration (a decl/`Auto` `BlockItem`'s payload).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,8 +110,8 @@ pub enum BlockItem {
 pub struct BlockItemResult {
     /// Zero-based position in the block.
     pub index: usize,
-    /// Item kind string: `"decl"`, `"stmt"`, or `"meta"`.
-    pub kind: String,
+    /// Item kind (`decl` / `stmt` / `meta`).
+    pub kind: ItemKind,
     /// Whether the item succeeded.
     pub ok: bool,
     /// Slim result for the default response shape: an inline JSON object whose
@@ -177,8 +222,8 @@ pub enum TurnOutcome {
     Bound { name: String, type_display: String },
     /// A bind item bound multiple values from a flat-tuple pattern
     /// (`(a, b) <- e` / `let (x, y) = e`). Each component is independently
-    /// referenceable and GC-rooted. `components` is `[(name, type_display)]`.
-    MultiBound { components: Vec<(String, String)> },
+    /// referenceable and GC-rooted.
+    MultiBound { components: Vec<BoundComponent> },
     /// A declaration item accumulated a decl; the session advanced to
     /// `generation` and `Tidepool.Session.Lib.G<generation>` now in scope.
     /// `head` is the declared identifier (for slim result display).
@@ -204,13 +249,9 @@ pub enum TurnOutcome {
         last_type: Option<String>,
         /// Truncation hint when the last expression's value was elided to stubs.
         last_truncated: Option<String>,
-        /// Declaration generation at block completion (verbose mode only).
-        generation: u64,
-        /// Value-binding generation at block completion (verbose mode only).
-        val_gen: u64,
-        /// When `true`, emit the full diagnostic shape (index, generation,
-        /// double-encoded result string) instead of the slim default.
-        verbose: bool,
+        /// Slim (default) vs verbose diagnostic rendering. The verbose-only
+        /// generation counters live inside [`ResponseShape::Verbose`].
+        shape: ResponseShape,
     },
     /// The turn failed (compile error, GHC error, runtime yield, …).
     Error(String),
@@ -241,8 +282,8 @@ impl TurnOutcome {
             })
             .to_string(),
             TurnOutcome::MultiBound { components } => serde_json::json!({
-                "bound": components.iter().map(|(n, _)| n).collect::<Vec<_>>(),
-                "types": components.iter().map(|(_, t)| t).collect::<Vec<_>>(),
+                "bound": components.iter().map(|c| &c.name).collect::<Vec<_>>(),
+                "types": components.iter().map(|c| &c.type_display).collect::<Vec<_>>(),
             })
             .to_string(),
             TurnOutcome::Defined {
@@ -265,11 +306,13 @@ impl TurnOutcome {
                 value,
                 last_type,
                 last_truncated,
-                generation,
-                val_gen,
-                verbose,
+                shape,
             } => {
-                if *verbose {
+                if let ResponseShape::Verbose {
+                    generation,
+                    val_gen,
+                } = shape
+                {
                     // Old full shape: index, kind, ok, result (double-encoded string).
                     let items_json: Vec<serde_json::Value> = items
                         .iter()
