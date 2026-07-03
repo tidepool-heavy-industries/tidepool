@@ -1,196 +1,14 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Arc;
 
-use rmcp::{model::*, service::RequestContext, ErrorData as McpError, RoleServer, ServerHandler};
-use tidepool_handlers::{
-    ConsoleHandler, ExecHandler, FsHandler, HandlerConfig, HttpHandler, KvHandler, LlmHandler,
-    LspHandler, MetaHandler,
-};
-use tidepool_mcp::TidepoolMcpServer;
+use tidepool_handlers::HandlerConfig;
+use tidepool_mcp::server_common;
 
 mod config;
+mod prelude;
+mod setup;
+mod stack;
+
 use config::Config;
-
-// ---------------------------------------------------------------------------
-// Bundled Haskell stdlib — embedded at build time (build.rs walks the whole
-// haskell/lib/Tidepool tree), materialized to a content-addressed cache dir.
-// ---------------------------------------------------------------------------
-
-// `EMBEDDED_STDLIB: &[(&str, &str)]` — (Tidepool/<rel>, contents) for every
-// `.hs` module in the tree (Internal/ + Prelude_cbor excluded). @generated.
-include!(concat!(env!("OUT_DIR"), "/embedded_stdlib.rs"));
-
-/// Deterministic hash of the embedded stdlib content. Stable across runs
-/// (`DefaultHasher` has fixed keys) so a given binary always maps to the same
-/// cache dir; a changed binary maps to a fresh one.
-fn stdlib_content_hash() -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    for (rel, content) in EMBEDDED_STDLIB {
-        rel.hash(&mut h);
-        content.hash(&mut h);
-    }
-    format!("{:016x}", h.finish())
-}
-
-/// Resolve the directory holding the Tidepool stdlib (an include root for GHC).
-/// Precedence: `TIDEPOOL_PRELUDE_DIR` → in-repo `haskell/lib` → materialized
-/// bundle in the content-addressed cache dir. The bundle is the COMPLETE tree
-/// and is keyed on content, so it can't go stale across binary versions (the
-/// old `.version` stamp froze it) and can't drift from a hand-maintained subset.
-fn ensure_prelude() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    if let Some(dir) = std::env::var_os("TIDEPOOL_PRELUDE_DIR") {
-        return Ok(PathBuf::from(dir));
-    }
-
-    // In-repo development: use haskell/lib/ directly if present
-    if let Ok(cwd) = std::env::current_dir() {
-        let from_root = cwd.join("haskell").join("lib");
-        if from_root.join("Tidepool").join("Prelude.hs").exists() {
-            return Ok(from_root);
-        }
-        let from_haskell = cwd.join("lib");
-        if from_haskell.join("Tidepool").join("Prelude.hs").exists() {
-            return Ok(from_haskell);
-        }
-    }
-
-    // Installed mode: materialize the bundled stdlib to a content-addressed dir.
-    let hash = stdlib_content_hash();
-    let base = tidepool_runtime::paths::stdlib_dir(&hash);
-    // Sentinel marks a COMPLETE write — guards against serving a half-written dir
-    // (e.g. a crash mid-materialization) and against the macOS cache reaper.
-    let sentinel = base.join(".complete");
-    if !sentinel.exists() {
-        for (rel, content) in EMBEDDED_STDLIB {
-            let full = base.join(rel);
-            if let Some(parent) = full.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&full, content)?;
-        }
-        std::fs::write(&sentinel, hash.as_bytes())?;
-    }
-    Ok(base)
-}
-
-/// Check if tidepool-extract is available.
-fn find_tidepool_extract() -> Option<PathBuf> {
-    // 1. TIDEPOOL_EXTRACT env var
-    if let Ok(p) = std::env::var("TIDEPOOL_EXTRACT") {
-        let path = PathBuf::from(&p);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    // 2. On PATH
-    which::which("tidepool-extract").ok()
-}
-
-// ---------------------------------------------------------------------------
-// Secrets loader — shared with tidepool-repl via tidepool_runtime::paths
-// ---------------------------------------------------------------------------
-
-fn load_secrets() {
-    let report = tidepool_runtime::paths::load_secrets();
-    for name in &report.loaded {
-        tracing::info!("loaded {name} from secrets dir");
-    }
-    for skipped in &report.ignored {
-        tracing::info!("secrets: {skipped} ignored (bad name, empty, or already set)");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Degraded MCP server — served when tidepool-extract is missing
-// ---------------------------------------------------------------------------
-
-#[derive(Clone)]
-struct SetupServer;
-
-const INSTALL_INSTRUCTIONS: &str = "\
-Tidepool MCP server is running but the GHC toolchain is not installed.
-The Haskell compiler is needed to evaluate code.
-
-Install it with Nix:
-
-  1. Install Nix (if needed):
-     curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install
-
-  2. Install the tidepool GHC toolchain:
-     nix profile install github:tidepool-heavy-industries/tidepool#tidepool-extract
-
-  3. Restart this MCP server.
-
-Alternatively, set TIDEPOOL_EXTRACT to point to an existing tidepool-extract binary.";
-
-impl ServerHandler for SetupServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
-                "Tidepool MCP server (setup mode). The GHC toolchain is not installed. \
-                 Call the install_instructions tool for setup steps."
-                    .into(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
-    }
-
-    async fn list_tools(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, McpError> {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {},
-        });
-        let input_schema = match schema {
-            serde_json::Value::Object(o) => Arc::new(o),
-            _ => Arc::new(serde_json::Map::new()),
-        };
-        Ok(ListToolsResult {
-            tools: vec![Tool {
-                name: "install_instructions".into(),
-                title: None,
-                description: Some(
-                    "Get instructions for installing the GHC toolchain required by Tidepool."
-                        .into(),
-                ),
-                input_schema,
-                output_schema: None,
-                annotations: None,
-                icons: None,
-                meta: None,
-                execution: None,
-            }],
-            next_cursor: None,
-            meta: None,
-        })
-    }
-
-    async fn call_tool(
-        &self,
-        request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
-        match request.name.as_ref() {
-            "install_instructions" => Ok(CallToolResult {
-                content: vec![Content::text(INSTALL_INSTRUCTIONS)],
-                structured_content: None,
-                is_error: Some(false),
-                meta: None,
-            }),
-            _ => Err(McpError {
-                code: ErrorCode::METHOD_NOT_FOUND,
-                message: format!("Tool not found: {}", request.name).into(),
-                data: None,
-            }),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -257,71 +75,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .http
         .or(args.port.map(|p| SocketAddr::from(([0, 0, 0, 0], p))));
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
-    // Initialize the `log`-crate diagnostic logging for the JIT subsystems
-    // (tidepool::calls / scope / heap / effects / fp). Routed to stderr via
-    // env_logger; honors RUST_LOG plus the legacy TIDEPOOL_TRACE* env vars.
-    // Independent of the tracing subscriber above (which owns the `tracing::`
-    // macros at the MCP layer); env_logger owns the `log::` global logger.
-    tidepool_codegen::debug::init_logging();
+    server_common::init_tracing();
 
     // Fill missing *_API_KEY env vars from .tidepool/secrets/ (drop a key
     // file in, restart, done). Must run before any handler reads the env.
-    load_secrets();
+    server_common::load_secrets_logged();
 
-    let prelude_dir = ensure_prelude()?;
+    let prelude_dir = prelude::ensure_prelude()?;
 
     // If tidepool-extract is not available, serve the degraded setup server.
-    if find_tidepool_extract().is_none() {
-        tracing::warn!(
-            "tidepool-extract not found — serving setup-only MCP server. \
-             Install via: nix profile install github:tidepool-heavy-industries/tidepool#tidepool-extract"
-        );
-        use rmcp::ServiceExt;
-        if let Some(addr) = http_addr {
-            use rmcp::transport::streamable_http_server::{
-                session::local::LocalSessionManager, StreamableHttpServerConfig,
-                StreamableHttpService,
-            };
-            let config = StreamableHttpServerConfig::default();
-            let cancel = config.cancellation_token.clone();
-            let service = StreamableHttpService::new(
-                || Ok(SetupServer),
-                Arc::new(LocalSessionManager::default()),
-                config,
-            );
-            async fn health() -> axum::Json<serde_json::Value> {
-                axum::Json(serde_json::json!({"status": "ok"}))
-            }
-            let router = axum::Router::new()
-                .route("/health", axum::routing::get(health))
-                .nest_service("/mcp", service);
-            let listener = tokio::net::TcpListener::bind(addr).await?;
-            tracing::debug!(
-                "Tidepool MCP v{} listening on http://{}/mcp (setup mode)",
-                env!("CARGO_PKG_VERSION"),
-                addr,
-            );
-            axum::serve(listener, router)
-                .with_graceful_shutdown(async move {
-                    tokio::signal::ctrl_c().await.ok();
-                    cancel.cancel();
-                })
-                .await?;
-        } else {
-            SetupServer
-                .serve((tokio::io::stdin(), tokio::io::stdout()))
-                .await?
-                .waiting()
-                .await?;
-        }
+    if setup::maybe_serve_degraded(http_addr).await? {
         return Ok(());
     }
 
@@ -363,47 +126,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if args.debug {
-        // Build Meta's effect_names/helper_sigs from full decls (standard + meta)
-        let mut decls = tidepool_mcp::standard_decls();
-        decls.insert(decls.len() - 2, tidepool_mcp::meta_decl()); // before Llm, Ask
-        let effect_names: Vec<String> = decls.iter().map(|d| d.type_name.to_string()).collect();
-        let mut helper_sigs: Vec<String> = Vec::new();
-        helper_sigs.push("putStrLn :: Text -> M ()".into());
-        helper_sigs.push("showI :: Int -> Text".into());
-        for decl in &decls {
-            for h in decl.helpers {
-                if let Some(sig) = h.lines().next() {
-                    helper_sigs.push(sig.to_string());
-                }
-            }
-        }
-        let handlers = frunk::hlist![
-            ConsoleHandler,
-            KvHandler::new(handler_cfg.kv_path.clone()),
-            FsHandler::new(handler_cfg.cwd.clone()),
-            HttpHandler,
-            ExecHandler::new(handler_cfg.cwd.clone()),
-            LspHandler::new(handler_cfg.cwd.clone()),
-            MetaHandler::new(effect_names, helper_sigs),
-            LlmHandler::new(model.clone())
-        ];
-        let server = TidepoolMcpServer::new(handlers)
-            .with_prelude(prelude_dir)
-            .with_help_tool(args.help_tool);
-        if let Some(addr) = http_addr {
-            server.serve_http(addr).await
-        } else {
-            server.serve_stdio().await
-        }
+        stack::run_debug(handler_cfg, model, prelude_dir, args.help_tool, http_addr).await
     } else {
-        let handlers = tidepool_handlers::build_base_stack(&handler_cfg);
-        let server = TidepoolMcpServer::new(handlers)
-            .with_prelude(prelude_dir)
-            .with_help_tool(args.help_tool);
-        if let Some(addr) = http_addr {
-            server.serve_http(addr).await
-        } else {
-            server.serve_stdio().await
-        }
+        stack::run_base(handler_cfg, prelude_dir, args.help_tool, http_addr).await
     }
 }

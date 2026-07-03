@@ -31,6 +31,8 @@ pub(crate) use ask::*;
 mod server;
 pub use server::*;
 
+pub mod server_common;
+
 use parking_lot::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

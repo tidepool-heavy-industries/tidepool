@@ -441,9 +441,9 @@ impl TidepoolReplServer {
     }
 
     fn next_continuation_id(&self) -> ContinuationId {
-        ContinuationId(format!(
-            "scont_{}",
-            self.inner.next_cont_id.fetch_add(1, Ordering::Relaxed)
+        ContinuationId(tidepool_mcp::server_common::mint_id(
+            &self.inner.next_cont_id,
+            "scont",
         ))
     }
 
@@ -735,21 +735,14 @@ impl TidepoolReplServer {
                     if let SessionState::Suspended(s) = &mut *st {
                         s.since = Instant::now();
                     }
-                    let body = serde_json::json!({
-                        "validation_failed": true,
-                        "violations": violations
-                            .iter()
-                            .map(tidepool_mcp::validate::Violation::to_json)
-                            .collect::<Vec<_>>(),
-                        "schema": schema,
-                        "continuation_id": req.continuation_id,
-                        "continuation_not_consumed": true,
-                    });
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Response does not match the suspension's schema. Call session_resume \
-                         again with the same continuation_id and a corrected response (or \
-                         session_abort).\n{body}"
-                    ))]));
+                    let msg = tidepool_mcp::server_common::validation_failed_body(
+                        "session_resume",
+                        "session_abort",
+                        &violations,
+                        schema.as_ref(),
+                        &req.continuation_id.0,
+                    );
+                    return Ok(CallToolResult::error(vec![Content::text(msg)]));
                 }
                 tidepool_mcp::validate::Outcome::Valid(canonical) => {
                     // Take the suspension out → Busy (the turn is resuming).
@@ -961,36 +954,23 @@ impl TidepoolReplServer {
             Some(WorkerMessage::Completed { result }) => {
                 *state.lock() = SessionState::Idle;
                 let out = captured.drain();
-                CallToolResult::success(vec![Content::text(with_output(&out, &result))])
+                CallToolResult::success(vec![Content::text(
+                    tidepool_mcp::server_common::format_with_output(&out, &result),
+                )])
             }
             Some(WorkerMessage::Error { error }) => {
                 *state.lock() = SessionState::Idle;
                 let out = captured.snapshot();
-                CallToolResult::error(vec![Content::text(with_output(&out, &error))])
+                CallToolResult::error(vec![Content::text(
+                    tidepool_mcp::server_common::format_with_output(&out, &error),
+                )])
             }
             Some(WorkerMessage::Suspended { prompt, meta }) => {
                 let cont_id = self.next_continuation_id();
-                let mut json_obj = serde_json::json!({
-                    "suspended": true,
-                    "continuation_id": cont_id,
-                    "prompt": prompt,
-                });
-                let mut expected_schema = None;
-                if let Some(serde_json::Value::Object(mut m)) = meta {
-                    if let Some(schema) = m.remove("schema") {
-                        // Keep the schema to validate + canonicalize the reply on
-                        // resume (BUG-9); also surface it to the caller.
-                        expected_schema = Some(schema.clone());
-                        if let Some(o) = json_obj.as_object_mut() {
-                            o.insert("schema".into(), schema);
-                        }
-                    }
-                    if !m.is_empty() {
-                        if let Some(o) = json_obj.as_object_mut() {
-                            o.insert("meta".into(), serde_json::Value::Object(m));
-                        }
-                    }
-                }
+                let (json_obj, expected_schema) =
+                    tidepool_mcp::server_common::build_suspension_envelope(
+                        &cont_id.0, &prompt, meta,
+                    );
                 // The suspension payload lives IN the state — a parked `ask` can't
                 // exist untracked, so teardown (close/reaper) is forced to release
                 // its `response_tx`.
@@ -1066,21 +1046,6 @@ fn reap_once(
             }
         }
     }
-}
-
-/// Prepend captured output (if any) to a result body.
-fn with_output(output: &[String], body: &str) -> String {
-    if output.is_empty() {
-        return body.to_string();
-    }
-    let mut s = String::from("## Output\n");
-    for line in output {
-        s.push_str(line);
-        s.push('\n');
-    }
-    s.push_str("\n## Result\n");
-    s.push_str(body);
-    s
 }
 
 fn build_tool_description(decls: &[EffectDecl]) -> String {
@@ -1165,41 +1130,17 @@ impl ServerHandler for TidepoolReplServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        fn schema_to_map(
-            schema: schemars::Schema,
-        ) -> Result<Arc<serde_json::Map<String, serde_json::Value>>, McpError> {
-            match serde_json::to_value(&schema).map_err(|e| {
-                McpError::internal_error(format!("schema serialize failed: {e}"), None)
-            })? {
-                serde_json::Value::Object(o) => Ok(Arc::new(o)),
-                _ => Ok(Arc::new(serde_json::Map::new())),
-            }
-        }
-        fn tool(
-            name: &str,
-            desc: &str,
-            schema: Arc<serde_json::Map<String, serde_json::Value>>,
-        ) -> Tool {
-            Tool {
-                name: name.to_string().into(),
-                title: None,
-                description: Some(desc.to_string().into()),
-                input_schema: schema,
-                output_schema: None,
-                annotations: None,
-                icons: None,
-                meta: None,
-                execution: None,
-            }
-        }
         let tools = vec![
-            tool(
+            tidepool_mcp::server_common::make_tool(
                 "session_open",
                 "Open a named session (one live JIT machine per name). Omit `session` to use the \
                  default session. Call before session_run.",
-                schema_to_map(schemars::schema_for!(SessionOpenRequest))?,
+                tidepool_mcp::server_common::schema_to_map(schemars::schema_for!(
+                    SessionOpenRequest
+                ))
+                .map_err(|e| McpError::internal_error(e, None))?,
             ),
-            tool(
+            tidepool_mcp::server_common::make_tool(
                 "session_run",
                 "Run a list of GHCi-capable items in sequence on the resident machine. Each item \
                  is a declaration (`data Foo = …`, `f x = …`), a bind statement (`x <- e` / \
@@ -1221,23 +1162,35 @@ impl ServerHandler for TidepoolReplServer {
                  double-encoded result strings). \
                  An in-turn `ask` suspends with a continuation_id; resume with session_resume \
                  or drop with session_abort.",
-                schema_to_map(schemars::schema_for!(SessionBlockRequest))?,
+                tidepool_mcp::server_common::schema_to_map(schemars::schema_for!(
+                    SessionBlockRequest
+                ))
+                .map_err(|e| McpError::internal_error(e, None))?,
             ),
-            tool(
+            tidepool_mcp::server_common::make_tool(
                 "session_close",
                 "Close the session: drop the resident machine and free its heap.",
-                schema_to_map(schemars::schema_for!(SessionCloseRequest))?,
+                tidepool_mcp::server_common::schema_to_map(schemars::schema_for!(
+                    SessionCloseRequest
+                ))
+                .map_err(|e| McpError::internal_error(e, None))?,
             ),
-            tool(
+            tidepool_mcp::server_common::make_tool(
                 "session_resume",
                 "Answer an in-turn `ask` suspension (continuation_id from a {\"suspended\":true} \
                  result) and run the turn to completion.",
-                schema_to_map(schemars::schema_for!(SessionResumeRequest))?,
+                tidepool_mcp::server_common::schema_to_map(schemars::schema_for!(
+                    SessionResumeRequest
+                ))
+                .map_err(|e| McpError::internal_error(e, None))?,
             ),
-            tool(
+            tidepool_mcp::server_common::make_tool(
                 "session_abort",
                 "Abort an in-turn `ask` suspension without answering it.",
-                schema_to_map(schemars::schema_for!(SessionAbortRequest))?,
+                tidepool_mcp::server_common::schema_to_map(schemars::schema_for!(
+                    SessionAbortRequest
+                ))
+                .map_err(|e| McpError::internal_error(e, None))?,
             ),
         ];
         Ok(ListToolsResult {
