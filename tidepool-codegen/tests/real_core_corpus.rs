@@ -220,6 +220,7 @@ const KNOWN: &[(&str, &str, &str)] = &[
 
 #[test]
 fn corpus_report() {
+    tidepool_testing::watchdog::arm();
     let dir = corpus_dir();
     let meta = std::fs::read(dir.join("meta.cbor")).expect("meta.cbor — run regen-corpus.sh");
 
@@ -247,6 +248,7 @@ fn corpus_report() {
 
     println!("\n=== REAL-CORE CORPUS ===");
     for (name, path) in &entries {
+        tidepool_testing::watchdog::begin(name);
         let node = std::fs::read(path).unwrap();
         let (is_fn, tag, detail, cov) = run_one(&node, &meta);
         coverage.extend(cov);
