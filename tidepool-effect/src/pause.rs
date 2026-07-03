@@ -24,6 +24,20 @@
 //!
 //! Only the gate is shared; the DISPATCHERS and worker/thread-parking mechanics
 //! stay crate-local (see each `ask.rs`).
+//!
+//! ## The two cancellation channels (deliberate layering, one known race)
+//!
+//! The gate is the COOPERATIVE channel: it can park-and-resume, and its abort
+//! is observed at effect-dispatch checkpoints, surfacing as
+//! `EffectError::Handler(reason)`. The JIT `cancel_flag` (an `Arc<AtomicBool>`
+//! polled at the trampoline / GC / join-back-edge / dispatch safepoints) is
+//! the FORCED-UNWIND backstop for pure compute that never reaches a
+//! checkpoint, surfacing as `YieldError::Cancelled`. The server timeout paths
+//! set BOTH (a gate-only abort leaves a pure loop spinning; a flag-only cancel
+//! cannot wake a thread parked in an ask). Consequence: the SAME timeout races
+//! between the two surface shapes — whichever safepoint fires first wins.
+//! Both terminate the turn, so callers must treat either shape as
+//! cancellation; do not string-match one of them.
 
 use std::sync::Arc;
 

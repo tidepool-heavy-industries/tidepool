@@ -496,19 +496,15 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
     // Post-OOM stores into the poison are bounded by `POISON_BUF_SIZE`
     // (16 KiB, sized for worst-case Con writes — see PR #272).
     //
-    // The other two cancel safepoints — the trampoline loop
-    // (`check_cancel_and_set_error` in trampoline_resolve) and the
-    // effect-dispatch boundary in `JitEffectMachine::run` — already
-    // give prompt unwind for tail-recursive and effect-driven programs;
-    // this path closes the gap for pure non-tail-call allocator loops
-    // that never reach either (#273).
-    if cancel_requested() {
-        RUNTIME_ERROR.with(|cell| {
-            let mut slot = cell.borrow_mut();
-            if slot.is_none() {
-                *slot = Some(RuntimeError::Cancelled);
-            }
-        });
+    // The other cancel safepoints — the trampoline loop, the join back-edge
+    // (`runtime_cancel_check`, #325), and the effect-dispatch boundary in
+    // `drive_to_done` — already give prompt unwind for tail-recursive,
+    // join-looping, and effect-driven programs; this path closes the gap for
+    // pure non-tail-call allocator loops that never reach any of them (#273).
+    // Same shared check as those safepoints; this one just returns void and
+    // skips perform_gc (the post-GC re-check routes the next allocation
+    // through runtime_oom's poison path, per the comment above).
+    if check_cancel_and_set_error() {
         return;
     }
 
