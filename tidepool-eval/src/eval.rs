@@ -12,7 +12,7 @@
 //!   `tidepool-repr/src/types.rs`.
 
 use crate::env::Env;
-use crate::error::EvalError;
+use crate::error::{ArityContext, EvalError};
 use crate::heap::{Heap, ThunkState};
 use crate::value::Value;
 use tidepool_repr::{
@@ -236,19 +236,18 @@ fn eval_at(
             let tag = (v.0 >> 56) as u8;
             if tag == tidepool_repr::ERROR_SENTINEL_TAG {
                 // 'E' = error tag: synthetic error VarIds from Translate.hs
-                let kind = v.0 & 0xFF;
-                return Err(match kind {
-                    0 => EvalError::TypeMismatch {
+                use crate::error::SentinelKind;
+                return Err(match SentinelKind::from_u8((v.0 & 0xFF) as u8) {
+                    SentinelKind::DivByZero => EvalError::TypeMismatch {
                         expected: "non-zero divisor",
                         got: crate::error::ValueKind::Other("division by zero".into()),
                     },
-                    1 => EvalError::TypeMismatch {
+                    SentinelKind::Overflow => EvalError::TypeMismatch {
                         expected: "no overflow",
                         got: crate::error::ValueKind::Other("arithmetic overflow".into()),
                     },
-                    2 => EvalError::UserError,
-                    3 => EvalError::Undefined,
-                    _ => EvalError::UserError,
+                    SentinelKind::UserError => EvalError::UserError,
+                    SentinelKind::Undefined => EvalError::Undefined,
                 });
             }
             env.get(v).cloned().ok_or(EvalError::UnboundVar(*v))
@@ -371,7 +370,7 @@ fn eval_at(
                             if con_tag == tag {
                                 if fields.len() != alt.binders.len() {
                                     return Err(EvalError::ArityMismatch {
-                                        context: "case binders",
+                                        context: ArityContext::CaseBinders,
                                         expected: alt.binders.len(),
                                         got: fields.len(),
                                     });
@@ -411,7 +410,7 @@ fn eval_at(
                 PrimOpKind::ShowDoubleAddr => {
                     if arg_vals.len() != 1 {
                         return Err(EvalError::ArityMismatch {
-                            context: "arguments",
+                            context: ArityContext::Arguments,
                             expected: 1,
                             got: arg_vals.len(),
                         });
@@ -489,7 +488,7 @@ fn enqueue_jump(
     };
     if params.len() != args.len() {
         return Err(EvalError::ArityMismatch {
-            context: "arguments",
+            context: ArityContext::Arguments,
             expected: params.len(),
             got: args.len(),
         });
@@ -532,7 +531,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::IntNegate => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -561,7 +560,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::IntNot => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -635,7 +634,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::WordNot => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -646,7 +645,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::WordShl => {
             if args.len() != 2 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 2,
                     got: args.len(),
                 });
@@ -658,7 +657,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::WordShrl => {
             if args.len() != 2 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 2,
                     got: args.len(),
                 });
@@ -693,7 +692,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleNegate => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -704,7 +703,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleFabs => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -715,7 +714,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleSqrt => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -726,7 +725,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleExp => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -737,7 +736,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleExpM1 => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -748,7 +747,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleLog => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -759,7 +758,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleLog1P => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -770,7 +769,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleSin => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -781,7 +780,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleCos => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -792,7 +791,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleTan => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -803,7 +802,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleAsin => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -814,7 +813,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleAcos => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -825,7 +824,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleAtan => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -836,7 +835,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleSinh => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -847,7 +846,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleCosh => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -858,7 +857,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleTanh => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -869,7 +868,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleAsinh => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -880,7 +879,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleAcosh => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -891,7 +890,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoubleAtanh => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -902,7 +901,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DoublePower => {
             if args.len() != 2 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 2,
                     got: args.len(),
                 });
@@ -930,7 +929,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::FloatNegate => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -942,7 +941,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::FloatSqrt => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -953,7 +952,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::FloatFabs => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -977,7 +976,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Int2Word => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -988,7 +987,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Word2Int => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -999,7 +998,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Narrow8Int => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1010,7 +1009,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Narrow16Int => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1021,7 +1020,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Narrow32Int => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1032,7 +1031,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Narrow8Word => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1043,7 +1042,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Narrow16Word => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1054,7 +1053,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Narrow32Word => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1065,7 +1064,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Int2Double => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1080,7 +1079,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Double2Int => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1091,7 +1090,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DecodeDoubleMantissa => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1103,7 +1102,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DecodeDoubleExponent => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1119,7 +1118,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Int2Float => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1130,7 +1129,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Float2Int => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1141,7 +1140,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Double2Float => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1152,7 +1151,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Float2Double => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1164,7 +1163,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::SeqOp => {
             if args.len() != 2 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 2,
                     got: args.len(),
                 });
@@ -1174,7 +1173,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::DataToTag => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1209,7 +1208,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Chr => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1228,7 +1227,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::Ord => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -1239,7 +1238,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::IndexCharOffAddr => {
             if args.len() != 2 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 2,
                     got: args.len(),
                 });
@@ -1262,7 +1261,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // In interpreter, Addr# is LitString. plusAddr# slices the byte vec.
             if args.len() != 2 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 2,
                     got: args.len(),
                 });
@@ -2089,7 +2088,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // ghc-internal:rintDouble (C rint): round to nearest, ties to even.
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -2302,7 +2301,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         | PrimOpKind::Ctz64 => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 1,
                     got: args.len(),
                 });
@@ -2435,7 +2434,7 @@ macro_rules! bin_op {
         fn $name(_op: PrimOpKind, args: &[Value]) -> Result<($t, $t), EvalError> {
             if args.len() != 2 {
                 return Err(EvalError::ArityMismatch {
-                    context: "arguments",
+                    context: ArityContext::Arguments,
                     expected: 2,
                     got: args.len(),
                 });

@@ -3,11 +3,42 @@
 use crate::value::ThunkId;
 use tidepool_repr::{JoinId, PrimOpKind, VarId};
 
+/// Name of a primitive literal's runtime type, for error reporting.
+///
+/// A closed set (replaces bare `&'static str` tags) so a `ValueKind::Literal`
+/// can only carry one of GHC's unboxed literal type names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LitTypeName {
+    /// `Int#`
+    Int,
+    /// `Word#`
+    Word,
+    /// `Double#`
+    Double,
+    /// `Char#`
+    Char,
+    /// `String` (unpacked `Addr#`/`[Char]`)
+    Str,
+}
+
+impl std::fmt::Display for LitTypeName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            LitTypeName::Int => "Int#",
+            LitTypeName::Word => "Word#",
+            LitTypeName::Double => "Double#",
+            LitTypeName::Char => "Char#",
+            LitTypeName::Str => "String",
+        };
+        f.write_str(s)
+    }
+}
+
 /// Describes the kind of a Value for error reporting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueKind {
     /// Primitive literal value
-    Literal(&'static str), // "Int#", "Word#", "Double#", "Char#", "String"
+    Literal(LitTypeName),
     /// Saturated data constructor
     Constructor,
     /// Function closure
@@ -30,6 +61,62 @@ impl std::fmt::Display for ValueKind {
     }
 }
 
+/// Which two counts an [`EvalError::ArityMismatch`] is comparing.
+///
+/// Replaces a bare `&'static str` context tag with a closed set (only the tags
+/// the interpreter actually raises).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArityContext {
+    /// Function / join-point arguments.
+    Arguments,
+    /// Case-alternative binders vs. constructor fields.
+    CaseBinders,
+}
+
+impl std::fmt::Display for ArityContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ArityContext::Arguments => "arguments",
+            ArityContext::CaseBinders => "case binders",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Low-byte payload of an error-sentinel `VarId` (encoded in Haskell
+/// `Translate.hs`, decoded here). Mirrors the style of
+/// [`tidepool_repr::VarKind`]: an exhaustive enum with an explicit decoder in
+/// place of bare numeric matches.
+///
+/// The numeric mapping is a wire contract with the Haskell encoder — keep
+/// [`SentinelKind::from_u8`] identical to it, including the lossy fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SentinelKind {
+    /// `0` — division by zero.
+    DivByZero,
+    /// `1` — arithmetic overflow.
+    Overflow,
+    /// `2` — Haskell `error "…"`.
+    UserError,
+    /// `3` — Haskell `undefined`.
+    Undefined,
+}
+
+impl SentinelKind {
+    /// Decode the sentinel's low byte. Unknown payloads collapse to
+    /// [`SentinelKind::UserError`] — matching the pre-enum lossy catch-all.
+    #[must_use]
+    pub fn from_u8(byte: u8) -> Self {
+        match byte {
+            0 => SentinelKind::DivByZero,
+            1 => SentinelKind::Overflow,
+            2 => SentinelKind::UserError,
+            3 => SentinelKind::Undefined,
+            _ => SentinelKind::UserError,
+        }
+    }
+}
+
 /// Errors that can occur during interpretation.
 ///
 /// Includes runtime type errors, unbound variables, and arity mismatches.
@@ -41,7 +128,7 @@ pub enum EvalError {
     /// Arity mismatch (wrong number of arguments or fields)
     #[error("arity mismatch: expected {expected} {context}, got {got}")]
     ArityMismatch {
-        context: &'static str, // "arguments", "fields", "case binders"
+        context: ArityContext,
         expected: usize,
         got: usize,
     },
@@ -92,13 +179,13 @@ mod tests {
         let errs = vec![
             EvalError::UnboundVar(VarId(42)),
             EvalError::ArityMismatch {
-                context: "arguments",
+                context: ArityContext::Arguments,
                 expected: 2,
                 got: 1,
             },
             EvalError::TypeMismatch {
                 expected: "Int#",
-                got: ValueKind::Literal("Char#"),
+                got: ValueKind::Literal(LitTypeName::Char),
             },
             EvalError::NoMatchingAlt,
             EvalError::InfiniteLoop(ThunkId(0)),
