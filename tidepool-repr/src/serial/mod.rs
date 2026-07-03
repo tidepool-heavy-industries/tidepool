@@ -50,7 +50,7 @@ pub enum ReadError {
 /// 4-byte magic: ASCII 'TPLR'
 pub const HEADER_MAGIC: [u8; 4] = [0x54, 0x50, 0x4C, 0x52];
 pub const VERSION_MAJOR: u16 = 1;
-pub const VERSION_MINOR: u16 = 0;
+pub const VERSION_MINOR: u16 = 1;
 /// Total header length in bytes.
 pub const HEADER_LEN: usize = 8;
 
@@ -445,6 +445,68 @@ mod tests {
             recovered.get_by_qualified_name("Data.Map.Tip"),
             Some(DataConId(200))
         );
+    }
+
+    #[test]
+    fn test_roundtrip_metadata_field_labels() {
+        use crate::datacon::DataCon;
+        use crate::datacon_table::DataConTable;
+
+        let mut table = DataConTable::new();
+        // Record con WITH a qualified name and field labels.
+        table.insert(DataCon {
+            id: DataConId(10),
+            name: "Hit".to_string(),
+            tag: 1,
+            rep_arity: 3,
+            field_bangs: vec![],
+            qualified_name: Some("Tidepool.Records.Hit".to_string()),
+        });
+        table.set_field_labels(
+            DataConId(10),
+            vec!["path".to_string(), "line".to_string(), "text".to_string()],
+        );
+        // Record con WITHOUT a qualified name but WITH field labels — exercises
+        // the empty-string qn placeholder path (writer emits "" → reader None).
+        table.insert(DataCon {
+            id: DataConId(20),
+            name: "Loc".to_string(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![],
+            qualified_name: None,
+        });
+        table.set_field_labels(DataConId(20), vec!["ln".to_string()]);
+        // Positional con: no labels at all.
+        table.insert(DataCon {
+            id: DataConId(30),
+            name: "Plain".to_string(),
+            tag: 1,
+            rep_arity: 2,
+            field_bangs: vec![],
+            qualified_name: None,
+        });
+
+        let bytes = write_metadata(&table).expect("write_metadata failed");
+        let (recovered, _) = read_metadata(&bytes).expect("read_metadata failed");
+
+        assert_eq!(
+            recovered.field_labels_of(DataConId(10)),
+            Some(["path".to_string(), "line".to_string(), "text".to_string()].as_slice())
+        );
+        // qn preserved for the labeled-with-qn con
+        assert_eq!(
+            recovered.get(DataConId(10)).unwrap().qualified_name,
+            Some("Tidepool.Records.Hit".to_string())
+        );
+        // labels preserved even without a qn; placeholder decodes back to None
+        assert_eq!(
+            recovered.field_labels_of(DataConId(20)),
+            Some(["ln".to_string()].as_slice())
+        );
+        assert_eq!(recovered.get(DataConId(20)).unwrap().qualified_name, None);
+        // positional con has no labels
+        assert_eq!(recovered.field_labels_of(DataConId(30)), None);
     }
 
     #[test]

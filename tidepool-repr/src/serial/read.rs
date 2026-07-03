@@ -154,10 +154,10 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
     let mut table = DataConTable::new();
     for entry in &entries {
         let arr = match entry {
-            Value::Array(a) if a.len() == 5 || a.len() == 6 => a,
+            Value::Array(a) if (5..=7).contains(&a.len()) => a,
             _ => {
                 return Err(ReadError::InvalidStructure(
-                    "Metadata entry must be array of 5 or 6".to_string(),
+                    "Metadata entry must be array of 5, 6, or 7".to_string(),
                 ))
             }
         };
@@ -202,24 +202,44 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
             })
             .collect::<Result<Vec<_>, ReadError>>()?;
 
-        // 6th element (optional): module-qualified name
+        // 6th element (optional): module-qualified name. An empty string is a
+        // placeholder (writer emits it only to hold the slot when field labels
+        // follow) and decodes back to `None`.
         let qualified_name = if arr.len() >= 6 {
             match &arr[5] {
-                Value::Text(t) => Some(t.clone()),
+                Value::Text(t) if !t.is_empty() => Some(t.clone()),
                 _ => None,
             }
         } else {
             None
         };
 
+        // 7th element (optional): record field labels, in field order.
+        let field_labels: Vec<String> = if arr.len() >= 7 {
+            match &arr[6] {
+                Value::Array(labels) => labels
+                    .iter()
+                    .filter_map(|l| match l {
+                        Value::Text(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+
+        let id = DataConId(dcid);
         table.insert_checked(DataCon {
-            id: DataConId(dcid),
+            id,
             name,
             tag,
             rep_arity: arity,
             field_bangs: bangs,
             qualified_name,
         })?;
+        table.set_field_labels(id, field_labels);
     }
 
     Ok((table, warnings))
