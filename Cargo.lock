@@ -3576,6 +3576,7 @@ name = "tidepool-effect"
 version = "0.1.0"
 dependencies = [
  "frunk",
+ "parking_lot",
  "proptest",
  "thiserror 1.0.69",
  "tidepool-bridge",

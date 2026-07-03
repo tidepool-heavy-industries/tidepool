@@ -5,12 +5,16 @@
 //! spawned-per-eval one: when an `M a` turn hits the `Ask` effect the
 //! [`ReplAskDispatcher`] parks the worker thread on `response_rx` and emits a
 //! [`WorkerMessage::Suspended`]; the server resumes it by sending a
-//! [`ResumeMsg`] back. [`PauseGate`] is the orthogonal timeout-as-yield-point
-//! latch (park at the next effect boundary when a turn's window expires).
+//! [`ResumeMsg`] back. The orthogonal timeout-as-yield-point latch is the SHARED
+//! [`tidepool_effect::pause::PauseGate`] — one gate, unified with the eval
+//! server's copy; the repl worker drives only its abort surface.
 //!
-//! The eval server's `ask.rs` items are `pub(crate)`, so rather than widen its
-//! visibility (and couple to its struct layout) the small mechanism is mirrored
-//! here. `tidepool-mcp` is left untouched.
+//! Only the gate is shared. The DISPATCHER/worker-parking mechanics are
+//! deliberately NOT: the eval server's `ask.rs` dispatcher items are
+//! `pub(crate)` and park a spawned-per-eval thread, whereas this
+//! [`ReplAskDispatcher`] parks the RESIDENT worker thread. Rather than widen
+//! that crate's visibility (and couple to its struct layout) the small
+//! dispatcher is mirrored here; `tidepool-mcp` is left untouched.
 
 use std::sync::Arc;
 
@@ -45,72 +49,17 @@ pub enum ResumeMsg {
     Abort(String),
 }
 
-/// Abort latch. A turn only computes during an MCP call; when the call's window
-/// expires (timeout), the server requests an abort and the worker unwinds at its
-/// next effect dispatch (every effect is a checkpoint). A pure JIT stretch that
-/// reaches no effect can't be interrupted — that turn is a runaway and the
-/// session is marked `Wedged` (the reaper / `session_close` reclaims it).
-pub struct PauseGate {
-    inner: parking_lot::Mutex<GateInner>,
-}
-
-struct GateInner {
-    state: GateState,
-    /// True while the worker thread is inside an effect handler (between
-    /// `checkpoint()` returning `Ok` and `exit_effect()` being called).
-    /// The server reads this at the grace deadline to distinguish "blocked
-    /// waiting for an external call (Exec/Http/…)" from "pure JIT runaway".
-    in_effect: bool,
-}
-
-#[derive(Clone, PartialEq)]
-enum GateState {
-    Run,
-    AbortRequested(String),
-}
-
-impl PauseGate {
-    pub fn new() -> Arc<Self> {
-        Arc::new(PauseGate {
-            inner: parking_lot::Mutex::new(GateInner {
-                state: GateState::Run,
-                in_effect: false,
-            }),
-        })
-    }
-
-    /// Worker side, at every effect dispatch entry: return `Err(reason)` if an
-    /// abort was requested (the turn then unwinds), else `Ok` to proceed and
-    /// mark `in_effect = true` (caller MUST pair with [`Self::exit_effect`]).
-    pub fn checkpoint(&self) -> Result<(), String> {
-        let mut g = self.inner.lock();
-        if let GateState::AbortRequested(r) = &g.state {
-            let r = r.clone();
-            g.state = GateState::Run;
-            return Err(r);
-        }
-        g.in_effect = true;
-        Ok(())
-    }
-
-    /// Worker side, on effect handler return (success or error): clear
-    /// `in_effect`. Must be called after every successful `checkpoint()`.
-    pub fn exit_effect(&self) {
-        self.inner.lock().in_effect = false;
-    }
-
-    /// Server side (on turn timeout): ask the worker to unwind at its next effect.
-    pub fn request_abort(&self, reason: String) {
-        self.inner.lock().state = GateState::AbortRequested(reason);
-    }
-
-    /// Server side (on turn timeout): returns `true` if the worker thread is
-    /// currently blocked inside an effect handler. When true, the timeout is
-    /// due to a slow external call (Exec/Http/…), NOT a pure infinite loop.
-    pub fn is_in_effect(&self) -> bool {
-        self.inner.lock().in_effect
-    }
-}
+// The abort latch is the shared [`tidepool_effect::pause::PauseGate`] (unified
+// with the eval server's copy — one gate, two dispatchers). The repl worker uses
+// only the abort surface: on a turn timeout the server calls `request_abort` and
+// the worker unwinds at its next effect dispatch (every effect is a checkpoint);
+// a pure JIT stretch that reaches no effect is a runaway and the session is
+// marked `Wedged` (the reaper / `session_close` reclaims it). It reads
+// `is_in_effect()` at the grace deadline to tell a slow external call
+// (Exec/Http/…) from a pure loop. The pause states + grace machinery on the
+// shared gate go unused here. Only the gate is shared; the `ReplAskDispatcher`
+// and its resident-worker parking stay crate-local.
+pub use tidepool_effect::pause::PauseGate;
 
 /// Wraps the session's base effect handler stack and intercepts the `Ask` tag.
 ///
@@ -206,48 +155,6 @@ pub fn extract_ask_request(
     Ok((prompt, meta))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `PauseGate`: `is_in_effect()` is false initially, true after a successful
-    /// `checkpoint()`, and false again after `exit_effect()`.
-    #[test]
-    fn pause_gate_in_effect_flag() {
-        let gate = PauseGate::new();
-        assert!(!gate.is_in_effect(), "fresh gate: not in effect");
-
-        gate.checkpoint().expect("first checkpoint ok");
-        assert!(gate.is_in_effect(), "after checkpoint: in effect");
-
-        gate.exit_effect();
-        assert!(!gate.is_in_effect(), "after exit_effect: not in effect");
-    }
-
-    /// When an abort was requested, `checkpoint()` returns `Err` and does NOT
-    /// set `in_effect` — there is no effect to exit.
-    #[test]
-    fn pause_gate_abort_does_not_set_in_effect() {
-        let gate = PauseGate::new();
-        gate.request_abort("timed out".into());
-        let result = gate.checkpoint();
-        assert!(result.is_err(), "aborted checkpoint returns Err");
-        assert!(
-            !gate.is_in_effect(),
-            "aborted checkpoint must not set in_effect"
-        );
-    }
-
-    /// After `request_abort` is consumed by `checkpoint()`, the gate resets to
-    /// `Run` and a subsequent `checkpoint()` succeeds and sets `in_effect`.
-    #[test]
-    fn pause_gate_abort_consumed_then_next_checkpoint_ok() {
-        let gate = PauseGate::new();
-        gate.request_abort("first abort".into());
-        let _ = gate.checkpoint(); // consumes the abort
-        // Gate is now Run again — next checkpoint should succeed.
-        gate.checkpoint().expect("second checkpoint ok after abort consumed");
-        assert!(gate.is_in_effect());
-        gate.exit_effect();
-    }
-}
+// The gate unit tests (in_effect lifecycle, abort consumption — #324) now live
+// with the shared gate in `tidepool_effect::pause`. The ask/suspend integration
+// suites in `tests/` exercise this crate's dispatcher wiring around it.

@@ -15,6 +15,7 @@ tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
 tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
 frunk = "0.4"
 thiserror = "1"
+parking_lot = "0.12"
 
 [dev-dependencies]
 proptest = "1"

@@ -6,6 +6,7 @@
 pub mod dispatch;
 pub mod error;
 pub mod machine;
+pub mod pause;
 
 pub use dispatch::*;
 pub use error::*;

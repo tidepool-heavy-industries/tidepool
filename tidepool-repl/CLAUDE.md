@@ -191,13 +191,16 @@ held across an `.await`. Every transition is lock → inspect/guard → move
 owned values out → unlock → then `.await`. Holding it across an await would
 deadlock the executor (`parking_lot` is not async-aware).
 
-`ask.rs`'s worker-thread-parking mechanism (sync `recv`, stack intact)
-deliberately duplicates `tidepool-mcp`'s per-eval `ask.rs` against the
-resident worker instead of a spawned-per-eval one, rather than widening that
-crate's `pub(crate)` visibility (see its module docstring) — `tidepool-mcp`
-is left untouched by design. `PauseGate` is the separate timeout-as-yield-
-point latch: cancels a runaway turn at the next JIT safepoint rather than
-killing the thread.
+`ask.rs`'s worker-thread-parking DISPATCHER (`ReplAskDispatcher`, sync `recv`,
+stack intact) deliberately duplicates `tidepool-mcp`'s per-eval `ask.rs`
+dispatcher against the resident worker instead of a spawned-per-eval one, rather
+than widening that crate's `pub(crate)` visibility (see its module docstring) —
+`tidepool-mcp` is left untouched by design. Only the DISPATCHER is duplicated:
+`PauseGate` — the timeout-as-yield-point latch that cancels a runaway turn at the
+next JIT safepoint rather than killing the thread — is now the ONE shared
+`tidepool_effect::pause::PauseGate` consumed by both dispatchers. The repl worker
+drives only its abort surface (`request_abort` on timeout, `is_in_effect` at the
+grace deadline); the gate's pause states + grace machinery go unused here.
 
 **Effects are handled in `tidepool-handlers/src/lib.rs`**, not
 `tidepool/src/main.rs` — main.rs only wires the handler stack via
