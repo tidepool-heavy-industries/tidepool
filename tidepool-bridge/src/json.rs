@@ -1,160 +1,31 @@
 //! Bridge between `serde_json::Value` and Tidepool Core values.
 //!
-//! Converts serde_json JSON values to the vendored Tidepool.Aeson.Value ADT
-//! representation in Core. Constructor names match exactly:
-//!   Value = Object | Array | String | Number | Bool | Null
-//!
-//! KeyMap is backed by Data.Map.Strict (Map Key Value), so objects are
-//! represented as balanced binary trees of (Key, Value) pairs.
+//! Delegates entirely to `tidepool_eval::json` — the single shared builder used
+//! by both the `JsonDecode` primop (eval + JIT) and bridge effect results. See
+//! `tidepool-eval/src/json.rs` for the canonical representation docs.
 
 use crate::error::BridgeError;
 use crate::traits::{sealed::ToCoreSealed, ToCore};
 use tidepool_eval::Value;
-use tidepool_repr::{DataConTable, Literal};
+use tidepool_repr::DataConTable;
+
+impl ToCoreSealed for serde_json::Value {}
 
 /// Convert a `serde_json::Value` to a Tidepool Core `Value` matching the
 /// vendored `Tidepool.Aeson.Value` Haskell type.
 ///
-/// The resulting Core value can be passed to Haskell code that expects
-/// `Value` (the aeson-compatible type) and accessed via lens combinators.
-impl ToCoreSealed for serde_json::Value {}
-
+/// Delegates to `tidepool_eval::json::json_to_value` — the same builder the
+/// `JsonDecode` primop uses, so JIT, eval, and bridge effect results all agree
+/// by construction.
 impl ToCore for serde_json::Value {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        // Use get_by_name_arity to disambiguate aeson Value constructors from
-        // GHC-internal types that share the same unqualified name (e.g. "Array").
-        match self {
-            serde_json::Value::Null => {
-                let id = table
-                    .get_by_name_arity("Null", 0)
-                    .ok_or_else(|| BridgeError::UnknownDataConName("Null".into()))?;
-                Ok(Value::Con(id, vec![]))
-            }
-
-            serde_json::Value::Bool(b) => {
-                let id = table
-                    .get_by_name_arity("Bool", 1)
-                    .ok_or_else(|| BridgeError::UnknownDataConName("Bool".into()))?;
-                let inner = (*b).to_value(table)?;
-                Ok(Value::Con(id, vec![inner]))
-            }
-
-            serde_json::Value::Number(n) => {
-                // Exact machine ints ride NumberI (BUG-8): the Double-backed
-                // Number loses integers past 2^53. Fall back to Number for
-                // genuine floats (and u64 > i64::MAX, matching serde's view).
-                if let Some(i) = n.as_i64() {
-                    let id = table
-                        .get_by_name_arity("NumberI", 1)
-                        .ok_or_else(|| BridgeError::UnknownDataConName("NumberI".into()))?;
-                    return Ok(Value::Con(id, vec![Value::Lit(Literal::LitInt(i))]));
-                }
-                let id = table
-                    .get_by_name_arity("Number", 1)
-                    .ok_or_else(|| BridgeError::UnknownDataConName("Number".into()))?;
-                let f = n.as_f64().unwrap_or(0.0);
-                Ok(Value::Con(
-                    id,
-                    vec![Value::Lit(Literal::LitDouble(f.to_bits()))],
-                ))
-            }
-
-            serde_json::Value::String(s) => {
-                let id = table
-                    .get_by_name_arity("String", 1)
-                    .ok_or_else(|| BridgeError::UnknownDataConName("String".into()))?;
-                let inner = s.clone().to_value(table)?;
-                Ok(Value::Con(id, vec![inner]))
-            }
-
-            serde_json::Value::Array(arr) => {
-                let id = table
-                    .get_by_name_arity("Array", 1)
-                    .ok_or_else(|| BridgeError::UnknownDataConName("Array".into()))?;
-                // Vendored Value uses [Value] for Array (cons-list, not Vector).
-                let elements: Result<Vec<Value>, BridgeError> =
-                    arr.iter().map(|v| v.to_value(table)).collect();
-                let list = elements?.to_value(table)?;
-                Ok(Value::Con(id, vec![list]))
-            }
-
-            serde_json::Value::Object(map) => {
-                let id = table
-                    .get_by_name_arity("Object", 1)
-                    .ok_or_else(|| BridgeError::UnknownDataConName("Object".into()))?;
-                // KeyMap = Map Key Value (backed by Data.Map.Strict)
-                // Map is a balanced binary tree:
-                //   data Map k v = Bin !Int !k !v !(Map k v) !(Map k v) | Tip
-                let map_val = keymap_to_value(map, table)?;
-                Ok(Value::Con(id, vec![map_val]))
-            }
-        }
+        let ids = tidepool_eval::json::JsonConIds::from_table(table).ok_or_else(|| {
+            BridgeError::UnknownDataConName(
+                "aeson Value constructors (Object/Array/String/…) not in scope".into(),
+            )
+        })?;
+        Ok(tidepool_eval::json::json_to_value(self, &ids))
     }
-}
-
-/// Build a Data.Map.Strict.Map Key Value from a serde_json Map.
-///
-/// Map is:
-///   Bin :: Int -> k -> v -> Map k v -> Map k v -> Map k v
-///   Tip :: Map k v
-///
-/// We build a balanced tree by sorting keys and using divide-and-conquer.
-fn keymap_to_value(
-    map: &serde_json::Map<std::string::String, serde_json::Value>,
-    table: &DataConTable,
-) -> Result<Value, BridgeError> {
-    // Prefer qualified name lookup; fall back to arity-based for legacy CBOR.
-    let bin_id = table
-        .get_by_qualified_name("Data.Map.Bin")
-        .or_else(|| table.get_by_name_arity("Bin", 5))
-        .ok_or_else(|| BridgeError::UnknownDataConName("Bin".into()))?;
-    let tip_id = table
-        .get_by_qualified_name("Data.Map.Tip")
-        .or_else(|| table.get_companion(bin_id, "Tip", 0))
-        .or_else(|| table.get_by_name_arity("Tip", 0))
-        .ok_or_else(|| BridgeError::UnknownDataConName("Tip".into()))?;
-    // Bin's first field is !Int — boxed on the heap as I#(Int#)
-    let i_hash_id = table
-        .get_by_name_arity("I#", 1)
-        .ok_or_else(|| BridgeError::UnknownDataConName("I#".into()))?;
-
-    // Collect and sort entries by key for balanced tree construction
-    let mut entries: Vec<(&std::string::String, &serde_json::Value)> = map.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
-
-    fn build_tree(
-        entries: &[(&std::string::String, &serde_json::Value)],
-        bin_id: tidepool_repr::DataConId,
-        tip_id: tidepool_repr::DataConId,
-        i_hash_id: tidepool_repr::DataConId,
-        table: &DataConTable,
-    ) -> Result<Value, BridgeError> {
-        if entries.is_empty() {
-            return Ok(Value::Con(tip_id, vec![]));
-        }
-        let mid = entries.len() / 2;
-        let (k, v) = entries[mid];
-        let left = build_tree(&entries[..mid], bin_id, tip_id, i_hash_id, table)?;
-        let right = build_tree(&entries[mid + 1..], bin_id, tip_id, i_hash_id, table)?;
-
-        // Key is a newtype for Text — GHC erases it, so store plain Text
-        let key_val = k.clone().to_value(table)?;
-
-        let json_val = v.to_value(table)?;
-        // Bin's !Int field must be boxed as I#(n) to match GHC's heap representation
-        let size = Value::Con(
-            i_hash_id,
-            vec![Value::Lit(Literal::LitInt(entries.len() as i64))],
-        );
-
-        // Bin size key value left right
-        Ok(Value::Con(
-            bin_id,
-            vec![size, key_val, json_val, left, right],
-        ))
-    }
-
-    build_tree(&entries, bin_id, tip_id, i_hash_id, table)
 }
 
 #[cfg(test)]
@@ -270,7 +141,7 @@ mod tests {
                 assert_eq!(table.name_of(*id), Some("NumberI"));
                 assert_eq!(fields.len(), 1);
                 match &fields[0] {
-                    Value::Lit(Literal::LitInt(i)) => assert_eq!(*i, 42),
+                    Value::Lit(tidepool_repr::Literal::LitInt(i)) => assert_eq!(*i, 42),
                     _ => panic!("Expected Lit(LitInt), got {:?}", fields[0]),
                 }
             }
@@ -278,8 +149,6 @@ mod tests {
         }
     }
 
-    /// BUG-8 regression: an integer past 2^53 must survive the wire exactly
-    /// (the Double-backed Number arm would flatten it).
     #[test]
     fn test_number_exact_past_2_53() {
         let table = json_test_table();
@@ -289,7 +158,9 @@ mod tests {
             Value::Con(id, fields) => {
                 assert_eq!(table.name_of(*id), Some("NumberI"));
                 match &fields[0] {
-                    Value::Lit(Literal::LitInt(i)) => assert_eq!(*i, 9007199254740993),
+                    Value::Lit(tidepool_repr::Literal::LitInt(i)) => {
+                        assert_eq!(*i, 9007199254740993)
+                    }
                     other => panic!("Expected exact LitInt, got {other:?}"),
                 }
             }
@@ -307,7 +178,7 @@ mod tests {
                 assert_eq!(table.name_of(*id), Some("Number"));
                 assert_eq!(fields.len(), 1);
                 match &fields[0] {
-                    Value::Lit(Literal::LitDouble(bits)) => {
+                    Value::Lit(tidepool_repr::Literal::LitDouble(bits)) => {
                         let f = f64::from_bits(*bits);
                         assert!((f - 3.14).abs() < 1e-10);
                     }
@@ -393,7 +264,7 @@ mod tests {
             Value::Con(id, fields) => {
                 assert_eq!(table.name_of(*id), Some("NumberI"));
                 match &fields[0] {
-                    Value::Lit(Literal::LitInt(i)) => {
+                    Value::Lit(tidepool_repr::Literal::LitInt(i)) => {
                         assert_eq!(*i, -1);
                     }
                     _ => panic!("Expected LitInt"),
@@ -411,7 +282,7 @@ mod tests {
             Value::Con(id, fields) => {
                 assert_eq!(table.name_of(*id), Some("NumberI"));
                 match &fields[0] {
-                    Value::Lit(Literal::LitInt(i)) => {
+                    Value::Lit(tidepool_repr::Literal::LitInt(i)) => {
                         assert_eq!(*i, 0);
                     }
                     _ => panic!("Expected LitDouble"),
@@ -556,7 +427,9 @@ mod tests {
                             Value::Con(i_id, i_fields) => {
                                 assert_eq!(table.name_of(*i_id), Some("I#"));
                                 match &i_fields[0] {
-                                    Value::Lit(Literal::LitInt(n)) => assert_eq!(*n, 1),
+                                    Value::Lit(tidepool_repr::Literal::LitInt(n)) => {
+                                        assert_eq!(*n, 1)
+                                    }
                                     _ => panic!("Expected LitInt(1)"),
                                 }
                             }
@@ -600,7 +473,9 @@ mod tests {
                         // size = 2
                         match &bin_fields[0] {
                             Value::Con(_, i_fields) => match &i_fields[0] {
-                                Value::Lit(Literal::LitInt(n)) => assert_eq!(*n, 2),
+                                Value::Lit(tidepool_repr::Literal::LitInt(n)) => {
+                                    assert_eq!(*n, 2)
+                                }
                                 _ => panic!("Expected LitInt(2)"),
                             },
                             _ => panic!("Expected I#"),
@@ -703,7 +578,7 @@ mod tests {
             field_bangs: vec![],
             qualified_name: None,
         });
-        // keymap_to_value should still work because it uses get_companion
+        // to_value should still work because from_table uses get_companion
         // to find the Tip closest to Bin
         let json = serde_json::json!({"key": "value"});
         let val = json.to_value(&table).unwrap();
@@ -779,7 +654,7 @@ mod tests {
             qualified_name: Some("Data.Set.Tip".into()),
         });
 
-        // keymap_to_value should resolve via qualified names
+        // to_value should resolve via qualified names
         let json = serde_json::json!({"a": 1, "b": 2});
         let val = json.to_value(&t).unwrap();
         match &val {

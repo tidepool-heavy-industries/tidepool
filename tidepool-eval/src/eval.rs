@@ -536,7 +536,11 @@ fn eval_at(
                             })
                         }
                     };
-                    Ok(crate::json::decode_json_str(&s, &ids))
+                    crate::json::decode_json_str(&s, &ids).ok_or_else(|| {
+                        EvalError::InternalError(
+                            "decodeJson: Maybe (Just/Nothing) constructors not in scope".into(),
+                        )
+                    })
                 }
                 _ => dispatch_primop(*op, arg_vals),
             }
