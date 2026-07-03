@@ -102,6 +102,11 @@ module Tidepool.Prelude
   , genericLength
   , zipWith3
   , zipWith4
+    -- * Additional list combinators (P3)
+  , inits
+  , group
+  , scanl'
+  , listIntercalate
     -- * Function combinators
   , on
   , comparing
@@ -171,7 +176,20 @@ module Tidepool.Prelude
   , Map.singleton, Map.empty
   , Map.findWithDefault, Map.adjust
   , Map.unionWith, Map.intersectionWith
-    -- * Set type (use qualified Set.xxx via preamble's `import qualified Data.Set as Set`)
+    -- * Map operations (extended — non-conflicting additions)
+    -- Note: Map.filter/partition/foldr/foldl' share names with list
+    -- functions already exported, so call them as Map.filter etc. (via
+    -- the preamble's auto-imported `Map.` qualifier).
+  , Map.toAscList, Map.fromListWith
+  , alter
+  , unionsWith
+  , (!?)
+    -- * Set operations
+    -- Set.* functions all share names with Map.* or list functions
+    -- already in scope. Use the preamble's auto-imported `Set.` qualifier
+    -- (Set.fromList, Set.member, Set.insert, …) — it is always available.
+    -- Local helpers for patterns that benefit from a safe implementation:
+  , setUnions
     -- * Map helpers (local impls — unqualified, unlike Map.* re-exports above)
   , insertWith
     -- * Prelude workhorses
@@ -181,6 +199,11 @@ module Tidepool.Prelude
   , Proc(..), ok, Hit(..), Doc(..)
   , FileMeta(..), UpdateOutcome(..), WriteOutcome(..)
   , Commit(..), StatusEntry(..), FileDelta(..)
+    -- * Text padding, chunking, and prefix utilities
+  , chunksOf
+  , justifyLeft, justifyRight, center
+  , textReplicate
+  , commonPrefixes
     -- * UTC time (Tidepool.Data.Time)
   , UTCTime(..), formatISO8601, diffUTCTime, addUTCTime, epochMillis
   ) where
@@ -228,7 +251,7 @@ import Tidepool.Data.Text (Pack(..), pack)
 import Tidepool.FilePath
 import Data.Char (ord, chr)
 import Data.Maybe (fromMaybe, fromJust, isJust, isNothing, catMaybes, mapMaybe, listToMaybe, maybeToList)
-import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, sortOn, maximumBy, minimumBy)
+import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, sortOn, maximumBy, minimumBy, inits, group, scanl')
 -- Bifunctor first/second (polymorphic — tuples AND Either). Control.Lens
 -- re-exports `bimap` but NOT first/second, so import those two from the library.
 import Data.Bifunctor (first, second)
@@ -268,6 +291,7 @@ import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, 
 import Control.Lens hiding (imap, (.=), (??), para, (<.>), rewrite)
 import Control.Applicative ((<|>))  -- Alternative (<|>) — Control.Lens omits it
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 
 -- Permanent binding-level interception in Translate.hs.
 -- GHC's floatToDigits/Integer pipeline is fundamentally incompatible with
@@ -969,8 +993,114 @@ nub :: (Eq a) => [a] -> [a]
 nub = nubBy (==)
 
 -- ---------------------------------------------------------------------------
--- Map insertWith (local impl — avoids GHC's internal unfolding)
+-- Map additional operations + local insertWith
 -- ---------------------------------------------------------------------------
+
+-- | @alter f k m@ — apply @f@ to the current value at @k@ (Nothing if absent),
+-- then insert (Just v) or delete (Nothing) based on the result.
+-- Implemented via Map.lookup/insert/delete to avoid GHC's complex internal
+-- alter unfoldings (same safety rationale as local 'insertWith').
+alter :: Ord k => (Maybe a -> Maybe a) -> k -> Map k a -> Map k a
+alter f k m = case f (Map.lookup k m) of
+  Nothing -> Map.delete k m
+  Just !v -> Map.insert k v m
+{-# INLINE alter #-}
+
+-- | Fold a list of maps together with a combining function.
+-- Uses foldl' to avoid stack overflow on large lists of maps.
+-- Equivalent to @Data.Map.Strict.unionsWith@ but stack-safe.
+unionsWith :: Ord k => (a -> a -> a) -> [Map k a] -> Map k a
+unionsWith f = foldl' (Map.unionWith f) Map.empty
+{-# INLINE unionsWith #-}
+
+-- | Infix lookup: @m '!?' k == Map.lookup k m@.
+(!?) :: Ord k => Map k a -> k -> Maybe a
+(!?) = flip Map.lookup
+infixl 9 !?
+{-# INLINE (!?) #-}
+
+-- ---------------------------------------------------------------------------
+-- Set helpers
+-- ---------------------------------------------------------------------------
+
+-- | Union all sets in a list. Uses foldl' to stay stack-safe for large lists.
+-- For small lists @Set.unions@ is equivalent.
+setUnions :: Ord a => [Set a] -> Set a
+setUnions = foldl' Set.union Set.empty
+{-# INLINE setUnions #-}
+
+-- ---------------------------------------------------------------------------
+-- List combinators (P3)
+-- ---------------------------------------------------------------------------
+
+-- | Intercalate for lists (not Text). Named to avoid shadowing the Text
+-- 'intercalate'; for Text use 'intercalate' (or 'joinText'), for lists use this.
+-- @listIntercalate [0] [[1,2],[3,4]] == [1,2,0,3,4]@
+listIntercalate :: [a] -> [[a]] -> [a]
+listIntercalate sep = go
+  where
+    go []     = []
+    go [x]    = x
+    go (x:xs) = x ++ sep ++ go xs
+{-# INLINE listIntercalate #-}
+
+-- ---------------------------------------------------------------------------
+-- Text padding, chunking, and prefix utilities
+-- ---------------------------------------------------------------------------
+
+-- | Split a Text into chunks of at most @n@ characters.
+-- Uses guarded corecursion (recursive call under a cons cell) so the
+-- JIT thunks the spine correctly. Returns @[]@ for empty text or @n <= 0@.
+chunksOf :: Int -> Text -> [Text]
+chunksOf n t
+  | n <= 0   = []
+  | T.null t = []
+  | otherwise = T.take n t : chunksOf n (T.drop n t)
+{-# INLINE chunksOf #-}
+
+-- | Left-justify text to width @w@, padding on the right with @c@.
+-- @justifyLeft 10 ' ' "hello" == "hello     "@
+justifyLeft :: Int -> Char -> Text -> Text
+justifyLeft w c t =
+  let !l = T.length t
+  in if l >= w then t
+     else t <> T.replicate (w - l) (T.singleton c)
+{-# INLINE justifyLeft #-}
+
+-- | Right-justify text to width @w@, padding on the left with @c@.
+-- @justifyRight 10 ' ' "hello" == "     hello"@
+justifyRight :: Int -> Char -> Text -> Text
+justifyRight w c t =
+  let !l = T.length t
+  in if l >= w then t
+     else T.replicate (w - l) (T.singleton c) <> t
+{-# INLINE justifyRight #-}
+
+-- | Center text to width @w@, padding with @c@ on both sides.
+-- Left pad gets the extra character when @(w - length t)@ is odd.
+-- @center 11 '-' "hello" == "---hello---"@
+center :: Int -> Char -> Text -> Text
+center w c t =
+  let !l     = T.length t
+  in if l >= w then t
+     else let !total = w - l
+              !lpad  = total `div` 2
+              !rpad  = total - lpad
+          in T.replicate lpad (T.singleton c) <> t <> T.replicate rpad (T.singleton c)
+{-# INLINE center #-}
+
+-- | Repeat a Text @n@ times: @textReplicate 3 "ab" == "ababab"@.
+-- Thin alias for @T.replicate@ (distinct from list 'replicate').
+textReplicate :: Int -> Text -> Text
+textReplicate = T.replicate
+{-# INLINE textReplicate #-}
+
+-- | Find the longest common prefix of two Texts.
+-- Returns @Just (prefix, rest1, rest2)@ or @Nothing@ if there is no common prefix.
+-- @commonPrefixes "foobar" "foobaz" == Just ("fooba", "r", "z")@
+commonPrefixes :: Text -> Text -> Maybe (Text, Text, Text)
+commonPrefixes = T.commonPrefixes
+{-# INLINE commonPrefixes #-}
 
 -- | @insertWith f key new m@ — if @key@ exists with value @old@, store @f new old@;
 -- otherwise insert @new@. Monomorphic on Text keys to avoid pulling in GHC's
