@@ -373,33 +373,9 @@ pub fn git_decl() -> EffectDecl {
 // (`effect_defs.rs`).
 crate::time_effect_def!(crate::effect_defs::effect_decl_projection);
 
-/// Meta effect: self-mirror for querying runtime metadata.
-pub fn meta_decl() -> EffectDecl {
-    EffectDecl {
-        type_name: "Meta",
-        description:
-            "Self-mirror for the runtime. Query constructors, primops, effects, diagnostics.",
-        constructors: &[
-            "MetaConstructors :: Meta [(Text, Int)]",
-            "MetaLookupCon    :: Text -> Meta (Maybe (Int, Int))",
-            "MetaPrimOps      :: Meta [Text]",
-            "MetaEffects      :: Meta [Text]",
-            "MetaDiagnostics  :: Meta [Text]",
-            "MetaVersion      :: Meta Text",
-            "MetaHelp         :: Meta [Text]",
-        ],
-        type_defs: &[],
-        helpers: &[
-            "metaConstructors :: M [(Text, Int)]\nmetaConstructors = send MetaConstructors",
-            "metaLookupCon :: Text -> M (Maybe (Int, Int))\nmetaLookupCon = send . MetaLookupCon",
-            "metaPrimOps :: M [Text]\nmetaPrimOps = send MetaPrimOps",
-            "metaEffects :: M [Text]\nmetaEffects = send MetaEffects",
-            "metaDiagnostics :: M [Text]\nmetaDiagnostics = send MetaDiagnostics",
-            "metaVersion :: M Text\nmetaVersion = send MetaVersion",
-            "metaHelp :: M [Text]\nmetaHelp = send MetaHelp",
-        ],
-    }
-}
+// Meta effect: `meta_decl()` is generated from the single-source definition
+// (`effect_defs.rs`).
+crate::meta_effect_def!(crate::effect_defs::effect_decl_projection);
 
 /// Ask effect: suspend execution to ask the calling LLM a question.
 pub fn ask_decl() -> EffectDecl {

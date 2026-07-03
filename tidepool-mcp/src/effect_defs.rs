@@ -218,6 +218,73 @@ macro_rules! time_effect_def {
     };
 }
 
+/// Meta effect — single definition (debug-path self-mirror).
+///
+/// NOTE: the hand-written decl aligned constructor names with padding
+/// ("MetaLookupCon    :: …"); the projection renders single-space signatures,
+/// a deliberate one-time normalization of the generated Effects module.
+#[macro_export]
+macro_rules! meta_effect_def {
+    ($project:path) => {
+        $project! {
+            effect Meta,
+            handler MetaHandler,
+            req MetaReq,
+            decl_fn meta_decl,
+            description [
+                "Self-mirror for the runtime. Query constructors, primops, effects, diagnostics.",
+            ],
+            type_defs [],
+            verbs [
+                { ctor MetaConstructors, method meta_constructors,
+                  args { },
+                  ret "[(Text, Int)]" },
+                { ctor MetaLookupCon, method meta_lookup_con,
+                  args { name: "Text" as String },
+                  ret "(Maybe (Int, Int))" },
+                { ctor MetaPrimOps, method meta_primops,
+                  args { },
+                  ret "[Text]" },
+                { ctor MetaEffects, method meta_effects,
+                  args { },
+                  ret "[Text]" },
+                { ctor MetaDiagnostics, method meta_diagnostics,
+                  args { },
+                  ret "[Text]" },
+                { ctor MetaVersion, method meta_version,
+                  args { },
+                  ret "Text" },
+                { ctor MetaHelp, method meta_help,
+                  args { },
+                  ret "[Text]" },
+            ],
+            helpers [
+                { name metaConstructors, sig "M [(Text, Int)]",
+                  doc ["Constructor table: (name, arity) pairs."],
+                  body nullary MetaConstructors },
+                { name metaLookupCon, sig "Text -> M (Maybe (Int, Int))",
+                  doc ["Look up a constructor by name: (tag, arity)."],
+                  body pointfree MetaLookupCon },
+                { name metaPrimOps, sig "M [Text]",
+                  doc ["Names of the JIT-implemented primops."],
+                  body nullary MetaPrimOps },
+                { name metaEffects, sig "M [Text]",
+                  doc ["Effect type names in the running stack."],
+                  body nullary MetaEffects },
+                { name metaDiagnostics, sig "M [Text]",
+                  doc ["Drain pending runtime diagnostics."],
+                  body nullary MetaDiagnostics },
+                { name metaVersion, sig "M Text",
+                  doc ["Server crate version."],
+                  body nullary MetaVersion },
+                { name metaHelp, sig "M [Text]",
+                  doc ["Helper-verb signatures of the running stack."],
+                  body nullary MetaHelp },
+            ],
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     /// Every generated `*_decl()` must be byte-identical to the hand-written

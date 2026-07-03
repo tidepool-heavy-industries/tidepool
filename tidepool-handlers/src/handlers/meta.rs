@@ -1,29 +1,15 @@
-use tidepool_bridge_derive::FromCore;
-use tidepool_effect::dispatch::{EffectContext, EffectHandler};
+use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
-use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
+use tidepool_mcp::CapturedOutput;
 
 // ============================================================================
 // Meta handler (debug path only — --debug flag in the eval server)
 // ============================================================================
 
-#[derive(FromCore)]
-pub enum MetaReq {
-    #[core(name = "MetaConstructors")]
-    Constructors,
-    #[core(name = "MetaLookupCon")]
-    LookupCon(String),
-    #[core(name = "MetaPrimOps")]
-    PrimOps,
-    #[core(name = "MetaEffects")]
-    Effects,
-    #[core(name = "MetaDiagnostics")]
-    Diagnostics,
-    #[core(name = "MetaVersion")]
-    Version,
-    #[core(name = "MetaHelp")]
-    Help,
-}
+// MetaReq + DescribeEffect + EffectHandler dispatch are generated from the
+// single-source definition; only the handler struct and the per-verb method
+// bodies below are hand-written.
+tidepool_mcp::meta_effect_def!(crate::effect_glue::effect_rust_projection);
 
 #[derive(Clone)]
 pub struct MetaHandler {
@@ -40,99 +26,118 @@ impl MetaHandler {
     }
 }
 
-impl DescribeEffect for MetaHandler {
-    fn effect_decl() -> EffectDecl {
-        tidepool_mcp::meta_decl()
-    }
-}
-
-impl EffectHandler<CapturedOutput> for MetaHandler {
-    type Request = MetaReq;
-    fn handle(
+impl MetaHandler {
+    fn meta_constructors(
         &mut self,
-        req: MetaReq,
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        match req {
-            MetaReq::Constructors => {
-                let mut pairs: Vec<(String, i64)> = cx
-                    .table()
-                    .iter()
-                    .map(|dc| (dc.name.clone(), dc.rep_arity as i64))
-                    .collect();
-                pairs.sort_by(|a, b| a.0.cmp(&b.0));
-                cx.respond(pairs)
-            }
-            MetaReq::LookupCon(name) => {
-                let result: Option<(i64, i64)> = cx.table().get_by_name(&name).and_then(|id| {
-                    cx.table()
-                        .get(id)
-                        .map(|dc| (dc.tag as i64, dc.rep_arity as i64))
-                });
-                cx.respond(result)
-            }
-            MetaReq::PrimOps => {
-                let primops: Vec<String> = vec![
-                    "+#",
-                    "-#",
-                    "*#",
-                    "negateInt#",
-                    "==#",
-                    "/=#",
-                    "<#",
-                    "<=#",
-                    ">#",
-                    ">=#",
-                    "quotInt#",
-                    "remInt#",
-                    "andI#",
-                    "orI#",
-                    "xorI#",
-                    "notI#",
-                    "uncheckedIShiftL#",
-                    "uncheckedIShiftRA#",
-                    "uncheckedIShiftRL#",
-                    "int2Double#",
-                    "double2Int#",
-                    "+##",
-                    "-##",
-                    "*##",
-                    "/##",
-                    "negateDouble#",
-                    "==##",
-                    "/=##",
-                    "<##",
-                    "<=##",
-                    ">##",
-                    ">=##",
-                    "sqrtDouble#",
-                    "sinDouble#",
-                    "cosDouble#",
-                    "expDouble#",
-                    "logDouble#",
-                    "**##",
-                    "fabsDouble#",
-                    "chr#",
-                    "ord#",
-                    "newMutVar#",
-                    "readMutVar#",
-                    "writeMutVar#",
-                    "seq#",
-                    "tagToEnum#",
-                ]
-                .into_iter()
-                .map(String::from)
-                .collect();
-                cx.respond(primops)
-            }
-            MetaReq::Effects => cx.respond(self.effect_names.clone()),
-            MetaReq::Diagnostics => {
-                let diags = tidepool_runtime::drain_diagnostics();
-                cx.respond(diags)
-            }
-            MetaReq::Version => cx.respond(env!("CARGO_PKG_VERSION").to_string()),
-            MetaReq::Help => cx.respond(self.helper_sigs.clone()),
-        }
+        let mut pairs: Vec<(String, i64)> = cx
+            .table()
+            .iter()
+            .map(|dc| (dc.name.clone(), dc.rep_arity as i64))
+            .collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        cx.respond(pairs)
+    }
+
+    fn meta_lookup_con(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        name: String,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let result: Option<(i64, i64)> = cx.table().get_by_name(&name).and_then(|id| {
+            cx.table()
+                .get(id)
+                .map(|dc| (dc.tag as i64, dc.rep_arity as i64))
+        });
+        cx.respond(result)
+    }
+
+    fn meta_primops(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let primops: Vec<String> = vec![
+            "+#",
+            "-#",
+            "*#",
+            "negateInt#",
+            "==#",
+            "/=#",
+            "<#",
+            "<=#",
+            ">#",
+            ">=#",
+            "quotInt#",
+            "remInt#",
+            "andI#",
+            "orI#",
+            "xorI#",
+            "notI#",
+            "uncheckedIShiftL#",
+            "uncheckedIShiftRA#",
+            "uncheckedIShiftRL#",
+            "int2Double#",
+            "double2Int#",
+            "+##",
+            "-##",
+            "*##",
+            "/##",
+            "negateDouble#",
+            "==##",
+            "/=##",
+            "<##",
+            "<=##",
+            ">##",
+            ">=##",
+            "sqrtDouble#",
+            "sinDouble#",
+            "cosDouble#",
+            "expDouble#",
+            "logDouble#",
+            "**##",
+            "fabsDouble#",
+            "chr#",
+            "ord#",
+            "newMutVar#",
+            "readMutVar#",
+            "writeMutVar#",
+            "seq#",
+            "tagToEnum#",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        cx.respond(primops)
+    }
+
+    fn meta_effects(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        cx.respond(self.effect_names.clone())
+    }
+
+    fn meta_diagnostics(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let diags = tidepool_runtime::drain_diagnostics();
+        cx.respond(diags)
+    }
+
+    fn meta_version(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        cx.respond(env!("CARGO_PKG_VERSION").to_string())
+    }
+
+    fn meta_help(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        cx.respond(self.helper_sigs.clone())
     }
 }
 
@@ -150,7 +155,7 @@ mod tests {
         let con_id = table.get_by_name("MetaVersion").unwrap();
         let val = Value::Con(con_id, vec![]);
         let req = MetaReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, MetaReq::Version));
+        assert!(matches!(req, MetaReq::MetaVersion()));
     }
 
     #[test]
@@ -159,7 +164,7 @@ mod tests {
         let con_id = table.get_by_name("MetaConstructors").unwrap();
         let val = Value::Con(con_id, vec![]);
         let req = MetaReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, MetaReq::Constructors));
+        assert!(matches!(req, MetaReq::MetaConstructors()));
     }
 
     #[test]
