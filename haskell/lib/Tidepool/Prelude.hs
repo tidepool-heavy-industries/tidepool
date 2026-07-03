@@ -201,7 +201,8 @@ module Tidepool.Prelude
   , FileMeta(..), UpdateOutcome(..), WriteOutcome(..)
   , Commit(..), StatusEntry(..), FileDelta(..)
     -- * Text padding, chunking, and prefix utilities
-  , chunksOf
+    -- (Text chunking is `T.chunksOf`; the unqualified `chunksOf` is the list
+    -- chunker from `.tidepool/lib/Schemes.hs` — do not shadow it here.)
   , justifyLeft, justifyRight, center
   , textReplicate
   , commonPrefixes
@@ -1049,16 +1050,6 @@ listIntercalate sep = go
 -- ---------------------------------------------------------------------------
 -- Text padding, chunking, and prefix utilities
 -- ---------------------------------------------------------------------------
-
--- | Split a Text into chunks of at most @n@ characters.
--- Uses guarded corecursion (recursive call under a cons cell) so the
--- JIT thunks the spine correctly. Returns @[]@ for empty text or @n <= 0@.
-chunksOf :: Int -> Text -> [Text]
-chunksOf n t
-  | n <= 0   = []
-  | T.null t = []
-  | otherwise = T.take n t : chunksOf n (T.drop n t)
-{-# INLINE chunksOf #-}
 
 -- | Left-justify text to width @w@, padding on the right with @c@.
 -- @justifyLeft 10 ' ' "hello" == "hello     "@
