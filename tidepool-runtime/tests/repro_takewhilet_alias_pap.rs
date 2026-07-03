@@ -1,8 +1,7 @@
 //! Sister matrix to `repro_takewhile_pap.rs`, exercising the `takeWhileT` /
 //! `dropWhileT` Prelude SHADOWS (not the raw `Data.Text` functions) through
-//! every PAP and predicate shape. This is the verification gate from
-//! `plans/takewhile-shadow-retirement.md` — and it is the gate that REJECTED the
-//! retirement.
+//! every PAP and predicate shape. This is the verification gate that REJECTED
+//! the proposed retirement of these shadows (see HISTORY below).
 //!
 //! HISTORY: `takeWhileT` / `dropWhileT` are pure `T.pack . go . T.unpack`
 //! reimplementations that began as a workaround for gotcha-audit #14 —

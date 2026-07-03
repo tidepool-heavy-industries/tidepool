@@ -959,8 +959,8 @@ fn reach_counters_capstraddle_coverage() {
 
 // ===========================================================================
 // FINDINGS — confirmed bugs. Each is `#[ignore]`d so the active suite stays
-// GREEN; remove the `#[ignore]` to watch it fail (and reproduce). See
-// `plans/proptest-findings-boundary.md` for the ledger.
+// GREEN; remove the `#[ignore]` to watch it fail (and reproduce). The
+// `#[ignore]`d repros below ARE the ledger.
 // ===========================================================================
 
 // ---------------------------------------------------------------------------

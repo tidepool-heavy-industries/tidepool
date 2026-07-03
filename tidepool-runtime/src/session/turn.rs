@@ -5,7 +5,7 @@
 //! through the session-aware extract path with the live `Tidepool.Session.Val.G<g>`
 //! ifaces injected. On a BIND turn the extract also writes the thin session iface
 //! (under `session_root`) and emits the [`BoundBinder`] sidecar this module
-//! parses. See `plans/wave3b-contract.md` §3–§5.
+//! parses.
 //!
 //! These calls deliberately bypass the memo cache in [`crate::compile_haskell`]:
 //! a session turn has on-disk side effects (the iface write) and depends on

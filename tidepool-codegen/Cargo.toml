@@ -46,5 +46,5 @@ tidepool-testing = { path = "../tidepool-testing" }
 # HCons/HNil. proptest_jit_dispatch.rs must drive BOTH the JIT machine and the
 # eval EffectMachine through genuine handler HLists to differentially test the
 # dispatch loop and tag routing; there is no reachable re-export. Dev-dep only —
-# production crate graph is unchanged. See plans/proptest-findings-dispatch.md.
+# production crate graph is unchanged.
 frunk = "0.4"

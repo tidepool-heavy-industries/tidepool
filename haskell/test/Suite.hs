@@ -5,7 +5,7 @@ module Suite where
 import Prelude
 import qualified Data.Text as T
 -- qq-suite: regen now needs `--include lib --target-module-only
--- --output-dir test/suite_cbor` (see CLAUDE.md / plans/qq-spike.md)
+-- --output-dir test/suite_cbor` (see haskell/CLAUDE.md "Regenerating Test Fixtures")
 import Tidepool.QQ (fmt, j, patch, uri)
 -- Patch core types/functions are lens-free, so the --all-closed extract
 -- session can import them directly (like Tidepool.Render below).

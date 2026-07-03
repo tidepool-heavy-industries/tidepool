@@ -27,8 +27,6 @@
 //! shape × a small fixed `k` splice set) keeps the GHC-extract disk cache hot:
 //! after one warm-up each case is run-only. Sizes flow through *handler data*
 //! (the dispatcher), never source — so threshold-straddling costs no compiles.
-//!
-//! See `plans/proptest-findings-lazy.md` for the bug table and #313 status.
 
 use std::collections::BTreeMap;
 use std::os::unix::process::ExitStatusExt;
@@ -1286,7 +1284,7 @@ fn repro_313_boundary() {
         }
     }
     eprintln!(
-        "#313 INLINE sweep: {}/{} cases diverged. (See plans/proptest-findings-lazy.md.)",
+        "#313 INLINE sweep: {}/{} cases diverged.",
         triggered,
         trials.len()
     );

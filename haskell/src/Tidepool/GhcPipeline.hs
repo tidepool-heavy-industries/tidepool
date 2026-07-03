@@ -54,8 +54,8 @@ data PipelineResult = PipelineResult
   -- CAVEAT (Wave-4): 'ppr' rendering is NOT parser-faithful — it can elide
   -- qualifiers / use unicode that won't round-trip through GHC's parser. Fine
   -- for v1 display + the synthetic @x :: <type>@ decl when the type is simple,
-  -- but cross-turn typechecking of references (round-3 plan) may need a
-  -- structured @IfaceType@ instead of this string. See plans/ghci-swarm-orchestration.md §0.3.
+  -- but cross-turn typechecking of references may need a structured
+  -- @IfaceType@ instead of this string.
   , prCapturedType :: Maybe String
   -- | The GHC 'Type' of the target module's @result@ binding, captured for the
   -- Wave-3b BIND mode (the value-binding turn). For @result = do { x <- action;
@@ -406,8 +406,7 @@ renderType ty = renderWithContext defaultSDocContext (ppr ty)
 -- quasi-quote dependency graph emits UNOPTIMIZED Core — e.g.
 -- @negate \@Double $fNumDouble (D# 2.5##)@ instead of a folded @D# -2.5##@,
 -- which then chases Integer machinery and dies with
--- "Unsupported primop: clz#". See plans/qq-spike.md (repro matrix M1-M8 in
--- scratch/qq-spike/).
+-- "Unsupported primop: clz#". Repro matrix M1-M8 lives in scratch/qq-spike/.
 --
 -- Surgical: backend/opt-level/gopt only — exactly the fields the TH
 -- downgrade touches. Per-module LANGUAGE pragmas already merged into

@@ -14,7 +14,7 @@
 //!   deep-clones a generated `Value`.
 //! - Property bodies run inside 8 MB stack threads with explicit `Config` cases.
 //!
-//! FINDINGS: see `plans/proptest-findings-render.md`. Confirmed bugs are pinned
+//! FINDINGS: confirmed bugs are pinned
 //! as `#[ignore]`d repros at the bottom of this file with minimal `Value`
 //! literals; the unconstrained `hunt_*` tests (also `#[ignore]`d) persist
 //! proptest regression seeds.

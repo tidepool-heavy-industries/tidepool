@@ -12,7 +12,7 @@
 -- evaluator) and expand to plain Core over 'Data.Text.Text' and the
 -- vendored 'Tidepool.Aeson.Value.Value' — no runtime parsing, no
 -- Generic/Typeable machinery, nothing the Cranelift JIT doesn't already
--- run. See @plans/qq-spike.md@ for the architecture decision.
+-- run.
 module Tidepool.QQ
   ( fmt
   , j

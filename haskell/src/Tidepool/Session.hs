@@ -116,7 +116,7 @@ import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeDirectory, (</>), (<.>))
 
 --------------------------------------------------------------------------------
--- Identifiers (mirror plans/ghci-domain-model.md §1–2)
+-- Identifiers
 --------------------------------------------------------------------------------
 
 -- | Monotonic per-session generation (= GHCi's @ic_mod_index@). Only ever bumped.

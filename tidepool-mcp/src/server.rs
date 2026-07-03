@@ -496,7 +496,7 @@ impl TidepoolMcpServerImpl {
         let mut all_imports = aeson_imports();
         // Tidepool.QQ is injected ONLY when a quoter token appears: the
         // import alone drags the quoter home-module graph into every eval
-        // (~+385ms, plans/qq-spike.md M3); no-splice evals keep an
+        // (~+385ms); no-splice evals keep an
         // import-identical (and cache-identical) module source. The
         // QuasiQuotes/ViewPatterns PRAGMAS are always-on in build_preamble
         // (root decision — see the comment there for the latency FIXME).

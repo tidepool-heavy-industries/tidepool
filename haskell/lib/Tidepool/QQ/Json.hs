@@ -9,9 +9,8 @@
 -- 'Tidepool.Aeson.KeyMap.fromList'/'Tidepool.Aeson.KeyMap.lookup',
 -- @toJSON@, and ordinary @case@ dispatch. No runtime JSON parsing, no
 -- @Generic@/@Typeable@, nothing the Cranelift JIT does not already run.
--- This does not reintroduce runtime JSON parsing (see PR #144 / the
--- @plans/qq-spike.md@ locked-decision clarification): an eval still cannot
--- parse a 'Data.Text.Text' it computed at runtime.
+-- This does not reintroduce runtime JSON parsing (see PR #144): an eval
+-- still cannot parse a 'Data.Text.Text' it computed at runtime.
 --
 -- == Construction API
 --

@@ -1,7 +1,7 @@
 //! Lazy effect-result materialization: large list-shaped handler responses
 //! are parked host-side and materialized chunk-by-chunk through host-code
 //! tail thunks, instead of eagerly converting (and previously, dying on the
-//! response node cap). See plans/lazy-effect-results.md.
+//! response node cap).
 
 use std::path::Path;
 use tidepool_effect::DispatchEffect;

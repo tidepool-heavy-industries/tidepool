@@ -1,6 +1,6 @@
 //! REPRO (2026-06-20): `send (Print …)` resolves to an unresolved variable at
 //! runtime in some contexts, even though it type-checks and `run`/other effects
-//! work. See plans/send-print-unresolved-bug.md. These tests MAP the minimal
+//! work. These tests MAP the minimal
 //! trigger in a controlled (single-Console-handler) effect stack so the bug can
 //! be bisected against pre-wave commits.
 //!
@@ -113,8 +113,7 @@ fn print_then_error_resolves() {
 /// REGRESSION GUARD (was failing): `send (Print x) >> (pure y)` forced the
 /// unresolved external `GHC.Magic.nospec` — the specializer's identity wrapper
 /// (emitted once Opt_Specialise is on), which the JIT didn't handle (only
-/// runRW#). Fixed by desugaring nospec as identity in Translate.hs. See
-/// plans/send-print-unresolved-bug.md.
+/// runRW#). Fixed by desugaring nospec as identity in Translate.hs.
 #[test]
 fn print_then_pure_resolves() {
     let (_out, r) = run(r#"send (Print (T.pack "MARK")) >> (pure (123 :: Int))"#);

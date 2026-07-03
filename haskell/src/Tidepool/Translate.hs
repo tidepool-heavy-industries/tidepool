@@ -1267,7 +1267,7 @@ translate expr =
     -- (once Opt_Specialise is on) to block over-specialization of dictionary /
     -- class-method code. It has no unfolding, so the JIT can't link it; desugar
     -- `nospec @t f x...` → `f x...` (drop the wrapper, apply its first value arg
-    -- to the rest). See plans/send-print-unresolved-bug.md.
+    -- to the rest).
     Var v | isNospecVar v
           , (f:rest) <- args -> do
       fIdx <- translate f

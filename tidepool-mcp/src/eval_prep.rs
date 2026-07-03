@@ -131,8 +131,7 @@ pub fn effects_module_source(effects: &[EffectDecl]) -> String {
 /// GHC's quote-open syntax is literally `[fmt|`/`[j|` — no whitespace is
 /// permitted between bracket, quoter name, and bar — so substring search
 /// cannot false-negative. A false positive (the token inside a string
-/// literal) only costs the ~+385ms quoter-module import
-/// (plans/qq-spike.md, M3), never correctness.
+/// literal) only costs the ~+385ms quoter-module import, never correctness.
 pub fn uses_qq(src: &str) -> bool {
     src.contains("[fmt|")
         || src.contains("[j|")

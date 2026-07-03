@@ -7,8 +7,6 @@
 //!      fixture in `haskell/test/suite_cbor/`.
 //!   3. Collision-resistance statistics for the 56-bit truncated-fingerprint
 //!      VarId scheme over the real fixture corpus (population + duplicates).
-//!
-//! Findings ledger: `plans/proptest-findings-varid.md`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

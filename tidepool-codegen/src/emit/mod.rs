@@ -163,7 +163,7 @@ impl TailCtx {
 }
 
 /// Session-scoped external bindings for GHCi-style re-entry: `VarId → stable
-/// root slot` (component C; `plans/ghci-swarm-orchestration.md` review item 3).
+/// root slot`.
 ///
 /// The value is a `root_slot: *mut *mut u8` — the **stable address** of the
 /// binding table's GC-updated persistent root (`binding_table.rs`,

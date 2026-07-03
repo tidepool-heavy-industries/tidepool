@@ -9,6 +9,4 @@ Queued cleanup work. Each plan is one worktree.
 
 ## Done
 
-| Plan | Focus | Verdict |
-|------|-------|---------|
-| [mcp-hardening](mcp-hardening.md) | Orphan eval thread cleanup + residual `.lock().unwrap()` | CONFIRMED-FIXED by `ff07cdd` (#269) + `97c6108` (pause-gate). Verified 2026-06-11 — see plan for evidence. |
+_Completed plans are deleted once landed — git holds the record. Most recent: mcp-hardening (orphan eval-thread cleanup + `.lock().unwrap()`), CONFIRMED-FIXED by `ff07cdd` (#269) + `97c6108` (pause-gate)._

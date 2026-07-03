@@ -152,8 +152,8 @@ pub fn session_decl_module_env(user_library: bool) -> ModuleEnv {
 // unpoison-fixed tidepool-extract-bin (this branch: GhcPipeline.hs
 // unsets Opt_IgnoreInterfacePragmas on the downgraded summaries between
 // depanal and load'); under a pre-fix binary every eval dies with the
-// clz# deopt class (see plans/qq-spike.md "deoptimization bug", and the
-// spliton repro tests which pin exactly this). Fix later = token-gating
+// clz# deopt class (the spliton repro tests pin exactly this
+// deoptimization bug). Fix later = token-gating
 // (see 71d77fb, reverted) or upstream lazy provisioning.
 // Dialect note: with QuasiQuotes on, `[x|x<-xs]` (comprehension with no
 // space before `|`) parses as a quasi-quote — write `[x | x <- xs]`.
