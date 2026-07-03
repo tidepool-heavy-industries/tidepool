@@ -2111,12 +2111,38 @@ fn mentions_word(text: &str, word: &str) -> bool {
 /// first identifier. Returns `""` for empty or unrecognised text.
 fn decl_head(text: &str) -> &str {
     let s = text.trim();
+    // Import: name the module being imported, not the `import` keyword. (#317)
+    if let Some(rest) = s.strip_prefix("import ") {
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix("qualified ").unwrap_or(rest).trim_start();
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '(')
+            .unwrap_or(rest.len());
+        return rest[..end].trim_end();
+    }
+    // Fixity: name the operator(s) being fixed, not the `infixl`/`infixr`/`infix`
+    // keyword (skip the optional precedence digits). (#317)
+    for kw in &["infixl ", "infixr ", "infix "] {
+        if let Some(rest) = s.strip_prefix(kw) {
+            return rest
+                .trim_start()
+                .trim_start_matches(|c: char| c.is_ascii_digit())
+                .trim();
+        }
+    }
     for kw in &["data ", "newtype ", "type ", "class ", "instance "] {
         if let Some(rest) = s.strip_prefix(kw) {
             let end = rest
                 .find(|c: char| c.is_whitespace() || c == '(' || c == '=')
                 .unwrap_or(rest.len());
             return rest[..end].trim_end();
+        }
+    }
+    // Prefix operator definition `(<>) x y = …` / `(<>) = …`: name the operator
+    // rather than returning "" (the `(` used to zero the token). (#317)
+    if let Some(rest) = s.strip_prefix('(') {
+        if let Some(close) = rest.find(')') {
+            return rest[..close].trim();
         }
     }
     let end = s
@@ -2273,6 +2299,13 @@ mod slim_tests {
         assert_eq!(decl_head("class MyClass a where"), "MyClass");
         assert_eq!(decl_head("  f x = x + 1"), "f");
         assert_eq!(decl_head(""), "");
+        // #317: import → module, fixity → operator, prefix-op def → operator.
+        assert_eq!(decl_head("import Data.Char"), "Data.Char");
+        assert_eq!(decl_head("import qualified Data.Map as M"), "Data.Map");
+        assert_eq!(decl_head("infixl 6 <+>"), "<+>");
+        assert_eq!(decl_head("infixr 5 >>>"), ">>>");
+        assert_eq!(decl_head("(<+>) = (++)"), "<+>");
+        assert_eq!(decl_head("(<>) x y = x <> y"), "<>");
     }
 
     #[test]
