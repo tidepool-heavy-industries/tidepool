@@ -9,6 +9,8 @@
 module Tidepool.Data.Time
   ( UTCTime(..)
   , formatISO8601
+  , parseISO8601
+  , daysFromCivil
   , diffUTCTime
   , addUTCTime
   , epochMillis
@@ -16,7 +18,9 @@ module Tidepool.Data.Time
 
 import Prelude
   ( Int, Double, Bool(..), Show(..), Char, String
+  , Maybe(..)
   , Fractional(..), Semigroup(..)
+  , negate
   , (+), (-), (*), div, mod, fromIntegral, truncate
   , (>), (>=), (<), (<=), otherwise
   , ($), (.)
@@ -100,6 +104,68 @@ formatISO8601 (UTCTime ms) =
       ss         = secsInDay `mod` 60
   in pad4 y <> "-" <> pad2 mo <> "-" <> pad2 d
           <> "T" <> pad2 hh <> ":" <> pad2 mm <> ":" <> pad2 ss <> "Z"
+
+-- | Howard Hinnant days_from_civil: (year, month, day) → epoch-days.
+-- Pure Int arithmetic; the inverse of 'civilFromDays'.
+--
+-- >>> daysFromCivil 1970 1 1
+-- 0
+--
+-- >>> daysFromCivil 2024 2 29
+-- 19782
+daysFromCivil :: Int -> Int -> Int -> Int
+daysFromCivil y0 m d =
+  let y   = y0 - (if m <= 2 then 1 else 0)
+      era = y `div` 400
+      yoe = y - era * 400
+      doy = (153 * (m + (if m > 2 then -3 else 9)) + 2) `div` 5 + d - 1
+      doe = yoe * 365 + yoe `div` 4 - yoe `div` 100 + doy
+  in era * 146097 + doe - 719468
+
+-- | Read a non-negative decimal integer from a Text slice of ASCII digits.
+-- Only called on guaranteed-digit fixed-width substrings from a well-formed
+-- ISO-8601 string, so no error handling is needed.
+readNat :: Text -> Int
+readNat t = go (T.unpack t) 0
+  where
+    go []     acc = acc
+    go (c:cs) acc = go cs (acc * 10 + charDigit c)
+
+-- | Map an ASCII digit Char to its Int value.
+-- Matches the inverse of the existing 'digitChar' function.
+charDigit :: Char -> Int
+charDigit '0' = 0
+charDigit '1' = 1
+charDigit '2' = 2
+charDigit '3' = 3
+charDigit '4' = 4
+charDigit '5' = 5
+charDigit '6' = 6
+charDigit '7' = 7
+charDigit '8' = 8
+charDigit _   = 9
+
+-- | Parse an ISO-8601 timestamp with numeric UTC offset or trailing @Z@ into
+-- a 'UTCTime'.  Handles both the simple UTC form used by 'formatISO8601' and
+-- the @git log --format=%cI@ shape (@2026-07-01T19:24:22-07:00@).
+--
+-- Fixed-width slicing; no dynamic parsing overhead.
+--
+-- >>> parseISO8601 "1970-01-01T00:00:00Z"
+-- 1970-01-01T00:00:00Z
+--
+-- >>> parseISO8601 "2026-07-01T19:24:22-07:00"
+-- 2026-07-02T02:24:22Z
+parseISO8601 :: Text -> UTCTime
+parseISO8601 t =
+  let grab a n = readNat (T.take n (T.drop a t))
+      days = daysFromCivil (grab 0 4) (grab 5 2) (grab 8 2)
+      secs = days * 86400 + grab 11 2 * 3600 + grab 14 2 * 60 + grab 17 2
+      off  = case T.uncons (T.drop 19 t) of
+               Just ('+', _) ->        grab 20 2 * 3600 + grab 23 2 * 60
+               Just ('-', _) -> negate (grab 20 2 * 3600 + grab 23 2 * 60)
+               _             -> 0
+  in UTCTime ((secs - off) * 1000)
 
 -- | Difference in seconds between two 'UTCTime' values (@a - b@).
 diffUTCTime :: UTCTime -> UTCTime -> Double
