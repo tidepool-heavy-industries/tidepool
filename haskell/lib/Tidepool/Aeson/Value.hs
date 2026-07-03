@@ -22,6 +22,8 @@ module Tidepool.Aeson.Value
   , (.=)
   , emptyObject
   , emptyArray
+    -- * Decoding
+  , decodeJson
     -- * ToJSON class
   , ToJSON(..)
   ) where
@@ -88,6 +90,19 @@ emptyObject = Object Map.empty
 -- | Empty JSON array.
 emptyArray :: Value
 emptyArray = Array []
+
+-- | Decode a JSON document into a 'Value' ('Nothing' on any parse error).
+--
+-- PURE — no effect. Calls to @decodeJson@ are intercepted in the extractor
+-- (Translate.hs) and lowered to the @JsonDecode@ primop, which dispatches to
+-- Rust @serde_json@ and builds this 'Value' ADT directly on the heap. That is
+-- why this can run inside a pure fold (e.g. JSONL-as-pure-fold) without an
+-- effect handler. The body below is a NOINLINE stub that never actually runs at
+-- a call site (the primop replaces it); it exists only so the name type-checks
+-- and stays an opaque 'Var' for the interceptor to spot.
+{-# NOINLINE decodeJson #-}
+decodeJson :: Text -> Maybe Value
+decodeJson _ = Nothing
 
 -- | A class for types that can be converted to JSON Value.
 class ToJSON a where

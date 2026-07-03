@@ -872,6 +872,22 @@ translate expr =
   let (hd, allArgs) = collectArgs expr
       args = filter isValueArg allArgs
   in case hd of
+    -- Intercept decodeJson :: Text -> Maybe Value. Lower the applied call to the
+    -- pure JsonDecode primop (Rust serde_json builds the aeson Maybe Value ADT).
+    Var v | isDecodeJsonVar v
+          , [arg] <- args -> do
+        argIdx <- translate arg
+        emitNode $ NPrimOp (T.pack "JsonDecode") [argIdx]
+
+    -- Point-free / higher-order use (`map decodeJson xs`): bare Var, no args.
+    -- Eta-expand to \t -> JsonDecode t so the value has a valid function body.
+    Var v | isDecodeJsonVar v
+          , null args -> do
+        let paramVarId = varId v .|. 0x01  -- unique param id (matches showDouble scheme)
+        paramRef <- emitNode $ NVar paramVarId
+        resultIdx <- emitNode $ NPrimOp (T.pack "JsonDecode") [paramRef]
+        emitNode $ NLam paramVarId resultIdx
+
     -- Intercept showDouble: emit ShowDoubleAddr primop + unpackCString loop
     Var v | isShowDoubleVar v
           , [arg] <- args -> do
@@ -2247,6 +2263,13 @@ isShowDoubleVar v =
   let name = occNameString (nameOccName (idName v))
   in name == "showDouble" || name == "showDouble'"
      || name == "$fShowDouble_$cshow"
+
+-- | Recognize @decodeJson@ (the stdlib stub in Tidepool.Aeson.Value). Its calls
+-- are lowered to the pure @JsonDecode@ primop; the NOINLINE stub body itself is
+-- dead. Matched by unqualified occurrence name (same convention as showDouble).
+isDecodeJsonVar :: Id -> Bool
+isDecodeJsonVar v =
+  occNameString (nameOccName (idName v)) == "decodeJson"
 
 -- | Recognize GHC's specialized showSignedFloat for Double.
 -- GHC -O2 specializes show @Double into $fShowDouble_$sshowSignedFloat

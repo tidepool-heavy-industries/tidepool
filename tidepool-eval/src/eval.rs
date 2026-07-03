@@ -24,6 +24,10 @@ use tidepool_repr::{
 /// bound to its worker VarId, so that `Var` references to constructors
 /// in the expression tree resolve correctly.
 pub fn env_from_datacon_table(table: &DataConTable) -> Env {
+    // Cache the aeson-`Value` constructor ids for the `JsonDecode` primop. This
+    // is the universal eval-setup chokepoint (every differential harness and
+    // caller builds its env here), so the primop always sees the right ids.
+    crate::json::set_json_con_ids(crate::json::JsonConIds::from_table(table));
     table
         .iter()
         .map(|dc| {
@@ -490,6 +494,49 @@ fn eval_at(
                     let mut bytes = s.into_bytes();
                     bytes.push(0);
                     Ok(Value::Lit(Literal::LitString(bytes)))
+                }
+                PrimOpKind::JsonDecode => {
+                    // decodeJson :: Text -> Maybe Value. Parse the Text's UTF-8
+                    // bytes with serde_json and build the aeson `Maybe Value`
+                    // ADT — the SAME builder the JIT host fn uses, so the two
+                    // agree by construction. Needs `heap` to force the Text
+                    // Con's (lazy) fields, hence handled here, not in
+                    // `dispatch_primop`.
+                    if arg_vals.len() != 1 {
+                        return Err(EvalError::ArityMismatch {
+                            context: ArityContext::Arguments,
+                            expected: 1,
+                            got: arg_vals.len(),
+                        });
+                    }
+                    let ids = crate::json::json_con_ids().ok_or_else(|| {
+                        EvalError::InternalError(
+                            "decodeJson: aeson Value/Maybe/Map constructors not in scope".into(),
+                        )
+                    })?;
+                    let text = force(arg_vals[0].clone(), heap)?;
+                    let s = match &text {
+                        Value::Con(_, fields) if fields.len() == 3 => {
+                            let ba = force(fields[0].clone(), heap)?;
+                            let off = expect_int_like(&force(fields[1].clone(), heap)?)?;
+                            let len = expect_int_like(&force(fields[2].clone(), heap)?)?;
+                            let ba = expect_byte_array(&ba)?;
+                            let guard = ba.lock().map_err(|e| {
+                                EvalError::InternalError(format!("mutex poisoned: {e}"))
+                            })?;
+                            let (off, len) = (off.max(0) as usize, len.max(0) as usize);
+                            let end = off.saturating_add(len).min(guard.len());
+                            let start = off.min(end);
+                            String::from_utf8_lossy(&guard[start..end]).into_owned()
+                        }
+                        other => {
+                            return Err(EvalError::TypeMismatch {
+                                expected: "Text (Con with 3 fields)",
+                                got: crate::error::ValueKind::Other(format!("{:?}", other)),
+                            })
+                        }
+                    };
+                    Ok(crate::json::decode_json_str(&s, &ids))
                 }
                 _ => dispatch_primop(*op, arg_vals),
             }
@@ -1183,6 +1230,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::ShowSignedDoubleAddr => {
             // Handled in eval_at PrimOp arm (needs heap for deep forcing)
             unreachable!("ShowSignedDoubleAddr should be intercepted in eval_at")
+        }
+        PrimOpKind::JsonDecode => {
+            // Handled in eval_at PrimOp arm (needs heap + cached con ids)
+            unreachable!("JsonDecode should be intercepted in eval_at")
         }
         PrimOpKind::Int2Float => {
             if args.len() != 1 {

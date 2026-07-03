@@ -3198,9 +3198,103 @@ unsafe extern "C" fn stream_element(vmctx: *mut VMContext, thunk: *mut u8) -> *m
     }
 }
 
+thread_local! {
+    /// The aeson-`Value` constructor ids for the currently-running JIT machine,
+    /// installed by the run entry (`JitEffectMachine`) from the compile-time
+    /// `DataConTable`. Read by [`runtime_json_decode`] to build the `Maybe
+    /// Value` result. `None` when the aeson/Maybe/Map closure isn't in scope.
+    static JSON_CON_IDS: Cell<Option<tidepool_eval::json::JsonConIds>> = const { Cell::new(None) };
+}
+
+/// Install the JSON constructor ids for this thread's JIT run. `None` clears.
+pub fn set_json_con_ids(ids: Option<tidepool_eval::json::JsonConIds>) {
+    JSON_CON_IDS.with(|c| c.set(ids));
+}
+
+/// Read an unboxed `Int#`/`Word#` payload out of a (forced) boxed literal.
+///
+/// # Safety
+/// `p` must be a valid, forced `Lit` heap object.
+unsafe fn read_lit_i64(p: *mut u8) -> i64 {
+    *(p.add(heap_layout::LIT_VALUE_OFFSET) as *const i64)
+}
+
+/// `decodeJson :: Text -> Maybe Value` — the pure JSON-decode primop.
+///
+/// Reads the argument `Text` (`Text ByteArray# Int# Int#`), parses its UTF-8
+/// slice with `serde_json`, and builds the aeson `Maybe Value` ADT on the
+/// nursery heap via `tidepool_eval::json` (the SAME builder the tree-walker
+/// uses, so JIT and eval agree by construction) + the stack-safe
+/// `value_to_heap`. Parse failure yields `Nothing`.
+///
+/// # Safety
+/// `vmctx` must be a valid live VMContext; `text_ptr` a valid heap pointer to a
+/// `Text` value (or a thunk that forces to one).
+#[no_mangle]
+pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *mut u8) -> *mut u8 {
+    let ids = match JSON_CON_IDS.with(|c| c.get()) {
+        Some(ids) => ids,
+        None => {
+            let msg = b"decodeJson: aeson Value/Maybe/Map constructors not in scope";
+            return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+        }
+    };
+
+    // Force the Text to WHNF, then force + read its three fields.
+    let text = heap_force(vmctx, text_ptr);
+    if text.is_null() {
+        let msg = b"decodeJson: null Text argument";
+        return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+    }
+    let tag = *text.add(0);
+    let nfields = *(text.add(heap_layout::CON_NUM_FIELDS_OFFSET) as *const u16);
+    if tag != heap_layout::TAG_CON || nfields != 3 {
+        let msg = b"decodeJson: argument is not a Text (Con with 3 fields)";
+        return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+    }
+    let fld = |i: usize| *(text.add(heap_layout::CON_FIELDS_OFFSET + 8 * i) as *const *mut u8);
+    let ba = heap_force(vmctx, fld(0)); // ByteArray# lit: LIT_VALUE -> [len:u64][bytes]
+    let off_box = heap_force(vmctx, fld(1));
+    let len_box = heap_force(vmctx, fld(2));
+    if ba.is_null() || off_box.is_null() || len_box.is_null() {
+        let msg = b"decodeJson: null Text field";
+        return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+    }
+    let data = *(ba.add(heap_layout::LIT_VALUE_OFFSET) as *const *const u8);
+    let off = read_lit_i64(off_box).max(0) as usize;
+    let len = read_lit_i64(len_box).max(0) as usize;
+    let s = if data.is_null() {
+        String::new()
+    } else {
+        let start = data.add(8).add(off);
+        let bytes = std::slice::from_raw_parts(start, len);
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+
+    // Build the eval Value (GC-inert Rust data), then materialize on the heap
+    // with one GC-and-retry (the deep spine converts stack-safely via the hylo
+    // in value_to_heap).
+    let value = tidepool_eval::json::decode_json_str(&s, &ids);
+    match crate::heap_bridge::value_to_heap(&value, &mut *vmctx) {
+        Ok(p) => p,
+        Err(crate::heap_bridge::BridgeError::NurseryExhausted) => {
+            gc_trigger(vmctx);
+            match crate::heap_bridge::value_to_heap(&value, &mut *vmctx) {
+                Ok(p) => p,
+                Err(_) => runtime_oom(),
+            }
+        }
+        Err(e) => {
+            let msg = format!("decodeJson: result materialization failed: {e}");
+            runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64)
+        }
+    }
+}
+
 pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
     vec![
         ("gc_trigger", gc_trigger as *const u8),
+        ("runtime_json_decode", runtime_json_decode as *const u8),
         ("runtime_oom", runtime_oom as *const u8),
         (
             "runtime_blackhole_trap",

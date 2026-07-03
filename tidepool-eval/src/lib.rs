@@ -8,6 +8,7 @@ pub mod env;
 pub mod error;
 pub mod eval;
 pub mod heap;
+pub mod json;
 pub mod pass;
 pub mod value;
 

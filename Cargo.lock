@@ -3588,6 +3588,7 @@ name = "tidepool-eval"
 version = "0.1.0"
 dependencies = [
  "im",
+ "serde_json",
  "thiserror 1.0.69",
  "tidepool-bignum",
  "tidepool-repr",
