@@ -1092,9 +1092,14 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          PRIMARY TOOL: session_run\n\
          Pass a list of items run in sequence: top-level declarations (`data Foo = …`, \
          `f x = …`), bind statements (`x <- e` / `let x = e`), bare expressions, or \
-         :commands (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`, `:stub <n>`, `:program`). \
+         :commands (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`, `:browse [Effect]`, \
+         `:stub <n>`, `:program`). \
          Items are classified automatically. Execution stops on the first error. \
          Returns per-item results and the last expression's value.\n\n\
+         DISCOVER VERBS: `:browse` lists every effect + one-line description; \
+         `:browse <Effect>` (case-insensitive) lists that effect's verbs (name :: signature) and \
+         constructors — reach for it instead of guessing verb names. `:vocab` covers the \
+         .tidepool/lib verbs, each module tagged bare (in scope) vs needs-import.\n\n\
          PREFERRED IDIOM — define then call in one block:\n\
          Put helper definitions and type aliases in the early items, then call them in the \
          final expression. One block with a clean definition + its caller beats cramming all \
@@ -1196,9 +1201,13 @@ impl ServerHandler for TidepoolReplServer {
                 "Run a list of GHCi-capable items in sequence on the resident machine. Each item \
                  is a declaration (`data Foo = …`, `f x = …`), a bind statement (`x <- e` / \
                  `let x = e`), a bare expression, or a `:command` (`:bindings`, `:reset`, \
-                 `:t <expr>`, `:i <name>`, `:vocab`, `:stub <n>`, `:program`). Items are classified automatically; \
+                 `:t <expr>`, `:i <name>`, `:vocab`, `:browse [Effect]`, `:stub <n>`, `:program`). \
+                 Items are classified automatically; \
                  execution stops on the first error. Returns slim per-item inline JSON plus the \
                  last expression's `value` and `type` at the top level. \
+                 DISCOVER VERBS with `:browse` (bare = all effects + descriptions; \
+                 `:browse <Effect>` = that effect's verbs + constructors) rather than guessing \
+                 verb names; `:vocab` lists .tidepool/lib verbs tagged bare vs needs-import. \
                  PREFERRED IDIOM: define helpers and types in early items, then invoke them in \
                  the final expression — one block with a clean definition plus its caller beats \
                  one cramped expression. Each declaration item is its own module, so a type \

@@ -1539,7 +1539,19 @@ impl Session {
                 }
                 dirs.extend(tidepool_runtime::paths::global_lib_dirs());
                 let vocab = library_vocab(&dirs, only.as_deref());
-                TurnOutcome::Meta(serde_json::json!({ "vocab": vocab }))
+                TurnOutcome::Meta(serde_json::json!({
+                    "vocab": vocab,
+                    // The vocab digest lists .tidepool/lib verbs (each module
+                    // tagged bare-in-scope vs needs-import). For the built-in
+                    // EFFECT verbs (run/grepGlob/kvSet/…), which live in the
+                    // effect decls not the lib dirs, use `:browse`.
+                    "hint": ":browse lists built-in effect verbs (:browse <Effect> for one effect's \
+                             verbs+constructors). Module tags below: \"bare (Library re-export)\" = \
+                             in scope directly; \"needs: import <Mod>\" = add that import first.",
+                }))
+            }
+            MetaCommand::Browse(only) => {
+                TurnOutcome::Meta(browse_effects(&self.cfg.decls, only.as_deref()))
             }
         }
     }
@@ -2333,9 +2345,181 @@ fn type_def_head(src: &str) -> Option<&str> {
     }
 }
 
+/// The one-line summary of an effect's (often multi-sentence) description: the
+/// first sentence, or the whole thing when it has no sentence break.
+fn first_sentence(desc: &str) -> &str {
+    let d = desc.trim();
+    match d.find(". ") {
+        // Keep the period; drop the trailing space + rest.
+        Some(i) => d[..=i].trim_end(),
+        None => d,
+    }
+}
+
+/// The signature line of an effect helper. Helper strings are
+/// `"[-- comment…\n]sig-line\ndefinition"`; the signature is the first
+/// non-comment line that carries a `::` (e.g. `run :: Text -> M Proc`). Falls
+/// back to the first non-comment line when no `::` is present.
+fn helper_sig(helper: &str) -> Option<String> {
+    let mut fallback = None;
+    for line in helper.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("--") {
+            continue;
+        }
+        if t.contains("::") {
+            return Some(t.to_string());
+        }
+        fallback.get_or_insert_with(|| t.to_string());
+    }
+    fallback
+}
+
+/// Render the `:browse` result. Bare (`None`) lists every effect with its
+/// one-line description; `Some(name)` (case-insensitive) lists that effect's
+/// helper verbs (`name :: signature`) and constructors, or — for an unknown
+/// name — an `error` payload naming the valid effects (the #319 not-ok
+/// convention: a `Meta` object carrying an `error` key surfaces as not-ok).
+fn browse_effects(decls: &[EffectDecl], only: Option<&str>) -> serde_json::Value {
+    match only {
+        None => {
+            let effects: Vec<serde_json::Value> = decls
+                .iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "effect": d.type_name,
+                        "description": first_sentence(d.description),
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "effects": effects,
+                "hint": ":browse <Effect> (case-insensitive) lists that effect's verbs + constructors.",
+            })
+        }
+        Some(name) => match decls.iter().find(|d| d.type_name.eq_ignore_ascii_case(name)) {
+            Some(d) => {
+                let verbs: Vec<String> = d.helpers.iter().filter_map(|h| helper_sig(h)).collect();
+                serde_json::json!({
+                    "effect": d.type_name,
+                    "description": d.description,
+                    "verbs": verbs,
+                    "constructors": d.constructors,
+                })
+            }
+            None => {
+                let valid: Vec<&str> = decls.iter().map(|d| d.type_name).collect();
+                serde_json::json!({
+                    "error": format!(
+                        "unknown effect '{name}'; valid effects: {}",
+                        valid.join(", ")
+                    ),
+                    "effects": valid,
+                })
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod slim_tests {
     use super::{decl_head, pure_bind_to_decl, slim_item_result, split_discard_bind};
+    use super::{browse_effects, first_sentence, helper_sig, EffectDecl};
+
+    /// Two-effect fixture mirroring the real decl shape: a comment-prefixed
+    /// helper (so the sig line is not the first line) and a multi-sentence
+    /// description.
+    fn sample_decls() -> Vec<EffectDecl> {
+        vec![
+            EffectDecl {
+                type_name: "Exec",
+                description: "Run shell commands. And capture output.",
+                constructors: &["Run :: Text -> Exec (Int, Text, Text)"],
+                type_defs: &[],
+                helpers: &[
+                    "-- | Run a shell command; returns a `Proc`.\nrun :: Text -> M Proc\nrun cmd = undefined",
+                    "readProcess :: Text -> M Text\nreadProcess cmd = undefined",
+                ],
+            },
+            EffectDecl {
+                type_name: "KV",
+                description: "Persistent key-value store.",
+                constructors: &["KvSet :: Text -> Value -> KV ()"],
+                type_defs: &[],
+                helpers: &["kvSet :: Text -> Value -> M ()\nkvSet k v = undefined"],
+            },
+        ]
+    }
+
+    #[test]
+    fn first_sentence_takes_leading_sentence() {
+        assert_eq!(
+            first_sentence("Run shell commands. And capture output."),
+            "Run shell commands."
+        );
+        // No sentence break → whole (trimmed) string.
+        assert_eq!(first_sentence("  just one clause  "), "just one clause");
+    }
+
+    #[test]
+    fn helper_sig_skips_comments_and_finds_signature() {
+        assert_eq!(
+            helper_sig("-- | doc line\nrun :: Text -> M Proc\nrun cmd = undefined").as_deref(),
+            Some("run :: Text -> M Proc")
+        );
+        // No comment: still the sig line.
+        assert_eq!(
+            helper_sig("kvSet :: Text -> Value -> M ()\nkvSet k v = undefined").as_deref(),
+            Some("kvSet :: Text -> Value -> M ()")
+        );
+    }
+
+    #[test]
+    fn browse_bare_lists_effects_with_descriptions() {
+        let v = browse_effects(&sample_decls(), None);
+        let effects = v["effects"].as_array().expect("effects array");
+        assert_eq!(effects.len(), 2);
+        assert_eq!(effects[0]["effect"], "Exec");
+        // One-line description only (first sentence).
+        assert_eq!(effects[0]["description"], "Run shell commands.");
+        assert_eq!(effects[1]["effect"], "KV");
+        // Bare browse is not an error.
+        assert!(v.get("error").is_none());
+    }
+
+    #[test]
+    fn browse_known_effect_lists_verbs_and_constructors() {
+        let v = browse_effects(&sample_decls(), Some("Exec"));
+        assert_eq!(v["effect"], "Exec");
+        let verbs: Vec<&str> = v["verbs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        assert!(verbs.contains(&"run :: Text -> M Proc"), "verbs: {verbs:?}");
+        assert!(verbs.contains(&"readProcess :: Text -> M Text"));
+        let cons = v["constructors"].as_array().unwrap();
+        assert_eq!(cons[0], "Run :: Text -> Exec (Int, Text, Text)");
+        assert!(v.get("error").is_none());
+    }
+
+    #[test]
+    fn browse_is_case_insensitive() {
+        let v = browse_effects(&sample_decls(), Some("exec"));
+        assert_eq!(v["effect"], "Exec");
+        assert!(v.get("error").is_none());
+    }
+
+    #[test]
+    fn browse_unknown_effect_errors_with_candidates() {
+        let v = browse_effects(&sample_decls(), Some("Nope"));
+        let err = v["error"].as_str().expect("error string");
+        // Names the valid effects so the caller can retry.
+        assert!(err.contains("Exec"), "{err}");
+        assert!(err.contains("KV"), "{err}");
+        assert!(err.contains("Nope"), "{err}");
+    }
 
     #[test]
     fn pure_bind_to_decl_normalizes() {

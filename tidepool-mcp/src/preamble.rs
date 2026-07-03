@@ -821,7 +821,19 @@ pub fn library_vocab(dirs: &[std::path::PathBuf], only: Option<&str>) -> String 
                 continue;
             }
             found = true;
-            out.push_str(&format!("  {stem}:\n"));
+            // Scope truth: tag each module bare-in-scope (a `Library`
+            // re-export, importable without ceremony) vs needs-import. The
+            // digest previously listed module-qualified names with no hint that
+            // some require an explicit `import`; the tag closes that drift.
+            let scope_tag = match &inscope {
+                Some(ins) if stem == "Library" || ins.contains(stem) => {
+                    "  -- bare (Library re-export)".to_string()
+                }
+                Some(_) => format!("  -- needs: import {stem}"),
+                // No parseable Library.hs: scope is unknown, so don't assert.
+                None => String::new(),
+            };
+            out.push_str(&format!("  {stem}:{scope_tag}\n"));
             for s in sigs {
                 let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
                 let s: String = s.chars().take(SIG_MAX).collect();
@@ -936,5 +948,42 @@ import Lsp
             out.contains("no module 'NoSuchModule' found"),
             "missing module should report clearly, not silently return empty: {out}"
         );
+    }
+
+    #[test]
+    fn library_vocab_tags_scope_bare_vs_needs_import() {
+        // A lib dir WITH a Library facade re-exporting only Alpha. Both modules
+        // are on disk, but only Alpha is bare-in-scope; the digest must say so.
+        let dir = std::env::temp_dir().join(format!(
+            "tidepool-vocab-scopetag-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Alpha.hs"), "module Alpha where\n\nfooAlpha :: Int\n").unwrap();
+        std::fs::write(dir.join("Beta.hs"), "module Beta where\n\nfooBeta :: Int\n").unwrap();
+        std::fs::write(
+            dir.join("Library.hs"),
+            "module Library ( module Alpha ) where\nimport Alpha\n",
+        )
+        .unwrap();
+
+        // Beta is not re-exported, so the in-scope gate hides it from the
+        // unscoped digest; Alpha is tagged as a bare re-export.
+        let all = super::library_vocab(&std::slice::from_ref(&dir), None);
+        assert!(
+            all.contains("Alpha:  -- bare (Library re-export)"),
+            "Alpha should be tagged bare: {all}"
+        );
+        assert!(!all.contains("Beta:"), "Beta is not re-exported: {all}");
+
+        // An explicit `:vocab Beta` bypasses the gate and marks it needs-import.
+        let beta = super::library_vocab(&std::slice::from_ref(&dir), Some("Beta"));
+        assert!(
+            beta.contains("Beta:  -- needs: import Beta"),
+            "explicit Beta should be tagged needs-import: {beta}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
