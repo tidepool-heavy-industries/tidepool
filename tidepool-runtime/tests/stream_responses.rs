@@ -6,8 +6,6 @@
 //! Lazy results are DEFAULT-ON (no env var needed); the kill-switch drain
 //! is covered separately in lazy_eager_fallback.rs (own process).
 
-mod common;
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tidepool_bridge::{BridgeError, ToCore};
@@ -17,7 +15,7 @@ use tidepool_effect::{
 };
 use tidepool_eval::value::Value;
 use tidepool_repr::DataConTable;
-use tidepool_runtime::compile_and_run;
+use tidepool_testing::eval_harness::EvalHarness;
 
 #[derive(FromCore)]
 enum ListingReq {
@@ -132,19 +130,12 @@ result = do
 {body}
 "#
     );
-    let pp = common::prelude_path();
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let include = [pp.as_path()];
-            let mut handlers = frunk::hlist![StreamListing { source }];
-            compile_and_run(&src, "result", &include, &mut handlers, &())
-                .map(|v| v.to_json())
-                .map_err(|e| format!("{e}"))
-        })
-        .unwrap()
-        .join()
-        .unwrap()
+    EvalHarness::new()
+        .with_stdlib()
+        .run(&src, "result", frunk::hlist![StreamListing { source }])
+        .into_result()
+        .map(|v| v.to_json())
+        .map_err(|e| format!("{e}"))
 }
 
 #[test]

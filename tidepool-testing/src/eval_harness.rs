@@ -319,6 +319,51 @@ impl EvalHarness {
             }
         }))
     }
+
+    /// As [`run`](Self::run) but hands `handlers` back alongside the
+    /// [`Outcome`] — for dispatchers whose post-eval state (write counts,
+    /// stored files, recorded calls) IS the assertion.
+    pub fn run_owned<H>(&self, source: &str, target: &str, handlers: H) -> (Outcome, H)
+    where
+        H: DispatchEffect<()> + Send + 'static,
+    {
+        self.run_with_owned(source, target, handlers, ())
+    }
+
+    /// As [`run_with`](Self::run_with) but hands `handlers` back alongside the
+    /// [`Outcome`].
+    pub fn run_with_owned<U, H>(
+        &self,
+        source: &str,
+        target: &str,
+        mut handlers: H,
+        user: U,
+    ) -> (Outcome, H)
+    where
+        U: Send + 'static,
+        H: DispatchEffect<U> + Send + 'static,
+    {
+        let includes = self.owned_includes();
+        let source = source.to_owned();
+        let target = target.to_owned();
+        let nursery = self.nursery;
+        let (result, handlers) = with_eval_stack(move || {
+            let refs: Vec<&Path> = includes.iter().map(|p| p.as_path()).collect();
+            let result = match nursery {
+                Some(n) => compile_and_run_with_nursery_size(
+                    &source,
+                    &target,
+                    &refs,
+                    &mut handlers,
+                    &user,
+                    n,
+                ),
+                None => compile_and_run(&source, &target, &refs, &mut handlers, &user),
+            };
+            (result, handlers)
+        });
+        (Outcome(result), handlers)
+    }
 }
 
 /// The canonical MCP effect stack: the 10-effect GADT preamble every effectful

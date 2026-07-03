@@ -2,23 +2,7 @@
 //! Run with: cargo test -p tidepool-runtime --test user_library
 
 use std::path::Path;
-use tidepool_runtime::compile_and_run_pure;
-
-fn prelude_dir() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("haskell/lib")
-        .leak()
-}
-
-fn user_lib_dir() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join(".tidepool/lib")
-        .leak()
-}
+use tidepool_testing::eval_harness::EvalHarness;
 
 fn run_expr(expr: &str) -> serde_json::Value {
     let source = format!(
@@ -34,13 +18,15 @@ result :: Value
 result = toJSON ({expr})
 "#
     );
-    let effects_dir = tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls())
-        .expect("write effects module")
-        .leak() as &std::path::Path;
-    let include = [prelude_dir(), user_lib_dir(), effects_dir];
-    let result =
-        compile_and_run_pure(&source, "result", &include).expect("compile_and_run_pure failed");
-    result.to_json()
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    EvalHarness::new()
+        .with_stdlib()
+        .with_include(root.join(".tidepool/lib"))
+        .with_effects_module()
+        .run_pure(&source, "result")
+        .into_result()
+        .expect("compile_and_run_pure failed")
+        .to_json()
 }
 
 #[test]
