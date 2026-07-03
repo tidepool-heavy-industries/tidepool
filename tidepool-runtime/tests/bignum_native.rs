@@ -8,41 +8,23 @@
 //! `compile_and_run_pure`. Needs the worktree extract binary built against the
 //! native-bignum GHC (TIDEPOOL_EXTRACT) + that GHC's libdir (TIDEPOOL_GHC_LIBDIR).
 use serde_json::json;
-use tidepool_runtime::compile_and_run_pure;
+use tidepool_testing::eval_harness::EvalHarness;
 
 fn show_pure(body: &str) -> serde_json::Value {
-    let body = body.to_string();
-    // Run on a large-stack thread: the JIT and some Haskell machinery (e.g. the
-    // Read/ReadP CPS parser) recurse deeper than the 2 MiB default test stack.
-    std::thread::Builder::new()
-        .stack_size(256 * 1024 * 1024)
-        .spawn(move || {
-            let src = format!("module M where\nx :: String\nx = {body}\n");
-            match compile_and_run_pure(&src, "x", &[]) {
-                Ok(r) => r.to_json(),
-                Err(e) => panic!("eval failed for `{body}`: {e}"),
-            }
-        })
-        .unwrap()
-        .join()
-        .unwrap()
+    let src = format!("module M where\nx :: String\nx = {body}\n");
+    EvalHarness::new()
+        .run_pure(&src, "x")
+        .expect(&format!("eval failed for `{body}`"))
+        .to_json()
 }
 
 /// Run a `Double` binding and return its rendered JSON number.
 fn dbl_pure(body: &str) -> serde_json::Value {
-    let body = body.to_string();
-    std::thread::Builder::new()
-        .stack_size(256 * 1024 * 1024)
-        .spawn(move || {
-            let src = format!("module M where\nx :: Double\nx = {body}\n");
-            match compile_and_run_pure(&src, "x", &[]) {
-                Ok(r) => r.to_json(),
-                Err(e) => panic!("eval failed for `{body}`: {e}"),
-            }
-        })
-        .unwrap()
-        .join()
-        .unwrap()
+    let src = format!("module M where\nx :: Double\nx = {body}\n");
+    EvalHarness::new()
+        .run_pure(&src, "x")
+        .expect(&format!("eval failed for `{body}`"))
+        .to_json()
 }
 
 // The ORIGINAL trigger: large base-10-exponent Double literals desugar to a
