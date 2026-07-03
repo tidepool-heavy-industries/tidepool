@@ -14,36 +14,22 @@
 //! `??` operator crash (`h_conf` computes `(b1 + b2 + b3) / 3.0` from lens
 //! extractions, then the result gets `show`n in the `ask` fallback path).
 
-mod common;
-
 use tidepool_eval::{deep_force, env_from_datacon_table, eval, VecHeap};
-use tidepool_runtime::{compile_and_run_pure, compile_haskell, value_to_json, CompileResult};
-
-fn prelude_path() -> std::path::PathBuf {
-    common::prelude_path()
-}
+use tidepool_runtime::{value_to_json, CompileResult};
+use tidepool_testing::eval_harness::EvalHarness;
 
 fn run(src: &str) -> serde_json::Value {
-    let pp = prelude_path();
-    let src = src.to_owned();
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let include = [pp.as_path()];
-            compile_and_run_pure(&src, "result", &include)
-                .expect("compile_and_run_pure failed")
-                .to_json()
-        })
-        .unwrap()
-        .join()
-        .unwrap()
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(src, "result")
+        .json()
 }
 
 fn dump_core(src: &str) -> String {
-    let pp = prelude_path();
-    let include = [pp.as_path()];
-    let CompileResult { expr, .. } =
-        compile_haskell(src, "result", &include).expect("compile_haskell failed");
+    let CompileResult { expr, .. } = EvalHarness::new()
+        .with_stdlib()
+        .compile(src, "result")
+        .expect("compile_haskell failed");
     tidepool_repr::pretty::pretty_print(&expr)
 }
 
@@ -388,10 +374,10 @@ result =
 // === Interpreter test: confirm JIT-specific bug ===
 
 fn run_interp(src: &str) -> Result<serde_json::Value, tidepool_eval::EvalError> {
-    let pp = prelude_path();
-    let include = [pp.as_path()];
-    let CompileResult { expr, table, .. } =
-        compile_haskell(src, "result", &include).expect("compile_haskell failed");
+    let CompileResult { expr, table, .. } = EvalHarness::new()
+        .with_stdlib()
+        .compile(src, "result")
+        .expect("compile_haskell failed");
     let env = env_from_datacon_table(&table);
     let mut heap = VecHeap::new();
     let val = eval(&expr, &env, &mut heap)?;
@@ -403,8 +389,6 @@ fn run_interp(src: &str) -> Result<serde_json::Value, tidepool_eval::EvalError> 
 fn test_interpreter_show_double_noinline() {
     // Same bug-triggering pattern but via the tree-walking interpreter.
     // If this passes, the bug is JIT-specific.
-    let pp = prelude_path();
-    let include = [pp.as_path()];
     let src = r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
@@ -419,8 +403,10 @@ result =
       b = case mkMaybe False of { Just True -> 1.0; _ -> 0.0 :: Double }
   in show (a + b)
 "#;
-    let CompileResult { expr, table, .. } =
-        compile_haskell(src, "result", &include).expect("compile_haskell failed");
+    let CompileResult { expr, table, .. } = EvalHarness::new()
+        .with_stdlib()
+        .compile(src, "result")
+        .expect("compile_haskell failed");
     let env = env_from_datacon_table(&table);
     let mut heap = VecHeap::new();
     let result = eval(&expr, &env, &mut heap);
