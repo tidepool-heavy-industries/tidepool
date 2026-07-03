@@ -438,7 +438,12 @@ impl Session {
                 outcome,
             } in segment
             {
-                let ok = !outcome.is_error();
+                // `ok` also reflects a meta command that reported an `error` in
+                // its payload (e.g. `:i` on a missing name) — a `Meta` outcome,
+                // not an `Error` variant, but still a failure for ok-scripting
+                // and the stop-on-first-error contract. (#319)
+                let ok = !outcome.is_error()
+                    && !matches!(&outcome, TurnOutcome::Meta(v) if v.get("error").is_some());
 
                 // Track the last value-producing expression result.
                 if let TurnOutcome::Value {
