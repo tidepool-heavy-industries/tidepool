@@ -1,27 +1,52 @@
-# tidepool-handlers — concrete effect handlers (`src/lib.rs`, single file)
+# tidepool-handlers — concrete effect handlers (per-effect modules)
 
-The Rust side of every `<Eff>Req` — Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Git,
-plus the debug-only Meta handler. `build_base_stack`/`base_decls_with_ask`
+The Rust side of every `<Eff>Req` — Console, KV, Fs, Http, Exec, Lsp, Llm, Git,
+Time, plus the debug-only Meta handler. `build_base_stack`/`base_decls_with_ask`
 assemble the fully-wired server. See root `CLAUDE.md` for the project map;
 `tidepool-mcp/CLAUDE.md` for the Haskell-facing half of the effect contract
 (`*_decl()` + the eval-authoring patterns) — this doc covers the Rust side of
 that same contract in more depth.
 
+## Module layout
+
+One module per effect under `src/handlers/`:
+
+- `src/handlers/console.rs` — `ConsoleReq`/`ConsoleHandler`
+- `src/handlers/kv.rs` — `KvReq`/`KvHandler` (JSON-file-backed store)
+- `src/handlers/fs.rs` — `FsReq`/`FsHandler` + the shared glob/sandbox helpers
+  (`expand_glob`, `component_filter`, `pattern_mentions`, `is_glob`, `blake3_hex`)
+- `src/handlers/http.rs` — `HttpReq`/`HttpHandler` + `parse_json_str`
+- `src/handlers/exec.rs` — `ExecReq`/`ExecHandler`
+- `src/handlers/lsp.rs` — `LspReq`/`LspHandler` + the `LspNode`/`LspPosition`/`LspDiag`
+  wire types + `json_str`/`json_line`
+- `src/handlers/llm.rs` — `LlmReq`/`LlmHandler` + `strictify`, `DEFAULT_OPENAI_MODEL`,
+  `LLM_MAX_CALLS`
+- `src/handlers/git.rs` — `GitReq`/`GitHandler` + the bridged records
+  (`GitCommit`/`GitStatusEntry`/`GitFileDelta`) + `bridged_records_module`
+- `src/handlers/time.rs` — `TimeReq`/`TimeHandler`
+- `src/handlers/meta.rs` — `MetaReq`/`MetaHandler` (debug path only)
+
+`src/lib.rs` keeps the stack assembly (`HandlerConfig`, `handler_for!`,
+`build_base_stack`, `build_minimal_stack`, `base_decls_with_ask`) and
+re-exports everything via `pub use handlers::*;` — the external surface is
+unchanged from the single-file era (consumers import `tidepool_handlers::FsHandler`
+etc. exactly as before). Each module carries its own `#[cfg(test)] mod tests`;
+shared test helpers (`full_effect_test_table`, `jit_eval`, `response_value`, …)
+live in `src/test_support.rs` (`pub(crate)`, test builds only).
+
 ## Adding a new effect constructor here
 
-Each effect is (usually) a `// === Tag N: Name ===` section: a
-`#[derive(FromCore)] enum <Eff>Req` (one variant per constructor, `#[core(name
-= "...")]` mapping to the Haskell GADT constructor name 1:1), a handler
-struct, `impl DescribeEffect` (returns the `tidepool_mcp::*_decl()`), and
-`impl EffectHandler<CapturedOutput>` whose `handle` match has one arm per
-variant. **The `Tag N` numbering is not dense or universal** — it follows the
-base-stack `HList` position for Console..Llm, but the Lsp section (`Lsp:
-semantic queries...`, sits between SG and Http, NOT tag-numbered) and the
-debug-only Meta section break the pattern; don't assume you can count tags to
-find a section. Adding an operation to an EXISTING effect = one new enum
-variant + one new match arm + (usually) an added constructor in the matching
-`tidepool-mcp` `*_decl()`. A wholly new effect type needs a new positional
-union-tag slot (see root `CLAUDE.md`'s locked-decision on union tags).
+Each effect module holds: a `#[derive(FromCore)] enum <Eff>Req` (one variant
+per constructor, `#[core(name = "...")]` mapping to the Haskell GADT
+constructor name 1:1), a handler struct, `impl DescribeEffect` (returns the
+`tidepool_mcp::*_decl()`), and `impl EffectHandler<CapturedOutput>` whose
+`handle` match has one arm per variant. Adding an operation to an EXISTING
+effect = one new enum variant + one new match arm in that effect's module +
+(usually) an added constructor in the matching `tidepool-mcp` `*_decl()`. A
+wholly new effect type needs a new module under `src/handlers/`, a `pub mod` +
+`pub use` line in `src/handlers/mod.rs`, a `handler_for!` arm in `src/lib.rs`,
+and a new positional union-tag slot (see root `CLAUDE.md`'s locked-decision on
+union tags).
 
 ## `cx.respond*` — pick by result shape, not habit
 
@@ -64,8 +89,7 @@ canonicalize+`starts_with` check** — it forwards node/file addressing to the
 
 ## Lsp handler specifics
 
-`LspHandler` (~line 960 of 3062 — between the SG and Http sections, roughly a
-third of the way into the file, NOT near the end) is a thin Unix-socket
+`LspHandler` (`src/handlers/lsp.rs`) is a thin Unix-socket
 client to the `tidepool-lsp-daemon` sidecar (`tidepool-lsp` crate — see its
 `CLAUDE.md`). No daemon running yields an immediately actionable error:
 `"no LSP daemon at <path> — start tidepool-lsp-daemon in the workspace"`
