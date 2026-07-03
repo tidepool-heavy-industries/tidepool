@@ -1108,7 +1108,9 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          RESPONSE SHAPE: slim by default — per-item inline objects (`kind`, `ok`, plus result \
          fields merged in), final-expression value at top-level `value`/`type` only. \
          Example bind: {{\"kind\":\"stmt\",\"ok\":true,\"bound\":\"vs\",\"type\":\"[Text]\"}}. \
-         Example decl: {{\"kind\":\"decl\",\"ok\":true,\"decl\":\"slug\"}}. \
+         Example decl: {{\"kind\":\"decl\",\"ok\":true,\"decl\":\"slug\",\"type\":\"Text -> Text\"}} \
+         — a value decl also carries the inferred `type` the server had at compile time (no \
+         `:t` needed); omitted for type/class/data/import decls and on a type-probe miss. \
          Pass `verbose: true` to get the full diagnostic shape \
          (per-item `index`, `generation` counters, double-encoded `result` string).\n\n\
          JSON OUTPUT: opt-in — return an `Aeson.Value` to get structured JSON instead of \

@@ -81,7 +81,7 @@ Default (slim) shape — no generation counters, no double-encoding:
 {
   "items": [
     {"kind":"stmt", "ok":true, "bound":"vs", "type":"[Text]"},
-    {"kind":"decl", "ok":true, "decl":"slug"},
+    {"kind":"decl", "ok":true, "decl":"slug", "type":"Text -> Text"},
     {"kind":"stmt", "ok":true, "type":"Int"}
   ],
   "value": 42,
@@ -91,7 +91,15 @@ Default (slim) shape — no generation counters, no double-encoding:
 
 - Each item has `kind` + `ok` + inline result fields (no nested `result` string).
 - Bind: `bound` + `type`. Multi-bind: `bound: [names]` + `types: [types]`.
-- Decl: `decl` (the declared identifier head: `slug`, `MyData`, `MyClass`, …).
+- Decl: `decl` (the declared identifier head: `slug`, `MyData`, `MyClass`, …)
+  plus `type` — the GHC-inferred (generalized) type the server had at compile
+  time, painted at mutation time so `{decl:"heatOf"}` doesn't cost the caller a
+  `:t` round-trip (#317). **Best-effort:** present for VALUE bindings only;
+  omitted for `data`/`newtype`/`type`/`class`/`instance`/`import`/fixity decls
+  (no term-level type) and when the type probe fails. For a signature+binding
+  pair split across two items, only the binding item carries `type`. Painting
+  costs one extra extract compile per value decl (the ~6s/turn floor), only
+  taken when there's a type to report.
 - Non-final expression: `type` (+ `value` for non-last exprs if more items follow).
 - Final expression: `type` in the item; `value` and `type` at top-level only.
 - Error item: `{"kind":"...", "ok":false, "error":"..."}`.

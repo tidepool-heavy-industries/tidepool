@@ -416,7 +416,7 @@ impl Session {
                         .map(|(k, t)| ItemRun {
                             index: start + k,
                             kind: ItemKind::Decl,
-                            outcome: self.defined_outcome(decl_head(t).to_string(), gen),
+                            outcome: self.defined_outcome(t, decl_head(t).to_string(), gen),
                         })
                         .collect(),
                     None => {
@@ -524,7 +524,7 @@ impl Session {
     fn run_def(&mut self, decl_text: &str) -> TurnOutcome {
         let head = decl_head(decl_text).to_string();
         match self.lib.define(decl_text) {
-            Ok(gen) => self.defined_outcome(head, gen),
+            Ok(gen) => self.defined_outcome(decl_text, head, gen),
             Err(e) => TurnOutcome::Error(format!("declaration failed: {e}")),
         }
     }
@@ -632,9 +632,11 @@ impl Session {
 
     /// Build the `Defined` outcome for one decl head at generation `gen`,
     /// computing the `stale` set (live binds whose defining expression
-    /// references this (re)defined name — notebook display truthfulness).
-    /// Shared by `run_def` and the whole-block decl-batch path.
-    fn defined_outcome(&self, head: String, gen: Generation) -> TurnOutcome {
+    /// references this (re)defined name — notebook display truthfulness) and
+    /// the inferred `type` the server had at compile time (#317).
+    /// Shared by `run_def` and the whole-block decl-batch path. `text` is the
+    /// decl item's source, used to gate the type probe to VALUE bindings.
+    fn defined_outcome(&mut self, text: &str, head: String, gen: Generation) -> TurnOutcome {
         let mut stale: Vec<String> = self
             .bindings
             .iter_current()
@@ -653,10 +655,23 @@ impl Session {
                 .filter(|(_, pb)| mentions_word(&pb.defining_expr, &head))
                 .map(|(n, _)| n.clone()),
         );
+        // Paint the inferred type — render every mutation fully, once, at
+        // mutation time. Best-effort: only for items with an actual DEFINING
+        // equation for `head` (a value/function binding — `defines_head` is
+        // false for type/class/data/instance/import/fixity decls and for a
+        // signature-only item in a split sig+bind pair, so the primary bind
+        // item is the one painted). The probe is one extra extract compile;
+        // its failure never fails the decl — the field is simply omitted.
+        let type_display = if defines_head(text, &head) {
+            self.probe_pure_type(&head)
+        } else {
+            None
+        };
         TurnOutcome::Defined {
             generation: gen.0,
             module: tidepool_repr::SessionModule::lib(gen).module_name(),
             head,
+            type_display,
             stale,
         }
     }
@@ -2236,8 +2251,19 @@ fn slim_item_result(outcome: &TurnOutcome) -> serde_json::Value {
             "bound": components.iter().map(|c| &c.name).collect::<Vec<_>>(),
             "types": components.iter().map(|c| &c.type_display).collect::<Vec<_>>(),
         }),
-        TurnOutcome::Defined { head, stale, .. } => {
+        TurnOutcome::Defined {
+            head,
+            type_display,
+            stale,
+            ..
+        } => {
             let mut obj = serde_json::json!({ "decl": head });
+            // Paint the inferred type the server had at compile time, so
+            // `{decl:"heatOf"}` doesn't cost the caller a `:t` (#317). Omitted
+            // (best-effort) for non-value decls and probe failures.
+            if let Some(ty) = type_display.as_deref().filter(|t| !t.is_empty()) {
+                obj["type"] = serde_json::json!(ty);
+            }
             if !stale.is_empty() {
                 obj["stale"] = serde_json::json!(stale);
             }
@@ -2415,13 +2441,27 @@ mod slim_tests {
             generation: 1,
             module: "Tidepool.Session.Lib.G1".into(),
             head: "slug".into(),
+            type_display: Some("Text -> Text".into()),
             stale: Vec::new(),
         };
         let r = slim_item_result(&defined);
         assert_eq!(r["decl"], "slug");
+        assert_eq!(r["type"], "Text -> Text", "inferred type painted (#317)");
         assert!(r.get("stale").is_none(), "no stale key when nothing stale");
         assert!(r.get("generation").is_none(), "no generation in slim decl");
         assert!(r.get("module").is_none(), "no module in slim decl");
+
+        // A non-value decl (or a probe failure) carries no `type` field.
+        let defined_no_type = TurnOutcome::Defined {
+            generation: 1,
+            module: "Tidepool.Session.Lib.G1".into(),
+            head: "Node".into(),
+            type_display: None,
+            stale: Vec::new(),
+        };
+        let r = slim_item_result(&defined_no_type);
+        assert_eq!(r["decl"], "Node");
+        assert!(r.get("type").is_none(), "no type key for a non-value decl");
     }
 }
 

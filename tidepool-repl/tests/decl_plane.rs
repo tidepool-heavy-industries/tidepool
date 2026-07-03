@@ -607,6 +607,61 @@ async fn define_then_call_in_one_block() {
     repl.close().await.expect_ok("close");
 }
 
+/// DECL TYPE PAINTING (#317): a VALUE decl carries the inferred type the server
+/// had at compile time, so `{decl:"sq"}` doesn't cost the caller a `:t`
+/// round-trip. `def` merges the decl item's inline `type` into `Turn.text`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn decl_paints_inferred_type() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.open_ok().await;
+
+    // Single item: signature + binding together (the one-decl-per-item idiom).
+    let sq = repl.def("sq :: Int -> Int\nsq x = x*x").await;
+    let text = sq.expect_ok("def sq with signature");
+    assert!(
+        text.contains("\"type\"") && text.contains("Int -> Int"),
+        "sq decl should paint `Int -> Int`, got: {text}"
+    );
+
+    // A BARE equation (no signature) is painted from GHC's inference.
+    let f = repl.def("f317 x = x + (1 :: Int)").await;
+    let ftext = f.expect_ok("def bare equation f317");
+    assert!(
+        ftext.contains("\"type\"") && ftext.contains("Int -> Int"),
+        "bare f317 should paint the inferred `Int -> Int`, got: {ftext}"
+    );
+
+    repl.close().await.expect_ok("close");
+}
+
+/// DECL TYPE PAINTING is BEST-EFFORT (#317): a type/data/class decl has no
+/// term-level type, so the `type` field is simply OMITTED — the probe is gated
+/// off (never fails the decl). Same graceful degradation as a probe miss.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_value_decl_omits_type() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.open_ok().await;
+
+    let d = repl.def("data Widget317 = Widget317 Int").await;
+    let text = d.expect_ok("def data Widget317");
+    assert!(
+        text.contains("Widget317"),
+        "decl head present for the data decl, got: {text}"
+    );
+    assert!(
+        !text.contains("\"type\""),
+        "a data decl has no term-level type — field omitted, got: {text}"
+    );
+
+    repl.close().await.expect_ok("close");
+}
+
 /// Mutual recursion AND a call, all in one block — the trailing call must not
 /// poison the mutual-recursion decl batch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
