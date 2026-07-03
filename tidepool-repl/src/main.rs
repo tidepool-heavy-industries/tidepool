@@ -74,22 +74,12 @@ fn resolve_prelude_dir() -> PathBuf {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-    tidepool_codegen::debug::init_logging();
+    tidepool_mcp::server_common::init_tracing();
     tidepool_codegen::signal_safety::install();
 
     // Same secrets surface as the oneshot server: .tidepool/secrets/*_API_KEY
     // (project, then global) into env, so the Llm/Http handlers find keys.
-    let secrets = tidepool_runtime::paths::load_secrets();
-    for name in &secrets.loaded {
-        tracing::info!("loaded {name} from secrets dir");
-    }
+    tidepool_mcp::server_common::load_secrets_logged();
 
     use clap::Parser;
     let args = Args::parse();
@@ -136,20 +126,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // on the include path, the preamble auto-imports `Library` (see
     // `has_user_library`) so `.tidepool/lib` verbs (vocab/gitS/census/…) are in
     // scope — previously the REPL listed them in `:vocab` but couldn't call them.
-    let mut lib_dirs: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(root) = &project_root {
-        let project_lib = root.join(".tidepool").join("lib");
-        if project_lib.is_dir() {
-            lib_dirs.push(project_lib);
-        }
-    }
-    lib_dirs.extend(tidepool_runtime::paths::global_lib_dirs());
+    let lib_dirs = tidepool_mcp::server_common::resolve_lib_dirs(project_root.as_deref());
     base_include.extend(lib_dirs.iter().cloned());
 
     // Mirrors `has_user_library` (server.rs) — computed here too since
     // `base_include` is about to move into `cfg` and `session_decl_module_env`
     // needs the flag before that.
-    let user_library = base_include.iter().any(|d| d.join("Library.hs").exists());
+    let user_library = tidepool_mcp::server_common::has_library_facade(&base_include);
 
     // Fault-isolate the verb-library layer (issue #322): if a `.tidepool/lib`
     // module is broken, `import Library` fails for EVERY session turn, including
