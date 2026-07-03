@@ -3,8 +3,7 @@ use crate::traits::{
     sealed::{FromCoreSealed, ToCoreSealed},
     FromCore, ToCore,
 };
-use std::sync::{Arc, Mutex};
-use tidepool_eval::Value;
+use tidepool_eval::{shapes, Value};
 use tidepool_repr::{DataConId, DataConTable, Literal};
 
 /// Resilient lookup for hand-written bridge impls.
@@ -39,11 +38,6 @@ pub fn get_resilient(table: &DataConTable, name: &str, arity: u32) -> Option<Dat
     }
 
     by_arity.or_else(|| matches.first().copied())
-}
-
-/// Check if a DataConId matches a known boxing constructor name (I#, W#, D#, C#).
-fn is_boxing_con(name: &str, id: DataConId, table: &DataConTable) -> bool {
-    get_resilient(table, name, 1) == Some(id)
 }
 
 // Helper for type mismatch errors
@@ -157,17 +151,7 @@ impl ToCoreSealed for i64 {}
 
 impl FromCore for i64 {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
-        match value {
-            Value::Lit(Literal::LitInt(n)) => Ok(*n),
-            Value::Con(id, fields) if fields.len() == 1 => {
-                if is_boxing_con("I#", *id, table) {
-                    i64::from_value(&fields[0], table)
-                } else {
-                    Err(type_mismatch("LitInt or I#", value))
-                }
-            }
-            _ => Err(type_mismatch("LitInt or I#", value)),
-        }
+        shapes::unbox_int(value, table).ok_or_else(|| type_mismatch("LitInt or I#", value))
     }
 }
 
@@ -175,7 +159,7 @@ impl ToCore for i64 {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let id = get_resilient(table, "I#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("I#".into()))?;
-        Ok(Value::Con(id, vec![Value::Lit(Literal::LitInt(*self))]))
+        Ok(shapes::box_int(*self, id))
     }
 }
 
@@ -186,17 +170,7 @@ impl ToCoreSealed for u64 {}
 
 impl FromCore for u64 {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
-        match value {
-            Value::Lit(Literal::LitWord(n)) => Ok(*n),
-            Value::Con(id, fields) if fields.len() == 1 => {
-                if is_boxing_con("W#", *id, table) {
-                    u64::from_value(&fields[0], table)
-                } else {
-                    Err(type_mismatch("LitWord or W#", value))
-                }
-            }
-            _ => Err(type_mismatch("LitWord or W#", value)),
-        }
+        shapes::unbox_word(value, table).ok_or_else(|| type_mismatch("LitWord or W#", value))
     }
 }
 
@@ -204,7 +178,7 @@ impl ToCore for u64 {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let id = get_resilient(table, "W#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("W#".into()))?;
-        Ok(Value::Con(id, vec![Value::Lit(Literal::LitWord(*self))]))
+        Ok(shapes::box_word(*self, id))
     }
 }
 
@@ -215,17 +189,7 @@ impl ToCoreSealed for f64 {}
 
 impl FromCore for f64 {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
-        match value {
-            Value::Lit(Literal::LitDouble(bits)) => Ok(f64::from_bits(*bits)),
-            Value::Con(id, fields) if fields.len() == 1 => {
-                if is_boxing_con("D#", *id, table) {
-                    f64::from_value(&fields[0], table)
-                } else {
-                    Err(type_mismatch("LitDouble or D#", value))
-                }
-            }
-            _ => Err(type_mismatch("LitDouble or D#", value)),
-        }
+        shapes::unbox_double(value, table).ok_or_else(|| type_mismatch("LitDouble or D#", value))
     }
 }
 
@@ -233,10 +197,7 @@ impl ToCore for f64 {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let id = get_resilient(table, "D#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("D#".into()))?;
-        Ok(Value::Con(
-            id,
-            vec![Value::Lit(Literal::LitDouble(self.to_bits()))],
-        ))
+        Ok(shapes::box_double(*self, id))
     }
 }
 
@@ -277,26 +238,14 @@ impl FromCore for bool {
                 let false_id = get_resilient(table, "False", 0)
                     .ok_or(BridgeError::UnknownDataConName("False".into()))?;
 
-                if *id == true_id {
-                    if fields.is_empty() {
-                        Ok(true)
-                    } else {
-                        Err(BridgeError::ArityMismatch {
-                            con: *id,
-                            expected: 0,
-                            got: fields.len(),
-                        })
-                    }
-                } else if *id == false_id {
-                    if fields.is_empty() {
-                        Ok(false)
-                    } else {
-                        Err(BridgeError::ArityMismatch {
-                            con: *id,
-                            expected: 0,
-                            got: fields.len(),
-                        })
-                    }
+                if *id == true_id || *id == false_id {
+                    // shapes::unbox_bool recognizes True/False by name; it
+                    // returns None for a True/False con carrying fields.
+                    shapes::unbox_bool(value, table).ok_or(BridgeError::ArityMismatch {
+                        con: *id,
+                        expected: 0,
+                        got: fields.len(),
+                    })
                 } else {
                     Err(BridgeError::UnknownDataCon(*id))
                 }
@@ -308,10 +257,11 @@ impl FromCore for bool {
 
 impl ToCore for bool {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        let name = if *self { "True" } else { "False" };
-        let id = get_resilient(table, name, 0)
-            .ok_or_else(|| BridgeError::UnknownDataConName(name.into()))?;
-        Ok(Value::Con(id, vec![]))
+        let true_id = get_resilient(table, "True", 0)
+            .ok_or_else(|| BridgeError::UnknownDataConName("True".into()))?;
+        let false_id = get_resilient(table, "False", 0)
+            .ok_or_else(|| BridgeError::UnknownDataConName("False".into()))?;
+        Ok(shapes::make_bool(*self, true_id, false_id))
     }
 }
 
@@ -321,17 +271,7 @@ impl ToCoreSealed for char {}
 
 impl FromCore for char {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
-        match value {
-            Value::Lit(Literal::LitChar(c)) => Ok(*c),
-            Value::Con(id, fields) if fields.len() == 1 => {
-                if is_boxing_con("C#", *id, table) {
-                    char::from_value(&fields[0], table)
-                } else {
-                    Err(type_mismatch("LitChar or C#", value))
-                }
-            }
-            _ => Err(type_mismatch("LitChar or C#", value)),
-        }
+        shapes::unbox_char(value, table).ok_or_else(|| type_mismatch("LitChar or C#", value))
     }
 }
 
@@ -339,7 +279,7 @@ impl ToCore for char {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let id = get_resilient(table, "C#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("C#".into()))?;
-        Ok(Value::Con(id, vec![Value::Lit(Literal::LitChar(*self))]))
+        Ok(shapes::box_char(*self, id))
     }
 }
 
@@ -349,59 +289,36 @@ impl ToCoreSealed for String {}
 impl FromCore for String {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         let text_id = get_resilient(table, "Text", 3);
-        let ba_id = get_resilient(table, "ByteArray", 1);
         let nil_id = get_resilient(table, "[]", 0);
         let cons_id = get_resilient(table, ":", 2);
 
         match value {
             // Text constructor: Text ByteArray# off len
             Value::Con(id, fields) if fields.len() == 3 && text_id == Some(*id) => {
-                let ba = match &fields[0] {
-                    Value::ByteArray(bs) => bs
-                        .lock()
-                        .map_err(|_| BridgeError::InternalError("mutex poisoned".into()))?
-                        .clone(),
-                    Value::Lit(Literal::LitString(bytes)) => bytes.clone(),
-                    // Lifted ByteArray wrapper: Con("ByteArray", [Value::ByteArray(..)])
-                    Value::Con(inner_ba_id, ba_fields)
-                        if ba_fields.len() == 1 && ba_id == Some(*inner_ba_id) =>
-                    {
-                        match &ba_fields[0] {
-                            Value::ByteArray(bs) => bs
-                                .lock()
-                                .map_err(|_| BridgeError::InternalError("mutex poisoned".into()))?
-                                .clone(),
-                            _ => {
-                                return Err(type_mismatch("ByteArray# in ByteArray", &ba_fields[0]))
+                let bytes = shapes::text_bytes_checked(fields, table).map_err(|e| match e {
+                    shapes::TextShapeError::WrongShape => {
+                        type_mismatch("Text ByteArray# Int# Int#", value)
+                    }
+                    shapes::TextShapeError::BadBacking => match &fields[0] {
+                        Value::Con(other_id, _) => {
+                            let name = table.name_of(*other_id).unwrap_or("<unknown>");
+                            BridgeError::TypeMismatch {
+                                expected: "ByteArray or ByteArray# in Text".to_string(),
+                                got: format!("Con({})", name),
                             }
                         }
+                        other => type_mismatch("ByteArray or ByteArray# in Text", other),
+                    },
+                    shapes::TextShapeError::BadOffLen => type_mismatch("LitInt or I#", &fields[1]),
+                    shapes::TextShapeError::BadSlice { off, len, ba_len } => {
+                        BridgeError::TypeMismatch {
+                            expected: "valid Text slice (non-negative off/len, in bounds)"
+                                .to_string(),
+                            got: format!("off={}, len={}, ba_len={}", off, len, ba_len),
+                        }
                     }
-                    Value::Con(other_id, _) => {
-                        let name = table.name_of(*other_id).unwrap_or("<unknown>");
-                        return Err(BridgeError::TypeMismatch {
-                            expected: "ByteArray or ByteArray# in Text".to_string(),
-                            got: format!("Con({})", name),
-                        });
-                    }
-                    _ => return Err(type_mismatch("ByteArray or ByteArray# in Text", &fields[0])),
-                };
-                let off_i = i64::from_value(&fields[1], table)?;
-                let len_i = i64::from_value(&fields[2], table)?;
-                // Validate as signed BEFORE casting: a negative offset cast to
-                // usize is huge, and `off + len` then overflows (panic in debug,
-                // wrap + OOB slice in release). Checked arithmetic turns every
-                // malformed slice into a clean Err. (proptest_boundary_roundtrip B2)
-                let bad_slice = || BridgeError::TypeMismatch {
-                    expected: "valid Text slice (non-negative off/len, in bounds)".to_string(),
-                    got: format!("off={}, len={}, ba_len={}", off_i, len_i, ba.len()),
-                };
-                let off = usize::try_from(off_i).map_err(|_| bad_slice())?;
-                let len = usize::try_from(len_i).map_err(|_| bad_slice())?;
-                let end = off
-                    .checked_add(len)
-                    .filter(|&e| e <= ba.len())
-                    .ok_or_else(bad_slice)?;
-                String::from_utf8(ba[off..end].to_vec()).map_err(|e| BridgeError::TypeMismatch {
+                })?;
+                String::from_utf8(bytes).map_err(|e| BridgeError::TypeMismatch {
                     expected: "UTF-8 Text".to_string(),
                     got: format!("Invalid UTF-8: {}", e),
                 })
@@ -422,19 +339,9 @@ impl FromCore for String {
                             break;
                         }
                         Value::Con(tag, fields) if cons_id == Some(*tag) && fields.len() == 2 => {
-                            match &fields[0] {
-                                Value::Lit(Literal::LitChar(c)) => chars.push(*c),
-                                // Boxing: C# wraps a Char
-                                Value::Con(box_tag, box_fields)
-                                    if box_fields.len() == 1
-                                        && get_resilient(table, "C#", 1) == Some(*box_tag) =>
-                                {
-                                    match &box_fields[0] {
-                                        Value::Lit(Literal::LitChar(c)) => chars.push(*c),
-                                        other => return Err(type_mismatch("Char in C#", other)),
-                                    }
-                                }
-                                other => return Err(type_mismatch("Char or C#", other)),
+                            match shapes::unbox_char(&fields[0], table) {
+                                Some(c) => chars.push(c),
+                                None => return Err(type_mismatch("Char or C#", &fields[0])),
                             }
                             cur = &fields[1];
                         }
@@ -452,19 +359,7 @@ impl ToCore for String {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let text_id = get_resilient(table, "Text", 3)
             .ok_or_else(|| BridgeError::UnknownDataConName("Text".into()))?;
-        let bytes = self.as_bytes().to_vec();
-        let len = bytes.len() as i64;
-        // GHC Core at -O2 uses the worker representation of Text with
-        // unboxed fields: Text ByteArray# Int# Int#
-        let ba_raw = Value::ByteArray(Arc::new(Mutex::new(bytes)));
-        Ok(Value::Con(
-            text_id,
-            vec![
-                ba_raw,
-                Value::Lit(Literal::LitInt(0)),
-                Value::Lit(Literal::LitInt(len)),
-            ],
-        ))
+        Ok(shapes::make_text(self, text_id))
     }
 }
 
