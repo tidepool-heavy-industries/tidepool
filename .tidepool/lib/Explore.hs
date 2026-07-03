@@ -43,10 +43,11 @@ defMod :: Text -> Text -> (Text, Text)
 defMod name body =
   ( ".tidepool/lib/" <> name <> ".hs"
   , unlines
-      [ "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}"
+      [ "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, OverloadedRecordDot #-}"
       , "module " <> name <> " where"
       , ""
-      , "import Tidepool.Prelude"
+      , "import Tidepool.Prelude hiding (error)"
+      , "import Tidepool.Effects"
       , ""
       , body
       ]
