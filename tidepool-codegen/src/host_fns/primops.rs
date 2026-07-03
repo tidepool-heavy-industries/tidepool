@@ -4,7 +4,6 @@
 
 use crate::context::VMContext;
 use std::cell::Cell;
-use tidepool_heap::layout as heap_layout;
 
 use super::errors::{
     check_ptr_invalid, error_poison_ptr, runtime_error_with_msg, runtime_oom, RuntimeError,
@@ -782,21 +781,16 @@ pub fn set_json_con_ids(ids: Option<tidepool_eval::json::JsonConIds>) {
     JSON_CON_IDS.with(|c| c.set(ids));
 }
 
-/// Read an unboxed `Int#`/`Word#` payload out of a (forced) boxed literal.
-///
-/// # Safety
-/// `p` must be a valid, forced `Lit` heap object.
-unsafe fn read_lit_i64(p: *mut u8) -> i64 {
-    *(p.add(heap_layout::LIT_VALUE_OFFSET) as *const i64)
-}
-
 /// `decodeJson :: Text -> Maybe Value` — the pure JSON-decode primop.
 ///
-/// Reads the argument `Text` (`Text ByteArray# Int# Int#`), parses its UTF-8
-/// slice with `serde_json`, and builds the aeson `Maybe Value` ADT on the
-/// nursery heap via `tidepool_eval::json` (the SAME builder the tree-walker
-/// uses, so JIT and eval agree by construction) + the stack-safe
-/// `value_to_heap`. Parse failure yields `Nothing`.
+/// Lifts the argument `Text` to a `Value` tree via `heap_bridge` (which owns
+/// the heap-byte layouts), slices its UTF-8 bytes via
+/// `tidepool_eval::shapes::text_bytes_clamped_with` (the same table-free
+/// Text decode the tree-walker's `JsonDecode` arm uses), parses with
+/// `serde_json`, and builds the aeson `Maybe Value` ADT on the nursery heap
+/// via `tidepool_eval::json` (the SAME builder the tree-walker uses, so JIT
+/// and eval agree by construction) + the stack-safe `value_to_heap`. Parse
+/// failure yields `Nothing`.
 ///
 /// # Safety
 /// `vmctx` must be a valid live VMContext; `text_ptr` a valid heap pointer to a
@@ -811,35 +805,38 @@ pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *m
         }
     };
 
-    // Force the Text to WHNF, then force + read its three fields.
+    // Force the Text to WHNF and lift it to a Value tree (forcing lazy fields
+    // during traversal).
     let text = heap_force(vmctx, text_ptr);
     if text.is_null() {
         let msg = b"decodeJson: null Text argument";
         return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
     }
-    let tag = *text.add(0);
-    let nfields = *(text.add(heap_layout::CON_NUM_FIELDS_OFFSET) as *const u16);
-    if tag != heap_layout::TAG_CON || nfields != 3 {
-        let msg = b"decodeJson: argument is not a Text (Con with 3 fields)";
-        return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
-    }
-    let fld = |i: usize| *(text.add(heap_layout::CON_FIELDS_OFFSET + 8 * i) as *const *mut u8);
-    let ba = heap_force(vmctx, fld(0)); // ByteArray# lit: LIT_VALUE -> [len:u64][bytes]
-    let off_box = heap_force(vmctx, fld(1));
-    let len_box = heap_force(vmctx, fld(2));
-    if ba.is_null() || off_box.is_null() || len_box.is_null() {
-        let msg = b"decodeJson: null Text field";
-        return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
-    }
-    let data = *(ba.add(heap_layout::LIT_VALUE_OFFSET) as *const *const u8);
-    let off = read_lit_i64(off_box).max(0) as usize;
-    let len = read_lit_i64(len_box).max(0) as usize;
-    let s = if data.is_null() {
-        String::new()
-    } else {
-        let start = data.add(8).add(off);
-        let bytes = std::slice::from_raw_parts(start, len);
-        String::from_utf8_lossy(bytes).into_owned()
+    let text_val = match crate::heap_bridge::heap_to_value_forcing(text, vmctx) {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = format!("decodeJson: Text argument read failed: {e}");
+            return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+        }
+    };
+    // No `&DataConTable` reaches this host fn (only the cached `JsonConIds`),
+    // so recognize `I#` by the concrete id already resolved into `ids`; a
+    // lifted `ByteArray` wrapper con has no such id here and goes
+    // unrecognized — exactly as in eval's `JsonDecode` arm.
+    let bytes = match &text_val {
+        tidepool_eval::Value::Con(_, fields) => tidepool_eval::shapes::text_bytes_clamped_with(
+            fields,
+            |_| false,
+            |id| id == ids.i_hash,
+        ),
+        _ => None,
+    };
+    let s = match bytes {
+        Some(b) => String::from_utf8_lossy(&b).into_owned(),
+        None => {
+            let msg = b"decodeJson: argument is not a Text (Con with 3 fields)";
+            return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+        }
     };
 
     // Build the eval Value (GC-inert Rust data), then materialize on the heap
