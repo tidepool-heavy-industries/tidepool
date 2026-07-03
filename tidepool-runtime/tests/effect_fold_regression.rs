@@ -4,8 +4,6 @@
 //! `forM`/`mapM` with effects. Pure lists and `map` over the same list work fine.
 //! Forcing the spine first (via `length`) is a workaround.
 
-use std::sync::{Arc, Mutex};
-
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_testing::eval_harness::EvalHarness;
@@ -17,7 +15,7 @@ enum ConsoleReq {
 }
 
 struct MockConsole {
-    prints: Arc<Mutex<Vec<String>>>,
+    prints: Vec<String>,
 }
 
 impl EffectHandler for MockConsole {
@@ -29,7 +27,7 @@ impl EffectHandler for MockConsole {
     ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             ConsoleReq::Print(s) => {
-                self.prints.lock().unwrap().push(s);
+                self.prints.push(s);
                 cx.respond(())
             }
         }
@@ -57,16 +55,11 @@ result = do
 {body}
 "#
     );
-    let prints = Arc::new(Mutex::new(Vec::new()));
-    let handlers = frunk::hlist![MockConsole {
-        prints: prints.clone()
-    }];
-    let result = EvalHarness::new()
+    let handlers = frunk::hlist![MockConsole { prints: vec![] }];
+    let (outcome, handlers) = EvalHarness::new()
         .with_stdlib()
-        .run(&src, "result", handlers)
-        .expect("compile_and_run failed");
-    let prints = Arc::try_unwrap(prints).unwrap().into_inner().unwrap();
-    (result, prints)
+        .run_owned(&src, "result", handlers);
+    (outcome.expect("compile_and_run failed"), handlers.head.prints)
 }
 
 // === Bug repro tests (expected to FAIL until fix) ===
