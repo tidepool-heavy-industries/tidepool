@@ -261,7 +261,24 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                 (_name, fields) => {
                     if fields.is_empty() {
                         json!(name)
+                    } else if let Some(labels) = table
+                        .field_labels_of(*id)
+                        .filter(|labels| labels.len() == fields.len())
+                    {
+                        // Record constructor: render as a named-field JSON object.
+                        // The constructor name rides along under "_con" so that
+                        // sum-of-records variants stay distinguishable; a bare
+                        // record field is very unlikely to collide with it.
+                        let mut obj = serde_json::Map::with_capacity(fields.len() + 1);
+                        obj.insert("_con".to_string(), json!(name));
+                        for (label, field) in labels.iter().zip(fields.iter()) {
+                            obj.insert(label.clone(), value_to_json(field, table, d));
+                        }
+                        serde_json::Value::Object(obj)
                     } else {
+                        // Positional constructor (no record syntax, or label/field
+                        // count mismatch from worker-wrapper unpacking): keep the
+                        // legacy positional shape.
                         let field_jsons: Vec<serde_json::Value> =
                             fields.iter().map(|f| value_to_json(f, table, d)).collect();
                         json!({
@@ -849,6 +866,142 @@ mod tests {
         let ba = Value::ByteArray(std::sync::Arc::new(std::sync::Mutex::new(bytes)));
         let val = Value::Con(in_id, vec![ba]);
         assert_eq!(value_to_json(&val, &table, 0), serde_json::json!("-42"));
+    }
+
+    #[test]
+    fn test_render_record_named_fields() {
+        // A record constructor with field labels renders as a named-field object
+        // (ledger #42): `Hit { path, line, text }` → {"_con","path","line","text"}.
+        let mut table = test_table();
+        let hit_id = DataConId(100);
+        table.insert(DataCon {
+            id: hit_id,
+            name: "Hit".into(),
+            tag: 1,
+            rep_arity: 3,
+            field_bangs: vec![],
+            qualified_name: Some("Tidepool.Records.Hit".into()),
+        });
+        table.set_field_labels(
+            hit_id,
+            vec!["path".into(), "line".into(), "text".into()],
+        );
+
+        let text_id = table.get_by_name("Text").unwrap();
+        let mk_text = |s: &[u8]| {
+            Value::Con(
+                text_id,
+                vec![
+                    Value::ByteArray(Arc::new(Mutex::new(s.to_vec()))),
+                    Value::Lit(Literal::LitInt(0)),
+                    Value::Lit(Literal::LitInt(s.len() as i64)),
+                ],
+            )
+        };
+        let hit = Value::Con(
+            hit_id,
+            vec![
+                mk_text(b"src/main.rs"),
+                Value::Lit(Literal::LitInt(42)),
+                mk_text(b"fn main"),
+            ],
+        );
+        assert_eq!(
+            value_to_json(&hit, &table, 0),
+            json!({"_con": "Hit", "path": "src/main.rs", "line": 42, "text": "fn main"})
+        );
+    }
+
+    #[test]
+    fn test_render_record_nested() {
+        // Nested records render recursively; a record field that is itself a
+        // record becomes a nested named-field object.
+        let mut table = test_table();
+        let inner_id = DataConId(101);
+        let outer_id = DataConId(102);
+        table.insert(DataCon {
+            id: inner_id,
+            name: "Loc".into(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![],
+            qualified_name: None,
+        });
+        table.insert(DataCon {
+            id: outer_id,
+            name: "Node".into(),
+            tag: 1,
+            rep_arity: 2,
+            field_bangs: vec![],
+            qualified_name: None,
+        });
+        table.set_field_labels(inner_id, vec!["line".into()]);
+        table.set_field_labels(outer_id, vec!["name".into(), "loc".into()]);
+
+        let inner = Value::Con(inner_id, vec![Value::Lit(Literal::LitInt(7))]);
+        let outer = Value::Con(
+            outer_id,
+            vec![Value::Lit(Literal::LitString(b"x".to_vec())), inner],
+        );
+        assert_eq!(
+            value_to_json(&outer, &table, 0),
+            json!({"_con": "Node", "name": "x", "loc": {"_con": "Loc", "line": 7}})
+        );
+    }
+
+    #[test]
+    fn test_render_positional_fallback_no_labels() {
+        // A constructor WITHOUT field labels keeps the legacy positional shape.
+        let mut table = test_table();
+        let con_id = DataConId(103);
+        table.insert(DataCon {
+            id: con_id,
+            name: "FileApplied".into(),
+            tag: 1,
+            rep_arity: 2,
+            field_bangs: vec![],
+            qualified_name: None,
+        });
+        let val = Value::Con(
+            con_id,
+            vec![
+                Value::Lit(Literal::LitString(b"a.txt".to_vec())),
+                Value::Lit(Literal::LitInt(1)),
+            ],
+        );
+        assert_eq!(
+            value_to_json(&val, &table, 0),
+            json!({"constructor": "FileApplied", "fields": ["a.txt", 1]})
+        );
+    }
+
+    #[test]
+    fn test_render_label_count_mismatch_falls_back() {
+        // If the label count does not match the runtime field count (e.g. worker-
+        // wrapper unpacking added/removed fields), fall back to positional.
+        let mut table = test_table();
+        let con_id = DataConId(104);
+        table.insert(DataCon {
+            id: con_id,
+            name: "Weird".into(),
+            tag: 1,
+            rep_arity: 2,
+            field_bangs: vec![],
+            qualified_name: None,
+        });
+        // Only one label, but two runtime fields.
+        table.set_field_labels(con_id, vec!["only".into()]);
+        let val = Value::Con(
+            con_id,
+            vec![
+                Value::Lit(Literal::LitInt(1)),
+                Value::Lit(Literal::LitInt(2)),
+            ],
+        );
+        assert_eq!(
+            value_to_json(&val, &table, 0),
+            json!({"constructor": "Weird", "fields": [1, 2]})
+        );
     }
 
     #[test]

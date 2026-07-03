@@ -95,7 +95,7 @@ encodeFlatAltCon = \case
 -- (the eval's @__user@ binding type — see GhcPipeline.capturedUserType) it also
 -- carries @captured_type@. The Rust reader (serial/read.rs parse_warnings)
 -- tolerates either map shape, so omitting the key on Nothing is backward-safe.
-encodeMetadata :: [(Word64, Text, Int, Int, [Text], Text)] -> Bool -> Maybe Text -> [(Word64, Text)] -> ByteString
+encodeMetadata :: [(Word64, Text, Int, Int, [Text], Text, [Text])] -> Bool -> Maybe Text -> [(Word64, Text)] -> ByteString
 encodeMetadata entries hasIO mCapturedType varNames = tplrHeader <> toStrictByteString (
   encodeListLen 2
   <> (encodeListLen (fromIntegral (length entries)) <> foldMap encodeMetaEntry entries)
@@ -113,8 +113,8 @@ encodeMetadata entries hasIO mCapturedType varNames = tplrHeader <> toStrictByte
             <> encodeListLen (fromIntegral (length varNames))
             <> foldMap (\(k, v) -> encodeListLen 2 <> encodeWord64 k <> encodeString v) varNames)
 
-encodeMetaEntry :: (Word64, Text, Int, Int, [Text], Text) -> Encoding
-encodeMetaEntry (dcid, name, tag, arity, bangs, qualName) =
+encodeMetaEntry :: (Word64, Text, Int, Int, [Text], Text, [Text]) -> Encoding
+encodeMetaEntry (dcid, name, tag, arity, bangs, qualName, fieldLabels) =
   let
     tagWord :: Word
     tagWord =
@@ -122,7 +122,11 @@ encodeMetaEntry (dcid, name, tag, arity, bangs, qualName) =
         then error "encodeMetaEntry: negative constructor tag"
         else fromIntegral tag
   in
-  encodeListLen 6
+  -- 7-element entry: the trailing field-labels array is new. The Rust reader
+  -- accepts arrays of length 5/6/7, so older readers of a 6-element entry and
+  -- newer readers of this 7-element entry both decode. Positional constructors
+  -- carry an empty labels array.
+  encodeListLen 7
   <> encodeWord64 dcid
   <> encodeString name
   <> encodeWord tagWord
@@ -130,3 +134,5 @@ encodeMetaEntry (dcid, name, tag, arity, bangs, qualName) =
   <> encodeListLen (fromIntegral (length bangs))
   <> foldMap encodeString bangs
   <> encodeString qualName
+  <> encodeListLen (fromIntegral (length fieldLabels))
+  <> foldMap encodeString fieldLabels

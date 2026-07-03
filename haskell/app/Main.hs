@@ -176,7 +176,7 @@ processFile args path = do
               BS.writeFile outFile cbor
               putStrLn $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
               let usedMeta = map dcToMeta (Map.elems usedDCs)
-              return (Just (Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _) <- usedMeta], reachBinds))
+              return (Just (Map.fromList [(dcid, entry) | entry@(dcid, _, _, _, _, _, _) <- usedMeta], reachBinds))
           case result of
             Left (e :: SomeException) -> do
               hPutStrLn stderr $ "  SKIPPED (" ++ name ++ "): " ++ show e
