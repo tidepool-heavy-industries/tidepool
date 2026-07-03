@@ -51,7 +51,16 @@ pub enum ResumeMsg {
 /// reaches no effect can't be interrupted — that turn is a runaway and the
 /// session is marked `Wedged` (the reaper / `session_close` reclaims it).
 pub struct PauseGate {
-    state: parking_lot::Mutex<GateState>,
+    inner: parking_lot::Mutex<GateInner>,
+}
+
+struct GateInner {
+    state: GateState,
+    /// True while the worker thread is inside an effect handler (between
+    /// `checkpoint()` returning `Ok` and `exit_effect()` being called).
+    /// The server reads this at the grace deadline to distinguish "blocked
+    /// waiting for an external call (Exec/Http/…)" from "pure JIT runaway".
+    in_effect: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -63,25 +72,43 @@ enum GateState {
 impl PauseGate {
     pub fn new() -> Arc<Self> {
         Arc::new(PauseGate {
-            state: parking_lot::Mutex::new(GateState::Run),
+            inner: parking_lot::Mutex::new(GateInner {
+                state: GateState::Run,
+                in_effect: false,
+            }),
         })
     }
 
     /// Worker side, at every effect dispatch entry: return `Err(reason)` if an
-    /// abort was requested (the turn then unwinds), else `Ok` to proceed.
+    /// abort was requested (the turn then unwinds), else `Ok` to proceed and
+    /// mark `in_effect = true` (caller MUST pair with [`Self::exit_effect`]).
     pub fn checkpoint(&self) -> Result<(), String> {
-        let mut g = self.state.lock();
-        if let GateState::AbortRequested(r) = &*g {
+        let mut g = self.inner.lock();
+        if let GateState::AbortRequested(r) = &g.state {
             let r = r.clone();
-            *g = GateState::Run;
+            g.state = GateState::Run;
             return Err(r);
         }
+        g.in_effect = true;
         Ok(())
+    }
+
+    /// Worker side, on effect handler return (success or error): clear
+    /// `in_effect`. Must be called after every successful `checkpoint()`.
+    pub fn exit_effect(&self) {
+        self.inner.lock().in_effect = false;
     }
 
     /// Server side (on turn timeout): ask the worker to unwind at its next effect.
     pub fn request_abort(&self, reason: String) {
-        *self.state.lock() = GateState::AbortRequested(reason);
+        self.inner.lock().state = GateState::AbortRequested(reason);
+    }
+
+    /// Server side (on turn timeout): returns `true` if the worker thread is
+    /// currently blocked inside an effect handler. When true, the timeout is
+    /// due to a slow external call (Exec/Http/…), NOT a pure infinite loop.
+    pub fn is_in_effect(&self) -> bool {
+        self.inner.lock().in_effect
     }
 }
 
@@ -108,8 +135,12 @@ impl<H: tidepool_effect::dispatch::DispatchEffect<CapturedOutput>>
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<Response, EffectError> {
         // Checkpoint: unwind here (Err) if the turn was aborted (timeout).
+        // On Ok, `in_effect` is set to true — we must call exit_effect() after.
         self.gate.checkpoint().map_err(EffectError::Handler)?;
-        self.dispatch_inner(tag, request, cx)
+        let result = self.dispatch_inner(tag, request, cx);
+        // Clear in_effect regardless of outcome: the effect handler has returned.
+        self.gate.exit_effect();
+        result
     }
 }
 
@@ -173,4 +204,50 @@ pub fn extract_ask_request(
         .get(1)
         .map(|m| tidepool_runtime::value_to_json(m, table, 0));
     Ok((prompt, meta))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `PauseGate`: `is_in_effect()` is false initially, true after a successful
+    /// `checkpoint()`, and false again after `exit_effect()`.
+    #[test]
+    fn pause_gate_in_effect_flag() {
+        let gate = PauseGate::new();
+        assert!(!gate.is_in_effect(), "fresh gate: not in effect");
+
+        gate.checkpoint().expect("first checkpoint ok");
+        assert!(gate.is_in_effect(), "after checkpoint: in effect");
+
+        gate.exit_effect();
+        assert!(!gate.is_in_effect(), "after exit_effect: not in effect");
+    }
+
+    /// When an abort was requested, `checkpoint()` returns `Err` and does NOT
+    /// set `in_effect` — there is no effect to exit.
+    #[test]
+    fn pause_gate_abort_does_not_set_in_effect() {
+        let gate = PauseGate::new();
+        gate.request_abort("timed out".into());
+        let result = gate.checkpoint();
+        assert!(result.is_err(), "aborted checkpoint returns Err");
+        assert!(
+            !gate.is_in_effect(),
+            "aborted checkpoint must not set in_effect"
+        );
+    }
+
+    /// After `request_abort` is consumed by `checkpoint()`, the gate resets to
+    /// `Run` and a subsequent `checkpoint()` succeeds and sets `in_effect`.
+    #[test]
+    fn pause_gate_abort_consumed_then_next_checkpoint_ok() {
+        let gate = PauseGate::new();
+        gate.request_abort("first abort".into());
+        let _ = gate.checkpoint(); // consumes the abort
+        // Gate is now Run again — next checkpoint should succeed.
+        gate.checkpoint().expect("second checkpoint ok after abort consumed");
+        assert!(gate.is_in_effect());
+        gate.exit_effect();
+    }
 }

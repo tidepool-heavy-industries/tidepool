@@ -896,6 +896,10 @@ impl TidepoolReplServer {
                 //   (2) the resident machine's `CancelHandle` aborts an
                 //       allocating / tail-recursive runaway at its next JIT
                 //       safepoint (`YieldError::Cancelled`).
+                // Snapshot whether an effect handler was active at the moment
+                // of timeout BEFORE requesting abort (abort changes the gate
+                // state, not in_effect, but reading early is clearest).
+                let effect_in_flight = gate.is_in_effect();
                 // Then a bounded grace re-wait: if the worker aborts promptly
                 // the session SELF-HEALS back to `Idle` (handle reset, ready
                 // for the next turn); only a genuinely-uninterruptible turn
@@ -922,10 +926,35 @@ impl TidepoolReplServer {
                 *state.lock() = SessionState::Wedged {
                     since: Instant::now(),
                 };
-                return CallToolResult::error(vec![Content::text(format!(
-                    "{op} timed out after {to_secs}s (the resident session is \
-                         wedged on an uninterruptible computation; close it)"
-                ))]);
+                let wedged_msg = if effect_in_flight {
+                    // The worker was blocked inside an effect handler (e.g.
+                    // an Exec/Http/Lsp call) when the timeout fired. The JIT
+                    // is not running so the JIT cancel has no effect; the
+                    // effect handler will continue until its external call
+                    // completes. Any spawned child process is NOT killed — it
+                    // runs to completion on its own. The session is wedged
+                    // for the reaper (session_close will reclaim it).
+                    format!(
+                        "{op} timed out after {to_secs}s while an effect was in \
+                         flight (an external call — e.g. a spawned process or \
+                         network request — was still running). Raise timeout_secs \
+                         or check the external command duration. Any spawned child \
+                         process was NOT killed. The session is wedged; close and \
+                         reopen it."
+                    )
+                } else {
+                    // The worker was in pure JIT computation with no effect
+                    // dispatch in progress — likely an infinite loop or
+                    // unbounded recursion. The JIT cancel was signalled but
+                    // the thread did not abort within the grace period.
+                    format!(
+                        "{op} timed out after {to_secs}s on pure JIT computation \
+                         (no effect boundary reached; likely an infinite loop or \
+                         unbounded recursion). The session is wedged; close and \
+                         reopen it."
+                    )
+                };
+                return CallToolResult::error(vec![Content::text(wedged_msg)]);
             }
         };
         match received {
