@@ -8,12 +8,7 @@
 //! external-package landmine (`takewhile-shadow-load-bearing`) is dissolved.
 
 use serde_json::{json, Value};
-use std::path::Path;
-
-fn prelude_path() -> std::path::PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest.parent().unwrap().join("haskell").join("lib")
-}
+use tidepool_testing::eval_harness::EvalHarness;
 
 fn run(body: &str) -> Value {
     let src = format!(
@@ -29,9 +24,9 @@ result :: _
 result = {body}
 "#
     );
-    let pp = prelude_path();
-    let include = [pp.as_path()];
-    tidepool_runtime::compile_and_run_pure(&src, "result", &include)
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(&src, "result")
         .expect("compile_and_run_pure failed")
         .to_json()
 }

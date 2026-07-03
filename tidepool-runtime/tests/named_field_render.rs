@@ -15,23 +15,13 @@
 //! `TIDEPOOL_EXTRACT` is unset so a plain `cargo test` on a checkout without the
 //! toolchain does not fail.
 
-mod common;
-
-use tidepool_runtime::compile_and_run_pure;
+use tidepool_testing::eval_harness::EvalHarness;
 
 fn run(src: &str, target: &str) -> tidepool_runtime::EvalResult {
-    let pp = common::prelude_path();
-    let src = src.to_owned();
-    let target = target.to_owned();
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(move || {
-            let include = [pp.as_path()];
-            compile_and_run_pure(&src, &target, &include).expect("compile_and_run_pure")
-        })
-        .unwrap()
-        .join()
-        .unwrap()
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(src, target)
+        .expect("compile_and_run_pure")
 }
 
 /// A flat record with mixed String + Int fields renders with named fields and
