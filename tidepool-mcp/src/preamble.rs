@@ -620,9 +620,12 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
             "fallback for things the typed effects don\u{2019}t cover.\n",
             "Effects (invoke via the helper verbs; read tidepool://effect/{name} for each one\u{2019}s constructors + helpers):\n",
         ));
-        for eff in effects {
-            desc.push_str(&format!("  {}: {}\n", eff.type_name, eff.description));
-        }
+        // DERIVED from the decls (crate::describe): one entry per effect —
+        // name + first-sentence description + helper verb names. The
+        // hand-written per-effect enumeration this replaced drifted from the
+        // decls (the #25/#31/#41 class); now `:browse`, this description, and
+        // the repl session_run description all render from the SAME derivation.
+        desc.push_str(&crate::describe_effects_index(effects));
 
         let has_llm = effects.iter().any(|e| e.type_name == "Llm");
         let has_ask = effects.iter().any(|e| e.type_name == "Ask");
@@ -960,7 +963,11 @@ import Lsp
             std::thread::current().id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("Alpha.hs"), "module Alpha where\n\nfooAlpha :: Int\n").unwrap();
+        std::fs::write(
+            dir.join("Alpha.hs"),
+            "module Alpha where\n\nfooAlpha :: Int\n",
+        )
+        .unwrap();
         std::fs::write(dir.join("Beta.hs"), "module Beta where\n\nfooBeta :: Int\n").unwrap();
         std::fs::write(
             dir.join("Library.hs"),

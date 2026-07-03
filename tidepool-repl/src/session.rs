@@ -22,8 +22,8 @@ use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_codegen::old_space::RootSlot;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_mcp::{
-    input_binding_source, library_vocab, template_haskell_show_default, CapturedOutput, EffectDecl,
-    PREAMBLE_DEFAULT_DECL,
+    first_sentence, helper_sig, input_binding_source, library_vocab, template_haskell_show_default,
+    CapturedOutput, EffectDecl, PREAMBLE_DEFAULT_DECL,
 };
 use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
@@ -2345,36 +2345,6 @@ fn type_def_head(src: &str) -> Option<&str> {
     }
 }
 
-/// The one-line summary of an effect's (often multi-sentence) description: the
-/// first sentence, or the whole thing when it has no sentence break.
-fn first_sentence(desc: &str) -> &str {
-    let d = desc.trim();
-    match d.find(". ") {
-        // Keep the period; drop the trailing space + rest.
-        Some(i) => d[..=i].trim_end(),
-        None => d,
-    }
-}
-
-/// The signature line of an effect helper. Helper strings are
-/// `"[-- comment…\n]sig-line\ndefinition"`; the signature is the first
-/// non-comment line that carries a `::` (e.g. `run :: Text -> M Proc`). Falls
-/// back to the first non-comment line when no `::` is present.
-fn helper_sig(helper: &str) -> Option<String> {
-    let mut fallback = None;
-    for line in helper.lines() {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with("--") {
-            continue;
-        }
-        if t.contains("::") {
-            return Some(t.to_string());
-        }
-        fallback.get_or_insert_with(|| t.to_string());
-    }
-    fallback
-}
-
 /// Render the `:browse` result. Bare (`None`) lists every effect with its
 /// one-line description; `Some(name)` (case-insensitive) lists that effect's
 /// helper verbs (`name :: signature`) and constructors, or — for an unknown
@@ -2397,7 +2367,10 @@ fn browse_effects(decls: &[EffectDecl], only: Option<&str>) -> serde_json::Value
                 "hint": ":browse <Effect> (case-insensitive) lists that effect's verbs + constructors.",
             })
         }
-        Some(name) => match decls.iter().find(|d| d.type_name.eq_ignore_ascii_case(name)) {
+        Some(name) => match decls
+            .iter()
+            .find(|d| d.type_name.eq_ignore_ascii_case(name))
+        {
             Some(d) => {
                 let verbs: Vec<String> = d.helpers.iter().filter_map(|h| helper_sig(h)).collect();
                 serde_json::json!({
@@ -2423,8 +2396,8 @@ fn browse_effects(decls: &[EffectDecl], only: Option<&str>) -> serde_json::Value
 
 #[cfg(test)]
 mod slim_tests {
-    use super::{decl_head, pure_bind_to_decl, slim_item_result, split_discard_bind};
     use super::{browse_effects, first_sentence, helper_sig, EffectDecl};
+    use super::{decl_head, pure_bind_to_decl, slim_item_result, split_discard_bind};
 
     /// Two-effect fixture mirroring the real decl shape: a comment-prefixed
     /// helper (so the sig line is not the first line) and a multi-sentence
@@ -2605,9 +2578,18 @@ mod slim_tests {
 
     #[test]
     fn split_discard_bind_strips_pattern() {
-        assert_eq!(split_discard_bind("_ <- pure (5 :: Int)"), Some("pure (5 :: Int)"));
-        assert_eq!(split_discard_bind("(_, _) <- pure (1, 2)"), Some("pure (1, 2)"));
-        assert_eq!(split_discard_bind("_ <- run \"echo hi\""), Some("run \"echo hi\""));
+        assert_eq!(
+            split_discard_bind("_ <- pure (5 :: Int)"),
+            Some("pure (5 :: Int)")
+        );
+        assert_eq!(
+            split_discard_bind("(_, _) <- pure (1, 2)"),
+            Some("pure (1, 2)")
+        );
+        assert_eq!(
+            split_discard_bind("_ <- run \"echo hi\""),
+            Some("run \"echo hi\"")
+        );
         assert_eq!(split_discard_bind("no arrow here"), None);
     }
 

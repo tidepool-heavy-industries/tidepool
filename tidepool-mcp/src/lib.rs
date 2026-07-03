@@ -15,6 +15,9 @@ pub use effect_decls::*;
 mod preamble;
 pub use preamble::*;
 
+mod describe;
+pub use describe::*;
+
 mod lib_isolate;
 pub use lib_isolate::*;
 
@@ -438,10 +441,7 @@ mod tests {
         // requirement it implies.
         for (src, name) in [
             (build_preamble(&[], false), "preamble"),
-            (
-                build_preamble(&[fs_decl()], true),
-                "preamble+lib",
-            ),
+            (build_preamble(&[fs_decl()], true), "preamble+lib"),
         ] {
             let pragma_line = src.lines().next().unwrap();
             assert!(
