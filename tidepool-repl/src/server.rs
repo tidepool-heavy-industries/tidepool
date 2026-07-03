@@ -20,7 +20,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_mcp::{CapturedOutput, EffectDecl};
+use tidepool_mcp::{describe_effects_index, CapturedOutput, EffectDecl};
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::ModuleEnv;
 use tokio::io::{stdin, stdout};
@@ -1084,7 +1084,10 @@ fn with_output(output: &[String], body: &str) -> String {
 }
 
 fn build_tool_description(decls: &[EffectDecl]) -> String {
-    let names: Vec<&str> = decls.iter().map(|d| d.type_name).collect();
+    // DERIVED from the decls (tidepool_mcp::describe): the same effect index
+    // (name + first-sentence + verb names) the eval tool description and
+    // `:browse` render — one source, so the three surfaces can't drift.
+    let effects = describe_effects_index(decls);
     format!(
         "tidepool-repl — a GHCi-style stateful Haskell session. Each named session holds one \
          resident JIT machine whose value heap and module scope persist across turns; \
@@ -1120,7 +1123,8 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          (per-item `index`, `generation` counters, double-encoded `result` string).\n\n\
          JSON OUTPUT: opt-in — return an `Aeson.Value` to get structured JSON instead of \
          Show output.\n\n\
-         Available effects: {effects}.\n\n\
+         EFFECTS (invoke via the helper verbs; `:browse <Effect>` for its constructors + full \
+         signatures):\n{effects}\n\
          Lifecycle: session_open → session_run* → session_close. \
          Multiple agents can open distinct named sessions in parallel \
          (omit `session` to use `\"default\"`). \
@@ -1131,7 +1135,6 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          `grepGlob`/`searchFiles` → `[Hit]` (access `h.path`, `h.line`, `h.text`); \
          `readGlob` → `[Doc]` (access `d.path`, `d.body`). \
          Bare selectors like `stdout p` are ambiguous — always use dot syntax.",
-        effects = names.join(", "),
     )
 }
 

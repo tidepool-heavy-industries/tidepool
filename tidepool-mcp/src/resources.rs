@@ -447,11 +447,11 @@ fn body(mime: &'static str, text: String) -> ResourceBody {
     ResourceBody { mime, text }
 }
 
+/// One-line effect summary — delegates to the shared parser
+/// ([`crate::describe::first_sentence`]) so the resource-descriptor blurb, the
+/// tool-description index, and `:browse` share ONE sentence-splitter.
 fn first_sentence(s: &str) -> String {
-    match s.find(". ") {
-        Some(i) => s[..=i].trim().to_string(),
-        None => s.trim().to_string(),
-    }
+    crate::describe::first_sentence(s).to_string()
 }
 
 #[cfg(test)]
