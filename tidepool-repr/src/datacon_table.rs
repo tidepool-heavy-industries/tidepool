@@ -50,6 +50,11 @@ pub struct DataConTable {
     /// Type-sibling groups: DataConIds that appear together in case branches.
     /// If Bin and Tip appear as alternatives in the same Case, they're siblings.
     siblings: HashMap<DataConId, Vec<DataConId>>,
+    /// Record field labels per constructor, in field order (from GHC's
+    /// `dataConFieldLabels`). Only present for record constructors; positional
+    /// constructors have no entry. Kept as a side-table (not on `DataCon`) so it
+    /// is pure render metadata and does not affect constructor identity/equality.
+    field_labels: HashMap<DataConId, Vec<String>>,
 }
 
 impl DataConTable {
@@ -118,6 +123,26 @@ impl DataConTable {
     /// Look up by module-qualified name (e.g., "Data.Map.Bin"), returning the DataConId.
     pub fn get_by_qualified_name(&self, qname: &str) -> Option<DataConId> {
         self.by_qualified_name.get(qname).copied()
+    }
+
+    /// Record field labels for a constructor, in field order. Returns `None` for
+    /// positional (non-record) constructors. Used by rendering to emit named-field
+    /// JSON objects instead of positional `{"constructor", "fields"}`.
+    pub fn field_labels_of(&self, id: DataConId) -> Option<&[String]> {
+        self.field_labels.get(&id).map(Vec::as_slice)
+    }
+
+    /// Attach record field labels to a constructor id. Empty label lists are
+    /// ignored (positional constructors carry no entry).
+    pub fn set_field_labels(&mut self, id: DataConId, labels: Vec<String>) {
+        if !labels.is_empty() {
+            self.field_labels.insert(id, labels);
+        }
+    }
+
+    /// Iterate over all `(DataConId, labels)` field-label entries (for serialization).
+    pub fn field_labels_iter(&self) -> impl Iterator<Item = (DataConId, &[String])> {
+        self.field_labels.iter().map(|(&id, v)| (id, v.as_slice()))
     }
 
     /// Look up by name, returning the DataConId.

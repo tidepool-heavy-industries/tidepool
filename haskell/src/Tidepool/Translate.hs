@@ -29,7 +29,9 @@ import GHC.Types.Var (isTyVar, isCoVar, varUnique, varName, setVarUnique)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
-import GHC.Core.DataCon (DataCon, dataConRepArity, dataConRepArgTys, dataConFullSig, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, dataConOrigArgTys, isUnboxedTupleDataCon, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
+import GHC.Core.DataCon (DataCon, dataConRepArity, dataConRepArgTys, dataConFullSig, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, dataConOrigArgTys, dataConFieldLabels, isUnboxedTupleDataCon, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
+import GHC.Types.FieldLabel (flLabel)
+import Language.Haskell.Syntax.Basic (FieldLabelString(..))
 import Language.Haskell.Syntax.Basic (Boxity(..))
 import GHC.Builtin.Types (consDataCon, nilDataCon, trueDataCon, falseDataCon, charDataCon, unitDataCon, tupleDataCon, ordLTDataCon, ordEQDataCon, ordGTDataCon, intDataCon, wordDataCon, doubleDataCon, floatDataCon)
 import GHC.Builtin.Names (ioTyConKey)
@@ -774,7 +776,7 @@ isGhcCompilerTyCon = isGhcCompilerName . tyConName
 -- This includes constructors from imported packages (e.g. freer-simple's
 -- Val, E, Leaf, Node, Union) that aren't in the module's mg_tcs.
 -- GHC compiler-library constructors are excluded (see 'isGhcCompilerDC').
-collectUsedDataCons :: [CoreBind] -> [(Word64, Text, Int, Int, [Text], Text)]
+collectUsedDataCons :: [CoreBind] -> [(Word64, Text, Int, Int, [Text], Text, [Text])]
 collectUsedDataCons binds =
   let allDCs = foldMap collectFromBind binds
   in map dcToMeta (filter (not . isGhcCompilerDC) (Map.elems allDCs))
@@ -788,7 +790,15 @@ collectUsedDataCons binds =
         in tsUsedDCs s
       ) pairs
 
-dcToMeta :: DataCon -> (Word64, Text, Int, Int, [Text], Text)
+-- | Record field labels for a constructor (from GHC's @dataConFieldLabels@), in
+-- field order. Empty for positional (non-record) constructors. The Rust renderer
+-- uses these to emit named-field JSON objects (only when the label count matches
+-- the runtime field count).
+dcFieldLabels :: DataCon -> [Text]
+dcFieldLabels dc =
+  map (T.pack . unpackFS . field_label . flLabel) (dataConFieldLabels dc)
+
+dcToMeta :: DataCon -> (Word64, Text, Int, Int, [Text], Text, [Text])
 dcToMeta dc =
   ( varId (dataConWorkId dc)
   , T.pack (occNameString (nameOccName (dataConName dc)))
@@ -796,6 +806,7 @@ dcToMeta dc =
   , valueRepArity dc
   , map mapBang (dataConSrcBangs dc)
   , qualifiedName (dataConName dc)
+  , dcFieldLabels dc
   )
 
 -- | Combine the metadata sources (HIGHEST priority FIRST, e.g.
@@ -811,19 +822,19 @@ dcToMeta dc =
 -- silently dropped one of a colliding pair (the freer-simple @Union@
 -- eviction). In the no-collision case the output is identical — every varId
 -- still appears once, in ascending varId order — so meta.cbor is unchanged.
-mergeMetaPreserving :: [[(Word64, Text, Int, Int, [Text], Text)]]
-                    -> [(Word64, Text, Int, Int, [Text], Text)]
+mergeMetaPreserving :: [[(Word64, Text, Int, Int, [Text], Text, [Text])]]
+                    -> [(Word64, Text, Int, Int, [Text], Text, [Text])]
 mergeMetaPreserving sources =
   -- Map.fromList keeps the LAST value per key, so feed the flattened sources
   -- reversed: the highest-priority copy (earliest in the input) is seen last
   -- and wins. Map.elems then yields ascending (varId, qname) order.
   Map.elems $ Map.fromList
     [ ((dcid, qname), e)
-    | e@(dcid, _, _, _, _, qname) <- reverse (concat sources) ]
+    | e@(dcid, _, _, _, _, qname, _) <- reverse (concat sources) ]
 
 -- | Compute transitive closure of TyCons reachable from all binder types,
 -- expanding through newtypes, then return metadata for all their DataCons.
-collectTransitiveDCons :: [CoreBind] -> [(Word64, Text, Int, Int, [Text], Text)]
+collectTransitiveDCons :: [CoreBind] -> [(Word64, Text, Int, Int, [Text], Text, [Text])]
 collectTransitiveDCons binds =
   let binderTypes = [ idType b | b <- concatMap bindersOfBind binds ]
       seedTyCons  = filter (not . isGhcCompilerTyCon)
@@ -855,16 +866,9 @@ closeTyCons visited (tc:rest)
             Nothing  -> []
       in closeTyCons visited' (newtypeChildren ++ fieldChildren ++ rest)
 
-tyConToDCMeta :: TyCon -> [(Word64, Text, Int, Int, [Text], Text)]
+tyConToDCMeta :: TyCon -> [(Word64, Text, Int, Int, [Text], Text, [Text])]
 tyConToDCMeta tc = case tyConDataCons_maybe tc of
-  Just dcs -> map (\dc ->
-    ( varId (dataConWorkId dc)
-    , T.pack (occNameString (nameOccName (dataConName dc)))
-    , dataConTag dc
-    , valueRepArity dc
-    , map mapBang (dataConSrcBangs dc)
-    , qualifiedName (dataConName dc)
-    )) dcs
+  Just dcs -> map dcToMeta dcs
   Nothing  -> []
 
 translate :: CoreExpr -> TransM Int
@@ -2066,9 +2070,9 @@ hasIOType ty = case splitTyConApp_maybe ty of
     Just (_, _, _, ret) -> hasIOType ret
     Nothing -> False
 
-collectDataCons :: [TyCon] -> [(Word64, Text, Int, Int, [Text], Text)]
+collectDataCons :: [TyCon] -> [(Word64, Text, Int, Int, [Text], Text, [Text])]
 collectDataCons tycons =
-  [ (varId (dataConWorkId dc), T.pack (occNameString (nameOccName (dataConName dc))), dataConTag dc, valueRepArity dc, map mapBang (dataConSrcBangs dc), qualifiedName (dataConName dc))
+  [ dcToMeta dc
   | tc <- tycons
   , isAlgTyCon tc
   , dc <- tyConDataCons tc
@@ -2085,16 +2089,8 @@ mapBang (HsSrcBang _ (HsBang srcUnpack srcBang)) =
 -- mg_tcs or binder types. We include these unconditionally in metadata so
 -- that ToCore impls ((), Bool, Char, Int, Word, Double, Float, tuples,
 -- Ordering, lists) always find their constructors in the DataConTable.
-wiredInDataCons :: [(Word64, Text, Int, Int, [Text], Text)]
-wiredInDataCons = concatMap (\dc ->
-    [( varId (dataConWorkId dc)
-     , T.pack (occNameString (nameOccName (dataConName dc)))
-     , dataConTag dc
-     , valueRepArity dc
-     , map mapBang (dataConSrcBangs dc)
-     , qualifiedName (dataConName dc)
-     )]
-  ) wiredInList
+wiredInDataCons :: [(Word64, Text, Int, Int, [Text], Text, [Text])]
+wiredInDataCons = map dcToMeta wiredInList
   where
     wiredInList =
       [ consDataCon, nilDataCon

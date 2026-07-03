@@ -41,6 +41,11 @@ pub fn write_cbor(expr: &RecursiveTree<CoreFrame<usize>>) -> Result<Vec<u8>, Wri
     Ok(bytes)
 }
 
+/// Encode a slice of record field labels as a CBOR array of text.
+fn field_labels_value(labels: &[String]) -> Value {
+    Value::Array(labels.iter().map(|l| Value::Text(l.clone())).collect())
+}
+
 /// Writes a DataConTable to CBOR-encoded metadata bytes (new format with warnings).
 pub fn write_metadata(table: &crate::datacon_table::DataConTable) -> Result<Vec<u8>, WriteError> {
     use crate::datacon::SrcBang;
@@ -74,8 +79,23 @@ pub fn write_metadata(table: &crate::datacon_table::DataConTable) -> Result<Vec<
             Value::Integer(arity.into()),
             bangs,
         ];
-        if let Some(ref qn) = dc.qualified_name {
-            entry.push(Value::Text(qn.clone()));
+        // Record field labels (7th slot) require the qualified-name (6th) slot to
+        // be present for positional decoding; emit an empty-string placeholder for
+        // the qn when it is absent but labels exist (the reader maps "" → None).
+        let field_labels = table.field_labels_of(dc.id);
+        match (&dc.qualified_name, field_labels) {
+            (Some(qn), Some(labels)) => {
+                entry.push(Value::Text(qn.clone()));
+                entry.push(field_labels_value(labels));
+            }
+            (Some(qn), None) => {
+                entry.push(Value::Text(qn.clone()));
+            }
+            (None, Some(labels)) => {
+                entry.push(Value::Text(String::new()));
+                entry.push(field_labels_value(labels));
+            }
+            (None, None) => {}
         }
         entries.push(Value::Array(entry));
     }
