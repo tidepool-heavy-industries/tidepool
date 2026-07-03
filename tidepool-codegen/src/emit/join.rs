@@ -1,7 +1,94 @@
 use crate::emit::expr::ensure_heap_ptr;
 use crate::emit::*;
-use cranelift_codegen::ir::{types, BlockArg, InstBuilder, Value};
+use cranelift_codegen::ir::{condcodes::IntCC, types, BlockArg, InstBuilder, Value};
+use cranelift_module::{Linkage, Module};
+use tidepool_repr::tree::get_children;
 use tidepool_repr::*;
+
+/// Does the subtree rooted at `rhs_idx` contain a `Jump` back to `label`?
+///
+/// That signals a **recursive** join — a loop whose back-edge is a Cranelift
+/// `jump` that touches none of the JIT's other cancel safepoints. Detected
+/// structurally because neither `CoreFrame::Join` nor `JoinInfo` carries a
+/// recursion flag (the Core loses GHC's `joinrec` distinction — see #325).
+/// Explicit-stack walk (no host recursion) with a visited set so shared
+/// subtrees in the flat DAG can't blow up the scan.
+fn rhs_contains_backedge(tree: &CoreExpr, rhs_idx: usize, label: JoinId) -> bool {
+    let mut stack = vec![rhs_idx];
+    let mut visited = rustc_hash::FxHashSet::default();
+    while let Some(i) = stack.pop() {
+        if !visited.insert(i) {
+            continue;
+        }
+        let frame = &tree.nodes[i];
+        if let CoreFrame::Jump { label: l, .. } = frame {
+            if *l == label {
+                return true;
+            }
+        }
+        for c in get_children(frame) {
+            stack.push(c);
+        }
+    }
+    false
+}
+
+/// Emit the external-cancellation safepoint that guards a **recursive** join
+/// back-edge (#325). A recursive join is a loop whose back-edge is a Cranelift
+/// `jump` reaching none of the JIT's other three cancel safepoints (trampoline,
+/// `gc_trigger`, effect dispatch). Immediately before the back-edge `jump`, call
+/// `runtime_cancel_check(vmctx)`: it returns null to continue, or the error
+/// poison pointer (with `RuntimeError::Cancelled` recorded) when a cancel is
+/// pending. On poison we RETURN it from the current function, unwinding to the
+/// run loop which surfaces `Cancelled` — mirroring `trampoline_resolve` one
+/// layer down. No-op when `recursive` is false, so forward joins (which run
+/// once) keep zero per-jump overhead.
+///
+/// Must be called while positioned at the block that ends in the back-edge
+/// `jump`, AFTER the jump arguments are materialized and BEFORE the `jump`
+/// terminator is emitted. On return the builder is positioned in a fresh,
+/// sealed `continue` block ready for the `jump`.
+pub(crate) fn emit_join_cancel_safepoint(
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    builder: &mut cranelift_frontend::FunctionBuilder,
+    vmctx: Value,
+    recursive: bool,
+) -> Result<(), EmitError> {
+    if !recursive {
+        return Ok(());
+    }
+    let check_fn = pipeline
+        .module
+        .declare_function(
+            "runtime_cancel_check",
+            Linkage::Import,
+            &crate::emit::runtime_cancel_check_sig(pipeline.isa.default_call_conv()),
+        )
+        .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+    let check_ref = pipeline.module.declare_func_in_func(check_fn, builder.func);
+    let call = builder.ins().call(check_ref, &[vmctx]);
+    let poison = builder.inst_results(call)[0];
+    let zero = builder.ins().iconst(types::I64, 0);
+    let cancelled = builder.ins().icmp(IntCC::NotEqual, poison, zero);
+
+    let cancel_block = builder.create_block();
+    let continue_block = builder.create_block();
+    builder
+        .ins()
+        .brif(cancelled, cancel_block, &[], continue_block, &[]);
+
+    // cancel_block: return the poison pointer from the current function.
+    // `poison` is defined in the predecessor (which dominates here), so it is
+    // usable directly without a block param.
+    builder.switch_to_block(cancel_block);
+    builder.seal_block(cancel_block);
+    builder.ins().return_(&[poison]);
+
+    // continue_block: fall through to the normal loop back-edge.
+    builder.switch_to_block(continue_block);
+    builder.seal_block(continue_block);
+    Ok(())
+}
 
 /// Emits a Join expression.
 /// Join { label, params, rhs, body } creates a join point (a parameterized block)
@@ -28,11 +115,16 @@ pub fn emit_join(
     // 4. Register the join point in ctx
     // We use a dummy Value(0) for param_types since Jump just needs to know they are heap pointers.
     let dummy_val = Value::from_u32(0);
+    // A join is a loop iff its rhs jumps back to its own label. Recursive
+    // back-edges get a cancel safepoint in `emit_jump` (#325); forward joins
+    // stay overhead-free.
+    let recursive = rhs_contains_backedge(args.sess.tree, rhs_idx, *label);
     args.ctx.join_blocks.register(
         *label,
         JoinInfo {
             block: join_block,
             param_types: params.iter().map(|_| SsaVal::HeapPtr(dummy_val)).collect(),
+            recursive,
         },
     );
 
@@ -122,7 +214,9 @@ pub fn emit_jump(
     arg_indices: &[usize],
 ) -> Result<SsaVal, EmitError> {
     // 1. Look up label in ctx.join_blocks
-    let join_block = args.ctx.join_blocks.get(label)?.block;
+    let join_info = args.ctx.join_blocks.get(label)?;
+    let join_block = join_info.block;
+    let recursive = join_info.recursive;
 
     // 2. Emit each arg
     let mut arg_values: Vec<BlockArg> = Vec::new();
@@ -148,6 +242,9 @@ pub fn emit_jump(
             val,
         )));
     }
+
+    // 3.5. External-cancellation safepoint for recursive join back-edges (#325).
+    emit_join_cancel_safepoint(args.sess.pipeline, args.builder, args.sess.vmctx, recursive)?;
 
     // 4. Jump
     args.builder.ins().jump(join_block, &arg_values);

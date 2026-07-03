@@ -359,6 +359,129 @@ fn cancel_pure_non_tail_call_allocator_loop() {
     );
 }
 
+/// `Join go(n) = case n ==# 0# of { 1# -> n; _ -> Jump go(n) } in Jump go(N)`
+///
+/// A **recursive join loop** — the rhs `Jump`s back to its own label `go`. This
+/// is the loop shape GHC produces by loopifying a non-tail recursion whose join
+/// point does not cross a lambda boundary; it survives translation as
+/// `CoreFrame::Join`/`Jump` (not `LetRec`+`App`). With `N != 0` the loop never
+/// terminates, and — crucially — it is **non-allocating**: the back-edge passes
+/// `n` unchanged (already a heap pointer, no re-boxing), and the body is pure
+/// unboxed `Int#` comparison. So it reaches NONE of the other three cancel
+/// safepoints: not the trampoline (it's a Cranelift `jump`, not a tail App),
+/// not `gc_trigger` (zero allocation), not the effect boundary (no effects).
+/// Before #325 this wedged uninterruptibly; the fix adds a cancel safepoint at
+/// the recursive back-edge in `emit_jump`.
+fn build_infinite_join_loop(n: i64) -> CoreExpr {
+    let go = JoinId(1);
+    let param_n = VarId(2);
+    let case_binder = VarId(3);
+
+    let mut bld = TreeBuilder::new();
+
+    // rhs: case (n ==# 0#) of { 1# -> n; _ -> Jump go(n) }
+    let var_n = bld.push(CoreFrame::Var(param_n));
+    let lit_0 = bld.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let cmp = bld.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntEq,
+        args: vec![var_n, lit_0],
+    });
+    // Terminating branch (never taken while n != 0): return n unchanged.
+    let var_n_term = bld.push(CoreFrame::Var(param_n));
+    // Recursive back-edge: Jump go(n) — n passed unchanged, so no allocation.
+    let var_n_jump = bld.push(CoreFrame::Var(param_n));
+    let recur = bld.push(CoreFrame::Jump {
+        label: go,
+        args: vec![var_n_jump],
+    });
+    let rhs = bld.push(CoreFrame::Case {
+        scrutinee: cmp,
+        binder: case_binder,
+        alts: vec![
+            Alt {
+                con: AltCon::LitAlt(Literal::LitInt(1)),
+                binders: vec![],
+                body: var_n_term,
+            },
+            Alt {
+                con: AltCon::Default,
+                binders: vec![],
+                body: recur,
+            },
+        ],
+    });
+
+    // body: Jump go(N) — enter the loop.
+    let lit_n = bld.push(CoreFrame::Lit(Literal::LitInt(n)));
+    let body = bld.push(CoreFrame::Jump {
+        label: go,
+        args: vec![lit_n],
+    });
+
+    bld.push(CoreFrame::Join {
+        label: go,
+        params: vec![param_n],
+        rhs,
+        body,
+    });
+
+    bld.build()
+}
+
+/// External cancellation surfaces for a pure, non-allocating **recursive join
+/// loop** (#325) — the one loop shape the other three safepoints miss. Without
+/// the `emit_jump` back-edge safepoint this test HANGS (the loop is uninterrup-
+/// tible); the wall-clock deadline turns a regression into a loud failure
+/// rather than a CI hang.
+#[test]
+fn cancel_pure_non_allocating_join_loop() {
+    let table = test_table();
+    let expr = build_infinite_join_loop(5);
+    let mut machine = JitEffectMachine::compile(&expr, &table, 1 << 16).unwrap();
+    let handle = machine.cancel_handle();
+
+    let done = std::sync::Arc::new(AtomicBool::new(false));
+    let done_thread = done.clone();
+    let jit_thread = std::thread::spawn(move || {
+        let result = machine.run_pure();
+        done_thread.store(true, Ordering::SeqCst);
+        result
+    });
+
+    // Let the loop start spinning. It must NOT terminate on its own (it's
+    // infinite) — if it did, the fixture is wrong and proves nothing.
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !done.load(Ordering::SeqCst),
+        "fixture loop was not actually infinite — it returned before cancel"
+    );
+
+    handle.cancel();
+
+    // The recursive back-edge check runs every iteration (many times per ms),
+    // so 5s is a very generous bound. Exceeding it means the loop wedged —
+    // i.e. the #325 safepoint regressed. Fail loudly instead of hanging CI.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !done.load(Ordering::SeqCst) {
+        if Instant::now() > deadline {
+            panic!(
+                "JIT did not observe cancellation within 5s — recursive join \
+                 back-edge is uninterruptible again (#325 regression)"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let err = jit_thread.join().unwrap().unwrap_err();
+    match err {
+        JitError::Yield(YieldError::Runtime(RuntimeError::Cancelled)) => {}
+        other => panic!(
+            "expected YieldError::Runtime(RuntimeError::Cancelled), got {:?}",
+            other
+        ),
+    }
+}
+
 /// The cancel flag is per-machine (not per-run). After cancellation unwinds,
 /// `reset()` lets the same machine be reused for a fresh run.
 #[test]

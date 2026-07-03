@@ -833,7 +833,9 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             label,
             args: jump_args,
         } => {
-            let join_block = args.ctx.join_blocks.get(&label)?.block;
+            let join_info = args.ctx.join_blocks.get(&label)?;
+            let join_block = join_info.block;
+            let recursive = join_info.recursive;
 
             let arg_values: Vec<BlockArg> = jump_args
                 .iter()
@@ -847,6 +849,16 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                     ))
                 })
                 .collect();
+
+            // External-cancellation safepoint for recursive join back-edges
+            // (#325) — the one loop shape the trampoline / gc_trigger / effect
+            // safepoints all miss. No-op for forward (non-recursive) joins.
+            crate::emit::join::emit_join_cancel_safepoint(
+                args.sess.pipeline,
+                args.builder,
+                args.sess.vmctx,
+                recursive,
+            )?;
 
             args.builder.ins().jump(join_block, &arg_values);
 
