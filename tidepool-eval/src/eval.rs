@@ -423,6 +423,14 @@ fn eval_at(
                 .collect::<Result<_, _>>()?;
             // Handle primops that need heap access for deep forcing
             match op {
+                // ShowDoubleAddr/ShowSignedDoubleAddr: the single-field-Con
+                // arms below are a deliberately narrower mirror of
+                // `shapes::unbox_double`/`unbox_int` — this function has no
+                // `&DataConTable` in scope (only `Value`/`Heap`), so they
+                // can't verify the con is actually named `D#`/`I#` and
+                // instead accept ANY single-field Con after forcing its
+                // field. Not a migration candidate without threading a
+                // table through the whole eval_at call chain.
                 PrimOpKind::ShowDoubleAddr => {
                     if arg_vals.len() != 1 {
                         return Err(EvalError::ArityMismatch {
