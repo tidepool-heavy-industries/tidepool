@@ -34,6 +34,52 @@ isTest :: LspNode -> Bool
 isTest n = isInfixOf "tests/" f || isInfixOf "/test" f || isInfixOf "_test" f
   where f = nodeFile n
 
+-- | Monadic cfg(test)-aware test predicate: more accurate than `isTest` for
+-- Rust source that uses @#[cfg(test)]@ regions inside prod-path files (e.g.
+-- @src\/lib.rs@).
+--
+-- Resolution order (cheapest first):
+--
+--   1. Pure path heuristic (`isTest`) — file in a @tests\/@ tree etc.
+--   2. Container name — the node's immediate enclosing symbol (@nodeContainer@)
+--      contains @\"test\"@.  Catches functions directly inside @mod tests { }@.
+--      Note: @nodeContainer@ is one level only (the immediate parent symbol
+--      name), not a full module path; deeper nesting falls through to step 3.
+--   3. File scan — reads the node's source file and checks whether @nodeLine n@
+--      falls after a @#[cfg(test)]@ marker line anywhere in the file.
+--      Handles functions nested more than one level deep inside a cfg(test)
+--      block, and standalone @#[cfg(test)]@ attributes on individual items.
+--
+-- Residual limits (documented honestly):
+--
+--   * Step 3 uses a line-offset heuristic and does __not__ track brace depth.
+--     If prod code follows a @mod tests { }@ block in the same file (uncommon
+--     in practice), those nodes may be mis-classified as test code.
+--   * Only effective for Rust @#[cfg(test)]@ patterns; other languages use
+--     different conventions (Python @_test@ suffix is caught by `isTest`).
+--   * @tryReadFile@ may fail (permission, file removed); falls back to @False@
+--     on read failure so as not to block exploration.
+--
+-- When to use which:
+--
+--   * Use `isTest` as the rule-tier predicate inside `steer` — it is pure and
+--     costs nothing (no IO).
+--   * Use `isTestM` anywhere that already runs in @M@ and where correctness on
+--     in-file @#[cfg(test)]@ functions matters more than throughput.
+isTestM :: LspNode -> M Bool
+isTestM n
+  | isTest n                            = pure True
+  | "test" `isInfixOf` nodeContainer n = pure True
+  | otherwise = do
+      er <- tryReadFile (nodeFile n)
+      case er of
+        Left _     -> pure False
+        Right body ->
+          let ls       = zip [1 :: Int ..] (lines body)
+              cfgLines = [l | (l, ln) <- ls, "#[cfg(test)]" `isInfixOf` ln]
+              target   = nodeLine n
+          in  pure (any (target >) cfgLines)
+
 -- | Unwrapping helpers: the effect ops return `Maybe [LspNode]` (Nothing = the
 -- node isn't analyzable). For plain graph-walking you usually want "[] = stop",
 -- so these collapse Nothing → []. The honest `lsp*` primitives stay available
@@ -95,20 +141,28 @@ walk edge keep depth root = loopM step (depth, [root], [])
 
 -- | Walk the caller graph, pruning each frontier with the cascade: skip tests
 -- by rule, else the local model judges "on the path to GOAL?", else ask.
+-- The model tier runs `isTestM` first so that @#[cfg(test)]@ functions in
+-- prod-path files (e.g. @src\/lib.rs@) are pruned without calling the LLM.
 explore :: Int -> Text -> LspNode -> M [LspNode]
 explore depth goal = walk callersOf onPath depth
   where
     onPath = steer
       (\n -> if isTest n then Just False else Nothing)
-      (\n -> judgeBool 0.7 ("Is " <> nodeName n <> " on the path to " <> goal <> "?  " <> nodeText n))
+      (\n -> do
+          t <- isTestM n
+          if t then pure (Just False)
+               else judgeBool 0.7 ("Is " <> nodeName n <> " on the path to " <> goal <> "?  " <> nodeText n))
       (\n -> askBool ("Follow " <> nodeName n <> "?  " <> nodeText n))
 
 -- | Resolve a name to its one intended definition: unique-after-rule, else the
 -- local model ranks, else the human chooses. Returns a `LspNode` to navigate from.
+-- Uses `isTestM` so that definitions inside @#[cfg(test)]@ regions of prod-path
+-- files are excluded alongside path-heuristic test files.
 the :: Text -> Text -> M (Maybe LspNode)
 the name intent = do
-  defs <- lspWhere name
-  case filter (not . isTest) defs of
+  defs    <- lspWhere name
+  nonTest <- filterM (fmap not . isTestM) defs
+  case nonTest of
     []  -> pure Nothing
     [n] -> pure (Just n)
     ns  -> Just <$> steer (\_ -> Nothing) (\_ -> pickModel ns) (\_ -> pickHuman ns) ()
@@ -231,13 +285,18 @@ dedupeOn f = go []
       | f x `elem` seen = go seen xs
       | otherwise       = x : go (f x : seen) xs
 
--- | One-verb blast radius: the definition + every use site, grouped per file.
+-- | One-verb blast radius: the definition + every production use site, grouped
+-- per file. Test references (path-heuristic or @#[cfg(test)]@-region) are
+-- excluded from @byFile@ and counted separately in @testRefs@.
 -- @blastRadius "remap_generated_coords" "the coordinate remapper"@
 blastRadius :: Text -> Text -> M Value
 blastRadius name intent = do
-  d  <- findDef name intent
-  rs <- refsOf d
-  let byFile = sortOn (negate . snd) (Map.toList (Map.fromListWith (+) [ (nodeFile r, 1 :: Int) | r <- rs ]))
-  pure (object [ "def" .= (nodeFile d <> ":" <> showT (nodeLine d))
+  d    <- findDef name intent
+  rs   <- refsOf d
+  prod <- filterM (fmap not . isTestM) rs
+  let byFile = sortOn (negate . snd) (Map.toList (Map.fromListWith (+) [ (nodeFile r, 1 :: Int) | r <- prod ]))
+  pure (object [ "def"      .= (nodeFile d <> ":" <> showT (nodeLine d))
                , "totalRefs" .= length rs
-               , "byFile" .= toJSON byFile ])
+               , "prodRefs"  .= length prod
+               , "testRefs"  .= (length rs - length prod)
+               , "byFile"   .= toJSON byFile ])
