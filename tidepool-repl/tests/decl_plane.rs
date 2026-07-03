@@ -671,6 +671,34 @@ async fn pure_numeric_bind_type_generalizes_in_display() {
     repl.close().await.expect_ok("close");
 }
 
+/// The `input`-lane materialize guard must key on the DECL COMPILE ERROR
+/// ("not in scope: input"), not a textual scan for the word `input` — else a
+/// pure bind whose RHS binds its OWN local `input` (a lambda param) would be
+/// falsely forced to materialize (losing generalization). `let localInput =
+/// \input -> input` references no payload lane, compiles on the decl plane, and
+/// must stay a GENERALIZED decl (usable at two types), not a monomorphic
+/// materialized closure. (Regression guard for the false-positive the crude
+/// `mentions_word("input")` guard would have had.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_input_param_not_confused_with_payload_lane() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+    repl.open_ok().await;
+    // `input` here is a LAMBDA PARAM, not the payload lane — must decl-plane it.
+    repl.eval("let localInput = \\input -> input")
+        .await
+        .expect_ok("local-input lambda binds as a decl");
+    // Generalized (`forall a. a -> a`) ⇒ usable at two distinct types across turns
+    // — proves it landed on the decl plane, not a monomorphic materialize.
+    let a = repl.eval_ok("pure (localInput (5 :: Int))").await;
+    assert!(a.contains('5'), "localInput at Int: {a}");
+    let b = repl.eval_ok("pure (localInput \"hi\")").await;
+    assert!(b.contains("hi"), "localInput at Text: {b}");
+    repl.close().await.expect_ok("close");
+}
+
 /// Record-dot (`h.path`) is a core idiom that compiles in production; the
 /// standalone test ModuleEnv must be FAITHFUL to that (friction #28: it lacked
 /// `OverloadedRecordDot`, so a record-dot helper compiled live but not in

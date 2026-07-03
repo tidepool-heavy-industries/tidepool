@@ -523,15 +523,6 @@ impl Session {
     /// Surfacing the decl error (e.g. the clean "Ambiguous occurrence") is the
     /// same actionable message the bare-decl form already gives.
     fn try_pure_bind_as_decl(&mut self, expr_text: &str, name: &str) -> Option<TurnOutcome> {
-        // do-block invariant: `input` (the payload lane) is in scope in EVERY item
-        // — but it is injected only on the value/stmt plane, never the decl plane.
-        // So a pure bind whose RHS references `input` must NOT be lowered to a decl
-        // (that silently drops `input` from scope — "not in scope: input"); return
-        // None so the caller materializes it on the value plane where `input` lives.
-        // (Regression from the M2 pure-bind→decl lowering; beta-harvest #1.)
-        if mentions_word(expr_text, "input") {
-            return None;
-        }
         let decl = pure_bind_to_decl(expr_text, name)?;
         match self.lib.define(&decl) {
             Ok(gen) => {
@@ -553,16 +544,38 @@ impl Session {
                 })
             }
             Err(e) => {
-                // Materialize is the right fallback ONLY when the RHS references
-                // a materialized value binding (which genuinely can't live in
-                // the decl plane). If it references no such value, the decl
-                // failure is a real error (collision / type) — surface it rather
-                // than materialize a broken binding (see the doc comment).
+                // Materialize is the right fallback when the RHS references a
+                // value-plane-only binding the decl plane genuinely lacks:
+                //  (a) a materialized session value (matched by name), or
+                //  (b) the `input` payload lane (injected only on the value/stmt
+                //      plane). We detect (b) PRECISELY by the decl error itself —
+                //      "not in scope: input" — NOT by scanning the text for the
+                //      word `input`: a user's OWN locally-bound `input` (a lambda
+                //      param, an inner `let`, or a decl-plane `let input = …`)
+                //      COMPILES on the decl plane, so it never trips this, and a
+                //      typo like `inputt` yields a different name. do-block
+                //      invariant #1 (payload lane in scope in every item).
+                // Otherwise the decl failure is a real error (collision / type)
+                // — surface it rather than materialize a broken binding.
+                let err_str = e.to_string();
                 let refs_materialized_value = self
                     .bindings
                     .iter_current()
                     .any(|(n, _)| mentions_word(expr_text, &n.0));
-                if refs_materialized_value {
+                // Whole-word `input` (GHC: "Variable not in scope: input :: Value"),
+                // never `inputText`/`input'` — check the char after the match is not
+                // an identifier continuation.
+                let refs_input_lane = {
+                    let needle = "not in scope: input";
+                    err_str.match_indices(needle).any(|(i, _)| {
+                        let after = &err_str[i + needle.len()..];
+                        !after
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_alphanumeric() || c == '\'' || c == '_')
+                    })
+                };
+                if refs_materialized_value || refs_input_lane {
                     None
                 } else {
                     Some(TurnOutcome::Error(format!("bind compile error: {e}")))
