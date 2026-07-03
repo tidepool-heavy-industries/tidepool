@@ -13,15 +13,9 @@
 //! Root cause hypothesis: `apply_cont_heap` reads k2 before calling k1, then uses
 //! stale k2 after GC may have run inside k1's execution.
 
-mod common;
-
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_runtime::compile_and_run_with_nursery_size;
-
-fn prelude_path() -> std::path::PathBuf {
-    common::prelude_path()
-}
+use tidepool_testing::eval_harness::EvalHarness;
 
 // --- Effect A: DataSource (returns a list of strings) ---
 
@@ -138,25 +132,15 @@ result = do
 {body}
 "#
     );
-    let pp = prelude_path();
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let include = [pp.as_path()];
-            let mut handlers = frunk::hlist![MockDataSource, MockClassifier, MockConsole];
-            compile_and_run_with_nursery_size(
-                &src,
-                "result",
-                &include,
-                &mut handlers,
-                &(),
-                nursery_size,
-            )
-            .expect("compile_and_run failed")
-        })
-        .unwrap()
-        .join()
-        .unwrap()
+    EvalHarness::new()
+        .with_stdlib()
+        .with_nursery(nursery_size)
+        .run(
+            &src,
+            "result",
+            frunk::hlist![MockDataSource, MockClassifier, MockConsole],
+        )
+        .expect("compile_and_run failed")
 }
 
 // === Reproducing the MCP SIGILL bug ===
@@ -359,23 +343,20 @@ result = do
   pure (prompt <> " => " <> r)
 "#
     .to_string();
-    let pp = prelude_path();
-    let result = std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let include = [pp.as_path()];
-            // Classifier returns "fail" to trigger fallback path
-            let mut handlers = frunk::hlist![
+    // Classifier returns "fail" to trigger fallback path
+    let result = EvalHarness::new()
+        .with_stdlib()
+        .with_nursery(1 << 20)
+        .run(
+            &src,
+            "result",
+            frunk::hlist![
                 MockDataSource,
                 MockClassifierCustom("fail".to_string()),
                 MockConsole
-            ];
-            compile_and_run_with_nursery_size(&src, "result", &include, &mut handlers, &(), 1 << 20)
-                .expect("compile_and_run failed")
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+            ],
+        )
+        .expect("compile_and_run failed");
     let json = result.to_json();
     let s = json.as_str().unwrap();
     assert!(s.contains("Found 50 items."));
@@ -441,25 +422,15 @@ result = do
   pure summary
 "#
     .to_string();
-    let pp = prelude_path();
-    let result = std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let include = [pp.as_path()];
-            let mut handlers = frunk::hlist![MockDataSource, MockClassifier, MockConsole];
-            compile_and_run_with_nursery_size(
-                &src,
-                "result",
-                &include,
-                &mut handlers,
-                &(),
-                1 << 18, // 256 KiB — very tight
-            )
-            .expect("compile_and_run failed")
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    let result = EvalHarness::new()
+        .with_stdlib()
+        .with_nursery(1 << 18) // 256 KiB — very tight
+        .run(
+            &src,
+            "result",
+            frunk::hlist![MockDataSource, MockClassifier, MockConsole],
+        )
+        .expect("compile_and_run failed");
     let json = result.to_json();
     let s = json.as_str().unwrap();
     assert!(s.contains("Found 50 items."));

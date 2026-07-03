@@ -4,15 +4,11 @@
 //! `forM`/`mapM` with effects. Pure lists and `map` over the same list work fine.
 //! Forcing the spine first (via `length`) is a workaround.
 
-mod common;
+use std::sync::{Arc, Mutex};
 
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_runtime::compile_and_run;
-
-fn prelude_path() -> std::path::PathBuf {
-    common::prelude_path()
-}
+use tidepool_testing::eval_harness::EvalHarness;
 
 #[derive(FromCore)]
 enum ConsoleReq {
@@ -21,7 +17,7 @@ enum ConsoleReq {
 }
 
 struct MockConsole {
-    prints: Vec<String>,
+    prints: Arc<Mutex<Vec<String>>>,
 }
 
 impl EffectHandler for MockConsole {
@@ -33,15 +29,15 @@ impl EffectHandler for MockConsole {
     ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
             ConsoleReq::Print(s) => {
-                self.prints.push(s);
+                self.prints.lock().unwrap().push(s);
                 cx.respond(())
             }
         }
     }
 }
 
-/// Run effectful Haskell with a Console handler on an 8 MiB stack.
-fn run_with_console(body: &str) -> (tidepool_runtime::EvalResult, MockConsole) {
+/// Run effectful Haskell with a Console handler.
+fn run_with_console(body: &str) -> (tidepool_runtime::EvalResult, Vec<String>) {
     let src = format!(
         r#"{{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds,
              TypeOperators, GADTs, FlexibleContexts, PartialTypeSignatures #-}}
@@ -61,20 +57,16 @@ result = do
 {body}
 "#
     );
-    let pp = prelude_path();
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let include = [pp.as_path()];
-            let mut handlers = frunk::hlist![MockConsole { prints: vec![] }];
-            let result = compile_and_run(&src, "result", &include, &mut handlers, &())
-                .expect("compile_and_run failed");
-            let console = handlers.head;
-            (result, console)
-        })
-        .unwrap()
-        .join()
-        .unwrap()
+    let prints = Arc::new(Mutex::new(Vec::new()));
+    let handlers = frunk::hlist![MockConsole {
+        prints: prints.clone()
+    }];
+    let result = EvalHarness::new()
+        .with_stdlib()
+        .run(&src, "result", handlers)
+        .expect("compile_and_run failed");
+    let prints = Arc::try_unwrap(prints).unwrap().into_inner().unwrap();
+    (result, prints)
 }
 
 // === Bug repro tests (expected to FAIL until fix) ===
@@ -165,5 +157,5 @@ fn test_show_effect_list_works() {
 "#,
     );
     assert_eq!(result.to_json(), serde_json::json!([1, 2, 3]));
-    assert!(console.prints.iter().any(|s| s.contains("1")));
+    assert!(console.iter().any(|s| s.contains("1")));
 }
