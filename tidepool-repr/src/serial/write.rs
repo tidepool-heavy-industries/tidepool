@@ -47,11 +47,19 @@ fn field_labels_value(labels: &[String]) -> Value {
 }
 
 /// Writes a DataConTable to CBOR-encoded metadata bytes (new format with warnings).
-pub fn write_metadata(table: &crate::datacon_table::DataConTable) -> Result<Vec<u8>, WriteError> {
+pub fn write_metadata(
+    table: &crate::datacon_table::DataConTable,
+    warnings: &super::read::MetaWarnings,
+) -> Result<Vec<u8>, WriteError> {
     use crate::datacon::SrcBang;
 
+    // Ascending DataConId order — the order `encodeMetadata` emits — so the
+    // encoding is deterministic and byte-comparable against Haskell output.
+    let mut cons: Vec<_> = table.iter().collect();
+    cons.sort_by_key(|dc| dc.id.0);
+
     let mut entries = Vec::with_capacity(table.len());
-    for dc in table.iter() {
+    for dc in cons {
         let dcid = dc.id.0;
         let name = &dc.name;
         let tag = dc.tag as u64;
@@ -72,41 +80,53 @@ pub fn write_metadata(table: &crate::datacon_table::DataConTable) -> Result<Vec<
                 .collect(),
         );
 
-        let mut entry = vec![
+        // Always the full 7-element shape (matching
+        // `Tidepool.CborEncode.encodeMetaEntry`): an absent qualified name is
+        // the empty string, absent field labels the empty array.
+        let entry = vec![
             Value::Integer(dcid.into()),
             Value::Text(name.clone()),
             Value::Integer(tag.into()),
             Value::Integer(arity.into()),
             bangs,
+            Value::Text(dc.qualified_name.clone().unwrap_or_default()),
+            field_labels_value(table.field_labels_of(dc.id).unwrap_or(&[])),
         ];
-        // Record field labels (7th slot) require the qualified-name (6th) slot to
-        // be present for positional decoding; emit an empty-string placeholder for
-        // the qn when it is absent but labels exist (the reader maps "" → None).
-        let field_labels = table.field_labels_of(dc.id);
-        match (&dc.qualified_name, field_labels) {
-            (Some(qn), Some(labels)) => {
-                entry.push(Value::Text(qn.clone()));
-                entry.push(field_labels_value(labels));
-            }
-            (Some(qn), None) => {
-                entry.push(Value::Text(qn.clone()));
-            }
-            (None, Some(labels)) => {
-                entry.push(Value::Text(String::new()));
-                entry.push(field_labels_value(labels));
-            }
-            (None, None) => {}
-        }
         entries.push(Value::Array(entry));
     }
 
-    // New format: [entries_array, warnings_map]
-    let warnings_map = Value::Map(vec![(
+    // Warnings map mirrors `encodeMetadata`'s emission exactly (key order and
+    // presence rules) so a read→re-encode of Haskell-produced meta is
+    // byte-identical: `has_io` always; `captured_type` only when present;
+    // `var_names` only when non-empty.
+    let mut warnings_pairs = vec![(
         Value::Text("has_io".to_string()),
-        Value::Bool(false),
-    )]);
-
-    let root = Value::Array(vec![Value::Array(entries), warnings_map]);
+        Value::Bool(warnings.has_io),
+    )];
+    if let Some(ty) = &warnings.captured_type {
+        warnings_pairs.push((
+            Value::Text("captured_type".to_string()),
+            Value::Text(ty.clone()),
+        ));
+    }
+    if !warnings.var_names.is_empty() {
+        warnings_pairs.push((
+            Value::Text("var_names".to_string()),
+            Value::Array(
+                warnings
+                    .var_names
+                    .iter()
+                    .map(|(id, nm)| {
+                        Value::Array(vec![
+                            Value::Integer((*id).into()),
+                            Value::Text(nm.clone()),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ));
+    }
+    let root = Value::Array(vec![Value::Array(entries), Value::Map(warnings_pairs)]);
 
     let mut bytes = Vec::new();
     write_header(&mut bytes);

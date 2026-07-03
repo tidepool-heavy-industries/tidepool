@@ -138,7 +138,7 @@ proptest! {
     #[test]
     #[serial]
     fn cbor_round_trip_data_con_table(table in arb_data_con_table()) {
-        let bytes = write_metadata(&table).expect("write_metadata failed");
+        let bytes = write_metadata(&table, &Default::default()).expect("write_metadata failed");
         let (recovered, _) = read_metadata(&bytes).expect("read_metadata failed");
         prop_assert_eq!(table, recovered);
     }

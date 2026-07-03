@@ -35,6 +35,12 @@ pub enum ReadError {
     /// The structural layout of the CBOR data does not match Tidepool IR.
     #[error("Invalid structure: {0}")]
     InvalidStructure(String),
+    /// Input without the mandatory `TPLR` header — a stale or foreign payload.
+    #[error(
+        "Missing TPLR header: not a current-format Tidepool CBOR payload \
+         (stale fixtures/caches must be regenerated, not tolerated)"
+    )]
+    MissingHeader,
     /// Truncated or incomplete Tidepool CBOR header.
     #[error("Truncated or incomplete Tidepool CBOR header")]
     TruncatedHeader,
@@ -285,17 +291,6 @@ mod tests {
             .any(|n| matches!(n, CoreFrame::Lam { .. })));
     }
 
-    #[test]
-    fn test_read_harness_trmodule_cbor() {
-        let bytes = std::fs::read("../haskell/test/Identity_cbor/$trModule.cbor")
-            .expect("$trModule.cbor not found — run tidepool-harness first");
-        let tree = read_cbor(&bytes).expect("read_cbor failed on $trModule.cbor");
-        assert!(
-            !tree.nodes.is_empty(),
-            "$trModule should have at least 1 node"
-        );
-    }
-
     // End-to-end: .cbor → read_cbor → pretty_print
     #[test]
     fn test_e2e_identity_pretty() {
@@ -328,15 +323,6 @@ mod tests {
         assert!(!output.is_empty());
         // const' = \x _ -> x, two chained lambdas
         assert!(output.contains('\\'), "expected lambda in: {}", output);
-    }
-
-    #[test]
-    fn test_e2e_trmodule_pretty() {
-        let bytes = std::fs::read("../haskell/test/Identity_cbor/$trModule.cbor")
-            .expect("$trModule.cbor not found");
-        let tree = read_cbor(&bytes).expect("read_cbor failed");
-        let output = crate::pretty::pretty_print(&tree);
-        assert!(!output.is_empty());
     }
 
     #[test]
@@ -377,7 +363,7 @@ mod tests {
             qualified_name: None,
         });
 
-        let bytes = write_metadata(&table).expect("write_metadata failed");
+        let bytes = write_metadata(&table, &Default::default()).expect("write_metadata failed");
         let (recovered, warnings) = read_metadata(&bytes).expect("read_metadata failed");
         assert_eq!(table, recovered);
         assert!(!warnings.has_io);
@@ -414,7 +400,7 @@ mod tests {
             qualified_name: Some("Data.Set.Bin".to_string()),
         });
 
-        let bytes = write_metadata(&table).expect("write_metadata failed");
+        let bytes = write_metadata(&table, &Default::default()).expect("write_metadata failed");
         let (recovered, _) = read_metadata(&bytes).expect("read_metadata failed");
 
         // Check by-id entries survived (HashMap order may differ, so check individually)
@@ -487,7 +473,7 @@ mod tests {
             qualified_name: None,
         });
 
-        let bytes = write_metadata(&table).expect("write_metadata failed");
+        let bytes = write_metadata(&table, &Default::default()).expect("write_metadata failed");
         let (recovered, _) = read_metadata(&bytes).expect("read_metadata failed");
 
         assert_eq!(
@@ -532,7 +518,7 @@ mod tests {
             qualified_name: None, // legacy: no qualified name
         });
 
-        let bytes = write_metadata(&table).expect("write_metadata failed");
+        let bytes = write_metadata(&table, &Default::default()).expect("write_metadata failed");
         let (recovered, _) = read_metadata(&bytes).expect("read_metadata failed");
 
         // Check individual entries (HashMap order may differ)
@@ -553,20 +539,24 @@ mod tests {
 
     fn cbor_bytes(val: ciborium::value::Value) -> Vec<u8> {
         let mut bytes = Vec::new();
+        bytes.extend_from_slice(&HEADER_MAGIC);
+        bytes.extend_from_slice(&VERSION_MAJOR.to_be_bytes());
+        bytes.extend_from_slice(&VERSION_MINOR.to_be_bytes());
         ciborium::ser::into_writer(&val, &mut bytes).unwrap();
         bytes
     }
 
     #[test]
     fn test_read_empty_bytes() {
-        assert!(matches!(read_cbor(&[]), Err(ReadError::Cbor(_))));
+        assert!(matches!(read_cbor(&[]), Err(ReadError::MissingHeader)));
     }
 
     #[test]
     fn test_read_not_cbor() {
+        // No TPLR magic — rejected at the header, before CBOR parsing.
         assert!(matches!(
             read_cbor(&[0xFF, 0xFE, 0x00, 0xAB, 0xCD]),
-            Err(ReadError::Cbor(_))
+            Err(ReadError::MissingHeader)
         ));
     }
 

@@ -78,7 +78,7 @@ fn lit_expr(n: i64) -> CoreExpr {
 }
 
 fn empty_meta_bytes() -> Vec<u8> {
-    write_metadata(&DataConTable::new()).expect("metadata fixture")
+    write_metadata(&DataConTable::new(), &Default::default()).expect("metadata fixture")
 }
 
 /// Monotone counter so every test/case gets a unique source string and cache

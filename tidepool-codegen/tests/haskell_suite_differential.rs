@@ -71,13 +71,10 @@ fn haskell_suite_differential() {
                 tidepool_testing::watchdog::begin(&name);
 
                 let bytes = std::fs::read(&path).unwrap();
-                let expr = match read_cbor(&bytes) {
-                    Ok(e) => e,
-                    Err(_) => {
-                        skipped += 1;
-                        continue;
-                    }
-                };
+                // One current format: an unreadable fixture is corpus rot,
+                // never silently reduced coverage.
+                let expr = read_cbor(&bytes)
+                    .unwrap_or_else(|e| panic!("{name}: fixture unreadable: {e}"));
 
                 // Interpreter
                 let mut heap = VecHeap::new();

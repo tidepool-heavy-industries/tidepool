@@ -71,17 +71,22 @@ Rust only stores and re-seeds it into `ExternalEnv` on later reference turns —
 it never recomputes the fingerprint. This is deliberate: there is no
 cross-language hashing algorithm to keep in sync, by construction.
 
-## CBOR wire format (`serial/mod.rs`)
+## CBOR wire format (`serial/mod.rs`) — ONE current format, no tolerance
 
 8-byte header: 4-byte magic `TPLR` + `VERSION_MAJOR`/`VERSION_MINOR` (currently
-`1.0`) as two big-endian `u16`s. **The header is OPTIONAL, not mandatory** —
-`read_cbor` only checks it if the first 4 bytes match the magic; payloads
-without it fall through to a legacy parse path silently, they are not
-rejected. When the magic IS present, `read_cbor` rejects a version it can't
-read loudly (`ReadError::UnsupportedVersion`) — specifically a `major`
-mismatch, or a `minor` newer than this build supports; an older `minor` within
-the same `major` is accepted (forward-compatible by design). Bump
-`VERSION_MAJOR` on any breaking change to the metadata/expression CBOR shape,
-and expect `haskell/`'s serializer to need a matching bump (the Haskell and
-Rust sides of this format are NOT independently versioned; they're one format
-with two implementations).
+`1.1`) as two big-endian `u16`s. **The header is MANDATORY** — a payload
+without it is rejected loudly (`ReadError::MissingHeader`); stale fixtures or
+caches get regenerated, never tolerated. Version rejection is also loud
+(`ReadError::UnsupportedVersion`): a `major` mismatch, or a `minor` newer than
+this build supports; an older `minor` within the same `major` is accepted.
+Metadata has exactly one accepted shape: `[entries_array, warnings_map]` with
+strictly 7-element entries — the shape `Tidepool.CborEncode.encodeMetadata`
+emits. The Rust writer mirrors the Haskell encoder byte-for-byte (always-7
+entries in ascending-`DataConId` order, same warnings-key emission rules);
+`tidepool-repr/tests/golden_wire_contract.rs` pins the byte identity for both
+trees and metadata over the committed corpus. Bump `VERSION_MAJOR` on any
+breaking shape change, bump `haskell/`'s serializer in the same commit, and
+regenerate the fixture corpora (`haskell/regen-corpus.sh` + the extract
+invocations in `haskell/CLAUDE.md`) — the Haskell and Rust sides are one
+format with two implementations, and the regenerated corpus diff is the
+review artifact.

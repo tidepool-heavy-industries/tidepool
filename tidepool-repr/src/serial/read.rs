@@ -6,31 +6,28 @@ use crate::tree::RecursiveTree;
 use crate::types::{Alt, AltCon, DataConId, JoinId, Literal, PrimOpKind, VarId};
 use ciborium::value::Value;
 
-/// Strip and validate the 8-byte version header. Returns the CBOR payload slice.
-/// For backward compatibility, if the first 4 bytes are NOT the magic, assume
-/// legacy headerless format and return the entire slice.
+/// Strip and validate the mandatory 8-byte version header. Returns the CBOR
+/// payload slice. Input without the `TPLR` magic is rejected loudly — there is
+/// ONE current format; regenerate stale payloads instead of tolerating them.
 fn strip_header(bytes: &[u8]) -> Result<&[u8], ReadError> {
-    if bytes.len() >= 4 && bytes[..4] == super::HEADER_MAGIC {
-        if bytes.len() < super::HEADER_LEN {
-            return Err(ReadError::TruncatedHeader);
-        }
-        let major = u16::from_be_bytes([bytes[4], bytes[5]]);
-        let minor = u16::from_be_bytes([bytes[6], bytes[7]]);
-        if major != super::VERSION_MAJOR || minor > super::VERSION_MINOR {
-            return Err(ReadError::UnsupportedVersion(major, minor));
-        }
-        Ok(&bytes[super::HEADER_LEN..])
-    } else {
-        // Legacy headerless CBOR — pass through
-        Ok(bytes)
+    if bytes.len() < 4 || bytes[..4] != super::HEADER_MAGIC {
+        return Err(ReadError::MissingHeader);
     }
+    if bytes.len() < super::HEADER_LEN {
+        return Err(ReadError::TruncatedHeader);
+    }
+    let major = u16::from_be_bytes([bytes[4], bytes[5]]);
+    let minor = u16::from_be_bytes([bytes[6], bytes[7]]);
+    if major != super::VERSION_MAJOR || minor > super::VERSION_MINOR {
+        return Err(ReadError::UnsupportedVersion(major, minor));
+    }
+    Ok(&bytes[super::HEADER_LEN..])
 }
 
 /// Reads a [`crate::CoreExpr`] from a CBOR-encoded byte slice.
 ///
-/// Decodes the binary representation of a Core expression tree. The input may
-/// be preceded by the `TPLR` magic/version header; for backward compatibility,
-/// legacy headerless CBOR is also accepted.
+/// Decodes the binary representation of a Core expression tree. The input must
+/// carry the `TPLR` magic/version header.
 pub fn read_cbor(bytes: &[u8]) -> Result<RecursiveTree<CoreFrame<usize>>, ReadError> {
     let bytes = strip_header(bytes)?;
     let tree_val: Value = ciborium::de::from_reader(bytes)?;
@@ -102,8 +99,9 @@ pub struct MetaWarnings {
 
 /// Reads a DataConTable and warnings from CBOR-encoded metadata bytes (meta.cbor format).
 ///
-/// New format: 2-element array `[entries_array, warnings_map]`
-/// Legacy format: flat array of 5-element entry arrays (backward compatible)
+/// The one accepted shape: 2-element array `[entries_array, warnings_map]`,
+/// every entry a 7-element array (id, name, tag, arity, bangs, qualified-name,
+/// field-labels) — the shape `Tidepool.CborEncode.encodeMetadata` emits.
 pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings), ReadError> {
     use crate::datacon::{DataCon, SrcBang};
     use crate::datacon_table::DataConTable;
@@ -121,43 +119,24 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
         }
     };
 
-    // Detect new vs legacy format:
-    // New format: root is [entries_array, warnings_map] where entries_array[0] is an array
-    // Legacy format: root is [entry1, entry2, ...] where entry1 is a 5-element array
-    let (entries, warnings) = if root.len() == 2 {
-        if let Value::Array(_) = &root[0] {
-            if let Value::Map(_) = &root[1] {
-                // New format
-                let entries = match &root[0] {
-                    Value::Array(a) => a.clone(),
-                    _ => {
-                        return Err(ReadError::InvalidStructure(
-                            "expected Array for entries".to_string(),
-                        ))
-                    }
-                };
-                let warnings = parse_warnings(&root[1]);
-                (entries, warnings)
-            } else {
-                // Could be legacy with exactly 2 entries
-                (root, MetaWarnings::default())
-            }
-        } else {
-            // Legacy: first element is not an array (shouldn't happen, but safe fallback)
-            (root, MetaWarnings::default())
+    let (entries, warnings) = match root.as_slice() {
+        [Value::Array(entries), warnings_map @ Value::Map(_)] => {
+            (entries.clone(), parse_warnings(warnings_map))
         }
-    } else {
-        // Legacy format (0, 1, or 3+ entries)
-        (root, MetaWarnings::default())
+        _ => {
+            return Err(ReadError::InvalidStructure(
+                "Metadata root must be [entries_array, warnings_map]".to_string(),
+            ))
+        }
     };
 
     let mut table = DataConTable::new();
     for entry in &entries {
         let arr = match entry {
-            Value::Array(a) if (5..=7).contains(&a.len()) => a,
+            Value::Array(a) if a.len() == 7 => a,
             _ => {
                 return Err(ReadError::InvalidStructure(
-                    "Metadata entry must be array of 5, 6, or 7".to_string(),
+                    "Metadata entry must be an array of exactly 7".to_string(),
                 ))
             }
         };
@@ -202,32 +181,22 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
             })
             .collect::<Result<Vec<_>, ReadError>>()?;
 
-        // 6th element (optional): module-qualified name. An empty string is a
-        // placeholder (writer emits it only to hold the slot when field labels
-        // follow) and decodes back to `None`.
-        let qualified_name = if arr.len() >= 6 {
-            match &arr[5] {
-                Value::Text(t) if !t.is_empty() => Some(t.clone()),
-                _ => None,
-            }
-        } else {
-            None
+        // 6th element: module-qualified name; an empty string encodes `None`.
+        let qualified_name = match &arr[5] {
+            Value::Text(t) if !t.is_empty() => Some(t.clone()),
+            _ => None,
         };
 
-        // 7th element (optional): record field labels, in field order.
-        let field_labels: Vec<String> = if arr.len() >= 7 {
-            match &arr[6] {
-                Value::Array(labels) => labels
-                    .iter()
-                    .filter_map(|l| match l {
-                        Value::Text(t) => Some(t.clone()),
-                        _ => None,
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            }
-        } else {
-            Vec::new()
+        // 7th element: record field labels, in field order (empty when none).
+        let field_labels: Vec<String> = match &arr[6] {
+            Value::Array(labels) => labels
+                .iter()
+                .filter_map(|l| match l {
+                    Value::Text(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
         };
 
         let id = DataConId(dcid);
@@ -647,10 +616,10 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_header_legacy() {
+    fn test_strip_header_rejects_headerless() {
         let bytes = [0x80];
-        let stripped = strip_header(&bytes).expect("should succeed");
-        assert_eq!(stripped, &[0x80]);
+        let err = strip_header(&bytes).expect_err("headerless payload must be rejected");
+        assert!(matches!(err, ReadError::MissingHeader));
     }
 
     #[test]
@@ -702,6 +671,7 @@ mod tests {
             Cbor::Integer(1u64.into()),
             Cbor::Array(vec![]),
             Cbor::Text(qn.to_string()),
+            Cbor::Array(vec![]),
         ])
     }
 

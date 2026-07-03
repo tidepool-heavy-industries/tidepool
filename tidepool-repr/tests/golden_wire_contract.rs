@@ -1,15 +1,16 @@
-//! Golden wire-contract proof (T5 spike — see notes/wire-single-source-spike.md).
+//! Golden wire-contract (T5 — see notes/wire-single-source-spike.md).
 //!
 //! Contract: every Haskell-encoder-produced fixture must (1) decode, (2)
-//! re-encode through the Rust writer to a byte-identical CBOR payload, and
-//! (3) decode again to the same structure. The committed fixtures double as
-//! the cross-language golden corpus: the Haskell side proves it still emits
-//! these bytes, the Rust side proves it reads and reproduces them. Either
-//! side drifting alone breaks its half of the contract.
+//! re-encode through the Rust writer to a byte-identical payload — trees AND
+//! metadata — and (3) decode again to the same structure. The committed
+//! fixtures double as the cross-language golden corpus: the Haskell side
+//! proves it still emits these bytes, the Rust side proves it reads and
+//! reproduces them. Either side drifting alone breaks its half of the
+//! contract.
 //!
-//! The committed corpus is legacy (headerless, 6-element meta entries), so it
-//! also pins the reader's tolerance paths — a corpus regenerated from the
-//! current encoder must be ADDED, not swapped in, or tolerance coverage is lost.
+//! There is ONE format: the TPLR-headed current version. Headerless or
+//! non-7-element-meta payloads are rejected loudly (pinned below); a format
+//! change bumps the version and regenerates the corpus in the same commit.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -44,13 +45,13 @@ fn corpus() -> (Vec<PathBuf>, Vec<PathBuf>) {
     (trees, metas)
 }
 
-/// CBOR payload without the optional 8-byte TPLR header.
+/// CBOR payload after the mandatory 8-byte TPLR header.
 fn payload(bytes: &[u8]) -> &[u8] {
-    if bytes.len() >= 8 && bytes[..4] == *b"TPLR" {
-        &bytes[8..]
-    } else {
-        bytes
-    }
+    assert!(
+        bytes.len() >= 8 && bytes[..4] == *b"TPLR",
+        "golden fixture missing TPLR header — regenerate the corpus"
+    );
+    &bytes[8..]
 }
 
 fn first_divergence(a: &[u8], b: &[u8]) -> usize {
@@ -81,36 +82,49 @@ fn tree_fixtures_roundtrip_byte_identically() {
     println!("byte-identical roundtrip: {} tree fixtures", trees.len());
 }
 
-/// Meta roundtrips SEMANTICALLY only: the two writers disagree today (Haskell
-/// always emits 7-element entries + optional warnings keys; the Rust writer
-/// emits 5/6/7 conditionally and drops warnings), so byte parity is asserted
-/// for the table content, not the bytes. Closing that writer gap is a finding
-/// of the spike, not this test's job.
+/// Meta roundtrips BYTE-identically: the Rust writer mirrors
+/// `Tidepool.CborEncode.encodeMetadata` exactly (always-7 entries, same
+/// warnings-key emission rules), so decode → re-encode reproduces the
+/// Haskell-produced bytes.
 #[test]
-fn meta_fixtures_roundtrip_semantically() {
+fn meta_fixtures_roundtrip_byte_identically() {
     let (_, metas) = corpus();
     for path in &metas {
         let golden = std::fs::read(path).unwrap();
-        let (table, _warnings) = read_metadata(&golden)
+        let (table, warnings) = read_metadata(&golden)
             .unwrap_or_else(|e| panic!("{}: decode failed: {e}", path.display()));
-        let reencoded = write_metadata(&table).unwrap();
+        let reencoded = write_metadata(&table, &warnings).unwrap();
+        let (want, got) = (payload(&golden), payload(&reencoded));
+        assert_eq!(
+            want,
+            got,
+            "{}: re-encoded meta diverges at byte {} of {}",
+            path.display(),
+            first_divergence(want, got),
+            want.len(),
+        );
         let (table2, _) = read_metadata(&reencoded).unwrap();
         assert_eq!(table, table2, "{}: table changed across roundtrip", path.display());
     }
-    println!("semantic meta roundtrip: {} fixtures", metas.len());
+    println!("byte-identical meta roundtrip: {} fixtures", metas.len());
 }
 
-/// A current-version TPLR header prepended to a legacy payload must decode to
-/// the same tree — pins header stripping against the legacy pass-through.
+/// Headerless (pre-format) payloads are REJECTED loudly, not tolerated.
 #[test]
-fn header_and_legacy_paths_agree() {
-    let (trees, _) = corpus();
+fn headerless_payload_rejected() {
+    let (trees, metas) = corpus();
     let golden = std::fs::read(&trees[0]).unwrap();
-    let legacy = read_cbor(&golden).unwrap();
-    let mut headered = b"TPLR\x00\x01\x00\x01".to_vec();
-    headered.extend_from_slice(payload(&golden));
-    let via_header = read_cbor(&headered).unwrap();
-    assert_eq!(legacy, via_header);
+    let err = read_cbor(payload(&golden)).unwrap_err();
+    assert!(
+        matches!(err, tidepool_repr::serial::ReadError::MissingHeader),
+        "expected MissingHeader, got {err:?}"
+    );
+    let golden_meta = std::fs::read(&metas[0]).unwrap();
+    let err = read_metadata(payload(&golden_meta)).unwrap_err();
+    assert!(
+        matches!(err, tidepool_repr::serial::ReadError::MissingHeader),
+        "expected MissingHeader, got {err:?}"
+    );
 }
 
 /// Corpus shape census. The matches are EXHAUSTIVE on purpose: adding a
