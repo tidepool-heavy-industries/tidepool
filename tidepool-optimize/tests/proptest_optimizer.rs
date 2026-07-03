@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 use serial_test::serial;
-use tidepool_eval::pass::Pass;
+use tidepool_optimize::Pass;
 use tidepool_eval::{eval, Env, VecHeap};
 use tidepool_optimize::beta::BetaReduce;
 use tidepool_optimize::case_reduce::CaseReduce;

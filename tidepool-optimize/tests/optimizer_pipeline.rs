@@ -1,4 +1,4 @@
-use tidepool_eval::pass::Pass;
+use tidepool_optimize::Pass;
 use tidepool_eval::{eval, Env, Value, VecHeap};
 use tidepool_optimize::beta::BetaReduce;
 use tidepool_optimize::case_reduce::CaseReduce;

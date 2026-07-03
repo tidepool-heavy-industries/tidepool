@@ -5,7 +5,7 @@ use crate::case_reduce::CaseReduce;
 use crate::dce::Dce;
 use crate::inline::Inline;
 use crate::partial::PartialEval;
-use tidepool_eval::pass::{Changed, Pass};
+use crate::{Changed, Pass};
 use tidepool_repr::CoreExpr;
 
 /// Maximum number of iterations for the pipeline to avoid infinite loops.

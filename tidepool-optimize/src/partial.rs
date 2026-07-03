@@ -1,7 +1,7 @@
 //! Partial evaluation pass for Core expressions.
 
 use rustc_hash::FxHashMap;
-use tidepool_eval::{Changed, Pass};
+use crate::{Changed, Pass};
 use tidepool_repr::{Alt, AltCon, CoreExpr, CoreFrame, DataConId, Literal, PrimOpKind, VarId};
 
 /// A value that might be known during partial evaluation.

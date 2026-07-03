@@ -1,7 +1,7 @@
 //! Inlining pass for Core expressions.
 
 use crate::occ::{get_occ, occ_analysis, Occ};
-use tidepool_eval::{Changed, Pass};
+use crate::{Changed, Pass};
 use tidepool_repr::{replace_subtree, CoreExpr, CoreFrame};
 
 /// Inlining pass: eliminates single-use `LetNonRec` bindings by substituting the RHS directly at the use site.

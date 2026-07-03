@@ -15,7 +15,7 @@
 // PartialEval is intentionally absent: like `subst`, it threads a per-path
 // environment and is left native-recursive (see partial.rs rationale), so it is
 // NOT stack-safe on a tower this deep and is not part of this conversion.
-use tidepool_eval::Pass;
+use tidepool_optimize::Pass;
 use tidepool_optimize::{beta::BetaReduce, case_reduce::CaseReduce, dce::Dce, inline::Inline};
 use tidepool_repr::{CoreExpr, CoreFrame, RecursiveTree, VarId};
 

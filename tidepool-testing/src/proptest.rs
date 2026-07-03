@@ -9,7 +9,7 @@ use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_eval::error::EvalError;
-use tidepool_eval::pass::Pass;
+use tidepool_optimize::Pass;
 use tidepool_eval::value::Value;
 use tidepool_eval::{env_from_datacon_table, eval, Env, VecHeap};
 use tidepool_repr::datacon_table::DataConTable;
