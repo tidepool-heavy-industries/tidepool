@@ -1893,4 +1893,124 @@ mod ergonomics_tests {
         let v5 = json!({"a": 1});
         assert_eq!(normalize_input(&v5), v5);
     }
+
+    // ---------------------------------------------------------------------------
+    // #315 regression: normalize_input → input_binding_source source-generation
+    // round-trip for all five payload shapes.  Fast (no JIT/GHC).
+    // ---------------------------------------------------------------------------
+
+    /// Helper: apply normalize_input then render to the Haskell binding snippet.
+    fn binding_for(v: &serde_json::Value) -> String {
+        let normalized = normalize_input(v);
+        input_binding_source(Some(&normalized))
+    }
+
+    /// THE #315 CASE: a double-encoded string (MCP client JSON.stringify'd the
+    /// payload) must unwrap so the generated binding contains the bare string,
+    /// not the surrounding quotes/escapes as literal characters.
+    #[test]
+    fn test_input_source_gen_double_encoded_string() {
+        // raw: String whose chars are: " h e l l o "
+        let raw = json!("\"hello\"");
+        let src = binding_for(&raw);
+        // Must NOT contain the literal outer quotes
+        assert!(
+            src.contains(r#"Aeson.String "hello""#),
+            "expected Aeson.String \"hello\", got: {src}"
+        );
+        assert!(
+            !src.contains(r#"Aeson.String "\"hello\"""#),
+            "double-encoding detected in: {src}"
+        );
+    }
+
+    /// Multi-line double-encoded string (the bug-report shape).
+    #[test]
+    fn test_input_source_gen_double_encoded_multiline() {
+        // The chars of the String value are: " l i n e 1 \ n l i n e 2 "
+        let raw = json!("\"line1\\nline2\"");
+        let src = binding_for(&raw);
+        // After unwrapping, the \n should be in the Haskell escape, not the outer quotes
+        assert!(
+            src.contains(r#"Aeson.String "line1\nline2""#),
+            "expected Aeson.String with \\n escape, got: {src}"
+        );
+    }
+
+    /// Plain string (not double-encoded) passes through — binding emits the
+    /// bare string value.
+    #[test]
+    fn test_input_source_gen_plain_string() {
+        let raw = json!("hello world");
+        let src = binding_for(&raw);
+        assert!(
+            src.contains(r#"Aeson.String "hello world""#),
+            "expected Aeson.String \"hello world\", got: {src}"
+        );
+    }
+
+    /// Number: binding emits `Aeson.NumberI (42 :: Int)`.
+    #[test]
+    fn test_input_source_gen_number() {
+        let raw = json!(42);
+        let src = binding_for(&raw);
+        assert!(
+            src.contains("Aeson.NumberI (42 :: Int)"),
+            "expected NumberI binding, got: {src}"
+        );
+    }
+
+    /// Bool true: binding emits `Aeson.Bool True`.
+    #[test]
+    fn test_input_source_gen_bool_true() {
+        let src = binding_for(&json!(true));
+        assert!(
+            src.contains("Aeson.Bool True"),
+            "expected Bool True, got: {src}"
+        );
+    }
+
+    /// Bool false: binding emits `Aeson.Bool False`.
+    #[test]
+    fn test_input_source_gen_bool_false() {
+        let src = binding_for(&json!(false));
+        assert!(
+            src.contains("Aeson.Bool False"),
+            "expected Bool False, got: {src}"
+        );
+    }
+
+    /// Object: binding emits `object [...]`.
+    #[test]
+    fn test_input_source_gen_object() {
+        let raw = json!({"key": "val"});
+        let src = binding_for(&raw);
+        assert!(
+            src.contains("object ["),
+            "expected object literal, got: {src}"
+        );
+        assert!(
+            src.contains(r#""key" .= Aeson.String "val""#),
+            "expected key-value pair, got: {src}"
+        );
+    }
+
+    /// Array: binding emits `toJSON [...]`.
+    #[test]
+    fn test_input_source_gen_array() {
+        let raw = json!(["x", "y"]);
+        let src = binding_for(&raw);
+        assert!(
+            src.contains("toJSON ["),
+            "expected toJSON array, got: {src}"
+        );
+        assert!(
+            src.contains(r#"Aeson.String "x""#),
+            "expected first element, got: {src}"
+        );
+        assert!(
+            src.contains(r#"Aeson.String "y""#),
+            "expected second element, got: {src}"
+        );
+    }
 }
