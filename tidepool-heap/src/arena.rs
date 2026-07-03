@@ -158,8 +158,8 @@ impl ArenaHeap {
                 Value::ThunkRef(id) => refs.push(*id),
                 Value::Con(_, fields) => stack.extend(fields.iter().rev()),
                 Value::ConFun(_, _, args) => stack.extend(args.iter().rev()),
-                Value::Closure(env, _, _) => stack.extend(env.values()),
-                Value::JoinCont(_, _, env) => stack.extend(env.values()),
+                Value::Closure { env, .. } => stack.extend(env.values()),
+                Value::JoinCont { env, .. } => stack.extend(env.values()),
                 Value::Lit(_) => {}
                 Value::ByteArray(_) => {}
             }

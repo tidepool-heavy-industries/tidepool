@@ -125,18 +125,18 @@ fn rewrite_value(val: &Value, table: &ForwardingTable) -> Value {
                         stack.push(RewriteWork::Rewrite(a));
                     }
                 }
-                Value::Closure(env, binder, expr) => {
+                Value::Closure { env, binder, body } => {
                     let (keys, vals) = env_keys_vals(env);
                     // `Build*` first (bottom), env values reversed on top: they
                     // pop in forward key order and the build runs after them.
-                    stack.push(RewriteWork::BuildClosure(keys, *binder, expr));
+                    stack.push(RewriteWork::BuildClosure(keys, *binder, body));
                     for v in vals.into_iter().rev() {
                         stack.push(RewriteWork::Rewrite(v));
                     }
                 }
-                Value::JoinCont(binders, expr, env) => {
+                Value::JoinCont { params, body, env } => {
                     let (keys, vals) = env_keys_vals(env);
-                    stack.push(RewriteWork::BuildJoinCont(keys, binders.clone(), expr));
+                    stack.push(RewriteWork::BuildJoinCont(keys, params.clone(), body));
                     for v in vals.into_iter().rev() {
                         stack.push(RewriteWork::Rewrite(v));
                     }
@@ -153,12 +153,20 @@ fn rewrite_value(val: &Value, table: &ForwardingTable) -> Value {
             RewriteWork::BuildClosure(keys, binder, expr) => {
                 let vals = results.split_off(results.len() - keys.len());
                 let env: Env = keys.into_iter().zip(vals).collect();
-                results.push(Value::Closure(env, binder, expr.clone()));
+                results.push(Value::Closure {
+                    env,
+                    binder,
+                    body: expr.clone(),
+                });
             }
             RewriteWork::BuildJoinCont(keys, binders, expr) => {
                 let vals = results.split_off(results.len() - keys.len());
                 let env: Env = keys.into_iter().zip(vals).collect();
-                results.push(Value::JoinCont(binders, expr.clone(), env));
+                results.push(Value::JoinCont {
+                    params: binders,
+                    body: expr.clone(),
+                    env,
+                });
             }
         }
     }
@@ -278,7 +286,11 @@ mod tests {
             vec![
                 Value::ThunkRef(target),
                 Value::Con(DataConId(2), vec![Value::Lit(Literal::LitInt(5))]),
-                Value::Closure(env, VarId(1), empty_expr()),
+                Value::Closure {
+                    env,
+                    binder: VarId(1),
+                    body: empty_expr(),
+                },
             ],
         );
 
@@ -290,7 +302,12 @@ mod tests {
         assert!(matches!(fields[0], Value::ThunkRef(ThunkId(0))));
         assert!(matches!(&fields[1], Value::Con(DataConId(2), inner)
             if matches!(inner[0], Value::Lit(Literal::LitInt(5)))));
-        let Value::Closure(renv, b, _) = &fields[2] else {
+        let Value::Closure {
+            env: renv,
+            binder: b,
+            ..
+        } = &fields[2]
+        else {
             panic!("expected Closure")
         };
         assert_eq!(*b, VarId(1));
@@ -344,7 +361,11 @@ mod tests {
         for _ in 0..200_000 {
             let mut env = Env::new();
             env.insert(VarId(0), v);
-            v = Value::Closure(env, VarId(1), empty_expr());
+            v = Value::Closure {
+                env,
+                binder: VarId(1),
+                body: empty_expr(),
+            };
         }
         let mut heap = VecHeap::new();
         let id = heap.alloc(Env::new(), empty_expr());

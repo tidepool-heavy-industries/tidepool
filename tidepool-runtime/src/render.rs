@@ -274,9 +274,9 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
         }
 
         // Closures / thunks — opaque
-        Value::Closure(_, _, _) => json!("<closure>"),
+        Value::Closure { .. } => json!("<closure>"),
         Value::ThunkRef(_) => json!("<thunk>"),
-        Value::JoinCont(_, _, _) => json!("<join>"),
+        Value::JoinCont { .. } => json!("<join>"),
         Value::ConFun(id, _, _) => {
             let name = con_name(*id, table);
             json!(format!("<partially-applied {}>", name))

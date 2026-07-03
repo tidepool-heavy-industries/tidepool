@@ -123,7 +123,7 @@ fn eval_is_closure(o: &CapturedOutcome) -> bool {
         CapturedOutcome::Diverge { eval, .. } => eval,
         _ => return false,
     };
-    matches!(v, Value::Closure(..) | Value::ConFun(..))
+    matches!(v, Value::Closure { .. } | Value::ConFun(..))
 }
 
 /// Returns `(is_function_program, tag, detail, emit_coverage)`. The closure-check

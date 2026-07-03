@@ -92,7 +92,11 @@ fn eval_settled(
         // knot binding is inert and behaviour matches a plain continuation jump.
         let mut new_env = req.join_env.update(
             req.join_var,
-            Value::JoinCont(req.params.clone(), req.rhs.clone(), req.join_env.clone()),
+            Value::JoinCont {
+                params: req.params.clone(),
+                body: req.rhs.clone(),
+                env: req.join_env.clone(),
+            },
         );
         for (param, arg) in req.params.iter().zip(req.args) {
             new_env = new_env.update(*param, arg);
@@ -266,7 +270,11 @@ fn eval_at(
             // spine dismantle), so fields cannot be moved out by pattern.
             // The swaps are pointer-sized — no clones on this hot path.
             match fun_val {
-                Value::Closure(ref mut clos_env, binder, ref mut body) => {
+                Value::Closure {
+                    env: ref mut clos_env,
+                    binder,
+                    ref mut body,
+                } => {
                     let mut new_env = std::mem::replace(clos_env, Env::new());
                     let body =
                         std::mem::replace(body, tidepool_repr::RecursiveTree { nodes: vec![] });
@@ -289,7 +297,11 @@ fn eval_at(
         }
         CoreFrame::Lam { binder, body } => {
             let body_expr = expr.extract_subtree(*body);
-            Ok(Value::Closure(env.clone(), *binder, body_expr))
+            Ok(Value::Closure {
+                env: env.clone(),
+                binder: *binder,
+                body: body_expr,
+            })
         }
         CoreFrame::LetNonRec { binder, rhs, body } => {
             let rhs_val = if matches!(&expr.nodes[*rhs], CoreFrame::Lam { .. }) {
@@ -488,7 +500,11 @@ fn eval_at(
             rhs,
             body,
         } => {
-            let join_val = Value::JoinCont(params.clone(), expr.extract_subtree(*rhs), env.clone());
+            let join_val = Value::JoinCont {
+                params: params.clone(),
+                body: expr.extract_subtree(*rhs),
+                env: env.clone(),
+            };
             let join_var = VarId(label.0 | (1u64 << 63)); // high bit distinguishes join labels
             let new_env = env.update(join_var, join_val);
             // Drive the body through `eval_settled`, not bare `eval_at`: a `Jump`
@@ -528,7 +544,11 @@ fn enqueue_jump(
 ) -> Result<Value, EvalError> {
     let join_var = VarId(label.0 | (1u64 << 63));
     let (params, rhs, join_env) = match env.get(&join_var) {
-        Some(Value::JoinCont(p, r, e)) => (p.clone(), r.clone(), e.clone()),
+        Some(Value::JoinCont {
+            params: p,
+            body: r,
+            env: e,
+        }) => (p.clone(), r.clone(), e.clone()),
         _ => return Err(EvalError::UnboundJoin(*label)),
     };
     if params.len() != args.len() {
@@ -2626,14 +2646,14 @@ mod tests {
         let f_state = heap.read(ThunkId(0));
         let g_state = heap.read(ThunkId(1));
 
-        let ThunkState::Evaluated(Value::Closure(..)) = f_state else {
+        let ThunkState::Evaluated(Value::Closure { .. }) = f_state else {
             panic!(
                 "Expected f to be eagerly evaluated to a Closure, got {:?}",
                 f_state
             );
         };
 
-        let ThunkState::Evaluated(Value::Closure(..)) = g_state else {
+        let ThunkState::Evaluated(Value::Closure { .. }) = g_state else {
             panic!(
                 "Expected g to be eagerly evaluated to a Closure, got {:?}",
                 g_state
