@@ -6,7 +6,7 @@ import Prelude
 import qualified Data.Text as T
 -- qq-suite: regen now needs `--include lib --target-module-only
 -- --output-dir test/suite_cbor` (see CLAUDE.md / plans/qq-spike.md)
-import Tidepool.QQ (fmt, j, patch, sg, uri)
+import Tidepool.QQ (fmt, j, patch, uri)
 -- Patch core types/functions are lens-free, so the --all-closed extract
 -- session can import them directly (like Tidepool.Render below).
 import Tidepool.Patch
@@ -1177,10 +1177,6 @@ qq_j_pat_open =
 -- Accept cases only — the literal Text comes through.  Reject cases fail
 -- at COMPILE time and so cannot be CBOR fixtures; their coverage lives in
 -- tidepool-runtime/tests/validator_reject.rs.
-
--- [sg|…|]: single ($NAME) and multi ($$$ARGS) metavariables, balanced ().
-qq_sg_accept :: T.Text
-qq_sg_accept = [sg|fn $NAME($$$ARGS)|]
 
 -- [uri|…|]: https scheme + non-empty host, no whitespace.
 qq_uri_accept :: T.Text

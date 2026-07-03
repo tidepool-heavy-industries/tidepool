@@ -1070,11 +1070,10 @@ suite_fmt!(qq_fmt_spec_escapes, "{x} and {y} done");
 suite_fmt!(qq_fmt_usek, "1.5");
 
 // =============================================================================
-// [sg|…|] / [uri|…|] validators: accept cases (Text passthrough). The
-// validators run their check at COMPILE time and emit the body verbatim;
-// reject cases live in tidepool-runtime/tests/validator_reject.rs.
+// [uri|…|] validator: accept case (Text passthrough). The validator runs its
+// check at COMPILE time and emits the body verbatim; reject cases live in
+// tidepool-runtime/tests/validator_reject.rs.
 // =============================================================================
-suite_fmt!(qq_sg_accept, "fn $NAME($$$ARGS)");
 suite_fmt!(qq_uri_accept, "https://example.com/a/b?q=1");
 
 // =============================================================================

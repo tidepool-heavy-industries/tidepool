@@ -375,28 +375,12 @@ mod tests {
     }
 
     #[test]
-    fn test_preamble_structural_search_updates() {
-        let effects = vec![sg_decl(), fs_decl()];
+    fn test_preamble_grep_glob_present() {
+        let effects = vec![fs_decl()];
         let preamble = generated_sources(&effects, false);
-
-        // Verify the rHas / rHasChild combinators are both present (the
-        // stopBy: end vs direct-child distinction is exercised by the
-        // dedicated sg-operators test; here we only assert presence so a
-        // body tweak doesn't break this test).
-        assert!(preamble.contains("rHas :: Value -> Value"));
-        assert!(preamble.contains("rHasChild :: Value -> Value"));
-
-        // Verify hsDef and rsFn recipes exist
-        assert!(preamble.contains("hsDef :: Text -> [Text] -> M [Match]"));
-        assert!(preamble.contains("rsFn :: Text -> [Text] -> M [Match]"));
-
-        // Verify grepGlob exists in Fs section
+        // grepGlob is the Fs structured text-search verb (the SG structural
+        // combinators it used to sit beside were cut with the SG effect).
         assert!(preamble.contains("grepGlob :: Text -> FilePath -> M [Hit]"));
-
-        // Verify Match record syntax + the Map-typed matchVars accessor
-        assert!(preamble.contains("data Match = Match {"));
-        assert!(preamble.contains("matchVars :: Match -> Map Text Text"));
-        assert!(preamble.contains("var :: Match -> Text -> Text"));
     }
 
     #[test]
@@ -408,7 +392,7 @@ mod tests {
         for (src, name) in [
             (build_preamble(&[], false), "preamble"),
             (
-                build_preamble(&[sg_decl(), fs_decl()], true),
+                build_preamble(&[fs_decl()], true),
                 "preamble+lib",
             ),
         ] {
@@ -431,11 +415,11 @@ mod tests {
         let code = "pure [fmt|hello {name}|]";
         let mut imports = aeson_imports();
         if uses_qq(code) {
-            imports.push_str("Tidepool.QQ (fmt, j, patch, sg, uri)\n");
+            imports.push_str("Tidepool.QQ (fmt, j, patch, uri)\n");
         }
         let src = template_haskell(&pre, "'[]", code, &imports, "", None, None);
         let qq = src
-            .find("import Tidepool.QQ (fmt, j, patch, sg, uri)\n")
+            .find("import Tidepool.QQ (fmt, j, patch, uri)\n")
             .expect("QQ import missing from rendered module");
         let default_decl = src.find("default (Int").unwrap();
         assert!(qq < default_decl, "QQ import must precede default decl");
@@ -447,7 +431,7 @@ mod tests {
         let code = "pure [x | x <- xs]";
         let mut imports = aeson_imports();
         if uses_qq(code) {
-            imports.push_str("Tidepool.QQ (fmt, j, patch, sg, uri)\n");
+            imports.push_str("Tidepool.QQ (fmt, j, patch, uri)\n");
         }
         let src = template_haskell(&pre, "'[]", code, &imports, "", None, None);
         assert!(
@@ -718,14 +702,14 @@ data Console a where
     #[test]
     fn test_standard_decls_includes_ask() {
         let decls = standard_decls();
-        assert_eq!(decls.len(), 11);
-        assert_eq!(decls[4].type_name, "Http");
-        assert_eq!(decls[5].type_name, "Exec");
-        assert_eq!(decls[6].type_name, "Lsp");
-        assert_eq!(decls[7].type_name, "Llm");
-        assert_eq!(decls[8].type_name, "Git");
-        assert_eq!(decls[9].type_name, "Time");
-        assert_eq!(decls[10].type_name, "Ask");
+        assert_eq!(decls.len(), 10);
+        assert_eq!(decls[3].type_name, "Http");
+        assert_eq!(decls[4].type_name, "Exec");
+        assert_eq!(decls[5].type_name, "Lsp");
+        assert_eq!(decls[6].type_name, "Llm");
+        assert_eq!(decls[7].type_name, "Git");
+        assert_eq!(decls[8].type_name, "Time");
+        assert_eq!(decls[9].type_name, "Ask");
     }
 
     #[test]
@@ -746,7 +730,7 @@ data Console a where
         assert!(preamble.contains("data Ask a where"));
         assert!(preamble.contains("  AskWith :: Text -> Value -> Ask Value"));
         assert!(preamble
-            .contains("type M = Eff '[Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Git, Time, Ask]"));
+            .contains("type M = Eff '[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask]"));
     }
 
     #[test]
@@ -755,7 +739,7 @@ data Console a where
         let stack = build_effect_stack_type(&decls);
         assert_eq!(
             stack,
-            "'[Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Git, Time, Ask]"
+            "'[Console, KV, Fs, Http, Exec, Lsp, Llm, Git, Time, Ask]"
         );
     }
 
@@ -876,24 +860,6 @@ data Console a where
             .filter(|d| d.type_name != "Exec")
             .collect();
         assert!(!orchestrate_module_source(&no_exec).contains("runChecked"));
-    }
-
-    #[test]
-    fn test_preamble_sg_rule_operators() {
-        let decls = standard_decls();
-        let preamble = generated_sources(&decls, false);
-        // Object merge operator (fixity + signature; the KM.unionWith body
-        // is an implementation detail).
-        assert!(preamble.contains("infixr 6 .+."));
-        assert!(preamble.contains("(.+.) :: Value -> Value -> Value"));
-        // Conjunction / disjunction
-        assert!(preamble.contains("infixr 5 .&."));
-        assert!(preamble.contains("infixr 4 .|."));
-        // Relational operators
-        assert!(preamble.contains("infixl 7 ?>"));
-        assert!(preamble.contains("infixl 7 <?"));
-        // Extra helpers
-        assert!(preamble.contains("rField :: Text -> Value"));
     }
 
     #[test]

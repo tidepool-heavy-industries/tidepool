@@ -6,7 +6,7 @@
 //!   1. pins each generated decl to its exact expected Haskell text (the
 //!      before/after DIFF — a field ORDER or NAME change on either side flips a
 //!      probe red; this is the drift the tool is built to catch);
-//!   2. ties the four SG/Lsp records still declared in `effect_decls` to their
+//!   2. ties the Lsp records still declared in `effect_decls` to their
 //!      generated decls (they are CoreRecord-derived but their Haskell text
 //!      currently lives in-place — the tie is the always-on guard that closes
 //!      friction #25's field-level gap without an LSP daemon / extract run);
@@ -16,7 +16,6 @@
 use tidepool_bridge::CoreRecord;
 use tidepool_handlers::{
     bridged_records_module, GitCommit, GitFileDelta, GitStatusEntry, LspDiag, LspNode, LspPosition,
-    SgMatch,
 };
 
 /// Strip a trailing `deriving (...)` and collapse whitespace so a hand-written
@@ -45,12 +44,7 @@ fn generated_decls_match_expected_exactly() {
         "data FileDelta = FileDelta { path :: Text, adds :: Int, dels :: Int, \
          binary :: Bool } deriving (Show, Eq)"
     );
-    // SG / Lsp records (CoreRecord-derived; decls still in effect_decls).
-    assert_eq!(
-        SgMatch::haskell_decl(),
-        "data Match = Match { matchText :: Text, matchFile :: Text, matchLine :: Int, \
-         matchVarsList :: [(Text, Text)], matchReplacement :: Text } deriving (Show, Eq)"
-    );
+    // Lsp records (CoreRecord-derived; decls still in effect_decls).
     assert_eq!(
         LspPosition::haskell_decl(),
         "data Position = Position { posLine :: Int, posChar :: Int } deriving (Show, Eq)"
@@ -85,7 +79,6 @@ fn effect_type_defs_corpus() -> String {
 fn in_place_decls_match_generated() {
     let corpus = effect_type_defs_corpus();
     for generated in [
-        SgMatch::haskell_decl(),
         LspPosition::haskell_decl(),
         LspNode::haskell_decl(),
         LspDiag::haskell_decl(),

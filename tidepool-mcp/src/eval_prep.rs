@@ -39,7 +39,6 @@ macro_rules! base_effects {
             (Console, console_decl),
             (KV,      kv_decl),
             (Fs,      fs_decl),
-            (SG,      sg_decl),
             (Http,    http_decl),
             (Exec,    exec_decl),
             (Lsp,     lsp_decl),
@@ -138,7 +137,6 @@ pub fn uses_qq(src: &str) -> bool {
     src.contains("[fmt|")
         || src.contains("[j|")
         || src.contains("[patch|")
-        || src.contains("[sg|")
         || src.contains("[uri|")
 }
 
@@ -521,8 +519,8 @@ mod tests {
     // can be hit directly: determinism, structural invariants, and the
     // failure-class ordering rule.
 
-    /// The five quasi-quoter open-tokens `uses_qq` must recognize.
-    const QQ_TOKENS: &[&str] = &["[fmt|", "[j|", "[patch|", "[sg|", "[uri|"];
+    /// The four quasi-quoter open-tokens `uses_qq` must recognize.
+    const QQ_TOKENS: &[&str] = &["[fmt|", "[j|", "[patch|", "[uri|"];
 
     /// Signal/yield marker pools mirroring the private `const`s inside
     /// `classify_error_text` — kept here so the property checks the same
@@ -547,7 +545,7 @@ mod tests {
         /// what surrounds it.
         #[test]
         fn prop_uses_qq_detects_every_token(
-            tok in 0usize..5,
+            tok in 0usize..4,
             prefix in "[a-zA-Z0-9 ]{0,40}",
             suffix in "[a-zA-Z0-9 ]{0,40}",
         ) {
@@ -666,7 +664,9 @@ mod tests {
         // Canonical order is load-bearing: handlers are tag-indexed by it.
         assert_eq!(a.first(), Some(&"Console"));
         assert_eq!(a.last(), Some(&"Ask"));
-        assert_eq!(a.len(), 11);
+        assert_eq!(a.len(), 10);
+        // SG was cut (friction #37); the stack must NOT contain it.
+        assert!(!a.contains(&"SG"), "SG should have been removed from the stack");
     }
 
     #[test]
@@ -676,10 +676,11 @@ mod tests {
         assert!(uses_qq("case v of [j|{\"k\": $x}|] -> pure x"));
         // wave-4 quoters: patch + the validators (glob omitted — see Validate.hs)
         assert!(uses_qq("apply [patch|--- a/x|]"));
-        assert!(uses_qq("pure [sg|fn $NAME|]"));
         assert!(uses_qq("pure [uri|https://x|]"));
-        // a glob-quoter token is NOT special (the quoter was dropped)
+        // dropped quoters are NOT special: glob (removed) and sg (cut with the
+        // SG effect) must both classify as non-QQ.
         assert!(!uses_qq("pure [glob|src/*.rs|]"));
+        assert!(!uses_qq("pure [sg|fn $NAME|]"));
         // list comprehensions with conventional spacing are NOT tokens
         assert!(!uses_qq("pure [x | x <- xs]"));
         assert!(!uses_qq("pure [ fmt | fmt <- fs ]"));
