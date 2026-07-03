@@ -20,6 +20,47 @@ fn table() -> DataConTable {
     read_metadata(META).unwrap().0
 }
 
+/// Watchdog state: the fixture currently being processed, and an epoch that
+/// bumps on every fixture transition. The corpus is data — one pathological
+/// fixture must fail loudly with its name, not spin the suite forever.
+static CURRENT_FIXTURE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static FIXTURE_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Abort the process (exit 101) if any single fixture runs longer than
+/// `TIDEPOOL_FIXTURE_TIMEOUT_SECS` (default 120). Writes to raw stderr so the
+/// message survives libtest output capture. The thread dies with the process.
+fn spawn_fixture_watchdog() {
+    use std::sync::atomic::Ordering;
+    let limit_secs: u64 = std::env::var("TIDEPOOL_FIXTURE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(120);
+    std::thread::spawn(move || {
+        let mut last_epoch = FIXTURE_EPOCH.load(Ordering::Relaxed);
+        let mut stuck_secs = 0u64;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            let epoch = FIXTURE_EPOCH.load(Ordering::Relaxed);
+            if epoch == last_epoch {
+                stuck_secs += 10;
+            } else {
+                last_epoch = epoch;
+                stuck_secs = 0;
+            }
+            if stuck_secs >= limit_secs {
+                let name = CURRENT_FIXTURE.lock().unwrap().clone();
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "\n[FIXTURE WATCHDOG] fixture '{name}' exceeded {limit_secs}s — \
+                     suspected non-termination; aborting suite"
+                );
+                std::process::exit(101);
+            }
+        }
+    });
+}
+
 /// Fixtures to skip — known to use features the JIT doesn't support for
 /// standalone execution (e.g., unresolved external bindings, string ops).
 fn should_skip(name: &str) -> bool {
@@ -36,6 +77,7 @@ fn should_skip(name: &str) -> bool {
 
 #[test]
 fn haskell_suite_differential() {
+    spawn_fixture_watchdog();
     let handle = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -66,6 +108,9 @@ fn haskell_suite_differential() {
                     skipped += 1;
                     continue;
                 }
+
+                *CURRENT_FIXTURE.lock().unwrap() = name.clone();
+                FIXTURE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 let bytes = std::fs::read(&path).unwrap();
                 let expr = match read_cbor(&bytes) {
