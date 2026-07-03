@@ -14,6 +14,10 @@ pub struct VariantInfo {
     /// to disambiguate constructors that share name and arity across modules.
     pub core_module: Option<String>,
     pub fields: Vec<Type>,
+    /// Whether the Rust variant is tuple-style (`V(...)`) — a ZERO-field tuple
+    /// variant (`V()`, as the effect projection macro emits) must be
+    /// constructed with parens, while a unit variant must not.
+    pub is_tuple: bool,
 }
 
 pub struct StructInfo {
@@ -106,6 +110,7 @@ pub fn parse_enum(input: &DeriveInput) -> Result<EnumInfo, syn::Error> {
             ..
         } = parse_core_attr(&variant.attrs)?;
 
+        let is_tuple = matches!(&variant.fields, Fields::Unnamed(_));
         let fields = match &variant.fields {
             Fields::Unnamed(f) => f.unnamed.iter().map(|field| field.ty.clone()).collect(),
             Fields::Unit => Vec::new(),
@@ -123,6 +128,7 @@ pub fn parse_enum(input: &DeriveInput) -> Result<EnumInfo, syn::Error> {
             rust_name,
             core_name: core_name_str,
             core_module,
+            is_tuple,
             fields,
         });
     }

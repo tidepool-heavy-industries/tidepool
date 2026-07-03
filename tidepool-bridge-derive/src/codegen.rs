@@ -165,7 +165,7 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
             }
         }
 
-        let construction = if rust_arity == 0 {
+        let construction = if rust_arity == 0 && !variant.is_tuple {
             quote! { #name::#rust_name }
         } else {
             quote! { #name::#rust_name(#(#field_exprs),*) }

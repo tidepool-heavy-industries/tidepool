@@ -1,44 +1,29 @@
-use tidepool_bridge_derive::FromCore;
-use tidepool_effect::dispatch::{EffectContext, EffectHandler};
+use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
-use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
+use tidepool_mcp::CapturedOutput;
 
 // ============================================================================
 // Tag 9: Time (UTC wall clock)
 // ============================================================================
 
-#[derive(FromCore)]
-pub enum TimeReq {
-    #[core(name = "TimeNow")]
-    Now,
-}
+// TimeReq + DescribeEffect + EffectHandler dispatch are generated from the
+// single-source definition; only the handler struct and the per-verb method
+// bodies below are hand-written.
+tidepool_mcp::time_effect_def!(crate::effect_glue::effect_rust_projection);
 
 #[derive(Clone)]
 pub struct TimeHandler;
 
-impl DescribeEffect for TimeHandler {
-    fn effect_decl() -> EffectDecl {
-        tidepool_mcp::time_decl()
-    }
-}
-
-impl EffectHandler<CapturedOutput> for TimeHandler {
-    type Request = TimeReq;
-
-    fn handle(
+impl TimeHandler {
+    fn time_now(
         &mut self,
-        req: TimeReq,
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        match req {
-            TimeReq::Now => {
-                let millis = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|e| EffectError::Handler(format!("system time error: {}", e)))?
-                    .as_millis() as i64;
-                cx.respond(millis)
-            }
-        }
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| EffectError::Handler(format!("system time error: {}", e)))?
+            .as_millis() as i64;
+        cx.respond(millis)
     }
 }
 
@@ -56,7 +41,7 @@ mod tests {
         let con_id = table.get_by_name("TimeNow").unwrap();
         let val = Value::Con(con_id, vec![]);
         let req = TimeReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, TimeReq::Now));
+        assert!(matches!(req, TimeReq::TimeNow()));
     }
 
     #[test]

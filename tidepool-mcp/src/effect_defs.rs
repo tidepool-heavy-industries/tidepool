@@ -184,11 +184,67 @@ macro_rules! console_effect_def {
     };
 }
 
+/// Time effect — single definition.
+///
+/// `UTCTime` and its helpers live in `Tidepool.Data.Time` (re-exported by
+/// `Tidepool.Prelude`), so the generated Effects module needs no `type_defs`.
+#[macro_export]
+macro_rules! time_effect_def {
+    ($project:path) => {
+        $project! {
+            effect Time,
+            handler TimeHandler,
+            req TimeReq,
+            decl_fn time_decl,
+            description [
+                "UTC wall-clock access (epoch milliseconds). ",
+                "`getCurrentTime` returns an opaque `UTCTime` value. ",
+                "`formatISO8601` renders it as ISO-8601 (e.g. \"2024-02-29T00:00:00Z\"). ",
+                "`diffUTCTime a b` gives seconds between two times; `addUTCTime secs t` adds seconds. ",
+                "`epochMillis t` exposes the raw epoch-millisecond integer.",
+            ],
+            type_defs [],
+            verbs [
+                { ctor TimeNow, method time_now,
+                  args { },
+                  ret "Int" },
+            ],
+            helpers [
+                { raw ["-- | Current UTC time as an opaque UTCTime (epoch-millisecond resolution).",
+                       "getCurrentTime :: M UTCTime",
+                       "getCurrentTime = UTCTime <$> send TimeNow"] },
+            ],
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
-    /// The generated `console_decl()` must be byte-identical to the
-    /// hand-written builder it replaced — the effects-module source (and so
-    /// the compiled-artifact cache key) must not move.
+    /// Every generated `*_decl()` must be byte-identical to the hand-written
+    /// builder it replaced — the effects-module source (and so the
+    /// compiled-artifact cache key) must not move.
+    #[test]
+    fn generated_time_decl_matches_handwritten_baseline() {
+        let d = crate::time_decl();
+        assert_eq!(d.type_name, "Time");
+        assert_eq!(
+            d.description,
+            "UTC wall-clock access (epoch milliseconds). \
+             `getCurrentTime` returns an opaque `UTCTime` value. \
+             `formatISO8601` renders it as ISO-8601 (e.g. \"2024-02-29T00:00:00Z\"). \
+             `diffUTCTime a b` gives seconds between two times; `addUTCTime secs t` adds seconds. \
+             `epochMillis t` exposes the raw epoch-millisecond integer."
+        );
+        assert_eq!(d.constructors, &["TimeNow :: Time Int"]);
+        assert!(d.type_defs.is_empty());
+        assert_eq!(
+            d.helpers,
+            &["-- | Current UTC time as an opaque UTCTime (epoch-millisecond resolution).\n\
+               getCurrentTime :: M UTCTime\n\
+               getCurrentTime = UTCTime <$> send TimeNow"]
+        );
+    }
+
     #[test]
     fn generated_console_decl_matches_handwritten_baseline() {
         let d = crate::console_decl();
