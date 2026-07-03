@@ -7,6 +7,7 @@ use tidepool_handlers::{
     ConsoleHandler, ExecHandler, FsHandler, HandlerConfig, HttpHandler, KvHandler, LlmHandler,
     LspHandler, MetaHandler,
 };
+use tidepool_mcp::server_common;
 use tidepool_mcp::TidepoolMcpServer;
 
 mod config;
@@ -86,20 +87,6 @@ fn find_tidepool_extract() -> Option<PathBuf> {
     }
     // 2. On PATH
     which::which("tidepool-extract").ok()
-}
-
-// ---------------------------------------------------------------------------
-// Secrets loader — shared with tidepool-repl via tidepool_runtime::paths
-// ---------------------------------------------------------------------------
-
-fn load_secrets() {
-    let report = tidepool_runtime::paths::load_secrets();
-    for name in &report.loaded {
-        tracing::info!("loaded {name} from secrets dir");
-    }
-    for skipped in &report.ignored {
-        tracing::info!("secrets: {skipped} ignored (bad name, empty, or already set)");
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -257,24 +244,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .http
         .or(args.port.map(|p| SocketAddr::from(([0, 0, 0, 0], p))));
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
-    // Initialize the `log`-crate diagnostic logging for the JIT subsystems
-    // (tidepool::calls / scope / heap / effects / fp). Routed to stderr via
-    // env_logger; honors RUST_LOG plus the legacy TIDEPOOL_TRACE* env vars.
-    // Independent of the tracing subscriber above (which owns the `tracing::`
-    // macros at the MCP layer); env_logger owns the `log::` global logger.
-    tidepool_codegen::debug::init_logging();
+    server_common::init_tracing();
 
     // Fill missing *_API_KEY env vars from .tidepool/secrets/ (drop a key
     // file in, restart, done). Must run before any handler reads the env.
-    load_secrets();
+    server_common::load_secrets_logged();
 
     let prelude_dir = ensure_prelude()?;
 
