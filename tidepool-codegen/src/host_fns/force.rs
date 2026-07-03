@@ -13,6 +13,12 @@ use super::gc::{register_rust_root, rust_roots_mark, truncate_rust_roots};
 
 /// Force a thunk to WHNF. Loops to handle chains (thunk returning thunk).
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// Upper bound on consecutive EVALUATED-indirection follows in one
+/// `heap_force` call. A genuine chain needs one distinct (>=48-byte) thunk per
+/// link — 64M links would need >3 GiB of thunks, beyond any heap we run — so
+/// exceeding it can only mean a memoized indirection cycle (#336).
+const INDIRECTION_FOLLOW_LIMIT: u64 = 64 * 1024 * 1024;
+
 pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
     if obj.is_null() {
         return obj;
@@ -23,6 +29,7 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
     // code pointers stored in the thunk object. vmctx is passed through from JIT.
     unsafe {
         let mut current = obj;
+        let mut follow_steps: u64 = 0;
 
         loop {
             let tag = heap_layout::read_tag(current);
@@ -81,6 +88,20 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                             "heap_force: registered root left forwarded"
                         );
 
+                        // A body that returns the very thunk being forced is a
+                        // value cycle (`let x = x`): memoizing it would write a
+                        // self-indirection and ERASE the blackhole, turning the
+                        // <<loop>> into an infinite EVALUATED-follow spin (#336).
+                        // Memoize the poison instead so re-forces fail fast.
+                        if result == current {
+                            let poison = runtime_blackhole_trap(vmctx);
+                            *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize)
+                                as *mut *mut u8) = poison;
+                            *current.add(layout::THUNK_STATE_OFFSET as usize) =
+                                layout::THUNK_EVALUATED;
+                            return poison;
+                        }
+
                         // 4. Write indirection (offset 16, overwriting code_ptr)
                         *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *mut *mut u8) =
                             result;
@@ -96,6 +117,16 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                         return runtime_blackhole_trap(vmctx);
                     }
                     layout::THUNK_EVALUATED => {
+                        // Mutual aliases (`x = y; y = x`) memoize an
+                        // EVALUATED indirection CYCLE that contains no
+                        // blackhole state to trap on (#336). A legitimate
+                        // chain is bounded by how many thunks fit in the heap
+                        // (each link is a distinct >=48-byte thunk), so a
+                        // follow count past the limit can only be a cycle.
+                        follow_steps += 1;
+                        if follow_steps > INDIRECTION_FOLLOW_LIMIT {
+                            return runtime_blackhole_trap(vmctx);
+                        }
                         let next = *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize)
                             as *const *mut u8);
                         current = next;

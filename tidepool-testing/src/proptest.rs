@@ -11,7 +11,7 @@ use tidepool_codegen::yield_type::YieldError;
 use tidepool_eval::error::EvalError;
 use tidepool_optimize::Pass;
 use tidepool_eval::value::Value;
-use tidepool_eval::{env_from_datacon_table, eval, Env, VecHeap};
+use tidepool_eval::{deep_force, env_from_datacon_table, eval, Env, VecHeap};
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
 use tidepool_repr::types::AltCon;
@@ -123,10 +123,16 @@ pub fn check_jit_vs_eval(expr: CoreExpr, nursery_size: usize) -> Result<(), Test
     watchdog_this_case(&expr);
     let table = build_table_for_expr(&expr);
 
-    // Tree-walking evaluation
+    // Tree-walking evaluation, deep-forced to NF: the JIT's result conversion
+    // forces lazy fields, so the eval side must observe the same demand or a
+    // program whose RESULT hides a bottom under a lazy field (e.g.
+    // `let x = x in (0, x)`) compares eval-Ok-with-ThunkRef against
+    // JIT-BlackHole and reads as a false divergence (#336). The corpus
+    // harness (haskell_suite_differential) applies the same policy.
     let mut heap_eval = VecHeap::new();
     let env_eval = env_from_datacon_table(&table);
-    let res_eval = eval(&expr, &env_eval, &mut heap_eval);
+    let res_eval =
+        eval(&expr, &env_eval, &mut heap_eval).and_then(|v| deep_force(v, &mut heap_eval));
 
     // JIT compilation and execution
     let res_jit = match JitEffectMachine::compile(&expr, &table, nursery_size) {
