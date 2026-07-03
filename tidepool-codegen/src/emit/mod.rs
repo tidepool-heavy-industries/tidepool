@@ -28,6 +28,20 @@ pub(crate) fn runtime_case_trap_sig(
     sig
 }
 
+/// ABI signature of the `runtime_cancel_check` host fn: one `vmctx` (`I64`)
+/// argument returning the error poison pointer (`I64`, or null to continue).
+/// Called at recursive join back-edges as an external-cancellation safepoint
+/// (#325) — see `host_fns::runtime_cancel_check`.
+pub(crate) fn runtime_cancel_check_sig(
+    call_conv: cranelift_codegen::isa::CallConv,
+) -> cranelift_codegen::ir::Signature {
+    use cranelift_codegen::ir::{types, AbiParam, Signature};
+    let mut sig = Signature::new(call_conv);
+    sig.params.push(AbiParam::new(types::I64)); // vmctx
+    sig.returns.push(AbiParam::new(types::I64)); // null = continue, else poison
+    sig
+}
+
 /// ABI signature of the `heap_force` host fn: `(vmctx, obj)` (both `I64`)
 /// returning the forced WHNF pointer (`I64`). Centralized — it was hand-declared
 /// identically at five emit sites (case.rs, expr.rs ×3, primop.rs).
@@ -382,6 +396,14 @@ impl JoinPointRegistry {
 pub struct JoinInfo {
     pub block: cranelift_codegen::ir::Block,
     pub param_types: Vec<SsaVal>,
+    /// True when this join is a **loop** — i.e. its `rhs` contains a `Jump`
+    /// back to its own label (a GHC-loopified join-recursion; recursive joins
+    /// that do NOT cross a lambda boundary survive as `Join`/`Jump`, per
+    /// Translate.hs's `tsRecJoinIds`/`jumpCrossesLam`). `emit_jump` emits an
+    /// external-cancellation safepoint before back-edges to a recursive join
+    /// (#325); forward (non-recursive) joins run once and get no per-jump
+    /// overhead.
+    pub recursive: bool,
 }
 
 /// Errors during IR emission.
