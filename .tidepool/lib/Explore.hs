@@ -55,13 +55,15 @@ defMod name body =
 -- ===== Effectful verbs (Tidepool.Effects is importable now) =====
 
 -- | Find a Rust function and show it with surrounding context. One call.
+-- (Was ast-grep `rsFn`; the SG effect was cut, so this is now a `grepGlob`
+-- text search for `fn <name>` over the given path globs.)
 defWithContext :: Text -> [Text] -> M [Text]
 defWithContext name roots = do
-  ms <- rsFn name roots
-  case ms of
-    (Match _ f l _ _ : _) -> do
-      content <- readFile f
-      pure ((f <> ":" <> pack (show l)) : aroundLine l 4 content)
+  hs <- concat <$> mapM (grepGlob ("fn " <> name)) roots
+  case hs of
+    (h : _) -> do
+      content <- readFile h.path
+      pure ((h.path <> ":" <> pack (show h.line)) : aroundLine h.line 4 content)
     [] -> pure []
 
 -- | Per-file reference counts for a regex, densest first.
