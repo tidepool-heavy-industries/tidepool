@@ -1,17 +1,11 @@
 //! Regression test for multi-module DataCon tag inconsistency.
 
-mod common;
-
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_runtime::{compile_and_run, compile_haskell, CompileResult};
+use tidepool_runtime::CompileResult;
+use tidepool_testing::eval_harness::EvalHarness;
 
-use std::path::{Path, PathBuf};
 use tempfile::TempDir;
-
-fn prelude_path() -> std::path::PathBuf {
-    common::prelude_path()
-}
 
 #[derive(FromCore)]
 enum FooReq {
@@ -70,11 +64,12 @@ agent = R.sendFoo
 #[test]
 fn test_cross_module_datacon_table_consistency() {
     let (effect_dir, main_src) = setup_multi_module_test();
-    let pp = prelude_path();
-    let include: Vec<&Path> = vec![pp.as_path(), effect_dir.path()];
 
-    let CompileResult { expr, table, .. } =
-        compile_haskell(&main_src, "agent", &include).expect("compilation failed");
+    let CompileResult { expr, table, .. } = EvalHarness::new()
+        .with_stdlib()
+        .with_include(effect_dir.path())
+        .compile(&main_src, "agent")
+        .expect("compilation failed");
 
     use tidepool_repr::frame::CoreFrame;
     use tidepool_repr::types::AltCon;
@@ -171,10 +166,11 @@ agent = do
   F.sendPing
 "#;
 
-    let pp = prelude_path();
-    let include: Vec<&Path> = vec![pp.as_path(), effect_dir.path()];
-    let CompileResult { expr, table, .. } =
-        compile_haskell(main_src, "agent", &include).expect("compilation failed");
+    let CompileResult { expr, table, .. } = EvalHarness::new()
+        .with_stdlib()
+        .with_include(effect_dir.path())
+        .compile(main_src, "agent")
+        .expect("compilation failed");
 
     use tidepool_repr::frame::CoreFrame;
     use tidepool_repr::types::AltCon;
@@ -225,24 +221,15 @@ agent = do
 /// non-canonical shapes reaching the JIT via a runtime fallback.
 #[test]
 fn test_cross_module_effect_runs() {
+    // `effect_dir` (TempDir) must outlive the run — `run` joins synchronously, so
+    // keeping it bound here holds the temp modules on disk until compilation reads them.
     let (effect_dir, main_src) = setup_multi_module_test();
-    let pp = prelude_path();
-    let effect_path: PathBuf = effect_dir.path().to_owned();
-    let pp_clone = pp.clone();
 
-    let result = std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let _keep = effect_dir;
-            let include: Vec<&Path> = vec![pp_clone.as_path(), effect_path.as_path()];
-            let mut handlers = frunk::hlist![FooHandler];
-            compile_and_run(&main_src, "agent", &include, &mut handlers, &())
-                .expect("compile_and_run should succeed for cross-module effect")
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-
-    let json = result.to_json();
+    let json = EvalHarness::new()
+        .with_stdlib()
+        .with_include(effect_dir.path())
+        .run(&main_src, "agent", frunk::hlist![FooHandler])
+        .expect("compile_and_run should succeed for cross-module effect")
+        .to_json();
     assert_eq!(json, serde_json::json!(null));
 }

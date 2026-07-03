@@ -8,18 +8,16 @@
 //! - `run_freer`: Prelude + Freer + qualified T (no Library)
 //! - `run_mcp`: full MCP preamble (Freer + Library + extra imports)
 
-use std::path::Path;
+use std::path::PathBuf;
 
 use serde_json::json;
+use tidepool_testing::eval_harness::EvalHarness;
 
-mod common;
-
-fn user_lib_dir() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+fn user_lib_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .join(".tidepool/lib")
-        .leak()
 }
 
 fn run(body: &str) -> serde_json::Value {
@@ -34,11 +32,11 @@ result :: _
 result = {body}
 "#
     );
-    let pp = common::prelude_path();
-    let include = [pp.as_path()];
-    let val = tidepool_runtime::compile_and_run_pure(&src, "result", &include)
-        .expect("compile_and_run_pure failed");
-    val.to_json()
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(&src, "result")
+        .expect("compile_and_run_pure failed")
+        .to_json()
 }
 
 /// Freer preamble: adds Control.Monad.Freer but NOT Library.
@@ -56,11 +54,11 @@ result :: _
 result = {body}
 "#
     );
-    let pp = common::prelude_path();
-    let include = [pp.as_path()];
-    let val = tidepool_runtime::compile_and_run_pure(&src, "result", &include)
-        .expect("compile_and_run_pure (freer) failed");
-    val.to_json()
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(&src, "result")
+        .expect("compile_and_run_pure (freer) failed")
+        .to_json()
 }
 
 /// MCP-like preamble: includes Control.Monad.Freer, Library, effect GADTs.
@@ -92,14 +90,13 @@ result :: _
 result = {body}
 "#
     );
-    let pp = common::prelude_path();
-    let eff = tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls())
-        .expect("write effects module")
-        .leak() as &Path;
-    let include = [pp.as_path(), ulp, eff];
-    let val = tidepool_runtime::compile_and_run_pure(&src, "result", &include)
-        .expect("compile_and_run_pure (mcp) failed");
-    val.to_json()
+    EvalHarness::new()
+        .with_stdlib()
+        .with_include(ulp)
+        .with_effects_module()
+        .run_pure(&src, "result")
+        .expect("compile_and_run_pure (mcp) failed")
+        .to_json()
 }
 
 // ========== Minimal preamble (pure, no Freer) ==========
@@ -220,14 +217,13 @@ result :: _
 result = {body}
 "#
     );
-    let pp = common::prelude_path();
-    let eff = tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls())
-        .expect("write effects module")
-        .leak() as &Path;
-    let include = [pp.as_path(), ulp, eff];
-    let val = tidepool_runtime::compile_and_run_pure(&src, "result", &include)
-        .expect("compile_and_run_pure (mcp+helpers) failed");
-    val.to_json()
+    EvalHarness::new()
+        .with_stdlib()
+        .with_include(ulp)
+        .with_effects_module()
+        .run_pure(&src, "result")
+        .expect("compile_and_run_pure (mcp+helpers) failed")
+        .to_json()
 }
 
 /// Same as run but wraps in Eff monad + toJSON like MCP does.
@@ -257,14 +253,13 @@ result :: _
 result = toJSON ({body})
 "#
     );
-    let pp = common::prelude_path();
-    let eff = tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls())
-        .expect("write effects module")
-        .leak() as &Path;
-    let include = [pp.as_path(), ulp, eff];
-    let val = tidepool_runtime::compile_and_run_pure(&src, "result", &include)
-        .expect("compile_and_run_pure (eff) failed");
-    val.to_json()
+    EvalHarness::new()
+        .with_stdlib()
+        .with_include(ulp)
+        .with_effects_module()
+        .run_pure(&src, "result")
+        .expect("compile_and_run_pure (eff) failed")
+        .to_json()
 }
 
 /// Closest to real MCP: effect GADTs + Eff monad wrapping + toJSON.
@@ -347,14 +342,13 @@ result = do
   pure (toJSON _r)
 "#
     );
-    let pp = common::prelude_path();
-    let eff = tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls())
-        .expect("write effects module")
-        .leak() as &Path;
-    let include = [pp.as_path(), ulp, eff];
-    let val = tidepool_runtime::compile_and_run_pure(&src, "result", &include)
-        .expect("compile_and_run_pure (full_mcp) failed");
-    val.to_json()
+    EvalHarness::new()
+        .with_stdlib()
+        .with_include(ulp)
+        .with_effects_module()
+        .run_pure(&src, "result")
+        .expect("compile_and_run_pure (full_mcp) failed")
+        .to_json()
 }
 
 #[test]

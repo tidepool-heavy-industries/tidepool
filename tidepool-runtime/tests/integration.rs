@@ -1,33 +1,21 @@
-mod common;
-
 use tidepool_repr::Literal;
-use tidepool_runtime::{compile_and_run_pure, compile_haskell, Value};
+use tidepool_runtime::Value;
+use tidepool_testing::eval_harness::EvalHarness;
 
-fn prelude_path() -> std::path::PathBuf {
-    common::prelude_path()
+/// The stdlib-included harness these tests share.
+fn harness() -> EvalHarness {
+    EvalHarness::new().with_stdlib()
 }
 
 /// Run compile_and_run_pure on a larger stack with Prelude includes.
 fn run(src: &str, target: &str) -> tidepool_runtime::EvalResult {
-    let pp = prelude_path();
-    let src = src.to_owned();
-    let target = target.to_owned();
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let include = [pp.as_path()];
-            compile_and_run_pure(&src, &target, &include).unwrap()
-        })
-        .unwrap()
-        .join()
-        .unwrap()
+    harness().run_pure(src, target).unwrap()
 }
 
 #[test]
 fn test_compile_haskell_identity() {
-    let pp = prelude_path();
     let src = "module Test where\nidentity :: a -> a\nidentity x = x";
-    let result = compile_haskell(src, "identity", &[pp.as_path()]).unwrap();
+    let result = harness().compile(src, "identity").unwrap();
     assert!(!result.expr.nodes.is_empty());
     assert!(!result.table.is_empty());
 }
@@ -62,9 +50,8 @@ fn test_compile_and_run_arithmetic() {
 
 #[test]
 fn test_compile_error() {
-    let pp = prelude_path();
     let src = "module Test where\nbad = undefined_thing";
-    let result = compile_haskell(src, "bad", &[pp.as_path()]);
+    let result = harness().compile(src, "bad");
     assert!(result.is_err());
 }
 
