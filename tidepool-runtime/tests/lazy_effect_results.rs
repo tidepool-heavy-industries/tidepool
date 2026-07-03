@@ -3,25 +3,16 @@
 //! tail thunks, instead of eagerly converting (and previously, dying on the
 //! response node cap).
 
-use std::path::Path;
+use std::path::PathBuf;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
-use tidepool_runtime::compile_and_run;
+use tidepool_testing::eval_harness::EvalHarness;
 
-fn prelude_dir() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("haskell/lib")
-        .leak()
-}
-
-fn user_lib_dir() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+fn user_lib_dir() -> PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .join(".tidepool/lib")
-        .leak()
 }
 
 /// Responds to EVERY effect with a large list of strings — stands in for a
@@ -57,12 +48,13 @@ fn run_with_big_list(code: &str, n: usize) -> Result<serde_json::Value, String> 
     );
 
     std::env::set_var("TIDEPOOL_LAZY_RESULTS", "1");
-    let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
-        .expect("write effects module")
-        .leak() as &Path;
-    let include = [prelude_dir(), user_lib_dir(), effects_dir];
-    let mut dispatcher = BigListDispatcher { n };
-    compile_and_run(&source, "result", &include, &mut dispatcher, &())
+    let dispatcher = BigListDispatcher { n };
+    EvalHarness::new()
+        .with_stdlib()
+        .with_include(user_lib_dir())
+        .with_effects_module()
+        .run(&source, "result", dispatcher)
+        .into_result()
         .map(|v| v.to_json())
         .map_err(|e| format!("{e}"))
 }

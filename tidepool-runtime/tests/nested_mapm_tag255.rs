@@ -13,17 +13,11 @@
 // Effect request enums mirror Haskell GADT constructors by name.
 #![allow(dead_code, clippy::enum_variant_names)]
 
-mod common;
-
 use std::path::{Path, PathBuf};
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::value::Value;
-use tidepool_runtime::compile_and_run;
-
-fn prelude_path() -> PathBuf {
-    common::prelude_path()
-}
+use tidepool_testing::eval_harness::EvalHarness;
 
 // ---------------------------------------------------------------------------
 // Effect handlers — real Fs, stubs for everything else
@@ -302,37 +296,25 @@ pure stats
         full_module.lines().count()
     );
 
-    let pp = prelude_path();
-    let result = std::thread::Builder::new()
-        .name("tag255-mcp-repro".into())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(move || {
-            // pp = <workspace>/haskell/lib; workspace root = pp's grandparent
-            let workspace = pp.parent().unwrap().parent().unwrap();
-            let lib_dir = workspace.join(".tidepool/lib");
-            let effects_dir = tidepool_mcp::ensure_effects_module(&tidepool_mcp::standard_decls())
-                .expect("write effects module");
-            let mut include: Vec<&Path> = if lib_dir.exists() {
-                vec![pp.as_path(), lib_dir.as_path()]
-            } else {
-                vec![pp.as_path()]
-            };
-            include.push(effects_dir.as_path());
-            let mut handlers = frunk::hlist![
-                StubConsole,
-                StubKv,
-                RealFs::new(),
-                StubSg,
-                StubHttp,
-                StubExec,
-                StubLlm,
-                StubAsk
-            ];
-            compile_and_run(&full_module, "result", &include, &mut handlers, &())
-        })
-        .unwrap()
-        .join()
-        .expect("thread panicked");
+    // workspace root = the crate's grandparent
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let lib_dir = workspace.join(".tidepool/lib");
+    let mut harness = EvalHarness::new().with_stdlib();
+    if lib_dir.exists() {
+        harness = harness.with_include(lib_dir);
+    }
+    let harness = harness.with_effects_module();
+    let handlers = frunk::hlist![
+        StubConsole,
+        StubKv,
+        RealFs::new(),
+        StubSg,
+        StubHttp,
+        StubExec,
+        StubLlm,
+        StubAsk
+    ];
+    let result = harness.run(&full_module, "result", handlers).into_result();
 
     match &result {
         Ok(val) => {

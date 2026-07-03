@@ -8,9 +8,6 @@
 //! from handling the request, surfacing `YieldError::Runtime(RuntimeError::Cancelled)` through the
 //! same error path as a top-level cancel.
 
-mod common;
-
-use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -19,7 +16,8 @@ use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{CancelHandle, JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_runtime::{compile_haskell, CompileResult};
+use tidepool_runtime::CompileResult;
+use tidepool_testing::eval_harness::EvalHarness;
 
 #[derive(FromCore)]
 enum TickReq {
@@ -71,12 +69,12 @@ tickLoop = do
 
 #[test]
 fn cancel_from_inside_effect_handler_unwinds() {
-    let pp = common::prelude_path();
-    let include: Vec<&Path> = vec![pp.as_path()];
-
     let CompileResult {
         expr, mut table, ..
-    } = compile_haskell(LOOP_SOURCE, "tickLoop", &include).expect("compile tickLoop fixture");
+    } = EvalHarness::new()
+        .with_stdlib()
+        .compile(LOOP_SOURCE, "tickLoop")
+        .expect("compile tickLoop fixture");
     table.populate_siblings_from_expr(&expr);
 
     let mut machine =
