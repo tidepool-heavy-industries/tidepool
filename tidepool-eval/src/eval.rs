@@ -439,7 +439,7 @@ fn eval_at(
                     // match the JIT host fn `runtime_show_signed_double_addr`.
                     if arg_vals.len() != 2 {
                         return Err(EvalError::ArityMismatch {
-                            context: "arguments",
+                            context: ArityContext::Arguments,
                             expected: 2,
                             got: arg_vals.len(),
                         });
