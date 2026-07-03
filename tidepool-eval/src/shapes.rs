@@ -221,8 +221,8 @@ pub fn text_backing(v: &Value, table: &DataConTable) -> Option<SharedByteArray> 
 }
 
 /// Table-free unbox of an `Int`/`I#`-boxed field: a bare `Lit(LitInt)`, or
-/// one layer of boxing recognized by `is_int_con` (a caller-supplied
-/// `DataConId` comparison, not a table name lookup).
+/// any number of nested boxing layers recognized by `is_int_con` (a
+/// caller-supplied `DataConId` predicate, not a table name lookup).
 fn unbox_int_with(v: &Value, is_int_con: &dyn Fn(DataConId) -> bool) -> Option<i64> {
     let mut cur = v;
     loop {
