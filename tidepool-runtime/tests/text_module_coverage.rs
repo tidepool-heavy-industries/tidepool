@@ -1,10 +1,5 @@
 use serde_json::json;
-use std::path::Path;
-
-fn prelude_path() -> std::path::PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest.parent().unwrap().join("haskell").join("lib")
-}
+use tidepool_testing::eval_harness::EvalHarness;
 
 fn run_plain(body: &str) -> serde_json::Value {
     let src = format!(
@@ -19,11 +14,11 @@ result :: _
 result = {body}
 "#
     );
-    let pp = prelude_path();
-    let include = [pp.as_path()];
-    let val = tidepool_runtime::compile_and_run_pure(&src, "result", &include)
-        .expect("compile_and_run_pure failed");
-    val.to_json()
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(&src, "result")
+        .expect("compile_and_run_pure failed")
+        .to_json()
 }
 
 #[test]

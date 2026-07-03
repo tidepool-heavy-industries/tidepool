@@ -1,14 +1,10 @@
 use serial_test::serial;
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tempfile::TempDir;
-use tidepool_runtime::{compile_haskell, CompileResult};
-
-fn prelude_path() -> PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest.parent().unwrap().join("haskell").join("lib")
-}
+use tidepool_runtime::CompileResult;
+use tidepool_testing::eval_harness::EvalHarness;
 
 /// Helper to restore an environment variable after a test.
 struct EnvGuard {
@@ -40,13 +36,13 @@ fn test_cache_hit_same_source() {
     let cache_root = TempDir::new().unwrap();
     let _guard = EnvGuard::set("XDG_CACHE_HOME", cache_root.path().to_path_buf());
     let tidepool_cache = cache_root.path().join("tidepool");
-    let pp = prelude_path();
+    let harness = EvalHarness::new().with_stdlib();
 
     let src = "module Test where\nval = 42";
     let target = "val";
 
     let CompileResult { expr: expr1, .. } =
-        compile_haskell(src, target, &[pp.as_path()]).expect("First compile failed");
+        harness.compile(src, target).expect("First compile failed");
     assert!(tidepool_cache.exists(), "Cache directory should be created");
     let count1 = fs::read_dir(&tidepool_cache).unwrap().count();
     assert!(
@@ -55,7 +51,7 @@ fn test_cache_hit_same_source() {
     );
 
     let CompileResult { expr: expr2, .. } =
-        compile_haskell(src, target, &[pp.as_path()]).expect("Second compile failed");
+        harness.compile(src, target).expect("Second compile failed");
     assert_eq!(expr1, expr2);
 
     let count2 = fs::read_dir(&tidepool_cache).unwrap().count();
@@ -68,16 +64,16 @@ fn test_cache_miss_different_source() {
     let cache_root = TempDir::new().unwrap();
     let _guard = EnvGuard::set("XDG_CACHE_HOME", cache_root.path().to_path_buf());
     let tidepool_cache = cache_root.path().join("tidepool");
-    let pp = prelude_path();
+    let harness = EvalHarness::new().with_stdlib();
 
     let src1 = "module Test where\nval = 1";
     let src2 = "module Test where\nval = 2";
     let target = "val";
 
-    compile_haskell(src1, target, &[pp.as_path()]).expect("First compile failed");
+    harness.compile(src1, target).expect("First compile failed");
     let count1 = fs::read_dir(&tidepool_cache).unwrap().count();
 
-    compile_haskell(src2, target, &[pp.as_path()]).expect("Second compile failed");
+    harness.compile(src2, target).expect("Second compile failed");
     let count2 = fs::read_dir(&tidepool_cache).unwrap().count();
 
     assert!(
@@ -99,14 +95,14 @@ fn test_cache_miss_modified_include() {
 
     let src = "module Test where\nimport Lib\nmain = foo";
     let target = "main";
-    let includes = [include_dir.path()];
+    let harness = EvalHarness::new().with_include(include_dir.path());
 
-    compile_haskell(src, target, &includes).expect("First compile failed");
+    harness.compile(src, target).expect("First compile failed");
     let count1 = fs::read_dir(&tidepool_cache).unwrap().count();
 
     fs::write(&hs_file, "module Lib where\nfoo = 2").unwrap();
 
-    compile_haskell(src, target, &includes).expect("Second compile failed");
+    harness.compile(src, target).expect("Second compile failed");
     let count2 = fs::read_dir(&tidepool_cache).unwrap().count();
 
     assert!(
@@ -121,12 +117,12 @@ fn test_corrupted_cache_recovery() {
     let cache_root = TempDir::new().unwrap();
     let _guard = EnvGuard::set("XDG_CACHE_HOME", cache_root.path().to_path_buf());
     let tidepool_cache = cache_root.path().join("tidepool");
-    let pp = prelude_path();
+    let harness = EvalHarness::new().with_stdlib();
 
     let src = "module Test where\nval = 100";
     let target = "val";
 
-    compile_haskell(src, target, &[pp.as_path()]).expect("Initial compile failed");
+    harness.compile(src, target).expect("Initial compile failed");
     assert!(tidepool_cache.exists());
 
     for entry in fs::read_dir(&tidepool_cache).unwrap() {
@@ -134,7 +130,7 @@ fn test_corrupted_cache_recovery() {
         fs::write(path, b"NOT CBOR DATA").unwrap();
     }
 
-    let result = compile_haskell(src, target, &[pp.as_path()]);
+    let result = harness.compile(src, target);
     assert!(
         result.is_ok(),
         "Should recover and recompile when cache is corrupted"

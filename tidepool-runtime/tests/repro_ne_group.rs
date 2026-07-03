@@ -43,7 +43,7 @@
 use std::path::Path;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
-use tidepool_runtime::compile_and_run;
+use tidepool_testing::eval_harness::EvalHarness;
 
 struct NullDispatcher;
 impl DispatchEffect<()> for NullDispatcher {
@@ -57,40 +57,21 @@ impl DispatchEffect<()> for NullDispatcher {
     }
 }
 
-fn eval_with_imports(
-    code: &str,
-    imports: &str,
-    helpers: &str,
-) -> Result<serde_json::Value, String> {
+fn run(code: &str, imports: &str, helpers: &str) -> Result<serde_json::Value, String> {
     let decls = tidepool_mcp::standard_decls();
     let pre = tidepool_mcp::build_preamble(&decls, true);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let src = tidepool_mcp::template_haskell(&pre, &stack, code, imports, helpers, None, None);
-    let effects_dir = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let hs = root.join("haskell/lib");
     let lib = root.join(".tidepool/lib");
-    let include = [hs.as_path(), lib.as_path(), effects_dir.as_path()];
-    let mut d = NullDispatcher;
-    match compile_and_run(&src, "result", &include, &mut d, &()) {
+    let harness = EvalHarness::new()
+        .with_stdlib()
+        .with_include(lib)
+        .with_effects_module();
+    match harness.run(&src, "result", NullDispatcher).into_result() {
         Ok(v) => Ok(v.to_json()),
         Err(e) => Err(format!("{e}")),
     }
-}
-
-fn run(code: &str, imports: &str, helpers: &str) -> Result<serde_json::Value, String> {
-    let code = code.to_string();
-    let imports = imports.to_string();
-    let helpers = helpers.to_string();
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(move || {
-            tidepool_codegen::signal_safety::install();
-            eval_with_imports(&code, &imports, &helpers)
-        })
-        .unwrap()
-        .join()
-        .map_err(|_| "thread panicked (HARD crash / uncaught signal)".to_string())?
 }
 
 /// `NE.group [1,1,2,3,3,3]` → `[[1,1],[2],[3,3,3]]` (via `NE.toList`).

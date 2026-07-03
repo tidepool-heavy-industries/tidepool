@@ -9,10 +9,9 @@
 //!   TIDEPOOL_EXTRACT=<worktree>/haskell/dist-newstyle/.../tidepool-extract-bin \
 //!   TIDEPOOL_GHC_LIBDIR=<with-packages>/lib/ghc-9.12.2/lib \
 //!   cargo test -p tidepool-runtime --test validator_reject
-use std::path::Path;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
-use tidepool_runtime::compile_and_run;
+use tidepool_testing::eval_harness::EvalHarness;
 
 /// Never actually invoked — `pure [..|]` dispatches no effect, and the reject
 /// cases fail to compile first.
@@ -43,30 +42,25 @@ fn try_compile(hole: &str) -> Result<(), String> {
         None,
         None,
     );
-    let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
-        .expect("write effects module")
-        .leak() as &Path;
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let hs = root.join("haskell/lib").leak() as &Path;
-    let lib = root.join(".tidepool/lib").leak() as &Path;
-    let include = [hs, lib, effects_dir];
-    let mut d = NullDispatcher;
-    match compile_and_run(&src, "result", &include, &mut d, &()) {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("{e}")),
-    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    EvalHarness::new()
+        .with_stdlib()
+        .with_include(root.join(".tidepool/lib"))
+        .with_effects_module()
+        .run(&src, "result", NullDispatcher)
+        .into_result()
+        .map(|_| ())
+        .map_err(|e| format!("{e}"))
 }
 
 #[test]
 fn validator_rejects() {
-    // Generous stack: importing Tidepool.QQ pulls the whole quoter graph
-    // (incl. the ghc-package-backed HsMeta), whose meta can exhaust 2MB.
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(run)
-        .unwrap()
-        .join()
-        .unwrap();
+    // Importing Tidepool.QQ pulls the whole quoter graph (incl. the
+    // ghc-package-backed HsMeta) — needs the harness's EVAL_STACK_SIZE thread,
+    // not the default 2MB test thread.
+    run();
 }
 
 fn run() {

@@ -84,16 +84,15 @@ pub fn effects_include() -> PathBuf {
 /// 3. Otherwise fall back to the checked-in nix-profile wrapper
 ///    `<root>/haskell/tidepool-extract`.
 ///
-/// Returns `true` iff the resolved binary answers `--numeric-version` (which
-/// also transitively proves `ghc` is reachable, since extract shells out to it).
+/// Returns `true` iff the resolved binary runs and prints its usage banner
+/// (a no-args invocation — the extract binary has no version flag; any flag it
+/// doesn't recognize is treated as an input file and fails).
 pub fn extract_env() -> bool {
     fn runs(bin: &str) -> bool {
         std::process::Command::new(bin)
-            .arg("--numeric-version")
-            .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
+            .output()
+            .map(|out| out.status.success() && out.stdout.starts_with(b"Usage:"))
             .unwrap_or(false)
     }
 
@@ -319,6 +318,51 @@ impl EvalHarness {
                 None => compile_and_run(&source, &target, &refs, &mut handlers, &user),
             }
         }))
+    }
+
+    /// As [`run`](Self::run) but hands `handlers` back alongside the
+    /// [`Outcome`] — for dispatchers whose post-eval state (write counts,
+    /// stored files, recorded calls) IS the assertion.
+    pub fn run_owned<H>(&self, source: &str, target: &str, handlers: H) -> (Outcome, H)
+    where
+        H: DispatchEffect<()> + Send + 'static,
+    {
+        self.run_with_owned(source, target, handlers, ())
+    }
+
+    /// As [`run_with`](Self::run_with) but hands `handlers` back alongside the
+    /// [`Outcome`].
+    pub fn run_with_owned<U, H>(
+        &self,
+        source: &str,
+        target: &str,
+        mut handlers: H,
+        user: U,
+    ) -> (Outcome, H)
+    where
+        U: Send + 'static,
+        H: DispatchEffect<U> + Send + 'static,
+    {
+        let includes = self.owned_includes();
+        let source = source.to_owned();
+        let target = target.to_owned();
+        let nursery = self.nursery;
+        let (result, handlers) = with_eval_stack(move || {
+            let refs: Vec<&Path> = includes.iter().map(|p| p.as_path()).collect();
+            let result = match nursery {
+                Some(n) => compile_and_run_with_nursery_size(
+                    &source,
+                    &target,
+                    &refs,
+                    &mut handlers,
+                    &user,
+                    n,
+                ),
+                None => compile_and_run(&source, &target, &refs, &mut handlers, &user),
+            };
+            (result, handlers)
+        });
+        (Outcome(result), handlers)
     }
 }
 

@@ -36,7 +36,6 @@ use std::sync::Mutex;
 
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
-use tidepool_runtime::compile_and_run_with_nursery_size;
 
 /// Matches `tidepool_runtime::DEFAULT_NURSERY_SIZE` (private): 64 MiB.
 const DEFAULT_NURSERY_SIZE: usize = 1 << 26;
@@ -502,9 +501,6 @@ impl DispatchEffect<()> for WorkerDispatcher {
 fn root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
 }
-fn prelude_dir() -> &'static Path {
-    root().join("haskell/lib").leak()
-}
 /// The live project verb library — the preamble emits `import Library`, so
 /// this must stay on the include path for EVERY compiled source.
 fn user_lib_dir() -> &'static Path {
@@ -521,21 +517,23 @@ fn probe_lib_dir() -> &'static Path {
 /// parent set on the `Command`; never sets `TIDEPOOL_LAZY_RESULTS` itself.
 fn run_case_inproc(case: &Case) -> Result<serde_json::Value, String> {
     let source = build_source(case);
-    let decls = tidepool_mcp::standard_decls();
-    let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
-        .expect("write effects module")
-        .leak() as &Path;
-    let include = [prelude_dir(), user_lib_dir(), probe_lib_dir(), effects_dir];
     let nursery = if case.tiny_nursery {
         TINY_NURSERY_SIZE
     } else {
         DEFAULT_NURSERY_SIZE
     };
-    let mut dispatcher = WorkerDispatcher {
+    let dispatcher = WorkerDispatcher {
         producer: case.producer,
         n: case.n,
     };
-    compile_and_run_with_nursery_size(&source, "result", &include, &mut dispatcher, &(), nursery)
+    tidepool_testing::eval_harness::EvalHarness::new()
+        .with_stdlib()
+        .with_include(user_lib_dir())
+        .with_include(probe_lib_dir())
+        .with_effects_module()
+        .with_nursery(nursery)
+        .run(&source, "result", dispatcher)
+        .into_result()
         .map(|v| v.to_json())
         .map_err(|e| format!("{e}"))
 }
@@ -653,22 +651,17 @@ fn worker_lib_probe() {
     let n: usize = std::env::var("TIDEPOOL_LIB_N").expect("n").parse().unwrap();
 
     let source = build_lib_source(&fn_name, &ty);
-    let decls = tidepool_mcp::standard_decls();
-    let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
-        .expect("write effects module")
-        .leak() as &Path;
-    let include = [prelude_dir(), user_lib_dir(), probe_lib_dir(), effects_dir];
-    let mut dispatcher = WorkerDispatcher { producer, n };
-    let r = compile_and_run_with_nursery_size(
-        &source,
-        "result",
-        &include,
-        &mut dispatcher,
-        &(),
-        DEFAULT_NURSERY_SIZE,
-    )
-    .map(|v| v.to_json())
-    .map_err(|e| format!("{e}"));
+    let dispatcher = WorkerDispatcher { producer, n };
+    let r = tidepool_testing::eval_harness::EvalHarness::new()
+        .with_stdlib()
+        .with_include(user_lib_dir())
+        .with_include(probe_lib_dir())
+        .with_effects_module()
+        .with_nursery(DEFAULT_NURSERY_SIZE)
+        .run(&source, "result", dispatcher)
+        .into_result()
+        .map(|v| v.to_json())
+        .map_err(|e| format!("{e}"));
     match r {
         Ok(v) => println!("WORKER_RESULT_OK {}", serde_json::to_string(&v).unwrap()),
         Err(e) => println!("WORKER_RESULT_ERR {e}"),

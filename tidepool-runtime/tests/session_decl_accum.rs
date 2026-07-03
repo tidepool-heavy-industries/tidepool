@@ -25,46 +25,17 @@ use tidepool_repr::Generation;
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::{ModuleEnv, SessionLib};
 use tidepool_runtime::{compile_and_run_pure_salted, paths};
+use tidepool_testing::eval_harness;
 
-/// Locate the extract binary (env override, the worktree symlink, or the
-/// dist-newstyle build) and confirm GHC is on PATH. Returns the lib include dir
-/// on success, or `None` to skip (toolchain unavailable).
+/// Confirm the extract toolchain (and transitively GHC) is reachable. Returns
+/// the lib include dir on success, or `None` to skip (toolchain unavailable).
 fn setup() -> Option<PathBuf> {
-    // GHC is needed by tidepool-extract; only available inside `nix develop`.
-    let ghc_ok = std::process::Command::new("ghc")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !ghc_ok {
-        eprintln!("Skipping: GHC not available (run inside `nix develop`)");
+    if !eval_harness::extract_available() {
+        eprintln!("Skipping: tidepool-extract toolchain not available (run inside `nix develop`)");
         return None;
     }
 
-    let haskell = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("haskell");
-
-    if std::env::var("TIDEPOOL_EXTRACT").is_err() {
-        // Prefer the worktree symlink; fall back to the dist-newstyle build.
-        let symlink = haskell.join("tidepool-extract");
-        let dist = haskell
-            .join("dist-newstyle/build/x86_64-linux/ghc-9.12.2/tidepool-harness-0.1.0.0")
-            .join("x/tidepool-extract-bin/build/tidepool-extract-bin/tidepool-extract-bin");
-        if symlink.exists() {
-            std::env::set_var("TIDEPOOL_EXTRACT", &symlink);
-        } else if dist.exists() {
-            std::env::set_var("TIDEPOOL_EXTRACT", &dist);
-        } else {
-            eprintln!("Skipping: no tidepool-extract binary (set TIDEPOOL_EXTRACT)");
-            return None;
-        }
-    }
-
-    let lib = haskell.join("lib");
+    let lib = eval_harness::prelude_path();
     assert!(lib.exists(), "haskell/lib include dir must exist");
     Some(lib)
 }

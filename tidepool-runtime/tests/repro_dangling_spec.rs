@@ -11,7 +11,7 @@
 use std::path::Path;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
-use tidepool_runtime::compile_and_run;
+use tidepool_testing::eval_harness::EvalHarness;
 
 struct NullDispatcher;
 impl DispatchEffect<()> for NullDispatcher {
@@ -38,15 +38,13 @@ fn run_dangling_probe(code: &str) -> Result<serde_json::Value, String> {
         None,
         None,
     );
-    let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
-        .expect("write effects module")
-        .leak() as &Path;
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let hs = root.join("haskell/lib").leak() as &Path;
-    let lib = root.join(".tidepool/lib").leak() as &Path;
-    let include = [hs, lib, effects_dir];
-    let mut d = NullDispatcher;
-    match compile_and_run(&src, "result", &include, &mut d, &()) {
+    let lib = root.join(".tidepool/lib");
+    let harness = EvalHarness::new()
+        .with_stdlib()
+        .with_include(lib)
+        .with_effects_module();
+    match harness.run(&src, "result", NullDispatcher).into_result() {
         Ok(v) => Ok(v.to_json()),
         Err(e) => Err(format!("{e}")),
     }
