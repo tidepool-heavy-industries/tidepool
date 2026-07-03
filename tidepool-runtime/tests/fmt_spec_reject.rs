@@ -9,7 +9,7 @@
 use std::path::Path;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
-use tidepool_runtime::compile_and_run;
+use tidepool_testing::eval_harness::EvalHarness;
 
 /// Never actually invoked — compilation fails first.
 struct NullDispatcher;
@@ -39,15 +39,15 @@ fn try_compile(hole: &str) -> Result<(), String> {
         None,
         None,
     );
-    let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
-        .expect("write effects module")
-        .leak() as &Path;
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let hs = root.join("haskell/lib").leak() as &Path;
-    let lib = root.join(".tidepool/lib").leak() as &Path;
-    let include = [hs, lib, effects_dir];
-    let mut d = NullDispatcher;
-    match compile_and_run(&src, "result", &include, &mut d, &()) {
+    let lib = root.join(".tidepool/lib");
+    match EvalHarness::new()
+        .with_stdlib()
+        .with_include(lib)
+        .with_effects_module()
+        .run(&src, "result", NullDispatcher)
+        .into_result()
+    {
         Ok(_) => Ok(()),
         Err(e) => Err(format!("{e}")),
     }
@@ -55,12 +55,7 @@ fn try_compile(hole: &str) -> Result<(), String> {
 
 #[test]
 fn fmt_spec_rejects_exponential() {
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(run)
-        .unwrap()
-        .join()
-        .unwrap();
+    run();
 }
 
 fn run() {

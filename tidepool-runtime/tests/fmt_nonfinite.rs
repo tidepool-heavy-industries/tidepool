@@ -9,7 +9,7 @@
 use std::path::Path;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
-use tidepool_runtime::compile_and_run;
+use tidepool_testing::eval_harness::EvalHarness;
 
 /// Never invoked — these holes are pure.
 struct NullDispatcher;
@@ -45,18 +45,15 @@ fn eval_hole(hole: &str) -> serde_json::Value {
         None,
         None,
     );
-    let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
-        .expect("write effects module")
-        .leak() as &Path;
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let hs = root.join("haskell/lib").leak() as &Path;
-    let lib = root.join(".tidepool/lib").leak() as &Path;
-    let include = [hs, lib, effects_dir];
-    let mut d = NullDispatcher;
-    match compile_and_run(&src, "result", &include, &mut d, &()) {
-        Ok(v) => v.to_json(),
-        Err(e) => panic!("eval failed for `{hole}`: {e}"),
-    }
+    let lib = root.join(".tidepool/lib");
+    EvalHarness::new()
+        .with_stdlib()
+        .with_include(lib)
+        .with_effects_module()
+        .run(&src, "result", NullDispatcher)
+        .expect(&format!("eval failed for `{hole}`"))
+        .to_json()
 }
 
 fn run() {
@@ -74,11 +71,7 @@ fn run() {
 
 #[test]
 fn fmt_nonfinite_renders_python_spellings() {
-    // fmt-spec evals nest deep through -O2-inlined Core; needs > 2 MiB stack.
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(run)
-        .unwrap()
-        .join()
-        .unwrap();
+    // fmt-spec evals nest deep through -O2-inlined Core; the harness's terminal
+    // already runs on an EVAL_STACK_SIZE (256 MiB) thread.
+    run();
 }
