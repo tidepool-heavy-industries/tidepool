@@ -2122,6 +2122,23 @@ pub struct HandlerConfig {
     pub llm_model: String,
 }
 
+/// Map an effect name (as listed in `tidepool_mcp::base_effects!`) to its
+/// handler-construction expression. This is a NAME-keyed lookup (arm order is
+/// irrelevant); the load-bearing ORDER lives solely in `base_effects!`, so this
+/// map stays in lockstep with the decl list by construction.
+macro_rules! handler_for {
+    (Console, $cfg:ident) => { ConsoleHandler };
+    (KV,      $cfg:ident) => { KvHandler::new($cfg.kv_path.clone()) };
+    (Fs,      $cfg:ident) => { FsHandler::new($cfg.cwd.clone()) };
+    (SG,      $cfg:ident) => { SgHandler::new($cfg.cwd.clone()) };
+    (Http,    $cfg:ident) => { HttpHandler };
+    (Exec,    $cfg:ident) => { ExecHandler::new($cfg.cwd.clone()) };
+    (Lsp,     $cfg:ident) => { LspHandler::new($cfg.cwd.clone()) };
+    (Llm,     $cfg:ident) => { LlmHandler::new($cfg.llm_model.clone()) };
+    (Git,     $cfg:ident) => { GitHandler::new($cfg.cwd.clone()) };
+    (Time,    $cfg:ident) => { TimeHandler };
+}
+
 /// Build the base effect stack (tags 0–9: Console, KV, Fs, SG, Http, Exec, Lsp, Llm, Git, Time).
 ///
 /// **Must be called inside a tokio runtime** — `LlmHandler` captures
@@ -2137,18 +2154,18 @@ pub fn build_base_stack(
        + Send
        + Sync
        + 'static {
-    frunk::hlist![
-        ConsoleHandler,
-        KvHandler::new(cfg.kv_path.clone()),
-        FsHandler::new(cfg.cwd.clone()),
-        SgHandler::new(cfg.cwd.clone()),
-        HttpHandler,
-        ExecHandler::new(cfg.cwd.clone()),
-        LspHandler::new(cfg.cwd.clone()),
-        LlmHandler::new(cfg.llm_model.clone()),
-        GitHandler::new(cfg.cwd.clone()),
-        TimeHandler,
-    ]
+    // The handler HList is generated from the single-source `base_effects!`
+    // list in `tidepool-mcp` (the SAME sequence that drives `standard_decls`,
+    // the `type M = Eff '[…]` string, and the union-tag positions). Reordering
+    // or cutting an effect is a single edit THERE — this fn just maps each
+    // effect name to its handler constructor (`handler_for!`), so the two
+    // orders cannot desync.
+    macro_rules! build_stack_rows {
+        ($(($name:ident, $decl:ident)),* $(,)?) => {
+            frunk::hlist![ $( handler_for!($name, cfg) ),* ]
+        };
+    }
+    tidepool_mcp::base_effects!(build_stack_rows)
 }
 
 /// Build the MINIMAL effect stack (tag 0: Console only).

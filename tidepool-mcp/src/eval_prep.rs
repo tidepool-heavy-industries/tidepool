@@ -13,26 +13,53 @@
 //! dir — IO, not pure — and only wraps the pure `effects_module_source` here).
 
 use crate::EffectDecl;
-use crate::{
-    ask_decl, console_decl, exec_decl, fs_decl, git_decl, http_decl, kv_decl, llm_decl, lsp_decl,
-    sg_decl, time_decl,
-};
 
-/// All standard effects in canonical order.
+/// THE single ordered source of the base effect stack (Ask excluded here — it
+/// is interposed separately by each server's `AskDispatcher`). Each row pairs
+/// the Haskell effect type name with its [`EffectDecl`] builder, in the ONE
+/// canonical order.
+///
+/// Both [`standard_decls`] (which derives the decl list, the `type M = Eff
+/// '[…]` string, and the `:vocab`/discoverability surface) and
+/// `tidepool_handlers::build_base_stack` (which builds the handler HList)
+/// expand THIS macro. Because the effect-list order and the handler-dispatch
+/// order come from the SAME sequence, they cannot desync — the freer-simple
+/// union-tag ↔ handler correspondence (a Locked Decision: tags index the
+/// effect list positionally) holds by construction, not by convention.
+///
+/// Invoke as `base_effects!(callback)`; the callback macro receives the rows
+/// `(Name, decl_fn), …` and expands them into whatever it needs — a
+/// `vec![…]` of decls, a `frunk::hlist![…]` of handlers, etc.
+///
+/// **Cutting / adding / reordering an effect is a single edit to THIS list.**
+#[macro_export]
+macro_rules! base_effects {
+    ($callback:ident) => {
+        $callback! {
+            (Console, console_decl),
+            (KV,      kv_decl),
+            (Fs,      fs_decl),
+            (SG,      sg_decl),
+            (Http,    http_decl),
+            (Exec,    exec_decl),
+            (Lsp,     lsp_decl),
+            (Llm,     llm_decl),
+            (Git,     git_decl),
+            (Time,    time_decl),
+        }
+    };
+}
+
+/// All standard effects in canonical order (the base stack + the interposed
+/// `Ask` effect appended last). Derived from the single-source [`base_effects!`]
+/// list — do not hand-maintain a parallel order here.
 pub fn standard_decls() -> Vec<EffectDecl> {
-    vec![
-        console_decl(),
-        kv_decl(),
-        fs_decl(),
-        sg_decl(),
-        http_decl(),
-        exec_decl(),
-        lsp_decl(),
-        llm_decl(),
-        git_decl(),
-        time_decl(),
-        ask_decl(),
-    ]
+    macro_rules! std_decls_rows {
+        ($(($name:ident, $decl:ident)),* $(,)?) => {
+            vec![ $( $crate::$decl() ),*, $crate::ask_decl() ]
+        };
+    }
+    crate::base_effects!(std_decls_rows)
 }
 
 /// Generate the Haskell module preamble that wraps user code in `eval` calls.
