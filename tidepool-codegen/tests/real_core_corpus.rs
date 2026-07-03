@@ -207,11 +207,15 @@ const KNOWN: &[(&str, &str, &str)] = &[
     // fired when the body forced it. Fixed in emit/expr.rs (Phase 2.5 only fast-
     // paths a Var alias when its target is already bound; otherwise defers it so
     // the topological sort evaluates it after its target). All three now MATCH.
-    (
-        "cycleTake",
-        "JIT-GAP",
-        "Known-Limit: cycle — self-referential lazy CAF (`xs = f a b xs`); needs knot-tying back-patch",
-    ),
+    //
+    // cycleTake was previously allow-listed as a `cycle` self-referential-CAF
+    // Known-Limit (expected JIT-GAP). It now MATCHes on both engines — `take n
+    // (cycle xs)` only forces a finite prefix, which both produce lazily and
+    // agree on — so the stale entry is pruned. A future regression will now fail
+    // LOUDLY as UNEXPECTED instead of being silently tolerated.
+    //
+    // The corpus is now fully green (every program MATCH). Add a new entry here
+    // only when a genuine, documented divergence is surfaced.
 ];
 
 #[test]
