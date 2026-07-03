@@ -158,6 +158,51 @@ impl DeclLog {
         self.turns.push(turn);
         self.generation()
     }
+
+    /// The declaration source texts of a **replayable** notebook skeleton: turn
+    /// sources in log order, but with fully-superseded turns dropped so a name
+    /// redefined across SEPARATE turns emits only its LATEST definition (#320).
+    ///
+    /// A flat `:program` replay concatenates top-level decls, so two turns that
+    /// both define `rf` (`rf x = x+1` then `rf x = x+2`) would emit two
+    /// conflicting `rf` equations — an overlapping-clause pair GHC rejects as
+    /// "multiple declarations of rf". The eval-time scope already resolves this
+    /// latest-wins (see [`cumulative_exports_before`]); this mirrors that rule
+    /// for the flat repaint.
+    ///
+    /// The rule matches the module scoping: a turn is dropped iff **every** head
+    /// it introduces (by head name) is redefined in a *later* turn. Consequences:
+    /// - Cross-turn redefinition (`rf` then `rf`): the earlier turn is fully
+    ///   superseded → dropped; only the latest `rf` source is emitted.
+    /// - A genuine multi-clause function in ONE turn (`f 0 = ..\nf n = ..`) is a
+    ///   single source with one head → never self-supersedes → emitted verbatim,
+    ///   both clauses preserved.
+    /// - A turn with no exportable head (e.g. a bare `instance`) is always kept.
+    ///
+    /// Limitation (matches the "one declaration per item" idiom's blind spot): a
+    /// turn co-defining a later-redefined head *and* a still-live head is NOT
+    /// fully superseded, so it is kept — the live head is preserved faithfully,
+    /// but the co-defined stale head can still duplicate in the flat replay. The
+    /// runtime resolves that via the gen-versioned module split; a flat skeleton
+    /// cannot, short of re-parsing the source per-binder. Single-head turns (the
+    /// documented norm) never hit this.
+    #[must_use]
+    pub fn replayable_sources(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for (i, turn) in self.turns.iter().enumerate() {
+            let heads: Vec<&str> = turn.items.iter().map(ExportItem::head_name).collect();
+            let fully_superseded = !heads.is_empty()
+                && heads.iter().all(|h| {
+                    self.turns[i + 1..]
+                        .iter()
+                        .any(|later| later.items.iter().any(|it| it.head_name() == *h))
+                });
+            if !fully_superseded {
+                out.extend(turn.sources.iter().map(String::as_str));
+            }
+        }
+        out
+    }
 }
 
 /// The import preamble the generated session module needs so user declarations
@@ -625,6 +670,61 @@ mod tests {
             .contains("import Tidepool.Session.Lib.G1 hiding (slug)"));
         assert!(r.source.contains("    slug,"));
         assert!(r.source.contains("    Greeter(..)"));
+    }
+
+    #[test]
+    fn replayable_sources_drops_cross_turn_redefinition() {
+        // #320: `rf x = x+1` then `rf x = x+2` in SEPARATE turns. A flat
+        // `:program` replay must emit ONLY the latest `rf`, not both (the two
+        // equations would be an overlapping-clause pair GHC rejects).
+        let mut log = DeclLog::new();
+        log.push(turn("rf x = x + 1", vec![val("rf")]));
+        log.push(turn("rf x = x + 2", vec![val("rf")]));
+        let srcs = log.replayable_sources();
+        assert_eq!(
+            srcs,
+            vec!["rf x = x + 2"],
+            "only the latest rf definition survives the flat repaint"
+        );
+    }
+
+    #[test]
+    fn replayable_sources_preserves_multiclause_single_item() {
+        // A GENUINE multi-clause function lives in ONE turn (one source, one
+        // head). It must survive verbatim — both clauses — never treated as a
+        // self-redefinition.
+        let mut log = DeclLog::new();
+        log.push(turn("f 0 = 0\nf n = n * f (n - 1)", vec![val("f")]));
+        let srcs = log.replayable_sources();
+        assert_eq!(srcs, vec!["f 0 = 0\nf n = n * f (n - 1)"]);
+        // And it still stands when an unrelated later turn is added.
+        log.push(turn("g y = y", vec![val("g")]));
+        assert_eq!(
+            log.replayable_sources(),
+            vec!["f 0 = 0\nf n = n * f (n - 1)", "g y = y"],
+        );
+    }
+
+    #[test]
+    fn replayable_sources_keeps_unredefined_and_orders_stably() {
+        // Interleaved: define a, define b, redefine a. Latest `a` and the sole
+        // `b` survive, in log order; the stale first `a` is dropped.
+        let mut log = DeclLog::new();
+        log.push(turn("a = 1", vec![val("a")]));
+        log.push(turn("b = 2", vec![val("b")]));
+        log.push(turn("a = 3", vec![val("a")]));
+        assert_eq!(log.replayable_sources(), vec!["b = 2", "a = 3"]);
+    }
+
+    #[test]
+    fn replayable_sources_keeps_headless_turn() {
+        // A turn with no exportable head (e.g. a bare instance) is always kept.
+        let mut log = DeclLog::new();
+        log.push(turn("instance Show Foo where show _ = \"foo\"", vec![]));
+        assert_eq!(
+            log.replayable_sources(),
+            vec!["instance Show Foo where show _ = \"foo\""],
+        );
     }
 
     #[test]

@@ -47,7 +47,23 @@ parse error, falls back to Stmt. The reported `kind` still comes back as
 function definition takes a try-then-fallback path, not a direct one.
 
 **decl items compile as their own module.** A signature and its binding —
-and all clauses of a multi-clause function — must be in the SAME item.
+and all clauses of a multi-clause function — must be in the SAME item. A
+genuine multi-clause function is therefore ONE item (`f 0 = ..\nf n = ..`);
+its clauses are one declaration and stay together.
+
+**Redefinition across separate items = REPLACE, latest wins (GHCi parity).**
+Re-running a decl that reuses a name (`rf x = x+1`, later `rf x = x+2` as two
+items) does NOT append an overlapping clause — the newest gen-versioned module
+`hiding`s the prior head, so at eval time only the latest `rf` is in scope
+(`SessionLib`'s `cumulative_exports_before`). `:program` mirrors this: it emits
+only each name's LATEST defining turn (`DeclLog::replayable_sources`, #320), so
+the replay is a compilable module, not two conflicting `rf` equations. This is
+distinct from a real multi-clause function in one item, which is preserved
+whole. (Edge case: a single item co-defining a later-redefined name *and* a
+still-live name is kept intact — the live name is faithful, but the stale
+co-defined head can duplicate in the flat `:program` text; the documented
+one-declaration-per-item idiom avoids this.)
+
 decl and stmt items share the same base import set (Prelude, effect verbs,
 `T.`/`Map.`/`Set.`/`L.`/etc., `Aeson`); when a project `Library` facade is on
 the include path, both also get `import Library` (guarded by a
