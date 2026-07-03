@@ -101,6 +101,18 @@ pub fn build_table_for_expr(expr: &CoreExpr) -> DataConTable {
     table
 }
 
+/// Arm the per-case hang watchdog and record this case's expression as the
+/// current item. A generated program that non-terminates (blackhole-class,
+/// JIT/eval loop) then aborts the suite after `TIDEPOOL_FIXTURE_TIMEOUT_SECS`
+/// with a truncated dump of the offending expression — enough to reconstruct
+/// the case, which a killed proptest run otherwise loses (the seed dies with
+/// the process).
+fn watchdog_this_case(expr: &CoreExpr) {
+    crate::watchdog::arm();
+    let label: String = format!("{expr:?}").chars().take(2000).collect();
+    crate::watchdog::begin(&label);
+}
+
 /// Compare JIT and interpreter results for a given expression.
 ///
 /// Evaluates the expression with both the tree-walking interpreter and the
@@ -108,6 +120,7 @@ pub fn build_table_for_expr(expr: &CoreExpr) -> DataConTable {
 /// failures (HeapOverflow, UnresolvedVar, HeapBridge) are skipped via
 /// `prop_assume!`.
 pub fn check_jit_vs_eval(expr: CoreExpr, nursery_size: usize) -> Result<(), TestCaseError> {
+    watchdog_this_case(&expr);
     let table = build_table_for_expr(&expr);
 
     // Tree-walking evaluation
@@ -195,6 +208,9 @@ pub fn check_jit_vs_eval_captured(
     table: &DataConTable,
     nursery_size: usize,
 ) -> CapturedOutcome {
+    // No watchdog_this_case here: the corpus drivers that call this label the
+    // watchdog with the FIXTURE NAME before each call, which identifies a hang
+    // better than an expression dump would.
     let mut heap_eval = VecHeap::new();
     let env_eval = env_from_datacon_table(table);
     let res_eval = eval(expr, &env_eval, &mut heap_eval);
@@ -224,6 +240,7 @@ pub fn check_jit_vs_eval_captured(
 /// compares results. If the original evaluation fails, the test case is
 /// skipped (passes only preserve behavior of well-defined programs).
 pub fn check_pass_preserves_eval(pass: &dyn Pass, expr: CoreExpr) -> Result<(), TestCaseError> {
+    watchdog_this_case(&expr);
     let mut heap1 = VecHeap::new();
     let env = Env::new();
 
