@@ -1,6 +1,7 @@
 //! Rendering logic for evaluated results.
 
 use serde_json::json;
+use tidepool_eval::shapes;
 use tidepool_eval::value::Value;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::types::{DataConId, Literal};
@@ -112,49 +113,32 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                 ("C#", [x]) => value_to_json(x, table, d),
 
                 // Text constructor: Text ByteArray off len → JSON string
-                // ByteArray# may be raw Value::ByteArray or lifted Con("ByteArray", [Value::ByteArray(..)])
-                ("Text", [ba_val, off_val, len_val]) => {
-                    // Recursively unwrap Con("ByteArray", [x]) layers to find
-                    // the raw ByteArray#. Sliced Text values (from splitOn etc.)
-                    // can produce multiple wrapping layers.
-                    let raw_ba = {
-                        let mut cur = ba_val;
-                        loop {
-                            match cur {
-                                Value::ByteArray(bs) => break Some(bs.clone()),
-                                Value::Lit(Literal::LitString(bytes)) => {
-                                    break Some(std::sync::Arc::new(std::sync::Mutex::new(
-                                        bytes.clone(),
-                                    )))
-                                }
-                                Value::Con(id, fields)
-                                    if con_name(*id, table) == "ByteArray" && fields.len() == 1 =>
-                                {
-                                    cur = &fields[0];
-                                }
-                                _ => break None,
-                            }
-                        }
-                    };
-                    if let Some(bs) = raw_ba {
-                        let borrowed = bs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let off = extract_boxed_int(off_val, table).unwrap_or(0) as usize;
-                        let len = extract_boxed_int(len_val, table).unwrap_or(borrowed.len() as i64)
-                            as usize;
-                        // Clamp BOTH ends: a malformed Text whose offset exceeds the
-                        // backing array (or whose off+len overflows) must degrade to an
-                        // empty/short slice, never a start>end slice panic — render runs
-                        // in-process in the MCP server. (proptest_render_json B-panic)
-                        let off = off.min(borrowed.len());
-                        let end = off.saturating_add(len).min(borrowed.len());
-                        match std::str::from_utf8(&borrowed[off..end]) {
+                ("Text", [ba_val, _, len_val]) => {
+                    match shapes::text_bytes_clamped(fields, table) {
+                        Some(bytes) => match std::str::from_utf8(&bytes) {
                             Ok(s) => json!(s),
-                            Err(_) => json!(format!("<Text invalid UTF-8 len={}>", len)),
+                            Err(_) => {
+                                // The reported length is the UNCLAMPED len
+                                // field (matching historical renderer
+                                // output), not the clamped slice length.
+                                let len = shapes::unbox_int(len_val, table).unwrap_or_else(|| {
+                                    shapes::text_backing(ba_val, table)
+                                        .map(|b| {
+                                            b.lock()
+                                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                                .len()
+                                                as i64
+                                        })
+                                        .unwrap_or(0)
+                                });
+                                json!(format!("<Text invalid UTF-8 len={}>", len))
+                            }
+                        },
+                        None => {
+                            let field_jsons: Vec<serde_json::Value> =
+                                fields.iter().map(|f| value_to_json(f, table, d)).collect();
+                            json!({"constructor": "Text", "fields": field_jsons})
                         }
-                    } else {
-                        let field_jsons: Vec<serde_json::Value> =
-                            fields.iter().map(|f| value_to_json(f, table, d)).collect();
-                        json!({"constructor": "Text", "fields": field_jsons})
                     }
                 }
 
@@ -238,9 +222,11 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
 
                 // Data.Vector.Vector: worker-wrapper inlines fields as
                 // Vector Int# Int# (Array# a). The Array# contents come from
-                // heap_bridge as Con(DataConId(0), elems). Extract and render
-                // the elements directly rather than delegating to value_to_json
-                // (which would hit the generic constructor case for the nameless Con).
+                // heap_bridge as Con(shapes::ARRAY_SENTINEL, elems) — a bare
+                // element vector with no real constructor (see
+                // ARRAY_SENTINEL's contract). Extract and render the elements
+                // directly rather than delegating to value_to_json (which
+                // would hit the generic constructor case for the nameless Con).
                 ("Vector", fields) => {
                     // Find the Array# field: it's the Con(_, elems) with elements,
                     // typically the last field (after Int# offset and length).
@@ -312,189 +298,39 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
 /// Keys are Text values (Key newtype is erased by GHC).
 fn map_to_json_object(val: &Value, table: &DataConTable, depth: usize) -> serde_json::Value {
     let mut entries = serde_json::Map::new();
-    collect_map_entries(val, table, depth, &mut entries);
+    shapes::walk_map_entries(val, table, depth, MAX_DEPTH, &mut |k, v, node_depth| {
+        let key_str = match value_to_json(k, table, node_depth) {
+            serde_json::Value::String(s) => s,
+            other => other.to_string(),
+        };
+        entries.insert(key_str, value_to_json(v, table, node_depth));
+    });
     serde_json::Value::Object(entries)
-}
-
-fn collect_map_entries(
-    val: &Value,
-    table: &DataConTable,
-    depth: usize,
-    out: &mut serde_json::Map<String, serde_json::Value>,
-) {
-    if depth > MAX_DEPTH {
-        return;
-    }
-    if let Value::Con(id, fields) = val {
-        let name = con_name(*id, table);
-        match (name, fields.as_slice()) {
-            ("Tip", []) => {}
-            // Bin size key value left right
-            ("Bin", [_size, k, v, left, right]) => {
-                collect_map_entries(left, table, depth + 1, out);
-                let key_str = match value_to_json(k, table, depth + 1) {
-                    serde_json::Value::String(s) => s,
-                    other => other.to_string(),
-                };
-                out.insert(key_str, value_to_json(v, table, depth + 1));
-                collect_map_entries(right, table, depth + 1, out);
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Extract an i64 from a potentially boxed Int value (LitInt or I#(I#(...(LitInt)))).
-/// Recursively unwraps nested Con("I#", [x]) layers.
-fn extract_boxed_int(val: &Value, table: &DataConTable) -> Option<i64> {
-    let mut cur = val;
-    loop {
-        match cur {
-            Value::Lit(Literal::LitInt(n)) => return Some(*n),
-            Value::Con(id, fields) if fields.len() == 1 && table.get_by_name("I#") == Some(*id) => {
-                cur = &fields[0];
-            }
-            _ => return None,
-        }
-    }
-}
-
-/// Try to extract a single char from a Value.
-/// Handles: LitChar, C#(LitChar), C#(Text(ByteArray(1 byte), 0, 1)).
-fn extract_char(val: &Value, table: &DataConTable) -> Option<char> {
-    match val {
-        Value::Lit(Literal::LitChar(c)) => Some(*c),
-        Value::Con(id, fields) if con_name(*id, table) == "C#" && fields.len() == 1 => {
-            extract_char_inner(&fields[0], table)
-        }
-        _ => None,
-    }
-}
-
-/// Extract a char from the inner value of a C# constructor (or bare value).
-fn extract_char_inner(val: &Value, table: &DataConTable) -> Option<char> {
-    match val {
-        Value::Lit(Literal::LitChar(c)) => Some(*c),
-        // Text(ByteArray#, off, len) where len == 1 — single-byte char
-        Value::Con(id, fields) if con_name(*id, table) == "Text" && fields.len() == 3 => {
-            let len = extract_boxed_int(&fields[2], table)?;
-            if len != 1 {
-                return None;
-            }
-            let off = extract_boxed_int(&fields[1], table).unwrap_or(0) as usize;
-            // Unwrap ByteArray layers to get the raw bytes
-            let raw_ba = {
-                let mut cur = &fields[0];
-                loop {
-                    match cur {
-                        Value::ByteArray(bs) => break Some(bs.clone()),
-                        Value::Lit(Literal::LitString(bytes)) => {
-                            break Some(std::sync::Arc::new(std::sync::Mutex::new(bytes.clone())))
-                        }
-                        Value::Con(cid, cfields)
-                            if con_name(*cid, table) == "ByteArray" && cfields.len() == 1 =>
-                        {
-                            cur = &cfields[0];
-                        }
-                        _ => break None,
-                    }
-                }
-            };
-            let bs = raw_ba?;
-            let borrowed = bs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let byte = *borrowed.get(off)?;
-            Some(byte as char)
-        }
-        _ => None,
-    }
 }
 
 /// Convert the BigNat# field of an IP/IN constructor to a decimal string.
 /// The field is a ByteArray of little-endian 64-bit limbs (from `bigNatLitBytes`).
 fn bignat_field_to_decimal(val: &Value, table: &DataConTable, depth: usize) -> String {
-    let bytes: Option<Vec<u8>> = match val {
-        Value::ByteArray(bs) => Some(
-            bs.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone(),
-        ),
-        Value::Lit(Literal::LitByteArray(bytes)) => Some(bytes.clone()),
-        // Unwrap a Con("ByteArray", [inner]) layer that heap_bridge occasionally emits
-        Value::Con(id, fields) if con_name(*id, table) == "ByteArray" && fields.len() == 1 => {
-            match &fields[0] {
-                Value::ByteArray(bs) => Some(
-                    bs.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone(),
-                ),
-                Value::Lit(Literal::LitByteArray(bytes)) => Some(bytes.clone()),
-                _ => None,
-            }
-        }
-        _ => {
-            // Unexpected shape — fall back to recursing as a plain value and
-            // rendering whatever comes out (e.g. a wrapped LitInt for IS-shaped
-            // sub-expressions).
-            let j = value_to_json(val, table, depth);
-            return match j {
-                serde_json::Value::Number(ref n) => n.to_string(),
-                serde_json::Value::String(ref s) => s.clone(),
-                _ => "<big-integer>".to_string(),
-            };
-        }
-    };
-    match bytes {
-        Some(b) => bignat_bytes_to_decimal(&b),
+    // Distinguish recognized-but-unreadable backing (ByteArray/LitByteArray/a
+    // lifted Con("ByteArray", [..]) layer) from an unrecognized shape: only
+    // the former reports "<big-integer>"; the latter falls back to recursing
+    // as a plain value (e.g. a wrapped LitInt for IS-shaped sub-expressions).
+    let is_recognized_shape = matches!(
+        val,
+        Value::ByteArray(_) | Value::Lit(Literal::LitByteArray(_))
+    ) || matches!(val, Value::Con(id, fields) if con_name(*id, table) == "ByteArray" && fields.len() == 1);
+    if !is_recognized_shape {
+        let j = value_to_json(val, table, depth);
+        return match j {
+            serde_json::Value::Number(ref n) => n.to_string(),
+            serde_json::Value::String(ref s) => s.clone(),
+            _ => "<big-integer>".to_string(),
+        };
+    }
+    match shapes::bignat_backing_bytes(val, table) {
+        Some(b) => shapes::bignat_bytes_to_decimal(&b),
         None => "<big-integer>".to_string(),
     }
-}
-
-/// Convert little-endian bignat bytes (padded to 8-byte boundary) to a decimal string.
-/// Each 8-byte chunk is one u64 limb; limbs are in little-endian order.
-fn bignat_bytes_to_decimal(bytes: &[u8]) -> String {
-    if bytes.is_empty() || bytes.iter().all(|&b| b == 0) {
-        return "0".to_string();
-    }
-    // Parse as little-endian u64 limbs
-    let mut limbs: Vec<u64> = bytes
-        .chunks(8)
-        .map(|chunk| {
-            let mut arr = [0u8; 8];
-            arr[..chunk.len()].copy_from_slice(chunk);
-            u64::from_le_bytes(arr)
-        })
-        .collect();
-    // Strip trailing zero limbs
-    while limbs.last() == Some(&0) {
-        limbs.pop();
-    }
-    if limbs.is_empty() {
-        return "0".to_string();
-    }
-    if limbs.len() == 1 {
-        return limbs[0].to_string();
-    }
-    if limbs.len() == 2 {
-        let val = (limbs[1] as u128) << 64 | (limbs[0] as u128);
-        return val.to_string();
-    }
-    // General: extract decimal digits via repeated division by 10.
-    // dividend = (rem_u128 << 64) | limb fits comfortably in u128 (rem < 10).
-    let mut digits: Vec<u8> = Vec::new();
-    while !limbs.is_empty() {
-        let mut rem: u128 = 0;
-        for limb in limbs.iter_mut().rev() {
-            let d = (rem << 64) | (*limb as u128);
-            *limb = (d / 10) as u64;
-            rem = d % 10;
-        }
-        digits.push(rem as u8 + b'0');
-        while limbs.last() == Some(&0) {
-            limbs.pop();
-        }
-    }
-    digits.reverse();
-    String::from_utf8(digits).expect("only ascii digits")
 }
 
 fn literal_to_json(lit: &Literal) -> serde_json::Value {
@@ -596,7 +432,7 @@ fn collect_list(
     let mut all_chars = true;
     let mut char_buf = String::new();
     for e in &elems {
-        if let Some(c) = extract_char(e, table) {
+        if let Some(c) = shapes::unbox_char(e, table) {
             char_buf.push(c);
         } else {
             all_chars = false;
@@ -813,12 +649,18 @@ mod tests {
     #[test]
     fn test_bignat_bytes_to_decimal_small() {
         // 1 = 0x01 in little-endian
-        assert_eq!(bignat_bytes_to_decimal(&[1, 0, 0, 0, 0, 0, 0, 0]), "1");
+        assert_eq!(
+            shapes::bignat_bytes_to_decimal(&[1, 0, 0, 0, 0, 0, 0, 0]),
+            "1"
+        );
         // 255 = 0xFF
-        assert_eq!(bignat_bytes_to_decimal(&[255, 0, 0, 0, 0, 0, 0, 0]), "255");
+        assert_eq!(
+            shapes::bignat_bytes_to_decimal(&[255, 0, 0, 0, 0, 0, 0, 0]),
+            "255"
+        );
         // u64::MAX = 18446744073709551615
         assert_eq!(
-            bignat_bytes_to_decimal(&[255, 255, 255, 255, 255, 255, 255, 255]),
+            shapes::bignat_bytes_to_decimal(&[255, 255, 255, 255, 255, 255, 255, 255]),
             "18446744073709551615"
         );
     }
@@ -829,7 +671,7 @@ mod tests {
         let mut bytes = vec![0u8; 16];
         bytes[8] = 1; // second limb = 1 → value = 1 << 64
         let expected = (1u128 << 64).to_string();
-        assert_eq!(bignat_bytes_to_decimal(&bytes), expected);
+        assert_eq!(shapes::bignat_bytes_to_decimal(&bytes), expected);
     }
 
     #[test]
