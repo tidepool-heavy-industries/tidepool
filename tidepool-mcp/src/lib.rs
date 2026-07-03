@@ -1565,42 +1565,9 @@ data Console a where
         assert!(text.contains("printed before timeout"));
     }
 
-    /// The gate state machine: pause parks a checkpointing thread, resume
-    /// releases it, abort errors it out; in_effect threads are not
-    /// runaways.
-    #[test]
-    fn test_pause_gate_park_resume_abort() {
-        // pause → thread parks at checkpoint → resume releases it
-        let gate = PauseGate::new();
-        gate.request_pause();
-        let g2 = Arc::clone(&gate);
-        let t = std::thread::spawn(move || g2.checkpoint());
-        assert!(gate.parked_or_in_effect(Duration::from_secs(2)));
-        gate.resume_run();
-        assert!(t.join().unwrap().is_ok());
-        gate.exit_effect();
-
-        // pause → park → abort errors the checkpoint
-        gate.request_pause();
-        let g3 = Arc::clone(&gate);
-        let t = std::thread::spawn(move || g3.checkpoint());
-        assert!(gate.parked_or_in_effect(Duration::from_secs(2)));
-        gate.request_abort("killed".into());
-        let err = t.join().unwrap().unwrap_err();
-        assert!(err.contains("killed"));
-
-        // a running gate with no checkpointing thread = runaway
-        let lone = PauseGate::new();
-        lone.request_pause();
-        assert!(!lone.parked_or_in_effect(Duration::from_millis(50)));
-
-        // ...unless the thread is inside an effect (e.g. a long LLM
-        // call): it will park at the NEXT boundary — not a runaway.
-        let busy = PauseGate::new();
-        busy.checkpoint().unwrap(); // enter effect (in_effect = true)
-        busy.request_pause();
-        assert!(busy.parked_or_in_effect(Duration::from_millis(50)));
-    }
+    // The gate state-machine unit test (pause/park/resume/abort/runaway) now
+    // lives with the shared gate in `tidepool_effect::pause`. The timeout-path
+    // integration tests below exercise the mcp-specific wiring around it.
 
     /// Timeout with a thread parked at the gate → paused continuation
     /// (not an error), and resume wakes it and collects the result.

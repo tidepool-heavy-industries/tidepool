@@ -3,9 +3,11 @@
 //! The Ask effect turns an eval into a coroutine: when the program hits an
 //! `Ask`/`AskWith` constructor the [`AskDispatcher`] parks the eval thread and
 //! emits a [`SessionMessage::Suspended`], and the server resumes it by sending a
-//! [`ResumeMsg`] back down the channel. [`PauseGate`] implements the orthogonal
-//! timeout-as-yield-point mechanism (park at the next effect boundary when a
-//! caller's window expires). [`EvalSession`] is the parked-continuation record
+//! [`ResumeMsg`] back down the channel. The orthogonal timeout-as-yield-point
+//! mechanism (park at the next effect boundary when a caller's window expires)
+//! is the SHARED [`tidepool_effect::pause::PauseGate`] — one gate, reused by the
+//! repl's dispatcher too; only this per-eval `AskDispatcher` and its thread-
+//! parking stay crate-local. [`EvalSession`] is the parked-continuation record
 //! the server keeps per suspended eval.
 
 use crate::{CapturedOutput, McpEffectHandler};
@@ -52,136 +54,10 @@ pub(crate) enum SessionKind {
     Paused,
 }
 
-/// The pause gate: timeout-as-yield-point. An eval only computes during
-/// an MCP call. When the caller's window expires, the server requests a
-/// pause and the eval thread parks itself at its NEXT effect dispatch
-/// (we own every dispatch, so every effect is a yield point). Between
-/// MCP calls: no compute, no LLM spend, nothing unobserved. Pure JIT
-/// stretches can't be interrupted — a thread that reaches no effect
-/// within a grace period is treated as a runaway and detached (the old
-/// timeout behavior, reserved for exactly that case).
-pub(crate) struct PauseGate {
-    pub(crate) inner: parking_lot::Mutex<GateInner>,
-    pub(crate) cv: parking_lot::Condvar,
-}
-
-pub(crate) struct GateInner {
-    pub(crate) state: GateState,
-    /// True while the thread is inside an effect handler (incl. blocked
-    /// on an ask). Used at the grace deadline to distinguish "will park
-    /// at the next boundary" from "pure compute runaway".
-    pub(crate) in_effect: bool,
-    /// True from eval-thread start until the JIT machine is created (the
-    /// cancel-handle installer callback fires at exactly that boundary).
-    /// A timeout during this phase is a slow GHC COMPILE, not a pure
-    /// runaway — the message must not blame user code for a cold cache. (#324)
-    pub(crate) compiling: bool,
-}
-
-#[derive(Clone, PartialEq)]
-pub(crate) enum GateState {
-    Run,
-    PauseRequested,
-    Paused,
-    AbortRequested(String),
-}
-
-impl PauseGate {
-    pub(crate) fn new() -> Arc<Self> {
-        Arc::new(PauseGate {
-            inner: parking_lot::Mutex::new(GateInner {
-                state: GateState::Run,
-                in_effect: false,
-                compiling: false,
-            }),
-            cv: parking_lot::Condvar::new(),
-        })
-    }
-
-    /// Called by the eval thread at every effect dispatch entry. Parks
-    /// while paused; returns Err on abort. On Ok, marks in_effect (the
-    /// caller MUST pair with exit_effect).
-    pub(crate) fn checkpoint(&self) -> Result<(), String> {
-        let mut g = self.inner.lock();
-        loop {
-            match &g.state {
-                GateState::Run => {
-                    g.in_effect = true;
-                    return Ok(());
-                }
-                GateState::AbortRequested(r) => {
-                    let r = r.clone();
-                    g.state = GateState::Run;
-                    return Err(r);
-                }
-                GateState::PauseRequested => {
-                    g.state = GateState::Paused;
-                    self.cv.notify_all(); // tell the server side we parked
-                }
-                GateState::Paused => {
-                    self.cv.wait(&mut g);
-                }
-            }
-        }
-    }
-
-    pub(crate) fn exit_effect(&self) {
-        self.inner.lock().in_effect = false;
-    }
-
-    /// Mark the compile phase (eval-thread start → JIT machine creation).
-    pub(crate) fn set_compiling(&self, on: bool) {
-        self.inner.lock().compiling = on;
-    }
-
-    /// Whether the eval thread was still in the compile phase (never
-    /// reached execution) — consulted by the timeout path to avoid
-    /// misdiagnosing a slow cold-cache compile as a pure infinite loop.
-    pub(crate) fn is_compiling(&self) -> bool {
-        self.inner.lock().compiling
-    }
-
-    pub(crate) fn request_pause(&self) {
-        let mut g = self.inner.lock();
-        if g.state == GateState::Run {
-            g.state = GateState::PauseRequested;
-        }
-    }
-
-    /// Wake a paused (or pause-pending) thread back into Run.
-    pub(crate) fn resume_run(&self) {
-        let mut g = self.inner.lock();
-        g.state = GateState::Run;
-        self.cv.notify_all();
-    }
-
-    /// Wake the thread with an abort: its current/next checkpoint
-    /// returns Err and the eval terminates as a normal error.
-    pub(crate) fn request_abort(&self, reason: String) {
-        let mut g = self.inner.lock();
-        g.state = GateState::AbortRequested(reason);
-        self.cv.notify_all();
-    }
-
-    /// Server side, after request_pause: wait up to `grace` for the
-    /// thread to park. Returns true if it parked OR is inside an effect
-    /// (it will park at the next boundary — long LLM/IO calls must not
-    /// be mistaken for runaways); false = pure-compute runaway.
-    pub(crate) fn parked_or_in_effect(&self, grace: std::time::Duration) -> bool {
-        let deadline = std::time::Instant::now() + grace;
-        let mut g = self.inner.lock();
-        loop {
-            if g.state == GateState::Paused {
-                return true;
-            }
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                return g.in_effect;
-            }
-            self.cv.wait_for(&mut g, deadline - now);
-        }
-    }
-}
+// The timeout-as-yield-point latch is the shared [`tidepool_effect::pause::PauseGate`]
+// (unified with the repl's copy — one gate, two dispatchers). Only the gate is
+// shared; the [`AskDispatcher`] and per-eval thread-parking below stay here.
+pub(crate) use tidepool_effect::pause::PauseGate;
 
 /// A suspended evaluation session, waiting for a resume call.
 pub(crate) struct EvalSession {
