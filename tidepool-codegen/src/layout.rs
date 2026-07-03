@@ -2,9 +2,18 @@
 //!
 //! These constants define the frozen layout of the VMContext struct and
 //! the various heap object types as `i32`/`i64` values suitable for
-//! Cranelift IR emission. `tidepool_heap::layout` defines the same
-//! layout using native Rust types for runtime use — the two modules
-//! must stay in sync.
+//! Cranelift IR emission. The heap-object *tag* discriminants (`TAG_*`,
+//! `THUNK_*`, and `LIT_TAG_*`) are NOT redefined here — they are DERIVED from
+//! (or re-exported from) `tidepool_heap::layout`, which is the single source of
+//! truth for the numeric ABI. This makes drift between the heap runtime and
+//! codegen a compile error rather than a silent divergence. All derivations are
+//! compile-time `as` casts / re-exports — zero runtime cost.
+
+/// The literal-value discriminant, re-exported from the heap crate so codegen
+/// and the runtime share one definition. `SsaVal::Raw` carries a `LitTag`
+/// (not a bare `i64`), so an unboxed value's tag can only be a real literal
+/// kind. Cast to `i64` with `as i64` at Cranelift `iconst`/`icmp_imm` sites.
+pub use tidepool_heap::layout::LitTag;
 
 // --- VMContext field offsets (i32 for Cranelift) ---
 
@@ -19,19 +28,19 @@ pub const VMCTX_TAIL_CALLEE_OFFSET: i32 = 24;
 /// Offset of tail_arg within VMContext.
 pub const VMCTX_TAIL_ARG_OFFSET: i32 = 32;
 
-// --- Heap object tags (u8) ---
+// --- Heap object tags (u8), derived from tidepool_heap::layout::HeapTag ---
 
-pub const TAG_CLOSURE: u8 = 0;
-pub const TAG_THUNK: u8 = 1;
-pub const TAG_CON: u8 = 2;
-pub const TAG_LIT: u8 = 3;
-pub const TAG_FORWARDED: u8 = 0xFF;
+pub const TAG_CLOSURE: u8 = tidepool_heap::layout::HeapTag::Closure as u8;
+pub const TAG_THUNK: u8 = tidepool_heap::layout::HeapTag::Thunk as u8;
+pub const TAG_CON: u8 = tidepool_heap::layout::HeapTag::Con as u8;
+pub const TAG_LIT: u8 = tidepool_heap::layout::HeapTag::Lit as u8;
+pub const TAG_FORWARDED: u8 = tidepool_heap::layout::TAG_FORWARDED;
 
-// --- Thunk state tags (u8) ---
+// --- Thunk state tags (u8), derived from ThunkStateTag ---
 
-pub const THUNK_UNEVALUATED: u8 = 0;
-pub const THUNK_BLACKHOLE: u8 = 1;
-pub const THUNK_EVALUATED: u8 = 2;
+pub const THUNK_UNEVALUATED: u8 = tidepool_heap::layout::ThunkStateTag::Unevaluated as u8;
+pub const THUNK_BLACKHOLE: u8 = tidepool_heap::layout::ThunkStateTag::BlackHole as u8;
+pub const THUNK_EVALUATED: u8 = tidepool_heap::layout::ThunkStateTag::Evaluated as u8;
 
 // --- HeapObject layout constants (i32/u64 for Cranelift and Rust) ---
 
@@ -52,17 +61,19 @@ pub const LIT_TAG_OFFSET: i32 = 8;
 pub const LIT_VALUE_OFFSET: i32 = 16;
 pub const LIT_TOTAL_SIZE: u64 = 24;
 
-// Lit tags (i64 for builder.ins().iconst)
-pub const LIT_TAG_INT: i64 = 0;
-pub const LIT_TAG_WORD: i64 = 1;
-pub const LIT_TAG_CHAR: i64 = 2;
-pub const LIT_TAG_FLOAT: i64 = 3;
-pub const LIT_TAG_DOUBLE: i64 = 4;
-pub const LIT_TAG_STRING: i64 = 5;
-pub const LIT_TAG_ADDR: i64 = 6;
-pub const LIT_TAG_BYTEARRAY: i64 = 7;
-pub const LIT_TAG_SMALLARRAY: i64 = 8;
-pub const LIT_TAG_ARRAY: i64 = 9;
+// Lit tags, re-exported as `LitTag` values from tidepool_heap::layout (the
+// single ABI source). `SsaVal::Raw` stores one directly; at Cranelift
+// `iconst`/`icmp_imm` sites write `LIT_TAG_INT as i64`.
+pub const LIT_TAG_INT: LitTag = LitTag::Int;
+pub const LIT_TAG_WORD: LitTag = LitTag::Word;
+pub const LIT_TAG_CHAR: LitTag = LitTag::Char;
+pub const LIT_TAG_FLOAT: LitTag = LitTag::Float;
+pub const LIT_TAG_DOUBLE: LitTag = LitTag::Double;
+pub const LIT_TAG_STRING: LitTag = LitTag::String;
+pub const LIT_TAG_ADDR: LitTag = LitTag::Addr;
+pub const LIT_TAG_BYTEARRAY: LitTag = LitTag::ByteArray;
+pub const LIT_TAG_SMALLARRAY: LitTag = LitTag::SmallArray;
+pub const LIT_TAG_ARRAY: LitTag = LitTag::Array;
 
 // Thunk layout
 pub const THUNK_STATE_OFFSET: i32 = 8;

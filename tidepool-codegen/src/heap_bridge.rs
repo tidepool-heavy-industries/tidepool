@@ -13,6 +13,13 @@ pub enum BridgeError {
     UnexpectedHeapTag(u8),
     #[error("unexpected lit tag: {0}")]
     UnexpectedLitTag(u8),
+    /// A `Value` variant with no heap representation reached `value_to_heap`
+    /// (only `Con`/`Lit`/`ByteArray` are convertible). Distinct from
+    /// `UnexpectedHeapTag` — this is a Rust-side `Value`-shape error, not a bad
+    /// byte read from the heap. It previously overloaded the `TAG_FORWARDED`
+    /// (255) sentinel and masqueraded as a heap-tag fault.
+    #[error("non-convertible Value (no heap representation)")]
+    NonConvertibleValue,
     #[error("null pointer")]
     NullPointer,
     #[error("nursery exhausted")]
@@ -157,9 +164,9 @@ unsafe fn heap_to_value_inner(
             let raw_value = *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const i64);
 
             match lit_tag {
-                x if x == LIT_TAG_INT => Ok(Value::Lit(Literal::LitInt(raw_value))),
-                x if x == LIT_TAG_WORD => Ok(Value::Lit(Literal::LitWord(raw_value as u64))),
-                x if x == LIT_TAG_CHAR => {
+                x if x == LIT_TAG_INT as i64 => Ok(Value::Lit(Literal::LitInt(raw_value))),
+                x if x == LIT_TAG_WORD as i64 => Ok(Value::Lit(Literal::LitWord(raw_value as u64))),
+                x if x == LIT_TAG_CHAR as i64 => {
                     // core-shapes.md §1: Char lit must hold valid Unicode codepoint.
                     // Fallback to \0 if invalid.
                     let c = char::from_u32(raw_value as u32);
@@ -169,9 +176,13 @@ unsafe fn heap_to_value_inner(
                     }
                     Ok(Value::Lit(Literal::LitChar(c.unwrap_or('\0'))))
                 }
-                x if x == LIT_TAG_FLOAT => Ok(Value::Lit(Literal::LitFloat(raw_value as u64))),
-                x if x == LIT_TAG_DOUBLE => Ok(Value::Lit(Literal::LitDouble(raw_value as u64))),
-                x if x == LIT_TAG_STRING => {
+                x if x == LIT_TAG_FLOAT as i64 => {
+                    Ok(Value::Lit(Literal::LitFloat(raw_value as u64)))
+                }
+                x if x == LIT_TAG_DOUBLE as i64 => {
+                    Ok(Value::Lit(Literal::LitDouble(raw_value as u64)))
+                }
+                x if x == LIT_TAG_STRING as i64 => {
                     // LitString# — raw pointer to [len: u64][bytes...]
                     let str_ptr = raw_value as *const u8;
                     if str_ptr.is_null() {
@@ -185,7 +196,7 @@ unsafe fn heap_to_value_inner(
                     let bytes = std::slice::from_raw_parts(bytes_ptr, len).to_vec();
                     Ok(Value::Lit(Literal::LitString(bytes)))
                 }
-                x if x == LIT_TAG_ADDR => {
+                x if x == LIT_TAG_ADDR as i64 => {
                     // Addr# is a legitimate intermediate runtime value: primops like
                     // PlusAddr / ShowDoubleAddr (see emit/primop.rs) emit
                     // SsaVal::Raw(_, LIT_TAG_ADDR), and any program that returns the
@@ -195,7 +206,7 @@ unsafe fn heap_to_value_inner(
                     // See core-shapes.md §1.
                     Ok(Value::Lit(Literal::LitString(vec![])))
                 }
-                x if x == LIT_TAG_BYTEARRAY => {
+                x if x == LIT_TAG_BYTEARRAY as i64 => {
                     // ByteArray# — raw pointer to [len: u64][bytes...]
                     let ba_ptr = raw_value as *const u8;
                     if ba_ptr.is_null() {
@@ -215,7 +226,7 @@ unsafe fn heap_to_value_inner(
                         std::sync::Mutex::new(bytes),
                     )))
                 }
-                x if x == LIT_TAG_SMALLARRAY || x == LIT_TAG_ARRAY => {
+                x if x == LIT_TAG_SMALLARRAY as i64 || x == LIT_TAG_ARRAY as i64 => {
                     // SmallArray# (8) / Array# (9) — boxed pointer arrays
                     // Layout: [u64 length][ptr0][ptr1]...[ptrN-1]
                     let arr_ptr = raw_value as *const u8;
@@ -385,7 +396,7 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
         |v: &Value| match v {
             Value::Con(id, fields) => Ok(ValueFrame::Con(*id, fields.iter().collect())),
             Value::Lit(_) | Value::ByteArray(_) => Ok(ValueFrame::Leaf(v as *const Value)),
-            _ => Err(BridgeError::UnexpectedHeapTag(255)),
+            _ => Err(BridgeError::NonConvertibleValue),
         },
         |frame: ValueFrame<*mut u8>| match frame {
             // SAFETY: leaf pointers reference nodes of `val`, alive for the
@@ -512,7 +523,7 @@ unsafe fn leaf_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u8, Br
             *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = data_ptr as i64;
             Ok(ptr)
         }
-        _ => Err(BridgeError::UnexpectedHeapTag(255)),
+        _ => Err(BridgeError::NonConvertibleValue),
     }
 }
 

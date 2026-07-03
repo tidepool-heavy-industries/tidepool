@@ -25,6 +25,17 @@ enum KnownValue {
 /// Environment mapping variables to their partial values.
 type PartialEnv = FxHashMap<VarId, PartialValue>;
 
+/// The result of partially evaluating one subtree: the index of the emitted
+/// node in the caller's rebuilt `new_nodes` buffer, paired with the abstract
+/// value that flows upward. A named struct (not a bare `(usize, PartialValue)`
+/// tuple) so call sites read `.idx` / `.value` instead of `.0` / `.1`.
+struct Residual {
+    /// Index of the emitted node in the caller's `new_nodes` buffer.
+    idx: usize,
+    /// The abstract (Known/Unknown) value produced by the subtree.
+    value: PartialValue,
+}
+
 /// First-order partial evaluation pass.
 pub struct PartialEval;
 
@@ -32,9 +43,9 @@ impl Pass for PartialEval {
     fn run(&self, expr: &mut CoreExpr) -> Changed {
         crate::apply_rewrite(expr, |e| {
             let mut new_nodes = Vec::new();
-            let (root_idx, _) =
+            let root =
                 partial_eval_at(e, e.nodes.len() - 1, &PartialEnv::default(), &mut new_nodes);
-            let new_expr = CoreExpr { nodes: new_nodes }.extract_subtree(root_idx);
+            let new_expr = CoreExpr { nodes: new_nodes }.extract_subtree(root.idx);
             // Unlike the redex-finding passes, PartialEval always produces a
             // rebuilt tree; signal Changed only when it actually differs.
             (new_expr != *e).then_some(new_expr)
@@ -63,28 +74,40 @@ fn partial_eval_at(
     idx: usize,
     env: &PartialEnv,
     new_nodes: &mut Vec<CoreFrame<usize>>,
-) -> (usize, PartialValue) {
+) -> Residual {
     match &expr.nodes[idx] {
         CoreFrame::Var(v) => match env.get(v) {
             Some(PartialValue::Known(kv)) => {
                 let ni = emit_known(kv, new_nodes);
-                (ni, PartialValue::Known(kv.clone()))
+                Residual {
+                    idx: ni,
+                    value: PartialValue::Known(kv.clone()),
+                }
             }
             _ => {
                 let ni = new_nodes.len();
                 new_nodes.push(CoreFrame::Var(*v));
-                (ni, PartialValue::Unknown)
+                Residual {
+                    idx: ni,
+                    value: PartialValue::Unknown,
+                }
             }
         },
         CoreFrame::Lit(lit) => {
             let ni = new_nodes.len();
             new_nodes.push(CoreFrame::Lit(lit.clone()));
-            (ni, PartialValue::Known(KnownValue::Lit(lit.clone())))
+            Residual {
+                idx: ni,
+                value: PartialValue::Known(KnownValue::Lit(lit.clone())),
+            }
         }
         CoreFrame::Con { tag, fields } => {
             let (fi, fv): (Vec<_>, Vec<_>) = fields
                 .iter()
-                .map(|&f| partial_eval_at(expr, f, env, new_nodes))
+                .map(|&f| {
+                    let r = partial_eval_at(expr, f, env, new_nodes);
+                    (r.idx, r.value)
+                })
                 .unzip();
             let ni = new_nodes.len();
             new_nodes.push(CoreFrame::Con {
@@ -99,28 +122,32 @@ fn partial_eval_at(
                 })
                 .collect::<Option<Vec<_>>>();
 
-            if let Some(kf) = known_fields {
-                (ni, PartialValue::Known(KnownValue::Con(*tag, kf)))
+            let value = if let Some(kf) = known_fields {
+                PartialValue::Known(KnownValue::Con(*tag, kf))
             } else {
-                (ni, PartialValue::Unknown)
-            }
+                PartialValue::Unknown
+            };
+            Residual { idx: ni, value }
         }
         CoreFrame::LetNonRec { binder, rhs, body } => {
-            let (rhs_i, rhs_v) = partial_eval_at(expr, *rhs, env, new_nodes);
+            let rhs_r = partial_eval_at(expr, *rhs, env, new_nodes);
             let mut new_env = env.clone();
-            new_env.insert(*binder, rhs_v.clone());
-            if matches!(rhs_v, PartialValue::Known(_)) {
+            new_env.insert(*binder, rhs_r.value.clone());
+            if matches!(rhs_r.value, PartialValue::Known(_)) {
                 // Known RHS: evaluate body with known binder, skip the let
                 partial_eval_at(expr, *body, &new_env, new_nodes)
             } else {
-                let (body_i, body_v) = partial_eval_at(expr, *body, &new_env, new_nodes);
+                let body_r = partial_eval_at(expr, *body, &new_env, new_nodes);
                 let ni = new_nodes.len();
                 new_nodes.push(CoreFrame::LetNonRec {
                     binder: *binder,
-                    rhs: rhs_i,
-                    body: body_i,
+                    rhs: rhs_r.idx,
+                    body: body_r.idx,
                 });
-                (ni, body_v)
+                Residual {
+                    idx: ni,
+                    value: body_r.value,
+                }
             }
         }
         CoreFrame::LetRec { bindings, body } => {
@@ -131,25 +158,28 @@ fn partial_eval_at(
             let nb: Vec<_> = bindings
                 .iter()
                 .map(|(b, r)| {
-                    let (ri, _) = partial_eval_at(expr, *r, &new_env, new_nodes);
+                    let ri = partial_eval_at(expr, *r, &new_env, new_nodes).idx;
                     (*b, ri)
                 })
                 .collect();
-            let (bi, bv) = partial_eval_at(expr, *body, &new_env, new_nodes);
+            let body_r = partial_eval_at(expr, *body, &new_env, new_nodes);
             let ni = new_nodes.len();
             new_nodes.push(CoreFrame::LetRec {
                 bindings: nb,
-                body: bi,
+                body: body_r.idx,
             });
-            (ni, bv)
+            Residual {
+                idx: ni,
+                value: body_r.value,
+            }
         }
         CoreFrame::Case {
             scrutinee,
             binder,
             alts,
         } => {
-            let (si, sv) = partial_eval_at(expr, *scrutinee, env, new_nodes);
-            match &sv {
+            let scrut = partial_eval_at(expr, *scrutinee, env, new_nodes);
+            match &scrut.value {
                 PartialValue::Known(KnownValue::Con(tag, field_vals)) => {
                     let matched = alts
                         .iter()
@@ -157,7 +187,7 @@ fn partial_eval_at(
                         .or_else(|| alts.iter().find(|a| matches!(&a.con, AltCon::Default)));
                     if let Some(alt) = matched {
                         let mut new_env = env.clone();
-                        new_env.insert(*binder, sv.clone());
+                        new_env.insert(*binder, scrut.value.clone());
                         if let AltCon::DataAlt(_) = &alt.con {
                             for (b, fv) in alt.binders.iter().zip(field_vals.iter()) {
                                 new_env.insert(*b, PartialValue::Known(fv.clone()));
@@ -165,7 +195,7 @@ fn partial_eval_at(
                         }
                         partial_eval_at(expr, alt.body, &new_env, new_nodes)
                     } else {
-                        emit_residual_case(expr, si, binder, alts, env, new_nodes)
+                        emit_residual_case(expr, scrut.idx, binder, alts, env, new_nodes)
                     }
                 }
                 PartialValue::Known(KnownValue::Lit(lit)) => {
@@ -175,45 +205,62 @@ fn partial_eval_at(
                         .or_else(|| alts.iter().find(|a| matches!(&a.con, AltCon::Default)));
                     if let Some(alt) = matched {
                         let mut new_env = env.clone();
-                        new_env.insert(*binder, sv.clone());
+                        new_env.insert(*binder, scrut.value.clone());
                         partial_eval_at(expr, alt.body, &new_env, new_nodes)
                     } else {
-                        emit_residual_case(expr, si, binder, alts, env, new_nodes)
+                        emit_residual_case(expr, scrut.idx, binder, alts, env, new_nodes)
                     }
                 }
-                PartialValue::Unknown => emit_residual_case(expr, si, binder, alts, env, new_nodes),
+                PartialValue::Unknown => {
+                    emit_residual_case(expr, scrut.idx, binder, alts, env, new_nodes)
+                }
             }
         }
         CoreFrame::PrimOp { op, args } => {
             let (ai, av): (Vec<_>, Vec<_>) = args
                 .iter()
-                .map(|&a| partial_eval_at(expr, a, env, new_nodes))
+                .map(|&a| {
+                    let r = partial_eval_at(expr, a, env, new_nodes);
+                    (r.idx, r.value)
+                })
                 .unzip();
             if let Some(result) = try_eval_primop(*op, &av) {
                 let ni = new_nodes.len();
                 new_nodes.push(CoreFrame::Lit(result.clone()));
-                (ni, PartialValue::Known(KnownValue::Lit(result)))
+                Residual {
+                    idx: ni,
+                    value: PartialValue::Known(KnownValue::Lit(result)),
+                }
             } else {
                 let ni = new_nodes.len();
                 new_nodes.push(CoreFrame::PrimOp { op: *op, args: ai });
-                (ni, PartialValue::Unknown)
+                Residual {
+                    idx: ni,
+                    value: PartialValue::Unknown,
+                }
             }
         }
         CoreFrame::App { fun, arg } => {
-            let (fi, _) = partial_eval_at(expr, *fun, env, new_nodes);
-            let (ai, _) = partial_eval_at(expr, *arg, env, new_nodes);
+            let fi = partial_eval_at(expr, *fun, env, new_nodes).idx;
+            let ai = partial_eval_at(expr, *arg, env, new_nodes).idx;
             let ni = new_nodes.len();
             new_nodes.push(CoreFrame::App { fun: fi, arg: ai });
-            (ni, PartialValue::Unknown)
+            Residual {
+                idx: ni,
+                value: PartialValue::Unknown,
+            }
         }
         CoreFrame::Lam { binder, body } => {
-            let (bi, _) = partial_eval_at(expr, *body, env, new_nodes);
+            let bi = partial_eval_at(expr, *body, env, new_nodes).idx;
             let ni = new_nodes.len();
             new_nodes.push(CoreFrame::Lam {
                 binder: *binder,
                 body: bi,
             });
-            (ni, PartialValue::Unknown)
+            Residual {
+                idx: ni,
+                value: PartialValue::Unknown,
+            }
         }
         CoreFrame::Join {
             label,
@@ -221,28 +268,34 @@ fn partial_eval_at(
             rhs,
             body,
         } => {
-            let (ri, _) = partial_eval_at(expr, *rhs, env, new_nodes);
-            let (bi, bv) = partial_eval_at(expr, *body, env, new_nodes);
+            let ri = partial_eval_at(expr, *rhs, env, new_nodes).idx;
+            let body_r = partial_eval_at(expr, *body, env, new_nodes);
             let ni = new_nodes.len();
             new_nodes.push(CoreFrame::Join {
                 label: *label,
                 params: params.clone(),
                 rhs: ri,
-                body: bi,
+                body: body_r.idx,
             });
-            (ni, bv)
+            Residual {
+                idx: ni,
+                value: body_r.value,
+            }
         }
         CoreFrame::Jump { label, args } => {
             let ai: Vec<_> = args
                 .iter()
-                .map(|&a| partial_eval_at(expr, a, env, new_nodes).0)
+                .map(|&a| partial_eval_at(expr, a, env, new_nodes).idx)
                 .collect();
             let ni = new_nodes.len();
             new_nodes.push(CoreFrame::Jump {
                 label: *label,
                 args: ai,
             });
-            (ni, PartialValue::Unknown)
+            Residual {
+                idx: ni,
+                value: PartialValue::Unknown,
+            }
         }
     }
 }
@@ -275,7 +328,7 @@ fn emit_residual_case(
     alts: &[Alt<usize>],
     env: &PartialEnv,
     new_nodes: &mut Vec<CoreFrame<usize>>,
-) -> (usize, PartialValue) {
+) -> Residual {
     let mut new_env = env.clone();
     new_env.insert(*binder, PartialValue::Unknown);
     let new_alts: Vec<_> = alts
@@ -285,7 +338,7 @@ fn emit_residual_case(
             for b in &alt.binders {
                 alt_env.insert(*b, PartialValue::Unknown);
             }
-            let (bi, _) = partial_eval_at(expr, alt.body, &alt_env, new_nodes);
+            let bi = partial_eval_at(expr, alt.body, &alt_env, new_nodes).idx;
             Alt {
                 con: alt.con.clone(),
                 binders: alt.binders.clone(),
@@ -299,7 +352,10 @@ fn emit_residual_case(
         binder: *binder,
         alts: new_alts,
     });
-    (ni, PartialValue::Unknown)
+    Residual {
+        idx: ni,
+        value: PartialValue::Unknown,
+    }
 }
 
 /// Try to evaluate a primitive operation on partially known arguments.

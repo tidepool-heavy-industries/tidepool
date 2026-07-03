@@ -67,6 +67,63 @@ pub enum RuntimeError {
     Cancelled,
 }
 
+/// The `kind` discriminant JIT code passes to [`runtime_error`] /
+/// [`runtime_error_with_msg`]. The numeric values are a FROZEN ABI: they are
+/// emitted as `iconst` args by the JIT (derived from the Haskell error-sentinel
+/// `VarId`, `extract_error_kind`), so the discriminants must stay byte-identical.
+///
+/// Centralising them here kills the previously hand-parallel `match kind` arms
+/// (one for the diagnostic name, one for the `RuntimeError`) that could — and
+/// did — disagree: the old `_` name was `"Unknown"` while the old `_` error
+/// variant was `UserError`. Now both derive from one decode, so an unknown
+/// discriminant is `UserError` consistently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum RuntimeErrorKind {
+    DivisionByZero = 0,
+    Overflow = 1,
+    UserError = 2,
+    Undefined = 3,
+    TypeMetadata = 4,
+}
+
+impl RuntimeErrorKind {
+    /// Decode the raw ABI discriminant. Unknown values map to `UserError`
+    /// (matching the historical `_ =>` fallback).
+    pub fn from_u64(kind: u64) -> Self {
+        match kind {
+            0 => Self::DivisionByZero,
+            1 => Self::Overflow,
+            3 => Self::Undefined,
+            4 => Self::TypeMetadata,
+            // includes 2 (UserError) and any out-of-range discriminant
+            _ => Self::UserError,
+        }
+    }
+
+    /// Short diagnostic name (used in the `[JIT] runtime_error` breadcrumb).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::DivisionByZero => "DivisionByZero",
+            Self::Overflow => "Overflow",
+            Self::UserError => "UserError",
+            Self::Undefined => "Undefined",
+            Self::TypeMetadata => "TypeMetadata",
+        }
+    }
+
+    /// The `RuntimeError` this kind raises (message-less variant).
+    pub fn into_error(self) -> RuntimeError {
+        match self {
+            Self::DivisionByZero => RuntimeError::DivisionByZero,
+            Self::Overflow => RuntimeError::Overflow,
+            Self::UserError => RuntimeError::UserError,
+            Self::Undefined => RuntimeError::Undefined,
+            Self::TypeMetadata => RuntimeError::TypeMetadata,
+        }
+    }
+}
+
 thread_local! {
     /// Registry of stack maps for JIT functions.
     /// This is set before calling into JIT code so gc_trigger can access it.
@@ -594,7 +651,7 @@ unsafe fn verify_heap_post_gc(
                     );
                 }
                 let lt = *obj.add(l::LIT_TAG_OFFSET as usize);
-                if lt as i64 > l::LIT_TAG_ARRAY {
+                if lt as i64 > l::LIT_TAG_ARRAY as i64 {
                     fail(
                         off,
                         idx,
@@ -1214,25 +1271,11 @@ pub extern "C" fn unresolved_var_trap(var_id: u64) -> *mut u8 {
 /// to Yield::Error.
 /// kind: 0 = divZeroError, 1 = overflowError, 2 = UserError, 3 = Undefined
 pub extern "C" fn runtime_error(kind: u64) -> *mut u8 {
-    let err_name = match kind {
-        0 => "DivisionByZero",
-        1 => "Overflow",
-        2 => "UserError",
-        3 => "Undefined",
-        4 => "TypeMetadata",
-        _ => "Unknown",
-    };
-    let msg = format!("[JIT] runtime_error called: kind={} ({})", kind, err_name);
+    let rk = RuntimeErrorKind::from_u64(kind);
+    let msg = format!("[JIT] runtime_error called: kind={} ({})", kind, rk.name());
     eprintln!("{}", msg);
     push_diagnostic(msg);
-    let err = match kind {
-        0 => RuntimeError::DivisionByZero,
-        1 => RuntimeError::Overflow,
-        2 => RuntimeError::UserError,
-        3 => RuntimeError::Undefined,
-        4 => RuntimeError::TypeMetadata,
-        _ => RuntimeError::UserError,
-    };
+    let err = rk.into_error();
     RUNTIME_ERROR.with(|cell| {
         let mut slot = cell.borrow_mut();
         if slot.is_none() {
@@ -1257,28 +1300,18 @@ pub extern "C" fn runtime_error_with_msg(kind: u64, msg_ptr: *const u8, msg_len:
     } else {
         String::new()
     };
-    let err_name = match kind {
-        0 => "DivisionByZero",
-        1 => "Overflow",
-        2 => "UserError",
-        3 => "Undefined",
-        4 => "TypeMetadata",
-        _ => "Unknown",
-    };
+    let rk = RuntimeErrorKind::from_u64(kind);
     let diag = format!(
         "[JIT] runtime_error called: kind={} ({}) msg={:?}",
-        kind, err_name, msg
+        kind,
+        rk.name(),
+        msg
     );
     eprintln!("{}", diag);
     push_diagnostic(diag);
-    let err = match kind {
-        2 if !msg.is_empty() => RuntimeError::UserErrorMsg(msg),
-        0 => RuntimeError::DivisionByZero,
-        1 => RuntimeError::Overflow,
-        2 => RuntimeError::UserError,
-        3 => RuntimeError::Undefined,
-        4 => RuntimeError::TypeMetadata,
-        _ => RuntimeError::UserError,
+    let err = match rk {
+        RuntimeErrorKind::UserError if !msg.is_empty() => RuntimeError::UserErrorMsg(msg),
+        other => other.into_error(),
     };
     RUNTIME_ERROR.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -2672,8 +2705,17 @@ pub(crate) struct ParkedStream {
     pub table: tidepool_repr::DataConTable,
 }
 
+/// Registry key for a parked stream. A `#[repr(transparent)]` newtype over the
+/// raw `u64` id so the [`PARKED_STREAMS`] map cannot be keyed by an arbitrary
+/// integer. The id CARRIED through JIT tail thunks stays a raw `u64` (that write
+/// is on the emit hot path); we wrap into `StreamId` only at the registry
+/// boundary (`park_stream` insert + the pull/probe lookups).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub(crate) struct StreamId(pub u64);
+
 thread_local! {
-    static PARKED_STREAMS: RefCell<std::collections::HashMap<u64, ParkedStream>> =
+    static PARKED_STREAMS: RefCell<std::collections::HashMap<StreamId, ParkedStream>> =
         RefCell::new(std::collections::HashMap::new());
     static STREAM_NEXT_ID: Cell<u64> = const { Cell::new(1) };
 }
@@ -2723,7 +2765,7 @@ pub(crate) fn park_stream(stream: ParkedStream) -> u64 {
         c.set(v + 1);
         v
     });
-    PARKED_STREAMS.with(|r| r.borrow_mut().insert(id, stream));
+    PARKED_STREAMS.with(|r| r.borrow_mut().insert(StreamId(id), stream));
     id
 }
 
@@ -2926,7 +2968,7 @@ unsafe extern "C" fn stream_chunk(vmctx: *mut VMContext, thunk: *mut u8) -> *mut
     // no producer code runs, so no panic/cancel containment needed here.
     let indexed = PARKED_STREAMS.with(|r| {
         let map = r.borrow();
-        map.get(&id)
+        map.get(&StreamId(id))
             .map(|ps| (ps.source.len(), ps.cons_tag, ps.nil_tag))
     });
     let Some((src_len, cons_tag, nil_tag)) = indexed else {
@@ -2964,7 +3006,7 @@ unsafe extern "C" fn stream_chunk(vmctx: *mut VMContext, thunk: *mut u8) -> *mut
     let pulled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         PARKED_STREAMS.with(|r| {
             let mut map = r.borrow_mut();
-            let Some(ps) = map.get_mut(&id) else {
+            let Some(ps) = map.get_mut(&StreamId(id)) else {
                 return ChunkPull::Missing;
             };
             let mut items = Vec::with_capacity(CHUNK);
@@ -3026,7 +3068,7 @@ unsafe extern "C" fn stream_chunk(vmctx: *mut VMContext, thunk: *mut u8) -> *mut
 
     if exhausted {
         PARKED_STREAMS.with(|r| {
-            r.borrow_mut().remove(&id);
+            r.borrow_mut().remove(&StreamId(id));
         });
     }
 
@@ -3106,7 +3148,8 @@ unsafe extern "C" fn stream_element(vmctx: *mut VMContext, thunk: *mut u8) -> *m
     let converted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         PARKED_STREAMS.with(|r| {
             let map = r.borrow();
-            map.get(&id).map(|ps| ps.source.get(idx, &ps.table))
+            map.get(&StreamId(id))
+                .map(|ps| ps.source.get(idx, &ps.table))
         })
     }));
 

@@ -11,6 +11,37 @@ use tidepool_repr::CoreExpr;
 /// Maximum number of iterations for the pipeline to avoid infinite loops.
 pub const MAX_PIPELINE_ITERATIONS: usize = 1000;
 
+/// Error from running the optimization pipeline to a fixed point.
+///
+/// The only failure mode is non-convergence within [`MAX_PIPELINE_ITERATIONS`]
+/// (a pass that keeps reporting a change). A dedicated type replaces the old
+/// `Result<_, String>` so callers match on structure, not a `format!`ed string;
+/// the human-readable text lives in the `Display` impl.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PipelineError {
+    /// A pass (or pass sequence) never stopped reporting changes.
+    MaxIterationsExceeded {
+        /// The cap that was hit ([`MAX_PIPELINE_ITERATIONS`]).
+        max: usize,
+        /// Names of the passes involved (the suspected non-terminating set).
+        passes: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for PipelineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PipelineError::MaxIterationsExceeded { max, passes } => write!(
+                f,
+                "optimization exceeded maximum iterations ({max}); \
+                 potential infinite loop in passes: {passes:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PipelineError {}
+
 /// Statistics from a pipeline run.
 #[derive(Debug, Clone, Default)]
 pub struct PipelineStats {
@@ -29,7 +60,7 @@ pub struct PipelineStats {
 pub fn run_pipeline(
     passes: &[Box<dyn Pass>],
     expr: &mut CoreExpr,
-) -> Result<PipelineStats, String> {
+) -> Result<PipelineStats, PipelineError> {
     let mut stats = PipelineStats {
         iterations: 0,
         pass_invocations: passes.iter().map(|p| (p.name().to_string(), 0)).collect(),
@@ -42,11 +73,10 @@ pub fn run_pipeline(
     loop {
         stats.iterations += 1;
         if stats.iterations > MAX_PIPELINE_ITERATIONS {
-            return Err(format!(
-                "Optimization pipeline exceeded maximum iterations ({}). Potential infinite loop in passes: {:?}",
-                MAX_PIPELINE_ITERATIONS,
-                passes.iter().map(|p| p.name()).collect::<Vec<_>>()
-            ));
+            return Err(PipelineError::MaxIterationsExceeded {
+                max: MAX_PIPELINE_ITERATIONS,
+                passes: passes.iter().map(|p| p.name().to_string()).collect(),
+            });
         }
 
         let mut changed: Changed = false;
@@ -78,13 +108,13 @@ pub fn default_passes() -> Vec<Box<dyn Pass>> {
 }
 
 /// Run the default optimization pipeline to fixed point.
-pub fn optimize(expr: &mut CoreExpr) -> Result<PipelineStats, String> {
+pub fn optimize(expr: &mut CoreExpr) -> Result<PipelineStats, PipelineError> {
     run_pipeline(&default_passes(), expr)
 }
 
 /// Run a single pass to fixed point (convenience).
 /// Returns the number of times the pass reported a change.
-pub fn run_pass_to_fixpoint(pass: &dyn Pass, expr: &mut CoreExpr) -> Result<usize, String> {
+pub fn run_pass_to_fixpoint(pass: &dyn Pass, expr: &mut CoreExpr) -> Result<usize, PipelineError> {
     let mut changes = 0;
     loop {
         if !pass.run(expr) {
@@ -92,11 +122,10 @@ pub fn run_pass_to_fixpoint(pass: &dyn Pass, expr: &mut CoreExpr) -> Result<usiz
         }
         changes += 1;
         if changes >= MAX_PIPELINE_ITERATIONS {
-            return Err(format!(
-                "Pass '{}' exceeded maximum iterations ({}) in run_pass_to_fixpoint.",
-                pass.name(),
-                MAX_PIPELINE_ITERATIONS
-            ));
+            return Err(PipelineError::MaxIterationsExceeded {
+                max: MAX_PIPELINE_ITERATIONS,
+                passes: vec![pass.name().to_string()],
+            });
         }
     }
     Ok(changes)
@@ -226,6 +255,13 @@ mod tests {
         let mut expr = dummy_expr();
         let result = run_pipeline(&[Box::new(InfinitePass)], &mut expr);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("exceeded maximum iterations"));
+        assert!(matches!(
+            result.as_ref().unwrap_err(),
+            PipelineError::MaxIterationsExceeded { .. }
+        ));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exceeded maximum iterations"));
     }
 }

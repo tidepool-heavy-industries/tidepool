@@ -99,8 +99,10 @@ pub struct EmitSession<'a> {
 /// SSA value with boxed/unboxed tracking.
 #[derive(Debug, Clone, Copy)]
 pub enum SsaVal {
-    /// Unboxed raw value (i64 or f64 bits) with its literal tag.
-    Raw(Value, i64),
+    /// Unboxed raw value (i64 or f64 bits) with its literal tag. The tag is a
+    /// [`crate::layout::LitTag`] (not a bare `i64`) so it can only ever be a
+    /// real literal kind — `as i64` at the `iconst` site keeps it zero-cost.
+    Raw(Value, crate::layout::LitTag),
     /// Heap pointer. Already declared via `declare_value_needs_stack_map`.
     HeapPtr(Value),
 }

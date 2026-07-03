@@ -1782,7 +1782,8 @@ impl EmitContext {
                 }
                 CoreFrame::App { fun, .. } => idx = *fun,
                 CoreFrame::Case { scrutinee, .. } => idx = *scrutinee,
-                _ => return 2, // fallback: UserError
+                // fallback: UserError (shared ABI discriminant, not a magic 2)
+                _ => return crate::host_fns::RuntimeErrorKind::UserError as u64,
             }
         }
     }
@@ -2860,6 +2861,7 @@ impl EmitContext {
                 ptr: *ptr,
                 field_indices: field_indices.clone(),
                 remaining_deps: deps,
+                filled: false,
             });
         }
 
@@ -3011,7 +3013,7 @@ impl EmitContext {
             std::mem::take(&mut args.ctx.letrec_state_mut(state_idx).deferred_con_deps);
         for dep in con_deps.iter_mut() {
             dep.remaining_deps.remove(binder);
-            if dep.remaining_deps.is_empty() && !dep.field_indices.is_empty() {
+            if !dep.filled && dep.remaining_deps.is_empty() {
                 for (i, &f_idx) in dep.field_indices.iter().enumerate() {
                     let field_val = if is_trivial_field(f_idx, args.sess.tree) {
                         let val = emit_subtree(
@@ -3049,7 +3051,7 @@ impl EmitContext {
                         CON_FIELDS_OFFSET + 8 * i as i32,
                     );
                 }
-                dep.field_indices.clear();
+                dep.filled = true;
             }
         }
         args.ctx.letrec_state_mut(state_idx).deferred_con_deps = con_deps;
@@ -3089,6 +3091,9 @@ impl EmitContext {
         // Phase 3d: Fill any deferred Con fields not already filled.
         let con_deps = std::mem::take(&mut args.ctx.letrec_state_mut(state_idx).deferred_con_deps);
         for dep in &con_deps {
+            if dep.filled {
+                continue;
+            }
             for (i, &f_idx) in dep.field_indices.iter().enumerate() {
                 let field_val = if is_trivial_field(f_idx, args.sess.tree) {
                     let val = emit_subtree(
@@ -3178,10 +3183,15 @@ pub(crate) struct ClosureCaptureSlot {
 /// simple-binding dependencies are satisfied.
 struct DeferredConDep {
     ptr: cranelift_codegen::ir::Value,
-    /// Field indices to fill. Emptied once filled (sentinel for "done").
+    /// Field indices to fill (the tree node indices of the Con's fields).
     field_indices: Vec<usize>,
     /// Simple bindings this Con depends on. Entries removed as deps are satisfied.
     remaining_deps: FxHashSet<VarId>,
+    /// Whether the fields have already been stored. An EXPLICIT done flag: an
+    /// unfilled zero-field Con is otherwise indistinguishable from a completed
+    /// one (the old code emptied `field_indices` as a "done" sentinel). Phase 3c
+    /// fills once and sets this; phase 3d skips deps already `filled`.
+    filled: bool,
 }
 
 enum LetCleanup {
@@ -3205,7 +3215,7 @@ fn emit_lit(
 
     match lit {
         Literal::LitInt(n) => {
-            let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_INT);
+            let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_INT as i64);
             builder
                 .ins()
                 .store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
@@ -3217,7 +3227,7 @@ fn emit_lit(
             Ok(SsaVal::HeapPtr(ptr))
         }
         Literal::LitWord(n) => {
-            let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_WORD);
+            let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_WORD as i64);
             builder
                 .ins()
                 .store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
@@ -3229,7 +3239,7 @@ fn emit_lit(
             Ok(SsaVal::HeapPtr(ptr))
         }
         Literal::LitChar(c) => {
-            let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_CHAR);
+            let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_CHAR as i64);
             builder
                 .ins()
                 .store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
@@ -3241,7 +3251,7 @@ fn emit_lit(
             Ok(SsaVal::HeapPtr(ptr))
         }
         Literal::LitFloat(bits) => {
-            let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_FLOAT);
+            let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_FLOAT as i64);
             builder
                 .ins()
                 .store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
@@ -3253,7 +3263,7 @@ fn emit_lit(
             Ok(SsaVal::HeapPtr(ptr))
         }
         Literal::LitDouble(bits) => {
-            let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_DOUBLE);
+            let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_DOUBLE as i64);
             builder
                 .ins()
                 .store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
@@ -3315,7 +3325,7 @@ fn emit_lit_bytearray_literal(
     builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
     let size = builder.ins().iconst(types::I16, LIT_TOTAL_SIZE as i64);
     builder.ins().store(MemFlags::trusted(), size, ptr, 1);
-    let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_BYTEARRAY);
+    let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_BYTEARRAY as i64);
     builder
         .ins()
         .store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
@@ -3372,7 +3382,7 @@ fn emit_lit_string(
     builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
     let size = builder.ins().iconst(types::I16, LIT_TOTAL_SIZE as i64);
     builder.ins().store(MemFlags::trusted(), size, ptr, 1);
-    let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_STRING);
+    let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_STRING as i64);
     builder
         .ins()
         .store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
@@ -3454,7 +3464,7 @@ pub(crate) fn ensure_heap_ptr(
             builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
             let size = builder.ins().iconst(types::I16, LIT_TOTAL_SIZE as i64);
             builder.ins().store(MemFlags::trusted(), size, ptr, 1);
-            let lit_tag_val = builder.ins().iconst(types::I8, lit_tag);
+            let lit_tag_val = builder.ins().iconst(types::I8, lit_tag as i64);
             builder
                 .ins()
                 .store(MemFlags::trusted(), lit_tag_val, ptr, LIT_TAG_OFFSET);
