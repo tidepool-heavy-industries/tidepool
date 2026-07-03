@@ -14,7 +14,7 @@
 use std::path::Path;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
-use tidepool_runtime::compile_and_run;
+use tidepool_testing::eval_harness::EvalHarness;
 
 struct NullDispatcher;
 impl DispatchEffect<()> for NullDispatcher {
@@ -33,16 +33,16 @@ fn eval_raw(code: &str) -> Result<serde_json::Value, String> {
     let pre = tidepool_mcp::build_preamble(&decls, true);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let src = tidepool_mcp::template_haskell(&pre, &stack, code, "", "", None, None);
-    let effects_dir = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let hs = root.join("haskell/lib");
     let lib = root.join(".tidepool/lib");
-    let include = [hs.as_path(), lib.as_path(), effects_dir.as_path()];
-    let mut d = NullDispatcher;
-    match compile_and_run(&src, "result", &include, &mut d, &()) {
-        Ok(v) => Ok(v.to_json()),
-        Err(e) => Err(format!("{e}")),
-    }
+    EvalHarness::new()
+        .with_stdlib()
+        .with_include(lib)
+        .with_effects_module()
+        .run(&src, "result", NullDispatcher)
+        .into_result()
+        .map(|v| v.to_json())
+        .map_err(|e| format!("{e}"))
 }
 
 fn eval_ok(code: &str, expected: serde_json::Value) {
@@ -57,7 +57,7 @@ fn eval_ok(code: &str, expected: serde_json::Value) {
 
 #[test]
 fn user_code_compiles_against_generated_bridged_decls() {
-    if std::env::var_os("TIDEPOOL_EXTRACT").is_none() {
+    if !tidepool_testing::eval_harness::extract_available() {
         eprintln!("skipping: TIDEPOOL_EXTRACT not set (no extract toolchain)");
         return;
     }

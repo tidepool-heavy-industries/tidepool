@@ -16,12 +16,7 @@
 //!    was misread by the bridge as data. Fixed: subtree literal scan +
 //!    poison-aware bridge.
 
-use std::path::Path;
-
-fn prelude_path() -> std::path::PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest.parent().unwrap().join("haskell").join("lib")
-}
+use tidepool_testing::eval_harness::EvalHarness;
 
 fn run_capture(body_decls: &str) -> Result<serde_json::Value, String> {
     let src = format!(
@@ -33,9 +28,10 @@ default (Int, Text)
 {body_decls}
 "#
     );
-    let pp = prelude_path();
-    let include = [pp.as_path()];
-    tidepool_runtime::compile_and_run_pure(&src, "result", &include)
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(&src, "result")
+        .into_result()
         .map(|v| v.to_json())
         .map_err(|e| format!("{e}"))
 }

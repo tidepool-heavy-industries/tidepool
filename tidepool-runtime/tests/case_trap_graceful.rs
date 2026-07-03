@@ -29,20 +29,11 @@
 // The injected reply is a constructed Value; variant names mirror Haskell.
 #![allow(clippy::enum_variant_names)]
 
-use std::path::{Path, PathBuf};
-
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler, Response};
 use tidepool_repr::DataConId;
 use tidepool_runtime::{compile_and_run, compile_and_run_pure, Value};
-
-fn prelude_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("haskell")
-        .join("lib")
-}
+use tidepool_testing::eval_harness::prelude_path;
 
 /// A `DataConId` that belongs to no constructor of any type referenced below.
 /// Real ids are content-addressed `fingerprint("module:conname")` hashes
