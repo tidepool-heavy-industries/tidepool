@@ -423,6 +423,14 @@ fn eval_at(
                 .collect::<Result<_, _>>()?;
             // Handle primops that need heap access for deep forcing
             match op {
+                // ShowDoubleAddr/ShowSignedDoubleAddr: the single-field-Con
+                // arms below are a deliberately narrower mirror of
+                // `shapes::unbox_double`/`unbox_int` — this function has no
+                // `&DataConTable` in scope (only `Value`/`Heap`), so they
+                // can't verify the con is actually named `D#`/`I#` and
+                // instead accept ANY single-field Con after forcing its
+                // field. Not a migration candidate without threading a
+                // table through the whole eval_at call chain.
                 PrimOpKind::ShowDoubleAddr => {
                     if arg_vals.len() != 1 {
                         return Err(EvalError::ArityMismatch {
@@ -517,17 +525,28 @@ fn eval_at(
                     let text = force(arg_vals[0].clone(), heap)?;
                     let s = match &text {
                         Value::Con(_, fields) if fields.len() == 3 => {
-                            let ba = force(fields[0].clone(), heap)?;
-                            let off = expect_int_like(&force(fields[1].clone(), heap)?)?;
-                            let len = expect_int_like(&force(fields[2].clone(), heap)?)?;
-                            let ba = expect_byte_array(&ba)?;
-                            let guard = ba.lock().map_err(|e| {
-                                EvalError::InternalError(format!("mutex poisoned: {e}"))
+                            // Force to WHNF locally (shapes.rs is heap-agnostic); an
+                            // off/len field that turns out boxed (`I#`) needs its
+                            // inner field forced too, so the table-free int unboxer
+                            // below sees a `Lit`, not an unevaluated thunk.
+                            let backing = force(fields[0].clone(), heap)?;
+                            let off = force_boxed_int_field(fields[1].clone(), heap, ids.i_hash)?;
+                            let len = force_boxed_int_field(fields[2].clone(), heap, ids.i_hash)?;
+                            let forced = [backing, off, len];
+                            // No `&DataConTable` reaches this arm (only the cached
+                            // `JsonConIds`), so recognize `I#` by the concrete id
+                            // already resolved into `ids`; a lifted `ByteArray`
+                            // wrapper con has no such id here and goes unrecognized.
+                            let bytes = crate::shapes::text_bytes_clamped_with(
+                                &forced,
+                                |_| false,
+                                |id| id == ids.i_hash,
+                            )
+                            .ok_or_else(|| EvalError::TypeMismatch {
+                                expected: "Text backing: ByteArray# or LitString",
+                                got: crate::error::ValueKind::Other(format!("{:?}", forced[0])),
                             })?;
-                            let (off, len) = (off.max(0) as usize, len.max(0) as usize);
-                            let end = off.saturating_add(len).min(guard.len());
-                            let start = off.min(end);
-                            String::from_utf8_lossy(&guard[start..end]).into_owned()
+                            String::from_utf8_lossy(&bytes).into_owned()
                         }
                         other => {
                             return Err(EvalError::TypeMismatch {
@@ -2473,6 +2492,20 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         | PrimOpKind::CloneArray
         | PrimOpKind::CloneMutableArray => Err(EvalError::UnsupportedPrimOp(op)),
     }
+}
+
+/// Force a field to WHNF; if that turns out to be a boxed `I#` (single-field
+/// Con matching `i_hash`), force its inner field too. Used by `JsonDecode` to
+/// hand `shapes::text_bytes_clamped_with` (heap-agnostic: it never forces) a
+/// value whose boxed-int layer, if present, already bottoms out in a `Lit`.
+fn force_boxed_int_field(v: Value, heap: &mut dyn Heap, i_hash: DataConId) -> Result<Value, EvalError> {
+    let mut forced = force(v, heap)?;
+    if let Value::Con(id, fields) = &mut forced {
+        if *id == i_hash && fields.len() == 1 {
+            fields[0] = force(fields[0].clone(), heap)?;
+        }
+    }
+    Ok(forced)
 }
 
 fn expect_byte_array(v: &Value) -> Result<&crate::value::SharedByteArray, EvalError> {

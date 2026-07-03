@@ -272,17 +272,12 @@ mod tests {
         }
 
         // Clear "ns1/" — expect count = 2.
-        // i64 is bridged as I#(LitInt(n)), so unwrap the boxing constructor.
+        // i64 is bridged as I#(LitInt(n)); unbox via the shared shape decoder.
         let prefix = "ns1/".to_string().to_value(&table).unwrap();
         let clear_req = Value::Con(clear_id, vec![prefix]);
         let clear_result = response_value(h.dispatch(0, &clear_req, &cx).unwrap(), &table);
-        let deleted_count = match &clear_result {
-            Value::Con(id, fields) if table.name_of(*id) == Some("I#") => match &fields[0] {
-                Value::Lit(tidepool_repr::Literal::LitInt(n)) => *n,
-                other => panic!("expected LitInt inside I#, got {:?}", other),
-            },
-            other => panic!("expected I#(LitInt) count from kvClear, got {:?}", other),
-        };
+        let deleted_count = tidepool_eval::shapes::unbox_int(&clear_result, &table)
+            .unwrap_or_else(|| panic!("expected I#(LitInt) count from kvClear, got {:?}", clear_result));
         assert_eq!(
             deleted_count, 2,
             "kvClear \"ns1/\" should have deleted 2 keys, got {deleted_count}"
