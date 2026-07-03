@@ -231,6 +231,13 @@ pub enum TurnOutcome {
         generation: u64,
         module: String,
         head: String,
+        /// The GHC-inferred (generalized) type of the declared VALUE head, as
+        /// the server had it at compile time — so `{decl:"heatOf"}` doesn't
+        /// cost the caller a `:t` round-trip (#317). `None` for
+        /// type/class/data/instance/import/fixity decls (no term-level type) or
+        /// when the best-effort probe failed — a probe failure never fails the
+        /// decl, it just omits the field.
+        type_display: Option<String>,
         /// Live binds whose defining expression references this (re)defined
         /// name — they still hold their OLD value (notebook-frame staleness).
         stale: Vec<String>,
@@ -289,15 +296,21 @@ impl TurnOutcome {
             TurnOutcome::Defined {
                 generation,
                 module,
+                type_display,
                 stale,
                 ..
-            } => serde_json::json!({
-                "defined": true,
-                "generation": generation,
-                "module": module,
-                "stale": stale,
-            })
-            .to_string(),
+            } => {
+                let mut obj = serde_json::json!({
+                    "defined": true,
+                    "generation": generation,
+                    "module": module,
+                    "stale": stale,
+                });
+                if let Some(ty) = type_display.as_deref().filter(|t| !t.is_empty()) {
+                    obj["type"] = serde_json::json!(ty);
+                }
+                obj.to_string()
+            }
             TurnOutcome::Meta(v) => {
                 serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
             }
