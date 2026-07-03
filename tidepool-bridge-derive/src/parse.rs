@@ -22,7 +22,21 @@ pub struct StructInfo {
     pub core_name: String,
     /// See [`VariantInfo::core_module`].
     pub core_module: Option<String>,
-    pub fields: Vec<(Ident, Type)>,
+    pub fields: Vec<FieldInfo>,
+}
+
+/// A single named struct field, with optional Haskell-side overrides parsed
+/// from a field-level `#[core(hs = "...", hs_type = "...")]` attribute.
+pub struct FieldInfo {
+    pub ident: Ident,
+    pub ty: Type,
+    /// Overrides the Haskell field NAME (default: snake_case → camelCase of the
+    /// Rust ident). E.g. `#[core(hs = "exitCode")]`.
+    pub hs_name: Option<String>,
+    /// Overrides the whole rendered Haskell field TYPE (default: mapped from the
+    /// Rust type). E.g. `pos: LspPosition` whose Haskell type is `Position`
+    /// uses `#[core(hs_type = "Position")]`.
+    pub hs_type: Option<String>,
 }
 
 pub enum DataInfo {
@@ -37,14 +51,26 @@ pub fn parse_input(input: &DeriveInput) -> Result<DataInfo, syn::Error> {
             let CoreAttr {
                 name: core_name,
                 module: core_module,
+                ..
             } = parse_core_attr(&input.attrs)?;
             let core_name = core_name.unwrap_or_else(|| input.ident.to_string());
             let fields = match &s.fields {
-                Fields::Named(f) => f
-                    .named
-                    .iter()
-                    .filter_map(|field| Some((field.ident.clone()?, field.ty.clone())))
-                    .collect(),
+                Fields::Named(f) => {
+                    let mut out = Vec::with_capacity(f.named.len());
+                    for field in &f.named {
+                        let Some(ident) = field.ident.clone() else {
+                            continue;
+                        };
+                        let attr = parse_core_attr(&field.attrs)?;
+                        out.push(FieldInfo {
+                            ident,
+                            ty: field.ty.clone(),
+                            hs_name: attr.hs,
+                            hs_type: attr.hs_type,
+                        });
+                    }
+                    out
+                }
                 Fields::Unit => Vec::new(),
                 Fields::Unnamed(_) => {
                     return Err(syn::Error::new_spanned(
@@ -77,6 +103,7 @@ pub fn parse_enum(input: &DeriveInput) -> Result<EnumInfo, syn::Error> {
         let CoreAttr {
             name: core_name,
             module: core_module,
+            ..
         } = parse_core_attr(&variant.attrs)?;
 
         let fields = match &variant.fields {
@@ -116,6 +143,10 @@ pub(crate) struct CoreAttr {
     /// `get_by_qualified_name("<module>.<name>")` to pick the correct
     /// constructor when name+arity collisions exist across source modules.
     pub(crate) module: Option<String>,
+    /// Field-level `hs = "..."`: overrides the generated Haskell field name.
+    pub(crate) hs: Option<String>,
+    /// Field-level `hs_type = "..."`: overrides the generated Haskell field type.
+    pub(crate) hs_type: Option<String>,
 }
 
 pub(crate) fn parse_core_attr(attrs: &[Attribute]) -> Result<CoreAttr, syn::Error> {
@@ -141,8 +172,28 @@ pub(crate) fn parse_core_attr(attrs: &[Attribute]) -> Result<CoreAttr, syn::Erro
                     } else {
                         Err(meta.error("expected string literal for 'module'"))
                     }
+                } else if meta.path.is_ident("hs") {
+                    let value = meta.value()?;
+                    let lit: Lit = value.parse()?;
+                    if let Lit::Str(s) = lit {
+                        out.hs = Some(s.value());
+                        Ok(())
+                    } else {
+                        Err(meta.error("expected string literal for 'hs'"))
+                    }
+                } else if meta.path.is_ident("hs_type") {
+                    let value = meta.value()?;
+                    let lit: Lit = value.parse()?;
+                    if let Lit::Str(s) = lit {
+                        out.hs_type = Some(s.value());
+                        Ok(())
+                    } else {
+                        Err(meta.error("expected string literal for 'hs_type'"))
+                    }
                 } else {
-                    Err(meta.error("unknown core attribute (expected 'name' or 'module')"))
+                    Err(meta.error(
+                        "unknown core attribute (expected 'name', 'module', 'hs', or 'hs_type')",
+                    ))
                 }
             })?;
         }

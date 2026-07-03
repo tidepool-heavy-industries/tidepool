@@ -6,8 +6,10 @@
 pub mod error;
 pub mod impls;
 pub mod json;
+pub mod record;
 pub mod traits;
 
 pub use error::*;
 pub use impls::get_resilient;
+pub use record::*;
 pub use traits::*;
