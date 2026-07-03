@@ -84,8 +84,16 @@ impl<H: tidepool_effect::dispatch::DispatchEffect<CapturedOutput>>
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<Response, EffectError> {
         // Checkpoint: unwind here (Err) if the turn was aborted (timeout).
+        // A gate abort is a cancellation — record it in the JIT's first-cause
+        // cell so the run boundary surfaces `RuntimeError::Cancelled` for a
+        // gate-fired abort exactly as it does for a flag-fired cancel.
         // On Ok, `in_effect` is set to true — we must call exit_effect() after.
-        self.gate.checkpoint().map_err(EffectError::Handler)?;
+        self.gate.checkpoint().map_err(|reason| {
+            tidepool_codegen::host_fns::set_first_cause(
+                tidepool_codegen::host_fns::RuntimeError::Cancelled,
+            );
+            EffectError::Handler(reason)
+        })?;
         let result = self.dispatch_inner(tag, request, cx);
         // Clear in_effect regardless of outcome: the effect handler has returned.
         self.gate.exit_effect();

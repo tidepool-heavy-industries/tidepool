@@ -129,7 +129,9 @@ thread_local! {
     /// This is set before calling into JIT code so gc_trigger can access it.
     static STACK_MAP_REGISTRY: RefCell<Option<*const StackMapRegistry>> = const { RefCell::new(None) };
 
-    /// Runtime error from JIT code. Checked after JIT returns.
+    /// The run's FIRST-CAUSE cell: the earliest `RuntimeError` recorded by
+    /// host/JIT code (first write wins — see [`set_first_cause`]). Boundaries
+    /// resolve it against their observed symptom via [`surface_error`].
     static RUNTIME_ERROR: RefCell<Option<RuntimeError>> = const { RefCell::new(None) };
 
     pub(crate) static GC_STATE: RefCell<Option<GcState>> = const { RefCell::new(None) };
@@ -424,6 +426,22 @@ fn cancel_requested() -> bool {
     })
 }
 
+/// Record `cause` as the run's pending first cause for the current thread,
+/// unless an earlier cause is already recorded — first write wins, because the
+/// earliest record is the one closest to the fault. Public so effect
+/// dispatchers can record a cooperative cancellation (a `PauseGate` abort
+/// observed at an effect checkpoint) as the same first cause a flag-fired
+/// cancel records; [`surface_error`] then surfaces `RuntimeError::Cancelled`
+/// regardless of which cancellation channel fired.
+pub fn set_first_cause(cause: RuntimeError) {
+    RUNTIME_ERROR.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(cause);
+        }
+    });
+}
+
 /// If cancellation has been requested, record `RuntimeError::Cancelled`
 /// (unless another error is already pending) and return `true`. Callers
 /// should then unwind by returning a poison pointer from their loop so the
@@ -431,12 +449,7 @@ fn cancel_requested() -> bool {
 #[inline]
 pub(crate) fn check_cancel_and_set_error() -> bool {
     if cancel_requested() {
-        RUNTIME_ERROR.with(|cell| {
-            let mut slot = cell.borrow_mut();
-            if slot.is_none() {
-                *slot = Some(RuntimeError::Cancelled);
-            }
-        });
+        set_first_cause(RuntimeError::Cancelled);
         true
     } else {
         false
@@ -489,9 +502,9 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
     // and skip `perform_gc`: the JIT's slow-path post-GC re-check will
     // fail (alloc_ptr/alloc_limit are unchanged), routing the next
     // allocation through `runtime_oom`'s poison path. `runtime_oom`'s
-    // `if slot.is_none()` guard preserves the `Cancelled` cause so the
-    // unwind surfaces correctly via `JitEffectMachine::run_pure`'s
-    // `take_runtime_error()` check, not as `HeapOverflow`.
+    // first-write-wins `set_first_cause` preserves the `Cancelled` cause so
+    // the unwind surfaces it via the boundary's `surface_error` resolution,
+    // not as `HeapOverflow`.
     //
     // Post-OOM stores into the poison are bounded by `POISON_BUF_SIZE`
     // (16 KiB, sized for worst-case Con writes — see PR #272).
@@ -1334,12 +1347,7 @@ pub extern "C" fn runtime_error_with_msg(kind: u64, msg_ptr: *const u8, msg_len:
         RuntimeErrorKind::UserError if !msg.is_empty() => RuntimeError::UserErrorMsg(msg),
         other => other.into_error(),
     };
-    RUNTIME_ERROR.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(err);
-        }
-    });
+    set_first_cause(err);
     error_poison_ptr()
 }
 
@@ -1349,16 +1357,11 @@ pub fn has_runtime_error() -> bool {
 }
 
 pub extern "C" fn runtime_oom() -> *mut u8 {
-    // Preserve a pre-existing runtime error if one is already set. The
-    // external-cancellation path (see `gc_trigger`) sets `RuntimeError::Cancelled`
-    // and then forces `runtime_oom` to fire; without this guard, `HeapOverflow`
-    // would overwrite the more specific cancellation cause.
-    RUNTIME_ERROR.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(RuntimeError::HeapOverflow);
-        }
-    });
+    // First-write-wins: the external-cancellation path (see `gc_trigger`)
+    // records `RuntimeError::Cancelled` and then forces `runtime_oom` to fire;
+    // `set_first_cause` keeps the more specific cancellation cause instead of
+    // overwriting it with `HeapOverflow`.
+    set_first_cause(RuntimeError::HeapOverflow);
     error_poison_ptr()
 }
 
@@ -1828,6 +1831,24 @@ unsafe extern "C" fn poison_trampoline_lazy_msg(
 /// and let the caller fall back (e.g. `Signal(sig)`).
 pub fn take_runtime_error() -> Option<RuntimeError> {
     RUNTIME_ERROR.with(|cell| cell.try_borrow_mut().ok().and_then(|mut e| e.take()))
+}
+
+/// The single first-cause resolver at the JIT boundary.
+///
+/// A pending [`RuntimeError`] is the run's *first cause*: it was recorded by
+/// the host fn or safepoint closest to the fault (`Cancelled` at a cancel
+/// safepoint or effect checkpoint, `HeapOverflow` in [`runtime_oom`], …).
+/// What a boundary observes afterwards is often only a downstream *symptom* —
+/// a signal, a failed (or poison-fed) heap-bridge conversion, a handler
+/// error. If a first cause is pending, take it (clearing the cell) and
+/// surface it; otherwise pass the symptomatic outcome through unchanged.
+/// Every boundary that chooses between the recorded cause and an observed
+/// symptom resolves through here.
+pub fn surface_error<T, E: From<RuntimeError>>(symptom: Result<T, E>) -> Result<T, E> {
+    match take_runtime_error() {
+        Some(cause) => Err(E::from(cause)),
+        None => symptom,
+    }
 }
 
 /// Reset the call depth counter. Call before each JIT invocation.

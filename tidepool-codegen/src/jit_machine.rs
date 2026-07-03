@@ -36,6 +36,14 @@ pub enum JitError {
     VarIdCollision(#[from] tidepool_repr::VarIdCollision),
 }
 
+/// A pending first-cause `RuntimeError` surfaces as a yield error — the shape
+/// `host_fns::surface_error` resolves to at `Result<_, JitError>` boundaries.
+impl From<crate::host_fns::RuntimeError> for JitError {
+    fn from(err: crate::host_fns::RuntimeError) -> Self {
+        JitError::Yield(err.into())
+    }
+}
+
 /// Kill-switch for the load-time duplicate-VarId check (#313 defense).
 /// Default ON; `TIDEPOOL_VARID_CHECK=0` disables it (bisection escape hatch).
 fn varid_check_enabled() -> bool {
@@ -459,13 +467,10 @@ impl JitEffectMachine {
             })
         }
         .map_err(JitError::Signal)?;
-        // Forcing may have triggered a `gc_trigger` cancel observation; prefer
-        // that over a symptomatic bridge error (see the corresponding comment
-        // in `run_pure`).
-        if let Some(err) = crate::host_fns::take_runtime_error() {
-            return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-        }
-        bridge_res.map_err(JitError::HeapBridge)
+        // A cancel observed during forcing (`gc_trigger`) records the first
+        // cause; the bridge outcome — even a successful bridge of a poison
+        // value — is only its symptom.
+        crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))
     }
 
     /// Run a pure (non-effectful) program to completion.
@@ -536,16 +541,11 @@ impl JitEffectMachine {
         }
         .map_err(JitError::Signal)?;
 
-        // Re-check for runtime errors recorded during thunk forcing. The
-        // bridge calls back into JIT via `heap_force`, which can trigger
-        // `gc_trigger` — and an external cancel observed there sets
-        // `RuntimeError::Cancelled` but surfaces only as a bridge-level
-        // `UnevaluatedThunk` failure (the forced thunk never completed).
-        // Prefer the cancellation cause over the symptomatic bridge error.
-        if let Some(err) = crate::host_fns::take_runtime_error() {
-            return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-        }
-        bridge_result.map_err(JitError::HeapBridge)
+        // The bridge calls back into JIT via `heap_force`, which can trigger
+        // `gc_trigger` — an external cancel observed there records
+        // `RuntimeError::Cancelled` as the first cause, while the bridge
+        // reports only its symptom (the forced thunk never completed).
+        crate::host_fns::surface_error(bridge_result.map_err(JitError::HeapBridge))
     }
 
     // ----------------------------------------------------------------------
@@ -1053,9 +1053,6 @@ unsafe fn resolve_tail_calls_protected(
     Ok(ptr)
 }
 
-/// Check for a pending RuntimeError (more specific) before falling back to the
-/// signal error. A runtime error like BadFunPtrTag is set by debug_app_check
-/// before the JIT continues and crashes — prefer it over the raw signal number.
 /// Normalized effect-response materialization: a stream to park, a Value to
 /// convert eagerly, or an already-materialized heap pointer (kill-switch
 /// drains). Shared by the one effect-drive loop below.
@@ -1129,13 +1126,20 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
                     })
                 }
                 .map_err(JitError::Signal)?;
-                if let Some(err) = crate::host_fns::take_runtime_error() {
-                    return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
-                }
-                let req_val = bridge_res.map_err(JitError::HeapBridge)?;
+                // Request forcing can record a first cause (e.g. a cancel in
+                // `gc_trigger`); the bridge outcome is only its symptom.
+                let req_val =
+                    crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
                 log::debug!(target: "tidepool::effects", "effect tag={} request={:?}", tag, req_val);
                 let cx = EffectContext::with_user(table, user);
-                let response = handlers.dispatch(tag, &req_val, &cx)?;
+                // A dispatcher that aborts at its `PauseGate` checkpoint
+                // records `RuntimeError::Cancelled` as the first cause before
+                // returning `EffectError::Handler`, so a gate-fired timeout
+                // surfaces the same cause as a flag-fired one. Ordinary
+                // handler errors record no cause and pass through unchanged.
+                let response = crate::host_fns::surface_error(
+                    handlers.dispatch(tag, &req_val, &cx).map_err(JitError::from),
+                )?;
 
                 // External cancellation safepoint at the effect-dispatch
                 // boundary. The handler we just called may itself have flipped
@@ -1337,29 +1341,24 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
     }
 }
 
+/// Signal-boundary adapter for `host_fns::surface_error`: the raw signal is
+/// the symptomatic fallback (a first cause like `BadFunPtrTag` is recorded by
+/// `debug_app_check` before the JIT crashes and outranks it). Names the
+/// faulting JIT function in the diagnostics when the fault address is known.
 fn runtime_error_or_signal(sig: i32) -> crate::yield_type::YieldError {
     let fault_addr = crate::signal_safety::FAULTING_ADDR.with(|c| c.get());
-    if let Some(err) = crate::host_fns::take_runtime_error() {
-        if fault_addr != 0 {
-            if let Some(name) = crate::debug::lookup_lambda_by_address(fault_addr) {
-                crate::host_fns::push_diagnostic(format!(
-                    "Faulting JIT function: {} (addr=0x{:x})",
-                    name, fault_addr
-                ));
-            }
+    if fault_addr != 0 {
+        if let Some(name) = crate::debug::lookup_lambda_by_address(fault_addr) {
+            crate::host_fns::push_diagnostic(format!(
+                "Signal {} in JIT function: {} (addr=0x{:x})",
+                sig, name, fault_addr
+            ));
         }
-        crate::yield_type::YieldError::from(err)
-    } else {
-        if fault_addr != 0 {
-            if let Some(name) = crate::debug::lookup_lambda_by_address(fault_addr) {
-                crate::host_fns::push_diagnostic(format!(
-                    "Signal {} in JIT function: {} (addr=0x{:x})",
-                    sig, name, fault_addr
-                ));
-            }
-        }
-        crate::yield_type::YieldError::Signal(sig)
     }
+    crate::host_fns::surface_error::<std::convert::Infallible, _>(Err(
+        crate::yield_type::YieldError::Signal(sig),
+    ))
+    .unwrap_err()
 }
 
 /// Detect a cons-list spine by reference: a chain of 2-field Cons sharing one
