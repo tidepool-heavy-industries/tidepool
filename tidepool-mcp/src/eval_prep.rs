@@ -143,10 +143,7 @@ pub fn effects_module_source(effects: &[EffectDecl]) -> String {
 /// cannot false-negative. A false positive (the token inside a string
 /// literal) only costs the ~+385ms quoter-module import, never correctness.
 pub fn uses_qq(src: &str) -> bool {
-    src.contains("[fmt|")
-        || src.contains("[j|")
-        || src.contains("[patch|")
-        || src.contains("[uri|")
+    src.contains("[fmt|") || src.contains("[j|") || src.contains("[patch|") || src.contains("[uri|")
 }
 
 pub fn build_effect_stack_type(effects: &[EffectDecl]) -> String {
@@ -675,7 +672,10 @@ mod tests {
         assert_eq!(a.last(), Some(&"Ask"));
         assert_eq!(a.len(), 10);
         // SG was cut (friction #37); the stack must NOT contain it.
-        assert!(!a.contains(&"SG"), "SG should have been removed from the stack");
+        assert!(
+            !a.contains(&"SG"),
+            "SG should have been removed from the stack"
+        );
     }
 
     #[test]

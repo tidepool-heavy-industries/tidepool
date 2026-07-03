@@ -81,19 +81,11 @@ where
 // Standard effect declarations
 // ---------------------------------------------------------------------------
 
-/// Console effect: print text output.
-pub fn console_decl() -> EffectDecl {
-    EffectDecl {
-        type_name: "Console",
-        description: "Print text output.",
-        constructors: &["Print :: Text -> Console ()"],
-        type_defs: &[],
-        helpers: &[
-            "-- | Emit a line of console output. Thin wrapper over the Print effect\n-- so chains never need `send (Print …)`.\nsay :: Text -> M ()\nsay = send . Print",
-            "-- | `say` on anything Showable (`say . show`).\nsayShow :: Show a => a -> M ()\nsayShow = say . show",
-        ],
-    }
-}
+// Console effect: `console_decl()` is generated from the single-source
+// definition in `effect_defs.rs` (the T6 spike prototype) — constructors,
+// description, and helper docstrings all live THERE, alongside the facts the
+// Rust half (`ConsoleReq`, dispatch) projects from the same table.
+crate::console_effect_def!(crate::effect_defs::effect_decl_projection);
 
 /// Key-value store effect.
 ///
@@ -212,7 +204,6 @@ pub fn fs_decl() -> EffectDecl {
         ],
     }
 }
-
 
 /// LSP effect: a node-addressed semantic code graph via the `tidepool-lsp-daemon`.
 ///
