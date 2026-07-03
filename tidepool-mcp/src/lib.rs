@@ -12,6 +12,8 @@ pub use eval_prep::*;
 mod effect_decls;
 pub use effect_decls::*;
 
+mod effect_defs;
+
 mod preamble;
 pub use preamble::*;
 

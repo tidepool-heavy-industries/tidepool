@@ -24,6 +24,8 @@ use std::path::PathBuf;
 
 use tidepool_mcp::{CapturedOutput, CollectEffectDecls, EffectDecl};
 
+pub(crate) mod effect_glue;
+
 pub mod handlers;
 pub use handlers::*;
 

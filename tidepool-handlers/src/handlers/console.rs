@@ -1,40 +1,29 @@
-use tidepool_bridge_derive::FromCore;
-use tidepool_effect::dispatch::{EffectContext, EffectHandler};
+use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
-use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
+use tidepool_mcp::CapturedOutput;
 
 // ============================================================================
 // Tag 0: Console
 // ============================================================================
 
-#[derive(FromCore)]
-pub enum ConsoleReq {
-    #[core(name = "Print")]
-    Print(String),
-}
+// `ConsoleReq` + `DescribeEffect` + the `EffectHandler` dispatch match are
+// generated from the single-source definition in
+// `tidepool-mcp/src/effect_defs.rs` — the same table that generates
+// `console_decl()`. Only the handler struct and the per-verb method bodies
+// below are hand-written.
+tidepool_mcp::console_effect_def!(crate::effect_glue::effect_rust_projection);
 
 #[derive(Clone)]
 pub struct ConsoleHandler;
 
-impl DescribeEffect for ConsoleHandler {
-    fn effect_decl() -> EffectDecl {
-        tidepool_mcp::console_decl()
-    }
-}
-
-impl EffectHandler<CapturedOutput> for ConsoleHandler {
-    type Request = ConsoleReq;
-    fn handle(
+impl ConsoleHandler {
+    fn print(
         &mut self,
-        req: ConsoleReq,
         cx: &EffectContext<'_, CapturedOutput>,
+        msg: String,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        match req {
-            ConsoleReq::Print(s) => {
-                cx.user().push(s);
-                cx.respond(())
-            }
-        }
+        cx.user().push(msg);
+        cx.respond(())
     }
 }
 
