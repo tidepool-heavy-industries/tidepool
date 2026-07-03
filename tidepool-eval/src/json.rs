@@ -23,13 +23,20 @@ use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 use tidepool_repr::{DataConId, DataConTable, Literal};
 
-/// `DataConId`s of every constructor needed to build a `Maybe Value`. `Copy`
-/// (all fields are `DataConId`) so it can be cached in a thread-local by value,
-/// with no borrow of the originating `DataConTable`.
+/// `DataConId`s of every constructor needed to build a `Value` (and optionally a
+/// `Maybe Value`). `Copy` so it can be cached in a thread-local by value, with no
+/// borrow of the originating `DataConTable`.
+///
+/// `just`/`nothing` are `Option<DataConId>` because `json_to_value` does not
+/// need them — only `decode_json_str` (the `JsonDecode` primop) does. This lets
+/// `tidepool-bridge`'s `ToCore for serde_json::Value` use `from_table` even when
+/// the program's `DataConTable` has no `Maybe` in scope.
 #[derive(Debug, Clone, Copy)]
 pub struct JsonConIds {
-    pub just: DataConId,
-    pub nothing: DataConId,
+    /// `Just` constructor (arity 1) — `None` when `Maybe` is not in scope.
+    pub just: Option<DataConId>,
+    /// `Nothing` constructor (arity 0) — `None` when `Maybe` is not in scope.
+    pub nothing: Option<DataConId>,
     pub object: DataConId,
     pub array: DataConId,
     pub string: DataConId,
@@ -48,14 +55,27 @@ pub struct JsonConIds {
 }
 
 impl JsonConIds {
-    /// Resolve every constructor id from a table. Returns `None` if ANY required
-    /// constructor is absent — i.e. the aeson `Value` / `Maybe` / `Data.Map`
-    /// closure is not in scope for this program. Callers surface a clean error
-    /// rather than fabricate a `Con` with a bogus id.
+    /// Resolve constructor ids from a table. Returns `None` if any core `Value` /
+    /// `Data.Map` / `Text` constructor is absent. `just`/`nothing` are optional:
+    /// they are set to `Some` only when `Maybe` is in scope. Callers that need
+    /// `decode_json_str` (the `JsonDecode` primop) must check that both are
+    /// `Some`; callers that only need `json_to_value` (e.g. `tidepool-bridge`)
+    /// can ignore them.
+    ///
+    /// Tip resolution uses `get_companion` first so that when both
+    /// `Data.Map.Tip` and `Data.Set.Tip` are present (cross-module closure) the
+    /// `Tip` that is actually a sibling of the resolved `Bin` is chosen.
     pub fn from_table(table: &DataConTable) -> Option<Self> {
+        let bin = table
+            .get_by_qualified_name("Data.Map.Bin")
+            .or_else(|| table.get_by_name_arity("Bin", 5))?;
+        let tip = table
+            .get_by_qualified_name("Data.Map.Tip")
+            .or_else(|| table.get_companion(bin, "Tip", 0))
+            .or_else(|| table.get_by_name_arity("Tip", 0))?;
         Some(JsonConIds {
-            just: table.get_by_name_arity("Just", 1)?,
-            nothing: table.get_by_name_arity("Nothing", 0)?,
+            just: table.get_by_name_arity("Just", 1),
+            nothing: table.get_by_name_arity("Nothing", 0),
             object: table.get_by_name_arity("Object", 1)?,
             array: table.get_by_name_arity("Array", 1)?,
             string: table.get_by_name_arity("String", 1)?,
@@ -65,12 +85,8 @@ impl JsonConIds {
             null: table.get_by_name_arity("Null", 0)?,
             true_con: table.get_by_name_arity("True", 0)?,
             false_con: table.get_by_name_arity("False", 0)?,
-            bin: table
-                .get_by_qualified_name("Data.Map.Bin")
-                .or_else(|| table.get_by_name_arity("Bin", 5))?,
-            tip: table
-                .get_by_qualified_name("Data.Map.Tip")
-                .or_else(|| table.get_by_name_arity("Tip", 0))?,
+            bin,
+            tip,
             i_hash: table.get_by_name_arity("I#", 1)?,
             text: table.get_by_name_arity("Text", 3)?,
             cons: table.get_by_name_arity(":", 2)?,
@@ -155,10 +171,17 @@ pub fn json_to_value(j: &serde_json::Value, ids: &JsonConIds) -> Value {
 
 /// Parse a JSON document and wrap the result: `Just v` on success, `Nothing` on
 /// any parse error. This is the semantics of `decodeJson :: Text -> Maybe Value`.
-pub fn decode_json_str(input: &str, ids: &JsonConIds) -> Value {
+///
+/// Returns `None` (rather than panicking) when `ids.just` or `ids.nothing` are
+/// absent, so callers can surface a clean error. In practice this only happens
+/// when the `DataConTable` lacks a `Maybe` closure — programs that call
+/// `decodeJson` always have it in scope.
+pub fn decode_json_str(input: &str, ids: &JsonConIds) -> Option<Value> {
+    let just = ids.just?;
+    let nothing = ids.nothing?;
     match serde_json::from_str::<serde_json::Value>(input) {
-        Ok(j) => Value::Con(ids.just, vec![json_to_value(&j, ids)]),
-        Err(_) => Value::Con(ids.nothing, vec![]),
+        Ok(j) => Some(Value::Con(just, vec![json_to_value(&j, ids)])),
+        Err(_) => Some(Value::Con(nothing, vec![])),
     }
 }
 

@@ -3299,7 +3299,13 @@ pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *m
     // Build the eval Value (GC-inert Rust data), then materialize on the heap
     // with one GC-and-retry (the deep spine converts stack-safely via the hylo
     // in value_to_heap).
-    let value = tidepool_eval::json::decode_json_str(&s, &ids);
+    let value = match tidepool_eval::json::decode_json_str(&s, &ids) {
+        Some(v) => v,
+        None => {
+            let msg = b"decodeJson: Maybe (Just/Nothing) constructors not in scope";
+            return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+        }
+    };
     match crate::heap_bridge::value_to_heap(&value, &mut *vmctx) {
         Ok(p) => p,
         Err(crate::heap_bridge::BridgeError::NurseryExhausted) => {
