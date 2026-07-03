@@ -37,6 +37,14 @@ with `tidepool-codegen/src/emit/primop.rs` and `define_primops!` in
 - **`Heap` is a trait**, not just `VecHeap` — the interpreter is written
   against `&mut dyn Heap` throughout, decoupling it from memory strategy on
   purpose, even though `VecHeap` is currently the only implementation.
+- **`shapes.rs` is the ONE home for Value-level data-shape facts** (Text
+  worker encode/decode with its backing forms and slice policies, `I#`-family
+  boxing, `Bool`, `Data.Map` `Bin`/`Tip`, the `NumberI` exact-int policy,
+  bignat limb decode, `ARRAY_SENTINEL`). `json.rs` builds on it for the
+  JSON-document policy; `tidepool-runtime`'s renderer and `tidepool-bridge`'s
+  impls decode through it. Don't hand-roll a Text/Map/boxing reader anywhere —
+  add it there. Heap BYTE layouts stay in `tidepool-codegen/src/heap_bridge.rs`
+  (that boundary is deliberate).
 
 ## Differential testing — how this crate is actually exercised
 

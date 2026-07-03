@@ -9,6 +9,7 @@ pub mod error;
 pub mod eval;
 pub mod heap;
 pub mod json;
+pub mod shapes;
 pub mod value;
 
 pub use env::*;

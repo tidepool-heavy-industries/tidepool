@@ -17,11 +17,14 @@
 //!
 //! Machine ints ride `NumberI` (exact); genuine floats ride `Number` (Double) —
 //! same BUG-8 split the bridge already used.
+//!
+//! The Value-level shape primitives (Text/list/Map/number construction) live
+//! in [`crate::shapes`] — this module owns only the JSON-document policy
+//! (key sorting, Maybe wrapping, the `JsonConIds` cache) on top of them.
 
 use crate::value::Value;
 use std::cell::Cell;
-use std::sync::{Arc, Mutex};
-use tidepool_repr::{DataConId, DataConTable, Literal};
+use tidepool_repr::{DataConId, DataConTable};
 
 /// `DataConId`s of every constructor needed to build a `Value` (and optionally a
 /// `Maybe Value`). `Copy` so it can be cached in a thread-local by value, with no
@@ -97,45 +100,33 @@ impl JsonConIds {
 
 /// Build the worker `Text ByteArray# Int# Int#` for a UTF-8 string (offset 0).
 fn text_value(s: &str, ids: &JsonConIds) -> Value {
-    let bytes = s.as_bytes().to_vec();
-    let len = bytes.len() as i64;
-    Value::Con(
-        ids.text,
-        vec![
-            Value::ByteArray(Arc::new(Mutex::new(bytes))),
-            Value::Lit(Literal::LitInt(0)),
-            Value::Lit(Literal::LitInt(len)),
-        ],
-    )
+    crate::shapes::make_text(s, ids.text)
 }
 
 /// Build a `[Value]` cons list (`:`/`[]`) from already-converted elements.
 fn list_value(items: Vec<Value>, ids: &JsonConIds) -> Value {
-    let mut acc = Value::Con(ids.nil, vec![]);
-    for v in items.into_iter().rev() {
-        acc = Value::Con(ids.cons, vec![v, acc]);
-    }
-    acc
+    crate::shapes::make_list(items, ids.cons, ids.nil)
 }
 
 /// Build a `Data.Map.Strict.Map Key Value` from key-sorted entries by
 /// divide-and-conquer (`Bin size k v left right` / `Tip`, size boxed as `I#`).
 fn map_value(entries: &[(&String, &serde_json::Value)], ids: &JsonConIds) -> Value {
     if entries.is_empty() {
-        return Value::Con(ids.tip, vec![]);
+        return crate::shapes::map_tip(ids.tip);
     }
     let mid = entries.len() / 2;
     let (k, v) = entries[mid];
     let left = map_value(&entries[..mid], ids);
     let right = map_value(&entries[mid + 1..], ids);
-    let key = text_value(k, ids);
-    let val = json_to_value(v, ids);
-    // Bin's leading !Int (subtree size) is boxed as I#(n) to match GHC's heap.
-    let size = Value::Con(
+    crate::shapes::map_bin_node(
+        entries.len() as i64,
+        text_value(k, ids),
+        json_to_value(v, ids),
+        left,
+        right,
+        ids.bin,
         ids.i_hash,
-        vec![Value::Lit(Literal::LitInt(entries.len() as i64))],
-    );
-    Value::Con(ids.bin, vec![size, key, val, left, right])
+    )
 }
 
 /// Convert a parsed `serde_json::Value` to the eval `Value` for the vendored
@@ -149,12 +140,7 @@ pub fn json_to_value(j: &serde_json::Value, ids: &JsonConIds) -> Value {
             Value::Con(ids.bool_con, vec![inner])
         }
         serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Con(ids.number_i, vec![Value::Lit(Literal::LitInt(i))])
-            } else {
-                let f = n.as_f64().unwrap_or(0.0);
-                Value::Con(ids.number, vec![Value::Lit(Literal::LitDouble(f.to_bits()))])
-            }
+            crate::shapes::json_number(n, ids.number_i, ids.number)
         }
         serde_json::Value::String(s) => Value::Con(ids.string, vec![text_value(s, ids)]),
         serde_json::Value::Array(arr) => {
