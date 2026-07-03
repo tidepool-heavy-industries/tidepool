@@ -21,12 +21,7 @@
 //! `text_breakon_replace_pure.rs`).
 
 use serde_json::json;
-use std::path::Path;
-
-fn prelude_path() -> std::path::PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest.parent().unwrap().join("haskell").join("lib")
-}
+use tidepool_testing::eval_harness::EvalHarness;
 
 /// Compile + run a pure `result = <body>` binding and return its JSON.
 /// `T.takeWhile` / `T.dropWhile` here are the REAL Data.Text functions
@@ -44,9 +39,9 @@ result :: _
 result = {body}
 "#
     );
-    let pp = prelude_path();
-    let include = [pp.as_path()];
-    tidepool_runtime::compile_and_run_pure(&src, "result", &include)
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(&src, "result")
         .expect("compile_and_run_pure failed")
         .to_json()
 }

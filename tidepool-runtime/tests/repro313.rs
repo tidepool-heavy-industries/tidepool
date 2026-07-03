@@ -3,7 +3,7 @@
 use std::path::Path;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
-use tidepool_runtime::compile_and_run;
+use tidepool_testing::eval_harness::EvalHarness;
 
 struct TupleDispatcher;
 impl DispatchEffect<()> for TupleDispatcher {
@@ -60,19 +60,18 @@ fn repro_313_patch_class() {
         None,
         None,
     );
-    let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
-        .expect("write effects module")
-        .leak() as &Path;
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let hs = root.join("haskell/lib").leak() as &Path;
     // .tidepool/lib supplies `Library` (the preamble imports it); the test
     // fixture dir supplies `Probe` (t1..t11 — relocated out of the live verb
     // library 2026-07-01 so vocab curation can't break this guard).
-    let lib = root.join(".tidepool/lib").leak() as &Path;
-    let probes = root.join("tidepool-runtime/tests/haskell").leak() as &Path;
-    let include = [hs, lib, probes, effects_dir];
-    let mut d = PatchDispatcher;
-    let r = compile_and_run(&src, "result", &include, &mut d, &());
+    let lib = root.join(".tidepool/lib");
+    let probes = root.join("tidepool-runtime/tests/haskell");
+    let harness = EvalHarness::new()
+        .with_stdlib()
+        .with_include(lib)
+        .with_include(probes)
+        .with_effects_module();
+    let r = harness.run(&src, "result", PatchDispatcher).into_result();
     match r {
         // `update :: M ()` — success means the occurrence-check case-dispatch ran
         // to completion (no #313 CASE TRAP); the unit result's exact JSON is moot.
@@ -107,19 +106,18 @@ fn repro_313() {
         None,
         None,
     );
-    let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
-        .expect("write effects module")
-        .leak() as &Path;
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let hs = root.join("haskell/lib").leak() as &Path;
     // .tidepool/lib supplies `Library` (the preamble imports it); the test
     // fixture dir supplies `Probe` (t1..t11 — relocated out of the live verb
     // library 2026-07-01 so vocab curation can't break this guard).
-    let lib = root.join(".tidepool/lib").leak() as &Path;
-    let probes = root.join("tidepool-runtime/tests/haskell").leak() as &Path;
-    let include = [hs, lib, probes, effects_dir];
-    let mut d = TupleDispatcher;
-    let r = compile_and_run(&src, "result", &include, &mut d, &());
+    let lib = root.join(".tidepool/lib");
+    let probes = root.join("tidepool-runtime/tests/haskell");
+    let harness = EvalHarness::new()
+        .with_stdlib()
+        .with_include(lib)
+        .with_include(probes)
+        .with_effects_module();
+    let r = harness.run(&src, "result", TupleDispatcher).into_result();
     // Regression gate (#313 t11): two occurrences → 2 (FORCE=1 → 3). The
     // TailCtx leak returned the breakOn remainder Text instead, trapping
     // downstream in the render path.
