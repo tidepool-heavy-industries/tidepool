@@ -103,6 +103,12 @@ pub const THUNK_EVALUATED: u8 = ThunkStateTag::Evaluated as u8;
 
 /// Discriminant for literal value types within a Lit HeapObject.
 /// Stored at offset 8 (first byte after header).
+///
+/// Tags 0–4 are scalar literals (the Lit value field holds an inline scalar);
+/// tags 5–9 are pointer-carrying literal shapes written by the codegen JIT (the
+/// value field holds a pointer). This enum is the SINGLE source of truth for the
+/// numeric discriminants — `tidepool_codegen::layout` re-exports it and derives
+/// its `LIT_TAG_*` constants from these variants, so do not fork the numbering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum LitTag {
@@ -111,6 +117,16 @@ pub enum LitTag {
     Char = 2,
     Float = 3,
     Double = 4,
+    /// `String#` string literal: value field holds a data pointer.
+    String = 5,
+    /// `Addr#`: value field holds a raw address.
+    Addr = 6,
+    /// `ByteArray#`: value field points to `[len: u64][bytes...]`.
+    ByteArray = 7,
+    /// `SmallArray#`: value field points to a boxed-element array.
+    SmallArray = 8,
+    /// `Array#`: value field points to a boxed-element array.
+    Array = 9,
 }
 
 impl LitTag {
@@ -121,6 +137,11 @@ impl LitTag {
             2 => Some(LitTag::Char),
             3 => Some(LitTag::Float),
             4 => Some(LitTag::Double),
+            5 => Some(LitTag::String),
+            6 => Some(LitTag::Addr),
+            7 => Some(LitTag::ByteArray),
+            8 => Some(LitTag::SmallArray),
+            9 => Some(LitTag::Array),
             _ => None,
         }
     }
@@ -145,6 +166,11 @@ impl std::fmt::Display for LitTag {
             LitTag::Char => f.write_str("Char#"),
             LitTag::Float => f.write_str("Float#"),
             LitTag::Double => f.write_str("Double#"),
+            LitTag::String => f.write_str("String#"),
+            LitTag::Addr => f.write_str("Addr#"),
+            LitTag::ByteArray => f.write_str("ByteArray#"),
+            LitTag::SmallArray => f.write_str("SmallArray#"),
+            LitTag::Array => f.write_str("Array#"),
         }
     }
 }
@@ -341,10 +367,19 @@ mod tests {
             LitTag::Char,
             LitTag::Float,
             LitTag::Double,
+            LitTag::String,
+            LitTag::Addr,
+            LitTag::ByteArray,
+            LitTag::SmallArray,
+            LitTag::Array,
         ] {
             assert_eq!(LitTag::from_byte(tag.as_byte()), Some(tag));
             assert_eq!(LitTag::try_from(tag.as_byte()), Ok(tag));
         }
+        // Numeric discriminants are the frozen heap ABI shared with codegen.
+        assert_eq!(LitTag::String as u8, 5);
+        assert_eq!(LitTag::Array as u8, 9);
+        assert_eq!(LitTag::from_byte(10), None);
         assert_eq!(LitTag::from_byte(255), None);
         assert_eq!(LitTag::try_from(255), Err(255));
     }

@@ -170,8 +170,12 @@ pub unsafe fn heap_to_value(
                             Some(layout::LitTag::Double) => Value::Lit(Literal::LitDouble(
                                 *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u64),
                             )),
-                            None => {
-                                // JIT uses extended lit tags (5=String, 7=ByteArray)
+                            // Extended pointer-carrying lit tags (String=5, Addr=6,
+                            // ByteArray=7, SmallArray=8, Array=9) and any unknown
+                            // byte: the differential comparison treats them as an
+                            // opaque placeholder. (These were previously the `None`
+                            // case, before `LitTag` covered tags 5–9.)
+                            _ => {
                                 Value::ByteArray(std::sync::Arc::new(std::sync::Mutex::new(vec![])))
                             }
                         };

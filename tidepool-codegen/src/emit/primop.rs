@@ -2263,7 +2263,7 @@ fn emit_int_compare(
     op: &PrimOpKind,
     cc: IntCC,
     args: &[SsaVal],
-    tag: i64,
+    tag: crate::layout::LitTag,
 ) -> Result<SsaVal, EmitError> {
     check_arity(op, 2, args.len())?;
     let a = unbox_int(pipeline, builder, vmctx, args[0]);
@@ -2279,7 +2279,7 @@ fn emit_double_compare(
     op: &PrimOpKind,
     cc: FloatCC,
     args: &[SsaVal],
-    tag: i64,
+    tag: crate::layout::LitTag,
 ) -> Result<SsaVal, EmitError> {
     check_arity(op, 2, args.len())?;
     let a = unbox_double(pipeline, builder, vmctx, args[0]);
@@ -2295,7 +2295,7 @@ fn emit_f32_compare(
     op: &PrimOpKind,
     cc: FloatCC,
     args: &[SsaVal],
-    tag: i64,
+    tag: crate::layout::LitTag,
 ) -> Result<SsaVal, EmitError> {
     check_arity(op, 2, args.len())?;
     let a = unbox_float(pipeline, builder, vmctx, args[0]);
@@ -2427,12 +2427,13 @@ fn unbox_addr(pipeline: &mut CodegenPipeline, builder: &mut FunctionBuilder, val
                     .load(types::I8, MemFlags::trusted(), v_final, LIT_TAG_OFFSET);
             let lit_tag_ext = builder.ins().uextend(types::I64, lit_tag);
 
-            let is_string = builder
-                .ins()
-                .icmp_imm(IntCC::Equal, lit_tag_ext, LIT_TAG_STRING);
+            let is_string =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, lit_tag_ext, LIT_TAG_STRING as i64);
             let is_ba = builder
                 .ins()
-                .icmp_imm(IntCC::Equal, lit_tag_ext, LIT_TAG_BYTEARRAY);
+                .icmp_imm(IntCC::Equal, lit_tag_ext, LIT_TAG_BYTEARRAY as i64);
             let needs_adj = builder.ins().bor(is_string, is_ba);
             let adjusted = builder.ins().iadd_imm(raw_val, 8);
             builder.ins().select(needs_adj, adjusted, raw_val)
@@ -2503,9 +2504,10 @@ fn unbox_bytearray(
             let lit_tag_ext = builder.ins().uextend(types::I64, lit_tag);
 
             // ByteArray# should also adjust for LIT_TAG_STRING if passed one.
-            let is_string = builder
-                .ins()
-                .icmp_imm(IntCC::Equal, lit_tag_ext, LIT_TAG_STRING);
+            let is_string =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, lit_tag_ext, LIT_TAG_STRING as i64);
             let adjusted = builder.ins().iadd_imm(raw_val, 8);
             builder.ins().select(is_string, adjusted, raw_val)
         }
@@ -2625,18 +2627,18 @@ fn unbox_numeric(
             let wrong_class = if load_type == types::F64 {
                 builder
                     .ins()
-                    .icmp_imm(IntCC::NotEqual, lit_tag, LIT_TAG_DOUBLE)
+                    .icmp_imm(IntCC::NotEqual, lit_tag, LIT_TAG_DOUBLE as i64)
             } else if load_type == types::F32 {
                 builder
                     .ins()
-                    .icmp_imm(IntCC::NotEqual, lit_tag, LIT_TAG_FLOAT)
+                    .icmp_imm(IntCC::NotEqual, lit_tag, LIT_TAG_FLOAT as i64)
             } else {
                 // Integer-width unbox: reject any lit-tag above CHAR — i.e.
                 // FLOAT(3) / DOUBLE(4) / STRING(5) / BYTEARRAY(7) / SMALLARRAY(8)
                 // / ARRAY(9). INT(0) / WORD(1) / CHAR(2) pass.
                 builder
                     .ins()
-                    .icmp_imm(IntCC::UnsignedGreaterThan, lit_tag, LIT_TAG_CHAR)
+                    .icmp_imm(IntCC::UnsignedGreaterThan, lit_tag, LIT_TAG_CHAR as i64)
             };
             let bad = builder.ins().bor(not_lit, wrong_class);
             let load_block = builder.create_block();
@@ -2724,7 +2726,7 @@ fn emit_lit_bytearray(
     builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
     let size = builder.ins().iconst(types::I16, LIT_TOTAL_SIZE as i64);
     builder.ins().store(MemFlags::trusted(), size, ptr, 1);
-    let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_BYTEARRAY);
+    let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_BYTEARRAY as i64);
     builder
         .ins()
         .store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
@@ -2742,14 +2744,14 @@ fn emit_lit_boxed_array(
     gc_sig: ir::SigRef,
     oom_func: ir::FuncRef,
     arr_ptr: Value,
-    lit_tag: i64,
+    lit_tag: crate::layout::LitTag,
 ) -> SsaVal {
     let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig, oom_func);
     let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);
     builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
     let size = builder.ins().iconst(types::I16, LIT_TOTAL_SIZE as i64);
     builder.ins().store(MemFlags::trusted(), size, ptr, 1);
-    let lt = builder.ins().iconst(types::I8, lit_tag);
+    let lt = builder.ins().iconst(types::I8, lit_tag as i64);
     builder
         .ins()
         .store(MemFlags::trusted(), lt, ptr, LIT_TAG_OFFSET);

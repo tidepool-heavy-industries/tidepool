@@ -145,7 +145,17 @@ pub(crate) struct RegistryGuard {
     /// stack frame as this guard (run / run_pure), which cannot have
     /// returned by the time Drop runs. VMContext has no custom Drop, so its
     /// bytes are valid on the stack even after the value is logically dropped.
-    reclaim: Option<(*mut Option<SessionState>, *const crate::context::VMContext)>,
+    reclaim: Option<ReclaimTargets>,
+}
+
+/// The two raw pointers `arm_reclaim` captures for the Drop-time heap reclaim.
+/// A named struct (not a bare tuple) so the `session_slot` and `vmctx` fields —
+/// both raw pointers — cannot be silently transposed at a call site.
+struct ReclaimTargets {
+    /// Points to `JitEffectMachine::session` (same call frame as the guard).
+    session_slot: *mut Option<SessionState>,
+    /// Points to the VMContext used for this run (same call frame; no Drop).
+    vmctx: *const crate::context::VMContext,
 }
 
 impl RegistryGuard {
@@ -165,7 +175,10 @@ impl RegistryGuard {
         vmctx: *const crate::context::VMContext,
     ) {
         if self.is_session {
-            self.reclaim = Some((session, vmctx));
+            self.reclaim = Some(ReclaimTargets {
+                session_slot: session,
+                vmctx,
+            });
         }
     }
 }
@@ -174,15 +187,19 @@ impl Drop for RegistryGuard {
     fn drop(&mut self) {
         // Reclaim the live heap buffer back onto the machine BEFORE
         // clear_run_scratch takes GcState (which would free active_buffer).
-        if let Some((sess, vmctx)) = self.reclaim {
+        if let Some(ReclaimTargets {
+            session_slot,
+            vmctx,
+        }) = self.reclaim
+        {
             // SAFETY: vmctx points into the enclosing run/run_pure stack
             // frame which is still live. VMContext has no custom Drop so its
             // bytes are intact even after the value is logically dropped.
-            // sess points to JitEffectMachine::session in the same frame.
+            // session_slot points to JitEffectMachine::session in the same frame.
             unsafe {
                 let ap = (*vmctx).alloc_ptr;
                 let (buf, cur) = crate::host_fns::reclaim_session_heap(ap);
-                if let Some(s) = (*sess).as_mut() {
+                if let Some(s) = (*session_slot).as_mut() {
                     s.heap = buf;
                     s.cursor = cur;
                 }
