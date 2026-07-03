@@ -193,15 +193,15 @@ impl SessionLib {
             .map(String::as_str)
     }
 
-    /// Every declaration turn's source text, in order — the replayable decl
-    /// half of a `:program` notebook repaint.
+    /// The replayable decl half of a `:program` notebook repaint: turn source
+    /// texts in log order, with fully-superseded turns dropped so a name
+    /// redefined across separate turns emits only its LATEST definition (#320)
+    /// instead of overlapping clauses GHC would reject. See
+    /// [`DeclLog::replayable_sources`] for the exact latest-wins rule (it mirrors
+    /// the eval-time module scoping).
     #[must_use]
     pub fn decl_sources(&self) -> Vec<&str> {
-        self.log
-            .turns
-            .iter()
-            .flat_map(|t| t.sources.iter().map(String::as_str))
-            .collect()
+        self.log.replayable_sources()
     }
 
     /// Names of every value/function binder introduced across all declaration
