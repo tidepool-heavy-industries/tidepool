@@ -523,9 +523,36 @@ impl TidepoolMcpServerImpl {
         if let Err(e) = write_generated_modules(&self.effects_source, &self.orchestrate_source) {
             eprintln!("[tidepool] failed to refresh generated Tidepool modules: {e}");
         }
-        let include_refs: Vec<PathBuf> = self.include.clone();
         let source_for_blocking = Arc::clone(&source);
         let captured = CapturedOutput::new();
+
+        // Fault-isolate the verb-library layer (issue #322): if a `.tidepool/lib`
+        // module is broken, `import Library` fails for EVERY eval, including the
+        // `writeFile` that would repair it. Probe the facade; on breakage, prepend
+        // a sanitized `Library.hs` (re-exporting only the modules that compile) so
+        // healthy verbs still work and the note names the culprit. The probe is
+        // blocking (shells out to extract) and memoized on a lib-snapshot hash, so
+        // the steady state is cheap — but run it off the async executor anyway.
+        let include_refs: Vec<PathBuf> = if self.has_user_library {
+            let lib_dirs = self.lib_dirs.clone();
+            let base_include = self.include.clone();
+            let layer = tokio::task::spawn_blocking(move || {
+                crate::isolate_lib_layer(&lib_dirs, &base_include)
+            })
+            .await
+            .unwrap_or_default();
+            if let Some(note) = layer.brick_note {
+                captured.push(note);
+            }
+            layer
+                .prepend_include
+                .into_iter()
+                .chain(self.include.iter().cloned())
+                .collect()
+        } else {
+            self.include.clone()
+        };
+
         let captured_for_blocking = captured.clone();
         let ask_tag = self.ask_tag;
         let effect_names = self.effect_names.clone();

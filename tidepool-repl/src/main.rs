@@ -136,18 +136,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // on the include path, the preamble auto-imports `Library` (see
     // `has_user_library`) so `.tidepool/lib` verbs (vocab/gitS/census/…) are in
     // scope — previously the REPL listed them in `:vocab` but couldn't call them.
+    let mut lib_dirs: Vec<std::path::PathBuf> = Vec::new();
     if let Some(root) = &project_root {
         let project_lib = root.join(".tidepool").join("lib");
         if project_lib.is_dir() {
-            base_include.push(project_lib);
+            lib_dirs.push(project_lib);
         }
     }
-    base_include.extend(tidepool_runtime::paths::global_lib_dirs());
+    lib_dirs.extend(tidepool_runtime::paths::global_lib_dirs());
+    base_include.extend(lib_dirs.iter().cloned());
 
     // Mirrors `has_user_library` (server.rs) — computed here too since
     // `base_include` is about to move into `cfg` and `session_decl_module_env`
     // needs the flag before that.
     let user_library = base_include.iter().any(|d| d.join("Library.hs").exists());
+
+    // Fault-isolate the verb-library layer (issue #322): if a `.tidepool/lib`
+    // module is broken, `import Library` fails for EVERY session turn, including
+    // the `writeFile` that would repair it. Probe the facade at startup and, on
+    // breakage, PREPEND a sanitized `Library.hs` (re-exporting only the modules
+    // that compile) so it shadows the broken one — healthy verbs stay in scope
+    // and a session can `writeChecked` a repair. This is the redeploy-recovery
+    // path for an effect-cut regression (a restart re-runs it); the eval server
+    // additionally re-probes per eval for mid-session breakage.
+    if user_library {
+        let layer = tidepool_mcp::isolate_lib_layer(&lib_dirs, &base_include);
+        if let Some(note) = &layer.brick_note {
+            eprintln!("[tidepool-repl] {note}");
+        }
+        if !layer.prepend_include.is_empty() {
+            let mut prefixed = layer.prepend_include;
+            prefixed.extend(base_include);
+            base_include = prefixed;
+        }
+    }
 
     // Per-session include trees live under a process-scoped temp dir.
     let session_root_base =

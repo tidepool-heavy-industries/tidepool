@@ -15,6 +15,9 @@ pub use effect_decls::*;
 mod preamble;
 pub use preamble::*;
 
+mod lib_isolate;
+pub use lib_isolate::*;
+
 mod resources;
 
 mod ask;
@@ -208,7 +211,7 @@ pub(crate) fn write_generated_modules(
 /// (the faster writer already renamed it) → spurious `NotFound`. The rename
 /// target is the same for all, and POSIX rename-onto-existing is atomic, so a
 /// double write just no-ops the loser.
-fn write_module_file(module_dir: &Path, name: &str, src: &str) -> std::io::Result<()> {
+pub(crate) fn write_module_file(module_dir: &Path, name: &str, src: &str) -> std::io::Result<()> {
     let module_path = module_dir.join(name);
     if !module_path.exists() {
         std::fs::create_dir_all(module_dir)?;
@@ -224,7 +227,7 @@ fn write_module_file(module_dir: &Path, name: &str, src: &str) -> std::io::Resul
 }
 
 /// FNV-1a 64-bit hash — deterministic, no external dependency.
-fn fnv1a_hash(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a_hash(bytes: &[u8]) -> u64 {
     let mut h: u64 = 14_695_981_039_346_656_037;
     for &b in bytes {
         h ^= b as u64;
