@@ -75,9 +75,11 @@ const MAX_DATA_SIZE: usize = 64 * 1024 * 1024; // 64MB
 
 /// RAII guard for scoped RUST_ROOTS registration: truncates the shadow-root
 /// registry back to its construction mark on drop, covering early returns.
-struct RootScope(usize);
+/// pub(crate): the jit_machine drive loops use it to root the continuation
+/// across GC-capable response materialization (see the Request arms).
+pub(crate) struct RootScope(usize);
 impl RootScope {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(crate::host_fns::rust_roots_mark())
     }
 }

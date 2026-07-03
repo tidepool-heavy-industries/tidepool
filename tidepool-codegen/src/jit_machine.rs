@@ -476,6 +476,24 @@ impl JitEffectMachine {
                     request,
                     continuation,
                 } => {
+                    // Root the continuation for the whole arm: request-forcing
+                    // (heap_force runs thunk code that can allocate → GC) and
+                    // response materialization (host_alloc_gc in
+                    // alloc_stream_tail_thunk / build_cons_cells) can collect
+                    // while the JIT stack is unwound — an UNROOTED continuation
+                    // tree is not evacuated and from-space is freed, so
+                    // `machine.resume(continuation, …)` would read freed
+                    // memory. The GC rewrites the rooted slot in place; resume
+                    // reads the updated pointer.
+                    let mut continuation = continuation;
+                    let _cont_root = heap_bridge::RootScope::new();
+                    // SAFETY: the slot lives on this frame until the arm ends
+                    // (after resume); _cont_root truncates the registry on drop.
+                    unsafe {
+                        crate::host_fns::register_rust_root(
+                            &mut continuation as *mut *mut u8,
+                        );
+                    }
                     // SAFETY: request is a valid heap pointer from the JIT effect dispatch.
                     let bridge_res = unsafe {
                         let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
@@ -1083,6 +1101,16 @@ impl JitEffectMachine {
                     request,
                     continuation,
                 } => {
+                    // Root the continuation across GC-capable request-forcing +
+                    // response materialization (see run_with_entry's Request arm).
+                    let mut continuation = continuation;
+                    let _cont_root = heap_bridge::RootScope::new();
+                    // SAFETY: slot lives on this frame until the arm ends.
+                    unsafe {
+                        crate::host_fns::register_rust_root(
+                            &mut continuation as *mut *mut u8,
+                        );
+                    }
                     // SAFETY: request is a valid heap pointer from the JIT effect dispatch.
                     let bridge_res = unsafe {
                         let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
@@ -1425,6 +1453,16 @@ impl JitEffectMachine {
                     request,
                     continuation,
                 } => {
+                    // Root the continuation across GC-capable request-forcing +
+                    // response materialization (see run_with_entry's Request arm).
+                    let mut continuation = continuation;
+                    let _cont_root = heap_bridge::RootScope::new();
+                    // SAFETY: slot lives on this frame until the arm ends.
+                    unsafe {
+                        crate::host_fns::register_rust_root(
+                            &mut continuation as *mut *mut u8,
+                        );
+                    }
                     let bridge_res = unsafe {
                         let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
                         crate::signal_safety::with_signal_protection(|| {
