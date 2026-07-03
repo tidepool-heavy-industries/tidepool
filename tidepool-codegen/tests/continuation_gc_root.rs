@@ -15,15 +15,13 @@
 //! must collect (repeatedly, with heap doubling) while the continuation is
 //! live, and the test ASSERTS the collections fired (gc_trigger_call_count).
 //!
-//! Honesty note: the unrooted-continuation failure is a silent use-after-free
-//! — glibc does not scrub freed pages, so on the un-fixed code this test's
-//! assertions can still pass by luck (verified: the negative control passed).
-//! What the test pins is the INVARIANT PATH: a collection provably fires
-//! inside the request window and the run must complete correctly — with the
-//! rooting fix that is correct by construction (the GC rewrites the rooted
-//! slot) rather than by allocator accident. The fix itself is mandated by
-//! `host_alloc_gc`'s documented contract ("any heap pointers the CALLER holds
-//! across this call must be RUST_ROOTS-registered").
+//! An unrooted-continuation failure is a silent use-after-free — the
+//! allocator does not scrub freed pages, so result assertions alone can pass
+//! by luck. What this test pins is the invariant path: a collection provably
+//! fires inside the request window and the run completes correctly, which the
+//! rooted slot makes true by construction (the GC rewrites it in place).
+//! The rooting is required by `host_alloc_gc`'s contract: any heap pointers
+//! the caller holds across it must be RUST_ROOTS-registered.
 
 use tidepool_codegen::effect_machine::EffContKind;
 use tidepool_codegen::jit_machine::JitEffectMachine;

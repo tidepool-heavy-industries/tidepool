@@ -1071,12 +1071,12 @@ enum ResponsePlan {
 /// caller's epilogue (value bridging in `run_with_entry`; deep-force/tenure in
 /// the `*_and_bind` variants; tuple projection in `_projected`).
 ///
-/// This is THE effect-boundary body — it was verbatim-triplicated across the
-/// three run loops (which differed only in Done epilogues, exec-context
-/// labels, and reclaim-arming position, all of which stay with the callers).
-/// It owns, exactly once: the continuation GC-rooting, the request bridge +
-/// runtime-error precedence, the effect-dispatch cancellation safepoint, and
-/// the Stream/Complete response planning with the lazy-spine re-park.
+/// This is THE effect-boundary body, shared by all three run methods — they
+/// differ only in their Done epilogues, exec-context labels, and
+/// reclaim-arming position. It owns the continuation GC-rooting, the request
+/// bridge + runtime-error precedence, the effect-dispatch cancellation
+/// safepoint, and the Stream/Complete response planning with the lazy-spine
+/// re-park.
 fn drive_to_done<U, H: DispatchEffect<U>>(
     machine: &mut CompiledEffectMachine,
     cancel_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
