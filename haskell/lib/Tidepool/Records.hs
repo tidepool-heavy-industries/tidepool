@@ -88,17 +88,24 @@ instance ToJSON UpdateOutcome where
   toJSON UpdateNoChange              = object ["ok" .= True, "changed" .= False]
   toJSON (UpdateDiff d)              = object ["ok" .= True, "changed" .= True, "diff" .= d]
 
--- | Outcome of @writeChecked@ (compute-check-commit). 'Written' carries the
--- file and the number of checks that held; 'WriteBlocked' carries the file and
--- the names of the failed checks (nothing was written).
+-- | Outcome of @writeChecked@ (compute-check-commit) and @writeCheckedIf@
+-- (content-hash compare-and-swap). 'Written' carries the file and the number
+-- of checks/preconditions that held; 'WriteBlocked' carries the file and the
+-- names of the failed checks (nothing was written); 'WriteConflict' is the CAS
+-- precondition miss — the file's current hash did not match the expected one,
+-- so nothing was written. It carries the file plus @expected@ vs @actual@
+-- blake3 hashes ('Nothing' = the file was absent) so a caller can re-read,
+-- recompute, and retry. Conflicts-as-data, matching the Diff/Edit philosophy.
 data WriteOutcome
   = Written { file :: Text, checks :: Int }
   | WriteBlocked { file :: Text, failed :: [Text] }
+  | WriteConflict { file :: Text, expected :: Maybe Text, actual :: Maybe Text }
   deriving (Show, Eq)
 
 instance ToJSON WriteOutcome where
-  toJSON (Written f c)       = object ["file" .= f, "written" .= True, "checks" .= c]
-  toJSON (WriteBlocked f xs) = object ["file" .= f, "written" .= False, "failed" .= xs]
+  toJSON (Written f c)         = object ["file" .= f, "written" .= True, "checks" .= c]
+  toJSON (WriteBlocked f xs)   = object ["file" .= f, "written" .= False, "failed" .= xs]
+  toJSON (WriteConflict f e a) = object ["file" .= f, "written" .= False, "conflict" .= True, "expected" .= e, "actual" .= a]
 
 -- | A git commit returned by 'gitLog' or 'gitShow'.
 -- The @data Commit@ decl is GENERATED (Tidepool.Records.Bridged); only its
