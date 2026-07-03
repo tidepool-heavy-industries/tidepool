@@ -501,10 +501,14 @@ mod tests {
                 "session decl import `{imp}` missing from eval preamble — drift"
             );
         }
-        // Same pragma block (one dialect everywhere).
+        // Same pragma block, modulo the decl-plane's intentional
+        // NoMonomorphismRestriction (decl_pragmas adds it so nullary
+        // constrained binds generalize; the eval expr module must NOT carry it
+        // — see decl_pragmas). Strip that one addition, then the blocks match.
+        let decl_pragmas_sans_nmr = env.pragmas.replace("NoMonomorphismRestriction, ", "");
         assert!(
-            preamble.contains(&env.pragmas),
-            "session decl pragmas diverged from eval preamble"
+            preamble.contains(&decl_pragmas_sans_nmr),
+            "session decl pragmas (minus decl-only NMR) diverged from eval preamble"
         );
         // The decl env is qualified-imports-only: no unqualified `import Library`
         // (it would clash with decl-defined names — see hide_library_names; the
