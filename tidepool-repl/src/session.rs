@@ -523,6 +523,15 @@ impl Session {
     /// Surfacing the decl error (e.g. the clean "Ambiguous occurrence") is the
     /// same actionable message the bare-decl form already gives.
     fn try_pure_bind_as_decl(&mut self, expr_text: &str, name: &str) -> Option<TurnOutcome> {
+        // do-block invariant: `input` (the payload lane) is in scope in EVERY item
+        // — but it is injected only on the value/stmt plane, never the decl plane.
+        // So a pure bind whose RHS references `input` must NOT be lowered to a decl
+        // (that silently drops `input` from scope — "not in scope: input"); return
+        // None so the caller materializes it on the value plane where `input` lives.
+        // (Regression from the M2 pure-bind→decl lowering; beta-harvest #1.)
+        if mentions_word(expr_text, "input") {
+            return None;
+        }
         let decl = pure_bind_to_decl(expr_text, name)?;
         match self.lib.define(&decl) {
             Ok(gen) => {
