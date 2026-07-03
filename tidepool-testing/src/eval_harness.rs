@@ -84,16 +84,15 @@ pub fn effects_include() -> PathBuf {
 /// 3. Otherwise fall back to the checked-in nix-profile wrapper
 ///    `<root>/haskell/tidepool-extract`.
 ///
-/// Returns `true` iff the resolved binary answers `--numeric-version` (which
-/// also transitively proves `ghc` is reachable, since extract shells out to it).
+/// Returns `true` iff the resolved binary runs and prints its usage banner
+/// (a no-args invocation — the extract binary has no version flag; any flag it
+/// doesn't recognize is treated as an input file and fails).
 pub fn extract_env() -> bool {
     fn runs(bin: &str) -> bool {
         std::process::Command::new(bin)
-            .arg("--numeric-version")
-            .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
+            .output()
+            .map(|out| out.status.success() && out.stdout.starts_with(b"Usage:"))
             .unwrap_or(false)
     }
 
