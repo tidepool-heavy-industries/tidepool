@@ -374,6 +374,22 @@ impl Session {
                 while end < items.len() {
                     match self.decl_shaped_text(&items[end]) {
                         Some(t) => {
+                            // Within-block REDEFINITION ends the segment: if this
+                            // item defines a head an earlier item in the segment
+                            // also DEFINES (not a sig+binding pair — those must
+                            // batch), batching would hand GHC two equation groups
+                            // it merges as multi-clause (first wins). Splitting
+                            // starts a new generation, so replace-latest applies,
+                            // matching the cross-turn GHCi-parity rule. (#320)
+                            let h = decl_head(t);
+                            if !h.is_empty()
+                                && defines_head(t, h)
+                                && texts
+                                    .iter()
+                                    .any(|prev| decl_head(prev) == h && defines_head(prev, h))
+                            {
+                                break;
+                            }
                             texts.push(t.to_string());
                             end += 1;
                         }
@@ -2126,6 +2142,31 @@ fn mentions_word(text: &str, word: &str) -> bool {
     false
 }
 
+/// Whether a decl item's text contains a DEFINING equation for `head` (as
+/// opposed to only a type signature `head :: T`). Drives the within-block
+/// redefinition split in the decl batcher (#320): sig+binding pairs must stay
+/// batched; two defining items for one head must not. A heuristic over lines
+/// (operator heads in prefix parens are not detected — GHC's verdict stays
+/// authoritative for what actually compiles).
+fn defines_head(text: &str, head: &str) -> bool {
+    if head.is_empty() {
+        return false;
+    }
+    text.lines().any(|l| {
+        let l = l.trim_start();
+        match l.strip_prefix(head) {
+            Some(rest) => {
+                let boundary_ok = rest
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '\''));
+                boundary_ok && !rest.trim_start().starts_with("::")
+            }
+            None => false,
+        }
+    })
+}
+
 /// For a discarding bind `pat <- e` (whose pattern binds no name, e.g. `_ <- e`
 /// or `(_,_) <- e`), return the RHS `e` so it can run as a plain effectful
 /// expression. The classifier has already confirmed a top-level `<-`, and a
@@ -2336,6 +2377,20 @@ mod slim_tests {
         assert_eq!(decl_head("infixr 5 >>>"), ">>>");
         assert_eq!(decl_head("(<+>) = (++)"), "<+>");
         assert_eq!(decl_head("(<>) x y = x <> y"), "<>");
+    }
+
+    #[test]
+    fn defines_head_sig_vs_binding() {
+        use super::defines_head;
+        // A binding defines; a bare signature does not.
+        assert!(defines_head("rf x = x + 1", "rf"));
+        assert!(!defines_head("rf :: Int -> Int", "rf"));
+        // Sig+binding in one item defines.
+        assert!(defines_head("rf :: Int -> Int\nrf x = x + 1", "rf"));
+        // Identifier-boundary: `rfoo` does not define `rf`.
+        assert!(!defines_head("rfoo x = 1", "rf"));
+        // Multi-clause single item defines (once).
+        assert!(defines_head("f 0 = 0\nf n = n", "f"));
     }
 
     #[test]
