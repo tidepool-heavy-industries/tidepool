@@ -299,39 +299,9 @@ pub fn http_decl() -> EffectDecl {
     }
 }
 
-/// Exec effect: run shell commands.
-pub fn exec_decl() -> EffectDecl {
-    EffectDecl {
-        type_name: "Exec",
-        description: "Run shell commands and capture output.",
-        constructors: &[
-            "Run :: Text -> Exec (Int, Text, Text)",
-            "RunIn :: Text -> Text -> Exec (Int, Text, Text)",
-            // Failure-isolating spawn: Left only when the process cannot be
-            // SPAWNED (sandbox/exec error). A command that runs and exits
-            // nonzero is Right (code, out, err) — the eval inspects the code.
-            "TryRun :: Text -> Exec (Either Text (Int, Text, Text))",
-            "TryRunIn :: Text -> Text -> Exec (Either Text (Int, Text, Text))",
-            // Shell-free exec: argv list, no sh -c. Safe with metachars ($1, globs).
-            "RunArgv :: [Text] -> Exec (Int, Text, Text)",
-        ],
-        type_defs: &[],
-        helpers: &[
-            "callCommand :: Text -> M ()\ncallCommand cmd = do { p <- run cmd; when (not (ok p)) (error (\"command failed (\" <> show p.exitCode <> \"): \" <> p.stderr)) }",
-            "readProcess :: Text -> M Text\nreadProcess cmd = do { p <- run cmd; if ok p then pure p.stdout else error (\"command failed (\" <> show p.exitCode <> \"): \" <> p.stderr) }",
-            "-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}\n-- (use `ok p` for the zero-exit check).\nrun :: Text -> M Proc\nrun cmd = (\\(ec, o, e) -> Proc ec o e) <$> send (Run cmd)",
-            "runIn :: Text -> Text -> M Proc\nrunIn dir cmd = (\\(ec, o, e) -> Proc ec o e) <$> send (RunIn dir cmd)",
-            // Isolating variants: spawn failure becomes `Left err` instead of
-            // aborting the eval. A nonzero exit is NOT a failure here — it
-            // arrives as `Right (code, out, err)`, so the common eval-killer
-            // (readProcess on nonzero exit) is avoided by inspecting the code.
-            "tryRun :: Text -> M (Either Text Proc)\ntryRun cmd = send (TryRun cmd) <&> fmap (\\(ec, o, e) -> Proc ec o e)",
-            "tryRunIn :: Text -> Text -> M (Either Text Proc)\ntryRunIn dir cmd = send (TryRunIn dir cmd) <&> fmap (\\(ec, o, e) -> Proc ec o e)",
-            // Shell-free: argv list, no sh -c. $1/$VAR/globs are literal — safe.
-            "runArgv :: [Text] -> M Proc\nrunArgv argv = (\\(ec, o, e) -> Proc ec o e) <$> send (RunArgv argv)",
-        ],
-    }
-}
+// Exec effect: `exec_decl()` is generated from the single-source definition
+// (`effect_defs.rs`).
+crate::exec_effect_def!(crate::effect_defs::effect_decl_projection);
 
 /// Git effect: typed read-only repository queries.
 ///

@@ -285,6 +285,65 @@ macro_rules! meta_effect_def {
     };
 }
 
+/// Exec effect — single definition.
+#[macro_export]
+macro_rules! exec_effect_def {
+    ($project:path) => {
+        $project! {
+            effect Exec,
+            handler ExecHandler,
+            req ExecReq,
+            decl_fn exec_decl,
+            description ["Run shell commands and capture output."],
+            type_defs [],
+            verbs [
+                { ctor Run, method exec_run,
+                  args { cmd: "Text" as String },
+                  ret "(Int, Text, Text)" },
+                { ctor RunIn, method exec_run_in,
+                  args { dir: "Text" as String, cmd: "Text" as String },
+                  ret "(Int, Text, Text)" },
+                // Failure-isolating spawn: Left only when the process cannot be
+                // SPAWNED (sandbox/exec error). A command that runs and exits
+                // nonzero is Right (code, out, err) — the eval inspects the code.
+                { ctor TryRun, method exec_try_run,
+                  args { cmd: "Text" as String },
+                  ret "(Either Text (Int, Text, Text))" },
+                { ctor TryRunIn, method exec_try_run_in,
+                  args { dir: "Text" as String, cmd: "Text" as String },
+                  ret "(Either Text (Int, Text, Text))" },
+                // Shell-free exec: argv list, no sh -c. Safe with metachars ($1, globs).
+                { ctor RunArgv, method exec_run_argv,
+                  args { argv: "[Text]" as Vec<String> },
+                  ret "(Int, Text, Text)" },
+            ],
+            helpers [
+                { raw ["callCommand :: Text -> M ()",
+                       "callCommand cmd = do { p <- run cmd; when (not (ok p)) (error (\"command failed (\" <> show p.exitCode <> \"): \" <> p.stderr)) }"] },
+                { raw ["readProcess :: Text -> M Text",
+                       "readProcess cmd = do { p <- run cmd; if ok p then pure p.stdout else error (\"command failed (\" <> show p.exitCode <> \"): \" <> p.stderr) }"] },
+                { raw ["-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}",
+                       "-- (use `ok p` for the zero-exit check).",
+                       "run :: Text -> M Proc",
+                       "run cmd = (\\(ec, o, e) -> Proc ec o e) <$> send (Run cmd)"] },
+                { raw ["runIn :: Text -> Text -> M Proc",
+                       "runIn dir cmd = (\\(ec, o, e) -> Proc ec o e) <$> send (RunIn dir cmd)"] },
+                // Isolating variants: spawn failure becomes `Left err` instead of
+                // aborting the eval. A nonzero exit is NOT a failure here — it
+                // arrives as `Right (code, out, err)`, so the common eval-killer
+                // (readProcess on nonzero exit) is avoided by inspecting the code.
+                { raw ["tryRun :: Text -> M (Either Text Proc)",
+                       "tryRun cmd = send (TryRun cmd) <&> fmap (\\(ec, o, e) -> Proc ec o e)"] },
+                { raw ["tryRunIn :: Text -> Text -> M (Either Text Proc)",
+                       "tryRunIn dir cmd = send (TryRunIn dir cmd) <&> fmap (\\(ec, o, e) -> Proc ec o e)"] },
+                // Shell-free: argv list, no sh -c. $1/$VAR/globs are literal — safe.
+                { raw ["runArgv :: [Text] -> M Proc",
+                       "runArgv argv = (\\(ec, o, e) -> Proc ec o e) <$> send (RunArgv argv)"] },
+            ],
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     /// Every generated `*_decl()` must be byte-identical to the hand-written
@@ -310,6 +369,44 @@ mod tests {
                getCurrentTime :: M UTCTime\n\
                getCurrentTime = UTCTime <$> send TimeNow"]
         );
+    }
+
+    /// Exec migrated with EXACT transport: generated decl must be
+    /// byte-identical to the hand-written baseline it replaced.
+    #[test]
+    fn generated_exec_decl_matches_handwritten_baseline() {
+        let d = crate::exec_decl();
+        assert_eq!(d.type_name, "Exec");
+        assert_eq!(d.description, "Run shell commands and capture output.");
+        assert_eq!(
+            d.constructors,
+            &[
+                "Run :: Text -> Exec (Int, Text, Text)",
+                "RunIn :: Text -> Text -> Exec (Int, Text, Text)",
+                "TryRun :: Text -> Exec (Either Text (Int, Text, Text))",
+                "TryRunIn :: Text -> Text -> Exec (Either Text (Int, Text, Text))",
+                "RunArgv :: [Text] -> Exec (Int, Text, Text)",
+            ]
+        );
+        assert_eq!(d.helpers.len(), 7);
+        assert_eq!(
+            d.helpers[2],
+            "-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}\n\
+             -- (use `ok p` for the zero-exit check).\n\
+             run :: Text -> M Proc\n\
+             run cmd = (\\(ec, o, e) -> Proc ec o e) <$> send (Run cmd)"
+        );
+    }
+
+    /// Meta's generated decl — pins the (deliberately normalized) output.
+    #[test]
+    fn generated_meta_decl_shape() {
+        let d = crate::meta_decl();
+        assert_eq!(d.type_name, "Meta");
+        assert_eq!(d.constructors.len(), 7);
+        assert_eq!(d.constructors[1], "MetaLookupCon :: Text -> Meta (Maybe (Int, Int))");
+        assert_eq!(d.helpers.len(), 7);
+        assert!(d.helpers[0].ends_with("metaConstructors = send MetaConstructors"));
     }
 
     #[test]

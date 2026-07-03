@@ -1,26 +1,16 @@
 use std::path::PathBuf;
-use tidepool_bridge_derive::FromCore;
-use tidepool_effect::dispatch::{EffectContext, EffectHandler};
+use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
-use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
+use tidepool_mcp::CapturedOutput;
 
 // ============================================================================
 // Tag 5: Exec (shell commands)
 // ============================================================================
 
-#[derive(FromCore)]
-pub enum ExecReq {
-    #[core(name = "Run")]
-    Run(String),
-    #[core(name = "RunIn")]
-    RunIn(String, String),
-    #[core(name = "TryRun")]
-    TryRun(String),
-    #[core(name = "TryRunIn")]
-    TryRunIn(String, String),
-    #[core(name = "RunArgv")]
-    RunArgv(Vec<String>),
-}
+// ExecReq + DescribeEffect + EffectHandler dispatch are generated from the
+// single-source definition; only the handler struct and the per-verb method
+// bodies below are hand-written.
+tidepool_mcp::exec_effect_def!(crate::effect_glue::effect_rust_projection);
 
 #[derive(Clone)]
 pub struct ExecHandler {
@@ -89,67 +79,82 @@ impl ExecHandler {
     }
 }
 
-impl DescribeEffect for ExecHandler {
-    fn effect_decl() -> EffectDecl {
-        tidepool_mcp::exec_decl()
-    }
-}
-
-impl EffectHandler<CapturedOutput> for ExecHandler {
-    type Request = ExecReq;
-    fn handle(
+impl ExecHandler {
+    fn exec_run(
         &mut self,
-        req: ExecReq,
         cx: &EffectContext<'_, CapturedOutput>,
+        cmd: String,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        match req {
-            ExecReq::Run(cmd) => {
-                let (code, stdout, stderr) = self.run_command(&cmd, &self.root)?;
-                cx.respond((code, stdout, stderr))
-            }
-            ExecReq::RunIn(dir, cmd) => {
-                let target = self.resolve_dir(&dir)?;
-                let (code, stdout, stderr) = self.run_command(&cmd, &target)?;
-                cx.respond((code, stdout, stderr))
-            }
-            ExecReq::TryRun(cmd) => cx.respond_caught(self.run_command(&cmd, &self.root)),
-            ExecReq::TryRunIn(dir, cmd) => cx.respond_caught(
-                self.resolve_dir(&dir)
-                    .and_then(|target| self.run_command(&cmd, &target)),
-            ),
-            ExecReq::RunArgv(argv) => {
-                if argv.is_empty() {
-                    return Err(EffectError::Handler("runArgv: empty argv".to_string()));
-                }
-                let output = std::process::Command::new(&argv[0])
-                    .args(&argv[1..])
-                    .current_dir(&self.root)
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .output()
-                    .map_err(|e| EffectError::Handler(format!("runArgv exec failed: {}", e)))?;
-                let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                if stdout.len() > Self::MAX_EXEC_OUTPUT_BYTES {
-                    let mut end = Self::MAX_EXEC_OUTPUT_BYTES;
-                    while !stdout.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    stdout.truncate(end);
-                    stdout.push_str("\n...[truncated at 2MB]");
-                }
-                if stderr.len() > Self::MAX_EXEC_OUTPUT_BYTES {
-                    let mut end = Self::MAX_EXEC_OUTPUT_BYTES;
-                    while !stderr.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    stderr.truncate(end);
-                    stderr.push_str("\n...[truncated at 2MB]");
-                }
-                let code = output.status.code().unwrap_or(-1) as i64;
-                cx.respond((code, stdout, stderr))
-            }
+        let (code, stdout, stderr) = self.run_command(&cmd, &self.root.clone())?;
+        cx.respond((code, stdout, stderr))
+    }
+
+    fn exec_run_in(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        dir: String,
+        cmd: String,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let target = self.resolve_dir(&dir)?;
+        let (code, stdout, stderr) = self.run_command(&cmd, &target)?;
+        cx.respond((code, stdout, stderr))
+    }
+
+    fn exec_try_run(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        cmd: String,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        cx.respond_caught(self.run_command(&cmd, &self.root.clone()))
+    }
+
+    fn exec_try_run_in(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        dir: String,
+        cmd: String,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        cx.respond_caught(
+            self.resolve_dir(&dir)
+                .and_then(|target| self.run_command(&cmd, &target)),
+        )
+    }
+
+    fn exec_run_argv(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        argv: Vec<String>,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        if argv.is_empty() {
+            return Err(EffectError::Handler("runArgv: empty argv".to_string()));
         }
+        let output = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .current_dir(&self.root)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|e| EffectError::Handler(format!("runArgv exec failed: {}", e)))?;
+        let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if stdout.len() > Self::MAX_EXEC_OUTPUT_BYTES {
+            let mut end = Self::MAX_EXEC_OUTPUT_BYTES;
+            while !stdout.is_char_boundary(end) {
+                end -= 1;
+            }
+            stdout.truncate(end);
+            stdout.push_str("\n...[truncated at 2MB]");
+        }
+        if stderr.len() > Self::MAX_EXEC_OUTPUT_BYTES {
+            let mut end = Self::MAX_EXEC_OUTPUT_BYTES;
+            while !stderr.is_char_boundary(end) {
+                end -= 1;
+            }
+            stderr.truncate(end);
+            stderr.push_str("\n...[truncated at 2MB]");
+        }
+        let code = output.status.code().unwrap_or(-1) as i64;
+        cx.respond((code, stdout, stderr))
     }
 }
 
