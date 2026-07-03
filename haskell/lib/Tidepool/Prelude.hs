@@ -148,6 +148,7 @@ module Tidepool.Prelude
   , isAbsolute, isRelative
     -- * JSON (Tidepool.Aeson — vendored, construction-only)
   , Value(..), Key, object, (.=), toJSON
+  , decodeJson
   , ToJSON
   , FromJSON(..), Result(..), fromJSON, resultToEither
   , (.:), (.:?), (.!=), withObject, withText, withArray, withBool, withDouble
@@ -250,7 +251,7 @@ import Tidepool.Data.Time (UTCTime(..), formatISO8601, diffUTCTime, addUTCTime, 
 import Tidepool.Render (Render(..))
 import Tidepool.QQ.Fmt.Runtime
   (FSign(..), FAlign(..), fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain)
-import Tidepool.Aeson (Value(..), Key, object, (.=), toJSON, ToJSON, fromText, FromJSON(..), Result(..), fromJSON, resultToEither, (.:), (.:?), (.!=), withObject, withText, withArray, withBool, withDouble)
+import Tidepool.Aeson (Value(..), Key, object, (.=), toJSON, ToJSON, fromText, decodeJson, FromJSON(..), Result(..), fromJSON, resultToEither, (.:), (.:?), (.!=), withObject, withText, withArray, withBool, withDouble)
 import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Integer, _Double, members, values, _Null)
 -- Wholesale Control.Lens, hiding only the two genuine clashes: `imap` (Prelude's
 -- list-index map, defined below) and `(.=)` (Aeson's object-pair operator, above).

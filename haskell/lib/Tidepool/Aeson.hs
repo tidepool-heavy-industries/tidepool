@@ -17,6 +17,8 @@ module Tidepool.Aeson
   , (.=)
   , emptyObject
   , emptyArray
+    -- * Decoding
+  , decodeJson
     -- * ToJSON class
   , ToJSON(..)
     -- * FromJSON / structural decode (from Tidepool.Aeson.FromJSON)
