@@ -115,3 +115,21 @@ matched. See the `qq_patch_pat_*` Suite fixtures for canonical shapes.
 - `grepGlob :: Text -> FilePath -> M [Hit]` — structured text-level search with
   regex + filename globbing. Returns `[Hit]` {path, line, text} (the shared
   record; `matchLocs` over `hsDef`/`rsFn` `[Match]` yields the same `[Hit]` shape).
+
+---
+
+## MCP Server Internals
+
+Notes for anyone working on the server process itself (`tidepool/src/main.rs`, `tidepool-mcp/src/lib.rs`).
+
+**Eval thread signal handling**: A best-effort SIGILL/SIGSEGV handler is installed via `sigaltstack`+`sigaction`. `panic!` from a signal handler is UB and does not reliably unwind. The real safety net is returning `Ok(None)` → `CallToolResult::error` (not `McpError`) from the JIT boundary — this surfaces the failure to the MCP client without killing the server process or the connection. Do not try to make the signal handler do more than set a flag.
+
+**Preamble imports**: Every eval sees:
+```haskell
+import Tidepool.Prelude hiding (error)
+import Control.Monad.Freer hiding (run)
+import qualified Prelude as P
+```
+Our `error :: Text -> a` shadows Prelude's `String` version. Our `run :: Text -> M Proc` shadows Freer's `run :: Eff '[] a -> a`. These hiding clauses are load-bearing — removing them breaks eval code that uses `error` with Text or `run` for shell commands.
+
+**Eval timeout**: The default is 30 seconds (configurable via `eval_timeout_secs` in `config.toml` or `TIDEPOOL_EVAL_TIMEOUT_SECS`). Shell commands blocked on `.output()` (e.g. `cargo test --workspace`) consume the full timeout. The timeout returns a clean `CallToolResult::error`, not a crash.
