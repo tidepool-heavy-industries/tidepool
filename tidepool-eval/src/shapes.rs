@@ -190,11 +190,13 @@ pub fn make_text(s: &str, text_id: DataConId) -> Value {
     )
 }
 
-/// Unwrap a Text backing field to its raw bytes. Accepts a raw
-/// `Value::ByteArray`, a `LitString`, or any number of lifted
-/// `Con("ByteArray", [..])` wrapper layers around either.
-/// (`LitString` is copied into a fresh `SharedByteArray`.)
-pub fn text_backing(v: &Value, table: &DataConTable) -> Option<SharedByteArray> {
+/// Unwrap a Text backing field to its raw bytes, given a recognizer for the
+/// lifted `Con("ByteArray", [..])` wrapper layer. Accepts a raw
+/// `Value::ByteArray` or a `LitString` unconditionally (`LitString` is
+/// copied into a fresh `SharedByteArray`); table-free callers that cannot
+/// recognize the wrapper con (no `DataConId` for it in hand) pass `|_|
+/// false` and simply won't unwrap that form.
+fn text_backing_with(v: &Value, is_bytearray_con: &dyn Fn(DataConId) -> bool) -> Option<SharedByteArray> {
     let mut cur = v;
     loop {
         match cur {
@@ -202,7 +204,31 @@ pub fn text_backing(v: &Value, table: &DataConTable) -> Option<SharedByteArray> 
             Value::Lit(Literal::LitString(bytes)) => {
                 return Some(Arc::new(Mutex::new(bytes.clone())))
             }
-            Value::Con(id, fields) if fields.len() == 1 && is_con_named(*id, "ByteArray", table) => {
+            Value::Con(id, fields) if fields.len() == 1 && is_bytearray_con(*id) => {
+                cur = &fields[0];
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Unwrap a Text backing field to its raw bytes. Accepts a raw
+/// `Value::ByteArray`, a `LitString`, or any number of lifted
+/// `Con("ByteArray", [..])` wrapper layers around either.
+/// (`LitString` is copied into a fresh `SharedByteArray`.)
+pub fn text_backing(v: &Value, table: &DataConTable) -> Option<SharedByteArray> {
+    text_backing_with(v, &|id| is_con_named(id, "ByteArray", table))
+}
+
+/// Table-free unbox of an `Int`/`I#`-boxed field: a bare `Lit(LitInt)`, or
+/// one layer of boxing recognized by `is_int_con` (a caller-supplied
+/// `DataConId` comparison, not a table name lookup).
+fn unbox_int_with(v: &Value, is_int_con: &dyn Fn(DataConId) -> bool) -> Option<i64> {
+    let mut cur = v;
+    loop {
+        match cur {
+            Value::Lit(Literal::LitInt(n)) => return Some(*n),
+            Value::Con(id, fields) if fields.len() == 1 && is_int_con(*id) => {
                 cur = &fields[0];
             }
             _ => return None,
@@ -262,17 +288,39 @@ pub fn text_bytes_checked(
 ///
 /// Returns `None` only when the backing field has no recognizable byte form.
 /// UTF-8 validation is the caller's policy.
-pub fn text_bytes_clamped(fields: &[Value], table: &DataConTable) -> Option<Vec<u8>> {
+///
+/// Table-free generalization of the same policy, for callers holding
+/// individually resolved `DataConId`s rather than a full `&DataConTable`
+/// (e.g. `JsonDecode`'s tree-walker arm, which only caches a `JsonConIds`).
+/// `is_bytearray_con`/`is_int_con` recognize the lifted `ByteArray` wrapper
+/// / boxed `I#` cons respectively — pass `|_| false` for either when no
+/// concrete id is reachable; that wrapper form then simply goes
+/// unrecognized (`None`/default).
+pub fn text_bytes_clamped_with(
+    fields: &[Value],
+    is_bytearray_con: impl Fn(DataConId) -> bool,
+    is_int_con: impl Fn(DataConId) -> bool,
+) -> Option<Vec<u8>> {
     if fields.len() != 3 {
         return None;
     }
-    let backing = text_backing(&fields[0], table)?;
+    let backing = text_backing_with(&fields[0], &is_bytearray_con)?;
     let bytes = backing.lock().unwrap_or_else(PoisonError::into_inner);
-    let off = unbox_int(&fields[1], table).unwrap_or(0) as usize;
-    let len = unbox_int(&fields[2], table).unwrap_or(bytes.len() as i64) as usize;
+    let off = unbox_int_with(&fields[1], &is_int_con).unwrap_or(0) as usize;
+    let len = unbox_int_with(&fields[2], &is_int_con).unwrap_or(bytes.len() as i64) as usize;
     let off = off.min(bytes.len());
     let end = off.saturating_add(len).min(bytes.len());
     Some(bytes[off..end].to_vec())
+}
+
+/// Table-based entry point for [`text_bytes_clamped_with`]: recognizes the
+/// `ByteArray`/`I#` wrapper cons by name via `table`.
+pub fn text_bytes_clamped(fields: &[Value], table: &DataConTable) -> Option<Vec<u8>> {
+    text_bytes_clamped_with(
+        fields,
+        |id| is_con_named(id, "ByteArray", table),
+        |id| is_con_named(id, "I#", table),
+    )
 }
 
 // ---------------------------------------------------------------------------
