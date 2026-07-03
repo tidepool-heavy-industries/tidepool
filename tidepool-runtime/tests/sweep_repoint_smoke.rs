@@ -14,29 +14,18 @@
 //!   validator path. Accept compiles+runs; reject fails to compile.
 
 use serde_json::{json, Value};
-use std::path::Path;
-
-fn prelude_path() -> std::path::PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest.parent().unwrap().join("haskell").join("lib")
-}
+use tidepool_testing::eval_harness::EvalHarness;
 
 /// Compile + run a pure `result = <body>` with the given pragmas/imports.
 ///
-/// Runs on a 64MB-stack thread: importing the utils (`Tidepool.TextFormat`) AND the
-/// vendored `Tidepool.Data.Text` deepens in-session emit recursion past the 2MB
-/// default test-thread stack (the known compile-time emit-depth class — cf.
-/// `repro_qq_union`'s 64MB wrapper; the live MCP server compiles on a 256MB
-/// eval thread, `tidepool-mcp/src/lib.rs`, so this is a test-harness accommodation).
+/// Importing the utils (`Tidepool.TextFormat`) AND the vendored
+/// `Tidepool.Data.Text` deepens in-session emit recursion past the 2MB default
+/// test-thread stack (the known compile-time emit-depth class) — the harness's
+/// terminal runs compile+eval on an `EVAL_STACK_SIZE` thread, matching the live
+/// MCP server's 256MB eval thread (`tidepool-mcp/src/lib.rs`).
 fn run_src(pragmas: &str, imports: &str, body: &str) -> Result<Value, String> {
-    let pragmas = pragmas.to_string();
-    let imports = imports.to_string();
-    let body = body.to_string();
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(move || {
-            let src = format!(
-                r#"{{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, PartialTypeSignatures{pragmas} #-}}
+    let src = format!(
+        r#"{{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, PartialTypeSignatures{pragmas} #-}}
 module Test where
 import Tidepool.Prelude hiding (error)
 import qualified Data.Text as DT
@@ -46,16 +35,13 @@ default (Int, Text)
 result :: _
 result = {body}
 "#
-            );
-            let pp = prelude_path();
-            let include = [pp.as_path()];
-            tidepool_runtime::compile_and_run_pure(&src, "result", &include)
-                .map(|v| v.to_json())
-                .map_err(|e| e.to_string())
-        })
-        .unwrap()
-        .join()
-        .unwrap()
+    );
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(&src, "result")
+        .into_result()
+        .map(|v| v.to_json())
+        .map_err(|e| e.to_string())
 }
 
 #[test]
