@@ -168,6 +168,23 @@ pub fn ensure_effects_module(effects: &[EffectDecl]) -> std::io::Result<PathBuf>
     )
 }
 
+/// Process-level write-through cache for the content-addressed effects-module
+/// directories. Keyed on the FNV-1a hash of the combined `Effects.hs` +
+/// `Orchestrate.hs` sources.
+///
+/// Serializes concurrent writes within one process: the first call for a given
+/// hash acquires the lock and writes BOTH modules; concurrent callers block
+/// until BOTH are on disk, then get the cached path. This closes the TOCTOU
+/// window where a caller could see Effects.hs but not Orchestrate.hs and
+/// compute a fingerprint / call GHC against an incomplete staging dir.
+/// Inter-process safety (multiple `cargo test` binaries) is handled by the
+/// atomic-rename primitive inside [`write_module_file`].
+fn effects_write_cache() -> &'static Mutex<std::collections::HashMap<u64, PathBuf>> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<u64, PathBuf>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
 /// Materialize the generated `Tidepool.Effects` AND `Tidepool.Orchestrate`
 /// modules from pre-generated source strings, writing each into the SAME
 /// content-addressed staging dir if absent, and returning the dir (an include
@@ -175,10 +192,16 @@ pub fn ensure_effects_module(effects: &[EffectDecl]) -> std::io::Result<PathBuf>
 /// cache dir — co-location means every `ensure_effects_module` caller picks up
 /// the orchestrate module for free, no extra include path to thread through.
 ///
-/// Lets the server self-heal each eval without re-deriving the source from
-/// decls — the cheap path is two `exists()` stats. Staged under the stable
-/// cache root (`tidepool_runtime::paths::effects_dir`), NOT `$TMPDIR`, which
-/// macOS reaps out from under a long-running server.
+/// Concurrent calls within the same process are serialized: only one caller
+/// writes the files at a time; others wait and reuse the cached result. This
+/// prevents parallel tests from racing on a partially-written staging dir
+/// (`effects_dir` present, `orchestrate_dir` absent → GHC sees incomplete
+/// include path). Inter-process races (parallel test binaries) are handled by
+/// the atomic-rename primitive inside [`write_module_file`].
+///
+/// Self-heals if the staging dir is externally removed
+/// (`rm -rf ~/.cache/tidepool`): the cache entry is evicted and the files are
+/// re-materialized on the next call.
 pub(crate) fn write_generated_modules(
     effects_src: &str,
     orchestrate_src: &str,
@@ -193,8 +216,29 @@ pub(crate) fn write_generated_modules(
     let root =
         tidepool_runtime::paths::effects_dir().join(format!("tidepool-effects-{:016x}", hash));
     let module_dir = root.join("Tidepool");
+
+    // Acquire the process-level serialization lock.  Concurrent callers (parallel
+    // test threads, concurrent eval requests) block here; the first to proceed
+    // writes BOTH files and stores the result; the rest take the fast path below.
+    let mut cache = effects_write_cache().lock();
+
+    // Fast path: previously written this hash AND files still present.
+    if cache.contains_key(&hash) {
+        let effects_ok = module_dir.join("Effects.hs").exists();
+        let orchestrate_ok = module_dir.join("Orchestrate.hs").exists();
+        if effects_ok && orchestrate_ok {
+            return Ok(root);
+        }
+        // Files were externally removed.  Evict the stale entry and fall
+        // through to re-materialize while still holding the lock.
+        cache.remove(&hash);
+    }
+
+    // Slow path: write both files (still under the lock so concurrent callers
+    // wait rather than racing into the same write sequence).
     write_module_file(&module_dir, "Effects.hs", effects_src)?;
     write_module_file(&module_dir, "Orchestrate.hs", orchestrate_src)?;
+    cache.insert(hash, root.clone());
     Ok(root)
 }
 
