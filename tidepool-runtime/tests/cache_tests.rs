@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
-use tidepool_runtime::compile_haskell;
+use tidepool_runtime::{compile_haskell, CompileResult};
 
 fn prelude_path() -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -45,7 +45,7 @@ fn test_cache_hit_same_source() {
     let src = "module Test where\nval = 42";
     let target = "val";
 
-    let (expr1, _, _) =
+    let CompileResult { expr: expr1, .. } =
         compile_haskell(src, target, &[pp.as_path()]).expect("First compile failed");
     assert!(tidepool_cache.exists(), "Cache directory should be created");
     let count1 = fs::read_dir(&tidepool_cache).unwrap().count();
@@ -54,7 +54,7 @@ fn test_cache_hit_same_source() {
         "At least .cbor and .meta.cbor should be cached"
     );
 
-    let (expr2, _, _) =
+    let CompileResult { expr: expr2, .. } =
         compile_haskell(src, target, &[pp.as_path()]).expect("Second compile failed");
     assert_eq!(expr1, expr2);
 

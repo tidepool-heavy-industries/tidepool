@@ -32,9 +32,9 @@ use tidepool_runtime::session::errmap::{
     dedupe_diagnostics, drop_foreign_gen_warnings, remap_generated_coords,
 };
 use tidepool_runtime::session::{
-    classify_turn, compile_session_turn, ModuleEnv, SessionBind, SessionLib, ValueTier,
+    classify_turn, compile_session_turn, ModuleEnv, SessionBind, SessionLib, TurnKind, ValueTier,
 };
-use tidepool_runtime::{compile_haskell_salted, value_to_json};
+use tidepool_runtime::{compile_haskell_salted, value_to_json, CompileResult};
 
 use crate::command::{
     BlockItem, BlockItemResult, BoundComponent, ExprText, ItemKind, MetaCommand, ResponseShape,
@@ -317,7 +317,9 @@ impl Session {
     fn decl_shaped_text<'a>(&self, item: &'a BlockItem) -> Option<&'a str> {
         match item {
             BlockItem::Decl(d) => Some(&d.0),
-            BlockItem::Auto(e) if classify_turn(&e.0).is_ok_and(|c| c.is_decl) => Some(&e.0),
+            BlockItem::Auto(e) if classify_turn(&e.0).is_ok_and(|c| c.kind == TurnKind::Decl) => {
+                Some(&e.0)
+            }
             BlockItem::Auto(_) | BlockItem::Stmt(_) | BlockItem::Meta(_) => None,
         }
     }
@@ -684,7 +686,7 @@ impl Session {
             Err(_) => return self.run_plain_eval(expr_text, handlers, captured),
         };
 
-        if classification.is_bind {
+        if classification.kind == TurnKind::Bind {
             match classification.binders.as_slice() {
                 // A bind statement with no extractable binder — treat as plain.
                 [] => self.run_plain_eval(expr_text, handlers, captured),
@@ -765,8 +767,12 @@ impl Session {
             let include = self.turn_include();
             compile_haskell_salted(&source, "result", &include, Some(&salt))
         };
-        let (expr, mut table, warnings) = match compile_result {
-            Ok(triple) => triple,
+        let CompileResult {
+            expr,
+            mut table,
+            warnings,
+        } = match compile_result {
+            Ok(r) => r,
             Err(e) => {
                 return TurnOutcome::Error(format!(
                     "compile error: {}",

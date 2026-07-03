@@ -24,7 +24,15 @@ pub mod session;
 pub use render::{value_to_json, EvalResult};
 
 /// Result of successful Haskell compilation: a Core expression, DataCon metadata, and warnings.
-pub type CompileResult = (CoreExpr, DataConTable, MetaWarnings);
+#[derive(Debug)]
+pub struct CompileResult {
+    /// The compiled Core expression (the JIT/eval input).
+    pub expr: CoreExpr,
+    /// DataCon metadata the JIT needs to dispatch on constructors.
+    pub table: DataConTable,
+    /// Compile warnings (e.g. `has_io`, captured type).
+    pub warnings: MetaWarnings,
+}
 
 /// Errors that can occur during Haskell compilation.
 #[derive(Error, Debug)]
@@ -121,7 +129,11 @@ pub fn compile_haskell_salted(
             (read_cbor(&expr_bytes), read_metadata(&meta_bytes))
         {
             tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
-            return Ok((expr, table, warnings));
+            return Ok(CompileResult {
+                expr,
+                table,
+                warnings,
+            });
         }
     }
 
@@ -192,7 +204,11 @@ pub fn compile_haskell_salted(
     // Only store in cache if deserialization succeeded
     cache::cache_store(&key, &expr_bytes, &meta_bytes);
 
-    Ok((expr, table, warnings))
+    Ok(CompileResult {
+        expr,
+        table,
+        warnings,
+    })
 }
 
 pub const DEFAULT_NURSERY_SIZE: usize = 1 << 26; // 64 MiB
@@ -255,7 +271,11 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
     nursery_size: usize,
     on_ready: impl FnOnce(CancelHandle),
 ) -> Result<EvalResult, RuntimeError> {
-    let (expr, mut table, warnings) = compile_haskell(source, target, include)?;
+    let CompileResult {
+        expr,
+        mut table,
+        warnings,
+    } = compile_haskell(source, target, include)?;
     if warnings.has_io {
         return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
     }
@@ -291,7 +311,11 @@ pub fn compile_and_run_pure_salted(
     include: &[&Path],
     cache_salt: Option<&str>,
 ) -> Result<EvalResult, RuntimeError> {
-    let (expr, mut table, warnings) = compile_haskell_salted(source, target, include, cache_salt)?;
+    let CompileResult {
+        expr,
+        mut table,
+        warnings,
+    } = compile_haskell_salted(source, target, include, cache_salt)?;
     if warnings.has_io {
         return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
     }
@@ -367,7 +391,7 @@ mod tests {
             return;
         }
         let source = "module Test where\nidentity x = x";
-        let (expr, _table, _warnings) =
+        let CompileResult { expr, .. } =
             compile_haskell(source, "identity", &[]).expect("Failed to compile identity");
 
         // identity = \x -> x — node count varies with GHC optimization level
@@ -386,7 +410,7 @@ mod tests {
             return;
         }
         let source = "module Probe where\n__user :: [Int]\n__user = [1, 2, 3]\n";
-        let (_expr, _table, warnings) =
+        let CompileResult { warnings, .. } =
             compile_haskell(source, "__user", &[]).expect("Failed to compile probe");
         eprintln!("captured_type = {:?}", warnings.captured_type);
         assert_eq!(warnings.captured_type.as_deref(), Some("[Int]"));
@@ -402,7 +426,7 @@ mod tests {
             return;
         }
         let source = "module Probe where\nidentity x = x\n";
-        let (_expr, _table, warnings) =
+        let CompileResult { warnings, .. } =
             compile_haskell(source, "identity", &[]).expect("Failed to compile identity");
         assert_eq!(warnings.captured_type, None);
     }

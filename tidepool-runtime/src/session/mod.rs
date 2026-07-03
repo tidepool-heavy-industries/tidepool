@@ -23,7 +23,7 @@ pub mod turn;
 
 pub use turn::{
     classify_turn, compile_session_turn, BoundBinder, SessionBind, SessionTurnResult,
-    TurnClassification, ValueTier,
+    TurnClassification, TurnKind, ValueTier,
 };
 
 use std::path::{Path, PathBuf};

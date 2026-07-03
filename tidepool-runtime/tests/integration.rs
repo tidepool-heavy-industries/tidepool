@@ -27,9 +27,9 @@ fn run(src: &str, target: &str) -> tidepool_runtime::EvalResult {
 fn test_compile_haskell_identity() {
     let pp = prelude_path();
     let src = "module Test where\nidentity :: a -> a\nidentity x = x";
-    let (expr, table, _) = compile_haskell(src, "identity", &[pp.as_path()]).unwrap();
-    assert!(!expr.nodes.is_empty());
-    assert!(!table.is_empty());
+    let result = compile_haskell(src, "identity", &[pp.as_path()]).unwrap();
+    assert!(!result.expr.nodes.is_empty());
+    assert!(!result.table.is_empty());
 }
 
 #[test]

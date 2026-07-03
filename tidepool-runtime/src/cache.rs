@@ -10,6 +10,19 @@ fn cache_dir() -> Option<PathBuf> {
     Some(crate::paths::cache_dir())
 }
 
+/// A content-addressed cache key: the blake3 hex digest of a compilation
+/// request. A newtype so a raw string can't be mistaken for a computed key at
+/// the [`cache_load`]/[`cache_store`] boundary (the digest also names the
+/// on-disk artifact files).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CacheKey(String);
+
+impl std::fmt::Display for CacheKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Computes a unique cache key for a compilation request.
 /// The key includes the source code, the target binder, and a fingerprint of
 /// all include directories to ensure cache invalidation when dependencies change.
@@ -17,7 +30,7 @@ fn cache_dir() -> Option<PathBuf> {
 /// named entry point used by the cache tests; production calls go through
 /// [`cache_key_salted`].
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn cache_key(source: &str, target: &str, include: &[&Path]) -> String {
+pub(crate) fn cache_key(source: &str, target: &str, include: &[&Path]) -> CacheKey {
     cache_key_salted(source, target, include, None)
 }
 
@@ -31,7 +44,7 @@ pub(crate) fn cache_key_salted(
     target: &str,
     include: &[&Path],
     salt: Option<&str>,
-) -> String {
+) -> CacheKey {
     let mut hasher = blake3::Hasher::new();
     // Length-prefixed framing (proptest_cache_layer F1a/F1b): NUL separators
     // alone let a NUL embedded in one field shift bytes across the boundary
@@ -57,7 +70,7 @@ pub(crate) fn cache_key_salted(
 
     extract_binary_fingerprint(&mut hasher);
 
-    hasher.finalize().to_hex().to_string()
+    CacheKey(hasher.finalize().to_hex().to_string())
 }
 
 /// Hash a length-prefixed field: unambiguous framing regardless of content.
@@ -283,7 +296,7 @@ fn fingerprint_dir(dir: &Path, hasher: &mut blake3::Hasher) {
 /// Attempts to load the Core expression and metadata from the cache.
 /// Returns `Some((expr_bytes, meta_bytes))` on success.
 /// Only returns data if the sentinel file exists, indicating a complete store.
-pub(crate) fn cache_load(key: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+pub(crate) fn cache_load(key: &CacheKey) -> Option<(Vec<u8>, Vec<u8>)> {
     let dir = cache_dir()?;
     let sentinel = dir.join(format!("{}.ok", key));
     if !sentinel.exists() {
@@ -302,7 +315,7 @@ pub(crate) fn cache_load(key: &str) -> Option<(Vec<u8>, Vec<u8>)> {
 /// Stores the compilation results in the cache. Each file is replaced atomically
 /// via rename. A sentinel file `{key}.ok` is written last to mark the entry as
 /// complete — `cache_load` checks for this before reading.
-pub(crate) fn cache_store(key: &str, expr_bytes: &[u8], meta_bytes: &[u8]) {
+pub(crate) fn cache_store(key: &CacheKey, expr_bytes: &[u8], meta_bytes: &[u8]) {
     let Some(dir) = cache_dir() else { return };
     if fs::create_dir_all(&dir).is_err() {
         return;
@@ -410,20 +423,20 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let _guard = EnvGuard::new("XDG_CACHE_HOME", temp_dir.path());
 
-        let key = "test-key";
+        let key = CacheKey("test-key".to_string());
         let expr = b"expr-data";
         let meta = b"meta-data";
 
         // Before store, load should miss.
-        assert!(cache_load(key).is_none());
+        assert!(cache_load(&key).is_none());
 
-        cache_store(key, expr, meta);
+        cache_store(&key, expr, meta);
 
         // Sentinel must exist after store.
         let sentinel = temp_dir.path().join("tidepool").join(format!("{}.ok", key));
         assert!(sentinel.exists(), "sentinel file should exist after store");
 
-        let loaded = cache_load(key).expect("cache should load after store");
+        let loaded = cache_load(&key).expect("cache should load after store");
         assert_eq!(loaded.0, expr);
         assert_eq!(loaded.1, meta);
     }
@@ -434,7 +447,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let _guard = EnvGuard::new("XDG_CACHE_HOME", temp_dir.path());
 
-        let key = "no-sentinel";
+        let key = CacheKey("no-sentinel".to_string());
         let dir = temp_dir.path().join("tidepool");
         fs::create_dir_all(&dir).unwrap();
 
@@ -443,7 +456,7 @@ mod tests {
         fs::write(dir.join(format!("{}.meta.cbor", key)), b"meta").unwrap();
 
         assert!(
-            cache_load(key).is_none(),
+            cache_load(&key).is_none(),
             "cache_load should return None without sentinel"
         );
     }

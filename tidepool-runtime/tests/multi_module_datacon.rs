@@ -4,7 +4,7 @@ mod common;
 
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_runtime::{compile_and_run, compile_haskell};
+use tidepool_runtime::{compile_and_run, compile_haskell, CompileResult};
 
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -73,7 +73,7 @@ fn test_cross_module_datacon_table_consistency() {
     let pp = prelude_path();
     let include: Vec<&Path> = vec![pp.as_path(), effect_dir.path()];
 
-    let (expr, table, _warnings) =
+    let CompileResult { expr, table, .. } =
         compile_haskell(&main_src, "agent", &include).expect("compilation failed");
 
     use tidepool_repr::frame::CoreFrame;
@@ -173,7 +173,7 @@ agent = do
 
     let pp = prelude_path();
     let include: Vec<&Path> = vec![pp.as_path(), effect_dir.path()];
-    let (expr, table, _warnings) =
+    let CompileResult { expr, table, .. } =
         compile_haskell(main_src, "agent", &include).expect("compilation failed");
 
     use tidepool_repr::frame::CoreFrame;

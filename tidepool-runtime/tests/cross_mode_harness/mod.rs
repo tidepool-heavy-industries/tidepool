@@ -74,20 +74,20 @@ pub fn compile_cross_mode(fixture: &CrossModeFixture) -> CrossModeArtifacts {
     let pp = prelude_path();
 
     // 1. Compile single mode
-    let (single_expr, single_table, _) = compile_haskell(&fixture.single, fixture.target, &[&pp])
+    let single = compile_haskell(&fixture.single, fixture.target, &[&pp])
         .expect("failed to compile single-mode fixture");
 
     // 2. Compile split mode
     let (last_source, temp_dir) = stage_split_fixture(fixture);
     let include = [pp.as_path(), temp_dir.path()];
-    let (split_expr, split_table, _) = compile_haskell(&last_source, fixture.target, &include)
+    let split = compile_haskell(&last_source, fixture.target, &include)
         .expect("failed to compile split-mode fixture");
 
     CrossModeArtifacts {
-        single_expr,
-        single_table,
-        split_expr,
-        split_table,
+        single_expr: single.expr,
+        single_table: single.table,
+        split_expr: split.expr,
+        split_table: split.table,
         _temp_dir: Some(temp_dir),
     }
 }
