@@ -83,8 +83,7 @@ pub struct TidepoolMcpServerImpl {
 
 impl TidepoolMcpServerImpl {
     fn next_continuation_id(&self) -> String {
-        let id = self.next_cont_id.fetch_add(1, Ordering::Relaxed);
-        format!("cont_{}", id)
+        crate::server_common::mint_id(&self.next_cont_id, "cont")
     }
 
     /// Borrow the raw sources that back the MCP resources (per-effect detail,
@@ -311,54 +310,16 @@ impl TidepoolMcpServerImpl {
                 match message {
                     SessionMessage::Completed { result } => {
                         tracing::info!("{} completed", op);
-                        let mut response = String::new();
-                        if !output.is_empty() {
-                            response.push_str("## Output\n");
-                            for line in &output {
-                                response.push_str(line);
-                                response.push('\n');
-                            }
-                            response.push_str("\n## Result\n");
-                        }
-                        response.push_str(&result);
+                        let response = crate::server_common::format_with_output(&output, &result);
                         Ok(CallToolResult::success(vec![Content::text(response)]))
                     }
                     SessionMessage::Suspended { prompt, meta } => {
                         tracing::info!(prompt = %prompt, "{} suspended on Ask", op);
                         let cont_id = self.next_continuation_id();
-                        let mut json_obj = serde_json::json!({
-                            "suspended": true,
-                            "continuation_id": cont_id,
-                            "prompt": prompt,
-                        });
-                        // AskWith metadata: hoist "schema" top-level (it
-                        // arms resume validation); everything else rides
-                        // under "meta" verbatim — no reserved-key
-                        // collisions, no silent drops.
-                        let mut expected_schema = None;
-                        match meta {
-                            Some(serde_json::Value::Object(mut meta_map)) => {
-                                if let Some(obj) = json_obj.as_object_mut() {
-                                    if let Some(schema) = meta_map.remove("schema") {
-                                        obj.insert("schema".into(), schema.clone());
-                                        expected_schema = Some(schema);
-                                    }
-                                    if !meta_map.is_empty() {
-                                        obj.insert(
-                                            "meta".into(),
-                                            serde_json::Value::Object(meta_map),
-                                        );
-                                    }
-                                }
-                            }
-                            Some(other) => {
-                                // Non-object metadata: pass through verbatim.
-                                if let Some(obj) = json_obj.as_object_mut() {
-                                    obj.insert("meta".into(), other);
-                                }
-                            }
-                            None => {}
-                        }
+                        let (mut json_obj, expected_schema) =
+                            crate::server_common::build_suspension_envelope(
+                                &cont_id, &prompt, meta,
+                            );
                         if !output.is_empty() {
                             if let Some(obj) = json_obj.as_object_mut() {
                                 obj.insert("output".into(), serde_json::Value::from(output));
@@ -770,19 +731,14 @@ impl TidepoolMcpServerImpl {
                             if let Some(session) = conts.get_mut(&req.continuation_id) {
                                 session.created_at = std::time::Instant::now();
                             }
-                            let body = serde_json::json!({
-                                "validation_failed": true,
-                                "violations": violations.iter().map(validate::Violation::to_json).collect::<Vec<_>>(),
-                                "schema": expected_schema,
-                                "continuation_id": req.continuation_id,
-                                "continuation_not_consumed": true,
-                            });
-                            Consumed::Reply(CallToolResult::error(vec![Content::text(format!(
-                                "Response does not match the suspension's schema. Call resume \
-                                 again with the same continuation_id and a corrected response \
-                                 (or abort).\n{}",
-                                body
-                            ))]))
+                            let body_text = crate::server_common::validation_failed_body(
+                                "resume",
+                                "abort",
+                                &violations,
+                                expected_schema.as_ref(),
+                                &req.continuation_id,
+                            );
+                            Consumed::Reply(CallToolResult::error(vec![Content::text(body_text)]))
                         }
                         validate::Outcome::Valid(canonical) => {
                             let session = conts
@@ -1028,99 +984,58 @@ impl ServerHandler for TidepoolMcpServerImpl {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        fn schema_to_map(
-            schema: schemars::Schema,
-        ) -> Result<Arc<serde_json::Map<String, serde_json::Value>>, McpError> {
-            let json = serde_json::to_value(&schema).map_err(|e| {
-                McpError::internal_error(format!("Failed to serialize schema: {}", e), None)
-            })?;
-            match json {
-                serde_json::Value::Object(o) => Ok(Arc::new(o)),
-                _ => Ok(Arc::new(serde_json::Map::new())),
-            }
-        }
-
         let mut tools = vec![
-            Tool {
-                name: "eval".into(),
-                title: None,
-                description: Some(self.eval_tool_description.clone().into()),
-                input_schema: schema_to_map(schemars::schema_for!(EvalRequest))?,
-                output_schema: None,
-                annotations: None,
-                icons: None,
-                meta: None,
-                execution: None,
-            },
-            Tool {
-                name: "resume".into(),
-                title: None,
-                description: Some(
-                    "Resume a suspended Haskell evaluation. When eval returns \
-                     {\"suspended\": true, \"continuation_id\": \"...\", \"prompt\": \"...\"}, \
-                     call this tool with the continuation_id and your response to the prompt. \
-                     If the suspension carried a \"schema\" field, the response must be JSON \
-                     matching it — pass the JSON value directly (string/enum schemas also \
-                     accept raw text). A response that fails validation does NOT consume the \
-                     continuation: the violations are returned and you can call resume again \
-                     with the same continuation_id. If you cannot answer, call abort instead. \
-                     If the suspension says \"paused\": true, the eval ran out of its time \
-                     window and is parked at an effect boundary (no compute happens while \
-                     paused): resume runs it another window (response ignored, may be \
-                     omitted); abort kills it."
-                        .into(),
-                ),
-                input_schema: schema_to_map(schemars::schema_for!(ResumeRequest))?,
-                output_schema: None,
-                annotations: None,
-                icons: None,
-                meta: None,
-                execution: None,
-            },
-            Tool {
-                name: "abort".into(),
-                title: None,
-                description: Some(
-                    "Abort a suspended Haskell evaluation without answering it. Use when you \
-                     cannot answer a suspension's question, or to clean up a suspended loop \
-                     you are abandoning (a suspended eval pins a thread until evicted). The \
-                     computation terminates with an error result (\"ask aborted by caller: \
-                     <reason>\") carrying any output produced so far."
-                        .into(),
-                ),
-                input_schema: schema_to_map(schemars::schema_for!(AbortRequest))?,
-                output_schema: None,
-                annotations: None,
-                icons: None,
-                meta: None,
-                execution: None,
-            },
+            crate::server_common::make_tool(
+                "eval",
+                &self.eval_tool_description,
+                crate::server_common::schema_to_map(schemars::schema_for!(EvalRequest))
+                    .map_err(|e| McpError::internal_error(e, None))?,
+            ),
+            crate::server_common::make_tool(
+                "resume",
+                "Resume a suspended Haskell evaluation. When eval returns \
+                 {\"suspended\": true, \"continuation_id\": \"...\", \"prompt\": \"...\"}, \
+                 call this tool with the continuation_id and your response to the prompt. \
+                 If the suspension carried a \"schema\" field, the response must be JSON \
+                 matching it — pass the JSON value directly (string/enum schemas also \
+                 accept raw text). A response that fails validation does NOT consume the \
+                 continuation: the violations are returned and you can call resume again \
+                 with the same continuation_id. If you cannot answer, call abort instead. \
+                 If the suspension says \"paused\": true, the eval ran out of its time \
+                 window and is parked at an effect boundary (no compute happens while \
+                 paused): resume runs it another window (response ignored, may be \
+                 omitted); abort kills it.",
+                crate::server_common::schema_to_map(schemars::schema_for!(ResumeRequest))
+                    .map_err(|e| McpError::internal_error(e, None))?,
+            ),
+            crate::server_common::make_tool(
+                "abort",
+                "Abort a suspended Haskell evaluation without answering it. Use when you \
+                 cannot answer a suspension's question, or to clean up a suspended loop \
+                 you are abandoning (a suspended eval pins a thread until evicted). The \
+                 computation terminates with an error result (\"ask aborted by caller: \
+                 <reason>\") carrying any output produced so far.",
+                crate::server_common::schema_to_map(schemars::schema_for!(AbortRequest))
+                    .map_err(|e| McpError::internal_error(e, None))?,
+            ),
         ];
 
         // The `help` tool is only advertised when enabled (`--help-tool`) — for
         // clients without MCP `resources` support, where it's the only way to
         // reach the depth. Resource-capable clients get it via resources/read.
         if self.help_tool {
-            tools.push(Tool {
-                name: "help".into(),
-                title: None,
-                description: Some(
-                    "Fetch reference content on demand — the same depth as the tidepool:// \
-                     resources, via a plain tool call so ANY client can reach it (no \
-                     resources/read support needed). topic: `guide` (how to write eval code), \
-                     `schema` (Schema + ask/llm), `edits` (editing verbs), `vocab` (every verb \
-                     signature in scope), `patterns` (worked examples), `effect <Name>` (e.g. \
-                     `effect Fs` — one effect's constructors + helpers), or `stdlib <Module>` \
-                     (e.g. `stdlib Tidepool.Prelude` — vendored source). Omit topic to list topics."
-                        .into(),
-                ),
-                input_schema: schema_to_map(schemars::schema_for!(HelpRequest))?,
-                output_schema: None,
-                annotations: None,
-                icons: None,
-                meta: None,
-                execution: None,
-            });
+            tools.push(crate::server_common::make_tool(
+                "help",
+                "Fetch reference content on demand — the same depth as the tidepool:// \
+                 resources, via a plain tool call so ANY client can reach it (no \
+                 resources/read support needed). topic: `guide` (how to write eval code), \
+                 `schema` (Schema + ask/llm), `edits` (editing verbs), `vocab` (every verb \
+                 signature in scope), `patterns` (worked examples), `effect <Name>` (e.g. \
+                 `effect Fs` — one effect's constructors + helpers), or `stdlib <Module>` \
+                 (e.g. `stdlib Tidepool.Prelude` — vendored source). Omit topic to list topics.",
+                crate::server_common::schema_to_map(schemars::schema_for!(HelpRequest))
+                    .map_err(|e| McpError::internal_error(e, None))?,
+            ));
         }
 
         Ok(ListToolsResult {
@@ -1231,16 +1146,10 @@ where
         // `~/.tidepool/lib`). Both sit AFTER the stdlib on the include path so
         // `Tidepool.*` resolves from the bundle; project is BEFORE global so a
         // project `Library`/module shadows the global one (GHC first-match-wins).
-        let mut lib_dirs: Vec<PathBuf> = Vec::new();
-        if let Ok(cwd) = std::env::current_dir() {
-            if let Some(root) = tidepool_runtime::paths::find_project_root(&cwd) {
-                let project_lib = root.join(".tidepool").join("lib");
-                if project_lib.is_dir() {
-                    lib_dirs.push(project_lib);
-                }
-            }
-        }
-        lib_dirs.extend(tidepool_runtime::paths::global_lib_dirs());
+        let project_root = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| tidepool_runtime::paths::find_project_root(&cwd));
+        let lib_dirs = crate::server_common::resolve_lib_dirs(project_root.as_deref());
 
         for dir in &lib_dirs {
             self.inner.include.push(dir.clone());
