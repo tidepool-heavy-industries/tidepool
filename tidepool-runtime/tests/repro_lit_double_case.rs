@@ -15,7 +15,7 @@
 use std::path::Path;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
-use tidepool_runtime::compile_and_run;
+use tidepool_testing::eval_harness::EvalHarness;
 
 /// Answers every effect with a JSON `Number`, materialized via the same bridge
 /// code (`serde_json::Value::to_value`) the live server uses — producing a
@@ -51,15 +51,13 @@ fn repro_lit_double_case() {
         None,
         None,
     );
-    let effects_dir = tidepool_mcp::ensure_effects_module(&decls)
-        .expect("write effects module")
-        .leak() as &Path;
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let hs = root.join("haskell/lib").leak() as &Path;
-    let lib = root.join(".tidepool/lib").leak() as &Path;
-    let include = [hs, lib, effects_dir];
-    let mut d = NumberDispatcher;
-    let r = compile_and_run(&src, "result", &include, &mut d, &());
+    let lib = root.join(".tidepool/lib");
+    let harness = EvalHarness::new()
+        .with_stdlib()
+        .with_include(lib)
+        .with_effects_module();
+    let r = harness.run(&src, "result", NumberDispatcher).into_result();
     match r {
         Ok(v) => assert_eq!(
             v.to_json(),
