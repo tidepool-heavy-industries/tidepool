@@ -63,8 +63,9 @@ pub enum SessionState {
     /// can't forget to release it.
     Suspended(Box<Suspension>),
     /// A turn timed out; `request_abort` was sent so it unwinds at its next
-    /// effect checkpoint (a pure infinite loop is uninterruptible). A follow-up
-    /// op errors clearly; the reaper or `close` reclaims it.
+    /// effect checkpoint (a pure computation with no effect dispatch is
+    /// uninterruptible via the gate; the JIT cancel handles that case). A
+    /// follow-up op errors clearly; the reaper or `close` reclaims it.
     Wedged { since: Instant },
     /// Teardown in progress — every op is rejected.
     Closing,
