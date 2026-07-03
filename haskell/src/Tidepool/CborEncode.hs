@@ -10,9 +10,9 @@ import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Tidepool.Translate
 
--- | 8-byte version header: magic 'TPLR' + version 1.0
+-- | 8-byte version header: magic 'TPLR' + version 1.1
 tplrHeader :: ByteString
-tplrHeader = BS.pack [0x54, 0x50, 0x4C, 0x52, 0x00, 0x01, 0x00, 0x00]
+tplrHeader = BS.pack [0x54, 0x50, 0x4C, 0x52, 0x00, 0x01, 0x00, 0x01]
 
 -- | Encodes the flattened node tree into a CBOR payload prepended with the TPLR version header.
 encodeTree :: Seq FlatNode -> ByteString

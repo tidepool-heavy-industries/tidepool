@@ -50,7 +50,7 @@ pub enum ReadError {
 /// 4-byte magic: ASCII 'TPLR'
 pub const HEADER_MAGIC: [u8; 4] = [0x54, 0x50, 0x4C, 0x52];
 pub const VERSION_MAJOR: u16 = 1;
-pub const VERSION_MINOR: u16 = 0;
+pub const VERSION_MINOR: u16 = 1;
 /// Total header length in bytes.
 pub const HEADER_LEN: usize = 8;
 
