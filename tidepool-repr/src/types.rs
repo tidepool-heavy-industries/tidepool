@@ -395,6 +395,11 @@ define_primops! {
     IndexWord32OffAddr => "IndexWord32OffAddr", "indexWord32OffAddr#";
     IndexWideCharOffAddr => "IndexWideCharOffAddr", "indexWideCharOffAddr#";
     WriteWideCharOffAddr => "WriteWideCharOffAddr", "writeWideCharOffAddr#";
+    // Pure JSON decode: `decodeJson :: Text -> Maybe Value`. Dispatches to Rust
+    // serde_json and builds the vendored aeson `Value` ADT on the heap (Rust
+    // side in `tidepool-eval::json` / the `runtime_json_decode` JIT host fn).
+    // Not a real GHC primop; surfaced via Translate.hs binding interception.
+    JsonDecode => "JsonDecode", "jsonDecode#";
 }
 
 /// Case alternative constructor.

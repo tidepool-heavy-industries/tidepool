@@ -67,6 +67,10 @@ pub struct JitEffectMachine {
     nursery: Nursery,
     tags: Result<ConTags, &'static str>,
     func_id: FuncId,
+    /// aeson-`Value` constructor ids for the `JsonDecode` primop, resolved once
+    /// at compile from the `DataConTable` and installed into a host-fn
+    /// thread-local at each run entry. `None` if the closure isn't in scope.
+    json_con_ids: Option<tidepool_eval::json::JsonConIds>,
     /// External cancellation flag. The JIT installs a thread-local clone of this
     /// `Arc` via `set_cancel_flag` before entering compiled code; the next
     /// GC safepoint observes the flag and aborts execution with
@@ -225,6 +229,7 @@ type CompiledParts = (
     Nursery,
     Result<ConTags, &'static str>,
     FuncId,
+    Option<tidepool_eval::json::JsonConIds>,
 );
 
 impl JitEffectMachine {
@@ -260,7 +265,10 @@ impl JitEffectMachine {
         pipeline.finalize()?;
         let tags = ConTags::from_table(table).map_err(|kind| kind.name());
         let nursery = Nursery::new(nursery_size);
-        Ok((pipeline, nursery, tags, func_id))
+        // Cache the aeson-`Value` constructor ids for the `JsonDecode` primop's
+        // host fn (installed into a thread-local at each run entry).
+        let json_con_ids = tidepool_eval::json::JsonConIds::from_table(table);
+        Ok((pipeline, nursery, tags, func_id, json_con_ids))
     }
 
     /// Compile a CoreExpr for one-shot JIT execution.
@@ -272,12 +280,14 @@ impl JitEffectMachine {
         table: &DataConTable,
         nursery_size: usize,
     ) -> Result<Self, JitError> {
-        let (pipeline, nursery, tags, func_id) = Self::compile_inner(expr, table, nursery_size)?;
+        let (pipeline, nursery, tags, func_id, json_con_ids) =
+            Self::compile_inner(expr, table, nursery_size)?;
         Ok(Self {
             pipeline,
             nursery,
             tags,
             func_id,
+            json_con_ids,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             session: None,
         })
@@ -295,12 +305,14 @@ impl JitEffectMachine {
         table: &DataConTable,
         nursery_size: usize,
     ) -> Result<Self, JitError> {
-        let (pipeline, nursery, tags, func_id) = Self::compile_inner(expr, table, nursery_size)?;
+        let (pipeline, nursery, tags, func_id, json_con_ids) =
+            Self::compile_inner(expr, table, nursery_size)?;
         Ok(Self {
             pipeline,
             nursery,
             tags,
             func_id,
+            json_con_ids,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             session: Some(SessionState {
                 heap: None,
@@ -338,6 +350,9 @@ impl JitEffectMachine {
             }
         }
         crate::host_fns::set_cancel_flag(self.cancel_flag.clone());
+        // Make the aeson-`Value` constructor ids visible to the `JsonDecode`
+        // primop's host fn for the duration of this run.
+        crate::host_fns::set_json_con_ids(self.json_con_ids);
         RegistryGuard {
             is_session: self.session.is_some(),
             reclaim: None,

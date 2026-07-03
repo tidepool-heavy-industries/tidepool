@@ -1,0 +1,182 @@
+//! serde_json → eval `Value` (the vendored `Tidepool.Aeson.Value` ADT).
+//!
+//! This is the ONE source of truth for how a parsed JSON document is built as a
+//! Tidepool Core `Value`, shared by:
+//!   - the pure `JsonDecode` primop, on BOTH the tree-walker (`eval.rs`) and the
+//!     Cranelift JIT (via the `runtime_json_decode` host fn in
+//!     `tidepool-codegen`), so the two agree by construction, and
+//!   - `tidepool-bridge`'s `impl ToCore for serde_json::Value` (effect results
+//!     that hand JSON back to Haskell), which delegates here.
+//!
+//! Representation (must match `haskell/lib/Tidepool/Aeson/Value.hs` at -O2):
+//!   Value = Object !Object | Array [Value] | String !Text | Number !Double
+//!         | Bool !Bool | Null | NumberI !Int
+//! with `Object` backed by `Data.Map.Strict` (`Bin`/`Tip` balanced tree, the
+//! `!Int` size boxed as `I#`), lists as `:`/`[]` cons cells, and `Text` stored
+//! as the GHC worker `Text ByteArray# Int# Int#` (UTF-8 bytes, offset 0).
+//!
+//! Machine ints ride `NumberI` (exact); genuine floats ride `Number` (Double) —
+//! same BUG-8 split the bridge already used.
+
+use crate::value::Value;
+use std::cell::Cell;
+use std::sync::{Arc, Mutex};
+use tidepool_repr::{DataConId, DataConTable, Literal};
+
+/// `DataConId`s of every constructor needed to build a `Maybe Value`. `Copy`
+/// (all fields are `DataConId`) so it can be cached in a thread-local by value,
+/// with no borrow of the originating `DataConTable`.
+#[derive(Debug, Clone, Copy)]
+pub struct JsonConIds {
+    pub just: DataConId,
+    pub nothing: DataConId,
+    pub object: DataConId,
+    pub array: DataConId,
+    pub string: DataConId,
+    pub number: DataConId,
+    pub number_i: DataConId,
+    pub bool_con: DataConId,
+    pub null: DataConId,
+    pub true_con: DataConId,
+    pub false_con: DataConId,
+    pub bin: DataConId,
+    pub tip: DataConId,
+    pub i_hash: DataConId,
+    pub text: DataConId,
+    pub cons: DataConId,
+    pub nil: DataConId,
+}
+
+impl JsonConIds {
+    /// Resolve every constructor id from a table. Returns `None` if ANY required
+    /// constructor is absent — i.e. the aeson `Value` / `Maybe` / `Data.Map`
+    /// closure is not in scope for this program. Callers surface a clean error
+    /// rather than fabricate a `Con` with a bogus id.
+    pub fn from_table(table: &DataConTable) -> Option<Self> {
+        Some(JsonConIds {
+            just: table.get_by_name_arity("Just", 1)?,
+            nothing: table.get_by_name_arity("Nothing", 0)?,
+            object: table.get_by_name_arity("Object", 1)?,
+            array: table.get_by_name_arity("Array", 1)?,
+            string: table.get_by_name_arity("String", 1)?,
+            number: table.get_by_name_arity("Number", 1)?,
+            number_i: table.get_by_name_arity("NumberI", 1)?,
+            bool_con: table.get_by_name_arity("Bool", 1)?,
+            null: table.get_by_name_arity("Null", 0)?,
+            true_con: table.get_by_name_arity("True", 0)?,
+            false_con: table.get_by_name_arity("False", 0)?,
+            bin: table
+                .get_by_qualified_name("Data.Map.Bin")
+                .or_else(|| table.get_by_name_arity("Bin", 5))?,
+            tip: table
+                .get_by_qualified_name("Data.Map.Tip")
+                .or_else(|| table.get_by_name_arity("Tip", 0))?,
+            i_hash: table.get_by_name_arity("I#", 1)?,
+            text: table.get_by_name_arity("Text", 3)?,
+            cons: table.get_by_name_arity(":", 2)?,
+            nil: table.get_by_name_arity("[]", 0)?,
+        })
+    }
+}
+
+/// Build the worker `Text ByteArray# Int# Int#` for a UTF-8 string (offset 0).
+fn text_value(s: &str, ids: &JsonConIds) -> Value {
+    let bytes = s.as_bytes().to_vec();
+    let len = bytes.len() as i64;
+    Value::Con(
+        ids.text,
+        vec![
+            Value::ByteArray(Arc::new(Mutex::new(bytes))),
+            Value::Lit(Literal::LitInt(0)),
+            Value::Lit(Literal::LitInt(len)),
+        ],
+    )
+}
+
+/// Build a `[Value]` cons list (`:`/`[]`) from already-converted elements.
+fn list_value(items: Vec<Value>, ids: &JsonConIds) -> Value {
+    let mut acc = Value::Con(ids.nil, vec![]);
+    for v in items.into_iter().rev() {
+        acc = Value::Con(ids.cons, vec![v, acc]);
+    }
+    acc
+}
+
+/// Build a `Data.Map.Strict.Map Key Value` from key-sorted entries by
+/// divide-and-conquer (`Bin size k v left right` / `Tip`, size boxed as `I#`).
+fn map_value(entries: &[(&String, &serde_json::Value)], ids: &JsonConIds) -> Value {
+    if entries.is_empty() {
+        return Value::Con(ids.tip, vec![]);
+    }
+    let mid = entries.len() / 2;
+    let (k, v) = entries[mid];
+    let left = map_value(&entries[..mid], ids);
+    let right = map_value(&entries[mid + 1..], ids);
+    let key = text_value(k, ids);
+    let val = json_to_value(v, ids);
+    // Bin's leading !Int (subtree size) is boxed as I#(n) to match GHC's heap.
+    let size = Value::Con(
+        ids.i_hash,
+        vec![Value::Lit(Literal::LitInt(entries.len() as i64))],
+    );
+    Value::Con(ids.bin, vec![size, key, val, left, right])
+}
+
+/// Convert a parsed `serde_json::Value` to the eval `Value` for the vendored
+/// aeson `Value` type. Recursion depth is bounded by serde_json's own nesting
+/// limit (128 by default), so this never approaches host-stack exhaustion.
+pub fn json_to_value(j: &serde_json::Value, ids: &JsonConIds) -> Value {
+    match j {
+        serde_json::Value::Null => Value::Con(ids.null, vec![]),
+        serde_json::Value::Bool(b) => {
+            let inner = Value::Con(if *b { ids.true_con } else { ids.false_con }, vec![]);
+            Value::Con(ids.bool_con, vec![inner])
+        }
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Con(ids.number_i, vec![Value::Lit(Literal::LitInt(i))])
+            } else {
+                let f = n.as_f64().unwrap_or(0.0);
+                Value::Con(ids.number, vec![Value::Lit(Literal::LitDouble(f.to_bits()))])
+            }
+        }
+        serde_json::Value::String(s) => Value::Con(ids.string, vec![text_value(s, ids)]),
+        serde_json::Value::Array(arr) => {
+            let items = arr.iter().map(|v| json_to_value(v, ids)).collect();
+            Value::Con(ids.array, vec![list_value(items, ids)])
+        }
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            Value::Con(ids.object, vec![map_value(&entries, ids)])
+        }
+    }
+}
+
+/// Parse a JSON document and wrap the result: `Just v` on success, `Nothing` on
+/// any parse error. This is the semantics of `decodeJson :: Text -> Maybe Value`.
+pub fn decode_json_str(input: &str, ids: &JsonConIds) -> Value {
+    match serde_json::from_str::<serde_json::Value>(input) {
+        Ok(j) => Value::Con(ids.just, vec![json_to_value(&j, ids)]),
+        Err(_) => Value::Con(ids.nothing, vec![]),
+    }
+}
+
+thread_local! {
+    /// The aeson-`Value` constructor ids for the current eval, cached by
+    /// `env_from_datacon_table` (the universal eval-setup chokepoint). Read by
+    /// the `JsonDecode` primop arm in `eval.rs`. `None` when the closure isn't
+    /// in scope, or before any env has been built on this thread.
+    static JSON_CON_IDS: Cell<Option<JsonConIds>> = const { Cell::new(None) };
+}
+
+/// Cache the JSON constructor ids for this thread (called from
+/// `env_from_datacon_table`). `None` clears them.
+pub fn set_json_con_ids(ids: Option<JsonConIds>) {
+    JSON_CON_IDS.with(|c| c.set(ids));
+}
+
+/// The JSON constructor ids cached for this thread, if any.
+pub fn json_con_ids() -> Option<JsonConIds> {
+    JSON_CON_IDS.with(|c| c.get())
+}

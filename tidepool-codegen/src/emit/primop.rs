@@ -595,6 +595,34 @@ pub fn emit_primop(
             )?;
             Ok(SsaVal::Raw(result, LIT_TAG_ADDR))
         }
+        PrimOpKind::JsonDecode => {
+            // decodeJson :: Text -> Maybe Value. Force the Text arg to a heap
+            // pointer (`Text ByteArray# Int# Int#` Con) and hand it + vmctx to
+            // the host fn, which parses via serde_json and builds the aeson
+            // `Maybe Value` on the nursery heap (same builder the tree-walker
+            // uses in `tidepool-eval::json`, so JIT == eval by construction).
+            check_arity(op, 1, args.len())?;
+            let text_ptr = crate::emit::expr::ensure_heap_ptr(
+                builder,
+                sess.vmctx,
+                sess.gc_sig,
+                sess.oom_func,
+                args[0],
+            );
+            let result = emit_runtime_call(
+                sess.pipeline,
+                builder,
+                "runtime_json_decode",
+                &[
+                    AbiParam::new(types::I64), // vmctx
+                    AbiParam::new(types::I64), // text Con ptr
+                ],
+                &[AbiParam::new(types::I64)],
+                &[sess.vmctx, text_ptr],
+            )?;
+            builder.declare_value_needs_stack_map(result);
+            Ok(SsaVal::HeapPtr(result))
+        }
         PrimOpKind::Int2Float => {
             check_arity(op, 1, args.len())?;
             let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
