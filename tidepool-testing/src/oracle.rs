@@ -814,15 +814,15 @@ mod tests {
         let cbor_res = eval_cbor("../haskell/test/Identity_cbor/identity.cbor").unwrap();
 
         // Both should be Closures
-        assert!(matches!(rust_res, Value::Closure(_, _, _)));
-        assert!(matches!(cbor_res, Value::Closure(_, _, _)));
+        assert!(matches!(rust_res, Value::Closure { .. }));
+        assert!(matches!(cbor_res, Value::Closure { .. }));
     }
 
     #[test]
     fn test_cbor_identity() {
         let res = eval_cbor("../haskell/test/Identity_cbor/identity.cbor").unwrap();
         match res {
-            Value::Closure(_, _, _) => (),
+            Value::Closure { .. } => (),
             _ => panic!("Expected Closure, got {:?}", res),
         }
     }
@@ -831,7 +831,7 @@ mod tests {
     fn test_cbor_apply() {
         let res = eval_cbor("../haskell/test/Identity_cbor/apply.cbor").unwrap();
         match res {
-            Value::Closure(_, _, _) => (),
+            Value::Closure { .. } => (),
             _ => panic!("Expected Closure, got {:?}", res),
         }
     }
@@ -840,7 +840,7 @@ mod tests {
     fn test_cbor_const() {
         let res = eval_cbor("../haskell/test/Identity_cbor/const'.cbor").unwrap();
         match res {
-            Value::Closure(_, _, _) => (),
+            Value::Closure { .. } => (),
             _ => panic!("Expected Closure, got {:?}", res),
         }
     }

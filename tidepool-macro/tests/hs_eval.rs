@@ -8,19 +8,19 @@ use tidepool_macro::haskell_eval;
 fn test_hs_identity() {
     let res = haskell_eval!("../haskell/test/Identity.hs::identity");
     assert!(res.is_ok(), "Evaluation failed: {:?}", res.as_ref().err());
-    assert!(matches!(res.unwrap(), Value::Closure(_, _, _)));
+    assert!(matches!(res.unwrap(), Value::Closure { .. }));
 }
 
 #[test]
 fn test_hs_apply() {
     let res = haskell_eval!("../haskell/test/Identity.hs::apply");
     assert!(res.is_ok(), "Evaluation failed: {:?}", res.as_ref().err());
-    assert!(matches!(res.unwrap(), Value::Closure(_, _, _)));
+    assert!(matches!(res.unwrap(), Value::Closure { .. }));
 }
 
 #[test]
 fn test_hs_const_prime() {
     let res = haskell_eval!("../haskell/test/Identity.hs::const'");
     assert!(res.is_ok(), "Evaluation failed: {:?}", res.as_ref().err());
-    assert!(matches!(res.unwrap(), Value::Closure(_, _, _)));
+    assert!(matches!(res.unwrap(), Value::Closure { .. }));
 }

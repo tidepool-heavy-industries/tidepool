@@ -560,9 +560,9 @@ fn compare_values(
                 compare_values(new_path, sv, s_table, pv, p_table);
             }
         }
-        (Value::Closure(..), Value::Closure(..)) => {} // Closures are opaque
-        (Value::ThunkRef(_), Value::ThunkRef(_)) => {} // Thunks are opaque
-        (Value::JoinCont(..), Value::JoinCont(..)) => {} // Join points are opaque
+        (Value::Closure { .. }, Value::Closure { .. }) => {} // Closures are opaque
+        (Value::ThunkRef(_), Value::ThunkRef(_)) => {}       // Thunks are opaque
+        (Value::JoinCont { .. }, Value::JoinCont { .. }) => {} // Join points are opaque
         (Value::ConFun(si, sa, sf), Value::ConFun(pi, pa, pf)) => {
             let s_dc = s_table.get(*si).expect("single_table missing ConFun ID");
             let p_dc = p_table.get(*pi).expect("split_table missing ConFun ID");
@@ -617,9 +617,9 @@ fn val_kind(v: &Value) -> &'static str {
     match v {
         Value::Lit(_) => "Lit",
         Value::Con(..) => "Con",
-        Value::Closure(..) => "Closure",
+        Value::Closure { .. } => "Closure",
         Value::ThunkRef(_) => "ThunkRef",
-        Value::JoinCont(..) => "JoinCont",
+        Value::JoinCont { .. } => "JoinCont",
         Value::ConFun(..) => "ConFun",
         Value::ByteArray(_) => "ByteArray",
     }

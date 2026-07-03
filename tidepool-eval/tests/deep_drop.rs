@@ -118,7 +118,11 @@ fn dummy_expr() -> tidepool_repr::CoreExpr {
 fn deep_spine_inside_closure_env_drops_on_small_stack() {
     let mut env = Env::new();
     env.insert(VarId(0), build_cons_list(SPINE_DEPTH));
-    let closure = Value::Closure(env, VarId(1), dummy_expr());
+    let closure = Value::Closure {
+        env,
+        binder: VarId(1),
+        body: dummy_expr(),
+    };
     drop_on_small_stack(move || drop(closure));
 }
 
@@ -132,7 +136,11 @@ fn deep_nested_closure_env_chain_drops_on_small_stack() {
     for _ in 0..SPINE_DEPTH {
         let mut env = Env::new();
         env.insert(VarId(0), v);
-        v = Value::Closure(env, VarId(1), dummy_expr());
+        v = Value::Closure {
+            env,
+            binder: VarId(1),
+            body: dummy_expr(),
+        };
     }
     drop_on_small_stack(move || drop(v));
 }
@@ -144,7 +152,11 @@ fn deep_nested_joincont_env_chain_drops_on_small_stack() {
     for _ in 0..SPINE_DEPTH {
         let mut env = Env::new();
         env.insert(VarId(0), v);
-        v = Value::JoinCont(vec![VarId(1)], dummy_expr(), env);
+        v = Value::JoinCont {
+            params: vec![VarId(1)],
+            body: dummy_expr(),
+            env,
+        };
     }
     drop_on_small_stack(move || drop(v));
 }
@@ -160,8 +172,16 @@ fn deep_nested_joincont_env_chain_drops_on_small_stack() {
 fn shared_deep_env_drop_is_refcount_aware() {
     let mut env = Env::new();
     env.insert(VarId(0), build_cons_list(SPINE_DEPTH));
-    let c1 = Value::Closure(env.clone(), VarId(1), dummy_expr());
-    let c2 = Value::Closure(env.clone(), VarId(2), dummy_expr());
+    let c1 = Value::Closure {
+        env: env.clone(),
+        binder: VarId(1),
+        body: dummy_expr(),
+    };
+    let c2 = Value::Closure {
+        env: env.clone(),
+        binder: VarId(2),
+        body: dummy_expr(),
+    };
     drop(env); // c1 and c2 now share the chunk holding the deep spine.
     drop_on_small_stack(move || {
         drop(c1); // c2 still alive: shared → decrement only, no clone.

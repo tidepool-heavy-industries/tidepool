@@ -208,7 +208,7 @@ impl<'a> EffectMachine<'a> {
                         pending.push(fields[1].clone());
                         k = fields[0].clone();
                     }
-                    Value::Closure(..) => {
+                    Value::Closure { .. } => {
                         // Raw closure (degenerate continuation)
                         break self.apply_closure(kf, arg)?;
                     }
@@ -276,7 +276,11 @@ impl<'a> EffectMachine<'a> {
         // `ref mut` + replace/take: Value implements Drop (iterative spine
         // dismantle), so fields cannot be moved out by pattern.
         match closure {
-            Value::Closure(ref mut env, binder, ref mut body) => {
+            Value::Closure {
+                ref mut env,
+                binder,
+                ref mut body,
+            } => {
                 let env = std::mem::replace(env, tidepool_eval::env::Env::new());
                 let body = std::mem::replace(body, tidepool_repr::RecursiveTree { nodes: vec![] });
                 let new_env = env.update(binder, arg);

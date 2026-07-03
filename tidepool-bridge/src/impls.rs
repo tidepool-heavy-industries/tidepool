@@ -51,9 +51,9 @@ fn type_mismatch(expected: &str, got: &Value) -> BridgeError {
     let got_str = match got {
         Value::Lit(l) => format!("{:?}", l),
         Value::Con(id, _) => format!("Con({:?})", id),
-        Value::Closure(_, _, _) => "Closure".to_string(),
+        Value::Closure { .. } => "Closure".to_string(),
         Value::ThunkRef(_) => "ThunkRef".to_string(),
-        Value::JoinCont(_, _, _) => "JoinCont".to_string(),
+        Value::JoinCont { .. } => "JoinCont".to_string(),
         Value::ConFun(id, arity, args) => format!("ConFun({:?}, {}/{})", id, args.len(), arity),
         Value::ByteArray(bs) => match bs.lock() {
             Ok(b) => format!("ByteArray(len={})", b.len()),

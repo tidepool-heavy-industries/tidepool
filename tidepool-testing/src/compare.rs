@@ -36,9 +36,9 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
                 }
             }
             // Closures: can't structurally compare, so treat as equal if both are closures
-            (Value::Closure(..), Value::Closure(..)) => {}
+            (Value::Closure { .. }, Value::Closure { .. }) => {}
             // JoinConts: similarly not comparable
-            (Value::JoinCont(..), Value::JoinCont(..)) => {}
+            (Value::JoinCont { .. }, Value::JoinCont { .. }) => {}
             // ConFun: compare tag and accumulated args
             (Value::ConFun(tag_a, arity_a, args_a), Value::ConFun(tag_b, arity_b, args_b)) => {
                 if tag_a != tag_b || arity_a != arity_b || args_a.len() != args_b.len() {
@@ -199,13 +199,13 @@ pub unsafe fn heap_to_value(
                     }
                     layout::TAG_CLOSURE => {
                         // Can't reconstruct a closure — return a sentinel.
-                        results.push(Value::Closure(
-                            tidepool_eval::env::Env::new(),
-                            tidepool_repr::VarId(0),
-                            tidepool_repr::RecursiveTree {
+                        results.push(Value::Closure {
+                            env: tidepool_eval::env::Env::new(),
+                            binder: tidepool_repr::VarId(0),
+                            body: tidepool_repr::RecursiveTree {
                                 nodes: vec![tidepool_repr::CoreFrame::Var(tidepool_repr::VarId(0))],
                             },
-                        ));
+                        });
                     }
                     _ => panic!("unknown heap tag: {}", tag),
                 }
@@ -227,7 +227,7 @@ pub fn contains_closure(val: &Value) -> bool {
     let mut stack: Vec<&Value> = vec![val];
     while let Some(v) = stack.pop() {
         match v {
-            Value::Closure(..) => return true,
+            Value::Closure { .. } => return true,
             Value::Con(_, fields) => stack.extend(fields.iter()),
             Value::ConFun(_, _, args) => stack.extend(args.iter()),
             _ => {}
@@ -277,8 +277,16 @@ mod tests {
         let expr = tidepool_repr::RecursiveTree {
             nodes: vec![tidepool_repr::CoreFrame::Var(tidepool_repr::VarId(0))],
         };
-        let a = Value::Closure(env.clone(), tidepool_repr::VarId(0), expr.clone());
-        let b = Value::Closure(env, tidepool_repr::VarId(1), expr);
+        let a = Value::Closure {
+            env: env.clone(),
+            binder: tidepool_repr::VarId(0),
+            body: expr.clone(),
+        };
+        let b = Value::Closure {
+            env,
+            binder: tidepool_repr::VarId(1),
+            body: expr,
+        };
         assert!(values_equal(&a, &b));
     }
 
@@ -289,7 +297,11 @@ mod tests {
         let expr = tidepool_repr::RecursiveTree {
             nodes: vec![tidepool_repr::CoreFrame::Var(tidepool_repr::VarId(0))],
         };
-        let closure = Value::Closure(env, tidepool_repr::VarId(0), expr);
+        let closure = Value::Closure {
+            env,
+            binder: tidepool_repr::VarId(0),
+            body: expr,
+        };
         assert!(contains_closure(&closure));
         let nested = Value::Con(DataConId(1), vec![closure]);
         assert!(contains_closure(&nested));

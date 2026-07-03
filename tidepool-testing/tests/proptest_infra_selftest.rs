@@ -39,8 +39,8 @@ fn naive_eq(a: &Value, b: &Value) -> bool {
                 && ga.len() == gb.len()
                 && ga.iter().zip(gb.iter()).all(|(x, y)| naive_eq(x, y))
         }
-        (Value::Closure(..), Value::Closure(..)) => true,
-        (Value::JoinCont(..), Value::JoinCont(..)) => true,
+        (Value::Closure { .. }, Value::Closure { .. }) => true,
+        (Value::JoinCont { .. }, Value::JoinCont { .. }) => true,
         _ => false,
     }
 }
@@ -83,8 +83,8 @@ fn naive_eq_strict_lits(a: &Value, b: &Value) -> bool {
                     .zip(gb.iter())
                     .all(|(x, y)| naive_eq_strict_lits(x, y))
         }
-        (Value::Closure(..), Value::Closure(..)) => true,
-        (Value::JoinCont(..), Value::JoinCont(..)) => true,
+        (Value::Closure { .. }, Value::Closure { .. }) => true,
+        (Value::JoinCont { .. }, Value::JoinCont { .. }) => true,
         _ => false,
     }
 }
@@ -108,20 +108,20 @@ fn arb_literal() -> impl Strategy<Value = Literal> {
 fn arb_value(depth: u32) -> impl Strategy<Value = Value> {
     let leaf = prop_oneof![
         arb_literal().prop_map(Value::Lit),
-        Just(Value::Closure(
-            Env::new(),
-            VarId(0),
-            RecursiveTree {
+        Just(Value::Closure {
+            env: Env::new(),
+            binder: VarId(0),
+            body: RecursiveTree {
                 nodes: vec![CoreFrame::Var(VarId(0))]
             }
-        )),
-        Just(Value::JoinCont(
-            vec![VarId(0)],
-            RecursiveTree {
+        }),
+        Just(Value::JoinCont {
+            params: vec![VarId(0)],
+            body: RecursiveTree {
                 nodes: vec![CoreFrame::Var(VarId(0))]
             },
-            Env::new()
-        )),
+            env: Env::new()
+        }),
     ];
 
     leaf.prop_recursive(depth, 60, 4, |inner| {
@@ -231,12 +231,12 @@ fn substitute_closures(v: &mut Value) {
                 substitute_closures(a);
             }
         }
-        Value::Closure(_, var, body) => {
-            var.0 += 1;
+        Value::Closure { binder, body, .. } => {
+            binder.0 += 1;
             body.nodes = vec![CoreFrame::Lit(Literal::LitInt(1))];
         }
-        Value::JoinCont(vars, body, _) => {
-            vars.push(VarId(99));
+        Value::JoinCont { params, body, .. } => {
+            params.push(VarId(99));
             body.nodes = vec![CoreFrame::Lit(Literal::LitInt(2))];
         }
         _ => {}
@@ -502,7 +502,7 @@ fn g4_generator_contracts() {
                     if let Ok(v) = eval(&expr, &Env::new(), &mut heap) {
                         if let Ok(fv) = deep_force(v, &mut heap) {
                             prop_assert!(!compare::contains_closure(&fv));
-                            if let Value::Closure(..) = fv {
+                            if let Value::Closure { .. } = fv {
                                 prop_assert!(false);
                             }
                             compared.set(compared.get() + 1);

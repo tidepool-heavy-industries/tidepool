@@ -23,11 +23,19 @@ pub enum Value {
     /// Fully-applied data constructor (GHC DataCon).
     Con(DataConId, Vec<Value>),
     /// Function closure: captured env + binder + body (GHC PAP/FUN).
-    Closure(Env, VarId, CoreExpr),
+    Closure {
+        env: Env,
+        binder: VarId,
+        body: CoreExpr,
+    },
     /// Reference to a heap-allocated thunk (GHC Thunk).
     ThunkRef(ThunkId),
     /// Join point continuation (GHC Join Point).
-    JoinCont(Vec<VarId>, CoreExpr, Env),
+    JoinCont {
+        params: Vec<VarId>,
+        body: CoreExpr,
+        env: Env,
+    },
     /// Partially-applied data constructor function: carries the constructor id,
     /// its total arity, and the arguments applied so far. When the number of
     /// arguments reaches the arity, this is reduced to a `Con` value.
@@ -74,9 +82,9 @@ impl std::fmt::Display for Value {
                 }
                 Ok(())
             }
-            Value::Closure(..) => write!(f, "<closure>"),
+            Value::Closure { .. } => write!(f, "<closure>"),
             Value::ThunkRef(id) => write!(f, "{}", id),
-            Value::JoinCont(..) => write!(f, "<join>"),
+            Value::JoinCont { .. } => write!(f, "<join>"),
             Value::ConFun(id, arity, args) => {
                 write!(f, "<partial Con#{} {}/{}>", id.0, args.len(), arity)
             }
@@ -144,7 +152,7 @@ fn detach_children(v: &mut Value, queue: &mut Vec<DropWork>) {
         Value::Con(_, fields) | Value::ConFun(_, _, fields) => {
             queue.extend(std::mem::take(fields).into_iter().map(DropWork::Val));
         }
-        Value::Closure(env, _, _) | Value::JoinCont(_, _, env) => {
+        Value::Closure { env, .. } | Value::JoinCont { env, .. } => {
             if !env.is_empty() {
                 queue.push(DropWork::Env(std::mem::take(env)));
             }
@@ -272,12 +280,22 @@ mod tests {
         );
 
         assert_eq!(
-            Value::Closure(env.clone(), VarId(0), expr.clone()).to_string(),
+            Value::Closure {
+                env: env.clone(),
+                binder: VarId(0),
+                body: expr.clone()
+            }
+            .to_string(),
             "<closure>"
         );
         assert_eq!(Value::ThunkRef(ThunkId(123)).to_string(), "<thunk#123>");
         assert_eq!(
-            Value::JoinCont(vec![VarId(1)], expr, env).to_string(),
+            Value::JoinCont {
+                params: vec![VarId(1)],
+                body: expr,
+                env
+            }
+            .to_string(),
             "<join>"
         );
 
@@ -296,9 +314,17 @@ mod tests {
         let expr = RecursiveTree {
             nodes: vec![CoreFrame::Var(VarId(0))],
         };
-        let closure = Value::Closure(env.clone(), VarId(0), expr.clone());
+        let closure = Value::Closure {
+            env: env.clone(),
+            binder: VarId(0),
+            body: expr.clone(),
+        };
         let thunk = Value::ThunkRef(ThunkId(0));
-        let join = Value::JoinCont(vec![VarId(1)], expr, env);
+        let join = Value::JoinCont {
+            params: vec![VarId(1)],
+            body: expr,
+            env,
+        };
 
         match lit {
             Value::Lit(_) => (),
@@ -309,7 +335,7 @@ mod tests {
             _ => panic!("Expected Con"),
         }
         match closure {
-            Value::Closure(_, _, _) => (),
+            Value::Closure { .. } => (),
             _ => panic!("Expected Closure"),
         }
         match thunk {
@@ -317,7 +343,7 @@ mod tests {
             _ => panic!("Expected ThunkRef"),
         }
         match join {
-            Value::JoinCont(_, _, _) => (),
+            Value::JoinCont { .. } => (),
             _ => panic!("Expected JoinCont"),
         }
     }
@@ -328,7 +354,11 @@ mod tests {
         let expr = RecursiveTree {
             nodes: vec![CoreFrame::Var(VarId(0))],
         };
-        let closure = Value::Closure(env, VarId(0), expr);
+        let closure = Value::Closure {
+            env,
+            binder: VarId(0),
+            body: expr,
+        };
         let _cloned = closure.clone();
     }
 }

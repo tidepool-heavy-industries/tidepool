@@ -203,9 +203,9 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
                         got: match value {
                             tidepool_eval::Value::Lit(l) => format!("Lit({:?})", l),
                             tidepool_eval::Value::Con(id, _) => format!("Con({:?})", id),
-                            tidepool_eval::Value::Closure(_, _, _) => "Closure".to_string(),
+                            tidepool_eval::Value::Closure { .. } => "Closure".to_string(),
                             tidepool_eval::Value::ThunkRef(id) => format!("ThunkRef({:?})", id),
-                            tidepool_eval::Value::JoinCont(_, _, _) => "JoinCont".to_string(),
+                            tidepool_eval::Value::JoinCont { .. } => "JoinCont".to_string(),
                             tidepool_eval::Value::ConFun(id, arity, args) => format!("ConFun({:?}, {}/{})", id, args.len(), arity),
                             tidepool_eval::Value::ByteArray(bs) => match bs.lock() {
                                 Ok(b) => format!("ByteArray(len={})", b.len()),
@@ -376,9 +376,9 @@ pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
                         got: match value {
                             tidepool_eval::Value::Lit(l) => format!("Lit({:?})", l),
                             tidepool_eval::Value::Con(id, _) => format!("Con({:?})", id),
-                            tidepool_eval::Value::Closure(_, _, _) => "Closure".to_string(),
+                            tidepool_eval::Value::Closure { .. } => "Closure".to_string(),
                             tidepool_eval::Value::ThunkRef(id) => format!("ThunkRef({:?})", id),
-                            tidepool_eval::Value::JoinCont(_, _, _) => "JoinCont".to_string(),
+                            tidepool_eval::Value::JoinCont { .. } => "JoinCont".to_string(),
                             tidepool_eval::Value::ConFun(id, arity, args) => format!("ConFun({:?}, {}/{})", id, args.len(), arity),
                             tidepool_eval::Value::ByteArray(bs) => match bs.lock() {
                                 Ok(b) => format!("ByteArray(len={})", b.len()),
