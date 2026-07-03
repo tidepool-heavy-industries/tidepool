@@ -693,8 +693,19 @@ impl Session {
 
         if classification.kind == TurnKind::Bind {
             match classification.binders.as_slice() {
-                // A bind statement with no extractable binder — treat as plain.
-                [] => self.run_plain_eval(expr_text, handlers, captured),
+                // A bind whose pattern binds NO name (`_ <- e`, `(_,_) <- e`):
+                // run the RHS effect and discard. Compiling the raw `_ <- e` as
+                // an expression fails "parse error on input '<-'" — strip the
+                // discarding pattern and route the RHS `e` like a bare effectful
+                // expression. (#321)
+                [] => {
+                    let rhs = split_discard_bind(expr_text).unwrap_or(expr_text);
+                    if !self.bindings.is_empty() || self.lib.generation().0 > 0 {
+                        self.run_session_reference(rhs, handlers, captured)
+                    } else {
+                        self.run_plain_eval(rhs, handlers, captured)
+                    }
+                }
                 [name] => {
                     let name = name.clone();
                     // "A pure binding is a declaration": a PURE bind (`let x = e`,
@@ -2115,6 +2126,15 @@ fn mentions_word(text: &str, word: &str) -> bool {
     false
 }
 
+/// For a discarding bind `pat <- e` (whose pattern binds no name, e.g. `_ <- e`
+/// or `(_,_) <- e`), return the RHS `e` so it can run as a plain effectful
+/// expression. The classifier has already confirmed a top-level `<-`, and a
+/// pattern can't contain `<-`, so the first `<-` is the bind arrow. (#321)
+fn split_discard_bind(text: &str) -> Option<&str> {
+    let idx = text.find("<-")?;
+    Some(text[idx + 2..].trim())
+}
+
 /// Extract the declared head identifier from a Haskell declaration string,
 /// for the slim `{"decl":"name"}` block item result. Strips keyword prefixes
 /// for type/class/instance declarations; for function definitions returns the
@@ -2248,7 +2268,7 @@ fn type_def_head(src: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod slim_tests {
-    use super::{decl_head, pure_bind_to_decl, slim_item_result};
+    use super::{decl_head, pure_bind_to_decl, slim_item_result, split_discard_bind};
 
     #[test]
     fn pure_bind_to_decl_normalizes() {
@@ -2316,6 +2336,14 @@ mod slim_tests {
         assert_eq!(decl_head("infixr 5 >>>"), ">>>");
         assert_eq!(decl_head("(<+>) = (++)"), "<+>");
         assert_eq!(decl_head("(<>) x y = x <> y"), "<>");
+    }
+
+    #[test]
+    fn split_discard_bind_strips_pattern() {
+        assert_eq!(split_discard_bind("_ <- pure (5 :: Int)"), Some("pure (5 :: Int)"));
+        assert_eq!(split_discard_bind("(_, _) <- pure (1, 2)"), Some("pure (1, 2)"));
+        assert_eq!(split_discard_bind("_ <- run \"echo hi\""), Some("run \"echo hi\""));
+        assert_eq!(split_discard_bind("no arrow here"), None);
     }
 
     #[test]
