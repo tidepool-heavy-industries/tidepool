@@ -38,6 +38,7 @@ extern crate proc_macro;
 
 mod codegen;
 mod parse;
+mod record_codegen;
 
 use parse::DataInfo;
 use proc_macro::TokenStream;
@@ -67,6 +68,23 @@ pub fn derive_to_core(input: TokenStream) -> TokenStream {
     match parse::parse_input(&input) {
         Ok(DataInfo::Enum(info)) => codegen::generate_to_core(&info).into(),
         Ok(DataInfo::Struct(info)) => codegen::generate_struct_to_core(&info).into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// Derive `CoreRecord` to render the Haskell `data` declaration this Rust type
+/// mirrors — the single source of truth for the record's Haskell shape.
+///
+/// The Rust struct/enum drives field order, names, and types; the generated
+/// `haskell_decl()` is what the Haskell side must use. Per-field overrides:
+/// `#[core(hs = "haskellName")]` renames a field, `#[core(hs_type = "T")]`
+/// overrides its rendered Haskell type. The type also registers itself in an
+/// `inventory` (`tidepool_bridge::all_record_decls`).
+#[proc_macro_derive(CoreRecord, attributes(core))]
+pub fn derive_core_record(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match parse::parse_input(&input).and_then(|info| record_codegen::generate_core_record(&info)) {
+        Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
 }

@@ -1,4 +1,8 @@
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DuplicateRecordFields, OverloadedRecordDot, DeriveGeneric #-}
+-- Commit/StatusEntry/FileDelta are defined in Tidepool.Records.Bridged (generated
+-- from the Rust wire-structs); their ToJSON instances live here, so they are
+-- orphan instances by construction.
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | Shared record vocabulary for the eval surface.
 --
@@ -28,6 +32,9 @@ module Tidepool.Records
 import Prelude (Int, Bool(..), Eq, Show, Maybe(..), (==))
 import Data.Text (Text)
 import Tidepool.Aeson.Value (ToJSON(..), object, (.=))
+-- Git wire records: GENERATED from the Rust structs (single source of truth).
+-- Re-exported below so `Tidepool.Prelude` (→ user evals) sees them unchanged.
+import Tidepool.Records.Bridged (Commit(..), StatusEntry(..), FileDelta(..))
 
 -- | A finished subprocess. Replaces @(Int, Text, Text)@ (exit code, stdout, stderr).
 data Proc = Proc { exitCode :: Int, stdout :: Text, stderr :: Text } deriving (Show, Eq)
@@ -94,14 +101,8 @@ instance ToJSON WriteOutcome where
   toJSON (WriteBlocked f xs) = object ["file" .= f, "written" .= False, "failed" .= xs]
 
 -- | A git commit returned by 'gitLog' or 'gitShow'.
-data Commit = Commit
-  { sha     :: Text
-  , subject :: Text
-  , author  :: Text
-  , date    :: Text
-  , files   :: [Text]
-  } deriving (Show, Eq)
-
+-- The @data Commit@ decl is GENERATED (Tidepool.Records.Bridged); only its
+-- 'ToJSON' instance lives here (orphan by construction).
 instance ToJSON Commit where
   toJSON c = object
     [ "sha"     .= c.sha
@@ -113,23 +114,13 @@ instance ToJSON Commit where
 
 -- | A single entry from 'gitStatus' (porcelain v1).
 -- 'state' is the two-character XY code (e.g. \"M \", \"??\", \"A \").
-data StatusEntry = StatusEntry
-  { path  :: Text
-  , state :: Text
-  } deriving (Show, Eq)
-
+-- The @data StatusEntry@ decl is GENERATED (Tidepool.Records.Bridged).
 instance ToJSON StatusEntry where
   toJSON e = object ["path" .= e.path, "state" .= e.state]
 
 -- | Per-file diff statistics from 'gitDiffStat'.
 -- 'binary' is True when git reports @-/@- instead of line counts.
-data FileDelta = FileDelta
-  { path   :: Text
-  , adds   :: Int
-  , dels   :: Int
-  , binary :: Bool
-  } deriving (Show, Eq)
-
+-- The @data FileDelta@ decl is GENERATED (Tidepool.Records.Bridged).
 instance ToJSON FileDelta where
   toJSON d = object
     [ "path"   .= d.path

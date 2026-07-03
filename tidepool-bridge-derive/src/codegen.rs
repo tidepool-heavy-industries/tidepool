@@ -312,7 +312,7 @@ pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
     add_trait_bounds(
         &mut generics,
         &trait_path,
-        info.fields.iter().map(|(_, ty)| ty.clone()),
+        info.fields.iter().map(|f| f.ty.clone()),
     );
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -320,7 +320,7 @@ pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
     let core_arity: usize = info
         .fields
         .iter()
-        .filter(|(_, ty)| !is_phantom_data(ty))
+        .filter(|f| !is_phantom_data(&f.ty))
         .count();
     let core_arity_u32 = core_arity as u32;
 
@@ -328,7 +328,9 @@ pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
     let field_constructions: Vec<_> = info
         .fields
         .iter()
-        .map(|(field_name, field_ty)| {
+        .map(|f| {
+            let field_name = &f.ident;
+            let field_ty = &f.ty;
             if is_phantom_data(field_ty) {
                 quote! {
                     #field_name: <#field_ty as core::default::Default>::default()
@@ -402,7 +404,7 @@ pub fn generate_struct_to_core(info: &StructInfo) -> TokenStream {
     add_trait_bounds(
         &mut generics,
         &trait_path,
-        info.fields.iter().map(|(_, ty)| ty.clone()),
+        info.fields.iter().map(|f| f.ty.clone()),
     );
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -410,7 +412,7 @@ pub fn generate_struct_to_core(info: &StructInfo) -> TokenStream {
     let core_arity: usize = info
         .fields
         .iter()
-        .filter(|(_, ty)| !is_phantom_data(ty))
+        .filter(|f| !is_phantom_data(&f.ty))
         .count();
     let core_arity_u32 = core_arity as u32;
 
@@ -419,9 +421,9 @@ pub fn generate_struct_to_core(info: &StructInfo) -> TokenStream {
     let field_bindings: Vec<_> = info
         .fields
         .iter()
-        .map(|(field_name, ty)| {
-            let is_phantom = is_phantom_data(ty);
-            (field_name.clone(), ty.clone(), is_phantom)
+        .map(|f| {
+            let is_phantom = is_phantom_data(&f.ty);
+            (f.ident.clone(), f.ty.clone(), is_phantom)
         })
         .collect();
 

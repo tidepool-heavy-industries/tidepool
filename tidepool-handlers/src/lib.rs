@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use ast_grep_config::{DeserializeEnv, SerializableRule};
 use ast_grep_core::{Language as _, Pattern};
 use ast_grep_language::{LanguageExt, SupportLang};
-use tidepool_bridge_derive::{FromCore, ToCore};
+use tidepool_bridge_derive::{CoreRecord, FromCore, ToCore};
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
 use tidepool_eval::value::Value;
@@ -604,13 +604,18 @@ fn truncate_match_text(text: String) -> String {
 /// Rust-side Match value returned to Haskell.
 /// Field order must match the Haskell data constructor:
 ///   Match { mText, mFile, mLine, mVars, mReplacement }
-#[derive(ToCore)]
+#[derive(ToCore, CoreRecord)]
 #[core(name = "Match")]
 pub struct SgMatch {
+    #[core(hs = "matchText")]
     pub text: String,
+    #[core(hs = "matchFile")]
     pub file: String,
+    #[core(hs = "matchLine")]
     pub line: i64,
+    #[core(hs = "matchVarsList")]
     pub vars: Vec<(String, String)>,
+    #[core(hs = "matchReplacement")]
     pub replacement: String,
 }
 
@@ -941,21 +946,29 @@ pub enum LspReq {
     Diagnostics(String),
 }
 
-#[derive(FromCore, ToCore, Clone)]
+#[derive(FromCore, ToCore, Clone, CoreRecord)]
 #[core(name = "Position")]
 pub struct LspPosition {
+    #[core(hs = "posLine")]
     pub line: i64,
+    #[core(hs = "posChar")]
     pub character: i64,
 }
 
-#[derive(FromCore, ToCore, Clone)]
+#[derive(FromCore, ToCore, Clone, CoreRecord)]
 #[core(name = "LspNode")]
 pub struct LspNode {
+    #[core(hs = "nodeName")]
     pub name: String,
+    #[core(hs = "nodeContainer")]
     pub container: String,
+    #[core(hs = "nodeKind")]
     pub kind: String,
+    #[core(hs = "nodeFile")]
     pub file: String,
+    #[core(hs = "nodePos", hs_type = "Position")]
     pub pos: LspPosition,
+    #[core(hs = "nodeText")]
     pub text: String,
 }
 
@@ -988,12 +1001,16 @@ impl LspNode {
     }
 }
 
-#[derive(ToCore)]
+#[derive(ToCore, CoreRecord)]
 #[core(name = "Diag")]
 pub struct LspDiag {
+    #[core(hs = "diagFile")]
     pub file: String,
+    #[core(hs = "diagLine")]
     pub line: i64,
+    #[core(hs = "diagSeverity")]
     pub severity: String,
+    #[core(hs = "diagMessage")]
     pub message: String,
 }
 
@@ -1797,7 +1814,7 @@ pub enum GitReq {
 }
 
 /// Haskell `Commit` record: sha / subject / author / date / files.
-#[derive(ToCore, Clone)]
+#[derive(ToCore, Clone, CoreRecord)]
 #[core(name = "Commit")]
 pub struct GitCommit {
     pub sha: String,
@@ -1808,7 +1825,7 @@ pub struct GitCommit {
 }
 
 /// Haskell `StatusEntry` record: path / state (2-char XY code).
-#[derive(ToCore, Clone)]
+#[derive(ToCore, Clone, CoreRecord)]
 #[core(name = "StatusEntry")]
 pub struct GitStatusEntry {
     pub path: String,
@@ -1816,13 +1833,55 @@ pub struct GitStatusEntry {
 }
 
 /// Haskell `FileDelta` record: path / adds / dels / binary.
-#[derive(ToCore, Clone)]
+#[derive(ToCore, Clone, CoreRecord)]
 #[core(name = "FileDelta")]
 pub struct GitFileDelta {
     pub path: String,
     pub adds: i64,
     pub dels: i64,
     pub binary: bool,
+}
+
+/// Build the `Tidepool.Records.Bridged` Haskell module — the GENERATED home of
+/// the fully-migrated bridged result records, where the Rust struct is the
+/// single source of truth. Materialized to the committed
+/// `haskell/lib/Tidepool/Records/Bridged.hs` (kept in sync by the
+/// `bridged_records` test) and re-exported by `Tidepool.Records` →
+/// `Tidepool.Prelude`.
+///
+/// Field ORDER is the wire contract: `ToCore` builds the `Con` in Rust struct
+/// field order; the extract assigns positions from this decl's field order.
+pub fn bridged_records_module() -> String {
+    use tidepool_bridge::CoreRecord;
+    let decls = [
+        GitCommit::haskell_decl(),
+        GitStatusEntry::haskell_decl(),
+        GitFileDelta::haskell_decl(),
+    ];
+    let exports = decls
+        .iter()
+        .map(|d| format!("{}(..)", d.split_whitespace().nth(1).unwrap_or("")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut out = String::new();
+    out.push_str("{-# LANGUAGE NoImplicitPrelude, DuplicateRecordFields #-}\n\n");
+    out.push_str("-- | GENERATED from the Rust bridged-record structs in tidepool-handlers\n");
+    out.push_str("-- (each carries `#[derive(CoreRecord)]`). DO NOT EDIT BY HAND: the Rust\n");
+    out.push_str("-- struct is the single source of truth for field order / name / type, and\n");
+    out.push_str("-- this file is regenerated + verified by the `bridged_records` test\n");
+    out.push_str(
+        "-- (`TIDEPOOL_REGEN_BRIDGED=1 cargo test -p tidepool-handlers bridged_records`).\n",
+    );
+    out.push_str(&format!(
+        "module Tidepool.Records.Bridged\n  ( {exports} ) where\n\n"
+    ));
+    out.push_str("import Prelude (Int, Bool, Eq, Show)\n");
+    out.push_str("import Data.Text (Text)\n\n");
+    for d in &decls {
+        out.push_str(d);
+        out.push('\n');
+    }
+    out
 }
 
 #[derive(Clone)]
