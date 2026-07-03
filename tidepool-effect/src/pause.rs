@@ -25,19 +25,22 @@
 //! Only the gate is shared; the DISPATCHERS and worker/thread-parking mechanics
 //! stay crate-local (see each `ask.rs`).
 //!
-//! ## The two cancellation channels (deliberate layering, one known race)
+//! ## The two cancellation channels (deliberate layering, one surfaced cause)
 //!
 //! The gate is the COOPERATIVE channel: it can park-and-resume, and its abort
-//! is observed at effect-dispatch checkpoints, surfacing as
-//! `EffectError::Handler(reason)`. The JIT `cancel_flag` (an `Arc<AtomicBool>`
-//! polled at the trampoline / GC / join-back-edge / dispatch safepoints) is
-//! the FORCED-UNWIND backstop for pure compute that never reaches a
-//! checkpoint, surfacing as `YieldError::Cancelled`. The server timeout paths
-//! set BOTH (a gate-only abort leaves a pure loop spinning; a flag-only cancel
-//! cannot wake a thread parked in an ask). Consequence: the SAME timeout races
-//! between the two surface shapes — whichever safepoint fires first wins.
-//! Both terminate the turn, so callers must treat either shape as
-//! cancellation; do not string-match one of them.
+//! is observed at effect-dispatch checkpoints. The JIT `cancel_flag` (an
+//! `Arc<AtomicBool>` polled at the trampoline / GC / join-back-edge / dispatch
+//! safepoints) is the FORCED-UNWIND backstop for pure compute that never
+//! reaches a checkpoint. The server timeout paths set BOTH (a gate-only abort
+//! leaves a pure loop spinning; a flag-only cancel cannot wake a thread parked
+//! in an ask). Whichever safepoint observes the timeout first records the SAME
+//! first cause: the dispatchers' checkpoint-abort paths write
+//! `RuntimeError::Cancelled` into the JIT's first-cause cell
+//! (`tidepool_codegen::host_fns::set_first_cause`) just as the flag safepoints
+//! do, and the run boundary resolves through the one first-cause resolver
+//! (`host_fns::surface_error`) — so a timeout surfaces
+//! `YieldError::Runtime(RuntimeError::Cancelled)` regardless of which
+//! channel's safepoint fired.
 
 use std::sync::Arc;
 

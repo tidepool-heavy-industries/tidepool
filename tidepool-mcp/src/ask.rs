@@ -103,10 +103,17 @@ impl DispatchEffect<CapturedOutput> for AskDispatcher {
         request: &tidepool_eval::value::Value,
         cx: &tidepool_effect::dispatch::EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
-        // Yield point: park here while paused; error out on abort.
-        self.gate
-            .checkpoint()
-            .map_err(tidepool_effect::error::EffectError::Handler)?;
+        // Yield point: park here while paused; error out on abort. A gate
+        // abort is a cancellation, not a handler fault — record it in the
+        // JIT's first-cause cell so the run boundary surfaces
+        // `RuntimeError::Cancelled` regardless of which cancellation channel
+        // (gate or cancel flag) fired first.
+        self.gate.checkpoint().map_err(|reason| {
+            tidepool_codegen::host_fns::set_first_cause(
+                tidepool_codegen::host_fns::RuntimeError::Cancelled,
+            );
+            tidepool_effect::error::EffectError::Handler(reason)
+        })?;
         let result = self.dispatch_inner(tag, request, cx);
         self.gate.exit_effect();
         result
