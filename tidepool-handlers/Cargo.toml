@@ -26,6 +26,9 @@ ureq = { version = "2", features = ["json"] }
 url = "2"
 # Direct deps for handler implementations
 serde_json = "1"
+# Content hashing for the Fs compare-and-swap write (FsHash/FsWriteCas) —
+# matches the cache layer's blake3 choice (tidepool-runtime).
+blake3 = "1"
 tracing = "0.1"
 # build_base_stack requires a tokio runtime (LlmHandler captures Handle::current())
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

@@ -171,6 +171,16 @@ pub fn fs_decl() -> EffectDecl {
             // Failure-isolating read: Left on a read error (missing file,
             // permission, non-UTF-8) instead of killing the eval.
             "TryFsRead :: Text -> Fs (Either Text Text)",
+            // Per-file failure-isolating glob read (#328): each match is
+            // (path, Right content) or (path, Left err) — a mixed glob (text +
+            // binary) survives, the binary just comes back as a Left.
+            "FsReadGlob :: Text -> Fs [(Text, Either Text Text)]",
+            // Content-hash compare-and-swap surface (#330). FsHash = current
+            // blake3 digest (Nothing = absent); FsWriteCas writes only if the
+            // current hash equals the expected one (Nothing = require absent),
+            // else returns `Left actual` with the ACTUAL hash (Nothing = absent).
+            "FsHash :: Text -> Fs (Maybe Text)",
+            "FsWriteCas :: Text -> Maybe Text -> Text -> Fs (Either (Maybe Text) ())",
         ],
         type_defs: &[],
         helpers: &[
@@ -189,6 +199,7 @@ pub fn fs_decl() -> EffectDecl {
             "glob :: FilePath -> M [FilePath]\nglob = send . FsGlob",
             "-- | Alias of `glob` — expand a glob to matching paths.\nfsGlob :: FilePath -> M [FilePath]\nfsGlob = send . FsGlob",
             "-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob\n-- SECOND — a path glob like \"*.rs\" goes in arg 2, not arg 1. Returns [Hit]\n-- {path, line, text} (the shared Hit shape, so it composes with\n-- hitsByFile/refs). NB regex metachars are double-escaped here (JSON x Haskell),\n-- so a literal dot needs four backslashes; the handler error shows the exact\n-- form if you get it wrong.\ngrepGlob :: Text -> FilePath -> M [Hit]\ngrepGlob pat g = map (\\(f, l, t) -> Hit f l t) <$> send (FsGrep pat g)",
+            "-- | Read every file matching a glob with PER-FILE failure isolation: each\n-- result is (path, Right content) on a clean UTF-8 read, or (path, Left err) on\n-- a per-file failure (binary / non-UTF-8, permission). Unlike readGlob, one bad\n-- file (e.g. a binary swept up by a wide glob) does NOT fail the whole batch —\n-- the Left rides alongside the Rights (the #328 mixed-glob case). An empty glob\n-- is rejected loudly (\"\" matches everything). Split with partitionEithers on the\n-- snd, or `[(p,t) | (p, Right t) <- rs]` for just the readable ones.\ntryReadGlob :: Text -> M [(Text, Either Text Text)]\ntryReadGlob = send . FsReadGlob",
             // --- Editing: exact str-replace (the common case; mirrors the Edit tool) ---
             "-- | Exact str-replace, EXACTLY-ONCE: applies, or errors with a precise\n-- reason (not-found / ambiguous). The trained Edit-tool shape: no news is\n-- good news. Pass enough surrounding text that `old` is unique. Use planUpdate\n-- to review the diff first; the full editing surface is in tidepool://edits.\nupdate :: FilePath -> Text -> Text -> M ()\nupdate path old new\n  | T.null old = error \"update: 'old' must be non-empty\"\n  | otherwise = do\n      src <- readFile path\n      case len (T.splitOn old src) - 1 of\n        0 -> error (\"update: 'old' not found in \" <> path)\n        1 -> writeFile path (replace old new src)\n        n -> error (\"update: 'old' matches \" <> show n <> \" places in \" <> path <> \" (add surrounding context to disambiguate)\")",
             "-- | Replace EVERY occurrence of `old`; returns the count. Errors if zero.\nupdateAll :: FilePath -> Text -> Text -> M Int\nupdateAll path old new\n  | T.null old = error \"updateAll: 'old' must be non-empty\"\n  | otherwise = do\n      src <- readFile path\n      let n = len (T.splitOn old src) - 1\n      if n == 0 then error (\"updateAll: 'old' not found in \" <> path)\n                else writeFile path (replace old new src) >> pure n",
@@ -196,6 +207,8 @@ pub fn fs_decl() -> EffectDecl {
             "-- | `update` from the input lane: {file, old, new} (for big/quote-heavy fragments).\nupdateJ :: Value -> M ()\nupdateJ v = case (v ^? key \"file\" . _String, v ^? key \"old\" . _String, v ^? key \"new\" . _String) of\n  (Just f, Just o, Just n) -> update f o n\n  _ -> error \"updateJ: need {file, old, new} strings in input\"",
             "-- | Insert a block after the unique line containing `anchor`. Errors on 0 or 2+.\ninsertAfter :: FilePath -> Text -> Text -> M ()\ninsertAfter path anchor block = do\n  src <- readFile path\n  let ls = lines src\n  case len (filter (isInfixOf anchor) ls) of\n    1 -> writeFile path (unlines (concatMap (\\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))\n    n -> error (\"insertAfter: anchor matched \" <> show n <> \" lines in \" <> path)",
             "-- | Compute-check-commit: write only if every named check holds; failures\n-- come back as a `WriteOutcome` (nothing written on failure).\nwriteChecked :: FilePath -> [(Text, Bool)] -> Text -> M WriteOutcome\nwriteChecked path checks content = do\n  let failed = [name | (name, ok) <- checks, not ok]\n  if null failed\n    then writeFile path content >> pure (Written path (length checks))\n    else pure (WriteBlocked path failed)",
+            "-- | Blake3 content hash (hex) of a file, or Nothing if it does not exist.\n-- The compare-and-swap token for writeCheckedIf: read it, compute your new\n-- content, then write back only if the file still hashes the same.\nfileHash :: FilePath -> M (Maybe Text)\nfileHash = send . FsHash",
+            "-- | Content-hash compare-and-swap write (#330). Writes CONTENT only if the\n-- file's current blake3 hash equals EXPECTED (Nothing = expect the file ABSENT,\n-- i.e. create-only). The compare-and-write is atomic within the handler, closing\n-- the lost-update race between parallel agents. Returns a WriteOutcome: 'Written'\n-- on success, or 'WriteConflict' (carrying expected vs actual hash) if the\n-- precondition failed — conflicts come back as DATA, nothing is written. Get\n-- EXPECTED from fileHash; on a conflict re-read, recompute, and retry.\nwriteCheckedIf :: Maybe Text -> FilePath -> Text -> M WriteOutcome\nwriteCheckedIf expected path content = do\n  r <- send (FsWriteCas path expected content)\n  pure $ case r of\n    Right () -> Written path 1\n    Left actual -> WriteConflict path expected actual",
         ],
     }
 }

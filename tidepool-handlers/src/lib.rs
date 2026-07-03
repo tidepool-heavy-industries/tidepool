@@ -243,6 +243,18 @@ pub enum FsReq {
     Metadata(String),
     #[core(name = "TryFsRead")]
     TryRead(String),
+    // Per-file failure-isolating glob read (#328): a mixed glob (good files +
+    // one binary) yields per-file `Right content` / `Left err`, never a
+    // wholesale failure.
+    #[core(name = "FsReadGlob")]
+    ReadGlob(String),
+    // Content-hash compare-and-swap surface (#330). `FsHash` reads the current
+    // blake3 digest (Nothing = absent); `FsWriteCas` writes only if the current
+    // hash equals the expected one (Nothing expected = require absent).
+    #[core(name = "FsHash")]
+    Hash(String),
+    #[core(name = "FsWriteCas")]
+    WriteCas(String, Option<String>, String),
 }
 
 pub const DEFAULT_IGNORE_DIRS: &[&str] = &["target", ".git", "node_modules", "dist-newstyle"];
@@ -272,6 +284,13 @@ pub fn component_filter(pattern: &str, rel_path: &std::path::Path) -> bool {
 /// Returns true if `p` contains glob metacharacters (`*`, `?`, `[`).
 pub fn is_glob(p: &str) -> bool {
     p.contains('*') || p.contains('?') || p.contains('[')
+}
+
+/// Blake3 content hash as a lowercase hex digest — the compare-and-swap token
+/// for `FsHash`/`FsWriteCas` (#330). Blake3 matches the cache layer's hash
+/// choice (`tidepool-runtime::cache`), so the whole codebase speaks one digest.
+pub fn blake3_hex(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
 }
 
 /// Build the `grepGlob` regex-compile error, always surfacing the underlying
@@ -309,6 +328,19 @@ fn grep_regex_error(regex_str: &str, e: &regex::Error) -> EffectError {
 /// Used by [`FsHandler`] (glob/grep) for `**`-normalisation, sandbox check,
 /// and hidden-dir filter.
 pub fn expand_glob(root: &std::path::Path, pattern: &str) -> Result<Vec<PathBuf>, EffectError> {
+    // ONE shared empty-glob guard (#328): `glob`/`readGlob`/`tryReadGlob`/
+    // `grepGlob` all resolve through here, so rejecting `""` in one place
+    // covers all four. An empty pattern used to resolve to the sandbox root
+    // and expand to `**/*` — matching EVERYTHING (once detonated a readGlob
+    // into binaries). It is now a loud error naming the fix.
+    if pattern.is_empty() {
+        return Err(EffectError::Handler(
+            "empty glob pattern matches EVERYTHING — this is a footgun (it once \
+             read the whole tree into binaries). Pass an explicit pattern, e.g. \
+             \"**/*.hs\" for a filetype or \".\" for the entire tree."
+                .to_string(),
+        ));
+    }
     if pattern.contains("..") {
         return Ok(Vec::new());
     }
@@ -326,7 +358,7 @@ pub fn expand_glob(root: &std::path::Path, pattern: &str) -> Result<Vec<PathBuf>
     let pattern = if !is_glob(pattern) {
         let target = root.join(pattern);
         if target.is_dir() {
-            normalized = if pattern.is_empty() || pattern == "." {
+            normalized = if pattern == "." {
                 "**/*".to_string()
             } else {
                 format!("{}/**/*", pattern.trim_end_matches('/'))
@@ -550,6 +582,67 @@ impl EffectHandler<CapturedOutput> for FsHandler {
                         "is_dir": meta.is_dir(),
                     })),
                     Err(_) => cx.respond(serde_json::Value::Null),
+                }
+            }
+            FsReq::ReadGlob(pattern) => {
+                // Per-file failure isolation (#328): a mixed glob (readable
+                // text + a binary/non-UTF-8 file) yields one entry per file —
+                // `Right content` on a clean UTF-8 read, `Left err` on failure —
+                // instead of failing the whole batch. The empty-glob guard in
+                // `expand_glob` covers `""` here too. Contract mirrors #335's
+                // per-item typed-failure surface: `[(path, Either err text)]`.
+                let paths = self.expand_glob(&pattern)?;
+                let results: Vec<(String, Result<String, String>)> = paths
+                    .into_iter()
+                    .filter(|p| p.is_file())
+                    .map(|p| {
+                        let rel = p
+                            .strip_prefix(&self.root)
+                            .unwrap_or(&p)
+                            .to_string_lossy()
+                            .to_string();
+                        let outcome = std::fs::read_to_string(&p)
+                            .map_err(|e| format!("{rel} failed: {e}"));
+                        (rel, outcome)
+                    })
+                    .collect();
+                cx.respond_list(results)
+            }
+            FsReq::Hash(path) => {
+                // Current blake3 digest, or Nothing if the file is absent — the
+                // read half of the CAS loop (#330). Read the hash, compute new
+                // content, then `FsWriteCas` back with this as the expectation.
+                let resolved = self.resolve(&path)?;
+                let hash: Option<String> = match std::fs::read(&resolved) {
+                    Ok(bytes) => Some(blake3_hex(&bytes)),
+                    Err(_) => None,
+                };
+                cx.respond(hash)
+            }
+            FsReq::WriteCas(path, expected, contents) => {
+                // Compare-and-swap write (#330): snapshot the current content
+                // hash (None = absent), and write ONLY if it equals `expected`
+                // (None expected = require the file absent, i.e. create-only).
+                // The compare-and-write is one handler call, so the lost-update
+                // race between parallel agents shrinks from an agent's
+                // think-time to a few syscalls. On a precondition miss nothing
+                // is written and the ACTUAL hash comes back as `Left actual`
+                // (conflicts-as-data, matching Diff/Edit philosophy + #335).
+                let resolved = self.resolve(&path)?;
+                let actual: Option<String> = match std::fs::read(&resolved) {
+                    Ok(bytes) => Some(blake3_hex(&bytes)),
+                    Err(_) => None,
+                };
+                if actual == expected {
+                    if let Some(parent) = resolved.parent() {
+                        std::fs::create_dir_all(parent)
+                            .map_err(|e| EffectError::Handler(e.to_string()))?;
+                    }
+                    std::fs::write(&resolved, &contents)
+                        .map_err(|e| EffectError::Handler(e.to_string()))?;
+                    cx.respond(Ok::<(), Option<String>>(()))
+                } else {
+                    cx.respond(Err::<(), Option<String>>(actual))
                 }
             }
         }
@@ -1960,6 +2053,9 @@ mod tests {
             ("Tip", 0),
             ("()", 0),
             ("(,,)", 3),
+            // Either — the per-file tryReadGlob surface + the WriteCas result.
+            ("Right", 1),
+            ("Left", 1),
             ("Match", 5),
             ("Rust", 0),
             ("Python", 0),
@@ -2146,6 +2242,123 @@ mod tests {
             .collect();
         assert!(names.iter().any(|n| n.ends_with("top.txt")), "{names:?}");
         assert!(names.iter().any(|n| n.ends_with("deep.txt")), "{names:?}");
+    }
+
+    #[test]
+    fn test_tryreadglob_mixed_binary_isolates_per_file() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("good.txt"), "hello\nworld").unwrap();
+        // Invalid UTF-8 — the mixed-glob case #328 is about: one binary swept up
+        // by a wide glob must not fail the whole batch.
+        std::fs::write(root.join("bad.bin"), vec![0xff, 0xfe, 0x00, 0x01]).unwrap();
+
+        let mut handler = FsHandler::new(root.clone());
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+
+        let req = FsReq::ReadGlob("*".to_string());
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
+        let mut results: Vec<(String, Result<String, String>)> =
+            FromCore::from_value(&res, &table).unwrap();
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(results.len(), 2, "{results:?}");
+        // bad.bin -> Left err (isolated), good.txt -> Right content (survives).
+        assert_eq!(results[0].0, "bad.bin");
+        assert!(results[0].1.is_err(), "binary must be Left: {results:?}");
+        assert_eq!(results[1].0, "good.txt");
+        assert_eq!(results[1].1.as_deref(), Ok("hello\nworld"));
+    }
+
+    #[test]
+    fn test_empty_glob_is_loud_on_all_four_verbs() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("a.txt"), "x").unwrap();
+
+        let mut handler = FsHandler::new(root.clone());
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+
+        // ONE shared guard in expand_glob → every glob-resolving verb inherits
+        // it: glob (FsGlob), readGlob/tryReadGlob (FsGlob/FsReadGlob), grepGlob
+        // (FsGrep). Empty pattern used to expand to the whole tree.
+        let err = handler.expand_glob("").unwrap_err();
+        assert!(format!("{err}").contains("matches EVERYTHING"), "{err}");
+
+        for req in [
+            FsReq::Glob(String::new()),
+            FsReq::ReadGlob(String::new()),
+            FsReq::Grep("x".to_string(), String::new()),
+        ] {
+            let e = handler.handle(req, &cx).unwrap_err();
+            assert!(
+                format!("{e}").contains("matches EVERYTHING"),
+                "empty glob should be loud, got: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_write_cas_hit_miss_and_hash_getter() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mut handler = FsHandler::new(root.clone());
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+
+        let decode = |r: tidepool_effect::Response, t: &DataConTable| -> Result<(), Option<String>> {
+            FromCore::from_value(&response_value(r, t), t).unwrap()
+        };
+
+        // create-only (expected = None): file absent → writes.
+        let req = FsReq::WriteCas("f.txt".to_string(), None, "v1".to_string());
+        assert_eq!(decode(handler.handle(req, &cx).unwrap(), &table), Ok(()));
+        assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "v1");
+
+        // fileHash (FsHash): current digest of an existing file.
+        let req = FsReq::Hash("f.txt".to_string());
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
+        let h: Option<String> = FromCore::from_value(&res, &table).unwrap();
+        let h = h.expect("hash of an existing file");
+        assert_eq!(h, blake3_hex(b"v1"));
+
+        // FsHash on an absent file → Nothing.
+        let req = FsReq::Hash("missing.txt".to_string());
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
+        let none: Option<String> = FromCore::from_value(&res, &table).unwrap();
+        assert_eq!(none, None);
+
+        // CAS HIT: expected == current hash → writes v2.
+        let req = FsReq::WriteCas("f.txt".to_string(), Some(h.clone()), "v2".to_string());
+        assert_eq!(decode(handler.handle(req, &cx).unwrap(), &table), Ok(()));
+        assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "v2");
+
+        // CAS MISS: stale expected hash (of v1) → Left(actual = hash of v2), no write.
+        let req = FsReq::WriteCas("f.txt".to_string(), Some(h), "v3".to_string());
+        assert_eq!(
+            decode(handler.handle(req, &cx).unwrap(), &table),
+            Err(Some(blake3_hex(b"v2"))),
+            "conflict must carry the ACTUAL hash"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("f.txt")).unwrap(),
+            "v2",
+            "a failed CAS must write NOTHING"
+        );
+
+        // create-only MISS: expected None but file exists → Left(actual).
+        let req = FsReq::WriteCas("f.txt".to_string(), None, "v4".to_string());
+        assert_eq!(
+            decode(handler.handle(req, &cx).unwrap(), &table),
+            Err(Some(blake3_hex(b"v2")))
+        );
     }
 
     #[test]
