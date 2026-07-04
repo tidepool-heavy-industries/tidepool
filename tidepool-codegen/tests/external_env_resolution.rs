@@ -24,6 +24,7 @@ use tidepool_codegen::emit::expr::compile_expr;
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::host_fns;
 use tidepool_codegen::layout;
+use tidepool_codegen::machine_state::MachineState;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_repr::{CoreExpr, CoreFrame, VarId};
 
@@ -67,9 +68,11 @@ fn compile_then_run(tree: &CoreExpr, env: &ExternalEnv, between: impl FnOnce()) 
     let start = nursery.as_mut_ptr();
     let end = unsafe { start.add(nursery.len()) };
     let mut vmctx = VMContext::new(start, end, host_fns::gc_trigger);
+    let machine_state = Box::new(MachineState::new());
+    vmctx.machine_state = machine_state.as_ref() as *const MachineState as *mut MachineState;
 
-    host_fns::set_gc_state(start, nursery.len());
-    host_fns::set_stack_map_registry(&pipeline.stack_maps);
+    machine_state.set_gc_state(start, nursery.len());
+    machine_state.set_stack_map_registry(&pipeline.stack_maps);
 
     // Simulate whatever happens between fragment compilation and its run —
     // e.g. a GC that relocates the bound value and rewrites *root_slot.

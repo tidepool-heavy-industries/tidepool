@@ -1,6 +1,7 @@
 use crate::context::VMContext;
 use crate::heap_bridge;
 use crate::layout;
+use crate::machine_state::machine_state;
 use crate::yield_type::{Yield, YieldError};
 use tidepool_heap::layout as heap_layout;
 
@@ -392,18 +393,21 @@ impl CompiledEffectMachine {
         // the continuation tree is collected out from under the loop below.
         let mut k = k;
         let mut arg = arg;
-        let entry_mark = crate::host_fns::rust_roots_mark();
+        // GC-cluster reach (leaf 3): all rust-root register/mark/truncate
+        // calls in this function key on this machine's own vmctx.
+        let vmctx = &mut self.vmctx as *mut VMContext;
+        let entry_mark = crate::host_fns::rust_roots_mark(vmctx);
         // SAFETY: slots remain valid until the truncate below.
         unsafe {
-            crate::host_fns::register_rust_root(&mut k as *mut *mut u8);
-            crate::host_fns::register_rust_root(&mut arg as *mut *mut u8);
+            crate::host_fns::register_rust_root(vmctx, &mut k as *mut *mut u8);
+            crate::host_fns::register_rust_root(vmctx, &mut arg as *mut *mut u8);
         }
         k = self.force_ptr(k);
         let entry_err = k.is_null() || crate::host_fns::has_runtime_error();
         if !entry_err {
             arg = self.force_ptr(arg);
         }
-        crate::host_fns::truncate_rust_roots(entry_mark);
+        crate::host_fns::truncate_rust_roots(vmctx, entry_mark);
         if entry_err || crate::host_fns::has_runtime_error() {
             return std::ptr::null_mut();
         }
@@ -430,51 +434,51 @@ impl CompiledEffectMachine {
                         // skips, so they must be registered as explicit roots
                         // BEFORE the first force — a GC during `force f` would
                         // otherwise leave every pending k2 dangling.
-                        let mark = crate::host_fns::rust_roots_mark();
+                        let mark = crate::host_fns::rust_roots_mark(vmctx);
                         // SAFETY: slots remain valid until truncate below;
                         // k2_stack is not pushed/popped while registered.
                         unsafe {
-                            crate::host_fns::register_rust_root(&mut arg as *mut *mut u8);
+                            crate::host_fns::register_rust_root(vmctx, &mut arg as *mut *mut u8);
                         }
                         for slot in k2_stack.iter_mut() {
                             // SAFETY: as above.
                             unsafe {
-                                crate::host_fns::register_rust_root(slot as *mut *mut u8);
+                                crate::host_fns::register_rust_root(vmctx, slot as *mut *mut u8);
                             }
                         }
                         let f = self.force_ptr(Self::read_con_field(k, 0));
                         if crate::host_fns::has_runtime_error() {
-                            crate::host_fns::truncate_rust_roots(mark);
+                            crate::host_fns::truncate_rust_roots(vmctx, mark);
                             return std::ptr::null_mut();
                         }
                         let res = self.call_closure(f, arg);
-                        crate::host_fns::truncate_rust_roots(mark);
+                        crate::host_fns::truncate_rust_roots(vmctx, mark);
                         res
                     } else if con_tag == self.tags.node {
                         // Node(k1, k2): push k2 for later, loop on k1.
                         // The first force can GC and move `k`/`arg`; the second can
                         // move `k1`. Register all three — and every pending k2 —
                         // across the forces.
-                        let mark = crate::host_fns::rust_roots_mark();
+                        let mark = crate::host_fns::rust_roots_mark(vmctx);
                         // SAFETY: slots remain valid until truncate below;
                         // k2_stack is not pushed/popped while registered.
                         unsafe {
-                            crate::host_fns::register_rust_root(&mut k as *mut *mut u8);
-                            crate::host_fns::register_rust_root(&mut arg as *mut *mut u8);
+                            crate::host_fns::register_rust_root(vmctx, &mut k as *mut *mut u8);
+                            crate::host_fns::register_rust_root(vmctx, &mut arg as *mut *mut u8);
                         }
                         for slot in k2_stack.iter_mut() {
                             // SAFETY: as above.
                             unsafe {
-                                crate::host_fns::register_rust_root(slot as *mut *mut u8);
+                                crate::host_fns::register_rust_root(vmctx, slot as *mut *mut u8);
                             }
                         }
                         let mut k1 = self.force_ptr(Self::read_con_field(k, 0));
                         // SAFETY: as above.
                         unsafe {
-                            crate::host_fns::register_rust_root(&mut k1 as *mut *mut u8);
+                            crate::host_fns::register_rust_root(vmctx, &mut k1 as *mut *mut u8);
                         }
                         let k2 = self.force_ptr(Self::read_con_field(k, 1));
-                        crate::host_fns::truncate_rust_roots(mark);
+                        crate::host_fns::truncate_rust_roots(vmctx, mark);
                         if crate::host_fns::has_runtime_error() {
                             return std::ptr::null_mut();
                         }
@@ -494,15 +498,15 @@ impl CompiledEffectMachine {
                 }
                 t if t == layout::TAG_CLOSURE => {
                     // Raw closure (degenerate continuation fallback)
-                    let mark = crate::host_fns::rust_roots_mark();
+                    let mark = crate::host_fns::rust_roots_mark(vmctx);
                     for slot in k2_stack.iter_mut() {
                         // SAFETY: k2_stack is not pushed/popped during call_closure.
                         unsafe {
-                            crate::host_fns::register_rust_root(slot as *mut *mut u8);
+                            crate::host_fns::register_rust_root(vmctx, slot as *mut *mut u8);
                         }
                     }
                     let res = self.call_closure(k, arg);
-                    crate::host_fns::truncate_rust_roots(mark);
+                    crate::host_fns::truncate_rust_roots(vmctx, mark);
                     res
                 }
                 _ => {
@@ -527,16 +531,16 @@ impl CompiledEffectMachine {
             }
             // Forcing the Eff result can GC: protect the pending k2s.
             let mut result = {
-                let mark = crate::host_fns::rust_roots_mark();
+                let mark = crate::host_fns::rust_roots_mark(vmctx);
                 for slot in k2_stack.iter_mut() {
                     // SAFETY: slots remain valid until truncate below;
                     // k2_stack is not pushed/popped while registered.
                     unsafe {
-                        crate::host_fns::register_rust_root(slot as *mut *mut u8);
+                        crate::host_fns::register_rust_root(vmctx, slot as *mut *mut u8);
                     }
                 }
                 let r = self.force_ptr(result);
-                crate::host_fns::truncate_rust_roots(mark);
+                crate::host_fns::truncate_rust_roots(vmctx, mark);
                 r
             };
             if result.is_null() || crate::host_fns::has_runtime_error() {
@@ -569,20 +573,20 @@ impl CompiledEffectMachine {
                 // Forcing y can GC (e.g. it is a lazy effect-result tail thunk
                 // materializing a chunk): protect `result` (returned below) and
                 // the pending k2s.
-                let mark = crate::host_fns::rust_roots_mark();
+                let mark = crate::host_fns::rust_roots_mark(vmctx);
                 // SAFETY: slots remain valid until truncate below;
                 // k2_stack is not pushed/popped while registered.
                 unsafe {
-                    crate::host_fns::register_rust_root(&mut result as *mut *mut u8);
+                    crate::host_fns::register_rust_root(vmctx, &mut result as *mut *mut u8);
                 }
                 for slot in k2_stack.iter_mut() {
                     // SAFETY: as above.
                     unsafe {
-                        crate::host_fns::register_rust_root(slot as *mut *mut u8);
+                        crate::host_fns::register_rust_root(vmctx, slot as *mut *mut u8);
                     }
                 }
                 let y = self.force_ptr(Self::read_con_field(result, 0));
-                crate::host_fns::truncate_rust_roots(mark);
+                crate::host_fns::truncate_rust_roots(vmctx, mark);
                 if crate::host_fns::has_runtime_error() {
                     return std::ptr::null_mut();
                 }
@@ -599,25 +603,25 @@ impl CompiledEffectMachine {
                 // the first force), `union_val` across the second force, and
                 // the pending k2s. The alloc_con composition below is bump-only
                 // (null on exhaustion), so no protection is needed past here.
-                let mark = crate::host_fns::rust_roots_mark();
+                let mark = crate::host_fns::rust_roots_mark(vmctx);
                 // SAFETY: slots remain valid until truncate below;
                 // k2_stack is not pushed/popped while registered.
                 unsafe {
-                    crate::host_fns::register_rust_root(&mut result as *mut *mut u8);
+                    crate::host_fns::register_rust_root(vmctx, &mut result as *mut *mut u8);
                 }
                 for slot in k2_stack.iter_mut() {
                     // SAFETY: as above.
                     unsafe {
-                        crate::host_fns::register_rust_root(slot as *mut *mut u8);
+                        crate::host_fns::register_rust_root(vmctx, slot as *mut *mut u8);
                     }
                 }
                 let mut union_val = self.force_ptr(Self::read_con_field(result, 0));
                 // SAFETY: as above.
                 unsafe {
-                    crate::host_fns::register_rust_root(&mut union_val as *mut *mut u8);
+                    crate::host_fns::register_rust_root(vmctx, &mut union_val as *mut *mut u8);
                 }
                 let mut k_prime = self.force_ptr(Self::read_con_field(result, 1));
-                crate::host_fns::truncate_rust_roots(mark);
+                crate::host_fns::truncate_rust_roots(vmctx, mark);
                 if crate::host_fns::has_runtime_error() {
                     return std::ptr::null_mut();
                 }
@@ -740,7 +744,7 @@ impl CompiledEffectMachine {
             // External cancellation safepoint — an infinite tail-recursive
             // loop must be interruptible. See `host_fns::trampoline_resolve`
             // for the rationale.
-            if crate::host_fns::check_cancel_and_set_error() {
+            if crate::host_fns::check_cancel_and_set_error(&mut self.vmctx as *mut VMContext) {
                 self.vmctx.tail_callee = std::ptr::null_mut();
                 self.vmctx.tail_arg = std::ptr::null_mut();
                 *result = crate::host_fns::error_poison_ptr();
@@ -751,7 +755,7 @@ impl CompiledEffectMachine {
             let arg = self.vmctx.tail_arg;
             self.vmctx.tail_callee = std::ptr::null_mut();
             self.vmctx.tail_arg = std::ptr::null_mut();
-            crate::host_fns::reset_call_depth();
+            unsafe { machine_state(&mut self.vmctx as *mut VMContext) }.reset_call_depth();
             let code_ptr = *(callee.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const usize);
             let func: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
                 std::mem::transmute(code_ptr);

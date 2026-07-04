@@ -31,6 +31,8 @@ use std::collections::HashSet;
 use tidepool_heap::gc::raw::{cheney_copy, for_each_pointer_field};
 use tidepool_heap::layout::{read_size, read_tag, TAG_FORWARDED};
 
+use crate::context::VMContext;
+
 /// Default arena size: 1 MiB. Each arena is a contiguous allocation whose
 /// byte-level address is stable for the OldSpace's lifetime.
 const DEFAULT_ARENA: usize = 1 << 20;
@@ -145,7 +147,7 @@ impl OldSpace {
     /// and never strand it.
     ///
     /// `nursery_from` is the nursery range to evacuate out of (typically
-    /// [`crate::host_fns::gc_active_range`]); objects outside it are already
+    /// `MachineState::gc_active_range`); objects outside it are already
     /// stable (old-space, static, poison) and are left untouched.
     ///
     /// Idempotent per object via forwarding pointers, exactly like
@@ -153,10 +155,14 @@ impl OldSpace {
     ///
     /// # Safety
     /// `ptr` must be a valid heap object; `nursery_from` must bound the live
-    /// nursery; the returned slot is registered as a persistent root and must
-    /// outlive every fragment compiled against it (machine lifetime).
+    /// nursery; `vmctx` must be the live `VMContext` for the run this tenure
+    /// happens during (its `machine_state` is where the persistent root gets
+    /// registered — see `host_fns::register_persistent_root`); the returned
+    /// slot is registered as a persistent root and must outlive every
+    /// fragment compiled against it (machine lifetime).
     pub unsafe fn tenure(
         &mut self,
+        vmctx: *mut VMContext,
         ptr: *mut u8,
         nursery_from: (*const u8, *const u8),
     ) -> RootSlot {
@@ -202,7 +208,7 @@ impl OldSpace {
 
         // Register as a persistent GC root so future minor (and major) GCs can
         // update *slot in-place if the tenured object ever relocates.
-        crate::host_fns::register_persistent_root(slot);
+        crate::host_fns::register_persistent_root(vmctx, slot);
 
         RootSlot::new(slot)
     }
@@ -304,8 +310,6 @@ mod tests {
     #[test]
     #[serial]
     fn test_tenured_survives_minor_gcs() {
-        crate::host_fns::clear_persistent_roots();
-
         unsafe {
             // Build Con(tag=7, fields=[Lit(42)]) in the nursery buffer.
             let mut nursery = AlignedBuf([0u8; 4096]);
@@ -319,7 +323,7 @@ mod tests {
             let from_end = n.as_ptr().add(n.len());
 
             let mut old_space = OldSpace::new();
-            let slot = old_space.tenure(con_ptr, (from_start, from_end));
+            let slot = old_space.tenure(std::ptr::null_mut(), con_ptr, (from_start, from_end));
 
             // Record the tenured address and verify initial content.
             let a: *mut u8 = slot.current();
@@ -369,8 +373,6 @@ mod tests {
     #[test]
     #[serial]
     fn test_minor_gc_cost_independent_of_old_space_size() {
-        crate::host_fns::clear_persistent_roots();
-
         // Fixed live-set: Lit(100) + Con(tag=5, fields=[Lit]).
         // Con size = CON_FIELDS_OFFSET + 1*FIELD_STRIDE = 24+8 = 32 (already aligned).
         // Expected bytes_copied = LIT_SIZE + 32 = 24 + 32 = 56.
@@ -398,12 +400,12 @@ mod tests {
                 let ptr = e.as_mut_ptr();
                 let extra_range = (e.as_ptr(), e.as_ptr().add(e.len()));
                 let mut os = OldSpace::new();
-                os.tenure(ptr, extra_range);
-                // os lives across the GC call — PERSISTENT_ROOTS slots are valid.
+                os.tenure(std::ptr::null_mut(), ptr, extra_range);
+                // os lives across the GC call; this test supplies its own
+                // explicit root set (fixed_nursery_gc_bytes), independent of
+                // persistent-root registration.
                 fixed_nursery_gc_bytes()
             };
-
-            crate::host_fns::clear_persistent_roots();
 
             // ── Scenario 2: 100 tenured objects ──────────────────────────────
             // 100 * LIT_SIZE = 100 * 24 = 2400 bytes, fits in 4096.
@@ -418,7 +420,7 @@ mod tests {
                     // Each Lit is independent; no pointer fields, so earlier
                     // forwarding pointers don't interfere with later measures.
                     let ptr = e.as_mut_ptr().add(off);
-                    os.tenure(ptr, extra_range);
+                    os.tenure(std::ptr::null_mut(), ptr, extra_range);
                 }
                 // os and its 100 slots live across the GC call.
                 fixed_nursery_gc_bytes()
@@ -442,8 +444,6 @@ mod tests {
     #[test]
     #[serial]
     fn test_overlapping_tenures_preserve_sharing() {
-        crate::host_fns::clear_persistent_roots();
-
         unsafe {
             // Nursery: Lit(99) shared by Con A(tag=1,[Lit]) and Con B(tag=2,[Lit]).
             let mut nursery = AlignedBuf([0u8; 4096]);
@@ -460,7 +460,7 @@ mod tests {
             let mut old_space = OldSpace::new();
 
             // First tenure forwards both A and the shared Lit in the nursery.
-            let slot_a = old_space.tenure(a_ptr, range);
+            let slot_a = old_space.tenure(std::ptr::null_mut(), a_ptr, range);
             let used_after_a = old_space.bytes_used();
             // Con(32, aligned) + Lit(24) = 56.
             assert_eq!(used_after_a, 56, "A + shared Lit");
@@ -468,7 +468,7 @@ mod tests {
             // Second tenure: B is fresh, its child Lit is already forwarded.
             // Without the forwarded-skip in measure, this panics on the
             // measure!=bytes_copied debug_assert.
-            let slot_b = old_space.tenure(b_ptr, range);
+            let slot_b = old_space.tenure(std::ptr::null_mut(), b_ptr, range);
             // Only B's own 32 bytes are newly copied (Lit already in old-space).
             assert_eq!(old_space.bytes_used(), 56 + 32, "B only; Lit not recopied");
 

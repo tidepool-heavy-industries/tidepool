@@ -42,6 +42,26 @@ pub enum BridgeError {
 
 /// Convert a heap-allocated object to a Value.
 ///
+/// ## Null-vmctx invariant (temporal safety)
+///
+/// This calls `heap_to_value_inner` with a null `vmctx`, so it runs OUTSIDE
+/// any machine: the forcing arms in `heap_to_value_inner`/`resolve_whnf` are
+/// all gated on `!vmctx.is_null()`, so no thunk is forced here and therefore
+/// **no GC can fire during this call**. That makes the `RootScope`/
+/// `register_rust_root` calls on this path genuine no-ops (there is no
+/// collection for them to protect against), not a skipped safety measure.
+///
+/// This is also safe ACROSS a later run's GC, not just during this call:
+/// `heap_to_value`'s traversal returns a COMPLETE DEEP COPY — every leaf is
+/// owned Rust data (`LitString`/`ByteArray` via `.to_vec()`; `Con`/array/spine
+/// via recursively-bridged owned `Value`s) — so the returned `Value` retains
+/// NO pointer into the JIT heap. A subsequent run's `gc_trigger`/`perform_gc`
+/// has nothing here to relocate or dangle. (Session-retained heap values are
+/// a SEPARATE mechanism — rooted via `PERSISTENT_ROOTS`, registered during
+/// `OldSpace::tenure` which runs DURING a run with a non-null `vmctx` — so
+/// this null-path no-op never touches them.) See
+/// `heap_bridge_tests::null_vmctx_bridge_survives_later_gc` for the regression test.
+///
 /// # Safety
 ///
 /// `ptr` must point to a valid HeapObject allocated by the JIT nursery.
@@ -73,19 +93,32 @@ const MAX_DEPTH: usize = 10_000;
 pub(crate) const MAX_FIELDS: usize = 1024;
 const MAX_DATA_SIZE: usize = 64 * 1024 * 1024; // 64MB
 
-/// RAII guard for scoped RUST_ROOTS registration: truncates the shadow-root
-/// registry back to its construction mark on drop, covering early returns.
-/// pub(crate): the jit_machine drive loop roots the continuation with it
-/// across GC-capable response materialization.
-pub(crate) struct RootScope(usize);
+/// RAII guard for scoped run-rooted-GC-root registration: truncates the
+/// owning machine's run-scoped root registry back to its construction mark on
+/// drop, covering early returns. pub(crate): the jit_machine drive loop roots
+/// the continuation with it across GC-capable response materialization.
+///
+/// Reached via `vmctx.machine_state` (leaf 3's GC-cluster reach — see the
+/// module doc on `host_fns::gc`), NOT `CURRENT_MACHINE`. `vmctx` may be null:
+/// `heap_to_value`'s null-vmctx bridge path constructs a `RootScope` whose
+/// mark/truncate calls are then no-ops — see the null-vmctx invariant on
+/// `heap_to_value` below for why that is temporally safe.
+pub(crate) struct RootScope(*mut VMContext, usize);
 impl RootScope {
-    pub(crate) fn new() -> Self {
-        Self(crate::host_fns::rust_roots_mark())
+    /// # Safety
+    /// If `vmctx` is non-null, it must point to a live `VMContext` for this
+    /// scope's entire lifetime (until it drops).
+    pub(crate) unsafe fn new(vmctx: *mut VMContext) -> Self {
+        Self(vmctx, crate::host_fns::rust_roots_mark(vmctx))
     }
 }
 impl Drop for RootScope {
     fn drop(&mut self) {
-        crate::host_fns::truncate_rust_roots(self.0);
+        // SAFETY: `self.0` satisfied `RootScope::new`'s contract at
+        // construction and this scope has not out-lived it.
+        unsafe {
+            crate::host_fns::truncate_rust_roots(self.0, self.1);
+        }
     }
 }
 
@@ -143,10 +176,12 @@ unsafe fn heap_to_value_inner(
     // each child conversion. For non-heap pointers (tests use stack
     // buffers) the collector's from-space range check skips the slot.
     let mut ptr = ptr;
-    let _roots = RootScope::new();
+    // SAFETY: vmctx is either null (no-op scope; see the null-vmctx
+    // invariant above) or the live VMContext this traversal was called with.
+    let _roots = unsafe { RootScope::new(vmctx) };
     // SAFETY: the slot lives until _roots drops at function exit.
     unsafe {
-        crate::host_fns::register_rust_root(&mut ptr as *mut *const u8 as *mut *mut u8);
+        crate::host_fns::register_rust_root(vmctx, &mut ptr as *mut *const u8 as *mut *mut u8);
     }
 
     // Converting ⊥ (a lazy poison closure) is a genuine demand: raise its
@@ -279,10 +314,14 @@ unsafe fn heap_to_value_inner(
                 // (updated) cell after each child conversion.
                 let mut elems: Vec<(u64, Value)> = Vec::new();
                 let mut cur = ptr;
-                let _spine_roots = RootScope::new();
+                // SAFETY: same contract as the outer scope's RootScope::new above.
+                let _spine_roots = unsafe { RootScope::new(vmctx) };
                 // SAFETY: the slot lives until _spine_roots drops.
                 unsafe {
-                    crate::host_fns::register_rust_root(&mut cur as *mut *const u8 as *mut *mut u8);
+                    crate::host_fns::register_rust_root(
+                        vmctx,
+                        &mut cur as *mut *const u8 as *mut *mut u8,
+                    );
                 }
                 loop {
                     if *cur != layout::TAG_CON {

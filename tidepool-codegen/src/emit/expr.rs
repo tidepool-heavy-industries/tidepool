@@ -656,6 +656,7 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                 .module
                 .declare_function("debug_app_check", Linkage::Import, &{
                     let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
+                    sig.params.push(AbiParam::new(types::I64)); // vmctx
                     sig.params.push(AbiParam::new(types::I64)); // fun_ptr
                     sig.returns.push(AbiParam::new(types::I64)); // 0 = ok, non-zero = poison
                     sig
@@ -666,7 +667,10 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                 .pipeline
                 .module
                 .declare_func_in_func(check_fn, args.builder.func);
-            let check_inst = args.builder.ins().call(check_ref, &[fun_ptr]);
+            let check_inst = args
+                .builder
+                .ins()
+                .call(check_ref, &[args.sess.vmctx, fun_ptr]);
             let check_result = args.builder.inst_results(check_inst)[0];
 
             // If debug_app_check returned non-zero (poison), short-circuit
@@ -2270,6 +2274,7 @@ impl EmitContext {
             .module
             .declare_function("debug_app_check", Linkage::Import, &{
                 let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
+                sig.params.push(AbiParam::new(types::I64)); // vmctx
                 sig.params.push(AbiParam::new(types::I64));
                 sig.returns.push(AbiParam::new(types::I64));
                 sig
@@ -2280,7 +2285,10 @@ impl EmitContext {
             .pipeline
             .module
             .declare_func_in_func(check_fn, args.builder.func);
-        let check_inst = args.builder.ins().call(check_ref, &[fun_ptr]);
+        let check_inst = args
+            .builder
+            .ins()
+            .call(check_ref, &[args.sess.vmctx, fun_ptr]);
         let check_result = args.builder.inst_results(check_inst)[0];
 
         // If debug_app_check returned non-zero (poison/error), return it directly

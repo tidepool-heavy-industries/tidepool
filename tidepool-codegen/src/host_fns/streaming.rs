@@ -1,10 +1,12 @@
 //! Lazy effect-result materialization.
 //!
 //! Large list-shaped effect responses are not converted to heap cells eagerly.
-//! Instead the dispatcher parks the flattened elements in a thread-local
-//! registry and responds with a single thunk whose code pointer is the HOST
-//! function `lazy_list_chunk` (precedent: poison trampolines — `heap_force`
-//! calls thunk entries through a transmute and cannot tell host from JIT).
+//! Instead the dispatcher parks the flattened elements in the running
+//! machine's parked-stream registry (`MachineState`, reached here via
+//! `current_machine()`) and responds with a single thunk whose code pointer
+//! is the HOST function `lazy_list_chunk` (precedent: poison trampolines —
+//! `heap_force` calls thunk entries through a transmute and cannot tell host
+//! from JIT).
 //! Forcing the tail materializes the next CHUNK elements and a fresh tail
 //! thunk. `take k` over a huge glob materializes one chunk ever; full folds
 //! stream chunks through the (growing) heap while consumed cells become
@@ -12,11 +14,13 @@
 //! non-pointer words, same as the vmctx tail fields.
 
 use crate::context::VMContext;
-use std::cell::{Cell, RefCell};
+use crate::machine_state::current_machine;
 
 use super::cancel::check_cancel_and_set_error;
 use super::errors::{error_poison_ptr, push_diagnostic, runtime_error_with_msg, runtime_oom};
-use super::gc::{gc_trigger, host_alloc_gc, register_rust_root, rust_roots_mark, truncate_rust_roots};
+use super::gc::{
+    gc_trigger, host_alloc_gc, register_rust_root, rust_roots_mark, truncate_rust_roots,
+};
 
 /// A parked effect-response stream: the element producer (the iterator IS
 /// the cursor — no offset bookkeeping), the list constructor tags, and an
@@ -33,19 +37,13 @@ pub(crate) struct ParkedStream {
 }
 
 /// Registry key for a parked stream. A `#[repr(transparent)]` newtype over the
-/// raw `u64` id so the [`PARKED_STREAMS`] map cannot be keyed by an arbitrary
-/// integer. The id CARRIED through JIT tail thunks stays a raw `u64` (that write
-/// is on the emit hot path); we wrap into `StreamId` only at the registry
-/// boundary (`park_stream` insert + the pull/probe lookups).
+/// raw `u64` id so `MachineState`'s parked-stream map cannot be keyed by an
+/// arbitrary integer. The id CARRIED through JIT tail thunks stays a raw
+/// `u64` (that write is on the emit hot path); we wrap into `StreamId` only
+/// at the registry boundary (`park_stream` insert + the pull/probe lookups).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub(crate) struct StreamId(pub u64);
-
-thread_local! {
-    static PARKED_STREAMS: RefCell<std::collections::HashMap<StreamId, ParkedStream>> =
-        RefCell::new(std::collections::HashMap::new());
-    static STREAM_NEXT_ID: Cell<u64> = const { Cell::new(1) };
-}
 
 /// Source over pre-converted Values (a dismantled `Response::Complete`
 /// spine). The table argument is unused. Random-access: element values are
@@ -86,19 +84,14 @@ impl tidepool_effect::ValueSource for ReadySource {
 }
 
 /// Park a response stream; returns the registry id carried by tail thunks.
+/// The no-machine case can't happen on a real run (parking only occurs while
+/// driving an effect step loop, with `CURRENT_MACHINE` installed for the
+/// duration) — return the sentinel id 0 rather than panic.
 pub(crate) fn park_stream(stream: ParkedStream) -> u64 {
-    let id = STREAM_NEXT_ID.with(|c| {
-        let v = c.get();
-        c.set(v + 1);
-        v
-    });
-    PARKED_STREAMS.with(|r| r.borrow_mut().insert(StreamId(id), stream));
-    id
-}
-
-/// Drop all parked streams (machine teardown).
-pub(crate) fn clear_parked_streams() {
-    PARKED_STREAMS.with(|r| r.borrow_mut().clear());
+    match unsafe { current_machine() } {
+        Some(ms) => ms.park_stream(stream),
+        None => 0,
+    }
 }
 
 /// Allocate a host-code thunk with two raw u64 captures. Raw ints are safe
@@ -180,13 +173,13 @@ unsafe fn build_cons_cells(
     items: &[tidepool_eval::value::Value],
     terminator: *mut u8,
 ) -> *mut u8 {
-    let mark = rust_roots_mark();
+    let mark = rust_roots_mark(vmctx);
     let mut tail: *mut u8 = terminator;
-    register_rust_root(&mut tail as *mut *mut u8);
+    register_rust_root(vmctx, &mut tail as *mut *mut u8);
 
     // Build cells back-to-front so each cons links the already-built tail.
     let mut elem: *mut u8 = std::ptr::null_mut();
-    register_rust_root(&mut elem as *mut *mut u8);
+    register_rust_root(vmctx, &mut elem as *mut *mut u8);
     for v in items.iter().rev() {
         elem = match crate::heap_bridge::value_to_heap(v, &mut *vmctx) {
             Ok(p) => p,
@@ -195,13 +188,13 @@ unsafe fn build_cons_cells(
                 match crate::heap_bridge::value_to_heap(v, &mut *vmctx) {
                     Ok(p) => p,
                     Err(_) => {
-                        truncate_rust_roots(mark);
+                        truncate_rust_roots(vmctx, mark);
                         return runtime_oom();
                     }
                 }
             }
             Err(_) => {
-                truncate_rust_roots(mark);
+                truncate_rust_roots(vmctx, mark);
                 let msg = b"effect result: element conversion failed";
                 return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
             }
@@ -209,7 +202,7 @@ unsafe fn build_cons_cells(
         let size = tidepool_heap::layout::CON_FIELDS_OFFSET + 16;
         let cell = host_alloc_gc(vmctx, size);
         if cell.is_null() {
-            truncate_rust_roots(mark);
+            truncate_rust_roots(vmctx, mark);
             return runtime_oom();
         }
         tidepool_heap::layout::write_header(cell, tidepool_heap::layout::TAG_CON, size as u16);
@@ -219,7 +212,7 @@ unsafe fn build_cons_cells(
         *(cell.add(tidepool_heap::layout::CON_FIELDS_OFFSET + 8) as *mut *mut u8) = tail;
         tail = cell;
     }
-    truncate_rust_roots(mark);
+    truncate_rust_roots(vmctx, mark);
     tail
 }
 
@@ -279,10 +272,10 @@ unsafe extern "C" fn stream_chunk(vmctx: *mut VMContext, thunk: *mut u8) -> *mut
     // forcing a head converts exactly one element; a fold that never
     // inspects heads (length) converts nothing. Registry lookups only;
     // no producer code runs, so no panic/cancel containment needed here.
-    let indexed = PARKED_STREAMS.with(|r| {
-        let map = r.borrow();
-        map.get(&StreamId(id))
-            .map(|ps| (ps.source.len(), ps.cons_tag, ps.nil_tag))
+    let indexed = current_machine().and_then(|ms| {
+        ms.parked_stream_get(StreamId(id), |ps| {
+            (ps.source.len(), ps.cons_tag, ps.nil_tag)
+        })
     });
     let Some((src_len, cons_tag, nil_tag)) = indexed else {
         let msg = b"effect result stream: registry entry missing (stale continuation?)";
@@ -317,35 +310,37 @@ unsafe extern "C" fn stream_chunk(vmctx: *mut VMContext, thunk: *mut u8) -> *mut
     //   be interruptible like any other long-running evaluation.
     // No heap operations happen while the registry borrow is held.
     let pulled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        PARKED_STREAMS.with(|r| {
-            let mut map = r.borrow_mut();
-            let Some(ps) = map.get_mut(&StreamId(id)) else {
-                return ChunkPull::Missing;
-            };
-            let mut items = Vec::with_capacity(CHUNK);
-            let mut exhausted = false;
-            while items.len() < CHUNK {
-                if check_cancel_and_set_error() {
-                    return ChunkPull::Cancelled;
-                }
-                match ps.source.next_value(&ps.table) {
-                    Some(Ok(v)) => items.push(v),
-                    Some(Err(e)) => {
-                        return ChunkPull::Failed(format!("stream element conversion failed: {e}"))
+        current_machine()
+            .and_then(|ms| {
+                ms.parked_stream_get_mut(StreamId(id), |ps| {
+                    let mut items = Vec::with_capacity(CHUNK);
+                    let mut exhausted = false;
+                    while items.len() < CHUNK {
+                        if check_cancel_and_set_error(vmctx) {
+                            return ChunkPull::Cancelled;
+                        }
+                        match ps.source.next_value(&ps.table) {
+                            Some(Ok(v)) => items.push(v),
+                            Some(Err(e)) => {
+                                return ChunkPull::Failed(format!(
+                                    "stream element conversion failed: {e}"
+                                ))
+                            }
+                            None => {
+                                exhausted = true;
+                                break;
+                            }
+                        }
                     }
-                    None => {
-                        exhausted = true;
-                        break;
+                    ChunkPull::Chunk {
+                        cons_tag: ps.cons_tag,
+                        nil_tag: ps.nil_tag,
+                        items,
+                        exhausted,
                     }
-                }
-            }
-            ChunkPull::Chunk {
-                cons_tag: ps.cons_tag,
-                nil_tag: ps.nil_tag,
-                items,
-                exhausted,
-            }
-        })
+                })
+            })
+            .unwrap_or(ChunkPull::Missing)
     }));
 
     let (cons_tag, nil_tag, items, exhausted) = match pulled {
@@ -380,9 +375,9 @@ unsafe extern "C" fn stream_chunk(vmctx: *mut VMContext, thunk: *mut u8) -> *mut
     };
 
     if exhausted {
-        PARKED_STREAMS.with(|r| {
-            r.borrow_mut().remove(&StreamId(id));
-        });
+        if let Some(ms) = current_machine() {
+            ms.remove_parked_stream(StreamId(id));
+        }
     }
 
     // Terminal: nil constructor or the next tail thunk.
@@ -416,22 +411,22 @@ unsafe fn build_cons_cells_thunked(
     range: std::ops::Range<usize>,
     terminator: *mut u8,
 ) -> *mut u8 {
-    let mark = rust_roots_mark();
+    let mark = rust_roots_mark(vmctx);
     let mut tail: *mut u8 = terminator;
-    register_rust_root(&mut tail as *mut *mut u8);
+    register_rust_root(vmctx, &mut tail as *mut *mut u8);
 
     let mut elem: *mut u8 = std::ptr::null_mut();
-    register_rust_root(&mut elem as *mut *mut u8);
+    register_rust_root(vmctx, &mut elem as *mut *mut u8);
     for idx in range.rev() {
         elem = alloc_element_thunk(vmctx, id, idx as u64);
         if elem.is_null() {
-            truncate_rust_roots(mark);
+            truncate_rust_roots(vmctx, mark);
             return runtime_oom();
         }
         let size = tidepool_heap::layout::CON_FIELDS_OFFSET + 16;
         let cell = host_alloc_gc(vmctx, size);
         if cell.is_null() {
-            truncate_rust_roots(mark);
+            truncate_rust_roots(vmctx, mark);
             return runtime_oom();
         }
         tidepool_heap::layout::write_header(cell, tidepool_heap::layout::TAG_CON, size as u16);
@@ -441,7 +436,7 @@ unsafe fn build_cons_cells_thunked(
         *(cell.add(tidepool_heap::layout::CON_FIELDS_OFFSET + 8) as *mut *mut u8) = tail;
         tail = cell;
     }
-    truncate_rust_roots(mark);
+    truncate_rust_roots(vmctx, mark);
     tail
 }
 
@@ -459,11 +454,8 @@ unsafe extern "C" fn stream_element(vmctx: *mut VMContext, thunk: *mut u8) -> *m
 
     // ToCore conversion is (potentially) user code: contain panics.
     let converted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        PARKED_STREAMS.with(|r| {
-            let map = r.borrow();
-            map.get(&StreamId(id))
-                .map(|ps| ps.source.get(idx, &ps.table))
-        })
+        current_machine()
+            .and_then(|ms| ms.parked_stream_get(StreamId(id), |ps| ps.source.get(idx, &ps.table)))
     }));
 
     let value = match converted {

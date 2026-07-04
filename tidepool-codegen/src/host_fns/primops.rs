@@ -3,11 +3,11 @@
 //! measurement helpers, and the pure `decodeJson` primop.
 
 use crate::context::VMContext;
-use std::cell::Cell;
+use crate::machine_state::machine_state;
 
 use super::errors::{
-    check_ptr_invalid, error_poison_ptr, runtime_error_with_msg, runtime_oom, RuntimeError,
-    MIN_VALID_ADDR, RUNTIME_ERROR,
+    check_ptr_invalid, error_poison_ptr, overwrite_runtime_error, runtime_error_with_msg,
+    runtime_oom, RuntimeError, MIN_VALID_ADDR,
 };
 use super::force::heap_force;
 use super::gc::gc_trigger;
@@ -37,11 +37,9 @@ const BYTE_ARRAY_BASE_OFFSET: usize = 8;
 
 pub extern "C" fn runtime_new_byte_array(size: i64) -> i64 {
     if size < 0 {
-        RUNTIME_ERROR.with(|cell| {
-            *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
-                "negative size in byte array allocation".to_string(),
-            ));
-        });
+        overwrite_runtime_error(RuntimeError::UserErrorMsg(
+            "negative size in byte array allocation".to_string(),
+        ));
         return error_poison_ptr() as i64;
     }
     let total = (2 * BYTE_ARRAY_BASE_OFFSET).saturating_add(size as usize);
@@ -128,11 +126,9 @@ pub extern "C" fn runtime_shrink_byte_array(ba: i64, new_size: i64) {
 /// zeroes any new bytes, and frees the old buffer. Returns the new pointer.
 pub extern "C" fn runtime_resize_byte_array(ba: i64, new_size: i64) -> i64 {
     if new_size < 0 {
-        RUNTIME_ERROR.with(|cell| {
-            *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
-                "negative size in byte array allocation".to_string(),
-            ));
-        });
+        overwrite_runtime_error(RuntimeError::UserErrorMsg(
+            "negative size in byte array allocation".to_string(),
+        ));
         return error_poison_ptr() as i64;
     }
     if (ba as u64) < MIN_VALID_ADDR {
@@ -271,33 +267,27 @@ pub extern "C" fn runtime_compare_byte_arrays(
 /// Each slot is 8 bytes (a heap pointer).
 pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
     if len < 0 {
-        RUNTIME_ERROR.with(|cell| {
-            *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
-                "negative length in array allocation".to_string(),
-            ));
-        });
+        overwrite_runtime_error(RuntimeError::UserErrorMsg(
+            "negative length in array allocation".to_string(),
+        ));
         return error_poison_ptr() as i64;
     }
     let n = len as usize;
     let slot_bytes = match n.checked_mul(8) {
         Some(v) => v,
         None => {
-            RUNTIME_ERROR.with(|cell| {
-                *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
-                    "array size overflow".to_string(),
-                ));
-            });
+            overwrite_runtime_error(RuntimeError::UserErrorMsg(
+                "array size overflow".to_string(),
+            ));
             return error_poison_ptr() as i64;
         }
     };
     let total = match 8usize.checked_add(slot_bytes) {
         Some(v) => v,
         None => {
-            RUNTIME_ERROR.with(|cell| {
-                *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
-                    "array size overflow".to_string(),
-                ));
-            });
+            overwrite_runtime_error(RuntimeError::UserErrorMsg(
+                "array size overflow".to_string(),
+            ));
             return error_poison_ptr() as i64;
         }
     };
@@ -328,33 +318,27 @@ pub extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64) -> i64
         return error_poison_ptr() as i64;
     }
     if len < 0 {
-        RUNTIME_ERROR.with(|cell| {
-            *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
-                "negative length in array allocation".to_string(),
-            ));
-        });
+        overwrite_runtime_error(RuntimeError::UserErrorMsg(
+            "negative length in array allocation".to_string(),
+        ));
         return error_poison_ptr() as i64;
     }
     let n = len as usize;
     let slot_bytes = match n.checked_mul(8) {
         Some(v) => v,
         None => {
-            RUNTIME_ERROR.with(|cell| {
-                *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
-                    "array size overflow".to_string(),
-                ));
-            });
+            overwrite_runtime_error(RuntimeError::UserErrorMsg(
+                "array size overflow".to_string(),
+            ));
             return error_poison_ptr() as i64;
         }
     };
     let total = match 8usize.checked_add(slot_bytes) {
         Some(v) => v,
         None => {
-            RUNTIME_ERROR.with(|cell| {
-                *cell.borrow_mut() = Some(RuntimeError::UserErrorMsg(
-                    "array size overflow".to_string(),
-                ));
-            });
+            overwrite_runtime_error(RuntimeError::UserErrorMsg(
+                "array size overflow".to_string(),
+            ));
             return error_poison_ptr() as i64;
         }
     };
@@ -658,9 +642,7 @@ pub extern "C" fn runtime_show_double_addr(bits: i64) -> i64 {
     let c_str = match std::ffi::CString::new(s) {
         Ok(c) => c,
         Err(_) => {
-            RUNTIME_ERROR.with(|cell| {
-                *cell.borrow_mut() = Some(RuntimeError::Undefined);
-            });
+            overwrite_runtime_error(RuntimeError::Undefined);
             return error_poison_ptr() as i64;
         }
     };
@@ -689,9 +671,7 @@ pub extern "C" fn runtime_show_signed_double_addr(prec: i64, bits: i64) -> i64 {
     let c_str = match std::ffi::CString::new(s) {
         Ok(c) => c,
         Err(_) => {
-            RUNTIME_ERROR.with(|cell| {
-                *cell.borrow_mut() = Some(RuntimeError::Undefined);
-            });
+            overwrite_runtime_error(RuntimeError::Undefined);
             return error_poison_ptr() as i64;
         }
     };
@@ -768,19 +748,6 @@ pub extern "C" fn runtime_double_power(bits_a: i64, bits_b: i64) -> i64 {
     a.powf(b).to_bits() as i64
 }
 
-thread_local! {
-    /// The aeson-`Value` constructor ids for the currently-running JIT machine,
-    /// installed by the run entry (`JitEffectMachine`) from the compile-time
-    /// `DataConTable`. Read by [`runtime_json_decode`] to build the `Maybe
-    /// Value` result. `None` when the aeson/Maybe/Map closure isn't in scope.
-    static JSON_CON_IDS: Cell<Option<tidepool_eval::json::JsonConIds>> = const { Cell::new(None) };
-}
-
-/// Install the JSON constructor ids for this thread's JIT run. `None` clears.
-pub fn set_json_con_ids(ids: Option<tidepool_eval::json::JsonConIds>) {
-    JSON_CON_IDS.with(|c| c.set(ids));
-}
-
 /// `decodeJson :: Text -> Maybe Value` — the pure JSON-decode primop.
 ///
 /// Lifts the argument `Text` to a `Value` tree via `heap_bridge` (which owns
@@ -797,7 +764,7 @@ pub fn set_json_con_ids(ids: Option<tidepool_eval::json::JsonConIds>) {
 /// `Text` value (or a thunk that forces to one).
 #[no_mangle]
 pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *mut u8) -> *mut u8 {
-    let ids = match JSON_CON_IDS.with(|c| c.get()) {
+    let ids = match machine_state(vmctx).json_con_ids() {
         Some(ids) => ids,
         None => {
             let msg = b"decodeJson: aeson Value/Maybe/Map constructors not in scope";
@@ -824,11 +791,9 @@ pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *m
     // lifted `ByteArray` wrapper con has no such id here and goes
     // unrecognized — exactly as in eval's `JsonDecode` arm.
     let bytes = match &text_val {
-        tidepool_eval::Value::Con(_, fields) => tidepool_eval::shapes::text_bytes_clamped_with(
-            fields,
-            |_| false,
-            |id| id == ids.i_hash,
-        ),
+        tidepool_eval::Value::Con(_, fields) => {
+            tidepool_eval::shapes::text_bytes_clamped_with(fields, |_| false, |id| id == ids.i_hash)
+        }
         _ => None,
     };
     let s = match bytes {

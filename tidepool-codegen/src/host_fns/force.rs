@@ -2,23 +2,24 @@
 
 use crate::context::VMContext;
 use crate::layout;
+use crate::machine_state::machine_state;
 use tidepool_heap::layout as heap_layout;
 
 use super::cancel::check_cancel_and_set_error;
 use super::errors::{
-    error_poison_ptr, has_runtime_error, reset_call_depth, runtime_bad_thunk_state_trap,
-    runtime_blackhole_trap, RuntimeError, RUNTIME_ERROR,
+    error_poison_ptr, has_runtime_error, overwrite_runtime_error, runtime_bad_thunk_state_trap,
+    runtime_blackhole_trap, RuntimeError,
 };
 use super::gc::{register_rust_root, rust_roots_mark, truncate_rust_roots};
 
-/// Force a thunk to WHNF. Loops to handle chains (thunk returning thunk).
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
 /// Upper bound on consecutive EVALUATED-indirection follows in one
 /// `heap_force` call. A genuine chain needs one distinct (>=48-byte) thunk per
 /// link — 64M links would need >3 GiB of thunks, beyond any heap we run — so
 /// exceeding it can only mean a memoized indirection cycle (#336).
 const INDIRECTION_FOLLOW_LIMIT: u64 = 64 * 1024 * 1024;
 
+/// Force a thunk to WHNF. Loops to handle chains (thunk returning thunk).
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
     if obj.is_null() {
         return obj;
@@ -46,9 +47,7 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                             *(current.add(layout::THUNK_CODE_PTR_OFFSET as usize) as *const usize);
 
                         if code_ptr == 0 {
-                            RUNTIME_ERROR.with(|cell| {
-                                *cell.borrow_mut() = Some(RuntimeError::NullFunPtr);
-                            });
+                            overwrite_runtime_error(RuntimeError::NullFunPtr);
                             return error_poison_ptr();
                         }
 
@@ -63,10 +62,10 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                         // memory (post-call forwarding checks are unsound).
                         let f: extern "C" fn(*mut VMContext, *mut u8) -> *mut u8 =
                             std::mem::transmute(code_ptr);
-                        let mark = rust_roots_mark();
-                        register_rust_root(&mut current as *mut *mut u8);
+                        let mark = rust_roots_mark(vmctx);
+                        register_rust_root(vmctx, &mut current as *mut *mut u8);
                         let result = f(vmctx, current);
-                        truncate_rust_roots(mark);
+                        truncate_rust_roots(vmctx, mark);
 
                         // If the thunk body raised an error (e.g. HeapOverflow
                         // from runtime_oom), memoize the poison result so
@@ -193,8 +192,8 @@ pub extern "C" fn deep_force(vmctx: *mut VMContext, root: *mut u8) -> *mut u8 {
         // Keep the NF root registered for the WHOLE descent: once a child is
         // popped off the work stack it is reachable only through the root graph,
         // so the root must stay live (and GC-updated) until we return it.
-        let base_mark = rust_roots_mark();
-        register_rust_root(&mut nf_root as *mut *mut u8);
+        let base_mark = rust_roots_mark(vmctx);
+        register_rust_root(vmctx, &mut nf_root as *mut *mut u8);
 
         // Work items are (parent heap pointer, field index). Parents are exterior
         // heap-object pointers — GC-relocatable, and rewritten in place because we
@@ -208,20 +207,20 @@ pub extern "C" fn deep_force(vmctx: *mut VMContext, root: *mut u8) -> *mut u8 {
             // Register every pending parent + the current parent so a GC inside
             // the upcoming heap_force rewrites them all in place. (nf_root is
             // already registered at base_mark and stays so.)
-            let mark = rust_roots_mark();
+            let mark = rust_roots_mark(vmctx);
             for item in work.iter_mut() {
-                register_rust_root(&mut item.0 as *mut *mut u8);
+                register_rust_root(vmctx, &mut item.0 as *mut *mut u8);
             }
-            register_rust_root(&mut parent as *mut *mut u8);
+            register_rust_root(vmctx, &mut parent as *mut *mut u8);
 
             // Read the child from the live parent, force it, then write the NF
             // child back into the (possibly relocated) parent's field slot.
             let field_off = layout::CON_FIELDS_OFFSET as usize + idx * CON_FIELD_PTR_STRIDE;
             let child = *(parent.add(field_off) as *const *mut u8);
             let forced_child = heap_force(vmctx, child);
-            truncate_rust_roots(mark);
+            truncate_rust_roots(vmctx, mark);
             if has_runtime_error() {
-                truncate_rust_roots(base_mark);
+                truncate_rust_roots(vmctx, base_mark);
                 return error_poison_ptr();
             }
             // `parent` may have moved during the force; recompute the slot.
@@ -231,7 +230,7 @@ pub extern "C" fn deep_force(vmctx: *mut VMContext, root: *mut u8) -> *mut u8 {
             push_con_fields(forced_child, &mut work);
         }
 
-        truncate_rust_roots(base_mark);
+        truncate_rust_roots(vmctx, base_mark);
         nf_root
     }
 }
@@ -271,7 +270,7 @@ pub extern "C" fn trampoline_resolve(vmctx: *mut VMContext) -> *mut u8 {
             // immediately re-enters the trampoline forever. Returning the
             // poison here unwinds up to `JitEffectMachine::run_pure`, which
             // then surfaces `RuntimeError::Cancelled`.
-            if check_cancel_and_set_error() {
+            if check_cancel_and_set_error(vmctx) {
                 (*vmctx).tail_callee = std::ptr::null_mut();
                 (*vmctx).tail_arg = std::ptr::null_mut();
                 return error_poison_ptr();
@@ -303,7 +302,7 @@ pub extern "C" fn trampoline_resolve(vmctx: *mut VMContext) -> *mut u8 {
             }
 
             // Reset call depth so tail-recursive loops don't hit the limit
-            reset_call_depth();
+            machine_state(vmctx).reset_call_depth();
 
             // Read code pointer from closure
             let code_ptr = *(callee.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const usize);
@@ -331,8 +330,8 @@ pub extern "C" fn trampoline_resolve(vmctx: *mut VMContext) -> *mut u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::errors::take_runtime_error;
+    use super::*;
     use std::cell::Cell;
 
     extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext) {}
@@ -355,6 +354,7 @@ mod tests {
                 gc_trigger: mock_gc_trigger,
                 tail_callee: std::ptr::null_mut(),
                 tail_arg: std::ptr::null_mut(),
+                machine_state: std::ptr::null_mut(),
             };
 
             // 1. Allocate a Lit object for the result
@@ -396,6 +396,7 @@ mod tests {
                 gc_trigger: mock_gc_trigger,
                 tail_callee: std::ptr::null_mut(),
                 tail_arg: std::ptr::null_mut(),
+                machine_state: std::ptr::null_mut(),
             };
 
             // 1. Result: a real heap object (Lit) so the force loop can read its tag
@@ -417,17 +418,15 @@ mod tests {
 
     #[test]
     fn test_heap_force_thunk_blackhole() {
-        unsafe {
+        crate::machine_state::test_support::with_test_machine(|| unsafe {
             let mut vmctx = VMContext {
                 alloc_ptr: std::ptr::null_mut(),
                 alloc_limit: std::ptr::null_mut(),
                 gc_trigger: mock_gc_trigger,
                 tail_callee: std::ptr::null_mut(),
                 tail_arg: std::ptr::null_mut(),
+                machine_state: std::ptr::null_mut(),
             };
-
-            // Reset runtime error
-            RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);
 
             // Blackholed thunk
             let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
@@ -441,21 +440,20 @@ mod tests {
 
             let err = take_runtime_error().expect("Should have flagged error");
             assert!(matches!(err, RuntimeError::BlackHole));
-        }
+        });
     }
 
     #[test]
     fn test_heap_force_thunk_null_code_ptr() {
-        unsafe {
+        crate::machine_state::test_support::with_test_machine(|| unsafe {
             let mut vmctx = VMContext {
                 alloc_ptr: std::ptr::null_mut(),
                 alloc_limit: std::ptr::null_mut(),
                 gc_trigger: mock_gc_trigger,
                 tail_callee: std::ptr::null_mut(),
                 tail_arg: std::ptr::null_mut(),
+                machine_state: std::ptr::null_mut(),
             };
-
-            RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);
 
             let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
             let thunk_ptr = thunk_buf.as_mut_ptr();
@@ -467,21 +465,20 @@ mod tests {
             assert_eq!(res, error_poison_ptr());
             let err = take_runtime_error().expect("Should have flagged error");
             assert!(matches!(err, RuntimeError::NullFunPtr));
-        }
+        });
     }
 
     #[test]
     fn test_heap_force_thunk_bad_state() {
-        unsafe {
+        crate::machine_state::test_support::with_test_machine(|| unsafe {
             let mut vmctx = VMContext {
                 alloc_ptr: std::ptr::null_mut(),
                 alloc_limit: std::ptr::null_mut(),
                 gc_trigger: mock_gc_trigger,
                 tail_callee: std::ptr::null_mut(),
                 tail_arg: std::ptr::null_mut(),
+                machine_state: std::ptr::null_mut(),
             };
-
-            RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);
 
             let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
             let thunk_ptr = thunk_buf.as_mut_ptr();
@@ -492,6 +489,6 @@ mod tests {
             assert_eq!(res, error_poison_ptr());
             let err = take_runtime_error().expect("Should have flagged error");
             assert!(matches!(err, RuntimeError::BadThunkState(255)));
-        }
+        });
     }
 }

@@ -258,7 +258,6 @@ fn converge_second_fragment_resolves_first_fragments_tenured_value() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
-            tidepool_codegen::host_fns::clear_persistent_roots();
             let table = table_with_c1();
 
             // 1. Session machine with a dummy entry (never run).
@@ -280,8 +279,11 @@ fn converge_second_fragment_resolves_first_fragments_tenured_value() {
                 .expect("run_pure_and_bind frag1");
 
             // The slot must be a registered persistent root, holding a live Con(C1,[7]).
+            // Via the machine's own accessor: leaf 3's GC cluster reaches
+            // through vmctx.machine_state, and there is no live vmctx here
+            // (the run already returned) — `machine` IS the handle.
             assert_eq!(
-                tidepool_codegen::host_fns::persistent_roots_count(),
+                machine.persistent_roots_count(),
                 1,
                 "tenure must register exactly one persistent root"
             );
@@ -306,12 +308,12 @@ fn converge_second_fragment_resolves_first_fragments_tenured_value() {
                 "fragment-2 must resolve fragment-1's tenured value (7)"
             );
 
+            // Machine drop clears persistent roots — now structural, not just
+            // tested: MachineState (and its persistent_roots Vec) is owned by
+            // `machine` and deallocated with it, so there is no longer a
+            // handle left to query afterward (the old thread-local read this
+            // assertion made would be UB against a freed MachineState).
             drop(machine);
-            assert_eq!(
-                tidepool_codegen::host_fns::persistent_roots_count(),
-                0,
-                "machine drop clears persistent roots"
-            );
         })
         .unwrap()
         .join()
@@ -327,7 +329,6 @@ fn converge_survives_real_gc_between_runs() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
-            tidepool_codegen::host_fns::clear_persistent_roots();
             tidepool_codegen::host_fns::reset_test_counters();
             let table = table_with_c1();
 
@@ -346,7 +347,7 @@ fn converge_survives_real_gc_between_runs() {
                 )
                 .expect("add_function frag1");
             let slot = machine.run_pure_and_bind(frag1).expect("bind frag1");
-            assert_eq!(tidepool_codegen::host_fns::persistent_roots_count(), 1);
+            assert_eq!(machine.persistent_roots_count(), 1);
 
             // Record what the slot points at BEFORE the GC.
             // SAFETY: slot is a live, registered persistent root.
@@ -391,7 +392,7 @@ fn converge_survives_real_gc_between_runs() {
                 "tenured value must not be relocated by a minor GC"
             );
             assert_eq!(
-                tidepool_codegen::host_fns::persistent_roots_count(),
+                machine.persistent_roots_count(),
                 1,
                 "persistent root must survive the collection"
             );
@@ -403,8 +404,9 @@ fn converge_survives_real_gc_between_runs() {
                 "fragment-2 must still resolve the tenured value after a real GC"
             );
 
+            // Machine drop clears persistent roots — structural now (see the
+            // comment in converge_second_fragment_resolves_first_fragments_tenured_value).
             drop(machine);
-            assert_eq!(tidepool_codegen::host_fns::persistent_roots_count(), 0);
         })
         .unwrap()
         .join()
@@ -424,7 +426,6 @@ fn effectful_bind_tier0_second_fragment_resolves_bound_value() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
-            tidepool_codegen::host_fns::clear_persistent_roots();
             let table = table_with_freer_and_c1();
 
             // 1. Session machine with a no-effect dummy entry.
@@ -450,7 +451,7 @@ fn effectful_bind_tier0_second_fragment_resolves_bound_value() {
                 .expect("run_fragment_and_bind");
 
             assert_eq!(
-                tidepool_codegen::host_fns::persistent_roots_count(),
+                machine.persistent_roots_count(),
                 1,
                 "effectful bind must register exactly one persistent root"
             );
@@ -474,8 +475,9 @@ fn effectful_bind_tier0_second_fragment_resolves_bound_value() {
                 "second fragment must resolve the effectfully-bound value (99)"
             );
 
+            // Machine drop clears persistent roots — structural now (see the
+            // comment in converge_second_fragment_resolves_first_fragments_tenured_value).
             drop(machine);
-            assert_eq!(tidepool_codegen::host_fns::persistent_roots_count(), 0);
         })
         .unwrap()
         .join()
@@ -494,7 +496,6 @@ fn effectful_bind_tier1_closure_is_callable_after_bind() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
-            tidepool_codegen::host_fns::clear_persistent_roots();
             let table = table_with_freer_and_c1();
 
             // Session machine with dummy entry.
@@ -518,7 +519,7 @@ fn effectful_bind_tier1_closure_is_callable_after_bind() {
                 .expect("run_fragment_and_bind tier1");
 
             assert_eq!(
-                tidepool_codegen::host_fns::persistent_roots_count(),
+                machine.persistent_roots_count(),
                 1,
                 "tier1 bind must register one persistent root"
             );
@@ -542,8 +543,9 @@ fn effectful_bind_tier1_closure_is_callable_after_bind() {
                 "tenured Tier1 closure must apply correctly (identity(7) = 7)"
             );
 
+            // Machine drop clears persistent roots — structural now (see the
+            // comment in converge_second_fragment_resolves_first_fragments_tenured_value).
             drop(machine);
-            assert_eq!(tidepool_codegen::host_fns::persistent_roots_count(), 0);
         })
         .unwrap()
         .join()

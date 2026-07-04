@@ -26,16 +26,28 @@
 //!
 //! ## The per-machine-state boundary (multi-machine / parMapM seam)
 //!
-//! The thread-locals declared across these submodules (GC_STATE, RUST_ROOTS,
-//! PERSISTENT_ROOTS, STACK_MAP_REGISTRY, CANCEL_FLAG, RUNTIME_ERROR, CALL_DEPTH,
-//! DIAGNOSTICS, PARKED_STREAMS, JSON_CON_IDS) are the machine's ambient state.
-//! Every consumer except the signal handler (EXEC_CONTEXT / SIGNAL_SAFE_CTX are
-//! read from async-signal context and must stay thread-scoped) receives vmctx,
-//! and VMContext's frozen ABI covers offsets 0-32 only — appending a per-machine
-//! state pointer is ABI-safe. Converting this cluster from per-thread to
-//! per-machine at the install_registries seam is one prerequisite for N
-//! concurrent machines (#329); the other is the single-mutator GC (the RBP
-//! frame walker walks one thread's stack).
+//! Per-machine state now lives entirely on [`crate::machine_state::MachineState`],
+//! owned by `JitEffectMachine`: the cancel flag, JSON con ids, stack-map
+//! registry, and call depth (T6 leaf 1); the first-cause runtime error,
+//! diagnostics, and parked-stream registry (T6 leaf 2); and the GC state plus
+//! the run-scoped/session-scoped GC root registries (T6 leaf 3). Two reach
+//! paths exist, and the GC cluster uses only the first:
+//!
+//! - **vmctx reach** (`(*vmctx).machine_state`) — the GC cluster
+//!   (`gc.rs`: `GcState`, run-scoped roots, persistent roots) is reached this
+//!   way EXCLUSIVELY, never via the per-thread slot below. A write (root
+//!   register) and the read that later traces it (`perform_gc`) must key on
+//!   the identical machine; see the "GC-cluster reach" note on
+//!   `machine_state.rs`.
+//! - **`CURRENT_MACHINE`** (a per-thread slot, `crate::machine_state`) — used
+//!   by the cancel/JSON/stack-map/call-depth/runtime-error/diagnostics/
+//!   parked-stream ambient shims for host fns that receive no `vmctx`.
+//!
+//! Only the signal handler (`EXEC_CONTEXT` / `SIGNAL_SAFE_CTX`, read from
+//! async-signal context) must stay thread-scoped rather than per-machine.
+//! Full host-fn vmctx-reach for the remaining ambient shims
+//! (`runtime_error`/`runtime_error_with_msg`/`unresolved_var_trap`/
+//! `runtime_case_trap`/`runtime_oom`/the array primops) is #329.
 
 mod cancel;
 mod errors;
@@ -44,28 +56,26 @@ mod gc;
 mod primops;
 mod streaming;
 
+pub(crate) use cancel::check_cancel_and_set_error;
 pub use cancel::runtime_cancel_check;
-pub(crate) use cancel::{check_cancel_and_set_error, clear_cancel_flag, set_cancel_flag};
 
+pub(crate) use gc::GcState;
 pub use gc::{
-    clear_gc_state, clear_persistent_roots, clear_run_scratch, clear_rust_roots,
-    clear_stack_map_registry, free_session_heap, gc_active_range, gc_trigger,
-    gc_trigger_call_count, gc_trigger_last_vmctx, install_session_buffer,
-    persistent_roots_count, reclaim_session_heap, register_persistent_root, register_rust_root,
-    reset_test_counters, rust_roots_mark, set_gc_state, set_stack_map_registry,
-    truncate_rust_roots,
+    clear_rust_roots, gc_trigger, gc_trigger_call_count, gc_trigger_last_vmctx,
+    persistent_roots_count, register_persistent_root, register_rust_root, reset_test_counters,
+    rust_roots_mark, truncate_rust_roots,
 };
 
+use errors::unresolved_var_trap;
 pub use errors::{
     debug_app_check, drain_diagnostics, error_poison_ptr, error_poison_ptr_lazy,
     error_poison_ptr_lazy_msg, get_exec_context, has_runtime_error, is_lazy_poison,
-    push_diagnostic, raise_lazy_poison, register_var_names, reset_call_depth, runtime_bad_thunk_state_trap,
+    push_diagnostic, raise_lazy_poison, register_var_names, runtime_bad_thunk_state_trap,
     runtime_blackhole_trap, runtime_case_trap, runtime_error, runtime_error_dynamic,
     runtime_error_with_msg, runtime_oom, set_exec_context, set_first_cause, surface_error,
     take_runtime_error, RuntimeError, RuntimeErrorKind,
 };
 pub(crate) use errors::{SIGNAL_SAFE_CTX, SIGNAL_SAFE_CTX_LEN};
-use errors::unresolved_var_trap;
 
 pub use force::{deep_force, heap_force, trampoline_resolve};
 
@@ -82,12 +92,11 @@ pub use primops::{
     runtime_show_double_addr, runtime_show_signed_double_addr, runtime_shrink_boxed_array,
     runtime_shrink_byte_array, runtime_strlen, runtime_text_measure_off, runtime_text_memchr,
     runtime_text_reverse, runtime_word2_quot, runtime_word2_rem, runtime_word_encode_double,
-    set_json_con_ids,
 };
 
 pub(crate) use streaming::{
-    alloc_stream_tail_thunk, clear_parked_streams, materialize_cons_list, park_stream,
-    ParkedStream, ReadySource,
+    alloc_stream_tail_thunk, materialize_cons_list, park_stream, ParkedStream, ReadySource,
+    StreamId,
 };
 
 /// Return the list of host function symbols for JIT registration.

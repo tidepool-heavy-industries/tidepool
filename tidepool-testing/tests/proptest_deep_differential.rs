@@ -41,6 +41,7 @@ use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::host_fns;
 use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
+use tidepool_codegen::machine_state::MachineState;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_eval::{env_from_datacon_table, eval::eval, heap::VecHeap};
@@ -150,7 +151,7 @@ fn classify_jit_error(err: &JitError) -> JitErrClass {
 fn jit_compile_and_run(
     tree: &CoreExpr,
     nursery_size: usize,
-) -> Option<(*const u8, VMContext, Vec<u8>, CodegenPipeline)> {
+) -> Option<(*const u8, VMContext, Vec<u8>, CodegenPipeline, Box<MachineState>)> {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).ok()?;
     let func_id = compile_expr(&mut pipeline, tree, "deep_diff", &ExternalEnv::new()).ok()?;
     pipeline.finalize().ok()?;
@@ -159,15 +160,19 @@ fn jit_compile_and_run(
     let start = nursery.as_mut_ptr();
     let end = unsafe { start.add(nursery.len()) };
     let mut vmctx = VMContext::new(start, end, host_fns::gc_trigger);
+    // Boxed so its address stays stable across the move out of this function
+    // — `vmctx.machine_state` points at its heap allocation.
+    let machine_state = Box::new(MachineState::new());
+    vmctx.machine_state = machine_state.as_ref() as *const MachineState as *mut MachineState;
 
-    host_fns::set_gc_state(start, nursery.len());
-    host_fns::set_stack_map_registry(&pipeline.stack_maps);
+    machine_state.set_gc_state(start, nursery.len());
+    machine_state.set_stack_map_registry(&pipeline.stack_maps);
 
     let ptr = pipeline.get_function_ptr(func_id);
     let func: unsafe extern "C" fn(*mut VMContext) -> i64 = unsafe { std::mem::transmute(ptr) };
     let result = unsafe { func(&mut vmctx as *mut VMContext) };
 
-    Some((result as *const u8, vmctx, nursery, pipeline))
+    Some((result as *const u8, vmctx, nursery, pipeline, machine_state))
 }
 
 /// Evaluate one case in both backends and classify the outcome into an exit
@@ -522,7 +527,7 @@ fn diag_seed(hex: &str, nursery: usize) {
 
     // 3. This crate's raw path: compile_expr + func() + compare::heap_to_value.
     let raw_val = match jit_compile_and_run(&expr, nursery) {
-        Some((ptr, mut vmctx, _n, _p)) => {
+        Some((ptr, mut vmctx, _n, _p, _ms)) => {
             let err = host_fns::take_runtime_error();
             if let Some(e) = err {
                 Err(format!("{e:?}"))

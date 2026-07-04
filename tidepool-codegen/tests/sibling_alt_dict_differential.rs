@@ -27,6 +27,7 @@ use tidepool_codegen::context::VMContext;
 use tidepool_codegen::emit::expr::compile_expr;
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::host_fns;
+use tidepool_codegen::machine_state::MachineState;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_eval::{deep_force, env_from_datacon_table, eval, VecHeap};
 use tidepool_repr::serial::read::{read_cbor, read_metadata};
@@ -62,14 +63,19 @@ fn diff_one(name: &str) -> Option<String> {
     let start = nursery.as_mut_ptr();
     let end = unsafe { start.add(nursery.len()) };
     let mut vmctx = VMContext::new(start, end, host_fns::gc_trigger);
-    host_fns::set_gc_state(start, nursery.len());
-    host_fns::set_stack_map_registry(&pipeline.stack_maps);
+    let machine_state = Box::new(MachineState::new());
+    vmctx.machine_state = machine_state.as_ref() as *const MachineState as *mut MachineState;
+    machine_state.set_gc_state(start, nursery.len());
+    machine_state.set_stack_map_registry(&pipeline.stack_maps);
 
     let ptr = pipeline.get_function_ptr(func_id);
     let func: unsafe extern "C" fn(*mut VMContext) -> i64 = unsafe { std::mem::transmute(ptr) };
     let result_ptr = unsafe { func(&mut vmctx as *mut VMContext) } as *const u8;
     let jit_val = unsafe {
-        tidepool_codegen::heap_bridge::heap_to_value_forcing(result_ptr, &mut vmctx as *mut VMContext)
+        tidepool_codegen::heap_bridge::heap_to_value_forcing(
+            result_ptr,
+            &mut vmctx as *mut VMContext,
+        )
     }
     .unwrap_or_else(|e| panic!("[{name}] jit bridge failed: {e:?}"));
 
@@ -125,11 +131,7 @@ fn sibling_alt_refined_dict_matches_oracle() {
             ];
             for (name, expected) in cases {
                 let got = diff_one(name);
-                assert_eq!(
-                    got.as_deref(),
-                    Some(expected),
-                    "[{name}] wrong Text value"
-                );
+                assert_eq!(got.as_deref(), Some(expected), "[{name}] wrong Text value");
             }
         })
         .unwrap()
