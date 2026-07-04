@@ -1159,4 +1159,77 @@ mod tests {
             .await;
         assert!(matches!(r, ResumeOutcome::NotFound));
     }
+
+    /// The eval thread's channel closing with no message (the thread died) is a
+    /// crash: partial output is surfaced, no panic payload without a joinable
+    /// handle.
+    #[tokio::test]
+    async fn closed_channel_is_crashed() {
+        let engine = test_engine();
+        let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel::<EngineMessage>();
+        let (response_tx, _response_rx) = std::sync::mpsc::channel::<ResumeMsg>();
+        drop(session_tx); // thread gone before any message
+        let outcome = engine
+            .drive(
+                session_rx,
+                "src".into(),
+                response_tx,
+                TestSink::with(&["last words"]),
+                None,
+                PauseGate::new(),
+                5,
+                Arc::new(Mutex::new(None)),
+            )
+            .await;
+        match outcome {
+            TurnOutcome::Crashed {
+                output,
+                thread_panic,
+                ..
+            } => {
+                assert_eq!(output, vec!["last words".to_string()]);
+                assert!(thread_panic.is_none());
+            }
+            _ => panic!("expected Crashed"),
+        }
+    }
+
+    /// The window expiring with nothing sent and no thread parked at the gate is
+    /// a pure runaway: the turn detaches, classified run-phase runtime, carrying
+    /// partial output. (The sender is held open so the channel does not read as
+    /// a crash.)
+    #[tokio::test]
+    async fn timeout_with_no_yield_point_detaches() {
+        let engine = test_engine();
+        let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel::<EngineMessage>();
+        let (response_tx, _response_rx) = std::sync::mpsc::channel::<ResumeMsg>();
+        let outcome = engine
+            .drive(
+                session_rx,
+                "src".into(),
+                response_tx,
+                TestSink::with(&["partial"]),
+                None,
+                PauseGate::new(),
+                1,
+                Arc::new(Mutex::new(None)),
+            )
+            .await;
+        drop(session_tx);
+        match outcome {
+            TurnOutcome::TimedOut {
+                class,
+                phase,
+                compiling,
+                output,
+                ..
+            } => {
+                assert_eq!(class, FailureClass::Runtime);
+                assert_eq!(phase, Phase::Run);
+                assert!(!compiling);
+                assert_eq!(output, vec!["partial".to_string()]);
+            }
+            _ => panic!("expected TimedOut"),
+        }
+    }
 }
