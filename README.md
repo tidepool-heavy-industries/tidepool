@@ -11,6 +11,26 @@ Tidepool compiles [freer-simple](https://hackage.haskell.org/package/freer-simpl
 
 Haskell describes what to do. Rust does it.
 
+## Why: bash++ for LLM agents
+
+LLMs are near-natively fluent in two languages they've read for decades: shell
+and Haskell. Tidepool turns the second into an agent tool surface — a
+"basically GHCi" environment (a one-shot `eval` tool and a stateful repl)
+where one Haskell expression replaces a dozen tool calls: grep + read +
+transform + write as a single round trip, over typed effects (files,
+processes, git, HTTP, LSP, LLM calls) instead of string-splicing.
+
+Two principles follow:
+
+- **The API is the prompt.** The surface mirrors canonical Haskell
+  (`Data.Map`, aeson-shaped JSON, GHCi conventions) because models already
+  know it — every deviation from standard Haskell is a fluency tax, every
+  mirror is free fluency.
+- **The interface evolves as an optimization loop, not a static design.**
+  Clean-context models work real tasks; the cases where tidepool beats bash —
+  and the frictions where it doesn't — drive each round of UX changes and new
+  effects.
+
 ## Getting Started
 
 ### 1. Install the MCP server
