@@ -25,6 +25,12 @@
 //!
 //! E1 drives the **oneshot** shape: `render = Json`, `retention = DropAfterDone`,
 //! an empty `ModuleEnv` (no declaration accumulation), one pool slot per turn.
+//! Only the stateless MCP eval server drives the engine today; the resident
+//! REPL server stays a direct consumer of the lower session substrate
+//! ([`super::SessionLib`] / [`super::compile_session_turn`]) with a parked
+//! worker thread, because unifying its resident-machine model onto this
+//! spawn-per-turn engine is not a behavior-preserving change — that convergence
+//! is E2 (see the seam below).
 //! The end-state registry entry the API is aimed at is
 //! `{machine, ModuleEnv, render policy, retention, pool slot}`;
 //! [`RenderPolicy`] and [`Retention`] are carried on [`EngineConfig`] as that
