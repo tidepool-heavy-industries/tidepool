@@ -17,7 +17,6 @@ module Library
   , module Diff
   , module Edit
   , module Optics
-  , module GotchaGuard
   , module SelfTest
   , module Lsp
   , module Churn
@@ -31,7 +30,6 @@ import Tables
 import Diff
 import Edit
 import Optics
-import GotchaGuard
 import SelfTest
 import Lsp
 import Churn

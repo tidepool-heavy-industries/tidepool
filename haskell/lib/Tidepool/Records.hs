@@ -47,7 +47,7 @@ instance ToJSON Proc where
   toJSON p = object ["exitCode" .= p.exitCode, "stdout" .= p.stdout, "stderr" .= p.stderr, "ok" .= ok p]
 
 -- | A search match. Replaces @(FilePath, Int, Text)@ (path, 1-based line, matched text)
--- everywhere (grepGlob / searchFiles / matchLocs / GotchaGuard.Hit).
+-- everywhere (grepGlob / searchFiles / matchLocs).
 data Hit = Hit { path :: Text, line :: Int, text :: Text } deriving (Show, Eq)
 
 instance ToJSON Hit where
