@@ -281,29 +281,9 @@ crate::time_effect_def!(crate::effect_defs::effect_decl_projection);
 // (`effect_defs.rs`).
 crate::meta_effect_def!(crate::effect_defs::effect_decl_projection);
 
-/// Ask effect: suspend execution to ask the calling LLM a question.
-pub fn ask_decl() -> EffectDecl {
-    EffectDecl {
-        type_name: "Ask",
-        description: "Suspend execution and ask the calling agent a STRUCTURED question. `ask schema prompt` carries the schema as JSON Schema in the suspension; the resume reply is validated against it server-side before re-entering the computation (invalid replies do NOT consume the continuation). Extract fields from the returned Value with optics, e.g. `v ^? key \"path\" . _String`.",
-        constructors: &[
-            "AskWith :: Text -> Value -> Ask Value",
-        ],
-        type_defs: &[
-            // Schema vocabulary lives on the Ask effect (always present in
-            // every stack) so .tidepool/lib modules and Llm-less stacks can
-            // build schemas. llm (llm_decl) references schemaToValue from
-            // here — same generated module.
-            "data Schema = SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema",
-        ],
-        helpers: &[
-            "ask :: Schema -> Text -> M Value\nask schema prompt = send (AskWith prompt (object [\"schema\" .= schemaToValue schema]))",
-            "isOpt :: Schema -> Bool\nisOpt (SOpt _) = True\nisOpt _ = False",
-            "innerSchema :: Schema -> Schema\ninnerSchema (SOpt s) = s\ninnerSchema s = s",
-            "schemaToValue :: Schema -> Value\nschemaToValue SStr = object [\"type\" .= (\"string\" :: Text)]\nschemaToValue SNum = object [\"type\" .= (\"number\" :: Text)]\nschemaToValue SBool = object [\"type\" .= (\"boolean\" :: Text)]\nschemaToValue (SEnum vs) = object [\"type\" .= (\"string\" :: Text), \"enum\" .= vs]\nschemaToValue (SArr item) = object [\"type\" .= (\"array\" :: Text), \"items\" .= schemaToValue item]\nschemaToValue (SOpt s) = schemaToValue s\nschemaToValue (SObj fields) = object [\"type\" .= (\"object\" :: Text), \"properties\" .= object (map (\\(k,s) -> k .= schemaToValue (innerSchema s)) fields), \"required\" .= map fst (filter (not . isOpt . snd) fields)]",
-        ],
-    }
-}
+// Ask effect: `ask_decl()` is generated from the single-source definition
+// (`effect_defs.rs`).
+crate::ask_effect_def!(crate::effect_defs::effect_decl_projection);
 
 /// LLM effect: call an LLM for classification, extraction, or judgment.
 pub fn llm_decl() -> EffectDecl {

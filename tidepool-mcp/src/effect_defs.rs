@@ -471,6 +471,62 @@ macro_rules! git_effect_def {
     };
 }
 
+/// Ask effect — single definition (decl-side only).
+///
+/// Ask has no `tidepool-handlers` handler: its dispatchers are server
+/// machinery (`tidepool-mcp/src/ask.rs`, `tidepool-repl/src/ask.rs`), so only
+/// [`effect_decl_projection!`] consumes this definition. The `handler`/`req`/
+/// `method` slots name types that are never generated.
+#[macro_export]
+macro_rules! ask_effect_def {
+    ($project:path) => {
+        $project! {
+            effect Ask,
+            handler AskHandler,
+            req AskReq,
+            decl_fn ask_decl,
+            description [
+                "Suspend execution and ask the calling agent a STRUCTURED question. ",
+                "`ask schema prompt` carries the schema as JSON Schema in the suspension; ",
+                "the resume reply is validated against it server-side before re-entering ",
+                "the computation (invalid replies do NOT consume the continuation). ",
+                "Extract fields from the returned Value with optics, e.g. ",
+                "`v ^? key \"path\" . _String`.",
+            ],
+            // Schema vocabulary lives on the Ask effect (always present in
+            // every stack) so .tidepool/lib modules and Llm-less stacks can
+            // build schemas. llm (llm_decl) references schemaToValue from
+            // here — same generated module.
+            type_defs [
+                "data Schema = SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema",
+            ],
+            verbs [
+                { ctor AskWith, method ask_with,
+                  args { prompt: "Text" as String, payload: "Value" as tidepool_eval::value::Value },
+                  ret "Value" },
+            ],
+            helpers [
+                { raw ["ask :: Schema -> Text -> M Value",
+                       "ask schema prompt = send (AskWith prompt (object [\"schema\" .= schemaToValue schema]))"] },
+                { raw ["isOpt :: Schema -> Bool",
+                       "isOpt (SOpt _) = True",
+                       "isOpt _ = False"] },
+                { raw ["innerSchema :: Schema -> Schema",
+                       "innerSchema (SOpt s) = s",
+                       "innerSchema s = s"] },
+                { raw ["schemaToValue :: Schema -> Value",
+                       "schemaToValue SStr = object [\"type\" .= (\"string\" :: Text)]",
+                       "schemaToValue SNum = object [\"type\" .= (\"number\" :: Text)]",
+                       "schemaToValue SBool = object [\"type\" .= (\"boolean\" :: Text)]",
+                       "schemaToValue (SEnum vs) = object [\"type\" .= (\"string\" :: Text), \"enum\" .= vs]",
+                       "schemaToValue (SArr item) = object [\"type\" .= (\"array\" :: Text), \"items\" .= schemaToValue item]",
+                       "schemaToValue (SOpt s) = schemaToValue s",
+                       "schemaToValue (SObj fields) = object [\"type\" .= (\"object\" :: Text), \"properties\" .= object (map (\\(k,s) -> k .= schemaToValue (innerSchema s)) fields), \"required\" .= map fst (filter (not . isOpt . snd) fields)]"] },
+            ],
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     /// Every generated `*_decl()` must be byte-identical to the hand-written
