@@ -55,3 +55,21 @@
 # moderate contention; ordinary tests (the overwhelming majority, sub-second)
 # are unaffected by a larger ceiling.
 slow-timeout = { period = "60s", terminate-after = 30 }
+
+# GHC-compile-heavy crates run capped, not at full core count. Every test in
+# tidepool-runtime/repl/mcp/handlers/testing forks a heavyweight GHC `extract`
+# compile through the EvalHarness pipeline; at full-core parallelism these
+# oversubscribe CPU+memory and THRASH — compiles that take ~13s quiet crawl to
+# minutes, which pushed tidepool-repl::lifecycle_state::
+# timed_out_runaway_self_heals_to_idle (a 20s-budget runaway that self-heals in
+# ~35s in isolation) past the 1800s ceiling on a full-workspace run. Capping the
+# GHC group prevents the thrash while the pure-Rust crates (codegen/eval/repr/
+# effect/bridge — zero extract calls) keep running at full parallelism, so the
+# codegen ~2.15x win is untouched. 4 is conservative for a 16-core box shared
+# with sibling agents; raise it on a dedicated machine if the battery is slow.
+[test-groups.ghc-heavy]
+max-threads = 4
+
+[[profile.default.overrides]]
+filter = 'package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing)'
+test-group = 'ghc-heavy'

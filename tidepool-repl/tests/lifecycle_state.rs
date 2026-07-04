@@ -148,10 +148,14 @@ async fn timed_out_runaway_self_heals_to_idle() {
         eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
         return;
     }
-    // Turn budget must exceed the per-eval GHC compile (~13s for a novel
-    // expression) so the timeout fires during the LOOP, not compilation; a
-    // generous reaper TTL ensures recovery comes from cancel alone, not reaping.
-    let repl = Repl::with_timeout(Duration::from_secs(20), Duration::from_secs(300));
+    // Turn budget must exceed the per-eval GHC compile so the timeout fires
+    // during the LOOP, not compilation. A novel expression compiles in ~13s
+    // quiet, but under a full-parallel `cargo nextest` run the extract compile
+    // is CPU-starved and can crawl well past that; 75s gives headroom for the
+    // starvation the ghc-heavy test-group cap already bounds (see
+    // .config/nextest.toml), while the reaper TTL stays far above it so
+    // recovery still comes from cancel alone, not reaping.
+    let repl = Repl::with_timeout(Duration::from_secs(75), Duration::from_secs(300));
 
     // A pure allocating runaway — `sum` over an infinite `[Int]` never returns
     // and allocates cons cells, so it polls the JIT gc safepoint. The bare-expr
