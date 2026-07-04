@@ -151,7 +151,13 @@ fn classify_jit_error(err: &JitError) -> JitErrClass {
 fn jit_compile_and_run(
     tree: &CoreExpr,
     nursery_size: usize,
-) -> Option<(*const u8, VMContext, Vec<u8>, CodegenPipeline, Box<MachineState>)> {
+) -> Option<(
+    *const u8,
+    VMContext,
+    Vec<u8>,
+    CodegenPipeline,
+    Box<MachineState>,
+)> {
     let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).ok()?;
     let func_id = compile_expr(&mut pipeline, tree, "deep_diff", &ExternalEnv::new()).ok()?;
     pipeline.finalize().ok()?;

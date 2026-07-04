@@ -160,7 +160,6 @@ async fn full_stack_effects_reachable_through_session() {
         text
     }
 
-
     // Exec: `run` a shell command — the result is (exit, stdout, stderr).
     let t = eval(&server, "run \"echo wave-b-ok\" >>= liftEither").await;
     assert!(t.contains("wave-b-ok"), "Exec/run output: {t}");
@@ -208,7 +207,6 @@ async fn full_stack_effects_reachable_through_session() {
         text.contains("from-the-input-lane"),
         "input lane value: {text}",
     );
-
 }
 
 /// `session_run` items see the FULL eval vocabulary — `M` + the effect verbs,
@@ -225,7 +223,6 @@ async fn session_def_sees_full_eval_vocabulary() {
     }
     let tmp = tempfile::tempdir().expect("tempdir");
     let server = build_full_server(tmp.path().to_path_buf());
-
 
     // A decl that uses `M` + the `run` effect verb (Tidepool.Effects) AND the
     // `L.`/`Set.` qualified namespaces — all out of scope under the old
@@ -261,7 +258,6 @@ async fn session_def_sees_full_eval_vocabulary() {
         text.contains('1') && text.contains('3'),
         "uniqSorted output: {text}"
     );
-
 }
 
 /// Run a multi-item `session_run` block and return the parsed result JSON
@@ -375,5 +371,4 @@ async fn block_runner_input_and_type_cleanups() {
         val_str.contains("10") && val_str.contains("20"),
         "where-expr value should contain both elements; got: {v}"
     );
-
 }

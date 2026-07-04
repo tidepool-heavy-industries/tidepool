@@ -1667,8 +1667,8 @@ fn materialize_response_and_resume(
             }
         }
         tidepool_effect::Response::Complete(resp_val) => {
-            let spine = probe_list_spine(&resp_val)
-                .filter(|&(_, _, len)| len > LAZY_SPINE_THRESHOLD_NODES);
+            let spine =
+                probe_list_spine(&resp_val).filter(|&(_, _, len)| len > LAZY_SPINE_THRESHOLD_NODES);
             match spine {
                 Some((cons_tag, nil_tag, len)) if lazy_enabled => {
                     // Re-park the dismantled spine as a
@@ -1726,7 +1726,9 @@ fn materialize_response_and_resume(
             }
             .map_err(JitError::Signal)?;
             if p.is_null() {
-                return Err(JitError::HeapBridge(heap_bridge::BridgeError::NurseryExhausted));
+                return Err(JitError::HeapBridge(
+                    heap_bridge::BridgeError::NurseryExhausted,
+                ));
             }
             p
         }

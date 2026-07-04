@@ -117,10 +117,7 @@ pub fn write_metadata(
                     .var_names
                     .iter()
                     .map(|(id, nm)| {
-                        Value::Array(vec![
-                            Value::Integer((*id).into()),
-                            Value::Text(nm.clone()),
-                        ])
+                        Value::Array(vec![Value::Integer((*id).into()), Value::Text(nm.clone())])
                     })
                     .collect(),
             ),

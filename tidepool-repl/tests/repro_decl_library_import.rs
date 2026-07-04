@@ -107,7 +107,6 @@ async fn decl_resolves_library_reexported_type_without_explicit_import() {
         return;
     };
 
-
     // `EditOutcome` is defined in `.tidepool/lib/Edit.hs` and re-exported by
     // `Library` — NOT imported explicitly here. Before the fix this failed
     // "Not in scope: type constructor or class 'EditOutcome'".
@@ -128,7 +127,6 @@ async fn decl_resolves_library_reexported_type_without_explicit_import() {
         "decl referencing Library-reexported EditOutcome should compile without an explicit \
          import: {text}"
     );
-
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -142,7 +140,6 @@ async fn decl_defining_a_library_reexported_name_does_not_collide() {
     let Some(server) = build_server_with_real_library(cwd) else {
         return;
     };
-
 
     // `Rose` is defined in `.tidepool/lib/Schemes.hs` (`data Rose a = Rose a
     // [Rose a]`) and re-exported by `Library`. Redefining it here would be an
@@ -168,5 +165,4 @@ async fn decl_defining_a_library_reexported_name_does_not_collide() {
         r.is_error != Some(true),
         "decl shadowing Library's Rose should compile cleanly: {text}"
     );
-
 }

@@ -47,7 +47,6 @@ async fn info_resolves_stdlib_proc() {
         v["file"].as_str().unwrap().ends_with("Records.hs"),
         "file points at the defining source: {v}"
     );
-
 }
 
 // ---------------------------------------------------------------------------
@@ -67,7 +66,6 @@ async fn info_resolves_stdlib_hit() {
     for field in ["path :: Text", "line :: Int", "text :: Text"] {
         assert!(shape.contains(field), "shape must carry `{field}`: {shape}");
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +88,6 @@ async fn info_constructor_only_hit() {
         shape.starts_with("data UpdateOutcome"),
         "shape is the enclosing decl: {shape}"
     );
-
 }
 
 // ---------------------------------------------------------------------------
@@ -118,7 +115,6 @@ async fn session_decl_shadows_stdlib() {
         v["shape"].as_str().unwrap().contains("Hit Int"),
         "shape is the session declaration: {v}"
     );
-
 }
 
 // ---------------------------------------------------------------------------
@@ -141,5 +137,4 @@ async fn info_miss_carries_hint() {
         hint.contains("stdlib") && hint.contains(":t"),
         "hint names the searched lanes and the :t affordance: {hint}"
     );
-
 }

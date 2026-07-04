@@ -441,5 +441,4 @@ mod tests {
             other => panic!("expected LitInt(42), got {other:?}"),
         }
     }
-
 }

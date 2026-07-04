@@ -35,7 +35,6 @@ async fn undefined_var_then_recover() {
     // session survives: the real binding still resolves.
     let t = repl.eval("x + 1").await;
     assert!(t.contains("2"), "post-error x + 1 should be 2: {}", t.text);
-
 }
 
 /// Case 2 — Type error in an expression.
@@ -53,7 +52,6 @@ async fn type_error_then_recover() {
 
     let t = repl.eval("pure (1 :: Int)").await;
     assert!(t.contains("1"), "post-type-error pure 1: {}", t.text);
-
 }
 
 /// Case 3 — Bad declaration (does a bad decl POISON later turns?).
@@ -95,7 +93,6 @@ async fn bad_decl_then_recover() {
     // No poison: good decl compiled directly; the defined fn is callable.
     let ev = repl.eval("pure (good 5)").await;
     assert!(ev.contains("6"), "good 5 should be 6: {}", ev.text);
-
 }
 
 /// Case 4 — Bind of bottom (KEY robustness).
@@ -123,7 +120,6 @@ async fn bind_of_bottom_is_lazy_then_clean_on_force() {
     // Session survives.
     let t = repl.eval("pure (1 :: Int)").await;
     assert!(t.contains("1"), "post-bottom-force pure 1: {}", t.text);
-
 }
 
 /// Case 5 — Deep non-tail recursion → clean yield.
@@ -157,7 +153,6 @@ async fn deep_recursion_yields_cleanly() {
     // session survives the yield.
     let t = repl.eval("pure (1 :: Int)").await;
     assert!(t.contains("1"), "post-deep-recursion pure 1: {}", t.text);
-
 }
 
 /// Case 6 — Empty / whitespace eval.
@@ -212,7 +207,6 @@ async fn failed_bind_leaves_no_state() {
     // z was never created — referencing it errors (not in scope).
     let t = repl.eval("pure z").await;
     t.expect_err("z not in scope after failed bind");
-
 }
 
 /// REGRESSION — dropping a session WITHOUT explicit teardown must NOT hang.

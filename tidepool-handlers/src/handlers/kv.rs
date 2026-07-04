@@ -71,8 +71,10 @@ impl KvHandler {
     /// Lock the store (shared prelude of every verb).
     fn locked(
         &self,
-    ) -> Result<std::sync::MutexGuard<'_, std::collections::HashMap<String, serde_json::Value>>, EffectError>
-    {
+    ) -> Result<
+        std::sync::MutexGuard<'_, std::collections::HashMap<String, serde_json::Value>>,
+        EffectError,
+    > {
         self.store
             .lock()
             .map_err(|e| EffectError::Handler(format!("Mutex poisoned: {}", e)))
@@ -289,8 +291,13 @@ mod tests {
         let prefix = "ns1/".to_string().to_value(&table).unwrap();
         let clear_req = Value::Con(clear_id, vec![prefix]);
         let clear_result = response_value(h.dispatch(0, &clear_req, &cx).unwrap(), &table);
-        let deleted_count = tidepool_eval::shapes::unbox_int(&clear_result, &table)
-            .unwrap_or_else(|| panic!("expected I#(LitInt) count from kvClear, got {:?}", clear_result));
+        let deleted_count =
+            tidepool_eval::shapes::unbox_int(&clear_result, &table).unwrap_or_else(|| {
+                panic!(
+                    "expected I#(LitInt) count from kvClear, got {:?}",
+                    clear_result
+                )
+            });
         assert_eq!(
             deleted_count, 2,
             "kvClear \"ns1/\" should have deleted 2 keys, got {deleted_count}"

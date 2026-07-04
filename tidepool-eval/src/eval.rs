@@ -507,9 +507,11 @@ fn eval_at(
                                 |_| false,
                                 |id| id == ids.i_hash,
                             )
-                            .ok_or_else(|| EvalError::TypeMismatch {
-                                expected: "Text backing: ByteArray# or LitString",
-                                got: crate::error::ValueKind::Other(format!("{:?}", forced[0])),
+                            .ok_or_else(|| {
+                                EvalError::TypeMismatch {
+                                    expected: "Text backing: ByteArray# or LitString",
+                                    got: crate::error::ValueKind::Other(format!("{:?}", forced[0])),
+                                }
                             })?;
                             String::from_utf8_lossy(&bytes).into_owned()
                         }
@@ -2467,7 +2469,11 @@ fn dispatch_primop(
 /// Con matching `i_hash`), force its inner field too. Used by `JsonDecode` to
 /// hand `shapes::text_bytes_clamped_with` (heap-agnostic: it never forces) a
 /// value whose boxed-int layer, if present, already bottoms out in a `Lit`.
-fn force_boxed_int_field(v: Value, heap: &mut dyn Heap, i_hash: DataConId) -> Result<Value, EvalError> {
+fn force_boxed_int_field(
+    v: Value,
+    heap: &mut dyn Heap,
+    i_hash: DataConId,
+) -> Result<Value, EvalError> {
     let mut forced = force(v, heap)?;
     if let Value::Con(id, fields) = &mut forced {
         if *id == i_hash && fields.len() == 1 {

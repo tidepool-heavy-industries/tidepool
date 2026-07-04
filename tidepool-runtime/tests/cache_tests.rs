@@ -73,7 +73,9 @@ fn test_cache_miss_different_source() {
     harness.compile(src1, target).expect("First compile failed");
     let count1 = fs::read_dir(&tidepool_cache).unwrap().count();
 
-    harness.compile(src2, target).expect("Second compile failed");
+    harness
+        .compile(src2, target)
+        .expect("Second compile failed");
     let count2 = fs::read_dir(&tidepool_cache).unwrap().count();
 
     assert!(
@@ -122,7 +124,9 @@ fn test_corrupted_cache_recovery() {
     let src = "module Test where\nval = 100";
     let target = "val";
 
-    harness.compile(src, target).expect("Initial compile failed");
+    harness
+        .compile(src, target)
+        .expect("Initial compile failed");
     assert!(tidepool_cache.exists());
 
     for entry in fs::read_dir(&tidepool_cache).unwrap() {

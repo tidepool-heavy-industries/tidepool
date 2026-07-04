@@ -63,5 +63,4 @@ async fn value_bind_shadows_prelude_name() {
         after.text
     );
     assert!(after.text.contains('3'), "follow-up value: {}", after.text);
-
 }

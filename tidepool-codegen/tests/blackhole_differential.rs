@@ -62,7 +62,10 @@ fn mutual_alias_letrec_errors_both_engines() {
             .map_err(|e| format!("{e:?}")),
         Err(e) => Err(format!("compile: {e:?}")),
     };
-    assert!(jit_res.is_err(), "JIT must reject the alias cycle, got {jit_res:?}");
+    assert!(
+        jit_res.is_err(),
+        "JIT must reject the alias cycle, got {jit_res:?}"
+    );
 }
 
 #[test]

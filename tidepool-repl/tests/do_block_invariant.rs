@@ -154,7 +154,6 @@ async fn cross_call_scoping_both_planes_persist() {
         b.contains("16"),
         "n + m + 1 should be 16 (both planes visible in a later call), got: {b}"
     );
-
 }
 
 // ===========================================================================
@@ -178,7 +177,6 @@ async fn input_payload_lane_in_scope() {
         text.contains('7'),
         "input payload (7) should be in scope, got: {text}"
     );
-
 }
 
 /// Regression guard (input-lane fix 843bd05): a user binding literally NAMED
@@ -205,7 +203,6 @@ async fn user_binding_named_input_not_confused_with_lane() {
         out.contains('8'),
         "user `input` binding used (input + 1 = 8), not the payload lane, got: {out}"
     );
-
 }
 
 // ===========================================================================
@@ -237,7 +234,6 @@ async fn all_statement_forms_consecutive() {
         text.contains("16"),
         "trailing expression populates value (g3 z3 + y3 = 16), got: {text}"
     );
-
 }
 
 // ===========================================================================
@@ -312,7 +308,6 @@ async fn per_item_failure_granularity_and_clean_diag() {
         "error must not leak a generated `G<n>.hs:L:C` path: {}",
         out.text
     );
-
 }
 
 // ===========================================================================
@@ -349,7 +344,6 @@ async fn plane_opacity_binds_interchangeable() {
     // And together — both planes coexist and are indistinguishable in use.
     let c = repl.eval_ok("pure (purej + effk)").await;
     assert!(c.contains("10"), "purej + effk = 10, got: {c}");
-
 }
 
 /// OPACITY LEAK (ledger #36) — decl-plane cannot intentionally shadow a Prelude
@@ -378,7 +372,6 @@ async fn plane_opacity_pure_bind_shadows_prelude_name() {
         used.contains("43"),
         "pure bind must shadow Prelude.lookup (42 + 1 = 43), got: {used}"
     );
-
 }
 
 /// OPACITY LEAK (ledger #28) — a fully-open `HasField`-constrained record-dot
@@ -405,7 +398,6 @@ async fn plane_opacity_open_hasfield_helper_binds_cold() {
         text.contains("HasField") || text.contains("path"),
         "open record-dot helper should show its constrained type, got: {text}"
     );
-
 }
 
 /// OPACITY LEAK (ledger #31) — Record field naming is inconsistent across effect

@@ -44,7 +44,6 @@ async fn defs_accumulate_and_interact() {
         out.contains("12"),
         "accumulate+interact: expected 12 (twice 10 = inc (inc 10)), got: {out}"
     );
-
 }
 
 /// CASE 2 — Forward reference ACROSS turns is REJECTED at define-time (BUG-A fix).
@@ -86,7 +85,6 @@ async fn forward_reference_across_turns_poisons() {
         out.contains("21"),
         "case2: session not poisoned — f 10 = g 10 + 1 = 21, got: {out}"
     );
-
 }
 
 /// CASE 2b — Mutual/forward reference WITHIN ONE def turn DOES work.
@@ -110,7 +108,6 @@ async fn mutual_reference_single_turn_works() {
         out.contains("21"),
         "single-turn mutual ref: expected 21 (g2 10 + 1 = 21), got: {out}"
     );
-
 }
 
 /// CASE 3 — Redefine a function: latest-wins via the `hiding` shadow.
@@ -137,7 +134,6 @@ async fn redefine_function_latest_wins() {
         out2.contains("105"),
         "k v2: expected 105 (latest def wins via `hiding (k)`), got: {out2}"
     );
-
 }
 
 /// CASE 4 — Multi-constructor ADT: define once, use as a STABLE type across turns.
@@ -173,7 +169,6 @@ async fn multicon_adt_value_and_case() {
         out2.contains("12"),
         "case sh (Rect 3 4): expected 12 (3*4), got: {out2}"
     );
-
 }
 
 /// CASE 5 — type alias + newtype.
@@ -207,7 +202,6 @@ async fn type_alias_and_newtype() {
         out2.contains('3'),
         "type alias Name used: expected 3, got: {out2}"
     );
-
 }
 
 /// CASE 6 — record syntax on session-bound values, ALL PATHS. Historically the
@@ -268,7 +262,6 @@ async fn record_syntax_selectors_localized() {
         survive.contains("123"),
         "session survives via pure path: expected 123, got: {survive}"
     );
-
 }
 
 /// Record field selector on a session-bound value via the Eff path — was the
@@ -291,7 +284,6 @@ async fn record_selector_on_bound_value_via_eff_path() {
         .expect_ok("bind p via record syntax");
     let out = repl.eval_ok("pure (py p)").await;
     assert!(out.contains('2'), "py p: expected 2, got: {out}");
-
 }
 
 /// CASE 7 — class + instance: class exports with `(..)` so methods are visible.
@@ -321,7 +313,6 @@ async fn class_instance_describe() {
         out.contains("cat"),
         "describe Cat: expected \"cat\", got: {out}"
     );
-
 }
 
 /// CASE 7 (no-poison) — class + data + instance all compile; describe works;
@@ -370,7 +361,6 @@ async fn class_instance_poisons_until_reset() {
         ok.contains('2'),
         "unrelated eval after class+instance: expected 2 (no poison), got: {ok}"
     );
-
 }
 
 /// CASE 8 — decl/Prelude name collision: user decl shadows Prelude (BUG-7 fixed).
@@ -414,7 +404,6 @@ async fn decl_prelude_collision_is_graceful() {
         .expect_ok("session still usable after shadow eval (def)");
     let ok = repl.eval_ok("pure (noclash 9)").await;
     assert!(ok.contains("10"), "post-shadow: expected 10, got: {ok}");
-
 }
 
 /// CASE 9 — empty / garbage declarations: empty is a no-op, garbage fails cleanly.
@@ -482,7 +471,6 @@ async fn empty_and_garbage_decls_survive() {
         out.contains('7'),
         "post-garbage good def: expected 7, got: {out}"
     );
-
 }
 
 /// CASE 10 — a bad decl does NOT poison the log.
@@ -512,7 +500,6 @@ async fn bad_decl_does_not_poison_log() {
         out.contains("12"),
         "log not poisoned: good2 4 expected 12, got: {out}"
     );
-
 }
 
 /// WHOLE-BLOCK DECL ELABORATION (M1): a type signature and its binding in
@@ -600,7 +587,6 @@ async fn decl_paints_inferred_type() {
         ftext.contains("\"type\"") && ftext.contains("Int -> Int"),
         "bare f317 should paint the inferred `Int -> Int`, got: {ftext}"
     );
-
 }
 
 /// DECL TYPE PAINTING is BEST-EFFORT (#317): a type/data/class decl has no
@@ -623,7 +609,6 @@ async fn non_value_decl_omits_type() {
         !text.contains("\"type\""),
         "a data decl has no term-level type — field omitted, got: {text}"
     );
-
 }
 
 /// Mutual recursion AND a call, all in one block — the trailing call must not

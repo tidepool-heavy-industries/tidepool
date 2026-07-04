@@ -87,7 +87,6 @@ async fn stub_roundtrip_replace_and_unknown() {
             && msg.contains("replaced by the next truncated result"),
         "self-explaining unknown-stub error: {msg}"
     );
-
 }
 
 /// A value within the budget is untouched: no marker, no `truncated` key —
@@ -108,5 +107,4 @@ async fn small_result_has_no_truncation_key() {
         res.get("truncated").is_none(),
         "no truncated key for an in-budget value: {res}"
     );
-
 }

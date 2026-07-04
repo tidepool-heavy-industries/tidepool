@@ -112,7 +112,6 @@ async fn object_reply_is_extractable_value() {
          (if -1.0, the Value was delivered as a raw JSON string — fix is incomplete)",
         result
     );
-
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -147,7 +146,6 @@ async fn scalar_reply_extracts_via_double() {
         "expected 7.0 from scalar extraction, got {}",
         result
     );
-
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -202,5 +200,4 @@ async fn invalid_reply_does_not_consume_continuation() {
         "expected 42.0 from retry resume, got {}",
         result
     );
-
 }

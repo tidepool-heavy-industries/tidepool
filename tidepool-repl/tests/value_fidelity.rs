@@ -62,7 +62,6 @@ async fn text_first_class_bind_and_reference() {
         "T.toUpper s: expected HI, got: {}",
         upper.text
     );
-
 }
 
 /// CASE 2 — THE KEY DIAGNOSTIC: a Tier-0 Text bind under a DIFFERENT name while
@@ -116,7 +115,6 @@ async fn text_bind_with_prior_live_binding_diagnostic() {
         "diagnostic text bind: expected 2, got: {}",
         out.text
     );
-
 }
 
 /// CASE 3 — A bind that REFERENCES an earlier binding at bind time.
@@ -143,7 +141,6 @@ async fn bind_references_earlier_binding() {
         "bind-references-earlier: expected 6, got: {}",
         out.text
     );
-
 }
 
 /// CASE 4 — A Tier-1 closure capturing an earlier binding survives GC.
@@ -180,7 +177,6 @@ async fn closure_captures_binding_survives_gc() {
         "closure-captures-survives-GC: expected 105, got: {}",
         out.text
     );
-
 }
 
 /// CASE 5 — Nested/recursive ADT: bind a tree, sum it a later turn.
@@ -216,7 +212,6 @@ async fn nested_recursive_adt_bind_and_sum() {
         "nested ADT sum: expected 6, got: {}",
         out.text
     );
-
 }
 
 /// CASE 6a — Maybe: bind `Just 7`, case-match it.
@@ -238,7 +233,6 @@ async fn maybe_bind_and_case() {
         "Maybe case: expected 7, got: {}",
         out.text
     );
-
 }
 
 /// CASE 6b — Either: bind `Left 1`, case-match it.
@@ -261,7 +255,6 @@ async fn either_bind_and_case() {
         "Either case: expected 1, got: {}",
         out.text
     );
-
 }
 
 /// CASE 7 — Structured JSON `Value`: bind an `object`, read a field back.
@@ -300,7 +293,6 @@ async fn structured_json_value_bind_and_read() {
         "v ^? key a: expected 1, got: {}",
         field.text
     );
-
 }
 
 /// CASE 8 — A list binding survives GC; length + sum read back.
@@ -343,7 +335,6 @@ async fn list_bind_survives_gc() {
         "sum xs: expected 500500, got: {}",
         total.text
     );
-
 }
 
 /// CASE 9 — A function bound, then a value bound FROM applying it.
@@ -370,5 +361,4 @@ async fn function_applied_at_bind_time() {
         "function-applied-at-bind: expected 42, got: {}",
         out.text
     );
-
 }

@@ -1,9 +1,9 @@
-use tidepool_optimize::Pass;
 use tidepool_eval::{eval, Env, Value, VecHeap};
 use tidepool_optimize::beta::BetaReduce;
 use tidepool_optimize::case_reduce::CaseReduce;
 use tidepool_optimize::dce::Dce;
 use tidepool_optimize::inline::Inline;
+use tidepool_optimize::Pass;
 use tidepool_repr::frame::CoreFrame;
 use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, TreeBuilder};

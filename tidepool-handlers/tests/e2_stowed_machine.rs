@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use tidepool_mcp::CapturedOutput;
 use tidepool_runtime::session::{
-    EngineConfig, RenderPolicy, Retention, ResumeOutcome, SessionEngine, StartError, StartTurn,
+    EngineConfig, RenderPolicy, ResumeOutcome, Retention, SessionEngine, StartError, StartTurn,
     TurnOutcome,
 };
 
@@ -68,8 +68,10 @@ fn test_engine() -> SessionEngine<CapturedOutput> {
 fn start_turn_for(
     code: &str,
     nursery_size: usize,
-) -> StartTurn<impl tidepool_effect::dispatch::DispatchEffect<CapturedOutput> + Send + 'static, CapturedOutput>
-{
+) -> StartTurn<
+    impl tidepool_effect::dispatch::DispatchEffect<CapturedOutput> + Send + 'static,
+    CapturedOutput,
+> {
     let stack = tidepool_handlers::build_minimal_stack();
     let (decls, ask_tag) = tidepool_handlers::base_decls_with_ask(&stack);
     let preamble = tidepool_mcp::build_preamble(&decls, false);
@@ -114,11 +116,16 @@ async fn e2_suspend_resume_roundtrip() {
     let engine = test_engine();
     let turn = start_turn_for("x <- ask SNum \"pick\"\npure x", DEFAULT_NURSERY);
     let cont_id = match engine.start_turn(turn).await {
-        Ok(TurnOutcome::SuspendedAsk { cont_id, prompt, .. }) => {
+        Ok(TurnOutcome::SuspendedAsk {
+            cont_id, prompt, ..
+        }) => {
             assert_eq!(prompt, "pick");
             cont_id
         }
-        Ok(other) => panic!("expected SuspendedAsk, got a different outcome: {}", describe(&other)),
+        Ok(other) => panic!(
+            "expected SuspendedAsk, got a different outcome: {}",
+            describe(&other)
+        ),
         Err(StartError::Overloaded) => panic!("unexpected Overloaded"),
         Err(StartError::Busy) => panic!("unexpected Busy"),
     };
@@ -128,9 +135,15 @@ async fn e2_suspend_resume_roundtrip() {
         .await;
     match outcome {
         ResumeOutcome::Driven(TurnOutcome::Completed { result, .. }) => {
-            assert_eq!(result, "42", "the answer must round-trip through the resumed machine");
+            assert_eq!(
+                result, "42",
+                "the answer must round-trip through the resumed machine"
+            );
         }
-        other => panic!("expected Driven(Completed 42), got {}", describe_resume(&other)),
+        other => panic!(
+            "expected Driven(Completed 42), got {}",
+            describe_resume(&other)
+        ),
     }
 }
 

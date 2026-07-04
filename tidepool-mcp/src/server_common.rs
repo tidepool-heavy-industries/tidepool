@@ -111,7 +111,8 @@ pub fn mint_id(counter: &AtomicU64, prefix: &str) -> String {
 pub fn schema_to_map(
     schema: schemars::Schema,
 ) -> Result<Arc<serde_json::Map<String, serde_json::Value>>, String> {
-    let json = serde_json::to_value(&schema).map_err(|e| format!("failed to serialize schema: {e}"))?;
+    let json =
+        serde_json::to_value(&schema).map_err(|e| format!("failed to serialize schema: {e}"))?;
     match json {
         serde_json::Value::Object(o) => Ok(Arc::new(o)),
         _ => Ok(Arc::new(serde_json::Map::new())),

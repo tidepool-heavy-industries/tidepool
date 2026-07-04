@@ -2,7 +2,10 @@ use std::thread;
 use tidepool_testing::eval_harness::EvalHarness;
 
 fn run_pure(src: &str, target: &str) -> serde_json::Value {
-    EvalHarness::new().with_stdlib().run_pure(src, target).json()
+    EvalHarness::new()
+        .with_stdlib()
+        .run_pure(src, target)
+        .json()
 }
 
 #[test]

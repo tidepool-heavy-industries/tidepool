@@ -724,10 +724,7 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("Tidepool.Records.Hit".into()),
         });
-        table.set_field_labels(
-            hit_id,
-            vec!["path".into(), "line".into(), "text".into()],
-        );
+        table.set_field_labels(hit_id, vec!["path".into(), "line".into(), "text".into()]);
 
         let text_id = table.get_by_name("Text").unwrap();
         let mk_text = |s: &[u8]| {

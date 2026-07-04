@@ -34,7 +34,6 @@ async fn let_single_bind() {
     let t = repl.eval("x + 1").await;
     let out = t.expect_ok("x + 1");
     assert!(out.contains("6"), "let-single: expected 6, got: {out}");
-
 }
 
 /// CASE 2 — Tuple bind both components (the BUG-5 headline).
@@ -76,7 +75,6 @@ async fn tuple_bind_both_components() {
     let t = repl.eval("a + b").await;
     let out = t.expect_ok("a + b");
     assert!(out.contains("3"), "expected a + b == 3, got: {out}");
-
 }
 
 /// CASE 3 — `let`-tuple works.
@@ -99,7 +97,6 @@ async fn let_tuple_works() {
     let t = repl.eval("x + y").await;
     let out = t.expect_ok("x + y");
     assert!(out.contains("30"), "expected x + y == 30, got: {out}");
-
 }
 
 /// CASE 4 — Three-tuple works.
@@ -124,7 +121,6 @@ async fn three_tuple_works() {
     let t = repl.eval("p + q + r").await;
     let out = t.expect_ok("p + q + r");
     assert!(out.contains("6"), "expected p + q + r == 6, got: {out}");
-
 }
 
 /// CASE 5 — The original feature test (was #[ignore], now active).
@@ -146,7 +142,6 @@ async fn tuple_bind_both_components_feature() {
         out.contains("3"),
         "feature: expected a + b == 3, got: {out}"
     );
-
 }
 
 /// CASE 6 — Tuple components survive an organic GC.
@@ -192,7 +187,6 @@ async fn tuple_bind_components_survive_gc() {
         tb.expect_ok("b post-GC").contains("2"),
         "post-GC b should be 2"
     );
-
 }
 
 /// CASE 7 — Type-mismatch multi-bind is LOUDLY REJECTED (GHC compile error).
@@ -232,5 +226,4 @@ async fn mismatched_type_rejected_loudly() {
         "post-reject z: {}",
         t.text
     );
-
 }

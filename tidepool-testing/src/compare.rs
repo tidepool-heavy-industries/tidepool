@@ -168,9 +168,9 @@ pub unsafe fn heap_to_value(
                                 let bits = *(ptr.add(layout::LIT_VALUE_OFFSET) as *const u32);
                                 results.push(Value::Lit(Literal::LitFloat(bits as u64)));
                             }
-                            Some(layout::LitTag::Double) => results.push(Value::Lit(
-                                Literal::LitDouble(raw_value as u64),
-                            )),
+                            Some(layout::LitTag::Double) => {
+                                results.push(Value::Lit(Literal::LitDouble(raw_value as u64)))
+                            }
                             // Pointer-carrying lit tags (String=5, Addr=6, ByteArray=7,
                             // SmallArray=8, Array=9): decode the backing bytes/elements
                             // faithfully. The CANONICAL reader is

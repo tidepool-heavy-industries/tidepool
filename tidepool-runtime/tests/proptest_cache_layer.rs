@@ -738,7 +738,10 @@ fn partial_write_states_are_misses() {
             2,
             "partial state ({keep_cbor},{keep_meta},{keep_ok}) must be a MISS"
         );
-        assert_eq!(res.expr, original.expr, "recompile must restore the artifact");
+        assert_eq!(
+            res.expr, original.expr,
+            "recompile must restore the artifact"
+        );
     }
 }
 

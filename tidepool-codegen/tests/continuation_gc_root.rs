@@ -25,6 +25,7 @@
 
 use tidepool_codegen::effect_machine::EffContKind;
 use tidepool_codegen::jit_machine::JitEffectMachine;
+use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_effect::Response;
@@ -33,7 +34,6 @@ use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
 use tidepool_repr::types::*;
 use tidepool_repr::{CoreExpr, Literal, TreeBuilder};
-use tidepool_effect::dispatch::DispatchEffect;
 
 const CONS_ID: u64 = 5000;
 const NIL_ID: u64 = 5001;
@@ -168,7 +168,10 @@ fn assert_full_list(v: &Value) {
             other => panic!("unexpected list shape at cell {len}: {other:?}"),
         }
     }
-    assert_eq!(len, LIST_LEN, "list length after GC-through-materialization");
+    assert_eq!(
+        len, LIST_LEN,
+        "list length after GC-through-materialization"
+    );
     assert_eq!(first, Some(0));
     assert_eq!(last, Some((LIST_LEN - 1) as i64));
 }
@@ -185,8 +188,8 @@ fn continuation_survives_gc_during_response_materialization() {
 
     // 16 KiB nursery: LIST_LEN cells (~40 B each) require multiple
     // collections + heap doublings during materialization.
-    let mut machine = JitEffectMachine::compile(&expr, &table, 1 << 14)
-        .expect("compile one-effect program");
+    let mut machine =
+        JitEffectMachine::compile(&expr, &table, 1 << 14).expect("compile one-effect program");
     let mut handler = ListResponder;
 
     tidepool_codegen::host_fns::reset_test_counters();

@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
-use tidepool_optimize::Pass;
 use tidepool_optimize::partial::PartialEval;
+use tidepool_optimize::Pass;
 use tidepool_repr::frame::CoreFrame;
 use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, TreeBuilder};

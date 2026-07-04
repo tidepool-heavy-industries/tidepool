@@ -52,11 +52,35 @@ fn aeson_table() -> DataConTable {
     let mut t = DataConTable::new();
     t.insert(dc(NOTHING, "Nothing", 1, 0, Some("GHC.Maybe.Nothing")));
     t.insert(dc(JUST, "Just", 2, 1, Some("GHC.Maybe.Just")));
-    t.insert(dc(OBJECT, "Object", 1, 1, Some("Tidepool.Aeson.Value.Object")));
+    t.insert(dc(
+        OBJECT,
+        "Object",
+        1,
+        1,
+        Some("Tidepool.Aeson.Value.Object"),
+    ));
     t.insert(dc(ARRAY, "Array", 2, 1, Some("Tidepool.Aeson.Value.Array")));
-    t.insert(dc(STRING, "String", 3, 1, Some("Tidepool.Aeson.Value.String")));
-    t.insert(dc(NUMBER, "Number", 4, 1, Some("Tidepool.Aeson.Value.Number")));
-    t.insert(dc(NUMBER_I, "NumberI", 7, 1, Some("Tidepool.Aeson.Value.NumberI")));
+    t.insert(dc(
+        STRING,
+        "String",
+        3,
+        1,
+        Some("Tidepool.Aeson.Value.String"),
+    ));
+    t.insert(dc(
+        NUMBER,
+        "Number",
+        4,
+        1,
+        Some("Tidepool.Aeson.Value.Number"),
+    ));
+    t.insert(dc(
+        NUMBER_I,
+        "NumberI",
+        7,
+        1,
+        Some("Tidepool.Aeson.Value.NumberI"),
+    ));
     t.insert(dc(BOOL, "Bool", 5, 1, Some("Tidepool.Aeson.Value.Bool")));
     t.insert(dc(NULL, "Null", 6, 0, Some("Tidepool.Aeson.Value.Null")));
     t.insert(dc(FALSE, "False", 1, 0, Some("GHC.Types.False")));

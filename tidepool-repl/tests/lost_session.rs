@@ -36,7 +36,11 @@ async fn resume_err(repl: &Repl, continuation_id: &str, response: serde_json::Va
 fn parse_suspended(text: &str) -> String {
     let v: serde_json::Value = serde_json::from_str(text)
         .unwrap_or_else(|_| panic!("expected JSON from suspended turn, got: {text}"));
-    assert_eq!(v["suspended"], json!(true), "turn was not suspended: {text}");
+    assert_eq!(
+        v["suspended"],
+        json!(true),
+        "turn was not suspended: {text}"
+    );
     v["continuation_id"]
         .as_str()
         .unwrap_or_else(|| panic!("no continuation_id in: {text}"))

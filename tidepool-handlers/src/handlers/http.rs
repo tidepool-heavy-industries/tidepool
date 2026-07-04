@@ -84,9 +84,9 @@ impl HttpHandler {
             .timeout(std::time::Duration::from_secs(30))
             .call()
             .map_err(|e| Self::map_ureq_err(url_str, e))?;
-        let body = resp
-            .into_string()
-            .map_err(|e| HttpError::HttpNetwork(format!("Read body from '{}' failed: {}", url_str, e)))?;
+        let body = resp.into_string().map_err(|e| {
+            HttpError::HttpNetwork(format!("Read body from '{}' failed: {}", url_str, e))
+        })?;
         Self::parse_response(url_str, &body)
     }
 
@@ -100,9 +100,9 @@ impl HttpHandler {
             .timeout(std::time::Duration::from_secs(30))
             .send_json(json_body)
             .map_err(|e| Self::map_ureq_err(url_str, e))?;
-        let body = resp
-            .into_string()
-            .map_err(|e| HttpError::HttpNetwork(format!("Read body from '{}' failed: {}", url_str, e)))?;
+        let body = resp.into_string().map_err(|e| {
+            HttpError::HttpNetwork(format!("Read body from '{}' failed: {}", url_str, e))
+        })?;
         Self::parse_response(url_str, &body)
     }
 }

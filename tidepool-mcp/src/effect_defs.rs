@@ -969,9 +969,11 @@ mod tests {
         assert!(d.type_defs.is_empty());
         assert_eq!(
             d.helpers,
-            &["-- | Current UTC time as an opaque UTCTime (epoch-millisecond resolution).\n\
+            &[
+                "-- | Current UTC time as an opaque UTCTime (epoch-millisecond resolution).\n\
                getCurrentTime :: M UTCTime\n\
-               getCurrentTime = UTCTime <$> send TimeNow"]
+               getCurrentTime = UTCTime <$> send TimeNow"
+            ]
         );
     }
 
@@ -992,8 +994,12 @@ mod tests {
             ]
         );
         assert!(!d.constructors.iter().any(|c| c.starts_with("TryRun")));
-        assert!(d.type_defs.iter().any(|t| *t
-            == "data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)"));
+        assert!(
+            d.type_defs
+                .iter()
+                .any(|t| *t
+                    == "data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)")
+        );
         assert_eq!(d.helpers.len(), 5);
         assert_eq!(
             d.helpers[2],
@@ -1013,7 +1019,10 @@ mod tests {
         let d = crate::meta_decl();
         assert_eq!(d.type_name, "Meta");
         assert_eq!(d.constructors.len(), 7);
-        assert_eq!(d.constructors[1], "MetaLookupCon :: Text -> Meta (Maybe (Int, Int))");
+        assert_eq!(
+            d.constructors[1],
+            "MetaLookupCon :: Text -> Meta (Maybe (Int, Int))"
+        );
         assert_eq!(d.helpers.len(), 7);
         assert!(d.helpers[0].ends_with("metaConstructors = send MetaConstructors"));
     }
@@ -1048,7 +1057,8 @@ mod tests {
     fn generated_fs_decl_threads_either_and_emits_error_adt() {
         let d = crate::fs_decl();
         assert!(
-            d.constructors.contains(&"FsRead :: Text -> Fs (Either FsError Text)"),
+            d.constructors
+                .contains(&"FsRead :: Text -> Fs (Either FsError Text)"),
             "{:?}",
             d.constructors
         );
@@ -1060,7 +1070,9 @@ mod tests {
             .contains(&"FsGrep :: Text -> Text -> Fs (Either FsError [(Text, Int, Text)])"));
         // Untagged verbs keep their bare result.
         assert!(d.constructors.contains(&"FsMetadata :: Text -> Fs Value"));
-        assert!(d.constructors.contains(&"FsReadGlob :: Text -> Fs [FileRead]"));
+        assert!(d
+            .constructors
+            .contains(&"FsReadGlob :: Text -> Fs [FileRead]"));
         // TryFsRead is gone.
         assert!(!d.constructors.iter().any(|c| c.starts_with("TryFsRead")));
         // Both the FileRead record and the error ADT land in type_defs.
@@ -1089,8 +1101,11 @@ mod tests {
         assert!(d
             .constructors
             .contains(&"GitShow :: Text -> Git (Either GitError Commit)"));
-        assert!(d.type_defs.iter().any(|t| *t
-            == "data GitError = GitBadRevspec Text | GitFailed Int Text deriving (Show, Eq)"));
+        assert!(d
+            .type_defs
+            .iter()
+            .any(|t| *t
+                == "data GitError = GitBadRevspec Text | GitFailed Int Text deriving (Show, Eq)"));
     }
 
     /// #335 Http wave: HttpGet/HttpPost/ParseJson thread `Either HttpError`,
@@ -1146,8 +1161,10 @@ mod tests {
         assert!(d
             .constructors
             .contains(&"LspDef :: LspNode -> Lsp (Maybe LspNode)"));
-        assert!(d.type_defs.iter().any(|t| *t
-            == "data LspError = LspDaemonDown Text deriving (Show, Eq)"));
+        assert!(d
+            .type_defs
+            .iter()
+            .any(|t| *t == "data LspError = LspDaemonDown Text deriving (Show, Eq)"));
     }
 
     #[test]

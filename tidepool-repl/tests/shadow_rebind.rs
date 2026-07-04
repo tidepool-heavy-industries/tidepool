@@ -52,7 +52,6 @@ async fn rebind_value_name_newest_wins() {
         out.contains('3'),
         "rebind value: expected 3 (newest x=2, +1), got: {out}"
     );
-
 }
 
 /// CASE 2 — Rebind a name at a DIFFERENT type; newest type must win.
@@ -85,7 +84,6 @@ async fn rebind_value_different_type() {
         out.contains('2'),
         "rebind type: expected 2 (T.length \"hi\"), got: {out}"
     );
-
 }
 
 /// CONTROL for CASE 2 — bind a Text value as the FIRST/ONLY binding (no rebind).
@@ -113,7 +111,6 @@ async fn first_bind_text_no_rebind() {
         out.contains('2'),
         "control text bind: expected 2 (T.length \"hi\"), got: {out}"
     );
-
 }
 
 /// DIAGNOSTIC for CASE 2 — bind a Text under a DIFFERENT name while an Int
@@ -145,7 +142,6 @@ async fn different_name_text_after_int() {
         out.contains('2'),
         "diagnostic text bind: expected 2, got: {out}"
     );
-
 }
 
 /// CASE 3 — Redefine a FUNCTION (Lane A latest-wins).
@@ -174,7 +170,6 @@ async fn redefine_function_latest_wins() {
         out2.contains("110"),
         "g v2: expected 110 (latest def wins), got: {out2}"
     );
-
 }
 
 /// CASE 4 — Redefine a TYPE: the honest CURRENT CONTRACT (GHCi-correct behavior).
@@ -255,7 +250,6 @@ async fn redefine_type_old_binding_orphaned_gracefully() {
         "post-orphan c2: expected 2, got: {}",
         survive.text
     );
-
 }
 
 /// CASE 5 — `:bindings` after a rebind lists the name exactly ONCE (newest).
@@ -284,5 +278,4 @@ async fn bindings_after_rebind_lists_once() {
         occurrences, 1,
         ":bindings should list `x` exactly once (newest), got {occurrences}: {out}"
     );
-
 }

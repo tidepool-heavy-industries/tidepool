@@ -210,10 +210,7 @@ struct Continuation<O: OutputSink> {
 /// pure data — the server renders it.
 pub enum TurnOutcome {
     /// The program returned a value. `result` is the rendered value body.
-    Completed {
-        output: Vec<String>,
-        result: String,
-    },
+    Completed { output: Vec<String>, result: String },
     /// The program suspended on `Ask`. The continuation is already registered
     /// under `cont_id` (with `expected_schema = meta["schema"]`); the server
     /// builds the suspension envelope from `prompt`/`meta`.
@@ -583,7 +580,9 @@ impl<O: OutputSink> SessionEngine<O> {
             let _ = session_tx.send(msg);
         };
 
-        Ok(self.run_turn(body, captured, source, permit, timeout_secs).await)
+        Ok(self
+            .run_turn(body, captured, source, permit, timeout_secs)
+            .await)
     }
 
     /// Resume a parked continuation. `validate` is given the continuation's
@@ -642,9 +641,10 @@ impl<O: OutputSink> SessionEngine<O> {
                     }
                 }
                 Some(Continuation {
-                    state: ContinuationState::AwaitingAnswer {
-                        expected_schema, ..
-                    },
+                    state:
+                        ContinuationState::AwaitingAnswer {
+                            expected_schema, ..
+                        },
                     ..
                 }) => {
                     let expected_schema = expected_schema.clone();
@@ -751,9 +751,7 @@ impl<O: OutputSink> SessionEngine<O> {
                     .await,
                 )
             }
-            ContinuationState::AwaitingAnswer {
-                resume, permit, ..
-            } => {
+            ContinuationState::AwaitingAnswer { resume, permit, .. } => {
                 let body =
                     move |ctx: EvalThreadCtx<O>| resume(ctx, EngineResumeInput::Abort(reason));
                 AbortOutcome::Driven(
@@ -864,7 +862,9 @@ impl<O: OutputSink> SessionEngine<O> {
                     EngineMessage::SuspendedAsk { .. } => captured.snapshot(),
                 };
                 match message {
-                    EngineMessage::Completed { result } => TurnOutcome::Completed { output, result },
+                    EngineMessage::Completed { result } => {
+                        TurnOutcome::Completed { output, result }
+                    }
                     EngineMessage::SuspendedAsk {
                         prompt,
                         meta,
@@ -1109,9 +1109,7 @@ fn describe_run_error(e: &RuntimeError, effect_names: &[String]) -> (String, Fai
 /// Classify a caught panic (a signal that still took the eval frame down) as a
 /// run-phase runtime crash, appending any JIT diagnostics. Byte-identical to
 /// the E1 eval-thread panic arm.
-fn describe_panic(
-    payload: Box<dyn std::any::Any + Send>,
-) -> (String, FailureClass, Phase) {
+fn describe_panic(payload: Box<dyn std::any::Any + Send>) -> (String, FailureClass, Phase) {
     let diagnostics = crate::drain_diagnostics();
     let mut detail = format_panic_payload(payload);
     if !diagnostics.is_empty() {
@@ -1281,15 +1279,17 @@ mod tests {
     /// the AwaitingAnswer registry/validation lifecycle be tested without a real
     /// JIT machine.
     fn dummy_resume(result: &'static str) -> StowedResume<TestSink> {
-        Box::new(move |ctx: EvalThreadCtx<TestSink>, _input: EngineResumeInput| {
-            let EvalThreadCtx {
-                session_tx, permit, ..
-            } = ctx;
-            drop(permit);
-            let _ = session_tx.send(EngineMessage::Completed {
-                result: result.to_string(),
-            });
-        })
+        Box::new(
+            move |ctx: EvalThreadCtx<TestSink>, _input: EngineResumeInput| {
+                let EvalThreadCtx {
+                    session_tx, permit, ..
+                } = ctx;
+                drop(permit);
+                let _ = session_tx.send(EngineMessage::Completed {
+                    result: result.to_string(),
+                });
+            },
+        )
     }
 
     fn one_permit(engine: &SessionEngine<TestSink>) -> OwnedSemaphorePermit {
@@ -1358,7 +1358,10 @@ mod tests {
             ContinuationState::AwaitingAnswer {
                 expected_schema, ..
             } => {
-                assert_eq!(expected_schema, &Some(serde_json::json!({"type": "string"})));
+                assert_eq!(
+                    expected_schema,
+                    &Some(serde_json::json!({"type": "string"}))
+                );
             }
             _ => panic!("expected AwaitingAnswer"),
         }

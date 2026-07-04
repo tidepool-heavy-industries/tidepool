@@ -9,8 +9,8 @@ use std::process::Command;
 use tempfile::TempDir;
 use thiserror::Error;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
-use tidepool_codegen::jit_machine::{JitEffectMachine, SuspendableOutcome};
 pub use tidepool_codegen::jit_machine::{CancelHandle, JitError, ResumeInput};
+use tidepool_codegen::jit_machine::{JitEffectMachine, SuspendableOutcome};
 pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_eval::value::Value;
 use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings, ReadError};
@@ -298,6 +298,10 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
 /// is retained (session machinery) and the whole `JitEffectMachine` — plus the
 /// `DataConTable` — is handed back so the caller can stow it as data (no parked
 /// thread) and resume it later, on any thread, via [`resume_suspended_turn`].
+// The `Suspended` variant carries a whole `JitEffectMachine` by design (that IS
+// the stowed value); this enum is constructed and destructured immediately at
+// the eval-thread boundary, so the size asymmetry is inherent, not a leak.
+#[allow(clippy::large_enum_variant)]
 pub enum SuspendableRun {
     /// The turn ran to completion.
     Completed(EvalResult),
@@ -314,6 +318,9 @@ pub enum SuspendableRun {
 }
 
 /// The outcome of resuming a stowed turn (see [`resume_suspended_turn`]).
+// `Completed(EvalResult)` is the large variant; like `SuspendableRun` this is a
+// transient boundary carrier, destructured immediately by the caller.
+#[allow(clippy::large_enum_variant)]
 pub enum ResumedRun {
     /// The turn ran to completion.
     Completed(EvalResult),
@@ -331,6 +338,7 @@ pub enum ResumedRun {
 /// the substrate for E2 threadless session suspension. The machine is compiled
 /// as a SESSION machine so its heap is retained across the suspension (the drive
 /// itself is byte-identical to the one-shot path for a turn that never asks).
+#[allow(clippy::too_many_arguments)]
 pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
     source: &str,
     target: &str,

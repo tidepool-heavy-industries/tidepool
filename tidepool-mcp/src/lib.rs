@@ -862,8 +862,11 @@ data Console a where
             .constructors
             .iter()
             .any(|c| c.contains("Run :: Text -> Exec (Either ExecError (Int, Text, Text))")));
-        assert!(decl.constructors.iter().any(|c| c
-            .contains("RunIn :: Text -> Text -> Exec (Either ExecError (Int, Text, Text))")));
+        assert!(decl
+            .constructors
+            .iter()
+            .any(|c| c
+                .contains("RunIn :: Text -> Text -> Exec (Either ExecError (Int, Text, Text))")));
     }
 
     #[test]

@@ -402,7 +402,10 @@ impl FsHandler {
                     std::io::ErrorKind::InvalidData => FsError::FsNotUtf8(rel.clone()),
                     _ => FsError::FsIo(format!("{rel} failed: {e}")),
                 });
-                FileRead { path: rel, contents }
+                FileRead {
+                    path: rel,
+                    contents,
+                }
             })
             .collect();
         cx.respond_list(results)
@@ -442,8 +445,7 @@ impl FsHandler {
         };
         if actual == expected {
             if let Some(parent) = resolved.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| EffectError::Handler(e.to_string()))?;
+                std::fs::create_dir_all(parent).map_err(|e| EffectError::Handler(e.to_string()))?;
             }
             std::fs::write(&resolved, &contents)
                 .map_err(|e| EffectError::Handler(e.to_string()))?;
@@ -457,9 +459,9 @@ impl FsHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_effect::dispatch::EffectHandler;
     use crate::test_support::*;
     use tidepool_bridge::{FromCore, ToCore};
+    use tidepool_effect::dispatch::EffectHandler;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
     use tidepool_eval::value::Value;
     use tidepool_repr::DataConTable;
@@ -583,7 +585,10 @@ mod tests {
         assert_eq!(results.len(), 2, "{results:?}");
         // bad.bin -> contents Left err (isolated), good.txt -> Right (survives).
         assert_eq!(results[0].path, "bad.bin");
-        assert!(results[0].contents.is_err(), "binary must be Left: {results:?}");
+        assert!(
+            results[0].contents.is_err(),
+            "binary must be Left: {results:?}"
+        );
         assert_eq!(results[1].path, "good.txt");
         assert_eq!(results[1].contents.as_deref(), Ok("hello\nworld"));
     }
@@ -855,7 +860,10 @@ mod tests {
         let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
         // FsListDir is errors-tagged: `Right [entries]`.
         let decoded: Result<Vec<String>, FsError> = FromCore::from_value(&result, &table).unwrap();
-        assert!(!decoded.unwrap().is_empty(), "repo root should have entries");
+        assert!(
+            !decoded.unwrap().is_empty(),
+            "repo root should have entries"
+        );
     }
 
     #[test]
@@ -893,7 +901,10 @@ mod tests {
         let decoded: Result<(), FsError> = FromCore::from_value(&res, &table).unwrap();
         match decoded {
             Err(FsError::FsSandbox(msg)) => {
-                assert!(msg.contains("outside sandbox") || msg.contains("escape"), "{msg}");
+                assert!(
+                    msg.contains("outside sandbox") || msg.contains("escape"),
+                    "{msg}"
+                );
             }
             other => panic!("expected Left (FsSandbox _), got {other:?}"),
         }

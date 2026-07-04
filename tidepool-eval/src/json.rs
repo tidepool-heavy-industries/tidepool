@@ -139,9 +139,7 @@ pub fn json_to_value(j: &serde_json::Value, ids: &JsonConIds) -> Value {
             let inner = Value::Con(if *b { ids.true_con } else { ids.false_con }, vec![]);
             Value::Con(ids.bool_con, vec![inner])
         }
-        serde_json::Value::Number(n) => {
-            crate::shapes::json_number(n, ids.number_i, ids.number)
-        }
+        serde_json::Value::Number(n) => crate::shapes::json_number(n, ids.number_i, ids.number),
         serde_json::Value::String(s) => Value::Con(ids.string, vec![text_value(s, ids)]),
         serde_json::Value::Array(arr) => {
             let items = arr.iter().map(|v| json_to_value(v, ids)).collect();

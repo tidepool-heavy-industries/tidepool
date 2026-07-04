@@ -57,7 +57,6 @@ async fn text_bind_alone_control() {
         "T.unpack s: {}",
         t.text
     );
-
 }
 
 /// DECISIVE CONTROL: byte-for-byte the GREEN headline turn sequence through a
@@ -89,7 +88,6 @@ async fn box_second_bind_replica() {
     );
     let t = repl.eval("case b of Box n -> n + 100").await;
     assert!(t.expect_ok("case b").contains("107"), "case b: {}", t.text);
-
 }
 
 /// MINIMAL repro of the dominant kind=4 bug (now FIXED): with ANY binding live,
@@ -117,7 +115,6 @@ async fn eff_ref_pure_const_with_binding_live() {
         "pure 123: {}",
         t.text
     );
-
 }
 
 /// CONTROL: the SAME Eff reference run with NO binding live works (plain path).
@@ -135,7 +132,6 @@ async fn eff_ref_pure_const_no_binding_control() {
         "pure 123: {}",
         t.text
     );
-
 }
 
 // ───────────── REGRESSION GATES (were the open BUG-2 repros) ─────────────
@@ -193,7 +189,6 @@ async fn text_bind_headline_faithful() {
         "append y: {}",
         t.text
     );
-
 }
 
 /// Same-name rebind: `x <- Int` then `x <- Text`. Same root cause (fixed).
@@ -233,7 +228,6 @@ async fn text_rebind_same_name() {
         "T.unpack x: {}",
         t.text
     );
-
 }
 
 /// Longer multibyte-capable Text as a second bind — same root cause (fixed);
@@ -274,5 +268,4 @@ async fn text_bind_longer_with_prior() {
         "T.unpack y: {}",
         t.text
     );
-
 }

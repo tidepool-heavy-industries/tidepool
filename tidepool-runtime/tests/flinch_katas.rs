@@ -50,7 +50,11 @@ result = case decodeJson "{\"rx\":3,\"ry\":4}" of
         "result",
     );
     eprintln!("kata_a result: {json}");
-    assert_eq!(json, json!(7), "Rec(rx=3, ry=4) should sum to 7, got {json}");
+    assert_eq!(
+        json,
+        json!(7),
+        "Rec(rx=3, ry=4) should sum to 7, got {json}"
+    );
 }
 
 /// Kata (b) — typeclass-in-helpers: a custom class with two instances, called

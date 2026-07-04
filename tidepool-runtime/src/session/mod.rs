@@ -23,7 +23,7 @@ pub mod render;
 pub mod turn;
 
 pub use engine::{
-    AbortOutcome, EngineConfig, OutputSink, RenderPolicy, Retention, ResumeOutcome, SessionEngine,
+    AbortOutcome, EngineConfig, OutputSink, RenderPolicy, ResumeOutcome, Retention, SessionEngine,
     StartError, StartTurn, TurnOutcome,
 };
 

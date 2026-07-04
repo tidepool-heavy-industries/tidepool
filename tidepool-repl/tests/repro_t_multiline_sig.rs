@@ -57,5 +57,4 @@ async fn t_on_wide_multiline_signature_does_not_crash() {
         ":t steerRepro should report a function type: {}",
         t.text
     );
-
 }

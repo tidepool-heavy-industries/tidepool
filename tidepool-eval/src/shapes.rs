@@ -108,7 +108,10 @@ pub fn box_double(f: f64, d_hash: DataConId) -> Value {
 
 /// Box a `Float` as `F#(LitFloat bits)`.
 pub fn box_float(f: f32, f_hash: DataConId) -> Value {
-    Value::Con(f_hash, vec![Value::Lit(Literal::LitFloat(f.to_bits() as u64))])
+    Value::Con(
+        f_hash,
+        vec![Value::Lit(Literal::LitFloat(f.to_bits() as u64))],
+    )
 }
 
 /// Box a `Char` as `C#(LitChar c)`.
@@ -196,7 +199,10 @@ pub fn make_text(s: &str, text_id: DataConId) -> Value {
 /// copied into a fresh `SharedByteArray`); table-free callers that cannot
 /// recognize the wrapper con (no `DataConId` for it in hand) pass `|_|
 /// false` and simply won't unwrap that form.
-fn text_backing_with(v: &Value, is_bytearray_con: &dyn Fn(DataConId) -> bool) -> Option<SharedByteArray> {
+fn text_backing_with(
+    v: &Value,
+    is_bytearray_con: &dyn Fn(DataConId) -> bool,
+) -> Option<SharedByteArray> {
     let mut cur = v;
     loop {
         match cur {
@@ -367,7 +373,12 @@ pub fn make_map_from_sorted(
     tip_id: DataConId,
     i_hash: DataConId,
 ) -> Value {
-    fn go(entries: &mut [Option<(Value, Value)>], bin: DataConId, tip: DataConId, i: DataConId) -> Value {
+    fn go(
+        entries: &mut [Option<(Value, Value)>],
+        bin: DataConId,
+        tip: DataConId,
+        i: DataConId,
+    ) -> Value {
         if entries.is_empty() {
             return map_tip(tip);
         }
@@ -418,11 +429,7 @@ pub fn walk_map_entries<'a>(
 /// Exact-int policy (BUG-8): i64-representable JSON numbers ride
 /// `NumberI(LitInt)` so they never lose precision; everything else rides the
 /// Double-backed `Number(LitDouble)`.
-pub fn json_number(
-    n: &serde_json::Number,
-    number_i: DataConId,
-    number: DataConId,
-) -> Value {
+pub fn json_number(n: &serde_json::Number, number_i: DataConId, number: DataConId) -> Value {
     if let Some(i) = n.as_i64() {
         Value::Con(number_i, vec![Value::Lit(Literal::LitInt(i))])
     } else {
@@ -444,11 +451,7 @@ pub fn json_number(
 pub fn bignat_backing_bytes(v: &Value, table: &DataConTable) -> Option<Vec<u8>> {
     fn raw(v: &Value) -> Option<Vec<u8>> {
         match v {
-            Value::ByteArray(bs) => Some(
-                bs.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone(),
-            ),
+            Value::ByteArray(bs) => Some(bs.lock().unwrap_or_else(PoisonError::into_inner).clone()),
             Value::Lit(Literal::LitByteArray(bytes)) => Some(bytes.clone()),
             _ => None,
         }
@@ -700,9 +703,10 @@ mod tests {
         match &json_number(&big, ni, nd) {
             Value::Con(c, fields) => {
                 assert_eq!(*c, ni);
-                assert!(
-                    matches!(fields.as_slice(), [Value::Lit(Literal::LitInt(9007199254740993))])
-                );
+                assert!(matches!(
+                    fields.as_slice(),
+                    [Value::Lit(Literal::LitInt(9007199254740993))]
+                ));
             }
             _ => panic!("expected Con"),
         }
@@ -725,7 +729,10 @@ mod tests {
         assert_eq!(bignat_bytes_to_decimal(&[1, 0, 0, 0, 0, 0, 0, 0]), "1");
         let mut two_limbs = vec![0u8; 16];
         two_limbs[8] = 1;
-        assert_eq!(bignat_bytes_to_decimal(&two_limbs), (1u128 << 64).to_string());
+        assert_eq!(
+            bignat_bytes_to_decimal(&two_limbs),
+            (1u128 << 64).to_string()
+        );
         // three limbs → repeated-division path: 2^128
         let mut three = vec![0u8; 24];
         three[16] = 1;
@@ -743,7 +750,10 @@ mod tests {
             id(&t, "ByteArray"),
             vec![Value::Lit(Literal::LitByteArray(vec![7]))],
         );
-        assert_eq!(bignat_backing_bytes(&lifted, &t).as_deref(), Some(&[7u8][..]));
+        assert_eq!(
+            bignat_backing_bytes(&lifted, &t).as_deref(),
+            Some(&[7u8][..])
+        );
         assert_eq!(
             bignat_backing_bytes(&Value::Lit(Literal::LitString(b"x".to_vec())), &t),
             None

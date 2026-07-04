@@ -137,10 +137,19 @@ async fn reset_from_cold_start_then_run() {
         .dispatch_tool("session_reset", serde_json::Map::new())
         .await
         .expect("session_reset");
-    assert_ne!(r.is_error, Some(true), "cold reset errored: {}", text_of(&r));
+    assert_ne!(
+        r.is_error,
+        Some(true),
+        "cold reset errored: {}",
+        text_of(&r)
+    );
     assert!(text_of(&r).contains("reset"));
 
     let turn = repl.eval("pure (1 :: Int)").await;
-    assert!(!turn.is_error, "run after cold reset errored: {}", turn.text);
+    assert!(
+        !turn.is_error,
+        "run after cold reset errored: {}",
+        turn.text
+    );
     assert!(turn.text.contains('1'), "run after reset: {}", turn.text);
 }

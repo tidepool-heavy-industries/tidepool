@@ -2,12 +2,12 @@
 #![allow(clippy::vec_init_then_push)]
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use tidepool_optimize::Pass;
 use tidepool_optimize::beta::BetaReduce;
 use tidepool_optimize::case_reduce::CaseReduce;
 use tidepool_optimize::dce::Dce;
 use tidepool_optimize::inline::Inline;
 use tidepool_optimize::pipeline::{default_passes, run_pipeline};
+use tidepool_optimize::Pass;
 use tidepool_repr::{
     Alt, AltCon, CoreExpr, CoreFrame, DataConId, Literal, PrimOpKind, RecursiveTree, TreeBuilder,
     VarId,

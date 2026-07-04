@@ -19,15 +19,18 @@ use tidepool_repr::frame::CoreFrame;
 use tidepool_repr::serial::{read_cbor, read_metadata, write_cbor, write_metadata};
 use tidepool_repr::types::{AltCon, Literal};
 
-const CORPUS_DIRS: &[&str] = &["../haskell/test/Identity_cbor", "../haskell/test/TextSuite_cbor"];
+const CORPUS_DIRS: &[&str] = &[
+    "../haskell/test/Identity_cbor",
+    "../haskell/test/TextSuite_cbor",
+];
 
 /// Tree fixtures (everything except meta.cbor) and meta fixtures, by dir scan.
 fn corpus() -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut trees = Vec::new();
     let mut metas = Vec::new();
     for dir in CORPUS_DIRS {
-        let entries = std::fs::read_dir(dir)
-            .unwrap_or_else(|e| panic!("corpus dir {dir} missing: {e}"));
+        let entries =
+            std::fs::read_dir(dir).unwrap_or_else(|e| panic!("corpus dir {dir} missing: {e}"));
         for entry in entries {
             let path = entry.unwrap().path();
             if path.extension().is_some_and(|x| x == "cbor") {
@@ -41,7 +44,10 @@ fn corpus() -> (Vec<PathBuf>, Vec<PathBuf>) {
     }
     trees.sort();
     metas.sort();
-    assert!(!trees.is_empty() && !metas.is_empty(), "empty golden corpus");
+    assert!(
+        !trees.is_empty() && !metas.is_empty(),
+        "empty golden corpus"
+    );
     (trees, metas)
 }
 
@@ -64,8 +70,8 @@ fn tree_fixtures_roundtrip_byte_identically() {
     let (trees, _) = corpus();
     for path in &trees {
         let golden = std::fs::read(path).unwrap();
-        let tree = read_cbor(&golden)
-            .unwrap_or_else(|e| panic!("{}: decode failed: {e}", path.display()));
+        let tree =
+            read_cbor(&golden).unwrap_or_else(|e| panic!("{}: decode failed: {e}", path.display()));
         let reencoded = write_cbor(&tree).unwrap();
         let (want, got) = (payload(&golden), payload(&reencoded));
         assert_eq!(
@@ -104,7 +110,12 @@ fn meta_fixtures_roundtrip_byte_identically() {
             want.len(),
         );
         let (table2, _) = read_metadata(&reencoded).unwrap();
-        assert_eq!(table, table2, "{}: table changed across roundtrip", path.display());
+        assert_eq!(
+            table,
+            table2,
+            "{}: table changed across roundtrip",
+            path.display()
+        );
     }
     println!("byte-identical meta roundtrip: {} fixtures", metas.len());
 }
@@ -190,7 +201,17 @@ fn corpus_shape_census() {
     println!("altcons covered: {alts:?}");
 
     let all_frames: BTreeSet<&str> = [
-        "Var", "Lit", "App", "Lam", "LetNonRec", "LetRec", "Case", "Con", "Join", "Jump", "PrimOp",
+        "Var",
+        "Lit",
+        "App",
+        "Lam",
+        "LetNonRec",
+        "LetRec",
+        "Case",
+        "Con",
+        "Join",
+        "Jump",
+        "PrimOp",
     ]
     .into();
     let uncovered: Vec<_> = all_frames.difference(&frames).collect();

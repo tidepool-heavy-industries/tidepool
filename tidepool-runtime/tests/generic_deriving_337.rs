@@ -33,7 +33,8 @@ fn run(source: &str, target: &str) -> Option<serde_json::Value> {
     )
 }
 
-const HEADER: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, DeriveAnyClass #-}\n\
+const HEADER: &str =
+    "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, DeriveAnyClass #-}\n\
                       module Expr where\n\
                       import Tidepool.Prelude hiding (error)\n";
 
@@ -88,7 +89,11 @@ fn generic_tojson_builds_object() {
          result = toJSON (Rec 3 4)\n"
     );
     match run(&src, "result") {
-        Some(v) => assert_eq!(v, json!({"rx": 3, "ry": 4}), "toJSON emits field-keyed object"),
+        Some(v) => assert_eq!(
+            v,
+            json!({"rx": 3, "ry": 4}),
+            "toJSON emits field-keyed object"
+        ),
         None => {}
     }
 }
@@ -125,7 +130,11 @@ fn missing_field_returns_error() {
          \x20 Nothing -> -2\n"
     );
     match run(&src, "result") {
-        Some(v) => assert_eq!(v, json!(0), "missing field decodes to Error (0), not a crash"),
+        Some(v) => assert_eq!(
+            v,
+            json!(0),
+            "missing field decodes to Error (0), not a crash"
+        ),
         None => {}
     }
 }

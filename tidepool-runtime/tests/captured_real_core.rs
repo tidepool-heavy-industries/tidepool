@@ -208,10 +208,7 @@ mod regen {
     #[test]
     #[ignore = "mutates the checked-in meta.cbor fixture; run explicitly to migrate"]
     fn regenerate_meta_fixture() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/captured_core/meta.cbor"
-        );
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/captured_core/meta.cbor");
         let old = std::fs::read(path).expect("read old meta.cbor");
         assert_eq!(&old[..4], b"TPLR", "fixture must carry the TPLR header");
         let payload = &old[HEADER_LEN..];
@@ -245,7 +242,11 @@ mod regen {
         );
 
         let fresh = write_metadata(&table, &warnings).expect("re-encode meta in current format");
-        assert_eq!(&fresh[..4], b"TPLR", "regenerated meta must carry the header");
+        assert_eq!(
+            &fresh[..4],
+            b"TPLR",
+            "regenerated meta must carry the header"
+        );
         std::fs::write(path, &fresh).expect("write migrated meta.cbor");
         eprintln!("regen: wrote {} bytes to {path}", fresh.len());
     }

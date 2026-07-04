@@ -59,7 +59,10 @@ result = do
     let (outcome, handlers) = EvalHarness::new()
         .with_stdlib()
         .run_owned(&src, "result", handlers);
-    (outcome.expect("compile_and_run failed"), handlers.head.prints)
+    (
+        outcome.expect("compile_and_run failed"),
+        handlers.head.prints,
+    )
 }
 
 // === Bug repro tests (expected to FAIL until fix) ===

@@ -85,7 +85,11 @@ impl ExecHandler {
         self.run_command(&cmd, &self.root.clone())
     }
 
-    fn exec_run_in(&mut self, dir: String, cmd: String) -> Result<(i64, String, String), ExecError> {
+    fn exec_run_in(
+        &mut self,
+        dir: String,
+        cmd: String,
+    ) -> Result<(i64, String, String), ExecError> {
         let target = self.resolve_dir(&dir)?;
         self.run_command(&cmd, &target)
     }

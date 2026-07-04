@@ -109,7 +109,8 @@ impl LspHandler {
             ))
         })?;
         let mut writer = &stream;
-        let mut line = serde_json::to_vec(&req).map_err(|e| LspError::LspDaemonDown(e.to_string()))?;
+        let mut line =
+            serde_json::to_vec(&req).map_err(|e| LspError::LspDaemonDown(e.to_string()))?;
         line.push(b'\n');
         writer
             .write_all(&line)

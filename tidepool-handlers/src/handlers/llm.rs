@@ -210,13 +210,13 @@ impl LlmHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_effect::dispatch::EffectHandler;
-    use tidepool_mcp::{DescribeEffect, EffectDecl};
     use crate::test_support::*;
     use crate::{ConsoleHandler, ExecHandler, FsHandler, HttpHandler, KvHandler, LspHandler};
     use tidepool_effect::dispatch::EffectContext;
+    use tidepool_effect::dispatch::EffectHandler;
     use tidepool_effect::error::EffectError;
     use tidepool_mcp::CapturedOutput;
+    use tidepool_mcp::{DescribeEffect, EffectDecl};
 
     // === Mock LLM handler for JIT structured-output tests ===
 
