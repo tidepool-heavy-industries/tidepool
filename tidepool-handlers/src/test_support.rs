@@ -120,7 +120,7 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         ("Tip", 0),
         ("()", 0),
         ("(,,)", 3),
-        // Either — the per-file tryReadGlob surface + the WriteCas result.
+        // Either — the per-file readGlob surface + the WriteCas result + #335 typed failures.
         ("Right", 1),
         ("Left", 1),
         ("Match", 5),

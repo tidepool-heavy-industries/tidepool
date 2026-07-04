@@ -50,16 +50,38 @@
 //! (`v = send . C` / `v = send C` / `v a b = send (C a b)`); `raw` passes
 //! newline-joined Haskell through for non-thin helpers.
 //!
-//! ## The `errors` slot (#335 — reserved, NOT implemented)
+//! ## The `errors` block (#335 — typed per-verb failure)
 //!
-//! `errors FsError` on a verb row is accepted by both projections and
-//! currently ignored. Its designed semantics: the decl projection renders the
-//! result as `<Effect> (Either FsError <ret>)`; the Rust projection tightens
-//! the dispatch arm so the hand-written method returns typed
-//! `Result<_, FsError>` data and the handler becomes total (never aborts the
-//! eval). The error ADT itself is a Rust enum deriving `CoreRecord` +
-//! `ToCore`, so its Haskell `data` decl is generated into `type_defs` by the
-//! existing record single-source. See `notes/effect-single-source-spike.md`.
+//! An effect declares its failure ADT ONCE, as a top-level block between
+//! `type_defs` and `verbs`:
+//!
+//! ```text
+//! errors FsError [
+//!   { ctor FsNotFound, fields { path: "Text" as String }, doc "path does not exist" },
+//!   { ctor FsIo,       fields { detail: "Text" as String }, doc "other I/O failure" },
+//! ],
+//! ```
+//!
+//! and tags each fallible verb with `errors FsError` in its row. Both
+//! projections consume the block:
+//!
+//! - **Decl projection** ([`effect_decl_projection!`]) appends
+//!   `data FsError = FsNotFound Text | FsIo Text deriving (Show, Eq)` to the
+//!   effect's `type_defs` (via [`error_decl_text!`]), and renders an
+//!   `errors`-tagged verb's result as `<Effect> (Either FsError <ret>)` (via
+//!   [`ctor_sig!`]). The `Either` threads through the generated helper sigs.
+//! - **Rust projection** (`effect_rust_projection!`) emits
+//!   `#[derive(ToCore, Debug)] pub enum FsError { #[core(module =
+//!   "Tidepool.Effects")] FsNotFound(String), … }` (the variants live in the
+//!   generated `Tidepool.Effects` module, so ToCore looks them up by qualified
+//!   name), and an `errors`-tagged dispatch arm calls a hand-written method
+//!   returning `Result<T, FsError>` and wraps it with `cx.respond` (Ok→Right,
+//!   Err→Left) — so the handler is total by construction. Only untagged verbs
+//!   keep the `Result<Response, EffectError>` method shape.
+//!
+//! The error ADT's `data` decl is single-sourced from the same block that
+//! generates the Rust enum, so the two cannot drift. See
+//! `notes/effect-single-source-spike.md`.
 
 /// Render one helper entry of a definition to its Haskell source string.
 ///
@@ -106,6 +128,54 @@ macro_rules! helper_text {
 }
 pub(crate) use helper_text;
 
+/// Render one GADT constructor signature string. An `errors`-tagged verb wraps
+/// its result in `Either <ErrEnum>` (the #335 typed-failure surface); a plain
+/// verb renders the bare result. A separate macro so the optional per-verb
+/// `errors` tag selects the arm.
+macro_rules! ctor_sig {
+    // errors-tagged: `<Ctor> :: <args> -> <Eff> (Either <Err> <ret>)`.
+    ({ $eff:ident, $ctor:ident, [ $($ah:literal),* $(,)? ], $ret:literal, errors $everr:ident }) => {
+        concat!(
+            stringify!($ctor), " :: ",
+            $($ah, " -> ",)*
+            stringify!($eff), " (Either ", stringify!($everr), " ", $ret, ")"
+        )
+    };
+    // plain: `<Ctor> :: <args> -> <Eff> <ret>`.
+    ({ $eff:ident, $ctor:ident, [ $($ah:literal),* $(,)? ], $ret:literal }) => {
+        concat!(
+            stringify!($ctor), " :: ",
+            $($ah, " -> ",)*
+            stringify!($eff), " ", $ret
+        )
+    };
+}
+pub(crate) use ctor_sig;
+
+/// Render one variant of an `errors` ADT to `<Ctor> <hsField> …` (Haskell
+/// field types come from each field's `"<hs>" as <rust>` pair).
+macro_rules! error_variant_text {
+    ({ ctor $c:ident, fields { $($efn:ident : $efh:literal as $efr:ty),* $(,)? }, doc $d:literal $(,)? }) => {
+        concat!(stringify!($c) $(, " ", $efh)*)
+    };
+}
+pub(crate) use error_variant_text;
+
+/// Render the Haskell `data <Err> = … deriving (Show, Eq)` decl for an
+/// `errors` block. Peels the first variant so `|` separators land between
+/// (not before) constructors.
+macro_rules! error_decl_text {
+    ($errname:ident, $first:tt $(, $rest:tt)* $(,)?) => {
+        concat!(
+            "data ", stringify!($errname), " = ",
+            crate::effect_defs::error_variant_text!($first),
+            $( " | ", crate::effect_defs::error_variant_text!($rest), )*
+            " deriving (Show, Eq)"
+        )
+    };
+}
+pub(crate) use error_decl_text;
+
 /// The tidepool-mcp projection: expand a definition into its `EffectDecl`
 /// builder fn. Constructor strings render as
 /// `<Ctor> :: <arg-hs> -> ... -> <Effect> <ret>`; helpers render via
@@ -119,12 +189,15 @@ macro_rules! effect_decl_projection {
         decl_fn $decl_fn:ident,
         description [$($desc:literal),* $(,)?],
         type_defs [$($td:literal),* $(,)?],
+        $(errors $errname:ident [
+            $($evariant:tt),* $(,)?
+        ],)?
         verbs [
             $({ ctor $ctor:ident,
                 method $method:ident,
                 args { $($an:ident : $ah:literal as $ar:ty),* $(,)? },
                 ret $ret:literal
-                $(, errors $err:ty)?
+                $(, errors $everr:ident)?
                 $(,)?
             }),* $(,)?
         ],
@@ -135,13 +208,14 @@ macro_rules! effect_decl_projection {
                 type_name: stringify!($eff),
                 description: concat!($($desc),*),
                 constructors: &[
-                    $( concat!(
-                        stringify!($ctor), " :: ",
-                        $($ah, " -> ",)*
-                        stringify!($eff), " ", $ret
+                    $( crate::effect_defs::ctor_sig!(
+                        { $eff, $ctor, [ $($ah),* ], $ret $(, errors $everr)? }
                     ) ),*
                 ],
-                type_defs: &[$($td),*],
+                type_defs: &[
+                    $($td,)*
+                    $( crate::effect_defs::error_decl_text!($errname $(, $evariant)*) )?
+                ],
                 helpers: &[ $( crate::effect_defs::helper_text!($helper) ),* ],
             }
         }
@@ -756,76 +830,89 @@ macro_rules! fs_effect_def {
             decl_fn fs_decl,
             description ["Read and write files (sandboxed to server working directory)."],
             type_defs [],
+            // #335 typed-failure ADT. Coarse: `FsNotFound`/`FsNotUtf8` carry the
+            // path so callers can dispatch (`Left (FsNotFound _)`); the rest carry
+            // a message. `FsSandbox` covers sandbox escapes and the glob boundary
+            // guards (empty/absolute pattern); `FsBadRegex` is a grep compile
+            // failure; `FsIo` is the residual.
+            errors FsError [
+                { ctor FsNotFound, fields { path: "Text" as String },   doc "path does not exist" },
+                { ctor FsNotUtf8,  fields { path: "Text" as String },   doc "file is not valid UTF-8" },
+                { ctor FsSandbox,  fields { detail: "Text" as String }, doc "path escapes the sandbox, or the glob pattern is not allowed" },
+                { ctor FsBadRegex, fields { detail: "Text" as String }, doc "grep regex failed to compile" },
+                { ctor FsIo,       fields { detail: "Text" as String }, doc "other I/O failure" },
+            ],
             verbs [
                 { ctor FsRead, method fs_read,
                   args { path: "Text" as String },
-                  ret "Text" },
+                  ret "Text", errors FsError },
                 { ctor FsWrite, method fs_write,
                   args { path: "Text" as String, content: "Text" as String },
-                  ret "()" },
+                  ret "()", errors FsError },
+                // A Left is decided eagerly, so the success list materializes
+                // whole (no lazy stream under an Either — see #335 boundary).
                 { ctor FsListDir, method fs_list_dir,
                   args { path: "Text" as String },
-                  ret "[Text]" },
+                  ret "[Text]", errors FsError },
                 { ctor FsGlob, method fs_glob,
                   args { pattern: "Text" as String },
-                  ret "[Text]" },
+                  ret "[Text]", errors FsError },
                 { ctor FsGrep, method fs_grep,
                   args { pattern: "Text" as String, file_glob: "Text" as String },
-                  ret "[(Text, Int, Text)]" },
+                  ret "[(Text, Int, Text)]", errors FsError },
                 { ctor FsExists, method fs_exists,
                   args { path: "Text" as String },
-                  ret "Bool" },
+                  ret "Bool", errors FsError },
                 // Value-native: `{size, is_file, is_dir}` on success, `Null` for a
                 // missing/unreadable path — lens in with `^? key "size" . _Int`.
+                // Stays total-by-Null (no Either): absence IS the answer here.
                 { ctor FsMetadata, method fs_metadata,
                   args { path: "Text" as String },
                   ret "Value" },
-                // Failure-isolating read: Left on a read error (missing file,
-                // permission, non-UTF-8) instead of killing the eval.
-                { ctor TryFsRead, method fs_try_read,
-                  args { path: "Text" as String },
-                  ret "(Either Text Text)" },
                 // Per-file failure-isolating glob read (#328): each match is
                 // (path, Right content) or (path, Left err) — a mixed glob (text +
-                // binary) survives, the binary just comes back as a Left.
+                // binary) survives, the binary just comes back as a Left. The
+                // per-item Either rides inside the streamed list (not a verb-level
+                // Either), so this verb stays lazy.
                 { ctor FsReadGlob, method fs_read_glob,
                   args { pattern: "Text" as String },
-                  ret "[(Text, Either Text Text)]" },
+                  ret "[(Text, Either FsError Text)]" },
                 // Content-hash compare-and-swap surface (#330). FsHash = current
                 // blake3 digest (Nothing = absent); FsWriteCas writes only if the
                 // current hash equals the expected one (Nothing = require absent),
                 // else returns `Left actual` with the ACTUAL hash (Nothing = absent).
                 { ctor FsHash, method fs_hash,
                   args { path: "Text" as String },
-                  ret "(Maybe Text)" },
+                  ret "(Maybe Text)", errors FsError },
+                // CAS keeps its own `Either (Maybe Text) ()` shape: the Left is a
+                // hash CONFLICT (data), not an FsError. Not errors-tagged.
                 { ctor FsWriteCas, method fs_write_cas,
                   args { path: "Text" as String, expected: "Maybe Text" as Option<String>, content: "Text" as String },
                   ret "(Either (Maybe Text) ())" },
             ],
             helpers [
-                { raw ["readFile :: FilePath -> M Text\nreadFile = send . FsRead"] },
-                { raw ["-- | Read a file, isolating failure: `Left err` on a read error\n-- (missing file, permission, non-UTF-8) instead of aborting the eval.\ntryReadFile :: FilePath -> M (Either Text Text)\ntryReadFile = send . TryFsRead"] },
-                { raw ["writeFile :: FilePath -> Text -> M ()\nwriteFile f c = send (FsWrite f c)"] },
-                { raw ["appendFile :: FilePath -> Text -> M ()\nappendFile p t = readFile p >>= \\old -> writeFile p (old <> t)"] },
-                { raw ["listDirectory :: FilePath -> M [FilePath]\nlistDirectory = send . FsListDir"] },
-                { raw ["doesFileExist :: FilePath -> M Bool\ndoesFileExist = send . FsExists"] },
+                { raw ["-- | Read a file. Failure is TYPED (#335): `Left (FsNotFound p)` / `Left\n-- (FsNotUtf8 p)` / `Left (FsIo _)`. The natural spelling unwraps-or-aborts with\n-- a failable bind: `Right src <- readFile path` (or `readFile path >>= liftEither`).\nreadFile :: FilePath -> M (Either FsError Text)\nreadFile = send . FsRead"] },
+                { raw ["-- | Write a file (mkdir -p on the parent). `Left (FsSandbox _)` on a path\n-- escape, `Left (FsIo _)` on write failure; unwrap with `liftEither`.\nwriteFile :: FilePath -> Text -> M (Either FsError ())\nwriteFile f c = send (FsWrite f c)"] },
+                { raw ["-- | Append to a file (reads then writes); aborts on either failure.\nappendFile :: FilePath -> Text -> M ()\nappendFile p t = do { old <- readFile p >>= liftEither; writeFile p (old <> t) >>= liftEither }"] },
+                { raw ["-- | List a directory. `Left (FsNotFound _)` when absent; unwrap with `liftEither`.\nlistDirectory :: FilePath -> M (Either FsError [FilePath])\nlistDirectory = send . FsListDir"] },
+                { raw ["doesFileExist :: FilePath -> M Bool\ndoesFileExist p = send (FsExists p) >>= liftEither"] },
                 { raw ["doesDirectoryExist :: FilePath -> M Bool\ndoesDirectoryExist p = send (FsMetadata p) <&> (== Just True) . (^? key \"is_dir\" . _Bool)"] },
                 { raw ["-- | File size in bytes, or `Nothing` if the path is missing.\ngetFileSize :: FilePath -> M (Maybe Int)\ngetFileSize p = send (FsMetadata p) <&> (^? key \"size\" . _Int)"] },
                 { raw ["-- | Parse the raw metadata Value into a `FileMeta`, or `Nothing` for a\n-- missing/unreadable path.\nparseFileMeta :: Value -> Maybe FileMeta\nparseFileMeta v = case (v ^? key \"size\" . _Int, v ^? key \"is_file\" . _Bool, v ^? key \"is_dir\" . _Bool) of\n  (Just s, Just f, Just d) -> Just (FileMeta s f d)\n  _ -> Nothing"] },
                 { raw ["-- | File metadata as a `FileMeta` record {size, isFile, isDir}, or `Nothing`\n-- if the path is missing/unreadable (use record-dot: `m.size`, `m.isDir`).\nfsMeta :: FilePath -> M (Maybe FileMeta)\nfsMeta p = send (FsMetadata p) <&> parseFileMeta"] },
                 { raw ["-- | Alias of `fsMeta` — metadata as a `Maybe FileMeta`.\nfsMetadata :: FilePath -> M (Maybe FileMeta)\nfsMetadata = fsMeta"] },
                 { raw ["getCurrentDirectory :: M FilePath\ngetCurrentDirectory = do { p <- run \"pwd\"; pure (T.strip p.stdout) }"] },
-                { raw ["glob :: FilePath -> M [FilePath]\nglob = send . FsGlob"] },
-                { raw ["-- | Alias of `glob` — expand a glob to matching paths.\nfsGlob :: FilePath -> M [FilePath]\nfsGlob = send . FsGlob"] },
-                { raw ["-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob\n-- SECOND — a path glob like \"*.rs\" goes in arg 2, not arg 1. Returns [Hit]\n-- {path, line, text} (the shared Hit shape, so it composes with\n-- hitsByFile/refs). NB regex metachars are double-escaped here (JSON x Haskell),\n-- so a literal dot needs four backslashes; the handler error shows the exact\n-- form if you get it wrong.\ngrepGlob :: Text -> FilePath -> M [Hit]\ngrepGlob pat g = map (\\(f, l, t) -> Hit f l t) <$> send (FsGrep pat g)"] },
-                { raw ["-- | Read every file matching a glob with PER-FILE failure isolation: each\n-- result is (path, Right content) on a clean UTF-8 read, or (path, Left err) on\n-- a per-file failure (binary / non-UTF-8, permission). Unlike readGlob, one bad\n-- file (e.g. a binary swept up by a wide glob) does NOT fail the whole batch —\n-- the Left rides alongside the Rights (the #328 mixed-glob case). An empty glob\n-- is rejected loudly (\"\" matches everything). Split with partitionEithers on the\n-- snd, or `[(p,t) | (p, Right t) <- rs]` for just the readable ones.\ntryReadGlob :: Text -> M [(Text, Either Text Text)]\ntryReadGlob = send . FsReadGlob"] },
-                { raw ["-- | Exact str-replace, EXACTLY-ONCE: applies, or errors with a precise\n-- reason (not-found / ambiguous). The trained Edit-tool shape: no news is\n-- good news. Pass enough surrounding text that `old` is unique. Use planUpdate\n-- to review the diff first; the full editing surface is in tidepool://edits.\nupdate :: FilePath -> Text -> Text -> M ()\nupdate path old new\n  | T.null old = error \"update: 'old' must be non-empty\"\n  | otherwise = do\n      src <- readFile path\n      case len (T.splitOn old src) - 1 of\n        0 -> error (\"update: 'old' not found in \" <> path)\n        1 -> writeFile path (replace old new src)\n        n -> error (\"update: 'old' matches \" <> show n <> \" places in \" <> path <> \" (add surrounding context to disambiguate)\")"] },
-                { raw ["-- | Replace EVERY occurrence of `old`; returns the count. Errors if zero.\nupdateAll :: FilePath -> Text -> Text -> M Int\nupdateAll path old new\n  | T.null old = error \"updateAll: 'old' must be non-empty\"\n  | otherwise = do\n      src <- readFile path\n      let n = len (T.splitOn old src) - 1\n      if n == 0 then error (\"updateAll: 'old' not found in \" <> path)\n                else writeFile path (replace old new src) >> pure n"] },
-                { raw ["-- | Dry-run `update`: returns an `UpdateOutcome` (the review diff, or the\n-- reason it can't apply), writes NOTHING. Never errors — the conflict comes\n-- back as data so you can branch before committing.\nplanUpdate :: FilePath -> Text -> Text -> M UpdateOutcome\nplanUpdate path old new = do\n  er <- tryReadFile path\n  case er of\n    Left e -> pure (UpdateRejected (\"file not found: \" <> e) Nothing)\n    Right src ->\n      let n = if T.null old then 0 else len (T.splitOn old src) - 1\n      in if T.null old then pure (UpdateRejected \"'old' must be non-empty\" Nothing)\n         else if n == 0 then pure (UpdateRejected \"not found\" Nothing)\n         else if n > 1 then pure (UpdateRejected \"ambiguous\" (Just n))\n         else case Patch.genPatch path src (replace old new src) of\n                Left _ -> pure UpdateNoChange\n                Right fp -> pure (UpdateDiff (Patch.renderPatch [fp]))"] },
+                { raw ["-- | Expand a glob to matching file paths. `Left (FsSandbox _)` on an empty\n-- or absolute pattern, `Left (FsNotFound _)` on a missing search root; unwrap\n-- with `Right ps <- glob pat` or `glob pat >>= liftEither`.\nglob :: FilePath -> M (Either FsError [FilePath])\nglob = send . FsGlob"] },
+                { raw ["-- | Alias of `glob` — expand a glob to matching paths.\nfsGlob :: FilePath -> M (Either FsError [FilePath])\nfsGlob = send . FsGlob"] },
+                { raw ["-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob\n-- SECOND — a path glob like \"*.rs\" goes in arg 2, not arg 1. Returns [Hit]\n-- {path, line, text} (the shared Hit shape, so it composes with\n-- hitsByFile/refs). Failure is typed: `Left (FsBadRegex _)` on a bad regex.\n-- NB regex metachars are double-escaped here (JSON x Haskell), so a literal dot\n-- needs four backslashes; the FsBadRegex detail shows the exact form.\ngrepGlob :: Text -> FilePath -> M (Either FsError [Hit])\ngrepGlob pat g = fmap (map (\\(f, l, t) -> Hit f l t)) <$> send (FsGrep pat g)"] },
+                { raw ["-- | Read every file matching a glob with PER-FILE failure isolation: each\n-- result is (path, Right content) on a clean UTF-8 read, or (path, Left err) on\n-- a per-file failure (binary / non-UTF-8, permission). One bad file (e.g. a\n-- binary swept up by a wide glob) does NOT fail the whole batch — the Left rides\n-- alongside the Rights (the #328 mixed-glob case). An empty glob is rejected\n-- loudly. Split with `partitionEithers . map snd`, or `[(p,t) | (p, Right t) <- rs]`.\nreadGlob :: Text -> M [(Text, Either FsError Text)]\nreadGlob = send . FsReadGlob"] },
+                { raw ["-- | Exact str-replace, EXACTLY-ONCE: applies, or errors with a precise\n-- reason (not-found / ambiguous). The trained Edit-tool shape: no news is\n-- good news. Pass enough surrounding text that `old` is unique. Use planUpdate\n-- to review the diff first; the full editing surface is in tidepool://edits.\nupdate :: FilePath -> Text -> Text -> M ()\nupdate path old new\n  | T.null old = error \"update: 'old' must be non-empty\"\n  | otherwise = do\n      src <- readFile path >>= liftEither\n      case len (T.splitOn old src) - 1 of\n        0 -> error (\"update: 'old' not found in \" <> path)\n        1 -> writeFile path (replace old new src) >>= liftEither\n        n -> error (\"update: 'old' matches \" <> show n <> \" places in \" <> path <> \" (add surrounding context to disambiguate)\")"] },
+                { raw ["-- | Replace EVERY occurrence of `old`; returns the count. Errors if zero.\nupdateAll :: FilePath -> Text -> Text -> M Int\nupdateAll path old new\n  | T.null old = error \"updateAll: 'old' must be non-empty\"\n  | otherwise = do\n      src <- readFile path >>= liftEither\n      let n = len (T.splitOn old src) - 1\n      if n == 0 then error (\"updateAll: 'old' not found in \" <> path)\n                else writeFile path (replace old new src) >>= liftEither >> pure n"] },
+                { raw ["-- | Dry-run `update`: returns an `UpdateOutcome` (the review diff, or the\n-- reason it can't apply), writes NOTHING. Never errors — the conflict comes\n-- back as data so you can branch before committing.\nplanUpdate :: FilePath -> Text -> Text -> M UpdateOutcome\nplanUpdate path old new = do\n  er <- readFile path\n  case er of\n    Left e -> pure (UpdateRejected (\"file not found: \" <> show e) Nothing)\n    Right src ->\n      let n = if T.null old then 0 else len (T.splitOn old src) - 1\n      in if T.null old then pure (UpdateRejected \"'old' must be non-empty\" Nothing)\n         else if n == 0 then pure (UpdateRejected \"not found\" Nothing)\n         else if n > 1 then pure (UpdateRejected \"ambiguous\" (Just n))\n         else case Patch.genPatch path src (replace old new src) of\n                Left _ -> pure UpdateNoChange\n                Right fp -> pure (UpdateDiff (Patch.renderPatch [fp]))"] },
                 { raw ["-- | `update` from the input lane: {file, old, new} (for big/quote-heavy fragments).\nupdateJ :: Value -> M ()\nupdateJ v = case (v ^? key \"file\" . _String, v ^? key \"old\" . _String, v ^? key \"new\" . _String) of\n  (Just f, Just o, Just n) -> update f o n\n  _ -> error \"updateJ: need {file, old, new} strings in input\""] },
-                { raw ["-- | Insert a block after the unique line containing `anchor`. Errors on 0 or 2+.\ninsertAfter :: FilePath -> Text -> Text -> M ()\ninsertAfter path anchor block = do\n  src <- readFile path\n  let ls = lines src\n  case len (filter (isInfixOf anchor) ls) of\n    1 -> writeFile path (unlines (concatMap (\\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))\n    n -> error (\"insertAfter: anchor matched \" <> show n <> \" lines in \" <> path)"] },
-                { raw ["-- | Compute-check-commit: write only if every named check holds; failures\n-- come back as a `WriteOutcome` (nothing written on failure).\nwriteChecked :: FilePath -> [(Text, Bool)] -> Text -> M WriteOutcome\nwriteChecked path checks content = do\n  let failed = [name | (name, ok) <- checks, not ok]\n  if null failed\n    then writeFile path content >> pure (Written path (length checks))\n    else pure (WriteBlocked path failed)"] },
-                { raw ["-- | Blake3 content hash (hex) of a file, or Nothing if it does not exist.\n-- The compare-and-swap token for writeCheckedIf: read it, compute your new\n-- content, then write back only if the file still hashes the same.\nfileHash :: FilePath -> M (Maybe Text)\nfileHash = send . FsHash"] },
+                { raw ["-- | Insert a block after the unique line containing `anchor`. Errors on 0 or 2+.\ninsertAfter :: FilePath -> Text -> Text -> M ()\ninsertAfter path anchor block = do\n  src <- readFile path >>= liftEither\n  let ls = lines src\n  case len (filter (isInfixOf anchor) ls) of\n    1 -> writeFile path (unlines (concatMap (\\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls)) >>= liftEither\n    n -> error (\"insertAfter: anchor matched \" <> show n <> \" lines in \" <> path)"] },
+                { raw ["-- | Compute-check-commit: write only if every named check holds; failures\n-- come back as a `WriteOutcome` (nothing written on failure).\nwriteChecked :: FilePath -> [(Text, Bool)] -> Text -> M WriteOutcome\nwriteChecked path checks content = do\n  let failed = [name | (name, ok) <- checks, not ok]\n  if null failed\n    then writeFile path content >>= liftEither >> pure (Written path (length checks))\n    else pure (WriteBlocked path failed)"] },
+                { raw ["-- | Blake3 content hash (hex) of a file, or Nothing if it does not exist.\n-- The compare-and-swap token for writeCheckedIf: read it, compute your new\n-- content, then write back only if the file still hashes the same.\nfileHash :: FilePath -> M (Maybe Text)\nfileHash p = send (FsHash p) >>= liftEither"] },
                 { raw ["-- | Content-hash compare-and-swap write (#330). Writes CONTENT only if the\n-- file's current blake3 hash equals EXPECTED (Nothing = expect the file ABSENT,\n-- i.e. create-only). The compare-and-write is atomic within the handler, closing\n-- the lost-update race between parallel agents. Returns a WriteOutcome: 'Written'\n-- on success, or 'WriteConflict' (carrying expected vs actual hash) if the\n-- precondition failed — conflicts come back as DATA, nothing is written. Get\n-- EXPECTED from fileHash; on a conflict re-read, recompute, and retry.\nwriteCheckedIf :: Maybe Text -> FilePath -> Text -> M WriteOutcome\nwriteCheckedIf expected path content = do\n  r <- send (FsWriteCas path expected content)\n  pure $ case r of\n    Right () -> Written path 1\n    Left actual -> WriteConflict path expected actual"] },
             ],
         }
@@ -895,6 +982,59 @@ mod tests {
         assert_eq!(d.constructors[1], "MetaLookupCon :: Text -> Meta (Maybe (Int, Int))");
         assert_eq!(d.helpers.len(), 7);
         assert!(d.helpers[0].ends_with("metaConstructors = send MetaConstructors"));
+    }
+
+    /// #335 mechanism: the `errors` grammar renders an `Either`-wrapped result
+    /// for tagged verbs and a `data <Err> = …` decl for the block.
+    #[test]
+    fn errors_grammar_ctor_sig_and_data_decl() {
+        // errors-tagged verb wraps its result in `Either <Err>`.
+        assert_eq!(
+            crate::effect_defs::ctor_sig!({ Fs, FsRead, ["Text"], "Text", errors FsError }),
+            "FsRead :: Text -> Fs (Either FsError Text)"
+        );
+        // plain verb is unchanged (the byte-identity path).
+        assert_eq!(
+            crate::effect_defs::ctor_sig!({ Fs, FsExists, ["Text"], "Bool" }),
+            "FsExists :: Text -> Fs Bool"
+        );
+        // the error ADT renders `|`-separated with a Show/Eq deriving.
+        assert_eq!(
+            crate::effect_defs::error_decl_text!(FsError,
+                { ctor FsNotFound, fields { path: "Text" as String }, doc "x" },
+                { ctor FsIo, fields { detail: "Text" as String }, doc "y" }),
+            "data FsError = FsNotFound Text | FsIo Text deriving (Show, Eq)"
+        );
+    }
+
+    /// #335 Fs wave: the generated `fs_decl()` threads `Either FsError` through
+    /// the tagged verbs, leaves the untagged ones bare, and emits the ADT into
+    /// `type_defs`.
+    #[test]
+    fn generated_fs_decl_threads_either_and_emits_error_adt() {
+        let d = crate::fs_decl();
+        assert!(
+            d.constructors.contains(&"FsRead :: Text -> Fs (Either FsError Text)"),
+            "{:?}",
+            d.constructors
+        );
+        assert!(d
+            .constructors
+            .contains(&"FsExists :: Text -> Fs (Either FsError Bool)"));
+        assert!(d
+            .constructors
+            .contains(&"FsGrep :: Text -> Text -> Fs (Either FsError [(Text, Int, Text)])"));
+        // Untagged verbs keep their bare result.
+        assert!(d.constructors.contains(&"FsMetadata :: Text -> Fs Value"));
+        assert!(d
+            .constructors
+            .contains(&"FsReadGlob :: Text -> Fs [(Text, Either FsError Text)]"));
+        // TryFsRead is gone.
+        assert!(!d.constructors.iter().any(|c| c.starts_with("TryFsRead")));
+        // The error ADT lands in type_defs.
+        assert!(d.type_defs.iter().any(|t| *t
+            == "data FsError = FsNotFound Text | FsNotUtf8 Text | FsSandbox Text | \
+                FsBadRegex Text | FsIo Text deriving (Show, Eq)"));
     }
 
     #[test]
