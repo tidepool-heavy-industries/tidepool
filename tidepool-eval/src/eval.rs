@@ -439,20 +439,7 @@ fn eval_at(
                             got: arg_vals.len(),
                         });
                     }
-                    // Defense in depth: force through Con fields to handle thunked D# fields
-                    let d = match &arg_vals[0] {
-                        Value::Lit(Literal::LitDouble(bits)) => f64::from_bits(*bits),
-                        Value::Con(_, fields) if fields.len() == 1 => {
-                            let forced = force(fields[0].clone(), heap)?;
-                            expect_double(&forced)?
-                        }
-                        other => {
-                            return Err(EvalError::TypeMismatch {
-                                expected: "Double# or D# Double#",
-                                got: crate::error::ValueKind::Other(format!("{:?}", other)),
-                            })
-                        }
-                    };
+                    let d = expect_double(&arg_vals[0], heap)?;
                     let s = eval_haskell_show_double(d);
                     let mut bytes = s.into_bytes();
                     bytes.push(0); // null terminator for IndexCharOffAddr
@@ -468,30 +455,8 @@ fn eval_at(
                             got: arg_vals.len(),
                         });
                     }
-                    let prec = match &arg_vals[0] {
-                        Value::Lit(Literal::LitInt(n)) => *n,
-                        Value::Con(_, fields) if fields.len() == 1 => {
-                            expect_int(&force(fields[0].clone(), heap)?)?
-                        }
-                        other => {
-                            return Err(EvalError::TypeMismatch {
-                                expected: "Int# or I# Int#",
-                                got: crate::error::ValueKind::Other(format!("{:?}", other)),
-                            })
-                        }
-                    };
-                    let d = match &arg_vals[1] {
-                        Value::Lit(Literal::LitDouble(bits)) => f64::from_bits(*bits),
-                        Value::Con(_, fields) if fields.len() == 1 => {
-                            expect_double(&force(fields[0].clone(), heap)?)?
-                        }
-                        other => {
-                            return Err(EvalError::TypeMismatch {
-                                expected: "Double# or D# Double#",
-                                got: crate::error::ValueKind::Other(format!("{:?}", other)),
-                            })
-                        }
-                    };
+                    let prec = expect_int(&arg_vals[0], heap)?;
+                    let d = expect_double(&arg_vals[1], heap)?;
                     let body = eval_haskell_show_double(d);
                     // `showSignedFloat`'s `x < 0` test (so -0.0 does NOT parenthesize).
                     let s = if prec > 6 && d < 0.0 {
@@ -561,7 +526,7 @@ fn eval_at(
                         )
                     })
                 }
-                _ => dispatch_primop(*op, arg_vals),
+                _ => dispatch_primop(*op, arg_vals, heap),
             }
         }
         CoreFrame::Join {
@@ -649,18 +614,22 @@ fn enqueue_jump(
     Ok(Value::Lit(Literal::LitInt(0)))
 }
 
-fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError> {
+fn dispatch_primop(
+    op: PrimOpKind,
+    args: Vec<Value>,
+    heap: &mut dyn Heap,
+) -> Result<Value, EvalError> {
     match op {
         PrimOpKind::IntAdd => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_add(b))))
         }
         PrimOpKind::IntSub => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_sub(b))))
         }
         PrimOpKind::IntMul => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_mul(b))))
         }
         PrimOpKind::IntNegate => {
@@ -671,25 +640,25 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_int(&args[0])?;
+            let a = expect_int(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_neg())))
         }
-        PrimOpKind::IntEq => cmp_int(op, &args, |a, b| a == b),
-        PrimOpKind::IntNe => cmp_int(op, &args, |a, b| a != b),
-        PrimOpKind::IntLt => cmp_int(op, &args, |a, b| a < b),
-        PrimOpKind::IntLe => cmp_int(op, &args, |a, b| a <= b),
-        PrimOpKind::IntGt => cmp_int(op, &args, |a, b| a > b),
-        PrimOpKind::IntGe => cmp_int(op, &args, |a, b| a >= b),
+        PrimOpKind::IntEq => cmp_int(op, &args, heap, |a, b| a == b),
+        PrimOpKind::IntNe => cmp_int(op, &args, heap, |a, b| a != b),
+        PrimOpKind::IntLt => cmp_int(op, &args, heap, |a, b| a < b),
+        PrimOpKind::IntLe => cmp_int(op, &args, heap, |a, b| a <= b),
+        PrimOpKind::IntGt => cmp_int(op, &args, heap, |a, b| a > b),
+        PrimOpKind::IntGe => cmp_int(op, &args, heap, |a, b| a >= b),
         PrimOpKind::IntAnd => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a & b)))
         }
         PrimOpKind::IntOr => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a | b)))
         }
         PrimOpKind::IntXor => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a ^ b)))
         }
         PrimOpKind::IntNot => {
@@ -700,44 +669,44 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_int(&args[0])?;
+            let a = expect_int(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitInt(!a)))
         }
         PrimOpKind::IntShl => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_shl(b as u32))))
         }
         PrimOpKind::IntShra => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_shr(b as u32))))
         }
         PrimOpKind::IntShrl => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(
                 (a as u64).wrapping_shr(b as u32) as i64,
             )))
         }
 
         PrimOpKind::WordAdd => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_add(b))))
         }
         PrimOpKind::WordSub => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_sub(b))))
         }
         PrimOpKind::WordMul => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_mul(b))))
         }
-        PrimOpKind::WordEq | PrimOpKind::Word64Eq => cmp_word(op, &args, |a, b| a == b),
-        PrimOpKind::WordNe | PrimOpKind::Word64Ne => cmp_word(op, &args, |a, b| a != b),
-        PrimOpKind::WordLt | PrimOpKind::Word64Lt => cmp_word(op, &args, |a, b| a < b),
-        PrimOpKind::WordLe | PrimOpKind::Word64Le => cmp_word(op, &args, |a, b| a <= b),
-        PrimOpKind::WordGt | PrimOpKind::Word64Gt => cmp_word(op, &args, |a, b| a > b),
-        PrimOpKind::WordGe | PrimOpKind::Word64Ge => cmp_word(op, &args, |a, b| a >= b),
+        PrimOpKind::WordEq | PrimOpKind::Word64Eq => cmp_word(op, &args, heap, |a, b| a == b),
+        PrimOpKind::WordNe | PrimOpKind::Word64Ne => cmp_word(op, &args, heap, |a, b| a != b),
+        PrimOpKind::WordLt | PrimOpKind::Word64Lt => cmp_word(op, &args, heap, |a, b| a < b),
+        PrimOpKind::WordLe | PrimOpKind::Word64Le => cmp_word(op, &args, heap, |a, b| a <= b),
+        PrimOpKind::WordGt | PrimOpKind::Word64Gt => cmp_word(op, &args, heap, |a, b| a > b),
+        PrimOpKind::WordGe | PrimOpKind::Word64Ge => cmp_word(op, &args, heap, |a, b| a >= b),
         PrimOpKind::WordQuot => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             if b == 0 {
                 return Err(EvalError::InternalError(
                     "division by zero (quotWord#)".into(),
@@ -746,7 +715,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             Ok(Value::Lit(Literal::LitWord(a.wrapping_div(b))))
         }
         PrimOpKind::WordRem => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             if b == 0 {
                 return Err(EvalError::InternalError(
                     "division by zero (remWord#)".into(),
@@ -755,15 +724,15 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             Ok(Value::Lit(Literal::LitWord(a.wrapping_rem(b))))
         }
         PrimOpKind::WordAnd => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a & b)))
         }
         PrimOpKind::WordOr => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a | b)))
         }
         PrimOpKind::WordXor => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a ^ b)))
         }
         PrimOpKind::WordNot => {
@@ -774,7 +743,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_word(&args[0])?;
+            let a = expect_word(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitWord(!a)))
         }
         PrimOpKind::WordShl => {
@@ -785,8 +754,8 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_word(&args[0])?;
-            let b = expect_int(&args[1])?;
+            let a = expect_word(&args[0], heap)?;
+            let b = expect_int(&args[1], heap)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_shl(b as u32))))
         }
         PrimOpKind::WordShrl => {
@@ -797,33 +766,33 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_word(&args[0])?;
-            let b = expect_int(&args[1])?;
+            let a = expect_word(&args[0], heap)?;
+            let b = expect_int(&args[1], heap)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_shr(b as u32))))
         }
 
         PrimOpKind::DoubleAdd => {
-            let (a, b) = bin_op_double(op, &args)?;
+            let (a, b) = bin_op_double(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitDouble((a + b).to_bits())))
         }
         PrimOpKind::DoubleSub => {
-            let (a, b) = bin_op_double(op, &args)?;
+            let (a, b) = bin_op_double(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitDouble((a - b).to_bits())))
         }
         PrimOpKind::DoubleMul => {
-            let (a, b) = bin_op_double(op, &args)?;
+            let (a, b) = bin_op_double(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitDouble((a * b).to_bits())))
         }
         PrimOpKind::DoubleDiv => {
-            let (a, b) = bin_op_double(op, &args)?;
+            let (a, b) = bin_op_double(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitDouble((a / b).to_bits())))
         }
-        PrimOpKind::DoubleEq => cmp_double(op, &args, |a, b| a == b),
-        PrimOpKind::DoubleNe => cmp_double(op, &args, |a, b| a != b),
-        PrimOpKind::DoubleLt => cmp_double(op, &args, |a, b| a < b),
-        PrimOpKind::DoubleLe => cmp_double(op, &args, |a, b| a <= b),
-        PrimOpKind::DoubleGt => cmp_double(op, &args, |a, b| a > b),
-        PrimOpKind::DoubleGe => cmp_double(op, &args, |a, b| a >= b),
+        PrimOpKind::DoubleEq => cmp_double(op, &args, heap, |a, b| a == b),
+        PrimOpKind::DoubleNe => cmp_double(op, &args, heap, |a, b| a != b),
+        PrimOpKind::DoubleLt => cmp_double(op, &args, heap, |a, b| a < b),
+        PrimOpKind::DoubleLe => cmp_double(op, &args, heap, |a, b| a <= b),
+        PrimOpKind::DoubleGt => cmp_double(op, &args, heap, |a, b| a > b),
+        PrimOpKind::DoubleGe => cmp_double(op, &args, heap, |a, b| a >= b),
         PrimOpKind::DoubleNegate => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
@@ -832,7 +801,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble((-a).to_bits())))
         }
         PrimOpKind::DoubleFabs => {
@@ -843,7 +812,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.abs().to_bits())))
         }
         PrimOpKind::DoubleSqrt => {
@@ -854,7 +823,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.sqrt().to_bits())))
         }
         PrimOpKind::DoubleExp => {
@@ -865,7 +834,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.exp().to_bits())))
         }
         PrimOpKind::DoubleExpM1 => {
@@ -876,7 +845,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.exp_m1().to_bits())))
         }
         PrimOpKind::DoubleLog => {
@@ -887,7 +856,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.ln().to_bits())))
         }
         PrimOpKind::DoubleLog1P => {
@@ -898,7 +867,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.ln_1p().to_bits())))
         }
         PrimOpKind::DoubleSin => {
@@ -909,7 +878,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.sin().to_bits())))
         }
         PrimOpKind::DoubleCos => {
@@ -920,7 +889,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.cos().to_bits())))
         }
         PrimOpKind::DoubleTan => {
@@ -931,7 +900,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.tan().to_bits())))
         }
         PrimOpKind::DoubleAsin => {
@@ -942,7 +911,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.asin().to_bits())))
         }
         PrimOpKind::DoubleAcos => {
@@ -953,7 +922,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.acos().to_bits())))
         }
         PrimOpKind::DoubleAtan => {
@@ -964,7 +933,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.atan().to_bits())))
         }
         PrimOpKind::DoubleSinh => {
@@ -975,7 +944,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.sinh().to_bits())))
         }
         PrimOpKind::DoubleCosh => {
@@ -986,7 +955,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.cosh().to_bits())))
         }
         PrimOpKind::DoubleTanh => {
@@ -997,7 +966,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.tanh().to_bits())))
         }
         PrimOpKind::DoubleAsinh => {
@@ -1008,7 +977,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.asinh().to_bits())))
         }
         PrimOpKind::DoubleAcosh => {
@@ -1019,7 +988,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.acosh().to_bits())))
         }
         PrimOpKind::DoubleAtanh => {
@@ -1030,7 +999,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.atanh().to_bits())))
         }
         PrimOpKind::DoublePower => {
@@ -1041,24 +1010,24 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
-            let b = expect_double(&args[1])?;
+            let a = expect_double(&args[0], heap)?;
+            let b = expect_double(&args[1], heap)?;
             Ok(Value::Lit(Literal::LitDouble(a.powf(b).to_bits())))
         }
         PrimOpKind::FloatAdd => {
-            let (a, b) = bin_op_float(op, &args)?;
+            let (a, b) = bin_op_float(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitFloat((a + b).to_bits() as u64)))
         }
         PrimOpKind::FloatSub => {
-            let (a, b) = bin_op_float(op, &args)?;
+            let (a, b) = bin_op_float(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitFloat((a - b).to_bits() as u64)))
         }
         PrimOpKind::FloatMul => {
-            let (a, b) = bin_op_float(op, &args)?;
+            let (a, b) = bin_op_float(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitFloat((a * b).to_bits() as u64)))
         }
         PrimOpKind::FloatDiv => {
-            let (a, b) = bin_op_float(op, &args)?;
+            let (a, b) = bin_op_float(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitFloat((a / b).to_bits() as u64)))
         }
         PrimOpKind::FloatNegate => {
@@ -1069,7 +1038,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_float(&args[0])?;
+            let a = expect_float(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitFloat((-a).to_bits() as u64)))
         }
         // sqrtFloat# / fabsFloat# — native f32 (parallel to DoubleSqrt/DoubleFabs).
@@ -1081,7 +1050,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_float(&args[0])?;
+            let a = expect_float(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitFloat(a.sqrt().to_bits() as u64)))
         }
         PrimOpKind::FloatFabs => {
@@ -1092,22 +1061,22 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_float(&args[0])?;
+            let a = expect_float(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitFloat(a.abs().to_bits() as u64)))
         }
-        PrimOpKind::FloatEq => cmp_float(op, &args, |a, b| a == b),
-        PrimOpKind::FloatNe => cmp_float(op, &args, |a, b| a != b),
-        PrimOpKind::FloatLt => cmp_float(op, &args, |a, b| a < b),
-        PrimOpKind::FloatLe => cmp_float(op, &args, |a, b| a <= b),
-        PrimOpKind::FloatGt => cmp_float(op, &args, |a, b| a > b),
-        PrimOpKind::FloatGe => cmp_float(op, &args, |a, b| a >= b),
+        PrimOpKind::FloatEq => cmp_float(op, &args, heap, |a, b| a == b),
+        PrimOpKind::FloatNe => cmp_float(op, &args, heap, |a, b| a != b),
+        PrimOpKind::FloatLt => cmp_float(op, &args, heap, |a, b| a < b),
+        PrimOpKind::FloatLe => cmp_float(op, &args, heap, |a, b| a <= b),
+        PrimOpKind::FloatGt => cmp_float(op, &args, heap, |a, b| a > b),
+        PrimOpKind::FloatGe => cmp_float(op, &args, heap, |a, b| a >= b),
 
-        PrimOpKind::CharEq => cmp_char(op, &args, |a, b| a == b),
-        PrimOpKind::CharNe => cmp_char(op, &args, |a, b| a != b),
-        PrimOpKind::CharLt => cmp_char(op, &args, |a, b| a < b),
-        PrimOpKind::CharLe => cmp_char(op, &args, |a, b| a <= b),
-        PrimOpKind::CharGt => cmp_char(op, &args, |a, b| a > b),
-        PrimOpKind::CharGe => cmp_char(op, &args, |a, b| a >= b),
+        PrimOpKind::CharEq => cmp_char(op, &args, heap, |a, b| a == b),
+        PrimOpKind::CharNe => cmp_char(op, &args, heap, |a, b| a != b),
+        PrimOpKind::CharLt => cmp_char(op, &args, heap, |a, b| a < b),
+        PrimOpKind::CharLe => cmp_char(op, &args, heap, |a, b| a <= b),
+        PrimOpKind::CharGt => cmp_char(op, &args, heap, |a, b| a > b),
+        PrimOpKind::CharGe => cmp_char(op, &args, heap, |a, b| a >= b),
         PrimOpKind::Int2Word => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
@@ -1116,7 +1085,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_int(&args[0])?;
+            let a = expect_int(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitWord(a as u64)))
         }
         PrimOpKind::Word2Int => {
@@ -1127,7 +1096,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_word(&args[0])?;
+            let a = expect_word(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitInt(a as i64)))
         }
         PrimOpKind::Narrow8Int => {
@@ -1138,7 +1107,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_int(&args[0])?;
+            let a = expect_int(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitInt(a as i8 as i64)))
         }
         PrimOpKind::Narrow16Int => {
@@ -1149,7 +1118,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_int(&args[0])?;
+            let a = expect_int(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitInt(a as i16 as i64)))
         }
         PrimOpKind::Narrow32Int => {
@@ -1160,7 +1129,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_int(&args[0])?;
+            let a = expect_int(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitInt(a as i32 as i64)))
         }
         PrimOpKind::Narrow8Word => {
@@ -1171,7 +1140,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_word(&args[0])?;
+            let a = expect_word(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitWord(a as u8 as u64)))
         }
         PrimOpKind::Narrow16Word => {
@@ -1182,7 +1151,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_word(&args[0])?;
+            let a = expect_word(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitWord(a as u16 as u64)))
         }
         PrimOpKind::Narrow32Word => {
@@ -1193,7 +1162,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_word(&args[0])?;
+            let a = expect_word(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitWord(a as u32 as u64)))
         }
         PrimOpKind::Int2Double => {
@@ -1204,11 +1173,11 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_int(&args[0])?;
+            let a = expect_int(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble((a as f64).to_bits())))
         }
         PrimOpKind::Word2Double => {
-            let a = expect_word(&args[0])?;
+            let a = expect_word(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble((a as f64).to_bits())))
         }
         PrimOpKind::Double2Int => {
@@ -1219,7 +1188,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitInt(a as i64)))
         }
         PrimOpKind::DecodeDoubleMantissa => {
@@ -1230,7 +1199,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let d = expect_double(&args[0])?;
+            let d = expect_double(&args[0], heap)?;
             let (man, _) = eval_decode_double_int64(d);
             Ok(Value::Lit(Literal::LitInt(man)))
         }
@@ -1242,7 +1211,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let d = expect_double(&args[0])?;
+            let d = expect_double(&args[0], heap)?;
             let (_, exp) = eval_decode_double_int64(d);
             Ok(Value::Lit(Literal::LitInt(exp)))
         }
@@ -1266,7 +1235,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_int(&args[0])?;
+            let a = expect_int(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitFloat((a as f32).to_bits() as u64)))
         }
         PrimOpKind::Float2Int => {
@@ -1277,7 +1246,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_float(&args[0])?;
+            let a = expect_float(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitInt(a as i64)))
         }
         PrimOpKind::Double2Float => {
@@ -1288,7 +1257,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitFloat((a as f32).to_bits() as u64)))
         }
         PrimOpKind::Float2Double => {
@@ -1299,7 +1268,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_float(&args[0])?;
+            let a = expect_float(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble((a as f64).to_bits())))
         }
 
@@ -1331,7 +1300,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             }
         }
         PrimOpKind::IntQuot => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             if b == 0 {
                 return Err(EvalError::InternalError(
                     "division by zero (quotInt#)".into(),
@@ -1340,7 +1309,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             Ok(Value::Lit(Literal::LitInt(a.wrapping_div(b))))
         }
         PrimOpKind::IntRem => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             if b == 0 {
                 return Err(EvalError::InternalError(
                     "division by zero (remInt#)".into(),
@@ -1356,7 +1325,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let n = expect_int(&args[0])?;
+            let n = expect_int(&args[0], heap)?;
             let code = u32::try_from(n).map_err(|_| EvalError::TypeMismatch {
                 expected: "valid Unicode codepoint (0..=0x10FFFF)",
                 got: crate::error::ValueKind::Other(format!("out of range: {}", n)),
@@ -1375,7 +1344,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let c = expect_char(&args[0])?;
+            let c = expect_char(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitInt(c as i64)))
         }
         PrimOpKind::IndexCharOffAddr => {
@@ -1395,7 +1364,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     })
                 }
             };
-            let offset = expect_int(&args[1])? as usize;
+            let offset = expect_int(&args[1], heap)? as usize;
             let ch = bytes.get(offset).copied().unwrap_or(0);
             Ok(Value::Lit(Literal::LitChar(ch as char)))
         }
@@ -1418,7 +1387,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     })
                 }
             };
-            let offset = expect_int(&args[1])? as usize;
+            let offset = expect_int(&args[1], heap)? as usize;
             if offset > bytes.len() {
                 return Err(EvalError::TypeMismatch {
                     expected: "valid byte offset",
@@ -1446,14 +1415,14 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
 
         // --- ByteArray# / MutableByteArray# ---
         PrimOpKind::NewByteArray => {
-            let size = expect_int(&args[0])? as usize;
+            let size = expect_int(&args[0], heap)? as usize;
             Ok(Value::ByteArray(std::sync::Arc::new(
                 std::sync::Mutex::new(vec![0u8; size]),
             )))
         }
         PrimOpKind::ReadWord8Array => {
             let ba = expect_byte_array(&args[0])?;
-            let idx = expect_int(&args[1])? as usize;
+            let idx = expect_int(&args[1], heap)? as usize;
             let bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
@@ -1462,8 +1431,8 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         }
         PrimOpKind::WriteWord8Array => {
             let ba = expect_byte_array(&args[0])?;
-            let idx = expect_int(&args[1])? as usize;
-            let val = expect_int_like(&args[2])? as u8;
+            let idx = expect_int(&args[1], heap)? as usize;
+            let val = expect_int_like(&args[2], heap)? as u8;
             let mut bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
@@ -1487,10 +1456,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::CopyByteArray | PrimOpKind::CopyMutableByteArray => {
             // copyByteArray# src src_off dst dst_off len
             let src_ba = expect_byte_array(&args[0])?;
-            let src_off = expect_int(&args[1])? as usize;
+            let src_off = expect_int(&args[1], heap)? as usize;
             let dst_ba = expect_byte_array(&args[2])?;
-            let dst_off = expect_int(&args[3])? as usize;
-            let len = expect_int(&args[4])? as usize;
+            let dst_off = expect_int(&args[3], heap)? as usize;
+            let len = expect_int(&args[4], heap)? as usize;
             // Clone src data first to avoid double-lock deadlock when src == dst
             let src_data: Vec<u8> = {
                 let src = src_ba
@@ -1542,8 +1511,8 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 }
             };
             let dst_ba = expect_byte_array(&args[1])?;
-            let dst_off = expect_int(&args[2])? as usize;
-            let len = expect_int(&args[3])? as usize;
+            let dst_off = expect_int(&args[2], heap)? as usize;
+            let len = expect_int(&args[3], heap)? as usize;
             let mut dst = dst_ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
@@ -1566,7 +1535,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         }
         PrimOpKind::ShrinkMutableByteArray => {
             let ba = expect_byte_array(&args[0])?;
-            let new_size = expect_int(&args[1])? as usize;
+            let new_size = expect_int(&args[1], heap)? as usize;
             ba.lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?
                 .truncate(new_size);
@@ -1574,7 +1543,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         }
         PrimOpKind::ResizeMutableByteArray => {
             let ba = expect_byte_array(&args[0])?;
-            let new_size = expect_int(&args[1])? as usize;
+            let new_size = expect_int(&args[1], heap)? as usize;
             let mut bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
@@ -1583,13 +1552,13 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             Ok(Value::ByteArray(ba.clone()))
         }
         PrimOpKind::Clz8 => {
-            let w = expect_word(&args[0])?;
+            let w = expect_word(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitWord(
                 (w as u8).leading_zeros() as u64
             )))
         }
         PrimOpKind::Clz => {
-            let w = expect_word(&args[0])?;
+            let w = expect_word(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitWord(w.leading_zeros() as u64)))
         }
         PrimOpKind::IntToInt64 => {
@@ -1597,12 +1566,12 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             Ok(args[0].clone())
         }
         PrimOpKind::Int64ToWord64 => {
-            let n = expect_int(&args[0])?;
+            let n = expect_int(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitWord(n as u64)))
         }
         PrimOpKind::TimesInt2Hi | PrimOpKind::TimesInt2Lo | PrimOpKind::TimesInt2Overflow => {
-            let a = expect_int(&args[0])? as i128;
-            let b = expect_int(&args[1])? as i128;
+            let a = expect_int(&args[0], heap)? as i128;
+            let b = expect_int(&args[1], heap)? as i128;
             let result = a * b;
             match op {
                 PrimOpKind::TimesInt2Overflow => {
@@ -1620,7 +1589,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
 
         PrimOpKind::IndexWord8Array => {
             let ba = expect_byte_array(&args[0])?;
-            let idx_val = expect_int(&args[1])?;
+            let idx_val = expect_int(&args[1], heap)?;
             if idx_val < 0 {
                 return Err(EvalError::TypeMismatch {
                     expected: "non-negative array index",
@@ -1645,7 +1614,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     })
                 }
             };
-            let idx = expect_int(&args[1])? as usize;
+            let idx = expect_int(&args[1], heap)? as usize;
             let val = bytes.get(idx).copied().unwrap_or(0);
             Ok(Value::Lit(Literal::LitWord(val as u64)))
         }
@@ -1671,10 +1640,10 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::CompareByteArrays => {
             // compareByteArrays# ba1 off1 ba2 off2 len -> Int#
             let ba1 = expect_byte_array(&args[0])?;
-            let off1 = expect_int(&args[1])? as usize;
+            let off1 = expect_int(&args[1], heap)? as usize;
             let ba2 = expect_byte_array(&args[2])?;
-            let off2 = expect_int(&args[3])? as usize;
-            let len = expect_int(&args[4])? as usize;
+            let off2 = expect_int(&args[3], heap)? as usize;
+            let len = expect_int(&args[4], heap)? as usize;
             // Clone to avoid potential double-lock if ba1 == ba2
             let slice1: Vec<u8> = {
                 let b = ba1
@@ -1721,11 +1690,11 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         }
         PrimOpKind::WordToWord8 => {
             // Narrow Word# to Word8# (mask to 8 bits)
-            let w = expect_word(&args[0])?;
+            let w = expect_word(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitWord(w & 0xFF)))
         }
         PrimOpKind::Word64And => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a & b)))
         }
         PrimOpKind::Int64ToInt => {
@@ -1734,7 +1703,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         }
         PrimOpKind::Word64ToWord | PrimOpKind::WordToWord64 => {
             // Identity on 64-bit; normalize to a Word literal.
-            Ok(Value::Lit(Literal::LitWord(expect_word(&args[0])?)))
+            Ok(Value::Lit(Literal::LitWord(expect_word(&args[0], heap)?)))
         }
         PrimOpKind::Word64ToInt64 => {
             // Identity on 64-bit (reinterpret Word64 as Int64)
@@ -1755,15 +1724,15 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             Ok(args[0].clone())
         }
         PrimOpKind::Word8Gt => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(if a > b { 1 } else { 0 })))
         }
         PrimOpKind::Word8Mul => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord((a.wrapping_mul(b)) & 0xFF)))
         }
         PrimOpKind::Word8Quot => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             let (a, b) = (a & 0xFF, b & 0xFF);
             if b == 0 {
                 return Err(EvalError::InternalError("Word8 division by zero".into()));
@@ -1771,7 +1740,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             Ok(Value::Lit(Literal::LitWord(a / b)))
         }
         PrimOpKind::Word8Rem => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             let (a, b) = (a & 0xFF, b & 0xFF);
             if b == 0 {
                 return Err(EvalError::InternalError("Word8 division by zero".into()));
@@ -1781,48 +1750,48 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         // --- Int8 conversions ---
         PrimOpKind::Int8ToInt | PrimOpKind::Word8ToInt8 => {
             // Reinterpret the low byte as signed and sign-extend to 64 bits.
-            let v = expect_int_like(&args[0])?;
+            let v = expect_int_like(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitInt(v as i8 as i64)))
         }
         PrimOpKind::Int8ToWord8 => {
-            let v = expect_int_like(&args[0])?;
+            let v = expect_int_like(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitWord((v as u8) as u64)))
         }
         PrimOpKind::Int8Negate => {
-            let v = expect_int_like(&args[0])?;
+            let v = expect_int_like(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitInt((v as i8).wrapping_neg() as i64)))
         }
         // --- Int32 / Word32 conversions and arithmetic ---
         PrimOpKind::Int32ToInt => {
-            let v = expect_int_like(&args[0])?;
+            let v = expect_int_like(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitInt(v as i32 as i64)))
         }
         PrimOpKind::Word32ToWord | PrimOpKind::WordToWord32 => {
-            let v = expect_int_like(&args[0])?;
+            let v = expect_int_like(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitWord((v as u64) & 0xFFFF_FFFF)))
         }
         PrimOpKind::Word32Add => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(
                 (a.wrapping_add(b)) & 0xFFFF_FFFF,
             )))
         }
         PrimOpKind::Word32Sub => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(
                 (a.wrapping_sub(b)) & 0xFFFF_FFFF,
             )))
         }
         PrimOpKind::Word32Gt => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(if a > b { 1 } else { 0 })))
         }
         PrimOpKind::Word32Le => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(if a <= b { 1 } else { 0 })))
         }
         PrimOpKind::Word32Lt => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(if a < b { 1 } else { 0 })))
         }
         // --- Addr# ---
@@ -1870,7 +1839,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     })
                 }
             };
-            let idx = expect_int(&args[1])? as usize;
+            let idx = expect_int(&args[1], heap)? as usize;
             let val = bytes.get(idx).copied().unwrap_or(0) as i8;
             Ok(Value::Lit(Literal::LitInt(val as i64)))
         }
@@ -1885,7 +1854,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     })
                 }
             };
-            let idx = expect_int(&args[1])? as usize;
+            let idx = expect_int(&args[1], heap)? as usize;
             let off = idx.wrapping_mul(4);
             let mut buf = [0u8; 4];
             for (i, b) in buf.iter_mut().enumerate() {
@@ -1904,7 +1873,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     })
                 }
             };
-            let idx = expect_int(&args[1])? as usize;
+            let idx = expect_int(&args[1], heap)? as usize;
             let off = idx.wrapping_mul(4);
             let mut buf = [0u8; 4];
             for (i, b) in buf.iter_mut().enumerate() {
@@ -1920,35 +1889,35 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             Ok(Value::Lit(Literal::LitInt(0)))
         }
         PrimOpKind::Word8Lt => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(if a < b { 1 } else { 0 })))
         }
         PrimOpKind::Int64Ge => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(if a >= b { 1 } else { 0 })))
         }
         PrimOpKind::Int64Negate => {
-            let a = expect_int_like(&args[0])?;
+            let a = expect_int_like(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitInt(-a)))
         }
         PrimOpKind::Int64Shra => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a >> (b as u32))))
         }
         PrimOpKind::Word64Shl => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a << (b as u32))))
         }
         PrimOpKind::Word64Shrl => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a >> (b as u32))))
         }
         PrimOpKind::Word8Ge => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(if a >= b { 1 } else { 0 })))
         }
         PrimOpKind::Word8Sub => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_sub(b) & 0xFF)))
         }
         PrimOpKind::SizeofByteArray => {
@@ -1963,7 +1932,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // indexWordArray# :: ByteArray# -> Int# -> Word#
             // Read a machine word (8 bytes on 64-bit) at index i (word-sized offset)
             let ba = expect_byte_array(&args[0])?;
-            let idx_val = expect_int_like(&args[1])?;
+            let idx_val = expect_int_like(&args[1], heap)?;
             if idx_val < 0 {
                 return Err(EvalError::TypeMismatch {
                     expected: "non-negative array index",
@@ -1996,49 +1965,49 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             Ok(Value::Lit(Literal::LitWord(word)))
         }
         PrimOpKind::Int64Mul => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_mul(b))))
         }
         PrimOpKind::Word64Or => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a | b)))
         }
         PrimOpKind::Word8Le => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(if a <= b { 1 } else { 0 })))
         }
         PrimOpKind::Int64Add => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_add(b))))
         }
         PrimOpKind::Int64Gt => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(if a > b { 1 } else { 0 })))
         }
         PrimOpKind::Int64Lt => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(if a < b { 1 } else { 0 })))
         }
         PrimOpKind::Int64Le => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(if a <= b { 1 } else { 0 })))
         }
         PrimOpKind::Int64Sub => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_sub(b))))
         }
         PrimOpKind::Int64Shl => {
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_shl(b as u32))))
         }
         PrimOpKind::Word8Add => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord((a.wrapping_add(b)) & 0xFF)))
         }
         PrimOpKind::WriteWordArray => {
             // writeWordArray# :: MutableByteArray# -> Int# -> Word# -> State# -> State#
             let ba = expect_byte_array(&args[0])?;
-            let idx_val = expect_int_like(&args[1])?;
+            let idx_val = expect_int_like(&args[1], heap)?;
             if idx_val < 0 {
                 return Err(EvalError::TypeMismatch {
                     expected: "non-negative array index",
@@ -2046,7 +2015,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                 });
             }
             let idx = idx_val as usize;
-            let val = expect_word(&args[2])?;
+            let val = expect_word(&args[2], heap)?;
             let mut bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
@@ -2064,7 +2033,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         PrimOpKind::ReadWordArray => {
             // readWordArray# :: MutableByteArray# -> Int# -> State# -> (# State#, Word# #)
             let ba = expect_byte_array(&args[0])?;
-            let idx_val = expect_int_like(&args[1])?;
+            let idx_val = expect_int_like(&args[1], heap)?;
             if idx_val < 0 {
                 return Err(EvalError::TypeMismatch {
                     expected: "non-negative array index",
@@ -2100,9 +2069,9 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // setByteArray# :: MutableByteArray# -> Int# -> Int# -> Int# -> State# -> State#
             // Fill `count` bytes starting at `offset` with byte `val`
             let ba = expect_byte_array(&args[0])?;
-            let offset = expect_int_like(&args[1])? as usize;
-            let count = expect_int_like(&args[2])? as usize;
-            let val = expect_int_like(&args[3])? as u8;
+            let offset = expect_int_like(&args[1], heap)? as usize;
+            let count = expect_int_like(&args[2], heap)? as usize;
+            let val = expect_int_like(&args[3], heap)? as u8;
             let mut bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
@@ -2127,73 +2096,73 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         }
         PrimOpKind::AddIntCVal => {
             // addIntC# returns (# result, carry #). This is the result component.
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_add(b))))
         }
         PrimOpKind::AddIntCCarry => {
             // addIntC# carry flag: 1 if overflow, 0 otherwise
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             let overflow = a.checked_add(b).is_none();
             Ok(Value::Lit(Literal::LitInt(if overflow { 1 } else { 0 })))
         }
         PrimOpKind::SubIntCVal => {
             // subIntC# result component: a - b (wrapping)
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(a.wrapping_sub(b))))
         }
         PrimOpKind::SubIntCCarry => {
             // subIntC# overflow flag: 1 if signed subtraction overflowed
-            let (a, b) = bin_op_int(op, &args)?;
+            let (a, b) = bin_op_int(op, &args, heap)?;
             let overflow = a.checked_sub(b).is_none();
             Ok(Value::Lit(Literal::LitInt(if overflow { 1 } else { 0 })))
         }
         PrimOpKind::SubWordCVal => {
             // subWordC# result component: a - b (wrapping)
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_sub(b))))
         }
         PrimOpKind::SubWordCCarry => {
             // subWordC# carry: 1 if borrow (a < b), 0 otherwise
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitInt(if a < b { 1 } else { 0 })))
         }
         PrimOpKind::AddWordCVal => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_add(b))))
         }
         PrimOpKind::AddWordCCarry => {
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             let carry = a.checked_add(b).is_none();
             Ok(Value::Lit(Literal::LitInt(if carry { 1 } else { 0 })))
         }
         PrimOpKind::TimesWord2Hi => {
             // timesWord2# high word: (a * b) >> 64
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             let product = (a as u128) * (b as u128);
             Ok(Value::Lit(Literal::LitWord((product >> 64) as u64)))
         }
         PrimOpKind::TimesWord2Lo => {
             // timesWord2# low word: (a * b) & 0xFFFFFFFFFFFFFFFF
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_mul(b))))
         }
         PrimOpKind::WordAdd2Lo => {
             // plusWord2# low word: a + b (wrapping)
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(a.wrapping_add(b))))
         }
         PrimOpKind::WordAdd2Hi => {
             // plusWord2# high word: the carry-out (0 or 1)
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             Ok(Value::Lit(Literal::LitWord(
                 if a.checked_add(b).is_none() { 1 } else { 0 },
             )))
         }
         PrimOpKind::WordQuotRem2Quot | PrimOpKind::WordQuotRem2Rem => {
             // quotRemWord2# hi lo d -> ((hi<<64)|lo) `quotRem` d
-            let hi = expect_word(&args[0])?;
-            let lo = expect_word(&args[1])?;
-            let d = expect_word(&args[2])?;
+            let hi = expect_word(&args[0], heap)?;
+            let lo = expect_word(&args[1], heap)?;
+            let d = expect_word(&args[2], heap)?;
             if d == 0 {
                 return Ok(Value::Lit(Literal::LitWord(0)));
             }
@@ -2207,7 +2176,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         }
         PrimOpKind::QuotRemWordVal => {
             // quotRemWord# quotient: a / b
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             if b == 0 {
                 return Err(EvalError::InternalError(
                     "division by zero (quotRemWord# quot)".into(),
@@ -2217,7 +2186,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         }
         PrimOpKind::QuotRemWordRem => {
             // quotRemWord# remainder: a % b
-            let (a, b) = bin_op_word(op, &args)?;
+            let (a, b) = bin_op_word(op, &args, heap)?;
             if b == 0 {
                 return Err(EvalError::InternalError(
                     "division by zero (quotRemWord# rem)".into(),
@@ -2236,7 +2205,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let a = expect_double(&args[0])?;
+            let a = expect_double(&args[0], heap)?;
             Ok(Value::Lit(Literal::LitDouble(
                 a.round_ties_even().to_bits(),
             )))
@@ -2259,8 +2228,8 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // _hs_text_measure_off(ByteArray#, off, len) -> Int#
             // Walk UTF-8 bytes counting `len` chars, return byte offset
             let ba = expect_byte_array(&args[0])?;
-            let off_raw = expect_int_like(&args[1])?;
-            let n_chars_raw = expect_int_like(&args[2])?;
+            let off_raw = expect_int_like(&args[1], heap)?;
+            let n_chars_raw = expect_int_like(&args[2], heap)?;
             if off_raw < 0 || n_chars_raw < 0 {
                 return Err(EvalError::TypeMismatch {
                     expected: "non-negative offset and length",
@@ -2309,8 +2278,8 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // Find byte in array starting at off, return RELATIVE offset from off, or -1
             // Matches C: ptr - (arr + off), NOT absolute position
             let ba = expect_byte_array(&args[0])?;
-            let off_raw = expect_int_like(&args[1])?;
-            let len_raw = expect_int_like(&args[2])?;
+            let off_raw = expect_int_like(&args[1], heap)?;
+            let len_raw = expect_int_like(&args[2], heap)?;
             if off_raw < 0 || len_raw < 0 {
                 return Err(EvalError::TypeMismatch {
                     expected: "non-negative offset and length",
@@ -2322,7 +2291,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             }
             let off = off_raw as usize;
             let len = len_raw as usize;
-            let needle = expect_int_like(&args[3])? as u8;
+            let needle = expect_int_like(&args[3], heap)? as u8;
             let bytes = ba
                 .lock()
                 .map_err(|e| EvalError::InternalError(format!("mutex poisoned: {e}")))?;
@@ -2348,8 +2317,8 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
             // Reverse UTF-8 chars from src[off..off+len] into dst
             let dst_ba = expect_byte_array(&args[0])?;
             let src_ba = expect_byte_array(&args[1])?;
-            let off_raw = expect_int_like(&args[2])?;
-            let len_raw = expect_int_like(&args[3])?;
+            let off_raw = expect_int_like(&args[2], heap)?;
+            let len_raw = expect_int_like(&args[3], heap)?;
             if off_raw < 0 || len_raw < 0 {
                 return Err(EvalError::TypeMismatch {
                     expected: "non-negative offset and length",
@@ -2411,15 +2380,15 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
         }
 
         PrimOpKind::FfiIntEncodeDouble => {
-            let m = expect_int_like(&args[0])?;
-            let e = expect_int_like(&args[1])?;
+            let m = expect_int_like(&args[0], heap)?;
+            let e = expect_int_like(&args[1], heap)?;
             Ok(Value::Lit(Literal::LitDouble(
                 tidepool_bignum::encode_double(m, e).to_bits(),
             )))
         }
         PrimOpKind::FfiWordEncodeDouble => {
-            let m = expect_word(&args[0])?;
-            let e = expect_int_like(&args[1])?;
+            let m = expect_word(&args[0], heap)?;
+            let e = expect_int_like(&args[1], heap)?;
             Ok(Value::Lit(Literal::LitDouble(
                 tidepool_bignum::encode_double_word(m, e).to_bits(),
             )))
@@ -2449,7 +2418,7 @@ fn dispatch_primop(op: PrimOpKind, args: Vec<Value>) -> Result<Value, EvalError>
                     got: args.len(),
                 });
             }
-            let w = expect_word(&args[0])?;
+            let w = expect_word(&args[0], heap)?;
             let r = match op {
                 PrimOpKind::PopCnt | PrimOpKind::PopCnt64 => w.count_ones(),
                 PrimOpKind::PopCnt8 => (w as u8).count_ones(),
@@ -2519,11 +2488,35 @@ fn expect_byte_array(v: &Value) -> Result<&crate::value::SharedByteArray, EvalEr
     }
 }
 
+/// Peel repeated single-field boxed-scalar `Con` layers down to the raw
+/// literal underneath, forcing through thunks at each layer.
+///
+/// GHC's strict-field unboxing (`-funbox-small-strict-fields`, implied at
+/// -O1+) can leave a scalar primop operand re-boxed one layer deeper than the
+/// immediately enclosing `case`-of already unwrapped — e.g. a data
+/// constructor with a `!Int`/`!Double` field (like the generic `Aeson`
+/// `Value`'s `NumberI`) reboxes an argument that GHC's own Core already
+/// treats as unboxed at that pattern-match site (see #339). Safe to apply
+/// unconditionally in the `expect_*` scalar extractors below: a well-typed
+/// program only ever hands them a genuine scalar, never an ADT value with
+/// more than one field.
+fn peel_boxed_scalar(v: &Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
+    let mut cur = force(v.clone(), heap)?;
+    while let Value::Con(_, fields) = &cur {
+        if fields.len() != 1 {
+            break;
+        }
+        cur = force(fields[0].clone(), heap)?;
+    }
+    Ok(cur)
+}
+
 /// Accept both LitInt and LitWord — FFI args go through Int→Int64→Word64 conversions
-fn expect_int_like(v: &Value) -> Result<i64, EvalError> {
+fn expect_int_like(v: &Value, heap: &mut dyn Heap) -> Result<i64, EvalError> {
+    let v = peel_boxed_scalar(v, heap)?;
     match v {
-        Value::Lit(Literal::LitInt(n)) => Ok(*n),
-        Value::Lit(Literal::LitWord(n)) => Ok(*n as i64),
+        Value::Lit(Literal::LitInt(n)) => Ok(n),
+        Value::Lit(Literal::LitWord(n)) => Ok(n as i64),
         _ => Err(EvalError::TypeMismatch {
             expected: "Int# or Word#",
             got: crate::error::ValueKind::Other(format!("{:?}", v)),
@@ -2531,9 +2524,10 @@ fn expect_int_like(v: &Value) -> Result<i64, EvalError> {
     }
 }
 
-fn expect_int(v: &Value) -> Result<i64, EvalError> {
+fn expect_int(v: &Value, heap: &mut dyn Heap) -> Result<i64, EvalError> {
+    let v = peel_boxed_scalar(v, heap)?;
     if let Value::Lit(Literal::LitInt(n)) = v {
-        Ok(*n)
+        Ok(n)
     } else {
         Err(EvalError::TypeMismatch {
             expected: "Int#",
@@ -2542,10 +2536,11 @@ fn expect_int(v: &Value) -> Result<i64, EvalError> {
     }
 }
 
-fn expect_word(v: &Value) -> Result<u64, EvalError> {
+fn expect_word(v: &Value, heap: &mut dyn Heap) -> Result<u64, EvalError> {
+    let v = peel_boxed_scalar(v, heap)?;
     match v {
-        Value::Lit(Literal::LitWord(n)) => Ok(*n),
-        Value::Lit(Literal::LitInt(n)) => Ok(*n as u64),
+        Value::Lit(Literal::LitWord(n)) => Ok(n),
+        Value::Lit(Literal::LitInt(n)) => Ok(n as u64),
         _ => Err(EvalError::TypeMismatch {
             expected: "Word#",
             got: crate::error::ValueKind::Other(format!("{:?}", v)),
@@ -2553,9 +2548,10 @@ fn expect_word(v: &Value) -> Result<u64, EvalError> {
     }
 }
 
-fn expect_double(v: &Value) -> Result<f64, EvalError> {
+fn expect_double(v: &Value, heap: &mut dyn Heap) -> Result<f64, EvalError> {
+    let v = peel_boxed_scalar(v, heap)?;
     if let Value::Lit(Literal::LitDouble(bits)) = v {
-        Ok(f64::from_bits(*bits))
+        Ok(f64::from_bits(bits))
     } else {
         Err(EvalError::TypeMismatch {
             expected: "Double#",
@@ -2564,9 +2560,10 @@ fn expect_double(v: &Value) -> Result<f64, EvalError> {
     }
 }
 
-fn expect_float(v: &Value) -> Result<f32, EvalError> {
+fn expect_float(v: &Value, heap: &mut dyn Heap) -> Result<f32, EvalError> {
+    let v = peel_boxed_scalar(v, heap)?;
     if let Value::Lit(Literal::LitFloat(bits)) = v {
-        Ok(f32::from_bits(*bits as u32))
+        Ok(f32::from_bits(bits as u32))
     } else {
         Err(EvalError::TypeMismatch {
             expected: "Float#",
@@ -2575,9 +2572,10 @@ fn expect_float(v: &Value) -> Result<f32, EvalError> {
     }
 }
 
-fn expect_char(v: &Value) -> Result<char, EvalError> {
+fn expect_char(v: &Value, heap: &mut dyn Heap) -> Result<char, EvalError> {
+    let v = peel_boxed_scalar(v, heap)?;
     if let Value::Lit(Literal::LitChar(c)) = v {
-        Ok(*c)
+        Ok(c)
     } else {
         Err(EvalError::TypeMismatch {
             expected: "Char#",
@@ -2588,7 +2586,11 @@ fn expect_char(v: &Value) -> Result<char, EvalError> {
 
 macro_rules! bin_op {
     ($name:ident, $extract:ident, $t:ty) => {
-        fn $name(_op: PrimOpKind, args: &[Value]) -> Result<($t, $t), EvalError> {
+        fn $name(
+            _op: PrimOpKind,
+            args: &[Value],
+            heap: &mut dyn Heap,
+        ) -> Result<($t, $t), EvalError> {
             if args.len() != 2 {
                 return Err(EvalError::ArityMismatch {
                     context: ArityContext::Arguments,
@@ -2596,7 +2598,9 @@ macro_rules! bin_op {
                     got: args.len(),
                 });
             }
-            Ok(($extract(&args[0])?, $extract(&args[1])?))
+            let a = $extract(&args[0], heap)?;
+            let b = $extract(&args[1], heap)?;
+            Ok((a, b))
         }
     };
 }
@@ -2662,9 +2666,10 @@ macro_rules! cmp_fn {
         fn $name(
             op: PrimOpKind,
             args: &[Value],
+            heap: &mut dyn Heap,
             f: impl Fn($t, $t) -> bool,
         ) -> Result<Value, EvalError> {
-            let (a, b) = $bin_op(op, args)?;
+            let (a, b) = $bin_op(op, args, heap)?;
             Ok(Value::Lit(Literal::LitInt(if f(a, b) { 1 } else { 0 })))
         }
     };

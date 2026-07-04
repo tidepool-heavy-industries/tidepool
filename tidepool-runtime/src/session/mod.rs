@@ -17,9 +17,15 @@
 //! as a usable declaration REPL.
 
 pub mod binders;
+pub mod engine;
 pub mod errmap;
 pub mod render;
 pub mod turn;
+
+pub use engine::{
+    AbortOutcome, EngineConfig, OutputSink, RenderPolicy, Retention, ResumeOutcome, SessionEngine,
+    StartError, StartTurn, TurnOutcome,
+};
 
 pub use turn::{
     classify_turn, compile_session_turn, BoundBinder, SessionBind, SessionTurnResult,

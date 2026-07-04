@@ -1,4 +1,10 @@
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE UndecidableInstances #-}
 -- | Structural @FromJSON@: decode an already-parsed 'Value' into a typed result.
 --
 -- This is PURE Haskell over the vendored Double-based 'Value' — it carries none
@@ -8,6 +14,8 @@
 -- (typeclass-dictionary dispatch over constructor pattern-matches).
 module Tidepool.Aeson.FromJSON
   ( FromJSON(..)
+  , GFromJSON(..)
+  , genericParseJSON
   , Result(..)
   , fromJSON
   , resultToEither
@@ -28,6 +36,9 @@ import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
 import Tidepool.Aeson.Value (Value(..), Object, Array, fromText, toText)
+import Data.Proxy (Proxy(..))
+import GHC.Generics
+import GHC.TypeLits (TypeError, ErrorMessage(Text, (:<>:)))
 
 -- | The result of a structural decode: a typed value or an error message.
 data Result a = Error String | Success a
@@ -49,13 +60,68 @@ instance Monad Result where
 
 -- | Types decodable from a JSON 'Value'. @parseJSON@ pattern-matches the
 -- structural shape; mismatches return 'Error' (no exceptions).
+--
+-- The default method decodes a single-constructor record generically via
+-- 'GHC.Generics' — @data Rec = Rec {..} deriving (Generic, FromJSON)@ decodes a
+-- field-name-keyed JSON object into the record. Sum types are rejected at
+-- compile time; write an explicit instance for those.
 class FromJSON a where
   parseJSON :: Value -> Result a
+  default parseJSON :: (Generic a, GFromJSON (Rep a)) => Value -> Result a
+  parseJSON = genericParseJSON
 
 -- | Decode a 'Value'. @FromJSON Value@ is the identity, so @fromJSON v :: Result Value@
 -- round-trips the raw value — one entry point covers both raw and typed decoding.
 fromJSON :: FromJSON a => Value -> Result a
 fromJSON = parseJSON
+
+-- | Decode a single-constructor record from a JSON object, keyed by exact
+-- selector name. This is the implementation behind the 'FromJSON' default
+-- method: @deriving (Generic, FromJSON)@ resolves @parseJSON@ to this.
+genericParseJSON :: (Generic a, GFromJSON (Rep a)) => Value -> Result a
+genericParseJSON v = to <$> gParseJSON v
+
+-- | Structural decode over a 'GHC.Generics' representation. @M1 D@ (datatype)
+-- and @M1 C@ (constructor) are the 'Value'-level layers; the record fields
+-- underneath decode from an 'Object' via 'GFromRecord'.
+class GFromJSON f where
+  gParseJSON :: Value -> Result (f a)
+
+-- | Decode the record fields of one constructor from a JSON 'Object'.
+class GFromRecord f where
+  gParseRecord :: Object -> Result (f a)
+
+-- Datatype metadata layer: transparent.
+instance GFromJSON f => GFromJSON (M1 D d f) where
+  gParseJSON v = M1 <$> gParseJSON v
+
+-- Constructor layer: a record decodes from a JSON object.
+instance GFromRecord f => GFromJSON (M1 C c f) where
+  gParseJSON = withObject "record" (\o -> M1 <$> gParseRecord o)
+
+-- Product: each field group reads its own keys out of the shared object.
+instance (GFromRecord a, GFromRecord b) => GFromRecord (a :*: b) where
+  gParseRecord o = (:*:) <$> gParseRecord o <*> gParseRecord o
+
+-- Selector leaf: look the field up by its exact selector name, decode via its
+-- own 'FromJSON' instance (so nested records recurse through the default).
+instance (Selector s, FromJSON c) => GFromRecord (M1 S s (K1 R c)) where
+  gParseRecord o = (M1 . K1) <$> (o .: fieldName)
+    -- The proxy is a real (non-bottom) 'Proxy' constructor rather than
+    -- 'undefined': 'selName' inspects only the phantom selector type @s@, and a
+    -- bottom here would be forced by the tree-walking eval oracle (though not by
+    -- the JIT), diverging the two engines.
+    where fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
+
+-- Nullary constructor: an empty record decodes from any object.
+instance GFromRecord U1 where
+  gParseRecord _ = Success U1
+
+-- Sum types have no field-name-keyed object form under this decoder.
+instance TypeError ('Text "deriving FromJSON via GHC.Generics supports single-constructor records only; "
+                    ':<>: 'Text "this type has multiple constructors. Write an explicit FromJSON instance.")
+    => GFromJSON (a :+: b) where
+  gParseJSON = error "unreachable: sum FromJSON is a compile-time TypeError"
 
 -- | Project a 'Result' to 'Either', carrying the error as 'Text'.
 resultToEither :: Result a -> Either Text a

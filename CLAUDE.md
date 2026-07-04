@@ -6,6 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Compile freer-simple effect stacks into Cranelift-backed state machines drivable from Rust. Haskell expands, Rust collapses. The language boundary is the hylo boundary.
 
+**The core idea — bash++ for LLM agents.** Models are near-natively fluent in
+Haskell from decades of training data, the same way they are in bash. Tidepool
+presents a "basically GHCi" surface (one-shot `eval` + stateful repl over typed
+effects) that inherits that fluency: one eval replaces N tool calls. Two rules
+govern all surface work: (1) **the API is the prompt** — mirror canonical
+Haskell/GHCi; every deviation is a fluency tax; (2) **the interface evolves as
+an optimization loop** — clean-context model usage (wins vs bash, frictions)
+drives UX changes and new effects, not speculative design.
+
 ---
 
 ## Rules
