@@ -261,43 +261,9 @@ pub fn lsp_decl() -> EffectDecl {
     }
 }
 
-/// Http effect: JSON I/O — fetch from HTTP endpoints, or parse a JSON string.
-pub fn http_decl() -> EffectDecl {
-    EffectDecl {
-        type_name: "Http",
-        description: "JSON I/O. Fetch JSON from HTTP endpoints (returns Value), or \
-                      parse a JSON Text into a Value with `parseJson`/`tryParseJson` \
-                      (spec-compliant, parsed Rust-side via serde_json).",
-        constructors: &[
-            "HttpGet :: Text -> Http Value",
-            "HttpPost :: Text -> Value -> Http Value",
-            // Failure-isolating variants: a network error or non-2xx status
-            // becomes `Left err` instead of killing the eval.
-            "TryHttpGet :: Text -> Http (Either Text Value)",
-            "TryHttpPost :: Text -> Value -> Http (Either Text Value)",
-            // Parse a JSON string Rust-side (serde_json) into a Value. ParseJson
-            // raises on invalid JSON; TryParseJson returns Left.
-            "ParseJson :: Text -> Http Value",
-            "TryParseJson :: Text -> Http (Either Text Value)",
-        ],
-        type_defs: &[],
-        helpers: &[
-            "httpGet :: Text -> M Value\nhttpGet = send . HttpGet",
-            "httpPost :: Text -> Value -> M Value\nhttpPost url body = send (HttpPost url body)",
-            // Isolating variants: a 404/network failure becomes `Left err`
-            // (carrying the URL + cause) instead of aborting the eval.
-            "tryHttpGet :: Text -> M (Either Text Value)\ntryHttpGet = send . TryHttpGet",
-            "tryHttpPost :: Text -> Value -> M (Either Text Value)\ntryHttpPost url body = send (TryHttpPost url body)",
-            // Parse JSON Text into ANY FromJSON type: the result type drives the
-            // decode (`FromJSON Value` is identity, so `parseJson t :: M Value`
-            // gives the raw value; `:: M Cfg` decodes a record). Raises on a parse
-            // OR decode failure.
-            "parseJson :: FromJSON a => Text -> M a\nparseJson t = send (ParseJson t) >>= \\v -> case fromJSON v of { Success a -> pure a; Error e -> error (T.pack e) }",
-            // Failure-isolating: a parse OR decode error becomes `Left err`.
-            "tryParseJson :: FromJSON a => Text -> M (Either Text a)\ntryParseJson t = send (TryParseJson t) >>= \\r -> pure (r >>= resultToEither . fromJSON)",
-        ],
-    }
-}
+// Http effect: `http_decl()` is generated from the single-source definition
+// (`effect_defs.rs`).
+crate::http_effect_def!(crate::effect_defs::effect_decl_projection);
 
 // Exec effect: `exec_decl()` is generated from the single-source definition
 // (`effect_defs.rs`).

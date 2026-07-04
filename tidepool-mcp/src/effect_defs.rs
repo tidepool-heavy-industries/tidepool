@@ -344,6 +344,74 @@ macro_rules! exec_effect_def {
     };
 }
 
+/// Http effect — single definition.
+#[macro_export]
+macro_rules! http_effect_def {
+    ($project:path) => {
+        $project! {
+            effect Http,
+            handler HttpHandler,
+            req HttpReq,
+            decl_fn http_decl,
+            description [
+                "JSON I/O. Fetch JSON from HTTP endpoints (returns Value), or ",
+                "parse a JSON Text into a Value with `parseJson`/`tryParseJson` ",
+                "(spec-compliant, parsed Rust-side via serde_json).",
+            ],
+            type_defs [],
+            verbs [
+                { ctor HttpGet, method http_get,
+                  args { url: "Text" as String },
+                  ret "Value" },
+                { ctor HttpPost, method http_post,
+                  args { url: "Text" as String, body: "Value" as tidepool_eval::value::Value },
+                  ret "Value" },
+                // Failure-isolating variants: a network error or non-2xx status
+                // becomes `Left err` instead of killing the eval.
+                { ctor TryHttpGet, method http_try_get,
+                  args { url: "Text" as String },
+                  ret "(Either Text Value)" },
+                { ctor TryHttpPost, method http_try_post,
+                  args { url: "Text" as String, body: "Value" as tidepool_eval::value::Value },
+                  ret "(Either Text Value)" },
+                // Parse a JSON string Rust-side (serde_json) into a Value. ParseJson
+                // raises on invalid JSON; TryParseJson returns Left.
+                { ctor ParseJson, method http_parse_json,
+                  args { s: "Text" as String },
+                  ret "Value" },
+                { ctor TryParseJson, method http_try_parse_json,
+                  args { s: "Text" as String },
+                  ret "(Either Text Value)" },
+            ],
+            helpers [
+                { name httpGet, sig "Text -> M Value",
+                  doc ["Fetch JSON from an HTTP endpoint."],
+                  body pointfree HttpGet },
+                { name httpPost, sig "Text -> Value -> M Value",
+                  doc ["POST a JSON body; returns the response Value."],
+                  body applied HttpPost(url, body) },
+                // Isolating variants: a 404/network failure becomes `Left err`
+                // (carrying the URL + cause) instead of aborting the eval.
+                { name tryHttpGet, sig "Text -> M (Either Text Value)",
+                  doc ["`httpGet` with failure isolation: network/status errors arrive as `Left err`."],
+                  body pointfree TryHttpGet },
+                { name tryHttpPost, sig "Text -> Value -> M (Either Text Value)",
+                  doc ["`httpPost` with failure isolation: network/status errors arrive as `Left err`."],
+                  body applied TryHttpPost(url, body) },
+                // Parse JSON Text into ANY FromJSON type: the result type drives the
+                // decode (`FromJSON Value` is identity, so `parseJson t :: M Value`
+                // gives the raw value; `:: M Cfg` decodes a record). Raises on a parse
+                // OR decode failure.
+                { raw ["parseJson :: FromJSON a => Text -> M a",
+                       "parseJson t = send (ParseJson t) >>= \\v -> case fromJSON v of { Success a -> pure a; Error e -> error (T.pack e) }"] },
+                // Failure-isolating: a parse OR decode error becomes `Left err`.
+                { raw ["tryParseJson :: FromJSON a => Text -> M (Either Text a)",
+                       "tryParseJson t = send (TryParseJson t) >>= \\r -> pure (r >>= resultToEither . fromJSON)"] },
+            ],
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     /// Every generated `*_decl()` must be byte-identical to the hand-written

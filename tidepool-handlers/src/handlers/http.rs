@@ -1,28 +1,16 @@
-use tidepool_bridge_derive::FromCore;
-use tidepool_effect::dispatch::{EffectContext, EffectHandler};
+use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_eval::value::Value;
-use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
+use tidepool_mcp::CapturedOutput;
 
 // ============================================================================
 // Tag 4: Http
 // ============================================================================
 
-#[derive(FromCore)]
-pub enum HttpReq {
-    #[core(name = "HttpGet")]
-    Get(String),
-    #[core(name = "HttpPost")]
-    Post(String, Value),
-    #[core(name = "TryHttpGet")]
-    TryGet(String),
-    #[core(name = "TryHttpPost")]
-    TryPost(String, Value),
-    #[core(name = "ParseJson")]
-    ParseJson(String),
-    #[core(name = "TryParseJson")]
-    TryParseJson(String),
-}
+// HttpReq + DescribeEffect + EffectHandler dispatch are generated from the
+// single-source definition; only the handler struct and the per-verb method
+// bodies below are hand-written.
+tidepool_mcp::http_effect_def!(crate::effect_glue::effect_rust_projection);
 
 pub fn parse_json_str(s: &str) -> Result<serde_json::Value, EffectError> {
     serde_json::from_str(s).map_err(|e| EffectError::Handler(format!("invalid JSON: {e}")))
@@ -107,33 +95,57 @@ impl HttpHandler {
     }
 }
 
-impl DescribeEffect for HttpHandler {
-    fn effect_decl() -> EffectDecl {
-        tidepool_mcp::http_decl()
-    }
-}
-
-impl EffectHandler<CapturedOutput> for HttpHandler {
-    type Request = HttpReq;
-    fn handle(
+impl HttpHandler {
+    fn http_get(
         &mut self,
-        req: HttpReq,
         cx: &EffectContext<'_, CapturedOutput>,
+        url: String,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        match req {
-            HttpReq::Get(url_str) => cx.respond(self.get(&url_str)?),
-            HttpReq::Post(url_str, body_val) => {
-                let json_body = tidepool_runtime::value_to_json(&body_val, cx.table(), 0);
-                cx.respond(self.post(&url_str, &json_body)?)
-            }
-            HttpReq::TryGet(url_str) => cx.respond_caught(self.get(&url_str)),
-            HttpReq::TryPost(url_str, body_val) => {
-                let json_body = tidepool_runtime::value_to_json(&body_val, cx.table(), 0);
-                cx.respond_caught(self.post(&url_str, &json_body))
-            }
-            HttpReq::ParseJson(s) => cx.respond(parse_json_str(&s)?),
-            HttpReq::TryParseJson(s) => cx.respond_caught(parse_json_str(&s)),
-        }
+        cx.respond(self.get(&url)?)
+    }
+
+    fn http_post(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        url: String,
+        body: Value,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let json_body = tidepool_runtime::value_to_json(&body, cx.table(), 0);
+        cx.respond(self.post(&url, &json_body)?)
+    }
+
+    fn http_try_get(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        url: String,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        cx.respond_caught(self.get(&url))
+    }
+
+    fn http_try_post(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        url: String,
+        body: Value,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let json_body = tidepool_runtime::value_to_json(&body, cx.table(), 0);
+        cx.respond_caught(self.post(&url, &json_body))
+    }
+
+    fn http_parse_json(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        s: String,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        cx.respond(parse_json_str(&s)?)
+    }
+
+    fn http_try_parse_json(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        s: String,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        cx.respond_caught(parse_json_str(&s))
     }
 }
 
@@ -151,7 +163,7 @@ mod tests {
         let url = "https://example.com".to_string().to_value(&table).unwrap();
         let val = Value::Con(con_id, vec![url]);
         let req = HttpReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, HttpReq::Get(ref u) if u == "https://example.com"));
+        assert!(matches!(req, HttpReq::HttpGet(ref u) if u == "https://example.com"));
     }
 
     #[test]
@@ -166,6 +178,6 @@ mod tests {
         let body = Value::Con(null_id, vec![]);
         let val = Value::Con(con_id, vec![url, body]);
         let req = HttpReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, HttpReq::Post(ref u, _) if u == "https://example.com/api"));
+        assert!(matches!(req, HttpReq::HttpPost(ref u, _) if u == "https://example.com/api"));
     }
 }
