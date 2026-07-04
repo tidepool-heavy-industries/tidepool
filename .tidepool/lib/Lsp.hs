@@ -80,14 +80,14 @@ isTestM n
               target   = nodeLine n
           in  pure (any (target >) cfgLines)
 
--- | Unwrapping helpers: the effect ops return `Maybe [LspNode]` (Nothing = the
--- node isn't analyzable). For plain graph-walking you usually want "[] = stop",
--- so these collapse Nothing → []. The honest `lsp*` primitives stay available
--- when you want to distinguish "not a function" from "no callers".
+-- | Aliases over the effect verbs, kept for the graph-walk helpers below.
+-- `lspCallers`/`lspCallees`/`lspRefs` are already plain `LspNode -> M
+-- [LspNode]` ([] = none), so these are now a naming convenience, not an
+-- unwrap — see `LspGraph.walk` for the shared BFS engine these compose with.
 callersOf, calleesOf, refsOf :: LspNode -> M [LspNode]
-callersOf = fmap (fromMaybe []) . lspCallers
-calleesOf = fmap (fromMaybe []) . lspCallees
-refsOf    = fmap (fromMaybe []) . lspRefs
+callersOf = lspCallers
+calleesOf = lspCallees
+refsOf    = lspRefs
 
 -- ===== the steer cascade =====
 
@@ -125,9 +125,12 @@ askBool prompt = do
 -- ===== graph walk core =====
 
 -- | BFS `edge` outward from `root` up to `depth`, keeping frontier nodes that
--- pass `keep`. The shared engine behind `explore`/`chart`.
-walk :: (LspNode -> M [LspNode]) -> (LspNode -> M Bool) -> Int -> LspNode -> M [LspNode]
-walk edge keep depth root = loopM step (depth, [root], [])
+-- pass `keep`. The shared engine behind `explore`/`chart`. Distinct from
+-- `LspGraph.walk` (no cascade predicate, visited-set dedup instead) — this
+-- one prunes each frontier through the steer cascade, that one closes a
+-- transitive closure.
+walkKeep :: (LspNode -> M [LspNode]) -> (LspNode -> M Bool) -> Int -> LspNode -> M [LspNode]
+walkKeep edge keep depth root = loopM step (depth, [root], [])
   where
     step (d, frontier, acc) =
       if d <= (0 :: Int)
@@ -144,7 +147,7 @@ walk edge keep depth root = loopM step (depth, [root], [])
 -- The model tier runs `isTestM` first so that @#[cfg(test)]@ functions in
 -- prod-path files (e.g. @src\/lib.rs@) are pruned without calling the LLM.
 explore :: Int -> Text -> LspNode -> M [LspNode]
-explore depth goal = walk callersOf onPath depth
+explore depth goal = walkKeep callersOf onPath depth
   where
     onPath = steer
       (\n -> if isTest n then Just False else Nothing)
@@ -207,7 +210,7 @@ saferRename sym new = do
 -- local model write a one-line role (escalating unclear ones), emit a map.
 chart :: Int -> LspNode -> M Value
 chart depth entry = do
-  ns   <- walk calleesOf (\_ -> pure True) depth entry
+  ns   <- walkKeep calleesOf (\_ -> pure True) depth entry
   rows <- mapM describe ns
   pure (toJSON rows)
   where
@@ -252,7 +255,7 @@ findDef name intent =
 -- ("function description", "summary") fall back to the hover line too.
 chartAuto :: Int -> LspNode -> M Value
 chartAuto depth entry = do
-  ns   <- walk localCallees (\_ -> pure True) depth entry
+  ns   <- walkKeep localCallees (\_ -> pure True) depth entry
   rows <- mapM describe (dedupeOn nodeKey ns)
   pure (toJSON rows)
   where

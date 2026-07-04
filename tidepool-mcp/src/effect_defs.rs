@@ -667,12 +667,15 @@ macro_rules! lsp_effect_def {
                 "Semantic code-graph navigation via a language server (rust-analyzer, .rs). ",
                 "Everything is a LspNode {nodeName, nodeContainer, nodeKind, nodeFile, nodePos, nodeText} ",
                 "(nodeLine derives from nodePos) — the currency you thread. ",
-                "`lspWhere name` → all definitions of NAME (the seed). Then walk the graph: ",
-                "`lspCallers n` / `lspCallees n` (incoming/outgoing calls), `lspRefs n` (use sites), ",
-                "`lspDef n` (any node → its definition), `lspHover n` (type/sig/docs), ",
-                "`lspRename n new` (→ unified diff; review then `applyDiff`). Each returns LspNodes you feed ",
-                "back in (e.g. `lspWhere \"x\" >>= concatMapM lspCallers`). `lspDiags file` for a file's errors. ",
-                "Needs the `tidepool-lsp-daemon` running in the workspace; queries error cleanly if not.",
+                "`lspWhere name` → all definitions of NAME (the seed, `Either LspError [LspNode]`). ",
+                "Then walk the graph: `lspCallers n` / `lspCallees n` (incoming/outgoing calls), ",
+                "`lspRefs n` (use sites) — each `LspNode -> M [LspNode]`, [] = none, so they chain ",
+                "directly (e.g. `lspWhere \"x\" >>= liftEither >>= concatMapM lspCallers`). ",
+                "`lspDef n` (any node → its definition), `lspHover n` (type/sig/docs) stay `Maybe` ",
+                "(a node genuinely may lack one). `lspRename n new` (→ unified diff; review then ",
+                "`applyDiff`). `lspDiags file` for a file's errors. Needs the `tidepool-lsp-daemon` ",
+                "running in the workspace; a daemon-down failure surfaces as `Left (LspDaemonDown _)` ",
+                "from `lspWhere`/`lspDiags`, or a structural eval abort from the walker verbs.",
             ],
             type_defs [
                 "data Position = Position { posLine :: Int, posChar :: Int } deriving (Show, Eq)",
@@ -684,14 +687,19 @@ macro_rules! lsp_effect_def {
                 "instance ToJSON Diag where\n  toJSON (Diag f l s m) = object [\"file\" .= f, \"line\" .= l, \"severity\" .= s, \"message\" .= m]",
             ],
             // #335 typed-failure ADT — MINIMAL tagging. The daemon-connection
-            // failure is the only failure shared across every verb, but most
-            // verbs already answer absence via `Maybe` (Nothing = "doesn't
-            // apply to this node"), so tagging them too would fold two
-            // different kinds of "no" into one Either. Only the SEED
-            // (`lspWhere`) and the plain-list `lspDiags` — neither of which
-            // has a Maybe already — get `errors LspError`; the Maybe-returning
-            // graph-walk verbs (lspCallers/lspCallees/lspRefs/lspDef/lspHover/
-            // lspRename) keep aborting on daemon-down, unchanged.
+            // failure is the only failure shared across every verb, but
+            // lspDef/lspHover/lspRename already answer per-node absence via
+            // `Maybe` (Nothing = "doesn't apply to this node"), so tagging
+            // them too would fold two different kinds of "no" into one
+            // Either. Only the SEED (`lspWhere`) and the plain-list
+            // `lspDiags` — neither of which has a Maybe already — get
+            // `errors LspError`. lspCallers/lspCallees/lspRefs return a plain
+            // `[LspNode]` (empty = none) so they compose with `concatMapM`;
+            // a daemon-down failure there is a STRUCTURAL eval abort (you
+            // can't meaningfully continue a graph walk with no daemon), not
+            // a silent `[]` — see `lsp_err_to_effect` in handlers/lsp.rs.
+            // lspDef/lspHover/lspRename keep aborting on daemon-down too,
+            // unchanged.
             errors LspError [
                 { ctor LspDaemonDown, fields { detail: "Text" as String }, doc "no tidepool-lsp-daemon reachable at the workspace socket" },
             ],
@@ -701,13 +709,13 @@ macro_rules! lsp_effect_def {
                   ret "[LspNode]", errors LspError },
                 { ctor LspCallers, method lsp_callers,
                   args { n: "LspNode" as LspNode },
-                  ret "(Maybe [LspNode])" },
+                  ret "[LspNode]" },
                 { ctor LspCallees, method lsp_callees,
                   args { n: "LspNode" as LspNode },
-                  ret "(Maybe [LspNode])" },
+                  ret "[LspNode]" },
                 { ctor LspRefs, method lsp_refs,
                   args { n: "LspNode" as LspNode },
-                  ret "(Maybe [LspNode])" },
+                  ret "[LspNode]" },
                 { ctor LspDef, method lsp_def,
                   args { n: "LspNode" as LspNode },
                   ret "(Maybe LspNode)" },
@@ -726,14 +734,15 @@ macro_rules! lsp_effect_def {
                   doc ["Seed: every workspace definition named X (each a LspNode with container/file/line/source line).",
                        "`Left (LspDaemonDown _)` when the daemon isn't reachable; unwrap with `>>= liftEither`."],
                   body pointfree LspWhere },
-                { name lspCallers, sig "LspNode -> M (Maybe [LspNode])",
-                  doc ["Incoming calls. Nothing = node not callable; Just [] = callable, none. Unwrap with callersOf for plain chaining."],
+                { name lspCallers, sig "LspNode -> M [LspNode]",
+                  doc ["Incoming calls; [] = none (or node not callable). A daemon-down failure",
+                       "aborts the eval structurally (not a silent []) — see the Lsp effect description."],
                   body pointfree LspCallers },
-                { name lspCallees, sig "LspNode -> M (Maybe [LspNode])",
-                  doc ["Outgoing calls. Nothing = node not callable; Just [] = callable, none."],
+                { name lspCallees, sig "LspNode -> M [LspNode]",
+                  doc ["Outgoing calls; [] = none (or node not callable)."],
                   body pointfree LspCallees },
-                { name lspRefs, sig "LspNode -> M (Maybe [LspNode])",
-                  doc ["Use sites of this node's symbol (kind = \"reference\"). Nothing = not a symbol."],
+                { name lspRefs, sig "LspNode -> M [LspNode]",
+                  doc ["Use sites of this node's symbol (kind = \"reference\"); [] = none (or not a symbol)."],
                   body pointfree LspRefs },
                 { name lspDef, sig "LspNode -> M (Maybe LspNode)",
                   doc ["Resolve any node (e.g. a use site) to its definition node."],
@@ -1144,8 +1153,10 @@ mod tests {
     }
 
     /// #335 Lsp wave: MINIMAL tagging — only the seed (`lspWhere`) and the
-    /// plain-list `lspDiags` thread `Either LspError`; the Maybe-returning
-    /// graph-walk verbs are untouched.
+    /// plain-list `lspDiags` thread `Either LspError`. The list-returning
+    /// graph-walk verbs (lspCallers/lspCallees/lspRefs) are plain `[LspNode]`
+    /// (round-2 ergonomics: empty = none, so they compose with concatMapM);
+    /// lspDef/lspHover/lspRename keep `Maybe` (genuine per-node absence).
     #[test]
     fn generated_lsp_decl_threads_either_for_seed_and_diags_only() {
         let d = crate::lsp_decl();
@@ -1155,10 +1166,17 @@ mod tests {
         assert!(d
             .constructors
             .contains(&"LspDiagnostics :: Text -> Lsp (Either LspError [Diag])"));
-        // Maybe-returning graph-walk verbs stay bare.
+        // List-returning graph-walk verbs are plain [LspNode], not Maybe-wrapped.
         assert!(d
             .constructors
-            .contains(&"LspCallers :: LspNode -> Lsp (Maybe [LspNode])"));
+            .contains(&"LspCallers :: LspNode -> Lsp [LspNode]"));
+        assert!(d
+            .constructors
+            .contains(&"LspCallees :: LspNode -> Lsp [LspNode]"));
+        assert!(d
+            .constructors
+            .contains(&"LspRefs :: LspNode -> Lsp [LspNode]"));
+        // lspDef/lspHover keep Maybe — a node genuinely may lack one.
         assert!(d
             .constructors
             .contains(&"LspDef :: LspNode -> Lsp (Maybe LspNode)"));

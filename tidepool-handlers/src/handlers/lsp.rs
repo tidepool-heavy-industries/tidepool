@@ -137,8 +137,8 @@ impl LspHandler {
     }
 }
 
-/// Human-readable render of a typed Lsp failure, for the untagged
-/// Maybe-returning verbs that still forward to the eval-abort channel.
+/// Human-readable render of a typed Lsp failure, for the untagged verbs
+/// that still forward to the eval-abort channel.
 impl std::fmt::Display for LspError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -148,8 +148,10 @@ impl std::fmt::Display for LspError {
 }
 
 /// Forward a typed `LspError` to the eval-abort channel, for the untagged
-/// Maybe-returning verbs (lspCallers/lspCallees/lspRefs/lspDef/lspHover/
-/// lspRename) whose shared `query` helper is now `Result<_, LspError>`.
+/// verbs (lspCallers/lspCallees/lspRefs/lspDef/lspHover/lspRename) whose
+/// shared `query` helper is now `Result<_, LspError>`. For the plain-list
+/// walkers this IS the "structural abort" the round-2 design calls for —
+/// a daemon-down failure mid-walk kills the eval, it never surfaces as [].
 fn lsp_err_to_effect(e: LspError) -> EffectError {
     EffectError::Handler(e.to_string())
 }
@@ -176,15 +178,6 @@ fn nodes(r: &serde_json::Value) -> Vec<LspNode> {
         .collect()
 }
 
-/// Null reply = the operation doesn't apply to this node.
-fn maybe_nodes(r: &serde_json::Value) -> Option<Vec<LspNode>> {
-    if r.is_null() {
-        None
-    } else {
-        Some(nodes(r))
-    }
-}
-
 impl LspHandler {
     // Errors-tagged (#335): total in `LspError`, no `cx` — the dispatch arm
     // wraps the `Result` via `cx.respond` (Ok→Right, Err→Left).
@@ -193,9 +186,13 @@ impl LspHandler {
         Ok(nodes(&r))
     }
 
-    // Untagged: daemon-down still aborts the eval (via `lsp_err_to_effect`) —
-    // these verbs already answer per-node absence with `Maybe`, so folding
-    // daemon-down into that same Maybe would conflate two different "no"s.
+    // Untagged, plain [LspNode] (round-2 ergonomics): a daemon-down failure
+    // still aborts the eval structurally (via `lsp_err_to_effect`) — you
+    // can't meaningfully continue a graph walk with no daemon. A null/empty
+    // reply from the daemon (node not analyzable, or analyzable with no
+    // results) collapses to the SAME `[]` here — that ambiguity is fine
+    // because both mean "nothing to walk from this node", the only
+    // distinction a caller composing `concatMapM lspCallers` cares about.
     fn lsp_callers(
         &mut self,
         cx: &EffectContext<'_, CapturedOutput>,
@@ -204,7 +201,7 @@ impl LspHandler {
         let r = self
             .query(serde_json::json!({ "op": "callers", "node": n.to_wire() }))
             .map_err(lsp_err_to_effect)?;
-        cx.respond(maybe_nodes(&r))
+        cx.respond(nodes(&r))
     }
 
     fn lsp_callees(
@@ -215,7 +212,7 @@ impl LspHandler {
         let r = self
             .query(serde_json::json!({ "op": "callees", "node": n.to_wire() }))
             .map_err(lsp_err_to_effect)?;
-        cx.respond(maybe_nodes(&r))
+        cx.respond(nodes(&r))
     }
 
     fn lsp_refs(
@@ -226,7 +223,7 @@ impl LspHandler {
         let r = self
             .query(serde_json::json!({ "op": "references", "node": n.to_wire() }))
             .map_err(lsp_err_to_effect)?;
-        cx.respond(maybe_nodes(&r))
+        cx.respond(nodes(&r))
     }
 
     fn lsp_def(

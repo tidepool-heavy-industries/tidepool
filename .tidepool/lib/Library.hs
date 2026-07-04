@@ -19,6 +19,7 @@ module Library
   , module Optics
   , module SelfTest
   , module Lsp
+  , module LspGraph
   , module Churn
   , module Repo
   ) where
@@ -32,5 +33,6 @@ import Edit
 import Optics
 import SelfTest
 import Lsp
+import LspGraph
 import Churn
 import Repo
