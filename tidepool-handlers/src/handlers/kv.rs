@@ -1,37 +1,19 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tidepool_bridge_derive::FromCore;
-use tidepool_effect::dispatch::{EffectContext, EffectHandler};
+use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_eval::value::Value;
-use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
+use tidepool_mcp::CapturedOutput;
 
 // ============================================================================
 // Tag 1: KV Store
 // ============================================================================
 
-#[derive(FromCore)]
-pub enum KvReq {
-    #[core(name = "KvGet")]
-    Get(String),
-    #[core(name = "KvSet")]
-    Set(String, Value),
-    #[core(name = "KvDelete")]
-    Delete(String),
-    #[core(name = "KvKeys")]
-    Keys,
-    /// Delete all keys whose string representation starts with `prefix`.
-    /// Pass an empty string to clear the ENTIRE store.
-    #[core(name = "KvClear")]
-    Clear(String),
-    /// List all keys whose string representation starts with `prefix`.
-    #[core(name = "KvKeysP")]
-    KeysP(String),
-    /// Return a summary JSON value: `{count, sample, file_size_bytes}`.
-    #[core(name = "KvInfo")]
-    Info,
-}
+// KvReq + DescribeEffect + EffectHandler dispatch are generated from the
+// single-source definition; only the handler struct and the per-verb method
+// bodies below are hand-written.
+tidepool_mcp::kv_effect_def!(crate::effect_glue::effect_rust_projection);
 
 #[derive(Clone)]
 pub struct KvHandler {
@@ -85,81 +67,112 @@ impl KvHandler {
     }
 }
 
-impl DescribeEffect for KvHandler {
-    fn effect_decl() -> EffectDecl {
-        tidepool_mcp::kv_decl()
+impl KvHandler {
+    /// Lock the store (shared prelude of every verb).
+    fn locked(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, std::collections::HashMap<String, serde_json::Value>>, EffectError>
+    {
+        self.store
+            .lock()
+            .map_err(|e| EffectError::Handler(format!("Mutex poisoned: {}", e)))
     }
-}
 
-impl EffectHandler<CapturedOutput> for KvHandler {
-    type Request = KvReq;
-    fn handle(
+    fn kv_get(
         &mut self,
-        req: KvReq,
+        cx: &EffectContext<'_, CapturedOutput>,
+        key: String,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let store = self.locked()?;
+        let val: Option<serde_json::Value> = store.get(&key).cloned();
+        cx.respond(val)
+    }
+
+    fn kv_set(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        key: String,
+        val: Value,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let json_val = tidepool_runtime::value_to_json(&val, cx.table(), 0);
+        let mut store = self.locked()?;
+        store.insert(key, json_val);
+        self.flush(&store);
+        cx.respond(())
+    }
+
+    fn kv_delete(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        key: String,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let mut store = self.locked()?;
+        store.remove(&key);
+        self.flush(&store);
+        cx.respond(())
+    }
+
+    fn kv_keys(
+        &mut self,
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        let mut store = self
-            .store
-            .lock()
-            .map_err(|e| EffectError::Handler(format!("Mutex poisoned: {}", e)))?;
-        match req {
-            KvReq::Get(key) => {
-                let val: Option<serde_json::Value> = store.get(&key).cloned();
-                cx.respond(val)
-            }
-            KvReq::Set(key, val) => {
-                let json_val = tidepool_runtime::value_to_json(&val, cx.table(), 0);
-                store.insert(key, json_val);
-                self.flush(&store);
-                cx.respond(())
-            }
-            KvReq::Delete(key) => {
-                store.remove(&key);
-                self.flush(&store);
-                cx.respond(())
-            }
-            KvReq::Keys => {
-                let keys: Vec<String> = store.keys().cloned().collect();
-                cx.respond(keys)
-            }
-            KvReq::Clear(prefix) => {
-                let before = store.len();
-                if prefix.is_empty() {
-                    // Empty prefix clears the ENTIRE store. This is intentional and loud
-                    // in the docstring — callers that want to clear a namespace should pass
-                    // a non-empty prefix (e.g. "agent/" rather than "").
-                    store.clear();
-                } else {
-                    store.retain(|k, _| !k.starts_with(prefix.as_str()));
-                }
-                let deleted = (before - store.len()) as i64;
-                self.flush(&store);
-                cx.respond(deleted)
-            }
-            KvReq::KeysP(prefix) => {
-                let mut keys: Vec<String> = store
-                    .keys()
-                    .filter(|k| k.starts_with(prefix.as_str()))
-                    .cloned()
-                    .collect();
-                keys.sort();
-                cx.respond(keys)
-            }
-            KvReq::Info => {
-                let count = store.len() as i64;
-                let mut sample: Vec<String> = store.keys().take(10).cloned().collect();
-                sample.sort();
-                let file_size = std::fs::metadata(&self.path)
-                    .map(|m| m.len() as i64)
-                    .unwrap_or(0);
-                let info = serde_json::json!({
-                    "count": count,
-                    "sample": sample,
-                    "file_size_bytes": file_size
-                });
-                cx.respond(info)
-            }
+        let store = self.locked()?;
+        let keys: Vec<String> = store.keys().cloned().collect();
+        cx.respond(keys)
+    }
+
+    fn kv_clear(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        prefix: String,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let mut store = self.locked()?;
+        let before = store.len();
+        if prefix.is_empty() {
+            // Empty prefix clears the ENTIRE store. This is intentional and loud
+            // in the docstring — callers that want to clear a namespace should pass
+            // a non-empty prefix (e.g. "agent/" rather than "").
+            store.clear();
+        } else {
+            store.retain(|k, _| !k.starts_with(prefix.as_str()));
         }
+        let deleted = (before - store.len()) as i64;
+        self.flush(&store);
+        cx.respond(deleted)
+    }
+
+    fn kv_keys_p(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        prefix: String,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let store = self.locked()?;
+        let mut keys: Vec<String> = store
+            .keys()
+            .filter(|k| k.starts_with(prefix.as_str()))
+            .cloned()
+            .collect();
+        keys.sort();
+        cx.respond(keys)
+    }
+
+    fn kv_info(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let store = self.locked()?;
+        let count = store.len() as i64;
+        let mut sample: Vec<String> = store.keys().take(10).cloned().collect();
+        sample.sort();
+        let file_size = std::fs::metadata(&self.path)
+            .map(|m| m.len() as i64)
+            .unwrap_or(0);
+        let info = serde_json::json!({
+            "count": count,
+            "sample": sample,
+            "file_size_bytes": file_size
+        });
+        cx.respond(info)
     }
 }
 
@@ -178,7 +191,7 @@ mod tests {
         let con_id = table.get_by_name("KvKeys").unwrap();
         let val = Value::Con(con_id, vec![]);
         let req = KvReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, KvReq::Keys));
+        assert!(matches!(req, KvReq::KvKeys()));
     }
 
     #[test]
@@ -188,7 +201,7 @@ mod tests {
         let key = "mykey".to_string().to_value(&table).unwrap();
         let val = Value::Con(con_id, vec![key]);
         let req = KvReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, KvReq::Get(ref k) if k == "mykey"));
+        assert!(matches!(req, KvReq::KvGet(ref k) if k == "mykey"));
     }
 
     #[test]

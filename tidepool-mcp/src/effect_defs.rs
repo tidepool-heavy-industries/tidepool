@@ -660,6 +660,85 @@ macro_rules! lsp_effect_def {
     };
 }
 
+/// KV effect — single definition.
+#[macro_export]
+macro_rules! kv_effect_def {
+    ($project:path) => {
+        $project! {
+            effect KV,
+            handler KvHandler,
+            req KvReq,
+            decl_fn kv_decl,
+            description [
+                "Persistent key-value store. State survives across calls within one server session. ",
+                "Key convention: use slash-delimited namespaces (e.g. \"agent-42/foo\") to avoid ",
+                "cross-agent collision. kvClear/kvKeysP operate on prefix boundaries.",
+            ],
+            type_defs [],
+            verbs [
+                { ctor KvGet, method kv_get,
+                  args { key: "Text" as String },
+                  ret "(Maybe Value)" },
+                { ctor KvSet, method kv_set,
+                  args { key: "Text" as String, val: "Value" as tidepool_eval::value::Value },
+                  ret "()" },
+                { ctor KvDelete, method kv_delete,
+                  args { key: "Text" as String },
+                  ret "()" },
+                { ctor KvKeys, method kv_keys,
+                  args { },
+                  ret "[Text]" },
+                // Delete all keys with the given prefix; return count deleted.
+                // Pass "" to clear the ENTIRE store (dangerous — see kvClear docstring).
+                { ctor KvClear, method kv_clear,
+                  args { prefix: "Text" as String },
+                  ret "Int" },
+                // List keys matching a prefix, sorted.
+                { ctor KvKeysP, method kv_keys_p,
+                  args { prefix: "Text" as String },
+                  ret "[Text]" },
+                // Summary: {count, sample, file_size_bytes} — inspect the junk-drawer.
+                { ctor KvInfo, method kv_info,
+                  args { },
+                  ret "Value" },
+            ],
+            helpers [
+                { name kvGet, sig "Text -> M (Maybe Value)",
+                  doc ["Look up a key; Nothing when absent."],
+                  body pointfree KvGet },
+                { name kvSet, sig "Text -> Value -> M ()",
+                  doc ["Persist a JSON value under a key."],
+                  body applied KvSet(k, v) },
+                { name kvDel, sig "Text -> M ()",
+                  doc ["Delete a key (no-op when absent)."],
+                  body pointfree KvDelete },
+                { name kvKeys, sig "M [Text]",
+                  doc ["All keys (unordered; kvKeysP \"\" for sorted)."],
+                  body nullary KvKeys },
+                { name kvClear, sig "Text -> M Int",
+                  doc ["Delete all keys whose name starts with @prefix@; return the count deleted.",
+                       "Pass \"\" (empty string) to clear the ENTIRE store — this erases ALL",
+                       "persisted KV data for this server session, so use with caution.",
+                       "Recommended pattern: namespace keys as \"ns/key\" and clear with \"ns/\".",
+                       "NOTE: per-session automatic scoping is a deferred design decision (#327);",
+                       "callers manage namespaces manually via this prefix argument."],
+                  body pointfree KvClear },
+                { name kvKeysP, sig "Text -> M [Text]",
+                  doc ["All keys whose name starts with @prefix@, returned sorted.",
+                       "E.g. @kvKeysP \"agent/\"@ returns @[\"agent/bar\", \"agent/foo\", ...]@.",
+                       "Pass \"\" to list ALL keys sorted (like kvKeys but deterministically ordered)."],
+                  body pointfree KvKeysP },
+                { name kvInfo, sig "M Value",
+                  doc ["Summary of KV store state as a JSON Value:",
+                       "@{count :: Int, sample :: [Text], file_size_bytes :: Int}@.",
+                       "Use to inspect junk-drawer accumulation without listing all keys.",
+                       "Extract fields with optics: @i <- kvInfo; i ^? key \"count\" . _Int@"],
+                  body nullary KvInfo },
+            ],
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     /// Every generated `*_decl()` must be byte-identical to the hand-written

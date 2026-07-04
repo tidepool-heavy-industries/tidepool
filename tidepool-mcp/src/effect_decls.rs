@@ -87,63 +87,9 @@ where
 // Rust half (`ConsoleReq`, dispatch) projects from the same table.
 crate::console_effect_def!(crate::effect_defs::effect_decl_projection);
 
-/// Key-value store effect.
-///
-/// ## Namespacing convention
-///
-/// Keys are plain `Text`; there is no automatic per-session scoping (deferred
-/// design decision, tracked in issue #327). To avoid cross-agent collision use a
-/// slash-delimited prefix: `"agent-42/foo"`, `"session-abc/bar"`. The `kvClear`
-/// and `kvKeysP` verbs operate on prefix boundaries, so a namespace is a usable
-/// first-class scope without any server-side change.
-pub fn kv_decl() -> EffectDecl {
-    EffectDecl {
-        type_name: "KV",
-        description:
-            "Persistent key-value store. State survives across calls within one server session. \
-             Key convention: use slash-delimited namespaces (e.g. \"agent-42/foo\") to avoid \
-             cross-agent collision. kvClear/kvKeysP operate on prefix boundaries.",
-        constructors: &[
-            "KvGet :: Text -> KV (Maybe Value)",
-            "KvSet :: Text -> Value -> KV ()",
-            "KvDelete :: Text -> KV ()",
-            "KvKeys :: KV [Text]",
-            // Delete all keys with the given prefix; return count deleted.
-            // Pass \"\" to clear the ENTIRE store (dangerous — see kvClear docstring).
-            "KvClear :: Text -> KV Int",
-            // List keys matching a prefix, sorted.
-            "KvKeysP :: Text -> KV [Text]",
-            // Summary: {count, sample, file_size_bytes} — inspect the junk-drawer.
-            "KvInfo :: KV Value",
-        ],
-        type_defs: &[],
-        helpers: &[
-            "kvGet :: Text -> M (Maybe Value)\nkvGet = send . KvGet",
-            "kvSet :: Text -> Value -> M ()\nkvSet k v = send (KvSet k v)",
-            "kvDel :: Text -> M ()\nkvDel = send . KvDelete",
-            "kvKeys :: M [Text]\nkvKeys = send KvKeys",
-            "-- | Delete all keys whose name starts with @prefix@; return the count deleted.\n\
-             -- Pass \\\"\\\" (empty string) to clear the ENTIRE store — this erases ALL\n\
-             -- persisted KV data for this server session, so use with caution.\n\
-             -- Recommended pattern: namespace keys as \\\"ns/key\\\" and clear with \\\"ns/\\\".\n\
-             -- NOTE: per-session automatic scoping is a deferred design decision (#327);\n\
-             -- callers manage namespaces manually via this prefix argument.\n\
-             kvClear :: Text -> M Int\n\
-             kvClear = send . KvClear",
-            "-- | All keys whose name starts with @prefix@, returned sorted.\n\
-             -- E.g. @kvKeysP \\\"agent/\\\"@ returns @[\\\"agent/bar\\\", \\\"agent/foo\\\", ...]@.\n\
-             -- Pass \\\"\\\" to list ALL keys sorted (like kvKeys but deterministically ordered).\n\
-             kvKeysP :: Text -> M [Text]\n\
-             kvKeysP = send . KvKeysP",
-            "-- | Summary of KV store state as a JSON Value:\n\
-             -- @{count :: Int, sample :: [Text], file_size_bytes :: Int}@.\n\
-             -- Use to inspect junk-drawer accumulation without listing all keys.\n\
-             -- Extract fields with optics: @i <- kvInfo; i ^? key \\\"count\\\" . _Int@\n\
-             kvInfo :: M Value\n\
-             kvInfo = send KvInfo",
-        ],
-    }
-}
+// KV effect: `kv_decl()` is generated from the single-source definition
+// (`effect_defs.rs`).
+crate::kv_effect_def!(crate::effect_defs::effect_decl_projection);
 
 /// File I/O effect (sandboxed).
 pub fn fs_decl() -> EffectDecl {
