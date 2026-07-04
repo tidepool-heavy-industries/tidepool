@@ -93,7 +93,26 @@ pub struct JitEffectMachine {
     /// `(*vmctx).machine_state`, pointed at this field by
     /// `install_registries`/the run entries. Leaves 2 and 3 add more fields.
     machine_state: MachineState,
+    /// E2 threadless suspension: the freer-simple continuation heap pointer of a
+    /// turn that suspended at the ask boundary (`run_suspendable` →
+    /// `SuspendableOutcome::Suspended`), waiting for `resume_suspended`. `None`
+    /// for a running or completed machine. The pointer is into this machine's
+    /// retained session heap; it stays valid while stowed (no GC runs on a
+    /// suspended machine) and is re-rooted by `resume_suspended` before its
+    /// answer materialization can collect.
+    suspended_continuation: Option<*mut u8>,
 }
+
+// SAFETY: a `JitEffectMachine` is only ever touched by ONE thread at a time —
+// it is either stowed as data (E2 suspension) or running on exactly one eval
+// thread, never both. This mirrors the existing `unsafe impl Send` on
+// `CompiledEffectMachine`/`MachineState`/`GcState`: the JIT executable mappings
+// and heap buffers are process-global address space, valid on any thread, and
+// the raw `suspended_continuation` pointer is a heap offset into an owned
+// buffer that moves with the machine. Concurrent access is prevented by the
+// SessionEngine registry (a machine is stowed XOR running), so sending
+// ownership across the suspend/resume thread boundary is sound.
+unsafe impl Send for JitEffectMachine {}
 
 /// External handle for cancelling a running `JitEffectMachine`.
 ///
@@ -319,6 +338,7 @@ impl JitEffectMachine {
             cancel_flag: Arc::new(AtomicBool::new(false)),
             session: None,
             machine_state: MachineState::new(),
+            suspended_continuation: None,
         })
     }
 
@@ -349,6 +369,7 @@ impl JitEffectMachine {
                 old_space: crate::old_space::OldSpace::new(),
             }),
             machine_state: MachineState::new(),
+            suspended_continuation: None,
         })
     }
 
@@ -512,6 +533,185 @@ impl JitEffectMachine {
         // cause; the bridge outcome — even a successful bridge of a poison
         // value — is only its symptom.
         crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))
+    }
+
+    // ----------------------------------------------------------------------
+    // E2 — threadless suspension at the ask boundary.
+    // ----------------------------------------------------------------------
+
+    /// Drive an effectful turn until it COMPLETES or SUSPENDS at `suspend_tag`
+    /// (the `Ask` union tag). Additive sibling of [`Self::run`]: a turn that
+    /// never reaches `suspend_tag` drives byte-identically — the effect loop's
+    /// suspend branch is simply never taken (see [`drive_effect_loop`]).
+    ///
+    /// On suspension the machine's heap is retained through the session
+    /// machinery (`RegistryGuard::drop` → `reclaim_session_heap`) and the
+    /// continuation is stowed inside `self`; the whole `JitEffectMachine` can
+    /// then be moved off this thread and parked as data. Call
+    /// [`Self::resume_suspended`] with the answer to continue on ANY thread.
+    ///
+    /// # Panics
+    /// Panics on a non-session machine — heap retention across the suspension
+    /// requires [`Self::compile_session`].
+    pub fn run_suspendable<U, H: DispatchEffect<U>>(
+        &mut self,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+    ) -> Result<SuspendableOutcome, JitError> {
+        assert!(
+            self.session.is_some(),
+            "run_suspendable requires a session machine (compile_session)"
+        );
+        let func_id = self.func_id;
+        let tags = self.tags.map_err(JitError::MissingConTags)?;
+        crate::signal_safety::install();
+        let mut _guard = self.install_registries();
+        // SAFETY: finalized JIT code pointer; calling convention per contract.
+        let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
+            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
+        let vmctx = self.make_session_vmctx();
+        let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
+        // SAFETY: machine_state outlives this run (owned by self).
+        machine.vmctx_mut().machine_state = &mut self.machine_state as *mut MachineState;
+        // SAFETY: machine.vmctx_mut() points into `machine` on this frame;
+        // CompiledEffectMachine has no custom Drop so the bytes are valid when
+        // _guard drops (machine drops first but the frame is still live).
+        unsafe {
+            _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
+        }
+        let yield_result = initial_step(&mut machine, "stepping main function");
+        let outcome = drive_effect_loop(
+            &mut machine,
+            &self.cancel_flag,
+            table,
+            handlers,
+            user,
+            "",
+            Some(suspend_tag),
+            yield_result,
+        )?;
+        self.finish_suspendable(&mut machine, outcome)
+    }
+
+    /// Re-enter a turn suspended by [`Self::run_suspendable`], feeding the
+    /// (already schema-validated, bridged) answer — or an abort — into the
+    /// stowed ask and driving to the next suspension or completion.
+    ///
+    /// Runs on ANY thread: [`Self::install_registries`] re-installs this
+    /// machine's per-thread reach (`CURRENT_MACHINE`, stack-map/lambda
+    /// registry, cancel flag) and re-points the GC state at the RETAINED
+    /// session heap. It must NOT reset the nursery — the session heap-retention
+    /// path (heap `Some` → `install_session_buffer`, or `None` → nursery at the
+    /// preserved cursor) preserves the mid-ask heap; a nursery reset would
+    /// silently discard it. That is edit site (a).
+    ///
+    /// Errors if the machine is not currently suspended.
+    pub fn resume_suspended<U, H: DispatchEffect<U>>(
+        &mut self,
+        table: &DataConTable,
+        handlers: &mut H,
+        user: &U,
+        suspend_tag: u64,
+        input: ResumeInput,
+    ) -> Result<SuspendableOutcome, JitError> {
+        let continuation = self.suspended_continuation.take().ok_or_else(|| {
+            JitError::Effect(EffectError::Handler(
+                "resume_suspended called on a machine that is not suspended".into(),
+            ))
+        })?;
+        let tags = self.tags.map_err(JitError::MissingConTags)?;
+        crate::signal_safety::install();
+        // Re-points GC state at the retained heap (heap `Some` → session buffer,
+        // else nursery at the preserved cursor) — NOT a nursery reset.
+        let mut _guard = self.install_registries();
+        // SAFETY: finalized JIT code pointer. The entry func is not re-called on
+        // resume (the continuation is applied via `machine.resume`), but
+        // CompiledEffectMachine needs a func_ptr for its own tail-call resolution.
+        let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
+            unsafe { std::mem::transmute(self.pipeline.get_function_ptr(self.func_id)) };
+        let vmctx = self.make_session_vmctx();
+        let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
+        // SAFETY: machine_state outlives this run (owned by self).
+        machine.vmctx_mut().machine_state = &mut self.machine_state as *mut MachineState;
+        // SAFETY: as in run_suspendable.
+        unsafe {
+            _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
+        }
+
+        let answer = match input {
+            ResumeInput::Answer(val) => val,
+            ResumeInput::Abort(reason) => {
+                // Edit site (b): a stowed machine has no thread, so record the
+                // cancel cause DIRECTLY on this machine's state (not via the
+                // CURRENT_MACHINE thread-local). We do NOT run the continuation
+                // — the ask itself fails, mirroring pre-E2's answer-channel
+                // abort (`EffectError::Handler("ask aborted by caller: …")`),
+                // which is what the engine maps to its terminal error outcome.
+                self.machine_state
+                    .set_first_cause(crate::host_fns::RuntimeError::Cancelled);
+                return Err(JitError::Effect(EffectError::Handler(format!(
+                    "ask aborted by caller: {reason}"
+                ))));
+            }
+        };
+
+        // Feed the answer as a Complete response through the SAME materialization
+        // + resume path the effect loop uses, then continue driving.
+        let yield_result = materialize_response_and_resume(
+            &mut machine,
+            continuation,
+            tidepool_effect::Response::Complete(answer),
+            table,
+            suspend_tag,
+            "",
+        )?;
+        let outcome = drive_effect_loop(
+            &mut machine,
+            &self.cancel_flag,
+            table,
+            handlers,
+            user,
+            "",
+            Some(suspend_tag),
+            yield_result,
+        )?;
+        self.finish_suspendable(&mut machine, outcome)
+    }
+
+    /// Shared epilogue for the suspendable path: bridge a `Done` pointer to a
+    /// `Value` (byte-identical to [`Self::run_with_entry`]'s epilogue), or stow
+    /// the continuation on `self` and surface the suspension.
+    fn finish_suspendable(
+        &mut self,
+        machine: &mut CompiledEffectMachine,
+        outcome: DriveOutcome,
+    ) -> Result<SuspendableOutcome, JitError> {
+        match outcome {
+            DriveOutcome::Done(done_ptr) => {
+                // SAFETY: done_ptr is a valid heap pointer returned by the JIT;
+                // vmctx is valid for forcing thunks; signal protection guards
+                // against crashes.
+                let bridge_res = unsafe {
+                    let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
+                    crate::signal_safety::with_signal_protection(|| {
+                        heap_bridge::heap_to_value_forcing(done_ptr, vmctx_ptr)
+                    })
+                }
+                .map_err(JitError::Signal)?;
+                let value =
+                    crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
+                Ok(SuspendableOutcome::Completed(value))
+            }
+            DriveOutcome::Suspended {
+                request,
+                continuation,
+            } => {
+                self.suspended_continuation = Some(continuation);
+                Ok(SuspendableOutcome::Suspended { request })
+            }
+        }
     }
 
     /// Run a pure (non-effectful) program to completion.
@@ -1135,6 +1335,46 @@ enum ResponsePlan {
     Ready(*mut u8),
 }
 
+/// Outcome of the shared effect step loop ([`drive_effect_loop`]): the turn
+/// completed with a Done heap pointer, or it SUSPENDED at the caller's
+/// `suspend_tag` (threadless suspension — E2). `Suspended` carries the bridged
+/// request `Value` (the caller extracts prompt/meta) and the raw continuation
+/// heap pointer (the caller stows it; the machine's session heap is retained
+/// across the suspension). The non-suspend callers pass `suspend_tag = None`
+/// and never observe `Suspended`.
+enum DriveOutcome {
+    Done(*mut u8),
+    Suspended {
+        request: tidepool_eval::value::Value,
+        continuation: *mut u8,
+    },
+}
+
+/// Result of a suspendable turn ([`JitEffectMachine::run_suspendable`] /
+/// [`JitEffectMachine::resume_suspended`]): the turn produced a value, or it
+/// suspended at the ask boundary carrying the bridged request `Value` (the
+/// continuation is stowed inside the machine, ready for `resume_suspended`).
+pub enum SuspendableOutcome {
+    /// The turn ran to completion; `Value` is the bridged result.
+    Completed(tidepool_eval::value::Value),
+    /// The turn suspended at the ask boundary. `request` is the bridged `Ask`
+    /// request; the machine holds the continuation internally.
+    Suspended {
+        request: tidepool_eval::value::Value,
+    },
+}
+
+/// How a suspended turn is re-entered ([`JitEffectMachine::resume_suspended`]).
+pub enum ResumeInput {
+    /// Feed the (already-validated, bridged) answer value into the suspended
+    /// ask and continue driving.
+    Answer(tidepool_eval::value::Value),
+    /// Abort the suspended ask: record `Cancelled` as the first cause on this
+    /// machine and unwind — the same terminal outcome a pre-E2 caller-abort
+    /// produced, without running the continuation.
+    Abort(String),
+}
+
 /// Drive the freer-simple effect step loop to `Yield::Done`: step the machine,
 /// bridge + dispatch each effect request, materialize the response (lazy park
 /// or eager), and resume — returning the final Done heap pointer for the
@@ -1156,6 +1396,32 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
     exec_start: &str,
     resume_suffix: &str,
 ) -> Result<*mut u8, JitError> {
+    let yield_result = initial_step(machine, exec_start);
+    // suspend_tag = None: the ask-suspend branch is never taken, so this drives
+    // exactly as the pre-E2 inline loop did — byte-identical non-suspend path.
+    // Threadless suspension is opt-in via `JitEffectMachine::run_suspendable`,
+    // which passes `Some(ask_tag)`.
+    match drive_effect_loop(
+        machine,
+        cancel_flag,
+        table,
+        handlers,
+        user,
+        resume_suffix,
+        None,
+        yield_result,
+    )? {
+        DriveOutcome::Done(ptr) => Ok(ptr),
+        DriveOutcome::Suspended { .. } => {
+            unreachable!("drive_to_done passes suspend_tag=None; the effect loop never suspends")
+        }
+    }
+}
+
+/// The initial `machine.step()` for a fresh drive: reset call depth, set the
+/// exec-context label, step under signal protection. Shared by
+/// [`drive_to_done`] and [`JitEffectMachine::run_suspendable`].
+fn initial_step(machine: &mut CompiledEffectMachine, exec_start: &str) -> Yield {
     // SAFETY: machine.vmctx_mut()'s machine_state was set by the caller before
     // entering the effect loop.
     unsafe { machine_state(machine.vmctx_mut() as *mut VMContext) }.reset_call_depth();
@@ -1163,15 +1429,37 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
     // SAFETY: with_signal_protection wraps the JIT call with sigsetjmp for
     // crash recovery; machine.step() calls the JIT function through a valid
     // function pointer.
-    let mut yield_result =
-        match unsafe { crate::signal_safety::with_signal_protection(|| machine.step()) } {
-            Ok(y) => y,
-            Err(e) => signal_error_to_yield(e),
-        };
+    match unsafe { crate::signal_safety::with_signal_protection(|| machine.step()) } {
+        Ok(y) => y,
+        Err(e) => signal_error_to_yield(e),
+    }
+}
 
+/// The shared freer-simple effect step loop, factored out of [`drive_to_done`]
+/// so the same body serves the non-suspending run AND threadless suspension.
+///
+/// `suspend_tag = Some(t)`: a `Yield::Request` with `tag == t` unwinds as
+/// [`DriveOutcome::Suspended`] (after bridging the request and while the
+/// continuation is still valid), instead of dispatching to a handler.
+/// `suspend_tag = None`: every effect dispatches exactly as the pre-E2 inline
+/// loop did — the non-suspend path is byte-identical.
+///
+/// `yield_result` is the entry Yield: a fresh [`initial_step`] for a new turn,
+/// or a `machine.resume(..)` of the stowed continuation for a re-entry.
+#[allow(clippy::too_many_arguments)]
+fn drive_effect_loop<U, H: DispatchEffect<U>>(
+    machine: &mut CompiledEffectMachine,
+    cancel_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    table: &DataConTable,
+    handlers: &mut H,
+    user: &U,
+    resume_suffix: &str,
+    suspend_tag: Option<u64>,
+    mut yield_result: Yield,
+) -> Result<DriveOutcome, JitError> {
     loop {
         match yield_result {
-            Yield::Done(ptr) => return Ok(ptr),
+            Yield::Done(ptr) => return Ok(DriveOutcome::Done(ptr)),
             Yield::Request {
                 tag,
                 request,
@@ -1211,6 +1499,22 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
                 let req_val =
                     crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
                 log::debug!(target: "tidepool::effects", "effect tag={} request={:?}", tag, req_val);
+                // E2 threadless suspension: if this is the caller's suspend tag
+                // (the ask boundary), unwind carrying the bridged request + the
+                // continuation instead of dispatching. `continuation` here is the
+                // post-request-bridge value (the arm's `register_rust_root`
+                // updated it in place through any GC during forcing). The arm's
+                // `_cont_root` drops as we return, releasing the run-scoped root;
+                // the raw pointer stays valid because the session heap buffer is
+                // retained across the suspension (no GC runs while stowed), and
+                // `resume_suspended` re-roots it before its answer materialization
+                // can collect.
+                if suspend_tag == Some(tag) {
+                    return Ok(DriveOutcome::Suspended {
+                        request: req_val,
+                        continuation,
+                    });
+                }
                 let cx = EffectContext::with_user(table, user);
                 // A dispatcher that aborts at its `PauseGate` checkpoint
                 // records `RuntimeError::Cancelled` as the first cause before
@@ -1238,190 +1542,227 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
                     )));
                 }
 
-                // Response materialization. Two channels:
-                //
-                // Stream: the handler parked nothing and built nothing —
-                // elements convert per-pull, chunk-by-chunk, as Haskell forces
-                // tails (`take k` of a huge listing converts ~one chunk; an
-                // infinite producer is a legitimate infinite list). With the
-                // TIDEPOOL_LAZY_RESULTS=0 kill-switch the stream drains
-                // eagerly through the node cap instead.
-                //
-                // Complete: classic Value. Long list spines are flattened BY
-                // VALUE (iterative dismantle) and re-parked as a pre-converted
-                // stream — a deep spine must never reach a recursive Drop or
-                // recursive value_to_heap (~3 stack frames per cell overflow
-                // the eval thread; the fault lands outside signal protection
-                // and silently kills the thread — see .tidepool/crash.log).
-                // The node cap remains as a backstop for large non-list
-                // responses.
-                const LAZY_SPINE_THRESHOLD_NODES: usize = 2_000;
-                const MAX_EFFECT_RESPONSE_NODES: usize = 100_000;
-                let lazy_enabled = std::env::var("TIDEPOOL_LAZY_RESULTS")
-                    .map(|v| v != "0")
-                    .unwrap_or(true);
-
-                let plan = match response {
-                    tidepool_effect::Response::Stream(s) => {
-                        let (mut source, cons_id, nil_id) = s.into_parts();
-                        if lazy_enabled {
-                            ResponsePlan::Park(crate::host_fns::ParkedStream {
-                                source,
-                                cons_tag: cons_id.0,
-                                nil_tag: nil_id.0,
-                                table: table.clone(),
-                            })
-                        } else {
-                            // Kill-switch: drain through the node cap. (This
-                            // makes infinite producers a clean TooLarge error
-                            // instead of divergence.)
-                            let mut items = Vec::new();
-                            let mut nodes = 0usize;
-                            let mut too_large = false;
-                            while let Some(r) = source.next_value(table) {
-                                let v = r.map_err(|e| JitError::from(EffectError::Bridge(e)))?;
-                                nodes += 3 + v.node_count();
-                                items.push(v);
-                                if nodes > MAX_EFFECT_RESPONSE_NODES {
-                                    too_large = true;
-                                    break;
-                                }
-                            }
-                            if too_large {
-                                return Err(JitError::EffectResponseTooLarge {
-                                    nodes,
-                                    limit: MAX_EFFECT_RESPONSE_NODES,
-                                });
-                            }
-                            let p = unsafe {
-                                crate::signal_safety::with_signal_protection(|| {
-                                    crate::host_fns::materialize_cons_list(
-                                        machine.vmctx_mut(),
-                                        cons_id.0,
-                                        nil_id.0,
-                                        &items,
-                                    )
-                                })
-                            }
-                            .map_err(JitError::Signal)?;
-                            if let Some(err) = crate::host_fns::take_runtime_error() {
-                                return Err(JitError::Yield(crate::yield_type::YieldError::from(
-                                    err,
-                                )));
-                            }
-                            ResponsePlan::Ready(p)
-                        }
-                    }
-                    tidepool_effect::Response::Complete(resp_val) => {
-                        let spine = probe_list_spine(&resp_val)
-                            .filter(|&(_, _, len)| len > LAZY_SPINE_THRESHOLD_NODES);
-                        match spine {
-                            Some((cons_tag, nil_tag, len)) if lazy_enabled => {
-                                // Re-park the dismantled spine as a
-                                // pre-converted stream: one registry, one chunk
-                                // materializer for both channels.
-                                let items = dismantle_list_spine(resp_val, len);
-                                ResponsePlan::Park(crate::host_fns::ParkedStream {
-                                    source: Box::new(crate::host_fns::ReadySource::new(items)),
-                                    cons_tag,
-                                    nil_tag,
-                                    // Pre-converted: table never consulted.
-                                    table: tidepool_repr::DataConTable::new(),
-                                })
-                            }
-                            Some((cons_tag, nil_tag, len)) => {
-                                // Kill-switch: eager iterative materialization,
-                                // cap still applies.
-                                let items = dismantle_list_spine(resp_val, len);
-                                let nodes =
-                                    3 * len + items.iter().map(|v| v.node_count()).sum::<usize>();
-                                if nodes > MAX_EFFECT_RESPONSE_NODES {
-                                    return Err(JitError::EffectResponseTooLarge {
-                                        nodes,
-                                        limit: MAX_EFFECT_RESPONSE_NODES,
-                                    });
-                                }
-                                let p = unsafe {
-                                    crate::signal_safety::with_signal_protection(|| {
-                                        crate::host_fns::materialize_cons_list(
-                                            machine.vmctx_mut(),
-                                            cons_tag,
-                                            nil_tag,
-                                            &items,
-                                        )
-                                    })
-                                }
-                                .map_err(JitError::Signal)?;
-                                if let Some(err) = crate::host_fns::take_runtime_error() {
-                                    return Err(JitError::Yield(
-                                        crate::yield_type::YieldError::from(err),
-                                    ));
-                                }
-                                ResponsePlan::Ready(p)
-                            }
-                            None => ResponsePlan::Eager(resp_val),
-                        }
-                    }
-                };
-                let resp_ptr = match plan {
-                    ResponsePlan::Ready(p) => p,
-                    ResponsePlan::Park(stream) => {
-                        let id = crate::host_fns::park_stream(stream);
-                        // SAFETY: vmctx is valid with installed GC state.
-                        let p = unsafe {
-                            crate::signal_safety::with_signal_protection(|| {
-                                crate::host_fns::alloc_stream_tail_thunk(machine.vmctx_mut(), id, 0)
-                            })
-                        }
-                        .map_err(JitError::Signal)?;
-                        if p.is_null() {
-                            return Err(JitError::HeapBridge(
-                                heap_bridge::BridgeError::NurseryExhausted,
-                            ));
-                        }
-                        p
-                    }
-                    ResponsePlan::Eager(resp_val) => {
-                        let nodes = resp_val.node_count();
-                        if nodes > MAX_EFFECT_RESPONSE_NODES {
-                            return Err(JitError::EffectResponseTooLarge {
-                                nodes,
-                                limit: MAX_EFFECT_RESPONSE_NODES,
-                            });
-                        }
-                        // SAFETY: Converting a Value back to a heap object in
-                        // the nursery. vmctx has sufficient nursery space (GC
-                        // may have reclaimed).
-                        unsafe {
-                            crate::signal_safety::with_signal_protection(|| {
-                                heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut())
-                            })
-                        }
-                        .map_err(JitError::Signal)?
-                        .map_err(JitError::HeapBridge)?
-                    }
-                };
-                // SAFETY: as above.
-                unsafe { machine_state(machine.vmctx_mut() as *mut VMContext) }.reset_call_depth();
-                crate::host_fns::set_exec_context(&format!(
-                    "resuming after effect tag={}{}",
-                    tag, resume_suffix
-                ));
-                // SAFETY: continuation and resp_ptr are valid nursery heap
-                // pointers. resume applies the continuation tree to the
-                // response.
-                yield_result = match unsafe {
-                    crate::signal_safety::with_signal_protection(|| {
-                        machine.resume(continuation, resp_ptr)
-                    })
-                } {
-                    Ok(y) => y,
-                    Err(e) => signal_error_to_yield(e),
-                };
+                // Materialize the handler response and resume the continuation.
+                // Extracted so `resume_suspended` re-enters a stowed turn
+                // through the identical path (see the helper's doc).
+                yield_result = materialize_response_and_resume(
+                    machine,
+                    continuation,
+                    response,
+                    table,
+                    tag,
+                    resume_suffix,
+                )?;
             }
             Yield::Error(e) => return Err(JitError::Yield(e)),
         }
     }
+}
+
+/// Materialize a handler [`tidepool_effect::Response`] into a heap pointer and
+/// resume the machine's `continuation` with it, returning the next [`Yield`].
+///
+/// Factored verbatim out of the effect loop so [`JitEffectMachine::resume_suspended`]
+/// re-enters a stowed turn through the EXACT same materialization path (lazy
+/// `Stream` park, long-spine re-park, eager `value_to_heap`) — one body, no
+/// drift-prone second copy. The non-suspend loop calls this once per effect
+/// exactly as before, so its behavior is unchanged.
+///
+/// `continuation` is GC-rooted here for the duration: response materialization
+/// (`value_to_heap` / `alloc_stream_tail_thunk` / `materialize_cons_list`) can
+/// allocate and collect, which would move the continuation out from under the
+/// `machine.resume` below. The in-loop caller also holds its own arm root
+/// across request forcing; this extra registration harmlessly overlaps it
+/// (both slots track the same pointer through a GC).
+fn materialize_response_and_resume(
+    machine: &mut CompiledEffectMachine,
+    mut continuation: *mut u8,
+    response: tidepool_effect::Response,
+    table: &DataConTable,
+    tag: u64,
+    resume_suffix: &str,
+) -> Result<Yield, JitError> {
+    let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
+    // SAFETY: vmctx_ptr is the active run's VMContext; the slot lives on this
+    // frame until _root truncates the registry on drop.
+    let _root = unsafe { heap_bridge::RootScope::new(vmctx_ptr) };
+    // SAFETY: &mut continuation is a stable stack slot for the duration below.
+    unsafe {
+        crate::host_fns::register_rust_root(vmctx_ptr, &mut continuation as *mut *mut u8);
+    }
+
+    // Response materialization. Two channels:
+    //
+    // Stream: the handler parked nothing and built nothing —
+    // elements convert per-pull, chunk-by-chunk, as Haskell forces
+    // tails (`take k` of a huge listing converts ~one chunk; an
+    // infinite producer is a legitimate infinite list). With the
+    // TIDEPOOL_LAZY_RESULTS=0 kill-switch the stream drains
+    // eagerly through the node cap instead.
+    //
+    // Complete: classic Value. Long list spines are flattened BY
+    // VALUE (iterative dismantle) and re-parked as a pre-converted
+    // stream — a deep spine must never reach a recursive Drop or
+    // recursive value_to_heap (~3 stack frames per cell overflow
+    // the eval thread; the fault lands outside signal protection
+    // and silently kills the thread — see .tidepool/crash.log).
+    // The node cap remains as a backstop for large non-list
+    // responses.
+    const LAZY_SPINE_THRESHOLD_NODES: usize = 2_000;
+    const MAX_EFFECT_RESPONSE_NODES: usize = 100_000;
+    let lazy_enabled = std::env::var("TIDEPOOL_LAZY_RESULTS")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+
+    let plan = match response {
+        tidepool_effect::Response::Stream(s) => {
+            let (mut source, cons_id, nil_id) = s.into_parts();
+            if lazy_enabled {
+                ResponsePlan::Park(crate::host_fns::ParkedStream {
+                    source,
+                    cons_tag: cons_id.0,
+                    nil_tag: nil_id.0,
+                    table: table.clone(),
+                })
+            } else {
+                // Kill-switch: drain through the node cap. (This
+                // makes infinite producers a clean TooLarge error
+                // instead of divergence.)
+                let mut items = Vec::new();
+                let mut nodes = 0usize;
+                let mut too_large = false;
+                while let Some(r) = source.next_value(table) {
+                    let v = r.map_err(|e| JitError::from(EffectError::Bridge(e)))?;
+                    nodes += 3 + v.node_count();
+                    items.push(v);
+                    if nodes > MAX_EFFECT_RESPONSE_NODES {
+                        too_large = true;
+                        break;
+                    }
+                }
+                if too_large {
+                    return Err(JitError::EffectResponseTooLarge {
+                        nodes,
+                        limit: MAX_EFFECT_RESPONSE_NODES,
+                    });
+                }
+                let p = unsafe {
+                    crate::signal_safety::with_signal_protection(|| {
+                        crate::host_fns::materialize_cons_list(
+                            machine.vmctx_mut(),
+                            cons_id.0,
+                            nil_id.0,
+                            &items,
+                        )
+                    })
+                }
+                .map_err(JitError::Signal)?;
+                if let Some(err) = crate::host_fns::take_runtime_error() {
+                    return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                }
+                ResponsePlan::Ready(p)
+            }
+        }
+        tidepool_effect::Response::Complete(resp_val) => {
+            let spine = probe_list_spine(&resp_val)
+                .filter(|&(_, _, len)| len > LAZY_SPINE_THRESHOLD_NODES);
+            match spine {
+                Some((cons_tag, nil_tag, len)) if lazy_enabled => {
+                    // Re-park the dismantled spine as a
+                    // pre-converted stream: one registry, one chunk
+                    // materializer for both channels.
+                    let items = dismantle_list_spine(resp_val, len);
+                    ResponsePlan::Park(crate::host_fns::ParkedStream {
+                        source: Box::new(crate::host_fns::ReadySource::new(items)),
+                        cons_tag,
+                        nil_tag,
+                        // Pre-converted: table never consulted.
+                        table: tidepool_repr::DataConTable::new(),
+                    })
+                }
+                Some((cons_tag, nil_tag, len)) => {
+                    // Kill-switch: eager iterative materialization,
+                    // cap still applies.
+                    let items = dismantle_list_spine(resp_val, len);
+                    let nodes = 3 * len + items.iter().map(|v| v.node_count()).sum::<usize>();
+                    if nodes > MAX_EFFECT_RESPONSE_NODES {
+                        return Err(JitError::EffectResponseTooLarge {
+                            nodes,
+                            limit: MAX_EFFECT_RESPONSE_NODES,
+                        });
+                    }
+                    let p = unsafe {
+                        crate::signal_safety::with_signal_protection(|| {
+                            crate::host_fns::materialize_cons_list(
+                                machine.vmctx_mut(),
+                                cons_tag,
+                                nil_tag,
+                                &items,
+                            )
+                        })
+                    }
+                    .map_err(JitError::Signal)?;
+                    if let Some(err) = crate::host_fns::take_runtime_error() {
+                        return Err(JitError::Yield(crate::yield_type::YieldError::from(err)));
+                    }
+                    ResponsePlan::Ready(p)
+                }
+                None => ResponsePlan::Eager(resp_val),
+            }
+        }
+    };
+    let resp_ptr = match plan {
+        ResponsePlan::Ready(p) => p,
+        ResponsePlan::Park(stream) => {
+            let id = crate::host_fns::park_stream(stream);
+            // SAFETY: vmctx is valid with installed GC state.
+            let p = unsafe {
+                crate::signal_safety::with_signal_protection(|| {
+                    crate::host_fns::alloc_stream_tail_thunk(machine.vmctx_mut(), id, 0)
+                })
+            }
+            .map_err(JitError::Signal)?;
+            if p.is_null() {
+                return Err(JitError::HeapBridge(heap_bridge::BridgeError::NurseryExhausted));
+            }
+            p
+        }
+        ResponsePlan::Eager(resp_val) => {
+            let nodes = resp_val.node_count();
+            if nodes > MAX_EFFECT_RESPONSE_NODES {
+                return Err(JitError::EffectResponseTooLarge {
+                    nodes,
+                    limit: MAX_EFFECT_RESPONSE_NODES,
+                });
+            }
+            // SAFETY: Converting a Value back to a heap object in
+            // the nursery. vmctx has sufficient nursery space (GC
+            // may have reclaimed).
+            unsafe {
+                crate::signal_safety::with_signal_protection(|| {
+                    heap_bridge::value_to_heap(&resp_val, machine.vmctx_mut())
+                })
+            }
+            .map_err(JitError::Signal)?
+            .map_err(JitError::HeapBridge)?
+        }
+    };
+    // SAFETY: as above.
+    unsafe { machine_state(machine.vmctx_mut() as *mut VMContext) }.reset_call_depth();
+    crate::host_fns::set_exec_context(&format!(
+        "resuming after effect tag={}{}",
+        tag, resume_suffix
+    ));
+    // SAFETY: continuation and resp_ptr are valid nursery heap pointers.
+    // resume applies the continuation tree to the response.
+    Ok(
+        match unsafe {
+            crate::signal_safety::with_signal_protection(|| machine.resume(continuation, resp_ptr))
+        } {
+            Ok(y) => y,
+            Err(e) => signal_error_to_yield(e),
+        },
+    )
 }
 
 /// Signal-boundary adapter for `host_fns::surface_error`: the raw signal is
