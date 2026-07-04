@@ -39,19 +39,19 @@ impl DispatchEffect<()> for FsDispatcher {
             match table.name_of(*con_id) {
                 Some("FsExists") => {
                     let path = String::from_value(&fields[0], table).unwrap();
-                    return cx.respond(self.files.contains_key(&path));
+                    return cx.respond(Ok::<bool, String>(self.files.contains_key(&path)));
                 }
                 Some("FsRead") => {
                     let path = String::from_value(&fields[0], table).unwrap();
                     let content = self.files.get(&path).cloned().unwrap_or_default();
-                    return cx.respond(content);
+                    return cx.respond(Ok::<String, String>(content));
                 }
                 Some("FsWrite") => {
                     let path = String::from_value(&fields[0], table).unwrap();
                     let content = String::from_value(&fields[1], table).unwrap();
                     self.files.insert(path, content);
                     self.writes += 1;
-                    return cx.respond(());
+                    return cx.respond(Ok::<(), String>(()));
                 }
                 _ => {}
             }
