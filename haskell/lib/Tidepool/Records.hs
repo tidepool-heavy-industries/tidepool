@@ -22,6 +22,8 @@ module Tidepool.Records
   ( Proc(..), ok, Hit(..)
   , FileMeta(..)
   , UpdateOutcome(..)
+  , UpdateAllOutcome(..)
+  , InsertAfterOutcome(..)
   , WriteOutcome(..)
   , Commit(..)
   , StatusEntry(..)
@@ -80,6 +82,38 @@ instance ToJSON UpdateOutcome where
   toJSON (UpdateRejected r (Just c)) = object ["ok" .= False, "reason" .= r, "count" .= c]
   toJSON UpdateNoChange              = object ["ok" .= True, "changed" .= False]
   toJSON (UpdateDiff d)              = object ["ok" .= True, "changed" .= True, "diff" .= d]
+
+-- | Outcome of @updateAll@ (replace-EVERY-occurrence str-replace). Reported as
+-- DATA, never thrown (mirrors 'UpdateOutcome'):
+--
+--   * 'UpdateAllRejected' — @old@ was empty, or matched nowhere, or the file
+--     is missing; nothing written.
+--   * 'UpdateAllApplied' — every occurrence replaced; carries the count.
+data UpdateAllOutcome
+  = UpdateAllRejected { reason :: Text }
+  | UpdateAllApplied { count :: Int }
+  deriving (Show, Eq)
+
+instance ToJSON UpdateAllOutcome where
+  toJSON (UpdateAllRejected r) = object ["ok" .= False, "reason" .= r]
+  toJSON (UpdateAllApplied c)  = object ["ok" .= True, "count" .= c]
+
+-- | Outcome of @insertAfter@ (insert a block after the unique anchor line).
+-- Reported as DATA, never thrown (mirrors 'UpdateOutcome'):
+--
+--   * 'InsertAfterRejected' — the file is missing, or the anchor matched zero
+--     or 2+ lines. The 'Maybe' 'Int' carries the anchor's match count (only
+--     present when the rejection is anchor-related, not a missing file).
+--   * 'InsertAfterApplied' — the block was inserted.
+data InsertAfterOutcome
+  = InsertAfterRejected { reason :: Text, matchCount :: Maybe Int }
+  | InsertAfterApplied
+  deriving (Show, Eq)
+
+instance ToJSON InsertAfterOutcome where
+  toJSON (InsertAfterRejected r Nothing)  = object ["ok" .= False, "reason" .= r]
+  toJSON (InsertAfterRejected r (Just n)) = object ["ok" .= False, "reason" .= r, "matches" .= n]
+  toJSON InsertAfterApplied                = object ["ok" .= True]
 
 -- | Outcome of @writeChecked@ (compute-check-commit) and @writeCheckedIf@
 -- (content-hash compare-and-swap). 'Written' carries the file and the number

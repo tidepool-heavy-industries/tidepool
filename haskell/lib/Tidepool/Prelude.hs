@@ -201,6 +201,7 @@ module Tidepool.Prelude
     -- * Shared record vocabulary (Tidepool.Records)
   , Proc(..), ok, Hit(..)
   , FileMeta(..), UpdateOutcome(..), WriteOutcome(..)
+  , UpdateAllOutcome(..), InsertAfterOutcome(..)
   , Commit(..), StatusEntry(..), FileDelta(..)
     -- * Text padding, chunking, and prefix utilities
     -- (Text chunking is `T.chunksOf`; the unqualified `chunksOf` is the list
@@ -286,7 +287,7 @@ import Control.Monad
   , (=<<), (>=>), (<=<)
   , foldM, foldM_
   )
-import Tidepool.Records (Proc(..), ok, Hit(..), FileMeta(..), UpdateOutcome(..), WriteOutcome(..), Commit(..), StatusEntry(..), FileDelta(..))
+import Tidepool.Records (Proc(..), ok, Hit(..), FileMeta(..), UpdateOutcome(..), WriteOutcome(..), UpdateAllOutcome(..), InsertAfterOutcome(..), Commit(..), StatusEntry(..), FileDelta(..))
 import Tidepool.Data.Time (UTCTime(..), formatISO8601, parseISO8601, daysFromCivil, diffUTCTime, addUTCTime, epochMillis)
 import Tidepool.Render (Render(..))
 import Tidepool.QQ.Fmt.Runtime

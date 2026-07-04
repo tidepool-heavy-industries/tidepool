@@ -64,12 +64,15 @@ generating domain-specific syntax directly.
 
 `update path old new` is exact str-replace — it errors loudly if `old` is absent
 OR ambiguous (ambiguity is how string surgery corrupts silently), so pass enough
-surrounding context to be unique. `insertAfter` anchors on a unique line;
-`overFileM` rewrites matching lines through optics.
+surrounding context to be unique. `insertAfter` anchors on a unique line and
+reports its outcome as DATA (never throws — a missing anchor or an ambiguous
+one comes back as `InsertAfterRejected`, not an aborted eval); `overFileM`
+rewrites matching lines through optics.
 
 ```haskell
 update "target/demo.cfg" "retries = 3" "retries = 5"        -- exact, exactly-once
-insertAfter "target/demo.cfg" "[limits]" "max_depth = 64"   -- after the unique anchor line
+r <- insertAfter "target/demo.cfg" "[limits]" "max_depth = 64"   -- after the unique anchor line
+case r of { InsertAfterApplied -> pure (); InsertAfterRejected why _ -> error why }
 overFileM "target/demo.cfg" (linesOf . filteredT (isPrefixOf "#")) (("# [reviewed] " <>) . sdrop 2)
 pure "edited"
 ```
