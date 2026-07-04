@@ -16,7 +16,8 @@ fn user_lib_dir() -> PathBuf {
 }
 
 /// Responds to EVERY effect with a large list of strings — stands in for a
-/// glob/grep handler returning tens of thousands of paths.
+/// handler returning tens of thousands of items (the eval calls `kvKeys`, an
+/// untagged `M [Text]` verb; the dispatcher ignores the tag).
 struct BigListDispatcher {
     n: usize,
 }
@@ -63,14 +64,14 @@ fn run_with_big_list(code: &str, n: usize) -> Result<serde_json::Value, String> 
 fn length_of_huge_response_streams() {
     // 12k elements (~36k value nodes): far over the old 10k hard cap.
     // length folds the lazy chunks; consumed cells become garbage.
-    let r = run_with_big_list("xs <- glob \"**\"\npure (length xs)", 12_000);
+    let r = run_with_big_list("xs <- kvKeys\npure (length xs)", 12_000);
     assert_eq!(r.ok(), Some(serde_json::json!(12_000)));
 }
 
 #[test]
 fn take_prefix_of_huge_response() {
     // take only forces the first chunk; the rest is never materialized.
-    let r = run_with_big_list("xs <- glob \"**\"\npure (take 3 xs)", 12_000);
+    let r = run_with_big_list("xs <- kvKeys\npure (take 3 xs)", 12_000);
     assert_eq!(
         r.ok(),
         Some(serde_json::json!(["item-0", "item-1", "item-2"]))
@@ -80,7 +81,7 @@ fn take_prefix_of_huge_response() {
 #[test]
 fn small_responses_stay_eager() {
     // Below the lazy threshold nothing changes.
-    let r = run_with_big_list("xs <- glob \"**\"\npure (length xs)", 50);
+    let r = run_with_big_list("xs <- kvKeys\npure (length xs)", 50);
     assert_eq!(r.ok(), Some(serde_json::json!(50)));
 }
 
@@ -89,7 +90,7 @@ fn filtered_fold_over_huge_response() {
     // A realistic shape: census-style filter+length over a huge listing,
     // exercising chunk boundaries mid-stream.
     let r = run_with_big_list(
-        "xs <- glob \"**\"\npure (length (filter (\\x -> \"item-1\" `isPrefixOf` x) xs))",
+        "xs <- kvKeys\npure (length (filter (\\x -> \"item-1\" `isPrefixOf` x) xs))",
         30_000,
     );
     // decimal-starts-with-1 counts in 0..30000: 1+10+100+1000+10000
@@ -98,7 +99,7 @@ fn filtered_fold_over_huge_response() {
 
 #[test]
 fn take_then_length_bisect() {
-    let r = run_with_big_list("xs <- glob \"**\"\npure (length (take 3 xs))", 12_000);
+    let r = run_with_big_list("xs <- kvKeys\npure (length (take 3 xs))", 12_000);
     assert_eq!(r.ok(), Some(serde_json::json!(3)));
 }
 
@@ -111,7 +112,7 @@ fn whole_lazy_list_result_is_paginated() {
     // full pipeline survives (no silent thread death) and yields a
     // truncated-but-well-formed prefix. The RAW bridge path (no paginator)
     // is covered by lazy_bisect::variant_d_whole_list_result.
-    let r = run_with_big_list("xs <- glob \"**\"\npure xs", 12_000);
+    let r = run_with_big_list("xs <- kvKeys\npure xs", 12_000);
     let arr = r.expect("whole-list result must succeed");
     let arr = arr.as_array().expect("expected JSON array");
     assert!(

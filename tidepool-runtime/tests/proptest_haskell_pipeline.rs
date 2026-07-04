@@ -1560,7 +1560,8 @@ fn gen_effect_case(seed: u64) -> EffectCase {
 }
 
 impl EffectCase {
-    /// The Haskell body that consumes `xs <- glob "**"`.
+    /// The Haskell body that consumes `xs <- kvKeys` (an untagged `M [Text]`
+    /// vehicle; the dispatcher ignores the tag. Was `glob` pre-#335).
     fn body(&self) -> String {
         match &self.op {
             EffectOp::Length => "pure (length xs)".to_string(),
@@ -1576,7 +1577,7 @@ impl EffectCase {
     }
 
     fn code(&self) -> String {
-        format!("xs <- glob \"**\"\n{}", self.body())
+        format!("xs <- kvKeys\n{}", self.body())
     }
 
     /// The synthetic handler list: ["item-0", ..., "item-(n-1)"].

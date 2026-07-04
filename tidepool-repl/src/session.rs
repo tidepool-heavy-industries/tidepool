@@ -1471,7 +1471,7 @@ impl Session {
                         "source": "session",
                     }));
                 }
-                // 4. Stdlib/preamble types (`Proc`, `Hit`, `Doc`, … — source-scanned
+                // 4. Stdlib/preamble types (`Proc`, `Hit`, … — source-scanned
                 // from the same include dirs the session compiles against).
                 if let Some(info) = crate::introspect::stdlib_info(&self.cfg.base_include, name) {
                     return TurnOutcome::Meta(info);

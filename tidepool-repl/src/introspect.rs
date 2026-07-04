@@ -2,7 +2,7 @@
 //!
 //! The repl's `:i` used to see only (1) session value bindings, (2) built-in
 //! effect decl `type_defs`, and (3) session-declared types — so the types the
-//! preamble puts in scope (`Proc`, `Hit`, `Doc`, `Schema`, … from
+//! preamble puts in scope (`Proc`, `Hit`, `Schema`, … from
 //! `haskell/lib/Tidepool/*.hs`, re-exported by `Tidepool.Prelude`, plus
 //! project/global `.tidepool/lib` verb-module types) answered
 //! `not a bound value or known type` — a dead end exactly where a caller is

@@ -1098,7 +1098,7 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          RECORDS — effect results are named records, not tuples. Use record-dot syntax: \
          `run cmd` → `Proc` (access `p.stdout`, `p.exitCode`, `p.stderr`; `ok p` = zero exit); \
          `grepGlob`/`searchFiles` → `[Hit]` (access `h.path`, `h.line`, `h.text`); \
-         `readGlob` → `[Doc]` (access `d.path`, `d.body`). \
+         `readGlob` → `[FileRead]` (access `r.path`, `r.contents :: Either FsError Text`). \
          Bare selectors like `stdout p` are ambiguous — always use dot syntax.",
     )
 }

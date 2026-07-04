@@ -165,9 +165,10 @@ Designed semantics (per-effect waves, NOT implemented here):
   single-source generates its Haskell `data` decl (via the `inventory`
   registry) so the error-type shape can't drift either. Granularity is a
   per-wave decision (start coarse, refine where dispatch on the case matters).
-- **Per-item granularity** (`readGlob :: … -> M [(Text, Either FsError Text)]`)
-  stays a verb-level property: the row writes it directly in `ret`, `errors`
-  is for the scalar wrapping case.
+- **Per-item granularity** (`readGlob :: … -> M [FileRead]`, where
+  `FileRead = { path, contents :: Either FsError Text }`) stays a verb-level
+  property: the row writes it directly in `ret`, `errors` is for the scalar
+  wrapping case.
 
 Because a #335 wave edits ONE definition per effect (rows + helper docs move
 together) instead of four surfaces, the migration cost drops to roughly the

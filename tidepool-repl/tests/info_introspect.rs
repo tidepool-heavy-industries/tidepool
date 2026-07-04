@@ -7,8 +7,8 @@
 //!     with fields AND types verbatim (`exitCode :: Int`, …), `source: "stdlib"`,
 //!   - a constructor-only name (`UpdateNoChange`) returns its ENCLOSING data
 //!     declaration plus a `constructor` key,
-//!   - a session-declared type (`data Doc = Doc Int`) still SHADOWS the
-//!     stdlib `Doc` (`source: "session"`),
+//!   - a session-declared type (`data Hit = Hit Int`) still SHADOWS the
+//!     stdlib `Hit` (`source: "session"`),
 //!   - a total miss carries the self-explaining `hint` alongside the error.
 //!
 //! Each test drives the REAL `tidepool-repl` MCP entry point (`dispatch_tool`)
@@ -101,8 +101,8 @@ async fn info_constructor_only_hit() {
 
 // ---------------------------------------------------------------------------
 // Case 4 — a session-declared type SHADOWS the stdlib hit: after
-// `data Doc = Doc Int`, `:i Doc` reports source "session" (not the
-// `Tidepool.Records` Doc).
+// `data Hit = Hit Int`, `:i Hit` reports source "session" (not the
+// `Tidepool.Records` Hit).
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_decl_shadows_stdlib() {
@@ -112,17 +112,17 @@ async fn session_decl_shadows_stdlib() {
     let repl = Repl::new();
     repl.open_ok().await;
 
-    // Before the session decl, Doc resolves from the stdlib.
-    let t = repl.cmd(":i Doc").await;
-    let v = parse_meta(t.expect_ok(":i Doc (pre-decl)"));
-    assert_eq!(v["source"], "stdlib", "pre-decl Doc is the stdlib one: {v}");
+    // Before the session decl, Hit resolves from the stdlib.
+    let t = repl.cmd(":i Hit").await;
+    let v = parse_meta(t.expect_ok(":i Hit (pre-decl)"));
+    assert_eq!(v["source"], "stdlib", "pre-decl Hit is the stdlib one: {v}");
 
-    repl.def("data Doc = Doc Int").await.expect_ok("decl Doc");
-    let t = repl.cmd(":i Doc").await;
-    let v = parse_meta(t.expect_ok(":i Doc (post-decl)"));
+    repl.def("data Hit = Hit Int").await.expect_ok("decl Hit");
+    let t = repl.cmd(":i Hit").await;
+    let v = parse_meta(t.expect_ok(":i Hit (post-decl)"));
     assert_eq!(v["source"], "session", "session decl wins: {v}");
     assert!(
-        v["shape"].as_str().unwrap().contains("Doc Int"),
+        v["shape"].as_str().unwrap().contains("Hit Int"),
         "shape is the session declaration: {v}"
     );
 
