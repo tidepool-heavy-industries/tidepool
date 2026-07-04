@@ -17,7 +17,6 @@ use std::path::PathBuf;
 use rmcp::model::{CallToolResult, RawContent};
 use tidepool_handlers::{base_decls_with_ask, build_minimal_stack};
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
-use tidepool_runtime::session::ModuleEnv;
 
 /// True if the extract binary can be spawned (exit code irrelevant — the nix
 /// wrapper supplies GHC internally, so we must NOT gate on `ghc --version`).
@@ -55,11 +54,15 @@ fn build_server() -> TidepoolReplServer {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
+    // NOT `ModuleEnv::standalone_default()` (see tests/common/mod.rs): decl-plane
+    // pure binds need the same Prelude/Aeson surface production always has,
+    // even under this minimal (Console-only) stack.
+    let module_env = tidepool_mcp::session_decl_module_env(&decls, false);
     let cfg = ReplServerConfig {
         decls,
         ask_tag,
         base_include: vec![effects_dir, prelude_dir],
-        module_env: ModuleEnv::standalone_default(),
+        module_env,
         session_root_base,
         nursery_size: None,
         continuation_ttl: None,
