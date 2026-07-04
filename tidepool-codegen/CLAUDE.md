@@ -32,7 +32,7 @@ see one, that's a reportable codegen bug, not user error.
 variants are implemented (the `_ =>` catch-all is unreachable). An exhausted/empty
 case no longer emits a bare Cranelift `trap user2` (→ `ud2` → SIGILL): `emit_case_trap`
 (`src/emit/case.rs`) now emits a CALL to the `runtime_case_trap` host fn
-(`src/host_fns.rs`), uses its return value, and continues. That host fn prints the
+(`src/host_fns/errors.rs`), uses its return value, and continues. That host fn prints the
 always-on `[CASE TRAP] in compiled fn: <name>` breadcrumb, then returns
 `error_poison_ptr()` — surfacing a clean runtime error (detected when
 `with_signal_protection` returns) instead of crashing. If a poison/error already

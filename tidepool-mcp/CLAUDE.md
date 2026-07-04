@@ -5,12 +5,18 @@ reference for eval authors is the **`eval` tool description** (emitted by the
 server, assembled from the `*_decl()` functions here). The eval stdlib lives in
 `haskell/lib/Tidepool/`. See the repo-root `CLAUDE.md` for the project map.
 
-Adding an effect = a `*_decl()` here (Haskell-facing constructors + helpers) + a
-`*Req` handler arm in `tidepool-handlers/src/lib.rs` (using `cx.respond`/
-`respond_caught`/`respond_stream`); `tidepool/src/main.rs` only wires the handler
-stack (`build_base_stack`). The `tidepool-bridge` marshals `Value` ↔ `serde_json::Value`.
-The cheap path is a new constructor on an existing effect (e.g. `ParseJson` on
-`Http`); a wholly new effect type needs a positional union-tag slot.
+Every effect has ONE definition: a `<eff>_effect_def!` macro in
+`src/effect_defs.rs` carrying the GADT constructors (Haskell type strings AND
+Rust bridge types), helper-verb text, and the handler/method wiring. Two
+projections consume it: `effect_decl_projection!` (in `effect_decls.rs`)
+generates the `*_decl()` builder, and `effect_rust_projection!`
+(`tidepool-handlers/src/effect_glue.rs`) generates the `*Req` enum +
+`DescribeEffect` + dispatch. Adding a constructor = one `verbs` row in the
+definition + one hand-written inherent method on the handler struct (using
+`cx.respond`/`respond_caught`/`respond_stream`). A wholly new effect type
+needs a new definition + handler module + a positional union-tag slot.
+`tidepool/src/main.rs` only wires the handler stack (`build_base_stack`); the
+`tidepool-bridge` marshals `Value` ↔ `serde_json::Value`.
 
 ## On-disk paths & config (`tidepool_runtime::paths`)
 

@@ -36,17 +36,21 @@ live in `src/test_support.rs` (`pub(crate)`, test builds only).
 
 ## Adding a new effect constructor here
 
-Each effect module holds: a `#[derive(FromCore)] enum <Eff>Req` (one variant
-per constructor, `#[core(name = "...")]` mapping to the Haskell GADT
-constructor name 1:1), a handler struct, `impl DescribeEffect` (returns the
-`tidepool_mcp::*_decl()`), and `impl EffectHandler<CapturedOutput>` whose
-`handle` match has one arm per variant. Adding an operation to an EXISTING
-effect = one new enum variant + one new match arm in that effect's module +
-(usually) an added constructor in the matching `tidepool-mcp` `*_decl()`. A
-wholly new effect type needs a new module under `src/handlers/`, a `pub mod` +
-`pub use` line in `src/handlers/mod.rs`, a `handler_for!` arm in `src/lib.rs`,
-and a new positional union-tag slot (see root `CLAUDE.md`'s locked-decision on
-union tags).
+Each effect module invokes its single-source definition —
+`tidepool_mcp::<eff>_effect_def!(crate::effect_glue::effect_rust_projection)`
+— which generates the `<Eff>Req` enum (one tuple variant per GADT constructor,
+named EXACTLY as in Haskell — no rename layer), `impl DescribeEffect`, and the
+`EffectHandler` dispatch whose arms call hand-written inherent methods. What
+stays hand-written per module: the handler struct (its fields are
+configuration, not contract) and one inherent method per verb —
+`fn <method>(&mut self, cx: &EffectContext<'_, CapturedOutput>, <args>) ->
+Result<Response, EffectError>`. Adding an operation to an EXISTING effect =
+one `verbs` row + helper text in the definition
+(`tidepool-mcp/src/effect_defs.rs`) + one inherent method here. A wholly new
+effect type needs a new definition, a new module under `src/handlers/`, a
+`pub mod` + `pub use` line in `src/handlers/mod.rs`, a `handler_for!` arm in
+`src/lib.rs`, and a new positional union-tag slot (see root `CLAUDE.md`'s
+locked decision on union tags).
 
 ## `cx.respond*` — pick by result shape, not habit
 
