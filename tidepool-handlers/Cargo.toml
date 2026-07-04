@@ -20,6 +20,9 @@ inventory = "0.3"
 frunk = "0.4"
 # Native deps moved from tidepool/Cargo.toml
 glob = "0.3"
+# Gitignore-aware exclusion for the glob/grep walk (#343) — ripgrep's own
+# gitignore matcher, so expand_glob's default exclusions match `rg`'s.
+ignore = "0.4"
 regex = "1"
 genai = "0.5"
 ureq = { version = "2", features = ["json"] }

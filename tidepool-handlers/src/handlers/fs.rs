@@ -53,6 +53,24 @@ pub fn is_glob(p: &str) -> bool {
     p.contains('*') || p.contains('?') || p.contains('[')
 }
 
+/// Build a gitignore matcher from the root's `.gitignore`, ripgrep-style
+/// (#343): a broad glob like `**/*.rs` must not walk paths the repo itself
+/// considers noise (build scratch, generated output) any more than `rg`
+/// would. Uses the `ignore` crate — the same gitignore matcher ripgrep is
+/// built on — so `glob`/`grepGlob`/`readGlob` inherit `rg`'s exclusions for
+/// free. Missing `.gitignore` or a parse error yields an empty (match-nothing)
+/// matcher rather than failing the glob.
+fn gitignore_matcher(root: &std::path::Path) -> ignore::gitignore::Gitignore {
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
+    let gitignore_path = root.join(".gitignore");
+    if gitignore_path.exists() {
+        let _ = builder.add(&gitignore_path);
+    }
+    builder
+        .build()
+        .unwrap_or_else(|_| ignore::gitignore::Gitignore::empty())
+}
+
 /// Blake3 content hash as a lowercase hex digest — the compare-and-swap token
 /// for `FsHash`/`FsWriteCas` (#330). Blake3 matches the cache layer's hash
 /// choice (`tidepool-runtime::cache`), so the whole codebase speaks one digest.
@@ -149,6 +167,7 @@ pub fn expand_glob(root: &std::path::Path, pattern: &str) -> Result<Vec<PathBuf>
         .canonicalize()
         .map_err(|e| FsError::FsIo(e.to_string()))?;
 
+    let matcher = gitignore_matcher(root);
     let paths: Vec<PathBuf> = glob::glob(&full_pattern)
         .map_err(|e| FsError::FsIo(format!("invalid glob: {}", e)))?
         .filter_map(std::result::Result::ok)
@@ -160,6 +179,16 @@ pub fn expand_glob(root: &std::path::Path, pattern: &str) -> Result<Vec<PathBuf>
         .filter(|p| {
             let rel_path = p.strip_prefix(root).unwrap_or(p);
             component_filter(pattern, rel_path)
+        })
+        .filter(|p| {
+            let rel_path = p.strip_prefix(root).unwrap_or(p);
+            // `matched` alone only tests the path itself; a directory-shaped
+            // pattern like `scratch/` must also exclude everything beneath
+            // it, so check the path AND its ancestors (mirrors how `rg`/
+            // `WalkBuilder` prune a whole ignored directory).
+            !matcher
+                .matched_path_or_any_parents(rel_path, p.is_dir())
+                .is_ignore()
         })
         .collect();
     Ok(paths)
@@ -541,6 +570,40 @@ mod tests {
 
         // A real glob that matches nothing still returns [] (not an error).
         assert!(handler.expand_glob("src/*.nope").unwrap().is_empty());
+    }
+
+    /// #343: a broad glob must not walk gitignored scratch dirs (a real
+    /// tester's `**/*.rs` picked up a gitignored copy that `rg` skipped) NOR
+    /// the always-heavy dirs, while still returning real source files.
+    #[test]
+    fn test_expand_glob_respects_gitignore_and_heavy_dirs() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        std::fs::write(root.join(".gitignore"), "scratch/\n").unwrap();
+
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn main() {}").unwrap();
+
+        std::fs::create_dir_all(root.join("scratch")).unwrap();
+        std::fs::write(root.join("scratch/junk.rs"), "junk").unwrap();
+
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
+        std::fs::write(root.join("target/debug/build.rs"), "junk").unwrap();
+
+        let handler = FsHandler::new(root.clone());
+        let names: Vec<String> = handler
+            .expand_glob("**/*.rs")
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.strip_prefix(&root).ok())
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+
+        assert!(names.iter().any(|n| n.ends_with("lib.rs")), "{names:?}");
+        assert!(!names.iter().any(|n| n.contains("scratch")), "{names:?}");
+        assert!(!names.iter().any(|n| n.contains("target")), "{names:?}");
     }
 
     #[test]
