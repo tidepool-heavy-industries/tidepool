@@ -23,12 +23,14 @@ import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson.Value (Value)
 import Tidepool.Records (Proc(..), ok)
-import Tidepool.Effects (M, runArgv, parseJson)
+import Tidepool.Effects (M, runArgv, parseJson, liftEither)
 
 -- | Run a command (argv, no shell), strip stdout, throw on nonzero exit.
+-- `runArgv` is typed (#335): a spawn failure aborts via `liftEither`, same as
+-- pre-#335 (a nonzero exit is not a spawn failure — it's still checked below).
 sh1 :: [Text] -> M Text
 sh1 argv = do
-  p <- runArgv argv
+  p <- runArgv argv >>= liftEither
   if ok p
     then pure (T.strip p.stdout)
     else Prelude.error ("sh: exit " ++ show p.exitCode ++ ": " ++ T.unpack (T.strip p.stderr))
@@ -40,14 +42,17 @@ shLines argv = do
   let ls = T.lines out
   pure (filter (not . T.null) ls)
 
--- | Run and parse stdout as JSON via 'parseJson'. Throws on parse error.
+-- | Run and parse stdout as JSON via 'parseJson'. Throws on parse error
+-- (`parseJson`'s `Left (HttpBadJson _)` aborts via `liftEither`).
 shJson :: [Text] -> M Value
-shJson argv = sh1 argv >>= parseJson
+shJson argv = sh1 argv >>= parseJson >>= liftEither
 
--- | Run; return @Right stdout@ on zero exit, @Left stderr@ on nonzero.
+-- | Run; return @Right stdout@ on zero exit, @Left stderr@ on nonzero. A
+-- spawn failure still aborts (via `liftEither`) — this @Either@ is purely the
+-- exit-code check, distinct from `runArgv`'s own typed `ExecError`.
 shTry :: [Text] -> M (Either Text Text)
 shTry argv = do
-  p <- runArgv argv
+  p <- runArgv argv >>= liftEither
   if ok p
     then pure (Right (T.strip p.stdout))
     else pure (Left (T.strip p.stderr))

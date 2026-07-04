@@ -266,7 +266,11 @@ pub fn generate_to_core(info: &EnumInfo) -> TokenStream {
             .collect();
 
         let pattern_idents = field_bindings.iter().map(|(ident, _)| ident);
-        let pattern = if rust_arity == 0 {
+        // A 0-arity TUPLE variant (`Foo::Bar()`, e.g. an `errors`-block ADT's
+        // nullary constructor — #335's `LlmBudget`) still needs the `()`
+        // pattern; only a genuine unit variant (`Foo::Bar`) omits it. Mirrors
+        // `generate_from_core`'s construction-side check just below.
+        let pattern = if rust_arity == 0 && !variant.is_tuple {
             quote! { #name::#rust_name }
         } else {
             quote! { #name::#rust_name(#(#pattern_idents),*) }

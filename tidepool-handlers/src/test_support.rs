@@ -132,6 +132,22 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         ("FsBadRegex", 1),
         ("FsIo", 1),
         ("FileRead", 2),
+        // #335 rest-wave typed-failure ADTs (Exec/Http/Git/Llm/Lsp) — same
+        // reason as the Fs constructors above: they live in each effect's
+        // type_defs, not its GADT constructors.
+        ("ExecSpawn", 1),
+        ("ExecBadDir", 1),
+        ("HttpInvalidUrl", 1),
+        ("HttpRestricted", 1),
+        ("HttpNetwork", 1),
+        ("HttpStatus", 2),
+        ("HttpBadJson", 1),
+        ("GitBadRevspec", 1),
+        ("GitFailed", 2),
+        ("LlmApi", 1),
+        ("LlmRefusal", 1),
+        ("LlmBudget", 0),
+        ("LspDaemonDown", 1),
         ("Match", 5),
         ("Rust", 0),
         ("Python", 0),

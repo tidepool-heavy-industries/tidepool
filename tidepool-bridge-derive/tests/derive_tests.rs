@@ -26,6 +26,19 @@ enum MultiField {
     Triple(i64, bool, String),
 }
 
+/// A ZERO-ARITY TUPLE variant (`Budget()`, parens present) — distinct from a
+/// unit variant (`MyBool::MyTrue` above, no parens). Regression coverage for
+/// a #335 bug: `ToCore`'s pattern-match arm dropped the `()` for any
+/// `rust_arity == 0` variant, so a nullary tuple constructor (e.g. an
+/// `errors`-block ADT's `LlmBudget`) failed to compile.
+#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+enum NullaryTuple {
+    #[core(name = "Budget")]
+    Budget(),
+    #[core(name = "NullaryDetail")]
+    Detail(String),
+}
+
 fn test_table() -> DataConTable {
     let mut t = standard_datacon_table();
     t.insert(DataCon {
@@ -68,6 +81,22 @@ fn test_table() -> DataConTable {
         field_bangs: vec![],
         qualified_name: None,
     });
+    t.insert(DataCon {
+        id: DataConId(25),
+        name: "Budget".into(),
+        tag: 1,
+        rep_arity: 0,
+        field_bangs: vec![],
+        qualified_name: None,
+    });
+    t.insert(DataCon {
+        id: DataConId(26),
+        name: "NullaryDetail".into(),
+        tag: 1,
+        rep_arity: 1,
+        field_bangs: vec![],
+        qualified_name: None,
+    });
     t
 }
 
@@ -105,6 +134,24 @@ fn test_multi_field_derive() {
     let val = MultiField::Triple(42, true, "hello".into());
     let value = val.to_value(&table).unwrap();
     let back = MultiField::from_value(&value, &table).unwrap();
+    assert_eq!(val, back);
+}
+
+/// Regression for #335: `ToCore`'s generated pattern arm for a ZERO-ARITY
+/// TUPLE variant (`Budget()`) used to drop the `()`, which doesn't compile —
+/// `rust_arity == 0` alone doesn't distinguish a nullary tuple ctor from a
+/// genuine unit variant. Round-trips both variants of `NullaryTuple`.
+#[test]
+fn test_nullary_tuple_variant_round_trip() {
+    let table = test_table();
+    let val = NullaryTuple::Budget();
+    let value = val.to_value(&table).unwrap();
+    let back = NullaryTuple::from_value(&value, &table).unwrap();
+    assert_eq!(val, back);
+
+    let val = NullaryTuple::Detail("over budget".to_string());
+    let value = val.to_value(&table).unwrap();
+    let back = NullaryTuple::from_value(&value, &table).unwrap();
     assert_eq!(val, back);
 }
 
