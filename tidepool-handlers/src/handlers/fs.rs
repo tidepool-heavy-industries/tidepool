@@ -53,24 +53,6 @@ pub fn is_glob(p: &str) -> bool {
     p.contains('*') || p.contains('?') || p.contains('[')
 }
 
-/// Build a gitignore matcher from the root's `.gitignore`, ripgrep-style
-/// (#343): a broad glob like `**/*.rs` must not walk paths the repo itself
-/// considers noise (build scratch, generated output) any more than `rg`
-/// would. Uses the `ignore` crate — the same gitignore matcher ripgrep is
-/// built on — so `glob`/`grepGlob`/`readGlob` inherit `rg`'s exclusions for
-/// free. Missing `.gitignore` or a parse error yields an empty (match-nothing)
-/// matcher rather than failing the glob.
-fn gitignore_matcher(root: &std::path::Path) -> ignore::gitignore::Gitignore {
-    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
-    let gitignore_path = root.join(".gitignore");
-    if gitignore_path.exists() {
-        let _ = builder.add(&gitignore_path);
-    }
-    builder
-        .build()
-        .unwrap_or_else(|_| ignore::gitignore::Gitignore::empty())
-}
-
 /// Blake3 content hash as a lowercase hex digest — the compare-and-swap token
 /// for `FsHash`/`FsWriteCas` (#330). Blake3 matches the cache layer's hash
 /// choice (`tidepool-runtime::cache`), so the whole codebase speaks one digest.
@@ -111,7 +93,10 @@ fn grep_regex_error(regex_str: &str, e: &regex::Error) -> FsError {
 /// Expand a glob pattern relative to `root` with sandbox and component filtering.
 ///
 /// Used by [`FsHandler`] (glob/grep) for `**`-normalisation, sandbox check,
-/// and hidden-dir filter.
+/// and hidden-dir filter. Walks via [`ignore::WalkBuilder`] (#343) so
+/// gitignored and always-heavy (`target`/`.git`/`node_modules`/
+/// `dist-newstyle`) directories are pruned DURING traversal — never
+/// descended into — rather than filtered out of the results afterward.
 pub fn expand_glob(root: &std::path::Path, pattern: &str) -> Result<Vec<PathBuf>, FsError> {
     // ONE shared empty-glob guard (#328): `glob`/`readGlob`/`grepGlob` all
     // resolve through here, so rejecting `""` in one place covers all three. An
@@ -166,31 +151,66 @@ pub fn expand_glob(root: &std::path::Path, pattern: &str) -> Result<Vec<PathBuf>
     let canonical_root = root
         .canonicalize()
         .map_err(|e| FsError::FsIo(e.to_string()))?;
+    let glob_pattern = glob::Pattern::new(&full_pattern)
+        .map_err(|e| FsError::FsIo(format!("invalid glob: {}", e)))?;
+    // Matches what `glob::glob`/`glob_with` always uses internally
+    // (`require_literal_separator` is forced `true` regardless of the
+    // options passed to it) — preserves the exact `**`/`*`/`?` semantics
+    // callers already rely on.
+    let match_options = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        require_literal_leading_dot: false,
+    };
 
-    let matcher = gitignore_matcher(root);
-    let paths: Vec<PathBuf> = glob::glob(&full_pattern)
-        .map_err(|e| FsError::FsIo(format!("invalid glob: {}", e)))?
-        .filter_map(std::result::Result::ok)
-        .filter(|p| {
-            p.canonicalize()
-                .map(|cp| cp.starts_with(&canonical_root))
-                .unwrap_or(false)
-        })
-        .filter(|p| {
-            let rel_path = p.strip_prefix(root).unwrap_or(p);
-            component_filter(pattern, rel_path)
-        })
-        .filter(|p| {
-            let rel_path = p.strip_prefix(root).unwrap_or(p);
-            // `matched` alone only tests the path itself; a directory-shaped
-            // pattern like `scratch/` must also exclude everything beneath
-            // it, so check the path AND its ancestors (mirrors how `rg`/
-            // `WalkBuilder` prune a whole ignored directory).
-            !matcher
-                .matched_path_or_any_parents(rel_path, p.is_dir())
-                .is_ignore()
-        })
-        .collect();
+    // Prune gitignored + always-heavy dirs DURING the walk (#343): filtering
+    // `glob::glob`'s RESULTS can't stop `glob()` from descending into e.g. a
+    // multi-hundred-GB `target/` to produce them in the first place — that
+    // descent IS the wedge. `ignore::WalkBuilder` walks the tree itself and
+    // never recurses past an entry `filter_entry` rejects, so a heavy/
+    // gitignored dir is skipped, not merely discarded afterward. Matching
+    // against the glob pattern is done separately (`glob::Pattern`) to keep
+    // exact pattern semantics; the walk only decides what's traversed.
+    let pattern_owned = pattern.to_string();
+    let root_owned = root.to_path_buf();
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
+        // Hidden-dir pruning is handled by `component_filter` below
+        // (mention-aware — e.g. `.tidepool/lib/*.hs` still traverses
+        // `.tidepool`), so disable the builtin blanket hidden-file skip.
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(false)
+        // `.gitignore` applies whether or not `root` sits inside a real git
+        // checkout (e.g. a temp-dir test, or a sandboxed session root).
+        .require_git(false)
+        .filter_entry(move |entry| {
+            if entry.depth() == 0 {
+                return true;
+            }
+            let rel_path = entry
+                .path()
+                .strip_prefix(&root_owned)
+                .unwrap_or(entry.path());
+            component_filter(&pattern_owned, rel_path)
+        });
+
+    let paths: Vec<PathBuf> = {
+        let mut paths: Vec<PathBuf> = builder
+            .build()
+            .filter_map(std::result::Result::ok)
+            .map(ignore::DirEntry::into_path)
+            .filter(|p| {
+                p.canonicalize()
+                    .map(|cp| cp.starts_with(&canonical_root))
+                    .unwrap_or(false)
+            })
+            .filter(|p| glob_pattern.matches_path_with(p, match_options))
+            .collect();
+        paths.sort();
+        paths
+    };
     Ok(paths)
 }
 
