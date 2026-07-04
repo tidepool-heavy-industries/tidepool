@@ -330,6 +330,33 @@ impl<U, H: EffectHandler<U>, T: DispatchEffect<U>> DispatchEffect<U> for HCons<H
     }
 }
 
+// Forwarding impls: a `&mut H` or a boxed handler dispatches through its inner
+// handler. These let a generic `H: DispatchEffect<U>` bound accept a type-erased
+// `Box<dyn _>` handler stack (e.g. the MCP server's `Box<dyn McpEffectHandler>`),
+// so a driver that is generic over the handler can be fed a boxed one without a
+// bespoke wrapper.
+impl<U, H: DispatchEffect<U> + ?Sized> DispatchEffect<U> for &mut H {
+    fn dispatch(
+        &mut self,
+        tag: u64,
+        request: &Value,
+        cx: &EffectContext<'_, U>,
+    ) -> Result<Response, EffectError> {
+        (**self).dispatch(tag, request, cx)
+    }
+}
+
+impl<U, H: DispatchEffect<U> + ?Sized> DispatchEffect<U> for Box<H> {
+    fn dispatch(
+        &mut self,
+        tag: u64,
+        request: &Value,
+        cx: &EffectContext<'_, U>,
+    ) -> Result<Response, EffectError> {
+        (**self).dispatch(tag, request, cx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
