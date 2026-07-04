@@ -1,8 +1,3 @@
-use tidepool_effect::dispatch::EffectContext;
-use tidepool_effect::error::EffectError;
-use tidepool_eval::value::Value;
-use tidepool_mcp::CapturedOutput;
-
 // ============================================================================
 // Tag 4: Http
 // ============================================================================
@@ -12,20 +7,20 @@ use tidepool_mcp::CapturedOutput;
 // bodies below are hand-written.
 tidepool_mcp::http_effect_def!(crate::effect_glue::effect_rust_projection);
 
-pub fn parse_json_str(s: &str) -> Result<serde_json::Value, EffectError> {
-    serde_json::from_str(s).map_err(|e| EffectError::Handler(format!("invalid JSON: {e}")))
+pub fn parse_json_str(s: &str) -> Result<serde_json::Value, HttpError> {
+    serde_json::from_str(s).map_err(|e| HttpError::HttpBadJson(format!("invalid JSON: {e}")))
 }
 
 #[derive(Clone)]
 pub struct HttpHandler;
 
 impl HttpHandler {
-    pub fn validate_url(url_str: &str) -> Result<url::Url, EffectError> {
+    pub fn validate_url(url_str: &str) -> Result<url::Url, HttpError> {
         let url = url::Url::parse(url_str)
-            .map_err(|e| EffectError::Handler(format!("Invalid URL '{}': {}", url_str, e)))?;
+            .map_err(|e| HttpError::HttpInvalidUrl(format!("Invalid URL '{}': {}", url_str, e)))?;
 
         if url.scheme() != "http" && url.scheme() != "https" {
-            return Err(EffectError::Handler(format!(
+            return Err(HttpError::HttpInvalidUrl(format!(
                 "Unsupported protocol '{}'. Only http/https allowed.",
                 url.scheme()
             )));
@@ -35,7 +30,7 @@ impl HttpHandler {
             match host {
                 url::Host::Ipv4(ip) => {
                     if ip.is_loopback() || ip.is_private() || ip.is_link_local() {
-                        return Err(EffectError::Handler(format!(
+                        return Err(HttpError::HttpRestricted(format!(
                             "Access to internal IP '{}' is restricted.",
                             ip
                         )));
@@ -43,7 +38,7 @@ impl HttpHandler {
                 }
                 url::Host::Ipv6(ip) => {
                     if ip.is_loopback() || ip.is_unspecified() {
-                        return Err(EffectError::Handler(format!(
+                        return Err(HttpError::HttpRestricted(format!(
                             "Access to internal IP '{}' is restricted.",
                             ip
                         )));
@@ -51,7 +46,7 @@ impl HttpHandler {
                 }
                 url::Host::Domain(domain) => {
                     if domain == "localhost" {
-                        return Err(EffectError::Handler(
+                        return Err(HttpError::HttpRestricted(
                             "Access to 'localhost' is restricted.".into(),
                         ));
                     }
@@ -62,19 +57,36 @@ impl HttpHandler {
         Ok(url)
     }
 
-    fn parse_response(_url_str: &str, body: &str) -> Result<serde_json::Value, EffectError> {
+    fn parse_response(_url_str: &str, body: &str) -> Result<serde_json::Value, HttpError> {
         serde_json::from_str(body).or_else(|_| Ok(serde_json::Value::String(body.to_string())))
     }
 
-    pub fn get(&self, url_str: &str) -> Result<serde_json::Value, EffectError> {
+    /// Map a `ureq` call failure to a typed `HttpError`: a non-2xx response
+    /// carries its status CODE as data (`HttpStatus`); anything else (DNS,
+    /// connect, timeout, TLS) is `HttpNetwork`.
+    fn map_ureq_err(url_str: &str, e: ureq::Error) -> HttpError {
+        match e {
+            ureq::Error::Status(code, response) => {
+                let body = response
+                    .into_string()
+                    .unwrap_or_else(|_| "<unreadable body>".to_string());
+                HttpError::HttpStatus(code as i64, body)
+            }
+            ureq::Error::Transport(t) => {
+                HttpError::HttpNetwork(format!("HTTP request to '{}' failed: {}", url_str, t))
+            }
+        }
+    }
+
+    pub fn get(&self, url_str: &str) -> Result<serde_json::Value, HttpError> {
         let url = Self::validate_url(url_str)?;
         let resp = ureq::get(url.as_str())
             .timeout(std::time::Duration::from_secs(30))
             .call()
-            .map_err(|e| EffectError::Handler(format!("HTTP GET '{}' failed: {}", url_str, e)))?;
-        let body = resp.into_string().map_err(|e| {
-            EffectError::Handler(format!("Read body from '{}' failed: {}", url_str, e))
-        })?;
+            .map_err(|e| Self::map_ureq_err(url_str, e))?;
+        let body = resp
+            .into_string()
+            .map_err(|e| HttpError::HttpNetwork(format!("Read body from '{}' failed: {}", url_str, e)))?;
         Self::parse_response(url_str, &body)
     }
 
@@ -82,70 +94,36 @@ impl HttpHandler {
         &self,
         url_str: &str,
         json_body: &serde_json::Value,
-    ) -> Result<serde_json::Value, EffectError> {
+    ) -> Result<serde_json::Value, HttpError> {
         let url = Self::validate_url(url_str)?;
         let resp = ureq::post(url.as_str())
             .timeout(std::time::Duration::from_secs(30))
             .send_json(json_body)
-            .map_err(|e| EffectError::Handler(format!("HTTP POST '{}' failed: {}", url_str, e)))?;
-        let body = resp.into_string().map_err(|e| {
-            EffectError::Handler(format!("Read body from '{}' failed: {}", url_str, e))
-        })?;
+            .map_err(|e| Self::map_ureq_err(url_str, e))?;
+        let body = resp
+            .into_string()
+            .map_err(|e| HttpError::HttpNetwork(format!("Read body from '{}' failed: {}", url_str, e)))?;
         Self::parse_response(url_str, &body)
     }
 }
 
 impl HttpHandler {
-    fn http_get(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        url: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        cx.respond(self.get(&url)?)
+    // Errors-tagged verbs: total in `HttpError`, no `cx` — the dispatch arm
+    // wraps the `Result` via `cx.respond` (Ok→Right, Err→Left). See #335.
+    fn http_get(&mut self, url: String) -> Result<serde_json::Value, HttpError> {
+        self.get(&url)
     }
 
     fn http_post(
         &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
         url: String,
-        body: Value,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        let json_body = tidepool_runtime::value_to_json(&body, cx.table(), 0);
-        cx.respond(self.post(&url, &json_body)?)
+        body: crate::effect_glue::JsonArg,
+    ) -> Result<serde_json::Value, HttpError> {
+        self.post(&url, &body.0)
     }
 
-    fn http_try_get(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        url: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        cx.respond_caught(self.get(&url))
-    }
-
-    fn http_try_post(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        url: String,
-        body: Value,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        let json_body = tidepool_runtime::value_to_json(&body, cx.table(), 0);
-        cx.respond_caught(self.post(&url, &json_body))
-    }
-
-    fn http_parse_json(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        s: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        cx.respond(parse_json_str(&s)?)
-    }
-
-    fn http_try_parse_json(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        s: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        cx.respond_caught(parse_json_str(&s))
+    fn http_parse_json(&mut self, s: String) -> Result<serde_json::Value, HttpError> {
+        parse_json_str(&s)
     }
 }
 
@@ -179,5 +157,26 @@ mod tests {
         let val = Value::Con(con_id, vec![url, body]);
         let req = HttpReq::from_value(&val, &table).unwrap();
         assert!(matches!(req, HttpReq::HttpPost(ref u, _) if u == "https://example.com/api"));
+    }
+
+    /// #335 acceptance: `httpGet` on a malformed URL is a typed
+    /// `Left (HttpInvalidUrl _)` the eval pattern-matches — never an abort.
+    #[tokio::test]
+    async fn http_get_bad_url_is_typed_left_httpinvalidurl() {
+        let v = jit_eval(&[
+            "r <- httpGet \"not-a-url\"",
+            "pure (case r of { Left (HttpInvalidUrl _) -> (\"badurl\" :: Text); Left _ -> \"other\"; Right _ -> \"ok\" })",
+        ]);
+        assert_eq!(v, serde_json::json!("badurl"));
+    }
+
+    /// `httpGet` on a restricted (localhost) URL is `Left (HttpRestricted _)`.
+    #[tokio::test]
+    async fn http_get_localhost_is_typed_left_httprestricted() {
+        let v = jit_eval(&[
+            "r <- httpGet \"http://localhost/\"",
+            "pure (case r of { Left (HttpRestricted _) -> (\"restricted\" :: Text); Left _ -> \"other\"; Right _ -> \"ok\" })",
+        ]);
+        assert_eq!(v, serde_json::json!("restricted"));
     }
 }

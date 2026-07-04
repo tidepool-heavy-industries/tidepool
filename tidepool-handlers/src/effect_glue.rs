@@ -126,3 +126,27 @@ macro_rules! dispatch_body {
     };
 }
 pub(crate) use dispatch_body;
+
+/// An incoming aeson-`Value` GADT argument (e.g. `HttpPost`'s body,
+/// `LlmStructured`'s schema), pre-converted to `serde_json::Value`.
+///
+/// An `errors`-tagged verb's method receives no `cx` (see [`dispatch_body!`]),
+/// so it has no `DataConTable` to interpret a raw core `Value` — the table
+/// lookup has to happen at Req-decode time instead, while `cx` (and so the
+/// table) is still in scope. `FromCore` for a LOCAL wrapper type is exactly
+/// that decode-time hook: `tidepool_bridge_derive`'s enum derive calls
+/// `<$ar as FromCore>::from_value(&fields[i], table)` for every GADT arg
+/// (`$ar` here is `JsonArg`), so the conversion rides the SAME table the
+/// dispatch already has, before the tagged method ever runs.
+pub struct JsonArg(pub serde_json::Value);
+
+impl tidepool_bridge::sealed::FromCoreSealed for JsonArg {}
+
+impl tidepool_bridge::FromCore for JsonArg {
+    fn from_value(
+        value: &tidepool_eval::Value,
+        table: &tidepool_repr::DataConTable,
+    ) -> Result<Self, tidepool_bridge::BridgeError> {
+        Ok(JsonArg(tidepool_runtime::value_to_json(value, table, 0)))
+    }
+}

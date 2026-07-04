@@ -1,7 +1,4 @@
 use std::path::PathBuf;
-use tidepool_effect::dispatch::EffectContext;
-use tidepool_effect::error::EffectError;
-use tidepool_mcp::CapturedOutput;
 
 // ============================================================================
 // Tag 5: Exec (shell commands)
@@ -24,17 +21,17 @@ impl ExecHandler {
 
     const MAX_EXEC_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 
-    fn resolve_dir(&self, rel: &str) -> Result<PathBuf, EffectError> {
+    fn resolve_dir(&self, rel: &str) -> Result<PathBuf, ExecError> {
         let target = self.root.join(rel);
         let canonical_root = self
             .root
             .canonicalize()
-            .map_err(|e| EffectError::Handler(e.to_string()))?;
+            .map_err(|e| ExecError::ExecBadDir(e.to_string()))?;
         let canonical = target
             .canonicalize()
-            .map_err(|e| EffectError::Handler(format!("Cannot resolve directory: {}", e)))?;
+            .map_err(|e| ExecError::ExecBadDir(format!("Cannot resolve directory: {}", e)))?;
         if !canonical.starts_with(&canonical_root) {
-            return Err(EffectError::Handler(format!(
+            return Err(ExecError::ExecBadDir(format!(
                 "Path escapes sandbox: {}",
                 rel
             )));
@@ -46,7 +43,7 @@ impl ExecHandler {
         &self,
         cmd: &str,
         dir: &std::path::Path,
-    ) -> Result<(i64, String, String), EffectError> {
+    ) -> Result<(i64, String, String), ExecError> {
         let output = std::process::Command::new("sh")
             .arg("-c")
             .arg(cmd)
@@ -54,7 +51,7 @@ impl ExecHandler {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
-            .map_err(|e| EffectError::Handler(format!("exec failed: {}", e)))?;
+            .map_err(|e| ExecError::ExecSpawn(format!("exec failed: {}", e)))?;
 
         let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -80,53 +77,22 @@ impl ExecHandler {
 }
 
 impl ExecHandler {
-    fn exec_run(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        cmd: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        let (code, stdout, stderr) = self.run_command(&cmd, &self.root.clone())?;
-        cx.respond((code, stdout, stderr))
+    // Errors-tagged verbs: total in `ExecError`, no `cx` — the dispatch arm
+    // wraps the `Result` via `cx.respond` (Ok→Right, Err→Left). See #335. A
+    // nonzero EXIT is not a failure: `run_command` always returns `Ok((code,
+    // out, err))` once the process spawns — `Err` is only ExecSpawn/ExecBadDir.
+    fn exec_run(&mut self, cmd: String) -> Result<(i64, String, String), ExecError> {
+        self.run_command(&cmd, &self.root.clone())
     }
 
-    fn exec_run_in(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        dir: String,
-        cmd: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
+    fn exec_run_in(&mut self, dir: String, cmd: String) -> Result<(i64, String, String), ExecError> {
         let target = self.resolve_dir(&dir)?;
-        let (code, stdout, stderr) = self.run_command(&cmd, &target)?;
-        cx.respond((code, stdout, stderr))
+        self.run_command(&cmd, &target)
     }
 
-    fn exec_try_run(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        cmd: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        cx.respond_caught(self.run_command(&cmd, &self.root.clone()))
-    }
-
-    fn exec_try_run_in(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        dir: String,
-        cmd: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        cx.respond_caught(
-            self.resolve_dir(&dir)
-                .and_then(|target| self.run_command(&cmd, &target)),
-        )
-    }
-
-    fn exec_run_argv(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        argv: Vec<String>,
-    ) -> Result<tidepool_effect::Response, EffectError> {
+    fn exec_run_argv(&mut self, argv: Vec<String>) -> Result<(i64, String, String), ExecError> {
         if argv.is_empty() {
-            return Err(EffectError::Handler("runArgv: empty argv".to_string()));
+            return Err(ExecError::ExecSpawn("runArgv: empty argv".to_string()));
         }
         let output = std::process::Command::new(&argv[0])
             .args(&argv[1..])
@@ -134,7 +100,7 @@ impl ExecHandler {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
-            .map_err(|e| EffectError::Handler(format!("runArgv exec failed: {}", e)))?;
+            .map_err(|e| ExecError::ExecSpawn(format!("runArgv exec failed: {}", e)))?;
         let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
         if stdout.len() > Self::MAX_EXEC_OUTPUT_BYTES {
@@ -154,7 +120,7 @@ impl ExecHandler {
             stderr.push_str("\n...[truncated at 2MB]");
         }
         let code = output.status.code().unwrap_or(-1) as i64;
-        cx.respond((code, stdout, stderr))
+        Ok((code, stdout, stderr))
     }
 }
 
@@ -184,5 +150,25 @@ mod tests {
         let val = Value::Con(con_id, vec![dir, cmd]);
         let req = ExecReq::from_value(&val, &table).unwrap();
         assert!(matches!(req, ExecReq::RunIn(ref d, ref c) if d == "/tmp" && c == "ls"));
+    }
+
+    /// #335 end-to-end acceptance: `runIn` with a bad/escaping directory is a
+    /// typed `Left (ExecBadDir _)` the eval pattern-matches — never an abort.
+    #[tokio::test]
+    async fn exec_run_in_bad_dir_is_typed_left_execbaddir() {
+        let v = jit_eval(&[
+            "r <- runIn \"../../nope-335\" \"echo hi\"",
+            "pure (case r of { Left (ExecBadDir _) -> (\"baddir\" :: Text); Left _ -> \"other\"; Right _ -> \"ok\" })",
+        ]);
+        assert_eq!(v, serde_json::json!("baddir"));
+    }
+
+    /// The happy path still threads through the Either: `run` on a valid
+    /// command is `Right _`, so `run cmd >>= liftEither` (the natural unwrap)
+    /// yields the Proc.
+    #[tokio::test]
+    async fn exec_run_existing_command_is_right() {
+        let v = jit_eval(&["p <- run \"echo hi\" >>= liftEither", "pure (ok p)"]);
+        assert_eq!(v, serde_json::json!(true));
     }
 }

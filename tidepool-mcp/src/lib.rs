@@ -718,7 +718,8 @@ data Console a where
         assert!(preamble.contains("say :: Text -> M ()"));
         // Other helpers unchanged
         assert!(preamble.contains("kvGet :: Text -> M (Maybe Value)"));
-        assert!(preamble.contains("httpGet :: Text -> M Value"));
+        // #335: httpGet is errors-tagged.
+        assert!(preamble.contains("httpGet :: Text -> M (Either HttpError Value)"));
         assert!(preamble.contains("ask :: Schema -> Text -> M Value"));
     }
 
@@ -806,9 +807,9 @@ data Console a where
         let decls = standard_decls();
         let preamble = generated_sources(&decls, false);
         assert!(preamble.contains("import Control.Monad.Freer hiding (run)"));
-        // Our run helper should still be present
+        // Our run helper should still be present (#335: errors-tagged).
         assert!(preamble.contains(
-            "run :: Text -> M Proc\nrun cmd = (\\(ec, o, e) -> Proc ec o e) <$> send (Run cmd)"
+            "run :: Text -> M (Either ExecError Proc)\nrun cmd = send (Run cmd) <&> fmap (\\(ec, o, e) -> Proc ec o e)"
         ));
     }
 
@@ -829,14 +830,13 @@ data Console a where
     fn test_exec_decl() {
         let decl = exec_decl();
         assert_eq!(decl.type_name, "Exec");
+        // #335: Run/RunIn are errors-tagged.
         assert!(decl
             .constructors
             .iter()
-            .any(|c| c.contains("Run :: Text -> Exec (Int, Text, Text)")));
-        assert!(decl
-            .constructors
-            .iter()
-            .any(|c| c.contains("RunIn :: Text -> Text -> Exec (Int, Text, Text)")));
+            .any(|c| c.contains("Run :: Text -> Exec (Either ExecError (Int, Text, Text))")));
+        assert!(decl.constructors.iter().any(|c| c
+            .contains("RunIn :: Text -> Text -> Exec (Either ExecError (Int, Text, Text))")));
     }
 
     #[test]
@@ -871,8 +871,10 @@ data Console a where
         let effects_mod = effects_module_source(&decls);
         assert!(effects_mod.contains("data Schema = SObj"));
         assert!(effects_mod.contains("ask :: Schema -> Text -> M Value"));
-        assert!(effects_mod.contains("llm :: Schema -> Text -> M Value"));
-        assert!(effects_mod.contains("tryLlm :: Schema -> Text -> M (Either Text Value)"));
+        // #335: llm is errors-tagged (fully total — budget exhaustion is DATA);
+        // tryLlm is gone (llm supersedes it).
+        assert!(effects_mod.contains("llm :: Schema -> Text -> M (Either LlmError Value)"));
+        assert!(!effects_mod.contains("tryLlm"));
         // ask suspends to the caller via AskWith (no autonomous LLM call)
         assert!(effects_mod
             .contains("send (AskWith prompt (object [\"schema\" .= schemaToValue schema]))"));
@@ -897,7 +899,7 @@ data Console a where
         let no_llm_mod = effects_module_source(&no_llm);
         assert!(no_llm_mod.contains("ask :: Schema -> Text -> M Value"));
         // llm needs the Llm effect — absent from an Llm-less stack.
-        assert!(!no_llm_mod.contains("llm :: Schema -> Text -> M Value"));
+        assert!(!no_llm_mod.contains("llm :: Schema -> Text -> M (Either LlmError Value)"));
     }
 
     #[test]

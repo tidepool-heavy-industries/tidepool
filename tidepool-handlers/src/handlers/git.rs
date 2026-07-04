@@ -1,8 +1,5 @@
 use std::path::PathBuf;
 use tidepool_bridge_derive::{CoreRecord, ToCore};
-use tidepool_effect::dispatch::EffectContext;
-use tidepool_effect::error::EffectError;
-use tidepool_mcp::CapturedOutput;
 
 // ============================================================================
 // Tag 8: Git (read-only repository queries)
@@ -94,9 +91,11 @@ impl GitHandler {
         Self { root }
     }
 
-    /// Run a git command in the sandbox root; propagate non-zero exit as
-    /// `EffectError::Handler` (clean eval failure, no panic).
-    fn run_git(&self, args: &[&str]) -> Result<String, EffectError> {
+    /// Run a git command in the sandbox root. Failure is TYPED (#335): an
+    /// unknown/ambiguous revspec is `GitBadRevspec`; any other nonzero exit
+    /// (or a git binary that can't even be spawned, exit code -1) is
+    /// `GitFailed code detail`.
+    fn run_git(&self, args: &[&str]) -> Result<String, GitError> {
         let output = std::process::Command::new("git")
             .args(args)
             .current_dir(&self.root)
@@ -105,10 +104,17 @@ impl GitHandler {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
-            .map_err(|e| EffectError::Handler(format!("git exec failed: {}", e)))?;
+            .map_err(|e| GitError::GitFailed(-1, format!("git exec failed: {}", e)))?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(EffectError::Handler(format!("git: {}", stderr.trim())));
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let code = output.status.code().unwrap_or(-1) as i64;
+            if stderr.contains("bad revision")
+                || stderr.contains("unknown revision")
+                || stderr.contains("ambiguous argument")
+            {
+                return Err(GitError::GitBadRevspec(stderr));
+            }
+            return Err(GitError::GitFailed(code, stderr));
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
@@ -159,10 +165,10 @@ impl GitHandler {
     }
 
     /// Parse one commit from log output; error if missing.
-    fn parse_single_commit(output: &str, revspec: &str) -> Result<GitCommit, EffectError> {
+    fn parse_single_commit(output: &str, revspec: &str) -> Result<GitCommit, GitError> {
         let commits = Self::parse_log_output(output);
         commits.into_iter().next().ok_or_else(|| {
-            EffectError::Handler(format!("gitShow: no commit found for '{}'", revspec))
+            GitError::GitBadRevspec(format!("gitShow: no commit found for '{}'", revspec))
         })
     }
 
@@ -220,11 +226,9 @@ impl GitHandler {
 }
 
 impl GitHandler {
-    fn git_log(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        n: i64,
-    ) -> Result<tidepool_effect::Response, EffectError> {
+    // Errors-tagged verbs: total in `GitError`, no `cx` — the dispatch arm
+    // wraps the `Result` via `cx.respond` (Ok→Right, Err→Left). See #335.
+    fn git_log(&mut self, n: i64) -> Result<Vec<GitCommit>, GitError> {
         let n_str = n.to_string();
         let output = self.run_git(&[
             "log",
@@ -233,31 +237,20 @@ impl GitHandler {
             "--format=%H%x00%s%x00%an%x00%cI",
             "--name-only",
         ])?;
-        cx.respond_list(Self::parse_log_output(&output))
+        Ok(Self::parse_log_output(&output))
     }
 
-    fn git_status(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-    ) -> Result<tidepool_effect::Response, EffectError> {
+    fn git_status(&mut self) -> Result<Vec<GitStatusEntry>, GitError> {
         let output = self.run_git(&["status", "--porcelain=v1"])?;
-        cx.respond_list(Self::parse_status_output(&output))
+        Ok(Self::parse_status_output(&output))
     }
 
-    fn git_diff_stat(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        rev: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
+    fn git_diff_stat(&mut self, rev: String) -> Result<Vec<GitFileDelta>, GitError> {
         let output = self.run_git(&["diff", "--numstat", &rev])?;
-        cx.respond_list(Self::parse_numstat_output(&output))
+        Ok(Self::parse_numstat_output(&output))
     }
 
-    fn git_show(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        rev: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
+    fn git_show(&mut self, rev: String) -> Result<GitCommit, GitError> {
         let output = self.run_git(&[
             "log",
             "-n",
@@ -266,8 +259,7 @@ impl GitHandler {
             "--format=%H%x00%s%x00%an%x00%cI",
             "--name-only",
         ])?;
-        let commit = Self::parse_single_commit(&output, &rev)?;
-        cx.respond(commit)
+        Self::parse_single_commit(&output, &rev)
     }
 }
 
@@ -278,6 +270,22 @@ mod tests {
     use tidepool_bridge::{FromCore, ToCore};
     use tidepool_effect::dispatch::{EffectContext, EffectHandler};
     use tidepool_eval::value::Value;
+    use tidepool_mcp::CapturedOutput;
+
+    /// Peel one `Right`/`Left` Con layer off a #335 errors-tagged response,
+    /// panicking with the decoded `GitError` on `Left`. Matches by reference
+    /// (`Value` has a manual `Drop` impl, so it can't be partially moved out
+    /// of) and clones just the field it needs.
+    fn unwrap_right(val: Value, table: &tidepool_repr::DataConTable) -> Value {
+        match &val {
+            Value::Con(id, fields) if table.name_of(*id).unwrap() == "Right" => fields[0].clone(),
+            Value::Con(id, fields) if table.name_of(*id).unwrap() == "Left" => {
+                let err: GitError = FromCore::from_value(&fields[0], table).unwrap();
+                panic!("expected Right, got Left({:?})", err);
+            }
+            other => panic!("expected Right/Left, got {:?}", other),
+        }
+    }
 
     #[test]
     fn test_git_from_core_log() {
@@ -433,7 +441,10 @@ file_c.txt\n\
         let n = (2i64).to_value(&table).unwrap();
         let con_id = table.get_by_name("GitLog").unwrap();
         let request = Value::Con(con_id, vec![n]);
-        let result = response_value(handler.handle(GitReq::GitLog(2), &cx).unwrap(), &table);
+        let result = unwrap_right(
+            response_value(handler.handle(GitReq::GitLog(2), &cx).unwrap(), &table),
+            &table,
+        );
 
         // Should be a cons list with 2 Commit cells
         let mut node = &result;
@@ -476,7 +487,10 @@ file_c.txt\n\
         let cx = EffectContext::with_user(&table, &captured);
         let mut handler = GitHandler::new(dir.path().to_path_buf());
 
-        let result = response_value(handler.handle(GitReq::GitStatus(), &cx).unwrap(), &table);
+        let result = unwrap_right(
+            response_value(handler.handle(GitReq::GitStatus(), &cx).unwrap(), &table),
+            &table,
+        );
 
         // Collect all StatusEntry names from the cons list
         let mut paths_and_states: Vec<(String, String)> = Vec::new();
@@ -513,10 +527,13 @@ file_c.txt\n\
         let cx = EffectContext::with_user(&table, &captured);
         let mut handler = GitHandler::new(dir.path().to_path_buf());
 
-        let result = response_value(
-            handler
-                .handle(GitReq::GitDiffStat("HEAD~1".to_string()), &cx)
-                .unwrap(),
+        let result = unwrap_right(
+            response_value(
+                handler
+                    .handle(GitReq::GitDiffStat("HEAD~1".to_string()), &cx)
+                    .unwrap(),
+                &table,
+            ),
             &table,
         );
         // HEAD~1 introduces beta.txt; should return at least 1 FileDelta
@@ -553,10 +570,13 @@ file_c.txt\n\
         let cx = EffectContext::with_user(&table, &captured);
         let mut handler = GitHandler::new(dir.path().to_path_buf());
 
-        let result = response_value(
-            handler
-                .handle(GitReq::GitShow("HEAD".to_string()), &cx)
-                .unwrap(),
+        let result = unwrap_right(
+            response_value(
+                handler
+                    .handle(GitReq::GitShow("HEAD".to_string()), &cx)
+                    .unwrap(),
+                &table,
+            ),
             &table,
         );
         match &result {
@@ -580,8 +600,25 @@ file_c.txt\n\
         let cx = EffectContext::with_user(&table, &captured);
         let mut handler = GitHandler::new(dir.path().to_path_buf());
 
-        let result = handler.handle(GitReq::GitShow("notaref_zzzzzz".to_string()), &cx);
-        assert!(result.is_err(), "gitShow with bad revspec should error");
+        // GitShow is errors-tagged (#335): a bad revspec is a typed
+        // `Left (GitBadRevspec _)` DATA, not an abort.
+        let res = response_value(
+            handler
+                .handle(GitReq::GitShow("notaref_zzzzzz".to_string()), &cx)
+                .unwrap(),
+            &table,
+        );
+        match &res {
+            Value::Con(id, fields) if table.name_of(*id).unwrap() == "Left" => {
+                let err: GitError = FromCore::from_value(&fields[0], &table).unwrap();
+                assert!(
+                    matches!(err, GitError::GitBadRevspec(_)),
+                    "expected GitBadRevspec, got {:?}",
+                    err
+                );
+            }
+            other => panic!("expected Left (GitBadRevspec _), got {:?}", other),
+        }
     }
 
     fn extract_available() -> bool {
@@ -607,7 +644,7 @@ file_c.txt\n\
         // Return the observed values (not a collapsed Bool) so a failure names
         // which invariant broke and what we actually saw.
         let source = jit_test_source(&[
-            "commits <- gitLog 1",
+            "commits <- gitLog 1 >>= liftEither",
             "let n = length commits",
             "let shaLen = case commits of { (c:_) -> T.length c.sha; _ -> 0 }",
             "pure (toJSON [n, shaLen])",
@@ -643,6 +680,49 @@ file_c.txt\n\
                 "gitLog 1 should return exactly 1 Commit ([n, shaLen] observed)"
             ),
             Err(e) => panic!("JIT gitLog eval failed: {:?}", e),
+        }
+    }
+
+    /// #335 acceptance: `gitShow` with a bad revspec is a typed
+    /// `Left (GitBadRevspec _)` the eval pattern-matches — never an abort.
+    #[tokio::test]
+    async fn test_jit_git_show_bad_revspec_is_typed_left() {
+        if !extract_available() {
+            eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
+            return;
+        }
+        let decls = tidepool_mcp::standard_decls();
+        let source = jit_test_source(&[
+            "r <- gitShow \"notaref_zzzzzz\"",
+            "pure (case r of { Left (GitBadRevspec _) -> (\"badrevspec\" :: Text); Left _ -> \"other\"; Right _ -> \"ok\" })",
+        ]);
+        let include = prelude_include();
+        let effects_dir = tidepool_mcp::ensure_effects_module(&decls).unwrap();
+        let include_paths: Vec<&std::path::Path> = vec![include.as_path(), effects_dir.as_path()];
+        let kv_path = std::env::temp_dir().join("tidepool_git_jit_kv_badrevspec.json");
+        let cwd = repo_root();
+        let captured = CapturedOutput::new();
+        let mut handlers = frunk::hlist![
+            crate::ConsoleHandler,
+            crate::KvHandler::new(kv_path),
+            crate::FsHandler::new(cwd.clone()),
+            crate::HttpHandler,
+            crate::ExecHandler::new(cwd.clone()),
+            crate::LspHandler::new(cwd.clone()),
+            crate::LlmHandler::new("ollama:llama3.2".to_string()),
+            GitHandler::new(cwd.clone()),
+            crate::TimeHandler,
+        ];
+        let result = tidepool_runtime::compile_and_run(
+            &source,
+            "result",
+            &include_paths,
+            &mut handlers,
+            &captured,
+        );
+        match result {
+            Ok(v) => assert_eq!(v.to_json(), serde_json::json!("badrevspec")),
+            Err(e) => panic!("JIT gitShow eval failed: {:?}", e),
         }
     }
 }
