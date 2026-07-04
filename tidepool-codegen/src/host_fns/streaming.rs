@@ -173,13 +173,13 @@ unsafe fn build_cons_cells(
     items: &[tidepool_eval::value::Value],
     terminator: *mut u8,
 ) -> *mut u8 {
-    let mark = rust_roots_mark();
+    let mark = rust_roots_mark(vmctx);
     let mut tail: *mut u8 = terminator;
-    register_rust_root(&mut tail as *mut *mut u8);
+    register_rust_root(vmctx, &mut tail as *mut *mut u8);
 
     // Build cells back-to-front so each cons links the already-built tail.
     let mut elem: *mut u8 = std::ptr::null_mut();
-    register_rust_root(&mut elem as *mut *mut u8);
+    register_rust_root(vmctx, &mut elem as *mut *mut u8);
     for v in items.iter().rev() {
         elem = match crate::heap_bridge::value_to_heap(v, &mut *vmctx) {
             Ok(p) => p,
@@ -188,13 +188,13 @@ unsafe fn build_cons_cells(
                 match crate::heap_bridge::value_to_heap(v, &mut *vmctx) {
                     Ok(p) => p,
                     Err(_) => {
-                        truncate_rust_roots(mark);
+                        truncate_rust_roots(vmctx, mark);
                         return runtime_oom();
                     }
                 }
             }
             Err(_) => {
-                truncate_rust_roots(mark);
+                truncate_rust_roots(vmctx, mark);
                 let msg = b"effect result: element conversion failed";
                 return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
             }
@@ -202,7 +202,7 @@ unsafe fn build_cons_cells(
         let size = tidepool_heap::layout::CON_FIELDS_OFFSET + 16;
         let cell = host_alloc_gc(vmctx, size);
         if cell.is_null() {
-            truncate_rust_roots(mark);
+            truncate_rust_roots(vmctx, mark);
             return runtime_oom();
         }
         tidepool_heap::layout::write_header(cell, tidepool_heap::layout::TAG_CON, size as u16);
@@ -212,7 +212,7 @@ unsafe fn build_cons_cells(
         *(cell.add(tidepool_heap::layout::CON_FIELDS_OFFSET + 8) as *mut *mut u8) = tail;
         tail = cell;
     }
-    truncate_rust_roots(mark);
+    truncate_rust_roots(vmctx, mark);
     tail
 }
 
@@ -411,22 +411,22 @@ unsafe fn build_cons_cells_thunked(
     range: std::ops::Range<usize>,
     terminator: *mut u8,
 ) -> *mut u8 {
-    let mark = rust_roots_mark();
+    let mark = rust_roots_mark(vmctx);
     let mut tail: *mut u8 = terminator;
-    register_rust_root(&mut tail as *mut *mut u8);
+    register_rust_root(vmctx, &mut tail as *mut *mut u8);
 
     let mut elem: *mut u8 = std::ptr::null_mut();
-    register_rust_root(&mut elem as *mut *mut u8);
+    register_rust_root(vmctx, &mut elem as *mut *mut u8);
     for idx in range.rev() {
         elem = alloc_element_thunk(vmctx, id, idx as u64);
         if elem.is_null() {
-            truncate_rust_roots(mark);
+            truncate_rust_roots(vmctx, mark);
             return runtime_oom();
         }
         let size = tidepool_heap::layout::CON_FIELDS_OFFSET + 16;
         let cell = host_alloc_gc(vmctx, size);
         if cell.is_null() {
-            truncate_rust_roots(mark);
+            truncate_rust_roots(vmctx, mark);
             return runtime_oom();
         }
         tidepool_heap::layout::write_header(cell, tidepool_heap::layout::TAG_CON, size as u16);
@@ -436,7 +436,7 @@ unsafe fn build_cons_cells_thunked(
         *(cell.add(tidepool_heap::layout::CON_FIELDS_OFFSET + 8) as *mut *mut u8) = tail;
         tail = cell;
     }
-    truncate_rust_roots(mark);
+    truncate_rust_roots(vmctx, mark);
     tail
 }
 

@@ -4,12 +4,39 @@
 //!
 //! Homes the state that used to live in per-thread `thread_local!` cells: the
 //! external-cancellation flag, the JSON decode constructor ids, the stack-map
-//! registry pointer, the call-depth counter (T6 leaf 1), and the first-cause
-//! runtime error, diagnostics, and parked-stream registry (T6 leaf 2). Each
-//! `JitEffectMachine` owns one `MachineState` inline; `install_registries`
-//! points the run's `VMContext.machine_state` at it and installs it as this
-//! thread's [`CURRENT_MACHINE`]. Leaf 3 adds the GC-state fields (GC_STATE,
-//! RUST_ROOTS, PERSISTENT_ROOTS).
+//! registry pointer, the call-depth counter (T6 leaf 1), the first-cause
+//! runtime error, diagnostics, and parked-stream registry (T6 leaf 2), and the
+//! GC state + GC root registries (T6 leaf 3: `GC_STATE`, `RUST_ROOTS`,
+//! `PERSISTENT_ROOTS`). Each `JitEffectMachine` owns one `MachineState`
+//! inline; `install_registries` points the run's `VMContext.machine_state` at
+//! it and installs it as this thread's [`CURRENT_MACHINE`].
+//!
+//! ## GC-cluster reach (leaf 3): vmctx only, never `CURRENT_MACHINE`
+//!
+//! Unlike leaves 1/2, the GC cluster (`gc_state`/`rust_roots`/
+//! `persistent_roots`) is reached EXCLUSIVELY via `VMContext.machine_state`
+//! (through [`machine_state`] or a raw `(*vmctx).machine_state` check),
+//! never through [`current_machine`]. A write (`register_rust_root`,
+//! `register_persistent_root`) and the read that later traces it
+//! (`perform_gc`) must key on the SAME machine or the collector can walk the
+//! wrong heap; `CURRENT_MACHINE` is a per-THREAD slot that can point at a
+//! different machine than the one a given `vmctx` belongs to (nested runs,
+//! or a caller that captured a stale thread-local read), so it is not used
+//! anywhere in the GC cluster. Every GC-root register/read site already has
+//! (or is threaded to have) a `vmctx`; when `vmctx` is null OR
+//! `(*vmctx).machine_state` is null, root registration/reads are a **no-op**
+//! (register does nothing; reads return 0/empty/`None`) rather than a panic —
+//! see the null-vmctx invariant on `RootScope`/`heap_to_value` in
+//! `heap_bridge.rs` for why that no-op is temporally safe.
+//!
+//! GC-cluster **isolation invariant**: `MAX_CONCURRENT_EVALS` machines can be
+//! live at once, one parked at `ask` on one thread, another running on
+//! another. Per-machine (not process-global) GC state is what keeps two
+//! concurrent evals' heaps from corrupting each other — a single global
+//! `GC_STATE`/root-registry slot would let one eval's `perform_gc` walk (and
+//! relocate objects in) a DIFFERENT eval's heap. This is why a process-global
+//! GC pointer is forbidden here: every field lives on the `MachineState` the
+//! running `vmctx` actually points at.
 //!
 //! `MachineState` is `pub`, and several of its methods plus
 //! [`install_current_machine`]/[`restore_current_machine`] are `pub` (not
@@ -18,13 +45,13 @@
 //! and/or installs it as `CURRENT_MACHINE`, exercising the same reach paths
 //! as production instead of a test-only backdoor.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, RefCell, RefMut};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::context::VMContext;
-use crate::host_fns::{ParkedStream, RuntimeError, StreamId};
+use crate::host_fns::{GcState, ParkedStream, RuntimeError, StreamId};
 use crate::stack_map::StackMapRegistry;
 
 /// Per-machine ambient state. Every cell keeps the exact wrapper type
@@ -39,6 +66,15 @@ pub struct MachineState {
     diagnostics: RefCell<Vec<String>>,
     parked_streams: RefCell<HashMap<StreamId, ParkedStream>>,
     stream_next_id: Cell<u64>,
+    gc_state: RefCell<Option<GcState>>,
+    /// Run-scoped GC roots (mirrors the old `RUST_ROOTS` thread-local):
+    /// heap-pointer slots registered by Rust host-fn frames the JIT frame
+    /// walker cannot see. Cleared every `clear_run_scratch`/`clear_gc_state`.
+    rust_roots: RefCell<Vec<*mut *mut u8>>,
+    /// Session-scoped GC roots (mirrors the old `PERSISTENT_ROOTS`
+    /// thread-local): tenured bindings' stable slots. Survive across runs;
+    /// cleared only at machine teardown (`free_session_heap`).
+    persistent_roots: RefCell<Vec<*mut *mut u8>>,
 }
 
 // SAFETY: MachineState is only ever accessed from the single thread driving
@@ -57,6 +93,9 @@ impl MachineState {
             diagnostics: RefCell::new(Vec::new()),
             parked_streams: RefCell::new(HashMap::new()),
             stream_next_id: Cell::new(1),
+            gc_state: RefCell::new(None),
+            rust_roots: RefCell::new(Vec::new()),
+            persistent_roots: RefCell::new(Vec::new()),
         }
     }
 
@@ -202,6 +241,138 @@ impl MachineState {
     pub(crate) fn remove_parked_stream(&self, id: StreamId) {
         self.parked_streams.borrow_mut().remove(&id);
     }
+
+    // --- GC state (T6 leaf 3) --------------------------------------------
+    // `set_gc_state`/`clear_gc_state` are `pub`: bare-VMContext test
+    // harnesses (e.g. proptest_parked_registry.rs) own a MachineState, wire
+    // `vmctx.machine_state` at it, and drive GC state directly — same
+    // pattern leaf 1 used for `set_stack_map_registry`. The rest are
+    // `pub(crate)`: their only callers (`install_registries`,
+    // `RegistryGuard::drop`, `JitEffectMachine::drop`, `make_session_vmctx`)
+    // are all in this crate and hold `self.machine_state`/a guard pointer.
+
+    /// Set the active GC region for this machine. Mirrors the old
+    /// `GC_STATE.with(|cell| *cell.borrow_mut() = Some(GcState { .. }))` body.
+    pub fn set_gc_state(&self, start: *mut u8, size: usize) {
+        *self.gc_state.borrow_mut() = Some(GcState {
+            active_start: start,
+            active_size: size,
+            active_buffer: None,
+        });
+    }
+
+    /// Install a retained session heap buffer as the active GC region (see
+    /// the free-fn doc this replaces, `host_fns::gc::install_session_buffer`).
+    pub(crate) fn install_session_buffer(&self, mut buffer: Vec<u8>) {
+        let start = buffer.as_mut_ptr();
+        let size = buffer.len();
+        *self.gc_state.borrow_mut() = Some(GcState {
+            active_start: start,
+            active_size: size,
+            active_buffer: Some(buffer),
+        });
+    }
+
+    /// Reclaim the live heap buffer + high-water cursor from this machine's
+    /// GC state, called from `RegistryGuard::drop` BEFORE `clear_run_scratch`
+    /// takes the `GcState`. See the free-fn doc this replaces for the
+    /// `(buffer, cursor)` contract.
+    pub(crate) fn reclaim_session_heap(&self, alloc_ptr: *mut u8) -> (Option<Vec<u8>>, usize) {
+        match self.gc_state.borrow_mut().as_mut() {
+            Some(state) => {
+                let cursor = (alloc_ptr as usize).saturating_sub(state.active_start as usize);
+                let buf = state.active_buffer.take();
+                (buf, cursor)
+            }
+            None => (None, 0),
+        }
+    }
+
+    /// The current active GC region as `(start, size_bytes)`, or `None` if no
+    /// GC state is installed on this machine.
+    pub(crate) fn gc_active_range(&self) -> Option<(*mut u8, usize)> {
+        self.gc_state
+            .borrow()
+            .as_ref()
+            .map(|s| (s.active_start, s.active_size))
+    }
+
+    /// Clear this machine's GC state and run-scoped rust roots. One-shot
+    /// teardown path (mirrors the old `clear_gc_state` free fn).
+    pub fn clear_gc_state(&self) {
+        self.gc_state.borrow_mut().take();
+        self.clear_rust_roots();
+    }
+
+    /// PER-RUN teardown: take `GcState` (the `active_buffer` was already
+    /// reclaimed by `reclaim_session_heap` before this runs) and clear the
+    /// per-run rust roots. Does NOT touch `persistent_roots` — those are
+    /// session-scoped and survive until `free_session_heap`.
+    pub(crate) fn clear_run_scratch(&self) {
+        self.gc_state.borrow_mut().take();
+        self.clear_rust_roots();
+    }
+
+    /// MACHINE-DROP teardown: clear session-scoped persistent roots and take
+    /// `GcState`. Called by `JitEffectMachine::drop`. Operates directly on
+    /// `self` (not through any ambient reach) so it always clears exactly
+    /// the dying machine's own registries.
+    pub(crate) fn free_session_heap(&self) {
+        self.clear_persistent_roots();
+        self.gc_state.borrow_mut().take();
+    }
+
+    /// Borrow this machine's `GcState` cell mutably — used by `perform_gc`'s
+    /// Cheney-copy body, which needs to swap `active_buffer` in place.
+    pub(crate) fn gc_state_mut(&self) -> RefMut<'_, Option<GcState>> {
+        self.gc_state.borrow_mut()
+    }
+
+    // --- rust roots (run-scoped GC roots, T6 leaf 3) ----------------------
+
+    pub(crate) fn register_rust_root(&self, slot: *mut *mut u8) {
+        self.rust_roots.borrow_mut().push(slot);
+    }
+
+    pub(crate) fn rust_roots_len(&self) -> usize {
+        self.rust_roots.borrow().len()
+    }
+
+    pub(crate) fn truncate_rust_roots(&self, mark: usize) {
+        self.rust_roots.borrow_mut().truncate(mark);
+    }
+
+    pub(crate) fn clear_rust_roots(&self) {
+        self.rust_roots.borrow_mut().clear();
+    }
+
+    /// Append this machine's run-scoped rust roots to `out` — used by
+    /// `perform_gc` to build its root slot list (byte-identical logic to the
+    /// old `RUST_ROOTS.with(|r| root_slots.extend(r.borrow().iter().copied()))`).
+    pub(crate) fn extend_rust_roots(&self, out: &mut Vec<*mut *mut u8>) {
+        out.extend(self.rust_roots.borrow().iter().copied());
+    }
+
+    // --- persistent roots (session-scoped GC roots, T6 leaf 3) ------------
+
+    pub(crate) fn register_persistent_root(&self, slot: *mut *mut u8) {
+        self.persistent_roots.borrow_mut().push(slot);
+    }
+
+    /// Number of registered persistent roots (test/diagnostic accessor).
+    pub(crate) fn persistent_roots_count(&self) -> usize {
+        self.persistent_roots.borrow().len()
+    }
+
+    pub(crate) fn clear_persistent_roots(&self) {
+        self.persistent_roots.borrow_mut().clear();
+    }
+
+    /// Append this machine's session-scoped persistent roots to `out` — the
+    /// persistent-root sibling of `extend_rust_roots`, used by `perform_gc`.
+    pub(crate) fn extend_persistent_roots(&self, out: &mut Vec<*mut *mut u8>) {
+        out.extend(self.persistent_roots.borrow().iter().copied());
+    }
 }
 
 impl Default for MachineState {
@@ -223,6 +394,26 @@ pub(crate) unsafe fn machine_state<'a>(vmctx: *mut VMContext) -> &'a MachineStat
     &*(*vmctx).machine_state
 }
 
+/// Null-safe sibling of [`machine_state`] for the GC-cluster register/read
+/// sites (leaf 3): `register_rust_root`/`rust_roots_mark`/
+/// `truncate_rust_roots`/`clear_rust_roots`/`register_persistent_root`/
+/// `persistent_roots_count` all reach through this instead of panicking on a
+/// null `vmctx`. Returns `None` — a legitimate no-op, not an error — when
+/// `vmctx` is null (the `heap_to_value` null-vmctx bridge path; see the
+/// invariant on `RootScope` in `heap_bridge.rs` for why that is temporally
+/// safe) OR `(*vmctx).machine_state` is null (a hand-built `VMContext` in a
+/// unit test that never wired a machine, e.g. `force.rs`'s raw-thunk tests).
+///
+/// # Safety
+/// If `vmctx` is non-null, it must point to a live `VMContext`.
+pub(crate) unsafe fn machine_state_opt<'a>(vmctx: *mut VMContext) -> Option<&'a MachineState> {
+    if vmctx.is_null() || (*vmctx).machine_state.is_null() {
+        None
+    } else {
+        Some(&*(*vmctx).machine_state)
+    }
+}
+
 thread_local! {
     /// Per-thread reach for vmctx-less callers: host fns (called from
     /// JIT/emitted code) that take no `vmctx`, and the external ambient
@@ -240,13 +431,17 @@ thread_local! {
     /// State itself still lives on [`MachineState`], owned per-machine; this
     /// cell is only the reach path for code that has no `vmctx` to follow.
     ///
-    /// Elimination path: leaf 3 threads `vmctx` into the allocating GC_STATE
-    /// writers, shrinking this cell's remaining internal callers to the two
-    /// external shims (`set_first_cause`/`drain_diagnostics`, anchored to
-    /// #340), which keep using it until that sibling-crate cutover captures a
-    /// machine handle at suspension time instead. Full host-fn vmctx-reach
-    /// (`runtime_error`/`runtime_error_with_msg`/`unresolved_var_trap`/
-    /// `runtime_case_trap`/`runtime_oom`/the array primops) is #329.
+    /// Elimination path: leaf 3 threads `vmctx` into every GC-cluster
+    /// register/read site instead of routing them through this cell (see the
+    /// module-level "GC-cluster reach" note — a per-thread slot can diverge
+    /// from the `vmctx` a write/read actually belongs to, which the GC
+    /// cluster cannot tolerate), shrinking this cell's remaining internal
+    /// callers to the two external shims (`set_first_cause`/
+    /// `drain_diagnostics`, anchored to #340), which keep using it until that
+    /// sibling-crate cutover captures a machine handle at suspension time
+    /// instead. Full host-fn vmctx-reach (`runtime_error`/
+    /// `runtime_error_with_msg`/`unresolved_var_trap`/`runtime_case_trap`/
+    /// `runtime_oom`/the array primops) is #329.
     static CURRENT_MACHINE: Cell<*mut MachineState> = const { Cell::new(std::ptr::null_mut()) };
 }
 

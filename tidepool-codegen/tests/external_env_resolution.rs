@@ -71,7 +71,7 @@ fn compile_then_run(tree: &CoreExpr, env: &ExternalEnv, between: impl FnOnce()) 
     let machine_state = Box::new(MachineState::new());
     vmctx.machine_state = machine_state.as_ref() as *const MachineState as *mut MachineState;
 
-    host_fns::set_gc_state(start, nursery.len());
+    machine_state.set_gc_state(start, nursery.len());
     machine_state.set_stack_map_registry(&pipeline.stack_maps);
 
     // Simulate whatever happens between fragment compilation and its run —

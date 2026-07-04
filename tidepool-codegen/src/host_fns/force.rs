@@ -12,14 +12,14 @@ use super::errors::{
 };
 use super::gc::{register_rust_root, rust_roots_mark, truncate_rust_roots};
 
-/// Force a thunk to WHNF. Loops to handle chains (thunk returning thunk).
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
 /// Upper bound on consecutive EVALUATED-indirection follows in one
 /// `heap_force` call. A genuine chain needs one distinct (>=48-byte) thunk per
 /// link — 64M links would need >3 GiB of thunks, beyond any heap we run — so
 /// exceeding it can only mean a memoized indirection cycle (#336).
 const INDIRECTION_FOLLOW_LIMIT: u64 = 64 * 1024 * 1024;
 
+/// Force a thunk to WHNF. Loops to handle chains (thunk returning thunk).
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
     if obj.is_null() {
         return obj;
@@ -62,10 +62,10 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                         // memory (post-call forwarding checks are unsound).
                         let f: extern "C" fn(*mut VMContext, *mut u8) -> *mut u8 =
                             std::mem::transmute(code_ptr);
-                        let mark = rust_roots_mark();
-                        register_rust_root(&mut current as *mut *mut u8);
+                        let mark = rust_roots_mark(vmctx);
+                        register_rust_root(vmctx, &mut current as *mut *mut u8);
                         let result = f(vmctx, current);
-                        truncate_rust_roots(mark);
+                        truncate_rust_roots(vmctx, mark);
 
                         // If the thunk body raised an error (e.g. HeapOverflow
                         // from runtime_oom), memoize the poison result so
@@ -192,8 +192,8 @@ pub extern "C" fn deep_force(vmctx: *mut VMContext, root: *mut u8) -> *mut u8 {
         // Keep the NF root registered for the WHOLE descent: once a child is
         // popped off the work stack it is reachable only through the root graph,
         // so the root must stay live (and GC-updated) until we return it.
-        let base_mark = rust_roots_mark();
-        register_rust_root(&mut nf_root as *mut *mut u8);
+        let base_mark = rust_roots_mark(vmctx);
+        register_rust_root(vmctx, &mut nf_root as *mut *mut u8);
 
         // Work items are (parent heap pointer, field index). Parents are exterior
         // heap-object pointers — GC-relocatable, and rewritten in place because we
@@ -207,20 +207,20 @@ pub extern "C" fn deep_force(vmctx: *mut VMContext, root: *mut u8) -> *mut u8 {
             // Register every pending parent + the current parent so a GC inside
             // the upcoming heap_force rewrites them all in place. (nf_root is
             // already registered at base_mark and stays so.)
-            let mark = rust_roots_mark();
+            let mark = rust_roots_mark(vmctx);
             for item in work.iter_mut() {
-                register_rust_root(&mut item.0 as *mut *mut u8);
+                register_rust_root(vmctx, &mut item.0 as *mut *mut u8);
             }
-            register_rust_root(&mut parent as *mut *mut u8);
+            register_rust_root(vmctx, &mut parent as *mut *mut u8);
 
             // Read the child from the live parent, force it, then write the NF
             // child back into the (possibly relocated) parent's field slot.
             let field_off = layout::CON_FIELDS_OFFSET as usize + idx * CON_FIELD_PTR_STRIDE;
             let child = *(parent.add(field_off) as *const *mut u8);
             let forced_child = heap_force(vmctx, child);
-            truncate_rust_roots(mark);
+            truncate_rust_roots(vmctx, mark);
             if has_runtime_error() {
-                truncate_rust_roots(base_mark);
+                truncate_rust_roots(vmctx, base_mark);
                 return error_poison_ptr();
             }
             // `parent` may have moved during the force; recompute the slot.
@@ -230,7 +230,7 @@ pub extern "C" fn deep_force(vmctx: *mut VMContext, root: *mut u8) -> *mut u8 {
             push_con_fields(forced_child, &mut work);
         }
 
-        truncate_rust_roots(base_mark);
+        truncate_rust_roots(vmctx, base_mark);
         nf_root
     }
 }

@@ -65,8 +65,12 @@ fn deep_force_traverses_deep_chain_without_host_recursion() {
     // Lit (24) + DEPTH Cons (32 each) + slack.
     let mut buf = vec![0u8; layout::LIT_TOTAL_SIZE as usize + DEPTH * 32 + 64];
 
-    host_fns::clear_persistent_roots();
-    host_fns::clear_rust_roots();
+    // No vmctx/machine anywhere in this test — leaf 3's GC-cluster reach is
+    // vmctx-gated, so a null vmctx makes these harmless no-ops (same as
+    // `deep_force`'s own null-vmctx calls below; nothing here ever collects).
+    unsafe {
+        host_fns::clear_rust_roots(std::ptr::null_mut());
+    }
 
     unsafe {
         // Terminal Lit at offset 0.
@@ -109,11 +113,10 @@ fn deep_force_traverses_deep_chain_without_host_recursion() {
 
     // Rust roots fully unwound (base_mark restored).
     assert_eq!(
-        host_fns::rust_roots_mark(),
+        unsafe { host_fns::rust_roots_mark(std::ptr::null_mut()) },
         0,
         "deep_force must unwind all roots"
     );
-    host_fns::clear_persistent_roots();
 }
 
 /// `deep_force` forces a value to WHNF then descends into Tier-0 `Con` fields,
@@ -124,8 +127,9 @@ fn deep_force_traverses_deep_chain_without_host_recursion() {
 fn deep_force_descends_con_but_not_closure() {
     let mut buf = vec![0u8; 512];
 
-    host_fns::clear_persistent_roots();
-    host_fns::clear_rust_roots();
+    unsafe {
+        host_fns::clear_rust_roots(std::ptr::null_mut());
+    }
 
     unsafe {
         let mut off = 0;
@@ -173,8 +177,10 @@ fn deep_force_descends_con_but_not_closure() {
         );
     }
 
-    assert_eq!(host_fns::rust_roots_mark(), 0);
-    host_fns::clear_persistent_roots();
+    assert_eq!(
+        unsafe { host_fns::rust_roots_mark(std::ptr::null_mut()) },
+        0
+    );
 }
 
 /// A null root is returned unchanged (defensive — matches `heap_force`).

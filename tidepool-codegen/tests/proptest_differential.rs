@@ -64,7 +64,7 @@ fn jit_compile_and_run(
     let machine_state = Box::new(MachineState::new());
     vmctx.machine_state = machine_state.as_ref() as *const MachineState as *mut MachineState;
 
-    host_fns::set_gc_state(start, nursery.len());
+    machine_state.set_gc_state(start, nursery.len());
     machine_state.set_stack_map_registry(&pipeline.stack_maps);
 
     let ptr = pipeline.get_function_ptr(func_id);

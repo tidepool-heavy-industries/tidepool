@@ -502,11 +502,11 @@ unsafe fn materialize_message(vmctx: *mut VMContext, arg: *mut u8) -> Option<Vec
         return None;
     }
 
-    let mark = rust_roots_mark();
+    let mark = rust_roots_mark(vmctx);
     let mut cur: *mut u8 = arg;
     let mut tmp: *mut u8 = std::ptr::null_mut();
-    register_rust_root(&mut cur as *mut *mut u8);
-    register_rust_root(&mut tmp as *mut *mut u8);
+    register_rust_root(vmctx, &mut cur as *mut *mut u8);
+    register_rust_root(vmctx, &mut tmp as *mut *mut u8);
 
     // Reads an Int/Char payload, looking through an I#/C# box.
     // Does not force; callers force into `tmp` first.
@@ -645,7 +645,7 @@ unsafe fn materialize_message(vmctx: *mut VMContext, arg: *mut u8) -> Option<Vec
         }
     })();
 
-    truncate_rust_roots(mark);
+    truncate_rust_roots(vmctx, mark);
     result
 }
 

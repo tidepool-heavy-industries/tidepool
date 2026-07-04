@@ -222,20 +222,21 @@ impl Drop for RegistryGuard {
             // session_slot points to JitEffectMachine::session in the same frame.
             unsafe {
                 let ap = (*vmctx).alloc_ptr;
-                let (buf, cur) = crate::host_fns::reclaim_session_heap(ap);
+                let (buf, cur) = (*self.machine_state).reclaim_session_heap(ap);
                 if let Some(s) = (*session_slot).as_mut() {
                     s.heap = buf;
                     s.cursor = cur;
                 }
             }
         }
-        crate::host_fns::clear_run_scratch();
         // SAFETY: machine_state was set by install_registries and outlives
         // this guard (points at the owning JitEffectMachine's field). Clean
-        // the per-run cells directly through the machine (not the ambient
-        // free-fn shims) BEFORE restoring CURRENT_MACHINE below — otherwise
-        // the free fns would see a cleared/stale current-machine pointer.
+        // the per-run cells (including the GC-cluster's clear_run_scratch)
+        // directly through the machine (not the ambient free-fn shims)
+        // BEFORE restoring CURRENT_MACHINE below — otherwise the free fns
+        // would see a cleared/stale current-machine pointer.
         unsafe {
+            (*self.machine_state).clear_run_scratch();
             (*self.machine_state).clear_stack_map_registry();
             (*self.machine_state).clear_cancel_flag();
             let _ = (*self.machine_state).take_runtime_error();
@@ -376,15 +377,14 @@ impl JitEffectMachine {
             .set_stack_map_registry(&self.pipeline.stack_maps);
         match &mut self.session {
             Some(s) => match s.heap.take() {
-                Some(buf) => crate::host_fns::install_session_buffer(buf),
-                None => crate::host_fns::set_gc_state(
-                    self.nursery.start() as *mut u8,
-                    self.nursery.size(),
-                ),
+                Some(buf) => self.machine_state.install_session_buffer(buf),
+                None => self
+                    .machine_state
+                    .set_gc_state(self.nursery.start() as *mut u8, self.nursery.size()),
             },
-            None => {
-                crate::host_fns::set_gc_state(self.nursery.start() as *mut u8, self.nursery.size())
-            }
+            None => self
+                .machine_state
+                .set_gc_state(self.nursery.start() as *mut u8, self.nursery.size()),
         }
         self.machine_state.set_cancel_flag(self.cancel_flag.clone());
         // Make the aeson-`Value` constructor ids visible to the `JsonDecode`
@@ -414,7 +414,9 @@ impl JitEffectMachine {
     /// # Panics
     /// Panics if called without GC state installed or on a non-session machine.
     fn make_session_vmctx(&self) -> crate::context::VMContext {
-        let (start, size) = crate::host_fns::gc_active_range()
+        let (start, size) = self
+            .machine_state
+            .gc_active_range()
             .expect("GC state must be installed before make_session_vmctx");
         let cursor = self
             .session
@@ -728,19 +730,24 @@ impl JitEffectMachine {
         // register its persistent root. gc_active_range is the nursery from-range
         // (still installed; the guard has not dropped). The tenured copy lives in
         // old-space arenas, independent of the buffer the guard reclaims.
-        let from = crate::host_fns::gc_active_range().expect("GC state installed for the bind run");
+        let from = self
+            .machine_state
+            .gc_active_range()
+            .expect("GC state installed for the bind run");
         let from_range = (from.0 as *const u8, unsafe {
             from.0.add(from.1) as *const u8
         });
+        let vmctx_ptr = &mut vmctx as *mut VMContext;
         // SAFETY: nf_ptr is a live heap object inside the nursery from-range;
-        // tenure evacuates its closure and registers the returned slot as a
-        // persistent root valid for the machine's life.
+        // tenure evacuates its closure and registers the returned slot (via
+        // vmctx_ptr's machine_state) as a persistent root valid for the
+        // machine's life.
         let slot = unsafe {
             self.session
                 .as_mut()
                 .expect("session machine")
                 .old_space
-                .tenure(nf_ptr, from_range)
+                .tenure(vmctx_ptr, nf_ptr, from_range)
         };
 
         // Arm reclaim LAST (after all `self.session` access) so the guard's raw
@@ -857,20 +864,24 @@ impl JitEffectMachine {
             // is the nursery from-range (still installed; the guard has not
             // dropped). The tenured copy lives in old-space arenas, independent
             // of the buffer the guard reclaims.
-            let from =
-                crate::host_fns::gc_active_range().expect("GC state installed for the bind run");
+            let from = self
+                .machine_state
+                .gc_active_range()
+                .expect("GC state installed for the bind run");
             let from_range = (from.0 as *const u8, unsafe {
                 from.0.add(from.1) as *const u8
             });
+            let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
             // SAFETY: nf_ptr is a live heap object inside the nursery
             // from-range; tenure evacuates its closure and registers the
-            // returned slot as a persistent root valid for the machine's life.
+            // returned slot (via vmctx_ptr's machine_state) as a persistent
+            // root valid for the machine's life.
             let slot = unsafe {
                 self.session
                     .as_mut()
                     .expect("session machine")
                     .old_space
-                    .tenure(nf_ptr, from_range)
+                    .tenure(vmctx_ptr, nf_ptr, from_range)
             };
             Ok(slot)
         });
@@ -993,11 +1004,14 @@ impl JitEffectMachine {
             // 3. Capture from_range AFTER deep_force (GC may have changed the
             //    active region). tenure() is pure Rust — no JIT GC fires — so
             //    this range stays valid for all field tenures.
-            let from =
-                crate::host_fns::gc_active_range().expect("GC state installed for the bind run");
+            let from = self
+                .machine_state
+                .gc_active_range()
+                .expect("GC state installed for the bind run");
             let from_range = (from.0 as *const u8, unsafe {
                 from.0.add(from.1) as *const u8
             });
+            let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
 
             // 4. Project each field from nf_tuple and tenure. nf_tuple stays
             //    valid across all tenure() calls (no JIT GC). deep_force
@@ -1013,7 +1027,7 @@ impl JitEffectMachine {
                         .as_mut()
                         .expect("session machine")
                         .old_space
-                        .tenure(field_ptr, from_range)
+                        .tenure(vmctx_ptr, field_ptr, from_range)
                 };
                 slots.push(slot);
             }
@@ -1029,12 +1043,12 @@ impl JitEffectMachine {
     }
 
     /// Register a session-scoped GC root slot that survives across runs (i.e.
-    /// across `RegistryGuard` drops), unlike the per-run `RUST_ROOTS`.
+    /// across `RegistryGuard` drops), unlike the per-run rust roots.
     ///
-    /// Wave 1.A (component D): fill the `PERSISTENT_ROOTS` thread-local so a
-    /// tenured binding's root is appended to `perform_gc`'s root set and is NOT
-    /// cleared by the per-run `clear_run_scratch`. Takes a slot pointer
-    /// (`*mut *mut u8`) like `host_fns::register_rust_root`.
+    /// Wave 1.A (component D): fill this machine's persistent-roots registry
+    /// so a tenured binding's root is appended to `perform_gc`'s root set and
+    /// is NOT cleared by the per-run `clear_run_scratch`. Takes a slot
+    /// pointer (`*mut *mut u8`) like `host_fns::register_rust_root`.
     ///
     /// # Safety
     /// The caller guarantees that `slot` is non-null, points to a valid
@@ -1043,23 +1057,35 @@ impl JitEffectMachine {
     /// GC will read and rewrite `*slot` in place on every collection until then.
     /// A slot freed or moved before machine teardown is a use-after-free.
     pub unsafe fn register_persistent_root(&self, slot: *mut *mut u8) {
-        // Delegates to the thread-local PERSISTENT_ROOTS registry (component D).
-        // The machine is pinned to one thread for its lifetime, so the
-        // thread-local and the machine share a lifetime; `free_session_heap`
-        // (machine drop) clears the registry. SAFETY: forwarded to the caller's
+        // Delegates directly to this machine's own MachineState (not through
+        // the vmctx-gated free fn) — `self.machine_state` IS the handle that
+        // fn would otherwise have to look up. `free_session_heap` (machine
+        // drop) clears the registry. SAFETY: forwarded to the caller's
         // contract documented above.
-        crate::host_fns::register_persistent_root(slot);
+        self.machine_state.register_persistent_root(slot);
+    }
+
+    /// Number of persistent GC roots currently registered on this machine
+    /// (test/diagnostic accessor). Reads `self.machine_state` directly —
+    /// unlike the vmctx-gated `host_fns::persistent_roots_count` free fn,
+    /// this works whether or not a run is currently in flight, since a
+    /// `JitEffectMachine` always owns its `MachineState`.
+    pub fn persistent_roots_count(&self) -> usize {
+        self.machine_state.persistent_roots_count()
     }
 }
 
 impl Drop for JitEffectMachine {
     fn drop(&mut self) {
-        // Clear session-scoped thread-local roots whose slots point into the
-        // session heap Vec (which drops with self after this). Harmless for
-        // one-shot machines (free_session_heap does nothing if GC state is
-        // already absent, and no persistent roots are registered).
+        // Clear this machine's persistent-root registry (whose slots point
+        // into the session heap Vec, which drops with self after this).
+        // Harmless for one-shot machines (free_session_heap does nothing if
+        // GC state is already absent, and no persistent roots are
+        // registered). Operates directly on self.machine_state — always
+        // clears exactly this machine's own registries, never a different
+        // one (see the `free_session_heap` doc on `MachineState`).
         if self.session.is_some() {
-            crate::host_fns::free_session_heap();
+            self.machine_state.free_session_heap();
         }
     }
 }
@@ -1161,11 +1187,16 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
                 // The GC rewrites the rooted slot in place; resume reads the
                 // updated pointer.
                 let mut continuation = continuation;
-                let _cont_root = heap_bridge::RootScope::new();
+                let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
+                // SAFETY: vmctx_ptr is the active run's VMContext.
+                let _cont_root = unsafe { heap_bridge::RootScope::new(vmctx_ptr) };
                 // SAFETY: the slot lives on this frame until the arm ends
                 // (after resume); _cont_root truncates the registry on drop.
                 unsafe {
-                    crate::host_fns::register_rust_root(&mut continuation as *mut *mut u8);
+                    crate::host_fns::register_rust_root(
+                        vmctx_ptr,
+                        &mut continuation as *mut *mut u8,
+                    );
                 }
                 // SAFETY: request is a valid heap pointer from the JIT effect dispatch.
                 let bridge_res = unsafe {
@@ -1648,46 +1679,67 @@ mod tests {
 
     /// Test (c): persistent roots survive a RegistryGuard drop; per-run rust
     /// roots and GC state are cleared.
+    ///
+    /// Bare-VMContext harness (leaf 3's GC cluster reaches exclusively via
+    /// `vmctx.machine_state`, never `CURRENT_MACHINE`): owns a `MachineState`,
+    /// wires it onto a hand-built `VMContext`, and drives the vmctx-gated
+    /// free fns through it — same pattern leaf 1 used for
+    /// `set_stack_map_registry`.
     #[test]
     #[serial]
     fn test_persistent_root_survives_guard_drop() {
-        crate::host_fns::clear_persistent_roots();
+        let machine_state = MachineState::new();
+        let mut vmctx = VMContext {
+            alloc_ptr: std::ptr::null_mut(),
+            alloc_limit: std::ptr::null_mut(),
+            gc_trigger: crate::host_fns::gc_trigger,
+            tail_callee: std::ptr::null_mut(),
+            tail_arg: std::ptr::null_mut(),
+            machine_state: &machine_state as *const MachineState as *mut MachineState,
+        };
+        let vmctx_ptr = &mut vmctx as *mut VMContext;
 
         // Register a persistent root (null heap ptr — GC skips null slots)
         let mut persistent_slot: *mut u8 = std::ptr::null_mut();
         unsafe {
-            crate::host_fns::register_persistent_root(&mut persistent_slot as *mut *mut u8);
+            crate::host_fns::register_persistent_root(
+                vmctx_ptr,
+                &mut persistent_slot as *mut *mut u8,
+            );
         }
-        assert_eq!(crate::host_fns::persistent_roots_count(), 1);
+        assert_eq!(
+            unsafe { crate::host_fns::persistent_roots_count(vmctx_ptr) },
+            1
+        );
 
         // Register a per-run rust root
         let mut rust_slot: *mut u8 = std::ptr::null_mut();
         unsafe {
-            crate::host_fns::register_rust_root(&mut rust_slot as *mut *mut u8);
+            crate::host_fns::register_rust_root(vmctx_ptr, &mut rust_slot as *mut *mut u8);
         }
-        assert_eq!(crate::host_fns::rust_roots_mark(), 1);
+        assert_eq!(unsafe { crate::host_fns::rust_roots_mark(vmctx_ptr) }, 1);
 
         // Simulate what RegistryGuard::drop does for the per-run half
-        crate::host_fns::clear_run_scratch();
+        machine_state.clear_run_scratch();
 
         // Persistent root must survive; rust roots and GC state must be gone
         assert_eq!(
-            crate::host_fns::persistent_roots_count(),
+            unsafe { crate::host_fns::persistent_roots_count(vmctx_ptr) },
             1,
             "persistent root must survive clear_run_scratch"
         );
         assert_eq!(
-            crate::host_fns::rust_roots_mark(),
+            unsafe { crate::host_fns::rust_roots_mark(vmctx_ptr) },
             0,
             "rust roots must be cleared by clear_run_scratch"
         );
         assert!(
-            crate::host_fns::gc_active_range().is_none(),
+            machine_state.gc_active_range().is_none(),
             "GC state must be cleared by clear_run_scratch"
         );
 
         // Cleanup
-        crate::host_fns::clear_persistent_roots();
+        machine_state.clear_persistent_roots();
     }
 
     /// Test (d): THE SEAM TEST — compile_session, run, verify heap retention,
@@ -1698,7 +1750,6 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {
-                crate::host_fns::clear_persistent_roots();
                 crate::host_fns::reset_test_counters();
 
                 let (expr, table) = make_gc_forcing_setup(40);
@@ -1734,8 +1785,10 @@ mod tests {
 
                 // install_registries must RE-POINT at the retained buffer (not nursery.start())
                 let guard = machine.install_registries();
-                let (active_start, _) =
-                    crate::host_fns::gc_active_range().expect("GC state installed");
+                let (active_start, _) = machine
+                    .machine_state
+                    .gc_active_range()
+                    .expect("GC state installed");
                 assert_eq!(
                     active_start as *const u8, retained_heap_ptr,
                     "install_registries must re-point GC state at the retained heap"
@@ -1749,11 +1802,14 @@ mod tests {
                 drop(guard);
 
                 // --- Register a persistent root before run 2 ---
+                // Via the machine's own accessor (not the vmctx-gated free fn:
+                // there is no live vmctx between runs) — same MachineState
+                // cell either way.
                 let mut persistent_slot: *mut u8 = std::ptr::null_mut();
                 unsafe {
-                    crate::host_fns::register_persistent_root(&mut persistent_slot as *mut *mut u8);
+                    machine.register_persistent_root(&mut persistent_slot as *mut *mut u8);
                 }
-                assert_eq!(crate::host_fns::persistent_roots_count(), 1);
+                assert_eq!(machine.persistent_roots_count(), 1);
 
                 // --- Run 2 ---
                 let result2 = machine.run_pure().expect("run 2 should succeed");
@@ -1767,18 +1823,19 @@ mod tests {
 
                 // Persistent root must have survived run 2's teardown
                 assert_eq!(
-                    crate::host_fns::persistent_roots_count(),
+                    machine.persistent_roots_count(),
                     1,
                     "persistent root must survive run-2 teardown (clear_run_scratch)"
                 );
 
-                // Drop the machine: free_session_heap clears persistent roots
+                // Drop the machine: free_session_heap clears persistent roots.
+                // Per-machine ownership means this is now structural — the
+                // MachineState (and its persistent_roots Vec) is deallocated
+                // with `machine`, so there is nothing left to query; the
+                // assertion this replaces (`persistent_roots_count() == 0`
+                // read through a since-freed handle) is no longer expressible
+                // and would be UB, not a check.
                 drop(machine);
-                assert_eq!(
-                    crate::host_fns::persistent_roots_count(),
-                    0,
-                    "persistent roots must be cleared by JitEffectMachine::drop"
-                );
             })
             .unwrap()
             .join()

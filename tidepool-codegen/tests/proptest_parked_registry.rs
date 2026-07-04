@@ -20,6 +20,7 @@ use tidepool_codegen::context::VMContext;
 use tidepool_codegen::host_fns;
 use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
+use tidepool_codegen::machine_state::MachineState;
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_effect::dispatch::{EffectContext, EffectHandler, Response};
 use tidepool_effect::error::EffectError;
@@ -104,7 +105,9 @@ fn t_a1_memoization() {
         let start = nursery.as_mut_ptr();
         let end = start.add(nursery.len());
         let mut vmctx = VMContext::new(start, end, mock_gc_trigger);
-        host_fns::set_gc_state(start, nursery.len());
+        let machine_state = MachineState::new();
+        vmctx.machine_state = &machine_state as *const MachineState as *mut MachineState;
+        machine_state.set_gc_state(start, nursery.len());
 
         let thunk_ptr = start;
         layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
@@ -126,7 +129,7 @@ fn t_a1_memoization() {
             1,
             "Memoization failed: entry called twice"
         );
-        host_fns::clear_gc_state();
+        machine_state.clear_gc_state();
     }
 }
 
@@ -142,7 +145,9 @@ fn t_a2_poison_memoization() {
         let start = nursery.as_mut_ptr();
         let end = start.add(nursery.len());
         let mut vmctx = VMContext::new(start, end, mock_gc_trigger);
-        host_fns::set_gc_state(start, nursery.len());
+        let machine_state = MachineState::new();
+        vmctx.machine_state = &machine_state as *const MachineState as *mut MachineState;
+        machine_state.set_gc_state(start, nursery.len());
         let _ = host_fns::take_runtime_error();
 
         let thunk_ptr = start;
@@ -168,7 +173,7 @@ fn t_a2_poison_memoization() {
             host_fns::take_runtime_error().is_none(),
             "Second force must NOT set error (already consumed)"
         );
-        host_fns::clear_gc_state();
+        machine_state.clear_gc_state();
     }
 }
 
@@ -183,7 +188,9 @@ fn t_a3_reentrant_blackhole() {
         let start = nursery.as_mut_ptr();
         let end = start.add(nursery.len());
         let mut vmctx = VMContext::new(start, end, mock_gc_trigger);
-        host_fns::set_gc_state(start, nursery.len());
+        let machine_state = MachineState::new();
+        vmctx.machine_state = &machine_state as *const MachineState as *mut MachineState;
+        machine_state.set_gc_state(start, nursery.len());
         let _ = host_fns::take_runtime_error();
 
         let thunk_ptr = start;
@@ -204,7 +211,7 @@ fn t_a3_reentrant_blackhole() {
             "Error msg should contain 'blackhole', got: {}",
             err
         );
-        host_fns::clear_gc_state();
+        machine_state.clear_gc_state();
     }
 }
 
@@ -215,7 +222,9 @@ fn t_a4_indirection_chains() {
         let start = nursery.as_mut_ptr();
         let end = start.add(nursery.len());
         let mut vmctx = VMContext::new(start, end, mock_gc_trigger);
-        host_fns::set_gc_state(start, nursery.len());
+        let machine_state = MachineState::new();
+        vmctx.machine_state = &machine_state as *const MachineState as *mut MachineState;
+        machine_state.set_gc_state(start, nursery.len());
 
         let lit_ptr = start;
         layout::write_header(lit_ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
@@ -235,7 +244,7 @@ fn t_a4_indirection_chains() {
         let res = host_fns::heap_force(&mut vmctx, thunk_a);
         assert_eq!(res, lit_ptr, "Indirection chain should resolve to Lit");
         assert_eq!(read_lit_int(res), 100);
-        host_fns::clear_gc_state();
+        machine_state.clear_gc_state();
     }
 }
 
