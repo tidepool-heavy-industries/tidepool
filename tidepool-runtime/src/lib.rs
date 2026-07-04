@@ -17,10 +17,14 @@ use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings, ReadError};
 use tidepool_repr::{CoreExpr, DataConTable};
 
 mod cache;
+pub mod failclass;
 pub mod paths;
 mod render;
 pub mod session;
 
+pub use failclass::{
+    classify, classify_compile, classify_session, FailureClass, FailureEnvelope, Phase,
+};
 pub use render::{value_to_json, EvalResult};
 
 /// Result of successful Haskell compilation: a Core expression, DataCon metadata, and warnings.

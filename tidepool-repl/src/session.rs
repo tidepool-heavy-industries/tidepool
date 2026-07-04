@@ -32,9 +32,13 @@ use tidepool_runtime::session::errmap::{
     dedupe_diagnostics, drop_foreign_gen_warnings, remap_generated_coords,
 };
 use tidepool_runtime::session::{
-    classify_turn, compile_session_turn, ModuleEnv, SessionBind, SessionLib, TurnKind, ValueTier,
+    classify_turn, compile_session_turn, ModuleEnv, SessionBind, SessionError, SessionLib,
+    TurnKind, ValueTier,
 };
-use tidepool_runtime::{compile_haskell_salted, value_to_json, CompileResult};
+use tidepool_runtime::{
+    classify_compile, classify_session, compile_haskell_salted, value_to_json, CompileError,
+    CompileResult, FailureClass, Phase,
+};
 
 use crate::command::{
     BlockItem, BlockItemResult, BoundComponent, ExprText, ItemKind, MetaCommand, ResponseShape,
@@ -525,7 +529,7 @@ impl Session {
         let head = decl_head(decl_text).to_string();
         match self.lib.define(decl_text) {
             Ok(gen) => self.defined_outcome(decl_text, head, gen),
-            Err(e) => TurnOutcome::Error(format!("declaration failed: {e}")),
+            Err(e) => TurnOutcome::Error(session_fail(&e, "declaration failed")),
         }
     }
 
@@ -601,7 +605,7 @@ impl Session {
                 if refs_materialized_value || refs_input_lane {
                     None
                 } else {
-                    Some(TurnOutcome::Error(format!("bind compile error: {e}")))
+                    Some(TurnOutcome::Error(session_fail(&e, "bind compile error")))
                 }
             }
         }
@@ -820,17 +824,10 @@ impl Session {
             warnings,
         } = match compile_result {
             Ok(r) => r,
-            Err(e) => {
-                return TurnOutcome::Error(format!(
-                    "compile error: {}",
-                    remap_item_err(&e.to_string(), &source)
-                ))
-            }
+            Err(e) => return TurnOutcome::Error(compile_fail(&e, &source)),
         };
         if warnings.has_io {
-            return TurnOutcome::Error(
-                "IO type detected in result binding. IO operations are not supported.".into(),
-            );
+            return io_type_fail();
         }
         table.populate_siblings_from_expr(&expr);
 
@@ -844,14 +841,14 @@ impl Session {
             Some(ref mut machine) => {
                 match machine.add_function(&frag_name, &expr, &table, &ExternalEnv::new()) {
                     Ok(fid) => machine.run_fragment(fid, &table, handlers, captured),
-                    Err(e) => return TurnOutcome::Error(format!("JIT re-entry error: {e}")),
+                    Err(e) => return TurnOutcome::Error(run_fail("JIT re-entry error", e)),
                 }
             }
             None => {
                 let m =
                     match JitEffectMachine::compile_session(&expr, &table, self.cfg.nursery_size) {
                         Ok(m) => m,
-                        Err(e) => return TurnOutcome::Error(format!("JIT compile error: {e}")),
+                        Err(e) => return TurnOutcome::Error(run_fail("JIT compile error", e)),
                     };
                 // Store + publish the cancel handle BEFORE running, so a runaway
                 // on this bare-expression path is cancellable from the start.
@@ -865,7 +862,7 @@ impl Session {
 
         match run_result {
             Ok(value) => self.value_outcome(value_to_json(&value, &table, 0), inner_type),
-            Err(e) => TurnOutcome::Error(format!("runtime error: {e}")),
+            Err(e) => TurnOutcome::Error(run_fail("runtime error", e)),
         }
     }
 
@@ -931,24 +928,27 @@ impl Session {
             }),
         ) {
             Ok(t) => t,
-            Err(e) => {
-                return TurnOutcome::Error(format!(
-                    "bind compile error: {}",
-                    remap_item_err(&e.to_string(), &wrapped)
-                ))
-            }
+            Err(e) => return TurnOutcome::Error(compile_fail(&e, &wrapped)),
         };
         if turn.warnings.has_io {
-            return TurnOutcome::Error(
+            return TurnOutcome::Error(tag_failure(
+                FailureClass::UserHaskell,
+                Phase::Compile,
                 "IO type detected in bound value. IO operations are not supported.".into(),
-            );
+            ));
         }
         let binder = match turn.binders.into_iter().next() {
             Some(b) => b,
-            None => return TurnOutcome::Error("bind turn produced no binder metadata".into()),
+            None => {
+                return TurnOutcome::Error(tag_failure(
+                    FailureClass::Infra,
+                    Phase::Compile,
+                    "bind turn produced no binder metadata".into(),
+                ))
+            }
         };
         if let Err(e) = self.merge_table(&turn.table) {
-            return TurnOutcome::Error(e);
+            return TurnOutcome::Error(tag_failure(FailureClass::Runtime, Phase::Run, e));
         }
 
         // Bootstrap the resident machine on the first turn from THIS turn's table
@@ -958,7 +958,7 @@ impl Session {
             match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
             {
                 Ok(m) => self.bootstrap_machine(m),
-                Err(e) => return TurnOutcome::Error(format!("JIT compile error: {e}")),
+                Err(e) => return TurnOutcome::Error(run_fail("JIT compile error", e)),
             }
         }
 
@@ -971,7 +971,7 @@ impl Session {
         let machine = self.machine.as_mut().expect("machine bootstrapped above");
         let fid = match machine.add_function(&frag_name, &turn.expr, &self.session_table, &env) {
             Ok(f) => f,
-            Err(e) => return TurnOutcome::Error(format!("JIT bind add_function error: {e}")),
+            Err(e) => return TurnOutcome::Error(run_fail("JIT bind add_function error", e)),
         };
         // `run_fragment_and_bind` still takes a `forced: bool` (a codegen API);
         // the tier is the single source of truth — derive the flag at the call
@@ -984,7 +984,7 @@ impl Session {
             matches!(binder.tier, ValueTier::Tier0Data),
         ) {
             Ok(s) => s,
-            Err(e) => return TurnOutcome::Error(format!("bind runtime error: {e}")),
+            Err(e) => return TurnOutcome::Error(run_fail("bind runtime error", e)),
         };
 
         self.val_gen = g;
@@ -1045,34 +1045,35 @@ impl Session {
             }),
         ) {
             Ok(t) => t,
-            Err(e) => {
-                return TurnOutcome::Error(format!(
-                    "multi-bind compile error: {}",
-                    remap_item_err(&e.to_string(), &wrapped)
-                ))
-            }
+            Err(e) => return TurnOutcome::Error(compile_fail(&e, &wrapped)),
         };
         if turn.warnings.has_io {
-            return TurnOutcome::Error(
+            return TurnOutcome::Error(tag_failure(
+                FailureClass::UserHaskell,
+                Phase::Compile,
                 "IO type detected in bound value. IO operations are not supported.".into(),
-            );
+            ));
         }
         if turn.binders.len() != names.len() {
-            return TurnOutcome::Error(format!(
-                "multi-bind: extract returned {} binders, expected {}",
-                turn.binders.len(),
-                names.len()
+            return TurnOutcome::Error(tag_failure(
+                FailureClass::Infra,
+                Phase::Compile,
+                format!(
+                    "multi-bind: extract returned {} binders, expected {}",
+                    turn.binders.len(),
+                    names.len()
+                ),
             ));
         }
         if let Err(e) = self.merge_table(&turn.table) {
-            return TurnOutcome::Error(e);
+            return TurnOutcome::Error(tag_failure(FailureClass::Runtime, Phase::Run, e));
         }
 
         if self.machine.is_none() {
             match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
             {
                 Ok(m) => self.bootstrap_machine(m),
-                Err(e) => return TurnOutcome::Error(format!("JIT compile error: {e}")),
+                Err(e) => return TurnOutcome::Error(run_fail("JIT compile error", e)),
             }
         }
 
@@ -1083,7 +1084,7 @@ impl Session {
         let machine = self.machine.as_mut().expect("machine bootstrapped above");
         let fid = match machine.add_function(&frag_name, &turn.expr, &self.session_table, &env) {
             Ok(f) => f,
-            Err(e) => return TurnOutcome::Error(format!("JIT multi-bind add_function error: {e}")),
+            Err(e) => return TurnOutcome::Error(run_fail("JIT multi-bind add_function error", e)),
         };
         // run_fragment_and_bind_projected deep-forces the whole tuple first
         // (GC-safe: registers all pending parents as Rust roots), then projects
@@ -1096,7 +1097,7 @@ impl Session {
             names.len(),
         ) {
             Ok(s) => s,
-            Err(e) => return TurnOutcome::Error(format!("multi-bind runtime error: {e}")),
+            Err(e) => return TurnOutcome::Error(run_fail("multi-bind runtime error", e)),
         };
 
         self.val_gen = g;
@@ -1199,10 +1200,7 @@ impl Session {
                             captured,
                         )
                     }
-                    Err(pure_err) => TurnOutcome::Error(format!(
-                        "compile error: {}",
-                        remap_item_err(&pure_err.to_string(), &pure_src)
-                    )),
+                    Err(pure_err) => TurnOutcome::Error(compile_fail(&pure_err, &pure_src)),
                 }
             }
         }
@@ -1221,12 +1219,10 @@ impl Session {
         captured: &CapturedOutput,
     ) -> TurnOutcome {
         if turn.warnings.has_io {
-            return TurnOutcome::Error(
-                "IO type detected in result binding. IO operations are not supported.".into(),
-            );
+            return io_type_fail();
         }
         if let Err(e) = self.merge_table(&turn.table) {
-            return TurnOutcome::Error(e);
+            return TurnOutcome::Error(tag_failure(FailureClass::Runtime, Phase::Run, e));
         }
         // Seed the machine from an Eff fragment first, so its table has the
         // freer cons even when THIS fragment is pure (a pure fragment omits
@@ -1236,7 +1232,7 @@ impl Session {
             match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
             {
                 Ok(m) => self.bootstrap_machine(m),
-                Err(e) => return TurnOutcome::Error(format!("JIT compile error: {e}")),
+                Err(e) => return TurnOutcome::Error(run_fail("JIT compile error", e)),
             }
         }
         let env = self.bindings.seed_external_env();
@@ -1246,7 +1242,7 @@ impl Session {
         let machine = self.machine.as_mut().expect("machine bootstrapped above");
         let fid = match machine.add_function(&frag_name, &turn.expr, &self.session_table, &env) {
             Ok(f) => f,
-            Err(e) => return TurnOutcome::Error(format!("JIT reference add_function error: {e}")),
+            Err(e) => return TurnOutcome::Error(run_fail("JIT reference add_function error", e)),
         };
         let run_result = match mode {
             EvalMode::Pure => machine.run_fragment_pure(fid),
@@ -1259,7 +1255,7 @@ impl Session {
                 let rendered = value_to_json(&value, &self.session_table, 0);
                 self.value_outcome(rendered, inner_type)
             }
-            Err(e) => TurnOutcome::Error(format!("runtime error: {e}")),
+            Err(e) => TurnOutcome::Error(run_fail("runtime error", e)),
         }
     }
 
@@ -1902,6 +1898,60 @@ fn user_code_offset(source: &str) -> Option<(usize, usize)> {
 /// Remap `Expr.hs:<L>:<C>` GHC coordinates in a compile error to item-relative
 /// ones (`<item>:l:c`), using the wrapped source the error was produced from.
 /// Foreign paths pass through; unknown wrappers return the error untouched.
+/// Prepend the greppable failure-class/phase tag line onto a repl error message
+/// so a caller can branch on class/phase, exactly as the MCP server's envelope
+/// does. Both servers share the ONE `tidepool_runtime` classifier; this only
+/// formats. The original message is embedded verbatim, so string sniffs over it
+/// (e.g. `is_parse_error`) still match.
+fn tag_failure(class: FailureClass, phase: Phase, body: String) -> String {
+    format!(
+        "**failure-class:** `{}`  **phase:** `{}`\n{}",
+        class.tag(),
+        phase.tag(),
+        body
+    )
+}
+
+/// A compile-phase failure envelope from a structured [`CompileError`] (the
+/// eval/bind/reference path): classify it and remap GHC coords in the message
+/// onto the user's item. A wire-format skew (`CompileError::ReadError`) becomes
+/// version-skew/compile here; skew/infra messages carry no coords, so the remap
+/// is a passthrough for them.
+fn compile_fail(err: &CompileError, source: &str) -> String {
+    let env = classify_compile(err);
+    tag_failure(env.class, env.phase, remap_item_err(&env.message, source))
+}
+
+/// A compile-phase failure envelope from the declaration path's [`SessionError`].
+/// The body is the ORIGINAL `"<prefix>: <err>"` text (not the classifier's
+/// re-messaging), so the Auto decl→stmt fallback's `is_parse_error` sniff still
+/// finds the "binder extraction failed" marker; the envelope supplies only the
+/// class/phase tag.
+fn session_fail(err: &SessionError, prefix: &str) -> String {
+    let env = classify_session(err);
+    tag_failure(env.class, env.phase, format!("{prefix}: {err}"))
+}
+
+/// A run-phase JIT/eval failure envelope (always runtime/run), with `context`
+/// naming the site (e.g. "runtime error", "JIT compile error").
+fn run_fail(context: &str, detail: impl std::fmt::Display) -> String {
+    tag_failure(
+        FailureClass::Runtime,
+        Phase::Run,
+        format!("{context}: {detail}"),
+    )
+}
+
+/// The result binding typed to IO — a compile-phase user-Haskell constraint.
+/// (Shared across the eval/bind/multi-bind/reference paths.)
+fn io_type_fail() -> TurnOutcome {
+    TurnOutcome::Error(tag_failure(
+        FailureClass::UserHaskell,
+        Phase::Compile,
+        "IO type detected in result binding. IO operations are not supported.".into(),
+    ))
+}
+
 fn remap_item_err(err: &str, source: &str) -> String {
     // Session-lib generation warnings are dependency noise on the stmt plane
     // (a gen-25 -Wx-partial otherwise rides every later item's errors).

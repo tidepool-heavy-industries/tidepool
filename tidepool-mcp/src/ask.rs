@@ -26,8 +26,14 @@ pub(crate) enum SessionMessage {
     },
     /// The program completed successfully.
     Completed { result: String },
-    /// The program encountered an error.
-    Error { error: String },
+    /// The program encountered an error, pre-classified on the eval thread (which
+    /// still holds the structured [`tidepool_runtime::RuntimeError`]) so the
+    /// server stamps class/phase without re-parsing the message text.
+    Error {
+        error: String,
+        class: tidepool_runtime::FailureClass,
+        phase: tidepool_runtime::Phase,
+    },
 }
 
 /// Messages from the MCP server to the blocked eval thread.
