@@ -26,16 +26,24 @@
 //!
 //! ## The per-machine-state boundary (multi-machine / parMapM seam)
 //!
-//! The thread-locals declared across these submodules (GC_STATE, RUST_ROOTS,
-//! PERSISTENT_ROOTS, STACK_MAP_REGISTRY, CANCEL_FLAG, RUNTIME_ERROR, CALL_DEPTH,
-//! DIAGNOSTICS, PARKED_STREAMS, JSON_CON_IDS) are the machine's ambient state.
-//! Every consumer except the signal handler (EXEC_CONTEXT / SIGNAL_SAFE_CTX are
-//! read from async-signal context and must stay thread-scoped) receives vmctx,
-//! and VMContext's frozen ABI covers offsets 0-32 only — appending a per-machine
-//! state pointer is ABI-safe. Converting this cluster from per-thread to
-//! per-machine at the install_registries seam is one prerequisite for N
-//! concurrent machines (#329); the other is the single-mutator GC (the RBP
-//! frame walker walks one thread's stack).
+//! Two flavors of ambient state exist here. Per-machine state — currently
+//! the cancel flag, JSON con ids, stack-map registry, and call depth (T6
+//! leaf 1) — lives on [`crate::machine_state::MachineState`], owned by
+//! `JitEffectMachine` and reached via `(*vmctx).machine_state`. DIAGNOSTICS
+//! stays thread-local for now (deferred to leaf 2 alongside RUNTIME_ERROR:
+//! both are consumed zero-arg by sibling crates — tidepool-runtime/mcp/repl —
+//! outside this migration's edit boundary, so their cutover needs
+//! cross-crate coordination). The remaining thread-locals declared across
+//! these submodules (GC_STATE, RUST_ROOTS, PERSISTENT_ROOTS, RUNTIME_ERROR,
+//! DIAGNOSTICS, PARKED_STREAMS) are still per-thread — migrating them is
+//! later-leaf work. Every per-machine-state consumer except the signal
+//! handler (EXEC_CONTEXT / SIGNAL_SAFE_CTX are read from async-signal context
+//! and must stay thread-scoped) receives vmctx, and VMContext's frozen ABI
+//! covers offsets 0-32 only — appending a per-machine state pointer at offset
+//! 40 is ABI-safe. Converting this cluster from per-thread to per-machine at
+//! the install_registries seam is one prerequisite for N concurrent machines
+//! (#329); the other is the single-mutator GC (the RBP frame walker walks
+//! one thread's stack).
 
 mod cancel;
 mod errors;
@@ -44,28 +52,26 @@ mod gc;
 mod primops;
 mod streaming;
 
+pub(crate) use cancel::check_cancel_and_set_error;
 pub use cancel::runtime_cancel_check;
-pub(crate) use cancel::{check_cancel_and_set_error, clear_cancel_flag, set_cancel_flag};
 
 pub use gc::{
-    clear_gc_state, clear_persistent_roots, clear_run_scratch, clear_rust_roots,
-    clear_stack_map_registry, free_session_heap, gc_active_range, gc_trigger,
-    gc_trigger_call_count, gc_trigger_last_vmctx, install_session_buffer,
-    persistent_roots_count, reclaim_session_heap, register_persistent_root, register_rust_root,
-    reset_test_counters, rust_roots_mark, set_gc_state, set_stack_map_registry,
-    truncate_rust_roots,
+    clear_gc_state, clear_persistent_roots, clear_run_scratch, clear_rust_roots, free_session_heap,
+    gc_active_range, gc_trigger, gc_trigger_call_count, gc_trigger_last_vmctx,
+    install_session_buffer, persistent_roots_count, reclaim_session_heap, register_persistent_root,
+    register_rust_root, reset_test_counters, rust_roots_mark, set_gc_state, truncate_rust_roots,
 };
 
+use errors::unresolved_var_trap;
 pub use errors::{
     debug_app_check, drain_diagnostics, error_poison_ptr, error_poison_ptr_lazy,
     error_poison_ptr_lazy_msg, get_exec_context, has_runtime_error, is_lazy_poison,
-    push_diagnostic, raise_lazy_poison, register_var_names, reset_call_depth, runtime_bad_thunk_state_trap,
+    push_diagnostic, raise_lazy_poison, register_var_names, runtime_bad_thunk_state_trap,
     runtime_blackhole_trap, runtime_case_trap, runtime_error, runtime_error_dynamic,
     runtime_error_with_msg, runtime_oom, set_exec_context, set_first_cause, surface_error,
     take_runtime_error, RuntimeError, RuntimeErrorKind,
 };
 pub(crate) use errors::{SIGNAL_SAFE_CTX, SIGNAL_SAFE_CTX_LEN};
-use errors::unresolved_var_trap;
 
 pub use force::{deep_force, heap_force, trampoline_resolve};
 
@@ -82,7 +88,6 @@ pub use primops::{
     runtime_show_double_addr, runtime_show_signed_double_addr, runtime_shrink_boxed_array,
     runtime_shrink_byte_array, runtime_strlen, runtime_text_measure_off, runtime_text_memchr,
     runtime_text_reverse, runtime_word2_quot, runtime_word2_rem, runtime_word_encode_double,
-    set_json_con_ids,
 };
 
 pub(crate) use streaming::{

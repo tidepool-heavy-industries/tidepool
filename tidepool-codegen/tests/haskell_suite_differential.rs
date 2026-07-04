@@ -8,6 +8,7 @@ use tidepool_codegen::context::VMContext;
 use tidepool_codegen::emit::expr::compile_expr;
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::host_fns;
+use tidepool_codegen::machine_state::MachineState;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_eval::{deep_force, env_from_datacon_table, eval, VecHeap};
 use tidepool_repr::serial::read::{read_cbor, read_metadata};
@@ -73,8 +74,8 @@ fn haskell_suite_differential() {
                 let bytes = std::fs::read(&path).unwrap();
                 // One current format: an unreadable fixture is corpus rot,
                 // never silently reduced coverage.
-                let expr = read_cbor(&bytes)
-                    .unwrap_or_else(|e| panic!("{name}: fixture unreadable: {e}"));
+                let expr =
+                    read_cbor(&bytes).unwrap_or_else(|e| panic!("{name}: fixture unreadable: {e}"));
 
                 // Interpreter
                 let mut heap = VecHeap::new();
@@ -93,9 +94,12 @@ fn haskell_suite_differential() {
                     let start = nursery.as_mut_ptr();
                     let end = unsafe { start.add(nursery.len()) };
                     let mut vmctx = VMContext::new(start, end, host_fns::gc_trigger);
+                    let machine_state = MachineState::new();
+                    vmctx.machine_state =
+                        &machine_state as *const MachineState as *mut MachineState;
 
                     host_fns::set_gc_state(start, nursery.len());
-                    host_fns::set_stack_map_registry(&pipeline.stack_maps);
+                    machine_state.set_stack_map_registry(&pipeline.stack_maps);
 
                     let ptr = pipeline.get_function_ptr(func_id);
                     let func: unsafe extern "C" fn(*mut VMContext) -> i64 =

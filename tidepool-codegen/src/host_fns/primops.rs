@@ -3,7 +3,7 @@
 //! measurement helpers, and the pure `decodeJson` primop.
 
 use crate::context::VMContext;
-use std::cell::Cell;
+use crate::machine_state::machine_state;
 
 use super::errors::{
     check_ptr_invalid, error_poison_ptr, runtime_error_with_msg, runtime_oom, RuntimeError,
@@ -768,19 +768,6 @@ pub extern "C" fn runtime_double_power(bits_a: i64, bits_b: i64) -> i64 {
     a.powf(b).to_bits() as i64
 }
 
-thread_local! {
-    /// The aeson-`Value` constructor ids for the currently-running JIT machine,
-    /// installed by the run entry (`JitEffectMachine`) from the compile-time
-    /// `DataConTable`. Read by [`runtime_json_decode`] to build the `Maybe
-    /// Value` result. `None` when the aeson/Maybe/Map closure isn't in scope.
-    static JSON_CON_IDS: Cell<Option<tidepool_eval::json::JsonConIds>> = const { Cell::new(None) };
-}
-
-/// Install the JSON constructor ids for this thread's JIT run. `None` clears.
-pub fn set_json_con_ids(ids: Option<tidepool_eval::json::JsonConIds>) {
-    JSON_CON_IDS.with(|c| c.set(ids));
-}
-
 /// `decodeJson :: Text -> Maybe Value` — the pure JSON-decode primop.
 ///
 /// Lifts the argument `Text` to a `Value` tree via `heap_bridge` (which owns
@@ -797,7 +784,7 @@ pub fn set_json_con_ids(ids: Option<tidepool_eval::json::JsonConIds>) {
 /// `Text` value (or a thunk that forces to one).
 #[no_mangle]
 pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *mut u8) -> *mut u8 {
-    let ids = match JSON_CON_IDS.with(|c| c.get()) {
+    let ids = match machine_state(vmctx).json_con_ids() {
         Some(ids) => ids,
         None => {
             let msg = b"decodeJson: aeson Value/Maybe/Map constructors not in scope";
@@ -824,11 +811,9 @@ pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *m
     // lifted `ByteArray` wrapper con has no such id here and goes
     // unrecognized — exactly as in eval's `JsonDecode` arm.
     let bytes = match &text_val {
-        tidepool_eval::Value::Con(_, fields) => tidepool_eval::shapes::text_bytes_clamped_with(
-            fields,
-            |_| false,
-            |id| id == ids.i_hash,
-        ),
+        tidepool_eval::Value::Con(_, fields) => {
+            tidepool_eval::shapes::text_bytes_clamped_with(fields, |_| false, |id| id == ids.i_hash)
+        }
         _ => None,
     };
     let s = match bytes {

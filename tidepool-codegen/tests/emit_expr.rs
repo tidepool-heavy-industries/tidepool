@@ -6,6 +6,7 @@ use tidepool_codegen::context::VMContext;
 use tidepool_codegen::emit::expr::compile_expr;
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::host_fns;
+use tidepool_codegen::machine_state::MachineState;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_heap::layout;
 use tidepool_repr::*;
@@ -15,6 +16,9 @@ struct TestResult {
     vmctx: VMContext,
     _nursery: Vec<u8>,
     _pipeline: CodegenPipeline,
+    // Boxed so its address stays stable across the move out of
+    // `compile_and_run` — `vmctx.machine_state` points at its heap allocation.
+    _machine_state: Box<MachineState>,
 }
 
 impl TestResult {
@@ -35,9 +39,11 @@ fn compile_and_run(tree: &CoreExpr) -> TestResult {
     let start = nursery.as_mut_ptr();
     let end = unsafe { start.add(nursery.len()) };
     let mut vmctx = VMContext::new(start, end, host_fns::gc_trigger);
+    let machine_state = Box::new(MachineState::new());
+    vmctx.machine_state = machine_state.as_ref() as *const MachineState as *mut MachineState;
 
     host_fns::set_gc_state(start, nursery.len());
-    host_fns::set_stack_map_registry(&pipeline.stack_maps);
+    machine_state.set_stack_map_registry(&pipeline.stack_maps);
 
     let ptr = pipeline.get_function_ptr(func_id);
     let func: unsafe extern "C" fn(*mut VMContext) -> i64 = unsafe { std::mem::transmute(ptr) };
@@ -48,6 +54,7 @@ fn compile_and_run(tree: &CoreExpr) -> TestResult {
         vmctx,
         _nursery: nursery,
         _pipeline: pipeline,
+        _machine_state: machine_state,
     }
 }
 
@@ -2824,7 +2831,6 @@ fn test_thunk_con_basic() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let mut result = compile_and_run(&tree);
     unsafe {
         // Result is a Con
@@ -2917,7 +2923,6 @@ fn test_thunk_con_recursive() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         // Result should be Lit(42) — the head of go 42
@@ -3009,7 +3014,6 @@ fn test_thunkcon_field_in_lit_case() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(
@@ -3074,7 +3078,6 @@ fn test_thunkcon_field_in_primop() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(
@@ -3212,7 +3215,6 @@ fn test_thunkcon_recursive_countdown() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(
@@ -3273,7 +3275,6 @@ fn test_thunkcon_primop_field_in_data_case() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let mut result = compile_and_run(&tree);
     unsafe {
         // Field v is a thunk (lazy case alt extraction), force it explicitly
@@ -3346,7 +3347,6 @@ fn test_thunkcon_app_field_in_lit_case() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(
@@ -3407,7 +3407,6 @@ fn test_thunkcon_app_field_in_primop() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(
@@ -3495,7 +3494,6 @@ fn test_thunkcon_case_field_in_lit_case() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(
@@ -3576,7 +3574,6 @@ fn test_thunkcon_nested_in_primop() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(
@@ -3651,7 +3648,6 @@ fn test_adversarial_multi_field_thunkcon() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -3751,7 +3747,6 @@ fn test_adversarial_thunk_forces_to_con_in_data_dispatch() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -3817,7 +3812,6 @@ fn test_adversarial_thunked_closure_in_app_fun() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -3889,7 +3883,6 @@ fn test_adversarial_join_point_thunked_arg() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -3959,7 +3952,6 @@ fn test_adversarial_litchar_thunk_dispatch() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -4029,7 +4021,6 @@ fn test_adversarial_double_thunk_in_lit_dispatch() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -4093,7 +4084,6 @@ fn test_adversarial_thunked_arg_through_app() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -4193,7 +4183,6 @@ fn test_adversarial_multi_alt_after_thunk_force() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -4260,7 +4249,6 @@ fn test_holistic_let_nonrec_thunked_con_rhs() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -4325,7 +4313,6 @@ fn test_holistic_letrec_case_scrutinee() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -4401,7 +4388,6 @@ fn test_holistic_default_only_case_thunked_scrutinee() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -4452,7 +4438,6 @@ fn test_holistic_zero_field_con() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -4550,7 +4535,6 @@ fn test_holistic_nested_let_nonrec_thunk_chain() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -4618,7 +4602,6 @@ fn test_holistic_letrec_con_with_closure_sibling() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -4701,7 +4684,6 @@ fn test_holistic_join_in_letrec_body() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -4787,7 +4769,6 @@ fn test_holistic_multi_layer_thunk_force() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -4865,7 +4846,6 @@ fn test_holistic_case_binder_reuse() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);
@@ -4933,7 +4913,6 @@ fn test_holistic_letrec_recursive_with_case() {
         ],
     };
 
-    host_fns::reset_call_depth();
     let result = compile_and_run(&tree);
     unsafe {
         assert_eq!(layout::read_tag(result.result_ptr), layout::TAG_LIT);

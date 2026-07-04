@@ -4,6 +4,7 @@
 
 use crate::context::VMContext;
 use crate::layout;
+use crate::machine_state::machine_state;
 use std::cell::{Cell, RefCell};
 use tidepool_heap::layout as heap_layout;
 
@@ -114,10 +115,6 @@ thread_local! {
     /// host/JIT code (first write wins — see [`set_first_cause`]). Boundaries
     /// resolve it against their observed symptom via [`surface_error`].
     pub(crate) static RUNTIME_ERROR: RefCell<Option<RuntimeError>> = const { RefCell::new(None) };
-
-    /// Call depth counter for detecting runaway recursion (e.g. infinite lists).
-    /// Reset before each JIT invocation; incremented in debug_app_check.
-    static CALL_DEPTH: Cell<u32> = const { Cell::new(0) };
 
     /// Captured JIT diagnostics.
     static DIAGNOSTICS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -802,11 +799,6 @@ pub fn surface_error<T, E: From<RuntimeError>>(symptom: Result<T, E>) -> Result<
     }
 }
 
-/// Reset the call depth counter. Call before each JIT invocation.
-pub fn reset_call_depth() {
-    CALL_DEPTH.with(|c| c.set(0));
-}
-
 /// Check pointer validity; if bad, set runtime error and return true.
 pub(crate) fn check_ptr_invalid(ptr: *const u8, fn_name: &str) -> bool {
     if (ptr as i64) < MIN_VALID_ADDR as i64 {
@@ -840,19 +832,19 @@ const MAX_CALL_DEPTH: u32 = 20_000;
 /// should be short-circuited (runtime error already set or call depth exceeded).
 ///
 /// # Safety
-/// fun_ptr must point to a valid HeapObject or be null.
-pub unsafe extern "C" fn debug_app_check(fun_ptr: *const u8) -> *mut u8 {
+/// `vmctx` must be non-null with `machine_state` installed; `fun_ptr` must
+/// point to a valid HeapObject or be null.
+pub unsafe extern "C" fn debug_app_check(vmctx: *mut VMContext, fun_ptr: *const u8) -> *mut u8 {
     // If a runtime error is already pending, don't abort on tag mismatches —
     // we're in error-propagation mode and the effect machine will handle it.
     let has_error = RUNTIME_ERROR.with(|cell| cell.borrow().is_some());
 
+    // SAFETY: caller contract above.
+    let ms = unsafe { machine_state(vmctx) };
+
     // Check call depth to catch runaway recursion before stack overflow.
     if !has_error {
-        let depth = CALL_DEPTH.with(|c| {
-            let d = c.get() + 1;
-            c.set(d);
-            d
-        });
+        let depth = ms.incr_call_depth();
         if depth > MAX_CALL_DEPTH {
             RUNTIME_ERROR.with(|cell| {
                 *cell.borrow_mut() = Some(RuntimeError::StackOverflow);

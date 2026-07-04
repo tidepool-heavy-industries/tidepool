@@ -9,6 +9,7 @@ use tidepool_repr::{CoreExpr, DataConTable};
 use crate::context::VMContext;
 use crate::effect_machine::{CompiledEffectMachine, ConTags};
 use crate::heap_bridge;
+use crate::machine_state::{machine_state, MachineState};
 use crate::nursery::Nursery;
 use crate::pipeline::CodegenPipeline;
 use crate::yield_type::Yield;
@@ -87,6 +88,11 @@ pub struct JitEffectMachine {
     /// Session state for GHCi-style persistent machines (Wave 1.A).
     /// `None` for one-shot machines created by [`Self::compile`].
     session: Option<SessionState>,
+    /// Per-machine ambient state (cancel flag, JSON con ids, stack-map
+    /// registry, call depth, diagnostics). Reached at run time via
+    /// `(*vmctx).machine_state`, pointed at this field by
+    /// `install_registries`/the run entries. Leaves 2 and 3 add more fields.
+    machine_state: MachineState,
 }
 
 /// External handle for cancelling a running `JitEffectMachine`.
@@ -158,6 +164,9 @@ pub(crate) struct RegistryGuard {
     /// returned by the time Drop runs. VMContext has no custom Drop, so its
     /// bytes are valid on the stack even after the value is logically dropped.
     reclaim: Option<ReclaimTargets>,
+    /// Points at the owning `JitEffectMachine::machine_state`, set by
+    /// `install_registries`. Outlives this guard (same call frame).
+    machine_state: *mut MachineState,
 }
 
 /// The two raw pointers `arm_reclaim` captures for the Drop-time heap reclaim.
@@ -218,14 +227,21 @@ impl Drop for RegistryGuard {
             }
         }
         crate::host_fns::clear_run_scratch();
-        crate::host_fns::clear_stack_map_registry();
-        crate::host_fns::clear_cancel_flag();
+        // SAFETY: machine_state was set by install_registries and outlives
+        // this guard (points at the owning JitEffectMachine's field).
+        unsafe {
+            (*self.machine_state).clear_stack_map_registry();
+            (*self.machine_state).clear_cancel_flag();
+        }
         crate::host_fns::clear_parked_streams();
         crate::debug::clear_lambda_registry();
         // Clean up remaining thread-local state for same-thread reuse
         let _ = crate::host_fns::take_runtime_error();
         let _ = crate::host_fns::drain_diagnostics();
-        crate::host_fns::reset_call_depth();
+        // SAFETY: as above.
+        unsafe {
+            (*self.machine_state).reset_call_depth();
+        }
         crate::host_fns::set_exec_context("");
     }
 }
@@ -298,6 +314,7 @@ impl JitEffectMachine {
             json_con_ids,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             session: None,
+            machine_state: MachineState::new(),
         })
     }
 
@@ -327,6 +344,7 @@ impl JitEffectMachine {
                 cursor: 0,
                 old_space: crate::old_space::OldSpace::new(),
             }),
+            machine_state: MachineState::new(),
         })
     }
 
@@ -344,7 +362,8 @@ impl JitEffectMachine {
     /// only). For one-shot machines: always points at `nursery.start()`.
     pub(crate) fn install_registries(&mut self) -> RegistryGuard {
         crate::debug::set_lambda_registry(self.pipeline.build_lambda_registry());
-        crate::host_fns::set_stack_map_registry(&self.pipeline.stack_maps);
+        self.machine_state
+            .set_stack_map_registry(&self.pipeline.stack_maps);
         match &mut self.session {
             Some(s) => match s.heap.take() {
                 Some(buf) => crate::host_fns::install_session_buffer(buf),
@@ -357,13 +376,14 @@ impl JitEffectMachine {
                 crate::host_fns::set_gc_state(self.nursery.start() as *mut u8, self.nursery.size())
             }
         }
-        crate::host_fns::set_cancel_flag(self.cancel_flag.clone());
+        self.machine_state.set_cancel_flag(self.cancel_flag.clone());
         // Make the aeson-`Value` constructor ids visible to the `JsonDecode`
         // primop's host fn for the duration of this run.
-        crate::host_fns::set_json_con_ids(self.json_con_ids);
+        self.machine_state.set_json_con_ids(self.json_con_ids);
         RegistryGuard {
             is_session: self.session.is_some(),
             reclaim: None,
+            machine_state: &mut self.machine_state as *mut MachineState,
         }
     }
 
@@ -441,6 +461,9 @@ impl JitEffectMachine {
         };
 
         let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
+        // SAFETY: machine_state outlives this run (owned by self); machine's
+        // vmctx is stable for the run's duration.
+        machine.vmctx_mut().machine_state = &mut self.machine_state as *mut MachineState;
         // Arm reclaim so Drop can recover active_buffer → session.heap.
         // SAFETY: machine.vmctx_mut() points into `machine` on this stack frame;
         // CompiledEffectMachine has no custom Drop so the bytes are valid when
@@ -502,6 +525,8 @@ impl JitEffectMachine {
         } else {
             self.nursery.make_vmctx(crate::host_fns::gc_trigger)
         };
+        // SAFETY: machine_state outlives this run (owned by self).
+        vmctx.machine_state = &mut self.machine_state as *mut MachineState;
         // Arm reclaim so Drop can recover active_buffer → session.heap.
         // SAFETY: &vmctx lives on this stack frame; VMContext has no custom Drop
         // so its bytes are valid when _guard drops (which is before run_pure returns).
@@ -509,7 +534,7 @@ impl JitEffectMachine {
             _guard.arm_reclaim(&mut self.session as *mut _, &vmctx as *const _);
         }
 
-        crate::host_fns::reset_call_depth();
+        self.machine_state.reset_call_depth();
         crate::host_fns::set_exec_context("running pure computation");
         // SAFETY: Calling the JIT function through a valid function pointer with signal
         // protection for crash recovery. vmctx is freshly created from the nursery.
@@ -651,8 +676,10 @@ impl JitEffectMachine {
         let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
             unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
         let mut vmctx = self.make_session_vmctx();
+        // SAFETY: machine_state outlives this run (owned by self).
+        vmctx.machine_state = &mut self.machine_state as *mut MachineState;
 
-        crate::host_fns::reset_call_depth();
+        self.machine_state.reset_call_depth();
         crate::host_fns::set_exec_context("running pure computation (bind)");
         // SAFETY: calling the JIT function through a valid pointer, signal-protected.
         let result_ptr: *mut u8 =
@@ -764,6 +791,8 @@ impl JitEffectMachine {
         let vmctx = self.make_session_vmctx();
 
         let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
+        // SAFETY: machine_state outlives this run (owned by self).
+        machine.vmctx_mut().machine_state = &mut self.machine_state as *mut MachineState;
         // NOTE: do NOT arm reclaim before the step loop — the Done arm accesses
         // self.session (for tenure) and arm_reclaim stores a raw *mut self.session;
         // the two cannot alias. Follow run_pure_and_bind's ordering: tenure first
@@ -812,8 +841,8 @@ impl JitEffectMachine {
             // is the nursery from-range (still installed; the guard has not
             // dropped). The tenured copy lives in old-space arenas, independent
             // of the buffer the guard reclaims.
-            let from = crate::host_fns::gc_active_range()
-                .expect("GC state installed for the bind run");
+            let from =
+                crate::host_fns::gc_active_range().expect("GC state installed for the bind run");
             let from_range = (from.0 as *const u8, unsafe {
                 from.0.add(from.1) as *const u8
             });
@@ -891,6 +920,8 @@ impl JitEffectMachine {
             unsafe { std::mem::transmute(self.pipeline.get_function_ptr(func_id)) };
         let vmctx = self.make_session_vmctx();
         let mut machine = CompiledEffectMachine::new(func_ptr, vmctx, tags);
+        // SAFETY: machine_state outlives this run (owned by self).
+        machine.vmctx_mut().machine_state = &mut self.machine_state as *mut MachineState;
         // NOTE: do NOT arm reclaim before the step loop (same ordering as
         // run_fragment_and_bind — tenure is in the Done arm).
 
@@ -946,8 +977,8 @@ impl JitEffectMachine {
             // 3. Capture from_range AFTER deep_force (GC may have changed the
             //    active region). tenure() is pure Rust — no JIT GC fires — so
             //    this range stays valid for all field tenures.
-            let from = crate::host_fns::gc_active_range()
-                .expect("GC state installed for the bind run");
+            let from =
+                crate::host_fns::gc_active_range().expect("GC state installed for the bind run");
             let from_range = (from.0 as *const u8, unsafe {
                 from.0.add(from.1) as *const u8
             });
@@ -1031,7 +1062,7 @@ unsafe fn resolve_tail_calls_protected(
         // `host_fns::trampoline_resolve`. Without this check, an infinite
         // tail-recursive loop never yields control back to the caller even
         // when cancellation has been requested.
-        if crate::host_fns::check_cancel_and_set_error() {
+        if crate::host_fns::check_cancel_and_set_error(vmctx) {
             vmctx.tail_callee = std::ptr::null_mut();
             vmctx.tail_arg = std::ptr::null_mut();
             ptr = crate::host_fns::error_poison_ptr();
@@ -1042,7 +1073,7 @@ unsafe fn resolve_tail_calls_protected(
         let arg = vmctx.tail_arg;
         vmctx.tail_callee = std::ptr::null_mut();
         vmctx.tail_arg = std::ptr::null_mut();
-        crate::host_fns::reset_call_depth();
+        machine_state(vmctx).reset_call_depth();
         let code_ptr =
             *(callee.add(crate::layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const usize);
         let func: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
@@ -1083,7 +1114,9 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
     exec_start: &str,
     resume_suffix: &str,
 ) -> Result<*mut u8, JitError> {
-    crate::host_fns::reset_call_depth();
+    // SAFETY: machine.vmctx_mut()'s machine_state was set by the caller before
+    // entering the effect loop.
+    unsafe { machine_state(machine.vmctx_mut() as *mut VMContext) }.reset_call_depth();
     crate::host_fns::set_exec_context(exec_start);
     // SAFETY: with_signal_protection wraps the JIT call with sigsetjmp for
     // crash recovery; machine.step() calls the JIT function through a valid
@@ -1138,7 +1171,9 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
                 // surfaces the same cause as a flag-fired one. Ordinary
                 // handler errors record no cause and pass through unchanged.
                 let response = crate::host_fns::surface_error(
-                    handlers.dispatch(tag, &req_val, &cx).map_err(JitError::from),
+                    handlers
+                        .dispatch(tag, &req_val, &cx)
+                        .map_err(JitError::from),
                 )?;
 
                 // External cancellation safepoint at the effect-dispatch
@@ -1223,9 +1258,9 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
                             }
                             .map_err(JitError::Signal)?;
                             if let Some(err) = crate::host_fns::take_runtime_error() {
-                                return Err(JitError::Yield(
-                                    crate::yield_type::YieldError::from(err),
-                                ));
+                                return Err(JitError::Yield(crate::yield_type::YieldError::from(
+                                    err,
+                                )));
                             }
                             ResponsePlan::Ready(p)
                         }
@@ -1319,7 +1354,8 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
                         .map_err(JitError::HeapBridge)?
                     }
                 };
-                crate::host_fns::reset_call_depth();
+                // SAFETY: as above.
+                unsafe { machine_state(machine.vmctx_mut() as *mut VMContext) }.reset_call_depth();
                 crate::host_fns::set_exec_context(&format!(
                     "resuming after effect tag={}{}",
                     tag, resume_suffix

@@ -10,6 +10,7 @@ use tidepool_codegen::emit::expr::compile_expr;
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::host_fns;
 use tidepool_codegen::host_fns::RuntimeError;
+use tidepool_codegen::machine_state::MachineState;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_eval::{env::Env, eval::eval, heap::VecHeap};
 use tidepool_repr::*;
@@ -39,7 +40,15 @@ fn is_whitelisted_jit_error(err: &RuntimeError) -> bool {
 /// Compile and run an expression through the JIT, returning the result pointer.
 /// Panics on compilation failure — the generator produces well-typed expressions
 /// that the JIT should always be able to compile.
-fn jit_compile_and_run(tree: &CoreExpr) -> (*const u8, VMContext, Vec<u8>, CodegenPipeline) {
+fn jit_compile_and_run(
+    tree: &CoreExpr,
+) -> (
+    *const u8,
+    VMContext,
+    Vec<u8>,
+    CodegenPipeline,
+    Box<MachineState>,
+) {
     let mut pipeline =
         CodegenPipeline::new(&host_fns::host_fn_symbols()).expect("pipeline creation failed");
     let func_id = compile_expr(&mut pipeline, tree, "diff_test", &ExternalEnv::new())
@@ -50,15 +59,19 @@ fn jit_compile_and_run(tree: &CoreExpr) -> (*const u8, VMContext, Vec<u8>, Codeg
     let start = nursery.as_mut_ptr();
     let end = unsafe { start.add(nursery.len()) };
     let mut vmctx = VMContext::new(start, end, host_fns::gc_trigger);
+    // Boxed so its address stays stable across the move out of this function
+    // — `vmctx.machine_state` points at its heap allocation.
+    let machine_state = Box::new(MachineState::new());
+    vmctx.machine_state = machine_state.as_ref() as *const MachineState as *mut MachineState;
 
     host_fns::set_gc_state(start, nursery.len());
-    host_fns::set_stack_map_registry(&pipeline.stack_maps);
+    machine_state.set_stack_map_registry(&pipeline.stack_maps);
 
     let ptr = pipeline.get_function_ptr(func_id);
     let func: unsafe extern "C" fn(*mut VMContext) -> i64 = unsafe { std::mem::transmute(ptr) };
     let result = unsafe { func(&mut vmctx as *mut VMContext) };
 
-    (result as *const u8, vmctx, nursery, pipeline)
+    (result as *const u8, vmctx, nursery, pipeline, machine_state)
 }
 
 #[test]
@@ -84,7 +97,8 @@ fn interpreter_matches_jit() {
                     let eval_result = eval(&expr, &Env::new(), &mut heap);
 
                     // 2. JIT — compilation must succeed
-                    let (result_ptr, mut vmctx, _nursery, _pipeline) = jit_compile_and_run(&expr);
+                    let (result_ptr, mut vmctx, _nursery, _pipeline, _machine_state) =
+                        jit_compile_and_run(&expr);
 
                     // Check for JIT runtime error (e.g., division by zero, stack overflow)
                     let jit_runtime_error = host_fns::take_runtime_error();

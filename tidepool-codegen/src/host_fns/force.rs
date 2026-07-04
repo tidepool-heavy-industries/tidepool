@@ -2,12 +2,13 @@
 
 use crate::context::VMContext;
 use crate::layout;
+use crate::machine_state::machine_state;
 use tidepool_heap::layout as heap_layout;
 
 use super::cancel::check_cancel_and_set_error;
 use super::errors::{
-    error_poison_ptr, has_runtime_error, reset_call_depth, runtime_bad_thunk_state_trap,
-    runtime_blackhole_trap, RuntimeError, RUNTIME_ERROR,
+    error_poison_ptr, has_runtime_error, runtime_bad_thunk_state_trap, runtime_blackhole_trap,
+    RuntimeError, RUNTIME_ERROR,
 };
 use super::gc::{register_rust_root, rust_roots_mark, truncate_rust_roots};
 
@@ -271,7 +272,7 @@ pub extern "C" fn trampoline_resolve(vmctx: *mut VMContext) -> *mut u8 {
             // immediately re-enters the trampoline forever. Returning the
             // poison here unwinds up to `JitEffectMachine::run_pure`, which
             // then surfaces `RuntimeError::Cancelled`.
-            if check_cancel_and_set_error() {
+            if check_cancel_and_set_error(vmctx) {
                 (*vmctx).tail_callee = std::ptr::null_mut();
                 (*vmctx).tail_arg = std::ptr::null_mut();
                 return error_poison_ptr();
@@ -303,7 +304,7 @@ pub extern "C" fn trampoline_resolve(vmctx: *mut VMContext) -> *mut u8 {
             }
 
             // Reset call depth so tail-recursive loops don't hit the limit
-            reset_call_depth();
+            machine_state(vmctx).reset_call_depth();
 
             // Read code pointer from closure
             let code_ptr = *(callee.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const usize);
@@ -331,8 +332,8 @@ pub extern "C" fn trampoline_resolve(vmctx: *mut VMContext) -> *mut u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::errors::take_runtime_error;
+    use super::*;
     use std::cell::Cell;
 
     extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext) {}
@@ -355,6 +356,7 @@ mod tests {
                 gc_trigger: mock_gc_trigger,
                 tail_callee: std::ptr::null_mut(),
                 tail_arg: std::ptr::null_mut(),
+                machine_state: std::ptr::null_mut(),
             };
 
             // 1. Allocate a Lit object for the result
@@ -396,6 +398,7 @@ mod tests {
                 gc_trigger: mock_gc_trigger,
                 tail_callee: std::ptr::null_mut(),
                 tail_arg: std::ptr::null_mut(),
+                machine_state: std::ptr::null_mut(),
             };
 
             // 1. Result: a real heap object (Lit) so the force loop can read its tag
@@ -424,6 +427,7 @@ mod tests {
                 gc_trigger: mock_gc_trigger,
                 tail_callee: std::ptr::null_mut(),
                 tail_arg: std::ptr::null_mut(),
+                machine_state: std::ptr::null_mut(),
             };
 
             // Reset runtime error
@@ -453,6 +457,7 @@ mod tests {
                 gc_trigger: mock_gc_trigger,
                 tail_callee: std::ptr::null_mut(),
                 tail_arg: std::ptr::null_mut(),
+                machine_state: std::ptr::null_mut(),
             };
 
             RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);
@@ -479,6 +484,7 @@ mod tests {
                 gc_trigger: mock_gc_trigger,
                 tail_callee: std::ptr::null_mut(),
                 tail_arg: std::ptr::null_mut(),
+                machine_state: std::ptr::null_mut(),
             };
 
             RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);

@@ -16,7 +16,9 @@ use std::cell::{Cell, RefCell};
 
 use super::cancel::check_cancel_and_set_error;
 use super::errors::{error_poison_ptr, push_diagnostic, runtime_error_with_msg, runtime_oom};
-use super::gc::{gc_trigger, host_alloc_gc, register_rust_root, rust_roots_mark, truncate_rust_roots};
+use super::gc::{
+    gc_trigger, host_alloc_gc, register_rust_root, rust_roots_mark, truncate_rust_roots,
+};
 
 /// A parked effect-response stream: the element producer (the iterator IS
 /// the cursor — no offset bookkeeping), the list constructor tags, and an
@@ -325,7 +327,7 @@ unsafe extern "C" fn stream_chunk(vmctx: *mut VMContext, thunk: *mut u8) -> *mut
             let mut items = Vec::with_capacity(CHUNK);
             let mut exhausted = false;
             while items.len() < CHUNK {
-                if check_cancel_and_set_error() {
+                if check_cancel_and_set_error(vmctx) {
                     return ChunkPull::Cancelled;
                 }
                 match ps.source.next_value(&ps.table) {
