@@ -1,7 +1,7 @@
 //! Wave 3b hardening — DIMENSION E: value-plane fidelity.
 //!
 //! Adversarial integration tests driving the REAL `tidepool-repl` entry point
-//! (session_open / session_run / session_close — the harness `def`/`eval`/`cmd`
+//! (session_run — the harness `def`/`eval`/`cmd`
 //! helpers are thin 1-item `session_run` wrappers) over multiple turns, per the
 //! standing rule (production tool dispatch over real turns, organic GC on the
 //! 2 MiB nursery — never a bespoke harness or forced GC).
@@ -13,7 +13,7 @@
 //! structured JSON `Value` (Tier-0 + DataConTable), and lists.
 //!
 //! Each test skips cleanly when the session-aware extract is unavailable, and
-//! ALWAYS ends with `repl.close().await` (teardown discipline).
+//! The session auto-opens on the first `session_run`; teardown is implicit.
 //!
 //! Regression gate: these tests guard the now-fixed kind=4 TypeMetadata force bug
 //! (fixed in GhcPipeline.runSessionPipeline — see text_bind.rs header for the
@@ -33,7 +33,6 @@ async fn text_first_class_bind_and_reference() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.eval("s <- pure (T.pack \"hi\")")
         .await
@@ -64,7 +63,6 @@ async fn text_first_class_bind_and_reference() {
         upper.text
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 2 — THE KEY DIAGNOSTIC: a Tier-0 Text bind under a DIFFERENT name while
@@ -99,7 +97,6 @@ async fn text_bind_with_prior_live_binding_diagnostic() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.eval("x <- pure (1 :: Int)")
         .await
@@ -120,7 +117,6 @@ async fn text_bind_with_prior_live_binding_diagnostic() {
         out.text
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 3 — A bind that REFERENCES an earlier binding at bind time.
@@ -133,7 +129,6 @@ async fn bind_references_earlier_binding() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.eval("k <- pure (5 :: Int)")
         .await
@@ -149,7 +144,6 @@ async fn bind_references_earlier_binding() {
         out.text
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 4 — A Tier-1 closure capturing an earlier binding survives GC.
@@ -163,7 +157,6 @@ async fn closure_captures_binding_survives_gc() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.eval("base <- pure (100 :: Int)")
         .await
@@ -188,7 +181,6 @@ async fn closure_captures_binding_survives_gc() {
         out.text
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 5 — Nested/recursive ADT: bind a tree, sum it a later turn.
@@ -205,7 +197,6 @@ async fn nested_recursive_adt_bind_and_sum() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.def("data Tree = Leaf Int | Node Tree Tree")
         .await
@@ -226,7 +217,6 @@ async fn nested_recursive_adt_bind_and_sum() {
         out.text
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 6a — Maybe: bind `Just 7`, case-match it.
@@ -238,7 +228,6 @@ async fn maybe_bind_and_case() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.eval("mb <- pure (Just (7 :: Int))")
         .await
@@ -250,7 +239,6 @@ async fn maybe_bind_and_case() {
         out.text
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 6b — Either: bind `Left 1`, case-match it.
@@ -263,7 +251,6 @@ async fn either_bind_and_case() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.eval("e <- pure (Left (1 :: Int) :: Either Int Int)")
         .await
@@ -275,7 +262,6 @@ async fn either_bind_and_case() {
         out.text
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 7 — Structured JSON `Value`: bind an `object`, read a field back.
@@ -289,7 +275,6 @@ async fn structured_json_value_bind_and_read() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.eval("v <- pure (object [(\"a\", toJSON (1 :: Int)), (\"b\", toJSON (2 :: Int))])")
         .await
@@ -316,7 +301,6 @@ async fn structured_json_value_bind_and_read() {
         field.text
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 8 — A list binding survives GC; length + sum read back.
@@ -329,7 +313,6 @@ async fn list_bind_survives_gc() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.eval("xs <- pure [1..1000 :: Int]")
         .await
@@ -361,7 +344,6 @@ async fn list_bind_survives_gc() {
         total.text
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 9 — A function bound, then a value bound FROM applying it.
@@ -374,7 +356,6 @@ async fn function_applied_at_bind_time() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.eval("g <- pure (\\n -> n * 2 :: Int)")
         .await
@@ -390,5 +371,4 @@ async fn function_applied_at_bind_time() {
         out.text
     );
 
-    repl.close().await.expect_ok("close");
 }

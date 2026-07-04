@@ -1,17 +1,16 @@
 //! Wave-3b hardening — DIMENSION: lifecycle & meta-commands.
 //!
-//! THE CONTRACT under test: the session lifecycle (open / close / reopen) and
-//! the meta-command surface (`:bindings`, `:reset`, `:t`, `:i`, and malformed
-//! commands — all sent as `:command` items via `session_run`) behave predictably:
-//!   - same-name re-open is rejected (a second open for the same session name
-//!     without closing the first must error),
-//!   - post-close turns report "no session open",
-//!   - reopen gives a FRESH session (no leaked bindings),
+//! THE CONTRACT under test: the session lifecycle (auto-open on first
+//! `session_run`, `session_reset` for a fresh machine) and the meta-command
+//! surface (`:bindings`, `:reset`, `:t`, `:i`, and malformed commands — all sent
+//! as `:command` items via `session_run`) behave predictably:
+//!   - `session_reset` gives a FRESH session (no leaked bindings) and works from
+//!     a cold start (never opened),
 //!   - `:reset` clears BOTH planes (decl log + value bindings) yet leaves the
 //!     session reusable,
 //!   - `:bindings` reports the documented JSON shape (name/type/module/tier),
 //!   - `:t` / `:i` are IMPLEMENTED (inferred type and binding info respectively),
-//!     and malformed / unopened commands fail gracefully (clean error, never a panic).
+//!     and malformed commands fail gracefully (clean error, never a panic).
 //!
 //! Each test drives the REAL `tidepool-repl` MCP entry point (`dispatch_tool`)
 //! through the shared harness (`common::*`), multi-turn. Requires the Wave-3b
@@ -40,83 +39,59 @@ fn binding_entry<'a>(meta: &'a serde_json::Value, name: &str) -> Option<&'a serd
 }
 
 // ---------------------------------------------------------------------------
-// Case 1 — same-name re-open is rejected.
+// Case 1 — `session_reset` from a cold start (never opened) is graceful: it
+// succeeds and leaves a fresh, runnable session behind (no panic).
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn double_open_is_capped() {
+async fn reset_when_never_opened_is_graceful() {
     if !extract_available() {
         return;
     }
     let repl = Repl::new();
-    repl.open().await.expect_ok("first open");
-    // Same-name re-open is rejected: a second open without closing the first must error.
-    let t = repl.open().await;
-    t.expect_err("second open");
+    // No prior run. Reset must NOT panic; it acks and opens a fresh session.
+    let t = repl.reset().await;
     assert!(
-        t.contains("already open"),
-        "second open should mention 'already open': {}",
+        t.expect_ok("cold reset").contains("reset"),
+        "cold reset should ack with 'reset': {}",
         t.text
     );
-    repl.close().await.expect_ok("close");
-}
-
-// ---------------------------------------------------------------------------
-// Case 2 — eval after close reports "no session open".
-// ---------------------------------------------------------------------------
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn eval_after_close_no_session() {
-    if !extract_available() {
-        return;
-    }
-    let repl = Repl::new();
-    repl.open_ok().await;
-    // one good turn so the session genuinely existed.
-    repl.eval("pure (1 :: Int)").await.expect_ok("good eval");
-    repl.close().await.expect_ok("close");
-
-    // post-close: the session manager is empty → clean no-session error.
-    // (Multi-session names the session: "no session 'default' open".)
-    let t = repl.eval("pure (2 :: Int)").await;
-    t.expect_err("eval after close");
+    // The fresh session is immediately runnable.
+    let t = repl.eval("pure (1 :: Int)").await;
     assert!(
-        t.contains("no session") && t.contains("open"),
-        "post-close eval should report no open session: {}",
+        t.expect_ok("run after cold reset").contains('1'),
+        "run after cold reset: {}",
         t.text
     );
 }
 
 // ---------------------------------------------------------------------------
-// Case 3 — close then reopen yields a FRESH session (no leaked bindings).
+// Case 2 — `session_reset` yields a FRESH session (no leaked bindings).
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reopen_is_fresh() {
+async fn reset_is_fresh() {
     if !extract_available() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
     repl.eval("x <- pure (1 :: Int)").await.expect_ok("bind x");
-    repl.close().await.expect_ok("close");
 
-    // reopen: a brand-new worker / Session with an empty BindingTable.
-    repl.open_ok().await;
+    // reset: a brand-new worker / Session with an empty BindingTable.
+    repl.reset().await.expect_ok("reset");
     let t = repl.cmd(":bindings").await;
-    let meta = parse_meta(t.expect_ok(":bindings on fresh reopen"));
+    let meta = parse_meta(t.expect_ok(":bindings on fresh reset"));
     assert_eq!(
         meta["bindings"].as_array().map(|a| a.len()),
         Some(0),
-        "reopened session must have NO bindings: {}",
+        "reset session must have NO bindings: {}",
         t.text
     );
     // x is gone: referencing it is a scope error (folded to a clean MCP error).
     let t = repl.eval("x + 1").await;
-    t.expect_err("x should be gone after reopen");
-
-    repl.close().await.expect_ok("close");
+    t.expect_err("x should be gone after reset");
 }
 
 // ---------------------------------------------------------------------------
-// Case 4 — `:reset` clears BOTH planes, then the session stays reusable.
+// Case 3 — `:reset` clears BOTH planes, then the session stays reusable.
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reset_clears_both_planes_and_is_reusable() {
@@ -124,7 +99,6 @@ async fn reset_clears_both_planes_and_is_reusable() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // Environment: define g; bind v (a pure bind → also lands in the decl
     // plane under the GHCi-environment model, so two generations: g, v).
@@ -194,12 +168,10 @@ async fn reset_clears_both_planes_and_is_reusable() {
     // read a bound VALUE back — the known-good reference path (slot-load).
     let t = repl.eval("w").await;
     assert!(t.contains("3"), "post-reset w should be 3: {}", t.text);
-
-    repl.close().await.expect_ok("close");
 }
 
 // ---------------------------------------------------------------------------
-// Case 5 — `:reset` after a heavy (GC-triggering) turn rebuilds cleanly.
+// Case 4 — `:reset` after a heavy (GC-triggering) turn rebuilds cleanly.
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reset_after_gc_rebuilds() {
@@ -207,7 +179,6 @@ async fn reset_after_gc_rebuilds() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.eval("a <- pure (5 :: Int)").await.expect_ok("bind a");
     // heavy strict left fold over 200k elements → forces organic GC on the
@@ -233,12 +204,10 @@ async fn reset_after_gc_rebuilds() {
         "post-reset rebuilt machine: b + 1 should be 8: {}",
         t.text
     );
-
-    repl.close().await.expect_ok("close");
 }
 
 // ---------------------------------------------------------------------------
-// Case 6 — `:bindings` JSON shape (name / type / module / tier; tier per kind).
+// Case 5 — `:bindings` JSON shape (name / type / module / tier; tier per kind).
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bindings_shape() {
@@ -246,7 +215,6 @@ async fn bindings_shape() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // Pure binds under the GHCi-environment model: routed into the decl plane
     // (so they generalize) but STILL surfaced in the unified `:bindings` view.
@@ -282,12 +250,10 @@ async fn bindings_shape() {
     }
     // The generalized type is reported (x :: Int here).
     assert_eq!(x["type"].as_str(), Some("Int"), "x type: {x}");
-
-    repl.close().await.expect_ok("close");
 }
 
 // ---------------------------------------------------------------------------
-// Case 7 — `:t` / `:i` are IMPLEMENTED: `:t` reports an expression's inferred
+// Case 6 — `:t` / `:i` are IMPLEMENTED: `:t` reports an expression's inferred
 // type (via the throwaway-bind → type_display path); `:i` reports a bound
 // name's type/tier. (Formerly Wave-4 stubs.)
 // ---------------------------------------------------------------------------
@@ -297,7 +263,6 @@ async fn type_and_info_are_implemented() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // `:t` returns the inferred type — no longer a stub.
     let t = repl.cmd(":t (1 :: Int)").await;
@@ -318,12 +283,10 @@ async fn type_and_info_are_implemented() {
         ":i b should report Bool: {}",
         t.text
     );
-
-    repl.close().await.expect_ok("close");
 }
 
 // ---------------------------------------------------------------------------
-// Case 8 — an unknown meta-command returns CallToolResult{is_error:true} with
+// Case 7 — an unknown meta-command returns CallToolResult{is_error:true} with
 // "unknown session command". MetaCommand::parse failures route through
 // CallToolResult::error (same channel as eval/compile errors), not a
 // transport-level McpError.
@@ -334,7 +297,6 @@ async fn unknown_meta_command_is_clean_error() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl.cmd(":nope").await;
     t.expect_err("unknown :nope should surface as is_error=true");
@@ -343,31 +305,10 @@ async fn unknown_meta_command_is_clean_error() {
         "error should mention 'unknown session command': {}",
         t.text
     );
-
-    repl.close().await.expect_ok("close");
 }
 
 // ---------------------------------------------------------------------------
-// Case 9 — close when never opened is graceful (clean error, never a panic).
-// ---------------------------------------------------------------------------
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn close_when_never_opened_is_graceful() {
-    if !extract_available() {
-        return;
-    }
-    let repl = Repl::new();
-    // No open. Close must NOT panic; it reports no open session.
-    let t = repl.close().await;
-    t.expect_err("close with no session");
-    assert!(
-        t.contains("no session"),
-        "close-without-open should report 'no session': {}",
-        t.text
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Case 10 — `:bindings` on a fresh session: empty list, generation 0.
+// Case 8 — `:bindings` on a fresh session: empty list, generation 0.
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bindings_on_fresh_session() {
@@ -375,7 +316,6 @@ async fn bindings_on_fresh_session() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl.cmd(":bindings").await;
     let meta = parse_meta(t.expect_ok(":bindings on fresh session"));
@@ -389,12 +329,10 @@ async fn bindings_on_fresh_session() {
         Some(0),
         "fresh session decl generation should be 0: {meta}"
     );
-
-    repl.close().await.expect_ok("close");
 }
 
 // ---------------------------------------------------------------------------
-// Case 11 — REGRESSION GATE (was BUG-2): the REFERENCE path (engaged whenever
+// Case 9 — REGRESSION GATE (was BUG-2): the REFERENCE path (engaged whenever
 // ANY value binding is live) used to trap with "forced type metadata (should be
 // dead code)" for `Eff`-wrapped references and decl-function references, while
 // structurally-similar bound-value references worked.
@@ -419,7 +357,6 @@ async fn reference_path_type_metadata_trap() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.def("g x = x + (1 :: Int)").await.expect_ok("def g");
     repl.eval("x <- pure (1 :: Int)").await.expect_ok("bind x");
@@ -447,8 +384,6 @@ async fn reference_path_type_metadata_trap() {
         "`pure (g 1)` should be 2: {}",
         ok.text
     );
-
-    repl.close().await.expect_ok("close");
 }
 
 /// `:program` repaints the session as a replayable notebook — declarations
@@ -461,7 +396,6 @@ async fn program_repaint_round_trips() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.def("dbl x = x * (2 :: Int)")
         .await
@@ -481,9 +415,8 @@ async fn program_repaint_round_trips() {
         "pure bind missing from program: {text}"
     );
 
-    // Replay into a fresh session reproduces the value.
+    // Replay into a fresh session (its own server) reproduces the value.
     let fresh = Repl::new();
-    fresh.open_ok().await;
     fresh
         .def("dbl x = x * (2 :: Int)")
         .await
@@ -494,9 +427,6 @@ async fn program_repaint_round_trips() {
         .expect_ok("replay bind");
     let out = fresh.eval_ok("pure x").await;
     assert!(out.contains("42"), "replay value: expected 42, got {out}");
-
-    repl.close().await.expect_ok("close");
-    fresh.close().await.expect_ok("close fresh");
 }
 
 /// Redefining a decl that a live bind referenced reports the bind as `stale`
@@ -507,7 +437,6 @@ async fn redefine_reports_stale_binds() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.def("factor x = x * (2 :: Int)")
         .await
@@ -529,6 +458,4 @@ async fn redefine_reports_stale_binds() {
         !ut.contains("stale"),
         "unrelated redefine should not be stale: {ut}"
     );
-
-    repl.close().await.expect_ok("close");
 }

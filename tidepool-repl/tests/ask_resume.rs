@@ -79,7 +79,6 @@ async fn object_reply_is_extractable_value() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // Eval: ask with an object schema; extract field "n" via optic.
     // fromMaybe (-1.0) distinguishes Just 5.0 (fix: structured Value) from
@@ -114,7 +113,6 @@ async fn object_reply_is_extractable_value() {
         result
     );
 
-    repl.close().await;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -130,7 +128,6 @@ async fn scalar_reply_extracts_via_double() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl
         .eval(r#"ask SNum "enter a number" <&> (\v -> fromMaybe (-1.0 :: Double) (v ^? _Double))"#)
@@ -151,7 +148,6 @@ async fn scalar_reply_extracts_via_double() {
         result
     );
 
-    repl.close().await;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -170,7 +166,6 @@ async fn invalid_reply_does_not_consume_continuation() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl
         .eval(r#"ask SNum "enter a number" <&> (\v -> fromMaybe (-1.0 :: Double) (v ^? _Double))"#)
@@ -208,5 +203,4 @@ async fn invalid_reply_does_not_consume_continuation() {
         result
     );
 
-    repl.close().await;
 }

@@ -24,7 +24,6 @@ async fn undefined_var_then_recover() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // root a real binding first so the session has live state to survive with.
     repl.eval("x <- pure (1 :: Int)").await.expect_ok("bind x");
@@ -37,7 +36,6 @@ async fn undefined_var_then_recover() {
     let t = repl.eval("x + 1").await;
     assert!(t.contains("2"), "post-error x + 1 should be 2: {}", t.text);
 
-    repl.close().await.expect_ok("close");
 }
 
 /// Case 2 — Type error in an expression.
@@ -49,7 +47,6 @@ async fn type_error_then_recover() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl.eval("pure (True + (1 :: Int))").await;
     t.expect_err("type error");
@@ -57,7 +54,6 @@ async fn type_error_then_recover() {
     let t = repl.eval("pure (1 :: Int)").await;
     assert!(t.contains("1"), "post-type-error pure 1: {}", t.text);
 
-    repl.close().await.expect_ok("close");
 }
 
 /// Case 3 — Bad declaration (does a bad decl POISON later turns?).
@@ -71,7 +67,6 @@ async fn bad_decl_then_recover() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // `data = oops` — not a valid declaration.
     let t = repl.def("data = oops").await;
@@ -101,7 +96,6 @@ async fn bad_decl_then_recover() {
     let ev = repl.eval("pure (good 5)").await;
     assert!(ev.contains("6"), "good 5 should be 6: {}", ev.text);
 
-    repl.close().await.expect_ok("close");
 }
 
 /// Case 4 — Bind of bottom (KEY robustness).
@@ -116,7 +110,6 @@ async fn bind_of_bottom_is_lazy_then_clean_on_force() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // Lazy bind: no error at bind (the decl `x = error "boom"` isn't forced).
     repl.eval("x <- pure (error \"boom\" :: Int)")
@@ -131,7 +124,6 @@ async fn bind_of_bottom_is_lazy_then_clean_on_force() {
     let t = repl.eval("pure (1 :: Int)").await;
     assert!(t.contains("1"), "post-bottom-force pure 1: {}", t.text);
 
-    repl.close().await.expect_ok("close");
 }
 
 /// Case 5 — Deep non-tail recursion → clean yield.
@@ -151,7 +143,6 @@ async fn deep_recursion_yields_cleanly() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.def("countDeep n = if n == (0 :: Int) then (0 :: Int) else 1 + countDeep (n - 1)")
         .await
@@ -167,7 +158,6 @@ async fn deep_recursion_yields_cleanly() {
     let t = repl.eval("pure (1 :: Int)").await;
     assert!(t.contains("1"), "post-deep-recursion pure 1: {}", t.text);
 
-    repl.close().await.expect_ok("close");
 }
 
 /// Case 6 — Empty / whitespace eval.
@@ -179,7 +169,6 @@ async fn empty_and_whitespace_eval() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // Empty: graceful (we don't assert error-vs-ok, only that it doesn't panic).
     let _ = repl.eval("").await;
@@ -193,7 +182,6 @@ async fn empty_and_whitespace_eval() {
     // MANDATORY: close to avoid the WorkerHandle::drop deadlock (see
     // `drop_without_close_deadlocks` below). Without this the test hangs on
     // teardown even though every turn succeeded.
-    repl.close().await.expect_ok("close");
 }
 
 /// Case 7 — A bind that genuinely FAILS (to typecheck) must leave NO state:
@@ -208,7 +196,6 @@ async fn failed_bind_leaves_no_state() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // A good pure bind first (a lazy decl `k = 5`).
     repl.eval("k <- pure (5 :: Int)").await.expect_ok("bind k");
@@ -226,17 +213,16 @@ async fn failed_bind_leaves_no_state() {
     let t = repl.eval("pure z").await;
     t.expect_err("z not in scope after failed bind");
 
-    repl.close().await.expect_ok("close");
 }
 
-/// REGRESSION — dropping a session WITHOUT `session_close` must NOT hang.
+/// REGRESSION — dropping a session WITHOUT explicit teardown must NOT hang.
 ///
 /// History: `WorkerHandle::drop` (tidepool-repl/src/worker.rs) used to call
 /// `t.join()` BEFORE `cmd_tx` was dropped. Rust drops struct fields only after
 /// `Drop::drop` returns, so the sender was still alive during join(); the worker
 /// thread, parked in `rx.recv()` (which returns `Err` only once EVERY sender
 /// drops), never woke → join blocked forever → teardown deadlock. ANY session
-/// not `session_close`'d (a crashed/abandoned MCP client, a panicking turn)
+/// never torn down (a crashed/abandoned MCP client, a panicking turn)
 /// would wedge the process on shutdown. Fix: drop/replace `cmd_tx` with a dead
 /// sender BEFORE join (mirrors `shutdown()`).
 ///
@@ -251,7 +237,6 @@ async fn drop_without_close_does_not_hang() {
     }
     {
         let repl = Repl::new();
-        repl.open_ok().await;
         let t = repl.eval("pure (1 :: Int)").await;
         assert!(t.contains("1"), "pure 1: {}", t.text);
         // NO close(): `repl` drops HERE → server → WorkerHandle::drop. Before the

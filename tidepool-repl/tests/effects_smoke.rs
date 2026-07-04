@@ -159,11 +159,6 @@ async fn full_stack_effects_reachable_through_session() {
         text
     }
 
-    let r = server
-        .dispatch_tool("session_open", serde_json::Map::new())
-        .await
-        .expect("session_open");
-    assert_ne!(r.is_error, Some(true), "open: {}", text_of(&r));
 
     // Exec: `run` a shell command — the result is (exit, stdout, stderr).
     let t = eval(&server, "run \"echo wave-b-ok\"").await;
@@ -213,9 +208,6 @@ async fn full_stack_effects_reachable_through_session() {
         "input lane value: {text}",
     );
 
-    let _ = server
-        .dispatch_tool("session_close", serde_json::Map::new())
-        .await;
 }
 
 /// `session_run` items see the FULL eval vocabulary — `M` + the effect verbs,
@@ -233,11 +225,6 @@ async fn session_def_sees_full_eval_vocabulary() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let server = build_full_server(tmp.path().to_path_buf());
 
-    let r = server
-        .dispatch_tool("session_open", serde_json::Map::new())
-        .await
-        .expect("session_open");
-    assert_ne!(r.is_error, Some(true), "open: {}", text_of(&r));
 
     // A decl that uses `M` + the `run` effect verb (Tidepool.Effects) AND the
     // `L.`/`Set.` qualified namespaces — all out of scope under the old
@@ -274,9 +261,6 @@ async fn session_def_sees_full_eval_vocabulary() {
         "uniqSorted output: {text}"
     );
 
-    let _ = server
-        .dispatch_tool("session_close", serde_json::Map::new())
-        .await;
 }
 
 /// Run a multi-item `session_run` block and return the parsed result JSON
@@ -325,11 +309,6 @@ async fn block_runner_input_and_type_cleanups() {
     }
     let tmp = tempfile::tempdir().expect("tempdir");
     let server = build_full_server(tmp.path().to_path_buf());
-    let r = server
-        .dispatch_tool("session_open", serde_json::Map::new())
-        .await
-        .expect("session_open");
-    assert_ne!(r.is_error, Some(true), "open: {}", text_of(&r));
 
     // (1)+(2): input arrives DOUBLE-ENCODED as a JSON string (the MCP-client
     // shape); it must decode to a structured Value AND be visible to a `let`
@@ -396,7 +375,4 @@ async fn block_runner_input_and_type_cleanups() {
         "where-expr value should contain both elements; got: {v}"
     );
 
-    let _ = server
-        .dispatch_tool("session_close", serde_json::Map::new())
-        .await;
 }

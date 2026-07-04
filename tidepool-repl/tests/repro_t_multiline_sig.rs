@@ -26,7 +26,6 @@ async fn t_on_wide_multiline_signature_does_not_crash() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // Same TYPE shape as the real repro (steer cascade: pure rule -> local
     // model -> suspend-to-human) — three curried function-typed arguments,
@@ -59,5 +58,4 @@ async fn t_on_wide_multiline_signature_does_not_crash() {
         t.text
     );
 
-    repl.close().await.expect_ok("close");
 }

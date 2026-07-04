@@ -258,9 +258,6 @@ impl Repl {
         }
     }
 
-    pub async fn open(&self) -> Turn {
-        self.dispatch("session_open", serde_json::Map::new()).await
-    }
     pub async fn def(&self, decl: &str) -> Turn {
         self.run_block_single(decl).await
     }
@@ -270,14 +267,35 @@ impl Repl {
     pub async fn cmd(&self, command: &str) -> Turn {
         self.run_block_single(command).await
     }
-    pub async fn close(&self) -> Turn {
-        self.dispatch("session_close", serde_json::Map::new()).await
+
+    /// `session_reset`: drop the resident machine + any pending `ask` and open a
+    /// fresh session. The single lifecycle verb (open/close/abort folded in).
+    pub async fn reset(&self) -> Turn {
+        self.dispatch("session_reset", serde_json::Map::new()).await
     }
 
-    /// open + assert ok (the common preamble for every suite).
-    pub async fn open_ok(&self) {
-        self.open().await.expect_ok("open");
+    /// `session_resume`: answer an in-turn `ask` suspension and run the turn to
+    /// completion. `continuation_id` comes from a `{"suspended":true,...}` turn.
+    ///
+    /// A miss (no session / not suspended / wrong continuation) surfaces as a
+    /// protocol-level `McpError`, not a `CallToolResult`; it is mapped to an
+    /// error `Turn` here so callers can `expect_err` it without panicking.
+    pub async fn resume(&self, continuation_id: &str, response: serde_json::Value) -> Turn {
+        let mut args = serde_json::Map::new();
+        args.insert("continuation_id".into(), serde_json::json!(continuation_id));
+        args.insert("response".into(), response);
+        match self.server.dispatch_tool("session_resume", args).await {
+            Ok(r) => Turn {
+                text: text_of(&r),
+                is_error: r.is_error == Some(true),
+            },
+            Err(e) => Turn {
+                text: e.message.to_string(),
+                is_error: true,
+            },
+        }
     }
+
     /// eval + assert ok, returning the text.
     pub async fn eval_ok(&self, code: &str) -> String {
         self.eval(code).await.expect_ok(code).to_string()

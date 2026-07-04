@@ -29,7 +29,6 @@ async fn stub_roundtrip_replace_and_unknown() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // 1. A >4096-char field: truncated with a fetchable stub_0 marker + hint.
     let t = repl
@@ -89,7 +88,6 @@ async fn stub_roundtrip_replace_and_unknown() {
         "self-explaining unknown-stub error: {msg}"
     );
 
-    repl.close().await;
 }
 
 /// A value within the budget is untouched: no marker, no `truncated` key —
@@ -100,7 +98,6 @@ async fn small_result_has_no_truncation_key() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl
         .eval("pure (object [(\"region\", toJSON (T.replicate 40 \"x\"))])")
@@ -112,5 +109,4 @@ async fn small_result_has_no_truncation_key() {
         "no truncated key for an in-budget value: {res}"
     );
 
-    repl.close().await;
 }

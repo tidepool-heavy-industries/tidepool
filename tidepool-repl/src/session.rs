@@ -1552,6 +1552,54 @@ impl Session {
         }
     }
 
+    /// A read-only JSON snapshot of the live session environment for the
+    /// `tidepool://session/bindings` resource: one entry per in-scope binding.
+    /// Each is `{name, type, kind (decl|bind), generation}`. `decl` entries are
+    /// the decl-plane heads (`f x = …`, `data Foo`, `class C`); `bind` entries
+    /// are value-plane binds (`x <- e`) and pure decl-backed binds (`let x = e`,
+    /// `x <- pure e`). A pure bind lives in the decl log too, so its name is
+    /// EXCLUDED from the decl listing here and surfaced once, as a `bind`.
+    pub fn bindings_snapshot(&self) -> serde_json::Value {
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+        // Decl plane: current in-scope heads (latest-wins), minus pure-bind
+        // names (those are surfaced as `bind` below).
+        for (name, gen) in self.lib.current_decl_heads() {
+            if self.pure_binds.contains_key(&name) {
+                continue;
+            }
+            entries.push(serde_json::json!({
+                "name": name,
+                "type": "",
+                "kind": "decl",
+                "generation": gen,
+            }));
+        }
+        // Value plane: materialized (effectful) binds.
+        for (name, entry) in self.bindings.iter_current() {
+            entries.push(serde_json::json!({
+                "name": name.0,
+                "type": entry.type_display.clone().unwrap_or_default(),
+                "kind": "bind",
+                "generation": entry.module.gen.0,
+            }));
+        }
+        // Pure binds (decl-backed values) — environment members, kind `bind`.
+        for (name, pb) in &self.pure_binds {
+            entries.push(serde_json::json!({
+                "name": name,
+                "type": pb.type_display,
+                "kind": "bind",
+                "generation": pb.gen.0,
+            }));
+        }
+        entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        serde_json::json!({
+            "bindings": entries,
+            "generation": self.lib.generation().0,
+            "valGeneration": self.val_gen.0,
+        })
+    }
+
     /// The eval preamble with every import the session can collide with
     /// (`Tidepool.Prelude`, the project `Library`, and the generated
     /// `Tidepool.Effects` effect verbs) extended with a `hiding (…)` clause
@@ -1724,6 +1772,13 @@ impl SessionHandle<Open> {
     /// The current declaration generation (0 until the first declaration item).
     pub fn generation(&self) -> u64 {
         self.inner.lib.generation().0
+    }
+
+    /// A read-only JSON snapshot of the live session bindings — the worker
+    /// republishes it after each turn for the `tidepool://session/bindings`
+    /// resource.
+    pub fn bindings_snapshot(&self) -> serde_json::Value {
+        self.inner.bindings_snapshot()
     }
 
     /// Consume the open handle: free the resident machine and transition to

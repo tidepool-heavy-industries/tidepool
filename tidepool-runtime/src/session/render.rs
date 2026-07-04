@@ -159,6 +159,22 @@ impl DeclLog {
         self.generation()
     }
 
+    /// The currently in-scope declaration heads (value/type/class names) paired
+    /// with the generation of their LATEST defining turn (latest-wins across
+    /// turns, mirroring the eval-time module scoping). Backs the decl-plane half
+    /// of the `tidepool://session/bindings` live-state snapshot.
+    #[must_use]
+    pub fn current_heads(&self) -> Vec<(String, u64)> {
+        let mut map: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        for (i, turn) in self.turns.iter().enumerate() {
+            let gen = (i + 1) as u64;
+            for item in &turn.items {
+                map.insert(item.head_name().to_string(), gen);
+            }
+        }
+        map.into_iter().collect()
+    }
+
     /// The declaration source texts of a **replayable** notebook skeleton: turn
     /// sources in log order, but with fully-superseded turns dropped so a name
     /// redefined across SEPARATE turns emits only its LATEST definition (#320).
