@@ -11,6 +11,7 @@ module Expr where
 import Tidepool.Prelude
 import Tidepool.TextFormat
 import qualified Data.Text as T
+import qualified Data.List as L
 import Library
 default (Int, Text)
 
@@ -273,14 +274,8 @@ fn test_zip_with_index() {
 }
 
 #[test]
-#[ignore = "#342: Schemes' !? (list) and Prelude's !? (Map, from Tidepool.Prelude) \
-            are NOT behaviorally identical — different, non-unifying types, not just \
-            a name clash. Cutting Schemes' !? makes this fail to COMPILE (`Couldn't \
-            match expected type: Map k a with actual type: [Int]`), confirmed by probe. \
-            Needs a human call (e.g. rename one side); out of scope here (Prelude.hs is \
-            off-limits for this task). scanl' had no such conflict and was cut/un-ignored."]
 fn test_safe_index() {
-    let r = run_expr(r#"([10,20,30 :: Int] !? 1, [10,20,30 :: Int] !? 5)"#);
+    let r = run_expr(r#"([10,20,30 :: Int] L.!? 1, [10,20,30 :: Int] L.!? 5)"#);
     assert_eq!(r, serde_json::json!([20, null]));
 }
 

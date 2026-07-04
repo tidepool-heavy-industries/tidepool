@@ -91,9 +91,6 @@ convergeN :: Eq a => Int -> (a -> a) -> a -> a
 convergeN n _ x | n <= 0 = x
 convergeN n f x = let x' = f x in if x == x' then x else convergeN (n - 1) f x'
 
--- scanl' removed: use Tidepool.Prelude's (from Data.List) — identical semantics,
--- and defining our own here made it ambiguous when a user imports both (#342).
-
 -- | Monadic left scan: collect each intermediate accumulator via an effectful step.
 scanlM :: Monad m => (b -> a -> m b) -> b -> [a] -> m [b]
 scanlM f z []     = pure [z]
@@ -175,17 +172,6 @@ windows :: Int -> [a] -> [[a]]
 windows n xs
   | Prelude.length xs < n = []
   | otherwise = Prelude.take n xs : windows n (Prelude.drop 1 xs)
-
--- (`indexed` removed: it was a verbatim duplicate of the Prelude's
--- `zipWithIndex :: [a] -> [(Int, a)]`. Use that. Dropping it also frees the
--- name for Control.Lens's `indexed`, now re-exported wholesale by the Prelude.)
-
--- | Safe list indexing
-(!?) :: [a] -> Int -> Maybe a
-[] !? _ = Nothing
-(x:_)  !? 0 = Just x
-(_:xs) !? n = if n < 0 then Nothing else xs !? (n - 1)
-infixl 9 !?
 
 -- | Run-length encode a list: group CONSECUTIVE equal elements only.
 -- Each separated run produces its own entry — non-adjacent duplicates are NOT merged.
