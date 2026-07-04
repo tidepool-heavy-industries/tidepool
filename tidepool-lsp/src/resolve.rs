@@ -8,7 +8,7 @@
 //! position by reading the node's exact `pos` (0-based UTF-16 line/char)
 //! directly — not a substring search, so there is no wrong-column ambiguity.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -296,6 +296,15 @@ pub fn def(client: &RaClient, n: &Value) -> Result<Option<Value>, String> {
 
 /// References (use sites) of the node's symbol. Tagged `kind:"reference"`.
 /// `Ok(None)` when the position isn't a symbol (RA returns null).
+///
+/// `textDocument/references` alone undercounts: rust-analyzer drops sites
+/// where the symbol is coerced to a value rather than called or imported
+/// (e.g. `f as *const u8` fn-pointer registration — #348), even though
+/// `textDocument/rename` DOES rewrite those same sites. So the reference set
+/// here is unioned with a rename probe's touch points, deduped by
+/// `(file, line, char)` — the two verbs must agree on what counts as a
+/// reference, since `lspRefs` is the blast-radius query and `lspRename` is
+/// its ground truth for "does this site depend on the symbol".
 pub fn references(client: &RaClient, n: &Value) -> Result<Option<Vec<Value>>, String> {
     let (uri, line, ch) = node_position(client, n)?;
     let name = n.get("name").and_then(Value::as_str).unwrap_or("");
@@ -313,11 +322,13 @@ pub fn references(client: &RaClient, n: &Value) -> Result<Option<Vec<Value>>, St
     let arr = result.as_array().cloned().unwrap_or_default();
     let root = client.root().to_path_buf();
     let mut cache = FileCache::default();
+    let mut seen: HashSet<(String, u64, u64)> = HashSet::new();
     let mut out = Vec::new();
     for loc in arr {
         let Some((abs, line0, char0)) = location_of_loc(&loc) else {
             continue;
         };
+        seen.insert((abs.clone(), line0, char0));
         out.push(node(
             name,
             "",
@@ -328,6 +339,32 @@ pub fn references(client: &RaClient, n: &Value) -> Result<Option<Vec<Value>>, St
             &cache.line(&abs, line0 as usize),
         ));
     }
+
+    // Scratch-name rename probe: never applied, read-only (`request_rename_edit`
+    // only returns the WorkspaceEdit; nothing touches disk). Best-effort — a
+    // probe failure (e.g. the symbol genuinely can't be renamed, such as an
+    // external-crate item) just means no supplement, not an error.
+    if !name.is_empty() {
+        let probe_name = format!("{name}__tidepool_ref_probe");
+        if let Ok(Some(edit)) = request_rename_edit(client, n, &probe_name) {
+            for (edit_uri, line0, char0) in edit_touch_points(&edit) {
+                let abs = uri_to_path(&edit_uri);
+                if seen.insert((abs.clone(), line0, char0)) {
+                    out.push(node(
+                        name,
+                        "",
+                        "reference",
+                        &rel_of(&root, &abs),
+                        line0 + 1,
+                        char0,
+                        &cache.line(&abs, line0 as usize),
+                    ));
+                }
+            }
+        }
+    }
+
+    out.sort_by(|a, b| node_sort_key(a).cmp(&node_sort_key(b)));
     Ok(Some(out))
 }
 
@@ -346,9 +383,10 @@ pub fn hover(client: &RaClient, n: &Value) -> Result<Option<String>, String> {
     Ok(flatten_hover(result.get("contents")))
 }
 
-/// Rename the node's symbol to `new_name`; returns a unified diff (not applied).
-/// `Ok(None)` when the symbol can't be renamed (RA returns null).
-pub fn rename(client: &RaClient, n: &Value, new_name: &str) -> Result<Option<String>, String> {
+/// Raw `textDocument/rename` WorkspaceEdit, or `None` when RA can't rename
+/// here. Read-only — the edit is never applied to disk; callers either diff
+/// it in memory (`rename`) or just harvest touch points (`references`).
+fn request_rename_edit(client: &RaClient, n: &Value, new_name: &str) -> Result<Option<Value>, String> {
     let (uri, line, ch) = node_position(client, n)?;
     let result = client.request(
         "textDocument/rename",
@@ -358,9 +396,58 @@ pub fn rename(client: &RaClient, n: &Value, new_name: &str) -> Result<Option<Str
             "newName": new_name
         }),
     )?;
-    if result.is_null() {
-        return Ok(None);
+    Ok(if result.is_null() { None } else { Some(result) })
+}
+
+/// Every edit's `(uri, 0-based line, 0-based UTF-16 char)` start position in
+/// a WorkspaceEdit — the set of sites rename would touch.
+fn edit_touch_points(edit: &Value) -> Vec<(String, u64, u64)> {
+    let mut out = Vec::new();
+    if let Some(changes) = edit.get("changes").and_then(Value::as_object) {
+        for (uri, edits) in changes {
+            for e in edits.as_array().into_iter().flatten() {
+                if let Some(range) = e.get("range") {
+                    let (l, c) = start_lc(range);
+                    out.push((uri.clone(), l, c));
+                }
+            }
+        }
     }
+    if let Some(docs) = edit.get("documentChanges").and_then(Value::as_array) {
+        for doc in docs {
+            let Some(uri) = doc
+                .get("textDocument")
+                .and_then(|t| t.get("uri"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            for e in doc.get("edits").and_then(Value::as_array).into_iter().flatten() {
+                if let Some(range) = e.get("range") {
+                    let (l, c) = start_lc(range);
+                    out.push((uri.to_string(), l, c));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `(file, line, char)` sort key for a reference/def node, for deterministic ordering.
+fn node_sort_key(v: &Value) -> (String, u64, u64) {
+    let file = v.get("file").and_then(Value::as_str).unwrap_or("").to_string();
+    let pos = v.get("pos");
+    let line = pos.and_then(|p| p.get("line")).and_then(Value::as_u64).unwrap_or(0);
+    let char = pos.and_then(|p| p.get("char")).and_then(Value::as_u64).unwrap_or(0);
+    (file, line, char)
+}
+
+/// Rename the node's symbol to `new_name`; returns a unified diff (not applied).
+/// `Ok(None)` when the symbol can't be renamed (RA returns null).
+pub fn rename(client: &RaClient, n: &Value, new_name: &str) -> Result<Option<String>, String> {
+    let Some(result) = request_rename_edit(client, n, new_name)? else {
+        return Ok(None);
+    };
 
     // WorkspaceEdit: either `changes: {uri: [edit]}` or `documentChanges: [...]`.
     let mut per_file: Vec<(String, Vec<Value>)> = Vec::new();
