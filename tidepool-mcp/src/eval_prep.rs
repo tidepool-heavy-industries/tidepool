@@ -21,7 +21,8 @@ use crate::EffectDecl;
 use tidepool_runtime::{FailureClass, Phase};
 
 /// THE single ordered source of the base effect stack (Ask excluded here — it
-/// is interposed separately by each server's `AskDispatcher`). Each row pairs
+/// is interposed separately, by the shared `tidepool_runtime::session::SessionEngine`
+/// for the eval server and by `tidepool-repl`'s own dispatcher). Each row pairs
 /// the Haskell effect type name with its [`EffectDecl`] builder, in the ONE
 /// canonical order.
 ///
