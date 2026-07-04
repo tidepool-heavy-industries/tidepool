@@ -123,6 +123,15 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         // Either — the per-file readGlob surface + the WriteCas result + #335 typed failures.
         ("Right", 1),
         ("Left", 1),
+        // #335 Fs typed-failure ADT + the readGlob record (these live in the Fs
+        // effect's type_defs, not its GADT constructors, so they aren't picked up
+        // by the decl-constructor loop above).
+        ("FsNotFound", 1),
+        ("FsNotUtf8", 1),
+        ("FsSandbox", 1),
+        ("FsBadRegex", 1),
+        ("FsIo", 1),
+        ("FileRead", 2),
         ("Match", 5),
         ("Rust", 0),
         ("Python", 0),

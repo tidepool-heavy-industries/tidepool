@@ -12,6 +12,18 @@ use tidepool_mcp::CapturedOutput;
 // bodies below are hand-written.
 tidepool_mcp::fs_effect_def!(crate::effect_glue::effect_rust_projection);
 
+/// The record `readGlob` (`FsReadGlob`) yields per matched file (#335): a
+/// `path` plus a typed `contents` — `Right text` on a clean UTF-8 read, `Left
+/// (FsError)` on a per-file failure. Named record per the records-over-tuples
+/// house rule; its Haskell `data FileRead = FileRead { path, contents }` decl is
+/// emitted into `Tidepool.Effects` via the Fs `type_defs`. ToCore/FromCore use
+/// plain name+arity lookup (unique name), like the bridged records.
+#[derive(tidepool_bridge_derive::ToCore, tidepool_bridge_derive::FromCore, Debug)]
+struct FileRead {
+    path: String,
+    contents: Result<String, FsError>,
+}
+
 pub const DEFAULT_IGNORE_DIRS: &[&str] = &["target", ".git", "node_modules", "dist-newstyle"];
 
 pub fn pattern_mentions(pattern: &str, dir: &str) -> bool {
@@ -377,7 +389,7 @@ impl FsHandler {
         // `expand_glob` covers `""` here too. Contract mirrors #335's
         // per-item typed-failure surface: `[(path, Either err text)]`.
         let paths = self.expand_glob(&pattern).map_err(fs_err_to_effect)?;
-        let results: Vec<(String, Result<String, FsError>)> = paths
+        let results: Vec<FileRead> = paths
             .into_iter()
             .filter(|p| p.is_file())
             .map(|p| {
@@ -386,11 +398,11 @@ impl FsHandler {
                     .unwrap_or(&p)
                     .to_string_lossy()
                     .to_string();
-                let outcome = std::fs::read_to_string(&p).map_err(|e| match e.kind() {
+                let contents = std::fs::read_to_string(&p).map_err(|e| match e.kind() {
                     std::io::ErrorKind::InvalidData => FsError::FsNotUtf8(rel.clone()),
                     _ => FsError::FsIo(format!("{rel} failed: {e}")),
                 });
-                (rel, outcome)
+                FileRead { path: rel, contents }
             })
             .collect();
         cx.respond_list(results)
@@ -566,15 +578,14 @@ mod tests {
 
         let req = FsReq::FsReadGlob("*".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let mut results: Vec<(String, Result<String, FsError>)> =
-            FromCore::from_value(&res, &table).unwrap();
-        results.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut results: Vec<FileRead> = FromCore::from_value(&res, &table).unwrap();
+        results.sort_by(|a, b| a.path.cmp(&b.path));
         assert_eq!(results.len(), 2, "{results:?}");
-        // bad.bin -> Left err (isolated), good.txt -> Right content (survives).
-        assert_eq!(results[0].0, "bad.bin");
-        assert!(results[0].1.is_err(), "binary must be Left: {results:?}");
-        assert_eq!(results[1].0, "good.txt");
-        assert_eq!(results[1].1.as_deref(), Ok("hello\nworld"));
+        // bad.bin -> contents Left err (isolated), good.txt -> Right (survives).
+        assert_eq!(results[0].path, "bad.bin");
+        assert!(results[0].contents.is_err(), "binary must be Left: {results:?}");
+        assert_eq!(results[1].path, "good.txt");
+        assert_eq!(results[1].contents.as_deref(), Ok("hello\nworld"));
     }
 
     #[test]
@@ -893,8 +904,8 @@ mod tests {
     /// `readFile` is a typed `Left (FsNotFound _)` the eval pattern-matches in
     /// Haskell — never an abort. This is the acceptance proof that the whole
     /// errors-block mechanism composes.
-    #[test]
-    fn fs_read_missing_file_is_typed_left_fsnotfound() {
+    #[tokio::test]
+    async fn fs_read_missing_file_is_typed_left_fsnotfound() {
         let v = jit_eval(&[
             "r <- readFile \"definitely-not-a-real-file-xyz-335.txt\"",
             "pure (case r of { Left (FsNotFound _) -> (\"notfound\" :: Text); Left _ -> \"other\"; Right _ -> \"ok\" })",
@@ -905,8 +916,8 @@ mod tests {
     /// The happy path still threads through the Either: an existing read is a
     /// `Right _`, so `readFile p >>= liftEither` (the natural unwrap) yields the
     /// content.
-    #[test]
-    fn fs_read_existing_file_is_right() {
+    #[tokio::test]
+    async fn fs_read_existing_file_is_right() {
         let v = jit_eval(&[
             "src <- readFile \"Cargo.toml\" >>= liftEither",
             "pure (T.length src > 0)",

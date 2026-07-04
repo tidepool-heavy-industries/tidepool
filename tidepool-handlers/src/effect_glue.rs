@@ -81,15 +81,17 @@ pub(crate) use effect_rust_projection;
 
 /// Emit the whole `errors` ADT as one item (a macro can't sit in enum-variant
 /// position, so the variants are built inline here from the re-matched block).
-/// `Debug` lets a `From<Err> for EffectError` render it when an untagged method
-/// forwards a shared-helper failure. The `#[core(module = "Tidepool.Effects")]`
-/// qualifier points ToCore at the constructor in the generated effects module.
+/// `Debug` lets `Display`/`fs_err_to_effect` render it when an untagged method
+/// forwards a shared-helper failure. ToCore/FromCore use plain name+arity lookup
+/// (the variant names are unique), matching the bridged records — no module
+/// qualifier (the generated `data` decl's constructors are not registered under
+/// a `Module.Ctor` qualified name).
 macro_rules! error_enum {
     ( $errname:ident, $({ ctor $c:ident,
                           fields { $($efn:ident : $efh:literal as $efr:ty),* $(,)? },
                           doc $d:literal $(,)? }),* $(,)? ) => {
         // FromCore is for test-side decoding of a `Left err`; the error is only
-        // ever SENT (ToCore) in production. Debug backs the `Display`/`From` path;
+        // ever SENT (ToCore) in production. Debug backs the `Display` path;
         // PartialEq/Eq let handler tests assert on decoded `Left` payloads.
         #[derive(
             tidepool_bridge_derive::ToCore,
@@ -99,10 +101,7 @@ macro_rules! error_enum {
             Eq
         )]
         pub enum $errname {
-            $(
-                #[core(module = "Tidepool.Effects")]
-                $c( $($efr),* )
-            ),*
+            $( $c( $($efr),* ) ),*
         }
     };
 }
