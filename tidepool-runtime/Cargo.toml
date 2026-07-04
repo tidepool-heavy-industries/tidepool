@@ -23,6 +23,7 @@ log = "0.4"
 
 [dev-dependencies]
 proptest = "1"
+ciborium = "0.2"
 tidepool-testing = { path = "../tidepool-testing" }
 tidepool-optimize = { path = "../tidepool-optimize" }
 frunk = "0.4"
