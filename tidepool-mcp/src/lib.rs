@@ -741,24 +741,28 @@ data Console a where
         // shape.
         assert!(preamble.contains("readFile :: FilePath -> M (Either FsError Text)"));
         assert!(preamble.contains("writeFile :: FilePath -> Text -> M (Either FsError ())"));
-        assert!(preamble.contains("appendFile :: FilePath -> Text -> M ()"));
+        assert!(preamble.contains("appendFile :: FilePath -> Text -> M (Either FsError ())"));
         assert!(preamble.contains("listDirectory :: FilePath -> M (Either FsError [FilePath])"));
         assert!(preamble.contains("doesFileExist :: FilePath -> M Bool"));
         assert!(preamble.contains("getFileSize :: FilePath -> M (Maybe Int)"));
         assert!(preamble.contains("fsMeta :: FilePath -> M (Maybe FileMeta)"));
         assert!(preamble.contains("glob :: FilePath -> M (Either FsError [FilePath])"));
         // Core editing verbs (the str-replace common case + dry-run).
-        assert!(preamble.contains("update :: FilePath -> Text -> Text -> M ()"));
+        assert!(preamble.contains("update :: FilePath -> Text -> Text -> M UpdateOneOutcome"));
         assert!(preamble.contains("updateAll :: FilePath -> Text -> Text -> M UpdateAllOutcome"));
         assert!(preamble.contains("planUpdate :: FilePath -> Text -> Text -> M UpdateOutcome"));
         assert!(
             preamble.contains("insertAfter :: FilePath -> Text -> Text -> M InsertAfterOutcome")
         );
-        assert!(preamble.contains("callCommand :: Text -> M ()"));
-        assert!(preamble.contains("readProcess :: Text -> M Text"));
-        // No old aliases
+        assert!(preamble.contains("run :: Text -> M (Either ExecError Proc)"));
+        // No old aliases (verb-type sweep: records over tuples, no dup names)
         assert!(!preamble.contains("fsRead"));
         assert!(!preamble.contains("fsWrite"));
+        assert!(!preamble.contains("callCommand"));
+        assert!(!preamble.contains("readProcess"));
+        assert!(!preamble.contains("fsGlob"));
+        assert!(!preamble.contains("fsMetadata"));
+        assert!(!preamble.contains("parseFileMeta"));
         // `say` is the Console wrapper (re-added 2026-06-22, friction #5).
         assert!(preamble.contains("say :: Text -> M ()"));
         // Other helpers unchanged
@@ -837,9 +841,7 @@ data Console a where
         let preamble = generated_sources(&decls, false);
         assert!(preamble.contains("import Control.Monad.Freer hiding (run)"));
         // Our run helper should still be present (#335: errors-tagged).
-        assert!(preamble.contains(
-            "run :: Text -> M (Either ExecError Proc)\nrun cmd = send (Run cmd) <&> fmap (\\(ec, o, e) -> Proc ec o e)"
-        ));
+        assert!(preamble.contains("run :: Text -> M (Either ExecError Proc)\nrun = send . Run"));
     }
 
     #[test]
@@ -863,12 +865,11 @@ data Console a where
         assert!(decl
             .constructors
             .iter()
-            .any(|c| c.contains("Run :: Text -> Exec (Either ExecError (Int, Text, Text))")));
+            .any(|c| c.contains("Run :: Text -> Exec (Either ExecError Proc)")));
         assert!(decl
             .constructors
             .iter()
-            .any(|c| c
-                .contains("RunIn :: Text -> Text -> Exec (Either ExecError (Int, Text, Text))")));
+            .any(|c| c.contains("RunIn :: Text -> Text -> Exec (Either ExecError Proc)")));
     }
 
     #[test]
@@ -878,8 +879,8 @@ data Console a where
         // the generated Tidepool.Orchestrate module (the namespace-poison fix);
         // assert their signatures there instead.
         let orch = orchestrate_module_source(&decls);
-        // runChecked is now an alias for readProcess (assert the signature;
-        // the alias body is volatile).
+        // runChecked runs a command and returns stdout, erroring on nonzero
+        // exit (assert the signature; the body is volatile).
         assert!(orch.contains("runChecked :: Text -> M Text"));
         // File manipulation helpers
         assert!(orch.contains("mapFile :: Text -> (Text -> Text) -> M ()"));

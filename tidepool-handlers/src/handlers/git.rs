@@ -49,11 +49,15 @@ pub struct GitFileDelta {
 /// Field ORDER is the wire contract: `ToCore` builds the `Con` in Rust struct
 /// field order; the extract assigns positions from this decl's field order.
 pub fn bridged_records_module() -> String {
+    use crate::{FileMeta, Hit, Proc};
     use tidepool_bridge::CoreRecord;
     let decls = [
         GitCommit::haskell_decl(),
         GitStatusEntry::haskell_decl(),
         GitFileDelta::haskell_decl(),
+        Proc::haskell_decl(),
+        Hit::haskell_decl(),
+        FileMeta::haskell_decl(),
     ];
     let exports = decls
         .iter()

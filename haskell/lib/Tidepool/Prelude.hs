@@ -200,7 +200,7 @@ module Tidepool.Prelude
   , partitionEithers, rights, lefts, fromLeft, fromRight
     -- * Shared record vocabulary (Tidepool.Records)
   , Proc(..), ok, Hit(..)
-  , FileMeta(..), UpdateOutcome(..), WriteOutcome(..)
+  , FileMeta(..), UpdateOutcome(..), UpdateOneOutcome(..), WriteOutcome(..)
   , UpdateAllOutcome(..), InsertAfterOutcome(..)
   , Commit(..), StatusEntry(..), FileDelta(..)
     -- * Text padding, chunking, and prefix utilities
@@ -287,7 +287,7 @@ import Control.Monad
   , (=<<), (>=>), (<=<)
   , foldM, foldM_
   )
-import Tidepool.Records (Proc(..), ok, Hit(..), FileMeta(..), UpdateOutcome(..), WriteOutcome(..), UpdateAllOutcome(..), InsertAfterOutcome(..), Commit(..), StatusEntry(..), FileDelta(..))
+import Tidepool.Records (Proc(..), ok, Hit(..), FileMeta(..), UpdateOutcome(..), UpdateOneOutcome(..), WriteOutcome(..), UpdateAllOutcome(..), InsertAfterOutcome(..), Commit(..), StatusEntry(..), FileDelta(..))
 import Tidepool.Data.Time (UTCTime(..), formatISO8601, parseISO8601, daysFromCivil, diffUTCTime, addUTCTime, epochMillis)
 import Tidepool.Render (Render(..))
 import Tidepool.QQ.Fmt.Runtime
@@ -886,7 +886,7 @@ max' a b = if a >= b then a else b
 -- JIT-safe — same class as mapM/foldM). Fixities match Control.Arrow.
 --
 -- >>> (\x -> pure (x + 1)) &&& (\x -> pure (x * 2)) $ 10   -- pure (11, 20)
--- >>> readFile *** fsMetadata $ ("a.txt", "b.txt")          -- pair of effects
+-- >>> readFile *** fsMeta $ ("a.txt", "b.txt")              -- pair of effects
 -- >>> (handleLeft ||| handleRight) someEither
 -- ---------------------------------------------------------------------------
 

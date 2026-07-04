@@ -390,32 +390,28 @@ macro_rules! exec_effect_def {
             verbs [
                 { ctor Run, method exec_run,
                   args { cmd: "Text" as String },
-                  ret "(Int, Text, Text)", errors ExecError },
+                  ret "Proc", errors ExecError },
                 { ctor RunIn, method exec_run_in,
                   args { dir: "Text" as String, cmd: "Text" as String },
-                  ret "(Int, Text, Text)", errors ExecError },
+                  ret "Proc", errors ExecError },
                 // Shell-free exec: argv list, no sh -c. Safe with metachars ($1, globs).
                 { ctor RunArgv, method exec_run_argv,
                   args { argv: "[Text]" as Vec<String> },
-                  ret "(Int, Text, Text)", errors ExecError },
+                  ret "Proc", errors ExecError },
             ],
             helpers [
-                { raw ["callCommand :: Text -> M ()",
-                       "callCommand cmd = do { p <- run cmd >>= liftEither; when (not (ok p)) (error (\"command failed (\" <> show p.exitCode <> \"): \" <> p.stderr)) }"] },
-                { raw ["readProcess :: Text -> M Text",
-                       "readProcess cmd = do { p <- run cmd >>= liftEither; if ok p then pure p.stdout else error (\"command failed (\" <> show p.exitCode <> \"): \" <> p.stderr) }"] },
                 { raw ["-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}",
                        "-- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left",
                        "-- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`",
                        "-- for `runIn` with a bad/escaping directory. A nonzero EXIT is NOT a",
                        "-- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.",
                        "run :: Text -> M (Either ExecError Proc)",
-                       "run cmd = send (Run cmd) <&> fmap (\\(ec, o, e) -> Proc ec o e)"] },
+                       "run = send . Run"] },
                 { raw ["runIn :: Text -> Text -> M (Either ExecError Proc)",
-                       "runIn dir cmd = send (RunIn dir cmd) <&> fmap (\\(ec, o, e) -> Proc ec o e)"] },
+                       "runIn dir cmd = send (RunIn dir cmd)"] },
                 // Shell-free: argv list, no sh -c. $1/$VAR/globs are literal — safe.
                 { raw ["runArgv :: [Text] -> M (Either ExecError Proc)",
-                       "runArgv argv = send (RunArgv argv) <&> fmap (\\(ec, o, e) -> Proc ec o e)"] },
+                       "runArgv = send . RunArgv"] },
             ],
         }
     };
@@ -898,16 +894,16 @@ macro_rules! fs_effect_def {
                   ret "[Text]", errors FsError },
                 { ctor FsGrep, method fs_grep,
                   args { pattern: "Text" as String, file_glob: "Text" as String },
-                  ret "[(Text, Int, Text)]", errors FsError },
+                  ret "[Hit]", errors FsError },
                 { ctor FsExists, method fs_exists,
                   args { path: "Text" as String },
                   ret "Bool", errors FsError },
-                // Value-native: `{size, is_file, is_dir}` on success, `Null` for a
-                // missing/unreadable path — lens in with `^? key "size" . _Int`.
-                // Stays total-by-Null (no Either): absence IS the answer here.
+                // Record-native: `Just FileMeta{..}` on success, `Nothing` for a
+                // missing/unreadable path. Stays total-by-Maybe (no Either):
+                // absence IS the answer here.
                 { ctor FsMetadata, method fs_metadata,
                   args { path: "Text" as String },
-                  ret "Value" },
+                  ret "(Maybe FileMeta)" },
                 // Per-file failure-isolating glob read (#328): each match is a
                 // `FileRead {path, contents}` — a mixed glob (text + binary)
                 // survives, the binary just comes back as `contents = Left err`.
@@ -932,23 +928,20 @@ macro_rules! fs_effect_def {
             helpers [
                 { raw ["-- | Read a file. Failure is TYPED (#335): `Left (FsNotFound p)` / `Left\n-- (FsNotUtf8 p)` / `Left (FsIo _)`. The natural spelling unwraps-or-aborts with\n-- a failable bind: `Right src <- readFile path` (or `readFile path >>= liftEither`).\nreadFile :: FilePath -> M (Either FsError Text)\nreadFile = send . FsRead"] },
                 { raw ["-- | Write a file (mkdir -p on the parent). `Left (FsSandbox _)` on a path\n-- escape, `Left (FsIo _)` on write failure; unwrap with `liftEither`.\nwriteFile :: FilePath -> Text -> M (Either FsError ())\nwriteFile f c = send (FsWrite f c)"] },
-                { raw ["-- | Append to a file (reads then writes); aborts on either failure.\nappendFile :: FilePath -> Text -> M ()\nappendFile p t = do { old <- readFile p >>= liftEither; writeFile p (old <> t) >>= liftEither }"] },
+                { raw ["-- | Append to a file (reads then writes). Failure is TYPED (#335): a read\n-- or write failure comes back as `Left (FsError)` DATA, nothing partially\n-- applied; unwrap with `Right () <- appendFile path t` or `>>= liftEither`.\nappendFile :: FilePath -> Text -> M (Either FsError ())\nappendFile p t = do\n  er <- readFile p\n  case er of\n    Left e -> pure (Left e)\n    Right old -> writeFile p (old <> t)"] },
                 { raw ["-- | List a directory. `Left (FsNotFound _)` when absent; unwrap with `liftEither`.\nlistDirectory :: FilePath -> M (Either FsError [FilePath])\nlistDirectory = send . FsListDir"] },
                 { raw ["doesFileExist :: FilePath -> M Bool\ndoesFileExist p = send (FsExists p) >>= liftEither"] },
-                { raw ["doesDirectoryExist :: FilePath -> M Bool\ndoesDirectoryExist p = send (FsMetadata p) <&> (== Just True) . (^? key \"is_dir\" . _Bool)"] },
-                { raw ["-- | File size in bytes, or `Nothing` if the path is missing.\ngetFileSize :: FilePath -> M (Maybe Int)\ngetFileSize p = send (FsMetadata p) <&> (^? key \"size\" . _Int)"] },
-                { raw ["-- | Parse the raw metadata Value into a `FileMeta`, or `Nothing` for a\n-- missing/unreadable path.\nparseFileMeta :: Value -> Maybe FileMeta\nparseFileMeta v = case (v ^? key \"size\" . _Int, v ^? key \"is_file\" . _Bool, v ^? key \"is_dir\" . _Bool) of\n  (Just s, Just f, Just d) -> Just (FileMeta s f d)\n  _ -> Nothing"] },
-                { raw ["-- | File metadata as a `FileMeta` record {size, isFile, isDir}, or `Nothing`\n-- if the path is missing/unreadable (use record-dot: `m.size`, `m.isDir`).\nfsMeta :: FilePath -> M (Maybe FileMeta)\nfsMeta p = send (FsMetadata p) <&> parseFileMeta"] },
-                { raw ["-- | Alias of `fsMeta` — metadata as a `Maybe FileMeta`.\nfsMetadata :: FilePath -> M (Maybe FileMeta)\nfsMetadata = fsMeta"] },
+                { raw ["doesDirectoryExist :: FilePath -> M Bool\ndoesDirectoryExist p = send (FsMetadata p) <&> maybe False (\\m -> m.isDir)"] },
+                { raw ["-- | File size in bytes, or `Nothing` if the path is missing.\ngetFileSize :: FilePath -> M (Maybe Int)\ngetFileSize p = send (FsMetadata p) <&> fmap (\\m -> m.size)"] },
+                { raw ["-- | File metadata as a `FileMeta` record {size, isFile, isDir}, or `Nothing`\n-- if the path is missing/unreadable (use record-dot: `m.size`, `m.isDir`).\nfsMeta :: FilePath -> M (Maybe FileMeta)\nfsMeta = send . FsMetadata"] },
                 { raw ["getCurrentDirectory :: M FilePath\ngetCurrentDirectory = do { p <- run \"pwd\" >>= liftEither; pure (T.strip p.stdout) }"] },
                 { raw ["-- | Expand a glob to matching file paths. `Left (FsSandbox _)` on an empty\n-- or absolute pattern, `Left (FsNotFound _)` on a missing search root; unwrap\n-- with `Right ps <- glob pat` or `glob pat >>= liftEither`.\nglob :: FilePath -> M (Either FsError [FilePath])\nglob = send . FsGlob"] },
-                { raw ["-- | Alias of `glob` — expand a glob to matching paths.\nfsGlob :: FilePath -> M (Either FsError [FilePath])\nfsGlob = send . FsGlob"] },
-                { raw ["-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob\n-- SECOND — a path glob like \"*.rs\" goes in arg 2, not arg 1. Returns [Hit]\n-- {path, line, text} (the shared Hit shape, so it composes with\n-- hitsByFile/refs). Failure is typed: `Left (FsBadRegex _)` on a bad regex.\n-- NB regex metachars are double-escaped here (JSON x Haskell), so a literal dot\n-- needs four backslashes; the FsBadRegex detail shows the exact form.\ngrepGlob :: Text -> FilePath -> M (Either FsError [Hit])\ngrepGlob pat g = fmap (map (\\(f, l, t) -> Hit f l t)) <$> send (FsGrep pat g)"] },
+                { raw ["-- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob\n-- SECOND — a path glob like \"*.rs\" goes in arg 2, not arg 1. Returns [Hit]\n-- {path, line, text} (the shared Hit shape, so it composes with\n-- hitsByFile/refs). Failure is typed: `Left (FsBadRegex _)` on a bad regex.\n-- NB regex metachars are double-escaped here (JSON x Haskell), so a literal dot\n-- needs four backslashes; the FsBadRegex detail shows the exact form.\ngrepGlob :: Text -> FilePath -> M (Either FsError [Hit])\ngrepGlob pat g = send (FsGrep pat g)"] },
                 { raw ["-- | Read every file matching a glob with PER-FILE failure isolation: one\n-- `FileRead {path, contents}` per match — `contents` is `Right text` on a clean\n-- UTF-8 read, `Left err` on a per-file failure (binary / non-UTF-8, permission).\n-- One bad file (e.g. a binary swept up by a wide glob) does NOT fail the whole\n-- batch. An empty glob is rejected loudly. Recover the readable files with\n-- `[r.path | r <- rs, isRight r.contents]`, or split all outcomes with\n-- `partitionEithers (map (.contents) rs)`.\nreadGlob :: Text -> M [FileRead]\nreadGlob = send . FsReadGlob"] },
-                { raw ["-- | Exact str-replace, EXACTLY-ONCE: applies, or errors with a precise\n-- reason (not-found / ambiguous). The trained Edit-tool shape: no news is\n-- good news. Pass enough surrounding text that `old` is unique. Use planUpdate\n-- to review the diff first; the full editing surface is in tidepool://edits.\nupdate :: FilePath -> Text -> Text -> M ()\nupdate path old new\n  | T.null old = error \"update: 'old' must be non-empty\"\n  | otherwise = do\n      src <- readFile path >>= liftEither\n      case len (T.splitOn old src) - 1 of\n        0 -> error (\"update: 'old' not found in \" <> path)\n        1 -> writeFile path (replace old new src) >>= liftEither\n        n -> error (\"update: 'old' matches \" <> show n <> \" places in \" <> path <> \" (add surrounding context to disambiguate)\")"] },
+                { raw ["-- | Exact str-replace, EXACTLY-ONCE. Reports the outcome as an\n-- `UpdateOneOutcome` DATA value (never throws, mirrors `InsertAfterOutcome`):\n-- empty `old`, a missing file, `old` not found, or `old` matching 2+ places\n-- is `UpdateOneRejected` (nothing written); otherwise `UpdateOneApplied`.\n-- Pass enough surrounding text that `old` is unique. Use planUpdate to review\n-- the diff first; the full editing surface is in tidepool://edits.\nupdate :: FilePath -> Text -> Text -> M UpdateOneOutcome\nupdate path old new\n  | T.null old = pure (UpdateOneRejected \"'old' must be non-empty\" Nothing)\n  | otherwise = do\n      er <- readFile path\n      case er of\n        Left e -> pure (UpdateOneRejected (\"file not found: \" <> show e) Nothing)\n        Right src ->\n          case len (T.splitOn old src) - 1 of\n            0 -> pure (UpdateOneRejected (\"'old' not found in \" <> path) Nothing)\n            1 -> writeFile path (replace old new src) >>= liftEither >> pure UpdateOneApplied\n            n -> pure (UpdateOneRejected (\"'old' matches \" <> show n <> \" places in \" <> path <> \" (add surrounding context to disambiguate)\") (Just n))"] },
                 { raw ["-- | Replace EVERY occurrence of `old` with `new`. Reports the outcome as an\n-- `UpdateAllOutcome` DATA value (never throws): empty `old`, a missing file,\n-- or zero matches is `UpdateAllRejected` (nothing written); otherwise\n-- `UpdateAllApplied` carries the replacement count.\nupdateAll :: FilePath -> Text -> Text -> M UpdateAllOutcome\nupdateAll path old new\n  | T.null old = pure (UpdateAllRejected \"'old' must be non-empty\")\n  | otherwise = do\n      er <- readFile path\n      case er of\n        Left e -> pure (UpdateAllRejected (\"file not found: \" <> show e))\n        Right src ->\n          let n = len (T.splitOn old src) - 1\n          in if n == 0\n               then pure (UpdateAllRejected (\"'old' not found in \" <> path))\n               else writeFile path (replace old new src) >>= liftEither >> pure (UpdateAllApplied n)"] },
                 { raw ["-- | Dry-run `update`: returns an `UpdateOutcome` (the review diff, or the\n-- reason it can't apply), writes NOTHING. Never errors — the conflict comes\n-- back as data so you can branch before committing.\nplanUpdate :: FilePath -> Text -> Text -> M UpdateOutcome\nplanUpdate path old new = do\n  er <- readFile path\n  case er of\n    Left e -> pure (UpdateRejected (\"file not found: \" <> show e) Nothing)\n    Right src ->\n      let n = if T.null old then 0 else len (T.splitOn old src) - 1\n      in if T.null old then pure (UpdateRejected \"'old' must be non-empty\" Nothing)\n         else if n == 0 then pure (UpdateRejected \"not found\" Nothing)\n         else if n > 1 then pure (UpdateRejected \"ambiguous\" (Just n))\n         else case Patch.genPatch path src (replace old new src) of\n                Left _ -> pure UpdateNoChange\n                Right fp -> pure (UpdateDiff (Patch.renderPatch [fp]))"] },
-                { raw ["-- | `update` from the input lane: {file, old, new} (for big/quote-heavy fragments).\nupdateJ :: Value -> M ()\nupdateJ v = case (v ^? key \"file\" . _String, v ^? key \"old\" . _String, v ^? key \"new\" . _String) of\n  (Just f, Just o, Just n) -> update f o n\n  _ -> error \"updateJ: need {file, old, new} strings in input\""] },
+                { raw ["-- | `update` from the input lane: {file, old, new} (for big/quote-heavy fragments).\nupdateJ :: Value -> M UpdateOneOutcome\nupdateJ v = case (v ^? key \"file\" . _String, v ^? key \"old\" . _String, v ^? key \"new\" . _String) of\n  (Just f, Just o, Just n) -> update f o n\n  _ -> error \"updateJ: need {file, old, new} strings in input\""] },
                 { raw ["-- | Insert a block after the unique line containing `anchor`. Reports the\n-- outcome as an `InsertAfterOutcome` DATA value (never throws): a missing\n-- file, or an anchor matching zero or 2+ lines, is `InsertAfterRejected`\n-- (nothing written); otherwise `InsertAfterApplied`.\ninsertAfter :: FilePath -> Text -> Text -> M InsertAfterOutcome\ninsertAfter path anchor block = do\n  er <- readFile path\n  case er of\n    Left e -> pure (InsertAfterRejected (\"file not found: \" <> show e) Nothing)\n    Right src ->\n      let ls = lines src\n          n = len (filter (isInfixOf anchor) ls)\n      in case n of\n           1 -> writeFile path (unlines (concatMap (\\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))\n                  >>= liftEither >> pure InsertAfterApplied\n           _ -> pure (InsertAfterRejected (\"anchor matched \" <> show n <> \" lines in \" <> path) (Just n))"] },
                 { raw ["-- | Compute-check-commit: write only if every named check holds; failures\n-- come back as a `WriteOutcome` (nothing written on failure).\nwriteChecked :: FilePath -> [(Text, Bool)] -> Text -> M WriteOutcome\nwriteChecked path checks content = do\n  let failed = [name | (name, ok) <- checks, not ok]\n  if null failed\n    then writeFile path content >>= liftEither >> pure (Written path (length checks))\n    else pure (WriteBlocked path failed)"] },
                 { raw ["-- | Blake3 content hash (hex) of a file, or Nothing if it does not exist.\n-- The compare-and-swap token for writeCheckedIf: read it, compute your new\n-- content, then write back only if the file still hashes the same.\nfileHash :: FilePath -> M (Maybe Text)\nfileHash p = send (FsHash p) >>= liftEither"] },
@@ -998,9 +991,9 @@ mod tests {
         assert_eq!(
             d.constructors,
             &[
-                "Run :: Text -> Exec (Either ExecError (Int, Text, Text))",
-                "RunIn :: Text -> Text -> Exec (Either ExecError (Int, Text, Text))",
-                "RunArgv :: [Text] -> Exec (Either ExecError (Int, Text, Text))",
+                "Run :: Text -> Exec (Either ExecError Proc)",
+                "RunIn :: Text -> Text -> Exec (Either ExecError Proc)",
+                "RunArgv :: [Text] -> Exec (Either ExecError Proc)",
             ]
         );
         assert!(!d.constructors.iter().any(|c| c.starts_with("TryRun")));
@@ -1010,16 +1003,16 @@ mod tests {
                 .any(|t| *t
                     == "data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)")
         );
-        assert_eq!(d.helpers.len(), 5);
+        assert_eq!(d.helpers.len(), 3);
         assert_eq!(
-            d.helpers[2],
+            d.helpers[0],
             "-- | Run a shell command; returns a `Proc` record {exitCode, stdout, stderr}\n\
              -- (use `ok p` for the zero-exit check). Failure is TYPED (#335): `Left\n\
              -- (ExecSpawn _)` when the process can't be spawned, `Left (ExecBadDir _)`\n\
              -- for `runIn` with a bad/escaping directory. A nonzero EXIT is NOT a\n\
              -- failure — inspect `p.exitCode`. Natural spelling: `Right p <- run cmd`.\n\
              run :: Text -> M (Either ExecError Proc)\n\
-             run cmd = send (Run cmd) <&> fmap (\\(ec, o, e) -> Proc ec o e)"
+             run = send . Run"
         );
     }
 
@@ -1077,9 +1070,11 @@ mod tests {
             .contains(&"FsExists :: Text -> Fs (Either FsError Bool)"));
         assert!(d
             .constructors
-            .contains(&"FsGrep :: Text -> Text -> Fs (Either FsError [(Text, Int, Text)])"));
+            .contains(&"FsGrep :: Text -> Text -> Fs (Either FsError [Hit])"));
         // Untagged verbs keep their bare result.
-        assert!(d.constructors.contains(&"FsMetadata :: Text -> Fs Value"));
+        assert!(d
+            .constructors
+            .contains(&"FsMetadata :: Text -> Fs (Maybe FileMeta)"));
         assert!(d
             .constructors
             .contains(&"FsReadGlob :: Text -> Fs [FileRead]"));
