@@ -87,13 +87,15 @@ impl Method {
 /// What the handler produces and the static Haskell type it presents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Producer {
-    /// `xs :: [Text]` via `glob "**"`, delivered by `method`.
+    /// `xs :: [Text]` via `kvKeys`, delivered by `method`. (`kvKeys` is an
+    /// untagged `M [Text]` verb; the dispatcher ignores the tag. Was `glob`
+    /// pre-#335, which now returns `M (Either FsError [Text])`.)
     List(Method),
-    /// `s :: Text` of `n` newline-joined lines via `readFile`.
+    /// `s :: Text` of `n` newline-joined lines via `readFile` (`>>= liftEither`).
     StringLines,
     /// `(c,o,e) :: (Int, Text, Text)` via `run` — stderr has `n` lines. #313.
     TupleStringList,
-    /// Two `[Text]` effects via two `glob` calls, both delivered by `method`.
+    /// Two `[Text]` effects via two `kvKeys` calls, both delivered by `method`.
     TwoList(Method),
 }
 
@@ -345,89 +347,89 @@ fn reference(case: &Case) -> serde_json::Value {
 fn result_type_and_body(case: &Case) -> (&'static str, String) {
     let k = case.consumer.k().unwrap_or(0);
     match (case.producer, case.consumer) {
-        // ---- list-shaped producers: xs :: [Text] via `glob` -----------------
+        // ---- list-shaped producers: xs :: [Text] via `kvKeys` ---------------
         (Producer::List(_), Consumer::Full) => {
-            ("Int", "xs <- glob \"**\"\npure (length xs)".into())
+            ("Int", "xs <- kvKeys\npure (length xs)".into())
         }
         (Producer::List(_), Consumer::BranchOnly) => (
             "Int",
-            "xs <- glob \"**\"\npure (case xs of { [] -> 0; _ -> 1 })".into(),
+            "xs <- kvKeys\npure (case xs of { [] -> 0; _ -> 1 })".into(),
         ),
         (Producer::List(_), Consumer::Prefix(_)) => {
-            ("[Text]", format!("xs <- glob \"**\"\npure (take {k} xs)"))
+            ("[Text]", format!("xs <- kvKeys\npure (take {k} xs)"))
         }
         (Producer::List(_), Consumer::PrefixThenEffect(_)) => (
             "Int",
             format!(
-                "xs <- glob \"**\"\nlet p = take {k} xs\nys <- glob \"**\"\npure (length p + length ys)"
+                "xs <- kvKeys\nlet p = take {k} xs\nys <- kvKeys\npure (length p + length ys)"
             ),
         ),
         (Producer::List(_), Consumer::MapFilterPrefix(_)) => (
             "[Text]",
             format!(
-                "xs <- glob \"**\"\npure (take {k} (filter (\\x -> \"item-1\" `isPrefixOf` x) xs))"
+                "xs <- kvKeys\npure (take {k} (filter (\\x -> \"item-1\" `isPrefixOf` x) xs))"
             ),
         ),
         (Producer::List(_), Consumer::ForceTwice(_)) => (
             "Int",
             format!(
-                "xs <- glob \"**\"\nlet p = take {k} xs\npure (sum (map len p) + sum (map len p))"
+                "xs <- kvKeys\nlet p = take {k} xs\npure (sum (map len p) + sum (map len p))"
             ),
         ),
         // ---- StringLines: s :: Text via `readFile`, then `lines` -------------
         (Producer::StringLines, Consumer::Full) => (
             "Int",
-            "s <- readFile \"x\"\npure (length (lines s))".into(),
+            "s <- readFile \"x\" >>= liftEither\npure (length (lines s))".into(),
         ),
         (Producer::StringLines, Consumer::BranchOnly) => (
             "Int",
-            "s <- readFile \"x\"\npure (case lines s of { [] -> 0; _ -> 1 })".into(),
+            "s <- readFile \"x\" >>= liftEither\npure (case lines s of { [] -> 0; _ -> 1 })".into(),
         ),
         (Producer::StringLines, Consumer::LinesOfPartial(_)) => (
             "[Text]",
-            format!("s <- readFile \"x\"\npure (take {k} (lines s))"),
+            format!("s <- readFile \"x\" >>= liftEither\npure (take {k} (lines s))"),
         ),
         // ---- TupleStringList: Proc via `run` (wire tuple -> Proc in the helper),
         // then `lines pr.stderr` — #313. Records-era rewrite of the (c,o,e) shape.
         (Producer::TupleStringList, Consumer::Full) => (
             "Int",
-            "pr <- run \"x\"\npure (length (lines pr.stderr))".into(),
+            "Right pr <- run \"x\"\npure (length (lines pr.stderr))".into(),
         ),
         (Producer::TupleStringList, Consumer::LinesOfPartial(_)) => (
             "[Text]",
-            format!("pr <- run \"x\"\npure (take {k} (lines pr.stderr))"),
+            format!("Right pr <- run \"x\"\npure (take {k} (lines pr.stderr))"),
         ),
         (Producer::TupleStringList, Consumer::MapFilterPrefix(_)) => (
             "[Text]",
             format!(
-                "pr <- run \"x\"\npure (take {k} (filter (\\l -> \"item-1\" `isPrefixOf` l) (lines pr.stderr)))"
+                "Right pr <- run \"x\"\npure (take {k} (filter (\\l -> \"item-1\" `isPrefixOf` l) (lines pr.stderr)))"
             ),
         ),
         // #313 bisection: t7 inline + the field-isolating sub-cases.
         (Producer::TupleStringList, Consumer::TupleAllFields) => (
             "[Text]",
-            "pr <- run \"x\"\npure (filter (\\l -> len l > 1) (lines pr.stderr) <> [pack (show pr.exitCode), pr.stdout])".into(),
+            "Right pr <- run \"x\"\npure (filter (\\l -> len l > 1) (lines pr.stderr) <> [pack (show pr.exitCode), pr.stdout])".into(),
         ),
         (Producer::TupleStringList, Consumer::TupleAppendStdout) => (
             "[Text]",
-            "pr <- run \"x\"\npure (lines pr.stderr <> [pr.stdout])".into(),
+            "Right pr <- run \"x\"\npure (lines pr.stderr <> [pr.stdout])".into(),
         ),
         (Producer::TupleStringList, Consumer::TupleShowCode) => (
             "[Text]",
-            "pr <- run \"x\"\npure [pack (show pr.exitCode)]".into(),
+            "Right pr <- run \"x\"\npure [pack (show pr.exitCode)]".into(),
         ),
-        // ---- TwoList: xs, ys :: [Text] via two `glob`s -----------------------
+        // ---- TwoList: xs, ys :: [Text] via two `kvKeys` calls ----------------
         (Producer::TwoList(_), Consumer::Full) => (
             "Int",
-            "xs <- glob \"**\"\nys <- glob \"**\"\npure (length xs + length ys)".into(),
+            "xs <- kvKeys\nys <- kvKeys\npure (length xs + length ys)".into(),
         ),
         (Producer::TwoList(_), Consumer::ZipInterleave(_)) => (
             "[(Text, Text)]",
-            format!("xs <- glob \"**\"\nys <- glob \"**\"\npure (take {k} (zip xs ys))"),
+            format!("xs <- kvKeys\nys <- kvKeys\npure (take {k} (zip xs ys))"),
         ),
         (Producer::TwoList(_), Consumer::Prefix(_)) => (
             "[Text]",
-            format!("xs <- glob \"**\"\nys <- glob \"**\"\npure (take {k} xs ++ take {k} ys)"),
+            format!("xs <- kvKeys\nys <- kvKeys\npure (take {k} xs ++ take {k} ys)"),
         ),
         (p, c) => panic!("invalid producer×consumer pairing: {p:?} × {c:?}"),
     }
@@ -483,12 +485,24 @@ impl DispatchEffect<()> for WorkerDispatcher {
                 }
             },
             Producer::StringLines => {
+                // #335: readFile is now `M (Either FsError Text)`; the eval
+                // unwraps with `>>= liftEither`, so deliver the big string as a
+                // `Right`. It's a Complete value (not a list), so no stream /
+                // probe_list_spine concern.
                 let s: String = (0..n).map(item).collect::<Vec<_>>().join("\n");
-                cx.respond(s)
+                cx.respond(Ok::<String, String>(s))
             }
             Producer::TupleStringList => {
+                // #335: `run` is now `M (Either ExecError Proc)`; the eval
+                // unwraps with `Right pr <- run "x"`, so deliver the wire tuple
+                // as a `Right`. It's a Complete value, not a list, so no stream
+                // / probe_list_spine concern.
                 let stderr: String = (0..n).map(item).collect::<Vec<_>>().join("\n");
-                cx.respond((0i64, "stdout".to_string(), stderr))
+                cx.respond(Ok::<(i64, String, String), String>((
+                    0i64,
+                    "stdout".to_string(),
+                    stderr,
+                )))
             }
         }
     }

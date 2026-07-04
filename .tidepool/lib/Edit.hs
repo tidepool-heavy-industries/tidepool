@@ -233,7 +233,7 @@ spliceLines = go 1
 readTarget :: Text -> M (Maybe Text)
 readTarget path = do
   exists <- doesFileExist path
-  if exists then fmap Just (readFile path) else pure Nothing
+  if exists then fmap Just (readFile path >>= liftEither) else pure Nothing
 
 -- | Lower the edits to a context-anchored patch against the current file. The
 -- candidate is diffed back to @src@ by 'genPatch', so the returned 'FilePatch'

@@ -75,8 +75,8 @@ pub fn standard_decls() -> Vec<EffectDecl> {
 /// import (if present), GADT declarations for each registered effect, the `type M`
 /// alias over the full effect list, and thin helper functions (e.g. `say`, `kvGet`).
 ///
-/// The Schema vocabulary + structured `ask`/`llm`/`tryLlm` come from the Ask/Llm
-/// effect decls (`ask`/Schema always present; `llm`/`tryLlm` need the Llm effect).
+/// The Schema vocabulary + structured `ask`/`llm` come from the Ask/Llm effect
+/// decls (`ask`/Schema always present; `llm` needs the Llm effect).
 /// Source of the generated `Tidepool.Effects` module: effect type_defs,
 /// GADTs, the `M` alias, the `error :: Text -> a` shadow, and the thin
 /// send-wrapper helpers.

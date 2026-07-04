@@ -488,50 +488,52 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         ));
     }
     if has_fs {
+        // The primitive Fs verbs return typed failure (#335); these orchestration
+        // helpers abort-on-failure via `liftEither` (in scope from Tidepool.Effects),
+        // preserving their pre-#335 throw-on-read-error behaviour. The per-file
+        // isolating read lives on the Fs `readGlob :: Text -> M [FileRead]`.
         out.push_str("-- File orchestration helpers\n");
         out.push_str(concat!(
             "mapFiles :: [Text] -> (Text -> Text -> M Text) -> M [Text]\n",
             "mapFiles paths transform = mapM (\\p -> do\n",
-            "  content <- readFile p\n",
+            "  content <- readFile p >>= liftEither\n",
             "  result <- transform p content\n",
-            "  writeFile p result\n",
+            "  writeFile p result >>= liftEither\n",
             "  pure p) paths\n",
         ));
         out.push_str(concat!(
-            "readGlob :: Text -> M [Doc]\n",
-            "readGlob pat = glob pat >>= mapM (\\p -> Doc p <$> readFile p)\n",
-        ));
-        out.push_str(concat!(
             "mapFile :: Text -> (Text -> Text) -> M ()\n",
-            "mapFile path f = readFile path >>= \\c -> writeFile path (f c)\n",
+            "mapFile path f = do { c <- readFile path >>= liftEither; writeFile path (f c) >>= liftEither }\n",
         ));
         out.push_str(concat!(
             "mapFileM :: Text -> (Text -> M Text) -> M ()\n",
-            "mapFileM path f = readFile path >>= f >>= writeFile path\n",
+            "mapFileM path f = readFile path >>= liftEither >>= f >>= writeFile path >>= liftEither\n",
         ));
         out.push_str(concat!(
             "searchFiles :: Text -> Text -> M [Hit]\n",
             "searchFiles pat needle = do\n",
-            "  files <- glob pat\n",
+            "  files <- glob pat >>= liftEither\n",
             "  fmap concat $ forM files $ \\p -> do\n",
-            "    content <- readFile p\n",
+            "    content <- readFile p >>= liftEither\n",
             "    let ls = zip [(1::Int)..] (T.lines content)\n",
             "    pure [Hit p n l | (n, l) <- ls, T.isInfixOf needle l]\n",
         ));
         out.push_str(concat!(
             "lineCount :: Text -> M Int\n",
-            "lineCount path = length . T.lines <$> readFile path\n",
+            "lineCount path = length . T.lines <$> (readFile path >>= liftEither)\n",
         ));
         out.push_str(concat!(
             "fileContains :: Text -> Text -> M Bool\n",
-            "fileContains path needle = T.isInfixOf needle <$> readFile path\n",
+            "fileContains path needle = T.isInfixOf needle <$> (readFile path >>= liftEither)\n",
         ));
     }
     if has_exec {
         out.push_str("runChecked :: Text -> M Text\nrunChecked = readProcess\n");
+        // `run` is typed (#335); abort-on-spawn-failure via `liftEither`,
+        // preserving `runAll`'s pre-#335 throw-on-failure behaviour.
         out.push_str(concat!(
             "runAll :: [Text] -> M [Proc]\n",
-            "runAll = mapM run\n",
+            "runAll = mapM (\\c -> run c >>= liftEither)\n",
         ));
     }
 
@@ -614,8 +616,8 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         "`Value` → that JSON directly. In the REPL (`session_run`), results render ",
         "via `Show` by default — `Text` is bare, custom ADTs work without `ToJSON`. ",
         "For structured output return a `Value` (via ",
-        "`object`/`toJSON`/`parseJson`/`llm`/`tryHttpGet`, …), e.g. ",
-        "`tryHttpGet \"https://api.github.com/repos/o/r\"`; reserve `putStrLn`/`say` for ",
+        "`object`/`toJSON`/`parseJson`/`llm`/`httpGet`, …), e.g. ",
+        "`Right v <- httpGet \"https://api.github.com/repos/o/r\"`; reserve `putStrLn`/`say` for ",
         "human-readable debug traces, and return `pure x` in place of ",
         "`send (Print (show x))`. Extract from a ",
         "`Value` with optics: `v ^? key \"f\" . _String` (also `_Int`, `_Double`, ",
@@ -672,7 +674,7 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
             "\nResources — this description is a FLOOR; pull the depth on demand via resources/read:\n",
             "  tidepool://guide           full guide: returning JSON, the input lane, examples, failure isolation\n",
             "  tidepool://effect/{name}   per-effect constructors, types, and helper signatures\n",
-            "  tidepool://schema          the Schema grammar + ask/llm/tryLlm in full\n",
+            "  tidepool://schema          the Schema grammar + ask/llm in full\n",
             "  tidepool://edits           the declarative Edit verb JSON schema\n",
             "  tidepool://vocab           live project-library verb signatures (.tidepool/lib)\n",
             "  tidepool://capabilities    the Prelude shadow surface + names that live under a qualifier\n",

@@ -959,7 +959,7 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          `run cmd` → `Either <EffectError> Proc` — bind the `Right` (`Right p <- run cmd`) and \
          read `p.stdout`, `p.exitCode`, `p.stderr` (`ok p` = zero exit); \
          `grepGlob`/`searchFiles` → `[Hit]` (`h.path`, `h.line`, `h.text`); \
-         `readGlob` → `[Doc]` (`d.path`, `d.body`). \
+         `readGlob` → `[FileRead]` (`r.path`, `r.contents :: Either FsError Text`). \
          Bare selectors like `stdout p` are ambiguous — always use dot syntax.",
     )
 }

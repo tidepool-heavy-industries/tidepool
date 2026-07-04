@@ -1,8 +1,3 @@
-use tidepool_effect::dispatch::EffectContext;
-use tidepool_effect::error::EffectError;
-use tidepool_eval::value::Value;
-use tidepool_mcp::CapturedOutput;
-
 // ============================================================================
 // Tag 7 (base stack position 7): Llm
 // ============================================================================
@@ -98,15 +93,15 @@ impl LlmHandler {
         )
     }
 
-    pub fn check_rate_limit(&self) -> Result<(), EffectError> {
+    /// Budget check (#335): exhaustion is typed DATA (`LlmBudget`), not an
+    /// abort. Called from the `llm_structured` dispatch method before the
+    /// actual API call, so it never touches the network.
+    pub fn check_rate_limit(&self) -> Result<(), LlmError> {
         let count = self
             .call_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if count >= LLM_MAX_CALLS {
-            Err(EffectError::Handler(format!(
-                "LLM call limit exceeded ({} calls max per eval)",
-                LLM_MAX_CALLS
-            )))
+            Err(LlmError::LlmBudget())
         } else {
             Ok(())
         }
@@ -116,7 +111,7 @@ impl LlmHandler {
         &self,
         prompt: String,
         mut schema_json: serde_json::Value,
-    ) -> Result<serde_json::Value, EffectError> {
+    ) -> Result<serde_json::Value, LlmError> {
         let wrapped = schema_json.get("type").and_then(|t| t.as_str()) != Some("object");
         if wrapped {
             schema_json = serde_json::json!({
@@ -138,8 +133,13 @@ impl LlmHandler {
         let resp = self
             .rt
             .block_on(self.client.exec_chat(&self.model, req, Some(&opts)))
-            .map_err(|e| EffectError::Handler(format!("LLM structured call failed: {}", e)))?;
-        let text = resp.first_text().unwrap_or("null");
+            .map_err(|e| LlmError::LlmApi(format!("LLM structured call failed: {}", e)))?;
+        // No text content back (e.g. content-filtered/declined) is the closest
+        // signal genai gives us to a refusal — there's no dedicated
+        // finish-reason surface to key off of.
+        let text = resp
+            .first_text()
+            .ok_or_else(|| LlmError::LlmRefusal("model returned no text content".to_string()))?;
         let mut out = serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
         if wrapped {
             out = out
@@ -194,24 +194,16 @@ pub fn strictify(schema: &mut serde_json::Value) {
 }
 
 impl LlmHandler {
+    // Errors-tagged, no `cx` — the dispatch arm wraps the `Result` via
+    // `cx.respond` (Ok→Right, Err→Left). See #335. Fully total: nothing here
+    // aborts the eval (budget exhaustion included).
     fn llm_structured(
         &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
         prompt: String,
-        schema: Value,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        let schema_json = tidepool_runtime::value_to_json(&schema, cx.table(), 0);
-        cx.respond(self.structured_core(prompt, schema_json)?)
-    }
-
-    fn llm_try_structured(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        prompt: String,
-        schema: Value,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        let schema_json = tidepool_runtime::value_to_json(&schema, cx.table(), 0);
-        cx.respond_caught(self.structured_core(prompt, schema_json))
+        schema: crate::effect_glue::JsonArg,
+    ) -> Result<serde_json::Value, LlmError> {
+        self.check_rate_limit()?;
+        self.structured_core(prompt, schema.0)
     }
 }
 
@@ -223,6 +215,8 @@ mod tests {
     use crate::test_support::*;
     use crate::{ConsoleHandler, ExecHandler, FsHandler, HttpHandler, KvHandler, LspHandler};
     use tidepool_effect::dispatch::EffectContext;
+    use tidepool_effect::error::EffectError;
+    use tidepool_mcp::CapturedOutput;
 
     // === Mock LLM handler for JIT structured-output tests ===
 
@@ -245,9 +239,10 @@ mod tests {
             cx: &EffectContext<'_, CapturedOutput>,
         ) -> Result<tidepool_effect::Response, EffectError> {
             match req {
-                LlmReq::LlmStructured(_, _) => cx.respond(self.response.clone()),
-                LlmReq::TryLlmStructured(_, _) => {
-                    cx.respond_caught(Ok::<serde_json::Value, EffectError>(self.response.clone()))
+                // LlmStructured is errors-tagged (#335): the wire shape is
+                // `Either LlmError Value`, so the mock must answer `Right v`.
+                LlmReq::LlmStructured(_, _) => {
+                    cx.respond(Ok::<serde_json::Value, LlmError>(self.response.clone()))
                 }
             }
         }
@@ -292,7 +287,13 @@ mod tests {
     #[test]
     fn test_llm_structured_simple_object() {
         let mock = serde_json::json!({"greeting": "hello"});
-        let result = jit_eval_with_mock_llm(&["llm (SObj [(\"greeting\", SStr)]) \"test\""], mock);
+        let result = jit_eval_with_mock_llm(
+            &[
+                "r <- llm (SObj [(\"greeting\", SStr)]) \"test\" >>= liftEither",
+                "pure r",
+            ],
+            mock,
+        );
         assert_eq!(result["greeting"], "hello");
     }
 
@@ -306,7 +307,10 @@ mod tests {
             ]
         });
         let result = jit_eval_with_mock_llm(
-            &["llm (SObj [(\"languages\", SArr (SObj [(\"name\", SStr), (\"year\", SNum)]))]) \"test\""],
+            &[
+                "r <- llm (SObj [(\"languages\", SArr (SObj [(\"name\", SStr), (\"year\", SNum)]))]) \"test\" >>= liftEither",
+                "pure r",
+            ],
             mock,
         );
         let langs = result["languages"]
@@ -321,7 +325,7 @@ mod tests {
         let mock = serde_json::json!({"greeting": "hello"});
         let result = jit_eval_with_mock_llm(
             &[
-                "r <- llm (SObj [(\"greeting\", SStr)]) \"test\"",
+                "r <- llm (SObj [(\"greeting\", SStr)]) \"test\" >>= liftEither",
                 "pure (object [\"result\" .= r, \"field\" .= (r ?. \"greeting\")])",
             ],
             mock,
@@ -340,7 +344,7 @@ mod tests {
         });
         let result = jit_eval_with_mock_llm(
             &[
-                "r <- llm (SObj [(\"languages\", SArr (SObj [(\"name\", SStr), (\"year\", SNum)]))]) \"test\"",
+                "r <- llm (SObj [(\"languages\", SArr (SObj [(\"name\", SStr), (\"year\", SNum)]))]) \"test\" >>= liftEither",
                 "pure r",
             ],
             mock,
@@ -354,7 +358,10 @@ mod tests {
     #[test]
     fn test_llm_structured_empty_object() {
         let mock = serde_json::json!({});
-        let result = jit_eval_with_mock_llm(&["llm (SObj []) \"test\""], mock);
+        let result = jit_eval_with_mock_llm(
+            &["r <- llm (SObj []) \"test\" >>= liftEither", "pure r"],
+            mock,
+        );
         assert!(result.is_object());
         assert_eq!(result.as_object().unwrap().len(), 0);
     }
@@ -367,7 +374,10 @@ mod tests {
             "active": true
         });
         let result = jit_eval_with_mock_llm(
-            &["llm (SObj [(\"name\", SStr), (\"count\", SNum), (\"active\", SBool)]) \"test\""],
+            &[
+                "r <- llm (SObj [(\"name\", SStr), (\"count\", SNum), (\"active\", SBool)]) \"test\" >>= liftEither",
+                "pure r",
+            ],
             mock,
         );
         assert_eq!(result["name"], "test");
@@ -384,7 +394,7 @@ mod tests {
         });
         let result = jit_eval_with_mock_llm(
             &[
-                "r <- llm (SObj [(\"name\", SStr), (\"count\", SNum), (\"active\", SBool)]) \"test\"",
+                "r <- llm (SObj [(\"name\", SStr), (\"count\", SNum), (\"active\", SBool)]) \"test\" >>= liftEither",
                 "pure r",
             ],
             mock,
@@ -458,6 +468,24 @@ mod tests {
         let fresh = handler.clone();
         assert!(fresh.check_rate_limit().is_ok());
         assert!(handler.check_rate_limit().is_err());
+    }
+
+    /// #335 acceptance: budget exhaustion is a typed `Err(LlmBudget)` from the
+    /// dispatch method itself — checked before any network call, so this is
+    /// cheap and needs no live LLM. (A full JIT round-trip would need 200 real
+    /// calls to exhaust the budget through `llm`; skipped as impractical —
+    /// this exercises the same `check_rate_limit` gate `llm_structured` calls.)
+    #[tokio::test]
+    async fn llm_budget_exhausted_is_typed_llmbudget() {
+        let mut handler = LlmHandler::new("ollama:llama3.2".to_string());
+        handler
+            .call_count
+            .store(LLM_MAX_CALLS, std::sync::atomic::Ordering::Relaxed);
+        let result = handler.llm_structured(
+            "prompt".to_string(),
+            crate::effect_glue::JsonArg(serde_json::json!({"type": "string"})),
+        );
+        assert!(matches!(result, Err(LlmError::LlmBudget())));
     }
 
     #[test]

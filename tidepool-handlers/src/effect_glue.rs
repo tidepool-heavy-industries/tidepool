@@ -28,17 +28,25 @@ macro_rules! effect_rust_projection {
         decl_fn $decl_fn:ident,
         description $desc:tt,
         type_defs $tds:tt,
+        $(errors $errname:ident [
+            $($evariant:tt),* $(,)?
+        ],)?
         verbs [
             $({ ctor $ctor:ident,
                 method $method:ident,
                 args { $($an:ident : $ah:literal as $ar:ty),* $(,)? },
                 ret $ret:literal
-                $(, errors $err:ty)?
+                $(, errors $everr:ident)?
                 $(,)?
             }),* $(,)?
         ],
         helpers $hs:tt $(,)?
     ) => {
+        // Generated failure ADT (#335). Present only when the definition has an
+        // `errors` block; its variants live in the generated `Tidepool.Effects`
+        // module, so ToCore resolves them by qualified name.
+        $( crate::effect_glue::error_enum!($errname, $($evariant),*); )?
+
         #[derive(tidepool_bridge_derive::FromCore)]
         pub enum $req {
             $( $ctor($($ar),*) ),*
@@ -59,10 +67,86 @@ macro_rules! effect_rust_projection {
                 cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
             ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
                 match req {
-                    $( $req::$ctor($($an),*) => self.$method(cx $(, $an)*) ),*
+                    $(
+                        $req::$ctor($($an),*) => crate::effect_glue::dispatch_body!(
+                            self, cx, $method, [ $($an),* ] $(, errors $everr)?
+                        ),
+                    )*
                 }
             }
         }
     };
 }
 pub(crate) use effect_rust_projection;
+
+/// Emit the whole `errors` ADT as one item (a macro can't sit in enum-variant
+/// position, so the variants are built inline here from the re-matched block).
+/// `Debug` lets `Display`/`fs_err_to_effect` render it when an untagged method
+/// forwards a shared-helper failure. ToCore/FromCore use plain name+arity lookup
+/// (the variant names are unique), matching the bridged records — no module
+/// qualifier (the generated `data` decl's constructors are not registered under
+/// a `Module.Ctor` qualified name).
+macro_rules! error_enum {
+    ( $errname:ident, $({ ctor $c:ident,
+                          fields { $($efn:ident : $efh:literal as $efr:ty),* $(,)? },
+                          doc $d:literal $(,)? }),* $(,)? ) => {
+        // FromCore is for test-side decoding of a `Left err`; the error is only
+        // ever SENT (ToCore) in production. Debug backs the `Display` path;
+        // PartialEq/Eq let handler tests assert on decoded `Left` payloads.
+        #[derive(
+            tidepool_bridge_derive::ToCore,
+            tidepool_bridge_derive::FromCore,
+            Debug,
+            PartialEq,
+            Eq
+        )]
+        pub enum $errname {
+            $( $c( $($efr),* ) ),*
+        }
+    };
+}
+pub(crate) use error_enum;
+
+/// The BODY of one dispatch match arm (the arm's pattern is written inline in
+/// the projection — a macro can't expand to a whole `pat => body` arm). An
+/// `errors`-tagged verb's method returns typed `Result<T, ErrEnum>` and takes
+/// no `cx`; the body wraps it via `cx.respond` (Ok→Right, Err→Left), so the
+/// handler is total by construction. A plain verb's method takes `cx` and
+/// returns `Result<Response, EffectError>`; the body forwards it directly.
+///
+/// The receiver is threaded in as `$s:expr` (`self` from the projection site):
+/// `self` written literally here would resolve to the module, not the method
+/// receiver (macro hygiene), so the projection passes its own `self` token.
+macro_rules! dispatch_body {
+    ( $s:expr, $cx:ident, $method:ident, [ $($an:ident),* $(,)? ], errors $everr:ident ) => {
+        $cx.respond($s.$method($($an),*))
+    };
+    ( $s:expr, $cx:ident, $method:ident, [ $($an:ident),* $(,)? ] ) => {
+        $s.$method($cx $(, $an)*)
+    };
+}
+pub(crate) use dispatch_body;
+
+/// An incoming aeson-`Value` GADT argument (e.g. `HttpPost`'s body,
+/// `LlmStructured`'s schema), pre-converted to `serde_json::Value`.
+///
+/// An `errors`-tagged verb's method receives no `cx` (see [`dispatch_body!`]),
+/// so it has no `DataConTable` to interpret a raw core `Value` — the table
+/// lookup has to happen at Req-decode time instead, while `cx` (and so the
+/// table) is still in scope. `FromCore` for a LOCAL wrapper type is exactly
+/// that decode-time hook: `tidepool_bridge_derive`'s enum derive calls
+/// `<$ar as FromCore>::from_value(&fields[i], table)` for every GADT arg
+/// (`$ar` here is `JsonArg`), so the conversion rides the SAME table the
+/// dispatch already has, before the tagged method ever runs.
+pub struct JsonArg(pub serde_json::Value);
+
+impl tidepool_bridge::sealed::FromCoreSealed for JsonArg {}
+
+impl tidepool_bridge::FromCore for JsonArg {
+    fn from_value(
+        value: &tidepool_eval::Value,
+        table: &tidepool_repr::DataConTable,
+    ) -> Result<Self, tidepool_bridge::BridgeError> {
+        Ok(JsonArg(tidepool_runtime::value_to_json(value, table, 0)))
+    }
+}

@@ -12,6 +12,18 @@ use tidepool_mcp::CapturedOutput;
 // bodies below are hand-written.
 tidepool_mcp::fs_effect_def!(crate::effect_glue::effect_rust_projection);
 
+/// The record `readGlob` (`FsReadGlob`) yields per matched file (#335): a
+/// `path` plus a typed `contents` — `Right text` on a clean UTF-8 read, `Left
+/// (FsError)` on a per-file failure. Named record per the records-over-tuples
+/// house rule; its Haskell `data FileRead = FileRead { path, contents }` decl is
+/// emitted into `Tidepool.Effects` via the Fs `type_defs`. ToCore/FromCore use
+/// plain name+arity lookup (unique name), like the bridged records.
+#[derive(tidepool_bridge_derive::ToCore, tidepool_bridge_derive::FromCore, Debug)]
+struct FileRead {
+    path: String,
+    contents: Result<String, FsError>,
+}
+
 pub const DEFAULT_IGNORE_DIRS: &[&str] = &["target", ".git", "node_modules", "dist-newstyle"];
 
 pub fn pattern_mentions(pattern: &str, dir: &str) -> bool {
@@ -54,7 +66,7 @@ pub fn blake3_hex(bytes: &[u8]) -> String {
 /// under-escaping — regex metachars need double-escaping (JSON x Haskell).
 /// Loss-less: the real error is always shown, so a heuristic misfire can't hide
 /// it. Mirrors the `checked_pattern` diagnose-at-the-boundary precedent.
-fn grep_regex_error(regex_str: &str, e: &regex::Error) -> EffectError {
+fn grep_regex_error(regex_str: &str, e: &regex::Error) -> FsError {
     let mut msg = format!("invalid regex {:?}: {}", regex_str, e);
     // (a) Looks like a path glob in arg 1. Gate on path-shape so a regex
     // char-class like `[abc]` doesn't misfire; the real error shows regardless.
@@ -75,21 +87,21 @@ fn grep_regex_error(regex_str: &str, e: &regex::Error) -> EffectError {
              (JSON x Haskell) — write a literal dot as four backslashes then a dot.",
         );
     }
-    EffectError::Handler(msg)
+    FsError::FsBadRegex(msg)
 }
 
 /// Expand a glob pattern relative to `root` with sandbox and component filtering.
 ///
 /// Used by [`FsHandler`] (glob/grep) for `**`-normalisation, sandbox check,
 /// and hidden-dir filter.
-pub fn expand_glob(root: &std::path::Path, pattern: &str) -> Result<Vec<PathBuf>, EffectError> {
-    // ONE shared empty-glob guard (#328): `glob`/`readGlob`/`tryReadGlob`/
-    // `grepGlob` all resolve through here, so rejecting `""` in one place
-    // covers all four. An empty pattern used to resolve to the sandbox root
-    // and expand to `**/*` — matching EVERYTHING (once detonated a readGlob
-    // into binaries). It is now a loud error naming the fix.
+pub fn expand_glob(root: &std::path::Path, pattern: &str) -> Result<Vec<PathBuf>, FsError> {
+    // ONE shared empty-glob guard (#328): `glob`/`readGlob`/`grepGlob` all
+    // resolve through here, so rejecting `""` in one place covers all three. An
+    // empty pattern used to resolve to the sandbox root and expand to `**/*` —
+    // matching EVERYTHING (once detonated a readGlob into binaries). It is now a
+    // loud typed failure (`FsSandbox`) naming the fix.
     if pattern.is_empty() {
-        return Err(EffectError::Handler(
+        return Err(FsError::FsSandbox(
             "empty glob pattern matches EVERYTHING — this is a footgun (it once \
              read the whole tree into binaries). Pass an explicit pattern, e.g. \
              \"**/*.hs\" for a filetype or \".\" for the entire tree."
@@ -100,7 +112,7 @@ pub fn expand_glob(root: &std::path::Path, pattern: &str) -> Result<Vec<PathBuf>
         return Ok(Vec::new());
     }
     if pattern.starts_with('/') || pattern.starts_with('\\') {
-        return Err(EffectError::Handler(
+        return Err(FsError::FsSandbox(
             "absolute glob patterns not allowed".to_string(),
         ));
     }
@@ -122,10 +134,7 @@ pub fn expand_glob(root: &std::path::Path, pattern: &str) -> Result<Vec<PathBuf>
         } else if target.exists() {
             pattern
         } else {
-            return Err(EffectError::Handler(format!(
-                "no such file or directory: {pattern:?} (search root does not exist; \
-                 a zero-match glob returns [] — a missing root is an error)"
-            )));
+            return Err(FsError::FsNotFound(pattern.to_string()));
         }
     } else if pattern == "**" || pattern.ends_with("/**") {
         // The glob crate's `**` matches DIRECTORIES only, so a bare trailing
@@ -138,10 +147,10 @@ pub fn expand_glob(root: &std::path::Path, pattern: &str) -> Result<Vec<PathBuf>
     let full_pattern = root.join(pattern).to_string_lossy().to_string();
     let canonical_root = root
         .canonicalize()
-        .map_err(|e| EffectError::Handler(e.to_string()))?;
+        .map_err(|e| FsError::FsIo(e.to_string()))?;
 
     let paths: Vec<PathBuf> = glob::glob(&full_pattern)
-        .map_err(|e| EffectError::Handler(format!("invalid glob: {}", e)))?
+        .map_err(|e| FsError::FsIo(format!("invalid glob: {}", e)))?
         .filter_map(std::result::Result::ok)
         .filter(|p| {
             p.canonicalize()
@@ -166,20 +175,20 @@ impl FsHandler {
         Self { root }
     }
 
-    pub fn expand_glob(&self, pattern: &str) -> Result<Vec<PathBuf>, EffectError> {
+    pub fn expand_glob(&self, pattern: &str) -> Result<Vec<PathBuf>, FsError> {
         expand_glob(&self.root, pattern)
     }
 
-    pub fn resolve(&self, path: &str) -> Result<PathBuf, EffectError> {
+    pub fn resolve(&self, path: &str) -> Result<PathBuf, FsError> {
         let resolved = self.root.join(path);
         let canonical_root = self
             .root
             .canonicalize()
-            .map_err(|e| EffectError::Handler(e.to_string()))?;
+            .map_err(|e| FsError::FsIo(e.to_string()))?;
         let check_path = if resolved.exists() {
             resolved
                 .canonicalize()
-                .map_err(|e| EffectError::Handler(e.to_string()))?
+                .map_err(|e| FsError::FsIo(e.to_string()))?
         } else {
             // Walk up to the deepest existing ancestor, canonicalize it, then
             // reconstruct. Handles paths like "a/b/c.txt" when "a/b/" doesn't
@@ -198,14 +207,14 @@ impl FsHandler {
             }
             let canonical_ancestor = cur
                 .canonicalize()
-                .map_err(|e| EffectError::Handler(e.to_string()))?;
+                .map_err(|e| FsError::FsIo(e.to_string()))?;
             suffix
                 .iter()
                 .rev()
                 .fold(canonical_ancestor, |p, c| p.join(c))
         };
         if !check_path.starts_with(&canonical_root) {
-            return Err(EffectError::Handler(format!(
+            return Err(FsError::FsSandbox(format!(
                 "path escape: {} is outside sandbox",
                 path
             )));
@@ -213,64 +222,68 @@ impl FsHandler {
         Ok(check_path)
     }
 
-    fn read_core(&self, path: &str) -> Result<String, EffectError> {
+    fn read_core(&self, path: &str) -> Result<String, FsError> {
         let resolved = self.resolve(path)?;
-        std::fs::read_to_string(&resolved)
-            .map_err(|e| EffectError::Handler(format!("read '{}' failed: {}", path, e)))
+        std::fs::read_to_string(&resolved).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => FsError::FsNotFound(path.to_string()),
+            std::io::ErrorKind::InvalidData => FsError::FsNotUtf8(path.to_string()),
+            _ => FsError::FsIo(format!("read '{}' failed: {}", path, e)),
+        })
     }
 }
 
+/// Human-readable render of a typed Fs failure. The `Left` payload the eval
+/// pattern-matches is the primary signal; this Display is what `liftEither`
+/// shows on abort and what an untagged verb forwards via [`fs_err_to_effect`].
+impl std::fmt::Display for FsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FsError::FsNotFound(p) => write!(f, "no such file or directory: {p}"),
+            FsError::FsNotUtf8(p) => write!(f, "{p}: not valid UTF-8"),
+            FsError::FsSandbox(d) | FsError::FsBadRegex(d) | FsError::FsIo(d) => write!(f, "{d}"),
+        }
+    }
+}
+
+/// Forward a typed `FsError` to the eval-abort channel, for the untagged verbs
+/// (`FsMetadata`/`FsReadGlob`/`FsWriteCas`) whose method still returns
+/// `Result<Response, EffectError>`. Their shared-helper (`resolve`/`expand_glob`)
+/// failures are genuine aborts (a sandbox escape is not per-item data).
+fn fs_err_to_effect(e: FsError) -> EffectError {
+    EffectError::Handler(e.to_string())
+}
+
 impl FsHandler {
-    fn fs_read(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        path: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        cx.respond(self.read_core(&path)?)
+    // Errors-tagged verbs: total in `FsError`, no `cx` — the dispatch arm wraps
+    // the `Result` via `cx.respond` (Ok→Right, Err→Left). See #335.
+    fn fs_read(&mut self, path: String) -> Result<String, FsError> {
+        self.read_core(&path)
     }
 
-    fn fs_try_read(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        path: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        cx.respond_caught(self.read_core(&path))
-    }
-
-    fn fs_write(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        path: String,
-        contents: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
+    fn fs_write(&mut self, path: String, contents: String) -> Result<(), FsError> {
         let resolved = self.resolve(&path)?;
         if let Some(parent) = resolved.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| EffectError::Handler(e.to_string()))?;
+            std::fs::create_dir_all(parent).map_err(|e| FsError::FsIo(e.to_string()))?;
         }
-        std::fs::write(&resolved, &contents).map_err(|e| EffectError::Handler(e.to_string()))?;
-        cx.respond(())
+        std::fs::write(&resolved, &contents).map_err(|e| FsError::FsIo(e.to_string()))?;
+        Ok(())
     }
 
-    fn fs_list_dir(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        path: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
+    fn fs_list_dir(&mut self, path: String) -> Result<Vec<String>, FsError> {
         let resolved = self.resolve(&path)?;
         let mut entries: Vec<String> = std::fs::read_dir(&resolved)
-            .map_err(|e| EffectError::Handler(e.to_string()))?
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => FsError::FsNotFound(path.clone()),
+                _ => FsError::FsIo(e.to_string()),
+            })?
             .filter_map(std::result::Result::ok)
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
         entries.sort();
-        cx.respond_list(entries)
+        Ok(entries)
     }
 
-    fn fs_glob(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        pattern: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
+    fn fs_glob(&mut self, pattern: String) -> Result<Vec<String>, FsError> {
         // Files only: `glob` feeds `readGlob`/`grepGlob`, which read
         // file contents — a matched DIRECTORY (from a `dir/**/*`
         // recursion or a `*/`-shaped pattern) would make `readGlob`
@@ -285,15 +298,14 @@ impl FsHandler {
                     .map(|r| r.to_string_lossy().to_string())
             })
             .collect();
-        cx.respond_list(rel_paths)
+        Ok(rel_paths)
     }
 
     fn fs_grep(
         &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
         pattern: String,
         file_glob: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
+    ) -> Result<Vec<(String, i64, String)>, FsError> {
         let re = regex::Regex::new(&pattern).map_err(|e| grep_regex_error(&pattern, &e))?;
         let paths = self.expand_glob(&file_glob)?;
         let mut results: Vec<(String, i64, String)> = Vec::new();
@@ -341,16 +353,12 @@ impl FsHandler {
             ));
         }
 
-        cx.respond_list(results)
+        Ok(results)
     }
 
-    fn fs_exists(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        path: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
+    fn fs_exists(&mut self, path: String) -> Result<bool, FsError> {
         let resolved = self.resolve(&path)?;
-        cx.respond(resolved.exists())
+        Ok(resolved.exists())
     }
 
     fn fs_metadata(
@@ -358,7 +366,7 @@ impl FsHandler {
         cx: &EffectContext<'_, CapturedOutput>,
         path: String,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        let resolved = self.resolve(&path)?;
+        let resolved = self.resolve(&path).map_err(fs_err_to_effect)?;
         match std::fs::metadata(&resolved) {
             Ok(meta) => cx.respond(serde_json::json!({
                 "size": meta.len() as i64,
@@ -380,8 +388,8 @@ impl FsHandler {
         // instead of failing the whole batch. The empty-glob guard in
         // `expand_glob` covers `""` here too. Contract mirrors #335's
         // per-item typed-failure surface: `[(path, Either err text)]`.
-        let paths = self.expand_glob(&pattern)?;
-        let results: Vec<(String, Result<String, String>)> = paths
+        let paths = self.expand_glob(&pattern).map_err(fs_err_to_effect)?;
+        let results: Vec<FileRead> = paths
             .into_iter()
             .filter(|p| p.is_file())
             .map(|p| {
@@ -390,19 +398,17 @@ impl FsHandler {
                     .unwrap_or(&p)
                     .to_string_lossy()
                     .to_string();
-                let outcome =
-                    std::fs::read_to_string(&p).map_err(|e| format!("{rel} failed: {e}"));
-                (rel, outcome)
+                let contents = std::fs::read_to_string(&p).map_err(|e| match e.kind() {
+                    std::io::ErrorKind::InvalidData => FsError::FsNotUtf8(rel.clone()),
+                    _ => FsError::FsIo(format!("{rel} failed: {e}")),
+                });
+                FileRead { path: rel, contents }
             })
             .collect();
         cx.respond_list(results)
     }
 
-    fn fs_hash(
-        &mut self,
-        cx: &EffectContext<'_, CapturedOutput>,
-        path: String,
-    ) -> Result<tidepool_effect::Response, EffectError> {
+    fn fs_hash(&mut self, path: String) -> Result<Option<String>, FsError> {
         // Current blake3 digest, or Nothing if the file is absent — the
         // read half of the CAS loop (#330). Read the hash, compute new
         // content, then `FsWriteCas` back with this as the expectation.
@@ -411,7 +417,7 @@ impl FsHandler {
             Ok(bytes) => Some(blake3_hex(&bytes)),
             Err(_) => None,
         };
-        cx.respond(hash)
+        Ok(hash)
     }
 
     fn fs_write_cas(
@@ -429,7 +435,7 @@ impl FsHandler {
         // think-time to a few syscalls. On a precondition miss nothing
         // is written and the ACTUAL hash comes back as `Left actual`
         // (conflicts-as-data, matching Diff/Edit philosophy + #335).
-        let resolved = self.resolve(&path)?;
+        let resolved = self.resolve(&path).map_err(fs_err_to_effect)?;
         let actual: Option<String> = match std::fs::read(&resolved) {
             Ok(bytes) => Some(blake3_hex(&bytes)),
             Err(_) => None,
@@ -572,15 +578,14 @@ mod tests {
 
         let req = FsReq::FsReadGlob("*".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let mut results: Vec<(String, Result<String, String>)> =
-            FromCore::from_value(&res, &table).unwrap();
-        results.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut results: Vec<FileRead> = FromCore::from_value(&res, &table).unwrap();
+        results.sort_by(|a, b| a.path.cmp(&b.path));
         assert_eq!(results.len(), 2, "{results:?}");
-        // bad.bin -> Left err (isolated), good.txt -> Right content (survives).
-        assert_eq!(results[0].0, "bad.bin");
-        assert!(results[0].1.is_err(), "binary must be Left: {results:?}");
-        assert_eq!(results[1].0, "good.txt");
-        assert_eq!(results[1].1.as_deref(), Ok("hello\nworld"));
+        // bad.bin -> contents Left err (isolated), good.txt -> Right (survives).
+        assert_eq!(results[0].path, "bad.bin");
+        assert!(results[0].contents.is_err(), "binary must be Left: {results:?}");
+        assert_eq!(results[1].path, "good.txt");
+        assert_eq!(results[1].contents.as_deref(), Ok("hello\nworld"));
     }
 
     #[test]
@@ -596,22 +601,35 @@ mod tests {
         let cx = EffectContext::with_user(&table, &captured);
 
         // ONE shared guard in expand_glob → every glob-resolving verb inherits
-        // it: glob (FsGlob), readGlob/tryReadGlob (FsGlob/FsReadGlob), grepGlob
-        // (FsGrep). Empty pattern used to expand to the whole tree.
+        // it. Empty pattern used to expand to the whole tree.
         let err = handler.expand_glob("").unwrap_err();
         assert!(format!("{err}").contains("matches EVERYTHING"), "{err}");
 
+        // The errors-tagged glob verbs now return the guard as DATA — a
+        // `Left (FsSandbox _)` — not an abort (#335). FsReadGlob is untagged, so
+        // its verb-level guard still aborts (per-item Eithers ride the list).
         for req in [
             FsReq::FsGlob(String::new()),
-            FsReq::FsReadGlob(String::new()),
             FsReq::FsGrep("x".to_string(), String::new()),
         ] {
-            let e = handler.handle(req, &cx).unwrap_err();
-            assert!(
-                format!("{e}").contains("matches EVERYTHING"),
-                "empty glob should be loud, got: {e}"
-            );
+            let res = response_value(handler.handle(req, &cx).unwrap(), &table);
+            let decoded: Result<Value, FsError> = FromCore::from_value(&res, &table).unwrap();
+            match decoded {
+                Err(FsError::FsSandbox(d)) => assert!(
+                    d.contains("matches EVERYTHING"),
+                    "empty glob should be loud, got: {d}"
+                ),
+                other => panic!("expected Left (FsSandbox _), got {other:?}"),
+            }
         }
+
+        let e = handler
+            .handle(FsReq::FsReadGlob(String::new()), &cx)
+            .unwrap_err();
+        assert!(
+            format!("{e}").contains("matches EVERYTHING"),
+            "empty readGlob should still abort loudly, got: {e}"
+        );
     }
 
     #[test]
@@ -634,18 +652,19 @@ mod tests {
         assert_eq!(decode(handler.handle(req, &cx).unwrap(), &table), Ok(()));
         assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "v1");
 
-        // fileHash (FsHash): current digest of an existing file.
+        // fileHash (FsHash): current digest of an existing file. Now errors-
+        // tagged, so the digest arrives as `Right (Just hash)`.
         let req = FsReq::FsHash("f.txt".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let h: Option<String> = FromCore::from_value(&res, &table).unwrap();
-        let h = h.expect("hash of an existing file");
+        let h: Result<Option<String>, FsError> = FromCore::from_value(&res, &table).unwrap();
+        let h = h.unwrap().expect("hash of an existing file");
         assert_eq!(h, blake3_hex(b"v1"));
 
-        // FsHash on an absent file → Nothing.
+        // FsHash on an absent file → Right Nothing (absence is data, not error).
         let req = FsReq::FsHash("missing.txt".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let none: Option<String> = FromCore::from_value(&res, &table).unwrap();
-        assert_eq!(none, None);
+        let none: Result<Option<String>, FsError> = FromCore::from_value(&res, &table).unwrap();
+        assert_eq!(none.unwrap(), None);
 
         // CAS HIT: expected == current hash → writes v2.
         let req = FsReq::FsWriteCas("f.txt".to_string(), Some(h.clone()), "v2".to_string());
@@ -695,7 +714,9 @@ mod tests {
 
         let req = FsReq::FsGrep("hello".to_string(), "**/*.txt".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let results: Vec<(String, i64, String)> = FromCore::from_value(&res, &table).unwrap();
+        let decoded: Result<Vec<(String, i64, String)>, FsError> =
+            FromCore::from_value(&res, &table).unwrap();
+        let results = decoded.unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(
             results[0],
@@ -708,8 +729,9 @@ mod tests {
 
         let req = FsReq::FsGrep("hello".to_string(), "**/*".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let results: Vec<(String, i64, String)> = FromCore::from_value(&res, &table).unwrap();
-        assert_eq!(results.len(), 2);
+        let decoded: Result<Vec<(String, i64, String)>, FsError> =
+            FromCore::from_value(&res, &table).unwrap();
+        assert_eq!(decoded.unwrap().len(), 2);
     }
 
     #[test]
@@ -731,7 +753,9 @@ mod tests {
 
         let req = FsReq::FsGrep("match".to_string(), "large.txt".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let results: Vec<(String, i64, String)> = FromCore::from_value(&res, &table).unwrap();
+        let decoded: Result<Vec<(String, i64, String)>, FsError> =
+            FromCore::from_value(&res, &table).unwrap();
+        let results = decoded.unwrap();
 
         assert_eq!(results.len(), 2001);
         assert_eq!(results[2000].0, "...");
@@ -814,13 +838,9 @@ mod tests {
         let path = "Cargo.toml".to_string().to_value(&table).unwrap();
         let request = Value::Con(con_id, vec![path]);
         let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
-        match &result {
-            Value::Con(id, _) => {
-                let name = table.name_of(*id).unwrap();
-                assert_eq!(name, "True", "Cargo.toml should exist");
-            }
-            other => panic!("Expected Con (Bool), got {:?}", other),
-        }
+        // FsExists is errors-tagged: `Right True` for an existing path.
+        let decoded: Result<bool, FsError> = FromCore::from_value(&result, &table).unwrap();
+        assert_eq!(decoded, Ok(true), "Cargo.toml should exist");
     }
 
     #[test]
@@ -833,7 +853,9 @@ mod tests {
         let path = ".".to_string().to_value(&table).unwrap();
         let request = Value::Con(con_id, vec![path]);
         let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
-        assert_is_cons_list(&result, &table);
+        // FsListDir is errors-tagged: `Right [entries]`.
+        let decoded: Result<Vec<String>, FsError> = FromCore::from_value(&result, &table).unwrap();
+        assert!(!decoded.unwrap().is_empty(), "repo root should have entries");
     }
 
     #[test]
@@ -863,15 +885,88 @@ mod tests {
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
-        // Attempt to escape via `..` into a sibling directory that doesn't exist
+        // Attempt to escape via `..` into a sibling directory that doesn't exist.
+        // FsWrite is errors-tagged: the escape now comes back as `Left
+        // (FsSandbox _)` DATA, not an abort (#335).
         let req = FsReq::FsWrite("../../escape/evil.txt".into(), "bad".into());
-        let err = handler
-            .handle(req, &cx)
-            .expect_err("sandbox escape must be rejected");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("outside sandbox") || msg.contains("escape"),
-            "{msg}"
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
+        let decoded: Result<(), FsError> = FromCore::from_value(&res, &table).unwrap();
+        match decoded {
+            Err(FsError::FsSandbox(msg)) => {
+                assert!(msg.contains("outside sandbox") || msg.contains("escape"), "{msg}");
+            }
+            other => panic!("expected Left (FsSandbox _), got {other:?}"),
+        }
+    }
+
+    /// #335 end-to-end through the REAL pipeline (extract → generated
+    /// `Tidepool.Effects` with `data FsError` → JIT → Either): a missing-file
+    /// `readFile` is a typed `Left (FsNotFound _)` the eval pattern-matches in
+    /// Haskell — never an abort. This is the acceptance proof that the whole
+    /// errors-block mechanism composes.
+    #[tokio::test]
+    async fn fs_read_missing_file_is_typed_left_fsnotfound() {
+        let v = jit_eval(&[
+            "r <- readFile \"definitely-not-a-real-file-xyz-335.txt\"",
+            "pure (case r of { Left (FsNotFound _) -> (\"notfound\" :: Text); Left _ -> \"other\"; Right _ -> \"ok\" })",
+        ]);
+        assert_eq!(v, serde_json::json!("notfound"));
+    }
+
+    /// The happy path still threads through the Either: an existing read is a
+    /// `Right _`, so `readFile p >>= liftEither` (the natural unwrap) yields the
+    /// content.
+    #[tokio::test]
+    async fn fs_read_existing_file_is_right() {
+        let v = jit_eval(&[
+            "src <- readFile \"Cargo.toml\" >>= liftEither",
+            "pure (T.length src > 0)",
+        ]);
+        assert_eq!(v, serde_json::json!(true));
+    }
+
+    /// #328/#335 acceptance: `readGlob` over a mixed glob (one clean UTF-8 text
+    /// file, one invalid-UTF-8 binary file) through the REAL extract → JIT
+    /// pipeline, rooted at a temp dir (not the repo root, so `jit_eval` doesn't
+    /// fit — `EvalHarness` is). `partitionEithers (map (.contents) rs)` must
+    /// split the per-file outcomes: the binary isolates as `Left`, the text
+    /// file survives as `Right`, and neither poisons the batch.
+    #[tokio::test]
+    async fn fs_read_glob_mixed_binary_partitions_via_partition_eithers() {
+        use tempfile::tempdir;
+        use tidepool_testing::eval_harness::EvalHarness;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("good.txt"), "hello").unwrap();
+        std::fs::write(root.join("bad.bin"), vec![0xff, 0xfe, 0x00, 0x01]).unwrap();
+
+        let decls = tidepool_mcp::standard_decls();
+        let preamble = tidepool_mcp::build_preamble(&decls, false);
+        let stack = tidepool_mcp::build_effect_stack_type(&decls);
+        let code = tidepool_mcp::wrap_do(concat!(
+            "rs <- readGlob \"*\"\n",
+            "let (bad, good) = partitionEithers (map (.contents) rs)\n",
+            "pure (object [\"goodCount\" .= length good, \"badCount\" .= length bad, \"goodText\" .= good])",
+        ));
+        let source = tidepool_mcp::template_haskell(&preamble, &stack, &code, "", "", None, None);
+
+        // Only Fs is exercised (readGlob), so the handler HList only needs to
+        // cover tags 0..2 (Console, KV, Fs) — dispatch never recurses past Fs.
+        let kv_path = std::env::temp_dir().join("tidepool_fs_readglob_partition_test_kv.json");
+        let handlers = frunk::hlist![
+            crate::ConsoleHandler,
+            crate::KvHandler::new(kv_path),
+            FsHandler::new(root),
+        ];
+
+        let harness = EvalHarness::new().with_stdlib().with_effects_module();
+        let out = harness.run_with(&source, "result", handlers, CapturedOutput::new());
+        assert_eq!(
+            out.json(),
+            serde_json::json!({"goodCount": 1, "badCount": 1, "goodText": ["hello"]}),
+            "{:?}",
+            out.err()
         );
     }
 }

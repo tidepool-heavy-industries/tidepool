@@ -10,7 +10,7 @@
 -- historical (stale-binary) collision:
 --
 --   1. Two field selectors sharing a label ('path') but under DIFFERENT parent
---      types get DISTINCT disambiguators — @"@Hit"@ vs @"@Doc"@ — hence distinct
+--      types get DISTINCT disambiguators — @"@Hit"@ vs @"@FileRead"@ — hence distinct
 --      'stableVarId's even though module + occ name coincide.
 --   2. A non-field 'Name' gets the EMPTY disambiguator, so 'stableVarId' stays
 --      byte-identical to the original scheme (no DataConTable / fixture drift).
@@ -43,18 +43,18 @@ main = do
   let recMod   = mkModule (stringToUnit "main") (mkModuleName "Tidepool.Records")
       mkNm u o = mkExternalName (mkUniqueGrimily u) recMod o noSrcSpan
       pathHit  = mkNm 1 (mkRecFieldOccFS (fsLit "Hit") (fsLit "path"))
-      pathDoc  = mkNm 2 (mkRecFieldOccFS (fsLit "Doc") (fsLit "path"))
+      pathFileRead  = mkNm 2 (mkRecFieldOccFS (fsLit "FileRead") (fsLit "path"))
       plain    = mkNm 3 (mkVarOccFS (fsLit "path"))
 
       checks :: [(String, Bool)]
       checks =
         [ ("field parent Hit -> \"@Hit\"", fieldParentDisamb pathHit == "@Hit")
-        , ("field parent Doc -> \"@Doc\"", fieldParentDisamb pathDoc == "@Doc")
+        , ("field parent FileRead -> \"@FileRead\"", fieldParentDisamb pathFileRead == "@FileRead")
         , ("shared label, different parent -> distinct disamb",
-            fieldParentDisamb pathHit /= fieldParentDisamb pathDoc)
+            fieldParentDisamb pathHit /= fieldParentDisamb pathFileRead)
         , ("non-field -> empty disamb", fieldParentDisamb plain == "")
         , ("shared label, different parent -> distinct stableVarId",
-            stableVarId pathHit /= stableVarId pathDoc)
+            stableVarId pathHit /= stableVarId pathFileRead)
         ]
 
   forM_ checks $ \(label, ok) ->

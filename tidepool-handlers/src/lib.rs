@@ -236,7 +236,7 @@ mod tests {
     #[tokio::test]
     async fn test_jit_fs_listdir_roundtrip() {
         let result = jit_eval(&[
-            "entries <- listDirectory \".\"",
+            "entries <- listDirectory \".\" >>= liftEither",
             "pure (toJSON (length entries > 0))",
         ]);
         assert_eq!(result, serde_json::json!(true));

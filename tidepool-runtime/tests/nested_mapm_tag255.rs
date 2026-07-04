@@ -269,12 +269,12 @@ fn nested_mapm_readfile_full_mcp_preamble() {
     let stack = format!("'[{}]", names.join(", "));
 
     let user_code = r#"
-crates <- listDirectory "."
+crates <- listDirectory "." >>= liftEither
 let rustCrates = filter (\d -> T.isPrefixOf "tidepool-" d) crates
 stats <- mapM (\crate -> do
-  files <- glob (crate <> "/src/**/*.rs")
+  files <- glob (crate <> "/src/**/*.rs") >>= liftEither
   total <- foldM (\acc f -> do
-    content <- readFile f
+    content <- readFile f >>= liftEither
     pure (acc + length (T.lines content))) (0 :: Int) files
   pure (object ["crate" .= crate, "files" .= length files, "lines" .= total])) rustCrates
 pure stats

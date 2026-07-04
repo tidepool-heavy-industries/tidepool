@@ -37,7 +37,7 @@ glimpse xs = object
   , "top"    .= topFreq xs ]           -- top-5 (value,count) of the first String column
 ```
 - **Generic over `ToJSON a`** — `toJSON` each element, treat as `Object`, read keys
-  via `KM.toList`. Works on any record (`[Hit]`, `[Proc]`, `[Doc]`) and on `[Value]`.
+  via `KM.toList`. Works on any record (`[Hit]`, `[Proc]`, `[FileRead]`) and on `[Value]`.
 - **Frequency column:** default to the first String-valued field; offer
   `glimpseOn :: ToJSON a => (a -> Text) -> [a] -> Value` for an explicit key.
 - **Placement:** pure, no effects → `Tidepool.Prelude` re-export (always unqualified)

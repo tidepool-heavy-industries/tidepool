@@ -68,7 +68,7 @@ fn eager_big_list_materializes_iteratively() {
     // 12k elements (~36k nodes): over the OLD 10k cap, under the new 100k.
     // Must fully materialize without lazy gating — and without the silent
     // eval-thread death the recursive paths caused.
-    let r = run_eager("xs <- glob \"**\"\npure (length xs)", 12_000);
+    let r = run_eager("xs <- kvKeys\npure (length xs)", 12_000);
     assert_eq!(r.ok(), Some(serde_json::json!(12_000)));
 }
 
@@ -77,7 +77,7 @@ fn eager_oversize_list_errors_cleanly() {
     // ~5x the node cap: must surface EffectResponseTooLarge as a clean
     // error — historically the error path itself could die in the deep
     // drop of the rejected response.
-    let r = run_eager("xs <- glob \"**\"\npure (length xs)", 200_000);
+    let r = run_eager("xs <- kvKeys\npure (length xs)", 200_000);
     let err = r.expect_err("oversize eager response must error");
     assert!(
         err.contains("too large") || err.contains("TooLarge") || err.contains("100000"),
@@ -134,13 +134,13 @@ fn run_eager_stream(code: &str, n: Option<usize>) -> Result<serde_json::Value, S
 
 #[test]
 fn eager_stream_drains_fully() {
-    let r = run_eager_stream("xs <- glob \"**\"\npure (length xs)", Some(12_000));
+    let r = run_eager_stream("xs <- kvKeys\npure (length xs)", Some(12_000));
     assert_eq!(r.ok(), Some(serde_json::json!(12_000)));
 }
 
 #[test]
 fn eager_infinite_stream_errors_cleanly() {
-    let r = run_eager_stream("xs <- glob \"**\"\npure (length xs)", None);
+    let r = run_eager_stream("xs <- kvKeys\npure (length xs)", None);
     let err = r.expect_err("infinite stream under kill-switch must error");
     assert!(
         err.contains("too large") || err.contains("TooLarge") || err.contains("100000"),

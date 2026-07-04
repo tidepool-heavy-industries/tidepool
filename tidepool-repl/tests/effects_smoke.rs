@@ -162,13 +162,13 @@ async fn full_stack_effects_reachable_through_session() {
 
 
     // Exec: `run` a shell command — the result is (exit, stdout, stderr).
-    let t = eval(&server, "run \"echo wave-b-ok\"").await;
+    let t = eval(&server, "run \"echo wave-b-ok\" >>= liftEither").await;
     assert!(t.contains("wave-b-ok"), "Exec/run output: {t}");
 
     // Fs: write then read a file in the cwd sandbox (round-trip).
     let t = eval(
         &server,
-        "writeFile \"hello.txt\" \"from-fs\" >> readFile \"hello.txt\"",
+        "writeFile \"hello.txt\" \"from-fs\" >>= liftEither >> readFile \"hello.txt\" >>= liftEither",
     )
     .await;
     assert!(t.contains("from-fs"), "Fs read-back: {t}");
@@ -233,14 +233,14 @@ async fn session_def_sees_full_eval_vocabulary() {
     let (is_error, text) = run_single(
         &server,
         "sh :: Text -> M Text\n\
-         sh cmd = run cmd <&> \\p -> p.stdout\n\
+         sh cmd = run cmd >>= liftEither <&> \\p -> p.stdout\n\
          \n\
          uniqSorted :: [Int] -> [Int]\n\
          uniqSorted = L.sort . Set.toList . Set.fromList\n\
          \n\
          -- shell-effect module (Git) must be in DECL scope too\n\
          dirtyCount :: M Int\n\
-         dirtyCount = Git.gitStatus <&> length",
+         dirtyCount = Git.gitStatus >>= liftEither <&> length",
         None,
     )
     .await;

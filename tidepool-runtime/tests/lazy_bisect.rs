@@ -75,14 +75,14 @@ fn run_variant_typed(
 #[test]
 fn variant_a_discard() {
     // Lazy response delivered, never consumed past the entry force.
-    let r = run_variant("xs <- glob \"**\"\nlet _ = xs\npure Null", 12_000);
+    let r = run_variant("xs <- kvKeys\nlet _ = xs\npure Null", 12_000);
     assert_eq!(r.ok(), Some(serde_json::json!(null)));
 }
 
 #[test]
 fn variant_b_tojson_take() {
     // take + toJSON, but NO paginateResult.
-    let r = run_variant("xs <- glob \"**\"\npure (toJSON (take 3 xs))", 12_000);
+    let r = run_variant("xs <- kvKeys\npure (toJSON (take 3 xs))", 12_000);
     assert_eq!(
         r.ok(),
         Some(serde_json::json!(["item-0", "item-1", "item-2"]))
@@ -99,7 +99,7 @@ fn variant_d_whole_list_result() {
     // iterative spine conversion, and Value's iterative Drop on a default
     // test thread. Historically each of those was a recursive stack
     // overflow → silent thread death.
-    let r = run_variant_typed("xs <- glob \"**\"\npure xs", "[Text]", 12_000);
+    let r = run_variant_typed("xs <- kvKeys\npure xs", "[Text]", 12_000);
     let arr = r.expect("whole-list result must succeed");
     let arr = arr.as_array().expect("expected JSON array");
     assert_eq!(arr.len(), 10_001);
@@ -112,7 +112,7 @@ fn variant_d_whole_list_result() {
 fn variant_c_paginate() {
     // The full MCP template shape (the originally-reported hang).
     let r = run_variant(
-        "xs <- glob \"**\"\nlet _r = take 3 xs\npaginateResult 4096 (toJSON _r)",
+        "xs <- kvKeys\nlet _r = take 3 xs\npaginateResult 4096 (toJSON _r)",
         12_000,
     );
     assert_eq!(

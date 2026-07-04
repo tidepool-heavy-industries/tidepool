@@ -97,10 +97,10 @@ is `httpGet`/`httpPost`, which already `serde_json::from_str` the body Rust-side
 parsed `Value`, so an `httpGetJSON` variant would be a no-op duplicate.
 
 - **Minimal bandaid:** expose that same Rust-side parse as a standalone verb —
-  `parseJson :: Text -> M Value` (+ `tryParseJson :: Text -> M (Either Text Value)`).
-  One new effect constructor mirroring `HttpGet`'s structure (decl in
-  `tidepool-mcp/src/lib.rs` + handler in `tidepool/src/main.rs`); reuses the
-  existing `serde_json::from_str`. Closes the gap; lens consumes the result.
+  `parseJson`. ✅ SHIPPED (#335): `parseJson :: Text -> M (Either HttpError Value)`
+  — typed-failure directly (no separate `try` variant; a parse failure is
+  `Left (HttpBadJson _)`). One effect constructor mirroring `HttpGet`; reuses the
+  existing `serde_json::from_str`. Lens consumes the `Right`.
 - **Bigger (separate):** typed decode — re-add `FromJSON` + `fromJSON ::
   Value -> Result a` + `Result(..)` (pure Haskell, operates on an existing
   `Value`, no text-parser risk) so records decode without hand-lensing every

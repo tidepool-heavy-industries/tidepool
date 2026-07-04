@@ -11,28 +11,28 @@ import qualified Data.List as L
 import qualified Tidepool.Data.Text as T
 
 -- | The crate name from a Cargo.toml body (the [package] name field).
-crateName :: Doc -> Text
-crateName d = case [ l | l <- T.lines d.body, T.isPrefixOf "name " l || T.isPrefixOf "name=" l ] of
+crateName :: Text -> Text
+crateName body = case [ l | l <- T.lines body, T.isPrefixOf "name " l || T.isPrefixOf "name=" l ] of
   (l : _) -> T.filter (\c -> c /= '"' && c /= ' ') (snd (T.breakOnEnd "=" l))
   _       -> ""
 
 -- | In-workspace path-dependency crate names from a Cargo.toml body.
-crateDeps :: Doc -> [Text]
-crateDeps d =
+crateDeps :: Text -> [Text]
+crateDeps body =
   [ T.strip (T.takeWhile (\c -> c /= ' ' && c /= '=') l)
-  | l <- T.lines d.body
+  | l <- T.lines body
   , T.isPrefixOf "tidepool" (T.strip l)
   , T.isInfixOf "path" l
   ]
 
 -- | The workspace dependency graph: crate -> its in-workspace deps.
--- Uses the Fs primitives (glob/readFile) directly -- readGlob lives in
--- Tidepool.Orchestrate, not Tidepool.Effects, so a lib module can't see it.
+-- readGlob isolates per-file read failures (#328); a Cargo.toml that fails to
+-- read (binary, permission) is dropped from the graph rather than aborting.
 crateGraph :: M (Map.Map Text [Text])
 crateGraph = do
-  paths <- glob "*/Cargo.toml"
-  tomls <- mapM (\p -> Doc p <$> readFile p) paths
-  let g0    = Map.fromList [ (crateName d, crateDeps d) | d <- tomls, crateName d /= "" ]
+  rs <- readGlob "*/Cargo.toml"
+  let bodies = [ c | r <- rs, Right c <- [r.contents] ]
+      g0    = Map.fromList [ (crateName b, crateDeps b) | b <- bodies, crateName b /= "" ]
       names = Map.keysSet g0
   pure (Map.map (filter (`Set.member` names)) g0)
 

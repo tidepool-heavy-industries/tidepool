@@ -59,7 +59,7 @@ const HS: &str = "text/x-haskell";
 pub fn list(ctx: &ResourceCtx) -> Vec<ResourceDescriptor> {
     let mut out = vec![
         descriptor("tidepool://guide", "Eval guide", "How to write eval `code`: the M-a model, composition, returning JSON, the input payload lane, examples, and failure isolation."),
-        descriptor("tidepool://schema", "Schema + ask/llm", "The structured-output Schema grammar and the ask/llm/tryLlm primitives; how to extract results with optics."),
+        descriptor("tidepool://schema", "Schema + ask/llm", "The structured-output Schema grammar and the ask/llm primitives; how to extract results with optics."),
         descriptor("tidepool://edits", "Edit verb schema", "The declarative line/anchor `Edit` JSON schema (applyEdits/editsJ) and its conflict vocabulary."),
         descriptor("tidepool://vocab", "Vocabulary", "Live signatures of every verb in scope — core effect verbs + project library (.tidepool/lib), refreshed on read."),
         descriptor("tidepool://capabilities", "Capabilities", "The Prelude shadow surface (names in scope unqualified) plus the canonical Prelude/Data.List names that live under a qualifier."),
@@ -184,7 +184,7 @@ fn help_index(ctx: &ResourceCtx) -> String {
     let mut s = String::from(
         "# help topics\n\nCall `help` with one of:\n\
          - `guide`     — how to write eval code (the M-a model, returning JSON, the input lane)\n\
-         - `schema`    — the Schema grammar + ask/llm/tryLlm\n\
+         - `schema`    — the Schema grammar + ask/llm\n\
          - `edits`     — editing verbs (update, planUpdate, the Edit DSL, diffs)\n\
          - `vocab`     — every verb signature in scope (effects + project library)\n\
          - `capabilities` — the Prelude shadow surface + names that live under a qualifier\n\
@@ -212,7 +212,7 @@ fn guide_md(ctx: &ResourceCtx) -> String {
         "## Returning results\n",
         "The final value renders to JSON for the caller — Int → number, [Char] → string, ",
         "Bool → true/false, lists → arrays, and a `Value` → that JSON directly. Return a `Value` ",
-        "for structured output (`object`/`toJSON`/`parseJson`/`llm`/`tryHttpGet`); `putStrLn`/`say` ",
+        "for structured output (`object`/`toJSON`/`parseJson`/`llm`/`httpGet`); `putStrLn`/`say` ",
         "carry human-readable debug traces, and `pure x` returns a value directly. Extract from a `Value` with ",
         "optics: `v ^? key \"f\" . _String` (also `_Int`, `_Double`, `_Bool`, `_Array`); ",
         "`renderJson :: Value -> Text` renders one to compact JSON.\n\n",
@@ -242,13 +242,13 @@ fn guide_md(ctx: &ResourceCtx) -> String {
         "Verbs return named records — read fields with **record-dot** (`p.stdout`, `h.path`):\n",
         "- `run cmd :: M (Either <EffectError> Proc)` — bind the `Right`; `Proc` fields `exitCode`, `stdout`, `stderr`; `ok p` = zero exit\n",
         "- `grepGlob`/`searchFiles` → `[Hit]` — fields `path`, `line`, `text`\n",
-        "- `readGlob` → `[Doc]` — fields `path`, `body`\n",
+        "- `readGlob` → `[FileRead]` — fields `path`, `contents :: Either FsError Text`\n",
         "- `fsMeta` → `Maybe FileMeta` — fields `size`, `isFile`, `isDir`\n",
     ));
     if ctx
         .effects
         .iter()
-        .any(|e| matches!(e.type_name, "Http" | "Exec" | "Llm" | "Fs"))
+        .any(|e| matches!(e.type_name, "Http" | "Exec" | "Llm" | "Fs" | "Git" | "Lsp"))
     {
         s.push_str(concat!(
             "\n## Effect failures are values\n",
@@ -274,15 +274,19 @@ fn schema_md() -> String {
         "Both primitives take a `Schema`, return a validated `Value`, and you extract with optics.\n\n",
         "```haskell\n",
         "Schema = SObj [(Text,Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema\n\n",
-        "ask    :: Schema -> Text -> M Value   -- SUSPEND to the calling agent; reply validated vs schema, no token burn\n",
-        "llm    :: Schema -> Text -> M Value   -- AUTONOMOUS server-side model call (costs tokens); structured, no fences\n",
-        "tryLlm :: Schema -> Text -> M (Either Text Value)  -- as llm, API error/refusal -> Left err\n",
+        "ask :: Schema -> Text -> M Value   -- SUSPEND to the calling agent; reply validated vs schema, no token burn\n",
+        "llm :: Schema -> Text -> M (Either LlmError Value)   -- AUTONOMOUS server-side model call (costs tokens); structured, no fences\n",
         "```\n\n",
+        "`llm`'s failure is TYPED and TOTAL (#335) — `Left (LlmApi _)` on an API/network failure, ",
+        "`Left (LlmRefusal _)` on a declined answer, `Left LlmBudget` when the per-eval call budget is ",
+        "exhausted — none of these abort the eval. Natural spelling: `Right v <- llm schema prompt` or ",
+        "`>>= liftEither`.\n\n",
         "A non-object top-level schema (`SEnum`/`SStr`/…) is auto-wrapped for the provider and ",
-        "unwrapped on return, so `llm (SEnum [\"a\",\"b\"]) prompt` yields the bare value.\n\n",
+        "unwrapped on return, so `llm (SEnum [\"a\",\"b\"]) prompt` yields the bare value (still `Either`-wrapped).\n\n",
         "## Extracting\n",
         "```haskell\n",
-        "cat <- llm (SObj [(\"category\", SEnum [\"bug\",\"feat\"])]) prompt <&> (^? key \"category\" . _String)\n",
+        "Right v <- llm (SObj [(\"category\", SEnum [\"bug\",\"feat\"])]) prompt\n",
+        "let cat = v ^? key \"category\" . _String\n",
         "ok  <- ask (SObj [(\"ok\", SBool)]) \"proceed?\" <&> (^? key \"ok\" . _Bool)\n",
         "```\n\n",
         "## Orchestration rule\n",

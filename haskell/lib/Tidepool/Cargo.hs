@@ -21,7 +21,7 @@ import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import Tidepool.Aeson.Value (Value)
 import Tidepool.Records (Proc(..))
-import Tidepool.Effects (M, runArgv, tryParseJson)
+import Tidepool.Effects (M, runArgv, parseJson, liftEither)
 import qualified Tidepool.Shell as Shell
 
 -- | Run @cargo check --message-format=json [extras]@ and return each JSON
@@ -57,14 +57,14 @@ cargoMetadata = Shell.shJson ["cargo", "metadata", "--format-version=1"]
 -- progress messages in some terminal configurations) are silently skipped.
 runCargoJson :: [Text] -> M [Value]
 runCargoJson subArgs = do
-  p <- runArgv ("cargo" : subArgs)
+  p <- runArgv ("cargo" : subArgs) >>= liftEither
   let ls = filter (not . T.null) (T.lines p.stdout)
   vs <- mapM parseLine ls
   pure (concat vs)
   where
     parseLine :: Text -> M [Value]
     parseLine l = do
-      r <- (tryParseJson l :: M (Either Text Value))
+      r <- parseJson l
       case r of
         Right v -> pure [v]
         Left _  -> pure []

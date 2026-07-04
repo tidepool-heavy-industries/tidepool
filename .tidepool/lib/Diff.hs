@@ -100,7 +100,7 @@ apply p = do
   where
     conflictsOf (_, Left cs) = cs
     conflictsOf (_, Right _) = []
-    writeResult (fp, Right (out, _)) = writeFile (fpPath fp) out
+    writeResult (fp, Right (out, _)) = writeFile (fpPath fp) out >>= liftEither
     writeResult (_, Left _)          = pure ()           -- unreachable: zero-conflict guard
     fileReport (fp, Right (_, hrs)) = FileApplied (fpPath fp) (length hrs) (map hrLine hrs) (map hrDrift hrs)
     fileReport (fp, Left _)          = FileApplied (fpPath fp) 0 [] []   -- unreachable
@@ -128,7 +128,7 @@ rollback p = case invertPatch p of
 readTarget :: FilePatch -> M (Maybe Text)
 readTarget fp = do
   exists <- doesFileExist (fpPath fp)
-  if exists then fmap Just (readFile (fpPath fp)) else pure Nothing
+  if exists then fmap Just (readFile (fpPath fp) >>= liftEither) else pure Nothing
 
 -- | Diff two existing files (old → new) and return the rendered unified diff
 -- plus summary stats as DATA. Reads both paths; the patch is labelled with the
@@ -137,8 +137,8 @@ readTarget fp = do
 -- @{"path":…,"changed":false}@.
 diffFiles :: Text -> Text -> M DiffFilesOutcome
 diffFiles oldP newP = do
-  oldC <- readFile oldP
-  newC <- readFile newP
+  oldC <- readFile oldP >>= liftEither
+  newC <- readFile newP >>= liftEither
   case genPatch oldP oldC newC of
     Left _   -> pure (DiffFilesUnchanged oldP)
     Right fp -> pure (DiffFilesChanged
@@ -157,7 +157,7 @@ genPatchTo path newContent = do
   exists <- doesFileExist path
   if exists
     then do
-      old <- readFile path
+      old <- readFile path >>= liftEither
       case genPatch path old newContent of
         Left _   -> pure ""
         Right fp -> pure (renderPatch [fp])
