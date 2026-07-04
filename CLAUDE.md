@@ -92,13 +92,35 @@ description emitted by the server — not duplicated in these files (it drifts).
 ```bash
 nix develop                              # Enter dev shell (provides Rust + GHC 9.12)
 cargo check --workspace                  # Type check
-cargo test --workspace                   # Run all tests
-cargo test -p tidepool-codegen           # Run tests for one crate
-cargo test -p tidepool-eval -- test_name # Run a single test by name
+scripts/battery.sh                       # Run all tests (cargo-nextest; builds TIDEPOOL_EXTRACT if unset)
+cargo nextest run -p tidepool-codegen    # Run tests for one crate
+cargo nextest run -p tidepool-eval -E 'test(test_name)'  # Run a single test by name
 cargo clippy --workspace                 # Lint
 cargo fmt --all -- --check               # Format check
 cargo install --path tidepool            # Install the MCP server binary (`tidepool`)
 ```
+
+**Test runner is `cargo-nextest`** (`cargo install cargo-nextest --locked` if not
+already on PATH), not plain `cargo test`. nextest runs every test in its own OS
+process — never two tests sharing one — which structurally de-races the JIT's
+process-global-ish state (signal handlers, GC, fork-safety harnesses) that the
+old blanket `-- --test-threads=1` discipline used to serialize against by
+brute force. See `.config/nextest.toml` for the hazard-audit note (which
+historical hazards existed, why process-per-test resolves them, and why no
+`test-group` overrides are needed today) and `scripts/battery.sh` for the
+canonical full-suite invocation. Plain `cargo test --workspace -- --test-threads=1`
+still works as a fallback (e.g. no `cargo-nextest` available) but is
+noticeably slower — see the branch history for a measured comparison.
+
+**Every test run needs `TIDEPOOL_EXTRACT`** pointing at a built
+`tidepool-extract-bin`, or tests fail loud with `Metadata entry must be an
+array of exactly 7`:
+```bash
+export PATH=<nix-ghc-with-packages>/bin:$PATH   # lens on the GHC package DB
+cd haskell && cabal build tidepool-extract-bin
+export TIDEPOOL_EXTRACT=$(cabal list-bin tidepool-extract-bin)
+```
+`scripts/battery.sh` does this automatically when `TIDEPOOL_EXTRACT` is unset.
 
 Changed `haskell/`? See `haskell/CLAUDE.md` for the rebuild + deploy steps.
 
