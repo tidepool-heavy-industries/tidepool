@@ -74,6 +74,7 @@ auditFile file = do
             <> payload
   llm (SArr (SObj [ ("line", SNum), ("kind", SStr)
                   , ("risk", SEnum ["low", "medium", "high"]), ("reason", SStr) ])) prompt
+    >>= liftEither
 
 -- | Cheap line-local risk bucket; pre-classifies sites to shrink the LLM-judged residue.
 bucket :: Site -> Text

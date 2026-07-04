@@ -21,7 +21,7 @@ commitHeat now halfLife c =
 -- Example: hotspots 300 12
 hotspots :: Int -> Int -> M [(Text, Double)]
 hotspots n k = do
-  cs  <- gitLog n
+  cs  <- gitLog n >>= liftEither
   now <- getCurrentTime
   let hot = Map.fromListWith (+) [(f, commitHeat now 30 c) | c <- cs, f <- c.files]
   pure (L.take k (L.sortOn (negate . snd) (Map.toList hot)))

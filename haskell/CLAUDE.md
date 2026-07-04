@@ -109,13 +109,15 @@ extract with optics:
   server-side against `schema` before re-entering (invalid replies do NOT consume
   the continuation). No autonomous token burn — the caller answers.
 - `llm schema prompt` — AUTONOMOUS server-side model call (one structured call,
-  costs tokens); returns a `Value` with no markdown fences.
-- `tryLlm schema prompt` — as `llm`, but an API error/refusal becomes `Left err`
-  instead of aborting the eval.
+  costs tokens); returns `Either LlmError Value` (#335) — no markdown fences.
+  Failure is TYPED and TOTAL: `Left (LlmApi _)` on an API/network failure,
+  `Left (LlmRefusal _)` on a declined answer, `Left LlmBudget` when the
+  per-eval call budget is exhausted — none of these abort the eval. Natural
+  spelling: `Right v <- llm schema prompt` or `>>= liftEither`.
 - `Schema` ADT (NOT a JSON Value): `SObj [(Text,Schema)] | SArr Schema | SStr |
   SNum | SBool | SEnum [Text] | SOpt Schema`.
 - Extract: `v ^? key "f" . _String` (also `_Int`/`_Double`/`_Bool`/`_Array`). E.g.
-  `cat <- llm (SObj [("c", SEnum ["a","b"])]) p <&> (^? key "c" . _String)`;
+  `Right v <- llm (SObj [("c", SEnum ["a","b"])]) p; let cat = v ^? key "c" . _String`;
   `ok <- ask (SObj [("ok", SBool)]) "proceed?" <&> (^? key "ok" . _Bool)`.
 - Orchestration: let the LLM DECIDE (`SEnum`/`SBool`) and let deterministic code
   EMIT syntax (regex/AST) — models are unreliable at generating domain syntax.
@@ -123,8 +125,8 @@ extract with optics:
 > **Removed, do not hunt for these:** the unstructured `llm :: Text -> M Text` /
 > `ask :: Text -> M Value`, the `Q` mini-DSL (`askQ`/`llmQ`/`pick`/`yn`/`obj`/
 > `txt`/`num`/`bar`), `llmJson`/`tryLlmJson`, `??`/`?!`, `triage`/`survey`/`sift`,
-> and the `.tidepool/lib` `Asks`/`Seek`/`Flow` modules — all superseded by the
-> `Schema`/`ask`/`llm`/`tryLlm` vocabulary above.
+> `tryLlm` (folded into `llm`, #335), and the `.tidepool/lib` `Asks`/`Seek`/`Flow`
+> modules — all superseded by the `Schema`/`ask`/`llm` vocabulary above.
 
 ## Known Limits (the JIT runs a strict Haskell subset; failures are LOUD)
 

@@ -10,7 +10,7 @@ import qualified Tidepool.Data.Text as T
 -- | Run a command; return stdout. Non-zero exit = loud error with stderr.
 sh :: Text -> M Text
 sh cmd = do
-  p <- run cmd
+  p <- run cmd >>= liftEither
   if ok p
     then pure p.stdout
     else error ("sh: exit " <> pack (show p.exitCode) <> ": " <> cmd <> "\n" <> p.stderr)
@@ -21,7 +21,7 @@ shLines cmd = lines <$> sh cmd
 
 -- | Run a command and return the full Proc record (exitCode, stdout, stderr) without erroring on failure.
 shProc :: Text -> M Proc
-shProc = run
+shProc cmd = run cmd >>= liftEither
 
 -- | grep -rn equivalent: search all files under a directory for a regex.
 -- @grepIn pat dir@ — content regex FIRST, directory path SECOND (same order as grepGlob).
@@ -70,9 +70,9 @@ vocab = do
 -- diagnostic carries a [GHC-nnnnn] code; this fetches what it means.
 explainGhc :: Text -> M Text
 explainGhc code = do
-  r <- tryHttpGet ("https://errors.haskell.org/messages/" <> code <> "/")
+  r <- httpGet ("https://errors.haskell.org/messages/" <> code <> "/")
   pure (case r of
-    Left e -> "fetch failed: " <> e
+    Left e -> "fetch failed: " <> pack (show e)
     Right (String html) -> T.strip (between "<title>" "</title>" html)
     Right _ -> "unexpected non-text body")
   where

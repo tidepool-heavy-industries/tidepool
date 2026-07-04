@@ -7,17 +7,17 @@ import qualified Tidepool.Data.Text as T
 
 t1 :: M [Text]
 t1 = do
-  p <- run "echo hi 1>&2"
+  Right p <- run "echo hi 1>&2"
   pure (lines p.stderr)
 
 t2 :: M [Text]
 t2 = do
-  p <- run "echo hi 1>&2"
+  Right p <- run "echo hi 1>&2"
   pure (filter (\l -> "h" `isPrefixOf` l) (lines p.stderr))
 
 t3 :: M [Text]
 t3 = do
-  p <- run "echo hi 1>&2"
+  Right p <- run "echo hi 1>&2"
   pure (filter (\l -> "h" `isPrefixOf` l || "w" `isPrefixOf` l) (lines p.stderr))
 
 t4 :: [Text]
@@ -25,22 +25,22 @@ t4 = filter (\l -> "h" `isPrefixOf` l) ["hi", "wo"]
 
 t5 :: M [Text]
 t5 = do
-  p <- run "echo hi 1>&2"
+  Right p <- run "echo hi 1>&2"
   pure (filter (\l -> len l > 1) (lines p.stderr))
 
 t6 :: M [Bool]
 t6 = do
-  p <- run "echo hi 1>&2"
+  Right p <- run "echo hi 1>&2"
   pure (map (\l -> "h" `isPrefixOf` l) (lines p.stderr))
 
 t7 :: M [Text]
 t7 = do
-  p <- run "echo hi 1>&2"
+  Right p <- run "echo hi 1>&2"
   pure (filter (\l -> len l > 1) (lines p.stderr) <> [pack (show p.exitCode), p.stdout])
 
 t8 :: M [Text]
 t8 = do
-  _ <- run "true"
+  _ <- run "true" >>= liftEither
   pure (filter (\l -> len l > 1) ["hi", "a"])
 
 t9 :: M Int

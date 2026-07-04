@@ -26,7 +26,7 @@ impl DispatchEffect<()> for NumberDispatcher {
         _request: &Value,
         cx: &tidepool_effect::EffectContext<'_, ()>,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
-        cx.respond(serde_json::json!(42.0))
+        cx.respond(Ok::<serde_json::Value, String>(serde_json::json!(42.0)))
     }
 }
 
@@ -43,7 +43,7 @@ fn repro_qq_union() {
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let nonce = std::env::var("NONCE").unwrap_or_default();
     let code = format!(
-        "v <- httpGet \"x\"\n-- nonce {nonce}\npure [fmt|got {{maybe 0 round (v ^? _Number)}}|]"
+        "Right v <- httpGet \"x\"\n-- nonce {nonce}\npure [fmt|got {{maybe 0 round (v ^? _Number)}}|]"
     );
     // Mirror the MCP eval handler: a quoter token in the code injects the
     // Tidepool.QQ import (template_haskell prepends `import ` per line).

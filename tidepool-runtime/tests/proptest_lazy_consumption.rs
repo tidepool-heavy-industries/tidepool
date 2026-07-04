@@ -393,30 +393,30 @@ fn result_type_and_body(case: &Case) -> (&'static str, String) {
         // then `lines pr.stderr` — #313. Records-era rewrite of the (c,o,e) shape.
         (Producer::TupleStringList, Consumer::Full) => (
             "Int",
-            "pr <- run \"x\"\npure (length (lines pr.stderr))".into(),
+            "Right pr <- run \"x\"\npure (length (lines pr.stderr))".into(),
         ),
         (Producer::TupleStringList, Consumer::LinesOfPartial(_)) => (
             "[Text]",
-            format!("pr <- run \"x\"\npure (take {k} (lines pr.stderr))"),
+            format!("Right pr <- run \"x\"\npure (take {k} (lines pr.stderr))"),
         ),
         (Producer::TupleStringList, Consumer::MapFilterPrefix(_)) => (
             "[Text]",
             format!(
-                "pr <- run \"x\"\npure (take {k} (filter (\\l -> \"item-1\" `isPrefixOf` l) (lines pr.stderr)))"
+                "Right pr <- run \"x\"\npure (take {k} (filter (\\l -> \"item-1\" `isPrefixOf` l) (lines pr.stderr)))"
             ),
         ),
         // #313 bisection: t7 inline + the field-isolating sub-cases.
         (Producer::TupleStringList, Consumer::TupleAllFields) => (
             "[Text]",
-            "pr <- run \"x\"\npure (filter (\\l -> len l > 1) (lines pr.stderr) <> [pack (show pr.exitCode), pr.stdout])".into(),
+            "Right pr <- run \"x\"\npure (filter (\\l -> len l > 1) (lines pr.stderr) <> [pack (show pr.exitCode), pr.stdout])".into(),
         ),
         (Producer::TupleStringList, Consumer::TupleAppendStdout) => (
             "[Text]",
-            "pr <- run \"x\"\npure (lines pr.stderr <> [pr.stdout])".into(),
+            "Right pr <- run \"x\"\npure (lines pr.stderr <> [pr.stdout])".into(),
         ),
         (Producer::TupleStringList, Consumer::TupleShowCode) => (
             "[Text]",
-            "pr <- run \"x\"\npure [pack (show pr.exitCode)]".into(),
+            "Right pr <- run \"x\"\npure [pack (show pr.exitCode)]".into(),
         ),
         // ---- TwoList: xs, ys :: [Text] via two `kvKeys` calls ----------------
         (Producer::TwoList(_), Consumer::Full) => (
@@ -493,8 +493,16 @@ impl DispatchEffect<()> for WorkerDispatcher {
                 cx.respond(Ok::<String, String>(s))
             }
             Producer::TupleStringList => {
+                // #335: `run` is now `M (Either ExecError Proc)`; the eval
+                // unwraps with `Right pr <- run "x"`, so deliver the wire tuple
+                // as a `Right`. It's a Complete value, not a list, so no stream
+                // / probe_list_spine concern.
                 let stderr: String = (0..n).map(item).collect::<Vec<_>>().join("\n");
-                cx.respond((0i64, "stdout".to_string(), stderr))
+                cx.respond(Ok::<(i64, String, String), String>((
+                    0i64,
+                    "stdout".to_string(),
+                    stderr,
+                )))
             }
         }
     }

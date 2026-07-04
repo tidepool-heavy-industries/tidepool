@@ -109,7 +109,7 @@ steer rule model human x = case rule x of
 -- or below threshold → the cascade escalates.
 judgeBool :: Double -> Text -> M (Maybe Bool)
 judgeBool thresh prompt = do
-  r <- tryLlm (SObj [("verdict", SBool), ("confidence", SNum)]) prompt
+  r <- llm (SObj [("verdict", SBool), ("confidence", SNum)]) prompt
   pure (case r of
     Right v -> case (v ^? key "confidence" . _Double, v ^? key "verdict" . _Bool) of
       (Just c, Just b) -> if c >= thresh then Just b else Nothing
@@ -160,7 +160,7 @@ explore depth goal = walk callersOf onPath depth
 -- files are excluded alongside path-heuristic test files.
 the :: Text -> Text -> M (Maybe LspNode)
 the name intent = do
-  defs    <- lspWhere name
+  defs    <- lspWhere name >>= liftEither
   nonTest <- filterM (fmap not . isTestM) defs
   case nonTest of
     []  -> pure Nothing
@@ -169,7 +169,7 @@ the name intent = do
   where
     menu ns = intercalate "\n" (imap (\i n -> showT i <> ") " <> nodeContainer n <> "  " <> nodeText n) ns)
     pickModel ns = do
-      r <- tryLlm (SObj [("index", SNum), ("confidence", SNum)])
+      r <- llm (SObj [("index", SNum), ("confidence", SNum)])
              ("Pick the definition matching: " <> intent <> "\n" <> menu ns)
       pure (case r of
         Right v -> case (v ^? key "confidence" . _Double, v ^? key "index" . _Double) of
@@ -216,7 +216,7 @@ chart depth entry = do
       role <- steer (\_ -> Nothing) (\_ -> roleModel n sig) (\_ -> roleHuman n) ()
       pure (object ["sym" .= nodeName n, "file" .= nodeFile n, "role" .= role])
     roleModel n sig = do
-      r <- tryLlm (SObj [("role", SStr), ("confidence", SNum)])
+      r <- llm (SObj [("role", SStr), ("confidence", SNum)])
              ("One short line: what does " <> nodeName n <> " do?\n" <> maybe (nodeText n) id sig)
       pure (case r of
         Right v -> case (v ^? key "confidence" . _Double, v ^? key "role" . _String) of
@@ -260,7 +260,7 @@ chartAuto depth entry = do
     describe n = do
       sig <- lspHover n
       let fallback = firstUseful (maybe (nodeText n) id sig)
-      r <- tryLlm (SObj [("role", SStr), ("confidence", SNum)])
+      r <- llm (SObj [("role", SStr), ("confidence", SNum)])
              ("One short specific line: what does " <> nodeName n <> " do? If unsure, confidence 0.\n"
               <> maybe (nodeText n) id sig)
       let role = case r of
