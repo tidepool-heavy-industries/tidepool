@@ -9,8 +9,8 @@ use std::process::Command;
 use tempfile::TempDir;
 use thiserror::Error;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
-use tidepool_codegen::jit_machine::JitEffectMachine;
-pub use tidepool_codegen::jit_machine::{CancelHandle, JitError};
+use tidepool_codegen::jit_machine::{JitEffectMachine, SuspendableOutcome};
+pub use tidepool_codegen::jit_machine::{CancelHandle, JitError, ResumeInput};
 pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_eval::value::Value;
 use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings, ReadError};
@@ -291,6 +291,101 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
     on_ready(machine.cancel_handle());
     let value = machine.run(&table, handlers, user)?;
     Ok(EvalResult::new(value, table))
+}
+
+/// The outcome of driving a turn that may SUSPEND at the ask boundary (E2
+/// threadless suspension). On [`SuspendableRun::Suspended`] the machine's heap
+/// is retained (session machinery) and the whole `JitEffectMachine` — plus the
+/// `DataConTable` — is handed back so the caller can stow it as data (no parked
+/// thread) and resume it later, on any thread, via [`resume_suspended_turn`].
+pub enum SuspendableRun {
+    /// The turn ran to completion.
+    Completed(EvalResult),
+    /// The turn suspended at the ask boundary.
+    Suspended {
+        /// The stowed machine (heap retained; continuation held internally).
+        machine: JitEffectMachine,
+        /// The constructor table this turn compiled against (needed to extract
+        /// the prompt/meta from `request` and to convert the answer on resume).
+        table: DataConTable,
+        /// The bridged `Ask` request value.
+        request: tidepool_eval::value::Value,
+    },
+}
+
+/// The outcome of resuming a stowed turn (see [`resume_suspended_turn`]).
+pub enum ResumedRun {
+    /// The turn ran to completion.
+    Completed(EvalResult),
+    /// The turn suspended again at a further ask boundary. The machine (borrowed
+    /// `&mut` by the resume) holds the new continuation internally, ready for
+    /// another [`resume_suspended_turn`].
+    Suspended {
+        request: tidepool_eval::value::Value,
+    },
+}
+
+/// Compile `source` and drive it until it COMPLETES or SUSPENDS at `ask_tag`
+/// (the `Ask` union tag). Sibling of [`compile_and_run_cancellable`] that, at an
+/// ask boundary, hands the machine back as data instead of blocking a thread —
+/// the substrate for E2 threadless session suspension. The machine is compiled
+/// as a SESSION machine so its heap is retained across the suspension (the drive
+/// itself is byte-identical to the one-shot path for a turn that never asks).
+pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
+    source: &str,
+    target: &str,
+    include: &[&Path],
+    handlers: &mut H,
+    user: &U,
+    nursery_size: usize,
+    ask_tag: u64,
+    on_ready: impl FnOnce(CancelHandle),
+) -> Result<SuspendableRun, RuntimeError> {
+    let CompileResult {
+        expr,
+        mut table,
+        warnings,
+    } = compile_haskell(source, target, include)?;
+    if warnings.has_io {
+        return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
+    }
+    table.populate_siblings_from_expr(&expr);
+    let mut machine = JitEffectMachine::compile_session(&expr, &table, nursery_size)?;
+    on_ready(machine.cancel_handle());
+    match machine.run_suspendable(&table, handlers, user, ask_tag)? {
+        SuspendableOutcome::Completed(value) => {
+            Ok(SuspendableRun::Completed(EvalResult::new(value, table)))
+        }
+        SuspendableOutcome::Suspended { request } => Ok(SuspendableRun::Suspended {
+            machine,
+            table,
+            request,
+        }),
+    }
+}
+
+/// Re-enter a stowed turn (from [`compile_and_run_suspendable`]) with the
+/// answer or an abort, driving to the next suspension or completion. Runs on
+/// ANY thread — the machine re-installs its per-thread reach and re-points GC
+/// state at its retained heap (never a nursery reset). `on_ready` receives the
+/// machine's cancel handle before the (blocking) resume begins, exactly as
+/// [`compile_and_run_cancellable`] does, so a runaway resume can be aborted.
+pub fn resume_suspended_turn<U, H: DispatchEffect<U>>(
+    machine: &mut JitEffectMachine,
+    table: &DataConTable,
+    handlers: &mut H,
+    user: &U,
+    ask_tag: u64,
+    input: ResumeInput,
+    on_ready: impl FnOnce(CancelHandle),
+) -> Result<ResumedRun, RuntimeError> {
+    on_ready(machine.cancel_handle());
+    match machine.resume_suspended(table, handlers, user, ask_tag, input)? {
+        SuspendableOutcome::Completed(value) => {
+            Ok(ResumedRun::Completed(EvalResult::new(value, table.clone())))
+        }
+        SuspendableOutcome::Suspended { request } => Ok(ResumedRun::Suspended { request }),
+    }
 }
 
 /// Compile Haskell source and run it as a pure (non-effectful) program.

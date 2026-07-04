@@ -643,14 +643,17 @@ impl JitEffectMachine {
         let answer = match input {
             ResumeInput::Answer(val) => val,
             ResumeInput::Abort(reason) => {
-                // Edit site (b): a stowed machine has no thread, so record the
-                // cancel cause DIRECTLY on this machine's state (not via the
-                // CURRENT_MACHINE thread-local). We do NOT run the continuation
-                // — the ask itself fails, mirroring pre-E2's answer-channel
-                // abort (`EffectError::Handler("ask aborted by caller: …")`),
-                // which is what the engine maps to its terminal error outcome.
-                self.machine_state
-                    .set_first_cause(crate::host_fns::RuntimeError::Cancelled);
+                // Edit site (b): a stowed machine has no thread. We do NOT run
+                // the continuation — the ask itself fails, byte-identically to
+                // pre-E2's answer-channel abort, which returned
+                // `EffectError::Handler("ask aborted by caller: …")` from the
+                // dispatcher (no `Cancelled` first cause — that was only the
+                // gate/timeout abort). The engine maps this to its terminal
+                // error outcome exactly as before. `install_registries` above
+                // already installed this machine as `CURRENT_MACHINE`, so any
+                // machine-scoped state stays reachable, but this early return
+                // surfaces the error directly without touching the first-cause
+                // cell.
                 return Err(JitError::Effect(EffectError::Handler(format!(
                     "ask aborted by caller: {reason}"
                 ))));

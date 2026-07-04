@@ -21,6 +21,28 @@
 //! Keeping every wire string on the server side is also what makes the cutover
 //! behavior-preserving: the formatters (and their tests) are untouched.
 //!
+//! # E2 — threadless ask suspension (stowed machine)
+//!
+//! An `Ask` suspension no longer parks a blocked OS thread on an answer
+//! channel. Instead the eval thread drives the turn through
+//! [`crate::compile_and_run_suspendable`] to the ask boundary, where the JIT
+//! effect machine — already a reified coroutine (its continuation is a heap
+//! value; the native stack fully unwinds between yields) — is handed back as
+//! DATA. The eval thread packages the stowed `JitEffectMachine` + its table +
+//! the handler stack into a boxed resume closure ([`StowedResume`]), sends it in
+//! [`EngineMessage::SuspendedAsk`], and EXITS. The [`Continuation`]'s
+//! `AwaitingAnswer` state holds that closure (plus the turn's semaphore permit,
+//! transferred off the exiting thread so the suspended session keeps its pool
+//! slot). On [`resume`](SessionEngine::resume) a FRESH eval thread re-enters the
+//! stowed machine via [`crate::resume_suspended_turn`] — the machine re-installs
+//! its per-thread reach and re-points GC state at its RETAINED session heap
+//! (never a nursery reset), then drives to the next boundary.
+//!
+//! The timeout-`Paused` suspension is unchanged: it parks the eval thread on the
+//! gate mid-computation (NOT at an ask boundary — the native stack is live and
+//! cannot be stowed), so that continuation still carries a live parked thread.
+//! Only the ask boundary — a clean, reified yield point — goes threadless.
+//!
 //! # Oneshot vs. the end-state registry
 //!
 //! E1 drives the **oneshot** shape: `render = Json`, `retention = DropAfterDone`,
@@ -28,10 +50,8 @@
 //! Only the stateless MCP eval server drives the engine today; the resident
 //! REPL server stays a direct consumer of the lower session substrate
 //! ([`super::SessionLib`] / [`super::compile_session_turn`]) with a parked
-//! worker thread, because unifying its resident-machine model onto this
-//! spawn-per-turn engine is not a behavior-preserving change — that convergence
-//! is E2 (see the seam below).
-//! The end-state registry entry the API is aimed at is
+//! worker thread — unifying its resident-machine model onto this engine is a
+//! separate step. The end-state registry entry the API is aimed at is
 //! `{machine, ModuleEnv, render policy, retention, pool slot}`;
 //! [`RenderPolicy`] and [`Retention`] are carried on [`EngineConfig`] as that
 //! forward seam even though a oneshot turn pins them. Render policy is applied
@@ -39,44 +59,24 @@
 //! handing the engine a wrapped `source`), so the engine does not branch on it
 //! today; retention is inherent — a completed oneshot thread exits and drops its
 //! machine.
-//!
-//! # E2 seam — thread parking → machine stowing
-//!
-//! Today a suspended turn (`Ask` or timeout-pause) is a **real OS thread parked**
-//! on its `response_rx` / pause gate, held live in a [`Continuation`]. E2
-//! replaces that with a *stowed machine*: the machine-state TL's T3 work makes a
-//! `JitEffectMachine` suspendable, so a [`Continuation`] would carry a stowed
-//! machine instead of a blocked thread, and [`SessionEngine::drive`]'s park path
-//! would stow-and-return rather than leave a thread on the gate. The
-//! [`Continuation`] struct and that park path are the exact edit sites for E2.
-//!
-//! # Machine-scoped diagnostics — pending cutover
-//!
-//! The eval-thread error/panic arms call the ambient
-//! [`crate::drain_diagnostics`], and [`AskDispatcher`]'s gate-abort checkpoint
-//! calls the ambient `tidepool_codegen::host_fns::set_first_cause`. The
-//! machine-state TL is moving those thread-locals onto per-machine state; once
-//! that lands, these engine-internal call sites switch to
-//! `JitEffectMachine::drain_diagnostics(&self)` / a machine-scoped first-cause
-//! setter. Note the cross-thread reality: `set_first_cause` fires from the
-//! dispatcher's stack frame, so the machine-scoped setter must reach the right
-//! machine from there. Until then the ambient fns stay valid.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use parking_lot::Mutex;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::{timeout, Duration};
 
 use tidepool_bridge::{FromCore, ToCore};
 use tidepool_effect::pause::PauseGate;
 
 use crate::{
-    classify, value_to_json, CancelHandle, DispatchEffect, FailureClass, Phase, EVAL_STACK_SIZE,
+    classify, value_to_json, CancelHandle, DispatchEffect, FailureClass, Phase, ResumeInput,
+    ResumedRun, RuntimeError, SuspendableRun, EVAL_STACK_SIZE,
 };
 
 // ---------------------------------------------------------------------------
@@ -105,13 +105,13 @@ pub trait OutputSink: Clone + Send + 'static {
 pub enum RenderPolicy {
     /// Wrap the result in `toJSON` — the stateless eval contract.
     Json,
-    /// Render via `Show`/`toWire` — the resident REPL surface (E2).
+    /// Render via `Show`/`toWire` — the resident REPL surface.
     Show,
 }
 
 /// Whether the machine is dropped when its turn ends or kept resident. Oneshot
 /// pins [`Retention::DropAfterDone`] (the eval thread exits, freeing its heap);
-/// [`Retention::Persistent`] is the resident-REPL end-state (E2).
+/// [`Retention::Persistent`] is the resident-REPL end-state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Retention {
     /// Free the machine when the turn completes.
@@ -121,21 +121,50 @@ pub enum Retention {
 }
 
 // ---------------------------------------------------------------------------
-// Thread ↔ driver messages
+// Eval-thread context + thread → driver messages
 // ---------------------------------------------------------------------------
 
-/// Messages from the eval thread to the async driver.
-pub(crate) enum EngineMessage {
-    /// The program hit `Ask` and is parked waiting for a response. `meta`
-    /// carries `AskWith` metadata (e.g. a `"schema"` key) as JSON.
-    Suspended {
+/// Everything a spawned eval thread needs to run one turn segment and report
+/// back. Built by [`SessionEngine::run_turn`] and handed to the turn `body`.
+/// The `permit` rides along so a body that suspends at an ask can transfer it
+/// into the stowed continuation (keeping the suspended session's pool slot)
+/// rather than releasing it on thread exit.
+struct EvalThreadCtx<O: OutputSink> {
+    session_tx: UnboundedSender<EngineMessage<O>>,
+    gate: Arc<PauseGate>,
+    cancel_slot: Arc<Mutex<Option<CancelHandle>>>,
+    captured: O,
+    permit: OwnedSemaphorePermit,
+}
+
+/// A stowed ask-suspension: re-enter the captured machine with an answer or an
+/// abort, on a fresh eval thread. Boxed so the registry need not be generic
+/// over the handler stack `H` — the closure captures the concrete
+/// `JitEffectMachine` + `DataConTable` + handlers and erases them here.
+type StowedResume<O> = Box<dyn FnOnce(EvalThreadCtx<O>, EngineResumeInput) + Send>;
+
+/// Engine-level resume input: the validated answer (still JSON — converted to a
+/// core `Value` inside the stowed closure, which owns the table) or an abort.
+enum EngineResumeInput {
+    Answer(serde_json::Value),
+    Abort(String),
+}
+
+/// Messages from an eval thread to the async driver.
+enum EngineMessage<O: OutputSink> {
+    /// The program hit `Ask` and stowed itself. `resume` re-enters the captured
+    /// machine; `permit` is the turn's pool slot, transferred off the (now
+    /// exiting) eval thread so the suspended session keeps its slot.
+    SuspendedAsk {
         prompt: String,
         meta: Option<serde_json::Value>,
+        resume: StowedResume<O>,
+        permit: OwnedSemaphorePermit,
     },
     /// The program completed successfully.
     Completed { result: String },
     /// The program failed, pre-classified on the eval thread (which still holds
-    /// the structured [`crate::RuntimeError`]) so a wire-format skew stays
+    /// the structured [`RuntimeError`]) so a wire-format skew stays
     /// `version-skew`/`compile` instead of being re-guessed from text.
     Error {
         error: String,
@@ -144,41 +173,33 @@ pub(crate) enum EngineMessage {
     },
 }
 
-/// Messages from the driver back to the parked eval thread. `Answer` carries the
-/// CANONICAL validated JSON (the validator's parse, single source of truth);
-/// `Abort` terminates the ask as a handler error.
-pub(crate) enum ResumeMsg {
-    Answer(serde_json::Value),
-    Abort(String),
-}
-
 /// What a parked continuation is waiting for — decides resume semantics.
-enum ContinuationKind {
-    /// Parked on an `Ask`: resume validates the reply against `expected_schema`
-    /// (if any) and sends it down the channel.
+enum ContinuationState<O: OutputSink> {
+    /// Paused at the timeout-yield boundary: a real eval thread is parked on the
+    /// gate mid-computation (NOT an ask boundary, so the native stack is live
+    /// and cannot be stowed). Resume wakes the gate and drives the same thread;
+    /// abort wakes it with an error.
+    Paused {
+        session_rx: UnboundedReceiver<EngineMessage<O>>,
+        thread: Option<JoinHandle<()>>,
+        gate: Arc<PauseGate>,
+    },
+    /// Suspended at an `Ask`: STOWED as data (E2). No thread. `resume` re-enters
+    /// on a fresh thread; `permit` is the session's held pool slot, handed to
+    /// that thread. Resume validates the reply against `expected_schema` first.
     AwaitingAnswer {
         expected_schema: Option<serde_json::Value>,
+        resume: StowedResume<O>,
+        permit: OwnedSemaphorePermit,
     },
-    /// Paused at an effect boundary (timeout-as-yield): resume wakes the gate
-    /// and waits another window (its payload is ignored — sending on the channel
-    /// would poison the next ask); abort wakes the gate with an error.
-    Paused,
 }
 
-/// A suspended turn, waiting for a resume/abort call. The E2 seam: this holds a
-/// parked OS thread today; it will hold a stowed machine instead.
-struct Continuation<O> {
-    response_tx: Sender<ResumeMsg>,
-    session_rx: tokio::sync::mpsc::UnboundedReceiver<EngineMessage>,
+/// A suspended turn, waiting for a resume/abort call.
+struct Continuation<O: OutputSink> {
     source: Arc<str>,
     created_at: std::time::Instant,
     captured: O,
-    kind: ContinuationKind,
-    /// The eval thread's join handle, carried across park/resume cycles so abort
-    /// (and crash forensics) can reap it.
-    thread: Option<JoinHandle<()>>,
-    /// The pause gate shared with the eval thread's dispatcher.
-    gate: Arc<PauseGate>,
+    state: ContinuationState<O>,
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +304,7 @@ pub struct StartTurn<H, O> {
     pub include: Vec<PathBuf>,
     /// The effect handler stack for this turn (moved onto the eval thread).
     pub handlers: H,
-    /// The `Ask` effect's union tag, intercepted by the dispatcher.
+    /// The `Ask` effect's union tag, intercepted by the suspend driver.
     pub ask_tag: u64,
     /// Effect names by tag, for annotating an `UnhandledEffect` error.
     pub effect_names: Vec<String>,
@@ -314,7 +335,7 @@ pub struct EngineConfig {
 
 /// The session-turn driver. Generic over the output sink `O` so it stays below
 /// the server crate that owns the concrete buffer.
-pub struct SessionEngine<O> {
+pub struct SessionEngine<O: OutputSink> {
     continuations: Arc<Mutex<HashMap<String, Continuation<O>>>>,
     next_cont_id: Arc<AtomicU64>,
     orphaned_threads: Arc<AtomicUsize>,
@@ -350,11 +371,10 @@ impl<O: OutputSink> SessionEngine<O> {
         format!("{}_{}", self.config.cont_prefix, id)
     }
 
-    /// Evict the oldest continuation, freeing its pool slot. AwaitingAnswer:
-    /// dropping the entry drops `response_tx` → the blocked thread's
-    /// `recv()` returns `Err` → it exits → permit freed. Paused: the thread is
-    /// parked on the gate's condvar (dropping alone would leak it parked
-    /// forever) — wake it with an abort and reap.
+    /// Evict the oldest continuation, freeing its pool slot. Paused: the thread
+    /// is parked on the gate — wake it with an abort and reap. AwaitingAnswer
+    /// (E2): no thread — dropping the entry drops the stowed machine + releases
+    /// the held `permit`, freeing the slot directly.
     fn evict_oldest_continuation(&self) {
         let mut conts = self.continuations.lock();
         if let Some(oldest_key) = conts
@@ -364,11 +384,15 @@ impl<O: OutputSink> SessionEngine<O> {
         {
             log::info!("evicting oldest continuation {oldest_key} under pressure");
             if let Some(session) = conts.remove(&oldest_key) {
-                if matches!(session.kind, ContinuationKind::Paused) {
-                    session
-                        .gate
-                        .request_abort("evicted under pressure while paused".into());
-                    self.reap_detached(session.thread);
+                match session.state {
+                    ContinuationState::Paused { thread, gate, .. } => {
+                        gate.request_abort("evicted under pressure while paused".into());
+                        self.reap_detached(thread);
+                    }
+                    ContinuationState::AwaitingAnswer { .. } => {
+                        // Dropping `session` drops the resume closure (freeing
+                        // the stowed machine) and the `permit` (freeing the slot).
+                    }
                 }
             }
         }
@@ -388,6 +412,71 @@ impl<O: OutputSink> SessionEngine<O> {
                 orphan_count.fetch_sub(1, Ordering::Relaxed);
             });
         }
+    }
+
+    /// Acquire a pool slot; under pressure, evict the oldest suspended turn and
+    /// retry once. Mirrors the E1 admission dance.
+    async fn acquire_permit(&self) -> Result<OwnedSemaphorePermit, StartError> {
+        match self.semaphore.clone().try_acquire_owned() {
+            Ok(p) => Ok(p),
+            Err(_) => {
+                self.evict_oldest_continuation();
+                tokio::task::yield_now().await;
+                match self.semaphore.clone().try_acquire_owned() {
+                    Ok(p) => Ok(p),
+                    Err(_) => Err(StartError::Busy),
+                }
+            }
+        }
+    }
+
+    /// Spawn an eval thread running `body` and drive it to its first outcome.
+    /// Shared by [`start_turn`](Self::start_turn) (fresh compile+run) and
+    /// [`resume`](Self::resume)/[`abort`](Self::abort) (re-entry of a stowed
+    /// machine). The `permit` is moved into the thread's [`EvalThreadCtx`] so a
+    /// body that suspends can transfer it into the stowed continuation.
+    async fn run_turn(
+        &self,
+        body: impl FnOnce(EvalThreadCtx<O>) + Send + 'static,
+        captured: O,
+        source: Arc<str>,
+        permit: OwnedSemaphorePermit,
+        timeout_secs: u64,
+    ) -> TurnOutcome {
+        let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel::<EngineMessage<O>>();
+        let gate = PauseGate::new();
+        let cancel_slot: Arc<Mutex<Option<CancelHandle>>> = Arc::new(Mutex::new(None));
+
+        let gate_thread = Arc::clone(&gate);
+        let cancel_thread = Arc::clone(&cancel_slot);
+        let captured_thread = captured.clone();
+
+        let handle = std::thread::Builder::new()
+            .name("tidepool-eval".into())
+            .stack_size(EVAL_STACK_SIZE)
+            .spawn(move || {
+                // Catch SIGILL/SIGSEGV from JIT code instead of killing the host.
+                tidepool_codegen::signal_safety::install();
+                body(EvalThreadCtx {
+                    session_tx,
+                    gate: gate_thread,
+                    cancel_slot: cancel_thread,
+                    captured: captured_thread,
+                    permit,
+                });
+            })
+            .expect("failed to spawn eval thread");
+
+        self.drive(
+            session_rx,
+            source,
+            captured,
+            Some(handle),
+            gate,
+            timeout_secs,
+            cancel_slot,
+        )
+        .await
     }
 
     /// Spawn and drive one oneshot turn to its first outcome.
@@ -410,149 +499,91 @@ impl<O: OutputSink> SessionEngine<O> {
             timeout_secs,
         } = turn;
 
-        // Channels + pause gate for this turn.
-        let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel::<EngineMessage>();
-        let (response_tx, response_rx) = std::sync::mpsc::channel::<ResumeMsg>();
-        let gate = PauseGate::new();
-        let gate_for_thread = Arc::clone(&gate);
-
-        // Filled with the machine's JIT cancel handle once built (see `on_ready`);
-        // the timeout path reads it to abort a pure runaway at a safepoint.
-        let cancel_slot: Arc<Mutex<Option<CancelHandle>>> = Arc::new(Mutex::new(None));
-        let cancel_slot_thread = Arc::clone(&cancel_slot);
-
-        // Acquire a pool slot; under pressure, evict the oldest suspended turn.
-        let permit = match self.semaphore.clone().try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
-                self.evict_oldest_continuation();
-                tokio::task::yield_now().await;
-                match self.semaphore.clone().try_acquire_owned() {
-                    Ok(p) => p,
-                    Err(_) => return Err(StartError::Busy),
-                }
-            }
-        };
+        let permit = self.acquire_permit().await?;
 
         let source_for_thread = Arc::clone(&source);
-        let captured_for_thread = captured.clone();
-        let thread_session_tx = session_tx;
+        let body = move |ctx: EvalThreadCtx<O>| {
+            let EvalThreadCtx {
+                session_tx,
+                gate,
+                cancel_slot,
+                captured,
+                permit,
+            } = ctx;
 
-        let handle = std::thread::Builder::new()
-            .name("tidepool-eval".into())
-            .stack_size(EVAL_STACK_SIZE)
-            .spawn(move || {
-                let _permit = permit;
-                // Catch SIGILL/SIGSEGV from JIT code instead of killing the host.
-                tidepool_codegen::signal_safety::install();
+            let include_paths: Vec<&Path> =
+                include.iter().map(std::path::PathBuf::as_path).collect();
 
-                let include_paths: Vec<&Path> =
-                    include.iter().map(std::path::PathBuf::as_path).collect();
-                let gate_phase = Arc::clone(&gate_for_thread);
-                let mut dispatcher = AskDispatcher {
-                    inner: handlers,
+            // Compile starts now; the cancel-handle installer fires at machine
+            // creation — the compile→run boundary — so a timeout before it is a
+            // slow compile, not a runaway.
+            gate.set_compiling(true);
+            let gate_run = Arc::clone(&gate);
+            let cancel_cb = Arc::clone(&cancel_slot);
+            let mut wrapped = GateDispatcher {
+                inner: handlers,
+                gate: Arc::clone(&gate),
+            };
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::compile_and_run_suspendable(
+                    &source_for_thread,
+                    "result",
+                    &include_paths,
+                    &mut wrapped,
+                    &captured,
+                    nursery_size,
                     ask_tag,
-                    session_tx: thread_session_tx.clone(),
-                    response_rx,
-                    gate: gate_for_thread,
-                };
+                    |h| {
+                        gate_run.set_compiling(false);
+                        *cancel_cb.lock() = Some(h);
+                    },
+                )
+            }));
+            gate.set_compiling(false);
 
-                // Compile starts now; the cancel-handle installer fires at
-                // machine creation — the compile→run boundary — so a timeout
-                // before it is a slow compile, not a runaway.
-                gate_phase.set_compiling(true);
-                let gate_run = Arc::clone(&gate_phase);
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::compile_and_run_cancellable(
-                        &source_for_thread,
-                        "result",
-                        &include_paths,
-                        &mut dispatcher,
-                        &captured_for_thread,
-                        nursery_size,
-                        |h| {
-                            gate_run.set_compiling(false);
-                            *cancel_slot_thread.lock() = Some(h);
-                        },
-                    )
-                }));
-                gate_phase.set_compiling(false);
-
-                match result {
-                    Ok(Ok(eval_result)) => {
-                        let _ = thread_session_tx.send(EngineMessage::Completed {
-                            result: eval_result.to_string_pretty(),
-                        });
-                    }
-                    Ok(Err(e)) => {
-                        // Classify from the STRUCTURED error while we still hold
-                        // it — a wire-format skew becomes version-skew/compile
-                        // with a self-diagnosing message, not re-guessed text.
-                        let env = classify(&e);
-                        let diagnostics = crate::drain_diagnostics();
-                        let mut detail = env.message;
-                        // Annotate UnhandledEffect with the effect name + roster.
-                        if let Some(tag_str) = detail.strip_prefix("Unhandled effect at tag ") {
-                            if let Ok(tag) = tag_str.trim().parse::<usize>() {
-                                if tag < effect_names.len() {
-                                    detail = format!("{} (effect: {})", detail, effect_names[tag]);
-                                }
-                            }
-                            let roster: String = effect_names
-                                .iter()
-                                .enumerate()
-                                .map(|(i, name)| format!("  {} = {}", i, name))
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            detail.push_str(&format!("\n\nRegistered effects:\n{roster}"));
-                        }
-                        if !diagnostics.is_empty() {
-                            detail.push_str("\n\n## JIT Diagnostics\n");
-                            for d in &diagnostics {
-                                detail.push_str(d);
-                                detail.push('\n');
-                            }
-                        }
-                        let _ = thread_session_tx.send(EngineMessage::Error {
-                            error: detail,
-                            class: env.class,
-                            phase: env.phase,
-                        });
-                    }
-                    Err(panic_payload) => {
-                        // A panic unwinding out of the JIT is a run-phase engine
-                        // crash (a caught signal that still took the frame down).
-                        let diagnostics = crate::drain_diagnostics();
-                        let mut detail = format_panic_payload(panic_payload);
-                        if !diagnostics.is_empty() {
-                            detail.push_str("\n\n## JIT Diagnostics\n");
-                            for d in &diagnostics {
-                                detail.push_str(d);
-                                detail.push('\n');
-                            }
-                        }
-                        let _ = thread_session_tx.send(EngineMessage::Error {
-                            error: detail,
-                            class: FailureClass::Runtime,
-                            phase: Phase::Run,
-                        });
+            let msg = match result {
+                Ok(Ok(SuspendableRun::Completed(eval_result))) => {
+                    drop(permit);
+                    EngineMessage::Completed {
+                        result: eval_result.to_string_pretty(),
                     }
                 }
-            })
-            .map_err(|_| StartError::Busy)?;
+                Ok(Ok(SuspendableRun::Suspended {
+                    machine,
+                    table,
+                    request,
+                })) => build_suspended_message::<O, H>(
+                    machine,
+                    table,
+                    wrapped,
+                    request,
+                    permit,
+                    effect_names,
+                    ask_tag,
+                ),
+                Ok(Err(e)) => {
+                    drop(permit);
+                    let (error, class, phase) = describe_run_error(&e, &effect_names);
+                    EngineMessage::Error {
+                        error,
+                        class,
+                        phase,
+                    }
+                }
+                Err(panic_payload) => {
+                    drop(permit);
+                    let (error, class, phase) = describe_panic(panic_payload);
+                    EngineMessage::Error {
+                        error,
+                        class,
+                        phase,
+                    }
+                }
+            };
+            let _ = session_tx.send(msg);
+        };
 
-        Ok(self
-            .drive(
-                session_rx,
-                source,
-                response_tx,
-                captured,
-                Some(handle),
-                gate,
-                timeout_secs,
-                cancel_slot,
-            )
-            .await)
+        Ok(self.run_turn(body, captured, source, permit, timeout_secs).await)
     }
 
     /// Resume a parked continuation. `validate` is given the continuation's
@@ -564,28 +595,56 @@ impl<O: OutputSink> SessionEngine<O> {
     where
         F: FnOnce(Option<&serde_json::Value>) -> Result<serde_json::Value, V>,
     {
-        enum Consumed<O, V> {
-            Session(Continuation<O>),
-            Invalid(V),
+        enum Taken<O: OutputSink> {
+            Paused {
+                session_rx: UnboundedReceiver<EngineMessage<O>>,
+                thread: Option<JoinHandle<()>>,
+                gate: Arc<PauseGate>,
+                captured: O,
+                source: Arc<str>,
+            },
+            Ask {
+                resume: StowedResume<O>,
+                permit: OwnedSemaphorePermit,
+                captured: O,
+                source: Arc<str>,
+                canonical: serde_json::Value,
+            },
         }
-        let consumed = {
+
+        let taken = {
             let mut conts = self.continuations.lock();
             match conts.get(cont_id) {
                 None => return ResumeOutcome::NotFound,
-                // Paused: nothing listens on the channel (sending would poison
-                // the next ask). Consume, wake the gate, wait another window.
+                // Paused: nothing to validate. Consume, wake the gate, re-drive.
                 Some(Continuation {
-                    kind: ContinuationKind::Paused,
+                    state: ContinuationState::Paused { .. },
                     ..
                 }) => {
                     let session = conts
                         .remove(cont_id)
                         .expect("present: checked under the same lock");
-                    session.gate.resume_run();
-                    Consumed::Session(session)
+                    let ContinuationState::Paused {
+                        session_rx,
+                        thread,
+                        gate,
+                    } = session.state
+                    else {
+                        unreachable!("matched Paused above")
+                    };
+                    gate.resume_run();
+                    Taken::Paused {
+                        session_rx,
+                        thread,
+                        gate,
+                        captured: session.captured,
+                        source: session.source,
+                    }
                 }
                 Some(Continuation {
-                    kind: ContinuationKind::AwaitingAnswer { expected_schema },
+                    state: ContinuationState::AwaitingAnswer {
+                        expected_schema, ..
+                    },
                     ..
                 }) => {
                     let expected_schema = expected_schema.clone();
@@ -597,15 +656,23 @@ impl<O: OutputSink> SessionEngine<O> {
                             if let Some(session) = conts.get_mut(cont_id) {
                                 session.created_at = std::time::Instant::now();
                             }
-                            Consumed::Invalid(v)
+                            return ResumeOutcome::Invalid(v);
                         }
                         Ok(canonical) => {
                             let session = conts
                                 .remove(cont_id)
                                 .expect("present: checked under the same lock");
-                            match session.response_tx.send(ResumeMsg::Answer(canonical)) {
-                                Ok(()) => Consumed::Session(session),
-                                Err(_) => return ResumeOutcome::ThreadGone,
+                            let ContinuationState::AwaitingAnswer { resume, permit, .. } =
+                                session.state
+                            else {
+                                unreachable!("matched AwaitingAnswer above")
+                            };
+                            Taken::Ask {
+                                resume,
+                                permit,
+                                captured: session.captured,
+                                source: session.source,
+                                canonical,
                             }
                         }
                     }
@@ -613,15 +680,47 @@ impl<O: OutputSink> SessionEngine<O> {
             }
         };
 
-        let session = match consumed {
-            Consumed::Invalid(v) => return ResumeOutcome::Invalid(v),
-            Consumed::Session(s) => s,
-        };
-        ResumeOutcome::Driven(self.drive_continuation(session).await)
+        let timeout_secs = self.config.default_timeout_secs;
+        match taken {
+            Taken::Paused {
+                session_rx,
+                thread,
+                gate,
+                captured,
+                source,
+            } => ResumeOutcome::Driven(
+                self.drive(
+                    session_rx,
+                    source,
+                    captured,
+                    thread,
+                    gate,
+                    timeout_secs,
+                    Arc::new(Mutex::new(None)),
+                )
+                .await,
+            ),
+            Taken::Ask {
+                resume,
+                permit,
+                captured,
+                source,
+                canonical,
+            } => {
+                let body =
+                    move |ctx: EvalThreadCtx<O>| resume(ctx, EngineResumeInput::Answer(canonical));
+                ResumeOutcome::Driven(
+                    self.run_turn(body, captured, source, permit, timeout_secs)
+                        .await,
+                )
+            }
+        }
     }
 
-    /// Abort a parked continuation: wake it (answer-channel `Abort` for an ask,
-    /// gate abort for a pause) and drive it to its terminal error outcome.
+    /// Abort a parked continuation: Paused wakes its parked thread with a gate
+    /// abort and re-drives it to its terminal error; AwaitingAnswer (E2)
+    /// re-enters the stowed machine with an abort input on a fresh thread,
+    /// producing the same terminal error a pre-E2 answer-channel abort did.
     pub async fn abort(&self, cont_id: &str, reason: String) -> AbortOutcome {
         let session = {
             let mut conts = self.continuations.lock();
@@ -631,47 +730,49 @@ impl<O: OutputSink> SessionEngine<O> {
             }
         };
 
-        match &session.kind {
-            ContinuationKind::AwaitingAnswer { .. } => {
-                if session.response_tx.send(ResumeMsg::Abort(reason)).is_err() {
-                    return AbortOutcome::ThreadGone;
-                }
+        let timeout_secs = self.config.default_timeout_secs;
+        match session.state {
+            ContinuationState::Paused {
+                session_rx,
+                thread,
+                gate,
+            } => {
+                gate.request_abort(format!("aborted by caller (while paused): {reason}"));
+                AbortOutcome::Driven(
+                    self.drive(
+                        session_rx,
+                        session.source,
+                        session.captured,
+                        thread,
+                        gate,
+                        timeout_secs,
+                        Arc::new(Mutex::new(None)),
+                    )
+                    .await,
+                )
             }
-            ContinuationKind::Paused => {
-                session
-                    .gate
-                    .request_abort(format!("aborted by caller (while paused): {reason}"));
+            ContinuationState::AwaitingAnswer {
+                resume, permit, ..
+            } => {
+                let body =
+                    move |ctx: EvalThreadCtx<O>| resume(ctx, EngineResumeInput::Abort(reason));
+                AbortOutcome::Driven(
+                    self.run_turn(body, session.captured, session.source, permit, timeout_secs)
+                        .await,
+                )
             }
         }
-        AbortOutcome::Driven(self.drive_continuation(session).await)
-    }
-
-    /// Drive a resumed/aborted continuation with the default window. There is no
-    /// JIT cancel handle to forward (the original thread holds its own; a
-    /// resumed runaway falls back to the detach path).
-    async fn drive_continuation(&self, session: Continuation<O>) -> TurnOutcome {
-        self.drive(
-            session.session_rx,
-            session.source,
-            session.response_tx,
-            session.captured,
-            session.thread,
-            session.gate,
-            self.config.default_timeout_secs,
-            Arc::new(Mutex::new(None)),
-        )
-        .await
     }
 
     /// Drive a turn to its first outcome, with the window set by `timeout_secs`.
-    /// At the window an eval at (or reaching) an effect boundary parks as a
-    /// continuation; a pure runaway is detached.
+    /// At the window an eval reaching an effect boundary parks as a `Paused`
+    /// continuation; a pure runaway is detached. An ask suspension arrives
+    /// pre-stowed as [`EngineMessage::SuspendedAsk`].
     #[allow(clippy::too_many_arguments)]
     async fn drive(
         &self,
-        mut session_rx: tokio::sync::mpsc::UnboundedReceiver<EngineMessage>,
+        mut session_rx: UnboundedReceiver<EngineMessage<O>>,
         source: Arc<str>,
-        response_tx: Sender<ResumeMsg>,
         captured: O,
         mut handle: Option<JoinHandle<()>>,
         gate: Arc<PauseGate>,
@@ -682,8 +783,8 @@ impl<O: OutputSink> SessionEngine<O> {
             Ok(received) => received,
             Err(_elapsed) => {
                 // The window expired. A message may have raced the deadline
-                // (e.g. an Ask suspend just as we timed out) — drain it rather
-                // than pausing a thread already parked on the answer channel.
+                // (e.g. an ask suspend just as we timed out) — drain it rather
+                // than pausing a thread that already sent and exited.
                 match session_rx.try_recv() {
                     Ok(message) => Some(message),
                     Err(_) => {
@@ -703,14 +804,14 @@ impl<O: OutputSink> SessionEngine<O> {
                             self.continuations.lock().insert(
                                 cont_id.clone(),
                                 Continuation {
-                                    response_tx,
-                                    session_rx,
                                     source,
                                     created_at: std::time::Instant::now(),
                                     captured,
-                                    kind: ContinuationKind::Paused,
-                                    thread: handle.take(),
-                                    gate,
+                                    state: ContinuationState::Paused {
+                                        session_rx,
+                                        thread: handle.take(),
+                                        gate,
+                                    },
                                 },
                             );
                             return TurnOutcome::Paused {
@@ -726,7 +827,9 @@ impl<O: OutputSink> SessionEngine<O> {
                         // safepoints, unlike the effect-only gate) so a pure
                         // runaway aborts at its next safepoint and EXITS, freeing
                         // its permit instead of pinning it forever.
-                        gate.request_abort("detached after timeout (no yield point reached)".into());
+                        gate.request_abort(
+                            "detached after timeout (no yield point reached)".into(),
+                        );
                         if let Some(cancel) = cancel_slot.lock().as_ref() {
                             cancel.cancel();
                         }
@@ -758,11 +861,19 @@ impl<O: OutputSink> SessionEngine<O> {
                     EngineMessage::Completed { .. } | EngineMessage::Error { .. } => {
                         captured.drain()
                     }
-                    EngineMessage::Suspended { .. } => captured.snapshot(),
+                    EngineMessage::SuspendedAsk { .. } => captured.snapshot(),
                 };
                 match message {
                     EngineMessage::Completed { result } => TurnOutcome::Completed { output, result },
-                    EngineMessage::Suspended { prompt, meta } => {
+                    EngineMessage::SuspendedAsk {
+                        prompt,
+                        meta,
+                        resume,
+                        permit,
+                    } => {
+                        // The eval thread stowed itself and is exiting; detach
+                        // its handle (nothing to join across the suspension).
+                        let _ = handle.take();
                         let cont_id = self.next_continuation_id();
                         // `expected_schema` mirrors the server's envelope hoist:
                         // the `"schema"` key of an object `meta`, else `None`.
@@ -773,14 +884,14 @@ impl<O: OutputSink> SessionEngine<O> {
                         self.continuations.lock().insert(
                             cont_id.clone(),
                             Continuation {
-                                response_tx,
-                                session_rx,
                                 source,
                                 created_at: std::time::Instant::now(),
                                 captured,
-                                kind: ContinuationKind::AwaitingAnswer { expected_schema },
-                                thread: handle.take(),
-                                gate,
+                                state: ContinuationState::AwaitingAnswer {
+                                    expected_schema,
+                                    resume,
+                                    permit,
+                                },
                             },
                         );
                         TurnOutcome::SuspendedAsk {
@@ -821,22 +932,213 @@ impl<O: OutputSink> SessionEngine<O> {
 }
 
 // ---------------------------------------------------------------------------
-// Ask-effect dispatcher (parks the eval thread on suspend)
+// Eval-thread outcome → message helpers (shared by start + resume bodies)
 // ---------------------------------------------------------------------------
 
-/// Wraps a handler stack and intercepts the `Ask` tag: on `Ask`, emits a
-/// [`EngineMessage::Suspended`] and blocks the eval thread on `response_rx`
-/// until the driver answers or aborts. Every dispatch entry is also a
-/// timeout-yield checkpoint (the shared [`PauseGate`]).
-struct AskDispatcher<H> {
-    inner: H,
+/// Build an [`EngineMessage::SuspendedAsk`] from a stowed machine: extract the
+/// prompt/meta from the bridged `request`, and box a [`StowedResume`] closure
+/// capturing the machine + table + (unwrapped) handlers for the next re-entry.
+/// `H` here is the WRAPPED [`GateDispatcher`] stack; `into_inner` recovers the
+/// base handlers so each turn re-wraps with its own fresh gate.
+fn build_suspended_message<O, H>(
+    machine: tidepool_codegen::jit_machine::JitEffectMachine,
+    table: tidepool_repr::DataConTable,
+    wrapped: GateDispatcher<H>,
+    request: tidepool_eval::value::Value,
+    permit: OwnedSemaphorePermit,
+    effect_names: Vec<String>,
     ask_tag: u64,
-    session_tx: tokio::sync::mpsc::UnboundedSender<EngineMessage>,
-    response_rx: Receiver<ResumeMsg>,
+) -> EngineMessage<O>
+where
+    O: OutputSink,
+    H: DispatchEffect<O> + Send + 'static,
+{
+    let (prompt, meta) = match extract_ask_request(&request, &table) {
+        Ok(pm) => pm,
+        Err(e) => {
+            drop(permit);
+            return EngineMessage::Error {
+                error: format!("ask request malformed: {e}"),
+                class: FailureClass::Runtime,
+                phase: Phase::Run,
+            };
+        }
+    };
+    let resume = make_resume_closure::<O, H>(machine, table, wrapped.inner, effect_names, ask_tag);
+    EngineMessage::SuspendedAsk {
+        prompt,
+        meta,
+        resume,
+        permit,
+    }
+}
+
+/// Box a re-entry closure for a stowed machine. When invoked with a fresh
+/// [`EvalThreadCtx`] and an answer/abort, it re-installs the machine's reach,
+/// drives to the next boundary, and sends the resulting [`EngineMessage`] —
+/// re-stowing (recursively) if it suspends at a further ask.
+fn make_resume_closure<O, H>(
+    mut machine: tidepool_codegen::jit_machine::JitEffectMachine,
+    table: tidepool_repr::DataConTable,
+    base: H,
+    effect_names: Vec<String>,
+    ask_tag: u64,
+) -> StowedResume<O>
+where
+    O: OutputSink,
+    H: DispatchEffect<O> + Send + 'static,
+{
+    Box::new(move |ctx: EvalThreadCtx<O>, input: EngineResumeInput| {
+        let EvalThreadCtx {
+            session_tx,
+            gate,
+            cancel_slot,
+            captured,
+            permit,
+        } = ctx;
+
+        // Convert the engine-level resume input to codegen's, using the stowed
+        // table to bridge a JSON answer to a core Value.
+        let codegen_input = match input {
+            EngineResumeInput::Answer(json) => match json.to_value(&table) {
+                Ok(v) => ResumeInput::Answer(v),
+                Err(e) => {
+                    drop(permit);
+                    let _ = session_tx.send(EngineMessage::Error {
+                        error: format!("ask answer could not be bridged to a value: {e}"),
+                        class: FailureClass::Runtime,
+                        phase: Phase::Run,
+                    });
+                    return;
+                }
+            },
+            EngineResumeInput::Abort(reason) => ResumeInput::Abort(reason),
+        };
+
+        let mut wrapped = GateDispatcher {
+            inner: base,
+            gate: Arc::clone(&gate),
+        };
+        let cancel_cb = Arc::clone(&cancel_slot);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::resume_suspended_turn(
+                &mut machine,
+                &table,
+                &mut wrapped,
+                &captured,
+                ask_tag,
+                codegen_input,
+                |h| {
+                    *cancel_cb.lock() = Some(h);
+                },
+            )
+        }));
+
+        let msg = match result {
+            Ok(Ok(ResumedRun::Completed(eval_result))) => {
+                drop(permit);
+                EngineMessage::Completed {
+                    result: eval_result.to_string_pretty(),
+                }
+            }
+            Ok(Ok(ResumedRun::Suspended { request })) => build_suspended_message::<O, H>(
+                machine,
+                table,
+                wrapped,
+                request,
+                permit,
+                effect_names,
+                ask_tag,
+            ),
+            Ok(Err(e)) => {
+                drop(permit);
+                let (error, class, phase) = describe_run_error(&e, &effect_names);
+                EngineMessage::Error {
+                    error,
+                    class,
+                    phase,
+                }
+            }
+            Err(panic_payload) => {
+                drop(permit);
+                let (error, class, phase) = describe_panic(panic_payload);
+                EngineMessage::Error {
+                    error,
+                    class,
+                    phase,
+                }
+            }
+        };
+        let _ = session_tx.send(msg);
+    })
+}
+
+/// Classify a run error into `(detail, class, phase)` for an
+/// [`EngineMessage::Error`], annotating an `UnhandledEffect` with the effect
+/// name + roster and appending any JIT diagnostics. Byte-identical to the E1
+/// eval-thread error arm.
+fn describe_run_error(e: &RuntimeError, effect_names: &[String]) -> (String, FailureClass, Phase) {
+    let env = classify(e);
+    let diagnostics = crate::drain_diagnostics();
+    let mut detail = env.message;
+    // Annotate UnhandledEffect with the effect name + roster.
+    if let Some(tag_str) = detail.strip_prefix("Unhandled effect at tag ") {
+        if let Ok(tag) = tag_str.trim().parse::<usize>() {
+            if tag < effect_names.len() {
+                detail = format!("{} (effect: {})", detail, effect_names[tag]);
+            }
+        }
+        let roster: String = effect_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| format!("  {} = {}", i, name))
+            .collect::<Vec<_>>()
+            .join("\n");
+        detail.push_str(&format!("\n\nRegistered effects:\n{roster}"));
+    }
+    if !diagnostics.is_empty() {
+        detail.push_str("\n\n## JIT Diagnostics\n");
+        for d in &diagnostics {
+            detail.push_str(d);
+            detail.push('\n');
+        }
+    }
+    (detail, env.class, env.phase)
+}
+
+/// Classify a caught panic (a signal that still took the eval frame down) as a
+/// run-phase runtime crash, appending any JIT diagnostics. Byte-identical to
+/// the E1 eval-thread panic arm.
+fn describe_panic(
+    payload: Box<dyn std::any::Any + Send>,
+) -> (String, FailureClass, Phase) {
+    let diagnostics = crate::drain_diagnostics();
+    let mut detail = format_panic_payload(payload);
+    if !diagnostics.is_empty() {
+        detail.push_str("\n\n## JIT Diagnostics\n");
+        for d in &diagnostics {
+            detail.push_str(d);
+            detail.push('\n');
+        }
+    }
+    (detail, FailureClass::Runtime, Phase::Run)
+}
+
+// ---------------------------------------------------------------------------
+// Gate dispatcher (timeout-yield checkpoint; ask is intercepted upstream)
+// ---------------------------------------------------------------------------
+
+/// Wraps a handler stack with the shared [`PauseGate`] timeout-yield checkpoint.
+/// Unlike E1's `AskDispatcher`, it does NOT intercept the ask tag — that is now
+/// handled by the codegen suspend driver (`ask_tag` → threadless suspension), so
+/// the ask never reaches this dispatcher. Every non-ask dispatch entry is a
+/// timeout-yield checkpoint: park while paused, error out on abort.
+struct GateDispatcher<H> {
+    inner: H,
     gate: Arc<PauseGate>,
 }
 
-impl<H: DispatchEffect<O>, O> DispatchEffect<O> for AskDispatcher<H> {
+impl<H: DispatchEffect<O>, O> DispatchEffect<O> for GateDispatcher<H> {
     fn dispatch(
         &mut self,
         tag: u64,
@@ -853,48 +1155,9 @@ impl<H: DispatchEffect<O>, O> DispatchEffect<O> for AskDispatcher<H> {
             );
             tidepool_effect::error::EffectError::Handler(reason)
         })?;
-        let result = self.dispatch_inner(tag, request, cx);
+        let result = self.inner.dispatch(tag, request, cx);
         self.gate.exit_effect();
         result
-    }
-}
-
-impl<H> AskDispatcher<H> {
-    fn dispatch_inner<O>(
-        &mut self,
-        tag: u64,
-        request: &tidepool_eval::value::Value,
-        cx: &tidepool_effect::dispatch::EffectContext<'_, O>,
-    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError>
-    where
-        H: DispatchEffect<O>,
-    {
-        if tag == self.ask_tag {
-            let (prompt, meta) = extract_ask_request(request, cx.table())
-                .map_err(tidepool_effect::error::EffectError::Handler)?;
-            let _ = self
-                .session_tx
-                .send(EngineMessage::Suspended { prompt, meta });
-            // Block until the driver sends a canonical (already validated) reply.
-            let msg = self.response_rx.recv().map_err(|_| {
-                tidepool_effect::error::EffectError::Handler(
-                    "Ask session closed (timeout or client disconnected)".into(),
-                )
-            })?;
-            match msg {
-                ResumeMsg::Answer(json_val) => {
-                    let core_val = json_val
-                        .to_value(cx.table())
-                        .map_err(tidepool_effect::error::EffectError::Bridge)?;
-                    Ok(core_val.into())
-                }
-                ResumeMsg::Abort(reason) => Err(tidepool_effect::error::EffectError::Handler(
-                    format!("ask aborted by caller: {reason}"),
-                )),
-            }
-        } else {
-            self.inner.dispatch(tag, request, cx)
-        }
     }
 }
 
@@ -990,35 +1253,57 @@ mod tests {
     }
 
     /// A driver harness: feed one `EngineMessage`, then drive with no live
-    /// thread (handle `None`). Mirrors the retired mcp `handle_session_result`
-    /// unit tests, now asserting the STRUCTURED outcome the server maps to wire.
+    /// thread (handle `None`). Asserts the STRUCTURED outcome the server maps to
+    /// wire. Mirrors the retired mcp `handle_session_result` unit tests.
     async fn drive_one(
         engine: &SessionEngine<TestSink>,
         captured: TestSink,
-        message: EngineMessage,
-    ) -> (TurnOutcome, Sender<ResumeMsg>) {
-        let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel::<EngineMessage>();
-        let (response_tx, _response_rx) = std::sync::mpsc::channel::<ResumeMsg>();
+        message: EngineMessage<TestSink>,
+    ) -> TurnOutcome {
+        let (session_tx, session_rx) =
+            tokio::sync::mpsc::unbounded_channel::<EngineMessage<TestSink>>();
         session_tx.send(message).unwrap();
-        let outcome = engine
+        // Hold the sender open so the channel does not read as a crash.
+        engine
             .drive(
                 session_rx,
                 "src".into(),
-                response_tx.clone(),
                 captured,
                 None,
                 PauseGate::new(),
                 600,
                 Arc::new(Mutex::new(None)),
             )
-            .await;
-        (outcome, response_tx)
+            .await
+    }
+
+    /// A dummy stowed-resume closure that immediately reports `Completed` — lets
+    /// the AwaitingAnswer registry/validation lifecycle be tested without a real
+    /// JIT machine.
+    fn dummy_resume(result: &'static str) -> StowedResume<TestSink> {
+        Box::new(move |ctx: EvalThreadCtx<TestSink>, _input: EngineResumeInput| {
+            let EvalThreadCtx {
+                session_tx, permit, ..
+            } = ctx;
+            drop(permit);
+            let _ = session_tx.send(EngineMessage::Completed {
+                result: result.to_string(),
+            });
+        })
+    }
+
+    fn one_permit(engine: &SessionEngine<TestSink>) -> OwnedSemaphorePermit {
+        engine
+            .semaphore
+            .clone()
+            .try_acquire_owned()
+            .expect("a permit is available")
     }
 
     #[tokio::test]
     async fn completed_splits_output_and_result() {
         let engine = test_engine();
-        let (outcome, _tx) = drive_one(
+        let outcome = drive_one(
             &engine,
             TestSink::with(&["log1"]),
             EngineMessage::Completed {
@@ -1039,12 +1324,15 @@ mod tests {
     async fn suspended_registers_continuation_and_hoists_schema() {
         let engine = test_engine();
         let meta = serde_json::json!({"schema": {"type": "string"}, "moves": ["a"]});
-        let (outcome, _tx) = drive_one(
+        let permit = one_permit(&engine);
+        let outcome = drive_one(
             &engine,
             TestSink::with(&["pre"]),
-            EngineMessage::Suspended {
+            EngineMessage::SuspendedAsk {
                 prompt: "pick".into(),
                 meta: Some(meta.clone()),
+                resume: dummy_resume("ok"),
+                permit,
             },
         )
         .await;
@@ -1066,8 +1354,10 @@ mod tests {
         // The continuation is registered, awaiting an answer, schema hoisted.
         let conts = engine.continuations.lock();
         let entry = conts.get(&cont_id).expect("continuation registered");
-        match &entry.kind {
-            ContinuationKind::AwaitingAnswer { expected_schema } => {
+        match &entry.state {
+            ContinuationState::AwaitingAnswer {
+                expected_schema, ..
+            } => {
                 assert_eq!(expected_schema, &Some(serde_json::json!({"type": "string"})));
             }
             _ => panic!("expected AwaitingAnswer"),
@@ -1077,7 +1367,7 @@ mod tests {
     #[tokio::test]
     async fn error_carries_class_phase_and_output() {
         let engine = test_engine();
-        let (outcome, _tx) = drive_one(
+        let outcome = drive_one(
             &engine,
             TestSink::with(&["oops"]),
             EngineMessage::Error {
@@ -1105,34 +1395,26 @@ mod tests {
     }
 
     /// A failing validator leaves the continuation in place (retryable); a valid
-    /// one consumes it; a third resume finds nothing. Mirrors the retired
-    /// mcp `test_resume_validation_fail_then_retry` wire lifecycle.
+    /// one consumes it and drives the stowed closure to its outcome; a third
+    /// resume finds nothing. Mirrors the retired mcp
+    /// `test_resume_validation_fail_then_retry` wire lifecycle.
     #[tokio::test]
     async fn resume_validation_fail_then_retry_then_gone() {
         let engine = test_engine();
-        // Register a suspended continuation directly (no live thread; the answer
-        // channel receiver is kept so `send` on resume succeeds).
-        let (response_tx, response_rx) = std::sync::mpsc::channel::<ResumeMsg>();
-        let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel::<EngineMessage>();
+        let permit = one_permit(&engine);
         engine.continuations.lock().insert(
             "cont_1".into(),
             Continuation {
-                response_tx,
-                session_rx,
                 source: "src".into(),
                 created_at: std::time::Instant::now(),
                 captured: TestSink::default(),
-                kind: ContinuationKind::AwaitingAnswer {
+                state: ContinuationState::AwaitingAnswer {
                     expected_schema: Some(serde_json::json!({"type": "string"})),
+                    resume: dummy_resume("resumed-value"),
+                    permit,
                 },
-                thread: None,
-                gate: PauseGate::new(),
             },
         );
-        // No live eval thread: dropping the sender closes the channel, so the
-        // post-resume `drive` observes the "thread gone" close immediately
-        // instead of blocking the whole window.
-        drop(session_tx);
 
         // 1. Invalid reply: continuation NOT consumed.
         let r = engine
@@ -1141,16 +1423,17 @@ mod tests {
         assert!(matches!(r, ResumeOutcome::Invalid(v) if v == "nope"));
         assert!(engine.continuations.lock().contains_key("cont_1"));
 
-        // 2. Valid reply: canonical crosses the channel; continuation consumed;
-        //    drive then observes the thread gone (channel closed) → Crashed.
+        // 2. Valid reply: continuation consumed; the dummy closure runs on a
+        //    fresh eval thread and reports Completed.
         let r = engine
             .resume::<_, String>("cont_1", |_schema| Ok(serde_json::json!("ok")))
             .await;
-        assert!(matches!(r, ResumeOutcome::Driven(_)));
-        assert!(matches!(
-            response_rx.recv(),
-            Ok(ResumeMsg::Answer(v)) if v == serde_json::json!("ok")
-        ));
+        match r {
+            ResumeOutcome::Driven(TurnOutcome::Completed { result, .. }) => {
+                assert_eq!(result, "resumed-value");
+            }
+            _ => panic!("expected Driven(Completed)"),
+        }
         assert!(!engine.continuations.lock().contains_key("cont_1"));
 
         // 3. Third resume: nothing there.
@@ -1160,20 +1443,53 @@ mod tests {
         assert!(matches!(r, ResumeOutcome::NotFound));
     }
 
+    /// Aborting a stowed ask continuation drives the dummy closure with an abort
+    /// input to a terminal outcome (here the dummy still reports Completed; a
+    /// real machine would surface the "ask aborted by caller" error).
+    #[tokio::test]
+    async fn abort_awaiting_answer_drives_to_terminal() {
+        let engine = test_engine();
+        let permit = one_permit(&engine);
+        engine.continuations.lock().insert(
+            "cont_9".into(),
+            Continuation {
+                source: "src".into(),
+                created_at: std::time::Instant::now(),
+                captured: TestSink::default(),
+                state: ContinuationState::AwaitingAnswer {
+                    expected_schema: None,
+                    resume: dummy_resume("aborted"),
+                    permit,
+                },
+            },
+        );
+        let r = engine.abort("cont_9", "stop".into()).await;
+        assert!(matches!(r, AbortOutcome::Driven(_)));
+        assert!(!engine.continuations.lock().contains_key("cont_9"));
+    }
+
+    #[tokio::test]
+    async fn abort_unknown_is_not_found() {
+        let engine = test_engine();
+        assert!(matches!(
+            engine.abort("nope", "x".into()).await,
+            AbortOutcome::NotFound
+        ));
+    }
+
     /// The eval thread's channel closing with no message (the thread died) is a
     /// crash: partial output is surfaced, no panic payload without a joinable
     /// handle.
     #[tokio::test]
     async fn closed_channel_is_crashed() {
         let engine = test_engine();
-        let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel::<EngineMessage>();
-        let (response_tx, _response_rx) = std::sync::mpsc::channel::<ResumeMsg>();
+        let (session_tx, session_rx) =
+            tokio::sync::mpsc::unbounded_channel::<EngineMessage<TestSink>>();
         drop(session_tx); // thread gone before any message
         let outcome = engine
             .drive(
                 session_rx,
                 "src".into(),
-                response_tx,
                 TestSink::with(&["last words"]),
                 None,
                 PauseGate::new(),
@@ -1201,13 +1517,12 @@ mod tests {
     #[tokio::test]
     async fn timeout_with_no_yield_point_detaches() {
         let engine = test_engine();
-        let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel::<EngineMessage>();
-        let (response_tx, _response_rx) = std::sync::mpsc::channel::<ResumeMsg>();
+        let (session_tx, session_rx) =
+            tokio::sync::mpsc::unbounded_channel::<EngineMessage<TestSink>>();
         let outcome = engine
             .drive(
                 session_rx,
                 "src".into(),
-                response_tx,
                 TestSink::with(&["partial"]),
                 None,
                 PauseGate::new(),
