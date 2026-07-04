@@ -2487,6 +2487,9 @@ fn browse_effects(decls: &[EffectDecl], only: Option<&str>) -> serde_json::Value
                     "description": d.description,
                     "verbs": verbs,
                     "constructors": d.constructors,
+                    // Real field names, straight from the type_def — the doc
+                    // prose above can drift, this can't (#346).
+                    "types": d.type_defs,
                 })
             }
             None => {
