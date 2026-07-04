@@ -412,6 +412,65 @@ macro_rules! http_effect_def {
     };
 }
 
+/// Git effect — single definition.
+///
+/// `Commit`/`StatusEntry`/`FileDelta` are defined in `Tidepool.Records` and
+/// re-exported by `Tidepool.Prelude`, so no `type_defs` here. (The
+/// hand-written decl aligned constructor signatures with padding; the
+/// projection renders single-space signatures — same one-time normalization
+/// as Meta.)
+#[macro_export]
+macro_rules! git_effect_def {
+    ($project:path) => {
+        $project! {
+            effect Git,
+            handler GitHandler,
+            req GitReq,
+            decl_fn git_decl,
+            description [
+                "Read-only git repository queries. Returns typed records parsed Rust-side ",
+                "from machine-format git output — no text-splitting needed. ",
+                "`gitLog n` → last N commits newest-first; `gitStatus` → working-tree status; ",
+                "`gitDiffStat rev` → per-file diff stats vs a revspec; `gitShow rev` → one commit. ",
+                "All three list verbs return typed records: `Commit {sha,subject,author,date,files}`, ",
+                "`StatusEntry {path,state}` (state = 2-char XY porcelain code), ",
+                "`FileDelta {path,adds,dels,binary}`.",
+            ],
+            type_defs [],
+            verbs [
+                { ctor GitLog, method git_log,
+                  args { n: "Int" as i64 },
+                  ret "[Commit]" },
+                { ctor GitStatus, method git_status,
+                  args { },
+                  ret "[StatusEntry]" },
+                { ctor GitDiffStat, method git_diff_stat,
+                  args { rev: "Text" as String },
+                  ret "[FileDelta]" },
+                { ctor GitShow, method git_show,
+                  args { rev: "Text" as String },
+                  ret "Commit" },
+            ],
+            helpers [
+                { name gitLog, sig "Int -> M [Commit]",
+                  doc ["Last N commits, newest-first. Each 'Commit' carries sha/subject/author/date/files."],
+                  body pointfree GitLog },
+                { name gitStatus, sig "M [StatusEntry]",
+                  doc ["Working-tree status. Each 'StatusEntry' has path and 2-char XY state code",
+                       "(e.g. \"M \", \"??\", \"A \")."],
+                  body nullary GitStatus },
+                { name gitDiffStat, sig "Text -> M [FileDelta]",
+                  doc ["Per-file diff stats vs a revspec (\"HEAD~1\", \"main\", \"HEAD~3..HEAD\", etc.).",
+                       "'FileDelta' carries path/adds/dels/binary."],
+                  body pointfree GitDiffStat },
+                { name gitShow, sig "Text -> M Commit",
+                  doc ["Single commit by revspec. Fails the eval on an unknown or ambiguous revspec."],
+                  body pointfree GitShow },
+            ],
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     /// Every generated `*_decl()` must be byte-identical to the hand-written

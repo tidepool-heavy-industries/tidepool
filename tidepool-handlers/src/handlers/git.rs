@@ -1,24 +1,17 @@
 use std::path::PathBuf;
-use tidepool_bridge_derive::{CoreRecord, FromCore, ToCore};
-use tidepool_effect::dispatch::{EffectContext, EffectHandler};
+use tidepool_bridge_derive::{CoreRecord, ToCore};
+use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
-use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
+use tidepool_mcp::CapturedOutput;
 
 // ============================================================================
 // Tag 8: Git (read-only repository queries)
 // ============================================================================
 
-#[derive(FromCore)]
-pub enum GitReq {
-    #[core(name = "GitLog")]
-    Log(i64),
-    #[core(name = "GitStatus")]
-    Status,
-    #[core(name = "GitDiffStat")]
-    DiffStat(String),
-    #[core(name = "GitShow")]
-    Show(String),
-}
+// GitReq + DescribeEffect + EffectHandler dispatch are generated from the
+// single-source definition; only the handler struct and the per-verb method
+// bodies below are hand-written.
+tidepool_mcp::git_effect_def!(crate::effect_glue::effect_rust_projection);
 
 /// Haskell `Commit` record: sha / subject / author / date / files.
 #[derive(ToCore, Clone, CoreRecord)]
@@ -226,53 +219,55 @@ impl GitHandler {
     }
 }
 
-impl DescribeEffect for GitHandler {
-    fn effect_decl() -> EffectDecl {
-        tidepool_mcp::git_decl()
-    }
-}
-
-impl EffectHandler<CapturedOutput> for GitHandler {
-    type Request = GitReq;
-
-    fn handle(
+impl GitHandler {
+    fn git_log(
         &mut self,
-        req: GitReq,
+        cx: &EffectContext<'_, CapturedOutput>,
+        n: i64,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let n_str = n.to_string();
+        let output = self.run_git(&[
+            "log",
+            "-n",
+            &n_str,
+            "--format=%H%x00%s%x00%an%x00%cI",
+            "--name-only",
+        ])?;
+        cx.respond_list(Self::parse_log_output(&output))
+    }
+
+    fn git_status(
+        &mut self,
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        match req {
-            GitReq::Log(n) => {
-                let n_str = n.to_string();
-                let output = self.run_git(&[
-                    "log",
-                    "-n",
-                    &n_str,
-                    "--format=%H%x00%s%x00%an%x00%cI",
-                    "--name-only",
-                ])?;
-                cx.respond_list(Self::parse_log_output(&output))
-            }
-            GitReq::Status => {
-                let output = self.run_git(&["status", "--porcelain=v1"])?;
-                cx.respond_list(Self::parse_status_output(&output))
-            }
-            GitReq::DiffStat(rev) => {
-                let output = self.run_git(&["diff", "--numstat", &rev])?;
-                cx.respond_list(Self::parse_numstat_output(&output))
-            }
-            GitReq::Show(rev) => {
-                let output = self.run_git(&[
-                    "log",
-                    "-n",
-                    "1",
-                    &rev,
-                    "--format=%H%x00%s%x00%an%x00%cI",
-                    "--name-only",
-                ])?;
-                let commit = Self::parse_single_commit(&output, &rev)?;
-                cx.respond(commit)
-            }
-        }
+        let output = self.run_git(&["status", "--porcelain=v1"])?;
+        cx.respond_list(Self::parse_status_output(&output))
+    }
+
+    fn git_diff_stat(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        rev: String,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let output = self.run_git(&["diff", "--numstat", &rev])?;
+        cx.respond_list(Self::parse_numstat_output(&output))
+    }
+
+    fn git_show(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        rev: String,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let output = self.run_git(&[
+            "log",
+            "-n",
+            "1",
+            &rev,
+            "--format=%H%x00%s%x00%an%x00%cI",
+            "--name-only",
+        ])?;
+        let commit = Self::parse_single_commit(&output, &rev)?;
+        cx.respond(commit)
     }
 }
 
@@ -281,7 +276,7 @@ mod tests {
     use super::*;
     use crate::test_support::*;
     use tidepool_bridge::{FromCore, ToCore};
-    use tidepool_effect::dispatch::EffectContext;
+    use tidepool_effect::dispatch::{EffectContext, EffectHandler};
     use tidepool_eval::value::Value;
 
     #[test]
@@ -291,7 +286,7 @@ mod tests {
         let n = (5i64).to_value(&table).unwrap();
         let val = Value::Con(con_id, vec![n]);
         let req = GitReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, GitReq::Log(5)));
+        assert!(matches!(req, GitReq::GitLog(5)));
     }
 
     #[test]
@@ -300,7 +295,7 @@ mod tests {
         let con_id = table.get_by_name("GitStatus").unwrap();
         let val = Value::Con(con_id, vec![]);
         let req = GitReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, GitReq::Status));
+        assert!(matches!(req, GitReq::GitStatus()));
     }
 
     #[test]
@@ -310,7 +305,7 @@ mod tests {
         let rev = "HEAD~1".to_string().to_value(&table).unwrap();
         let val = Value::Con(con_id, vec![rev]);
         let req = GitReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, GitReq::DiffStat(ref r) if r == "HEAD~1"));
+        assert!(matches!(req, GitReq::GitDiffStat(ref r) if r == "HEAD~1"));
     }
 
     #[test]
@@ -320,7 +315,7 @@ mod tests {
         let rev = "HEAD".to_string().to_value(&table).unwrap();
         let val = Value::Con(con_id, vec![rev]);
         let req = GitReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, GitReq::Show(ref r) if r == "HEAD"));
+        assert!(matches!(req, GitReq::GitShow(ref r) if r == "HEAD"));
     }
 
     // =========================================================================
@@ -438,7 +433,7 @@ file_c.txt\n\
         let n = (2i64).to_value(&table).unwrap();
         let con_id = table.get_by_name("GitLog").unwrap();
         let request = Value::Con(con_id, vec![n]);
-        let result = response_value(handler.handle(GitReq::Log(2), &cx).unwrap(), &table);
+        let result = response_value(handler.handle(GitReq::GitLog(2), &cx).unwrap(), &table);
 
         // Should be a cons list with 2 Commit cells
         let mut node = &result;
@@ -481,7 +476,7 @@ file_c.txt\n\
         let cx = EffectContext::with_user(&table, &captured);
         let mut handler = GitHandler::new(dir.path().to_path_buf());
 
-        let result = response_value(handler.handle(GitReq::Status, &cx).unwrap(), &table);
+        let result = response_value(handler.handle(GitReq::GitStatus(), &cx).unwrap(), &table);
 
         // Collect all StatusEntry names from the cons list
         let mut paths_and_states: Vec<(String, String)> = Vec::new();
@@ -520,7 +515,7 @@ file_c.txt\n\
 
         let result = response_value(
             handler
-                .handle(GitReq::DiffStat("HEAD~1".to_string()), &cx)
+                .handle(GitReq::GitDiffStat("HEAD~1".to_string()), &cx)
                 .unwrap(),
             &table,
         );
@@ -560,7 +555,7 @@ file_c.txt\n\
 
         let result = response_value(
             handler
-                .handle(GitReq::Show("HEAD".to_string()), &cx)
+                .handle(GitReq::GitShow("HEAD".to_string()), &cx)
                 .unwrap(),
             &table,
         );
@@ -585,7 +580,7 @@ file_c.txt\n\
         let cx = EffectContext::with_user(&table, &captured);
         let mut handler = GitHandler::new(dir.path().to_path_buf());
 
-        let result = handler.handle(GitReq::Show("notaref_zzzzzz".to_string()), &cx);
+        let result = handler.handle(GitReq::GitShow("notaref_zzzzzz".to_string()), &cx);
         assert!(result.is_err(), "gitShow with bad revspec should error");
     }
 
