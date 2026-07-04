@@ -157,7 +157,7 @@ pub fn build(
         continuation_ttl: None,
         // Wedged sessions (timed-out turns) ARE dead weight — sweep at 30 min.
         wedged_ttl: Some(std::time::Duration::from_secs(30 * 60)),
-        // Default 120 s turn budget (see `TURN_TIMEOUT_SECS`).
+        // Default 600 s turn budget (see `TURN_TIMEOUT_SECS`).
         turn_timeout: None,
     };
 

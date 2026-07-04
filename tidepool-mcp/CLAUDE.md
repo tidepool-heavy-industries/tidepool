@@ -147,4 +147,4 @@ import qualified Prelude as P
 ```
 Our `error :: Text -> a` shadows Prelude's `String` version. Our `run :: Text -> M Proc` shadows Freer's `run :: Eff '[] a -> a`. These hiding clauses are load-bearing — removing them breaks eval code that uses `error` with Text or `run` for shell commands.
 
-**Eval timeout**: The default is 30 seconds (configurable via `eval_timeout_secs` in `config.toml` or `TIDEPOOL_EVAL_TIMEOUT_SECS`). Shell commands blocked on `.output()` (e.g. `cargo test --workspace`) consume the full timeout. The timeout returns a clean `CallToolResult::error`, not a crash.
+**Eval timeout**: The default is 600 seconds, per-request raisable to 1800 (configurable via `eval_timeout_secs` in `config.toml` or `TIDEPOOL_EVAL_TIMEOUT_SECS`). Long shell commands (builds, test suites) run comfortably inside it; at the window an eval at an effect boundary parks as a continuation, a pure runaway is detached. The timeout returns a clean `CallToolResult::error`, not a crash.

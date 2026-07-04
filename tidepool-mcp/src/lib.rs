@@ -39,13 +39,13 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub(crate) const EVAL_TIMEOUT_SECS: u64 = 120;
+pub(crate) const EVAL_TIMEOUT_SECS: u64 = 600;
 
 /// Hard ceiling for the per-eval `timeout_secs` knob (seconds). The default is
 /// `EVAL_TIMEOUT_SECS`; a caller may raise the window up to this cap for
 /// deliberately heavy dev evals. Beyond it a runaway is likelier than an
 /// intentional compute, so the request is clamped here.
-const MAX_EVAL_TIMEOUT_SECS: u64 = 600;
+const MAX_EVAL_TIMEOUT_SECS: u64 = 1800;
 
 /// Resolve the effective eval window (seconds) from an optional per-request
 /// override: `None` → the server default (`EVAL_TIMEOUT_SECS`); `Some(t)` → `t`
@@ -1061,7 +1061,7 @@ data Console a where
 
     #[test]
     fn test_eval_timeout_value() {
-        assert_eq!(EVAL_TIMEOUT_SECS, 120);
+        assert_eq!(EVAL_TIMEOUT_SECS, 600);
     }
 
     #[test]

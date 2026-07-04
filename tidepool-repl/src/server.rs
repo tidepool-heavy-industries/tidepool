@@ -37,7 +37,7 @@ use crate::worker::{
 /// Per-turn window before a turn is declared timed out. A session is one
 /// resident thread, so a runaway wedges the session (MVP); the window keeps a
 /// single MCP call from hanging forever.
-const TURN_TIMEOUT_SECS: u64 = 120;
+const TURN_TIMEOUT_SECS: u64 = 600;
 
 /// After a turn times out and is cancelled, how long to wait for the worker to
 /// abort at a JIT safepoint before declaring the session `Wedged`. Allocating /
@@ -218,7 +218,7 @@ pub struct ReplServerConfig {
     /// ~30 min — a wedged session is dead weight, unlike a parked ask.
     pub wedged_ttl: Option<Duration>,
     /// Wall-clock budget for a single turn before it is cancelled at a JIT
-    /// safepoint (see [`drive`]). `None` ⇒ [`TURN_TIMEOUT_SECS`] (120 s). Tests
+    /// safepoint (see [`drive`]). `None` ⇒ [`TURN_TIMEOUT_SECS`] (600 s). Tests
     /// shrink it to exercise the timeout/self-heal path fast.
     pub turn_timeout: Option<Duration>,
 }
