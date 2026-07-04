@@ -11,16 +11,15 @@
 --
 --   * 'Proc' — a finished subprocess, replacing @(Int, Text, Text)@.
 --   * 'Hit'  — a search match, replacing @(FilePath, Int, Text)@.
---   * 'Doc'  — a file's contents, replacing @(path, content)@.
 --
 -- Field access uses record-dot (@x.field@): with 'DuplicateRecordFields' the
--- bare selectors (@path@, @line@, @text@) are shared between 'Hit' and 'Doc',
+-- bare selectors (@path@, @line@, @text@) are shared across record types,
 -- so dot-syntax is required to disambiguate.
 --
 -- NB: this module must NOT import 'Tidepool.Prelude' (that would create an
 -- import cycle — Prelude re-exports this module).
 module Tidepool.Records
-  ( Proc(..), ok, Hit(..), Doc(..)
+  ( Proc(..), ok, Hit(..)
   , FileMeta(..)
   , UpdateOutcome(..)
   , WriteOutcome(..)
@@ -52,12 +51,6 @@ data Hit = Hit { path :: Text, line :: Int, text :: Text } deriving (Show, Eq)
 
 instance ToJSON Hit where
   toJSON h = object ["path" .= h.path, "line" .= h.line, "text" .= h.text]
-
--- | A file's contents. Replaces readGlob's @(path, content)@ pair.
-data Doc = Doc { path :: Text, body :: Text } deriving (Show, Eq)
-
-instance ToJSON Doc where
-  toJSON d = object ["path" .= d.path, "body" .= d.body]
 
 -- | Filesystem metadata for a path. Replaces the opaque @{size, is_file,
 -- is_dir}@ Value that @fsMeta@\/@fsMetadata@ used to return; a missing path is

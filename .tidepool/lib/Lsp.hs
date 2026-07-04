@@ -57,7 +57,7 @@ isTest n = isInfixOf "tests/" f || isInfixOf "/test" f || isInfixOf "_test" f
 --     in practice), those nodes may be mis-classified as test code.
 --   * Only effective for Rust @#[cfg(test)]@ patterns; other languages use
 --     different conventions (Python @_test@ suffix is caught by `isTest`).
---   * @tryReadFile@ may fail (permission, file removed); falls back to @False@
+--   * @readFile@ may fail (permission, file removed); falls back to @False@
 --     on read failure so as not to block exploration.
 --
 -- When to use which:
@@ -71,7 +71,7 @@ isTestM n
   | isTest n                            = pure True
   | "test" `isInfixOf` nodeContainer n = pure True
   | otherwise = do
-      er <- tryReadFile (nodeFile n)
+      er <- readFile (nodeFile n)
       case er of
         Left _     -> pure False
         Right body ->

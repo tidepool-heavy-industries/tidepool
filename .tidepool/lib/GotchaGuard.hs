@@ -152,7 +152,7 @@ catalog =
 
 -- | Search for one pattern; return matches in source files.
 searchPattern :: Text -> Text -> M [Hit]
-searchPattern glob pat = grepGlob pat glob
+searchPattern glob pat = grepGlob pat glob >>= liftEither
 
 -- | Find handlers for one gotcha across both Haskell and Rust source.
 -- Each pattern is searched separately and hits are unioned.
@@ -190,7 +190,7 @@ gotchaReport = do
 -- parenthetical locations and normalize lightly.
 docGotchas :: M [Text]
 docGotchas = do
-  txt <- readFile "docs/core-shapes/audit-translate.md"
+  txt <- readFile "docs/core-shapes/audit-translate.md" >>= liftEither
   let heading l = case T.stripPrefix "## " (T.strip l) of
         Just rest -> Just (T.strip rest)
         Nothing   -> Nothing

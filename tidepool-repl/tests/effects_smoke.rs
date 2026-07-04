@@ -172,7 +172,7 @@ async fn full_stack_effects_reachable_through_session() {
     // Fs: write then read a file in the cwd sandbox (round-trip).
     let t = eval(
         &server,
-        "writeFile \"hello.txt\" \"from-fs\" >> readFile \"hello.txt\"",
+        "writeFile \"hello.txt\" \"from-fs\" >>= liftEither >> readFile \"hello.txt\" >>= liftEither",
     )
     .await;
     assert!(t.contains("from-fs"), "Fs read-back: {t}");

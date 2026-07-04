@@ -596,28 +596,33 @@ fn works_freer_node_resolves_without_data_tree() {
     works("pure (sum [1..10::Int])", serde_json::json!(55));
 }
 
-/// DuplicateRecordFields shared selector — the `Hit`/`Doc` library records both
-/// define a `path` field (legal under `DuplicateRecordFields`). In GHC 9.2+ the
-/// selectors keep the bare occ name `path` (record-field namespace, no `$sel:`
-/// mangling), so `stableVarId` fingerprinted identical `Tidepool.Records:path`
-/// strings → ONE varId for two distinct selectors. The DataConTable / external
-/// resolver coalesced them: `getField @"path" @Hit` bound to whichever selector
-/// won, and applying `Doc`'s selector to a `Hit` value (or vice-versa) hit a
-/// CASE TRAP ("scrutinee constructor not among case alternatives"). Type-checks,
-/// then traps at runtime = compiler bug. Fixed in `Translate.hs` by folding the
+/// DuplicateRecordFields shared selector — the `Hit`/`FileRead` library records
+/// both define a `path` field (legal under `DuplicateRecordFields`; `FileRead`
+/// is the #335 successor to the old `Doc` record this probe originally pinned
+/// against, same shared-field shape). In GHC 9.2+ the selectors keep the bare
+/// occ name `path` (record-field namespace, no `$sel:` mangling), so
+/// `stableVarId` fingerprinted identical `<Module>:path` strings → ONE varId
+/// for two distinct selectors. The DataConTable / external resolver coalesced
+/// them: `getField @"path" @Hit` bound to whichever selector won, and applying
+/// the other record's selector to a `Hit` value (or vice-versa) hit a CASE TRAP
+/// ("scrutinee constructor not among case alternatives"). Type-checks, then
+/// traps at runtime = compiler bug. Fixed in `Translate.hs` by folding the
 /// record selector's parent tycon into its varId (`stableVarIdWith`), so
-/// `path`@Hit ≠ `path`@Doc. BOTH accesses must now return the right field.
+/// `path`@Hit ≠ `path`@FileRead. BOTH accesses must now return the right field.
 #[test]
 fn works_dup_record_fields_shared_selector() {
     // Hit.path (shared field) via OverloadedRecordDot — the trapping case.
     works("pure ((Hit \"a\" 1 \"b\").path)", serde_json::json!("a"));
-    // Doc.path (the OTHER record sharing `path`) — must resolve to Doc's field.
-    works("pure ((Doc \"p\" \"body\").path)", serde_json::json!("p"));
-    // Both in one eval, plus a non-shared field each, to prove no cross-wiring:
-    // Hit.line (unique to Hit) and Doc.body (unique to Doc) still resolve.
+    // FileRead.path (the OTHER record sharing `path`) — must resolve to FileRead's field.
     works(
-        "pure (object [\"hp\" .= (Hit \"a\" 1 \"b\").path, \"dp\" .= (Doc \"p\" \"body\").path, \
-         \"hl\" .= (Hit \"a\" 1 \"b\").line, \"db\" .= (Doc \"p\" \"body\").body])",
+        "pure ((FileRead \"p\" (Right \"body\")).path)",
+        serde_json::json!("p"),
+    );
+    // Both in one eval, plus a non-shared field each, to prove no cross-wiring:
+    // Hit.line (unique to Hit) and FileRead.contents (unique to FileRead) still resolve.
+    works(
+        "pure (object [\"hp\" .= (Hit \"a\" 1 \"b\").path, \"dp\" .= (FileRead \"p\" (Right \"body\")).path, \
+         \"hl\" .= (Hit \"a\" 1 \"b\").line, \"db\" .= fromRight \"\" (FileRead \"p\" (Right \"body\")).contents])",
         serde_json::json!({"hp":"a","dp":"p","hl":1,"db":"body"}),
     );
 }

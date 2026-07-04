@@ -60,20 +60,20 @@ defMod name body =
 -- text search for `fn <name>` over the given path globs.)
 defWithContext :: Text -> [Text] -> M [Text]
 defWithContext name roots = do
-  hs <- concat <$> mapM (grepGlob ("fn " <> name)) roots
+  hs <- concat <$> mapM (\r -> grepGlob ("fn " <> name) r >>= liftEither) roots
   case hs of
     (h : _) -> do
-      content <- readFile h.path
+      content <- readFile h.path >>= liftEither
       pure ((h.path <> ":" <> pack (show h.line)) : aroundLine h.line 4 content)
     [] -> pure []
 
 -- | Per-file reference counts for a regex, densest first.
 refs :: Text -> Text -> M [(Text, Int)]
-refs pat g = hitsByFile <$> grepGlob pat g
+refs pat g = hitsByFile <$> (grepGlob pat g >>= liftEither)
 
 -- | One-call codebase overview for a glob: count, extensions, heaviest.
 census :: Text -> M Value
 census pat = do
-  ps <- glob pat
+  ps <- glob pat >>= liftEither
   sized <- mapM (\p -> do { s <- getFileSize p; pure (p, fromMaybe 0 s) }) ps
   pure (object ["files" .= len ps, "exts" .= take 5 (extHisto ps), "heaviest" .= sizeRank 5 sized])

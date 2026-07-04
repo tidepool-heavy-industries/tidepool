@@ -107,13 +107,14 @@ field names exist across record types.
 |--------|--------|----------------|
 | `Proc`        | `exitCode :: Int`, `stdout`, `stderr :: Text` | `p <- run cmd; p.stdout` |
 | `Hit`         | `path`, `text :: Text`, `line :: Int` | `h.path`, `h.line` |
-| `Doc`         | `path`, `body :: Text` | `d.path`, `d.body` |
+| `FileRead`    | `path :: Text`, `contents :: Either FsError Text` | `r.path`, `r.contents` |
 | `Commit`      | `sha`, `subject`, `author`, `date`, `files :: [Text]` | `c <- gitShow "HEAD"; c.sha`, `c.files` |
 | `StatusEntry` | `path`, `state :: Text` | `es <- gitStatus; map (.state) es` |
 | `FileDelta`   | `path :: Text`, `adds`, `dels :: Int`, `binary :: Bool` | `ds <- gitDiffStat "HEAD~1"; ds` |
 
 Key helpers: `ok :: Proc -> Bool` (true when `exitCode == 0`); `run :: Text -> M Proc`;
-`grepGlob :: Text -> FilePath -> M [Hit]`; `readGlob :: Text -> M [Doc]`.
+`grepGlob :: Text -> FilePath -> M (Either FsError [Hit])`;
+`readGlob :: Text -> M [FileRead]` — per-file failure isolation, not a verb-level Either.
 `tryRun :: Text -> M (Either Text Proc)` — `Left` only on spawn failure; non-zero exit
 is `Right proc`, inspect `proc.exitCode`.
 

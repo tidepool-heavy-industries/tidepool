@@ -45,13 +45,13 @@ t8 = do
 
 t9 :: M Int
 t9 = do
-  src <- readFile ".tidepool/lib/Tables.hs"
+  src <- readFile ".tidepool/lib/Tables.hs" >>= liftEither
   let (_, b) = T.breakOn "countTable" src
   pure (if isNull b then 0 else 1)
 
 t10 :: M Int
 t10 = do
-  src <- readFile ".tidepool/lib/Tables.hs"
+  src <- readFile ".tidepool/lib/Tables.hs" >>= liftEither
   pure (len (sdrop 3 src))
 
 occ2 :: Text -> Text -> Int
@@ -64,5 +64,5 @@ occ2 needle hay =
 
 t11 :: M Int
 t11 = do
-  src <- readFile ".tidepool/lib/Tables.hs"
+  src <- readFile ".tidepool/lib/Tables.hs" >>= liftEither
   pure (occ2 "countTable" src)

@@ -29,13 +29,13 @@ shProc = run
 -- Example: grepIn "unresolved variable" "tidepool-codegen\/src"
 grepIn :: Text -> Text -> M [Text]
 grepIn pat dir = do
-  hits <- grepGlob pat (dir <> "/**")
+  hits <- grepGlob pat (dir <> "/**") >>= liftEither
   pure (map (\h -> h.path <> ":" <> pack (show h.line) <> "| " <> strip h.text) hits)
 
 -- | sed -n 'lo,hi p' equivalent with line numbers.
 slice :: Text -> Int -> Int -> M [Text]
 slice f lo hi = do
-  content <- readFile f
+  content <- readFile f >>= liftEither
   let numbered = map (\(i, l) -> pack (show (i + 1)) <> "| " <> l) (zipWithIndex (lines content))
   pure (take (hi - lo + 1) (drop (lo - 1) numbered))
 
@@ -55,12 +55,12 @@ gitS = shLines "git status --short"
 -- .tidepool/lib module. Discoverability for future sessions.
 vocab :: M [Text]
 vocab = do
-  mods <- glob ".tidepool/lib/*.hs"
+  mods <- glob ".tidepool/lib/*.hs" >>= liftEither
   sigLists <- mapM sigsOf mods
   pure (concat sigLists)
   where
     sigsOf m = do
-      src <- readFile m
+      src <- readFile m >>= liftEither
       let name = replace ".hs" "" (last (splitOn "/" m))
       let topSig l = " :: " `isInfixOf` l && not (" " `isPrefixOf` l) && not ("--" `isPrefixOf` l)
       pure (map (\s -> name <> "." <> s) (filter topSig (lines src)))

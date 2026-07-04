@@ -35,11 +35,11 @@ filteredT p f x = if p x then f x else pure x
 -- file was touched (no-op rewrites never write).
 overFileM :: Text -> TextTraversal -> (Text -> Text) -> M Value
 overFileM path trav f = do
-  src <- readFile path
+  src <- readFile path >>= liftEither
   let targets = toListOf trav src
       changed = length (filter (\x -> f x /= x) targets)
       out = src & trav %~ f
-  when (changed > 0) (writeFile path out)
+  when (changed > 0) (writeFile path out >>= liftEither)
   pure (object
     [ "file" .= path
     , "targets" .= length targets

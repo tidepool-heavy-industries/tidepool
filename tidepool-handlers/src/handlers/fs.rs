@@ -924,4 +924,49 @@ mod tests {
         ]);
         assert_eq!(v, serde_json::json!(true));
     }
+
+    /// #328/#335 acceptance: `readGlob` over a mixed glob (one clean UTF-8 text
+    /// file, one invalid-UTF-8 binary file) through the REAL extract → JIT
+    /// pipeline, rooted at a temp dir (not the repo root, so `jit_eval` doesn't
+    /// fit — `EvalHarness` is). `partitionEithers (map (.contents) rs)` must
+    /// split the per-file outcomes: the binary isolates as `Left`, the text
+    /// file survives as `Right`, and neither poisons the batch.
+    #[tokio::test]
+    async fn fs_read_glob_mixed_binary_partitions_via_partition_eithers() {
+        use tempfile::tempdir;
+        use tidepool_testing::eval_harness::EvalHarness;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(root.join("good.txt"), "hello").unwrap();
+        std::fs::write(root.join("bad.bin"), vec![0xff, 0xfe, 0x00, 0x01]).unwrap();
+
+        let decls = tidepool_mcp::standard_decls();
+        let preamble = tidepool_mcp::build_preamble(&decls, false);
+        let stack = tidepool_mcp::build_effect_stack_type(&decls);
+        let code = tidepool_mcp::wrap_do(concat!(
+            "rs <- readGlob \"*\"\n",
+            "let (bad, good) = partitionEithers (map (.contents) rs)\n",
+            "pure (object [\"goodCount\" .= length good, \"badCount\" .= length bad, \"goodText\" .= good])",
+        ));
+        let source = tidepool_mcp::template_haskell(&preamble, &stack, &code, "", "", None, None);
+
+        // Only Fs is exercised (readGlob), so the handler HList only needs to
+        // cover tags 0..2 (Console, KV, Fs) — dispatch never recurses past Fs.
+        let kv_path = std::env::temp_dir().join("tidepool_fs_readglob_partition_test_kv.json");
+        let handlers = frunk::hlist![
+            crate::ConsoleHandler,
+            crate::KvHandler::new(kv_path),
+            FsHandler::new(root),
+        ];
+
+        let harness = EvalHarness::new().with_stdlib().with_effects_module();
+        let out = harness.run_with(&source, "result", handlers, CapturedOutput::new());
+        assert_eq!(
+            out.json(),
+            serde_json::json!({"goodCount": 1, "badCount": 1, "goodText": ["hello"]}),
+            "{:?}",
+            out.err()
+        );
+    }
 }

@@ -50,7 +50,7 @@ rankDesc = sortBy (\a b -> compare (snd b) (snd a))
 -- | Grep all Rust sources for panic-site patterns and classify each hit.
 panicSites :: M [Site]
 panicSites = do
-  hits <- grepGlob "\\.unwrap\\(\\)|\\.expect\\(|panic!|unreachable!|unimplemented!|todo!" "**/*.rs"
+  hits <- grepGlob "\\.unwrap\\(\\)|\\.expect\\(|panic!|unreachable!|unimplemented!|todo!" "**/*.rs" >>= liftEither
   pure [ Site h.path h.line k h.text | h <- hits, Just k <- [kindOf h.text] ]
 
 -- | Numbered context window of 'radius' lines either side of a 1-based target line.
@@ -63,7 +63,7 @@ contextAround target radius content =
 -- | LLM-based per-site risk triage for one file: low/medium/high rating per panic site.
 auditFile :: Text -> M Value
 auditFile file = do
-  content <- readFile file
+  content <- readFile file >>= liftEither
   let sites = [ (i + 1, k) | (i, l) <- zipWithIndex (lines content), Just k <- [kindOf l] ]
       block (ln, k) = "### line " <> pack (show ln) <> " (" <> k <> ")\n" <> contextAround ln 3 content
       payload = intercalate "\n\n" (map block sites)
