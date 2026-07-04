@@ -527,6 +527,54 @@ macro_rules! ask_effect_def {
     };
 }
 
+/// Llm effect — single definition.
+#[macro_export]
+macro_rules! llm_effect_def {
+    ($project:path) => {
+        $project! {
+            effect Llm,
+            handler LlmHandler,
+            req LlmReq,
+            decl_fn llm_decl,
+            description [
+                "Call an LLM for classification, extraction, or judgment. ",
+                "`llm schema prompt` returns a Value validated against the schema ",
+                "(structured output, no markdown fences). Extract with optics, e.g. ",
+                "`v ^? key \"category\" . _String`.",
+            ],
+            type_defs [],
+            verbs [
+                { ctor LlmStructured, method llm_structured,
+                  args { prompt: "Text" as String, schema: "Value" as tidepool_eval::value::Value },
+                  ret "Value" },
+                // Failure-isolating variant: an API/network error or refusal
+                // becomes `Left err` instead of killing the eval. (Budget
+                // exhaustion still aborts — that's a hard control limit.)
+                { ctor TryLlmStructured, method llm_try_structured,
+                  args { prompt: "Text" as String, schema: "Value" as tidepool_eval::value::Value },
+                  ret "(Either Text Value)" },
+            ],
+            helpers [
+                // schemaToValue lives in ask_decl (Ask is always present).
+                { raw ["llm :: Schema -> Text -> M Value",
+                       "llm schema prompt = send (LlmStructured prompt (schemaToValue schema))"] },
+                // Isolating variant: an API failure/refusal becomes `Left err`
+                // instead of aborting the eval (the LLM call-budget limit still
+                // aborts — it is a hard control limit, not a probe failure).
+                { raw ["tryLlm :: Schema -> Text -> M (Either Text Value)",
+                       "tryLlm schema prompt = send (TryLlmStructured prompt (schemaToValue schema))"] },
+                // Pure tally utilities (no LLM/Ask): build a frequency list while
+                // preserving first-seen order. Kept for .tidepool/lib verbs.
+                { raw ["findTally :: Eq a => a -> [(a, Int)] -> Maybe [(a, Int)]",
+                       "findTally _ [] = Nothing",
+                       "findTally x ((k, n):rest) = if x == k then Just ((k, n + 1) : rest) else case findTally x rest of { Just rest' -> Just ((k, n) : rest'); Nothing -> Nothing }"] },
+                { raw ["tallyList :: Eq a => [a] -> [(a, Int)]",
+                       "tallyList = foldl' (\\acc x -> case findTally x acc of { Just acc' -> acc'; Nothing -> acc ++ [(x, 1)] }) []"] },
+            ],
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     /// Every generated `*_decl()` must be byte-identical to the hand-written

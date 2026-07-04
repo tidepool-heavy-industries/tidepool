@@ -8,13 +8,10 @@ use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
 // Tag 7 (base stack position 7): Llm
 // ============================================================================
 
-#[derive(FromCore)]
-pub enum LlmReq {
-    #[core(name = "LlmStructured")]
-    Structured(String, Value),
-    #[core(name = "TryLlmStructured")]
-    TryStructured(String, Value),
-}
+// LlmReq + DescribeEffect + EffectHandler dispatch are generated from the
+// single-source definition; only the handler struct and the per-verb method
+// bodies below are hand-written.
+tidepool_mcp::llm_effect_def!(crate::effect_glue::effect_rust_projection);
 
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
 
@@ -197,30 +194,25 @@ pub fn strictify(schema: &mut serde_json::Value) {
     }
 }
 
-impl DescribeEffect for LlmHandler {
-    fn effect_decl() -> EffectDecl {
-        tidepool_mcp::llm_decl()
-    }
-}
-
-impl EffectHandler<CapturedOutput> for LlmHandler {
-    type Request = LlmReq;
-    fn handle(
+impl LlmHandler {
+    fn llm_structured(
         &mut self,
-        req: LlmReq,
         cx: &EffectContext<'_, CapturedOutput>,
+        prompt: String,
+        schema: Value,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        self.check_rate_limit()?;
-        match req {
-            LlmReq::Structured(prompt, schema_val) => {
-                let schema_json = tidepool_runtime::value_to_json(&schema_val, cx.table(), 0);
-                cx.respond(self.structured_core(prompt, schema_json)?)
-            }
-            LlmReq::TryStructured(prompt, schema_val) => {
-                let schema_json = tidepool_runtime::value_to_json(&schema_val, cx.table(), 0);
-                cx.respond_caught(self.structured_core(prompt, schema_json))
-            }
-        }
+        let schema_json = tidepool_runtime::value_to_json(&schema, cx.table(), 0);
+        cx.respond(self.structured_core(prompt, schema_json)?)
+    }
+
+    fn llm_try_structured(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        prompt: String,
+        schema: Value,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let schema_json = tidepool_runtime::value_to_json(&schema, cx.table(), 0);
+        cx.respond_caught(self.structured_core(prompt, schema_json))
     }
 }
 
@@ -252,8 +244,8 @@ mod tests {
             cx: &EffectContext<'_, CapturedOutput>,
         ) -> Result<tidepool_effect::Response, EffectError> {
             match req {
-                LlmReq::Structured(_, _) => cx.respond(self.response.clone()),
-                LlmReq::TryStructured(_, _) => {
+                LlmReq::LlmStructured(_, _) => cx.respond(self.response.clone()),
+                LlmReq::TryLlmStructured(_, _) => {
                     cx.respond_caught(Ok::<serde_json::Value, EffectError>(self.response.clone()))
                 }
             }

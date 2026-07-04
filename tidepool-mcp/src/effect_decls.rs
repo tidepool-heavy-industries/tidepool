@@ -285,30 +285,6 @@ crate::meta_effect_def!(crate::effect_defs::effect_decl_projection);
 // (`effect_defs.rs`).
 crate::ask_effect_def!(crate::effect_defs::effect_decl_projection);
 
-/// LLM effect: call an LLM for classification, extraction, or judgment.
-pub fn llm_decl() -> EffectDecl {
-    EffectDecl {
-        type_name: "Llm",
-        description: "Call an LLM for classification, extraction, or judgment. `llm schema prompt` returns a Value validated against the schema (structured output, no markdown fences). Extract with optics, e.g. `v ^? key \"category\" . _String`.",
-        constructors: &[
-            "LlmStructured :: Text -> Value -> Llm Value",
-            // Failure-isolating variant: an API/network error or refusal
-            // becomes `Left err` instead of killing the eval. (Budget
-            // exhaustion still aborts — that's a hard control limit.)
-            "TryLlmStructured :: Text -> Value -> Llm (Either Text Value)",
-        ],
-        type_defs: &[],
-        helpers: &[
-            // schemaToValue lives in ask_decl (Ask is always present).
-            "llm :: Schema -> Text -> M Value\nllm schema prompt = send (LlmStructured prompt (schemaToValue schema))",
-            // Isolating variant: an API failure/refusal becomes `Left err`
-            // instead of aborting the eval (the LLM call-budget limit still
-            // aborts — it is a hard control limit, not a probe failure).
-            "tryLlm :: Schema -> Text -> M (Either Text Value)\ntryLlm schema prompt = send (TryLlmStructured prompt (schemaToValue schema))",
-            // Pure tally utilities (no LLM/Ask): build a frequency list while
-            // preserving first-seen order. Kept for .tidepool/lib verbs.
-            "findTally :: Eq a => a -> [(a, Int)] -> Maybe [(a, Int)]\nfindTally _ [] = Nothing\nfindTally x ((k, n):rest) = if x == k then Just ((k, n + 1) : rest) else case findTally x rest of { Just rest' -> Just ((k, n) : rest'); Nothing -> Nothing }",
-            "tallyList :: Eq a => [a] -> [(a, Int)]\ntallyList = foldl' (\\acc x -> case findTally x acc of { Just acc' -> acc'; Nothing -> acc ++ [(x, 1)] }) []",
-        ],
-    }
-}
+// Llm effect: `llm_decl()` is generated from the single-source definition
+// (`effect_defs.rs`).
+crate::llm_effect_def!(crate::effect_defs::effect_decl_projection);
