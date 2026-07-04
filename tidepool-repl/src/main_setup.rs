@@ -111,15 +111,17 @@ pub fn build(
     let session_root_base =
         std::env::temp_dir().join(format!("tidepool-repl-{}", std::process::id()));
 
+    // Full effect stack + with-packages GHC: give Lane-A decls the SAME
+    // pragmas/imports an `eval` expression sees, so declaration-item helpers
+    // can use `M`, the effect verbs, the Prelude shadows, and `L.`/`Set.`/… —
+    // not just the lens-free T+Map of `standalone_default`.
+    let module_env = tidepool_mcp::session_decl_module_env(&decls, user_library);
+
     let cfg = ReplServerConfig {
         decls,
         ask_tag,
         base_include,
-        // Full effect stack + with-packages GHC: give Lane-A decls the SAME
-        // pragmas/imports an `eval` expression sees, so declaration-item helpers
-        // can use `M`, the effect verbs, the Prelude shadows, and `L.`/`Set.`/… —
-        // not just the lens-free T+Map of `standalone_default`.
-        module_env: tidepool_mcp::session_decl_module_env(user_library),
+        module_env,
         session_root_base,
         nursery_size: None,
         // Parked `ask` suspensions never expire: a long-parked knot holding one

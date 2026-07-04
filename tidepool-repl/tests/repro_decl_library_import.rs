@@ -80,11 +80,12 @@ fn build_server_with_real_library(cwd: PathBuf) -> Option<TidepoolReplServer> {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
+    let module_env = tidepool_mcp::session_decl_module_env(&decls, true);
     let cfg = ReplServerConfig {
         decls,
         ask_tag,
         base_include,
-        module_env: tidepool_mcp::session_decl_module_env(true),
+        module_env,
         session_root_base,
         nursery_size: None,
         continuation_ttl: None,

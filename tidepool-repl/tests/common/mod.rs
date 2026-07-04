@@ -10,7 +10,6 @@
 use rmcp::model::{CallToolResult, RawContent};
 use tidepool_handlers::{base_decls_with_ask, build_minimal_stack};
 use tidepool_repl::{ReplServerConfig, TidepoolReplServer};
-use tidepool_runtime::session::ModuleEnv;
 
 /// True if the session-aware `tidepool-extract` is reachable (else the suite
 /// skips cleanly — CI without the nix shell / `TIDEPOOL_EXTRACT` set).
@@ -71,11 +70,20 @@ pub fn build_server_full(
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
+    // NOT `ModuleEnv::standalone_default()`: the minimal (Console-only) stack
+    // has no Exec/Http, so `session_decl_module_env` correctly omits the
+    // Shell/Git/Cargo imports — but it still carries the same Prelude/Aeson
+    // surface every decl-plane pure bind needs (a `v <- pure (object [...])`
+    // bind is promoted to a decl for GHCi-parity generalization — see
+    // `try_pure_bind_as_decl` in `tidepool-runtime` — so it type-checks
+    // against THIS env, not the effectful eval preamble). The lens-free
+    // `standalone_default` dropped `object`/`toJSON` out of scope entirely.
+    let module_env = tidepool_mcp::session_decl_module_env(&decls, false);
     let cfg = ReplServerConfig {
         decls,
         ask_tag,
         base_include: vec![effects_dir, prelude_dir],
-        module_env: ModuleEnv::standalone_default(),
+        module_env,
         session_root_base,
         nursery_size: Some(1 << 21), // 2 MiB
         continuation_ttl,

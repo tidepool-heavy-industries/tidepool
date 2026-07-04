@@ -98,6 +98,21 @@ pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
 /// standalone REPL/tests; this requires the `with-packages` GHC (it imports
 /// `Tidepool.Prelude`, which pulls `Control.Lens`).
 ///
+/// `effects`: the session's actual effect stack — gates the Git/Shell/Cargo
+/// imports exactly like the eval preamble's `pragmas_and_imports` does (only
+/// when both Exec and Http are present; those stdlib modules reference
+/// `runArgv`/`parseJson` helpers that don't exist in a generated
+/// `Tidepool.Effects` built from a smaller stack). Passing the wrong (e.g.
+/// empty/minimal) effect set here used to be masked by callers reaching for
+/// the lens-free `ModuleEnv::standalone_default` instead — but that surface
+/// also drops Prelude/Aeson, so a decl-plane pure bind (`v = object [...]`,
+/// promoted to a decl for GHCi-parity generalization — see
+/// `tidepool-runtime` `try_pure_bind_as_decl`) failed to resolve `object`/
+/// `toJSON` under a minimal stack even though production always has them.
+/// This fn is now safe to call for ANY stack: it always carries
+/// Prelude/Aeson/qualified-namespaces (via `eval_import_lines`), and adds
+/// Shell/Git/Cargo only when the stack actually supports them.
+///
 /// `user_library`: whether a project/global `Library` facade is on the
 /// include path (mirrors the `stmt`-path flag in `has_user_library`, passed
 /// by the caller since this module has no filesystem access to check
@@ -112,20 +127,22 @@ pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
 /// for statements (a decl defining e.g. `data Hit`, which `Library`
 /// re-exports, would collide).
 #[must_use]
-pub fn session_decl_module_env(user_library: bool) -> ModuleEnv {
+pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> ModuleEnv {
     let mut imports: Vec<String> = eval_import_lines(user_library)
         .into_iter()
         .map(String::from)
         .collect();
-    // Full-stack repl decl surface: also import the shell-effect modules so
-    // `session_def` helpers can use Git/Shell/Cargo verbs (the eval module gets
-    // them via `pragmas_and_imports`, but the decl `ModuleEnv` needs them too,
-    // else a decl like `dirty = Git.gitStatus` fails to resolve). Safe here
-    // because this env is only used under the full stack (Exec+Http present);
-    // the lens-free `standalone_default` minimal env deliberately omits them.
-    imports.push("import qualified Tidepool.Shell as Shell".into());
-    imports.push("import qualified Tidepool.Git as Git".into());
-    imports.push("import qualified Tidepool.Cargo as Cargo".into());
+    // Shell-effect stdlib modules depend on the Exec (`runArgv`) + Http
+    // (`parseJson`) helpers in the generated Tidepool.Effects — import them
+    // only when both effects are present, mirroring `pragmas_and_imports`
+    // exactly so the decl and stmt/eval planes never diverge on this gate.
+    let has_exec = effects.iter().any(|e| e.type_name == "Exec");
+    let has_http = effects.iter().any(|e| e.type_name == "Http");
+    if has_exec && has_http {
+        imports.push("import qualified Tidepool.Shell as Shell".into());
+        imports.push("import qualified Tidepool.Git as Git".into());
+        imports.push("import qualified Tidepool.Cargo as Cargo".into());
+    }
     // Orchestration helpers (readGlob/searchFiles/memo/renderJson/…): the
     // stmt plane gets these via the expr module's imports; without this the
     // decl plane's import surface diverges — a decl using `readGlob` failed

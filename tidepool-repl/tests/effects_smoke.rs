@@ -65,14 +65,15 @@ fn build_full_server(cwd: PathBuf) -> TidepoolReplServer {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
+    // Match production (`main.rs`): the full-stack server gives Lane-A decls
+    // the eval pragmas+imports, so `session_def` helpers share the eval
+    // vocabulary (`M`, the effect verbs, `L.`/`Set.`, the Prelude shadows).
+    let module_env = tidepool_mcp::session_decl_module_env(&decls, false);
     let cfg = ReplServerConfig {
         decls,
         ask_tag,
         base_include,
-        // Match production (`main.rs`): the full-stack server gives Lane-A decls
-        // the eval pragmas+imports, so `session_def` helpers share the eval
-        // vocabulary (`M`, the effect verbs, `L.`/`Set.`, the Prelude shadows).
-        module_env: tidepool_mcp::session_decl_module_env(false),
+        module_env,
         session_root_base,
         nursery_size: None,
         continuation_ttl: None,

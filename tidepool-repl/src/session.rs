@@ -551,7 +551,11 @@ impl Session {
     /// same actionable message the bare-decl form already gives.
     fn try_pure_bind_as_decl(&mut self, expr_text: &str, name: &str) -> Option<TurnOutcome> {
         let decl = pure_bind_to_decl(expr_text, name)?;
-        match self.lib.define(&decl) {
+        // shadow_wildcard_imports: false — a pure bind promoted here for GHCi-
+        // parity generalization did not necessarily intend to redefine a
+        // Prelude/Library name, so a collision must surface loudly (see the
+        // doc comment above) rather than silently shadow.
+        match self.lib.define_batch_scoped(&[decl.as_str()], false) {
             Ok(gen) => {
                 let type_display = self.probe_pure_type(name).unwrap_or_default();
                 // Register in the environment (decl plane) so :bindings/stale/etc.
