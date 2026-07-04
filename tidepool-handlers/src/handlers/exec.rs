@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use tidepool_bridge_derive::{CoreRecord, ToCore};
 
 // ============================================================================
 // Tag 5: Exec (shell commands)
@@ -8,6 +9,14 @@ use std::path::PathBuf;
 // single-source definition; only the handler struct and the per-verb method
 // bodies below are hand-written.
 tidepool_mcp::exec_effect_def!(crate::effect_glue::effect_rust_projection);
+
+/// Haskell `Proc` record: exitCode / stdout / stderr — a finished subprocess.
+#[derive(ToCore, Clone, CoreRecord)]
+pub struct Proc {
+    pub exit_code: i64,
+    pub stdout: String,
+    pub stderr: String,
+}
 
 #[derive(Clone)]
 pub struct ExecHandler {
@@ -39,11 +48,7 @@ impl ExecHandler {
         Ok(canonical)
     }
 
-    fn run_command(
-        &self,
-        cmd: &str,
-        dir: &std::path::Path,
-    ) -> Result<(i64, String, String), ExecError> {
+    fn run_command(&self, cmd: &str, dir: &std::path::Path) -> Result<Proc, ExecError> {
         let output = std::process::Command::new("sh")
             .arg("-c")
             .arg(cmd)
@@ -71,30 +76,30 @@ impl ExecHandler {
             stderr.truncate(end);
             stderr.push_str("\n...[truncated at 2MB]");
         }
-        let code = output.status.code().unwrap_or(-1) as i64;
-        Ok((code, stdout, stderr))
+        let exit_code = output.status.code().unwrap_or(-1) as i64;
+        Ok(Proc {
+            exit_code,
+            stdout,
+            stderr,
+        })
     }
 }
 
 impl ExecHandler {
     // Errors-tagged verbs: total in `ExecError`, no `cx` — the dispatch arm
     // wraps the `Result` via `cx.respond` (Ok→Right, Err→Left). See #335. A
-    // nonzero EXIT is not a failure: `run_command` always returns `Ok((code,
-    // out, err))` once the process spawns — `Err` is only ExecSpawn/ExecBadDir.
-    fn exec_run(&mut self, cmd: String) -> Result<(i64, String, String), ExecError> {
+    // nonzero EXIT is not a failure: `run_command` always returns `Ok(Proc {
+    // .. })` once the process spawns — `Err` is only ExecSpawn/ExecBadDir.
+    fn exec_run(&mut self, cmd: String) -> Result<Proc, ExecError> {
         self.run_command(&cmd, &self.root.clone())
     }
 
-    fn exec_run_in(
-        &mut self,
-        dir: String,
-        cmd: String,
-    ) -> Result<(i64, String, String), ExecError> {
+    fn exec_run_in(&mut self, dir: String, cmd: String) -> Result<Proc, ExecError> {
         let target = self.resolve_dir(&dir)?;
         self.run_command(&cmd, &target)
     }
 
-    fn exec_run_argv(&mut self, argv: Vec<String>) -> Result<(i64, String, String), ExecError> {
+    fn exec_run_argv(&mut self, argv: Vec<String>) -> Result<Proc, ExecError> {
         if argv.is_empty() {
             return Err(ExecError::ExecSpawn("runArgv: empty argv".to_string()));
         }
@@ -123,8 +128,12 @@ impl ExecHandler {
             stderr.truncate(end);
             stderr.push_str("\n...[truncated at 2MB]");
         }
-        let code = output.status.code().unwrap_or(-1) as i64;
-        Ok((code, stdout, stderr))
+        let exit_code = output.status.code().unwrap_or(-1) as i64;
+        Ok(Proc {
+            exit_code,
+            stdout,
+            stderr,
+        })
     }
 }
 

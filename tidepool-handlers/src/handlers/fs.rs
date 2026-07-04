@@ -24,6 +24,39 @@ struct FileRead {
     contents: Result<String, FsError>,
 }
 
+/// Haskell `Hit` record: path / line / text — a search match (`grepGlob` and
+/// the shared structural-search surface).
+#[derive(
+    tidepool_bridge_derive::ToCore,
+    tidepool_bridge_derive::FromCore,
+    Clone,
+    Debug,
+    PartialEq,
+    tidepool_bridge_derive::CoreRecord,
+)]
+pub struct Hit {
+    pub path: String,
+    pub line: i64,
+    pub text: String,
+}
+
+/// Haskell `FileMeta` record: size / isFile / isDir — filesystem metadata for
+/// a path (`fsMeta`/`FsMetadata`). Absence of the path is `Nothing` at the
+/// `Maybe FileMeta` level, not a field on this record.
+#[derive(
+    tidepool_bridge_derive::ToCore,
+    tidepool_bridge_derive::FromCore,
+    Clone,
+    Debug,
+    PartialEq,
+    tidepool_bridge_derive::CoreRecord,
+)]
+pub struct FileMeta {
+    pub size: i64,
+    pub is_file: bool,
+    pub is_dir: bool,
+}
+
 pub const DEFAULT_IGNORE_DIRS: &[&str] = &["target", ".git", "node_modules", "dist-newstyle"];
 
 pub fn pattern_mentions(pattern: &str, dir: &str) -> bool {
@@ -350,14 +383,10 @@ impl FsHandler {
         Ok(rel_paths)
     }
 
-    fn fs_grep(
-        &mut self,
-        pattern: String,
-        file_glob: String,
-    ) -> Result<Vec<(String, i64, String)>, FsError> {
+    fn fs_grep(&mut self, pattern: String, file_glob: String) -> Result<Vec<Hit>, FsError> {
         let re = regex::Regex::new(&pattern).map_err(|e| grep_regex_error(&pattern, &e))?;
         let paths = self.expand_glob(&file_glob)?;
-        let mut results: Vec<(String, i64, String)> = Vec::new();
+        let mut results: Vec<Hit> = Vec::new();
         let mut more_matches = 0;
         let cap = 2000;
 
@@ -389,17 +418,21 @@ impl FsHandler {
                         more_matches += 1;
                         continue;
                     }
-                    results.push((rel_path.clone(), (i + 1) as i64, line.to_string()));
+                    results.push(Hit {
+                        path: rel_path.clone(),
+                        line: (i + 1) as i64,
+                        text: line.to_string(),
+                    });
                 }
             }
         }
 
         if more_matches > 0 {
-            results.push((
-                "...".to_string(),
-                0,
-                format!("truncated: {} more matches", more_matches),
-            ));
+            results.push(Hit {
+                path: "...".to_string(),
+                line: 0,
+                text: format!("truncated: {} more matches", more_matches),
+            });
         }
 
         Ok(results)
@@ -417,12 +450,12 @@ impl FsHandler {
     ) -> Result<tidepool_effect::Response, EffectError> {
         let resolved = self.resolve(&path).map_err(fs_err_to_effect)?;
         match std::fs::metadata(&resolved) {
-            Ok(meta) => cx.respond(serde_json::json!({
-                "size": meta.len() as i64,
-                "is_file": meta.is_file(),
-                "is_dir": meta.is_dir(),
+            Ok(meta) => cx.respond(Some(FileMeta {
+                size: meta.len() as i64,
+                is_file: meta.is_file(),
+                is_dir: meta.is_dir(),
             })),
-            Err(_) => cx.respond(serde_json::Value::Null),
+            Err(_) => cx.respond(None::<FileMeta>),
         }
     }
 
@@ -802,23 +835,29 @@ mod tests {
 
         let req = FsReq::FsGrep("hello".to_string(), "**/*.txt".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let decoded: Result<Vec<(String, i64, String)>, FsError> =
-            FromCore::from_value(&res, &table).unwrap();
+        let decoded: Result<Vec<Hit>, FsError> = FromCore::from_value(&res, &table).unwrap();
         let results = decoded.unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(
             results[0],
-            ("test.txt".to_string(), 1, "hello world".to_string())
+            Hit {
+                path: "test.txt".to_string(),
+                line: 1,
+                text: "hello world".to_string()
+            }
         );
         assert_eq!(
             results[1],
-            ("test.txt".to_string(), 3, "hello rust".to_string())
+            Hit {
+                path: "test.txt".to_string(),
+                line: 3,
+                text: "hello rust".to_string()
+            }
         );
 
         let req = FsReq::FsGrep("hello".to_string(), "**/*".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let decoded: Result<Vec<(String, i64, String)>, FsError> =
-            FromCore::from_value(&res, &table).unwrap();
+        let decoded: Result<Vec<Hit>, FsError> = FromCore::from_value(&res, &table).unwrap();
         assert_eq!(decoded.unwrap().len(), 2);
     }
 
@@ -841,14 +880,13 @@ mod tests {
 
         let req = FsReq::FsGrep("match".to_string(), "large.txt".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let decoded: Result<Vec<(String, i64, String)>, FsError> =
-            FromCore::from_value(&res, &table).unwrap();
+        let decoded: Result<Vec<Hit>, FsError> = FromCore::from_value(&res, &table).unwrap();
         let results = decoded.unwrap();
 
         assert_eq!(results.len(), 2001);
-        assert_eq!(results[2000].0, "...");
-        assert_eq!(results[2000].1, 0);
-        assert_eq!(results[2000].2, "truncated: 5 more matches");
+        assert_eq!(results[2000].path, "...");
+        assert_eq!(results[2000].line, 0);
+        assert_eq!(results[2000].text, "truncated: 5 more matches");
     }
 
     #[test]

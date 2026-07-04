@@ -38,13 +38,18 @@ async fn info_resolves_stdlib_proc() {
     let v = parse_meta(t.expect_ok(":i Proc"));
     assert_eq!(v["name"], "Proc", "name echoed: {v}");
     assert_eq!(v["source"], "stdlib", "resolved via the source scan: {v}");
-    assert_eq!(v["module"], "Tidepool.Records", "module from header: {v}");
+    // Proc is a bridged record (GENERATED from the Rust wire-struct), so its
+    // `data` decl lives in Tidepool.Records.Bridged, not Tidepool.Records.
+    assert_eq!(
+        v["module"], "Tidepool.Records.Bridged",
+        "module from header: {v}"
+    );
     let shape = v["shape"].as_str().expect("shape is a string");
     for field in ["exitCode :: Int", "stdout :: Text", "stderr :: Text"] {
         assert!(shape.contains(field), "shape must carry `{field}`: {shape}");
     }
     assert!(
-        v["file"].as_str().unwrap().ends_with("Records.hs"),
+        v["file"].as_str().unwrap().ends_with("Records/Bridged.hs"),
         "file points at the defining source: {v}"
     );
 }

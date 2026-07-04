@@ -528,9 +528,14 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         ));
     }
     if has_exec {
-        out.push_str("runChecked :: Text -> M Text\nrunChecked = readProcess\n");
-        // `run` is typed (#335); abort-on-spawn-failure via `liftEither`,
-        // preserving `runAll`'s pre-#335 throw-on-failure behaviour.
+        // `run` is typed (#335); abort-on-failure via `liftEither`, preserving
+        // `runChecked`/`runAll`'s pre-#335 throw-on-failure behaviour.
+        out.push_str(concat!(
+            "runChecked :: Text -> M Text\n",
+            "runChecked cmd = do\n",
+            "  p <- run cmd >>= liftEither\n",
+            "  if ok p then pure p.stdout else error (\"command failed (\" <> show p.exitCode <> \"): \" <> p.stderr)\n",
+        ));
         out.push_str(concat!(
             "runAll :: [Text] -> M [Proc]\n",
             "runAll = mapM (\\c -> run c >>= liftEither)\n",
