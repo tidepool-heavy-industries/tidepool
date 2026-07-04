@@ -7,8 +7,8 @@ use tidepool_heap::layout as heap_layout;
 
 use super::cancel::check_cancel_and_set_error;
 use super::errors::{
-    error_poison_ptr, has_runtime_error, runtime_bad_thunk_state_trap, runtime_blackhole_trap,
-    RuntimeError, RUNTIME_ERROR,
+    error_poison_ptr, has_runtime_error, overwrite_runtime_error, runtime_bad_thunk_state_trap,
+    runtime_blackhole_trap, RuntimeError,
 };
 use super::gc::{register_rust_root, rust_roots_mark, truncate_rust_roots};
 
@@ -47,9 +47,7 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                             *(current.add(layout::THUNK_CODE_PTR_OFFSET as usize) as *const usize);
 
                         if code_ptr == 0 {
-                            RUNTIME_ERROR.with(|cell| {
-                                *cell.borrow_mut() = Some(RuntimeError::NullFunPtr);
-                            });
+                            overwrite_runtime_error(RuntimeError::NullFunPtr);
                             return error_poison_ptr();
                         }
 
@@ -420,7 +418,7 @@ mod tests {
 
     #[test]
     fn test_heap_force_thunk_blackhole() {
-        unsafe {
+        crate::machine_state::test_support::with_test_machine(|| unsafe {
             let mut vmctx = VMContext {
                 alloc_ptr: std::ptr::null_mut(),
                 alloc_limit: std::ptr::null_mut(),
@@ -429,9 +427,6 @@ mod tests {
                 tail_arg: std::ptr::null_mut(),
                 machine_state: std::ptr::null_mut(),
             };
-
-            // Reset runtime error
-            RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);
 
             // Blackholed thunk
             let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
@@ -445,12 +440,12 @@ mod tests {
 
             let err = take_runtime_error().expect("Should have flagged error");
             assert!(matches!(err, RuntimeError::BlackHole));
-        }
+        });
     }
 
     #[test]
     fn test_heap_force_thunk_null_code_ptr() {
-        unsafe {
+        crate::machine_state::test_support::with_test_machine(|| unsafe {
             let mut vmctx = VMContext {
                 alloc_ptr: std::ptr::null_mut(),
                 alloc_limit: std::ptr::null_mut(),
@@ -459,8 +454,6 @@ mod tests {
                 tail_arg: std::ptr::null_mut(),
                 machine_state: std::ptr::null_mut(),
             };
-
-            RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);
 
             let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
             let thunk_ptr = thunk_buf.as_mut_ptr();
@@ -472,12 +465,12 @@ mod tests {
             assert_eq!(res, error_poison_ptr());
             let err = take_runtime_error().expect("Should have flagged error");
             assert!(matches!(err, RuntimeError::NullFunPtr));
-        }
+        });
     }
 
     #[test]
     fn test_heap_force_thunk_bad_state() {
-        unsafe {
+        crate::machine_state::test_support::with_test_machine(|| unsafe {
             let mut vmctx = VMContext {
                 alloc_ptr: std::ptr::null_mut(),
                 alloc_limit: std::ptr::null_mut(),
@@ -486,8 +479,6 @@ mod tests {
                 tail_arg: std::ptr::null_mut(),
                 machine_state: std::ptr::null_mut(),
             };
-
-            RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = None);
 
             let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
             let thunk_ptr = thunk_buf.as_mut_ptr();
@@ -498,6 +489,6 @@ mod tests {
             assert_eq!(res, error_poison_ptr());
             let err = take_runtime_error().expect("Should have flagged error");
             assert!(matches!(err, RuntimeError::BadThunkState(255)));
-        }
+        });
     }
 }

@@ -167,6 +167,9 @@ pub(crate) struct RegistryGuard {
     /// Points at the owning `JitEffectMachine::machine_state`, set by
     /// `install_registries`. Outlives this guard (same call frame).
     machine_state: *mut MachineState,
+    /// The thread's `CURRENT_MACHINE` value before `install_registries`
+    /// installed `machine_state` (null unless runs nest) — restored on drop.
+    prev_machine: *mut MachineState,
 }
 
 /// The two raw pointers `arm_reclaim` captures for the Drop-time heap reclaim.
@@ -228,21 +231,21 @@ impl Drop for RegistryGuard {
         }
         crate::host_fns::clear_run_scratch();
         // SAFETY: machine_state was set by install_registries and outlives
-        // this guard (points at the owning JitEffectMachine's field).
+        // this guard (points at the owning JitEffectMachine's field). Clean
+        // the per-run cells directly through the machine (not the ambient
+        // free-fn shims) BEFORE restoring CURRENT_MACHINE below — otherwise
+        // the free fns would see a cleared/stale current-machine pointer.
         unsafe {
             (*self.machine_state).clear_stack_map_registry();
             (*self.machine_state).clear_cancel_flag();
-        }
-        crate::host_fns::clear_parked_streams();
-        crate::debug::clear_lambda_registry();
-        // Clean up remaining thread-local state for same-thread reuse
-        let _ = crate::host_fns::take_runtime_error();
-        let _ = crate::host_fns::drain_diagnostics();
-        // SAFETY: as above.
-        unsafe {
+            let _ = (*self.machine_state).take_runtime_error();
+            let _ = (*self.machine_state).drain_diagnostics();
+            (*self.machine_state).clear_parked_streams();
             (*self.machine_state).reset_call_depth();
         }
+        crate::debug::clear_lambda_registry();
         crate::host_fns::set_exec_context("");
+        crate::machine_state::restore_current_machine(self.prev_machine);
     }
 }
 
@@ -355,6 +358,13 @@ impl JitEffectMachine {
         CancelHandle(self.cancel_flag.clone())
     }
 
+    /// Drain this machine's accumulated diagnostics. The machine-scoped
+    /// sibling of the ambient `host_fns::drain_diagnostics` free-fn shim
+    /// (per #340).
+    pub fn drain_diagnostics(&self) -> Vec<String> {
+        self.machine_state.drain_diagnostics()
+    }
+
     /// Install per-run thread-local registries and return a drop guard.
     ///
     /// For session machines: re-points the GC state at the retained heap
@@ -380,10 +390,16 @@ impl JitEffectMachine {
         // Make the aeson-`Value` constructor ids visible to the `JsonDecode`
         // primop's host fn for the duration of this run.
         self.machine_state.set_json_con_ids(self.json_con_ids);
+        let machine_state_ptr = &mut self.machine_state as *mut MachineState;
+        // Install this machine as the thread's reach target for vmctx-less
+        // host fns and the external ambient shims; RegistryGuard::drop
+        // restores whatever was installed before (null unless runs nest).
+        let prev_machine = crate::machine_state::install_current_machine(machine_state_ptr);
         RegistryGuard {
             is_session: self.session.is_some(),
             reclaim: None,
-            machine_state: &mut self.machine_state as *mut MachineState,
+            machine_state: machine_state_ptr,
+            prev_machine,
         }
     }
 
@@ -1474,17 +1490,19 @@ mod tests {
     /// something like BadFunPtrTag(255).
     #[test]
     fn test_runtime_error_preferred_over_signal() {
-        // Set a pending runtime error via public API (kind=0 = DivisionByZero)
-        crate::host_fns::runtime_error(0);
+        crate::machine_state::test_support::with_test_machine(|| {
+            // Set a pending runtime error via public API (kind=0 = DivisionByZero)
+            crate::host_fns::runtime_error(0);
 
-        // Signal fires after the runtime error was set
-        let err = runtime_error_or_signal(libc::SIGBUS);
+            // Signal fires after the runtime error was set
+            let err = runtime_error_or_signal(libc::SIGBUS);
 
-        // Should get DivisionByZero, not Signal(SIGBUS)
-        assert_eq!(
-            err,
-            YieldError::Runtime(crate::host_fns::RuntimeError::DivisionByZero)
-        );
+            // Should get DivisionByZero, not Signal(SIGBUS)
+            assert_eq!(
+                err,
+                YieldError::Runtime(crate::host_fns::RuntimeError::DivisionByZero)
+            );
+        });
     }
 
     /// When no RuntimeError is pending, the signal number comes through.

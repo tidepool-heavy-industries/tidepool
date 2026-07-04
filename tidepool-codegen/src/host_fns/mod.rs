@@ -92,7 +92,7 @@ pub use primops::{
 
 pub(crate) use streaming::{
     alloc_stream_tail_thunk, clear_parked_streams, materialize_cons_list, park_stream,
-    ParkedStream, ReadySource,
+    ParkedStream, ReadySource, StreamId,
 };
 
 /// Return the list of host function symbols for JIT registration.

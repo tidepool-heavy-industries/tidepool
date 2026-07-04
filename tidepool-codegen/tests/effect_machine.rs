@@ -24,6 +24,31 @@ const UNION_CON_TAG: u64 = 3;
 const LEAF_CON_TAG: u64 = 4;
 const NODE_CON_TAG: u64 = 5;
 
+/// Installs a throwaway `MachineState` as this thread's current machine (the
+/// reach path `runtime_error`/`take_runtime_error`/etc. use in place of
+/// `vmctx`), restoring whatever was installed before on drop — including on
+/// unwind, so a failed `assert_eq!` can't leave a dangling `CURRENT_MACHINE`
+/// pointer for a later test sharing this worker thread. Bare-VMContext test
+/// harnesses like this file exercise the same reach path as production.
+struct TestMachineGuard {
+    _ms: Box<tidepool_codegen::machine_state::MachineState>,
+    prev: *mut tidepool_codegen::machine_state::MachineState,
+}
+
+impl Drop for TestMachineGuard {
+    fn drop(&mut self) {
+        tidepool_codegen::machine_state::restore_current_machine(self.prev);
+    }
+}
+
+fn install_test_machine() -> TestMachineGuard {
+    let ms = Box::new(tidepool_codegen::machine_state::MachineState::new());
+    let ptr = &*ms as *const tidepool_codegen::machine_state::MachineState
+        as *mut tidepool_codegen::machine_state::MachineState;
+    let prev = tidepool_codegen::machine_state::install_current_machine(ptr);
+    TestMachineGuard { _ms: ms, prev }
+}
+
 /// Helper to build a JIT function for testing.
 fn build_test_fn<F>(
     name: &str,
@@ -441,6 +466,7 @@ fn test_runtime_error_div_zero() {
     let end = unsafe { start.add(4096) };
     let vmctx = VMContext::new(start, end, host_fns::gc_trigger);
     host_fns::reset_test_counters();
+    let _guard = install_test_machine();
 
     let mut machine = CompiledEffectMachine::new(
         func,
@@ -484,6 +510,7 @@ fn test_runtime_error_overflow() {
     let end = unsafe { start.add(4096) };
     let vmctx = VMContext::new(start, end, host_fns::gc_trigger);
     host_fns::reset_test_counters();
+    let _guard = install_test_machine();
 
     let mut machine = CompiledEffectMachine::new(
         func,
@@ -804,6 +831,7 @@ fn test_resume_null_continuation() {
 #[test]
 
 fn test_resume_unknown_tag() {
+    let _guard = install_test_machine();
     let mut nursery = vec![0u8; 1024];
 
     let vmctx = VMContext::new(
@@ -1000,6 +1028,7 @@ fn test_resume_node_with_effect_result() {
 
 #[test]
 fn test_force_ptr_invalid_tag() {
+    let _guard = install_test_machine();
     let mut nursery = vec![0u8; 1024];
     let vmctx = VMContext::new(
         nursery.as_mut_ptr(),
@@ -1029,6 +1058,7 @@ fn test_force_ptr_invalid_tag() {
 
 #[test]
 fn test_resume_unexpected_con_tag_harden() {
+    let _guard = install_test_machine();
     let mut nursery = vec![0u8; 1024];
     let vmctx = VMContext::new(
         nursery.as_mut_ptr(),

@@ -4,7 +4,7 @@
 
 use crate::context::VMContext;
 use crate::layout;
-use crate::machine_state::machine_state;
+use crate::machine_state::{current_machine, machine_state};
 use std::cell::{Cell, RefCell};
 use tidepool_heap::layout as heap_layout;
 
@@ -111,17 +111,20 @@ impl RuntimeErrorKind {
 }
 
 thread_local! {
-    /// The run's FIRST-CAUSE cell: the earliest `RuntimeError` recorded by
-    /// host/JIT code (first write wins — see [`set_first_cause`]). Boundaries
-    /// resolve it against their observed symptom via [`surface_error`].
-    pub(crate) static RUNTIME_ERROR: RefCell<Option<RuntimeError>> = const { RefCell::new(None) };
-
-    /// Captured JIT diagnostics.
-    static DIAGNOSTICS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-
     static EXEC_CONTEXT: RefCell<String> = const { RefCell::new(String::new()) };
     pub(crate) static SIGNAL_SAFE_CTX: Cell<[u8; 128]> = const { Cell::new([0u8; 128]) };
     pub(crate) static SIGNAL_SAFE_CTX_LEN: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Unconditionally overwrite this thread's current-machine pending cause —
+/// no-op if no machine is installed. Mirrors writers (e.g.
+/// `unresolved_var_trap`, the case/app traps) that replace any earlier cause
+/// rather than preserving it; see `MachineState::set_runtime_error_overwrite`
+/// and contrast with the first-write-wins [`set_first_cause`].
+pub(crate) fn overwrite_runtime_error(cause: RuntimeError) {
+    if let Some(ms) = unsafe { current_machine() } {
+        ms.set_runtime_error_overwrite(cause);
+    }
 }
 
 /// Set the current execution context for JIT code.
@@ -148,12 +151,16 @@ pub fn get_exec_context() -> String {
 
 /// Push a diagnostic message to the thread-local buffer.
 pub fn push_diagnostic(msg: String) {
-    DIAGNOSTICS.with(|d| d.borrow_mut().push(msg));
+    if let Some(ms) = unsafe { current_machine() } {
+        ms.push_diagnostic(msg);
+    }
 }
 
 /// Drain all accumulated diagnostics.
 pub fn drain_diagnostics() -> Vec<String> {
-    DIAGNOSTICS.with(|d| d.borrow_mut().drain(..).collect())
+    unsafe { current_machine() }
+        .map(|ms| ms.drain_diagnostics())
+        .unwrap_or_default()
 }
 
 /// varId → human name, registered from meta.cbor's `var_names` at load time
@@ -224,9 +231,7 @@ pub extern "C" fn unresolved_var_trap(var_id: u64) -> *mut u8 {
     );
     eprintln!("{}", msg);
     push_diagnostic(msg);
-    RUNTIME_ERROR.with(|cell| {
-        *cell.borrow_mut() = Some(RuntimeError::UnresolvedVar(var_id, name));
-    });
+    overwrite_runtime_error(RuntimeError::UnresolvedVar(var_id, name));
     error_poison_ptr()
 }
 
@@ -242,12 +247,7 @@ pub extern "C" fn runtime_error(kind: u64) -> *mut u8 {
     eprintln!("{}", msg);
     push_diagnostic(msg);
     let err = rk.into_error();
-    RUNTIME_ERROR.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(err);
-        }
-    });
+    set_first_cause(err);
     // Return a poison object instead of null. This is a valid Lit(Int#, 0)
     // heap object, so JIT code won't segfault when reading its tag byte.
     // The effect machine will detect the error flag and return Yield::Error
@@ -291,17 +291,14 @@ pub extern "C" fn runtime_error_with_msg(kind: u64, msg_ptr: *const u8, msg_len:
 /// cancel records; [`surface_error`] then surfaces `RuntimeError::Cancelled`
 /// regardless of which cancellation channel fired.
 pub fn set_first_cause(cause: RuntimeError) {
-    RUNTIME_ERROR.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(cause);
-        }
-    });
+    if let Some(ms) = unsafe { current_machine() } {
+        ms.set_first_cause(cause);
+    }
 }
 
 /// Returns true if a runtime error has been set for the current thread.
 pub fn has_runtime_error() -> bool {
-    RUNTIME_ERROR.with(|cell| cell.borrow().is_some())
+    unsafe { current_machine() }.is_some_and(|ms| ms.has_runtime_error())
 }
 
 pub extern "C" fn runtime_oom() -> *mut u8 {
@@ -318,9 +315,7 @@ pub extern "C" fn runtime_blackhole_trap(_vmctx: *mut VMContext) -> *mut u8 {
     let msg = "[JIT] BlackHole detected: infinite loop (thunk forcing itself)".to_string();
     eprintln!("{}", msg);
     push_diagnostic(msg);
-    RUNTIME_ERROR.with(|cell| {
-        *cell.borrow_mut() = Some(RuntimeError::BlackHole);
-    });
+    overwrite_runtime_error(RuntimeError::BlackHole);
     error_poison_ptr()
 }
 
@@ -329,9 +324,7 @@ pub extern "C" fn runtime_bad_thunk_state_trap(_vmctx: *mut VMContext, state: u8
     let msg = format!("[JIT] Invalid thunk state: {}", state);
     eprintln!("{}", msg);
     push_diagnostic(msg);
-    RUNTIME_ERROR.with(|cell| {
-        *cell.borrow_mut() = Some(RuntimeError::BadThunkState(state));
-    });
+    overwrite_runtime_error(RuntimeError::BadThunkState(state));
     error_poison_ptr()
 }
 
@@ -778,7 +771,7 @@ unsafe extern "C" fn poison_trampoline_lazy_msg(
 /// momentarily borrowed, there is no error we can safely take here; return None
 /// and let the caller fall back (e.g. `Signal(sig)`).
 pub fn take_runtime_error() -> Option<RuntimeError> {
-    RUNTIME_ERROR.with(|cell| cell.try_borrow_mut().ok().and_then(|mut e| e.take()))
+    unsafe { current_machine() }.and_then(|ms| ms.take_runtime_error())
 }
 
 /// The single first-cause resolver at the JIT boundary.
@@ -805,9 +798,7 @@ pub(crate) fn check_ptr_invalid(ptr: *const u8, fn_name: &str) -> bool {
         let msg = format!("[BUG] {}: bad pointer {:#x}", fn_name, ptr as u64);
         eprintln!("{}", msg);
         push_diagnostic(msg);
-        RUNTIME_ERROR.with(|cell| {
-            *cell.borrow_mut() = Some(RuntimeError::BadPointer);
-        });
+        overwrite_runtime_error(RuntimeError::BadPointer);
         true
     } else {
         false
@@ -837,7 +828,7 @@ const MAX_CALL_DEPTH: u32 = 20_000;
 pub unsafe extern "C" fn debug_app_check(vmctx: *mut VMContext, fun_ptr: *const u8) -> *mut u8 {
     // If a runtime error is already pending, don't abort on tag mismatches —
     // we're in error-propagation mode and the effect machine will handle it.
-    let has_error = RUNTIME_ERROR.with(|cell| cell.borrow().is_some());
+    let has_error = has_runtime_error();
 
     // SAFETY: caller contract above.
     let ms = unsafe { machine_state(vmctx) };
@@ -846,9 +837,7 @@ pub unsafe extern "C" fn debug_app_check(vmctx: *mut VMContext, fun_ptr: *const 
     if !has_error {
         let depth = ms.incr_call_depth();
         if depth > MAX_CALL_DEPTH {
-            RUNTIME_ERROR.with(|cell| {
-                *cell.borrow_mut() = Some(RuntimeError::StackOverflow);
-            });
+            overwrite_runtime_error(RuntimeError::StackOverflow);
             return error_poison_ptr();
         }
     }
@@ -859,9 +848,7 @@ pub unsafe extern "C" fn debug_app_check(vmctx: *mut VMContext, fun_ptr: *const 
         let msg = "[JIT] App: fun_ptr is NULL — unresolved binding".to_string();
         eprintln!("{}", msg);
         push_diagnostic(msg);
-        RUNTIME_ERROR.with(|cell| {
-            *cell.borrow_mut() = Some(RuntimeError::NullFunPtr);
-        });
+        overwrite_runtime_error(RuntimeError::NullFunPtr);
         return error_poison_ptr();
     }
     // SAFETY: fun_ptr was checked non-null above; reading the tag byte at offset 0
@@ -897,9 +884,7 @@ pub unsafe extern "C" fn debug_app_check(vmctx: *mut VMContext, fun_ptr: *const 
             push_diagnostic(msg2);
         }
         let _ = stderr.flush();
-        RUNTIME_ERROR.with(|cell| {
-            *cell.borrow_mut() = Some(RuntimeError::BadFunPtrTag(tag));
-        });
+        overwrite_runtime_error(RuntimeError::BadFunPtrTag(tag));
         return error_poison_ptr();
     }
     std::ptr::null_mut() // 0 = ok, proceed with the call
@@ -932,8 +917,7 @@ pub extern "C" fn runtime_case_trap(
     // value cascaded into a case expression. Return poison again instead of
     // aborting — the error flag will be detected when with_signal_protection
     // returns.
-    let has_error = RUNTIME_ERROR.with(|cell| cell.borrow().is_some());
-    if has_error {
+    if has_runtime_error() {
         return error_poison_ptr();
     }
 
@@ -952,7 +936,7 @@ pub extern "C" fn runtime_case_trap(
         {
             // SAFETY: code_ptr is the poison trampoline function pointer. Calling it
             // with null vmctx and arg triggers the lazy error flag without side effects
-            // beyond setting RUNTIME_ERROR.
+            // beyond setting the current machine's runtime-error cell.
             unsafe {
                 let func: unsafe extern "C" fn(*mut VMContext, *mut u8, *mut u8) -> *mut u8 =
                     std::mem::transmute(code_ptr);
@@ -1033,9 +1017,7 @@ pub extern "C" fn runtime_case_trap(
     }
     let _ = stderr.flush();
     drop(stderr);
-    RUNTIME_ERROR.with(|cell| {
-        *cell.borrow_mut() = Some(RuntimeError::CaseTrap);
-    });
+    overwrite_runtime_error(RuntimeError::CaseTrap);
     error_poison_ptr()
 }
 
@@ -1045,13 +1027,15 @@ mod tests {
 
     #[test]
     fn test_diagnostics() {
-        let _ = drain_diagnostics();
-        push_diagnostic("test1".to_string());
-        push_diagnostic("test2".to_string());
-        let d = drain_diagnostics();
-        assert_eq!(d, vec!["test1".to_string(), "test2".to_string()]);
-        let d2 = drain_diagnostics();
-        assert!(d2.is_empty());
+        crate::machine_state::test_support::with_test_machine(|| {
+            let _ = drain_diagnostics();
+            push_diagnostic("test1".to_string());
+            push_diagnostic("test2".to_string());
+            let d = drain_diagnostics();
+            assert_eq!(d, vec!["test1".to_string(), "test2".to_string()]);
+            let d2 = drain_diagnostics();
+            assert!(d2.is_empty());
+        });
     }
 
     /// Regression test for the poison-buffer undersize bug.
@@ -1072,54 +1056,56 @@ mod tests {
     /// and the buffer-size assertion below guards against regression.
     #[test]
     fn poison_buf_absorbs_max_con_write() {
-        // The read-side decoder cap; the compile-time assertion above
-        // guarantees POISON_BUF_SIZE absorbs this. The runtime check here
-        // additionally exercises the full write sequence to surface any
-        // overflow under Miri / ASan, not just the size relationship.
-        use crate::heap_bridge::MAX_FIELDS;
-        let worst_case_con = layout::CON_FIELDS_OFFSET as usize + MAX_FIELDS * 8;
-        assert!(
-            POISON_BUF_SIZE >= worst_case_con,
-            "poison buffer ({} B) must cover worst-case Con footprint ({} B)",
-            POISON_BUF_SIZE,
-            worst_case_con,
-        );
-
-        // Simulate the JIT's post-OOM write sequence exactly as
-        // `emit_alloc_fast_path` + the Con emitter do: tag at 0, size
-        // halfword at 1, CON_TAG at 8, num_fields at 16, fields from 24.
-        let ptr = runtime_oom();
-        assert!(!ptr.is_null());
-
-        // SAFETY: `ptr` is the poison buffer (POISON_BUF_SIZE >= worst_case_con).
-        // Writing a TAG_CON header and MAX_FIELDS u64 field slots into it
-        // stays entirely within the allocation after the fix.
-        // JIT stores use `MemFlags::trusted()` which permits unaligned
-        // access; mirror that with `write_unaligned` so the test also works
-        // on targets where a naked deref would trap on misalignment (the
-        // size halfword lands at offset 1).
-        unsafe {
-            ptr.write(layout::TAG_CON);
-            (ptr.add(1) as *mut u16).write_unaligned(worst_case_con as u16);
-            (ptr.add(layout::CON_TAG_OFFSET as usize) as *mut u64).write_unaligned(7);
-            (ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16)
-                .write_unaligned(MAX_FIELDS as u16);
-            for i in 0..MAX_FIELDS {
-                let off = layout::CON_FIELDS_OFFSET as usize + 8 * i;
-                (ptr.add(off) as *mut u64).write_unaligned(0xDEAD_BEEF_0000_0000 | (i as u64));
-            }
-            // Read back a sentinel to ensure the writes landed (and weren't
-            // silently dropped) — also defeats the optimizer.
-            let last_off = layout::CON_FIELDS_OFFSET as usize + 8 * (MAX_FIELDS - 1);
-            assert_eq!(
-                (ptr.add(last_off) as *const u64).read_unaligned(),
-                0xDEAD_BEEF_0000_0000 | (MAX_FIELDS as u64 - 1),
+        crate::machine_state::test_support::with_test_machine(|| {
+            // The read-side decoder cap; the compile-time assertion above
+            // guarantees POISON_BUF_SIZE absorbs this. The runtime check here
+            // additionally exercises the full write sequence to surface any
+            // overflow under Miri / ASan, not just the size relationship.
+            use crate::heap_bridge::MAX_FIELDS;
+            let worst_case_con = layout::CON_FIELDS_OFFSET as usize + MAX_FIELDS * 8;
+            assert!(
+                POISON_BUF_SIZE >= worst_case_con,
+                "poison buffer ({} B) must cover worst-case Con footprint ({} B)",
+                POISON_BUF_SIZE,
+                worst_case_con,
             );
-        }
 
-        // `runtime_oom` sets `RuntimeError::HeapOverflow` — clear it so
-        // we don't leak state to other tests sharing this thread.
-        let err = take_runtime_error().expect("runtime_oom must flag an error");
-        assert!(matches!(err, RuntimeError::HeapOverflow));
+            // Simulate the JIT's post-OOM write sequence exactly as
+            // `emit_alloc_fast_path` + the Con emitter do: tag at 0, size
+            // halfword at 1, CON_TAG at 8, num_fields at 16, fields from 24.
+            let ptr = runtime_oom();
+            assert!(!ptr.is_null());
+
+            // SAFETY: `ptr` is the poison buffer (POISON_BUF_SIZE >= worst_case_con).
+            // Writing a TAG_CON header and MAX_FIELDS u64 field slots into it
+            // stays entirely within the allocation after the fix.
+            // JIT stores use `MemFlags::trusted()` which permits unaligned
+            // access; mirror that with `write_unaligned` so the test also works
+            // on targets where a naked deref would trap on misalignment (the
+            // size halfword lands at offset 1).
+            unsafe {
+                ptr.write(layout::TAG_CON);
+                (ptr.add(1) as *mut u16).write_unaligned(worst_case_con as u16);
+                (ptr.add(layout::CON_TAG_OFFSET as usize) as *mut u64).write_unaligned(7);
+                (ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16)
+                    .write_unaligned(MAX_FIELDS as u16);
+                for i in 0..MAX_FIELDS {
+                    let off = layout::CON_FIELDS_OFFSET as usize + 8 * i;
+                    (ptr.add(off) as *mut u64).write_unaligned(0xDEAD_BEEF_0000_0000 | (i as u64));
+                }
+                // Read back a sentinel to ensure the writes landed (and weren't
+                // silently dropped) — also defeats the optimizer.
+                let last_off = layout::CON_FIELDS_OFFSET as usize + 8 * (MAX_FIELDS - 1);
+                assert_eq!(
+                    (ptr.add(last_off) as *const u64).read_unaligned(),
+                    0xDEAD_BEEF_0000_0000 | (MAX_FIELDS as u64 - 1),
+                );
+            }
+
+            // `runtime_oom` sets `RuntimeError::HeapOverflow` — clear it so
+            // we don't leak state to other tests sharing this thread.
+            let err = take_runtime_error().expect("runtime_oom must flag an error");
+            assert!(matches!(err, RuntimeError::HeapOverflow));
+        });
     }
 }
