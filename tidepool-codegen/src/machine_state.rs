@@ -296,10 +296,20 @@ pub(crate) mod test_support {
     /// installed afterward (mirrors `install_registries`/`RegistryGuard::drop`
     /// without needing a full `JitEffectMachine`).
     pub(crate) fn with_test_machine<R>(f: impl FnOnce() -> R) -> R {
+        struct Restore(*mut MachineState);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                restore_current_machine(self.0);
+            }
+        }
         let ms = MachineState::new();
-        let prev = install_current_machine(&ms as *const MachineState as *mut MachineState);
-        let result = f();
-        restore_current_machine(prev);
-        result
+        // Declared after `ms`, so this drops before `ms` on every exit —
+        // return OR unwind — restoring CURRENT_MACHINE off `ms` before `ms`
+        // is freed, so a panicking `f()` cannot leave a dangling pointer for
+        // a later test on the same worker thread.
+        let _restore = Restore(install_current_machine(
+            &ms as *const MachineState as *mut MachineState,
+        ));
+        f()
     }
 }

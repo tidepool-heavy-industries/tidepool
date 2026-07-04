@@ -91,7 +91,7 @@ pub use primops::{
 };
 
 pub(crate) use streaming::{
-    alloc_stream_tail_thunk, clear_parked_streams, materialize_cons_list, park_stream,
+    alloc_stream_tail_thunk, materialize_cons_list, park_stream,
     ParkedStream, ReadySource, StreamId,
 };
 

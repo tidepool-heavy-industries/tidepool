@@ -94,13 +94,6 @@ pub(crate) fn park_stream(stream: ParkedStream) -> u64 {
     }
 }
 
-/// Drop all parked streams (machine teardown).
-pub(crate) fn clear_parked_streams() {
-    if let Some(ms) = unsafe { current_machine() } {
-        ms.clear_parked_streams();
-    }
-}
-
 /// Allocate a host-code thunk with two raw u64 captures. Raw ints are safe
 /// captures: the GC's evacuation range-check skips non-pointer words.
 ///
