@@ -54,6 +54,25 @@ anaM f seed = do
     Nothing      -> pure []
     Just (b, a') -> (b :) <$> anaM f a'
 
+-- | Paramorphism: fold with access to the untouched tail at each step.
+para :: (a -> [a] -> b -> b) -> b -> [a] -> b
+para _ z []     = z
+para f z (x:xs) = f x xs (para f z xs)
+
+-- | Apomorphism: unfold with early bail — Right emits and continues,
+-- Left terminates the unfold with the remaining suffix supplied directly.
+apo :: (b -> Either [a] (a, b)) -> b -> [a]
+apo f seed = case f seed of
+  Left xs      -> xs
+  Right (a, b) -> a : apo f b
+
+-- | Tree hylomorphism: split a seed in two (recursing on each half) or bottom
+-- out at a leaf, then combine the two recursive results with the mid value.
+treeHylo :: (b -> mid -> b -> b) -> (a -> b) -> (a -> Either a (a, mid, a)) -> a -> b
+treeHylo combine leaf split seed = case split seed of
+  Left x          -> leaf x
+  Right (l, m, r) -> combine (treeHylo combine leaf split l) m (treeHylo combine leaf split r)
+
 -- ===========================================================================
 -- § Bounded Iteration
 -- ===========================================================================

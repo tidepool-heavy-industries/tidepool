@@ -50,14 +50,12 @@ fn test_cata_sum() {
 }
 
 #[test]
-#[ignore = "#342 pre-existing (confirmed on base 30afedef); not a Wave-3 regression"]
 fn test_para_with_tail() {
     let r = run_expr(r#"para (\x xs acc -> (x, length xs) : acc) ([] :: [(Int,Int)]) [10,20,30]"#);
     assert_eq!(r, serde_json::json!([[10, 2], [20, 1], [30, 0]]));
 }
 
 #[test]
-#[ignore = "#342 pre-existing (confirmed on base 30afedef); not a Wave-3 regression"]
 fn test_apo_short_circuit() {
     let r =
         run_expr(r#"apo (\n -> if n >= 3 then Left [99 :: Int] else Right (n, n+1)) (0 :: Int)"#);
@@ -118,7 +116,6 @@ fn test_until() {
 }
 
 #[test]
-#[ignore = "#342 pre-existing (confirmed on base 30afedef); not a Wave-3 regression"]
 fn test_apo_m() {
     // apoM: unfold counting up, bail with precomputed tail at 3
     let r = run_expr(
@@ -191,7 +188,6 @@ fn test_compose_converge_with_scanl() {
 }
 
 #[test]
-#[ignore = "#342 pre-existing (confirmed on base 30afedef); not a Wave-3 regression"]
 fn test_compose_apo_into_cata() {
     // apo produces with early bail, cata consumes
     // Count up from 1, bail at 5 injecting [100,200], then sum all
@@ -203,7 +199,6 @@ fn test_compose_apo_into_cata() {
 }
 
 #[test]
-#[ignore = "#342 pre-existing (confirmed on base 30afedef); not a Wave-3 regression"]
 fn test_compose_para_for_suffixes() {
     // para gives tail access: check if each element equals sum of remaining
     let r = run_expr(
@@ -248,7 +243,6 @@ fn test_retry_pure() {
 }
 
 #[test]
-#[ignore = "#342 pre-existing (confirmed on base 30afedef); not a Wave-3 regression"]
 fn test_tree_hylo_merge_sort() {
     let r = run_expr(
         r#"let merge [] ys = ys; merge xs [] = xs; merge (x:xs) (y:ys) = if x <= y then x : merge xs (y:ys) else y : merge (x:xs) ys in treeHylo (\l _ r -> merge l r) (id :: [Int] -> [Int]) (\xs -> if length xs <= 1 then Left xs else let h = length xs `div` 2 in Right (take h xs, (), drop h xs)) ([5,3,8,1,4,2 :: Int])"#,
