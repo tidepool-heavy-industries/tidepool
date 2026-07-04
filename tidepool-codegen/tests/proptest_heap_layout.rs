@@ -204,23 +204,29 @@ mod group3_lit {
 
     #[test]
     fn test_lit_tag_drift() {
-        // codegen defines LIT_TAG_STRING=5...ARRAY=9, heap only goes to 4.
+        // LitTag is the single unified source of truth shared by both crates
+        // (commit 000932c3, "unify LitTag ABI"): 0-4 are scalar literals,
+        // 5-9 are the pointer-carrying shapes (String/Addr/ByteArray/
+        // SmallArray/Array). Anything beyond the last variant stays invalid.
         for tag_val in 0..=9u8 {
             let guard = alloc_buf(LIT_SIZE);
             unsafe {
                 write_header(guard.ptr, TAG_LIT, LIT_SIZE as u16);
                 *guard.ptr.add(LIT_TAG_OFFSET) = tag_val;
                 let heap_tag = LitTag::from_byte(tag_val);
-                if tag_val <= 4 {
-                    assert!(heap_tag.is_some());
-                } else {
-                    assert!(
-                        heap_tag.is_none(),
-                        "Tag {} should be None in heap-side LitTag",
-                        tag_val
-                    );
-                }
+                assert!(
+                    heap_tag.is_some(),
+                    "Tag {} should be Some in heap-side LitTag",
+                    tag_val
+                );
             }
+        }
+        for tag_val in 10..=255u8 {
+            assert!(
+                LitTag::from_byte(tag_val).is_none(),
+                "Tag {} should be None in heap-side LitTag",
+                tag_val
+            );
         }
     }
 

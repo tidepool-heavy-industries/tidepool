@@ -2,6 +2,7 @@ use tidepool_codegen::context::VMContext;
 use tidepool_codegen::emit::expr::compile_expr;
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::host_fns;
+use tidepool_codegen::machine_state::MachineState;
 use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_heap::layout;
 use tidepool_repr::*;
@@ -10,6 +11,9 @@ struct TestResult {
     result_ptr: *const u8,
     _nursery: Vec<u8>,
     _pipeline: CodegenPipeline,
+    // Boxed so its address stays stable across the move out of
+    // `compile_and_run` — `vmctx.machine_state` points at its heap allocation.
+    _machine_state: Box<MachineState>,
 }
 
 fn compile_and_run(tree: &CoreExpr) -> TestResult {
@@ -22,6 +26,11 @@ fn compile_and_run(tree: &CoreExpr) -> TestResult {
     let start = nursery.as_mut_ptr();
     let end = unsafe { start.add(nursery.len()) };
     let mut vmctx = VMContext::new(start, end, host_fns::gc_trigger);
+    let machine_state = Box::new(MachineState::new());
+    vmctx.machine_state = machine_state.as_ref() as *const MachineState as *mut MachineState;
+
+    machine_state.set_gc_state(start, nursery.len());
+    machine_state.set_stack_map_registry(&pipeline.stack_maps);
 
     let ptr = pipeline.get_function_ptr(func_id);
     let func: unsafe extern "C" fn(*mut VMContext) -> i64 = unsafe { std::mem::transmute(ptr) };
@@ -37,6 +46,7 @@ fn compile_and_run(tree: &CoreExpr) -> TestResult {
         result_ptr: result as *const u8,
         _nursery: nursery,
         _pipeline: pipeline,
+        _machine_state: machine_state,
     }
 }
 

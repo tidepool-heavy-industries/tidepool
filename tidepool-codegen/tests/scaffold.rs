@@ -1,6 +1,7 @@
 use tidepool_codegen::alloc::emit_alloc_fast_path;
 use tidepool_codegen::context::VMContext;
 use tidepool_codegen::host_fns;
+use tidepool_codegen::machine_state::MachineState;
 use tidepool_codegen::pipeline::CodegenPipeline;
 
 use cranelift_codegen::ir::{self, types, AbiParam, InstBuilder, UserFuncName};
@@ -186,6 +187,8 @@ fn test_gc_trigger_called_from_jit() {
     let start = nursery.as_mut_ptr();
     let end = unsafe { start.add(4096) };
     let mut vmctx = VMContext::new(start, end, host_fns::gc_trigger);
+    let machine_state = Box::new(MachineState::new());
+    vmctx.machine_state = machine_state.as_ref() as *const MachineState as *mut MachineState;
 
     let ptr = pipeline.get_function_ptr(func_id);
     let func: unsafe extern "C" fn(*mut VMContext) -> i64 = unsafe { std::mem::transmute(ptr) };
@@ -335,6 +338,8 @@ fn test_stack_map_end_to_end() {
     let start = nursery.as_mut_ptr();
     let end = unsafe { start.add(4096) };
     let mut vmctx = VMContext::new(start, end, host_fns::gc_trigger);
+    let machine_state = Box::new(MachineState::new());
+    vmctx.machine_state = machine_state.as_ref() as *const MachineState as *mut MachineState;
 
     let f: unsafe extern "C" fn(*mut VMContext) -> i64 =
         unsafe { std::mem::transmute(pipeline.get_function_ptr(func_id)) };
