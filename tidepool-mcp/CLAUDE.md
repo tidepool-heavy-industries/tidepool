@@ -99,7 +99,7 @@ anchors are substring tests that must hit exactly one line). `planEdits`/
 all-or-nothing; problems come back as DATA (`anchor-missing`/`anchor-ambiguous`/
 `range-out-of-bounds`/`edits-overlap`). **Line-number safety:** numbers resolve
 against the file read in the SAME eval and bake into a context-anchored patch — an
-in-eval read+edit is safe; numbers captured in a PRIOR eval are the footgun (use
+in-eval read+edit is safe; numbers captured in a PRIOR eval go stale (use
 the anchor ops cross-eval — they're content-addressed and self-checking).
 
 **checkDiff-first when a `[patch|]` pattern silently fails to match.** A no-match

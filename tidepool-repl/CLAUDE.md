@@ -110,14 +110,13 @@ Default (slim) shape — no generation counters, no double-encoding:
 The `result` field is the old double-encoded format. Use this only when you need
 generation counters or the raw GHC module name for a declaration.
 
-## Known friction
+## Usage notes
 
 - **Default render is `Show`, not `ToJSON`.** A function returning a plain
   ADT (e.g. `checkDiff :: Text -> ParseResult`) renders as derived `Show`
-  text; getting the JSON shape a module's docstring advertises requires
-  `toJSON <$> ...` explicitly. Not a bug — "return an `Aeson.Value` to get
-  JSON" is the documented rule — but easy to trip on with the newer
-  sum-type-returning verbs (Diff/Edit/Patch) whose docstrings show JSON.
+  text; the JSON shape a module's docstring advertises comes from returning an
+  `Aeson.Value` (`toJSON <$> ...`) — relevant for the sum-type-returning verbs
+  (Diff/Edit/Patch) whose docstrings show JSON.
 - **`:vocab` lists modules that are NOT auto-imported.** Only `Library`
   re-exports are in scope bare; other listed verb modules need an explicit
   `import` even though `:vocab` shows them.
@@ -175,13 +174,7 @@ looks like), or the session isn't suspended at all.
 ## Internals: session lifecycle (read if modifying `state.rs`/`server.rs`, skip otherwise)
 
 `state.rs`'s module docstring is the primary source — read it directly before
-changing this. Session lifecycle used to be smeared across three disjoint
-representations (the `SessionManager` map, the server's `continuations` map,
-the worker-local `Option<SessionHandle>`) plus an implicit fourth (which
-channel the worker thread is blocked on) — composite states like "Suspended ∧
-Closing" had no representation, causing deadlock-on-close-while-suspended,
-leak-on-abandon, wedge-on-timeout, and stale-mutation-on-concurrent-run. The
-lifecycle is now one owned `SessionState` enum
+changing this. The session lifecycle is one owned `SessionState` enum
 (Idle/Busy/Suspended/Wedged/Closing), transitioned atomically by the server at
 the dispatch boundary; the ask suspension payload lives INSIDE
 `SessionState::Suspended`, not a side map.
