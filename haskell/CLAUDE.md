@@ -122,29 +122,6 @@ extract with optics:
 - Orchestration: let the LLM DECIDE (`SEnum`/`SBool`) and let deterministic code
   EMIT syntax (regex/AST) — models are unreliable at generating domain syntax.
 
-> **Removed, do not hunt for these:** the unstructured `llm :: Text -> M Text` /
-> `ask :: Text -> M Value`, the `Q` mini-DSL (`askQ`/`llmQ`/`pick`/`yn`/`obj`/
-> `txt`/`num`/`bar`), `llmJson`/`tryLlmJson`, `??`/`?!`, `triage`/`survey`/`sift`,
-> `tryLlm` (folded into `llm`, #335), and the `.tidepool/lib` `Asks`/`Seek`/`Flow`
-> modules — all superseded by the `Schema`/`ask`/`llm` vocabulary above.
-
-## Known Limits (the JIT runs a strict Haskell subset; failures are LOUD)
-
-Compile errors name the unsupported symbol, runtime errors carry the Haskell
-message, unbounded recursion is a clean "stack overflow" yield error — not
-SIGSEGV. The true standing list:
-
-- **Non-tail recursion** overflows ~10–20K frames with a clean yield error; tail
-  recursion is unbounded (TCO). Caveat: a *no-base-case* non-tail recursion
-  (`go n = n + go (n+1)`) is loopified by GHC into a non-stack-growing spin — it
-  runs until the eval *timeout* fires, not an overflow. Accumulation is correct
-  either way.
-
-Every WORKS / LOUD-FAIL / stale-doc footgun is pinned as a live probe in
-`tidepool-runtime/tests/gotcha_registry.rs`: a regression flips a green probe red;
-a footgun that ever fails SILENTLY (SIGILL/SIGSEGV/wrong output) trips its
-LOUD-FAIL probe. **A SIGILL/SIGSEGV is a compiler bug — report it** (common roots:
-constructor tag mismatch, missing external binding).
 ## Adding new Prelude functions
 
 Dictionary polymorphism runs on the JIT: custom classes, multi-param classes,
