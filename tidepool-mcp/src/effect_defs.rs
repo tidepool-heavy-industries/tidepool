@@ -665,7 +665,8 @@ macro_rules! lsp_effect_def {
             decl_fn lsp_decl,
             description [
                 "Semantic code-graph navigation via a language server (rust-analyzer, .rs). ",
-                "Everything is a LspNode {name, container, kind, file, line, text} — the currency you thread. ",
+                "Everything is a LspNode {nodeName, nodeContainer, nodeKind, nodeFile, nodePos, nodeText} ",
+                "(nodeLine derives from nodePos) — the currency you thread. ",
                 "`lspWhere name` → all definitions of NAME (the seed). Then walk the graph: ",
                 "`lspCallers n` / `lspCallees n` (incoming/outgoing calls), `lspRefs n` (use sites), ",
                 "`lspDef n` (any node → its definition), `lspHover n` (type/sig/docs), ",
@@ -674,8 +675,8 @@ macro_rules! lsp_effect_def {
                 "Needs the `tidepool-lsp-daemon` running in the workspace; queries error cleanly if not.",
             ],
             type_defs [
-                "data Position = Position { posLine :: Int, posChar :: Int }",
-                "data LspNode = LspNode { nodeName :: Text, nodeContainer :: Text, nodeKind :: Text, nodeFile :: Text, nodePos :: Position, nodeText :: Text }",
+                "data Position = Position { posLine :: Int, posChar :: Int } deriving (Show, Eq)",
+                "data LspNode = LspNode { nodeName :: Text, nodeContainer :: Text, nodeKind :: Text, nodeFile :: Text, nodePos :: Position, nodeText :: Text } deriving (Show, Eq)",
                 "data Diag = Diag { diagFile :: Text, diagLine :: Int, diagSeverity :: Text, diagMessage :: Text }",
                 "nodeLine :: LspNode -> Int\nnodeLine = posLine . nodePos",
                 "instance ToJSON Position where\n  toJSON (Position l c) = object [\"line\" .= l, \"char\" .= c]",
