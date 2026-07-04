@@ -91,10 +91,8 @@ convergeN :: Eq a => Int -> (a -> a) -> a -> a
 convergeN n _ x | n <= 0 = x
 convergeN n f x = let x' = f x in if x == x' then x else convergeN (n - 1) f x'
 
--- | Strict left scan: like Prelude.scanl but forces the accumulator at each step.
-scanl' :: (b -> a -> b) -> b -> [a] -> [b]
-scanl' f z []     = [z]
-scanl' f z (x:xs) = z : scanl' f (f z x) xs
+-- scanl' removed: use Tidepool.Prelude's (from Data.List) — identical semantics,
+-- and defining our own here made it ambiguous when a user imports both (#342).
 
 -- | Monadic left scan: collect each intermediate accumulator via an effectful step.
 scanlM :: Monad m => (b -> a -> m b) -> b -> [a] -> m [b]

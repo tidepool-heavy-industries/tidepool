@@ -97,7 +97,6 @@ fn test_lens_builder() {
 }
 
 #[test]
-#[ignore = "#342 pre-existing (confirmed on base 30afedef); not a Wave-3 regression"]
 fn test_scanl() {
     let r = run_expr(r#"scanl' (+) (0 :: Int) [1,2,3,4]"#);
     assert_eq!(r, serde_json::json!([0, 1, 3, 6, 10]));
@@ -158,7 +157,6 @@ fn test_compose_producer_lens_consumer() {
 }
 
 #[test]
-#[ignore = "#342 pre-existing (confirmed on base 30afedef); not a Wave-3 regression"]
 fn test_compose_scanl_is_ana_with_accumulator() {
     // Pattern 3: scanl' as fold-that-remembers, then consume the trace
     // Running sum, then find the max
@@ -275,7 +273,12 @@ fn test_zip_with_index() {
 }
 
 #[test]
-#[ignore = "#342 pre-existing (confirmed on base 30afedef); not a Wave-3 regression"]
+#[ignore = "#342: Schemes' !? (list) and Prelude's !? (Map, from Tidepool.Prelude) \
+            are NOT behaviorally identical — different, non-unifying types, not just \
+            a name clash. Cutting Schemes' !? makes this fail to COMPILE (`Couldn't \
+            match expected type: Map k a with actual type: [Int]`), confirmed by probe. \
+            Needs a human call (e.g. rename one side); out of scope here (Prelude.hs is \
+            off-limits for this task). scanl' had no such conflict and was cut/un-ignored."]
 fn test_safe_index() {
     let r = run_expr(r#"([10,20,30 :: Int] !? 1, [10,20,30 :: Int] !? 5)"#);
     assert_eq!(r, serde_json::json!([20, null]));
