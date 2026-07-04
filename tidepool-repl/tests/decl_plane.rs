@@ -1,7 +1,7 @@
 //! Wave 3b hardening — DIMENSION: declaration plane (Lane A) depth.
 //!
 //! Adversarial integration tests driving the REAL `tidepool-repl` entry point
-//! (session_open / session_run / session_close — the harness `def`/`eval`/`cmd`
+//! (session_run — the harness `def`/`eval`/`cmd`
 //! helpers are thin 1-item `session_run` wrappers) over multiple turns. Focus:
 //! the gen-versioned `Tidepool.Session.Lib.G<g>` declaration module that the
 //! `def` block-runner item regenerates each turn (selective re-export
@@ -31,7 +31,6 @@ async fn defs_accumulate_and_interact() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.def("inc x = x + (1 :: Int)")
         .await
@@ -46,7 +45,6 @@ async fn defs_accumulate_and_interact() {
         "accumulate+interact: expected 12 (twice 10 = inc (inc 10)), got: {out}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 2 — Forward reference ACROSS turns is REJECTED at define-time (BUG-A fix).
@@ -62,7 +60,6 @@ async fn forward_reference_across_turns_poisons() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // def f before g exists — define-time validation catches the forward ref.
     let f_turn = repl.def("f x = g x + (1 :: Int)").await;
@@ -90,7 +87,6 @@ async fn forward_reference_across_turns_poisons() {
         "case2: session not poisoned — f 10 = g 10 + 1 = 21, got: {out}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 2b — Mutual/forward reference WITHIN ONE def turn DOES work.
@@ -103,7 +99,6 @@ async fn mutual_reference_single_turn_works() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // f references g; both defined in one turn → one gen module → both in scope.
     repl.def("f2 x = g2 x + (1 :: Int)\ng2 x = x * (2 :: Int)")
@@ -116,7 +111,6 @@ async fn mutual_reference_single_turn_works() {
         "single-turn mutual ref: expected 21 (g2 10 + 1 = 21), got: {out}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 3 — Redefine a function: latest-wins via the `hiding` shadow.
@@ -130,7 +124,6 @@ async fn redefine_function_latest_wins() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.def("k x = x + (1 :: Int)").await.expect_ok("def k v1");
     let out = repl.eval_ok("pure (k 5)").await;
@@ -145,7 +138,6 @@ async fn redefine_function_latest_wins() {
         "k v2: expected 105 (latest def wins via `hiding (k)`), got: {out2}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 4 — Multi-constructor ADT: define once, use as a STABLE type across turns.
@@ -159,7 +151,6 @@ async fn multicon_adt_value_and_case() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.def("data Shape = Circle Int | Rect Int Int")
         .await
@@ -183,7 +174,6 @@ async fn multicon_adt_value_and_case() {
         "case sh (Rect 3 4): expected 12 (3*4), got: {out2}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 5 — type alias + newtype.
@@ -197,7 +187,6 @@ async fn type_alias_and_newtype() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.def("type Name = T.Text")
         .await
@@ -219,7 +208,6 @@ async fn type_alias_and_newtype() {
         "type alias Name used: expected 3, got: {out2}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 6 — record syntax on session-bound values, ALL PATHS. Historically the
@@ -233,7 +221,6 @@ async fn record_syntax_selectors_localized() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.def("data P = P { px :: Int, py :: Int }")
         .await
@@ -282,7 +269,6 @@ async fn record_syntax_selectors_localized() {
         "session survives via pure path: expected 123, got: {survive}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// Record field selector on a session-bound value via the Eff path — was the
@@ -296,7 +282,6 @@ async fn record_selector_on_bound_value_via_eff_path() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.def("data P = P { px :: Int, py :: Int }")
         .await
@@ -307,7 +292,6 @@ async fn record_selector_on_bound_value_via_eff_path() {
     let out = repl.eval_ok("pure (py p)").await;
     assert!(out.contains('2'), "py p: expected 2, got: {out}");
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 7 — class + instance: class exports with `(..)` so methods are visible.
@@ -321,7 +305,6 @@ async fn class_instance_describe() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.def("class Describe a where { describe :: a -> T.Text }")
         .await
@@ -339,7 +322,6 @@ async fn class_instance_describe() {
         "describe Cat: expected \"cat\", got: {out}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 7 (no-poison) — class + data + instance all compile; describe works;
@@ -350,7 +332,6 @@ async fn class_instance_poisons_until_reset() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let c = repl
         .def("class Describe a where { describe :: a -> T.Text }")
@@ -390,7 +371,6 @@ async fn class_instance_poisons_until_reset() {
         "unrelated eval after class+instance: expected 2 (no poison), got: {ok}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 8 — decl/Prelude name collision: user decl shadows Prelude (BUG-7 fixed).
@@ -407,7 +387,6 @@ async fn decl_prelude_collision_is_graceful() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // The gen module uses the lens-free standalone surface, so the def succeeds.
     let def = repl.def("over x = x + (1 :: Int)").await;
@@ -436,7 +415,6 @@ async fn decl_prelude_collision_is_graceful() {
     let ok = repl.eval_ok("pure (noclash 9)").await;
     assert!(ok.contains("10"), "post-shadow: expected 10, got: {ok}");
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 9 — empty / garbage declarations: empty is a no-op, garbage fails cleanly.
@@ -450,7 +428,6 @@ async fn empty_and_garbage_decls_survive() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // Capture gen before the empty def so we can assert it is unchanged after.
     let before = repl
@@ -506,7 +483,6 @@ async fn empty_and_garbage_decls_survive() {
         "post-garbage good def: expected 7, got: {out}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 10 — a bad decl does NOT poison the log.
@@ -520,7 +496,6 @@ async fn bad_decl_does_not_poison_log() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let bad = repl.def("data = oops").await;
     eprintln!(
@@ -538,7 +513,6 @@ async fn bad_decl_does_not_poison_log() {
         "log not poisoned: good2 4 expected 12, got: {out}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// WHOLE-BLOCK DECL ELABORATION (M1): a type signature and its binding in
@@ -550,14 +524,12 @@ async fn sig_and_binding_split_across_items() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
     // Two items: a bare signature, then the binding. Batched → one module.
     let out = repl.run(&["sig1 :: Int -> Int", "sig1 x = x + 1"]).await;
     let text = out.expect_ok("sig + binding split across items");
     assert!(text.contains("sig1"), "expected decl sig1: {text}");
     let val = repl.eval_ok("pure (sig1 41)").await;
     assert!(val.contains("42"), "sig1 41: expected 42, got {val}");
-    repl.close().await.expect_ok("close");
 }
 
 /// WHOLE-BLOCK DECL ELABORATION (M1): mutually-recursive functions defined in
@@ -569,7 +541,6 @@ async fn mutual_recursion_across_items() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
     let out = repl
         .run(&[
             "isEven n = if n == (0 :: Int) then True else isOdd (n - 1)",
@@ -582,7 +553,6 @@ async fn mutual_recursion_across_items() {
         val.contains("True"),
         "isEven 10 / isOdd 7 should be True: {val}"
     );
-    repl.close().await.expect_ok("close");
 }
 
 /// DEFINE-THEN-CALL IN ONE BLOCK (the tool's own recommended idiom): a
@@ -597,14 +567,12 @@ async fn define_then_call_in_one_block() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
     // sig + binding (batched decls) + a trailing call (a stmt, NOT batched).
     let out = repl
         .run(&["sq :: Int -> Int", "sq x = x * x", "pure (sq 7)"])
         .await;
     let text = out.expect_ok("define then call in one block");
     assert!(text.contains("49"), "sq 7 should be 49: {text}");
-    repl.close().await.expect_ok("close");
 }
 
 /// DECL TYPE PAINTING (#317): a VALUE decl carries the inferred type the server
@@ -616,7 +584,6 @@ async fn decl_paints_inferred_type() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // Single item: signature + binding together (the one-decl-per-item idiom).
     let sq = repl.def("sq :: Int -> Int\nsq x = x*x").await;
@@ -634,7 +601,6 @@ async fn decl_paints_inferred_type() {
         "bare f317 should paint the inferred `Int -> Int`, got: {ftext}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// DECL TYPE PAINTING is BEST-EFFORT (#317): a type/data/class decl has no
@@ -646,7 +612,6 @@ async fn non_value_decl_omits_type() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let d = repl.def("data Widget317 = Widget317 Int").await;
     let text = d.expect_ok("def data Widget317");
@@ -659,7 +624,6 @@ async fn non_value_decl_omits_type() {
         "a data decl has no term-level type — field omitted, got: {text}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// Mutual recursion AND a call, all in one block — the trailing call must not
@@ -670,7 +634,6 @@ async fn mutual_recursion_and_call_in_one_block() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
     let out = repl
         .run(&[
             "isEvn n = if n == (0 :: Int) then True else isOdd (n - 1)",
@@ -680,7 +643,6 @@ async fn mutual_recursion_and_call_in_one_block() {
         .await;
     let text = out.expect_ok("mutual recursion and call in one block");
     assert!(text.contains("True"), "isEvn 10 should be True: {text}");
-    repl.close().await.expect_ok("close");
 }
 
 /// PURE-BIND-AS-DECL (M2): a numeric bind generalizes instead of freezing to
@@ -692,7 +654,6 @@ async fn pure_numeric_bind_generalizes() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
     // Within one block:
     let out = repl.run(&["n <- pure 5", "pure (n + 1.5)"]).await;
     let text = out.expect_ok("pure numeric bind within block");
@@ -701,7 +662,6 @@ async fn pure_numeric_bind_generalizes() {
     repl.eval("m <- pure 10").await.expect_ok("bind m");
     let val = repl.eval_ok("pure (m * 2.5)").await;
     assert!(val.contains("25"), "m * 2.5 should be 25.0: {val}");
-    repl.close().await.expect_ok("close");
 }
 
 /// PURE-BIND-AS-DECL type display (NMR probe): a polymorphic numeric bind reads
@@ -715,7 +675,6 @@ async fn pure_numeric_bind_type_generalizes_in_display() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
     let out = repl.run(&["n <- pure 5"]).await;
     let text = out.expect_ok("numeric bind type display");
     // Generalized: a constrained type variable, not a bare `Int` monotype.
@@ -723,7 +682,6 @@ async fn pure_numeric_bind_type_generalizes_in_display() {
         text.contains("Num") || text.contains("=>"),
         "numeric bind should show a generalized type, got: {text}"
     );
-    repl.close().await.expect_ok("close");
 }
 
 /// The `input`-lane materialize guard must key on the DECL COMPILE ERROR
@@ -740,7 +698,6 @@ async fn local_input_param_not_confused_with_payload_lane() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
     // `input` here is a LAMBDA PARAM, not the payload lane — must decl-plane it.
     repl.eval("let localInput = \\input -> input")
         .await
@@ -751,7 +708,6 @@ async fn local_input_param_not_confused_with_payload_lane() {
     assert!(a.contains('5'), "localInput at Int: {a}");
     let b = repl.eval_ok("pure (localInput \"hi\")").await;
     assert!(b.contains("hi"), "localInput at Text: {b}");
-    repl.close().await.expect_ok("close");
 }
 
 /// Record-dot (`h.path`) is a core idiom that compiles in production; the
@@ -765,7 +721,6 @@ async fn record_dot_helper_binds_and_shows_type() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
     // Result type pinned by usage (`T.toUpper` → Text); the type stays
     // constrained on the record (`HasField "path" r Text`).
     let out = repl.run(&["let upPath h = T.toUpper h.path"]).await;
@@ -774,7 +729,6 @@ async fn record_dot_helper_binds_and_shows_type() {
         text.contains("HasField") || text.contains("path"),
         "record-dot helper should show its constrained type, got: {text}"
     );
-    repl.close().await.expect_ok("close");
 }
 
 /// PURE-BIND collision must fail LOUD, not silently materialize a broken
@@ -795,7 +749,6 @@ async fn colliding_pure_bind_fails_loud_not_broken() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
     repl.def("data Tree a = Leaf | Node (Tree a) a (Tree a)")
         .await
         .expect_ok("data Tree");
@@ -814,7 +767,6 @@ async fn colliding_pure_bind_fails_loud_not_broken() {
         .eval_ok("pure (treeList (Node Leaf (7 :: Int) Leaf))")
         .await;
     assert!(v.contains('7'), "treeList usable after: {v}");
-    repl.close().await.expect_ok("close");
 }
 
 /// PURE-BIND-AS-DECL (M2): a polymorphic empty-list bind stays polymorphic and
@@ -825,7 +777,6 @@ async fn pure_polymorphic_bind_instantiates_per_use() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
     repl.eval("xs <- pure []").await.expect_ok("bind xs = []");
     // Use at [Int]:
     let a = repl.eval_ok("pure (filter (> (3 :: Int)) xs)").await;
@@ -833,5 +784,4 @@ async fn pure_polymorphic_bind_instantiates_per_use() {
     // Use at another type in a later call — polymorphism preserved:
     let b = repl.eval_ok("pure (map (\\c -> [c]) xs :: [[Char]])").await;
     assert!(b.contains("[]"), "map over xs at [Char]: {b}");
-    repl.close().await.expect_ok("close");
 }

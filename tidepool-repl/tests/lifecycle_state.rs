@@ -2,13 +2,15 @@
 //!
 //! These guard the concurrency bug class the smeared lifecycle allowed, all
 //! through the real `dispatch_tool` entry point:
-//!   - H1: `session_close` while a turn is suspended on an `ask` must NOT hang
-//!     (the worker is parked on `response_rx`, not the command channel; close
-//!     releases the suspension so it can unwind and observe the `Close`).
+//!   - H1: `session_reset` while a turn is suspended on an `ask` must NOT hang
+//!     (the worker is parked on `response_rx`, not the command channel; reset
+//!     releases the suspension so it can unwind and observe the `Close`) and it
+//!     must DROP the pending ask (abort folds into reset).
 //!   - M5: a `session_run` on a suspended session is REJECTED with a clear error
 //!     (the busy-guard), not silently queued behind the parked worker.
-//!   - H2: an abandoned suspension (never resumed/aborted) is reaped back to
-//!     `Idle` so it doesn't leak a worker thread + JIT machine.
+//!   - H2: an abandoned suspension (never resumed) is reaped back to `Idle` so it
+//!     doesn't leak a worker thread + JIT machine.
+//!   - H3: a runaway turn is cancelled at a JIT safepoint and self-heals to Idle.
 //!
 //! Requires `TIDEPOOL_EXTRACT` (see project CLAUDE.md); skips cleanly otherwise.
 
@@ -34,36 +36,17 @@ fn parse_suspended(text: &str) -> String {
         .to_string()
 }
 
-/// Call `session_resume` directly (the `Repl` wrapper doesn't expose it).
-async fn resume(repl: &Repl, continuation_id: &str, response: serde_json::Value) -> Turn {
-    let mut args = serde_json::Map::new();
-    args.insert("continuation_id".into(), json!(continuation_id));
-    args.insert("response".into(), response);
-    let r = repl
-        .server
-        .dispatch_tool("session_resume", args)
-        .await
-        .unwrap_or_else(|e| panic!("session_resume transport error: {e:?}"));
-    Turn {
-        text: text_of(&r),
-        is_error: r.is_error == Some(true),
-    }
-}
-
-/// H1: closing a session that is parked on an `ask` must return promptly — it
-/// must NOT deadlock on `WorkerHandle::shutdown`'s `join()`. Before the
-/// `SessionState` fix, `close` sent `Close` to the (unread) command channel
-/// while the worker was parked on `response_rx`, the 30s ack timed out, and the
-/// join hung forever. We wrap the close in a generous timeout: a hang fails the
-/// test instead of stalling the suite.
+/// H1: resetting a session that is parked on an `ask` must return promptly — it
+/// must NOT deadlock on `WorkerHandle::shutdown`'s `join()` — and it must DROP
+/// the pending continuation (abort folds into reset). We wrap the reset in a
+/// generous timeout: a hang fails the test instead of stalling the suite.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn close_while_suspended_does_not_hang() {
+async fn reset_while_suspended_drops_ask_and_recovers() {
     if !extract_available() {
         eprintln!("skipping: tidepool-extract not available (set TIDEPOOL_EXTRACT)");
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // Suspend on an `ask` and DO NOT resume it.
     let t = repl.eval(r#"ask SNum "pick a number""#).await;
@@ -74,14 +57,31 @@ async fn close_while_suspended_does_not_hang() {
         "unexpected cont id: {cont_id}"
     );
 
-    // Close WITHOUT resuming — must come back well within the worker's 30s ack
-    // window + reap, not hang.
-    let closed = tokio::time::timeout(Duration::from_secs(45), repl.close()).await;
-    let turn = closed.expect("H1 REGRESSION: session_close hung while a continuation was parked");
+    // Reset WITHOUT resuming — must come back well within the worker's 30s ack
+    // window, not hang.
+    let reset = tokio::time::timeout(Duration::from_secs(45), repl.reset()).await;
+    let turn = reset.expect("H1 REGRESSION: session_reset hung while a continuation was parked");
     assert!(
-        turn.contains("closed"),
-        "close should report closed, got: {}",
+        turn.contains("reset"),
+        "reset should report reset, got: {}",
         turn.text
+    );
+
+    // The pending ask was DROPPED: resuming the old continuation now fails
+    // (the fresh session is not awaiting it).
+    let stale = repl.resume(&cont_id, json!(7.0)).await;
+    assert!(
+        stale.is_error,
+        "resuming a reset-away continuation should fail, got ok: {}",
+        stale.text
+    );
+
+    // The fresh session is usable.
+    let after = repl.eval("pure (1 :: Int)").await;
+    assert!(
+        !after.is_error,
+        "post-reset run should work: {}",
+        after.text
     );
 }
 
@@ -96,7 +96,6 @@ async fn run_on_suspended_session_is_rejected() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl.eval(r#"ask SNum "pick a number""#).await;
     assert!(!t.is_error, "ask should suspend: {}", t.text);
@@ -116,7 +115,7 @@ async fn run_on_suspended_session_is_rejected() {
     );
 
     // The original continuation is still live — resume succeeds.
-    let resumed = resume(&repl, &cont_id, json!(7.0)).await;
+    let resumed = repl.resume(&cont_id, json!(7.0)).await;
     assert!(
         !resumed.is_error,
         "resume after a rejected concurrent run should work: {}",
@@ -135,8 +134,6 @@ async fn run_on_suspended_session_is_rejected() {
         "post-resume value: {}",
         after.text
     );
-
-    repl.close().await;
 }
 
 /// H3 (self-healing): a turn that runs away past the turn budget is cancelled at
@@ -144,7 +141,7 @@ async fn run_on_suspended_session_is_rejected() {
 /// succeeds instead of being busy-rejected on a stuck `Wedged`. This guards the
 /// cooperative-cancel wiring (the resident machine's `CancelHandle`, published by
 /// the worker, fired on timeout). Before it, an allocating/tail runaway wedged the
-/// session until close/reap.
+/// session until reset/reap.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn timed_out_runaway_self_heals_to_idle() {
     if !extract_available() {
@@ -155,7 +152,6 @@ async fn timed_out_runaway_self_heals_to_idle() {
     // expression) so the timeout fires during the LOOP, not compilation; a
     // generous reaper TTL ensures recovery comes from cancel alone, not reaping.
     let repl = Repl::with_timeout(Duration::from_secs(20), Duration::from_secs(300));
-    repl.open_ok().await;
 
     // A pure allocating runaway — `sum` over an infinite `[Int]` never returns
     // and allocates cons cells, so it polls the JIT gc safepoint. The bare-expr
@@ -196,15 +192,12 @@ async fn timed_out_runaway_self_heals_to_idle() {
         "post-recovery value: {}",
         after.text
     );
-
-    repl.close().await;
 }
 
-/// H2: an abandoned suspension (never resumed/aborted) is reaped back to `Idle`
-/// after the TTL, freeing the worker for reuse (no thread/heap leak). We build a
-/// server with a tiny TTL, suspend, wait past it, and confirm a fresh run
-/// succeeds — which the busy-guard would reject if the session were still
-/// Suspended.
+/// H2: an abandoned suspension (never resumed) is reaped back to `Idle` after the
+/// TTL, freeing the worker for reuse (no thread/heap leak). We build a server
+/// with a tiny TTL, suspend, wait past it, and confirm a fresh run succeeds —
+/// which the busy-guard would reject if the session were still Suspended.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn abandoned_suspension_is_reaped_to_idle() {
     if !extract_available() {
@@ -212,7 +205,6 @@ async fn abandoned_suspension_is_reaped_to_idle() {
         return;
     }
     let repl = Repl::with_ttl(Duration::from_millis(300));
-    repl.open_ok().await;
 
     let t = repl.eval(r#"ask SNum "pick a number""#).await;
     assert!(!t.is_error, "ask should suspend: {}", t.text);
@@ -231,6 +223,4 @@ async fn abandoned_suspension_is_reaped_to_idle() {
         after.text
     );
     assert!(after.text.contains("42"), "post-reap value: {}", after.text);
-
-    repl.close().await;
 }

@@ -6,15 +6,14 @@ module Explore where
 
 import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
+import qualified Data.Map.Strict as Map
 
 -- | Histogram of file extensions from a path listing.
 extHisto :: [Text] -> [(Text, Int)]
-extHisto paths = sortBy (\a b -> compare (snd b) (snd a)) (foldl' bump [] paths)
+extHisto paths = sortBy (\a b -> compare (snd b) (snd a)) tally
   where
     ext p = case splitOn "." p of { [_] -> "(none)"; ps -> last ps }
-    bump acc p = ins (ext p) acc
-    ins k [] = [(k, 1)]
-    ins k ((k', n) : rest) = if k == k' then (k', n + 1) : rest else (k', n) : ins k rest
+    tally = Map.toList (Map.fromListWith (+) [(ext p, 1) | p <- paths])
 
 -- | Top-N heaviest entries from (path, size) pairs.
 sizeRank :: Int -> [(Text, Int)] -> [(Text, Int)]
@@ -22,11 +21,9 @@ sizeRank n = take n . sortBy (\a b -> compare (snd b) (snd a))
 
 -- | Group grep hits into per-file counts, densest first.
 hitsByFile :: [Hit] -> [(Text, Int)]
-hitsByFile hs = sortBy (\a b -> compare (snd b) (snd a)) (foldl' bump [] hs)
+hitsByFile hs = sortBy (\a b -> compare (snd b) (snd a)) tally
   where
-    bump acc h = ins h.path acc
-    ins k [] = [(k, 1)]
-    ins k ((k', n) : rest) = if k == k' then (k', n + 1) : rest else (k', n) : ins k rest
+    tally = Map.toList (Map.fromListWith (+) [(h.path, 1) | h <- hs])
 
 -- | Slice a window of numbered lines around a target line (1-based).
 aroundLine :: Int -> Int -> Text -> [Text]

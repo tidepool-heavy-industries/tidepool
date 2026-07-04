@@ -10,35 +10,6 @@ use tidepool_handlers::{
 };
 use tidepool_repl::ReplServerConfig;
 
-/// Derive the KV backing path for a given session name.
-///
-/// `tidepool_dir` is the project's `.tidepool/` directory (or the fallback cache dir).
-///
-/// - `"default"` maps to `<tidepool_dir>/kv.json` (unchanged from the pre-multi-session
-///   path) so existing callers and tests keep working without migration.
-/// - Any other name maps to `<tidepool_dir>/kv/<safe_name>.json` in a dedicated
-///   sub-directory, isolating each session's KV namespace.
-pub(crate) fn kv_path_for_session(
-    tidepool_dir: &std::path::Path,
-    session_name: &str,
-) -> std::path::PathBuf {
-    if session_name == "default" {
-        tidepool_dir.join("kv.json")
-    } else {
-        let safe: String = session_name
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        tidepool_dir.join("kv").join(format!("{}.json", safe))
-    }
-}
-
 /// Resolve the bundled Haskell prelude/stdlib dir (`Tidepool.*` modules).
 /// Honors `TIDEPOOL_PRELUDE_DIR`; falls back to the in-repo `haskell/lib`.
 pub(crate) fn resolve_prelude_dir() -> PathBuf {
@@ -140,15 +111,17 @@ pub fn build(
     let session_root_base =
         std::env::temp_dir().join(format!("tidepool-repl-{}", std::process::id()));
 
+    // Full effect stack + with-packages GHC: give Lane-A decls the SAME
+    // pragmas/imports an `eval` expression sees, so declaration-item helpers
+    // can use `M`, the effect verbs, the Prelude shadows, and `L.`/`Set.`/… —
+    // not just the lens-free T+Map of `standalone_default`.
+    let module_env = tidepool_mcp::session_decl_module_env(&decls, user_library);
+
     let cfg = ReplServerConfig {
         decls,
         ask_tag,
         base_include,
-        // Full effect stack + with-packages GHC: give Lane-A decls the SAME
-        // pragmas/imports an `eval` expression sees, so declaration-item helpers
-        // can use `M`, the effect verbs, the Prelude shadows, and `L.`/`Set.`/… —
-        // not just the lens-free T+Map of `standalone_default`.
-        module_env: tidepool_mcp::session_decl_module_env(user_library),
+        module_env,
         session_root_base,
         nursery_size: None,
         // Parked `ask` suspensions never expire: a long-parked knot holding one
@@ -157,7 +130,7 @@ pub fn build(
         continuation_ttl: None,
         // Wedged sessions (timed-out turns) ARE dead weight — sweep at 30 min.
         wedged_ttl: Some(std::time::Duration::from_secs(30 * 60)),
-        // Default 120 s turn budget (see `TURN_TIMEOUT_SECS`).
+        // Default 600 s turn budget (see `TURN_TIMEOUT_SECS`).
         turn_timeout: None,
     };
 

@@ -1,4 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE UndecidableInstances #-}
 -- | Vendored aeson Value type with construction.
 --
 -- This module provides the core JSON Value type and construction helpers.
@@ -26,6 +32,8 @@ module Tidepool.Aeson.Value
   , decodeJson
     -- * ToJSON class
   , ToJSON(..)
+  , GToJSON(..)
+  , genericToJSON
   ) where
 
 import Prelude
@@ -33,6 +41,8 @@ import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import GHC.Generics
+import GHC.TypeLits (TypeError, ErrorMessage(Text, (:<>:)))
 
 -- | A JSON object key. Transparently Text (like 'FilePath') — object keys are
 -- just Text, so @KM.lookup "k" m@ and @KM.keys@ work directly with no wrapper.
@@ -105,8 +115,54 @@ decodeJson :: Text -> Maybe Value
 decodeJson _ = Nothing
 
 -- | A class for types that can be converted to JSON Value.
+--
+-- The default method encodes a single-constructor record generically via
+-- 'GHC.Generics' — @data Rec = Rec {..} deriving (Generic, ToJSON)@ builds a
+-- field-name-keyed JSON object. Sum types are rejected at compile time.
 class ToJSON a where
   toJSON :: a -> Value
+  default toJSON :: (Generic a, GToJSON (Rep a)) => a -> Value
+  toJSON = genericToJSON
+
+-- | Encode a single-constructor record as a field-name-keyed JSON object. This
+-- is the implementation behind the 'ToJSON' default method.
+genericToJSON :: (Generic a, GToJSON (Rep a)) => a -> Value
+genericToJSON = gToJSON . from
+
+-- | Encode a 'GHC.Generics' representation. @M1 D@/@M1 C@ are the outer layers;
+-- the record fields underneath emit @[Pair]@ via 'GToRecord'.
+class GToJSON f where
+  gToJSON :: f a -> Value
+
+-- | Emit the record fields of one constructor as JSON object pairs.
+class GToRecord f where
+  gToRecord :: f a -> [Pair]
+
+-- Datatype metadata layer: transparent.
+instance GToJSON f => GToJSON (M1 D d f) where
+  gToJSON (M1 x) = gToJSON x
+
+-- Constructor layer: a record becomes a JSON object.
+instance GToRecord f => GToJSON (M1 C c f) where
+  gToJSON (M1 x) = object (gToRecord x)
+
+-- Product: concatenate the pairs from both field groups.
+instance (GToRecord a, GToRecord b) => GToRecord (a :*: b) where
+  gToRecord (a :*: b) = gToRecord a ++ gToRecord b
+
+-- Selector leaf: one pair, keyed by exact selector name.
+instance (Selector s, ToJSON c) => GToRecord (M1 S s (K1 R c)) where
+  gToRecord m@(M1 (K1 c)) = [(T.pack (selName m), toJSON c)]
+
+-- Nullary constructor: an empty record is an empty object.
+instance GToRecord U1 where
+  gToRecord _ = []
+
+-- Sum types have no field-name-keyed object form under this encoder.
+instance TypeError ('Text "deriving ToJSON via GHC.Generics supports single-constructor records only; "
+                    ':<>: 'Text "this type has multiple constructors. Write an explicit ToJSON instance.")
+    => GToJSON (a :+: b) where
+  gToJSON = error "unreachable: sum ToJSON is a compile-time TypeError"
 
 instance ToJSON Value where
   toJSON = id

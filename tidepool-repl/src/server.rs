@@ -1,13 +1,17 @@
 //! The `tidepool-repl` MCP server — a SEPARATE server/binary from the `tidepool`
-//! eval server (whose request path is untouched). It exposes the session tool
-//! surface and routes each tool to a [`SessionCommand`] on the resident worker.
+//! eval server (whose request path is untouched). It exposes ONE implicit
+//! session over three tools and one live-state resource.
 //!
 //! Tools:
-//! - `session_open` — spawn a named session worker (N concurrent sessions supported).
-//! - `session_run` — run a list of GHCi-capable items (decls, binds, exprs, :commands).
-//! - `session_close` — drop the machine, free the heap.
-//! - `session_resume` / `session_abort` — answer/abort an in-turn `ask`
-//!   (the parked-thread mechanism reused from the eval server).
+//! - `session_run` — run a list of GHCi-capable items (decls, binds, exprs,
+//!   :commands). Auto-opens the session on first use.
+//! - `session_resume` — answer an in-turn `ask` suspension (the parked-thread
+//!   mechanism reused from the eval server).
+//! - `session_reset` — drop the resident machine and open a fresh one; also
+//!   drops any pending `ask` continuation (abort folds into reset).
+//!
+//! Resource:
+//! - `tidepool://session/bindings` — read-only JSON over live session state.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,10 +38,14 @@ use crate::worker::{
     empty_cancel_slot, spawn_worker, CancelSlot, SessionManager, WorkerHandle, WorkerJob,
 };
 
+/// The `tidepool://session/bindings` resource URI: read-only JSON over the live
+/// session environment (decl plane + value/pure binds).
+const SESSION_BINDINGS_URI: &str = "tidepool://session/bindings";
+
 /// Per-turn window before a turn is declared timed out. A session is one
 /// resident thread, so a runaway wedges the session (MVP); the window keeps a
 /// single MCP call from hanging forever.
-const TURN_TIMEOUT_SECS: u64 = 120;
+const TURN_TIMEOUT_SECS: u64 = 600;
 
 /// After a turn times out and is cancelled, how long to wait for the worker to
 /// abort at a JIT safepoint before declaring the session `Wedged`. Allocating /
@@ -59,15 +67,6 @@ struct DriveCtl {
 // Request types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct SessionOpenRequest {
-    /// Session name. Omit to use `"default"` (back-compat). Multiple agents
-    /// can each open a distinct named session; the name is used as the key for
-    /// subsequent session_run/close/resume/abort calls.
-    #[serde(default)]
-    pub session: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionBlockRequest {
     /// List of GHCi-capable items to run in sequence. Each item is one of:
@@ -85,9 +84,6 @@ pub struct SessionBlockRequest {
     /// stateless `eval` tool's `input` lane.
     #[serde(default)]
     pub input: Option<serde_json::Value>,
-    /// Session name (default: `"default"`).
-    #[serde(default)]
-    pub session: Option<String>,
     /// Set `true` to get the full diagnostic shape: per-item `index` and
     /// double-encoded `result` string, plus top-level `generation` /
     /// `valGeneration` counters. Default (`false`): the slim shape with inline
@@ -96,41 +92,11 @@ pub struct SessionBlockRequest {
     pub verbose: Option<bool>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct SessionCloseRequest {
-    /// Session name (default: `"default"`).
-    #[serde(default)]
-    pub session: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionResumeRequest {
     pub continuation_id: ContinuationId,
     #[serde(default)]
     pub response: serde_json::Value,
-    /// Session name (default: `"default"`).
-    #[serde(default)]
-    pub session: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SessionAbortRequest {
-    pub continuation_id: ContinuationId,
-    #[serde(default)]
-    pub reason: Option<String>,
-    /// Session name (default: `"default"`).
-    #[serde(default)]
-    pub session: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Session name helpers
-// ---------------------------------------------------------------------------
-
-/// Resolve an optional session name to its canonical form. `None` yields
-/// `"default"` for back-compat with single-session callers.
-fn resolve_session(session: Option<String>) -> String {
-    session.unwrap_or_else(|| "default".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +160,7 @@ pub fn classify_item(text: &str) -> Result<BlockItem, String> {
 // ---------------------------------------------------------------------------
 
 /// Static config for the server (everything but the per-session root, which is
-/// minted per `session_open`).
+/// minted per session open).
 pub struct ReplServerConfig {
     pub decls: Vec<EffectDecl>,
     pub ask_tag: u64,
@@ -218,14 +184,14 @@ pub struct ReplServerConfig {
     /// ~30 min — a wedged session is dead weight, unlike a parked ask.
     pub wedged_ttl: Option<Duration>,
     /// Wall-clock budget for a single turn before it is cancelled at a JIT
-    /// safepoint (see [`drive`]). `None` ⇒ [`TURN_TIMEOUT_SECS`] (120 s). Tests
+    /// safepoint (see [`drive`]). `None` ⇒ [`TURN_TIMEOUT_SECS`] (600 s). Tests
     /// shrink it to exercise the timeout/self-heal path fast.
     pub turn_timeout: Option<Duration>,
 }
 
-/// Spawns a worker for a `(session_name, SessionConfig)` — the erased,
-/// per-session handler-stack builder (H is hidden behind this boxed closure).
-type SessionSpawn = Box<dyn Fn(&str, SessionConfig) -> WorkerHandle + Send + Sync>;
+/// Spawns a worker for a [`SessionConfig`] — the erased handler-stack builder
+/// (H is hidden behind this boxed closure).
+type SessionSpawn = Box<dyn Fn(SessionConfig) -> WorkerHandle + Send + Sync>;
 
 /// Whether a project/global `Library` facade is on the include path. When true
 /// the preamble emits `import Library` so `.tidepool/lib` verbs are in scope
@@ -254,17 +220,12 @@ struct ReplServerInner {
     manager: SessionManager,
     next_cont_id: AtomicU64,
     next_session_id: AtomicU64,
-    /// Spawns a worker for `(session_name, SessionConfig)` (captures handler builder + ask_tag).
+    /// Spawns a worker for a [`SessionConfig`] (captures handler builder + ask_tag).
     spawn: SessionSpawn,
     preamble: String,
     effect_stack: String,
     cfg: ReplServerConfig,
     tool_description: String,
-    /// Every session name `session_open`ed in THIS process, open or since
-    /// closed — lets the "no session" error distinguish a session closed here
-    /// from one that never existed in this process (typo, or the server
-    /// restarted and its process-scoped sessions died with it).
-    ever_opened: parking_lot::Mutex<std::collections::HashSet<String>>,
 }
 
 /// The `tidepool-repl` MCP server. `Clone` is cheap (Arc); the HTTP transport
@@ -283,46 +244,37 @@ impl TidepoolReplServer {
         let preamble = repl_preamble(&cfg);
         let effect_stack = tidepool_mcp::build_effect_stack_type(&cfg.decls);
         let ask_tag = cfg.ask_tag;
-        // Erase H: the spawn closure owns a clone of `base`; session name is ignored (shared stack).
-        let spawn: SessionSpawn =
-            Box::new(move |_: &str, sc| spawn_worker(sc, base.clone(), ask_tag));
-        let server = TidepoolReplServer {
-            inner: Arc::new(ReplServerInner {
-                manager: SessionManager::new(),
-                next_cont_id: AtomicU64::new(1),
-                next_session_id: AtomicU64::new(1),
-                spawn,
-                preamble,
-                effect_stack,
-                tool_description: build_tool_description(&cfg.decls),
-                cfg,
-                ever_opened: parking_lot::Mutex::new(std::collections::HashSet::new()),
-            }),
-        };
-        server.spawn_reaper();
-        server
+        // Erase H: the spawn closure owns a clone of `base`.
+        let spawn: SessionSpawn = Box::new(move |sc| spawn_worker(sc, base.clone(), ask_tag));
+        Self::from_spawn(spawn, cfg, preamble, effect_stack)
     }
 
-    /// Build a server where each named session gets its own handler stack from `builder`.
+    /// Build a server where the single session's handler stack comes from
+    /// `builder`, invoked once per session open (`session_run` auto-open /
+    /// `session_reset`). Use this to give the session its own KV namespace
+    /// (e.g. a per-session backing file) while sharing all other construction.
     ///
-    /// `builder` is invoked once per `session_open` with the session name, producing a
-    /// fresh base stack for that session. Use this to give each session an isolated KV
-    /// namespace (e.g. a per-session backing file) while sharing all other construction.
-    ///
-    /// The `cfg` must already carry the correct `decls` and `ask_tag` (derived from a
-    /// representative stack before calling this constructor).
+    /// The `cfg` must already carry the correct `decls` and `ask_tag` (derived
+    /// from a representative stack before calling this constructor).
     pub fn new_with_session_builder<H, F>(builder: F, cfg: ReplServerConfig) -> TidepoolReplServer
     where
         H: DispatchEffect<CapturedOutput> + Clone + Send + Sync + 'static,
-        F: Fn(&str) -> H + Send + Sync + 'static,
+        F: Fn() -> H + Send + Sync + 'static,
     {
         let preamble = repl_preamble(&cfg);
         let effect_stack = tidepool_mcp::build_effect_stack_type(&cfg.decls);
         let ask_tag = cfg.ask_tag;
-        let spawn: SessionSpawn = Box::new(move |session_name: &str, sc| {
-            let base = builder(session_name);
-            spawn_worker(sc, base, ask_tag)
-        });
+        let spawn: SessionSpawn = Box::new(move |sc| spawn_worker(sc, builder(), ask_tag));
+        Self::from_spawn(spawn, cfg, preamble, effect_stack)
+    }
+
+    /// Shared constructor: assemble the inner from an erased spawn closure.
+    fn from_spawn(
+        spawn: SessionSpawn,
+        cfg: ReplServerConfig,
+        preamble: String,
+        effect_stack: String,
+    ) -> TidepoolReplServer {
         let server = TidepoolReplServer {
             inner: Arc::new(ReplServerInner {
                 manager: SessionManager::new(),
@@ -333,18 +285,17 @@ impl TidepoolReplServer {
                 effect_stack,
                 tool_description: build_tool_description(&cfg.decls),
                 cfg,
-                ever_opened: parking_lot::Mutex::new(std::collections::HashSet::new()),
             }),
         };
         server.spawn_reaper();
         server
     }
 
-    /// Spawn the background reaper: periodically reclaim abandoned suspensions
-    /// (a parked `ask` never resumed/aborted, H2 — only if `continuation_ttl`
-    /// is set) and `Wedged` sessions (a timed-out turn, H3 — only if
-    /// `wedged_ttl` is set). No-op when both TTLs are `None` or there is no
-    /// tokio runtime (e.g. a unit test that constructs the server off-runtime).
+    /// Spawn the background reaper: periodically reclaim an abandoned suspension
+    /// (a parked `ask` never resumed, H2 — only if `continuation_ttl` is set)
+    /// and a `Wedged` session (a timed-out turn, H3 — only if `wedged_ttl` is
+    /// set). No-op when both TTLs are `None` or there is no tokio runtime (e.g. a
+    /// unit test that constructs the server off-runtime).
     fn spawn_reaper(&self) {
         let suspended_ttl = self.inner.cfg.continuation_ttl;
         let wedged_ttl = self.inner.cfg.wedged_ttl;
@@ -415,36 +366,55 @@ impl TidepoolReplServer {
         Ok(())
     }
 
-    /// The self-explaining "no session" error (the bare "no session 'x' open"
-    /// was correct but unexplaining after a server restart). Distinguishes a
-    /// session closed in THIS process from one this process never opened —
-    /// the latter is either a typo or the common dead end: the MCP server
-    /// restarted, and sessions are PROCESS-SCOPED (the resident machine and
-    /// every heap value died with the old process; only declarations are
-    /// cheap to replay).
-    fn lost_session_error(&self, session_name: &str) -> String {
-        if self.inner.ever_opened.lock().contains(session_name) {
-            format!(
-                "no session '{session_name}' open — it was closed earlier in this server \
-                 process. Reopen it with session_open and redeclare what you need \
-                 (declarations replay cheaply; heap values are gone)."
-            )
-        } else {
-            format!(
-                "no session '{session_name}' open in this server process. If you opened it \
-                 earlier, the MCP server has since restarted: sessions are process-scoped, \
-                 and the resident machine — including every bound heap value — died with \
-                 the old process. Reopen with session_open and redeclare (declarations \
-                 replay cheaply; heap values are gone). Otherwise call session_open first."
-            )
-        }
-    }
-
     fn next_continuation_id(&self) -> ContinuationId {
         ContinuationId(tidepool_mcp::server_common::mint_id(
             &self.inner.next_cont_id,
             "scont",
         ))
+    }
+
+    // -- session lifecycle -------------------------------------------------
+
+    /// Spawn a fresh resident worker for the implicit session (a new session id
+    /// ⇒ a new include-tree root). Does NOT install it into the manager.
+    fn spawn_session(&self) -> WorkerHandle {
+        let sid = SessionId(self.inner.next_session_id.fetch_add(1, Ordering::Relaxed));
+        let root = self
+            .inner
+            .cfg
+            .session_root_base
+            .join(format!("session-{}", sid.0));
+        let cfg = SessionConfig {
+            id: sid,
+            root,
+            base_include: self.inner.cfg.base_include.clone(),
+            decls: self.inner.cfg.decls.clone(),
+            preamble: self.inner.preamble.clone(),
+            effect_stack: self.inner.effect_stack.clone(),
+            ask_tag: self.inner.cfg.ask_tag,
+            module_env: self.inner.cfg.module_env.clone(),
+            nursery_size: self.inner.cfg.nursery_size.unwrap_or(DEFAULT_NURSERY_SIZE),
+        };
+        (self.inner.spawn)(cfg)
+    }
+
+    /// The implicit session's lifecycle state, auto-opening it on first use
+    /// (`session_run` needs no explicit open). If a concurrent caller wins the
+    /// install race, our freshly-spawned worker is dropped and the winner's
+    /// state is returned.
+    fn ensure_session(&self) -> Result<SharedState, String> {
+        if let Some(s) = self.inner.manager.state() {
+            return Ok(s);
+        }
+        let handle = self.spawn_session();
+        if let Err(rejected) = self.inner.manager.install(handle) {
+            // Lost the race — someone else installed first. Drop ours cleanly.
+            rejected.shutdown();
+        }
+        self.inner
+            .manager
+            .state()
+            .ok_or_else(|| "session worker vanished immediately after install".to_string())
     }
 
     // -- tool handlers -----------------------------------------------------
@@ -460,16 +430,9 @@ impl TidepoolReplServer {
         let parse =
             |args: serde_json::Map<String, serde_json::Value>| serde_json::Value::Object(args);
         match name {
-            "session_open" => {
-                let req: SessionOpenRequest = serde_json::from_value(parse(args))
-                    .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
-                let sid = resolve_session(req.session);
-                Ok(self.session_open(&sid).await)
-            }
             "session_run" => {
                 let req: SessionBlockRequest = serde_json::from_value(parse(args))
                     .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
-                let sid = resolve_session(req.session);
                 let mut block_items: Vec<BlockItem> = Vec::with_capacity(req.items.len());
                 for item_text in &req.items {
                     match classify_item(item_text) {
@@ -495,26 +458,15 @@ impl TidepoolReplServer {
                             verbose,
                         },
                         input,
-                        &sid,
                     )
                     .await)
-            }
-            "session_close" => {
-                let req: SessionCloseRequest = serde_json::from_value(parse(args))
-                    .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
-                let sid = resolve_session(req.session);
-                Ok(self.session_close(&sid).await)
             }
             "session_resume" => {
                 let req: SessionResumeRequest = serde_json::from_value(parse(args))
                     .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
                 self.session_resume(req).await
             }
-            "session_abort" => {
-                let req: SessionAbortRequest = serde_json::from_value(parse(args))
-                    .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
-                self.session_abort(req).await
-            }
+            "session_reset" => Ok(self.session_reset().await),
             other => Err(McpError {
                 code: ErrorCode::METHOD_NOT_FOUND,
                 message: format!("Tool not found: {other}").into(),
@@ -523,58 +475,18 @@ impl TidepoolReplServer {
         }
     }
 
-    async fn session_open(&self, session_name: &str) -> CallToolResult {
-        let sid = SessionId(self.inner.next_session_id.fetch_add(1, Ordering::Relaxed));
-        let root = self
-            .inner
-            .cfg
-            .session_root_base
-            .join(format!("session-{}", sid.0));
-        let cfg = SessionConfig {
-            id: sid,
-            root,
-            base_include: self.inner.cfg.base_include.clone(),
-            decls: self.inner.cfg.decls.clone(),
-            preamble: self.inner.preamble.clone(),
-            effect_stack: self.inner.effect_stack.clone(),
-            ask_tag: self.inner.cfg.ask_tag,
-            module_env: self.inner.cfg.module_env.clone(),
-            nursery_size: self.inner.cfg.nursery_size.unwrap_or(DEFAULT_NURSERY_SIZE),
-        };
-        let handle = (self.inner.spawn)(session_name, cfg);
-        self.inner
-            .ever_opened
-            .lock()
-            .insert(session_name.to_string());
-        match self.inner.manager.install(session_name, handle) {
-            Ok(()) => CallToolResult::success(vec![Content::text(
-                serde_json::json!({"opened": true, "session_id": sid.0, "session": session_name})
-                    .to_string(),
-            )]),
-            Err(rejected) => {
-                rejected.shutdown();
-                CallToolResult::error(vec![Content::text(format!(
-                    "session '{}' is already open; call session_close first",
-                    session_name
-                ))])
-            }
-        }
-    }
-
-    /// Send a `SessionCommand` to the named session worker and await its reply.
-    /// `eval_input` is forwarded to the worker so `input :: Aeson.Value` is in
-    /// scope for the first eval item in a `session_run` block.
+    /// Send a `SessionCommand` to the resident worker and await its reply,
+    /// auto-opening the session on first use. `eval_input` is forwarded so
+    /// `input :: Aeson.Value` is in scope for the first eval item in a block.
     async fn run_command(
         &self,
         op: &str,
         cmd: SessionCommand,
         eval_input: Option<serde_json::Value>,
-        session_name: &str,
     ) -> CallToolResult {
-        let Some(state) = self.inner.manager.state(session_name) else {
-            return CallToolResult::error(vec![Content::text(
-                self.lost_session_error(session_name),
-            )]);
+        let state = match self.ensure_session() {
+            Ok(s) => s,
+            Err(e) => return CallToolResult::error(vec![Content::text(e)]),
         };
         // Busy-guard (M5): only an Idle session accepts a new turn. A turn that
         // is running, suspended on an `ask`, wedged, or closing must be resolved
@@ -585,17 +497,14 @@ impl TidepoolReplServer {
             if !st.is_idle() {
                 let label = st.busy_label();
                 return CallToolResult::error(vec![Content::text(format!(
-                    "session '{session_name}' is {label}; resume/abort it (or close) \
-                     before running again"
+                    "session is {label}; resume it (or session_reset) before running again"
                 ))]);
             }
             *st = SessionState::Busy;
         }
-        let Some(sender) = self.inner.manager.get_sender(session_name) else {
+        let Some(sender) = self.inner.manager.get_sender() else {
             *state.lock() = SessionState::Idle;
-            return CallToolResult::error(vec![Content::text(
-                self.lost_session_error(session_name),
-            )]);
+            return CallToolResult::error(vec![Content::text("session worker is gone")]);
         };
         let (session_tx, session_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerMessage>();
         let (response_tx, response_rx) = std::sync::mpsc::channel::<ResumeMsg>();
@@ -616,7 +525,7 @@ impl TidepoolReplServer {
         let cancel = self
             .inner
             .manager
-            .cancel_slot(session_name)
+            .cancel_slot()
             .unwrap_or_else(empty_cancel_slot);
         self.drive(
             op,
@@ -629,39 +538,53 @@ impl TidepoolReplServer {
         .await
     }
 
-    async fn session_close(&self, session_name: &str) -> CallToolResult {
-        // H1 FIX: if the session is parked on an `ask`, RELEASE its suspension
-        // first. Setting `Closing` drops the old `SessionState` — and with it the
-        // `Suspension`'s `response_tx` — so the worker blocked on `response_rx`
-        // (inside `handle.run`, NOT reading `cmd_tx`) unblocks, unwinds the turn,
-        // and returns to its command loop where it can observe the `Close` below.
-        // Without this, the `Close` job is never read, the ack times out, and the
-        // unbounded `join()` in `shutdown()` hangs a tokio thread forever.
-        if let Some(state) = self.inner.manager.state(session_name) {
+    /// `session_reset`: tear down the current session (releasing a parked `ask`
+    /// and aborting a runaway) and open a fresh resident machine. The universal
+    /// get-unstuck button — abort folds into it, so resetting while suspended
+    /// drops the pending continuation.
+    async fn session_reset(&self) -> CallToolResult {
+        self.teardown_current().await;
+        match self.ensure_session() {
+            Ok(_) => CallToolResult::success(vec![Content::text(
+                serde_json::json!({"reset": true}).to_string(),
+            )]),
+            Err(e) => CallToolResult::error(vec![Content::text(e)]),
+        }
+    }
+
+    /// Tear down the current session if one is present: abort a runaway at a JIT
+    /// safepoint, RELEASE a parked `ask` suspension (setting `Closing` drops the
+    /// old `SessionState` — and with it the `Suspension`'s `response_tx` — so a
+    /// worker blocked on `response_rx` unblocks, unwinds the turn, and returns to
+    /// its command loop where it observes the `Close`), then close the worker.
+    /// The `Close` ack is awaited: on a clean ack the worker is joined; a
+    /// pure-compute runaway that never reads `Close` is DETACHED (`join()` would
+    /// hang forever on an uninterruptible thread).
+    async fn teardown_current(&self) {
+        // Abort a runaway turn at a JIT safepoint so a Busy session tears down
+        // promptly instead of waiting out the ack timeout (no-op if idle).
+        if let Some(cancel) = self.inner.manager.cancel_slot() {
+            if let Some(h) = cancel.lock().as_ref().cloned() {
+                h.cancel();
+            }
+        }
+        if let Some(state) = self.inner.manager.state() {
             *state.lock() = SessionState::Closing;
         }
-        let Some(handle) = self.inner.manager.remove(session_name) else {
-            return CallToolResult::error(vec![Content::text(
-                self.lost_session_error(session_name),
-            )]);
+        let Some(handle) = self.inner.manager.remove() else {
+            return;
         };
         let (session_tx, mut session_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerMessage>();
         let (_response_tx, response_rx) = std::sync::mpsc::channel::<ResumeMsg>();
-        let gate = PauseGate::new();
-        let captured = CapturedOutput::new();
         let job = WorkerJob {
             cmd: SessionCommand::Close,
             session_tx,
             response_rx,
-            gate,
-            captured,
+            gate: PauseGate::new(),
+            captured: CapturedOutput::new(),
             eval_input: None,
         };
         let _ = handle.sender().send(job);
-        // Await the Closed ack. If it arrives the worker reached its command loop
-        // and exited cleanly → join it. If it does NOT (a pure-compute runaway
-        // that never reads `Close`), DETACH instead of joining — `shutdown`'s
-        // `join()` would hang forever on an uninterruptible thread.
         let acked = timeout(Duration::from_secs(30), session_rx.recv())
             .await
             .is_ok();
@@ -670,9 +593,6 @@ impl TidepoolReplServer {
         } else {
             handle.detach();
         }
-        CallToolResult::success(vec![Content::text(
-            serde_json::json!({"closed": true, "session": session_name}).to_string(),
-        )])
     }
 
     async fn session_resume(&self, req: SessionResumeRequest) -> Result<CallToolResult, McpError> {
@@ -682,12 +602,11 @@ impl TidepoolReplServer {
         // string is parsed into the canonical shape (BUG-9) — and (b) leaves an
         // invalid reply's continuation un-consumed so the caller can retry.
         // Mirrors the eval server's resume (tidepool-mcp/src/server.rs).
-        let session_name = resolve_session(req.session);
-        let Some(state) = self.inner.manager.state(&session_name) else {
+        let Some(state) = self.inner.manager.state() else {
             return Err(McpError::invalid_params(
                 format!(
-                    "{}; continuation_id {} cannot be resumed",
-                    self.lost_session_error(&session_name),
+                    "no session is running; continuation_id {} cannot be resumed \
+                     (run session_run to start one)",
                     req.continuation_id
                 ),
                 None,
@@ -698,9 +617,8 @@ impl TidepoolReplServer {
         let suspension = {
             let mut st = state.lock();
             // Must be Suspended on the matching continuation. Three distinguishable
-            // causes on mismatch (was one collapsed "unknown or expired" message,
-            // which made a same-process footgun — e.g. resuming without echoing a
-            // non-default `session` — indistinguishable from a real flake).
+            // causes on mismatch: suspended on a DIFFERENT continuation, or not
+            // suspended at all (already spent or never existed).
             let schema = match &*st {
                 SessionState::Suspended(s) if s.cont_id == req.continuation_id => {
                     s.expected_schema.clone()
@@ -708,8 +626,8 @@ impl TidepoolReplServer {
                 SessionState::Suspended(s) => {
                     return Err(McpError::invalid_params(
                         format!(
-                            "Session '{session_name}' is suspended on continuation {}, not \
-                             {}; resume the pending one (or abort it first)",
+                            "session is suspended on continuation {}, not {}; resume the \
+                             pending one (or session_reset to drop it)",
                             s.cont_id, req.continuation_id
                         ),
                         None,
@@ -718,8 +636,8 @@ impl TidepoolReplServer {
                 other => {
                     return Err(McpError::invalid_params(
                         format!(
-                            "Session '{session_name}' is not awaiting a resume (state: {}); \
-                             continuation_id {} is already spent or never existed",
+                            "session is not awaiting a resume (state: {}); continuation_id {} \
+                             is already spent or never existed",
                             other.busy_label(),
                             req.continuation_id
                         ),
@@ -737,7 +655,7 @@ impl TidepoolReplServer {
                     }
                     let msg = tidepool_mcp::server_common::validation_failed_body(
                         "session_resume",
-                        "session_abort",
+                        "session_reset",
                         &violations,
                         schema.as_ref(),
                         &req.continuation_id.0,
@@ -769,86 +687,11 @@ impl TidepoolReplServer {
         let cancel = self
             .inner
             .manager
-            .cancel_slot(&session_name)
+            .cancel_slot()
             .unwrap_or_else(empty_cancel_slot);
         Ok(self
             .drive(
                 "session_resume",
-                suspension.session_rx,
-                suspension.response_tx,
-                suspension.gate,
-                suspension.captured,
-                DriveCtl { state, cancel },
-            )
-            .await)
-    }
-
-    async fn session_abort(&self, req: SessionAbortRequest) -> Result<CallToolResult, McpError> {
-        let session_name = resolve_session(req.session);
-        let Some(state) = self.inner.manager.state(&session_name) else {
-            return Err(McpError::invalid_params(
-                format!(
-                    "{}; continuation_id {} cannot be aborted",
-                    self.lost_session_error(&session_name),
-                    req.continuation_id
-                ),
-                None,
-            ));
-        };
-        let reason = req
-            .reason
-            .unwrap_or_else(|| "aborted by caller".to_string());
-        let suspension = {
-            let mut st = state.lock();
-            match &*st {
-                SessionState::Suspended(s) if s.cont_id == req.continuation_id => {}
-                SessionState::Suspended(s) => {
-                    return Err(McpError::invalid_params(
-                        format!(
-                            "Session '{session_name}' is suspended on continuation {}, not \
-                             {}; abort the pending one instead",
-                            s.cont_id, req.continuation_id
-                        ),
-                        None,
-                    ));
-                }
-                other => {
-                    return Err(McpError::invalid_params(
-                        format!(
-                            "Session '{session_name}' is not awaiting a resume (state: {}); \
-                             continuation_id {} is already spent or never existed",
-                            other.busy_label(),
-                            req.continuation_id
-                        ),
-                        None,
-                    ));
-                }
-            }
-            // Suspended was confirmed under this same lock above.
-            let Some(s) = take_suspension(&mut st) else {
-                return Err(McpError::internal_error(
-                    "session state changed under lock (expected Suspended)",
-                    None,
-                ));
-            };
-            let s = *s;
-            if s.response_tx.send(ResumeMsg::Abort(reason)).is_err() {
-                *st = SessionState::Idle;
-                return Err(McpError::internal_error(
-                    "session worker is no longer running",
-                    None,
-                ));
-            }
-            s
-        };
-        let cancel = self
-            .inner
-            .manager
-            .cancel_slot(&session_name)
-            .unwrap_or_else(empty_cancel_slot);
-        Ok(self
-            .drive(
-                "session_abort",
                 suspension.session_rx,
                 suspension.response_tx,
                 suspension.gate,
@@ -926,14 +769,14 @@ impl TidepoolReplServer {
                     // effect handler will continue until its external call
                     // completes. Any spawned child process is NOT killed — it
                     // runs to completion on its own. The session is wedged
-                    // for the reaper (session_close will reclaim it).
+                    // for the reaper (session_reset will reclaim it).
                     format!(
                         "{op} timed out after {to_secs}s while an effect was in \
                          flight (an external call — e.g. a spawned process or \
                          network request — was still running). Raise timeout_secs \
                          or check the external command duration. Any spawned child \
-                         process was NOT killed. The session is wedged; close and \
-                         reopen it."
+                         process was NOT killed. The session is wedged; session_reset \
+                         to recover."
                     )
                 } else {
                     // The worker was in pure JIT computation with no effect
@@ -943,8 +786,8 @@ impl TidepoolReplServer {
                     format!(
                         "{op} timed out after {to_secs}s on pure JIT computation \
                          (no effect boundary reached; likely an infinite loop or \
-                         unbounded recursion). The session is wedged; close and \
-                         reopen it."
+                         unbounded recursion). The session is wedged; session_reset \
+                         to recover."
                     )
                 };
                 return CallToolResult::error(vec![Content::text(wedged_msg)]);
@@ -972,7 +815,7 @@ impl TidepoolReplServer {
                         &cont_id.0, &prompt, meta,
                     );
                 // The suspension payload lives IN the state — a parked `ask` can't
-                // exist untracked, so teardown (close/reaper) is forced to release
+                // exist untracked, so teardown (reset/reaper) is forced to release
                 // its `response_tx`.
                 *state.lock() = SessionState::Suspended(Box::new(Suspension {
                     cont_id: cont_id.clone(),
@@ -1004,46 +847,61 @@ impl TidepoolReplServer {
             }
         }
     }
+
+    /// The live `tidepool://session/bindings` body: the worker's last-published
+    /// snapshot, or the empty-session shape if no session has opened yet.
+    fn session_bindings_body(&self) -> String {
+        match self.inner.manager.bindings_slot() {
+            Some(slot) => slot.lock().to_string(),
+            None => serde_json::json!({
+                "bindings": [],
+                "generation": 0,
+                "valGeneration": 0,
+            })
+            .to_string(),
+        }
+    }
 }
 
-/// One reaper sweep: reclaim suspensions / wedges older than `ttl`.
+/// One reaper sweep: reclaim the suspension / wedge if older than `ttl`.
 ///
-/// - An abandoned `Suspended` (never resumed/aborted) → `Idle`: dropping the
+/// - An abandoned `Suspended` (never resumed) → `Idle`: dropping the
 ///   `Suspension` drops its `response_tx`, so the parked worker's
 ///   `response_rx.recv()` errors, the turn unwinds, and the worker returns to
 ///   its command loop — the session stays alive and usable (H2).
-/// - A stale `Wedged` (timed-out turn) → removed, freeing the session name.
-///   The worker is DETACHED, not joined: a pure-compute runaway can't be joined
-///   without hanging.
+/// - A stale `Wedged` (timed-out turn) → removed, freeing the slot. The worker
+///   is DETACHED, not joined: a pure-compute runaway can't be joined without
+///   hanging.
 fn reap_once(
     inner: &ReplServerInner,
     suspended_ttl: Option<Duration>,
     wedged_ttl: Option<Duration>,
 ) {
     let now = Instant::now();
-    for (id, state) in inner.manager.snapshot_states() {
-        let remove_wedged = {
-            let mut st = state.lock();
-            match &*st {
-                SessionState::Suspended(s)
-                    if suspended_ttl.is_some_and(|ttl| now.duration_since(s.since) >= ttl) =>
-                {
-                    *st = SessionState::Idle;
-                    false
-                }
-                SessionState::Wedged { since }
-                    if wedged_ttl.is_some_and(|ttl| now.duration_since(*since) >= ttl) =>
-                {
-                    *st = SessionState::Closing;
-                    true
-                }
-                _ => false,
+    let Some(state) = inner.manager.state() else {
+        return;
+    };
+    let remove_wedged = {
+        let mut st = state.lock();
+        match &*st {
+            SessionState::Suspended(s)
+                if suspended_ttl.is_some_and(|ttl| now.duration_since(s.since) >= ttl) =>
+            {
+                *st = SessionState::Idle;
+                false
             }
-        };
-        if remove_wedged {
-            if let Some(handle) = inner.manager.remove(&id) {
-                handle.detach();
+            SessionState::Wedged { since }
+                if wedged_ttl.is_some_and(|ttl| now.duration_since(*since) >= ttl) =>
+            {
+                *st = SessionState::Closing;
+                true
             }
+            _ => false,
+        }
+    };
+    if remove_wedged {
+        if let Some(handle) = inner.manager.remove() {
+            handle.detach();
         }
     }
 }
@@ -1054,16 +912,17 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
     // `:browse` render — one source, so the three surfaces can't drift.
     let effects = describe_effects_index(decls);
     format!(
-        "tidepool-repl — a GHCi-style stateful Haskell session. Each named session holds one \
-         resident JIT machine whose value heap and module scope persist across turns; \
-         declarations accumulate across `session_run` calls.\n\n\
+        "tidepool-repl — a GHCi-style stateful Haskell session. ONE resident JIT machine whose \
+         value heap and module scope persist across turns; declarations accumulate across \
+         `session_run` calls.\n\n\
          PRIMARY TOOL: session_run\n\
          Pass a list of items run in sequence: top-level declarations (`data Foo = …`, \
          `f x = …`), bind statements (`x <- e` / `let x = e`), bare expressions, or \
          :commands (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`, `:browse [Effect]`, \
          `:stub <n>`, `:program`). \
          Items are classified automatically. Execution stops on the first error. \
-         Returns per-item results and the last expression's value.\n\n\
+         Returns per-item results and the last expression's value. \
+         The session auto-opens on the first `session_run` — no open step.\n\n\
          DISCOVER VERBS: `:browse` lists every effect + one-line description; \
          `:browse <Effect>` (case-insensitive) lists that effect's verbs (name :: signature) and \
          constructors — reach for it instead of guessing verb names. `:vocab` covers the \
@@ -1090,15 +949,17 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          Show output.\n\n\
          EFFECTS (invoke via the helper verbs; `:browse <Effect>` for its constructors + full \
          signatures):\n{effects}\n\
-         Lifecycle: session_open → session_run* → session_close. \
-         Multiple agents can open distinct named sessions in parallel \
-         (omit `session` to use `\"default\"`). \
-         An in-turn `ask` suspends with a continuation_id; answer it with session_resume or \
-         drop it with session_abort.\n\n\
+         LIFECYCLE: `session_run` auto-opens the session; `session_reset` drops the resident \
+         machine and starts fresh (and drops any pending `ask`). \
+         An in-turn `ask` suspends with a continuation_id; answer it with session_resume \
+         (resetting while suspended drops it).\n\n\
+         LIVE STATE: the `tidepool://session/bindings` resource serves the current \
+         environment as JSON (name/type/kind/generation per binding).\n\n\
          RECORDS — effect results are named records, not tuples. Use record-dot syntax: \
-         `run cmd` → `Proc` (access `p.stdout`, `p.exitCode`, `p.stderr`; `ok p` = zero exit); \
-         `grepGlob`/`searchFiles` → `[Hit]` (access `h.path`, `h.line`, `h.text`); \
-         `readGlob` → `[FileRead]` (access `r.path`, `r.contents :: Either FsError Text`). \
+         `run cmd` → `Either <EffectError> Proc` — bind the `Right` (`Right p <- run cmd`) and \
+         read `p.stdout`, `p.exitCode`, `p.stderr` (`ok p` = zero exit); \
+         `grepGlob`/`searchFiles` → `[Hit]` (`h.path`, `h.line`, `h.text`); \
+         `readGlob` → `[FileRead]` (`r.path`, `r.contents :: Either FsError Text`). \
          Bare selectors like `stdout p` are ambiguous — always use dot syntax.",
     )
 }
@@ -1111,7 +972,10 @@ impl ServerHandler for TidepoolReplServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(self.inner.tool_description.clone()),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
             ..Default::default()
         }
     }
@@ -1132,20 +996,12 @@ impl ServerHandler for TidepoolReplServer {
     ) -> Result<ListToolsResult, McpError> {
         let tools = vec![
             tidepool_mcp::server_common::make_tool(
-                "session_open",
-                "Open a named session (one live JIT machine per name). Omit `session` to use the \
-                 default session. Call before session_run.",
-                tidepool_mcp::server_common::schema_to_map(schemars::schema_for!(
-                    SessionOpenRequest
-                ))
-                .map_err(|e| McpError::internal_error(e, None))?,
-            ),
-            tidepool_mcp::server_common::make_tool(
                 "session_run",
-                "Run a list of GHCi-capable items in sequence on the resident machine. Each item \
-                 is a declaration (`data Foo = …`, `f x = …`), a bind statement (`x <- e` / \
-                 `let x = e`), a bare expression, or a `:command` (`:bindings`, `:reset`, \
-                 `:t <expr>`, `:i <name>`, `:vocab`, `:browse [Effect]`, `:stub <n>`, `:program`). \
+                "Run a list of GHCi-capable items in sequence on the resident machine (the \
+                 session auto-opens on first use). Each item is a declaration (`data Foo = …`, \
+                 `f x = …`), a bind statement (`x <- e` / `let x = e`), a bare expression, or a \
+                 `:command` (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`, \
+                 `:browse [Effect]`, `:stub <n>`, `:program`). \
                  Items are classified automatically; \
                  execution stops on the first error. Returns slim per-item inline JSON plus the \
                  last expression's `value` and `type` at the top level. \
@@ -1161,36 +1017,30 @@ impl ServerHandler for TidepoolReplServer {
                  output. Pass `verbose: true` for the full diagnostic shape (generation counters, \
                  double-encoded result strings). \
                  An in-turn `ask` suspends with a continuation_id; resume with session_resume \
-                 or drop with session_abort.",
+                 or drop it with session_reset.",
                 tidepool_mcp::server_common::schema_to_map(schemars::schema_for!(
                     SessionBlockRequest
                 ))
                 .map_err(|e| McpError::internal_error(e, None))?,
             ),
             tidepool_mcp::server_common::make_tool(
-                "session_close",
-                "Close the session: drop the resident machine and free its heap.",
-                tidepool_mcp::server_common::schema_to_map(schemars::schema_for!(
-                    SessionCloseRequest
-                ))
-                .map_err(|e| McpError::internal_error(e, None))?,
-            ),
-            tidepool_mcp::server_common::make_tool(
                 "session_resume",
                 "Answer an in-turn `ask` suspension (continuation_id from a {\"suspended\":true} \
-                 result) and run the turn to completion.",
+                 result) and run the turn to completion. A reply that doesn't match the \
+                 suspension's schema is rejected WITHOUT consuming the continuation, so it can \
+                 be retried.",
                 tidepool_mcp::server_common::schema_to_map(schemars::schema_for!(
                     SessionResumeRequest
                 ))
                 .map_err(|e| McpError::internal_error(e, None))?,
             ),
             tidepool_mcp::server_common::make_tool(
-                "session_abort",
-                "Abort an in-turn `ask` suspension without answering it.",
-                tidepool_mcp::server_common::schema_to_map(schemars::schema_for!(
-                    SessionAbortRequest
-                ))
-                .map_err(|e| McpError::internal_error(e, None))?,
+                "session_reset",
+                "Drop the resident machine (freeing its heap and all bindings) and open a fresh \
+                 session. Also drops any pending `ask` continuation — the universal \
+                 get-unstuck button (abort folds into reset). Takes no arguments.",
+                tidepool_mcp::server_common::schema_to_map(schemars::schema_for!(EmptyRequest))
+                    .map_err(|e| McpError::internal_error(e, None))?,
             ),
         ];
         Ok(ListToolsResult {
@@ -1199,4 +1049,58 @@ impl ServerHandler for TidepoolReplServer {
             meta: None,
         })
     }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        let resources = vec![RawResource {
+            uri: SESSION_BINDINGS_URI.to_string(),
+            name: "Session bindings".to_string(),
+            title: None,
+            description: Some(
+                "Live session environment as JSON: one entry per in-scope binding \
+                 (name, type, kind = decl|bind, generation), plus the decl/value generation \
+                 counters. Refreshed after every turn."
+                    .to_string(),
+            ),
+            mime_type: Some("application/json".to_string()),
+            size: None,
+            icons: None,
+            meta: None,
+        }
+        .no_annotation()];
+        Ok(ListResourcesResult {
+            resources,
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, McpError> {
+        if request.uri == SESSION_BINDINGS_URI {
+            Ok(ReadResourceResult {
+                contents: vec![ResourceContents::TextResourceContents {
+                    uri: request.uri,
+                    mime_type: Some("application/json".to_string()),
+                    text: self.session_bindings_body(),
+                    meta: None,
+                }],
+            })
+        } else {
+            Err(McpError::resource_not_found(
+                format!("Unknown resource: {}", request.uri),
+                None,
+            ))
+        }
+    }
 }
+
+/// An empty request schema — `session_reset` takes no arguments.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct EmptyRequest {}

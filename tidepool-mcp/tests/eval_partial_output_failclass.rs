@@ -24,8 +24,8 @@ use std::path::Path;
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
-use tidepool_mcp::{CapturedOutput, FailureClass};
-use tidepool_runtime::compile_and_run;
+use tidepool_mcp::CapturedOutput;
+use tidepool_runtime::{classify, compile_and_run, FailureClass, FailureEnvelope, Phase};
 
 fn prelude_dir() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -74,8 +74,8 @@ impl EffectHandler<CapturedOutput> for ConsoleHandler {
 
 /// Run `code` (with optional top-level `helpers`) through the real pipeline
 /// with a capturing Console handler. Returns the (drained) captured output and
-/// the runtime error string — the eval is expected to FAIL.
-fn run_capturing_expect_err(code: &str, helpers: &str) -> (Vec<String>, String) {
+/// the classified failure envelope — the eval is expected to FAIL.
+fn run_capturing_expect_err(code: &str, helpers: &str) -> (Vec<String>, FailureEnvelope) {
     let decls = tidepool_mcp::standard_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, true);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
@@ -120,21 +120,24 @@ fn run_capturing_expect_err(code: &str, helpers: &str) -> (Vec<String>, String) 
             tidepool_codegen::signal_safety::install();
             let include = [pp, ulp, eff];
             let mut handlers = frunk::hlist![ConsoleHandler];
-            let err = compile_and_run(
+            let env = match compile_and_run(
                 &source,
                 "result",
                 &include,
                 &mut handlers,
                 &captured_for_thread,
-            )
-            .expect_err("eval was expected to fail")
-            .to_string();
-            let _ = tx.send(err);
+            ) {
+                Ok(_) => panic!("eval was expected to fail"),
+                // Classify the STRUCTURED error here (the RuntimeError is on this
+                // thread) so the assertion checks the real class/phase.
+                Err(e) => classify(&e),
+            };
+            let _ = tx.send(env);
         })
         .expect("spawn eval-failclass thread");
 
-    let err = match rx.recv_timeout(std::time::Duration::from_secs(90)) {
-        Ok(err) => err,
+    let env = match rx.recv_timeout(std::time::Duration::from_secs(90)) {
+        Ok(env) => env,
         Err(_) => panic!(
             "eval did not terminate within 90s — a failing snippet MUST crash \
              (stack overflow / Haskell error), not loop. A no-base-case non-tail \
@@ -142,17 +145,18 @@ fn run_capturing_expect_err(code: &str, helpers: &str) -> (Vec<String>, String) 
         ),
     };
     let _ = handle.join();
-    (captured.drain(), err)
+    (captured.drain(), env)
 }
 
 /// A clean Haskell `error` after a `say`: the printed line survives, and the
-/// error classifies as `haskell-error` (not a codegen bug).
+/// error classifies as a run-phase `runtime` failure (the JIT reaches the
+/// `error` call at run time — NOT a compile-time user-haskell rejection).
 #[test]
 fn say_then_haskell_error_is_captured_and_classified() {
     let marker = "PARTIAL-OUTPUT-MARKER-haskell";
     // `send (Print ...)` fires only Console (tag 0); the `putStrLn` helper also
     // touches KV, which this single-handler HList does not handle.
-    let (output, err) = run_capturing_expect_err(
+    let (output, env) = run_capturing_expect_err(
         &format!(r#"send (Print (T.pack "{marker}")) >> (error (T.pack "boom") :: M Value)"#),
         "",
     );
@@ -162,19 +166,20 @@ fn say_then_haskell_error_is_captured_and_classified() {
         output.iter().any(|l| l.contains(marker)),
         "captured output should contain the pre-crash marker; got {output:?}"
     );
-    // 2. The REAL error string classifies as a clean Haskell error.
-    let class = FailureClass::classify_error_text(&err);
+    // 2. The REAL error classifies as a run-phase runtime failure.
     assert_eq!(
-        class,
-        FailureClass::HaskellError,
-        "expected haskell-error for `error \"boom\"`, got {} (err: {err})",
-        class.tag()
+        env.class,
+        FailureClass::Runtime,
+        "expected runtime for `error \"boom\"`, got {} (msg: {})",
+        env.class.tag(),
+        env.message
     );
+    assert_eq!(env.phase, Phase::Run);
 }
 
 /// Unbounded non-tail recursion whose RESULT is returned after a `say`: the
-/// printed line survives and the stack-overflow yield classifies as
-/// `runtime-yield`. Verified identical on the LIVE MCP server.
+/// printed line survives and the stack-overflow yield classifies as a run-phase
+/// `runtime` failure. Verified identical on the LIVE MCP server.
 ///
 /// SUBTLE — do NOT add `$!`. The earlier form `>> (pure $! (go 5_000_000))`
 /// does NOT capture the marker, on the live server OR here: `pure $! x` is
@@ -203,7 +208,7 @@ fn say_then_haskell_error_is_captured_and_classified() {
 #[test]
 fn say_then_stack_overflow_is_captured_and_classified() {
     let marker = "PARTIAL-OUTPUT-MARKER-yield";
-    let (output, err) = run_capturing_expect_err(
+    let (output, env) = run_capturing_expect_err(
         &format!(r#"send (Print (T.pack "{marker}")) >> (pure (go 5000000 :: Int))"#),
         "go :: Int -> Int\ngo n = if n <= 0 then 0 else n + go (n - 1)\n",
     );
@@ -212,11 +217,50 @@ fn say_then_stack_overflow_is_captured_and_classified() {
         output.iter().any(|l| l.contains(marker)),
         "captured output should contain the pre-crash marker; got {output:?}"
     );
-    let class = FailureClass::classify_error_text(&err);
     assert_eq!(
-        class,
-        FailureClass::RuntimeYield,
-        "expected runtime-yield for unbounded recursion, got {} (err: {err})",
-        class.tag()
+        env.class,
+        FailureClass::Runtime,
+        "expected runtime for unbounded recursion, got {} (msg: {})",
+        env.class.tag(),
+        env.message
     );
+    assert_eq!(env.phase, Phase::Run);
+}
+
+/// The motivating live bug, pinned at the compile path's read boundary: skew
+/// bytes from the extractor (a stand-in for a newer/foreign wire format) hit the
+/// SAME wire reader `compile_haskell` uses (`read_cbor`), yielding the real
+/// `CompileError::ReadError`, which MUST classify version-skew / compile — not
+/// user-haskell. Before the fix a skew made `pure 1` fail tagged as a user
+/// Haskell error, so a caller branching on class misrouted to "rewrite your
+/// code" instead of "redeploy the extractor". Needs no GHC — the wire reader is
+/// the unit under test.
+#[test]
+fn format_skew_bytes_through_compile_path_are_version_skew_compile() {
+    use tidepool_repr::serial::read_cbor;
+    use tidepool_runtime::{classify_compile, CompileError};
+
+    // Extractor output with no `TPLR` header — what a wire-format skew looks
+    // like to this server's reader (the exact read step in `compile_haskell`).
+    let skew_bytes = b"not-a-tplr-payload".to_vec();
+    let read_err = read_cbor(&skew_bytes).expect_err("headerless bytes must be rejected");
+
+    let env = classify_compile(&CompileError::ReadError(read_err));
+    assert_eq!(
+        env.class,
+        FailureClass::VersionSkew,
+        "a wire-format skew must be version-skew, got {} (msg: {})",
+        env.class.tag(),
+        env.message
+    );
+    assert_eq!(env.phase, Phase::Compile);
+    assert_ne!(
+        env.class,
+        FailureClass::UserHaskell,
+        "the live bug: a skew must NOT misroute as a user Haskell error"
+    );
+    // Self-diagnosing: names the supported wire version and says to redeploy,
+    // and carries no build sha.
+    assert!(env.message.to_lowercase().contains("redeploy"));
+    assert!(!env.message.to_lowercase().contains("sha"));
 }

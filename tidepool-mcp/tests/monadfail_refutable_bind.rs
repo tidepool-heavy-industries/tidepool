@@ -11,14 +11,13 @@
 //! `text_breakon_replace_mcp.rs`:
 //!   1. a refutable bind whose match SUCCEEDS binds and continues, and
 //!   2. a refutable bind whose match FAILS aborts with a CLEAN Haskell error
-//!      (not a SIGSEGV/hang), classified as `haskell-error`.
+//!      (not a SIGSEGV/hang), classified as a run-phase `runtime` failure.
 
 use serde_json::json;
 use std::path::Path;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
-use tidepool_mcp::FailureClass;
-use tidepool_runtime::compile_and_run;
+use tidepool_runtime::{classify, compile_and_run, FailureClass, FailureEnvelope, Phase};
 
 fn prelude_dir() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -50,8 +49,8 @@ impl DispatchEffect<()> for MockDispatcher {
 }
 
 /// Run `code` through the real MCP pipeline. `Ok` → the result JSON;
-/// `Err` → the runtime error string (the eval aborted).
-fn run_mcp(code: &str) -> Result<serde_json::Value, String> {
+/// `Err` → the classified failure envelope (the eval aborted).
+fn run_mcp(code: &str) -> Result<serde_json::Value, FailureEnvelope> {
     let decls = tidepool_mcp::standard_decls();
     let preamble = tidepool_mcp::build_preamble(&decls, true);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
@@ -71,7 +70,7 @@ fn run_mcp(code: &str) -> Result<serde_json::Value, String> {
     let mut dispatcher = MockDispatcher;
     compile_and_run(&source, "result", &include, &mut dispatcher, &())
         .map(|v| v.to_json())
-        .map_err(|e| e.to_string())
+        .map_err(|e| classify(&e))
 }
 
 /// A refutable bind whose match succeeds: `x` binds to 5 and the do-block
@@ -86,24 +85,29 @@ fn refutable_bind_success_runs() {
 /// A refutable bind whose match FAILS: `Just x <- pure Nothing` desugars to a
 /// `fail` call, which our instance routes through `error`. The eval must abort
 /// with a CLEAN Haskell error (not SIGSEGV / hang), carrying the desugared
-/// pattern-match-failure message, and classify as `haskell-error`.
+/// pattern-match-failure message. It aborts at RUN time (the JIT reaches the
+/// `error` call), so it classifies as a run-phase `runtime` failure — NOT a
+/// compile-time user-haskell error.
 #[test]
 fn refutable_bind_failure_clean_error() {
     let code = "do\n  Just x <- pure (Nothing :: Maybe Int)\n  pure (x :: Int)";
-    let err = run_mcp(code).expect_err("eval should abort on the failed bind");
+    let env = run_mcp(code).expect_err("eval should abort on the failed bind");
 
-    // Clean Haskell abort (routed through our `error`), NOT a codegen crash.
-    let class = FailureClass::classify_error_text(&err);
+    // A run-phase runtime abort routed through our `error`, NOT a compile-time
+    // user-haskell rejection.
     assert_eq!(
-        class,
-        FailureClass::HaskellError,
-        "expected a clean haskell-error, got {} (err: {err})",
-        class.tag()
+        env.class,
+        FailureClass::Runtime,
+        "expected a run-phase runtime abort, got {} (msg: {})",
+        env.class.tag(),
+        env.message
     );
+    assert_eq!(env.phase, Phase::Run);
 
     // The message is GHC's desugared do-block pattern-match failure text.
     assert!(
-        err.contains("Pattern match failure"),
-        "error should carry the desugared pattern-match-failure message; got: {err}"
+        env.message.contains("Pattern match failure"),
+        "error should carry the desugared pattern-match-failure message; got: {}",
+        env.message
     );
 }

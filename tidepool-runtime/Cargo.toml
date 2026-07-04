@@ -15,14 +15,18 @@ tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
 tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
 tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
 tidepool-codegen = { version = "0.1.0", path = "../tidepool-codegen" }
+tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
 serde_json = "1"
 tempfile = "3"
 blake3 = "1"
 which = "7"
 log = "0.4"
+parking_lot = "0.12"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 
 [dev-dependencies]
 proptest = "1"
+ciborium = "0.2"
 tidepool-testing = { path = "../tidepool-testing" }
 tidepool-optimize = { path = "../tidepool-optimize" }
 frunk = "0.4"

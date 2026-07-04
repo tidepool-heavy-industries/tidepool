@@ -102,7 +102,6 @@ read :: FilePeek -> M Text                 -- total; the ONLY blessed full read
   `FilePeek` (opaque), `peek`, `read`, and field accessors — NOT the constructor.
 - **`readFile` coexistence:** keep `readFile :: FilePath -> M Text` as the escape
   hatch (when you're sure); make `peek`→`read` the *documented default* in vocab.
-  Do NOT deprecate readFile yet.
 - Extends the `FileMeta` work (phase 2): `FilePeek` is `FileMeta` + a bounded preview.
 
 ---

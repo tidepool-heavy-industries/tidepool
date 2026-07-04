@@ -8,6 +8,9 @@ pub mod validate;
 
 mod eval_prep;
 pub use eval_prep::*;
+// The single failure taxonomy lives in tidepool-runtime; re-export it from the
+// server facade so callers keep reaching it as `tidepool_mcp::FailureClass`.
+pub use tidepool_runtime::{classify, FailureClass, FailureEnvelope, Phase};
 
 mod effect_decls;
 pub use effect_decls::*;
@@ -25,9 +28,6 @@ pub use lib_isolate::*;
 
 mod resources;
 
-mod ask;
-pub(crate) use ask::*;
-
 mod server;
 pub use server::*;
 
@@ -39,13 +39,13 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub(crate) const EVAL_TIMEOUT_SECS: u64 = 120;
+pub(crate) const EVAL_TIMEOUT_SECS: u64 = 600;
 
 /// Hard ceiling for the per-eval `timeout_secs` knob (seconds). The default is
 /// `EVAL_TIMEOUT_SECS`; a caller may raise the window up to this cap for
 /// deliberately heavy dev evals. Beyond it a runaway is likelier than an
 /// intentional compute, so the request is clamped here.
-const MAX_EVAL_TIMEOUT_SECS: u64 = 600;
+const MAX_EVAL_TIMEOUT_SECS: u64 = 1800;
 
 /// Resolve the effective eval window (seconds) from an optional per-request
 /// override: `None` → the server default (`EVAL_TIMEOUT_SECS`); `Some(t)` → `t`
@@ -305,20 +305,6 @@ pub fn normalize_input(v: &serde_json::Value) -> serde_json::Value {
 }
 
 // ---------------------------------------------------------------------------
-// Error formatting
-// ---------------------------------------------------------------------------
-
-pub(crate) fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else if let Some(s) = payload.downcast_ref::<&str>() {
-        s.to_string()
-    } else {
-        "unknown panic".to_string()
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Import blocklist
 // ---------------------------------------------------------------------------
 
@@ -389,6 +375,16 @@ impl CapturedOutput {
     }
 }
 
+impl tidepool_runtime::session::OutputSink for CapturedOutput {
+    fn drain(&self) -> Vec<String> {
+        CapturedOutput::drain(self)
+    }
+
+    fn snapshot(&self) -> Vec<String> {
+        CapturedOutput::snapshot(self)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -396,11 +392,6 @@ impl CapturedOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rmcp::model::RawContent;
-    use std::collections::HashMap;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-    use tidepool_runtime::DispatchEffect;
-    use tokio::time::Duration;
 
     #[test]
     fn test_eval_request_string_code() {
@@ -540,10 +531,10 @@ mod tests {
     /// import to the eval preamble but not `eval_import_lines`, this catches it.
     #[test]
     fn session_decl_env_matches_eval_preamble() {
-        let env = session_decl_module_env(false);
-        // Eval preamble with Exec+Http present so it emits the qualified
-        // Tidepool.Shell/Git/Cargo imports the decl env also carries (the full
-        // stack the repl always runs under).
+        // Exec+Http present so both the decl env and the eval preamble emit
+        // the qualified Tidepool.Shell/Git/Cargo imports (gated identically on
+        // the same effect pair in both).
+        let env = session_decl_module_env(&[exec_decl(), http_decl()], false);
         let preamble = build_preamble(&[exec_decl(), http_decl()], false);
         // Every decl import line appears verbatim in the eval preamble.
         for imp in &env.imports {
@@ -638,6 +629,58 @@ mod tests {
         assert!(!desc.contains("Built-in helpers"));
     }
 
+    /// The assembled eval description attests to the idealized surface: no
+    /// severity-halo vocabulary, no "JIT-safe" unsafe-zone implication, no
+    /// closed-world "prefer the unqualified" framing. A regression that
+    /// reintroduces a caution reads here as a failed assertion, not a review nit.
+    #[test]
+    fn eval_description_carries_no_caution_vocabulary() {
+        let desc = build_eval_tool_description(&standard_decls());
+        let lower = desc.to_lowercase();
+        for banned in [
+            "jit-safe",
+            "prefer the unqualified",
+            "do not",
+            "with care",
+            "use with caution",
+            "footgun",
+            "unsafe",
+        ] {
+            assert!(
+                !lower.contains(banned),
+                "assembled eval description must not contain caution vocabulary {banned:?}:\n{desc}"
+            );
+        }
+    }
+
+    /// The examples ARE the style guide: the primary `input` example is a typed
+    /// decode, and the effect-failure example binds the `Right`. If the modelled
+    /// idiom moves, these break — that is the point.
+    #[test]
+    fn eval_description_models_the_idealized_idiom() {
+        let desc = build_eval_tool_description(&standard_decls());
+        assert!(
+            desc.contains("deriving (Generic, FromJSON)"),
+            "primary input example must be a typed decode:\n{desc}"
+        );
+        assert!(
+            desc.contains("Right p <- run"),
+            "must model Either-returning effects:\n{desc}"
+        );
+        assert!(
+            desc.contains("Left (FsNotFound _)"),
+            "must model matching a specific Left:\n{desc}"
+        );
+        assert!(
+            desc.contains("recommended surface"),
+            "Prelude shadows get a positive attestation, not a JIT-safety hedge:\n{desc}"
+        );
+        assert!(
+            desc.contains("tidepool://capabilities"),
+            "the qualified-namespace list points at the live capabilities index:\n{desc}"
+        );
+    }
+
     #[test]
     fn test_extract_sigs() {
         let src = "\
@@ -721,22 +764,6 @@ data Console a where
         // #335: httpGet is errors-tagged.
         assert!(preamble.contains("httpGet :: Text -> M (Either HttpError Value)"));
         assert!(preamble.contains("ask :: Schema -> Text -> M Value"));
-    }
-
-    #[test]
-    fn test_format_panic_payload() {
-        use std::any::Any;
-
-        let s = "string panic".to_string();
-        let payload: Box<dyn Any + Send> = Box::new(s);
-        assert_eq!(format_panic_payload(payload), "string panic");
-
-        let s = "str panic";
-        let payload: Box<dyn Any + Send> = Box::new(s);
-        assert_eq!(format_panic_payload(payload), "str panic");
-
-        let payload: Box<dyn Any + Send> = Box::new(42);
-        assert_eq!(format_panic_payload(payload), "unknown panic");
     }
 
     #[test]
@@ -1014,7 +1041,7 @@ data Console a where
 
     #[test]
     fn test_eval_timeout_value() {
-        assert_eq!(EVAL_TIMEOUT_SECS, 120);
+        assert_eq!(EVAL_TIMEOUT_SECS, 600);
     }
 
     #[test]
@@ -1078,640 +1105,6 @@ data Console a where
         assert_eq!(input["key"], "value");
         assert_eq!(input["num"], 123);
     }
-
-    #[tokio::test]
-    async fn test_handle_session_result_completed() {
-        let server = create_mock_server();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
-        let source: Arc<str> = "test source".into();
-        let captured = CapturedOutput::new();
-        captured.push("log1".into());
-
-        tx.send(SessionMessage::Completed {
-            result: "42".into(),
-        })
-        .unwrap();
-
-        let res = server
-            .handle_session_result(
-                "eval",
-                rx,
-                source,
-                resp_tx,
-                captured,
-                None,
-                PauseGate::new(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(res.is_error, Some(false));
-        let text = match &res.content[0].raw {
-            RawContent::Text(t) => &t.text,
-            _ => panic!("Expected text content"),
-        };
-        assert!(text.contains("## Output\nlog1\n"));
-        assert!(text.contains("\n## Result\n42"));
-    }
-
-    #[tokio::test]
-    async fn test_handle_session_result_suspended() {
-        let server = create_mock_server();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
-        let source: Arc<str> = "test source".into();
-        let captured = CapturedOutput::new();
-
-        tx.send(SessionMessage::Suspended {
-            prompt: "what is your name?".into(),
-            meta: None,
-        })
-        .unwrap();
-
-        let res = server
-            .handle_session_result(
-                "eval",
-                rx,
-                source,
-                resp_tx,
-                captured,
-                None,
-                PauseGate::new(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(res.is_error, Some(false));
-        let text = match &res.content[0].raw {
-            RawContent::Text(t) => &t.text,
-            _ => panic!("Expected text content"),
-        };
-        let json: serde_json::Value = serde_json::from_str(text).unwrap();
-        assert_eq!(json["suspended"], true);
-        assert_eq!(json["prompt"], "what is your name?");
-        assert!(json["continuation_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("cont_"));
-
-        // Check if it's in the continuations map
-        let cont_id = json["continuation_id"].as_str().unwrap();
-        let conts = server.continuations.lock();
-        assert!(conts.contains_key(cont_id));
-    }
-
-    #[tokio::test]
-    async fn test_suspended_meta_schema_hoisted() {
-        let server = create_mock_server();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
-        let source: Arc<str> = "test source".into();
-        let captured = CapturedOutput::new();
-
-        tx.send(SessionMessage::Suspended {
-            prompt: "classify".into(),
-            meta: Some(serde_json::json!({
-                "schema": {"type": "string", "enum": ["a", "b"]},
-                "moves": ["grep", "view"],
-            })),
-        })
-        .unwrap();
-
-        let res = server
-            .handle_session_result(
-                "eval",
-                rx,
-                source,
-                resp_tx,
-                captured,
-                None,
-                PauseGate::new(),
-            )
-            .await
-            .unwrap();
-        let text = match &res.content[0].raw {
-            RawContent::Text(t) => &t.text,
-            _ => panic!("Expected text content"),
-        };
-        let json: serde_json::Value = serde_json::from_str(text).unwrap();
-        // "schema" hoisted top-level; remaining metadata under "meta"
-        assert_eq!(json["schema"]["enum"], serde_json::json!(["a", "b"]));
-        assert_eq!(json["meta"]["moves"], serde_json::json!(["grep", "view"]));
-        assert!(json.get("moves").is_none());
-
-        // ...and stored as expected_schema for resume validation
-        let cont_id = json["continuation_id"].as_str().unwrap();
-        let conts = server.continuations.lock();
-        assert!(matches!(
-            conts[cont_id].kind,
-            SessionKind::AwaitingAnswer {
-                expected_schema: Some(_)
-            }
-        ));
-    }
-
-    /// Hand-insert a suspended session carrying a schema; resume with an
-    /// invalid reply (continuation must survive), then a valid one (the
-    /// CANONICAL value must cross the channel and the continuation must be
-    /// consumed).
-    #[tokio::test]
-    async fn test_resume_validation_fail_then_retry() {
-        let server = create_mock_server();
-        let (resp_tx, resp_rx) = std::sync::mpsc::channel::<ResumeMsg>();
-        let (sess_tx, sess_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        server.continuations.lock().insert(
-            "cont_t1".into(),
-            EvalSession {
-                response_tx: resp_tx,
-                session_rx: sess_rx,
-                source: "src".into(),
-                created_at: std::time::Instant::now(),
-                captured_output: CapturedOutput::new(),
-                kind: SessionKind::AwaitingAnswer {
-                    expected_schema: Some(serde_json::json!({
-                        "type": "object",
-                        "properties": {"pick": {"type": "string", "enum": ["bug", "refactor"]}},
-                        "required": ["pick"],
-                    })),
-                },
-                thread: None,
-                gate: PauseGate::new(),
-            },
-        );
-
-        // 1: invalid reply — error result, continuation NOT consumed
-        let res = server
-            .resume(ResumeRequest {
-                continuation_id: "cont_t1".into(),
-                response: serde_json::json!("just some prose"),
-            })
-            .await
-            .unwrap();
-        assert_eq!(res.is_error, Some(true));
-        let text = match &res.content[0].raw {
-            RawContent::Text(t) => &t.text,
-            _ => panic!("Expected text content"),
-        };
-        assert!(text.contains("validation_failed"));
-        assert!(text.contains("cont_t1"));
-        assert!(server.continuations.lock().contains_key("cont_t1"));
-
-        // 2: valid retry on the SAME continuation_id. Pre-load the session
-        // channel so handle_session_result returns immediately.
-        sess_tx
-            .send(SessionMessage::Completed {
-                result: "\"ok\"".into(),
-            })
-            .unwrap();
-        let res = server
-            .resume(ResumeRequest {
-                continuation_id: "cont_t1".into(),
-                response: serde_json::json!({"pick": "bug", "rationale": "extra keys fine"}),
-            })
-            .await
-            .unwrap();
-        assert_eq!(res.is_error, Some(false));
-        // canonical value crossed the channel
-        match resp_rx.try_recv().unwrap() {
-            ResumeMsg::Answer(v) => assert_eq!(v["pick"], serde_json::json!("bug")),
-            ResumeMsg::Abort(_) => panic!("expected Answer"),
-        }
-        // consumed: a third resume is invalid_params
-        assert!(!server.continuations.lock().contains_key("cont_t1"));
-        let err = server
-            .resume(ResumeRequest {
-                continuation_id: "cont_t1".into(),
-                response: serde_json::json!({"pick": "bug"}),
-            })
-            .await;
-        assert!(err.is_err());
-    }
-
-    /// Stringified-JSON replies to object schemas unwrap one level (the
-    /// #315 failure mode) and deliver the parsed object.
-    #[tokio::test]
-    async fn test_resume_stringified_object_unwraps() {
-        let server = create_mock_server();
-        let (resp_tx, resp_rx) = std::sync::mpsc::channel::<ResumeMsg>();
-        let (sess_tx, sess_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        server.continuations.lock().insert(
-            "cont_t2".into(),
-            EvalSession {
-                response_tx: resp_tx,
-                session_rx: sess_rx,
-                source: "src".into(),
-                created_at: std::time::Instant::now(),
-                captured_output: CapturedOutput::new(),
-                kind: SessionKind::AwaitingAnswer {
-                    expected_schema: Some(serde_json::json!({
-                        "type": "object",
-                        "properties": {"answer": {"type": "boolean"}},
-                        "required": ["answer"],
-                    })),
-                },
-                thread: None,
-                gate: PauseGate::new(),
-            },
-        );
-        sess_tx
-            .send(SessionMessage::Completed {
-                result: "true".into(),
-            })
-            .unwrap();
-
-        let res = server
-            .resume(ResumeRequest {
-                continuation_id: "cont_t2".into(),
-                response: serde_json::json!("{\"answer\": true}"),
-            })
-            .await
-            .unwrap();
-        assert_eq!(res.is_error, Some(false));
-        match resp_rx.try_recv().unwrap() {
-            ResumeMsg::Answer(v) => assert_eq!(v, serde_json::json!({"answer": true})),
-            ResumeMsg::Abort(_) => panic!("expected Answer"),
-        }
-    }
-
-    /// abort consumes the continuation and the eval terminates as an error.
-    #[tokio::test]
-    async fn test_abort_consumes_continuation() {
-        let server = create_mock_server();
-        let (resp_tx, resp_rx) = std::sync::mpsc::channel::<ResumeMsg>();
-        let (sess_tx, sess_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        server.continuations.lock().insert(
-            "cont_t3".into(),
-            EvalSession {
-                response_tx: resp_tx,
-                session_rx: sess_rx,
-                source: "src".into(),
-                created_at: std::time::Instant::now(),
-                captured_output: CapturedOutput::new(),
-                kind: SessionKind::AwaitingAnswer {
-                    expected_schema: None,
-                },
-                thread: None,
-                gate: PauseGate::new(),
-            },
-        );
-        // In a real run the eval thread receives Abort and sends Error;
-        // emulate it.
-        sess_tx
-            .send(SessionMessage::Error {
-                error: "ask aborted by caller: cannot answer".into(),
-            })
-            .unwrap();
-
-        let res = server
-            .abort(AbortRequest {
-                continuation_id: "cont_t3".into(),
-                reason: Some("cannot answer".into()),
-            })
-            .await
-            .unwrap();
-        assert_eq!(res.is_error, Some(true));
-        let text = match &res.content[0].raw {
-            RawContent::Text(t) => &t.text,
-            _ => panic!("Expected text content"),
-        };
-        assert!(text.contains("aborted by caller"));
-        match resp_rx.try_recv().unwrap() {
-            ResumeMsg::Abort(r) => assert_eq!(r, "cannot answer"),
-            ResumeMsg::Answer(_) => panic!("expected Abort"),
-        }
-        assert!(!server.continuations.lock().contains_key("cont_t3"));
-    }
-
-    #[tokio::test]
-    async fn test_handle_session_result_error() {
-        let server = create_mock_server();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
-        let source: Arc<str> = "test source".into();
-        let captured = CapturedOutput::new();
-        // The eval printed before failing — that output must survive.
-        captured.push("printed before failure".into());
-
-        tx.send(SessionMessage::Error {
-            error: "oops".into(),
-        })
-        .unwrap();
-
-        let res = server
-            .handle_session_result(
-                "eval",
-                rx,
-                source,
-                resp_tx,
-                captured,
-                None,
-                PauseGate::new(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(res.is_error, Some(true));
-        let text = match &res.content[0].raw {
-            RawContent::Text(t) => &t.text,
-            _ => panic!("Expected text content"),
-        };
-        assert!(text.contains("## Error"));
-        assert!(text.contains("oops"));
-        // A plain error message is a clean Haskell error.
-        assert!(text.contains("**failure-class:** `haskell-error`"));
-        // Partial output is surfaced on the failure path.
-        assert!(text.contains("printed before failure"));
-    }
-
-    /// A `SessionMessage::Error` carrying a stack-overflow yield must tag
-    /// `runtime-yield`, not `haskell-error`.
-    #[tokio::test]
-    async fn test_handle_session_result_runtime_yield() {
-        let server = create_mock_server();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
-        let source: Arc<str> = "test source".into();
-        let captured = CapturedOutput::new();
-        captured.push("loop iter 1".into());
-
-        tx.send(SessionMessage::Error {
-            error: "stack overflow (likely infinite list or unbounded recursion)".into(),
-        })
-        .unwrap();
-
-        let res = server
-            .handle_session_result(
-                "eval",
-                rx,
-                source,
-                resp_tx,
-                captured,
-                None,
-                PauseGate::new(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(res.is_error, Some(true));
-        let text = match &res.content[0].raw {
-            RawContent::Text(t) => &t.text,
-            _ => panic!("Expected text content"),
-        };
-        assert!(text.contains("**failure-class:** `runtime-yield`"));
-        assert!(text.contains("loop iter 1"));
-    }
-
-    /// A caught JIT signal arrives on the in-band error channel; it must still
-    /// tag `signal-crash` (compiler bug), not `haskell-error`.
-    #[tokio::test]
-    async fn test_handle_session_result_caught_signal() {
-        let server = create_mock_server();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
-        let source: Arc<str> = "test source".into();
-        let captured = CapturedOutput::new();
-
-        tx.send(SessionMessage::Error {
-            error: "JIT signal: SIGILL (illegal instruction — likely exhausted case branch)".into(),
-        })
-        .unwrap();
-
-        let res = server
-            .handle_session_result(
-                "eval",
-                rx,
-                source,
-                resp_tx,
-                captured,
-                None,
-                PauseGate::new(),
-            )
-            .await
-            .unwrap();
-        let text = match &res.content[0].raw {
-            RawContent::Text(t) => &t.text,
-            _ => panic!("Expected text content"),
-        };
-        assert!(text.contains("**failure-class:** `signal-crash`"));
-    }
-
-    #[tokio::test]
-    async fn test_handle_session_result_crash() {
-        let server = create_mock_server();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
-        let source: Arc<str> = "test source".into();
-        let captured = CapturedOutput::new();
-        // Output printed before the thread died must still be surfaced.
-        captured.push("printed before crash".into());
-
-        // Close the channel without sending anything
-        drop(tx);
-
-        let res = server
-            .handle_session_result(
-                "eval",
-                rx,
-                source,
-                resp_tx,
-                captured,
-                None,
-                PauseGate::new(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(res.is_error, Some(true));
-        let text = match &res.content[0].raw {
-            RawContent::Text(t) => &t.text,
-            _ => panic!("Expected text content"),
-        };
-        assert!(text.contains("## Crash"));
-        assert!(text.contains("eval thread crashed"));
-        // A dead eval thread is a signal-crash (compiler bug), and its last
-        // words must survive.
-        assert!(text.contains("**failure-class:** `signal-crash`"));
-        assert!(text.contains("printed before crash"));
-    }
-
-    #[tokio::test]
-    async fn test_handle_session_result_timeout() {
-        tokio::time::pause();
-
-        let server = create_mock_server();
-        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
-        let source: Arc<str> = "test source".into();
-        let captured = CapturedOutput::new();
-        captured.push("printed before timeout".into());
-
-        let handle = tokio::spawn(async move {
-            server
-                .handle_session_result(
-                    "eval",
-                    rx,
-                    source,
-                    resp_tx,
-                    captured,
-                    None,
-                    PauseGate::new(),
-                )
-                .await
-        });
-
-        // Advance time past EVAL_TIMEOUT_SECS
-        tokio::time::advance(Duration::from_secs(EVAL_TIMEOUT_SECS + 1)).await;
-
-        let res = handle.await.unwrap().unwrap();
-        assert_eq!(res.is_error, Some(true));
-        let text = match &res.content[0].raw {
-            RawContent::Text(t) => &t.text,
-            _ => panic!("Expected text content"),
-        };
-        assert!(text.contains("## Timeout"));
-        assert!(text.contains("timed out"));
-        assert!(text.contains("**failure-class:** `timeout`"));
-        // Output before a pure-compute timeout is surfaced.
-        assert!(text.contains("printed before timeout"));
-    }
-
-    // The gate state-machine unit test (pause/park/resume/abort/runaway) now
-    // lives with the shared gate in `tidepool_effect::pause`. The timeout-path
-    // integration tests below exercise the mcp-specific wiring around it.
-
-    /// Timeout with a thread parked at the gate → paused continuation
-    /// (not an error), and resume wakes it and collects the result.
-    #[tokio::test]
-    async fn test_timeout_parks_paused_continuation_and_resume_collects() {
-        let server = create_mock_server();
-        let (sess_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (resp_tx, _resp_rx) = std::sync::mpsc::channel();
-        let source: Arc<str> = "test source".into();
-        let captured = CapturedOutput::new();
-        captured.push("step 1 done".into());
-
-        // A real "eval thread": parks at its checkpoint (pause is already
-        // requested), and once resumed reports completion.
-        let gate = PauseGate::new();
-        gate.request_pause();
-        let g2 = Arc::clone(&gate);
-        let thread_tx = sess_tx.clone();
-        let t = std::thread::spawn(move || {
-            g2.checkpoint().unwrap(); // parks here until resume
-            g2.exit_effect();
-            let _ = thread_tx.send(SessionMessage::Completed {
-                result: "\"finished\"".into(),
-            });
-        });
-
-        // Wait for the park, then drive the timeout branch.
-        assert!(gate.parked_or_in_effect(Duration::from_secs(2)));
-        tokio::time::pause();
-        let server2 = server.clone();
-        let h = tokio::spawn(async move {
-            server2
-                .handle_session_result("eval", rx, source, resp_tx, captured, None, gate)
-                .await
-        });
-        tokio::time::advance(Duration::from_secs(EVAL_TIMEOUT_SECS + 1)).await;
-        let res = h.await.unwrap().unwrap();
-        tokio::time::resume();
-
-        assert_eq!(res.is_error, Some(false));
-        let text = match &res.content[0].raw {
-            RawContent::Text(t) => &t.text,
-            _ => panic!("Expected text content"),
-        };
-        let json: serde_json::Value = serde_json::from_str(text).unwrap();
-        assert_eq!(json["paused"], true);
-        assert_eq!(json["output"][0], "step 1 done");
-        let cont_id = json["continuation_id"].as_str().unwrap().to_string();
-        assert!(matches!(
-            server.continuations.lock()[&cont_id].kind,
-            SessionKind::Paused
-        ));
-
-        // resume: wakes the gate; the thread completes and we collect.
-        let res = server
-            .resume(ResumeRequest {
-                continuation_id: cont_id,
-                response: serde_json::Value::Null,
-            })
-            .await
-            .unwrap();
-        assert_eq!(res.is_error, Some(false));
-        let text = match &res.content[0].raw {
-            RawContent::Text(t) => &t.text,
-            _ => panic!("Expected text content"),
-        };
-        assert!(text.contains("finished"));
-        t.join().unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_eval_orphaned_overload() {
-        let server = create_mock_server();
-        // Manually saturate the orphan count
-        server
-            .orphaned_threads
-            .store(MAX_ORPHANED_EVALS, Ordering::SeqCst);
-
-        let req = EvalRequest {
-            code: "pure 42".into(),
-            imports: String::new(),
-            helpers: String::new(),
-            input: None,
-            max_len: None,
-            timeout_secs: None,
-        };
-
-        let res = server.eval(req).await.unwrap();
-        assert_eq!(res.is_error, Some(true));
-        let text = match &res.content[0].raw {
-            RawContent::Text(t) => &t.text,
-            _ => panic!("Expected text content"),
-        };
-        assert!(text.contains("Server overloaded"));
-        assert!(text.contains("too many timed-out evaluations"));
-    }
-
-    fn create_mock_server() -> TidepoolMcpServerImpl {
-        #[derive(Clone)]
-        struct MockHandler;
-        impl DispatchEffect<CapturedOutput> for MockHandler {
-            fn dispatch(
-                &mut self,
-                _tag: u64,
-                _request: &tidepool_eval::value::Value,
-                _cx: &tidepool_effect::EffectContext<'_, CapturedOutput>,
-            ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError>
-            {
-                Ok(tidepool_eval::value::Value::Lit(tidepool_repr::Literal::LitInt(0)).into())
-            }
-        }
-
-        TidepoolMcpServerImpl {
-            handler_factory: Arc::new(MockHandler),
-            include: Vec::new(),
-            haskell_preamble: String::new(),
-            effect_stack_type: String::new(),
-            eval_tool_description: String::new(),
-            has_user_library: false,
-            ask_tag: 0,
-            effect_names: Vec::new(),
-            effect_decls: Vec::new(),
-            lib_dirs: Vec::new(),
-            patterns_path: None,
-            stdlib_dir: None,
-            help_tool: false,
-            continuations: Arc::new(Mutex::new(HashMap::new())),
-            next_cont_id: Arc::new(AtomicU64::new(1)),
-            eval_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_EVALS)),
-            orphaned_threads: Arc::new(AtomicUsize::new(0)),
-            effects_source: String::new(),
-            orchestrate_source: String::new(),
-        }
-    }
-
     /// Snapshot test: FNV-1a of a fixed string must produce the same hash
     /// in every process. If DefaultHasher (randomly seeded) is accidentally
     /// reintroduced, this assertion fails because the computed hash won't

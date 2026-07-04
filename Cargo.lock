@@ -3751,10 +3751,12 @@ name = "tidepool-runtime"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "ciborium",
  "filetime",
  "frunk",
  "glob",
  "log",
+ "parking_lot",
  "proptest",
  "serde_json",
  "serial_test",

@@ -36,7 +36,6 @@ async fn text_bind_alone_control() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl.eval("s <- pure (T.pack \"hi\")").await;
     assert!(
@@ -59,7 +58,6 @@ async fn text_bind_alone_control() {
         t.text
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// DECISIVE CONTROL: byte-for-byte the GREEN headline turn sequence through a
@@ -73,7 +71,6 @@ async fn box_second_bind_replica() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
     repl.def("data Box = Box Int").await.expect_ok("def Box");
 
     let t = repl.eval("x <- pure (42 :: Int)").await;
@@ -93,7 +90,6 @@ async fn box_second_bind_replica() {
     let t = repl.eval("case b of Box n -> n + 100").await;
     assert!(t.expect_ok("case b").contains("107"), "case b: {}", t.text);
 
-    repl.close().await.expect_ok("close");
 }
 
 /// MINIMAL repro of the dominant kind=4 bug (now FIXED): with ANY binding live,
@@ -106,7 +102,6 @@ async fn eff_ref_pure_const_with_binding_live() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl.eval("x <- pure (1 :: Int)").await;
     assert!(
@@ -123,7 +118,6 @@ async fn eff_ref_pure_const_with_binding_live() {
         t.text
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CONTROL: the SAME Eff reference run with NO binding live works (plain path).
@@ -134,7 +128,6 @@ async fn eff_ref_pure_const_no_binding_control() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl.eval("pure (123 :: Int)").await;
     assert!(
@@ -143,7 +136,6 @@ async fn eff_ref_pure_const_no_binding_control() {
         t.text
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 // ───────────── REGRESSION GATES (were the open BUG-2 repros) ─────────────
@@ -157,7 +149,6 @@ async fn text_bind_headline_faithful() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
     repl.def("data Box = Box Int").await.expect_ok("def Box");
 
     let t = repl.eval("x <- pure (42 :: Int)").await;
@@ -203,7 +194,6 @@ async fn text_bind_headline_faithful() {
         t.text
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// Same-name rebind: `x <- Int` then `x <- Text`. Same root cause (fixed).
@@ -214,7 +204,6 @@ async fn text_rebind_same_name() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl.eval("x <- pure (1 :: Int)").await;
     assert!(
@@ -245,7 +234,6 @@ async fn text_rebind_same_name() {
         t.text
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// Longer multibyte-capable Text as a second bind — same root cause (fixed);
@@ -257,7 +245,6 @@ async fn text_bind_longer_with_prior() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl.eval("n <- pure (0 :: Int)").await;
     assert!(
@@ -288,5 +275,4 @@ async fn text_bind_longer_with_prior() {
         t.text
     );
 
-    repl.close().await.expect_ok("close");
 }

@@ -9,9 +9,9 @@
 //! awaits the reply over the job's channels (the same suspend/resume shape as
 //! the eval server, reused for an in-turn `ask`).
 //!
-//! The [`SessionManager`] holds the active workers keyed by session name.
+//! The [`SessionManager`] holds the single implicit session's resident worker
+//! (one repl server per agent — no keying).
 
-use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -39,6 +39,22 @@ pub fn empty_cancel_slot() -> CancelSlot {
     Arc::new(Mutex::new(None))
 }
 
+/// A shared slot holding a JSON snapshot of the live session environment (the
+/// decl plane + value/pure binds), republished by the worker after every turn.
+/// The async server reads it directly for the `tidepool://session/bindings`
+/// resource WITHOUT driving a turn — a lock-free-of-await read of live state.
+pub type BindingsSlot = Arc<Mutex<serde_json::Value>>;
+
+/// A fresh bindings slot seeded with the empty-session snapshot, so a resource
+/// read before the first turn returns valid (empty) JSON rather than null.
+pub fn empty_bindings_slot() -> BindingsSlot {
+    Arc::new(Mutex::new(serde_json::json!({
+        "bindings": [],
+        "generation": 0,
+        "valGeneration": 0,
+    })))
+}
+
 /// One unit of work handed to the resident worker. Carries the per-turn
 /// channels: `session_tx` (worker → server: Suspended/Completed/Error/Closed)
 /// and `response_rx` (server → worker: the `ask` answer).
@@ -63,6 +79,9 @@ pub struct WorkerHandle {
     /// bootstrap. Shared with the worker thread; the server reads it on timeout
     /// to abort a runaway turn at a JIT safepoint.
     cancel_slot: CancelSlot,
+    /// The live bindings snapshot, republished by the worker after each turn.
+    /// The server reads it for the `tidepool://session/bindings` resource.
+    bindings_slot: BindingsSlot,
 }
 
 impl WorkerHandle {
@@ -75,6 +94,12 @@ impl WorkerHandle {
     /// [`CancelHandle`] from here to abort a timed-out turn at a JIT safepoint.
     pub fn cancel_slot(&self) -> CancelSlot {
         self.cancel_slot.clone()
+    }
+
+    /// The shared bindings snapshot slot — the server reads live session state
+    /// from here for the `tidepool://session/bindings` resource.
+    pub fn bindings_slot(&self) -> BindingsSlot {
+        self.bindings_slot.clone()
     }
 
     /// Drop the command channel and join the worker thread. The worker observes
@@ -136,6 +161,8 @@ where
     let (cmd_tx, rx) = std::sync::mpsc::channel::<WorkerJob>();
     let cancel_slot = empty_cancel_slot();
     let slot_for_thread = cancel_slot.clone();
+    let bindings_slot = empty_bindings_slot();
+    let bindings_for_thread = bindings_slot.clone();
     let thread = std::thread::Builder::new()
         .name("tidepool-repl-session".into())
         .stack_size(tidepool_runtime::EVAL_STACK_SIZE)
@@ -149,7 +176,7 @@ where
                     // resident machine's handle into it at bootstrap, so the
                     // server can abort a runaway turn at a JIT safepoint.
                     session.set_cancel_slot(slot_for_thread);
-                    worker_loop(session, base, ask_tag, rx)
+                    worker_loop(session, base, ask_tag, rx, bindings_for_thread)
                 }
                 Err(e) => drain_with_error(rx, format!("session open failed: {e}")),
             }
@@ -159,13 +186,19 @@ where
         cmd_tx,
         thread: Some(thread),
         cancel_slot,
+        bindings_slot,
     }
 }
 
 /// The worker's command loop. Owns the `SessionHandle<Open>` and consumes it on
 /// `Close` (the type-state: the resulting `SessionHandle<Closed>` has no `run`).
-fn worker_loop<H>(session: Session, base: H, ask_tag: u64, rx: Receiver<WorkerJob>)
-where
+fn worker_loop<H>(
+    session: Session,
+    base: H,
+    ask_tag: u64,
+    rx: Receiver<WorkerJob>,
+    bindings_slot: BindingsSlot,
+) where
     H: DispatchEffect<CapturedOutput> + Clone,
 {
     let mut open: Option<SessionHandle<Open>> = Some(SessionHandle::new(session));
@@ -211,6 +244,10 @@ where
         }
         handle.set_eval_input(job.eval_input);
         let outcome = handle.run(&job.cmd, &mut dispatcher, &job.captured);
+        // Republish the live bindings snapshot for the `tidepool://session/bindings`
+        // resource. Runs after every turn (a decl/bind/reset may have changed the
+        // environment); the read side never drives the worker.
+        *bindings_slot.lock() = handle.bindings_snapshot();
         let msg = if outcome.is_error() {
             WorkerMessage::Error {
                 error: outcome.render(),
@@ -246,71 +283,69 @@ struct SessionEntry {
     state: SharedState,
 }
 
-/// Named-session manager: holds one resident worker per session id. Sessions
-/// are keyed by user-supplied name strings (arbitrary, e.g. "default",
-/// "agent-1"). Distinct from the eval server's continuation registry — a
-/// session is one resident worker, not a permit slot.
+/// The single implicit session's manager: holds AT MOST one resident worker.
+/// The multi-agent story is one repl server per agent, so there is exactly one
+/// current session — no keying. `session_run` auto-installs it on first use;
+/// `session_reset` swaps in a fresh one. Distinct from the eval server's
+/// continuation registry — a session is one resident worker, not a permit slot.
 #[derive(Default)]
 pub struct SessionManager {
-    sessions: parking_lot::Mutex<HashMap<String, SessionEntry>>,
+    session: parking_lot::Mutex<Option<SessionEntry>>,
 }
 
 impl SessionManager {
     pub fn new() -> SessionManager {
         SessionManager {
-            sessions: parking_lot::Mutex::new(HashMap::new()),
+            session: parking_lot::Mutex::new(None),
         }
     }
 
-    /// Install a freshly-spawned worker under `id`, seeded `Idle`. Errors (and
-    /// drops the new worker) if a session with that id is already open.
-    pub fn install(&self, id: &str, handle: WorkerHandle) -> Result<(), WorkerHandle> {
-        let mut sessions = self.sessions.lock();
-        if sessions.contains_key(id) {
+    /// Install a freshly-spawned worker, seeded `Idle`. Errors (and hands back
+    /// the new worker) if a session is already present — the caller lost an
+    /// auto-open race and should drop this handle and use the existing session.
+    pub fn install(&self, handle: WorkerHandle) -> Result<(), WorkerHandle> {
+        let mut slot = self.session.lock();
+        if slot.is_some() {
             return Err(handle);
         }
-        sessions.insert(
-            id.to_string(),
-            SessionEntry {
-                handle,
-                state: shared(SessionState::Idle),
-            },
-        );
+        *slot = Some(SessionEntry {
+            handle,
+            state: shared(SessionState::Idle),
+        });
         Ok(())
     }
 
-    /// Clone the command sender for the named session, if it is open.
-    pub fn get_sender(&self, id: &str) -> Option<Sender<WorkerJob>> {
-        self.sessions.lock().get(id).map(|e| e.handle.sender())
+    /// Clone the command sender for the session, if one is present.
+    pub fn get_sender(&self) -> Option<Sender<WorkerJob>> {
+        self.session.lock().as_ref().map(|e| e.handle.sender())
     }
 
-    /// Clone the shared cancel slot for the named session, if it is open. The
-    /// server reads the resident machine's [`CancelHandle`] from it on timeout
-    /// to abort a runaway turn at a JIT safepoint.
-    pub fn cancel_slot(&self, id: &str) -> Option<CancelSlot> {
-        self.sessions.lock().get(id).map(|e| e.handle.cancel_slot())
+    /// Clone the shared cancel slot for the session, if present. The server
+    /// reads the resident machine's [`CancelHandle`] from it on timeout to abort
+    /// a runaway turn at a JIT safepoint.
+    pub fn cancel_slot(&self) -> Option<CancelSlot> {
+        self.session.lock().as_ref().map(|e| e.handle.cancel_slot())
     }
 
-    /// Clone the shared lifecycle state for the named session, if it is open.
-    /// The server locks this (briefly, never across an `.await`) to read/drive
-    /// transitions.
-    pub fn state(&self, id: &str) -> Option<SharedState> {
-        self.sessions.lock().get(id).map(|e| e.state.clone())
-    }
-
-    /// Snapshot every open session's `(id, state)` — for the reaper's sweep.
-    pub fn snapshot_states(&self) -> Vec<(String, SharedState)> {
-        self.sessions
+    /// Clone the live bindings snapshot slot for the session, if present. The
+    /// server reads it for the `tidepool://session/bindings` resource.
+    pub fn bindings_slot(&self) -> Option<BindingsSlot> {
+        self.session
             .lock()
-            .iter()
-            .map(|(id, e)| (id.clone(), e.state.clone()))
-            .collect()
+            .as_ref()
+            .map(|e| e.handle.bindings_slot())
     }
 
-    /// Remove the named session (e.g. for `session_close`), returning the
-    /// handle so the caller can `shutdown` it after the final `Closed` reply.
-    pub fn remove(&self, id: &str) -> Option<WorkerHandle> {
-        self.sessions.lock().remove(id).map(|e| e.handle)
+    /// Clone the shared lifecycle state for the session, if present. The server
+    /// locks this (briefly, never across an `.await`) to read/drive transitions.
+    pub fn state(&self) -> Option<SharedState> {
+        self.session.lock().as_ref().map(|e| e.state.clone())
+    }
+
+    /// Remove the session (e.g. for `session_reset`), returning the handle so
+    /// the caller can `shutdown`/`detach` it after the final `Closed` reply.
+    pub fn remove(&self) -> Option<WorkerHandle> {
+        self.session.lock().take().map(|e| e.handle)
     }
 }
 
@@ -324,32 +359,32 @@ mod tests {
             cmd_tx,
             thread: None,
             cancel_slot: empty_cancel_slot(),
+            bindings_slot: empty_bindings_slot(),
         }
     }
 
     #[test]
-    fn session_manager_keying() {
+    fn session_manager_single_slot() {
         let mgr = SessionManager::new();
 
-        // Install two distinct sessions.
-        assert!(mgr.install("a", make_handle()).is_ok());
-        assert!(mgr.install("b", make_handle()).is_ok());
+        // Empty until installed.
+        assert!(mgr.get_sender().is_none());
+        assert!(mgr.state().is_none());
 
-        // Both senders are retrievable.
-        assert!(mgr.get_sender("a").is_some());
-        assert!(mgr.get_sender("b").is_some());
-        assert!(mgr.get_sender("nonexistent").is_none());
+        // Install the single session.
+        assert!(mgr.install(make_handle()).is_ok());
+        assert!(mgr.get_sender().is_some());
+        assert!(mgr.state().is_some());
+        assert!(mgr.bindings_slot().is_some());
 
-        // Duplicate id is rejected.
-        assert!(mgr.install("a", make_handle()).is_err());
+        // A second install is rejected while one is present (auto-open race).
+        assert!(mgr.install(make_handle()).is_err());
 
-        // Remove one; the other persists.
-        let removed = mgr.remove("a");
-        assert!(removed.is_some());
-        assert!(mgr.get_sender("a").is_none());
-        assert!(mgr.get_sender("b").is_some());
+        // Remove it → empty again; a fresh install then succeeds (reset).
+        assert!(mgr.remove().is_some());
+        assert!(mgr.get_sender().is_none());
+        assert!(mgr.install(make_handle()).is_ok());
 
-        // Clean up.
-        let _ = mgr.remove("b");
+        let _ = mgr.remove();
     }
 }

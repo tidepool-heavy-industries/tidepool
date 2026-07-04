@@ -22,10 +22,7 @@ async fn value_binding_int_json_function_survive_gc() {
     }
     let repl = Repl::new();
 
-    // 0. open
-    repl.open().await.expect_ok("open");
-
-    // 0b. define a custom ADT (Lane A → Tidepool.Session.Lib.G1). A value of this
+    // 0. define a custom ADT (auto-opens the session; Lane A → Tidepool.Session.Lib.G1). A value of this
     //     user type, bound below, is what proves the DataConTable MERGE: its `Box`
     //     constructor is registered on the bind turn and must resolve on a LATER
     //     turn's case-match (gen-versioned module addressing, not a wired-in con).
@@ -81,7 +78,4 @@ async fn value_binding_int_json_function_survive_gc() {
         ":bindings: {}",
         turn.text
     );
-
-    // 11. close.
-    repl.close().await.expect_ok("close");
 }

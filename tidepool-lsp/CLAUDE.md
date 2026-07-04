@@ -46,7 +46,7 @@ declare or handle the Haskell-facing constructors itself — see
 `tidepool-handlers/src/lib.rs`'s Lsp section (handling); this doc only covers
 what happens on the daemon side of the socket call.
 
-## Known limits
+## Op surface boundaries
 
 - **No trait/impl-dispatch operation exists.** The op set above is exhaustive
   — there's no "go to implementations" or trait-dispatch query. If you need
@@ -57,7 +57,10 @@ what happens on the daemon side of the socket call.
   invocation). Falls back to rust-analyzer's last-pushed diagnostic cache on
   a pull timeout/error (400ms retry), so a stale-but-present result is
   preferred over a hard failure.
-- **No `try`-prefixed LSP op** — a query error (bad node, daemon hiccup)
-  propagates as a normal effect error, not a catchable `Either`. Wrap at the
-  `tidepool-handlers` `respond_caught` layer if isolation is needed for a
-  specific op (not currently wired for Lsp).
+- **Typed failure is minimal (#335)** — only `lspWhere`/`lspDiags` (the
+  daemon-touching entry points) return `Either LspError` (`LspDaemonDown`); the
+  graph-walk verbs (`lspCallers`/`lspCallees`/`lspRefs`/`lspDef`/`lspHover`/
+  `lspRename`) keep their existing `Maybe`-for-absence surface — a `Nothing` is
+  "no such node/edge", NOT a daemon error, so conflating the two into an
+  `Either` would blur the two meanings. Errors that aren't daemon-down still
+  propagate as normal effect errors.

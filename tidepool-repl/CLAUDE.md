@@ -6,24 +6,36 @@ accumulate turn over turn. See the repo-root `CLAUDE.md` for the project map;
 `tidepool-mcp/CLAUDE.md` for the shared eval-authoring patterns (Aperture,
 `update`/`Edit`/diff verbs, structural search) that apply here too.
 
-## The 5 MCP tools
+## The 3 MCP tools + 1 resource
 
-- **`session_open { session? }`** — spawn a named session worker (default
-  name `"default"`; multiple concurrent sessions supported). Call before
-  `session_run`.
-- **`session_run { items: [String], input?: Value, session?, verbose?: bool }`** — run a
-  block of GHCi-capable items in order; see Item classification and Response shape below.
-- **`session_resume { continuation_id, response }`** / **`session_abort {
-  continuation_id }`** — answer or drop an in-turn `ask` suspension (see
-  Suspension below). A session with a pending suspension will not accept a
-  new `session_run` until one of these is called.
-- **`session_close { session? }`** — drop the machine, free the heap.
+ONE implicit session — the multi-agent story is one repl server per agent, so
+there is no session name / no named-sessions map.
 
-Typical flow: `session_open` → repeated `session_run` → `session_close`. The
-`input` field on `session_run` is a payload lane: pass structured JSON there
-(e.g. whole-file content for a write) and it's in scope in every item of that
-block as `input :: Aeson.Value` — avoids Haskell-string-escaping large/quote-
-heavy content in `items` itself.
+- **`session_run { items: [String], input?: Value, verbose?: bool }`** — run a
+  block of GHCi-capable items in order; **auto-opens** the session on first use
+  (no open step). See Item classification and Response shape below.
+- **`session_resume { continuation_id, response }`** — answer an in-turn `ask`
+  suspension and run the turn to completion (see Suspension below). A reply that
+  doesn't match the suspension's schema is rejected WITHOUT consuming the
+  continuation, so it can be retried. A session with a pending suspension will
+  not accept a new `session_run` until it is resumed (or the session is reset).
+- **`session_reset {}`** — drop the resident machine (freeing the heap and all
+  bindings) and open a fresh session. Also drops any pending `ask` continuation:
+  **abort folds into reset** (resetting while suspended drops the pending ask).
+  The universal get-unstuck button; takes no arguments. Works from a cold start
+  (never run) too.
+
+- **`tidepool://session/bindings`** (resource, `application/json`) — read-only
+  JSON over LIVE session state: `{bindings: [{name, type, kind (decl|bind),
+  generation}], generation, valGeneration}`. Decl-plane heads (`f x = …`,
+  `data Foo`, `class C`) are `kind: "decl"`; value/pure binds are `kind: "bind"`.
+  Republished by the worker after every turn; read without driving a turn.
+
+Typical flow: repeated `session_run` → `session_reset` when you want a clean
+slate. The `input` field on `session_run` is a payload lane: pass structured
+JSON there (e.g. whole-file content for a write) and it's in scope in every item
+of that block as `input :: Aeson.Value` — avoids Haskell-string-escaping
+large/quote-heavy content in `items` itself.
 
 ## Item classification (the block-runner)
 
@@ -110,14 +122,13 @@ Default (slim) shape — no generation counters, no double-encoding:
 The `result` field is the old double-encoded format. Use this only when you need
 generation counters or the raw GHC module name for a declaration.
 
-## Known friction
+## Usage notes
 
 - **Default render is `Show`, not `ToJSON`.** A function returning a plain
   ADT (e.g. `checkDiff :: Text -> ParseResult`) renders as derived `Show`
-  text; getting the JSON shape a module's docstring advertises requires
-  `toJSON <$> ...` explicitly. Not a bug — "return an `Aeson.Value` to get
-  JSON" is the documented rule — but easy to trip on with the newer
-  sum-type-returning verbs (Diff/Edit/Patch) whose docstrings show JSON.
+  text; the JSON shape a module's docstring advertises comes from returning an
+  `Aeson.Value` (`toJSON <$> ...`) — relevant for the sum-type-returning verbs
+  (Diff/Edit/Patch) whose docstrings show JSON.
 - **`:vocab` lists modules that are NOT auto-imported.** Only `Library`
   re-exports are in scope bare; other listed verb modules need an explicit
   `import` even though `:vocab` shows them.
@@ -163,25 +174,18 @@ dev extract exists to point at.
 Hitting the `Ask` effect mid-block suspends the turn: `session_run` returns a
 `continuation_id` instead of completing. The session is now blocked — no new
 `session_run` on it until you call `session_resume` (to answer and continue
-the rest of the block) or `session_abort` (to drop it). A response that
-doesn't match the suspension's schema is rejected without consuming the
-continuation, so a bad `session_resume` payload can be retried.
-`session_resume`/`session_abort` distinguish three failure causes rather than
-one generic "unknown or expired continuation_id": no such session, the
-session is suspended on a DIFFERENT continuation (names the pending one —
-this is what a resume that forgets to echo a non-default `session` name
-looks like), or the session isn't suspended at all.
+the rest of the block) or `session_reset` (to drop the pending ask and start
+fresh — abort folds into reset). A response that doesn't match the suspension's
+schema is rejected without consuming the continuation, so a bad `session_resume`
+payload can be retried. `session_resume` distinguishes three failure causes
+rather than one generic "unknown or expired continuation_id": no session is
+running, the session is suspended on a DIFFERENT continuation (names the pending
+one), or the session isn't suspended at all.
 
 ## Internals: session lifecycle (read if modifying `state.rs`/`server.rs`, skip otherwise)
 
 `state.rs`'s module docstring is the primary source — read it directly before
-changing this. Session lifecycle used to be smeared across three disjoint
-representations (the `SessionManager` map, the server's `continuations` map,
-the worker-local `Option<SessionHandle>`) plus an implicit fourth (which
-channel the worker thread is blocked on) — composite states like "Suspended ∧
-Closing" had no representation, causing deadlock-on-close-while-suspended,
-leak-on-abandon, wedge-on-timeout, and stale-mutation-on-concurrent-run. The
-lifecycle is now one owned `SessionState` enum
+changing this. The session lifecycle is one owned `SessionState` enum
 (Idle/Busy/Suspended/Wedged/Closing), transitioned atomically by the server at
 the dispatch boundary; the ask suspension payload lives INSIDE
 `SessionState::Suspended`, not a side map.

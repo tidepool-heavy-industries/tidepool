@@ -55,14 +55,13 @@ locked decision on union tags).
 ## `cx.respond*` — pick by result shape, not habit
 
 - **`respond(val)`** — the default. One value, converted eagerly via `ToCore`.
-- **`respond_caught(result)`** — wraps a handler `Result` as `Right v` /
-  `Left msg` instead of aborting the eval on failure; this is the substrate
-  for `try*` verbs (failure isolation for long-running orchestrations, e.g. a
-  bad HTTP call becomes a catchable `Left`, not a killed eval). Only
-  `EffectError::Handler` becomes `Left` — structural/bridge/eval errors still
-  propagate unchanged (the line between failure *isolation* and corruption
-  *hiding*; see the `respond_caught_structural_err_propagates_not_swallowed`
-  test).
+  For a TYPED per-verb failure (#335), the errors-tagged method returns
+  `Result<T, <ErrEnum>>` and takes no `cx`; the generated dispatch arm wraps it
+  with `cx.respond` (`Ok → Right v`, `Err → Left e`), so the handler is total by
+  construction — no eval abort for a verb-level failure. (The old
+  `respond_caught` substrate for the `try*` zoo is gone: typed failures replace
+  it. A genuine panic or a non-`Handler` `EffectError` — real corruption — is
+  still the only abort path.)
 - **`respond_stream(iter)`** — parks an arbitrary (possibly infinite) Rust
   iterator; the JIT consumes it lazily. Use for open-ended/unbounded sources.
 - **`respond_list(vec)`** — an owned `Vec<T>` exposed lazily at ELEMENT

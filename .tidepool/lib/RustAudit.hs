@@ -7,6 +7,7 @@ module RustAudit where
 import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
 import qualified Data.Text as T
+import qualified Data.Map.Strict as Map
 
 -- | A panic-ish site: file, 1-based line, kind (unwrap/expect/panic/…), raw line text.
 data Site = Site { sFile :: Text, sLine :: Int, sKind :: Text, sText :: Text }
@@ -35,13 +36,9 @@ isTestSite s =
     || isInfixOf "#[test]" (sText s)
     || isInfixOf "#[cfg(test" (sText s)
 
--- | Count occurrences of each Text key, preserving first-seen order.
+-- | Count occurrences of each Text key (keyed, count-summed).
 tally :: [Text] -> [(Text, Int)]
-tally = foldl' bump []
-  where
-    bump acc k = ins k acc
-    ins k [] = [(k, 1)]
-    ins k ((k', n) : rest) = if k == k' then (k', n + 1) : rest else (k', n) : ins k rest
+tally ks = Map.toList (Map.fromListWith (+) [(k, 1) | k <- ks])
 
 -- | Sort (key, count) pairs by descending count.
 rankDesc :: [(Text, Int)] -> [(Text, Int)]

@@ -33,7 +33,6 @@ async fn value_bind_shadows_prelude_name() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let bind = repl.eval("let lookup = (42 :: Int)").await;
     assert!(
@@ -65,5 +64,4 @@ async fn value_bind_shadows_prelude_name() {
     );
     assert!(after.text.contains('3'), "follow-up value: {}", after.text);
 
-    repl.close().await;
 }

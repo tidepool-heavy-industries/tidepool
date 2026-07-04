@@ -98,6 +98,21 @@ pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
 /// standalone REPL/tests; this requires the `with-packages` GHC (it imports
 /// `Tidepool.Prelude`, which pulls `Control.Lens`).
 ///
+/// `effects`: the session's actual effect stack — gates the Git/Shell/Cargo
+/// imports exactly like the eval preamble's `pragmas_and_imports` does (only
+/// when both Exec and Http are present; those stdlib modules reference
+/// `runArgv`/`parseJson` helpers that don't exist in a generated
+/// `Tidepool.Effects` built from a smaller stack). Passing the wrong (e.g.
+/// empty/minimal) effect set here used to be masked by callers reaching for
+/// the lens-free `ModuleEnv::standalone_default` instead — but that surface
+/// also drops Prelude/Aeson, so a decl-plane pure bind (`v = object [...]`,
+/// promoted to a decl for GHCi-parity generalization — see
+/// `tidepool-runtime` `try_pure_bind_as_decl`) failed to resolve `object`/
+/// `toJSON` under a minimal stack even though production always has them.
+/// This fn is now safe to call for ANY stack: it always carries
+/// Prelude/Aeson/qualified-namespaces (via `eval_import_lines`), and adds
+/// Shell/Git/Cargo only when the stack actually supports them.
+///
 /// `user_library`: whether a project/global `Library` facade is on the
 /// include path (mirrors the `stmt`-path flag in `has_user_library`, passed
 /// by the caller since this module has no filesystem access to check
@@ -112,20 +127,22 @@ pub fn eval_import_lines(user_library: bool) -> Vec<&'static str> {
 /// for statements (a decl defining e.g. `data Hit`, which `Library`
 /// re-exports, would collide).
 #[must_use]
-pub fn session_decl_module_env(user_library: bool) -> ModuleEnv {
+pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> ModuleEnv {
     let mut imports: Vec<String> = eval_import_lines(user_library)
         .into_iter()
         .map(String::from)
         .collect();
-    // Full-stack repl decl surface: also import the shell-effect modules so
-    // `session_def` helpers can use Git/Shell/Cargo verbs (the eval module gets
-    // them via `pragmas_and_imports`, but the decl `ModuleEnv` needs them too,
-    // else a decl like `dirty = Git.gitStatus` fails to resolve). Safe here
-    // because this env is only used under the full stack (Exec+Http present);
-    // the lens-free `standalone_default` minimal env deliberately omits them.
-    imports.push("import qualified Tidepool.Shell as Shell".into());
-    imports.push("import qualified Tidepool.Git as Git".into());
-    imports.push("import qualified Tidepool.Cargo as Cargo".into());
+    // Shell-effect stdlib modules depend on the Exec (`runArgv`) + Http
+    // (`parseJson`) helpers in the generated Tidepool.Effects — import them
+    // only when both effects are present, mirroring `pragmas_and_imports`
+    // exactly so the decl and stmt/eval planes never diverge on this gate.
+    let has_exec = effects.iter().any(|e| e.type_name == "Exec");
+    let has_http = effects.iter().any(|e| e.type_name == "Http");
+    if has_exec && has_http {
+        imports.push("import qualified Tidepool.Shell as Shell".into());
+        imports.push("import qualified Tidepool.Git as Git".into());
+        imports.push("import qualified Tidepool.Cargo as Cargo".into());
+    }
     // Orchestration helpers (readGlob/searchFiles/memo/renderJson/…): the
     // stmt plane gets these via the expr module's imports; without this the
     // decl plane's import surface diverges — a decl using `readGlob` failed
@@ -582,44 +599,50 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
     let mut desc = String::from(concat!(
         "`code` is a single Haskell EXPRESSION of type `M a`; its value is the ",
         "eval's result. The server wraps it in a module with the effect stack, ",
-        "pragmas, and imports. Compose with `>>=`, `<&>`, `>=>`, point-free ",
-        "pipelines; attach a trailing `where` for local bindings. For ",
-        "step-by-step sequencing write an explicit `do` block — bare statement ",
-        "lines do NOT parse. ",
-        "Use `send (Constructor args)` to invoke effects. ",
-        "First call is slow (~2s). Subsequent calls are cached.\n",
-        "Qualified namespaces always in scope: T. (Data.Text), L. (Data.List), ",
-        "Map. (Data.Map.Strict), MM. (Data.Map.Merge.Strict), Set. (Data.Set), ",
-        "KM. (Tidepool.Aeson.KeyMap), TF. (Tidepool.TextFormat), Tab. (Tidepool.Table), ",
-        "P. (Prelude) \u{2014} ",
-        "prefer the unqualified Prelude shadows where they exist (they are ",
-        "the JIT-safe versions).\n",
-        "The final value of `code` is rendered to JSON for the caller \u{2014} Int → ",
+        "pragmas, and imports. Compose with `>>=`, `<&>`, `>=>`, and point-free ",
+        "pipelines; attach a trailing `where` for local bindings. For step-by-step ",
+        "sequencing write an explicit `do` block. Invoke effects with the helper ",
+        "verbs. First call is ~2s; subsequent calls are cached.\n",
+        "The unqualified `Tidepool.Prelude` is the recommended surface: a Text-first, ",
+        "effect-aware standard library that resolves cleanly on the JIT. Qualified ",
+        "namespaces reach the wider ecosystem \u{2014} among them T. (Data.Text), ",
+        "L. (Data.List), Map. (Data.Map.Strict), MM. (Data.Map.Merge.Strict), ",
+        "Set. (Data.Set), KM. (Tidepool.Aeson.KeyMap), TF. (Tidepool.TextFormat), ",
+        "Tab. (Tidepool.Table), and P. (the full base Prelude). tidepool://capabilities ",
+        "is the live index of the Prelude shadow surface and the names that live ",
+        "under a qualifier.\n",
+        "The final value of `code` renders to JSON for the caller \u{2014} Int → ",
         "number, [Char] → string, Bool → true/false, lists → arrays, and a ",
         "`Value` → that JSON directly. In the REPL (`session_run`), results render ",
         "via `Show` by default — `Text` is bare, custom ADTs work without `ToJSON`. ",
-        "JSON is opt-in: return a `Value` (via ",
-        "`object`/`toJSON`/`parseJson`/`llm`/",
-        "`httpGet`, …) for structured output, e.g. ",
-        "`Right v <- httpGet \"https://api.github.com/repos/o/r\"`; use `putStrLn`/`say` only ",
-        "for human-readable debug traces, not to stringify results. Extract from a ",
+        "For structured output return a `Value` (via ",
+        "`object`/`toJSON`/`parseJson`/`llm`/`httpGet`, …), e.g. ",
+        "`Right v <- httpGet \"https://api.github.com/repos/o/r\"`; reserve `putStrLn`/`say` for ",
+        "human-readable debug traces, and return `pure x` in place of ",
+        "`send (Print (show x))`. Extract from a ",
         "`Value` with optics: `v ^? key \"f\" . _String` (also `_Int`, `_Double`, ",
-        "`_Bool`, `_Array`); `renderJson :: Value -> Text` renders one to compact JSON. ",
-        "Prefer `pure x` over `send (Print (show x))`.\n",
+        "`_Bool`, `_Array`); `renderJson :: Value -> Text` renders one to compact JSON.\n",
         "The `input` param is the PAYLOAD LANE: pass large or quote-heavy ",
-        "content (file bodies, generated source) as a real JSON value there \u{2014} ",
-        "no Haskell string escaping \u{2014} and keep `code` a short verb consuming ",
-        "the `input` binding. E.g. whole-file writes: code = ",
-        "`writeFile \".tidepool/lib/Mod.hs\" src where src = case input of { String s -> s; _ -> \"\" }` ",
-        "with the file content in `input`.",
+        "content (file bodies, generated source, config) as a real JSON value there \u{2014} ",
+        "the eval reads it via the `input` binding, so `code` stays a short verb. ",
+        "Decode it into a typed record and the payload is available by field:\n",
+        "  data Cfg = Cfg { target :: Text, limit :: Int } deriving (Generic, FromJSON)\n",
+        "  do { Cfg{..} <- liftEither (resultToEither (fromJSON input)); grepGlob target \"**/*.rs\" <&> stake limit }\n",
+        "For a single field, optics read straight off the `Value`: ",
+        "`input ^? key \"target\" . _String`; for a whole-file write, put the body on ",
+        "`input`: `writeFile \".tidepool/lib/Mod.hs\" (input ^. _String)`.",
     ));
 
     if !effects.is_empty() {
         desc.push_str(concat!(
-            "\nPrefer typed effects for common operations: `glob`/`grepGlob` (Fs) for ",
-            "filesystem and structured text search, `lspWhere`/",
-            "`lspDefs` (Lsp) for symbol navigation. Use `run \"...\"` only as a shell ",
-            "fallback for things the typed effects don\u{2019}t cover.\n",
+            "\nTyped effects cover the common operations directly: `glob`/`grepGlob` (Fs) ",
+            "for filesystem and structured text search, `lspWhere`/`lspDefs` (Lsp) for ",
+            "symbol navigation; `run \"...\"` runs any shell command for the rest.\n",
+            "Effect verbs return `Either <EffectError>` \u{2014} bind the `Right`, and match a ",
+            "specific `Left` to recover:\n",
+            "  do { Right p <- run \"git status --short\"; pure (T.lines p.stdout) }\n",
+            "  readFile \"notes.md\" >>= \\case { Right body -> pure (T.length body); Left (FsNotFound _) -> pure 0 }\n",
+            "`liftEither` unwraps a `Right` or aborts the eval on the `Left`.\n",
             "Effects (invoke via the helper verbs; read tidepool://effect/{name} for each one\u{2019}s constructors + helpers):\n",
         ));
         // DERIVED from the decls (crate::describe): one entry per effect —
@@ -642,9 +665,9 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         }
 
         desc.push_str(concat!(
-            "\nEdit files: `update path old new` — exact str-replace, errors if the text is ",
-            "not-found or ambiguous (add surrounding context); `planUpdate` previews the diff. ",
-            "The full editing surface (Edit DSL, diffs) is in tidepool://edits.\n",
+            "\nEdit files: `update path old new` replaces the one exact occurrence of `old` ",
+            "(include enough surrounding context to name it uniquely); `planUpdate` returns the ",
+            "diff as data. The full editing surface (Edit DSL, diffs) is in tidepool://edits.\n",
         ));
 
         desc.push_str(concat!(
@@ -654,6 +677,7 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
             "  tidepool://schema          the Schema grammar + ask/llm in full\n",
             "  tidepool://edits           the declarative Edit verb JSON schema\n",
             "  tidepool://vocab           live project-library verb signatures (.tidepool/lib)\n",
+            "  tidepool://capabilities    the Prelude shadow surface + names that live under a qualifier\n",
             "  tidepool://patterns        worked examples\n",
             "  tidepool://stdlib/{module} vendored stdlib module source (e.g. Tidepool.Prelude)\n",
         ));

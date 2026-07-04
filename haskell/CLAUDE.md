@@ -145,57 +145,11 @@ Every WORKS / LOUD-FAIL / stale-doc footgun is pinned as a live probe in
 a footgun that ever fails SILENTLY (SIGILL/SIGSEGV/wrong output) trips its
 LOUD-FAIL probe. **A SIGILL/SIGSEGV is a compiler bug — report it** (common roots:
 constructor tag mismatch, missing external binding).
-
 ## Adding new Prelude functions
 
-Typeclass-dictionary polymorphism WORKS on the JIT — do not reflexively
-monomorphize. (Custom classes, multi-param classes, GADT construction +
-type-indexed dispatch all pass; GHC specialization is enabled; lazy poison
-closures defuse error-branch dictionary slots.)
-
-Shadow with a monomorphic version ONLY for:
-1. **Genuinely unsupported FFI** — `showDouble` (floatToDigits/Integer), `round`
-   (rintDouble), GMP beyond the add/sub shims. The shadow works around the FFI
-   gap, not the dictionary.
-2. **Ergonomics** — Pack/Len/Null/Slice-style Text+list polymorphism by design.
-
-If a GADT case crashes with no other explanation: re-run with
-`TIDEPOOL_VARID_AUDIT=1` and check for DataConTable stableVarId collisions FIRST,
-before suspecting emit.
-
-**GHC flags disabled in GhcPipeline.hs — DO NOT re-enable:**
-- `Opt_FullLaziness` — conflicts with eager JIT evaluation
-- `Opt_CprAnal` — CPR unboxes return values, changing calling conventions → CASE TRAP on constructor tags
-
-**Monomorphic shadows still required:**
-- `round :: Double -> Int` — GHC's specialized version calls `rintDouble` (C FFI, unsupported). Shadow uses `truncate` + manual banker's rounding.
-- `showDouble :: Double -> String` — intercepted at binding level in Translate.hs (see Translation Gotcha #8 below); emits `ShowDoubleAddr` primop to avoid `floatToDigits`/Integer. `deriving Show` with `!Double` fields requires this.
-
-**Polymorphic typeclasses safe for JIT** (single/dual-method; no error-branch dictionary slots):
-- `Pack` (`pack`) — `String` via `T.pack`, `Text` via `id`. Makes `pack (show x)` work.
-- `Len` (`len`) — `Text` via `T.length`, `[a]` via manual recursion
-- `Null` (`isNull`) — `Text` via `T.null`, `[a]` via pattern match
-- `Slice` (`stake`/`sdrop`) — `Text` via `T.take`/`T.drop`, `[a]` via manual recursion
-- `intercalate` shadowed to `Text -> [Text] -> Text`; aliases: `joinText`, `tReverse`
-
----
-
-## GHC Core Translation Gotchas (Translate.hs)
-
-Reference for anyone touching `haskell/app/Translate.hs` or `GhcPipeline.hs`. Each item is a bug we fixed — re-opening any of these will reproduce the original failure.
-
-**1. joinrec → LetRec**: GHC -O2 generates `Rec` groups with join point binders. Translate.hs strips join arity, translates as lambdas in LetRec, and registers IDs in `tsRecJoinIds` so call sites emit NApp instead of NJump.
-
-**2. tagToEnum#**: GHC uses `tagToEnum# @T (comparison)` to convert Int# comparison results to Bool/enum. Translate.hs desugars to `case arg of { 0# -> C0; 1# -> C1; ... }` using the type argument to find constructors. Do not pass the Int# through as-is.
-
-**3. GHC top-level binding filtering**: GHC lifts local bindings to top level and generates specializations (`$s$w...`, `$trModule`). Use `isExternalName (idName b)` to filter to user-defined bindings. Also filter names starting with `$`.
-
-**4. Join point arity includes type args**: `isJoinId_maybe` returns arity counting ALL args (type + value). `collectValueBinders` must decrement for type binders too. Join call-site matching compares `length allArgs == arity`, not just value args.
-
-**5. unpackCString# → cons cells, not LitString**: Desugar `unpackCString#` to cons-cell chains. `NLit(LitString)` cannot be case-matched as `[] | (:)`, breaking `++` and all list ops on pattern-matched string literals.
-
-**6. valueRepArity, not raw dataConRepArity**: For GADT constructors (e.g. `Print :: String -> Console ()`), `dataConRepArity` includes equality evidence args (`EqSpec`). GHC Core filters these as Coercion args via `isValueArg`, so `length args == dataConRepArity` fails at saturation. Use `valueRepArity dc = dataConRepArity dc - length eqSpec` (via `dataConFullSig`). Note: `isCoercionTy` does NOT detect `~#` (nominal equality) — only `~R#` (representational). The `dataConFullSig`/`EqSpec` approach is the correct one.
-
-**7. jumpCrossesLam**: GHC Core allows jumps to join points from inside nested lambdas, but each lambda compiles as a separate Cranelift function so the join's stack frame is gone. `jumpCrossesLam` in Translate.hs walks the body checking if a Jump to the join ID occurs under a value Lam. If so, convert the NonRec join to LetNonRec + lambda wrapper and register in `tsRecJoinIds` (same treatment as Rec joins).
-
-**8. showDouble binding-level interception**: Call-site interception alone is not enough — when `resolveExternals` includes `$fShowDouble_$sshowSignedFloat`, `wrapAllBinds` compiles its body, pulling in `floatToDigits`/Integer → SIGSEGV. Intercept at the BINDING level in `wrapAllBinds`: when a binder matches `isShowDoubleSpecVar`, emit `emitShowDoubleSpecBody` (4-lambda wrapper: `\fmt minExpt d rest → unpackAppendCString# (ShowDoubleAddr d) rest`) instead of translating the original RHS. Call-site interception must also handle the `rest` (ShowS continuation) via `emitRuntimeUnpackAppendCString`.
+Dictionary polymorphism runs on the JIT: custom classes, multi-param classes,
+and GADT type-indexed dispatch all compile and execute — write the polymorphic
+version. A few functions carry monomorphic shadows in the Prelude only for
+genuine FFI gaps (`round`, `showDouble`); `Opt_FullLaziness` and `Opt_CprAnal`
+are disabled in `GhcPipeline.hs`. The JIT-safe surface is enforced end-to-end by
+`tidepool-runtime/tests/gotcha_registry.rs` — extend it when you add a function.

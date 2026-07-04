@@ -5,6 +5,15 @@ reference for eval authors is the **`eval` tool description** (emitted by the
 server, assembled from the `*_decl()` functions here). The eval stdlib lives in
 `haskell/lib/Tidepool/`. See the repo-root `CLAUDE.md` for the project map.
 
+> **Review rule — examples are the de facto style guide.** The code snippets in
+> the `eval`/`session_run` tool descriptions (`preamble.rs`, `resources.rs`,
+> `tidepool-repl/src/server.rs`) are what callers imitate verbatim, so a change
+> in the idiom is a change to the examples: when the recommended spelling moves
+> (typed `input` decode, `Right p <- run cmd`, record-dot, …), update every
+> example that models the old form in the same pass. The descriptions attest to
+> the idealized surface — a gap a caller hits is a bug to fix, not a caution to
+> add.
+
 Every effect has ONE definition: a `<eff>_effect_def!` macro in
 `src/effect_defs.rs` carrying the GADT constructors (Haskell type strings AND
 Rust bridge types), helper-verb text, and the handler/method wiring. Two
@@ -13,7 +22,8 @@ generates the `*_decl()` builder, and `effect_rust_projection!`
 (`tidepool-handlers/src/effect_glue.rs`) generates the `*Req` enum +
 `DescribeEffect` + dispatch. Adding a constructor = one `verbs` row in the
 definition + one hand-written inherent method on the handler struct (using
-`cx.respond`/`respond_caught`/`respond_stream`). A wholly new effect type
+`cx.respond`/`respond_stream`/`respond_list`, or an errors-tagged method
+returning `Result<T, ErrEnum>` for typed failure). A wholly new effect type
 needs a new definition + handler module + a positional union-tag slot.
 `tidepool/src/main.rs` only wires the handler stack (`build_base_stack`); the
 `tidepool-bridge` marshals `Value` ↔ `serde_json::Value`.
@@ -99,7 +109,7 @@ anchors are substring tests that must hit exactly one line). `planEdits`/
 all-or-nothing; problems come back as DATA (`anchor-missing`/`anchor-ambiguous`/
 `range-out-of-bounds`/`edits-overlap`). **Line-number safety:** numbers resolve
 against the file read in the SAME eval and bake into a context-anchored patch — an
-in-eval read+edit is safe; numbers captured in a PRIOR eval are the footgun (use
+in-eval read+edit is safe; numbers captured in a PRIOR eval go stale (use
 the anchor ops cross-eval — they're content-addressed and self-checking).
 
 **checkDiff-first when a `[patch|]` pattern silently fails to match.** A no-match
@@ -138,4 +148,4 @@ import qualified Prelude as P
 ```
 Our `error :: Text -> a` shadows Prelude's `String` version. Our `run :: Text -> M (Either ExecError Proc)` shadows Freer's `run :: Eff '[] a -> a`. These hiding clauses are load-bearing — removing them breaks eval code that uses `error` with Text or `run` for shell commands.
 
-**Eval timeout**: The default is 30 seconds (configurable via `eval_timeout_secs` in `config.toml` or `TIDEPOOL_EVAL_TIMEOUT_SECS`). Shell commands blocked on `.output()` (e.g. `cargo test --workspace`) consume the full timeout. The timeout returns a clean `CallToolResult::error`, not a crash.
+**Eval timeout**: The default is 600 seconds, per-request raisable to 1800 (configurable via `eval_timeout_secs` in `config.toml` or `TIDEPOOL_EVAL_TIMEOUT_SECS`). Long shell commands (builds, test suites) run comfortably inside it; at the window an eval at an effect boundary parks as a continuation, a pure runaway is detached. The timeout returns a clean `CallToolResult::error`, not a crash.

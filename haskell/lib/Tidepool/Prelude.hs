@@ -111,6 +111,7 @@ module Tidepool.Prelude
     -- * Function combinators
   , on
   , comparing
+  , until
     -- * Monadic combinators
   , mapM, mapM_, sequence, sequence_, sequenceA
   , traverse_, for_
@@ -210,6 +211,18 @@ module Tidepool.Prelude
     -- * UTC time (Tidepool.Data.Time)
   , UTCTime(..), formatISO8601, parseISO8601, daysFromCivil
   , diffUTCTime, addUTCTime, epochMillis
+    -- Deliberately absent from the unqualified shadow — each canonical
+    -- Prelude/Data.List name below is reached through a qualifier instead
+    -- (tidepool://capabilities is the served index; the reasons live in
+    -- resources.rs `QUALIFIED_NAMES`, which the compile error-hint path reads):
+    --   list combinators → Data.List (L.): subsequences, permutations, delete,
+    --     insert, union, intersect, stripPrefix, mapAccumR, foldl1',
+    --     isSubsequenceOf, genericTake/genericDrop
+    --   rendering/parsing: showsPrec/shows/showString → `show :: a -> Text`;
+    --     reads/readsPrec → `read` + parseInt/parseIntM/parseDouble/parseDoubleM
+    --   IO console/stdin: print/getLine/interact → the Console effect + `input` lane
+    --   numeric → base (P.): gcd, lcm, properFraction
+    --   ranges: enumFrom/enumFromThen → `enumFromTo lo hi` ([lo..hi] desugars to it)
   ) where
 
 import GHC.Generics (Generic)
@@ -654,6 +667,14 @@ on f g x y = f (g x) (g y)
 comparing :: Ord b => (a -> b) -> a -> a -> Ordering
 comparing f x y = compare (f x) (f y)
 {-# INLINE comparing #-}
+
+-- | Iterate @f@ from @x@ until @p@ holds, returning the first value that
+-- satisfies it. Tail recursion (unbounded on the JIT), same shape as 'iterate'.
+until :: (a -> Bool) -> (a -> a) -> a -> a
+until p f = go
+  where
+    go x = if p x then x else go (f x)
+{-# INLINE until #-}
 
 -- ---------------------------------------------------------------------------
 -- Text-to-number parsing (avoids Read typeclass which crashes the JIT)

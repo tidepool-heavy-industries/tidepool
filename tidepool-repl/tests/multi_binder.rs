@@ -27,7 +27,6 @@ async fn let_single_bind() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl.eval("let x = (5 :: Int)").await;
     t.expect_ok("let x = 5");
@@ -36,7 +35,6 @@ async fn let_single_bind() {
     let out = t.expect_ok("x + 1");
     assert!(out.contains("6"), "let-single: expected 6, got: {out}");
 
-    repl.close().await;
 }
 
 /// CASE 2 — Tuple bind both components (the BUG-5 headline).
@@ -48,7 +46,6 @@ async fn tuple_bind_both_components() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let bind = repl.eval("(a, b) <- pure ((1 :: Int), (2 :: Int))").await;
     eprintln!(
@@ -80,7 +77,6 @@ async fn tuple_bind_both_components() {
     let out = t.expect_ok("a + b");
     assert!(out.contains("3"), "expected a + b == 3, got: {out}");
 
-    repl.close().await;
 }
 
 /// CASE 3 — `let`-tuple works.
@@ -92,7 +88,6 @@ async fn let_tuple_works() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let bind = repl.eval("let (x, y) = ((10 :: Int), (20 :: Int))").await;
     eprintln!(
@@ -105,7 +100,6 @@ async fn let_tuple_works() {
     let out = t.expect_ok("x + y");
     assert!(out.contains("30"), "expected x + y == 30, got: {out}");
 
-    repl.close().await;
 }
 
 /// CASE 4 — Three-tuple works.
@@ -117,7 +111,6 @@ async fn three_tuple_works() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let bind = repl
         .eval("(p, q, r) <- pure ((1::Int),(2::Int),(3::Int))")
@@ -132,7 +125,6 @@ async fn three_tuple_works() {
     let out = t.expect_ok("p + q + r");
     assert!(out.contains("6"), "expected p + q + r == 6, got: {out}");
 
-    repl.close().await;
 }
 
 /// CASE 5 — The original feature test (was #[ignore], now active).
@@ -143,7 +135,6 @@ async fn tuple_bind_both_components_feature() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.eval("(a, b) <- pure ((1 :: Int), (2 :: Int))")
         .await
@@ -156,7 +147,6 @@ async fn tuple_bind_both_components_feature() {
         "feature: expected a + b == 3, got: {out}"
     );
 
-    repl.close().await;
 }
 
 /// CASE 6 — Tuple components survive an organic GC.
@@ -170,7 +160,6 @@ async fn tuple_bind_components_survive_gc() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // Bind the tuple.
     repl.eval("(a, b) <- pure ((1 :: Int), (2 :: Int))")
@@ -204,7 +193,6 @@ async fn tuple_bind_components_survive_gc() {
         "post-GC b should be 2"
     );
 
-    repl.close().await;
 }
 
 /// CASE 7 — Type-mismatch multi-bind is LOUDLY REJECTED (GHC compile error).
@@ -217,7 +205,6 @@ async fn mismatched_type_rejected_loudly() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let bind = repl.eval("(a, b) <- pure (42 :: Int)").await;
     eprintln!(
@@ -246,5 +233,4 @@ async fn mismatched_type_rejected_loudly() {
         t.text
     );
 
-    repl.close().await;
 }

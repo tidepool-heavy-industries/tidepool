@@ -35,7 +35,7 @@
 //!     args { a: "Text" as String, n: "Int" as i64 },   Haskell type / Rust type pairs
 //!     ret "<haskell result>"     result type inside the effect (e.g. "()", "[Hit]",
 //!                                "(Either Text Text)")
-//!     [, errors <RustErrorEnum>] RESERVED (#335): typed per-verb failure — see below
+//!     [, errors <RustErrorEnum>] typed per-verb failure (#335) — see the errors block below
 //!   }, ...
 //! ],
 //! helpers [
