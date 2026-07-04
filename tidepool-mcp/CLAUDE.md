@@ -5,6 +5,15 @@ reference for eval authors is the **`eval` tool description** (emitted by the
 server, assembled from the `*_decl()` functions here). The eval stdlib lives in
 `haskell/lib/Tidepool/`. See the repo-root `CLAUDE.md` for the project map.
 
+> **Review rule — examples are the de facto style guide.** The code snippets in
+> the `eval`/`session_run` tool descriptions (`preamble.rs`, `resources.rs`,
+> `tidepool-repl/src/server.rs`) are what callers imitate verbatim, so a change
+> in the idiom is a change to the examples: when the recommended spelling moves
+> (typed `input` decode, `Right p <- run cmd`, record-dot, …), update every
+> example that models the old form in the same pass. The descriptions attest to
+> the idealized surface — a gap a caller hits is a bug to fix, not a caution to
+> add.
+
 Every effect has ONE definition: a `<eff>_effect_def!` macro in
 `src/effect_defs.rs` carrying the GADT constructors (Haskell type strings AND
 Rust bridge types), helper-verb text, and the handler/method wiring. Two

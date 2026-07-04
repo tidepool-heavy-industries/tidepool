@@ -13,6 +13,7 @@
 //! - `tidepool://schema`           — Schema grammar + structured ask/llm + extraction optics
 //! - `tidepool://edits`            — the declarative `Edit` verb JSON schema
 //! - `tidepool://vocab`            — live project-library verb signatures
+//! - `tidepool://capabilities`     — the Prelude shadow surface + qualifier-reached names
 //! - `tidepool://patterns`         — worked examples (PATTERNS.md)
 //! - `tidepool://effect/{name}`    — per-effect constructors + types + helpers (template)
 //! - `tidepool://stdlib/{module}`  — vendored stdlib module source (template)
@@ -61,6 +62,7 @@ pub fn list(ctx: &ResourceCtx) -> Vec<ResourceDescriptor> {
         descriptor("tidepool://schema", "Schema + ask/llm", "The structured-output Schema grammar and the ask/llm/tryLlm primitives; how to extract results with optics."),
         descriptor("tidepool://edits", "Edit verb schema", "The declarative line/anchor `Edit` JSON schema (applyEdits/editsJ) and its conflict vocabulary."),
         descriptor("tidepool://vocab", "Vocabulary", "Live signatures of every verb in scope — core effect verbs + project library (.tidepool/lib), refreshed on read."),
+        descriptor("tidepool://capabilities", "Capabilities", "The Prelude shadow surface (names in scope unqualified) plus the canonical Prelude/Data.List names that live under a qualifier."),
     ];
     if ctx.patterns_path.is_some() {
         out.push(descriptor(
@@ -113,6 +115,7 @@ pub fn read(ctx: &ResourceCtx, uri: &str) -> Option<ResourceBody> {
         "tidepool://schema" => Some(body(MD, schema_md())),
         "tidepool://edits" => Some(body(MD, edits_md())),
         "tidepool://vocab" => Some(body(MD, vocab_md(ctx))),
+        "tidepool://capabilities" => Some(body(MD, capabilities_md(ctx))),
         "tidepool://patterns" => ctx
             .patterns_path
             .and_then(|p| std::fs::read_to_string(p).ok())
@@ -150,7 +153,9 @@ pub fn help(ctx: &ResourceCtx, topic: &str) -> String {
 
 fn topic_uris(t: &str) -> Vec<String> {
     match t {
-        "guide" | "schema" | "edits" | "vocab" | "patterns" => vec![format!("tidepool://{t}")],
+        "guide" | "schema" | "edits" | "vocab" | "patterns" | "capabilities" => {
+            vec![format!("tidepool://{t}")]
+        }
         _ => {
             if let Some(rest) = t.strip_prefix("effect") {
                 vec![format!(
@@ -182,6 +187,7 @@ fn help_index(ctx: &ResourceCtx) -> String {
          - `schema`    — the Schema grammar + ask/llm/tryLlm\n\
          - `edits`     — editing verbs (update, planUpdate, the Edit DSL, diffs)\n\
          - `vocab`     — every verb signature in scope (effects + project library)\n\
+         - `capabilities` — the Prelude shadow surface + names that live under a qualifier\n\
          - `patterns`  — worked examples\n\
          - `effect <Name>`   — one effect's constructors + helpers\n\
          - `stdlib <Module>` — a vendored stdlib module's source\n\n",
@@ -200,41 +206,44 @@ fn guide_md(ctx: &ResourceCtx) -> String {
         "# Tidepool eval guide\n\n",
         "`code` is a single Haskell EXPRESSION of type `M a`; its value is the eval's result. ",
         "The server wraps it in a module with the effect stack, pragmas, and imports. Compose with ",
-        "`>>=`, `<&>`, `>=>`, point-free pipelines; attach a trailing `where` for local bindings. ",
-        "For step-by-step sequencing write an explicit `do` block — bare statement lines do NOT parse. ",
-        "Invoke effects with the helper verbs (prefer `putStrLn \"hi\"` over `send (Print \"hi\")`).\n\n",
+        "`>>=`, `<&>`, `>=>`, and point-free pipelines; attach a trailing `where` for local bindings. ",
+        "For step-by-step sequencing write an explicit `do` block. Invoke effects with the helper ",
+        "verbs (`putStrLn \"hi\"` sends to the Console; `run \"...\"` runs a shell command).\n\n",
         "## Returning results\n",
-        "The final value is rendered to JSON for the caller — Int → number, [Char] → string, ",
-        "Bool → true/false, lists → arrays, and a `Value` → that JSON directly. RETURN a `Value` ",
-        "for structured output (`object`/`toJSON`/`parseJson`/`llm`/`tryHttpGet`); use `putStrLn`/`say` ",
-        "only for human-readable debug traces, never to stringify a result. Extract from a `Value` with ",
+        "The final value renders to JSON for the caller — Int → number, [Char] → string, ",
+        "Bool → true/false, lists → arrays, and a `Value` → that JSON directly. Return a `Value` ",
+        "for structured output (`object`/`toJSON`/`parseJson`/`llm`/`tryHttpGet`); `putStrLn`/`say` ",
+        "carry human-readable debug traces, and `pure x` returns a value directly. Extract from a `Value` with ",
         "optics: `v ^? key \"f\" . _String` (also `_Int`, `_Double`, `_Bool`, `_Array`); ",
         "`renderJson :: Value -> Text` renders one to compact JSON.\n\n",
         "## The input payload lane\n",
-        "Pass large or quote-heavy content (file bodies, generated source) as a real JSON value in ",
-        "`input` — no Haskell string escaping — and keep `code` a short verb consuming the `input` ",
-        "binding. E.g. whole-file writes: ",
-        "`writeFile \".tidepool/lib/Mod.hs\" src where src = case input of { String s -> s; _ -> \"\" }`.\n\n",
+        "Pass large or quote-heavy content (file bodies, generated source, config) as a real JSON value in ",
+        "`input` — the eval reads it via the `input` binding, so `code` stays a short verb. Decode it ",
+        "into a typed record and the whole payload is available by field:\n",
+        "```haskell\n",
+        "data Cfg = Cfg { target :: Text, limit :: Int } deriving (Generic, FromJSON)\n",
+        "do { Cfg{..} <- liftEither (resultToEither (fromJSON input)); grepGlob target \"**/*.rs\" <&> stake limit }\n",
+        "```\n",
+        "For a single field, optics read straight off the `Value`: `input ^? key \"target\" . _String`. ",
+        "For a whole-file write, put the body on `input`: `writeFile \".tidepool/lib/Mod.hs\" (input ^. _String)`.\n\n",
         "## Polymorphic Prelude ops\n",
         "`len` (length of Text or [a]), `isNull` (emptiness of either), `stake`/`sdrop` ",
         "(take/drop on either), `intercalate` joins Text (alias `joinText`), `tReverse` reverses Text. ",
-        "List-only: `length`, `take`, `drop`, `null`.\n\n",
+        "List-only: `length`, `take`, `drop`, `null`. tidepool://capabilities indexes the full shadow surface.\n\n",
         "## Examples (expression-first)\n",
         "```haskell\n",
         "glob \"**/*.rs\" >>= mapM (\\p -> (,) p <$> getFileSize p)\n",
-        "do { src <- readFile \"CLAUDE.md\"; pure (stake 5 (lines src)) }  -- explicit do when sequencing\n",
+        "do { Right src <- readFile \"CLAUDE.md\"; pure (stake 5 (lines src)) }  -- explicit do when sequencing\n",
         "```\n\n",
         "Per-effect helper signatures live in `tidepool://effect/{name}`; library verbs in ",
-        "`tidepool://vocab`; structured ask/llm in `tidepool://schema`.\n\n",
+        "`tidepool://vocab`; structured ask/llm in `tidepool://schema`; the Prelude shadow surface ",
+        "in `tidepool://capabilities`.\n\n",
         "## Effect result records\n",
-        "Verbs return named records — use **record-dot** (`p.stdout`, `h.path`); bare selectors ",
-        "are ambiguous across record types:\n",
-        "- `run cmd :: M Proc` — fields `exitCode`, `stdout`, `stderr`; `ok p` = zero exit\n",
+        "Verbs return named records — read fields with **record-dot** (`p.stdout`, `h.path`):\n",
+        "- `run cmd :: M (Either <EffectError> Proc)` — bind the `Right`; `Proc` fields `exitCode`, `stdout`, `stderr`; `ok p` = zero exit\n",
         "- `grepGlob`/`searchFiles` → `[Hit]` — fields `path`, `line`, `text`\n",
         "- `readGlob` → `[Doc]` — fields `path`, `body`\n",
         "- `fsMeta` → `Maybe FileMeta` — fields `size`, `isFile`, `isDir`\n",
-        "`tryRun :: Text -> M (Either Text Proc)` — `Left` only on spawn failure; non-zero exit ",
-        "is `Right proc`, inspect `proc.exitCode`.\n",
     ));
     if ctx
         .effects
@@ -242,20 +251,18 @@ fn guide_md(ctx: &ResourceCtx) -> String {
         .any(|e| matches!(e.type_name, "Http" | "Exec" | "Llm" | "Fs"))
     {
         s.push_str(concat!(
-            "\n## Failure isolation (long-running evals)\n",
-            "The `try*` verbs return `M (Either Text a)` so one bad probe doesn't kill an eval. An ",
-            "EXTERNAL failure — bad URL, 404/network error, LLM API error/refusal, exec spawn failure, ",
-            "unreadable file — becomes `Left err` and the eval continues:\n",
+            "\n## Effect failures are values\n",
+            "Every effect verb returns `Either <EffectError> a`: an external condition — a 404 or network ",
+            "error, an LLM API error or refusal, an exec spawn failure, a missing file — arrives as `Left err`, ",
+            "so one probe's failure is data the eval reads and routes on:\n",
+            "```haskell\n",
+            "readFile \"notes.md\" >>= \\case\n",
+            "  Right body          -> pure (T.length body)\n",
+            "  Left (FsNotFound _) -> pure 0      -- match a specific cause to recover\n",
+            "Right p <- run \"git status --short\"  -- bind the Right; liftEither aborts the eval on a Left\n",
             "```\n",
-            "tryRun, tryRunIn        :: ... -> M (Either Text Proc)\n",
-            "tryHttpGet, tryHttpPost :: ... -> M (Either Text Value)\n",
-            "tryLlm                  :: Schema -> Text -> M (Either Text Value)\n",
-            "tryReadFile             :: Text -> M (Either Text Text)\n",
-            "```\n",
-            "They do NOT catch: Haskell `error`/partial functions (including readProcess/callCommand on ",
-            "a nonzero exit), other runtime faults, eval cancellation/timeout, or the LLM call-budget ",
-            "limit — those still abort. A command that RUNS but exits nonzero is NOT a failure: ",
-            "`tryRun` returns `Right proc`; inspect `proc.exitCode` (record-dot).\n",
+            "`liftEither :: Either e a -> M a` unwraps a `Right` or aborts rendering the `Left`. A command that ",
+            "RUNS and exits nonzero is a `Right proc` — read `proc.exitCode` (record-dot) to branch on the code.\n",
         ));
     }
     s
@@ -290,17 +297,17 @@ fn edits_md() -> String {
         "# Editing files — common case first\n\n",
         "## 1. `update` — exact str-replace (the 90% case, core, always available)\n",
         "Mirrors the Edit tool you already know: name the file, the exact `old` text (with enough ",
-        "surrounding context to be UNIQUE), and the `new` text. No news is good news.\n",
+        "surrounding context to name it uniquely), and the `new` text.\n",
         "```haskell\n",
-        "update      :: FilePath -> Text -> Text -> M ()   -- applies, or ERRORS (not-found / ambiguous-with-count)\n",
+        "update      :: FilePath -> Text -> Text -> M ()   -- applies the one unique `old` → `new` match\n",
         "updateAll   :: FilePath -> Text -> Text -> M Int  -- replace every occurrence; returns the count\n",
-        "planUpdate  :: FilePath -> Text -> Text -> M Value -- dry-run: {changed,diff} | {ok:false,reason,count}; writes nothing, never errors\n",
+        "planUpdate  :: FilePath -> Text -> Text -> M Value -- dry-run: {changed,diff} | {ok:false,reason,count}; writes nothing\n",
         "updateJ     :: Value -> M ()                      -- input lane: {file, old, new} for big/quote-heavy fragments\n",
         "insertAfter :: FilePath -> Text -> Text -> M ()   -- insert a block after the unique line containing an anchor\n",
         "```\n",
-        "`update` THROWS on failure (a bad edit is a bug — stop and fix); call `planUpdate` first if you ",
-        "want to inspect/branch. Fragments are plain `Text`, so compute them: ",
-        "`update p old (TF.camelToSnake x)` — no quoter, no escaping. Big fragments ride `input` via `updateJ`.\n\n",
+        "`update` applies the single unique occurrence of `old`; `planUpdate` returns the diff as data ",
+        "when you want to inspect or branch before committing. Fragments are plain `Text`, so compute ",
+        "them: `update p old (TF.camelToSnake x)` — no quoter, no escaping. Big fragments ride `input` via `updateJ`.\n\n",
         "## 2. `Edit` DSL — line/anchor batch (project library)\n",
         "When the change is naturally line- or anchor-shaped (replace lines 10–15, insert before an anchor) ",
         "and you want several edits applied atomically. Lowers to a context-anchored patch; conflicts as DATA.\n",
@@ -379,6 +386,172 @@ fn vocab_md(ctx: &ResourceCtx) -> String {
     } else {
         s.push_str("\n## Project library (.tidepool/lib)\n");
         s.push_str(&digest);
+    }
+    s
+}
+
+// --- capabilities: the Prelude shadow surface -------------------------------
+
+/// Canonical `Prelude` / `Data.List` names that resolve through a qualifier
+/// rather than the unqualified `Tidepool.Prelude` shadow, each paired with the
+/// mechanical fact of where it lives. Consumed by the `tidepool://capabilities`
+/// resource and by the compile error-hint path (`exclusion_reason`), so a
+/// "not in scope" on one of these names carries the reach-path with it.
+///
+/// Every entry is reachable: the list version lives in `Data.List` (`L.`), the
+/// Text version in `Data.Text` (`T.`), or the base definition under `P.`.
+pub(crate) const QUALIFIED_NAMES: &[(&str, &str)] = &[
+    // List combinators — the `Data.List` (`L.`) surface.
+    ("subsequences", "list combinatorics live in Data.List — `L.subsequences`"),
+    ("permutations", "`L.permutations`"),
+    ("delete", "list delete is `L.delete`; maps/sets have `Map.delete`/`Set.delete`"),
+    ("insert", "list insert is `L.insert`; `Map.insert`/`Set.insert` for maps/sets"),
+    ("union", "list union is `L.union`; `Set.union`/`Map.union` for sets/maps"),
+    ("intersect", "list intersect is `L.intersect`; `Set.intersection` for sets"),
+    ("stripPrefix", "`L.stripPrefix` for lists, `T.stripPrefix` for Text"),
+    ("mapAccumR", "`L.mapAccumR`; `mapAccumL` is in the shadow"),
+    ("foldl1'", "`L.foldl1'`; `foldl1` and `foldl'` are in the shadow"),
+    ("isSubsequenceOf", "`L.isSubsequenceOf`"),
+    ("genericTake", "the length-polymorphic variants are `L.genericTake`/`L.genericDrop`; `genericLength` is in the shadow"),
+    // Text — the `Data.Text` (`T.`) surface.
+    ("pack", "`pack` is in the shadow (polymorphic `Pack`); `T.pack` is the same function"),
+    // Rendering / parsing — the Text-first shadow spellings.
+    ("showsPrec", "`show :: a -> Text` is the shadow's renderer"),
+    ("shows", "`show :: a -> Text` is the shadow's renderer"),
+    ("showString", "`show :: a -> Text` is the shadow's renderer"),
+    ("reads", "`read` is in the shadow; `parseInt`/`parseIntM`/`parseDouble`/`parseDoubleM` are the Text-first parsers"),
+    ("readsPrec", "`read` is in the shadow; `parseIntM`/`parseDoubleM` are the Text-first parsers"),
+    // IO console/stdin — modelled as effects.
+    ("print", "console output is an effect — `say`/`putStrLn :: Text -> M ()` (Console)"),
+    ("getLine", "stdin arrives on the `input` payload lane; `ask` suspends for a caller reply"),
+    ("interact", "read stdin from the `input` payload lane; write via the Console verbs"),
+    // Numeric — reach base under `P.`.
+    ("gcd", "`P.gcd` (base, polymorphic over Integral)"),
+    ("lcm", "`P.lcm` (base, polymorphic over Integral)"),
+    ("properFraction", "`P.properFraction`; `truncate`/`round`/`ceiling`/`floor` are in the shadow"),
+    // Ranges / abort — shaped by eager evaluation.
+    ("enumFrom", "`enumFromTo lo hi` builds a finite `[Int]`; `[lo..hi]` desugars to it"),
+    ("enumFromThen", "`enumFromTo lo hi` builds a finite `[Int]`; `[lo..hi]` desugars to it"),
+    ("errorWithoutStackTrace", "`error :: Text -> a` is the shadow's abort"),
+];
+
+/// The reach-path fact for a canonical name that lives under a qualifier, or
+/// `None` for a name that is either in the unqualified shadow or unknown here.
+pub(crate) fn exclusion_reason(name: &str) -> Option<&'static str> {
+    QUALIFIED_NAMES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, reason)| *reason)
+}
+
+/// Parse the `Tidepool.Prelude` export list into its unqualified shadow names
+/// plus the qualified (`Map.`/`Set.`) and wholesale (`module …`) re-exports.
+/// The header runs `module Tidepool.Prelude ( … ) where`; entries are
+/// comma-separated and may carry `-- …` comments, `Type(..)` method bundles,
+/// and `(op)` operator sections.
+fn prelude_exports(src: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let after = src
+        .split_once("module Tidepool.Prelude")
+        .map_or("", |(_, r)| r);
+    let list = after.split_once(") where").map_or(after, |(l, _)| l);
+    // Strip per-line `-- …` comments, then join.
+    let mut cleaned = String::new();
+    for line in list.lines() {
+        cleaned.push_str(line.split_once("--").map_or(line, |(c, _)| c));
+        cleaned.push(' ');
+    }
+    let cleaned = cleaned.trim_start().strip_prefix('(').unwrap_or(&cleaned);
+    // Split on depth-0 commas so `Type(a, b)` stays one entry.
+    let mut entries: Vec<String> = Vec::new();
+    let (mut depth, mut cur) = (0i32, String::new());
+    for ch in cleaned.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            ',' if depth == 0 => entries.push(std::mem::take(&mut cur)),
+            _ => cur.push(ch),
+        }
+    }
+    entries.push(cur);
+
+    let (mut unqualified, mut qualified, mut wholesale) = (Vec::new(), Vec::new(), Vec::new());
+    for e in entries {
+        let e = e.split_whitespace().collect::<Vec<_>>().join(" ");
+        if e.is_empty() {
+            continue;
+        }
+        if let Some(m) = e.strip_prefix("module ") {
+            wholesale.push(m.to_string());
+        } else if is_module_qualified(&e) {
+            qualified.push(e);
+        } else {
+            unqualified.push(e);
+        }
+    }
+    unqualified.sort();
+    unqualified.dedup();
+    qualified.sort();
+    (unqualified, qualified, wholesale)
+}
+
+/// True for a `Module.name` export entry (an identifier run followed directly
+/// by `.`), distinguishing `Map.fromList` from a `Type(..)` method bundle.
+fn is_module_qualified(e: &str) -> bool {
+    let head: String = e
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    !head.is_empty() && e[head.len()..].starts_with('.')
+}
+
+fn capabilities_md(ctx: &ResourceCtx) -> String {
+    let mut s = String::from(
+        "# Tidepool capabilities — the Prelude shadow surface\n\n\
+         `import Tidepool.Prelude hiding (error)` is the unqualified surface every eval and \
+         session sees. The names below are in scope without a qualifier.\n\n",
+    );
+    let prelude_src = stdlib_source(ctx, "Tidepool.Prelude");
+    match prelude_src.as_deref().map(prelude_exports) {
+        Some((unqualified, qualified, wholesale)) if !unqualified.is_empty() => {
+            s.push_str("## In scope unqualified\n```haskell\n");
+            s.push_str(&unqualified.join(", "));
+            s.push_str("\n```\n\n");
+            if !wholesale.is_empty() {
+                s.push_str(&format!(
+                    "Re-exported wholesale: {} (every name from these modules is unqualified).\n\n",
+                    wholesale.join(", ")
+                ));
+            }
+            if !qualified.is_empty() {
+                s.push_str("Re-exported under a qualifier (call as written):\n```haskell\n");
+                s.push_str(&qualified.join(", "));
+                s.push_str("\n```\n\n");
+            }
+        }
+        _ => {
+            s.push_str(
+                "(The live export list renders from the vendored `Tidepool.Prelude` source.)\n\n",
+            );
+        }
+    }
+    s.push_str(
+        "The T. (Data.Text), L. (Data.List), Map. (Data.Map.Strict), MM. (Data.Map.Merge.Strict), \
+         Set. (Data.Set), KM. (Tidepool.Aeson.KeyMap), TF. (Tidepool.TextFormat), Tab. \
+         (Tidepool.Table), and P. (base Prelude) qualifiers are always in scope.\n\n",
+    );
+    s.push_str(
+        "## Names that live under a qualifier\n\
+         Canonical `Prelude` / `Data.List` names reached through a qualifier rather than the \
+         unqualified shadow:\n\n",
+    );
+    for (name, reason) in QUALIFIED_NAMES {
+        s.push_str(&format!("- `{name}` — {reason}\n"));
     }
     s
 }
@@ -477,5 +650,62 @@ mod tests {
         // Empty / unknown fall back to the index.
         assert!(help(&ctx, "").contains("help topics"));
         assert!(help(&ctx, "nope").contains("Unknown help topic"));
+    }
+
+    #[test]
+    fn capabilities_serves_shadow_surface_and_reasoned_exclusions() {
+        let decls = crate::standard_decls();
+        let ctx = ResourceCtx {
+            effects: &decls,
+            lib_dirs: &[],
+            patterns_path: None,
+            stdlib_dir: None,
+        };
+        let body = read(&ctx, "tidepool://capabilities").expect("capabilities resource resolves");
+        // The reasoned-exclusion table renders with each name and its reach-path.
+        assert!(
+            body.text.contains("`subsequences`"),
+            "lists an excluded name: {}",
+            body.text
+        );
+        assert!(
+            body.text.contains("Data.List"),
+            "reach-path names the qualifier: {}",
+            body.text
+        );
+        // help topic resolves too.
+        assert!(help(&ctx, "capabilities").contains("shadow surface"));
+    }
+
+    #[test]
+    fn exclusion_reason_hits_known_names_and_misses_shadowed_ones() {
+        assert!(exclusion_reason("subsequences").is_some());
+        assert!(exclusion_reason("gcd").is_some());
+        // A name that IS in the unqualified shadow has no reach-path.
+        assert!(exclusion_reason("sortBy").is_none());
+        assert!(exclusion_reason("definitely_not_a_prelude_name").is_none());
+    }
+
+    #[test]
+    fn prelude_exports_parses_a_header_export_list() {
+        let src = "\
+module Tidepool.Prelude
+  ( -- * Types
+    Int, Bool(..), Maybe(..)
+  , map, filter  -- a trailing comment
+  , (<$>)
+  , Map.fromList, Map.toList
+  , module Control.Lens
+  ) where
+
+import Prelude
+";
+        let (unqualified, qualified, wholesale) = super::prelude_exports(src);
+        assert!(unqualified.contains(&"map".to_string()));
+        assert!(unqualified.contains(&"filter".to_string()));
+        assert!(unqualified.contains(&"Bool(..)".to_string()));
+        assert!(unqualified.contains(&"(<$>)".to_string()));
+        assert!(qualified.iter().any(|q| q == "Map.fromList"));
+        assert!(wholesale.iter().any(|w| w == "Control.Lens"));
     }
 }

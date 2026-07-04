@@ -1095,11 +1095,11 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          (omit `session` to use `\"default\"`). \
          An in-turn `ask` suspends with a continuation_id; answer it with session_resume or \
          drop it with session_abort.\n\n\
-         RECORDS — effect results are named records, not tuples. Use record-dot syntax: \
-         `run cmd` → `Proc` (access `p.stdout`, `p.exitCode`, `p.stderr`; `ok p` = zero exit); \
-         `grepGlob`/`searchFiles` → `[Hit]` (access `h.path`, `h.line`, `h.text`); \
-         `readGlob` → `[Doc]` (access `d.path`, `d.body`). \
-         Bare selectors like `stdout p` are ambiguous — always use dot syntax.",
+         RECORDS — effect results are named records; read fields with record-dot syntax. \
+         `run cmd` → `Either <EffectError> Proc` — bind the `Right` (`Right p <- run cmd`) and \
+         read `p.stdout`, `p.exitCode`, `p.stderr` (`ok p` = zero exit); \
+         `grepGlob`/`searchFiles` → `[Hit]` (`h.path`, `h.line`, `h.text`); \
+         `readGlob` → `[Doc]` (`d.path`, `d.body`).",
     )
 }
 

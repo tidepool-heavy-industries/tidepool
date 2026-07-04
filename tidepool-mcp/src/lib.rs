@@ -638,6 +638,58 @@ mod tests {
         assert!(!desc.contains("Built-in helpers"));
     }
 
+    /// The assembled eval description attests to the idealized surface: no
+    /// severity-halo vocabulary, no "JIT-safe" unsafe-zone implication, no
+    /// closed-world "prefer the unqualified" framing. A regression that
+    /// reintroduces a caution reads here as a failed assertion, not a review nit.
+    #[test]
+    fn eval_description_carries_no_caution_vocabulary() {
+        let desc = build_eval_tool_description(&standard_decls());
+        let lower = desc.to_lowercase();
+        for banned in [
+            "jit-safe",
+            "prefer the unqualified",
+            "do not",
+            "with care",
+            "use with caution",
+            "footgun",
+            "unsafe",
+        ] {
+            assert!(
+                !lower.contains(banned),
+                "assembled eval description must not contain caution vocabulary {banned:?}:\n{desc}"
+            );
+        }
+    }
+
+    /// The examples ARE the style guide: the primary `input` example is a typed
+    /// decode, and the effect-failure example binds the `Right`. If the modelled
+    /// idiom moves, these break — that is the point.
+    #[test]
+    fn eval_description_models_the_idealized_idiom() {
+        let desc = build_eval_tool_description(&standard_decls());
+        assert!(
+            desc.contains("deriving (Generic, FromJSON)"),
+            "primary input example must be a typed decode:\n{desc}"
+        );
+        assert!(
+            desc.contains("Right p <- run"),
+            "must model Either-returning effects:\n{desc}"
+        );
+        assert!(
+            desc.contains("Left (FsNotFound _)"),
+            "must model matching a specific Left:\n{desc}"
+        );
+        assert!(
+            desc.contains("recommended surface"),
+            "Prelude shadows get a positive attestation, not a JIT-safety hedge:\n{desc}"
+        );
+        assert!(
+            desc.contains("tidepool://capabilities"),
+            "the qualified-namespace list points at the live capabilities index:\n{desc}"
+        );
+    }
+
     #[test]
     fn test_extract_sigs() {
         let src = "\

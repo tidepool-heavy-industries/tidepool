@@ -479,7 +479,42 @@ pub(crate) fn format_error_with_source(
 Add a type annotation to your expression, e.g. `pure (x :: Int)` or `pure (x :: Text)`.",
         );
     }
+    // A `not in scope` on a canonical Prelude/Data.List name that lives under a
+    // qualifier carries its reach-path (see `tidepool://capabilities`).
+    for hint in scope_reach_hints(error) {
+        out.push_str("\n\n**Hint:** ");
+        out.push_str(&hint);
+    }
     out
+}
+
+/// For each `… not in scope: <name>` in a GHC error whose `<name>` is a
+/// canonical Prelude/Data.List name reached through a qualifier, the reach-path
+/// fact ([`crate::resources::exclusion_reason`]). Empty when nothing matches.
+fn scope_reach_hints(error: &str) -> Vec<String> {
+    const NEEDLE: &str = "not in scope:";
+    let lower = error.to_ascii_lowercase();
+    let mut seen = std::collections::HashSet::new();
+    let mut hints = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find(NEEDLE) {
+        let start = from + rel + NEEDLE.len();
+        from = start;
+        // The name is the next identifier token, in the error's original case.
+        let name: String = error[start..]
+            .trim_start()
+            .trim_start_matches('`')
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '\'')
+            .collect();
+        if name.is_empty() || !seen.insert(name.clone()) {
+            continue;
+        }
+        if let Some(reason) = crate::resources::exclusion_reason(&name) {
+            hints.push(format!("`{name}` lives under a qualifier — {reason}."));
+        }
+    }
+    hints
 }
 
 /// Returns true when the GHC error is an ambiguous-type-variable failure
