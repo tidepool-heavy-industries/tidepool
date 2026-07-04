@@ -42,11 +42,15 @@ fn repro_lit_double_case() {
     let nonce = std::env::var("NONCE").unwrap_or_default();
     let code =
         format!("Right v <- httpGet \"x\"\n-- nonce {nonce}\npure (maybe (-1) round (v ^? _Number))");
+    // No extra import: the body (`httpGet` + `round`) is self-contained. The
+    // former `"Probe"` import arg was spurious — the Probe fixture dir was never
+    // on this harness's include path, so it only produced "Could not find module
+    // 'Probe'" (a pre-#335 harness bug, orthogonal to the typed-failure edit).
     let src = tidepool_mcp::template_haskell(
         &pre,
         &stack,
         &tidepool_mcp::wrap_do(&code),
-        "Probe",
+        "",
         "",
         None,
         None,
