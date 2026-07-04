@@ -1,0 +1,57 @@
+# cargo-nextest config. See tidepool CLAUDE.md "Build & Test" for the invocation
+# (TIDEPOOL_EXTRACT env, etc). Replaces the old blanket `-- --test-threads=1`
+# discipline: nextest runs every test in its OWN process, which structurally
+# de-races the process-global JIT state (signal handlers, GC, fork-safety) that
+# --test-threads=1 used to serialize against. See the hazard-audit note below.
+#
+# HAZARD AUDIT (nextest-adoption branch, see PR/branch notes for full detail):
+# every historical #[serial] annotation and the workspace-wide --test-threads=1
+# habit exist to prevent *other test THREADS in the same process* from racing
+# process-global JIT state:
+#   - tidepool-codegen/tests/signal_safety.rs: global JMP_BUF for sigsetjmp/
+#     siglongjmp signal protection.
+#   - tidepool-codegen/tests/proptest_host_arrays.rs (B3 fork harness): glibc
+#     malloc-lock safety in a libc::fork() child — unsafe if another test
+#     THREAD in the same process holds the malloc lock at fork time.
+#   - tidepool-codegen/src/old_space.rs, scaffold.rs, proptest_ghc_idioms.rs,
+#     proptest_gc_recursion.rs, proptest_boundary_roundtrip.rs,
+#     proptest_primops_differential.rs, proptest_case_dispatch.rs,
+#     converge_proof.rs: same class (JIT effect machine + GC state used to be
+#     reached via thread_local!/process-global statics).
+# None of these hazards are cross-PROCESS: no fixed port, fixed socket, or
+# shared file is involved (confirmed for tidepool-lsp's daemon socket too —
+# no `#[test]` in that crate ever starts the daemon, so its fixed
+# `<root>/.tidepool/lsp.sock` default is never exercised by the test suite).
+# The on-disk compiled-artifact cache (tidepool-runtime/src/cache.rs) IS shared
+# across concurrent processes, but is safe by construction: cache_store writes
+# via `tempfile::NamedTempFile::persist` (atomic rename) and writes the `.ok`
+# sentinel LAST; cache_load checks the sentinel before reading, so a reader
+# racing a concurrent writer sees a clean miss, never a torn file.
+# Empirically verified: `cargo nextest run -p tidepool-codegen --lib --test
+# signal_safety --test proptest_host_arrays --test scaffold --test-threads 8`
+# and again with `--test-threads 1` — no cross-test races surfaced in either
+# mode (two `#[serial]` scaffold.rs tests do fail, identically, under plain
+# `cargo test` too — a pre-existing bug from the MachineState migration,
+# unrelated to nextest; see branch report).
+#
+# Net result: no nextest `test-group` overrides are needed for correctness.
+# The `#[serial]`/`serial_test` annotations left in test sources are now
+# vestigial (serial_test's default lock is in-process only — this workspace
+# does not enable its `file_locks` feature — so it provided no cross-process
+# guarantee anyway) but harmless; they were left in place since editing test
+# sources is out of scope for this test-infra-only change.
+
+[profile.default]
+# Global test timeout: warn once a test has run past `period`, hard-kill it
+# after `terminate-after` further periods. Empirically, 15 * 60s = 900s is NOT
+# enough headroom: a full-workspace run under real machine contention (a
+# sibling agent's cargo test sharing the same cores) hit the 900s hard-kill on
+# `tidepool-runtime::proptest_lazy_consumption::lazy_consumption_property_suite`
+# — a test that is *known* to take up to ~900s on a quiet machine per its own
+# docs, so contention alone pushed it over. 30 * 60s = 1800s gives enough
+# margin for the known-heavy differential/proptest suites
+# (proptest_lazy_consumption, proptest_haskell_pipeline, the codegen
+# differential corpora, tidepool-testing::haskell_verified) even under
+# moderate contention; ordinary tests (the overwhelming majority, sub-second)
+# are unaffected by a larger ceiling.
+slow-timeout = { period = "60s", terminate-after = 30 }
