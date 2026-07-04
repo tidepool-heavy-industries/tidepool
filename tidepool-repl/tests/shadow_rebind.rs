@@ -1,7 +1,7 @@
 //! Wave 3b hardening — DIMENSION: shadowing & generations.
 //!
 //! Adversarial integration tests driving the REAL `tidepool-repl` entry point
-//! (session_open / session_run / session_close — the harness `def`/`eval`/`cmd`
+//! (session_run — the harness `def`/`eval`/`cmd`
 //! helpers are thin 1-item `session_run` wrappers) over multiple turns.
 //! Focus: what happens when a NAME is rebound (value or function) or a TYPE is
 //! redefined across generations.
@@ -36,7 +36,6 @@ async fn rebind_value_name_newest_wins() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.eval("x <- pure (1 :: Int)")
         .await
@@ -54,7 +53,6 @@ async fn rebind_value_name_newest_wins() {
         "rebind value: expected 3 (newest x=2, +1), got: {out}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 2 — Rebind a name at a DIFFERENT type; newest type must win.
@@ -71,7 +69,6 @@ async fn rebind_value_different_type() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.eval("x <- pure (1 :: Int)")
         .await
@@ -89,7 +86,6 @@ async fn rebind_value_different_type() {
         "rebind type: expected 2 (T.length \"hi\"), got: {out}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CONTROL for CASE 2 — bind a Text value as the FIRST/ONLY binding (no rebind).
@@ -104,7 +100,6 @@ async fn first_bind_text_no_rebind() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let bind = repl.eval("s <- pure (T.pack \"hi\")").await;
     // BUG (if this errors with the same TypeMetadata yield): binding a plain Text
@@ -119,7 +114,6 @@ async fn first_bind_text_no_rebind() {
         "control text bind: expected 2 (T.length \"hi\"), got: {out}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// DIAGNOSTIC for CASE 2 — bind a Text under a DIFFERENT name while an Int
@@ -136,7 +130,6 @@ async fn different_name_text_after_int() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.eval("x <- pure (1 :: Int)")
         .await
@@ -153,7 +146,6 @@ async fn different_name_text_after_int() {
         "diagnostic text bind: expected 2, got: {out}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 3 — Redefine a FUNCTION (Lane A latest-wins).
@@ -169,7 +161,6 @@ async fn redefine_function_latest_wins() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.def("g x = x + (1 :: Int)").await.expect_ok("def g v1");
     let out = repl.eval_ok("pure (g 10)").await;
@@ -184,7 +175,6 @@ async fn redefine_function_latest_wins() {
         "g v2: expected 110 (latest def wins), got: {out2}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 4 — Redefine a TYPE: the honest CURRENT CONTRACT (GHCi-correct behavior).
@@ -225,7 +215,6 @@ async fn redefine_type_old_binding_orphaned_gracefully() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.def("data Color = Red | Green")
         .await
@@ -267,7 +256,6 @@ async fn redefine_type_old_binding_orphaned_gracefully() {
         survive.text
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// CASE 5 — `:bindings` after a rebind lists the name exactly ONCE (newest).
@@ -281,7 +269,6 @@ async fn bindings_after_rebind_lists_once() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.eval("x <- pure (1 :: Int)")
         .await
@@ -298,5 +285,4 @@ async fn bindings_after_rebind_lists_once() {
         ":bindings should list `x` exactly once (newest), got {occurrences}: {out}"
     );
 
-    repl.close().await.expect_ok("close");
 }

@@ -53,16 +53,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let project_root = tidepool_runtime::paths::find_project_root(&cwd);
     let startup = main_setup::build(cwd, project_root)?;
 
-    // Per-session builder: each session_open gets its own KvHandler backed by a
-    // session-scoped file so kvKeys/kvGet/kvSet in session X cannot see session Y's keys.
+    // Session builder: invoked per session open (auto-open / reset) to build the
+    // effect stack. The single implicit session's KV is backed by `kv.json` in
+    // the project `.tidepool/` (or the cache dir), persisting across resets.
     let cwd_b = startup.cwd.clone();
     let llm_b = startup.llm_model.clone();
-    let tidepool_dir_b = startup.tidepool_dir.clone();
-    let builder = move |session_name: &str| {
-        let kv_path = main_setup::kv_path_for_session(&tidepool_dir_b, session_name);
+    let kv_path = startup.tidepool_dir.join("kv.json");
+    let builder = move || {
         let hcfg = HandlerConfig {
             cwd: cwd_b.clone(),
-            kv_path,
+            kv_path: kv_path.clone(),
             llm_model: llm_b.clone(),
         };
         build_base_stack(&hcfg)

@@ -33,7 +33,6 @@ async fn info_resolves_stdlib_proc() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl.cmd(":i Proc").await;
     let v = parse_meta(t.expect_ok(":i Proc"));
@@ -49,7 +48,6 @@ async fn info_resolves_stdlib_proc() {
         "file points at the defining source: {v}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 // ---------------------------------------------------------------------------
@@ -61,7 +59,6 @@ async fn info_resolves_stdlib_hit() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl.cmd(":i Hit").await;
     let v = parse_meta(t.expect_ok(":i Hit"));
@@ -71,7 +68,6 @@ async fn info_resolves_stdlib_hit() {
         assert!(shape.contains(field), "shape must carry `{field}`: {shape}");
     }
 
-    repl.close().await.expect_ok("close");
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +80,6 @@ async fn info_constructor_only_hit() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl.cmd(":i UpdateNoChange").await;
     let v = parse_meta(t.expect_ok(":i UpdateNoChange"));
@@ -96,7 +91,6 @@ async fn info_constructor_only_hit() {
         "shape is the enclosing decl: {shape}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +104,6 @@ async fn session_decl_shadows_stdlib() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // Before the session decl, Doc resolves from the stdlib.
     let t = repl.cmd(":i Doc").await;
@@ -126,7 +119,6 @@ async fn session_decl_shadows_stdlib() {
         "shape is the session declaration: {v}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +131,6 @@ async fn info_miss_carries_hint() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let t = repl.cmd(":i Nonexistent").await;
     let v = parse_meta(&t.text);
@@ -151,5 +142,4 @@ async fn info_miss_carries_hint() {
         "hint names the searched lanes and the :t affordance: {hint}"
     );
 
-    repl.close().await.expect_ok("close");
 }

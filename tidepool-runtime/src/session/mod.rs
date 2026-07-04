@@ -245,6 +245,14 @@ impl SessionLib {
             .collect()
     }
 
+    /// The currently in-scope declaration heads paired with the generation of
+    /// their latest defining turn — the decl-plane half of the live
+    /// `tidepool://session/bindings` resource snapshot. Latest-wins across turns.
+    #[must_use]
+    pub fn current_decl_heads(&self) -> Vec<(String, u64)> {
+        self.log.current_heads()
+    }
+
     /// A cache salt unique to `(session, generation)`. Threaded into
     /// [`crate::compile_haskell_salted`] so two sessions' identical-text modules
     /// don't collide and a generation bump invalidates correctly (plan §3 R6).

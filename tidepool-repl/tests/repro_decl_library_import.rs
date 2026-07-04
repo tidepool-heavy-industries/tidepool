@@ -106,10 +106,6 @@ async fn decl_resolves_library_reexported_type_without_explicit_import() {
         return;
     };
 
-    server
-        .dispatch_tool("session_open", serde_json::Map::new())
-        .await
-        .expect("open transport ok");
 
     // `EditOutcome` is defined in `.tidepool/lib/Edit.hs` and re-exported by
     // `Library` — NOT imported explicitly here. Before the fix this failed
@@ -132,10 +128,6 @@ async fn decl_resolves_library_reexported_type_without_explicit_import() {
          import: {text}"
     );
 
-    server
-        .dispatch_tool("session_close", serde_json::Map::new())
-        .await
-        .expect("close transport ok");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -150,10 +142,6 @@ async fn decl_defining_a_library_reexported_name_does_not_collide() {
         return;
     };
 
-    server
-        .dispatch_tool("session_open", serde_json::Map::new())
-        .await
-        .expect("open transport ok");
 
     // `Rose` is defined in `.tidepool/lib/Schemes.hs` (`data Rose a = Rose a
     // [Rose a]`) and re-exported by `Library`. Redefining it here would be an
@@ -180,8 +168,4 @@ async fn decl_defining_a_library_reexported_name_does_not_collide() {
         "decl shadowing Library's Rose should compile cleanly: {text}"
     );
 
-    server
-        .dispatch_tool("session_close", serde_json::Map::new())
-        .await
-        .expect("close transport ok");
 }

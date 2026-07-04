@@ -13,7 +13,7 @@
 //! not be able to TELL which happened from observable behavior.
 //!
 //! Every test drives the REAL production entry point through the shared
-//! `common` harness (`Repl::new` / `open_ok` / `eval` / `run` / `close`), each
+//! `common` harness (`Repl::new` / `eval` / `run`), each
 //! `repl.eval(..)` being one `session_run`. Cross-CALL persistence facets use
 //! SEPARATE `eval` calls (one `session_run` each), never a single multi-item
 //! block. Facets that are KNOWN to leak the plane are encoded as the test that
@@ -134,7 +134,6 @@ async fn cross_call_scoping_both_planes_persist() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // Call 1: effectful bind (materializes a heap value, monomorphic).
     repl.eval("n <- pure (5 :: Int)")
@@ -156,7 +155,6 @@ async fn cross_call_scoping_both_planes_persist() {
         "n + m + 1 should be 16 (both planes visible in a later call), got: {b}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 // ===========================================================================
@@ -172,7 +170,6 @@ async fn input_payload_lane_in_scope() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // `input :: Aeson.Value` — a JSON number 7 renders back as 7.
     let out = eval_with_input(&repl, "pure input", serde_json::json!(7)).await;
@@ -182,7 +179,6 @@ async fn input_payload_lane_in_scope() {
         "input payload (7) should be in scope, got: {text}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// Regression guard (input-lane fix 843bd05): a user binding literally NAMED
@@ -198,7 +194,6 @@ async fn user_binding_named_input_not_confused_with_lane() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // No `input` payload passed on these calls — the only `input` in scope is
     // the user's own binding.
@@ -211,7 +206,6 @@ async fn user_binding_named_input_not_confused_with_lane() {
         "user `input` binding used (input + 1 = 8), not the payload lane, got: {out}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 // ===========================================================================
@@ -229,7 +223,6 @@ async fn all_statement_forms_consecutive() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let out = repl
         .run(&[
@@ -245,7 +238,6 @@ async fn all_statement_forms_consecutive() {
         "trailing expression populates value (g3 z3 + y3 = 16), got: {text}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 // ===========================================================================
@@ -263,7 +255,6 @@ async fn per_item_failure_granularity_and_clean_diag() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     let out = repl
         .run(&[
@@ -322,7 +313,6 @@ async fn per_item_failure_granularity_and_clean_diag() {
         out.text
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 // ===========================================================================
@@ -341,7 +331,6 @@ async fn plane_opacity_binds_interchangeable() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // Pure bind (decl plane) and effectful bind (materialize), same type.
     repl.eval("let purej = (5 :: Int)")
@@ -361,7 +350,6 @@ async fn plane_opacity_binds_interchangeable() {
     let c = repl.eval_ok("pure (purej + effk)").await;
     assert!(c.contains("10"), "purej + effk = 10, got: {c}");
 
-    repl.close().await.expect_ok("close");
 }
 
 /// OPACITY LEAK (ledger #36) — decl-plane cannot intentionally shadow a Prelude
@@ -379,7 +367,6 @@ async fn plane_opacity_pure_bind_shadows_prelude_name() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     repl.eval("let lookup = (42 :: Int)")
         .await
@@ -392,7 +379,6 @@ async fn plane_opacity_pure_bind_shadows_prelude_name() {
         "pure bind must shadow Prelude.lookup (42 + 1 = 43), got: {used}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// OPACITY LEAK (ledger #28) — a fully-open `HasField`-constrained record-dot
@@ -410,7 +396,6 @@ async fn plane_opacity_open_hasfield_helper_binds_cold() {
         return;
     }
     let repl = Repl::new();
-    repl.open_ok().await;
 
     // Fully open: `HasField "path" r a` with both r and a free (no `T.toUpper`
     // to pin the result type). Must bind as a generalized decl, not materialize.
@@ -421,7 +406,6 @@ async fn plane_opacity_open_hasfield_helper_binds_cold() {
         "open record-dot helper should show its constrained type, got: {text}"
     );
 
-    repl.close().await.expect_ok("close");
 }
 
 /// OPACITY LEAK (ledger #31) — Record field naming is inconsistent across effect
