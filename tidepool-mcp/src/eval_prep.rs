@@ -4,15 +4,21 @@
 //!
 //! Everything here is a side-effect-free function of its inputs: effect-stack
 //! and preamble string builders, the `code -> module` templating, the
-//! quasi-quoter token probe, and the eval-failure taxonomy. They are
+//! quasi-quoter token probe, and error-payload rendering. They are
 //! re-exported from `lib.rs` via `pub use eval_prep::*;`, so existing callers
 //! (`tidepool_mcp::template_haskell`, `standard_decls`, ...) are unaffected.
 //!
 //! Two intentionally-excluded neighbours stay in `lib.rs`: `build_preamble`
 //! (being edited in parallel) and `ensure_effects_module` (it writes a temp
 //! dir — IO, not pure — and only wraps the pure `effects_module_source` here).
+//!
+//! Failure CLASSIFICATION (mapping an error to its class/phase) is NOT here — it
+//! is the single classifier in `tidepool_runtime::failclass`, shared by both
+//! servers. `format_error_with_source` only RENDERS an already-classified
+//! `(class, phase)` into the error payload.
 
 use crate::EffectDecl;
+use tidepool_runtime::{FailureClass, Phase};
 
 /// THE single ordered source of the base effect stack (Ask excluded here — it
 /// is interposed separately by each server's `AskDispatcher`). Each row pairs
@@ -359,84 +365,9 @@ fn json_to_haskell(val: &serde_json::Value) -> String {
     }
 }
 
-/// Coarse classification of an eval failure, surfaced as a stable,
-/// machine-greppable tag (`**failure-class:** `<tag>``) on every error payload.
-///
-/// Doubles as a loud-vs-silent health signal: `signal-crash` marks an actual
-/// compiler bug — a caught JIT trap/signal or an eval thread that died with the
-/// channel — and must be loud; `haskell-error` is the user's program failing on
-/// purpose. The four together let a caller (and later, aggregation) separate
-/// benign user errors from codegen bugs without parsing free-form prose.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FailureClass {
-    /// A clean Haskell `error`/`undefined`, or any other non-crash JIT yield
-    /// carrying a message (unhandled effect, unsupported feature). The program
-    /// failed deterministically — not a codegen bug.
-    HaskellError,
-    /// Resource exhaustion: stack overflow, heap overflow, unbounded recursion,
-    /// or a self-forcing thunk (blackhole). A user resource problem, not a bug.
-    RuntimeYield,
-    /// A fatal JIT signal or trap (SIGILL/SIGSEGV/SIGBUS, case trap, bad
-    /// pointer, null/non-closure application) — whether caught and reported as
-    /// an error string, or fatal enough to take the eval thread down with it
-    /// (the dead-channel path). These are compiler bugs.
-    SignalCrash,
-    /// The eval exceeded its wall-clock budget without reaching a yield point.
-    Timeout,
-}
-
-impl FailureClass {
-    /// Stable lowercase tag, safe to grep and count. Never reword these — they
-    /// are the health-signal vocabulary.
-    #[must_use]
-    pub fn tag(self) -> &'static str {
-        match self {
-            FailureClass::HaskellError => "haskell-error",
-            FailureClass::RuntimeYield => "runtime-yield",
-            FailureClass::SignalCrash => "signal-crash",
-            FailureClass::Timeout => "timeout",
-        }
-    }
-
-    /// Classify the text of a `SessionMessage::Error` payload. The dead-thread
-    /// (`None`) and timeout call sites classify themselves; this only splits the
-    /// in-band error channel into haskell-error / runtime-yield / (caught)
-    /// signal-crash.
-    ///
-    /// Order matters: a case trap that also blew the stack reads as the signal
-    /// crash it fundamentally is, so signal markers are checked first.
-    #[must_use]
-    pub fn classify_error_text(error: &str) -> FailureClass {
-        // Markers from tidepool-codegen `YieldType` Display impls + the
-        // always-on `[CASE TRAP]`/bad-pointer breadcrumbs (all matched
-        // lowercase).
-        const SIGNAL_MARKERS: &[&str] = &[
-            "jit signal:",
-            "case trap",
-            "bad pointer",
-            "null function pointer",
-            "application of non-closure",
-            "forced type metadata",
-        ];
-        const YIELD_MARKERS: &[&str] = &[
-            "stack overflow",
-            "heap overflow",
-            "unbounded recursion",
-            "blackhole",
-        ];
-        let lower = error.to_ascii_lowercase();
-        if SIGNAL_MARKERS.iter().any(|m| lower.contains(m)) {
-            FailureClass::SignalCrash
-        } else if YIELD_MARKERS.iter().any(|m| lower.contains(m)) {
-            FailureClass::RuntimeYield
-        } else {
-            FailureClass::HaskellError
-        }
-    }
-}
-
 pub(crate) fn format_error_with_source(
     class: FailureClass,
+    phase: Phase,
     title: &str,
     error: &str,
     source: &str,
@@ -464,9 +395,10 @@ pub(crate) fn format_error_with_source(
     let deduped = tidepool_runtime::session::errmap::dedupe_diagnostics(error);
     let remapped = remap_expr_lines(&deduped, offset);
     let mut out = format!(
-        "## {}\n**failure-class:** `{}`\n\n{}\n\n## User Code\n```haskell\n{}\n```",
+        "## {}\n**failure-class:** `{}`  **phase:** `{}`\n\n{}\n\n## User Code\n```haskell\n{}\n```",
         title,
         class.tag(),
+        phase.tag(),
         remapped,
         user_section
     );
@@ -560,29 +492,11 @@ mod tests {
     //
     // These functions were previously only reachable through the async server
     // and exercised by integration tests. Pulled into a sibling module, they
-    // can be hit directly: determinism, structural invariants, and the
-    // failure-class ordering rule.
+    // can be hit directly: determinism and structural invariants. Failure
+    // classification moved to `tidepool_runtime::failclass` (tested there).
 
     /// The four quasi-quoter open-tokens `uses_qq` must recognize.
     const QQ_TOKENS: &[&str] = &["[fmt|", "[j|", "[patch|", "[uri|"];
-
-    /// Signal/yield marker pools mirroring the private `const`s inside
-    /// `classify_error_text` — kept here so the property checks the same
-    /// vocabulary the function uses.
-    const SIGNAL_MARKERS: &[&str] = &[
-        "jit signal:",
-        "case trap",
-        "bad pointer",
-        "null function pointer",
-        "application of non-closure",
-        "forced type metadata",
-    ];
-    const YIELD_MARKERS: &[&str] = &[
-        "stack overflow",
-        "heap overflow",
-        "unbounded recursion",
-        "blackhole",
-    ];
 
     proptest! {
         /// Any text containing a quoter open-token is detected as QQ, no matter
@@ -637,46 +551,6 @@ mod tests {
                 let expected = format!("  {orig}");
                 prop_assert_eq!(out, expected.as_str());
             }
-        }
-
-        /// A signal marker always wins, even when a resource-yield marker
-        /// co-occurs AND appears first. Digit-only filler introduces no marker.
-        #[test]
-        fn prop_classify_signal_beats_yield(
-            sig in 0usize..6,
-            yld in 0usize..4,
-            a in "[0-9]{0,10}",
-            b in "[0-9]{0,10}",
-            c in "[0-9]{0,10}",
-        ) {
-            let msg = format!("{a}{}{b}{}{c}", YIELD_MARKERS[yld], SIGNAL_MARKERS[sig]);
-            prop_assert_eq!(
-                FailureClass::classify_error_text(&msg),
-                FailureClass::SignalCrash
-            );
-        }
-
-        /// A yield marker with no signal marker is a runtime yield.
-        #[test]
-        fn prop_classify_yield_without_signal(
-            yld in 0usize..4,
-            a in "[0-9]{0,10}",
-            b in "[0-9]{0,10}",
-        ) {
-            let msg = format!("{a}{}{b}", YIELD_MARKERS[yld]);
-            prop_assert_eq!(
-                FailureClass::classify_error_text(&msg),
-                FailureClass::RuntimeYield
-            );
-        }
-
-        /// Digit-only noise carries no marker, so it is a plain Haskell error.
-        #[test]
-        fn prop_classify_plain_haskell_error(s in "[0-9]{0,20}") {
-            prop_assert_eq!(
-                FailureClass::classify_error_text(&s),
-                FailureClass::HaskellError
-            );
         }
 
         /// `build_effect_stack_type` names every decl, in a promoted list, and
@@ -801,10 +675,16 @@ mod tests {
         let title = "Error";
         let error = "Type mismatch";
         let source = "preamble stuff\n-- [user]\nhelper :: Int\nhelper = 7\n\n__user = let {\n __b =\npure helper\n } in __b\n\nresult :: Eff '[] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON _r)\n";
-        let formatted = format_error_with_source(FailureClass::HaskellError, title, error, source);
+        let formatted = format_error_with_source(
+            FailureClass::UserHaskell,
+            Phase::Compile,
+            title,
+            error,
+            source,
+        );
 
         assert!(formatted.contains("## Error"));
-        assert!(formatted.contains("**failure-class:** `haskell-error`"));
+        assert!(formatted.contains("**failure-class:** `user-haskell`  **phase:** `compile`"));
         assert!(formatted.contains("Type mismatch"));
         assert!(formatted.contains("## User Code"));
         // The user's code (after `__user =`) is echoed, so reported line numbers
@@ -820,8 +700,13 @@ mod tests {
 
     #[test]
     fn test_format_error_no_marker_shows_full() {
-        let formatted =
-            format_error_with_source(FailureClass::HaskellError, "Error", "oops", "full source");
+        let formatted = format_error_with_source(
+            FailureClass::UserHaskell,
+            Phase::Compile,
+            "Error",
+            "oops",
+            "full source",
+        );
         assert!(formatted.contains("full source"));
     }
 
@@ -830,7 +715,13 @@ mod tests {
         let title = "Compile Error";
         let error = "Variable not in scope: x";
         let source = "module Test where\n-- [user]\n__user = let {\n __b =\ngo x y z\n  where go a b c = print [a,b,c]\n } in __b\n\nresult :: Eff '[] Value\nresult = do\n  _r <- __user\n";
-        let formatted = format_error_with_source(FailureClass::HaskellError, title, error, source);
+        let formatted = format_error_with_source(
+            FailureClass::UserHaskell,
+            Phase::Compile,
+            title,
+            error,
+            source,
+        );
 
         assert!(formatted.contains("## Compile Error"));
         assert!(formatted.contains("Variable not in scope: x"));
@@ -844,7 +735,13 @@ mod tests {
 
     #[test]
     fn test_format_error_empty_source() {
-        let formatted = format_error_with_source(FailureClass::HaskellError, "Error", "msg", "");
+        let formatted = format_error_with_source(
+            FailureClass::UserHaskell,
+            Phase::Compile,
+            "Error",
+            "msg",
+            "",
+        );
         assert!(formatted.contains("## Error"));
         assert!(formatted.contains("msg"));
         assert!(formatted.contains("## User Code"));
@@ -857,8 +754,13 @@ mod tests {
         let ghc_error = "Expr.hs:3:3: error:\n    \
             • Ambiguous type variable 'a0' arising from a use of 'toJSON'\n    \
               prevents the constraint '(ToJSON a0)' from being solved.\n";
-        let formatted =
-            format_error_with_source(FailureClass::HaskellError, "Compile Error", ghc_error, "");
+        let formatted = format_error_with_source(
+            FailureClass::UserHaskell,
+            Phase::Compile,
+            "Compile Error",
+            ghc_error,
+            "",
+        );
         assert!(
             formatted.contains("Hint:"),
             "expected ambiguous-type hint in output"
@@ -871,8 +773,13 @@ mod tests {
         // An ambiguous type error NOT involving toJSON should not append the hint.
         let ghc_error = "Expr.hs:3:3: error:\n    \
             • Ambiguous type variable 'a0' arising from a use of 'show'\n";
-        let formatted =
-            format_error_with_source(FailureClass::HaskellError, "Compile Error", ghc_error, "");
+        let formatted = format_error_with_source(
+            FailureClass::UserHaskell,
+            Phase::Compile,
+            "Compile Error",
+            ghc_error,
+            "",
+        );
         assert!(
             !formatted.contains("Hint:"),
             "should not hint for non-toJSON ambiguous type"
@@ -920,59 +827,5 @@ mod tests {
         let src = template_haskell(&pre, "'[]", "pure (42 :: Int)", "", "", None, None);
         assert!(src.contains("toJSON _r"), "default must use toJSON _r");
         assert!(!src.contains("toWire _r"), "default must not use toWire _r");
-    }
-
-    #[test]
-    fn test_failure_class_classify() {
-        use FailureClass::{HaskellError, RuntimeYield, SignalCrash};
-        // Clean Haskell errors / unsupported features / unhandled effects.
-        assert_eq!(
-            FailureClass::classify_error_text("Haskell error: boom"),
-            HaskellError
-        );
-        assert_eq!(
-            FailureClass::classify_error_text("Unhandled effect at tag 3"),
-            HaskellError
-        );
-        // Resource exhaustion.
-        assert_eq!(
-            FailureClass::classify_error_text(
-                "stack overflow (likely infinite list or unbounded recursion)"
-            ),
-            RuntimeYield
-        );
-        assert_eq!(
-            FailureClass::classify_error_text("heap overflow (nursery exhausted after GC)"),
-            RuntimeYield
-        );
-        assert_eq!(
-            FailureClass::classify_error_text("blackhole detected (infinite loop)"),
-            RuntimeYield
-        );
-        // Caught JIT signals / traps are compiler bugs even on the in-band lane.
-        assert_eq!(
-            FailureClass::classify_error_text("JIT signal: SIGSEGV (segmentation fault)"),
-            SignalCrash
-        );
-        assert_eq!(
-            FailureClass::classify_error_text(
-                "case trap: scrutinee constructor not among case alternatives"
-            ),
-            SignalCrash
-        );
-        assert_eq!(
-            FailureClass::classify_error_text("bad pointer in JIT runtime"),
-            SignalCrash
-        );
-        // Signal markers win over co-occurring yield markers.
-        assert_eq!(
-            FailureClass::classify_error_text("case trap after stack overflow"),
-            SignalCrash
-        );
-        // Tags are the stable health-signal vocabulary.
-        assert_eq!(FailureClass::HaskellError.tag(), "haskell-error");
-        assert_eq!(FailureClass::RuntimeYield.tag(), "runtime-yield");
-        assert_eq!(FailureClass::SignalCrash.tag(), "signal-crash");
-        assert_eq!(FailureClass::Timeout.tag(), "timeout");
     }
 }

@@ -8,6 +8,9 @@ pub mod validate;
 
 mod eval_prep;
 pub use eval_prep::*;
+// The single failure taxonomy lives in tidepool-runtime; re-export it from the
+// server facade so callers keep reaching it as `tidepool_mcp::FailureClass`.
+pub use tidepool_runtime::{classify, FailureClass, FailureEnvelope, Phase};
 
 mod effect_decls;
 pub use effect_decls::*;
@@ -1408,6 +1411,8 @@ data Console a where
         sess_tx
             .send(SessionMessage::Error {
                 error: "ask aborted by caller: cannot answer".into(),
+                class: FailureClass::Runtime,
+                phase: Phase::Run,
             })
             .unwrap();
 
@@ -1443,6 +1448,8 @@ data Console a where
 
         tx.send(SessionMessage::Error {
             error: "oops".into(),
+            class: FailureClass::Runtime,
+            phase: Phase::Run,
         })
         .unwrap();
 
@@ -1465,14 +1472,15 @@ data Console a where
         };
         assert!(text.contains("## Error"));
         assert!(text.contains("oops"));
-        // A plain error message is a clean Haskell error.
-        assert!(text.contains("**failure-class:** `haskell-error`"));
+        // handle_session_result renders the class/phase the message carries
+        // (classification happens on the eval thread / in tidepool-runtime).
+        assert!(text.contains("**failure-class:** `runtime`  **phase:** `run`"));
         // Partial output is surfaced on the failure path.
         assert!(text.contains("printed before failure"));
     }
 
-    /// A `SessionMessage::Error` carrying a stack-overflow yield must tag
-    /// `runtime-yield`, not `haskell-error`.
+    /// The Error arm renders the stamped class/phase verbatim — a run-phase
+    /// runtime failure (e.g. a stack-overflow yield) surfaces as `runtime`/`run`.
     #[tokio::test]
     async fn test_handle_session_result_runtime_yield() {
         let server = create_mock_server();
@@ -1484,6 +1492,8 @@ data Console a where
 
         tx.send(SessionMessage::Error {
             error: "stack overflow (likely infinite list or unbounded recursion)".into(),
+            class: FailureClass::Runtime,
+            phase: Phase::Run,
         })
         .unwrap();
 
@@ -1504,12 +1514,12 @@ data Console a where
             RawContent::Text(t) => &t.text,
             _ => panic!("Expected text content"),
         };
-        assert!(text.contains("**failure-class:** `runtime-yield`"));
+        assert!(text.contains("**failure-class:** `runtime`  **phase:** `run`"));
         assert!(text.contains("loop iter 1"));
     }
 
-    /// A caught JIT signal arrives on the in-band error channel; it must still
-    /// tag `signal-crash` (compiler bug), not `haskell-error`.
+    /// A caught JIT signal is a run-phase runtime failure: the Error arm renders
+    /// the stamped `runtime`/`run` tag.
     #[tokio::test]
     async fn test_handle_session_result_caught_signal() {
         let server = create_mock_server();
@@ -1520,6 +1530,8 @@ data Console a where
 
         tx.send(SessionMessage::Error {
             error: "JIT signal: SIGILL (illegal instruction — likely exhausted case branch)".into(),
+            class: FailureClass::Runtime,
+            phase: Phase::Run,
         })
         .unwrap();
 
@@ -1539,7 +1551,7 @@ data Console a where
             RawContent::Text(t) => &t.text,
             _ => panic!("Expected text content"),
         };
-        assert!(text.contains("**failure-class:** `signal-crash`"));
+        assert!(text.contains("**failure-class:** `runtime`  **phase:** `run`"));
     }
 
     #[tokio::test]
@@ -1574,9 +1586,9 @@ data Console a where
         };
         assert!(text.contains("## Crash"));
         assert!(text.contains("eval thread crashed"));
-        // A dead eval thread is a signal-crash (compiler bug), and its last
-        // words must survive.
-        assert!(text.contains("**failure-class:** `signal-crash`"));
+        // A dead eval thread is a run-phase runtime crash, and its last words
+        // must survive.
+        assert!(text.contains("**failure-class:** `runtime`  **phase:** `run`"));
         assert!(text.contains("printed before crash"));
     }
 
@@ -1616,7 +1628,9 @@ data Console a where
         };
         assert!(text.contains("## Timeout"));
         assert!(text.contains("timed out"));
-        assert!(text.contains("**failure-class:** `timeout`"));
+        // A run-phase timeout (the gate is not compiling here) is a runtime
+        // failure — a pure loop past the yield window.
+        assert!(text.contains("**failure-class:** `runtime`  **phase:** `run`"));
         // Output before a pure-compute timeout is surfaced.
         assert!(text.contains("printed before timeout"));
     }

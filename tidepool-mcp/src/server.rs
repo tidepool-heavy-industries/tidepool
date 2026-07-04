@@ -264,7 +264,11 @@ impl TidepoolMcpServerImpl {
                             cancel.cancel();
                         }
                         self.reap_detached(handle.take());
-                        let mut detail = if gate.is_compiling() {
+                        // A compile-phase timeout is a slow-GHC environment issue
+                        // (infra), not the user's code; a run-phase timeout is a
+                        // runtime failure (a pure loop past the yield window).
+                        let compiling = gate.is_compiling();
+                        let mut detail = if compiling {
                             format!(
                                 "{} timed out after {}s during COMPILATION — the first \
                                  eval of a new expression pays a GHC compile (~2-6s cold; \
@@ -287,12 +291,13 @@ impl TidepoolMcpServerImpl {
                                 detail.push('\n');
                             }
                         }
-                        let error_msg = format_error_with_source(
-                            FailureClass::Timeout,
-                            "Timeout",
-                            &detail,
-                            &source,
-                        );
+                        let (class, phase) = if compiling {
+                            (FailureClass::Infra, Phase::Compile)
+                        } else {
+                            (FailureClass::Runtime, Phase::Run)
+                        };
+                        let error_msg =
+                            format_error_with_source(class, phase, "Timeout", &detail, &source);
                         return Ok(CallToolResult::error(vec![Content::text(error_msg)]));
                     }
                 }
@@ -342,13 +347,17 @@ impl TidepoolMcpServerImpl {
                             json_obj.to_string(),
                         )]))
                     }
-                    SessionMessage::Error { error } => {
-                        // The in-band error channel carries both clean Haskell
-                        // errors and runtime yields (and caught JIT signals) —
-                        // split them by content for the failure-class tag.
-                        let class = FailureClass::classify_error_text(&error);
+                    SessionMessage::Error {
+                        error,
+                        class,
+                        phase,
+                    } => {
+                        // Class/phase were stamped on the eval thread from the
+                        // structured RuntimeError (see the classify call there),
+                        // so a wire-format skew stays version-skew/compile here
+                        // rather than being re-guessed from the message text.
                         let mut error_msg =
-                            format_error_with_source(class, "Error", &error, &source);
+                            format_error_with_source(class, phase, "Error", &error, &source);
                         if !output.is_empty() {
                             error_msg.push_str("\n\n## Output So Far\n");
                             for line in &output {
@@ -413,7 +422,8 @@ impl TidepoolMcpServerImpl {
                     }
                 }
                 let error_msg = format_error_with_source(
-                    FailureClass::SignalCrash,
+                    FailureClass::Runtime,
+                    Phase::Run,
                     "Crash",
                     &format!(
                         "{} thread crashed (likely SIGILL from exhausted case branch or SIGSEGV from invalid memory access). Set RUST_LOG=debug for JIT diagnostics on stderr.{}",
@@ -612,8 +622,13 @@ impl TidepoolMcpServerImpl {
                         });
                     }
                     Ok(Err(e)) => {
+                        // Classify from the STRUCTURED error here, while we still
+                        // hold it — a wire-format skew (CompileError::ReadError)
+                        // becomes version-skew/compile with a self-diagnosing
+                        // message instead of being re-guessed from text later.
+                        let env = tidepool_runtime::classify(&e);
                         let diagnostics = tidepool_runtime::drain_diagnostics();
-                        let mut error_detail = e.to_string();
+                        let mut error_detail = env.message;
                         // Annotate UnhandledEffect with effect names
                         if let Some(tag_str) = error_detail.strip_prefix("Unhandled effect at tag ")
                         {
@@ -642,9 +657,13 @@ impl TidepoolMcpServerImpl {
                         }
                         let _ = thread_session_tx.send(SessionMessage::Error {
                             error: error_detail,
+                            class: env.class,
+                            phase: env.phase,
                         });
                     }
                     Err(panic_payload) => {
+                        // A panic unwinding out of the JIT is a run-phase engine
+                        // crash (a caught signal that still took the frame down).
                         let diagnostics = tidepool_runtime::drain_diagnostics();
                         let mut error_detail = format_panic_payload(panic_payload);
                         if !diagnostics.is_empty() {
@@ -656,6 +675,8 @@ impl TidepoolMcpServerImpl {
                         }
                         let _ = thread_session_tx.send(SessionMessage::Error {
                             error: error_detail,
+                            class: FailureClass::Runtime,
+                            phase: Phase::Run,
                         });
                     }
                 }
