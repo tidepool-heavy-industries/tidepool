@@ -8,6 +8,7 @@ module Tidepool.Prelude
   ( -- * Types (re-exported from base)
     Int, Integer, Word, Char, Bool(..), Double, Float
   , String, Ordering(..), Maybe(..), Either(..)
+  , Generic
     -- NonEmpty is intentionally NOT re-exported: `maximumBy (compare `on` snd)`
     -- and friends cover the argmax case without the NE machinery. Users who
     -- genuinely need it can `import Data.List.NonEmpty as NE` explicitly.
@@ -211,6 +212,7 @@ module Tidepool.Prelude
   , diffUTCTime, addUTCTime, epochMillis
   ) where
 
+import GHC.Generics (Generic)
 import Prelude
   ( Int, Integer, Word, Char, Bool(..), Double, Float
   , String, Ordering(..), Maybe(..), Either(..)
