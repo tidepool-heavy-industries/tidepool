@@ -575,6 +575,91 @@ macro_rules! llm_effect_def {
     };
 }
 
+/// Lsp effect — single definition. (Constructor alignment padding
+/// normalizes to single spaces — same one-time change as Meta.)
+#[macro_export]
+macro_rules! lsp_effect_def {
+    ($project:path) => {
+        $project! {
+            effect Lsp,
+            handler LspHandler,
+            req LspReq,
+            decl_fn lsp_decl,
+            description [
+                "Semantic code-graph navigation via a language server (rust-analyzer, .rs). ",
+                "Everything is a LspNode {name, container, kind, file, line, text} — the currency you thread. ",
+                "`lspWhere name` → all definitions of NAME (the seed). Then walk the graph: ",
+                "`lspCallers n` / `lspCallees n` (incoming/outgoing calls), `lspRefs n` (use sites), ",
+                "`lspDef n` (any node → its definition), `lspHover n` (type/sig/docs), ",
+                "`lspRename n new` (→ unified diff; review then `applyDiff`). Each returns LspNodes you feed ",
+                "back in (e.g. `lspWhere \"x\" >>= concatMapM lspCallers`). `lspDiags file` for a file's errors. ",
+                "Needs the `tidepool-lsp-daemon` running in the workspace; queries error cleanly if not.",
+            ],
+            type_defs [
+                "data Position = Position { posLine :: Int, posChar :: Int }",
+                "data LspNode = LspNode { nodeName :: Text, nodeContainer :: Text, nodeKind :: Text, nodeFile :: Text, nodePos :: Position, nodeText :: Text }",
+                "data Diag = Diag { diagFile :: Text, diagLine :: Int, diagSeverity :: Text, diagMessage :: Text }",
+                "nodeLine :: LspNode -> Int\nnodeLine = posLine . nodePos",
+                "instance ToJSON Position where\n  toJSON (Position l c) = object [\"line\" .= l, \"char\" .= c]",
+                "instance ToJSON LspNode where\n  toJSON nd@(LspNode n c k f _ t) = object [\"name\" .= n, \"container\" .= c, \"kind\" .= k, \"file\" .= f, \"line\" .= nodeLine nd, \"text\" .= t]",
+                "instance ToJSON Diag where\n  toJSON (Diag f l s m) = object [\"file\" .= f, \"line\" .= l, \"severity\" .= s, \"message\" .= m]",
+            ],
+            verbs [
+                { ctor LspWhere, method lsp_where,
+                  args { symbol: "Text" as String },
+                  ret "[LspNode]" },
+                { ctor LspCallers, method lsp_callers,
+                  args { n: "LspNode" as LspNode },
+                  ret "(Maybe [LspNode])" },
+                { ctor LspCallees, method lsp_callees,
+                  args { n: "LspNode" as LspNode },
+                  ret "(Maybe [LspNode])" },
+                { ctor LspRefs, method lsp_refs,
+                  args { n: "LspNode" as LspNode },
+                  ret "(Maybe [LspNode])" },
+                { ctor LspDef, method lsp_def,
+                  args { n: "LspNode" as LspNode },
+                  ret "(Maybe LspNode)" },
+                { ctor LspHover, method lsp_hover,
+                  args { n: "LspNode" as LspNode },
+                  ret "(Maybe Text)" },
+                { ctor LspRename, method lsp_rename,
+                  args { n: "LspNode" as LspNode, new_name: "Text" as String },
+                  ret "(Maybe Text)" },
+                { ctor LspDiagnostics, method lsp_diagnostics,
+                  args { file: "Text" as String },
+                  ret "[Diag]" },
+            ],
+            helpers [
+                { name lspWhere, sig "Text -> M [LspNode]",
+                  doc ["Seed: every workspace definition named X (each a LspNode with container/file/line/source line)."],
+                  body pointfree LspWhere },
+                { name lspCallers, sig "LspNode -> M (Maybe [LspNode])",
+                  doc ["Incoming calls. Nothing = node not callable; Just [] = callable, none. Unwrap with callersOf for plain chaining."],
+                  body pointfree LspCallers },
+                { name lspCallees, sig "LspNode -> M (Maybe [LspNode])",
+                  doc ["Outgoing calls. Nothing = node not callable; Just [] = callable, none."],
+                  body pointfree LspCallees },
+                { name lspRefs, sig "LspNode -> M (Maybe [LspNode])",
+                  doc ["Use sites of this node's symbol (kind = \"reference\"). Nothing = not a symbol."],
+                  body pointfree LspRefs },
+                { name lspDef, sig "LspNode -> M (Maybe LspNode)",
+                  doc ["Resolve any node (e.g. a use site) to its definition node."],
+                  body pointfree LspDef },
+                { name lspHover, sig "LspNode -> M (Maybe Text)",
+                  doc ["Type / signature / docs for a node."],
+                  body pointfree LspHover },
+                { name lspRename, sig "LspNode -> Text -> M (Maybe Text)",
+                  doc ["Rename a node's symbol to NEW; returns a unified diff (apply with applyDiff). Nothing = can't rename."],
+                  body applied LspRename(n, new) },
+                { name lspDiags, sig "FilePath -> M [Diag]",
+                  doc ["Diagnostics (errors / warnings) for FILE."],
+                  body pointfree LspDiagnostics },
+            ],
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     /// Every generated `*_decl()` must be byte-identical to the hand-written

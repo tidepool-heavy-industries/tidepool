@@ -205,61 +205,9 @@ pub fn fs_decl() -> EffectDecl {
     }
 }
 
-/// LSP effect: a node-addressed semantic code graph via the `tidepool-lsp-daemon`.
-///
-/// `LspNode` is the composition currency — both the output of one op and the input
-/// of the next, so navigation chains without destructuring. `lspWhere name`
-/// seeds from a name; every other op takes a `LspNode` and the daemon re-resolves
-/// it by position (so there is no name ambiguity). Graph edges
-/// (`lspCallers`/`lspCallees`/`lspDef`) return `LspNode`s, so you fold them with
-/// `concatMapM`/`loopM`. All LSP detail (positions, UTF-16, `WorkspaceEdit`,
-/// call hierarchy) lives in the daemon. The `Lsp` lib module adds the `steer`
-/// cascade + ready-made explorers (`explore`/`the`/`saferRename`/`chart`).
-pub fn lsp_decl() -> EffectDecl {
-    EffectDecl {
-        type_name: "Lsp",
-        description: concat!(
-            "Semantic code-graph navigation via a language server (rust-analyzer, .rs). ",
-            "Everything is a LspNode {name, container, kind, file, line, text} — the currency you thread. ",
-            "`lspWhere name` → all definitions of NAME (the seed). Then walk the graph: ",
-            "`lspCallers n` / `lspCallees n` (incoming/outgoing calls), `lspRefs n` (use sites), ",
-            "`lspDef n` (any node → its definition), `lspHover n` (type/sig/docs), ",
-            "`lspRename n new` (→ unified diff; review then `applyDiff`). Each returns LspNodes you feed ",
-            "back in (e.g. `lspWhere \"x\" >>= concatMapM lspCallers`). `lspDiags file` for a file's errors. ",
-            "Needs the `tidepool-lsp-daemon` running in the workspace; queries error cleanly if not.",
-        ),
-        type_defs: &[
-            "data Position = Position { posLine :: Int, posChar :: Int }",
-            "data LspNode = LspNode { nodeName :: Text, nodeContainer :: Text, nodeKind :: Text, nodeFile :: Text, nodePos :: Position, nodeText :: Text }",
-            "data Diag = Diag { diagFile :: Text, diagLine :: Int, diagSeverity :: Text, diagMessage :: Text }",
-            // nodeLine: the human-facing 1-based line, derived from the exact pos.
-            "nodeLine :: LspNode -> Int\nnodeLine = posLine . nodePos",
-            "instance ToJSON Position where\n  toJSON (Position l c) = object [\"line\" .= l, \"char\" .= c]",
-            "instance ToJSON LspNode where\n  toJSON nd@(LspNode n c k f _ t) = object [\"name\" .= n, \"container\" .= c, \"kind\" .= k, \"file\" .= f, \"line\" .= nodeLine nd, \"text\" .= t]",
-            "instance ToJSON Diag where\n  toJSON (Diag f l s m) = object [\"file\" .= f, \"line\" .= l, \"severity\" .= s, \"message\" .= m]",
-        ],
-        constructors: &[
-            "LspWhere       :: Text -> Lsp [LspNode]",
-            "LspCallers     :: LspNode -> Lsp (Maybe [LspNode])",
-            "LspCallees     :: LspNode -> Lsp (Maybe [LspNode])",
-            "LspRefs        :: LspNode -> Lsp (Maybe [LspNode])",
-            "LspDef         :: LspNode -> Lsp (Maybe LspNode)",
-            "LspHover       :: LspNode -> Lsp (Maybe Text)",
-            "LspRename      :: LspNode -> Text -> Lsp (Maybe Text)",
-            "LspDiagnostics :: Text -> Lsp [Diag]",
-        ],
-        helpers: &[
-            "-- | Seed: every workspace definition named X (each a LspNode with container/file/line/source line).\nlspWhere :: Text -> M [LspNode]\nlspWhere = send . LspWhere",
-            "-- | Incoming calls. Nothing = node not callable; Just [] = callable, none. Unwrap with callersOf for plain chaining.\nlspCallers :: LspNode -> M (Maybe [LspNode])\nlspCallers = send . LspCallers",
-            "-- | Outgoing calls. Nothing = node not callable; Just [] = callable, none.\nlspCallees :: LspNode -> M (Maybe [LspNode])\nlspCallees = send . LspCallees",
-            "-- | Use sites of this node's symbol (kind = \"reference\"). Nothing = not a symbol.\nlspRefs :: LspNode -> M (Maybe [LspNode])\nlspRefs = send . LspRefs",
-            "-- | Resolve any node (e.g. a use site) to its definition node.\nlspDef :: LspNode -> M (Maybe LspNode)\nlspDef = send . LspDef",
-            "-- | Type / signature / docs for a node.\nlspHover :: LspNode -> M (Maybe Text)\nlspHover = send . LspHover",
-            "-- | Rename a node's symbol to NEW; returns a unified diff (apply with applyDiff). Nothing = can't rename.\nlspRename :: LspNode -> Text -> M (Maybe Text)\nlspRename n new = send (LspRename n new)",
-            "-- | Diagnostics (errors / warnings) for FILE.\nlspDiags :: FilePath -> M [Diag]\nlspDiags = send . LspDiagnostics",
-        ],
-    }
-}
+// Lsp effect: `lsp_decl()` is generated from the single-source definition
+// (`effect_defs.rs`).
+crate::lsp_effect_def!(crate::effect_defs::effect_decl_projection);
 
 // Http effect: `http_decl()` is generated from the single-source definition
 // (`effect_defs.rs`).

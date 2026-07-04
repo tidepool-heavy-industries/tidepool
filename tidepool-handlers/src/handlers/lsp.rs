@@ -1,32 +1,17 @@
 use std::path::PathBuf;
 use tidepool_bridge_derive::{CoreRecord, FromCore, ToCore};
-use tidepool_effect::dispatch::{EffectContext, EffectHandler};
+use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
-use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
+use tidepool_mcp::CapturedOutput;
 
 // ============================================================================
 // Lsp: semantic queries via the tidepool-lsp-daemon sidecar
 // ============================================================================
 
-#[derive(FromCore)]
-pub enum LspReq {
-    #[core(name = "LspWhere")]
-    Where(String),
-    #[core(name = "LspCallers")]
-    Callers(LspNode),
-    #[core(name = "LspCallees")]
-    Callees(LspNode),
-    #[core(name = "LspRefs")]
-    Refs(LspNode),
-    #[core(name = "LspDef")]
-    Def(LspNode),
-    #[core(name = "LspHover")]
-    Hover(LspNode),
-    #[core(name = "LspRename")]
-    Rename(LspNode, String),
-    #[core(name = "LspDiagnostics")]
-    Diagnostics(String),
-}
+// LspReq + DescribeEffect + EffectHandler dispatch are generated from the
+// single-source definition; only the handler struct and the per-verb method
+// bodies below are hand-written.
+tidepool_mcp::lsp_effect_def!(crate::effect_glue::effect_rust_projection);
 
 #[derive(FromCore, ToCore, Clone, CoreRecord)]
 #[core(name = "Position")]
@@ -161,86 +146,114 @@ pub fn json_line(o: &serde_json::Value) -> i64 {
         .unwrap_or(0)
 }
 
-impl DescribeEffect for LspHandler {
-    fn effect_decl() -> EffectDecl {
-        tidepool_mcp::lsp_decl()
+/// Decode a daemon reply array into nodes.
+fn nodes(r: &serde_json::Value) -> Vec<LspNode> {
+    r.as_array()
+        .into_iter()
+        .flatten()
+        .map(LspNode::from_wire)
+        .collect()
+}
+
+/// Null reply = the operation doesn't apply to this node.
+fn maybe_nodes(r: &serde_json::Value) -> Option<Vec<LspNode>> {
+    if r.is_null() {
+        None
+    } else {
+        Some(nodes(r))
     }
 }
 
-impl EffectHandler<CapturedOutput> for LspHandler {
-    type Request = LspReq;
-    fn handle(
+impl LspHandler {
+    fn lsp_where(
         &mut self,
-        req: LspReq,
         cx: &EffectContext<'_, CapturedOutput>,
+        symbol: String,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        let nodes = |r: &serde_json::Value| -> Vec<LspNode> {
-            r.as_array()
-                .into_iter()
-                .flatten()
-                .map(LspNode::from_wire)
-                .collect()
+        let r = self.query(serde_json::json!({ "op": "where", "symbol": symbol }))?;
+        cx.respond_list(nodes(&r))
+    }
+
+    fn lsp_callers(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        n: LspNode,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let r = self.query(serde_json::json!({ "op": "callers", "node": n.to_wire() }))?;
+        cx.respond(maybe_nodes(&r))
+    }
+
+    fn lsp_callees(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        n: LspNode,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let r = self.query(serde_json::json!({ "op": "callees", "node": n.to_wire() }))?;
+        cx.respond(maybe_nodes(&r))
+    }
+
+    fn lsp_refs(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        n: LspNode,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let r = self.query(serde_json::json!({ "op": "references", "node": n.to_wire() }))?;
+        cx.respond(maybe_nodes(&r))
+    }
+
+    fn lsp_def(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        n: LspNode,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let r = self.query(serde_json::json!({ "op": "def", "node": n.to_wire() }))?;
+        let opt = if r.is_null() {
+            None
+        } else {
+            Some(LspNode::from_wire(&r))
         };
-        let maybe_nodes = |r: &serde_json::Value| -> Option<Vec<LspNode>> {
-            if r.is_null() {
-                None
-            } else {
-                Some(nodes(r))
-            }
-        };
-        match req {
-            LspReq::Where(symbol) => {
-                let r = self.query(serde_json::json!({ "op": "where", "symbol": symbol }))?;
-                cx.respond_list(nodes(&r))
-            }
-            LspReq::Callers(n) => {
-                let r = self.query(serde_json::json!({ "op": "callers", "node": n.to_wire() }))?;
-                cx.respond(maybe_nodes(&r))
-            }
-            LspReq::Callees(n) => {
-                let r = self.query(serde_json::json!({ "op": "callees", "node": n.to_wire() }))?;
-                cx.respond(maybe_nodes(&r))
-            }
-            LspReq::Refs(n) => {
-                let r =
-                    self.query(serde_json::json!({ "op": "references", "node": n.to_wire() }))?;
-                cx.respond(maybe_nodes(&r))
-            }
-            LspReq::Def(n) => {
-                let r = self.query(serde_json::json!({ "op": "def", "node": n.to_wire() }))?;
-                let opt = if r.is_null() {
-                    None
-                } else {
-                    Some(LspNode::from_wire(&r))
-                };
-                cx.respond(opt)
-            }
-            LspReq::Hover(n) => {
-                let r = self.query(serde_json::json!({ "op": "hover", "node": n.to_wire() }))?;
-                cx.respond(r.as_str().map(str::to_string))
-            }
-            LspReq::Rename(n, new_name) => {
-                let r = self.query(serde_json::json!({
-                    "op": "rename", "node": n.to_wire(), "newName": new_name
-                }))?;
-                cx.respond(r.as_str().map(str::to_string))
-            }
-            LspReq::Diagnostics(file) => {
-                let r = self.query(serde_json::json!({ "op": "diagnostics", "file": file }))?;
-                let diags: Vec<LspDiag> = r
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|o| LspDiag {
-                        file: json_str(o, "file"),
-                        line: json_line(o),
-                        severity: json_str(o, "severity"),
-                        message: json_str(o, "message"),
-                    })
-                    .collect();
-                cx.respond_list(diags)
-            }
-        }
+        cx.respond(opt)
+    }
+
+    fn lsp_hover(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        n: LspNode,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let r = self.query(serde_json::json!({ "op": "hover", "node": n.to_wire() }))?;
+        cx.respond(r.as_str().map(str::to_string))
+    }
+
+    fn lsp_rename(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        n: LspNode,
+        new_name: String,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let r = self.query(serde_json::json!({
+            "op": "rename", "node": n.to_wire(), "newName": new_name
+        }))?;
+        cx.respond(r.as_str().map(str::to_string))
+    }
+
+    fn lsp_diagnostics(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        file: String,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        let r = self.query(serde_json::json!({ "op": "diagnostics", "file": file }))?;
+        let diags: Vec<LspDiag> = r
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|o| LspDiag {
+                file: json_str(o, "file"),
+                line: json_line(o),
+                severity: json_str(o, "severity"),
+                message: json_str(o, "message"),
+            })
+            .collect();
+        cx.respond_list(diags)
     }
 }
 
@@ -258,7 +271,7 @@ mod tests {
         let sym = "my_function".to_string().to_value(&table).unwrap();
         let val = Value::Con(con_id, vec![sym]);
         let req = LspReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, LspReq::Where(ref s) if s == "my_function"));
+        assert!(matches!(req, LspReq::LspWhere(ref s) if s == "my_function"));
     }
 
     #[test]
@@ -268,6 +281,6 @@ mod tests {
         let file = "src/main.rs".to_string().to_value(&table).unwrap();
         let val = Value::Con(con_id, vec![file]);
         let req = LspReq::from_value(&val, &table).unwrap();
-        assert!(matches!(req, LspReq::Diagnostics(ref f) if f == "src/main.rs"));
+        assert!(matches!(req, LspReq::LspDiagnostics(ref f) if f == "src/main.rs"));
     }
 }
