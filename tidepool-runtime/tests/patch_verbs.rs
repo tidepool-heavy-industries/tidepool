@@ -238,6 +238,70 @@ fn genpatchto_creation_absent_file() {
 }
 
 #[test]
+fn genpatchto_minimal_hunks_not_a_whole_file_replace() {
+    // #345: genPatchTo used to be blamed for a degenerate whole-file diff
+    // (`@@ -1,607 +1,1 @@`, i.e. delete-everything + insert-one-line) on a
+    // real ~600-line file. Reproduced directly against the pure Myers-diff
+    // core (haskell/lib/Tidepool/Patch.hs) outside this harness: the
+    // algorithm itself produces a correct minimal hunk for a localized
+    // change — the degenerate diff only reproduces when the caller passes
+    // something wildly different as `newContent` (e.g. a short path string
+    // instead of the real new body, a path-vs-text mixup). This test proves
+    // the actual verb, called correctly through the Fs effect, stays minimal
+    // on a large file with one changed line: a handful of context lines, not
+    // 600+.
+    let old_lines: Vec<String> = (1..=606).map(|i| format!("line{i}")).collect();
+    let old = old_lines.join("\n");
+    let mut new_lines = old_lines.clone();
+    new_lines[299] = "CHANGED300".to_string(); // 1-based line 300
+    let new = new_lines.join("\n");
+
+    let mut d = preload(&[("f.txt", old.as_str())]);
+    let json = run_eval(GENPATCHTO_F, &new, &mut d);
+    assert_eq!(
+        json["applied"],
+        serde_json::json!(true),
+        "the generated diff applies cleanly; got {json}"
+    );
+    assert_eq!(d.files.get("f.txt").map(String::as_str), Some(new.as_str()));
+
+    // Re-derive the diff text directly (not chained into applyDiff) to
+    // inspect its shape.
+    let mut d2 = preload(&[("f.txt", old.as_str())]);
+    let diff_json = run_eval(
+        "genPatchTo \"f.txt\" (case input of { String s -> s; _ -> error \"no input\" })",
+        &new,
+        &mut d2,
+    );
+    let diff = diff_json
+        .as_str()
+        .expect("genPatchTo returns rendered diff text");
+    assert!(
+        diff.contains("-line300") && diff.contains("+CHANGED300"),
+        "carries the actual change; got:\n{diff}"
+    );
+    assert!(
+        !diff.contains("-line1\n"),
+        "must NOT delete the untouched head of the file; got:\n{diff}"
+    );
+    assert!(
+        !diff.contains("-line606"),
+        "must NOT delete the untouched tail of the file; got:\n{diff}"
+    );
+    // The `@@` header's old-side count should be a handful of context lines
+    // around the single change (3 lines of context each side + 1 changed =
+    // 7), nowhere near the full 606-line file.
+    let header = diff
+        .lines()
+        .find(|l| l.starts_with("@@"))
+        .expect("a hunk header");
+    assert!(
+        header.contains("@@ -297,7"),
+        "expected a minimal ~7-line hunk starting at line 297, got header: {header}\nfull diff:\n{diff}"
+    );
+}
+
+#[test]
 fn difffiles_reports_patch_and_stats() {
     // Two existing files: diffFiles labels the patch with (and makes it
     // apply onto) the OLD path, and reports rendered text plus stats.
