@@ -118,9 +118,9 @@ impl EffectHandler for RealFs {
         match req {
             FsReq::FsRead(path) => {
                 let content = std::fs::read_to_string(self.resolve(&path)).unwrap_or_default();
-                cx.respond(content)
+                cx.respond(Ok::<String, String>(content))
             }
-            FsReq::FsWrite(_, _) => cx.respond(()),
+            FsReq::FsWrite(_, _) => cx.respond(Ok::<(), String>(())),
             FsReq::FsListDir(path) => {
                 let entries: Vec<String> = std::fs::read_dir(self.resolve(&path))
                     .map(|rd| {
@@ -129,7 +129,7 @@ impl EffectHandler for RealFs {
                             .collect()
                     })
                     .unwrap_or_default();
-                cx.respond(entries)
+                cx.respond(Ok::<Vec<String>, String>(entries))
             }
             FsReq::FsGlob(pattern) => {
                 let full = self.root.join(pattern.as_str());
@@ -146,9 +146,9 @@ impl EffectHandler for RealFs {
                             .collect()
                     })
                     .unwrap_or_default();
-                cx.respond(entries)
+                cx.respond(Ok::<Vec<String>, String>(entries))
             }
-            FsReq::FsExists(path) => cx.respond(self.resolve(&path).exists()),
+            FsReq::FsExists(path) => cx.respond(Ok::<bool, String>(self.resolve(&path).exists())),
             FsReq::FsMetadata(path) => {
                 let p = self.resolve(&path);
                 let (size, is_file, is_dir) = match std::fs::metadata(&p) {

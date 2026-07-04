@@ -14,8 +14,11 @@ impl DispatchEffect<()> for TupleDispatcher {
         cx: &tidepool_effect::EffectContext<'_, ()>,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         // TWO occurrences: drives occ2 down the False/False (deepest) path,
-        // the branch the #313 TailCtx leak miscompiled.
-        cx.respond("alpha countTable beta countTable gamma\n".to_string())
+        // the branch the #313 TailCtx leak miscompiled. FsRead is errors-tagged
+        // (#335): Right-wrap so `readFile >>= liftEither` unwraps cleanly.
+        cx.respond(Ok::<String, String>(
+            "alpha countTable beta countTable gamma\n".to_string(),
+        ))
     }
 }
 
@@ -31,10 +34,12 @@ impl DispatchEffect<()> for PatchDispatcher {
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         if let Value::Con(con_id, _) = request {
             if cx.table().get_by_name("FsWrite") == Some(*con_id) {
-                return cx.respond(());
+                return cx.respond(Ok::<(), String>(()));
             }
         }
-        cx.respond("line one\nthe old needle line\nline three\n".to_string())
+        cx.respond(Ok::<String, String>(
+            "line one\nthe old needle line\nline three\n".to_string(),
+        ))
     }
 }
 
