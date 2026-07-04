@@ -46,7 +46,7 @@ declare or handle the Haskell-facing constructors itself — see
 `tidepool-handlers/src/lib.rs`'s Lsp section (handling); this doc only covers
 what happens on the daemon side of the socket call.
 
-## Known limits
+## Op surface boundaries
 
 - **No trait/impl-dispatch operation exists.** The op set above is exhaustive
   — there's no "go to implementations" or trait-dispatch query. If you need

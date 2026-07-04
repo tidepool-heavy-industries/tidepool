@@ -71,9 +71,9 @@ in that directory):
   handler arm, the four `cx.respond*` variants, sandbox enforcement.
 - `tidepool-repl/CLAUDE.md` — resident-session block-runner (decl/stmt/meta item
   classification), the single-owned `SessionState` lifecycle machine, ask/suspend
-  mechanism, known repl-specific friction.
+  mechanism, repl-specific usage notes.
 - `tidepool-lsp/CLAUDE.md` — the `tidepool-lsp-daemon` sidecar: socket
-  resolution, name/path-only protocol design, known limits.
+  resolution, name/path-only protocol design, op-surface boundaries.
 
 The live **eval API reference** (what eval users can call) is the MCP `eval` tool
 description emitted by the server — not duplicated in these files (it drifts).

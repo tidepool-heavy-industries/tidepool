@@ -41,17 +41,3 @@ scrutinee is triggered to set the error flag. Root cause still varies (construct
 tag mismatch, unexpected value shape) — the breadcrumb names the enclosing fn and
 dumps the scrutinee tag + expected alt tags. (A genuine SIGILL/SIGSEGV now points
 at heap corruption or a bad pointer, not the case trap.)
-
----
-
-## JIT Emit Gotchas (emit/expr.rs)
-
-Reference for anyone touching `src/emit/expr.rs` or adjacent emit modules. Each item documents a hard-won fix; re-opening any of these reproduces the original failure.
-
-**LetRec 5-phase ordering**: The phases must run in order. Phase 3a: compile Lam bodies, fill code pointers + partial captures. Phase 3b: fill Con fields not referencing simple bindings. Phase 3c: evaluate deferred simple bindings with incremental capture + Con filling. Phase 3a': fill remaining closure captures. Phase 3d: fill any remaining deferred Con fields. Critical invariant in Phase 3c: after evaluating each simple binding, (1) fill pending closure captures, then (2) check deferred Cons whose simple-binding deps are all now satisfied and fill ALL their fields immediately. Deferring step (2) causes SIGSEGV when a later simple binding calls a closure that case-matches a Con whose fields haven't been filled yet.
-
-**Strict let / error bindings**: GHC Core hoists `error "..."` calls into shared `let` bindings used by impossible branches (e.g. `let err = error "Failure in balanceL" in case … of { … -> err; … -> normal }`). These are lazy thunks in Haskell; the JIT evaluates them eagerly and hits the error. Fix in `emit_letrec_phases` and the LetNonRec path: `rhs_has_error_sentinel()` checks if any free vars of the RHS are error sentinel VarIds (tag `0x45` in high byte). If so, bind to a poison closure instead of emitting the body. Applied in LetNonRec, LetRec all-simple, and LetRec deferred-simple paths.
-
-**Do NOT stripBoxCon wrapper args**: GHC DataCon wrappers take boxed args (e.g. `I# n`) while workers store unboxed. A prior `stripBoxCon` helper that stripped `I#` from wrapper args before storing in NCon was reverted — it caused Text `Array` fields to hold bare `Int#` instead of `I# n`, producing CASE TRAP when downstream code case-matched expecting `I#`. Current state: no stripping anywhere. The recursive `unbox_*` helpers (PR #120) handle both boxed and unboxed transparently when primops need a raw `Int#`. If a proposal to strip wrapper boxes for efficiency appears, reject it.
-
-**LetRec thunk sibling capture drop**: `emit_thunk` creates a fresh `EmitContext`, dropping free vars not present in the outer env at that moment. When a deferred simple binding is thunkified (because it's a dependency of a deferred Con), sibling deferred simple bindings not yet materialized in env are silently dropped from captures → `unresolved_var_trap` at runtime. Manifested as `T.split` returning `<closure>` instead of `""` (`Data.Text.Array.empty` was the dropped sibling). Fix in `emit_letrec_phases`: before thunkifying, check whether any free vars of the RHS are sibling deferred simple bindings not yet in env. If so, fall through to the work-stack path (evaluates in correct LIFO dependency order) instead of thunkifying.
