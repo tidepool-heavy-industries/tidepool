@@ -37,7 +37,6 @@ fn run_pure_kata(body: &str, target: &str) -> serde_json::Value {
 /// and its fields are summed. This is the capability people flinch from:
 /// trusting `deriving` to synthesize the parser instead of hand-rolling one.
 #[test]
-#[ignore = "#337 — deriving (Generic, FromJSON) has no generic parseJSON, crashes at runtime"]
 fn kata_a_generic_deriving() {
     let json = run_pure_kata(
         r#"data Rec = Rec { rx :: Int, ry :: Int } deriving (Generic, FromJSON)
