@@ -75,6 +75,182 @@ fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T 
         .unwrap()
 }
 
+// ---------------------------------------------------------------------------
+// Fixture migration tool (issue #338)
+// ---------------------------------------------------------------------------
+//
+// `captured_core/meta.cbor` was written by the OLD Rust metadata writer
+// (pre-parity), whose per-constructor entries carried FEWER than the current
+// always-7 elements `Tidepool.CborEncode.encodeMetaEntry` emits. The strict
+// wire reader (`read_metadata`) correctly rejects that shape — there is ONE
+// current format and stale fixtures get migrated, never tolerated.
+//
+// This helper migrates the BYTES forward: it parses the old meta with a LOCAL
+// minimal CBOR reader (private to this tool — the production reader stays
+// strict) and re-encodes via `tidepool_repr::serial::write_metadata`, the
+// current always-7 writer. The DataConIds/tags/names are preserved exactly, so
+// the expr fixtures' node refs stay consistent with the regenerated table.
+//
+// It is `#[ignore]`d (mutates checked-in fixtures) and is the documented
+// migration path for any future captured-fixture schema drift. Re-run with:
+//
+//     cargo test -p tidepool-runtime --test captured_real_core \
+//         -- --ignored --exact regen::regenerate_meta_fixture
+#[cfg(test)]
+mod regen {
+    use ciborium::value::Value as Cbor;
+    use tidepool_repr::serial::write_metadata;
+    use tidepool_repr::serial::MetaWarnings;
+    use tidepool_repr::{DataCon, DataConId, DataConTable, SrcBang};
+
+    const HEADER_LEN: usize = 8;
+
+    fn as_u64(v: &Cbor) -> u64 {
+        match v {
+            Cbor::Integer(i) => u64::try_from(*i).expect("meta integer fits u64"),
+            other => panic!("expected integer, got {other:?}"),
+        }
+    }
+
+    fn as_text(v: &Cbor) -> String {
+        match v {
+            Cbor::Text(t) => t.clone(),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    fn parse_bang(v: &Cbor) -> SrcBang {
+        match as_text(v).as_str() {
+            "SrcBang" => SrcBang::SrcBang,
+            "SrcUnpack" => SrcBang::SrcUnpack,
+            "NoSrcBang" => SrcBang::NoSrcBang,
+            other => panic!("unknown bang {other}"),
+        }
+    }
+
+    /// Parse an old-format metadata entry. The old writer emitted a prefix of
+    /// today's 7 elements; anything past what it wrote defaults (absent
+    /// qualified name → `None`, absent field labels → empty).
+    fn parse_entry(entry: &Cbor) -> (DataCon, Vec<String>) {
+        let arr = match entry {
+            Cbor::Array(a) => a,
+            other => panic!("meta entry must be array, got {other:?}"),
+        };
+        assert!(
+            arr.len() >= 5,
+            "old meta entry needs at least id/name/tag/arity/bangs, got {} elems",
+            arr.len()
+        );
+        let id = DataConId(as_u64(&arr[0]));
+        let name = as_text(&arr[1]);
+        let tag = as_u64(&arr[2]) as u32;
+        let rep_arity = as_u64(&arr[3]) as u32;
+        let field_bangs = match &arr[4] {
+            Cbor::Array(bs) => bs.iter().map(parse_bang).collect(),
+            other => panic!("bangs must be array, got {other:?}"),
+        };
+        let qualified_name = arr.get(5).and_then(|v| match v {
+            Cbor::Text(t) if !t.is_empty() => Some(t.clone()),
+            _ => None,
+        });
+        let field_labels = match arr.get(6) {
+            Some(Cbor::Array(labels)) => labels.iter().map(as_text).collect(),
+            _ => Vec::new(),
+        };
+        (
+            DataCon {
+                id,
+                name,
+                tag,
+                rep_arity,
+                field_bangs,
+                qualified_name,
+            },
+            field_labels,
+        )
+    }
+
+    fn parse_warnings(map: &Cbor) -> MetaWarnings {
+        let mut w = MetaWarnings::default();
+        if let Cbor::Map(pairs) = map {
+            for (k, v) in pairs {
+                match as_text(k).as_str() {
+                    "has_io" => {
+                        if let Cbor::Bool(b) = v {
+                            w.has_io = *b;
+                        }
+                    }
+                    "captured_type" => {
+                        if let Cbor::Text(t) = v {
+                            w.captured_type = Some(t.clone());
+                        }
+                    }
+                    "var_names" => {
+                        if let Cbor::Array(items) = v {
+                            for item in items {
+                                if let Cbor::Array(kv) = item {
+                                    if let (Some(id), Some(nm)) = (kv.first(), kv.get(1)) {
+                                        w.var_names.push((as_u64(id), as_text(nm)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        w
+    }
+
+    /// Migrate `captured_core/meta.cbor` from the old writer's shape to the
+    /// current always-7 wire format, preserving every constructor's identity.
+    #[test]
+    #[ignore = "mutates the checked-in meta.cbor fixture; run explicitly to migrate"]
+    fn regenerate_meta_fixture() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/captured_core/meta.cbor"
+        );
+        let old = std::fs::read(path).expect("read old meta.cbor");
+        assert_eq!(&old[..4], b"TPLR", "fixture must carry the TPLR header");
+        let payload = &old[HEADER_LEN..];
+        let root: Cbor = ciborium::de::from_reader(payload).expect("decode old meta CBOR");
+
+        let (entries, warnings_map) = match &root {
+            Cbor::Array(a) if a.len() == 2 => (&a[0], &a[1]),
+            other => panic!("meta root must be [entries, warnings], got {other:?}"),
+        };
+        let entries = match entries {
+            Cbor::Array(e) => e,
+            other => panic!("entries must be array, got {other:?}"),
+        };
+
+        let mut table = DataConTable::new();
+        for entry in entries {
+            let (dc, labels) = parse_entry(entry);
+            let id = dc.id;
+            table.insert(dc);
+            if !labels.is_empty() {
+                table.set_field_labels(id, labels);
+            }
+        }
+        let warnings = parse_warnings(warnings_map);
+        eprintln!(
+            "regen: {} constructors, has_io={}, {} var_names, captured_type={:?}",
+            table.len(),
+            warnings.has_io,
+            warnings.var_names.len(),
+            warnings.captured_type,
+        );
+
+        let fresh = write_metadata(&table, &warnings).expect("re-encode meta in current format");
+        assert_eq!(&fresh[..4], b"TPLR", "regenerated meta must carry the header");
+        std::fs::write(path, &fresh).expect("write migrated meta.cbor");
+        eprintln!("regen: wrote {} bytes to {path}", fresh.len());
+    }
+}
+
 // #1 — FIXED. `fromIntegral (1025 :: Integer) :: Double` now AGREES at 1025.0 in
 // both engines. The bug was NOT a constructor-tag misread (the dispatch reads IS
 // correctly): GHC lowers roundingMode#'s `IN -> error` to a bottoming unlifted
