@@ -65,11 +65,22 @@ fn deep_force_traverses_deep_chain_without_host_recursion() {
     // Lit (24) + DEPTH Cons (32 each) + slack.
     let mut buf = vec![0u8; layout::LIT_TOTAL_SIZE as usize + DEPTH * 32 + 64];
 
-    // No vmctx/machine anywhere in this test — leaf 3's GC-cluster reach is
-    // vmctx-gated, so a null vmctx makes these harmless no-ops (same as
-    // `deep_force`'s own null-vmctx calls below; nothing here ever collects).
+    // A throwaway machine wired onto a vmctx so deep_force's root
+    // register/truncate actually run (they're vmctx-gated in leaf 3); the
+    // final rust_roots_mark check then genuinely verifies deep_force unwinds
+    // every root it registers. The tiny nursery is never allocated from —
+    // this thunk-free structure forces to identity without collecting.
+    let ms = tidepool_codegen::machine_state::MachineState::new();
+    let mut nursery = [0u8; 64];
+    let mut vmctx = tidepool_codegen::context::VMContext::new(
+        nursery.as_mut_ptr(),
+        unsafe { nursery.as_ptr().add(nursery.len()) },
+        host_fns::gc_trigger,
+    );
+    vmctx.machine_state = &ms as *const _ as *mut _;
+    let vmctx_ptr = &mut vmctx as *mut tidepool_codegen::context::VMContext;
     unsafe {
-        host_fns::clear_rust_roots(std::ptr::null_mut());
+        host_fns::clear_rust_roots(vmctx_ptr);
     }
 
     unsafe {
@@ -85,9 +96,9 @@ fn deep_force_traverses_deep_chain_without_host_recursion() {
         }
         let head = child; // outermost Con
 
-        // No GC state installed: heap_force on non-thunks is pure; register/
-        // truncate roots are harmless no-ops without a collection.
-        let forced = host_fns::deep_force(std::ptr::null_mut(), head);
+        // heap_force on non-thunks is pure (identity); deep_force registers +
+        // truncates its traversal roots on the wired machine.
+        let forced = host_fns::deep_force(vmctx_ptr, head);
 
         assert_eq!(forced, head, "thunk-free head forces to itself (identity)");
         assert_ne!(
@@ -111,9 +122,9 @@ fn deep_force_traverses_deep_chain_without_host_recursion() {
         );
     }
 
-    // Rust roots fully unwound (base_mark restored).
+    // Rust roots fully unwound (base_mark restored) on the wired machine.
     assert_eq!(
-        unsafe { host_fns::rust_roots_mark(std::ptr::null_mut()) },
+        unsafe { host_fns::rust_roots_mark(vmctx_ptr) },
         0,
         "deep_force must unwind all roots"
     );
@@ -127,8 +138,19 @@ fn deep_force_traverses_deep_chain_without_host_recursion() {
 fn deep_force_descends_con_but_not_closure() {
     let mut buf = vec![0u8; 512];
 
+    // Wire a throwaway machine so deep_force's root register/truncate run
+    // (vmctx-gated in leaf 3); the tiny nursery is never allocated from.
+    let ms = tidepool_codegen::machine_state::MachineState::new();
+    let mut nursery = [0u8; 64];
+    let mut vmctx = tidepool_codegen::context::VMContext::new(
+        nursery.as_mut_ptr(),
+        unsafe { nursery.as_ptr().add(nursery.len()) },
+        host_fns::gc_trigger,
+    );
+    vmctx.machine_state = &ms as *const _ as *mut _;
+    let vmctx_ptr = &mut vmctx as *mut tidepool_codegen::context::VMContext;
     unsafe {
-        host_fns::clear_rust_roots(std::ptr::null_mut());
+        host_fns::clear_rust_roots(vmctx_ptr);
     }
 
     unsafe {
@@ -149,7 +171,7 @@ fn deep_force_descends_con_but_not_closure() {
         let outer = buf.as_mut_ptr().add(off);
         let _ = write_con(&mut buf, off, 1, &[leaf_lit, clo, inner_con]);
 
-        let forced = host_fns::deep_force(std::ptr::null_mut(), outer);
+        let forced = host_fns::deep_force(vmctx_ptr, outer);
         assert_eq!(forced, outer);
         assert_ne!(forced, host_fns::error_poison_ptr());
 
@@ -177,10 +199,7 @@ fn deep_force_descends_con_but_not_closure() {
         );
     }
 
-    assert_eq!(
-        unsafe { host_fns::rust_roots_mark(std::ptr::null_mut()) },
-        0
-    );
+    assert_eq!(unsafe { host_fns::rust_roots_mark(vmctx_ptr) }, 0);
 }
 
 /// A null root is returned unchanged (defensive — matches `heap_force`).

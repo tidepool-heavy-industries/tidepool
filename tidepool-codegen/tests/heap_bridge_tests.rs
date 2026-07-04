@@ -252,6 +252,20 @@ fn null_vmctx_bridge_survives_later_gc() {
         bridged
     );
 
+    // Overwrite the SOURCE buffer with garbage. The bridge output must be a
+    // complete OWNED deep copy retaining no pointer back into it — so this
+    // corruption of the source must leave `bridged` untouched. (Were the
+    // output to reference the source, the assert below would observe it; this
+    // is what makes the later-GC check meaningful rather than tautological.)
+    unsafe {
+        std::ptr::write_bytes(start, 0xEE, buf_data.0.len());
+    }
+    assert!(
+        expect_shape(&bridged),
+        "bridged value references the mutated source buffer (not a deep copy): {:?}",
+        bridged
+    );
+
     // 2. Drive a REAL JIT run, over a tiny nursery, on a totally SEPARATE
     //    machine/heap — one that forces at least one real GC.
     let (expr, table) = build_gc_forcing_program(40);

@@ -33,6 +33,26 @@ use tidepool_repr::DataCon;
 use tidepool_repr::{CoreExpr, CoreFrame, RecursiveTree};
 use tidepool_testing::proptest::values_equal;
 
+/// Installs `ms` as this thread's CURRENT_MACHINE — the reach RUNTIME_ERROR
+/// (leaf 2) uses for vmctx-less writers like `runtime_error_with_msg` — and
+/// restores the previous pointer on drop, including on unwind, so a failed
+/// assert cannot dangle CURRENT_MACHINE into a dropped stack machine for a
+/// later test on the same worker thread.
+struct CurrentMachineGuard(*mut MachineState);
+impl CurrentMachineGuard {
+    fn install(ms: &MachineState) -> Self {
+        let prev = tidepool_codegen::machine_state::install_current_machine(
+            ms as *const MachineState as *mut MachineState,
+        );
+        CurrentMachineGuard(prev)
+    }
+}
+impl Drop for CurrentMachineGuard {
+    fn drop(&mut self) {
+        tidepool_codegen::machine_state::restore_current_machine(self.0);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Constants & IDs matching make_table()
 // ---------------------------------------------------------------------------
@@ -147,6 +167,7 @@ fn t_a2_poison_memoization() {
         let mut vmctx = VMContext::new(start, end, mock_gc_trigger);
         let machine_state = MachineState::new();
         vmctx.machine_state = &machine_state as *const MachineState as *mut MachineState;
+        let _cm = CurrentMachineGuard::install(&machine_state);
         machine_state.set_gc_state(start, nursery.len());
         let _ = host_fns::take_runtime_error();
 
@@ -190,6 +211,7 @@ fn t_a3_reentrant_blackhole() {
         let mut vmctx = VMContext::new(start, end, mock_gc_trigger);
         let machine_state = MachineState::new();
         vmctx.machine_state = &machine_state as *const MachineState as *mut MachineState;
+        let _cm = CurrentMachineGuard::install(&machine_state);
         machine_state.set_gc_state(start, nursery.len());
         let _ = host_fns::take_runtime_error();
 

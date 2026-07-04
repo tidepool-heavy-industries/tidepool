@@ -401,7 +401,9 @@ mod tests {
                 let extra_range = (e.as_ptr(), e.as_ptr().add(e.len()));
                 let mut os = OldSpace::new();
                 os.tenure(std::ptr::null_mut(), ptr, extra_range);
-                // os lives across the GC call — PERSISTENT_ROOTS slots are valid.
+                // os lives across the GC call; this test supplies its own
+                // explicit root set (fixed_nursery_gc_bytes), independent of
+                // persistent-root registration.
                 fixed_nursery_gc_bytes()
             };
 
