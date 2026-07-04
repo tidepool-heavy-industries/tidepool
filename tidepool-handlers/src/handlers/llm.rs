@@ -1,8 +1,7 @@
-use tidepool_bridge_derive::FromCore;
-use tidepool_effect::dispatch::{EffectContext, EffectHandler};
+use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_eval::value::Value;
-use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
+use tidepool_mcp::CapturedOutput;
 
 // ============================================================================
 // Tag 7 (base stack position 7): Llm
@@ -219,6 +218,8 @@ impl LlmHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tidepool_effect::dispatch::EffectHandler;
+    use tidepool_mcp::{DescribeEffect, EffectDecl};
     use crate::test_support::*;
     use crate::{ConsoleHandler, ExecHandler, FsHandler, HttpHandler, KvHandler, LspHandler};
     use tidepool_effect::dispatch::EffectContext;
