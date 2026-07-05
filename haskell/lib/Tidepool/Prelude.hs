@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns, NoImplicitPrelude, FlexibleInstances, DuplicateRecordFields #-}
+{-# LANGUAGE BangPatterns, NoImplicitPrelude, FlexibleInstances, DuplicateRecordFields, DataKinds, TypeOperators #-}
 -- | Self-contained prelude for Tidepool user code.
 --
 -- With NoImplicitPrelude in the MCP template, this is the single import.
@@ -121,10 +121,13 @@ module Tidepool.Prelude
     -- * Maybe/Either utilities
   , maybe, fromMaybe, isJust, isNothing, catMaybes, mapMaybe, listToMaybe, maybeToList
   , either
-    -- * Safe list heads (the partial head/tail/last/init/(!!)/foldr1/foldl1/
-    -- fromJust are deliberately NOT re-exported — these total forms replace
-    -- them; the qualified base originals live behind `P.` if truly needed).
+    -- * Safe list heads — total forms; prefer these.
   , headMay, lastMay, initMay, tailMay, atMay, maximumMay, minimumMay
+    -- * Partial shadows: EXPORTED, but each has an Unsatisfiable type, so
+    -- referencing one is a compile error that names the total form to use.
+    -- The base partials stay reachable qualified (L.head, Data.Maybe.fromJust)
+    -- for the rare deliberate use.
+  , head, tail, last, init, (!!), foldr1, foldl1, fromJust
   , readMaybe
     -- * Railway-oriented error helpers (errors package)
   , note, hush
@@ -252,8 +255,6 @@ import Prelude
   , sum, product, minimum, maximum
   , concat, iterate, repeat, cycle
   , scanl, scanr, scanl1, scanr1
-  , foldr1, foldl1
-  , (!!)
   , negate, quot, rem, subtract
   , compare
   , fromEnum, succ, pred, toEnum
@@ -271,7 +272,8 @@ import qualified Tidepool.Data.Text as T
 import Tidepool.Data.Text (Pack(..), pack)
 import Tidepool.FilePath
 import Data.Char (ord, chr)
-import Data.Maybe (fromMaybe, fromJust, isJust, isNothing, catMaybes, mapMaybe, listToMaybe, maybeToList)
+import Data.Maybe (fromMaybe, isJust, isNothing, catMaybes, mapMaybe, listToMaybe, maybeToList)
+import GHC.TypeError (Unsatisfiable, unsatisfiable, ErrorMessage(..))
 import Data.List (foldl', find, partition, groupBy, takeWhile, tails, unfoldr, mapAccumL, transpose, genericLength, sort, sortBy, sortOn, maximumBy, minimumBy, inits, group, scanl')
 -- Bifunctor first/second (polymorphic — tuples AND Either). Control.Lens
 -- re-exports `bimap` but NOT first/second, so import those two from the library.
@@ -469,13 +471,6 @@ dropWhile p (x:xs)
   | otherwise  = x : xs
 {-# INLINE dropWhile #-}
 
--- | All elements except the last. Returns [] for empty input.
-init :: [a] -> [a]
-init []     = []
-init [_]    = []
-init (x:xs) = x : init xs
-{-# INLINE init #-}
-
 
 -- | Map a function over a list and concatenate results.
 concatMap :: (a -> [b]) -> [a] -> [b]
@@ -636,24 +631,35 @@ intersperse _   [x]    = [x]
 intersperse sep (x:xs) = x : sep : intersperse sep xs
 {-# INLINE intersperse #-}
 
--- | Extract the first element. Partial: errors on empty list.
-head :: [a] -> a
-head (x:_) = x
-head []    = error "head: empty list"
-{-# INLINE head #-}
+-- Partial-function shadows. These eight classic partials are EXPORTED, but
+-- each carries an Unsatisfiable constraint: the definitions below compile
+-- clean, while any CALLER's `head xs` is a compile error whose message names
+-- the total replacement. Unsatisfiable (not a bare TypeError, which fires at
+-- the definition) is what defers the error to the use site. The base partials
+-- remain reachable qualified (L.head / Data.Maybe.fromJust) for deliberate use.
+head :: Unsatisfiable ('Text "head is partial — use headMay :: [a] -> Maybe a." ':$$: 'Text "Deliberate partial use: L.head (qualified Data.List).") => [a] -> a
+head = unsatisfiable
 
--- | Extract all elements after the head. Partial: errors on empty list.
-tail :: [a] -> [a]
-tail (_:xs) = xs
-tail []     = error "tail: empty list"
-{-# INLINE tail #-}
+tail :: Unsatisfiable ('Text "tail is partial — use tailMay :: [a] -> Maybe [a]." ':$$: 'Text "Deliberate partial use: L.tail (qualified Data.List).") => [a] -> [a]
+tail = unsatisfiable
 
--- | Extract the last element. Partial: errors on empty list.
-last :: [a] -> a
-last [x]    = x
-last (_:xs) = last xs
-last []     = error "last: empty list"
-{-# INLINE last #-}
+last :: Unsatisfiable ('Text "last is partial — use lastMay :: [a] -> Maybe a." ':$$: 'Text "Deliberate partial use: L.last (qualified Data.List).") => [a] -> a
+last = unsatisfiable
+
+init :: Unsatisfiable ('Text "init is partial — use initMay :: [a] -> Maybe [a]." ':$$: 'Text "Deliberate partial use: L.init (qualified Data.List).") => [a] -> [a]
+init = unsatisfiable
+
+(!!) :: Unsatisfiable ('Text "(!!) is partial — use atMay xs i :: Maybe a." ':$$: 'Text "Deliberate partial use: (L.!!) (qualified Data.List).") => [a] -> Int -> a
+(!!) = unsatisfiable
+
+foldr1 :: Unsatisfiable ('Text "foldr1 is partial — seed the fold with foldr." ':$$: 'Text "Deliberate partial use: L.foldr1 (qualified Data.List).") => (a -> a -> a) -> [a] -> a
+foldr1 = unsatisfiable
+
+foldl1 :: Unsatisfiable ('Text "foldl1 is partial — seed the fold with foldl'." ':$$: 'Text "Deliberate partial use: L.foldl1 (qualified Data.List).") => (a -> a -> a) -> [a] -> a
+foldl1 = unsatisfiable
+
+fromJust :: Unsatisfiable ('Text "fromJust is partial — use fromMaybe def, maybe, or a Just pattern." ':$$: 'Text "Deliberate partial use: Data.Maybe.fromJust.") => Maybe a -> a
+fromJust = unsatisfiable
 
 -- #155: Monomorphic even/odd shadows removed — GHC specialization
 -- (re-enabled) eliminates Integral dictionary passing at compile time.
