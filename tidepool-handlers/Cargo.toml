@@ -16,6 +16,7 @@ tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
 tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
 tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
 tidepool-bridge-derive = { version = "0.1.0", path = "../tidepool-bridge-derive" }
+tidepool-bridge-effects = { version = "0.1.0", path = "../tidepool-bridge-effects" }
 inventory = "0.3"
 frunk = "0.4"
 # Native deps moved from tidepool/Cargo.toml

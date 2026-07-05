@@ -34,6 +34,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
 
+use tidepool_bridge_effects::Proc;
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
 
@@ -498,11 +499,11 @@ impl DispatchEffect<()> for WorkerDispatcher {
                 // as a `Right`. It's a Complete value, not a list, so no stream
                 // / probe_list_spine concern.
                 let stderr: String = (0..n).map(item).collect::<Vec<_>>().join("\n");
-                cx.respond(Ok::<(i64, String, String), String>((
-                    0i64,
-                    "stdout".to_string(),
+                cx.respond(Ok::<Proc, String>(Proc {
+                    exit_code: 0,
+                    stdout: "stdout".to_string(),
                     stderr,
-                )))
+                }))
             }
         }
     }

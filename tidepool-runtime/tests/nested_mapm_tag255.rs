@@ -15,6 +15,7 @@
 
 use std::path::{Path, PathBuf};
 use tidepool_bridge_derive::FromCore;
+use tidepool_bridge_effects::{FileMeta, Proc};
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::value::Value;
 use tidepool_testing::eval_harness::EvalHarness;
@@ -151,11 +152,14 @@ impl EffectHandler for RealFs {
             FsReq::FsExists(path) => cx.respond(Ok::<bool, String>(self.resolve(&path).exists())),
             FsReq::FsMetadata(path) => {
                 let p = self.resolve(&path);
-                let (size, is_file, is_dir) = match std::fs::metadata(&p) {
-                    Ok(m) => (m.len() as i64, m.is_file(), m.is_dir()),
-                    Err(_) => (0i64, false, false),
-                };
-                cx.respond((size, is_file, is_dir))
+                match std::fs::metadata(&p) {
+                    Ok(m) => cx.respond(Some(FileMeta {
+                        size: m.len() as i64,
+                        is_file: m.is_file(),
+                        is_dir: m.is_dir(),
+                    })),
+                    Err(_) => cx.respond(None::<FileMeta>),
+                }
             }
         }
     }
@@ -215,7 +219,11 @@ impl EffectHandler for StubExec {
         _req: ExecReq,
         cx: &EffectContext,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        cx.respond((0i64, String::new(), String::new()))
+        cx.respond(Ok::<Proc, String>(Proc {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }))
     }
 }
 

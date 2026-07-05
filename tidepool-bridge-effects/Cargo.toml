@@ -1,0 +1,16 @@
+[package]
+name = "tidepool-bridge-effects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Single-source bridged-record types shared by effect handlers and test mocks"
+
+[dependencies]
+tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
+tidepool-bridge-derive = { version = "0.1.0", path = "../tidepool-bridge-derive" }
+tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }
+tidepool-repr = { version = "0.1.0", path = "../tidepool-repr" }
+inventory = "0.3"

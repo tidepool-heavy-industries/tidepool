@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use tidepool_bridge_effects::{FileMeta, Hit};
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_mcp::CapturedOutput;
@@ -22,39 +23,6 @@ tidepool_mcp::fs_effect_def!(crate::effect_glue::effect_rust_projection);
 struct FileRead {
     path: String,
     contents: Result<String, FsError>,
-}
-
-/// Haskell `Hit` record: path / line / text — a search match (`grepGlob` and
-/// the shared structural-search surface).
-#[derive(
-    tidepool_bridge_derive::ToCore,
-    tidepool_bridge_derive::FromCore,
-    Clone,
-    Debug,
-    PartialEq,
-    tidepool_bridge_derive::CoreRecord,
-)]
-pub struct Hit {
-    pub path: String,
-    pub line: i64,
-    pub text: String,
-}
-
-/// Haskell `FileMeta` record: size / isFile / isDir — filesystem metadata for
-/// a path (`fsMeta`/`FsMetadata`). Absence of the path is `Nothing` at the
-/// `Maybe FileMeta` level, not a field on this record.
-#[derive(
-    tidepool_bridge_derive::ToCore,
-    tidepool_bridge_derive::FromCore,
-    Clone,
-    Debug,
-    PartialEq,
-    tidepool_bridge_derive::CoreRecord,
-)]
-pub struct FileMeta {
-    pub size: i64,
-    pub is_file: bool,
-    pub is_dir: bool,
 }
 
 pub const DEFAULT_IGNORE_DIRS: &[&str] = &["target", ".git", "node_modules", "dist-newstyle"];

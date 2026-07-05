@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use tidepool_bridge_derive::{CoreRecord, ToCore};
+use tidepool_bridge_effects::Proc;
 
 // ============================================================================
 // Tag 5: Exec (shell commands)
@@ -9,14 +9,6 @@ use tidepool_bridge_derive::{CoreRecord, ToCore};
 // single-source definition; only the handler struct and the per-verb method
 // bodies below are hand-written.
 tidepool_mcp::exec_effect_def!(crate::effect_glue::effect_rust_projection);
-
-/// Haskell `Proc` record: exitCode / stdout / stderr — a finished subprocess.
-#[derive(ToCore, Clone, CoreRecord)]
-pub struct Proc {
-    pub exit_code: i64,
-    pub stdout: String,
-    pub stderr: String,
-}
 
 #[derive(Clone)]
 pub struct ExecHandler {

@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use tidepool_bridge_derive::{CoreRecord, ToCore};
+use tidepool_bridge_effects::{GitCommit, GitFileDelta, GitStatusEntry};
 
 // ============================================================================
 // Tag 8: Git (read-only repository queries)
@@ -9,81 +9,6 @@ use tidepool_bridge_derive::{CoreRecord, ToCore};
 // single-source definition; only the handler struct and the per-verb method
 // bodies below are hand-written.
 tidepool_mcp::git_effect_def!(crate::effect_glue::effect_rust_projection);
-
-/// Haskell `Commit` record: sha / subject / author / date / files.
-#[derive(ToCore, Clone, CoreRecord)]
-#[core(name = "Commit")]
-pub struct GitCommit {
-    pub sha: String,
-    pub subject: String,
-    pub author: String,
-    pub date: String,
-    pub files: Vec<String>,
-}
-
-/// Haskell `StatusEntry` record: path / state (2-char XY code).
-#[derive(ToCore, Clone, CoreRecord)]
-#[core(name = "StatusEntry")]
-pub struct GitStatusEntry {
-    pub path: String,
-    pub state: String,
-}
-
-/// Haskell `FileDelta` record: path / adds / dels / binary.
-#[derive(ToCore, Clone, CoreRecord)]
-#[core(name = "FileDelta")]
-pub struct GitFileDelta {
-    pub path: String,
-    pub adds: i64,
-    pub dels: i64,
-    pub binary: bool,
-}
-
-/// Build the `Tidepool.Records.Bridged` Haskell module — the GENERATED home of
-/// the fully-migrated bridged result records, where the Rust struct is the
-/// single source of truth. Materialized to the committed
-/// `haskell/lib/Tidepool/Records/Bridged.hs` (kept in sync by the
-/// `bridged_records` test) and re-exported by `Tidepool.Records` →
-/// `Tidepool.Prelude`.
-///
-/// Field ORDER is the wire contract: `ToCore` builds the `Con` in Rust struct
-/// field order; the extract assigns positions from this decl's field order.
-pub fn bridged_records_module() -> String {
-    use crate::{FileMeta, Hit, Proc};
-    use tidepool_bridge::CoreRecord;
-    let decls = [
-        GitCommit::haskell_decl(),
-        GitStatusEntry::haskell_decl(),
-        GitFileDelta::haskell_decl(),
-        Proc::haskell_decl(),
-        Hit::haskell_decl(),
-        FileMeta::haskell_decl(),
-    ];
-    let exports = decls
-        .iter()
-        .map(|d| format!("{}(..)", d.split_whitespace().nth(1).unwrap_or("")))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut out = String::new();
-    out.push_str("{-# LANGUAGE NoImplicitPrelude, DuplicateRecordFields #-}\n\n");
-    out.push_str("-- | GENERATED from the Rust bridged-record structs in tidepool-handlers\n");
-    out.push_str("-- (each carries `#[derive(CoreRecord)]`). DO NOT EDIT BY HAND: the Rust\n");
-    out.push_str("-- struct is the single source of truth for field order / name / type, and\n");
-    out.push_str("-- this file is regenerated + verified by the `bridged_records` test\n");
-    out.push_str(
-        "-- (`TIDEPOOL_REGEN_BRIDGED=1 cargo test -p tidepool-handlers bridged_records`).\n",
-    );
-    out.push_str(&format!(
-        "module Tidepool.Records.Bridged\n  ( {exports} ) where\n\n"
-    ));
-    out.push_str("import Prelude (Int, Bool, Eq, Show)\n");
-    out.push_str("import Data.Text (Text)\n\n");
-    for d in &decls {
-        out.push_str(d);
-        out.push('\n');
-    }
-    out
-}
 
 #[derive(Clone)]
 pub struct GitHandler {

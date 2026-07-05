@@ -8,6 +8,7 @@ members = [
     "tidepool-optimize",
     "tidepool-bridge",
     "tidepool-bridge-derive",
+    "tidepool-bridge-effects",
     "tidepool-macro",
     "tidepool-effect",
     "tidepool-codegen",

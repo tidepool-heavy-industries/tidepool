@@ -376,6 +376,7 @@ pub mod mock {
     use std::collections::HashMap;
 
     use tidepool_bridge_derive::FromCore;
+    use tidepool_bridge_effects::{FileMeta, Proc};
     use tidepool_effect::{EffectContext, EffectError, EffectHandler, Response};
     use tidepool_eval::value::Value;
 
@@ -544,7 +545,11 @@ type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]
                     cx.respond(empty)
                 }
                 FsReq::FsExists(_) => cx.respond(false),
-                FsReq::FsMetadata(_) => cx.respond((0i64, false, false)),
+                FsReq::FsMetadata(_) => cx.respond(Some(FileMeta {
+                    size: 0,
+                    is_file: false,
+                    is_dir: false,
+                })),
             }
         }
     }
@@ -615,9 +620,11 @@ type M = Eff '[Console, KV, Fs, SG, Http, Exec, Meta, Git, Llm, Ask]
         type Request = ExecReq;
         fn handle(&mut self, req: ExecReq, cx: &EffectContext) -> Result<Response, EffectError> {
             match req {
-                ExecReq::Run(_) | ExecReq::RunIn(_, _) => {
-                    cx.respond((0i64, String::new(), String::new()))
-                }
+                ExecReq::Run(_) | ExecReq::RunIn(_, _) => cx.respond(Ok::<Proc, String>(Proc {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })),
                 ExecReq::RunJson(_) => cx.respond(()),
             }
         }

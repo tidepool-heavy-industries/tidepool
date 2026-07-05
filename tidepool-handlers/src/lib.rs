@@ -29,6 +29,13 @@ pub(crate) mod effect_glue;
 pub mod handlers;
 pub use handlers::*;
 
+// The six bridged wire records now live in the low `tidepool-bridge-effects`
+// crate (single source of truth shared with test mocks) — re-exported here so
+// the external surface (`tidepool_handlers::Proc`, etc.) is unchanged.
+pub use tidepool_bridge_effects::{
+    bridged_records_module, FileMeta, GitCommit, GitFileDelta, GitStatusEntry, Hit, Proc,
+};
+
 // ============================================================================
 // Stack assembly
 // ============================================================================

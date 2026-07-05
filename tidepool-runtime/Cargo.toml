@@ -31,6 +31,7 @@ tidepool-testing = { path = "../tidepool-testing" }
 tidepool-optimize = { path = "../tidepool-optimize" }
 frunk = "0.4"
 tidepool-bridge-derive = { version = "0.1.0", path = "../tidepool-bridge-derive" }
+tidepool-bridge-effects = { version = "0.1.0", path = "../tidepool-bridge-effects" }
 tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
 tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
 tidepool-eval = { version = "0.1.0", path = "../tidepool-eval" }

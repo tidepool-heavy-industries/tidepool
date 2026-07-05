@@ -23,6 +23,7 @@ tidepool-mcp = { version = "0.1.0", path = "../tidepool-mcp" }
 tidepool-effect = { version = "0.1.0", path = "../tidepool-effect" }
 tidepool-bridge = { version = "0.1.0", path = "../tidepool-bridge" }
 tidepool-bridge-derive = { version = "0.1.0", path = "../tidepool-bridge-derive" }
+tidepool-bridge-effects = { version = "0.1.0", path = "../tidepool-bridge-effects" }
 frunk = "0.4"
 
 [[bench]]

@@ -3581,6 +3581,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidepool-bridge-effects"
+version = "0.1.0"
+dependencies = [
+ "inventory",
+ "tidepool-bridge",
+ "tidepool-bridge-derive",
+ "tidepool-eval",
+ "tidepool-repr",
+]
+
+[[package]]
 name = "tidepool-codegen"
 version = "0.1.0"
 dependencies = [
@@ -3664,6 +3675,7 @@ dependencies = [
  "tempfile",
  "tidepool-bridge",
  "tidepool-bridge-derive",
+ "tidepool-bridge-effects",
  "tidepool-effect",
  "tidepool-eval",
  "tidepool-mcp",
@@ -3804,6 +3816,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tidepool-bridge",
  "tidepool-bridge-derive",
+ "tidepool-bridge-effects",
  "tidepool-codegen",
  "tidepool-effect",
  "tidepool-eval",
@@ -3825,6 +3838,7 @@ dependencies = [
  "serde_json",
  "tidepool-bridge",
  "tidepool-bridge-derive",
+ "tidepool-bridge-effects",
  "tidepool-codegen",
  "tidepool-effect",
  "tidepool-eval",
