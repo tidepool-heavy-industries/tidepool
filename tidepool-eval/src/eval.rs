@@ -2500,8 +2500,8 @@ fn expect_byte_array(v: &Value) -> Result<&crate::value::SharedByteArray, EvalEr
 /// GHC's strict-field unboxing (`-funbox-small-strict-fields`, implied at
 /// -O1+) can leave a scalar primop operand re-boxed one layer deeper than the
 /// immediately enclosing `case`-of already unwrapped — e.g. a data
-/// constructor with a `!Int`/`!Double` field (like the generic `Aeson`
-/// `Value`'s `NumberI`) reboxes an argument that GHC's own Core already
+/// constructor with a `!Int`/`!Double` field (like a boxed `I#`/`D#` in an
+/// exact-scalar carrier) reboxes an argument that GHC's own Core already
 /// treats as unboxed at that pattern-match site (see #339). Safe to apply
 /// unconditionally in the `expect_*` scalar extractors below: a well-typed
 /// program only ever hands them a genuine scalar, never an ADT value with

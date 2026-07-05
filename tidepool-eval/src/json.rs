@@ -9,14 +9,16 @@
 //!     that hand JSON back to Haskell), which delegates here.
 //!
 //! Representation (must match `haskell/lib/Tidepool/Aeson/Value.hs` at -O2):
-//!   Value = Object !Object | Array [Value] | String !Text | Number !Double
-//!         | Bool !Bool | Null | NumberI !Int
+//!   Value = Object !Object | Array [Value] | String !Text | Number !Scientific
+//!         | Bool !Bool | Null
 //! with `Object` backed by `Data.Map.Strict` (`Bin`/`Tip` balanced tree, the
 //! `!Int` size boxed as `I#`), lists as `:`/`[]` cons cells, and `Text` stored
 //! as the GHC worker `Text ByteArray# Int# Int#` (UTF-8 bytes, offset 0).
 //!
-//! Machine ints ride `NumberI` (exact); genuine floats ride `Number` (Double) —
-//! same BUG-8 split the bridge already used.
+//! Every JSON number rides `Number !Scientific` — `Scientific coeff exp` denotes
+//! `coeff * 10^exp` and stays exact, the coefficient an exact `Integer`
+//! (`IS`/`IP`/`IN`) and the exponent an `Int`. No Double rounding, so a >i64 or
+//! high-precision literal survives round-trip intact (BUG-8).
 //!
 //! The Value-level shape primitives (Text/list/Map/number construction) live
 //! in [`crate::shapes`] — this module owns only the JSON-document policy
@@ -44,7 +46,12 @@ pub struct JsonConIds {
     pub array: DataConId,
     pub string: DataConId,
     pub number: DataConId,
-    pub number_i: DataConId,
+    /// `Scientific` (arity 2: coefficient `Integer`, base10Exponent `Int`).
+    pub scientific: DataConId,
+    /// `Integer` constructors for the `Scientific` coefficient.
+    pub is: DataConId,
+    pub ip: DataConId,
+    pub in_: DataConId,
     pub bool_con: DataConId,
     pub null: DataConId,
     pub true_con: DataConId,
@@ -83,7 +90,10 @@ impl JsonConIds {
             array: table.get_by_name_arity("Array", 1)?,
             string: table.get_by_name_arity("String", 1)?,
             number: table.get_by_name_arity("Number", 1)?,
-            number_i: table.get_by_name_arity("NumberI", 1)?,
+            scientific: table.get_by_name_arity("Scientific", 2)?,
+            is: table.get_by_name_arity("IS", 1)?,
+            ip: table.get_by_name_arity("IP", 1)?,
+            in_: table.get_by_name_arity("IN", 1)?,
             bool_con: table.get_by_name_arity("Bool", 1)?,
             null: table.get_by_name_arity("Null", 0)?,
             true_con: table.get_by_name_arity("True", 0)?,
@@ -139,7 +149,16 @@ pub fn json_to_value(j: &serde_json::Value, ids: &JsonConIds) -> Value {
             let inner = Value::Con(if *b { ids.true_con } else { ids.false_con }, vec![]);
             Value::Con(ids.bool_con, vec![inner])
         }
-        serde_json::Value::Number(n) => crate::shapes::json_number(n, ids.number_i, ids.number),
+        serde_json::Value::Number(n) => crate::shapes::scientific_from_number(
+            n,
+            &crate::shapes::NumberConIds {
+                number: ids.number,
+                scientific: ids.scientific,
+                is: ids.is,
+                ip: ids.ip,
+                in_: ids.in_,
+            },
+        ),
         serde_json::Value::String(s) => Value::Con(ids.string, vec![text_value(s, ids)]),
         serde_json::Value::Array(arr) => {
             let items = arr.iter().map(|v| json_to_value(v, ids)).collect();

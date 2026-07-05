@@ -1,4 +1,5 @@
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 -- | Vendored lens-aeson — Prisms and Traversals for JSON Value.
 --
 -- Provides the same API as Data.Aeson.Lens but operates on our
@@ -29,6 +30,8 @@ import qualified Data.Map.Strict as Map
 import Control.Lens (Traversal', Prism', prism')
 
 import Tidepool.Aeson.Value (Value(..), KeyMap, fromText)
+import Tidepool.Aeson.Scientific
+  ( Scientific, scientific, toRealFloat, fromFloatDigits, truncateScientific )
 
 -- | Access a value at a given key in a JSON object.
 key :: Text -> Traversal' Value Value
@@ -61,12 +64,11 @@ _String = prism' String $ \v -> case v of
   String s -> Just s
   _        -> Nothing
 
--- | Prism into a Double number.
-_Number :: Prism' Value Double
+-- | Prism into the exact 'Scientific' number.
+_Number :: Prism' Value Scientific
 _Number = prism' Number $ \v -> case v of
-  Number n  -> Just n
-  NumberI n -> Just (fromIntegral n)
-  _         -> Nothing
+  Number s -> Just s
+  _        -> Nothing
 
 -- | Prism into a Bool value.
 _Bool :: Prism' Value Bool
@@ -86,29 +88,27 @@ _Object = prism' Object $ \v -> case v of
   Object o -> Just o
   _        -> Nothing
 
--- | Prism that extracts an Int from a Number value (truncates).
+-- | Prism that extracts an Int from a Number value: exact for integral
+-- numbers, truncating toward zero otherwise.
 _Int :: Prism' Value Int
-_Int = prism' NumberI $ \v -> case v of
-  NumberI n -> Just n
-  Number d  -> Just (truncate d)
-  _         -> Nothing
+_Int = prism' (\i -> Number (scientific (fromIntegral i) 0)) $ \v -> case v of
+  Number s -> Just (fromInteger (truncateScientific s))
+  _        -> Nothing
 
--- | Prism that extracts an Integer from a Number value (truncates). Mirrors
--- @Data.Aeson.Lens._Integer@. The getter routes through 'Int' (the JIT-safe
--- @truncate@ target) then widens to 'Integer' via 'fromIntegral' (a small-int
--- @IS@ construction — no GMP), so it stays clear of the multi-limb FFI.
+-- | Prism that extracts an Integer from a Number value. Mirrors
+-- @Data.Aeson.Lens._Integer@: an integral 'Scientific' yields its exact
+-- 'Integer' coefficient (any magnitude); a fractional number truncates toward
+-- zero.
 _Integer :: Prism' Value Integer
-_Integer = prism' (NumberI . fromIntegral) $ \v -> case v of
-  NumberI n -> Just (fromIntegral n)
-  Number d  -> Just (fromIntegral (truncate d :: Int))
-  _         -> Nothing
+_Integer = prism' (\i -> Number (scientific i 0)) $ \v -> case v of
+  Number s -> Just (truncateScientific s)
+  _        -> Nothing
 
 -- | Prism that extracts a Double from a Number value.
 _Double :: Prism' Value Double
-_Double = prism' Number $ \v -> case v of
-  Number d  -> Just d
-  NumberI n -> Just (fromIntegral n)
-  _         -> Nothing
+_Double = prism' (Number . fromFloatDigits) $ \v -> case v of
+  Number s -> Just (toRealFloat s)
+  _        -> Nothing
 
 -- | Prism into a Null value.
 _Null :: Prism' Value ()

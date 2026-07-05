@@ -15,6 +15,12 @@
 module Tidepool.Aeson.Value
   ( -- * Core types
     Value(..)
+  , Scientific
+  , scientific
+  , coefficient
+  , base10Exponent
+  , fromFloatDigits
+  , toRealFloat
   , Key
   , KeyMap
   , Object
@@ -42,6 +48,9 @@ import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import Tidepool.Aeson.Scientific
+  ( Scientific, scientific, coefficient, base10Exponent
+  , fromFloatDigits, toRealFloat )
 import GHC.Generics
 import GHC.TypeLits (TypeError, ErrorMessage(Text, (:<>:)))
 
@@ -69,20 +78,17 @@ type Array = [Value]
 -- | A key-value pair for building objects.
 type Pair = (Key, Value)
 
--- | A JSON value.
+-- | A JSON value. @Number@ carries an exact 'Scientific'
+-- (@coefficient * 10 ^ base10Exponent@) — integer and fractional JSON numbers
+-- share one aeson-faithful representation, with no @Double@ round-trip and no
+-- Int64 cap (arbitrary-precision integers run on the JIT via @tidepool-bignum@).
 data Value
   = Object !Object
   | Array Array
   | String !Text
-  | Number !Double
+  | Number !Scientific
   | Bool !Bool
   | Null
-  | NumberI !Int
-    -- ^ Exact machine-int JSON number (BUG-8 fix, 2026-07-02): `Number` is
-    -- Double-backed, so every Int/Integer rode through an f64 and values
-    -- past 2^53 silently lost precision AT CONSTRUCTION. Integral encoders
-    -- build this instead; consumers treat @NumberI n@ ≡ @Number (fromIntegral
-    -- n)@ minus the loss. Declared LAST to keep sibling ConTags stable.
   deriving (Eq, Ord, Show)
 
 -- | Construct a JSON object from key-value pairs.
@@ -182,13 +188,13 @@ instance ToJSON Text where
   toJSON = String
 
 instance ToJSON Int where
-  toJSON = NumberI
+  toJSON n = Number (scientific (fromIntegral n) 0)
 
 instance ToJSON Double where
-  toJSON = Number
+  toJSON = Number . fromFloatDigits
 
 instance ToJSON Float where
-  toJSON = Number . realToFrac
+  toJSON = Number . fromFloatDigits
 
 instance ToJSON Bool where
   toJSON = Bool
@@ -207,15 +213,11 @@ instance ToJSON () where
   toJSON () = Null
 
 instance ToJSON Integer where
-  -- Int-range integers stay exact; beyond that the Double fallback keeps the
-  -- old (lossy) behavior — exact bignum JSON needs a decimal-string carrier.
-  toJSON n
-    | n >= fromIntegral (minBound :: Int) && n <= fromIntegral (maxBound :: Int) =
-        NumberI (fromIntegral n)
-    | otherwise = Number (fromIntegral n)
+  -- Exact at any magnitude: 'Scientific' carries the full 'Integer' coefficient.
+  toJSON n = Number (scientific n 0)
 
 instance ToJSON Word where
-  toJSON n = NumberI (fromIntegral n)
+  toJSON n = Number (scientific (fromIntegral n) 0)
 
 instance ToJSON Char where
   toJSON c = String (T.singleton c)

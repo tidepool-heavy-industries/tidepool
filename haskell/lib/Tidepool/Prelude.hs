@@ -159,7 +159,9 @@ module Tidepool.Prelude
   , addExtension, replaceExtension, splitExtension, hasExtension, isExtensionOf
   , isAbsolute, isRelative
     -- * JSON (Tidepool.Aeson — vendored, construction-only)
-  , Value(..), Key, object, (.=), toJSON
+  , Value(..), Scientific, scientific, coefficient, base10Exponent
+  , fromFloatDigits, toRealFloat
+  , Key, object, (.=), toJSON
   , ToJSON
   , FromJSON(..), Result(..), fromJSON, resultToEither, eitherDecode
   , (.:), (.:?), (.!=), withObject, withText, withArray, withBool, withDouble
@@ -238,7 +240,7 @@ import Prelude
   , Bounded(minBound, maxBound)
   , Read, read
   , Semigroup(..), Monoid(..)
-  , fromIntegral, realToFrac, truncate, ceiling, floor, even, odd
+  , fromIntegral, realToFrac, truncate, ceiling, floor, round, even, odd
   , (^), (^^), atan2
   , Functor(..), Applicative(..), Monad(..)
   , (<$>)
@@ -260,7 +262,7 @@ import Prelude
   , mapM, mapM_, sequence, sequence_, sequenceA
   )
 import Data.Foldable (traverse_, for_)
-import qualified Prelude as P (show, drop, length, null, dropWhile, round)
+import qualified Prelude as P (show, drop, length, null, dropWhile)
 import Data.Text (Text)
 -- Vendored drop-in for Data.Text: re-exports all of Data.Text but overrides the
 -- (Char -> Bool)-taking functions (takeWhile/dropWhile/span/break/filter/all/…)
@@ -295,7 +297,8 @@ import Tidepool.Data.Time (UTCTime(..), formatISO8601, parseISO8601, daysFromCiv
 import Tidepool.Render (Render(..))
 import Tidepool.QQ.Fmt.Runtime
   (FSign(..), FAlign(..), fmtInt, fmtFrac, fmtStr, fmtChar, fmtSigned, fmtPlain)
-import Tidepool.Aeson (Value(..), Key, object, (.=), toJSON, ToJSON, fromText, eitherDecode, FromJSON(..), Result(..), fromJSON, resultToEither, (.:), (.:?), (.!=), withObject, withText, withArray, withBool, withDouble)
+import Tidepool.Aeson (Value(..), Scientific, scientific, coefficient, base10Exponent, fromFloatDigits, toRealFloat, Key, object, (.=), toJSON, ToJSON, fromText, eitherDecode, FromJSON(..), Result(..), fromJSON, resultToEither, (.:), (.:?), (.!=), withObject, withText, withArray, withBool, withDouble)
+import Tidepool.Aeson.Scientific (toBoundedInteger)
 import Tidepool.Aeson.Lens (key, nth, _String, _Number, _Bool, _Array, _Object, _Int, _Integer, _Double, members, values, _Null)
 -- Wholesale Control.Lens, hiding only the two genuine clashes: `imap` (Prelude's
 -- list-index map, defined below) and `(.=)` (Aeson's object-pair operator, above).
@@ -662,14 +665,11 @@ fromJust = unsatisfiable
 
 -- #155: Monomorphic even/odd shadows removed — GHC specialization
 -- (re-enabled) eliminates Integral dictionary passing at compile time.
-
--- Monomorphic round :: Double -> Int (keeps defaulting simple).
--- The JIT now supports rintDouble (FfiRintDouble -> Cranelift `nearest`,
--- round-to-nearest-ties-even), so this delegates to base's specialized
--- round instead of a manual banker's-rounding reimplementation.
-round :: Double -> Int
-round = P.round
-{-# INLINE round #-}
+-- Likewise `round` (was `Double -> Int`): it now comes polymorphically from
+-- base, matching its already-polymorphic siblings `truncate`/`floor`/`ceiling`,
+-- so `round`/`truncate`/`floor`/`ceiling` work on any `RealFrac` — including
+-- `Scientific`, exactly (Integer math, no `Double` round-trip). The Double case
+-- still lowers to the round primop (as `QQ.Fmt.Runtime` already relies on).
 
 -- | Zip three lists with a function.
 zipWith3 :: (a -> b -> c -> d) -> [a] -> [b] -> [c] -> [d]
@@ -786,17 +786,16 @@ asText (String t) = Just t
 asText _          = Nothing
 {-# INLINE asText #-}
 
--- | Extract Int from a Number Value (truncates), or Nothing.
+-- | Extract Int from a Number Value: @Just@ only for an in-range integral
+-- number, @Nothing@ for a fractional or out-of-range one.
 asInt :: Value -> Maybe Int
-asInt (NumberI n) = Just n
-asInt (Number d) = Just (truncate d)
+asInt (Number s) = toBoundedInteger s
 asInt _          = Nothing
 {-# INLINE asInt #-}
 
 -- | Extract Double from a Number Value, or Nothing.
 asDouble :: Value -> Maybe Double
-asDouble (NumberI n) = Just (fromIntegral n)
-asDouble (Number d) = Just d
+asDouble (Number s) = Just (toRealFloat s)
 asDouble _          = Nothing
 {-# INLINE asDouble #-}
 

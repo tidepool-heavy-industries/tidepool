@@ -41,7 +41,7 @@ fn repro_lit_double_case() {
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let nonce = std::env::var("NONCE").unwrap_or_default();
     let code = format!(
-        "Right v <- httpGet \"x\"\n-- nonce {nonce}\npure (maybe (-1) round (v ^? _Number))"
+        "Right v <- httpGet \"x\"\n-- nonce {nonce}\npure (maybe (-1) round (v ^? _Double))"
     );
     // No extra import: the body (`httpGet` + `round`) is self-contained. The
     // former `"Probe"` import arg was spurious — the Probe fixture dir was never

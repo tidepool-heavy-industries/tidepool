@@ -4,6 +4,12 @@
 module Tidepool.Aeson
   ( -- * Core types (from Tidepool.Aeson.Value)
     Value(..)
+  , Scientific
+  , scientific
+  , coefficient
+  , base10Exponent
+  , fromFloatDigits
+  , toRealFloat
   , Key
   , KeyMap
   , Object

@@ -65,7 +65,7 @@ fn show_double_10_effects_with_paginate() {
 say t = do
   send (Print t)
   v <- send (KvGet "__sayChars")
-  let cur = case v of {{ Just b -> case b ^? _Number of {{ Just n -> round n; _ -> 0 }}; Nothing -> 0 }}
+  let cur = case v of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   send (KvSet "__sayChars" (toJSON (cur + T.length t)))
 
 showI :: Int -> Text
@@ -87,7 +87,7 @@ result = do
         d = fromIntegral n :: Double
     pure (pack (showDouble d))
   _scV <- send (KvGet "__sayChars")
-  let _sayC = case _scV of {{ Just b -> case b ^? _Number of {{ Just n -> round n; _ -> 0 }}; Nothing -> 0 }}
+  let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   paginateResult (max' 100 (4096 - _sayC)) (toJSON _r)"#
     );
     let json = run10(&body);
@@ -128,7 +128,7 @@ result = do
         d = fromIntegral n :: Double
     pure (pack (showDouble d))
   _scV <- send (KvGet "__sayChars")
-  let _sayC = case _scV of { Just b -> case b ^? _Number of { Just n -> round n; _ -> 0 }; Nothing -> 0 }
+  let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }
   pure (toJSON _r)
 "#;
     let json = EvalHarness::new()
@@ -152,7 +152,7 @@ result = do
         d = fromIntegral n :: Double
     pure (pack (showDouble d))
   _scV <- send (KvGet "__sayChars")
-  let _sayC = case _scV of { Just b -> case b ^? _Number of { Just n -> round n; _ -> 0 }; Nothing -> 0 }
+  let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }
   pure (toJSON _r)"#,
     );
     eprintln!("Result: {json}");
@@ -177,7 +177,7 @@ result = do
         d = fromIntegral n :: Double
     pure (pack (showDouble d))
   _scV <- send (KvGet "__sayChars")
-  let _sayC = case _scV of {{ Just b -> case b ^? _Number of {{ Just n -> round n; _ -> 0 }}; Nothing -> 0 }}
+  let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   let sz = valSize (toJSON _r)
   pure (toJSON sz)"#
     );
@@ -269,7 +269,7 @@ say :: Text -> M ()
 say t = do
   send (Print t)
   v <- send (KvGet "__sayChars")
-  let cur = case v of { Just b -> case b ^? _Number of { Just n -> round n; _ -> 0 }; Nothing -> 0 }
+  let cur = case v of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }
   send (KvSet "__sayChars" (toJSON (cur + T.length t)))
 
 kvGet :: Text -> M (Maybe Value)
@@ -360,7 +360,7 @@ result = do
     let n = length [10 :: Int, 20, 30]
     pure (showDouble (fromIntegral n))
   _scV <- kvGet "__sayChars"
-  let _sayC = case _scV of { Just b -> case b ^? _Number of { Just n -> round n; _ -> 0 }; Nothing -> 0 }
+  let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }
   paginateResult (max' 100 (4096 - _sayC)) (toJSON _r)
 "#;
 
@@ -396,7 +396,7 @@ result = do
         d = fromIntegral n :: Double
     pure (pack (showDouble d))
   _scV <- send (KvGet "__sayChars")
-  let _sayC = case _scV of {{ Just b -> case b ^? _Number of {{ Just n -> round n; _ -> 0 }}; Nothing -> 0 }}
+  let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   paginateResult (max' 100 (4096 - _sayC)) (toJSON _r)"#
     );
     let json = run10(&body);
@@ -422,7 +422,7 @@ result = do
         d = fromIntegral n :: Double
     pure (pack (showDouble d))
   _scV <- send (KvGet "__sayChars")
-  let _sayC = case _scV of {{ Just b -> case b ^? _Number of {{ Just n -> round n; _ -> 0 }}; Nothing -> 0 }}
+  let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   let budget = max' 100 (4096 - _sayC)
   let val = toJSON _r
   if valSize val <= budget
@@ -448,7 +448,7 @@ result = do
         d = fromIntegral n :: Double
     pure (pack (showDouble d))
   _scV <- send (KvGet "__sayChars")
-  let _sayC = case _scV of {{ Just b -> case b ^? _Number of {{ Just n -> round n; _ -> 0 }}; Nothing -> 0 }}
+  let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   let val = toJSON _r
       _sz = valSize val
   pure val"#
@@ -498,7 +498,7 @@ result = do
         d = fromIntegral n :: Double
     pure (pack (showDouble d))
   _scV <- send (KvGet "__sayChars")
-  let _sayC = case _scV of {{ Just b -> case b ^? _Number of {{ Just n -> round n; _ -> 0 }}; Nothing -> 0 }}
+  let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   let val = toJSON _r
       budget = max' 100 (4096 - _sayC)
       sz = valSize val
@@ -549,7 +549,7 @@ result = do
         d = fromIntegral n :: Double
     pure (pack (showDouble d))
   _scV <- send (KvGet "__sayChars")
-  let _sayC = case _scV of { Just b -> case b ^? _Number of { Just n -> round n; _ -> 0 }; Nothing -> 0 }
+  let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }
   pure (toJSON _r)"#,
     );
     eprintln!("Result: {json}");
@@ -571,7 +571,7 @@ result = do
         d = fromIntegral n :: Double
     pure (pack (showDouble d))
   _scV <- send (KvGet "__sayChars")
-  let _sayC = case _scV of {{ Just b -> case b ^? _Number of {{ Just n -> round n; _ -> 0 }}; Nothing -> 0 }}
+  let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   let val = toJSON _r
       sz = valSize val
       budget = max' 100 (4096 - _sayC)
@@ -603,7 +603,7 @@ result = do
         d = fromIntegral n :: Double
     pure (pack (showDouble d))
   _scV <- send (KvGet "__sayChars")
-  let _sayC = case _scV of { Just b -> case b ^? _Number of { Just n -> round n; _ -> 0 }; Nothing -> 0 }
+  let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }
   let sz = valSize (toJSON _r)
   pure (toJSON sz)"#,
     );

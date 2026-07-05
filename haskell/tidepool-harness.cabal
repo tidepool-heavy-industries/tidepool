@@ -24,6 +24,7 @@ executable tidepool-extract-bin
     Tidepool.Table
     Tidepool.Internal.DataTextProbe
     Tidepool.Aeson
+    Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
     Tidepool.Aeson.KeyMap
     Tidepool.Aeson.Lens

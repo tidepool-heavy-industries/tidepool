@@ -1042,7 +1042,8 @@ data Console a where
         let result = template_haskell(&preamble, &stack, source, "", "", Some(&input), None);
 
         assert!(result.contains("input :: Aeson.Value"));
-        assert!(result.contains("input = object [\"val\" .= Aeson.NumberI (123 :: Int)]"));
+        assert!(result
+            .contains("input = object [\"val\" .= Aeson.Number (Aeson.scientific (123) (0))]"));
     }
 
     #[test]
@@ -1324,14 +1325,14 @@ mod ergonomics_tests {
         );
     }
 
-    /// Number: binding emits `Aeson.NumberI (42 :: Int)`.
+    /// Number: binding emits `Aeson.Number (Aeson.scientific (42) (0))`.
     #[test]
     fn test_input_source_gen_number() {
         let raw = json!(42);
         let src = binding_for(&raw);
         assert!(
-            src.contains("Aeson.NumberI (42 :: Int)"),
-            "expected NumberI binding, got: {src}"
+            src.contains("Aeson.Number (Aeson.scientific (42) (0))"),
+            "expected Scientific number binding, got: {src}"
         );
     }
 

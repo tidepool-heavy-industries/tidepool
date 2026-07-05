@@ -181,38 +181,25 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                     None => json!("<big-integer>"),
                 },
 
-                // BUG-8 (int precision through toJSON) FIXED 2026-07-02: the
-                // real culprit was the VENDORED aeson `Number !Double` — ints
-                // lost precision at CONSTRUCTION, Haskell-side (this arm was a
-                // red herring; the vendored Value never builds Scientific).
-                // Int-range integers now ride the exact `NumberI` carrier
-                // (see the arm below + gotcha works_exact_int_json). Residual
-                // documented loss: Integer beyond Int range falls back to the
-                // Double-backed Number (exact bignum JSON needs a decimal-
-                // string carrier — a design decision, not an oversight).
-                // Scientific (Data.Scientific) — coefficient × 10^exponent
+                // Scientific (Data.Scientific) — coefficient × 10^exponent,
+                // rendered as an EXACT JSON number. The coefficient may be an
+                // arbitrary-size Integer (IS/IP/IN), so compose the decimal via
+                // string arithmetic and emit through serde_json's
+                // arbitrary_precision — no f64, no i64 overflow, no precision loss.
                 ("Scientific", [coeff, exp_val]) => {
-                    let c = match value_to_json(coeff, table, d) {
-                        serde_json::Value::Number(n) => n.as_i64().unwrap_or(0),
-                        _ => 0,
+                    let cs = match value_to_json(coeff, table, d) {
+                        serde_json::Value::Number(n) => n.to_string(),
+                        serde_json::Value::String(s) => s, // big IP/IN → exact decimal
+                        _ => "0".to_string(),
                     };
                     let e = match value_to_json(exp_val, table, d) {
                         serde_json::Value::Number(n) => n.as_i64().unwrap_or(0),
                         _ => 0,
                     };
-                    // When exponent >= 0, produce an integer JSON number
-                    if e >= 0 {
-                        let val = c * 10i64.pow(e as u32);
-                        json!(val)
-                    } else {
-                        let val = c as f64 * 10f64.powi(e as i32);
-                        json!(val)
-                    }
+                    compose_scientific_json(&cs, e)
                 }
 
                 // Aeson Value constructors
-                // Exact-int JSON number (vendored Value's NumberI; BUG-8).
-                ("NumberI", [x]) => value_to_json(x, table, d),
                 ("Null", []) => json!(null),
                 ("Bool", [x]) => value_to_json(x, table, d),
                 ("Number", [x]) => value_to_json(x, table, d),
@@ -310,6 +297,55 @@ fn map_to_json_object(val: &Value, table: &DataConTable, depth: usize) -> serde_
 
 /// Convert the BigNat# field of an IP/IN constructor to a decimal string.
 /// The field is a ByteArray of little-endian 64-bit limbs (from `bigNatLitBytes`).
+/// Compose `coefficient × 10^exponent` into an exact JSON number. `coeff` is a
+/// decimal string (optionally sign-prefixed); no precision is lost — the result
+/// rides serde_json's `arbitrary_precision`. Falls back to a JSON string only if
+/// the composed token fails to parse as a number (it never should).
+fn compose_scientific_json(coeff: &str, exp: i64) -> serde_json::Value {
+    let decimal = compose_decimal(coeff, exp);
+    match serde_json::from_str::<serde_json::Value>(&decimal) {
+        Ok(v @ serde_json::Value::Number(_)) => v,
+        _ => serde_json::Value::String(decimal),
+    }
+}
+
+/// `coefficient × 10^exponent` as a canonical decimal string (no exponent form),
+/// with trailing fractional zeros trimmed.
+fn compose_decimal(coeff: &str, exp: i64) -> String {
+    let (neg, rest) = match coeff.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, coeff.strip_prefix('+').unwrap_or(coeff)),
+    };
+    let mag = rest.trim_start_matches('0');
+    if mag.is_empty() {
+        return "0".to_string();
+    }
+    let sign = if neg { "-" } else { "" };
+    let body = if exp >= 0 {
+        format!("{mag}{}", "0".repeat(exp as usize))
+    } else {
+        let k = (-exp) as usize;
+        if k < mag.len() {
+            let (int, frac) = mag.split_at(mag.len() - k);
+            let frac = frac.trim_end_matches('0');
+            if frac.is_empty() {
+                int.to_string()
+            } else {
+                format!("{int}.{frac}")
+            }
+        } else {
+            let frac = format!("{}{mag}", "0".repeat(k - mag.len()));
+            let frac = frac.trim_end_matches('0');
+            if frac.is_empty() {
+                "0".to_string()
+            } else {
+                format!("0.{frac}")
+            }
+        }
+    };
+    format!("{sign}{body}")
+}
+
 fn bignat_field_to_decimal(val: &Value, table: &DataConTable, depth: usize) -> String {
     // Distinguish recognized-but-unreadable backing (ByteArray/LitByteArray/a
     // lifted Con("ByteArray", [..]) layer) from an unrecognized shape: only

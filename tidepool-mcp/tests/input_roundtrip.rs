@@ -121,7 +121,7 @@ mod jit_roundtrip {
     fn number_input_roundtrip() {
         assert_eq!(
             run_with_input(
-                r#"case input of { Aeson.NumberI n -> pure n; _ -> pure (-999 :: Int) }"#,
+                r#"case input of { Aeson.Number s -> pure (round (Aeson.toRealFloat s :: Double) :: Int); _ -> pure (-999 :: Int) }"#,
                 json!(42),
             ),
             json!(42),

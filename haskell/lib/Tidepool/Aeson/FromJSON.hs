@@ -37,6 +37,7 @@ import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
 import Tidepool.Aeson.Value (Value(..), Object, Array, fromText, toText, eitherDecodeValue)
+import Tidepool.Aeson.Scientific (toRealFloat, truncateScientific)
 import Data.Proxy (Proxy(..))
 import GHC.Generics
 import GHC.TypeLits (TypeError, ErrorMessage(Text, (:<>:)))
@@ -146,7 +147,6 @@ kindOf v = case v of
   Array _  -> "array"
   String _ -> "string"
   Number _ -> "number"
-  NumberI _ -> "number"
   Bool _   -> "bool"
   Null     -> "null"
 
@@ -163,15 +163,14 @@ instance FromJSON Text where
   parseJSON v          = mismatch "string" v
 
 instance FromJSON Double where
-  parseJSON (Number n)  = Success n
-  parseJSON (NumberI n) = Success (fromIntegral n)
-  parseJSON v           = mismatch "number" v
+  parseJSON (Number s) = Success (toRealFloat s)
+  parseJSON v          = mismatch "number" v
 
--- Truncates toward zero, matching the `_Int` prism (Tidepool.Aeson.Lens).
+-- Integral values decode exactly; non-integral ones truncate toward zero,
+-- matching the `_Int` prism (Tidepool.Aeson.Lens).
 instance FromJSON Int where
-  parseJSON (NumberI n) = Success n
-  parseJSON (Number n)  = Success (truncate n)
-  parseJSON v           = mismatch "number" v
+  parseJSON (Number s) = Success (fromInteger (truncateScientific s))
+  parseJSON v          = mismatch "number" v
 
 instance FromJSON a => FromJSON [a] where
   parseJSON (Array xs) = traverse parseJSON xs
@@ -232,11 +231,9 @@ withBool :: String -> (Bool -> Result a) -> Value -> Result a
 withBool _    f (Bool b) = f b
 withBool name _ v        = typeMismatch name "bool" v
 
--- | Run a parser against a number (the vendored 'Value' carries 'Double',
--- not 'Scientific').
+-- | Run a parser against a number, projecting the 'Scientific' to 'Double'.
 withDouble :: String -> (Double -> Result a) -> Value -> Result a
-withDouble _    f (Number n) = f n
-withDouble _    f (NumberI n) = f (fromIntegral n)
+withDouble _    f (Number s) = f (toRealFloat s)
 withDouble name _ v          = typeMismatch name "number" v
 
 typeMismatch :: String -> String -> Value -> Result a

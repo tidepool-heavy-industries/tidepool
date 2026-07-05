@@ -328,13 +328,22 @@ fn works_tco_deep_tail_recursion() {
 
 /// Moderate Double literals render fine — documents the boundary for the
 /// near-DBL_MAX GMP trap below (3.14, 1.0e10, 1.23e100 all stay within the
-/// integerAdd/integerSub shims). 1.0e10 is integral → integer JSON.
+/// integerAdd/integerSub shims). `a`=3.14 renders compact (serde-exact); `b`
+/// and `c` are integral → integer JSON. `c` (1.234…e100) is an extreme
+/// whole-number magnitude, so it EXPANDS to the exact 101-digit integer
+/// (16 significant digits × 10^85) rather than serde's compact `…e+100` — a
+/// small coefficient with a large positive exponent is an integer, and the
+/// erased `Value` carries nothing to mark it as double-origin. See
+/// `large_double_literal_on_jit`.
 #[test]
 fn works_moderate_double_literals() {
+    let c = format!("1234567890123456{}", "0".repeat(85));
+    let expected: serde_json::Value =
+        serde_json::from_str(&format!("{{\"a\":3.14,\"b\":10000000000,\"c\":{c}}}")).unwrap();
     works(
         "pure (object [\"a\" .= (3.14 :: Double), \"b\" .= (1.0e10 :: Double), \
          \"c\" .= (1.234567890123456e100 :: Double)])",
-        serde_json::json!({"a":3.14,"b":10000000000i64,"c":1.234567890123456e100}),
+        expected,
     );
 }
 
@@ -397,10 +406,18 @@ fn read_double_on_jit() {
 
 /// A near-DBL_MAX Double LITERAL works on the JIT: the native-bignum
 /// integerAdd/integerSub shims handle it. Moderate literals are also fine (see
-/// `works_moderate_double_literals`).
+/// `works_moderate_double_literals`). The value renders as the exact expanded
+/// integer (179×10^306), not serde's compact `1.79e+308` — extreme
+/// whole-number doubles expand (see `works_moderate_double_literals`). Assert
+/// the value round-trips rather than pinning the 309-digit string.
 #[test]
 fn large_double_literal_on_jit() {
-    works("pure (1.79e308 :: Double)", serde_json::json!(1.79e308));
+    let got = run_probe("pure (1.79e308 :: Double)").expect("large double literal should eval");
+    assert_eq!(
+        got.as_f64(),
+        Some(1.79e308),
+        "value must round-trip through the expanded-integer render; got {got}"
+    );
 }
 
 /// `cycle` works: base's inlined body floats its
@@ -417,9 +434,9 @@ fn works_cycle_value_knot() {
     );
 }
 
-/// Integers survive the JSON path exactly. The vendored aeson `Number` is
-/// Double-backed, so `toJSON` on Int/Integer would lose precision past 2^53 at
-/// construction; Ints instead ride the exact `NumberI` carrier end-to-end
+/// Integers survive the JSON path exactly. The vendored aeson `Number` carries a
+/// `Scientific` (exact `Integer` coefficient × 10^exponent), so an Int/Integer
+/// rides its coefficient with no Double rounding past 2^53 — exact end-to-end
 /// (ToJSON instances, [j|] integral literals, serde bridge, render arm, optics
 /// `_Int`).
 #[test]

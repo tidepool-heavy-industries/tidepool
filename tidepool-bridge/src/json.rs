@@ -54,8 +54,12 @@ mod tests {
             // List
             ("[]", 10, 0),
             (":", 11, 2),
-            // Exact-int JSON number (BUG-8)
-            ("NumberI", 12, 1),
+            // Number carrier: Scientific coefficient×10^exponent (exact)
+            ("Scientific", 1, 2),
+            // Integer constructors for the Scientific coefficient
+            ("IS", 1, 1),
+            ("IP", 2, 1),
+            ("IN", 3, 1),
             // Text
             ("Text", 12, 3),
             // Int boxing
@@ -73,6 +77,42 @@ mod tests {
             });
         }
         t
+    }
+
+    /// Walk the number shape `Number(Scientific(IS <coeff>, <exp>))` and return
+    /// `(coeff, exp)` so the value equals `coeff * 10^exp`. Panics if the shape
+    /// doesn't match (i.e. not an i64-representable coefficient).
+    fn number_is_coeff_exp(val: &Value, table: &DataConTable) -> (i64, i64) {
+        let sci_fields = match val {
+            Value::Con(id, fields) => {
+                assert_eq!(table.name_of(*id), Some("Number"));
+                assert_eq!(fields.len(), 1);
+                match &fields[0] {
+                    Value::Con(sci_id, sci_fields) => {
+                        assert_eq!(table.name_of(*sci_id), Some("Scientific"));
+                        assert_eq!(sci_fields.len(), 2);
+                        sci_fields
+                    }
+                    other => panic!("Expected Con(Scientific), got {other:?}"),
+                }
+            }
+            _ => panic!("Expected Con(Number)"),
+        };
+        let coeff = match &sci_fields[0] {
+            Value::Con(is_id, is_fields) => {
+                assert_eq!(table.name_of(*is_id), Some("IS"));
+                match &is_fields[0] {
+                    Value::Lit(tidepool_repr::Literal::LitInt(i)) => *i,
+                    other => panic!("Expected IS(LitInt), got {other:?}"),
+                }
+            }
+            other => panic!("Expected Con(IS), got {other:?}"),
+        };
+        let exp = match &sci_fields[1] {
+            Value::Lit(tidepool_repr::Literal::LitInt(e)) => *e,
+            other => panic!("Expected LitInt exponent, got {other:?}"),
+        };
+        (coeff, exp)
     }
 
     #[test]
@@ -136,17 +176,8 @@ mod tests {
         let table = json_test_table();
         let json = serde_json::json!(42);
         let val = json.to_value(&table).unwrap();
-        match &val {
-            Value::Con(id, fields) => {
-                assert_eq!(table.name_of(*id), Some("NumberI"));
-                assert_eq!(fields.len(), 1);
-                match &fields[0] {
-                    Value::Lit(tidepool_repr::Literal::LitInt(i)) => assert_eq!(*i, 42),
-                    _ => panic!("Expected Lit(LitInt), got {:?}", fields[0]),
-                }
-            }
-            _ => panic!("Expected Con(NumberI)"),
-        }
+        // 42 == 42 * 10^0
+        assert_eq!(number_is_coeff_exp(&val, &table), (42, 0));
     }
 
     #[test]
@@ -154,18 +185,8 @@ mod tests {
         let table = json_test_table();
         let json = serde_json::json!(9007199254740993_i64);
         let val = json.to_value(&table).unwrap();
-        match &val {
-            Value::Con(id, fields) => {
-                assert_eq!(table.name_of(*id), Some("NumberI"));
-                match &fields[0] {
-                    Value::Lit(tidepool_repr::Literal::LitInt(i)) => {
-                        assert_eq!(*i, 9007199254740993)
-                    }
-                    other => panic!("Expected exact LitInt, got {other:?}"),
-                }
-            }
-            _ => panic!("Expected Con(NumberI)"),
-        }
+        // exact past 2^53: coefficient rides IS (fits i64), no Double rounding
+        assert_eq!(number_is_coeff_exp(&val, &table), (9007199254740993, 0));
     }
 
     #[test]
@@ -173,20 +194,8 @@ mod tests {
         let table = json_test_table();
         let json = serde_json::json!(3.14);
         let val = json.to_value(&table).unwrap();
-        match &val {
-            Value::Con(id, fields) => {
-                assert_eq!(table.name_of(*id), Some("Number"));
-                assert_eq!(fields.len(), 1);
-                match &fields[0] {
-                    Value::Lit(tidepool_repr::Literal::LitDouble(bits)) => {
-                        let f = f64::from_bits(*bits);
-                        assert!((f - 3.14).abs() < 1e-10);
-                    }
-                    _ => panic!("Expected Lit(LitDouble), got {:?}", fields[0]),
-                }
-            }
-            _ => panic!("Expected Con(Number)"),
-        }
+        // 3.14 == 314 * 10^-2 (exact, via Scientific — not a Double)
+        assert_eq!(number_is_coeff_exp(&val, &table), (314, -2));
     }
 
     #[test]
@@ -260,36 +269,14 @@ mod tests {
     fn test_number_negative() {
         let table = json_test_table();
         let val = serde_json::json!(-1).to_value(&table).unwrap();
-        match &val {
-            Value::Con(id, fields) => {
-                assert_eq!(table.name_of(*id), Some("NumberI"));
-                match &fields[0] {
-                    Value::Lit(tidepool_repr::Literal::LitInt(i)) => {
-                        assert_eq!(*i, -1);
-                    }
-                    _ => panic!("Expected LitInt"),
-                }
-            }
-            _ => panic!("Expected Con(Number)"),
-        }
+        assert_eq!(number_is_coeff_exp(&val, &table), (-1, 0));
     }
 
     #[test]
     fn test_number_zero() {
         let table = json_test_table();
         let val = serde_json::json!(0).to_value(&table).unwrap();
-        match &val {
-            Value::Con(id, fields) => {
-                assert_eq!(table.name_of(*id), Some("NumberI"));
-                match &fields[0] {
-                    Value::Lit(tidepool_repr::Literal::LitInt(i)) => {
-                        assert_eq!(*i, 0);
-                    }
-                    _ => panic!("Expected LitDouble"),
-                }
-            }
-            _ => panic!("Expected Con(Number)"),
-        }
+        assert_eq!(number_is_coeff_exp(&val, &table), (0, 0));
     }
 
     #[test]
@@ -357,13 +344,9 @@ mod tests {
                     Value::Con(cons_id, cons_fields) => {
                         assert_eq!(table.name_of(*cons_id), Some(":"));
                         assert_eq!(cons_fields.len(), 2);
-                        // Head should be NumberI(1) — ints ride exact (BUG-8)
-                        match &cons_fields[0] {
-                            Value::Con(num_id, _) => {
-                                assert_eq!(table.name_of(*num_id), Some("NumberI"));
-                            }
-                            _ => panic!("Expected Con(NumberI)"),
-                        }
+                        // Head should be Number(Scientific(IS 1, 0)) — ints ride
+                        // the exact Scientific coefficient (BUG-8)
+                        assert_eq!(number_is_coeff_exp(&cons_fields[0], &table), (1, 0));
                         // Tail should be []
                         match &cons_fields[1] {
                             Value::Con(nil_id, _) => {
@@ -604,8 +587,11 @@ mod tests {
             ("False", 9, 0),
             ("[]", 10, 0),
             (":", 11, 2),
-            // Exact-int JSON number (BUG-8)
-            ("NumberI", 12, 1),
+            // Number carrier: Scientific coefficient×10^exponent (exact, BUG-8)
+            ("Scientific", 1, 2),
+            ("IS", 1, 1),
+            ("IP", 2, 1),
+            ("IN", 3, 1),
             ("Text", 12, 3),
             ("I#", 13, 1),
         ];

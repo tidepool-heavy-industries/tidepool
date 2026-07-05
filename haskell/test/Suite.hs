@@ -1167,7 +1167,7 @@ qq_j_pat_open :: Bool
 qq_j_pat_open =
   case [j|{"a": 1, "b": 2, "c": 3}|] of
     [j|{"b": $v}|] -> case v of
-      Number d -> d == 2.0
+      Number d -> d == 2
       _        -> False
     _ -> False
 

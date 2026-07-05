@@ -81,7 +81,6 @@ import Language.Haskell.TH
   , mkName
   , newName
   , normalB
-  , rationalL
   , stringL
   , tupE
   , tupP
@@ -93,7 +92,8 @@ import Language.Haskell.TH
   )
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 
-import Tidepool.Aeson.Value (Value (..), fromText, toJSON)
+import Tidepool.Aeson.Value
+  (Value (..), scientific, coefficient, base10Exponent, fromFloatDigits, fromText, toJSON)
 import qualified Tidepool.Aeson.KeyMap as KM
 
 -- | @[j| {"user": {"id": $uid}} |]@ — a JSON 'Value' literal with antiquotes
@@ -554,12 +554,14 @@ expCodegen node = case node of
   NBool True   -> [| Bool True |]
   NBool False  -> [| Bool False |]
   NString t    -> [| String (T.pack $(litE (stringL (T.unpack t)))) |]
-  NNumber d
-    -- Integral literals stay exact (BUG-8): a Double-backed `Number` loses
-    -- ints past 2^53. (Parse still rides Double, so >2^53 literals in [j|]
-    -- source text remain lossy — rare; the builder path is the common one.)
-    | d == fromIntegral (round d :: Int) -> [| NumberI $(litE (integerL (toInteger (round d :: Int)))) |]
-    | otherwise -> [| Number $(litE (rationalL (toRational d))) |]
+  NNumber d ->
+    -- `Number` carries an exact 'Scientific'; decompose the parsed Double at
+    -- compile time into (coefficient, exponent) and splice the literals. (Parse
+    -- still rides Double, so >2^53 literals in [j|] source text remain lossy —
+    -- rare; the builder/antiquote path is the exact one.)
+    let s = fromFloatDigits d
+    in [| Number (scientific $(litE (integerL (coefficient s)))
+                             $(litE (integerL (toInteger (base10Exponent s))))) |]
   NArray es _  -> [| Array $(listE (map expCodegen es)) |]
   NObject kvs  -> [| Object (KM.fromList $(listE (map pairE kvs))) |]
   NAntiVar v   -> [| toJSON $(varE (mkName v)) |]
@@ -635,10 +637,12 @@ buildMatch ((scrut, node) : rest) binders =
                     then $(cont) else Nothing |]) [] ]
     NNumber d -> do
       x <- newName "n"
+      let s = fromFloatDigits d
       dispatch
         [ match (conP 'Number [varP x])
             (normalB
-               [| if $(varE x) == $(litE (rationalL (toRational d)))
+               [| if $(varE x) == scientific $(litE (integerL (coefficient s)))
+                                             $(litE (integerL (toInteger (base10Exponent s))))
                     then $(cont) else Nothing |]) [] ]
     NArray es ell -> do
       xs <- newName "xs"

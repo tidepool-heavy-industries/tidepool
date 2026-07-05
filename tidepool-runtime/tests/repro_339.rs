@@ -4,8 +4,9 @@
 //! while the JIT correctly returned 7.
 //!
 //! Root cause: GHC's strict-field unboxing (`-funbox-small-strict-fields`,
-//! implied at -O1+) leaves the vendored `Aeson` `Value`'s `NumberI !Int`
-//! constructor's field genuinely unboxed at pattern-match sites, so a
+//! implied at -O1+) leaves a strict scalar field (e.g. a boxed `I#`/`D#` inside
+//! the vendored `Aeson` `Value`'s number carrier) genuinely unboxed at
+//! pattern-match sites, so a
 //! generic-deriving decode Core can rebox an operand one layer deeper than
 //! the immediately enclosing `case`-of already unwrapped. The oracle's scalar
 //! primop extractors only stripped exactly one `Con` layer; the fix (in

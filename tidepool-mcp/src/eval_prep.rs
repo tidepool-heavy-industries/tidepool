@@ -296,7 +296,7 @@ fn template_haskell_impl(
     out.push_str("  _r <- __user\n");
     if let Some(b) = budget {
         out.push_str("  _scV <- kvGet \"__sayChars\"\n");
-        out.push_str("  let _sayC = case _scV of { Just b -> case b ^? _Number of { Just n -> round n; _ -> 0 }; Nothing -> 0 }\n");
+        out.push_str("  let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }\n");
         out.push_str(&format!(
             "  paginateResult (max' 100 ({} - _sayC)) ({render_call} _r)\n",
             b
@@ -347,7 +347,10 @@ fn json_to_haskell(val: &serde_json::Value) -> String {
             format!("Aeson.Bool {}", if *b { "True" } else { "False" })
         }
         serde_json::Value::Number(n) => {
-            format!("Aeson.NumberI ({} :: Int)", n)
+            // Exact for ints AND floats: decompose the token into an integer
+            // coefficient × 10^exponent and build the aeson Scientific directly.
+            let (coeff, exp) = tidepool_eval::shapes::parse_decimal_token(&n.to_string());
+            format!("Aeson.Number (Aeson.scientific ({coeff}) ({exp}))")
         }
         serde_json::Value::String(s) => {
             format!("Aeson.String \"{}\"", escape_haskell_string(s))
@@ -665,10 +668,12 @@ mod tests {
         assert!(haskell.contains("\"str\" .= Aeson.String \"hello\""));
         assert!(haskell.contains("\"bool\" .= Aeson.Bool True"));
         assert!(haskell.contains("\"null\" .= Aeson.Null"));
-        assert!(haskell.contains("\"num\" .= Aeson.NumberI (42 :: Int)"));
+        assert!(haskell.contains("\"num\" .= Aeson.Number (Aeson.scientific (42) (0))"));
+        assert!(haskell.contains(
+            "\"arr\" .= toJSON [Aeson.Number (Aeson.scientific (1) (0)), Aeson.Number (Aeson.scientific (2) (0))]"
+        ));
         assert!(haskell
-            .contains("\"arr\" .= toJSON [Aeson.NumberI (1 :: Int), Aeson.NumberI (2 :: Int)]"));
-        assert!(haskell.contains("\"obj\" .= object [\"a\" .= Aeson.NumberI (1 :: Int)]"));
+            .contains("\"obj\" .= object [\"a\" .= Aeson.Number (Aeson.scientific (1) (0))]"));
     }
 
     #[test]

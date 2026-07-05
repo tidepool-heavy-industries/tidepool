@@ -41,15 +41,21 @@ fn decode_scalars() {
         json!(42)
     );
     assert_eq!(
-        run(r#"case (eitherDecode "true" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#),
+        run(
+            r#"case (eitherDecode "true" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#
+        ),
         json!(true)
     );
     assert_eq!(
-        run(r#"case (eitherDecode "\"hi\"" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#),
+        run(
+            r#"case (eitherDecode "\"hi\"" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#
+        ),
         json!("hi")
     );
     assert_eq!(
-        run(r#"case (eitherDecode "null" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#),
+        run(
+            r#"case (eitherDecode "null" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#
+        ),
         json!(null)
     );
 }
@@ -58,11 +64,15 @@ fn decode_scalars() {
 #[ignore = "needs worktree extract binary (TIDEPOOL_EXTRACT) with JsonDecode interception"]
 fn decode_array_and_object() {
     assert_eq!(
-        run(r#"case (eitherDecode "[1,2,3]" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#),
+        run(
+            r#"case (eitherDecode "[1,2,3]" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#
+        ),
         json!([1, 2, 3])
     );
     assert_eq!(
-        run(r#"case (eitherDecode "{\"a\":1,\"b\":[true,null]}" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#),
+        run(
+            r#"case (eitherDecode "{\"a\":1,\"b\":[true,null]}" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#
+        ),
         json!({"a": 1, "b": [true, null]})
     );
 }
@@ -85,7 +95,9 @@ fn either_decode_preserves_error() {
     // ...and the serde error message is preserved (non-empty), never discarded —
     // the whole reason eitherDecode exists over a `Maybe`-shaped decoder.
     assert_eq!(
-        run(r#"case (eitherDecode "{oops" :: Either Text Value) of { Left e -> Bool (T.length e > 0); Right _ -> Bool False }"#),
+        run(
+            r#"case (eitherDecode "{oops" :: Either Text Value) of { Left e -> Bool (T.length e > 0); Right _ -> Bool False }"#
+        ),
         json!(true)
     );
 }

@@ -25,7 +25,7 @@ const OBJECT: u64 = 103;
 const ARRAY: u64 = 104;
 const STRING: u64 = 105;
 const NUMBER: u64 = 106;
-const NUMBER_I: u64 = 107;
+const SCIENTIFIC: u64 = 107;
 const BOOL: u64 = 108;
 const NULL: u64 = 109;
 const TRUE: u64 = 110;
@@ -36,6 +36,9 @@ const I_HASH: u64 = 114;
 const TEXT: u64 = 115;
 const CONS: u64 = 116;
 const NIL: u64 = 117;
+const IS: u64 = 118;
+const IP: u64 = 119;
+const IN: u64 = 120;
 
 fn dc(id: u64, name: &str, tag: u32, arity: u32, qual: Option<&str>) -> DataCon {
     DataCon {
@@ -76,12 +79,15 @@ fn aeson_table() -> DataConTable {
         Some("Tidepool.Aeson.Value.Number"),
     ));
     t.insert(dc(
-        NUMBER_I,
-        "NumberI",
-        7,
+        SCIENTIFIC,
+        "Scientific",
         1,
-        Some("Tidepool.Aeson.Value.NumberI"),
+        2,
+        Some("Tidepool.Aeson.Scientific.Scientific"),
     ));
+    t.insert(dc(IS, "IS", 1, 1, Some("GHC.Num.Integer.IS")));
+    t.insert(dc(IP, "IP", 2, 1, Some("GHC.Num.Integer.IP")));
+    t.insert(dc(IN, "IN", 3, 1, Some("GHC.Num.Integer.IN")));
     t.insert(dc(BOOL, "Bool", 5, 1, Some("Tidepool.Aeson.Value.Bool")));
     t.insert(dc(NULL, "Null", 6, 0, Some("Tidepool.Aeson.Value.Null")));
     t.insert(dc(FALSE, "False", 1, 0, Some("GHC.Types.False")));
@@ -122,14 +128,6 @@ fn lit_int(v: &Value) -> i64 {
         Value::Lit(Literal::LitWord(n)) => *n as i64,
         Value::Con(_, f) if f.len() == 1 => lit_int(&f[0]), // I# n
         other => panic!("expected Int, got {other:?}"),
-    }
-}
-
-fn lit_double(v: &Value) -> f64 {
-    match v {
-        Value::Lit(Literal::LitDouble(b)) => f64::from_bits(*b),
-        Value::Con(_, f) if f.len() == 1 => lit_double(&f[0]),
-        other => panic!("expected Double, got {other:?}"),
     }
 }
 
@@ -180,6 +178,74 @@ fn collect_list(v: &Value, table: &DataConTable, out: &mut Vec<String>) {
     }
 }
 
+/// Render `Scientific coeff exp` (coeff an `IS`/`IP`/`IN` Integer) as the exact
+/// decimal `coeff × 10^exp`, matching the runtime renderer's canonical form.
+fn render_scientific(sci: &Value, table: &DataConTable) -> String {
+    let (coeff, exp) = match sci {
+        Value::Con(id, f) if table.name_of(*id) == Some("Scientific") => (&f[0], lit_int(&f[1])),
+        other => panic!("expected Scientific, got {other:?}"),
+    };
+    let cs = integer_decimal(coeff, table);
+    compose_decimal(&cs, exp)
+}
+
+fn integer_decimal(v: &Value, table: &DataConTable) -> String {
+    match v {
+        Value::Con(id, f) => match table.name_of(*id) {
+            Some("IS") => lit_int(&f[0]).to_string(),
+            Some("IP") => bignat_decimal(&f[0]),
+            Some("IN") => format!("-{}", bignat_decimal(&f[0])),
+            other => panic!("expected IS/IP/IN, got {other:?}"),
+        },
+        other => panic!("expected Integer Con, got {other:?}"),
+    }
+}
+
+fn bignat_decimal(v: &Value) -> String {
+    let bytes = match v {
+        Value::ByteArray(a) => a.lock().unwrap().clone(),
+        Value::Lit(Literal::LitByteArray(b)) => b.clone(),
+        other => panic!("expected BigNat bytes, got {other:?}"),
+    };
+    tidepool_eval::shapes::bignat_bytes_to_decimal(&bytes)
+}
+
+/// `coeff × 10^exp` → canonical decimal string (mirrors render.rs::compose_decimal).
+fn compose_decimal(coeff: &str, exp: i64) -> String {
+    let (neg, rest) = match coeff.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, coeff),
+    };
+    let mag = rest.trim_start_matches('0');
+    if mag.is_empty() {
+        return "0".to_string();
+    }
+    let sign = if neg { "-" } else { "" };
+    let body = if exp >= 0 {
+        format!("{mag}{}", "0".repeat(exp as usize))
+    } else {
+        let k = (-exp) as usize;
+        if k < mag.len() {
+            let (int, frac) = mag.split_at(mag.len() - k);
+            let frac = frac.trim_end_matches('0');
+            if frac.is_empty() {
+                int.to_string()
+            } else {
+                format!("{int}.{frac}")
+            }
+        } else {
+            let frac = format!("{}{mag}", "0".repeat(k - mag.len()));
+            let frac = frac.trim_end_matches('0');
+            if frac.is_empty() {
+                "0".to_string()
+            } else {
+                format!("0.{frac}")
+            }
+        }
+    };
+    format!("{sign}{body}")
+}
+
 fn render_value(v: &Value, table: &DataConTable) -> String {
     match v {
         Value::Con(id, fields) => match table.name_of(*id) {
@@ -198,8 +264,7 @@ fn render_value(v: &Value, table: &DataConTable) -> String {
                 format!("[{}]", items.join(","))
             }
             Some("String") => format!("{:?}", text_str(&fields[0])),
-            Some("Number") => format!("{}", lit_double(&fields[0])),
-            Some("NumberI") => format!("{}", lit_int(&fields[0])),
+            Some("Number") => render_scientific(&fields[0], table),
             Some("Bool") => match &fields[0] {
                 Value::Con(bid, _) => match table.name_of(*bid) {
                     Some("True") => "true".into(),
@@ -265,6 +330,23 @@ fn scalars_agree() {
     assert_agree("\"\"", "\"\"");
 }
 
+/// The whole point of restoring Scientific: integers past i64/2^53 decode to an
+/// EXACT coefficient (IP/IN limbs), not a lossy Double, and JIT ≡ eval on it.
+#[test]
+fn big_integers_are_exact() {
+    assert_agree("9007199254740993", "9007199254740993"); // 2^53+1, still IS
+    assert_agree(
+        "265252859812191058636308480000000", // 30!, past u128 → IP
+        "265252859812191058636308480000000",
+    );
+    assert_agree(
+        "-123456789012345678901234567890", // negative big → IN
+        "-123456789012345678901234567890",
+    );
+    assert_agree("0.0001", "0.0001");
+    assert_agree("-0.5", "-0.5");
+}
+
 #[test]
 fn arrays_agree() {
     assert_agree("[]", "[]");
@@ -293,7 +375,10 @@ fn malformed_is_left_on_both() {
         let ev = eval_render(input);
         let jit = jit_render(input);
         assert!(ev.starts_with("left:"), "eval not Left for {input:?}: {ev}");
-        assert!(jit.starts_with("left:"), "jit not Left for {input:?}: {jit}");
+        assert!(
+            jit.starts_with("left:"),
+            "jit not Left for {input:?}: {jit}"
+        );
         assert_eq!(ev, jit, "eval/jit divergence for input {input:?}");
     }
 }

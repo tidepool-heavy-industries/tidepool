@@ -110,10 +110,14 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         ("Array", 1),
         ("String", 1),
         ("Number", 1),
-        // Exact-integer JSON numbers ride NumberI (BUG-8 fix in bridge/json.rs).
+        // JSON numbers ride Number(Scientific coeff exp) — the coefficient an
+        // exact Integer (IS/IP/IN), the exponent an Int (BUG-8, bridge/json.rs).
         // Must be in the table for kvInfo and any handler that returns serde_json
-        // objects containing integer fields.
-        ("NumberI", 1),
+        // objects containing numeric fields.
+        ("Scientific", 2),
+        ("IS", 1),
+        ("IP", 1),
+        ("IN", 1),
         ("Bool", 1),
         ("Null", 0),
         ("Bin", 5),

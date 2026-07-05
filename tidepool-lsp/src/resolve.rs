@@ -386,7 +386,11 @@ pub fn hover(client: &RaClient, n: &Value) -> Result<Option<String>, String> {
 /// Raw `textDocument/rename` WorkspaceEdit, or `None` when RA can't rename
 /// here. Read-only — the edit is never applied to disk; callers either diff
 /// it in memory (`rename`) or just harvest touch points (`references`).
-fn request_rename_edit(client: &RaClient, n: &Value, new_name: &str) -> Result<Option<Value>, String> {
+fn request_rename_edit(
+    client: &RaClient,
+    n: &Value,
+    new_name: &str,
+) -> Result<Option<Value>, String> {
     let (uri, line, ch) = node_position(client, n)?;
     let result = client.request(
         "textDocument/rename",
@@ -422,7 +426,12 @@ fn edit_touch_points(edit: &Value) -> Vec<(String, u64, u64)> {
             else {
                 continue;
             };
-            for e in doc.get("edits").and_then(Value::as_array).into_iter().flatten() {
+            for e in doc
+                .get("edits")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
                 if let Some(range) = e.get("range") {
                     let (l, c) = start_lc(range);
                     out.push((uri.to_string(), l, c));
@@ -435,10 +444,20 @@ fn edit_touch_points(edit: &Value) -> Vec<(String, u64, u64)> {
 
 /// `(file, line, char)` sort key for a reference/def node, for deterministic ordering.
 fn node_sort_key(v: &Value) -> (String, u64, u64) {
-    let file = v.get("file").and_then(Value::as_str).unwrap_or("").to_string();
+    let file = v
+        .get("file")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let pos = v.get("pos");
-    let line = pos.and_then(|p| p.get("line")).and_then(Value::as_u64).unwrap_or(0);
-    let char = pos.and_then(|p| p.get("char")).and_then(Value::as_u64).unwrap_or(0);
+    let line = pos
+        .and_then(|p| p.get("line"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let char = pos
+        .and_then(|p| p.get("char"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     (file, line, char)
 }
 

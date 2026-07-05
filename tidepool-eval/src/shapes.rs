@@ -15,9 +15,10 @@
 //!     boxed as `I#`;
 //!   - GHC bignums (`IP`/`IN` payloads) as ByteArrays of little-endian 64-bit
 //!     limbs (`bigNatLitBytes`);
-//!   - the vendored aeson `Value`'s exact-int policy: i64-representable JSON
-//!     numbers ride `NumberI`, everything else rides the Double-backed
-//!     `Number`.
+//!   - the vendored aeson `Value`'s number policy: every JSON number rides
+//!     `Number !Scientific`, the coefficient×10^exponent form that stays exact
+//!     (the coefficient an exact `Integer` — `IS`/`IP`/`IN` — the exponent an
+//!     `Int`).
 //!
 //! Encode and decode of the same shape live here, side by side —
 //! `tidepool-runtime`'s renderer, `tidepool-bridge`'s FromCore/ToCore impls,
@@ -426,21 +427,108 @@ pub fn walk_map_entries<'a>(
 // Vendored aeson Value — exact-int number policy
 // ---------------------------------------------------------------------------
 
-/// Exact-int policy (BUG-8): i64-representable JSON numbers ride
-/// `NumberI(LitInt)` so they never lose precision; everything else rides the
-/// Double-backed `Number(LitDouble)`.
-pub fn json_number(n: &serde_json::Number, number_i: DataConId, number: DataConId) -> Value {
-    if let Some(i) = n.as_i64() {
-        Value::Con(number_i, vec![Value::Lit(Literal::LitInt(i))])
+/// Constructor ids for building an aeson `Number (Scientific coeff exp)`.
+#[derive(Clone, Copy)]
+pub struct NumberConIds {
+    pub number: DataConId,
+    pub scientific: DataConId,
+    pub is: DataConId,
+    pub ip: DataConId,
+    pub in_: DataConId,
+}
+
+/// Split a JSON number token (`serde_json` under `arbitrary_precision` hands us
+/// the exact source text) into an integer `coefficient` decimal string and a
+/// `base10Exponent`, such that the value equals `coefficient * 10^exponent`.
+/// e.g. `"3.14"` → `("314", -2)`, `"1e10"` → `("1", 10)`, `"-0.001"` → `("-1", -3)`.
+pub fn parse_decimal_token(tok: &str) -> (String, i64) {
+    let (sign, rest) = match tok.strip_prefix('-') {
+        Some(r) => ("-", r),
+        None => ("", tok.strip_prefix('+').unwrap_or(tok)),
+    };
+    let (mantissa, exp_part) = match rest.split_once(['e', 'E']) {
+        Some((m, e)) => (m, e.parse::<i64>().unwrap_or(0)),
+        None => (rest, 0),
+    };
+    let (int_part, frac_part) = match mantissa.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (mantissa, ""),
+    };
+    // coefficient digits = int ++ frac; exponent shifts down by the frac length.
+    let mut digits = String::with_capacity(int_part.len() + frac_part.len());
+    digits.push_str(int_part);
+    digits.push_str(frac_part);
+    let exponent = exp_part - frac_part.len() as i64;
+    // Strip leading zeros (keep at least one digit) so `integer_from_decimal`'s
+    // i64 fast-path fires whenever possible.
+    let trimmed = digits.trim_start_matches('0');
+    let coeff = if trimmed.is_empty() {
+        "0".to_string()
     } else {
-        let f = n.as_f64().unwrap_or(0.0);
-        Value::Con(number, vec![Value::Lit(Literal::LitDouble(f.to_bits()))])
-    }
+        format!("{sign}{trimmed}")
+    };
+    (coeff, exponent)
+}
+
+/// Build an exact aeson `Number (Scientific coeff exp)` from a parsed JSON
+/// number. No precision is lost: the coefficient rides an exact `Integer`
+/// (`IS`/`IP`/`IN`) and the base-10 exponent an `Int`. Requires
+/// `serde_json`'s `arbitrary_precision` so `n.as_str()` is the exact token.
+pub fn scientific_from_number(n: &serde_json::Number, ids: &NumberConIds) -> Value {
+    let (coeff, exp) = parse_decimal_token(n.as_str());
+    let coefficient = integer_from_decimal(&coeff, ids.is, ids.ip, ids.in_);
+    let sci = Value::Con(
+        ids.scientific,
+        vec![coefficient, Value::Lit(Literal::LitInt(exp))],
+    );
+    Value::Con(ids.number, vec![sci])
 }
 
 // ---------------------------------------------------------------------------
 // GHC bignum limbs (IP/IN payloads)
 // ---------------------------------------------------------------------------
+
+/// Build a GHC `Integer` heap value from an exact decimal string (the inverse of
+/// [`bignat_bytes_to_decimal`]). `IS Int#` when the value fits a machine `Int`;
+/// otherwise `IP`/`IN` carrying the magnitude as little-endian u64 limb bytes
+/// (8 bytes per limb, least-significant first — exactly the layout the decoder
+/// reads back). This is what lets a >i64 JSON integer decode to an exact
+/// `Scientific` coefficient instead of a lossy `Double`.
+pub fn integer_from_decimal(
+    s: &str,
+    is_id: DataConId,
+    ip_id: DataConId,
+    in_id: DataConId,
+) -> Value {
+    // Machine-Int fast path (the overwhelmingly common case).
+    if let Ok(i) = s.parse::<i64>() {
+        return Value::Con(is_id, vec![Value::Lit(Literal::LitInt(i))]);
+    }
+    let (neg, mag) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    // Horner over base 2^64: limbs = limbs*10 + digit, little-endian.
+    let mut limbs: Vec<u64> = Vec::new();
+    for b in mag.bytes() {
+        let digit = (b - b'0') as u64;
+        let mut carry = digit;
+        for limb in limbs.iter_mut() {
+            let v = (*limb as u128) * 10 + carry as u128;
+            *limb = v as u64;
+            carry = (v >> 64) as u64;
+        }
+        if carry != 0 {
+            limbs.push(carry);
+        }
+    }
+    while limbs.last() == Some(&0) {
+        limbs.pop();
+    }
+    let bytes: Vec<u8> = limbs.iter().flat_map(|l| l.to_le_bytes()).collect();
+    let con = if neg { in_id } else { ip_id };
+    Value::Con(con, vec![Value::Lit(Literal::LitByteArray(bytes))])
+}
 
 /// Unwrap the `BigNat#` payload of an `IP`/`IN` con to its raw limb bytes.
 /// Accepts `Value::ByteArray`, `LitByteArray`, or ONE lifted
@@ -532,8 +620,11 @@ mod tests {
             (11, "[]", 0),
             (12, "Bin", 5),
             (13, "Tip", 0),
-            (14, "NumberI", 1),
             (15, "Number", 1),
+            (14, "Scientific", 2),
+            (16, "IS", 1),
+            (17, "IP", 1),
+            (18, "IN", 1),
         ];
         for (id, name, arity) in cons {
             t.insert(DataCon {
@@ -550,6 +641,55 @@ mod tests {
 
     fn id(table: &DataConTable, name: &str) -> DataConId {
         table.get_by_name(name).unwrap()
+    }
+
+    /// The `Integer` builder is the exact inverse of `bignat_bytes_to_decimal`:
+    /// small values box as `IS Int#`, big ones as `IP`/`IN` limb bytes, and both
+    /// reconstruct to the original decimal string.
+    #[test]
+    fn integer_from_decimal_round_trips() {
+        let (is, ip, in_) = (DataConId(100), DataConId(101), DataConId(102));
+        let cases = [
+            "0",
+            "42",
+            "-42",
+            "9223372036854775807",               // i64::MAX
+            "-9223372036854775808",              // i64::MIN
+            "9223372036854775808",               // i64::MAX + 1 → IP
+            "-9223372036854775809",              // i64::MIN - 1 → IN
+            "265252859812191058636308480000000", // 30! (past u128)
+            "-123456789012345678901234567890",
+        ];
+        for s in cases {
+            let v = integer_from_decimal(s, is, ip, in_);
+            let got = match &v {
+                Value::Con(cid, f) if *cid == is => match &f[0] {
+                    Value::Lit(Literal::LitInt(n)) => n.to_string(),
+                    other => panic!("IS payload not LitInt: {other:?}"),
+                },
+                Value::Con(cid, f) if *cid == ip || *cid == in_ => {
+                    let bytes = match &f[0] {
+                        Value::Lit(Literal::LitByteArray(b)) => b.clone(),
+                        other => panic!("IP/IN payload not LitByteArray: {other:?}"),
+                    };
+                    let mag = bignat_bytes_to_decimal(&bytes);
+                    if *cid == in_ {
+                        format!("-{mag}")
+                    } else {
+                        mag
+                    }
+                }
+                other => panic!("unexpected Integer shape: {other:?}"),
+            };
+            assert_eq!(got, s, "round-trip mismatch for {s}");
+            // Big values must NOT box as IS (that would silently cap at i64).
+            if s.parse::<i64>().is_err() {
+                assert!(
+                    matches!(&v, Value::Con(cid, _) if *cid == ip || *cid == in_),
+                    "{s} should be IP/IN, got {v:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -696,30 +836,58 @@ mod tests {
     }
 
     #[test]
-    fn json_number_exact_int_policy() {
-        let t = test_table();
-        let (ni, nd) = (id(&t, "NumberI"), id(&t, "Number"));
-        let big: serde_json::Number = serde_json::from_str("9007199254740993").unwrap();
-        match &json_number(&big, ni, nd) {
-            Value::Con(c, fields) => {
-                assert_eq!(*c, ni);
-                assert!(matches!(
-                    fields.as_slice(),
-                    [Value::Lit(Literal::LitInt(9007199254740993))]
-                ));
+    fn parse_decimal_token_splits_coeff_and_exp() {
+        assert_eq!(parse_decimal_token("3.14"), ("314".into(), -2));
+        assert_eq!(parse_decimal_token("1e10"), ("1".into(), 10));
+        assert_eq!(parse_decimal_token("-0.001"), ("-1".into(), -3));
+        assert_eq!(parse_decimal_token("42"), ("42".into(), 0));
+        assert_eq!(parse_decimal_token("1.5e-3"), ("15".into(), -4));
+        assert_eq!(parse_decimal_token("0"), ("0".into(), 0));
+        assert_eq!(parse_decimal_token("100"), ("100".into(), 0));
+        // exact big integer past f64/i64 stays exact in the coefficient
+        assert_eq!(
+            parse_decimal_token("9007199254740993"),
+            ("9007199254740993".into(), 0)
+        );
+    }
+
+    #[test]
+    fn scientific_from_number_builds_exact_contract() {
+        let ids = NumberConIds {
+            number: DataConId(200),
+            scientific: DataConId(201),
+            is: DataConId(202),
+            ip: DataConId(203),
+            in_: DataConId(204),
+        };
+        // A >i64 integer: Number(Scientific(IP<limbs>, 0)) — exact, not Double.
+        let big: serde_json::Number =
+            serde_json::from_str("265252859812191058636308480000000").unwrap();
+        match &scientific_from_number(&big, &ids) {
+            Value::Con(num, nf) => {
+                assert_eq!(*num, ids.number);
+                match &nf[0] {
+                    Value::Con(sci, sf) => {
+                        assert_eq!(*sci, ids.scientific);
+                        assert!(matches!(&sf[1], Value::Lit(Literal::LitInt(0))));
+                        match &sf[0] {
+                            Value::Con(c, cf) if *c == ids.ip => {
+                                let bytes = match &cf[0] {
+                                    Value::Lit(Literal::LitByteArray(b)) => b.clone(),
+                                    o => panic!("coeff not bytes: {o:?}"),
+                                };
+                                assert_eq!(
+                                    bignat_bytes_to_decimal(&bytes),
+                                    "265252859812191058636308480000000"
+                                );
+                            }
+                            o => panic!("coeff not IP: {o:?}"),
+                        }
+                    }
+                    o => panic!("not Scientific: {o:?}"),
+                }
             }
-            _ => panic!("expected Con"),
-        }
-        let frac: serde_json::Number = serde_json::from_str("1.5").unwrap();
-        match &json_number(&frac, ni, nd) {
-            Value::Con(c, fields) => {
-                assert_eq!(*c, nd);
-                let bits = 1.5f64.to_bits();
-                assert!(
-                    matches!(fields.as_slice(), [Value::Lit(Literal::LitDouble(b))] if *b == bits)
-                );
-            }
-            _ => panic!("expected Con"),
+            o => panic!("not Number: {o:?}"),
         }
     }
 
