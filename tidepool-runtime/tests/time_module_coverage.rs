@@ -6,8 +6,12 @@
 //!   - pre-1970 dates (negative epoch-ms)
 //!   - git %cI shape with negative UTC offset (e.g. -07:00)
 //!   - git %cI shape with positive UTC offset (e.g. +05:30)
+//!   - TYPED failure on malformed input (`Left`, not silent corruption)
 //!
-//! All functions are pure-Int JIT-safe (no FFI, no Integer, no lens).
+//! `parseISO8601 :: Text -> Either Text UTCTime` — the parse is a Rust `chrono`
+//! primop (ParseISO8601); malformed input is a typed `Left`. The success bodies
+//! below unwrap with `either` (a `Left` surfaces as a distinctive sentinel that
+//! fails the golden assertion loudly).
 
 use serde_json::json;
 use tidepool_testing::eval_harness::EvalHarness;
@@ -36,7 +40,7 @@ result = {body}
 #[test]
 fn test_format_then_parse_modern() {
     assert_eq!(
-        run("epochMillis (parseISO8601 (formatISO8601 (UTCTime 1709164800000)))"),
+        run("either (const (-1)) epochMillis (parseISO8601 (formatISO8601 (UTCTime 1709164800000)))"),
         json!(1709164800000i64)
     );
 }
@@ -46,7 +50,7 @@ fn test_format_then_parse_modern() {
 #[test]
 fn test_parse_then_format_z() {
     assert_eq!(
-        run(r#"formatISO8601 (parseISO8601 "2024-02-29T00:00:00Z")"#),
+        run(r#"either id formatISO8601 (parseISO8601 "2024-02-29T00:00:00Z")"#),
         json!("2024-02-29T00:00:00Z")
     );
 }
@@ -56,7 +60,7 @@ fn test_parse_then_format_z() {
 #[test]
 fn test_roundtrip_pre1970() {
     assert_eq!(
-        run(r#"formatISO8601 (parseISO8601 "1960-03-15T12:00:00Z")"#),
+        run(r#"either id formatISO8601 (parseISO8601 "1960-03-15T12:00:00Z")"#),
         json!("1960-03-15T12:00:00Z")
     );
 }
@@ -66,7 +70,7 @@ fn test_roundtrip_pre1970() {
 fn test_pre1970_epoch_millis_negative() {
     // 1960-03-15T12:00:00Z = -309182400000 ms
     assert_eq!(
-        run(r#"epochMillis (parseISO8601 "1960-03-15T12:00:00Z")"#),
+        run(r#"either (const (-1)) epochMillis (parseISO8601 "1960-03-15T12:00:00Z")"#),
         json!(-309182400000i64)
     );
 }
@@ -76,7 +80,7 @@ fn test_pre1970_epoch_millis_negative() {
 #[test]
 fn test_parse_git_ci_negative_offset() {
     assert_eq!(
-        run(r#"formatISO8601 (parseISO8601 "2026-07-01T19:24:22-07:00")"#),
+        run(r#"either id formatISO8601 (parseISO8601 "2026-07-01T19:24:22-07:00")"#),
         json!("2026-07-02T02:24:22Z")
     );
 }
@@ -86,7 +90,7 @@ fn test_parse_git_ci_negative_offset() {
 #[test]
 fn test_parse_git_ci_positive_offset() {
     assert_eq!(
-        run(r#"formatISO8601 (parseISO8601 "2024-01-15T10:30:00+05:30")"#),
+        run(r#"either id formatISO8601 (parseISO8601 "2024-01-15T10:30:00+05:30")"#),
         json!("2024-01-15T05:00:00Z")
     );
 }
@@ -96,7 +100,17 @@ fn test_parse_git_ci_positive_offset() {
 #[test]
 fn test_epoch_zero_roundtrip() {
     assert_eq!(
-        run("epochMillis (parseISO8601 (formatISO8601 (UTCTime 0)))"),
+        run("either (const (-1)) epochMillis (parseISO8601 (formatISO8601 (UTCTime 0)))"),
         json!(0i64)
+    );
+}
+
+// Typed failure (the point of the Either surface): malformed input is a `Left`,
+// not a silently-corrupted timestamp. `isLeft` → True on garbage.
+#[test]
+fn test_malformed_input_is_left() {
+    assert_eq!(
+        run(r#"either (const True) (const False) (parseISO8601 "not a timestamp")"#),
+        json!(true)
     );
 }

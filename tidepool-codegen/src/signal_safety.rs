@@ -201,10 +201,15 @@ mod inner {
     impl std::fmt::Display for SignalError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             let name = match self.0 {
-                libc::SIGILL => "SIGILL (illegal instruction — likely exhausted case branch)",
+                // The JIT no longer emits bare `trap`s: case misses, div-by-zero,
+                // and bad `chr` all route through host calls that yield clean
+                // RuntimeErrors. So a SIGILL/SIGFPE reaching here is a genuine
+                // fault (heap corruption, a bad pointer, an unguarded op), not a
+                // routine language-level error.
+                libc::SIGILL => "SIGILL (illegal instruction — likely heap corruption or a bad code pointer)",
                 libc::SIGSEGV => "SIGSEGV (segmentation fault — likely invalid memory access)",
                 libc::SIGBUS => "SIGBUS (bus error)",
-                libc::SIGFPE => "SIGFPE (arithmetic exception — likely division by zero)",
+                libc::SIGFPE => "SIGFPE (arithmetic exception — an unguarded hardware divide/overflow; JIT div-by-zero is guarded and yields a clean error)",
                 libc::SIGTRAP => "SIGTRAP (trap — likely Cranelift trap instruction)",
                 _ => return write!(f, "JIT signal: signal {} (unknown)", self.0),
             };

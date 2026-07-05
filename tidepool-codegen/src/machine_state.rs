@@ -60,6 +60,7 @@ use crate::stack_map::StackMapRegistry;
 pub struct MachineState {
     cancel_flag: RefCell<Option<Arc<AtomicBool>>>,
     json_con_ids: Cell<Option<tidepool_eval::json::JsonConIds>>,
+    time_con_ids: Cell<Option<tidepool_eval::time::TimeConIds>>,
     stack_map_registry: RefCell<Option<*const StackMapRegistry>>,
     call_depth: Cell<u32>,
     runtime_error: RefCell<Option<RuntimeError>>,
@@ -87,6 +88,7 @@ impl MachineState {
         Self {
             cancel_flag: RefCell::new(None),
             json_con_ids: Cell::new(None),
+            time_con_ids: Cell::new(None),
             stack_map_registry: RefCell::new(None),
             call_depth: Cell::new(0),
             runtime_error: RefCell::new(None),
@@ -153,6 +155,14 @@ impl MachineState {
 
     pub(crate) fn json_con_ids(&self) -> Option<tidepool_eval::json::JsonConIds> {
         self.json_con_ids.get()
+    }
+
+    pub(crate) fn set_time_con_ids(&self, ids: Option<tidepool_eval::time::TimeConIds>) {
+        self.time_con_ids.set(ids);
+    }
+
+    pub(crate) fn time_con_ids(&self) -> Option<tidepool_eval::time::TimeConIds> {
+        self.time_con_ids.get()
     }
 
     // --- runtime error (first-cause cell) -----------------------------------
@@ -440,7 +450,7 @@ thread_local! {
     /// `drain_diagnostics`, anchored to #340), which keep using it until that
     /// sibling-crate cutover captures a machine handle at suspension time
     /// instead. Full host-fn vmctx-reach (`runtime_error`/
-    /// `runtime_error_with_msg`/`unresolved_var_trap`/`runtime_case_trap`/
+    /// `runtime_error_with_msg`/`unresolved_var_trap`/`runtime_shape_trap`/
     /// `runtime_oom`/the array primops) is #329.
     static CURRENT_MACHINE: Cell<*mut MachineState> = const { Cell::new(std::ptr::null_mut()) };
 }

@@ -27,22 +27,53 @@ use cranelift_module::Module;
 use tidepool_heap::layout;
 use tidepool_repr::PrimOpKind;
 
-/// Emit a zero-divisor guard: if `divisor == 0`, trap; otherwise fall through.
-fn emit_div_zero_check(builder: &mut FunctionBuilder, divisor: Value) {
+/// Zero-divisor guard. If `divisor == 0`, raise a clean `DivisionByZero`
+/// runtime error (poison + pending-error flag, surfaced by the effect machine)
+/// and substitute `1` so the hardware divide that follows is well-defined; its
+/// result is never observed. Returns the divisor to actually divide by.
+///
+/// This is a runtime *domain* error, routed through the same `runtime_error`
+/// machinery as a Haskell `error` call — NOT a bare Cranelift `trap` (`ud2` →
+/// SIGILL), which used to crash the whole process on a divide by zero instead
+/// of yielding a catchable error.
+fn emit_div_zero_check(
+    sess: &mut EmitSession,
+    builder: &mut FunctionBuilder,
+    divisor: Value,
+) -> Result<Value, EmitError> {
     let zero = builder.ins().iconst(types::I64, 0);
     let is_zero = builder.ins().icmp(IntCC::Equal, divisor, zero);
-    let ok_block = builder.create_block();
-    let trap_block = builder.create_block();
-    builder.ins().brif(is_zero, trap_block, &[], ok_block, &[]);
+    let raise_block = builder.create_block();
+    let cont_block = builder.create_block();
+    builder.append_block_param(cont_block, types::I64);
+    builder.ins().brif(
+        is_zero,
+        raise_block,
+        &[],
+        cont_block,
+        &[BlockArg::Value(divisor)],
+    );
 
-    builder.switch_to_block(trap_block);
-    builder.seal_block(trap_block);
-    builder
-        .ins()
-        .trap(cranelift_codegen::ir::TrapCode::unwrap_user(3));
+    builder.switch_to_block(raise_block);
+    builder.seal_block(raise_block);
+    let kind = builder.ins().iconst(
+        types::I64,
+        crate::host_fns::RuntimeErrorKind::DivisionByZero as i64,
+    );
+    let _ = emit_runtime_call(
+        sess.pipeline,
+        builder,
+        "runtime_error",
+        &[AbiParam::new(types::I64)],
+        &[AbiParam::new(types::I64)],
+        &[kind],
+    )?;
+    let one = builder.ins().iconst(types::I64, 1);
+    builder.ins().jump(cont_block, &[BlockArg::Value(one)]);
 
-    builder.switch_to_block(ok_block);
-    builder.seal_block(ok_block);
+    builder.switch_to_block(cont_block);
+    builder.seal_block(cont_block);
+    Ok(builder.block_params(cont_block)[0])
 }
 
 /// Emit a primitive operation. Unboxes HeapPtr args, performs the op, returns Raw.
@@ -87,14 +118,14 @@ pub fn emit_primop(
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            emit_div_zero_check(builder, b);
+            let b = emit_div_zero_check(sess, builder, b)?;
             Ok(SsaVal::Raw(builder.ins().sdiv(a, b), LIT_TAG_INT))
         }
         PrimOpKind::IntRem => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            emit_div_zero_check(builder, b);
+            let b = emit_div_zero_check(sess, builder, b)?;
             Ok(SsaVal::Raw(builder.ins().srem(a, b), LIT_TAG_INT))
         }
 
@@ -223,14 +254,14 @@ pub fn emit_primop(
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            emit_div_zero_check(builder, b);
+            let b = emit_div_zero_check(sess, builder, b)?;
             Ok(SsaVal::Raw(builder.ins().udiv(a, b), LIT_TAG_WORD))
         }
         PrimOpKind::WordRem => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            emit_div_zero_check(builder, b);
+            let b = emit_div_zero_check(sess, builder, b)?;
             Ok(SsaVal::Raw(builder.ins().urem(a, b), LIT_TAG_WORD))
         }
 
@@ -490,11 +521,54 @@ pub fn emit_primop(
             let is_surrogate = builder.ins().band(is_surr_lo, is_surr_hi);
             let out_of_range = builder.ins().bor(is_negative, is_too_large);
             let is_invalid = builder.ins().bor(out_of_range, is_surrogate);
-            builder
-                .ins()
-                .trapnz(is_invalid, cranelift_codegen::ir::TrapCode::unwrap_user(1));
 
-            Ok(SsaVal::Raw(v, LIT_TAG_CHAR))
+            // Invalid codepoint: raise a clean error (matching GHC's
+            // `Prelude.chr: bad argument`) via the runtime_error machinery, then
+            // substitute 0 so the returned Char is well-formed. The placeholder
+            // is never observed — the effect machine surfaces the pending error
+            // first. (Was a bare `trapnz` → `ud2` → SIGILL, crashing the process
+            // instead of yielding a catchable error.)
+            let bad_block = builder.create_block();
+            let merge_block = builder.create_block();
+            builder.append_block_param(merge_block, types::I64);
+            // Valid codepoint: fall through to merge carrying `v`. Invalid: raise
+            // in bad_block, then merge carrying a 0 placeholder.
+            builder.ins().brif(
+                is_invalid,
+                bad_block,
+                &[],
+                merge_block,
+                &[BlockArg::Value(v)],
+            );
+
+            builder.switch_to_block(bad_block);
+            builder.seal_block(bad_block);
+            const CHR_MSG: &str = "Prelude.chr: bad argument";
+            let msg_ptr = builder.ins().iconst(types::I64, CHR_MSG.as_ptr() as i64);
+            let msg_len = builder.ins().iconst(types::I64, CHR_MSG.len() as i64);
+            let kind = builder.ins().iconst(
+                types::I64,
+                crate::host_fns::RuntimeErrorKind::UserError as i64,
+            );
+            let _ = emit_runtime_call(
+                sess.pipeline,
+                builder,
+                "runtime_error_with_msg",
+                &[
+                    AbiParam::new(types::I64), // kind
+                    AbiParam::new(types::I64), // msg ptr
+                    AbiParam::new(types::I64), // msg len
+                ],
+                &[AbiParam::new(types::I64)],
+                &[kind, msg_ptr, msg_len],
+            )?;
+            let zero_cp = builder.ins().iconst(types::I64, 0);
+            builder.ins().jump(merge_block, &[BlockArg::Value(zero_cp)]);
+
+            builder.switch_to_block(merge_block);
+            builder.seal_block(merge_block);
+            let out = builder.block_params(merge_block)[0];
+            Ok(SsaVal::Raw(out, LIT_TAG_CHAR))
         }
         PrimOpKind::Ord => {
             check_arity(op, 1, args.len())?;
@@ -613,6 +687,34 @@ pub fn emit_primop(
                 sess.pipeline,
                 builder,
                 "runtime_json_decode",
+                &[
+                    AbiParam::new(types::I64), // vmctx
+                    AbiParam::new(types::I64), // text Con ptr
+                ],
+                &[AbiParam::new(types::I64)],
+                &[sess.vmctx, text_ptr],
+            )?;
+            builder.declare_value_needs_stack_map(result);
+            Ok(SsaVal::HeapPtr(result))
+        }
+        PrimOpKind::ParseISO8601 => {
+            // parseISO8601 :: Text -> Either Text UTCTime. Force the Text arg to
+            // a heap pointer and hand it + vmctx to the host fn, which parses via
+            // chrono and builds the `Either Text UTCTime` ADT on the nursery heap
+            // (same builder the tree-walker uses in `tidepool-eval::json`, so
+            // JIT == eval by construction).
+            check_arity(op, 1, args.len())?;
+            let text_ptr = crate::emit::expr::ensure_heap_ptr(
+                builder,
+                sess.vmctx,
+                sess.gc_sig,
+                sess.oom_func,
+                args[0],
+            );
+            let result = emit_runtime_call(
+                sess.pipeline,
+                builder,
+                "runtime_parse_iso8601",
                 &[
                     AbiParam::new(types::I64), // vmctx
                     AbiParam::new(types::I64), // text Con ptr
@@ -1347,14 +1449,14 @@ pub fn emit_primop(
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            emit_div_zero_check(builder, b);
+            let b = emit_div_zero_check(sess, builder, b)?;
             Ok(SsaVal::Raw(builder.ins().udiv(a, b), LIT_TAG_WORD))
         }
         PrimOpKind::QuotRemWordRem => {
             check_arity(op, 2, args.len())?;
             let a = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
             let b = unbox_int(sess.pipeline, builder, sess.vmctx, args[1]);
-            emit_div_zero_check(builder, b);
+            let b = emit_div_zero_check(sess, builder, b)?;
             Ok(SsaVal::Raw(builder.ins().urem(a, b), LIT_TAG_WORD))
         }
 
@@ -2360,11 +2462,11 @@ fn emit_f32_compare(
 /// returned pointer-derived garbage instead of erroring).
 ///
 /// Emits a `num_fields == 1` check. The failing path calls
-/// `runtime_case_trap` (records the offending Con in the diagnostics, sets
-/// the pending `RuntimeError` that the machine surfaces before the result is
-/// used) and jumps to `next_block` with the returned poison pointer. Leaves
-/// the builder positioned in a fresh sealed block where the single-field
-/// unwrap should be emitted.
+/// `runtime_shape_trap` (kind `BoxingArity`: records the offending Con in the
+/// diagnostics, sets the pending `RuntimeError` that the machine surfaces before
+/// the result is used) and jumps to `next_block` with the returned poison
+/// pointer. Leaves the builder positioned in a fresh sealed block where the
+/// single-field unwrap should be emitted.
 fn emit_boxing_wrapper_guard(
     pipeline: &mut CodegenPipeline,
     builder: &mut FunctionBuilder,
@@ -2389,11 +2491,11 @@ fn emit_boxing_wrapper_guard(
     let trap_fn = pipeline
         .module
         .declare_function(
-            "runtime_case_trap",
+            "runtime_shape_trap",
             Linkage::Import,
-            &crate::emit::runtime_case_trap_sig(pipeline.isa.default_call_conv()),
+            &crate::emit::runtime_shape_trap_sig(pipeline.isa.default_call_conv()),
         )
-        .expect("declare runtime_case_trap");
+        .expect("declare runtime_shape_trap");
     let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
     // No expected-tags list (the expectation is "a 1-field boxing wrapper",
     // not a constructor set); pass a valid dummy slot so the host fn's slice
@@ -2405,9 +2507,13 @@ fn emit_boxing_wrapper_guard(
     ));
     let dummy_addr = builder.ins().stack_addr(types::I64, dummy_ss, 0);
     let zero = builder.ins().iconst(types::I64, 0);
+    let kind = builder.ins().iconst(
+        types::I64,
+        crate::host_fns::ShapeTrapKind::BoxingArity as i64,
+    );
     let call = builder
         .ins()
-        .call(trap_ref, &[curr_v, zero, dummy_addr, zero, zero]);
+        .call(trap_ref, &[kind, curr_v, zero, dummy_addr, zero, zero]);
     let poison = builder.inst_results(call)[0];
     builder.ins().jump(next_block, &[BlockArg::Value(poison)]);
 
@@ -2655,11 +2761,11 @@ fn unbox_numeric(
             // the wrong float/integer class (e.g. a DOUBLE response forced by an
             // Int# continuation — witness Double(3.5), whose IEEE-754 bits would
             // otherwise load as a garbage i64). Trap cleanly via
-            // runtime_case_trap instead; the poison object it returns is loaded
-            // from below, but the pending RuntimeError is surfaced before the
-            // garbage can be observed. Only ill-typed Core reaches a class
-            // mismatch — valid GHC output emits explicit Int2Double/Double2Int —
-            // so this cannot regress well-typed programs.
+            // runtime_shape_trap (kind LitClass) instead; the poison object it
+            // returns is loaded from below, but the pending RuntimeError is
+            // surfaced before the garbage can be observed. Only ill-typed Core
+            // reaches a class mismatch — valid GHC output emits explicit
+            // Int2Double/Double2Int — so this cannot regress well-typed programs.
             let obj_tag = builder
                 .ins()
                 .load(types::I8, MemFlags::trusted(), v_final, 0);
@@ -2703,11 +2809,11 @@ fn unbox_numeric(
             let trap_fn = pipeline
                 .module
                 .declare_function(
-                    "runtime_case_trap",
+                    "runtime_shape_trap",
                     Linkage::Import,
-                    &crate::emit::runtime_case_trap_sig(pipeline.isa.default_call_conv()),
+                    &crate::emit::runtime_shape_trap_sig(pipeline.isa.default_call_conv()),
                 )
-                .expect("declare runtime_case_trap");
+                .expect("declare runtime_shape_trap");
             let trap_ref = pipeline.module.declare_func_in_func(trap_fn, builder.func);
             let dummy_ss = builder.create_sized_stack_slot(ir::StackSlotData::new(
                 ir::StackSlotKind::ExplicitSlot,
@@ -2716,9 +2822,12 @@ fn unbox_numeric(
             ));
             let dummy_addr = builder.ins().stack_addr(types::I64, dummy_ss, 0);
             let zero = builder.ins().iconst(types::I64, 0);
+            let kind = builder
+                .ins()
+                .iconst(types::I64, crate::host_fns::ShapeTrapKind::LitClass as i64);
             let call = builder
                 .ins()
-                .call(trap_ref, &[v_final, zero, dummy_addr, zero, zero]);
+                .call(trap_ref, &[kind, v_final, zero, dummy_addr, zero, zero]);
             let poison = builder.inst_results(call)[0];
             builder.ins().jump(load_block, &[BlockArg::Value(poison)]);
 

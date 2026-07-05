@@ -13,8 +13,8 @@
 //! - **Lazy-result streaming** — the `ValueSource` / `ValueStream` machinery that
 //!   parks an effect-result iterator and serves it element-at-a-time.
 //!
-//! Always-on stderr breadcrumbs (`[CASE TRAP]`, `[BUG]`) fire only on genuine
-//! compiler bugs and must stay loud.
+//! Always-on stderr breadcrumbs (`[CASE TRAP]`/`[SHAPE TRAP: …]`, `[BUG]`) fire
+//! only on genuine compiler bugs and must stay loud.
 //!
 //! This module is split along system boundaries: [`cancel`] (external
 //! cancellation), [`gc`] (roots + the copying collector), [`errors`]
@@ -47,7 +47,7 @@
 //! async-signal context) must stay thread-scoped rather than per-machine.
 //! Full host-fn vmctx-reach for the remaining ambient shims
 //! (`runtime_error`/`runtime_error_with_msg`/`unresolved_var_trap`/
-//! `runtime_case_trap`/`runtime_oom`/the array primops) is #329.
+//! `runtime_shape_trap`/`runtime_oom`/the array primops) is #329.
 
 mod cancel;
 mod errors;
@@ -71,9 +71,9 @@ pub use errors::{
     debug_app_check, drain_diagnostics, error_poison_ptr, error_poison_ptr_lazy,
     error_poison_ptr_lazy_msg, get_exec_context, has_runtime_error, is_lazy_poison,
     push_diagnostic, raise_lazy_poison, register_var_names, runtime_bad_thunk_state_trap,
-    runtime_blackhole_trap, runtime_case_trap, runtime_error, runtime_error_dynamic,
-    runtime_error_with_msg, runtime_oom, set_exec_context, set_first_cause, surface_error,
-    take_runtime_error, RuntimeError, RuntimeErrorKind,
+    runtime_blackhole_trap, runtime_error, runtime_error_dynamic, runtime_error_with_msg,
+    runtime_oom, runtime_shape_trap, set_exec_context, set_first_cause, surface_error,
+    take_runtime_error, RuntimeError, RuntimeErrorKind, ShapeTrapKind,
 };
 pub(crate) use errors::{SIGNAL_SAFE_CTX, SIGNAL_SAFE_CTX_LEN};
 
@@ -88,10 +88,11 @@ pub use primops::{
     runtime_double_expm1, runtime_double_log, runtime_double_log1p, runtime_double_power,
     runtime_double_sin, runtime_double_sinh, runtime_double_tan, runtime_double_tanh,
     runtime_int_encode_double, runtime_json_decode, runtime_new_boxed_array,
-    runtime_new_byte_array, runtime_resize_byte_array, runtime_set_byte_array,
-    runtime_show_double_addr, runtime_show_signed_double_addr, runtime_shrink_boxed_array,
-    runtime_shrink_byte_array, runtime_strlen, runtime_text_measure_off, runtime_text_memchr,
-    runtime_text_reverse, runtime_word2_quot, runtime_word2_rem, runtime_word_encode_double,
+    runtime_new_byte_array, runtime_parse_iso8601, runtime_resize_byte_array,
+    runtime_set_byte_array, runtime_show_double_addr, runtime_show_signed_double_addr,
+    runtime_shrink_boxed_array, runtime_shrink_byte_array, runtime_strlen,
+    runtime_text_measure_off, runtime_text_memchr, runtime_text_reverse, runtime_word2_quot,
+    runtime_word2_rem, runtime_word_encode_double,
 };
 
 pub(crate) use streaming::{
@@ -106,6 +107,7 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
     vec![
         ("gc_trigger", gc_trigger as *const u8),
         ("runtime_json_decode", runtime_json_decode as *const u8),
+        ("runtime_parse_iso8601", runtime_parse_iso8601 as *const u8),
         ("runtime_oom", runtime_oom as *const u8),
         (
             "runtime_blackhole_trap",
@@ -201,7 +203,7 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
             "runtime_cas_boxed_array",
             runtime_cas_boxed_array as *const u8,
         ),
-        ("runtime_case_trap", runtime_case_trap as *const u8),
+        ("runtime_shape_trap", runtime_shape_trap as *const u8),
         (
             "runtime_show_double_addr",
             runtime_show_double_addr as *const u8,

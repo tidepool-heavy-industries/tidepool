@@ -15,3 +15,6 @@ tidepool-bignum = { version = "0.1.0", path = "../tidepool-bignum" }
 im = "15"
 thiserror = "1"
 serde_json = { version = "1", features = ["arbitrary_precision"] }
+# ISO-8601/RFC-3339 timestamp parsing for the `ParseISO8601` primop. No default
+# features (no clock/tz — we only parse), just `alloc` for error strings.
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }

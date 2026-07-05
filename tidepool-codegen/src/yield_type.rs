@@ -73,11 +73,15 @@ fn format_yield_signal(sig: i32) -> String {
     #[cfg(unix)]
     {
         let name = match sig {
-            libc::SIGILL => "SIGILL (illegal instruction — likely exhausted case branch)",
+            // Case misses, div-by-zero, and bad `chr` now route through host
+            // calls that yield clean RuntimeErrors, so these signals mean a
+            // genuine fault (heap corruption / bad pointer / unguarded op), not a
+            // routine language-level error.
+            libc::SIGILL => "SIGILL (illegal instruction — likely heap corruption or a bad code pointer)",
             libc::SIGSEGV => "SIGSEGV (segmentation fault — likely invalid memory access)",
             libc::SIGBUS => "SIGBUS (bus error)",
             libc::SIGTRAP => "SIGTRAP (trap — likely Cranelift trap instruction)",
-            libc::SIGFPE => "SIGFPE (arithmetic exception — likely division by zero or overflow)",
+            libc::SIGFPE => "SIGFPE (arithmetic exception — an unguarded hardware divide/overflow; JIT div-by-zero is guarded)",
             _ => {
                 if !ctx.is_empty() {
                     return format!("JIT signal: signal {} (unknown, context: {})", sig, ctx);

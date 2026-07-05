@@ -935,6 +935,37 @@ fn test_emit_int_rem() {
     }
 }
 
+// A literal divide-by-zero must NOT fault the process with a bare Cranelift
+// trap (`ud2` → SIGILL). The guard raises a clean `DivisionByZero` runtime
+// error and substitutes a safe divisor, so execution continues to a
+// well-formed placeholder value; the pending error is surfaced by the effect
+// machine before that value is observed. Here we assert the graceful-survival
+// half (the process runs to a valid Lit, no crash). That the pending error is
+// classified as `RuntimeError::DivisionByZero` is covered end-to-end by
+// `effect_machine::test_runtime_error_div_zero` (which installs a machine).
+#[test]
+fn test_emit_int_quot_by_zero_does_not_trap() {
+    let tree = RecursiveTree {
+        nodes: vec![
+            CoreFrame::Lit(Literal::LitInt(5)),
+            CoreFrame::Lit(Literal::LitInt(0)),
+            CoreFrame::PrimOp {
+                op: PrimOpKind::IntQuot,
+                args: vec![0, 1],
+            },
+        ],
+    };
+    // Must not panic/abort/SIGILL — returning at all is the point.
+    let result = compile_and_run(&tree);
+    unsafe {
+        assert_eq!(
+            layout::read_tag(result.result_ptr),
+            layout::TAG_LIT,
+            "divide by zero must continue gracefully to a well-formed Lit, not trap"
+        );
+    }
+}
+
 #[test]
 fn test_emit_primop_bytearray_basic() {
     let tree = RecursiveTree {

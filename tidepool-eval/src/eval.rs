@@ -24,10 +24,12 @@ use tidepool_repr::{
 /// bound to its worker VarId, so that `Var` references to constructors
 /// in the expression tree resolve correctly.
 pub fn env_from_datacon_table(table: &DataConTable) -> Env {
-    // Cache the aeson-`Value` constructor ids for the `JsonDecode` primop. This
-    // is the universal eval-setup chokepoint (every differential harness and
-    // caller builds its env here), so the primop always sees the right ids.
+    // Cache the aeson-`Value` constructor ids for the `JsonDecode` primop, and
+    // the `Either`/`I#`/`Text` ids for the `ParseISO8601` primop. This is the
+    // universal eval-setup chokepoint (every differential harness and caller
+    // builds its env here), so the primops always see the right ids.
     crate::json::set_json_con_ids(crate::json::JsonConIds::from_table(table));
+    crate::time::set_time_con_ids(crate::time::TimeConIds::from_table(table));
     table
         .iter()
         .map(|dc| {
@@ -79,9 +81,9 @@ thread_local! {
 ///
 /// Returns a value in Weak Head Normal Form (WHNF), NOT deeply forced. The
 /// trampoline (see [`JumpReq`]) keeps recursive join points O(1) in host stack:
-/// a tail jump parks itself in [`JUMP_SLOT`] and returns a placeholder; this
-/// loop picks it up, ties the recursive knot (the join is in scope inside its
-/// OWN rhs — GHC `joinrec` semantics), binds the parameters, and re-evaluates
+/// a tail jump parks itself in [`JUMP_SLOT`] and signals [`EvalError::JumpInFlight`];
+/// this loop catches it, ties the recursive knot (the join is in scope inside
+/// its OWN rhs — GHC `joinrec` semantics), binds the parameters, and re-evaluates
 /// the rhs — iterating until a jump-free value is produced.
 fn eval_settled(
     expr: &CoreExpr,
@@ -89,8 +91,16 @@ fn eval_settled(
     env: &Env,
     heap: &mut dyn Heap,
 ) -> Result<Value, EvalError> {
-    let mut res = eval_at(expr, idx, env, heap)?;
-    while let Some(req) = JUMP_SLOT.with(|s| s.borrow_mut().take()) {
+    // A tail `Jump` short-circuits with `EvalError::JumpInFlight` after parking
+    // its `JumpReq` — the signal accompanies the parked request one-for-one.
+    // Catch it, tie the recursive knot, bind the parameters, and re-evaluate the
+    // rhs; any other Ok/Err is the settled result and returns as-is. Self-jumps
+    // from the rhs loop here — O(1) host stack, mirroring the JIT's TCO.
+    let mut pending = eval_at(expr, idx, env, heap);
+    while matches!(pending, Err(EvalError::JumpInFlight)) {
+        let req = JUMP_SLOT
+            .with(|s| s.borrow_mut().take())
+            .expect("JumpInFlight signalled without a parked JumpReq");
         // rhs scope = definition-site env + recursive knot + parameters.
         // For a non-recursive join the rhs never references `join_var`, so the
         // knot binding is inert and behaviour matches a plain continuation jump.
@@ -106,9 +116,9 @@ fn eval_settled(
             new_env = new_env.update(*param, arg);
         }
         let root = req.rhs.nodes.len() - 1;
-        res = eval_at(&req.rhs, root, &new_env, heap)?;
+        pending = eval_at(&req.rhs, root, &new_env, heap);
     }
-    Ok(res)
+    pending
 }
 
 /// Evaluate a [`CoreExpr`] to a [`Value`] under a given environment and heap.
@@ -118,9 +128,18 @@ fn eval_settled(
 /// all fields.
 pub fn eval(expr: &CoreExpr, env: &Env, heap: &mut dyn Heap) -> Result<Value, EvalError> {
     if expr.nodes.is_empty() {
+        // An empty node vector is never a valid expression. The usual source is
+        // a LetRec knot-tying placeholder (allocated empty, then back-patched)
+        // being forced by a sibling binding BEFORE its back-patch — not a
+        // malformed top-level tree. Name both so the cause isn't mistaken for a
+        // generic type error.
         return Err(EvalError::TypeMismatch {
             expected: "non-empty expression",
-            got: crate::error::ValueKind::Other("empty tree".into()),
+            got: crate::error::ValueKind::Other(
+                "empty expression tree (malformed Core, or a LetRec knot-tying \
+                 binding forced before its back-patch)"
+                    .into(),
+            ),
         });
     }
     let res = eval_settled(expr, expr.nodes.len() - 1, env, heap)?;
@@ -232,6 +251,21 @@ pub fn deep_force(val: Value, heap: &mut dyn Heap) -> Result<Value, EvalError> {
     })
 }
 
+/// Whether the node at `idx` is a trivial Con field — safe to evaluate eagerly
+/// because it is already in WHNF or built entirely from trivial parts. This is a
+/// byte-for-byte mirror of the JIT's `is_trivial_field` in tidepool-codegen
+/// `emit/expr.rs`; the two MUST agree so the oracle and JIT thunk exactly the
+/// same Con fields (a diverging/erroring sub-expression under a constructor must
+/// not be forced at construction time on either backend).
+fn is_trivial_field(idx: usize, expr: &CoreExpr) -> bool {
+    match &expr.nodes[idx] {
+        CoreFrame::Var(_) | CoreFrame::Lit(_) | CoreFrame::Lam { .. } => true,
+        CoreFrame::Con { fields, .. } => fields.iter().all(|&f| is_trivial_field(f, expr)),
+        CoreFrame::PrimOp { args, .. } => args.iter().all(|&a| is_trivial_field(a, expr)),
+        _ => false, // App, Case, LetNonRec, LetRec, Join, Jump
+    }
+}
+
 /// Evaluate the node at `idx` in the expression tree.
 fn eval_at(
     expr: &CoreExpr,
@@ -323,6 +357,14 @@ fn eval_at(
 
             // 1. Allocate thunks for all binders to allow full knot-tying.
             // (Spec: non-lambdas -> ThunkRef, but for knot-tying lambdas also need to be accessible)
+            //
+            // Each thunk starts as an EMPTY-tree placeholder, back-patched in
+            // phase 2. Invariant: no phase-2 RHS may FORCE a sibling binding
+            // before that sibling is back-patched — forcing an empty placeholder
+            // yields the "empty expression tree … forced before its back-patch"
+            // error from `eval`. Lambda RHSes (the only phase-2 eval) capture the
+            // env without forcing, so the invariant holds; it is enforced by that
+            // property, not by types.
             for (binder, rhs_idx) in bindings {
                 let tid = heap.alloc(Env::new(), CoreExpr { nodes: vec![] });
                 new_env = new_env.update(*binder, Value::ThunkRef(tid));
@@ -347,22 +389,20 @@ fn eval_at(
             let field_vals = fields
                 .iter()
                 .map(|&f| {
-                    // Thunkify non-trivial fields to enable lazy evaluation.
-                    // Var and Lit are cheap lookups; everything else (App, Case,
-                    // Let, PrimOp, nested Con) gets wrapped in a thunk so that
-                    // infinite structures like `cycle` and `zipWith ... [0..]`
-                    // don't diverge at construction time.
-                    match &expr.nodes[f] {
-                        CoreFrame::Var(_)
-                        | CoreFrame::Lit(_)
-                        | CoreFrame::Con { .. }
-                        | CoreFrame::Lam { .. }
-                        | CoreFrame::PrimOp { .. } => eval_at(expr, f, env, heap),
-                        _ => {
-                            let subtree = expr.extract_subtree(f);
-                            let thunk_id = heap.alloc(env.clone(), subtree);
-                            Ok(Value::ThunkRef(thunk_id))
-                        }
+                    // Thunkify non-trivial fields to enable lazy evaluation, using
+                    // the SAME triviality predicate as the JIT (`is_trivial_field`
+                    // in tidepool-codegen `emit/expr.rs`). A field is evaluated
+                    // eagerly only when it is already in WHNF or built entirely
+                    // from trivial parts; anything that could diverge or error
+                    // when forced — including a `PrimOp`/`Con` with a non-trivial
+                    // argument like `Just (1 + <diverging>)` — is thunked, so
+                    // constructing a Con never forces it on either backend.
+                    if is_trivial_field(f, expr) {
+                        eval_at(expr, f, env, heap)
+                    } else {
+                        let subtree = expr.extract_subtree(f);
+                        let thunk_id = heap.alloc(env.clone(), subtree);
+                        Ok(Value::ThunkRef(thunk_id))
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -487,46 +527,33 @@ fn eval_at(
                             "eitherDecode: aeson Value/Either/Map constructors not in scope".into(),
                         )
                     })?;
-                    let text = force(arg_vals[0].clone(), heap)?;
-                    let s = match &text {
-                        Value::Con(_, fields) if fields.len() == 3 => {
-                            // Force to WHNF locally (shapes.rs is heap-agnostic); an
-                            // off/len field that turns out boxed (`I#`) needs its
-                            // inner field forced too, so the table-free int unboxer
-                            // below sees a `Lit`, not an unevaluated thunk.
-                            let backing = force(fields[0].clone(), heap)?;
-                            let off = force_boxed_int_field(fields[1].clone(), heap, ids.i_hash)?;
-                            let len = force_boxed_int_field(fields[2].clone(), heap, ids.i_hash)?;
-                            let forced = [backing, off, len];
-                            // No `&DataConTable` reaches this arm (only the cached
-                            // `JsonConIds`), so recognize `I#` by the concrete id
-                            // already resolved into `ids`; a lifted `ByteArray`
-                            // wrapper con has no such id here and goes unrecognized.
-                            let bytes = crate::shapes::text_bytes_clamped_with(
-                                &forced,
-                                |_| false,
-                                |id| id == ids.i_hash,
-                            )
-                            .ok_or_else(|| {
-                                EvalError::TypeMismatch {
-                                    expected: "Text backing: ByteArray# or LitString",
-                                    got: crate::error::ValueKind::Other(format!("{:?}", forced[0])),
-                                }
-                            })?;
-                            String::from_utf8_lossy(&bytes).into_owned()
-                        }
-                        other => {
-                            return Err(EvalError::TypeMismatch {
-                                expected: "Text (Con with 3 fields)",
-                                got: crate::error::ValueKind::Other(format!("{:?}", other)),
-                            })
-                        }
-                    };
+                    let s = force_text_arg(arg_vals[0].clone(), heap, ids.i_hash)?;
                     crate::json::decode_json_str(&s, &ids).ok_or_else(|| {
                         EvalError::InternalError(
                             "eitherDecode: Either (Left/Right) constructors not in scope".into(),
                         )
                     })
+                }
+                PrimOpKind::ParseISO8601 => {
+                    // parseISO8601 :: Text -> Either Text UTCTime. Chrono parses
+                    // the Text's UTF-8 bytes and builds the `Either Text UTCTime`
+                    // ADT — the SAME builder the JIT host fn uses, so the two
+                    // agree by construction. Needs `heap` to force the Text Con's
+                    // (lazy) fields, hence handled here, not in `dispatch_primop`.
+                    if arg_vals.len() != 1 {
+                        return Err(EvalError::ArityMismatch {
+                            context: ArityContext::Arguments,
+                            expected: 1,
+                            got: arg_vals.len(),
+                        });
+                    }
+                    let ids = crate::time::time_con_ids().ok_or_else(|| {
+                        EvalError::InternalError(
+                            "parseISO8601: Either/I#/Text constructors not in scope".into(),
+                        )
+                    })?;
+                    let s = force_text_arg(arg_vals[0].clone(), heap, ids.i_hash)?;
+                    Ok(crate::time::parse_iso8601_str(&s, &ids))
                 }
                 _ => dispatch_primop(*op, arg_vals, heap),
             }
@@ -546,11 +573,11 @@ fn eval_at(
             let new_env = env.update(join_var, join_val);
             // Drive the body through `eval_settled`, not bare `eval_at`: a `Jump`
             // in the body (the only place this join is in scope) parks itself in
-            // JUMP_SLOT and returns a placeholder. Draining it HERE means a
+            // JUMP_SLOT and signals `JumpInFlight`. Catching it HERE means a
             // `Join` node always yields a settled value, so a join expression in
             // a non-tail position (e.g. a `case (join … in …) of …` scrutinee)
-            // never leaks the placeholder. Self-jumps from the rhs iterate in
-            // this same loop — O(1) host stack.
+            // never leaks the signal. Self-jumps from the rhs iterate in this
+            // same loop — O(1) host stack.
             eval_settled(expr, *body, &new_env, heap)
         }
         CoreFrame::Jump { label, args } => enqueue_jump(expr, label, args, env, heap),
@@ -563,11 +590,11 @@ fn eval_at(
 /// rhs here (which would grow the host stack once per self-jump and overflow on
 /// the recursive joins GHC emits for loops), we look up the continuation,
 /// evaluate the arguments under the CALL-SITE env, store everything in the
-/// thread-local slot, and return a placeholder. The nearest [`eval_settled`]
-/// driver picks the slot up and loops. By the join-point invariant a `Jump`
-/// only ever appears in tail position (the JIT relies on this too), so the
-/// placeholder is only ever propagated up tail-return paths to that driver and
-/// is never inspected.
+/// thread-local slot, and signal [`EvalError::JumpInFlight`]. The nearest
+/// [`eval_settled`] driver catches the signal and loops. By the join-point
+/// invariant a `Jump` only ever appears in tail position (the JIT relies on this
+/// too), so the signal only ever propagates up tail-return paths to that driver;
+/// any other observer surfaces it as a loud internal error.
 ///
 /// Marked `#[inline(never)]` so the join machinery's locals do not inflate the
 /// stack frame of the hot `eval_at` match.
@@ -612,8 +639,11 @@ fn enqueue_jump(
             args: arg_vals,
         });
     });
-    // Placeholder — replaced by the driver; never inspected (see fn doc).
-    Ok(Value::Lit(Literal::LitInt(0)))
+    // An in-flight jump is a control signal, not a value. Returning a dedicated
+    // `EvalError` (rather than a dummy `Value`) means it can never be mistaken
+    // for a real result: the nearest `eval_settled` catches it and drains the
+    // slot; any other observer surfaces a loud internal error (see the variant).
+    Err(EvalError::JumpInFlight)
 }
 
 fn dispatch_primop(
@@ -1228,6 +1258,10 @@ fn dispatch_primop(
         PrimOpKind::JsonDecode => {
             // Handled in eval_at PrimOp arm (needs heap + cached con ids)
             unreachable!("JsonDecode should be intercepted in eval_at")
+        }
+        PrimOpKind::ParseISO8601 => {
+            // Handled in eval_at PrimOp arm (needs heap + cached con ids)
+            unreachable!("ParseISO8601 should be intercepted in eval_at")
         }
         PrimOpKind::Int2Float => {
             if args.len() != 1 {
@@ -2483,6 +2517,37 @@ fn force_boxed_int_field(
     Ok(forced)
 }
 
+/// Force a `Text` argument to WHNF and extract its UTF-8 bytes as a `String`.
+/// Shared by the `JsonDecode` and `ParseISO8601` primop arms (both take a single
+/// `Text` and hand its bytes to a shared Rust builder). `i_hash` recognizes a
+/// boxed `I#` off/len field (no `&DataConTable` reaches here — only the concrete
+/// id resolved into the cached con-ids).
+fn force_text_arg(val: Value, heap: &mut dyn Heap, i_hash: DataConId) -> Result<String, EvalError> {
+    let text = force(val, heap)?;
+    match &text {
+        Value::Con(_, fields) if fields.len() == 3 => {
+            // Force to WHNF locally (shapes.rs is heap-agnostic); an off/len field
+            // that turns out boxed (`I#`) needs its inner field forced too, so the
+            // table-free int unboxer sees a `Lit`, not an unevaluated thunk.
+            let backing = force(fields[0].clone(), heap)?;
+            let off = force_boxed_int_field(fields[1].clone(), heap, i_hash)?;
+            let len = force_boxed_int_field(fields[2].clone(), heap, i_hash)?;
+            let forced = [backing, off, len];
+            let bytes =
+                crate::shapes::text_bytes_clamped_with(&forced, |_| false, |id| id == i_hash)
+                    .ok_or_else(|| EvalError::TypeMismatch {
+                        expected: "Text backing: ByteArray# or LitString",
+                        got: crate::error::ValueKind::Other(format!("{:?}", forced[0])),
+                    })?;
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        }
+        other => Err(EvalError::TypeMismatch {
+            expected: "Text (Con with 3 fields)",
+            got: crate::error::ValueKind::Other(format!("{:?}", other)),
+        }),
+    }
+}
+
 fn expect_byte_array(v: &Value) -> Result<&crate::value::SharedByteArray, EvalError> {
     if let Value::ByteArray(ba) = v {
         Ok(ba)
@@ -3169,6 +3234,46 @@ mod tests {
             panic!("Expected LitInt(1), got {:?}", res);
         };
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn test_con_field_nontrivial_primop_is_lazy() {
+        // Con field `1 + ((\y -> z) 0)` where `z` is unbound: forcing the field
+        // errors, but building the Con to WHNF must NOT force it — the PrimOp has
+        // a non-trivial (App) argument, so it is thunked, matching the JIT's
+        // `is_trivial_field`. Regression for the oracle eagerly evaluating any
+        // Con-field PrimOp (which diverged from the JIT: oracle errored here
+        // where the JIT stayed lazy).
+        let nodes = vec![
+            CoreFrame::Lit(Literal::LitInt(1)), // 0
+            CoreFrame::Var(VarId(99)),          // 1: z (unbound — errors if forced)
+            CoreFrame::Lam {
+                binder: VarId(50),
+                body: 1,
+            }, // 2: \y -> z
+            CoreFrame::Lit(Literal::LitInt(0)), // 3
+            CoreFrame::App { fun: 2, arg: 3 },  // 4: (\y -> z) 0  (non-trivial)
+            CoreFrame::PrimOp {
+                op: PrimOpKind::IntAdd,
+                args: vec![0, 4],
+            }, // 5: 1 + ((\y -> z) 0)
+            CoreFrame::Con {
+                tag: tidepool_repr::DataConId(1),
+                fields: vec![5],
+            }, // 6: Just (…)
+        ];
+        let expr = CoreExpr { nodes };
+        let mut heap = crate::heap::VecHeap::new();
+        let res = eval(&expr, &Env::new(), &mut heap)
+            .expect("building the Con to WHNF must not force the erroring field");
+        let Value::Con(_, fields) = &res else {
+            panic!("expected a Con, got {res:?}");
+        };
+        assert!(
+            matches!(fields[0], Value::ThunkRef(_)),
+            "non-trivial Con-field PrimOp must be thunked, got {:?}",
+            fields[0]
+        );
     }
 
     #[test]

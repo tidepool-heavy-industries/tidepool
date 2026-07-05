@@ -9,16 +9,17 @@ use tidepool_repr::{CoreExpr, DataConId, DataConTable, JoinId, PrimOpKind, VarId
 
 pub use crate::layout::*;
 
-/// ABI signature of the `runtime_case_trap` host fn: 5 boxed (`I64`) arguments
-/// (scrut_ptr, num_alts, alt_tags, fn-name ptr, fn-name len) returning the
+/// ABI signature of the `runtime_shape_trap` host fn: 6 boxed (`I64`) arguments
+/// (kind, scrut_ptr, num_alts, alt_tags, fn-name ptr, fn-name len) returning the
 /// poison pointer (`I64`). Centralized so the trap's calling convention is
-/// defined ONCE — it was hand-declared identically at three sites (primop.rs
-/// ×2, case.rs).
-pub(crate) fn runtime_case_trap_sig(
+/// defined ONCE — it is declared identically at three sites (primop.rs ×2,
+/// case.rs). `kind` is a `ShapeTrapKind` discriminant selecting the breadcrumb.
+pub(crate) fn runtime_shape_trap_sig(
     call_conv: cranelift_codegen::isa::CallConv,
 ) -> cranelift_codegen::ir::Signature {
     use cranelift_codegen::ir::{types, AbiParam, Signature};
     let mut sig = Signature::new(call_conv);
+    sig.params.push(AbiParam::new(types::I64)); // kind (ShapeTrapKind)
     sig.params.push(AbiParam::new(types::I64)); // scrut_ptr
     sig.params.push(AbiParam::new(types::I64)); // num_alts
     sig.params.push(AbiParam::new(types::I64)); // alt_tags

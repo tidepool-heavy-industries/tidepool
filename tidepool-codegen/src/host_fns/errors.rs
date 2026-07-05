@@ -1,6 +1,6 @@
 //! Runtime error raising: `RuntimeError`/`RuntimeErrorKind`, the eager and
 //! lazy "poison" pointer machinery, diagnostics, and the App/case-dispatch
-//! guards (`debug_app_check`, `runtime_case_trap`).
+//! guards (`debug_app_check`, `runtime_shape_trap`).
 
 use crate::context::VMContext;
 use crate::layout;
@@ -106,6 +106,36 @@ impl RuntimeErrorKind {
             Self::UserError => RuntimeError::UserError,
             Self::Undefined => RuntimeError::Undefined,
             Self::TypeMetadata => RuntimeError::TypeMetadata,
+        }
+    }
+}
+
+/// Which shape/tag invariant a [`runtime_shape_trap`] call is reporting. The
+/// discriminant is emitted as an `iconst` by the codegen guards, so it is an
+/// ABI. It only selects the stderr breadcrumb label — every kind surfaces the
+/// same `RuntimeError::CaseTrap` (a constructor tag / heap shape didn't match
+/// what the compiler emitted; only ill-typed Core or a compiler bug reaches one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum ShapeTrapKind {
+    /// A case scrutinee's constructor matched no alternative.
+    CaseMiss = 0,
+    /// A numeric/addr boxing wrapper (`I#`, `W#`, `D#`, …) had `num_fields != 1`
+    /// when unboxed — a shape-mismatched value where a 1-field wrapper was due.
+    BoxingArity = 1,
+    /// A numeric unbox landed on a literal of the wrong class (e.g. a `Double`
+    /// payload forced by an `Int#` continuation).
+    LitClass = 2,
+}
+
+impl ShapeTrapKind {
+    /// The stderr breadcrumb label for a raw discriminant. Unknown values fall
+    /// back to the case-miss label (the historical, primary caller).
+    pub(crate) fn label(kind: u64) -> &'static str {
+        match kind {
+            1 => "SHAPE TRAP: boxing-wrapper arity",
+            2 => "SHAPE TRAP: literal class",
+            _ => "CASE TRAP",
         }
     }
 }
@@ -890,18 +920,28 @@ pub unsafe extern "C" fn debug_app_check(vmctx: *mut VMContext, fun_ptr: *const 
     std::ptr::null_mut() // 0 = ok, proceed with the call
 }
 
-/// Debug: called instead of `trap user2` when TIDEPOOL_DEBUG_CASE is set.
-/// Prints diagnostic info about the scrutinee that failed case matching.
-/// `scrut_ptr` is the heap pointer to the scrutinee.
-/// `num_alts` is the number of data alt tags expected.
-/// `alt_tags` is a pointer to an array of expected tag u64 values.
-pub extern "C" fn runtime_case_trap(
+/// The shared shape/tag-mismatch trap. The JIT calls this (unconditionally, on
+/// the production path — it replaced the bare `trap user2` → `ud2` → SIGILL)
+/// whenever a value's constructor tag or heap shape doesn't match what was
+/// compiled: a case scrutinee matching no alternative ([`ShapeTrapKind::CaseMiss`]),
+/// or a numeric unbox hitting a Con of the wrong arity / a literal of the wrong
+/// class ([`ShapeTrapKind::BoxingArity`] / [`ShapeTrapKind::LitClass`]). All
+/// surface `RuntimeError::CaseTrap`; `kind` only selects the stderr breadcrumb
+/// label so the diagnostic names the actual invariant rather than always saying
+/// "case".
+///
+/// `kind` is a [`ShapeTrapKind`] discriminant. `scrut_ptr` is the heap pointer
+/// to the offending value. `num_alts`/`alt_tags` carry the expected constructor
+/// tags for the case-miss path (0 / dummy for the unbox guards).
+pub extern "C" fn runtime_shape_trap(
+    kind: i64,
     scrut_ptr: i64,
     num_alts: i64,
     alt_tags: i64,
     fn_name_ptr: i64,
     fn_name_len: i64,
 ) -> *mut u8 {
+    let label = ShapeTrapKind::label(kind as u64);
     // Identify the enclosing compiled function (emit threads its name in).
     if fn_name_ptr != 0 && fn_name_len > 0 && fn_name_len < 4096 {
         // SAFETY: emit leaks a 'static str and passes its exact ptr/len.
@@ -911,7 +951,7 @@ pub extern "C" fn runtime_case_trap(
                 fn_name_len as usize,
             ))
         };
-        eprintln!("[CASE TRAP] in compiled fn: {}", name);
+        eprintln!("[{}] in compiled fn: {}", label, name);
     }
     // If a runtime error is already pending (e.g. DivisionByZero), the poison
     // value cascaded into a case expression. Return poison again instead of
@@ -947,7 +987,7 @@ pub extern "C" fn runtime_case_trap(
     }
 
     use std::io::Write;
-    if check_ptr_invalid(scrut_ptr as *const u8, "runtime_case_trap") {
+    if check_ptr_invalid(scrut_ptr as *const u8, "runtime_shape_trap") {
         return error_poison_ptr();
     }
     // SAFETY: ptr passed the null/low-address guard above. Reading the tag byte at offset 0.
@@ -976,7 +1016,7 @@ pub extern "C" fn runtime_case_trap(
     // Heap objects are always at least this size (minimum header is 8 bytes + fields).
     let raw_bytes: Vec<u8> = (0..32).map(|i| unsafe { *ptr.add(i) }).collect();
     let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "[CASE TRAP] raw bytes: {:02x?}", raw_bytes);
+    let _ = writeln!(stderr, "[{}] raw bytes: {:02x?}", label, raw_bytes);
 
     if tag_byte == layout::TAG_CON {
         // SAFETY: tag_byte == TAG_CON confirms Con; reading con_tag and num_fields at known offsets.
@@ -985,8 +1025,8 @@ pub extern "C" fn runtime_case_trap(
             unsafe { *(ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16) };
         let _ = writeln!(
             stderr,
-            "[CASE TRAP] Con: con_tag={:#x}, num_fields={}, expected_tags={:?}",
-            con_tag, num_fields, expected
+            "[{}] Con: con_tag={:#x}, num_fields={}, expected_tags={:?}",
+            label, con_tag, num_fields, expected
         );
     } else if tag_byte == layout::TAG_LIT {
         // SAFETY: tag_byte == TAG_LIT confirms Lit; reading lit_tag and value at known offsets.
@@ -994,8 +1034,8 @@ pub extern "C" fn runtime_case_trap(
         let value = unsafe { *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *const u64) };
         let _ = writeln!(
             stderr,
-            "[CASE TRAP] Lit: lit_tag={:#x}, value={:#x}, expected_tags={:?}",
-            lit_tag, value, expected
+            "[{}] Lit: lit_tag={:#x}, value={:#x}, expected_tags={:?}",
+            label, lit_tag, value, expected
         );
     } else if tag_byte == layout::TAG_CLOSURE {
         // SAFETY: tag_byte == TAG_CLOSURE confirms Closure; reading code_ptr and num_captured at known offsets.
@@ -1005,14 +1045,14 @@ pub extern "C" fn runtime_case_trap(
             unsafe { *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16) };
         let _ = writeln!(
             stderr,
-            "[CASE TRAP] Closure: code_ptr={:#x}, num_captured={}, expected_tags={:?}",
-            code_ptr, num_captured, expected
+            "[{}] Closure: code_ptr={:#x}, num_captured={}, expected_tags={:?}",
+            label, code_ptr, num_captured, expected
         );
     } else {
         let _ = writeln!(
             stderr,
-            "[CASE TRAP] tag_byte={} ({}), expected_tags={:?}",
-            tag_byte, tag_name, expected
+            "[{}] tag_byte={} ({}), expected_tags={:?}",
+            label, tag_byte, tag_name, expected
         );
     }
     let _ = stderr.flush();

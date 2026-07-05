@@ -12,9 +12,11 @@ import qualified Data.List as L
 import qualified Data.Text as T
 
 -- | Heat of one commit at `now`: 0.5 ** (ageDays / halfLifeDays).
+-- `parseISO8601` is typed-failure now (Either); git's %cI dates are well-formed,
+-- so a parse failure falls back to the epoch (heat ~0, negligible).
 commitHeat :: UTCTime -> Double -> Commit -> Double
 commitHeat now halfLife c =
-  0.5 ** (diffUTCTime now (parseISO8601 c.date) / 86400 / halfLife)
+  0.5 ** (diffUTCTime now (fromRight (UTCTime 0) (parseISO8601 c.date)) / 86400 / halfLife)
 
 -- | Recency-weighted churn hotspots: fold the last n commits' file lists
 -- with a 30-day half-life; top k (path, heat) pairs, hottest first.

@@ -894,6 +894,23 @@ translate expr =
         resultIdx <- emitNode $ NPrimOp (T.pack "JsonDecode") [paramRef]
         emitNode $ NLam paramVarId resultIdx
 
+    -- Intercept parseISO8601 :: Text -> Either Text UTCTime. Lower the applied
+    -- call to the pure ParseISO8601 primop (Rust chrono builds the
+    -- Either Text UTCTime ADT).
+    Var v | isParseISO8601Var v
+          , [arg] <- args -> do
+        argIdx <- translate arg
+        emitNode $ NPrimOp (T.pack "ParseISO8601") [argIdx]
+
+    -- Point-free / higher-order use: bare Var, no args. Eta-expand to
+    -- \t -> ParseISO8601 t so the value has a valid function body.
+    Var v | isParseISO8601Var v
+          , null args -> do
+        let paramVarId = varId v .|. 0x01
+        paramRef <- emitNode $ NVar paramVarId
+        resultIdx <- emitNode $ NPrimOp (T.pack "ParseISO8601") [paramRef]
+        emitNode $ NLam paramVarId resultIdx
+
     -- Intercept showDouble: emit ShowDoubleAddr primop + unpackCString loop
     Var v | isShowDoubleVar v
           , [arg] <- args -> do
@@ -2270,6 +2287,14 @@ isShowDoubleVar v =
 isEitherDecodeValueVar :: Id -> Bool
 isEitherDecodeValueVar v =
   occNameString (nameOccName (idName v)) == "eitherDecodeValue"
+
+-- | Recognize @parseISO8601@ (the stdlib OPAQUE stub in Tidepool.Data.Time).
+-- Its calls are lowered to the pure @ParseISO8601@ primop (Rust chrono);
+-- the stub body itself is dead. Matched by unqualified occurrence name (same
+-- convention as eitherDecodeValue); OPAQUE keeps the name stable against -O2 w/w.
+isParseISO8601Var :: Id -> Bool
+isParseISO8601Var v =
+  occNameString (nameOccName (idName v)) == "parseISO8601"
 
 -- | Recognize GHC's specialized showSignedFloat for Double.
 -- GHC -O2 specializes show @Double into $fShowDouble_$sshowSignedFloat

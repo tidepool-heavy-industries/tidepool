@@ -24,20 +24,34 @@ For the Haskell-extract knobs (a separate process: `DUMP_CLOSED`, `VARID_AUDIT`,
 | `RUST_LOG=tidepool::fp=debug` (legacy `TIDEPOOL_FP_DEBUG=1`) | Runtime cache | Binary-fingerprint memo keys + sidecar hit/miss (`tidepool-runtime/src/cache.rs`) | Stale-cache suspicion. Note: kernel ctime has ~3ms granularity — sub-tick writes legitimately memo-hit |
 | `NONCE=<x>` / `FORCE=1` | `repro313` test | Cache-busting fresh compile / forces Int result inside the user continuation | Re-running the #313 regression gate against a fresh compile |
 
-Always-on breadcrumbs (`[CASE TRAP]`, `[BUG]` bad-pointer lines on stderr) stay
-unconditional: they fire only on actual compiler bugs, which must be loud. If you
-see one, that's a reportable codegen bug, not user error.
+Always-on breadcrumbs (`[CASE TRAP]`/`[SHAPE TRAP: …]`, `[BUG]` bad-pointer lines
+on stderr) stay unconditional: they fire only on actual compiler bugs, which must
+be loud. If you see one, that's a reportable codegen bug, not user error.
 
-**Case trap = a value matched no branch, not a missing primop.** All `PrimOpKind`
-variants are implemented (the `_ =>` catch-all is unreachable). An exhausted/empty
-case no longer emits a bare Cranelift `trap user2` (→ `ud2` → SIGILL): `emit_case_trap`
-(`src/emit/case.rs`) now emits a CALL to the `runtime_case_trap` host fn
-(`src/host_fns/errors.rs`), uses its return value, and continues. That host fn prints the
-always-on `[CASE TRAP] in compiled fn: <name>` breadcrumb, then returns
-`error_poison_ptr()` — surfacing a clean runtime error (detected when
-`with_signal_protection` returns) instead of crashing. If a poison/error already
-cascaded into the case it returns poison immediately; a lazy poison-closure
-scrutinee is triggered to set the error flag. Root cause still varies (constructor
-tag mismatch, unexpected value shape) — the breadcrumb names the enclosing fn and
-dumps the scrutinee tag + expected alt tags. (A genuine SIGILL/SIGSEGV now points
-at heap corruption or a bad pointer, not the case trap.)
+**The JIT emits no bare `trap`s — every fault routes through a host call.** Two
+families:
+
+- **Shape/tag-mismatch traps** → `runtime_shape_trap` (`src/host_fns/errors.rs`),
+  formerly `runtime_case_trap`. A value's constructor tag or heap shape didn't
+  match what was compiled. Three `ShapeTrapKind` callers: a case scrutinee
+  matching no alternative (`CaseMiss`, `emit_case_trap` in `src/emit/case.rs`), and
+  the numeric-unbox guards for wrong Con arity (`BoxingArity`) / wrong literal
+  class (`LitClass`) in `src/emit/primop.rs`. The `kind` selects the breadcrumb
+  label (`[CASE TRAP]` / `[SHAPE TRAP: …]`); all three surface
+  `RuntimeError::CaseTrap` and print the enclosing fn + scrutinee tag + expected
+  alt tags. `emit_case_trap` replaced a bare `trap user2` (→ `ud2` → SIGILL) — it
+  CALLs the host fn, uses its poison return, and continues; if a poison/error
+  already cascaded in it returns poison immediately, and a lazy poison-closure
+  scrutinee is triggered to set the error flag.
+
+- **Runtime domain errors** (division by zero, `Prelude.chr: bad argument`) →
+  the `runtime_error`/`runtime_error_with_msg` machinery, same as a Haskell
+  `error` call. The div/`chr` guards in `src/emit/primop.rs` used to emit bare
+  `trap`/`trapnz` (→ SIGILL); they now raise a clean `RuntimeError` and substitute
+  a safe operand so execution continues to a placeholder value the pending error
+  preempts.
+
+All PrimOpKind variants are implemented (the `_ =>` catch-all is unreachable). A
+clean runtime error is surfaced when `with_signal_protection` returns, instead of
+crashing. (A genuine SIGILL/SIGSEGV now points at heap corruption or a bad
+pointer — no routine language-level error reaches a signal.)

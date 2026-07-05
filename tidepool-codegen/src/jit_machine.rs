@@ -80,6 +80,10 @@ pub struct JitEffectMachine {
     /// at compile from the `DataConTable` and installed into a host-fn
     /// thread-local at each run entry. `None` if the closure isn't in scope.
     json_con_ids: Option<tidepool_eval::json::JsonConIds>,
+    /// `Either`/`I#`/`Text` constructor ids for the `ParseISO8601` primop's host
+    /// fn — resolved at compile and installed into the machine state at each run
+    /// entry. `None` if those constructors aren't in scope.
+    time_con_ids: Option<tidepool_eval::time::TimeConIds>,
     /// External cancellation flag. The JIT installs a thread-local clone of this
     /// `Arc` via `set_cancel_flag` before entering compiled code; the next
     /// GC safepoint observes the flag and aborts execution with
@@ -277,6 +281,7 @@ type CompiledParts = (
     Result<ConTags, &'static str>,
     FuncId,
     Option<tidepool_eval::json::JsonConIds>,
+    Option<tidepool_eval::time::TimeConIds>,
 );
 
 impl JitEffectMachine {
@@ -313,9 +318,11 @@ impl JitEffectMachine {
         let tags = ConTags::from_table(table).map_err(|kind| kind.name());
         let nursery = Nursery::new(nursery_size);
         // Cache the aeson-`Value` constructor ids for the `JsonDecode` primop's
-        // host fn (installed into a thread-local at each run entry).
+        // host fn, and the `Either`/`I#`/`Text` ids for `ParseISO8601` (both
+        // installed into the machine state before each run).
         let json_con_ids = tidepool_eval::json::JsonConIds::from_table(table);
-        Ok((pipeline, nursery, tags, func_id, json_con_ids))
+        let time_con_ids = tidepool_eval::time::TimeConIds::from_table(table);
+        Ok((pipeline, nursery, tags, func_id, json_con_ids, time_con_ids))
     }
 
     /// Compile a CoreExpr for one-shot JIT execution.
@@ -327,7 +334,7 @@ impl JitEffectMachine {
         table: &DataConTable,
         nursery_size: usize,
     ) -> Result<Self, JitError> {
-        let (pipeline, nursery, tags, func_id, json_con_ids) =
+        let (pipeline, nursery, tags, func_id, json_con_ids, time_con_ids) =
             Self::compile_inner(expr, table, nursery_size)?;
         Ok(Self {
             pipeline,
@@ -335,6 +342,7 @@ impl JitEffectMachine {
             tags,
             func_id,
             json_con_ids,
+            time_con_ids,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             session: None,
             machine_state: MachineState::new(),
@@ -354,7 +362,7 @@ impl JitEffectMachine {
         table: &DataConTable,
         nursery_size: usize,
     ) -> Result<Self, JitError> {
-        let (pipeline, nursery, tags, func_id, json_con_ids) =
+        let (pipeline, nursery, tags, func_id, json_con_ids, time_con_ids) =
             Self::compile_inner(expr, table, nursery_size)?;
         Ok(Self {
             pipeline,
@@ -362,6 +370,7 @@ impl JitEffectMachine {
             tags,
             func_id,
             json_con_ids,
+            time_con_ids,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             session: Some(SessionState {
                 heap: None,
@@ -408,9 +417,11 @@ impl JitEffectMachine {
                 .set_gc_state(self.nursery.start() as *mut u8, self.nursery.size()),
         }
         self.machine_state.set_cancel_flag(self.cancel_flag.clone());
-        // Make the aeson-`Value` constructor ids visible to the `JsonDecode`
-        // primop's host fn for the duration of this run.
+        // Make the aeson-`Value` constructor ids (JsonDecode) and the
+        // Either/I#/Text ids (ParseISO8601) visible to those primops' host fns
+        // for the duration of this run.
         self.machine_state.set_json_con_ids(self.json_con_ids);
+        self.machine_state.set_time_con_ids(self.time_con_ids);
         let machine_state_ptr = &mut self.machine_state as *mut MachineState;
         // Install this machine as the thread's reach target for vmctx-less
         // host fns and the external ambient shims; RegistryGuard::drop

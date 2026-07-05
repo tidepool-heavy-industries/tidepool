@@ -830,6 +830,73 @@ pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *m
     }
 }
 
+/// JIT host fn for the `ParseISO8601` primop
+/// (`parseISO8601 :: Text -> Either Text UTCTime`). Forces the `Text` argument,
+/// extracts its UTF-8 bytes, parses via `chrono`, and builds the
+/// `Either Text UTCTime` ADT on the nursery heap via
+/// `tidepool_eval::json::parse_iso8601_str` (the SAME builder the tree-walker
+/// uses, so JIT and eval agree by construction) + the stack-safe
+/// `value_to_heap`. A parse failure yields `Left <message>`.
+///
+/// # Safety
+/// `vmctx` must be a valid live VMContext; `text_ptr` a valid heap pointer to a
+/// `Text` value (or a thunk that forces to one).
+#[no_mangle]
+pub unsafe extern "C" fn runtime_parse_iso8601(
+    vmctx: *mut VMContext,
+    text_ptr: *mut u8,
+) -> *mut u8 {
+    let ids = match machine_state(vmctx).time_con_ids() {
+        Some(ids) => ids,
+        None => {
+            let msg = b"parseISO8601: Either/I#/Text constructors not in scope";
+            return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+        }
+    };
+
+    let text = heap_force(vmctx, text_ptr);
+    if text.is_null() {
+        let msg = b"parseISO8601: null Text argument";
+        return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+    }
+    let text_val = match crate::heap_bridge::heap_to_value_forcing(text, vmctx) {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = format!("parseISO8601: Text argument read failed: {e}");
+            return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+        }
+    };
+    let bytes = match &text_val {
+        tidepool_eval::Value::Con(_, fields) => {
+            tidepool_eval::shapes::text_bytes_clamped_with(fields, |_| false, |id| id == ids.i_hash)
+        }
+        _ => None,
+    };
+    let s = match bytes {
+        Some(b) => String::from_utf8_lossy(&b).into_owned(),
+        None => {
+            let msg = b"parseISO8601: argument is not a Text (Con with 3 fields)";
+            return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
+        }
+    };
+
+    let value = tidepool_eval::time::parse_iso8601_str(&s, &ids);
+    match crate::heap_bridge::value_to_heap(&value, &mut *vmctx) {
+        Ok(p) => p,
+        Err(crate::heap_bridge::BridgeError::NurseryExhausted) => {
+            gc_trigger(vmctx);
+            match crate::heap_bridge::value_to_heap(&value, &mut *vmctx) {
+                Ok(p) => p,
+                Err(_) => runtime_oom(),
+            }
+        }
+        Err(e) => {
+            let msg = format!("parseISO8601: result materialization failed: {e}");
+            runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64)
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::approx_constant)] // tests use 3.14 literal floats as round-trip data
 mod tests {

@@ -168,6 +168,13 @@ pub enum EvalError {
     /// Internal invariant violation (should never happen)
     #[error("internal error: {0}")]
     InternalError(String),
+    /// Control signal, NOT a failure: a tail `Jump` has parked its continuation
+    /// in the trampoline slot. `enqueue_jump` returns this so an in-flight jump
+    /// is never mistaken for a value; the nearest `eval_settled` catches it,
+    /// drains the slot, and iterates. It must never escape to a caller — if one
+    /// observes it, a `Jump` appeared outside tail position (a compiler bug).
+    #[error("internal error: jump-in-flight signal escaped the trampoline")]
+    JumpInFlight,
 }
 
 #[cfg(test)]

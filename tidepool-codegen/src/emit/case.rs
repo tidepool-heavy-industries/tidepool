@@ -102,7 +102,7 @@ pub fn emit_case(
             .ins()
             .jump(merge_block, &[BlockArg::Value(result_ptr)]);
     } else {
-        // No alts? Call runtime_case_trap to handle pending errors gracefully.
+        // No alts? Call runtime_shape_trap to handle pending errors gracefully.
         emit_case_trap(
             args.sess,
             args.builder,
@@ -391,8 +391,9 @@ fn emit_data_dispatch(
     Ok(())
 }
 
-/// Emit a call to `runtime_case_trap` instead of a bare `trap user2`.
-/// Passes the scrutinee pointer and expected alt tags for diagnostic output.
+/// Emit a call to `runtime_shape_trap` (kind `CaseMiss`) instead of a bare
+/// `trap user2`. Passes the scrutinee pointer and expected alt tags for
+/// diagnostic output.
 fn emit_case_trap(
     sess: &mut EmitSession,
     builder: &mut FunctionBuilder,
@@ -437,19 +438,22 @@ fn emit_case_trap(
         .pipeline
         .module
         .declare_function(
-            "runtime_case_trap",
+            "runtime_shape_trap",
             Linkage::Import,
-            &crate::emit::runtime_case_trap_sig(sess.pipeline.isa.default_call_conv()),
+            &crate::emit::runtime_shape_trap_sig(sess.pipeline.isa.default_call_conv()),
         )
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
     let trap_ref = sess
         .pipeline
         .module
         .declare_func_in_func(trap_fn, builder.func);
+    let kind = builder
+        .ins()
+        .iconst(types::I64, crate::host_fns::ShapeTrapKind::CaseMiss as i64);
     let num_alts_val = builder.ins().iconst(types::I64, num_alts as i64);
     let call = builder.ins().call(
         trap_ref,
-        &[scrut_ptr, num_alts_val, tags_addr, name_ptr, name_len],
+        &[kind, scrut_ptr, num_alts_val, tags_addr, name_ptr, name_len],
     );
     let result = builder.inst_results(call)[0];
     builder.ins().jump(merge_block, &[BlockArg::Value(result)]);

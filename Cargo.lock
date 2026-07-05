@@ -3638,6 +3638,7 @@ dependencies = [
 name = "tidepool-eval"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "im",
  "serde_json",
  "thiserror 1.0.69",
