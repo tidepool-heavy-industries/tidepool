@@ -418,7 +418,7 @@ result = do
   r1 <- classify prompt
   r2 <- classify (prompt <> " r1=" <> r1)
   -- Use items, prompt, r1, r2 all in the result (all captured across effects)
-  let summary = prompt <> " | " <> r1 <> " | " <> r2 <> " | head=" <> head items
+  let summary = prompt <> " | " <> r1 <> " | " <> r2 <> " | head=" <> fromMaybe "" (headMay items)
   pure summary
 "#
     .to_string();

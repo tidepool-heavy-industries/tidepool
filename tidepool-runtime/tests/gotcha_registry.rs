@@ -807,3 +807,113 @@ fn claims_nobase_nontail_loopifies_not_overflows() {
         }
     }
 }
+
+// =========================================================================
+// NEWLY ADDED (2026-07-04 prelude-fallout-gotcha): canonical safe idioms that
+// replaced the un-exported partials head/tail/last/init/(!!)/foldr1/foldl1/
+// fromJust (commit f10f0461, "haskell-as-interface polish wave"). Each PIN
+// proves the new `Tidepool.Prelude` re-export JIT-runs end-to-end, per
+// haskell/CLAUDE.md: "extend gotcha_registry.rs when you add a function".
+// =========================================================================
+
+/// `headMay`/`lastMay`/`initMay`/`tailMay` (safe package) — `Just` on a
+/// non-empty list, `Nothing` on empty. Total replacements for bare
+/// head/tail/last/init.
+#[test]
+fn works_safe_list_may_functions() {
+    works(
+        "pure (object [\"head_some\" .= headMay [1,2,3::Int], \"head_none\" .= headMay ([]::[Int]), \
+         \"last_some\" .= lastMay [1,2,3::Int], \"last_none\" .= lastMay ([]::[Int]), \
+         \"init_some\" .= initMay [1,2,3::Int], \"init_none\" .= initMay ([]::[Int]), \
+         \"tail_some\" .= tailMay [1,2,3::Int], \"tail_none\" .= tailMay ([]::[Int])])",
+        serde_json::json!({
+            "head_some": 1, "head_none": null,
+            "last_some": 3, "last_none": null,
+            "init_some": [1,2], "init_none": null,
+            "tail_some": [2,3], "tail_none": null
+        }),
+    );
+}
+
+/// `atMay` (safe package) — `Just` at a valid index, `Nothing` out of range.
+/// Total replacement for `xs !! i`.
+#[test]
+fn works_safe_at_may() {
+    works(
+        "pure (object [\"hit\" .= atMay [10,20,30::Int] 1, \"miss\" .= atMay [10,20,30::Int] 5])",
+        serde_json::json!({"hit": 20, "miss": null}),
+    );
+}
+
+/// `maximumMay`/`minimumMay` (safe package) — `Just` on non-empty, `Nothing`
+/// on empty (contrast the always-partial `maximum`/`minimum`, still bare-
+/// exported and pinned by `works_error_worker_folds`).
+#[test]
+fn works_safe_maximum_minimum_may() {
+    works(
+        "pure (object [\"max_some\" .= maximumMay [3,1,4,1,5::Int], \"max_none\" .= maximumMay ([]::[Int]), \
+         \"min_some\" .= minimumMay [3,1,4,1,5::Int], \"min_none\" .= minimumMay ([]::[Int])])",
+        serde_json::json!({"max_some": 5, "max_none": null, "min_some": 1, "min_none": null}),
+    );
+}
+
+/// `readMaybe` (Text.Read) — `Just` on a parseable literal, `Nothing` on
+/// garbage. Bare `read` (partial) is still exported/pinned separately
+/// (`stale_doc_read_now_works`); this is the total sibling.
+#[test]
+fn works_read_maybe() {
+    works(
+        "pure (object [\"ok\" .= (readMaybe \"42\" :: Maybe Int), \"bad\" .= (readMaybe \"abc\" :: Maybe Int)])",
+        serde_json::json!({"ok": 42, "bad": null}),
+    );
+}
+
+/// `note`/`hush` (errors package) railway helpers. `note` tags a `Nothing`
+/// into a `Left e`; `hush` forgets a `Left` back to `Nothing`. `Either` renders
+/// via the `{"Left":_}`/`{"Right":_}` `ToJSON` instance (`Tidepool.Aeson.Value`).
+#[test]
+fn works_note_hush() {
+    works(
+        "pure (object [\"note_some\" .= (note (\"e\"::Text) (Just (5::Int)) :: Either Text Int), \
+         \"note_none\" .= (note (\"e\"::Text) (Nothing :: Maybe Int) :: Either Text Int), \
+         \"hush_right\" .= (hush (Right (5::Int) :: Either Text Int)), \
+         \"hush_left\" .= (hush (Left (\"e\"::Text) :: Either Text Int))])",
+        serde_json::json!({
+            "note_some": {"Right": 5}, "note_none": {"Left": "e"},
+            "hush_right": 5, "hush_left": null
+        }),
+    );
+}
+
+/// `wither`/`filterA` (witherable package) — effectful filter-map/filter fused
+/// through an `Applicative` (here `Maybe`). `wither` is `mapMaybe` with
+/// effects; `filterA` is `filter` with effects.
+#[test]
+fn works_wither_filter_a() {
+    works(
+        "pure (object [\"wither\" .= fromMaybe [] (wither (\\x -> Just (if even x then Just x else Nothing)) [1,2,3,4,5,6::Int]), \
+         \"filterA\" .= fromMaybe [] (filterA (\\x -> Just (even x)) [1,2,3,4::Int])])",
+        serde_json::json!({"wither": [2,4,6], "filterA": [2,4]}),
+    );
+}
+
+/// `ordNub` (witherable package) — the O(n log n) `Ord`-based nub, preserving
+/// first-occurrence order like `nub` (pinned separately by `works_nub_dedup`).
+#[test]
+fn works_ord_nub() {
+    works(
+        "pure (ordNub [3,1,2,3,1::Int])",
+        serde_json::json!([3, 1, 2]),
+    );
+}
+
+/// `(>>>)`/`(<<<)` (Control.Category) point-free composition. `f >>> g` runs
+/// `f` then `g`; `g <<< f` is the same pipeline written in `(.)` order.
+#[test]
+fn works_category_compose() {
+    works(
+        "pure (object [\"gt\" .= (((subtract 1) :: Int -> Int) >>> (* 10)) 5, \
+         \"lt\" .= (((* 10) :: Int -> Int) <<< subtract 1) 5])",
+        serde_json::json!({"gt": 40, "lt": 40}),
+    );
+}

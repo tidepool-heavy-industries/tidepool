@@ -114,7 +114,7 @@ fn text_length_twice() {
 fn text_head_twice() {
     let json = run(r#"
         let words = ["hello", "world"] :: [T.Text]
-        in (head words, head words)
+        in (fromMaybe "" (headMay words), fromMaybe "" (headMay words))
         "#);
     assert_eq!(json, serde_json::json!(["hello", "hello"]));
 }
@@ -174,7 +174,7 @@ fn text_empty_list_twice() {
 /// head of a singleton text list, once (not shared).
 #[test]
 fn text_singleton_head_once() {
-    let json = run(r#"head (["hello"] :: [T.Text])"#);
+    let json = run(r#"fromMaybe "" (headMay (["hello"] :: [T.Text]))"#);
     assert_eq!(json, serde_json::json!("hello"));
 }
 

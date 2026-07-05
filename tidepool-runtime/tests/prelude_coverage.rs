@@ -44,22 +44,34 @@ fn test_drop() {
 
 #[test]
 fn test_head() {
-    assert_eq!(run_plain(r#"head [1,2,3 :: Int]"#), json!(1));
+    assert_eq!(
+        run_plain(r#"fromMaybe 0 (headMay [1,2,3 :: Int])"#),
+        json!(1)
+    );
 }
 
 #[test]
 fn test_tail() {
-    assert_eq!(run_plain(r#"tail [1,2,3 :: Int]"#), json!([2, 3]));
+    assert_eq!(
+        run_plain(r#"fromMaybe [] (tailMay [1,2,3 :: Int])"#),
+        json!([2, 3])
+    );
 }
 
 #[test]
 fn test_last() {
-    assert_eq!(run_plain(r#"last [1,2,3 :: Int]"#), json!(3));
+    assert_eq!(
+        run_plain(r#"fromMaybe 0 (lastMay [1,2,3 :: Int])"#),
+        json!(3)
+    );
 }
 
 #[test]
 fn test_init() {
-    assert_eq!(run_plain(r#"init [1,2,3 :: Int]"#), json!([1, 2]));
+    assert_eq!(
+        run_plain(r#"fromMaybe [] (initMay [1,2,3 :: Int])"#),
+        json!([1, 2])
+    );
 }
 
 #[test]

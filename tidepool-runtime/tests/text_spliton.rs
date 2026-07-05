@@ -621,8 +621,8 @@ fn adversarial_text_predicates() {
 fn adversarial_csv_parse() {
     let result = run_mcp(
         r#"let { rows = T.lines "name,age\nalice,30\nbob,25"
-             ; hdr = T.splitOn "," (head rows)
-             ; dat = map (T.splitOn ",") (tail rows)
+             ; hdr = T.splitOn "," (fromMaybe "" (headMay rows))
+             ; dat = map (T.splitOn ",") (fromMaybe [] (tailMay rows))
              ; recs = map (\r -> Map.fromList (zip hdr r)) dat
              ; names = map (\m -> Map.findWithDefault "" "name" m) recs
              } in names"#,
@@ -649,7 +649,7 @@ fn adversarial_group_by_first_char() {
         r#"let { fruits = T.splitOn "," "banana,apple,avocado,blueberry,cherry,apricot"
              ; sorted = sort fruits
              ; grouped = groupBy (\a b -> T.head a == T.head b) sorted
-             ; summary = map (\g -> (T.singleton (T.head (head g)), length g)) grouped
+             ; summary = map (\g -> (T.singleton (T.head (fromMaybe "" (headMay g))), length g)) grouped
              } in summary"#,
     );
     assert_eq!(result, json!([["a", 3], ["b", 2], ["c", 1]]));
