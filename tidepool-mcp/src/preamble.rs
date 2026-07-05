@@ -361,7 +361,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         "      Array xs -> let (items, nid', stubs) = truncArr bud nid xs in (Array items, nid', stubs)\n",
         "      Object m -> let (pairs, nid', stubs) = truncKvs bud nid (KM.toList m)\n",
         "                  in (object (map (\\(k',v') -> KM.toText k' .= v') pairs), nid', stubs)\n",
-        "      String t -> let keep = max' 10 (bud - 30)\n",
+        "      String t -> let keep = max 10 (bud - 30)\n",
         "                  in (String (T.take keep t <> \"...[\" <> showI (T.length t) <> \" chars]\"), nid, [])\n",
         "      _ -> (v, nid, [])\n",
     ));

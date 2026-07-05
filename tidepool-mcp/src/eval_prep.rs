@@ -298,7 +298,7 @@ fn template_haskell_impl(
         out.push_str("  _scV <- kvGet \"__sayChars\"\n");
         out.push_str("  let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }\n");
         out.push_str(&format!(
-            "  paginateResult (max' 100 ({} - _sayC)) ({render_call} _r)\n",
+            "  paginateResult (max 100 ({} - _sayC)) ({render_call} _r)\n",
             b
         ));
     } else {

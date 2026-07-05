@@ -123,7 +123,7 @@ truncGo bud nid v
       Array xs -> let (items, nid', stubs) = truncArr bud nid xs in (Array items, nid', stubs)
       Object m -> let (pairs, nid', stubs) = truncKvs bud nid (KM.toList m)
                   in (object (map (\(k',v') -> KM.toText k' .= v') pairs), nid', stubs)
-      String t -> let keep = max' 10 (bud - 30)
+      String t -> let keep = max 10 (bud - 30)
                   in (String (T.take keep t <> "...[" <> showI (T.length t) <> " chars]"), nid, [])
       _ -> (v, nid, [])
 truncVal :: Int -> Value -> (Value, [(Int, Value)])
@@ -159,4 +159,4 @@ result = do
     pure (pack (showDouble d))
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of { Just b -> case b ^? _Number of { Just n -> round n; _ -> 0 }; Nothing -> 0 }
-  paginateResult (max' 100 (4096 - _sayC)) (toJSON _r)
+  paginateResult (max 100 (4096 - _sayC)) (toJSON _r)

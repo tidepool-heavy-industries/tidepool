@@ -1018,7 +1018,7 @@ data Console a where
         // With budget
         let result = template_haskell(&preamble, &stack, source, "", "", None, Some(1024));
         assert!(result.contains("kvSet \"__sayChars\" (toJSON (0 :: Int))"));
-        assert!(result.contains("paginateResult (max' 100 (1024 - _sayC)) (toJSON _r)"));
+        assert!(result.contains("paginateResult (max 100 (1024 - _sayC)) (toJSON _r)"));
 
         // Without budget (defaults to 4096)
         let result = template_haskell(&preamble, &stack, source, "", "", None, None);

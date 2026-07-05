@@ -88,7 +88,7 @@ result = do
     pure (pack (showDouble d))
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
-  paginateResult (max' 100 (4096 - _sayC)) (toJSON _r)"#
+  paginateResult (max 100 (4096 - _sayC)) (toJSON _r)"#
     );
     let json = run10(&body);
     eprintln!("Result: {json}");
@@ -327,7 +327,7 @@ truncGo bud nid v
       Array xs -> let (items, nid', stubs) = truncArr bud nid xs in (Array items, nid', stubs)
       Object m -> let (pairs, nid', stubs) = truncKvs bud nid (KM.toList m)
                   in (object (map (\(k',v') -> KM.toText k' .= v') pairs), nid', stubs)
-      String t -> let keep = max' 10 (bud - 30)
+      String t -> let keep = max 10 (bud - 30)
                   in (String (T.take keep t <> "...[" <> showI (T.length t) <> " chars]"), nid, [])
       _ -> (v, nid, [])
 truncVal :: Int -> Value -> (Value, [(Int, Value)])
@@ -361,7 +361,7 @@ result = do
     pure (showDouble (fromIntegral n))
   _scV <- kvGet "__sayChars"
   let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }
-  paginateResult (max' 100 (4096 - _sayC)) (toJSON _r)
+  paginateResult (max 100 (4096 - _sayC)) (toJSON _r)
 "#;
 
     let json = EvalHarness::new()
@@ -397,7 +397,7 @@ result = do
     pure (pack (showDouble d))
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
-  paginateResult (max' 100 (4096 - _sayC)) (toJSON _r)"#
+  paginateResult (max 100 (4096 - _sayC)) (toJSON _r)"#
     );
     let json = run10(&body);
     eprintln!("Result: {json}");
@@ -423,7 +423,7 @@ result = do
     pure (pack (showDouble d))
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
-  let budget = max' 100 (4096 - _sayC)
+  let budget = max 100 (4096 - _sayC)
   let val = toJSON _r
   if valSize val <= budget
     then pure val
@@ -500,7 +500,7 @@ result = do
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   let val = toJSON _r
-      budget = max' 100 (4096 - _sayC)
+      budget = max 100 (4096 - _sayC)
       sz = valSize val
   if sz <= budget
     then pure val
@@ -574,7 +574,7 @@ result = do
   let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   let val = toJSON _r
       sz = valSize val
-      budget = max' 100 (4096 - _sayC)
+      budget = max 100 (4096 - _sayC)
   pure (toJSON (sz + budget))"#
     );
     let json = run10(&body);
