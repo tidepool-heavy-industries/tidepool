@@ -28,8 +28,9 @@ module Tidepool.Aeson.Value
   , (.=)
   , emptyObject
   , emptyArray
-    -- * Decoding
-  , decodeJson
+    -- * Decoding (primop anchor; the public decoder is
+    --   'Tidepool.Aeson.FromJSON.eitherDecode')
+  , eitherDecodeValue
     -- * ToJSON class
   , ToJSON(..)
   , GToJSON(..)
@@ -101,18 +102,28 @@ emptyObject = Object Map.empty
 emptyArray :: Value
 emptyArray = Array []
 
--- | Decode a JSON document into a 'Value' ('Nothing' on any parse error).
+-- | Decode a JSON document into an @'Either' 'Text' 'Value'@ — @Right v@ on
+-- success, @Left msg@ (the serde_json parse error) on failure. This is the
+-- internal primop anchor that the public @'Tidepool.Aeson.FromJSON.eitherDecode'@
+-- is derived from — prefer that on the surface.
 --
--- PURE — no effect. Calls to @decodeJson@ are intercepted in the extractor
--- (Translate.hs) and lowered to the @JsonDecode@ primop, which dispatches to
--- Rust @serde_json@ and builds this 'Value' ADT directly on the heap. That is
--- why this can run inside a pure fold (e.g. JSONL-as-pure-fold) without an
--- effect handler. The body below is a NOINLINE stub that never actually runs at
--- a call site (the primop replaces it); it exists only so the name type-checks
--- and stays an opaque 'Var' for the interceptor to spot.
-{-# NOINLINE decodeJson #-}
-decodeJson :: Text -> Maybe Value
-decodeJson _ = Nothing
+-- PURE — no effect. Calls to @eitherDecodeValue@ are intercepted in the
+-- extractor (Translate.hs) and lowered to the @JsonDecode@ primop, which
+-- dispatches to Rust @serde_json@ and builds the ADT directly on the heap. That
+-- is why this can run inside a pure fold (e.g. JSONL-as-pure-fold) without an
+-- effect handler. The body below is a stub that never actually runs at a call
+-- site (the primop replaces it); it exists only so the name type-checks and
+-- stays an opaque 'Var' for the interceptor to spot.
+--
+-- OPAQUE (not merely NOINLINE): the interceptor matches the name
+-- @eitherDecodeValue@, but returning @Either@ makes GHC's CPR worker/wrapper
+-- split it into @$weitherDecodeValue@ at -O2 — which the interceptor would miss,
+-- leaving the stub to run (every decode → @Left@). OPAQUE forbids w/w (and
+-- specialization/inlining), so the wrapper name survives verbatim into every
+-- caller's Core.
+{-# OPAQUE eitherDecodeValue #-}
+eitherDecodeValue :: Text -> Either Text Value
+eitherDecodeValue _ = Left T.empty
 
 -- | A class for types that can be converted to JSON Value.
 --

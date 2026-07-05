@@ -469,12 +469,12 @@ fn eval_at(
                     Ok(Value::Lit(Literal::LitString(bytes)))
                 }
                 PrimOpKind::JsonDecode => {
-                    // decodeJson :: Text -> Maybe Value. Parse the Text's UTF-8
-                    // bytes with serde_json and build the aeson `Maybe Value`
-                    // ADT — the SAME builder the JIT host fn uses, so the two
-                    // agree by construction. Needs `heap` to force the Text
-                    // Con's (lazy) fields, hence handled here, not in
-                    // `dispatch_primop`.
+                    // eitherDecodeValue :: Text -> Either Text Value. Parse the
+                    // Text's UTF-8 bytes with serde_json and build the aeson
+                    // `Either Text Value` ADT (`Left <err>` / `Right v`) — the
+                    // SAME builder the JIT host fn uses, so the two agree by
+                    // construction. Needs `heap` to force the Text Con's (lazy)
+                    // fields, hence handled here, not in `dispatch_primop`.
                     if arg_vals.len() != 1 {
                         return Err(EvalError::ArityMismatch {
                             context: ArityContext::Arguments,
@@ -484,7 +484,7 @@ fn eval_at(
                     }
                     let ids = crate::json::json_con_ids().ok_or_else(|| {
                         EvalError::InternalError(
-                            "decodeJson: aeson Value/Maybe/Map constructors not in scope".into(),
+                            "eitherDecode: aeson Value/Either/Map constructors not in scope".into(),
                         )
                     })?;
                     let text = force(arg_vals[0].clone(), heap)?;
@@ -524,7 +524,7 @@ fn eval_at(
                     };
                     crate::json::decode_json_str(&s, &ids).ok_or_else(|| {
                         EvalError::InternalError(
-                            "decodeJson: Maybe (Just/Nothing) constructors not in scope".into(),
+                            "eitherDecode: Either (Left/Right) constructors not in scope".into(),
                         )
                     })
                 }

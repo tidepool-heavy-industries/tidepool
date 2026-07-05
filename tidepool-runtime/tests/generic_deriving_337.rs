@@ -46,11 +46,11 @@ fn repro_337_fields_sum_to_7() {
         "{HEADER}\n\
          data Rec = Rec {{ rx :: Int, ry :: Int }} deriving (Generic, FromJSON)\n\n\
          result :: Int\n\
-         result = case decodeJson \"{{\\\"rx\\\":3,\\\"ry\\\":4}}\" of\n\
-         \x20 Just v -> case (fromJSON v :: Result Rec) of\n\
+         result = case (eitherDecode \"{{\\\"rx\\\":3,\\\"ry\\\":4}}\" :: Either Text Value) of\n\
+         \x20 Right v -> case (fromJSON v :: Result Rec) of\n\
          \x20   Success r -> rx r + ry r\n\
          \x20   Error _ -> -1\n\
-         \x20 Nothing -> -2\n"
+         \x20 Left _ -> -2\n"
     );
     match run(&src, "result") {
         Some(v) => assert_eq!(v, json!(7), "#337 repro must decode fields summing to 7"),
@@ -67,11 +67,11 @@ fn nested_record_decodes() {
          data Inner = Inner {{ nx :: Int, ny :: Int }} deriving (Generic, FromJSON)\n\
          data Outer = Outer {{ inner :: Inner, oz :: Int }} deriving (Generic, FromJSON)\n\n\
          result :: Int\n\
-         result = case decodeJson \"{{\\\"inner\\\":{{\\\"nx\\\":3,\\\"ny\\\":4}},\\\"oz\\\":5}}\" of\n\
-         \x20 Just v -> case (fromJSON v :: Result Outer) of\n\
+         result = case (eitherDecode \"{{\\\"inner\\\":{{\\\"nx\\\":3,\\\"ny\\\":4}},\\\"oz\\\":5}}\" :: Either Text Value) of\n\
+         \x20 Right v -> case (fromJSON v :: Result Outer) of\n\
          \x20   Success o -> nx (inner o) + ny (inner o) + oz o\n\
          \x20   Error _ -> -1\n\
-         \x20 Nothing -> -2\n"
+         \x20 Left _ -> -2\n"
     );
     match run(&src, "result") {
         Some(v) => assert_eq!(v, json!(12), "nested record fields sum to 12"),
@@ -123,11 +123,11 @@ fn missing_field_returns_error() {
         "{HEADER}\n\
          data Rec = Rec {{ rx :: Int, ry :: Int }} deriving (Generic, FromJSON)\n\n\
          result :: Int\n\
-         result = case decodeJson \"{{\\\"rx\\\":3}}\" of\n\
-         \x20 Just v -> case (fromJSON v :: Result Rec) of\n\
+         result = case (eitherDecode \"{{\\\"rx\\\":3}}\" :: Either Text Value) of\n\
+         \x20 Right v -> case (fromJSON v :: Result Rec) of\n\
          \x20   Success _ -> 1\n\
          \x20   Error _ -> 0\n\
-         \x20 Nothing -> -2\n"
+         \x20 Left _ -> -2\n"
     );
     match run(&src, "result") {
         Some(v) => assert_eq!(
@@ -167,7 +167,7 @@ fn sum_type_rejected_at_compile_time() {
 }
 
 /// Differential parity on the #337 decode path: the generic-deriving Core
-/// (M1/K1/:*:/selector metadata dictionaries, `decodeJson` → generic
+/// (M1/K1/:*:/selector metadata dictionaries, `eitherDecode` → generic
 /// `parseJSON` → field arithmetic) produces the SAME result on the tree-walking
 /// eval oracle and the JIT. This is the guarantee that generics-heavy Core is
 /// executed consistently by both engines, not just that the JIT returns 7.
@@ -185,11 +185,11 @@ fn eval_jit_parity_on_generic_core() {
         "{HEADER}\n\
          data Rec = Rec {{ rx :: Int, ry :: Int }} deriving (Generic, FromJSON)\n\n\
          result :: Int\n\
-         result = case decodeJson \"{{\\\"rx\\\":3,\\\"ry\\\":4}}\" of\n\
-         \x20 Just v -> case (fromJSON v :: Result Rec) of\n\
+         result = case (eitherDecode \"{{\\\"rx\\\":3,\\\"ry\\\":4}}\" :: Either Text Value) of\n\
+         \x20 Right v -> case (fromJSON v :: Result Rec) of\n\
          \x20   Success r -> rx r + ry r\n\
          \x20   Error _ -> -1\n\
-         \x20 Nothing -> -2\n"
+         \x20 Left _ -> -2\n"
     );
     let compiled = EvalHarness::new()
         .with_stdlib()

@@ -1,7 +1,8 @@
 //! Differential coverage for the pure `JsonDecode` primop
-//! (`decodeJson :: Text -> Maybe Value`): the Cranelift JIT and the tree-walker
-//! must agree on the aeson `Maybe Value` they build from a JSON `Text`, for
-//! scalars, arrays, nested objects, and malformed input (`Nothing`).
+//! (`eitherDecodeValue :: Text -> Either Text Value`): the Cranelift JIT and the
+//! tree-walker must agree on the aeson `Either Text Value` they build from a JSON
+//! `Text`, for scalars, arrays, nested objects, and malformed input
+//! (`Left <serde error>`).
 //!
 //! Both engines dispatch to the SAME Rust builder (`tidepool_eval::json`), so
 //! this is really a check that the JIT's heap materialization + the eval's
@@ -18,8 +19,8 @@ use tidepool_eval::{deep_force, env_from_datacon_table, eval, Value, VecHeap};
 // Fixed, distinct ids for the aeson `Value` / `Maybe` / `Data.Map` / list /
 // `Text` closure the primop constructs. Names + arities are what the primop's
 // `JsonConIds::from_table` resolves against.
-const JUST: u64 = 101;
-const NOTHING: u64 = 102;
+const LEFT: u64 = 101;
+const RIGHT: u64 = 102;
 const OBJECT: u64 = 103;
 const ARRAY: u64 = 104;
 const STRING: u64 = 105;
@@ -47,11 +48,11 @@ fn dc(id: u64, name: &str, tag: u32, arity: u32, qual: Option<&str>) -> DataCon 
     }
 }
 
-/// A `DataConTable` carrying exactly the constructors `decodeJson` needs.
+/// A `DataConTable` carrying exactly the constructors `eitherDecodeValue` needs.
 fn aeson_table() -> DataConTable {
     let mut t = DataConTable::new();
-    t.insert(dc(NOTHING, "Nothing", 1, 0, Some("GHC.Maybe.Nothing")));
-    t.insert(dc(JUST, "Just", 2, 1, Some("GHC.Maybe.Just")));
+    t.insert(dc(LEFT, "Left", 1, 1, Some("Data.Either.Left")));
+    t.insert(dc(RIGHT, "Right", 2, 1, Some("Data.Either.Right")));
     t.insert(dc(
         OBJECT,
         "Object",
@@ -94,7 +95,7 @@ fn aeson_table() -> DataConTable {
     t
 }
 
-/// `decodeJson <text>` where `<text>` is a literal `Text ByteArray# Int# Int#`.
+/// `eitherDecodeValue <text>` where `<text>` is a literal `Text ByteArray# Int# Int#`.
 fn build_decode(input: &str) -> CoreExpr {
     let mut b = TreeBuilder::new();
     let bytes = input.as_bytes().to_vec();
@@ -214,15 +215,15 @@ fn render_value(v: &Value, table: &DataConTable) -> String {
     }
 }
 
-/// Render the top-level `Maybe Value`: `<nothing>` or the decoded value.
-fn render_maybe(v: &Value, table: &DataConTable) -> String {
+/// Render the top-level `Either Text Value`: `left:<msg>` or the decoded value.
+fn render_either(v: &Value, table: &DataConTable) -> String {
     match v {
         Value::Con(id, fields) => match table.name_of(*id) {
-            Some("Nothing") => "<nothing>".into(),
-            Some("Just") => render_value(&fields[0], table),
-            other => panic!("expected Maybe, got {other:?}"),
+            Some("Left") => format!("left:{}", text_str(&fields[0])),
+            Some("Right") => render_value(&fields[0], table),
+            other => panic!("expected Either, got {other:?}"),
         },
-        other => panic!("expected Maybe Con, got {other:?}"),
+        other => panic!("expected Either Con, got {other:?}"),
     }
 }
 
@@ -233,7 +234,7 @@ fn eval_render(input: &str) -> String {
     let mut heap = VecHeap::new();
     let raw = eval(&expr, &env, &mut heap).expect("eval");
     let forced = deep_force(raw, &mut heap).expect("deep_force");
-    render_maybe(&forced, &table)
+    render_either(&forced, &table)
 }
 
 fn jit_render(input: &str) -> String {
@@ -241,7 +242,7 @@ fn jit_render(input: &str) -> String {
     let table = aeson_table();
     let mut m = JitEffectMachine::compile(&expr, &table, 256 * 1024).expect("JIT compile");
     let raw = m.run_pure().expect("JIT run");
-    render_maybe(&raw, &table)
+    render_either(&raw, &table)
 }
 
 fn assert_agree(input: &str, expected: &str) {
@@ -283,10 +284,16 @@ fn objects_and_nesting_agree() {
     );
 }
 
+/// Malformed input yields `Left <serde error>` on BOTH engines, with an
+/// identical message (both share `decode_json_str`). The exact wording is
+/// serde_json's, so assert the shape + cross-engine agreement, not a pinned string.
 #[test]
-fn malformed_is_nothing_on_both() {
-    assert_agree("{not json", "<nothing>");
-    assert_agree("", "<nothing>");
-    assert_agree("[1,2", "<nothing>");
-    assert_agree("truex", "<nothing>");
+fn malformed_is_left_on_both() {
+    for input in ["{not json", "", "[1,2", "truex"] {
+        let ev = eval_render(input);
+        let jit = jit_render(input);
+        assert!(ev.starts_with("left:"), "eval not Left for {input:?}: {ev}");
+        assert!(jit.starts_with("left:"), "jit not Left for {input:?}: {jit}");
+        assert_eq!(ev, jit, "eval/jit divergence for input {input:?}");
+    }
 }

@@ -1,6 +1,9 @@
-//! End-to-end: the Haskell `decodeJson :: Text -> Maybe Value` surface compiles
-//! through the extractor (Translate.hs lowers it to the `JsonDecode` primop) and
-//! runs PURE on the JIT. Requires a worktree extract binary that includes the
+//! End-to-end: the Haskell pure JSON-decode surface — `eitherDecode :: FromJSON a
+//! => Text -> Either Text a` — compiles through the extractor (Translate.hs lowers
+//! the OPAQUE `eitherDecodeValue` primop anchor to the `JsonDecode` primop) and
+//! runs PURE on the JIT: no effect, no abort. `eitherDecode @Value` is the raw
+//! parse (identity `FromJSON` instance); malformed input is `Left <serde error>`,
+//! not `Nothing`. Requires a worktree extract binary that includes the
 //! interception + the stdlib stub (build with `cabal build tidepool-extract-bin`
 //! and point `TIDEPOOL_EXTRACT` at it), so it is `#[ignore]` by default.
 
@@ -26,23 +29,27 @@ result = {body}
         .to_json()
 }
 
+// The result type var is annotated `:: Either Text Value` throughout: a bare
+// `eitherDecode` whose decoded value is discarded is ambiguous, exactly as in
+// upstream aeson. `Value` selects the identity `FromJSON` instance (raw parse).
+
 #[test]
 #[ignore = "needs worktree extract binary (TIDEPOOL_EXTRACT) with JsonDecode interception"]
 fn decode_scalars() {
     assert_eq!(
-        run(r#"case decodeJson "42" of { Just v -> v; Nothing -> Null }"#),
+        run(r#"case (eitherDecode "42" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#),
         json!(42)
     );
     assert_eq!(
-        run(r#"case decodeJson "true" of { Just v -> v; Nothing -> Null }"#),
+        run(r#"case (eitherDecode "true" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#),
         json!(true)
     );
     assert_eq!(
-        run(r#"case decodeJson "\"hi\"" of { Just v -> v; Nothing -> Null }"#),
+        run(r#"case (eitherDecode "\"hi\"" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#),
         json!("hi")
     );
     assert_eq!(
-        run(r#"case decodeJson "null" of { Just v -> v; Nothing -> Null }"#),
+        run(r#"case (eitherDecode "null" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#),
         json!(null)
     );
 }
@@ -51,23 +58,35 @@ fn decode_scalars() {
 #[ignore = "needs worktree extract binary (TIDEPOOL_EXTRACT) with JsonDecode interception"]
 fn decode_array_and_object() {
     assert_eq!(
-        run(r#"case decodeJson "[1,2,3]" of { Just v -> v; Nothing -> Null }"#),
+        run(r#"case (eitherDecode "[1,2,3]" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#),
         json!([1, 2, 3])
     );
     assert_eq!(
-        run(r#"case decodeJson "{\"a\":1,\"b\":[true,null]}" of { Just v -> v; Nothing -> Null }"#),
+        run(r#"case (eitherDecode "{\"a\":1,\"b\":[true,null]}" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#),
         json!({"a": 1, "b": [true, null]})
     );
 }
 
 #[test]
 #[ignore = "needs worktree extract binary (TIDEPOOL_EXTRACT) with JsonDecode interception"]
-fn decode_malformed_is_nothing() {
+fn either_decode_preserves_error() {
+    // Right on valid input.
+    assert_eq!(
+        run(r#"case (eitherDecode "42" :: Either Text Value) of { Right v -> v; Left _ -> Null }"#),
+        json!(42)
+    );
+    // Left branch fires on malformed input...
     assert_eq!(
         run(
-            r#"case decodeJson "{oops" of { Just _ -> String "just"; Nothing -> String "nothing" }"#
+            r#"case (eitherDecode "{oops" :: Either Text Value) of { Right _ -> String "right"; Left _ -> String "left" }"#
         ),
-        json!("nothing")
+        json!("left")
+    );
+    // ...and the serde error message is preserved (non-empty), never discarded —
+    // the whole reason eitherDecode exists over a `Maybe`-shaped decoder.
+    assert_eq!(
+        run(r#"case (eitherDecode "{oops" :: Either Text Value) of { Left e -> Bool (T.length e > 0); Right _ -> Bool False }"#),
+        json!(true)
     );
 }
 
@@ -77,7 +96,7 @@ fn decode_in_pure_fold() {
     // The headline use case: decode each JSONL line inside a pure fold, no effect.
     assert_eq!(
         run(
-            r#"map (\l -> case decodeJson l of { Just v -> v; Nothing -> Null }) (T.lines "1\n2\n3")"#
+            r#"map (\l -> case (eitherDecode l :: Either Text Value) of { Right v -> v; Left _ -> Null }) (T.lines "1\n2\n3")"#
         ),
         json!([1, 2, 3])
     );

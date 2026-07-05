@@ -876,16 +876,18 @@ translate expr =
   let (hd, allArgs) = collectArgs expr
       args = filter isValueArg allArgs
   in case hd of
-    -- Intercept decodeJson :: Text -> Maybe Value. Lower the applied call to the
-    -- pure JsonDecode primop (Rust serde_json builds the aeson Maybe Value ADT).
-    Var v | isDecodeJsonVar v
+    -- Intercept eitherDecodeValue :: Text -> Either Text Value. Lower the applied
+    -- call to the pure JsonDecode primop (Rust serde_json builds the aeson
+    -- Either Text Value ADT). The public `eitherDecode` is a pure Haskell
+    -- wrapper over this, so it lowers through here too.
+    Var v | isEitherDecodeValueVar v
           , [arg] <- args -> do
         argIdx <- translate arg
         emitNode $ NPrimOp (T.pack "JsonDecode") [argIdx]
 
-    -- Point-free / higher-order use (`map decodeJson xs`): bare Var, no args.
-    -- Eta-expand to \t -> JsonDecode t so the value has a valid function body.
-    Var v | isDecodeJsonVar v
+    -- Point-free / higher-order use (`map eitherDecodeValue xs`): bare Var, no
+    -- args. Eta-expand to \t -> JsonDecode t so the value has a valid function body.
+    Var v | isEitherDecodeValueVar v
           , null args -> do
         let paramVarId = varId v .|. 0x01  -- unique param id (matches showDouble scheme)
         paramRef <- emitNode $ NVar paramVarId
@@ -2260,12 +2262,14 @@ isShowDoubleVar v =
   in name == "showDouble" || name == "showDouble'"
      || name == "$fShowDouble_$cshow"
 
--- | Recognize @decodeJson@ (the stdlib stub in Tidepool.Aeson.Value). Its calls
--- are lowered to the pure @JsonDecode@ primop; the NOINLINE stub body itself is
--- dead. Matched by unqualified occurrence name (same convention as showDouble).
-isDecodeJsonVar :: Id -> Bool
-isDecodeJsonVar v =
-  occNameString (nameOccName (idName v)) == "decodeJson"
+-- | Recognize @eitherDecodeValue@ (the stdlib stub in Tidepool.Aeson.Value). Its
+-- calls are lowered to the pure @JsonDecode@ primop; the OPAQUE stub body
+-- itself is dead. The surface @eitherDecode@ is a pure wrapper over it, so it
+-- lowers through the same primop. Matched by unqualified occurrence name (same
+-- convention as showDouble); OPAQUE keeps that name stable against -O2 w/w.
+isEitherDecodeValueVar :: Id -> Bool
+isEitherDecodeValueVar v =
+  occNameString (nameOccName (idName v)) == "eitherDecodeValue"
 
 -- | Recognize GHC's specialized showSignedFloat for Double.
 -- GHC -O2 specializes show @Double into $fShowDouble_$sshowSignedFloat

@@ -19,6 +19,7 @@ module Tidepool.Aeson.FromJSON
   , Result(..)
   , fromJSON
   , resultToEither
+  , eitherDecode
     -- * Object field accessors (aeson-style)
   , (.:)
   , (.:?)
@@ -35,7 +36,7 @@ import Prelude
 import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
-import Tidepool.Aeson.Value (Value(..), Object, Array, fromText, toText)
+import Tidepool.Aeson.Value (Value(..), Object, Array, fromText, toText, eitherDecodeValue)
 import Data.Proxy (Proxy(..))
 import GHC.Generics
 import GHC.TypeLits (TypeError, ErrorMessage(Text, (:<>:)))
@@ -127,6 +128,14 @@ instance TypeError ('Text "deriving FromJSON via GHC.Generics supports single-co
 resultToEither :: Result a -> Either Text a
 resultToEither (Success a) = Right a
 resultToEither (Error e)   = Left (T.pack e)
+
+-- | Decode a JSON document straight into a typed value, aeson-style: @Right a@
+-- on success, @Left msg@ on a parse error (from serde_json) or a shape mismatch
+-- (from 'fromJSON'). PURE — no effect and no abort, unlike the HTTP @parseJson@
+-- verb. Because 'Value' has an identity 'FromJSON' instance,
+-- @eitherDecode \@Value@ is the raw parse.
+eitherDecode :: FromJSON a => Text -> Either Text a
+eitherDecode t = eitherDecodeValue t >>= resultToEither . fromJSON
 
 mismatch :: String -> Value -> Result a
 mismatch want v = Error ("expected " ++ want ++ ", got " ++ kindOf v)

@@ -20,26 +20,26 @@
 //!
 //! The Value-level shape primitives (Text/list/Map/number construction) live
 //! in [`crate::shapes`] — this module owns only the JSON-document policy
-//! (key sorting, Maybe wrapping, the `JsonConIds` cache) on top of them.
+//! (key sorting, Either wrapping, the `JsonConIds` cache) on top of them.
 
 use crate::value::Value;
 use std::cell::Cell;
 use tidepool_repr::{DataConId, DataConTable};
 
-/// `DataConId`s of every constructor needed to build a `Value` (and optionally a
-/// `Maybe Value`). `Copy` so it can be cached in a thread-local by value, with no
-/// borrow of the originating `DataConTable`.
+/// `DataConId`s of every constructor needed to build a `Value` (and optionally an
+/// `Either Text Value`). `Copy` so it can be cached in a thread-local by value,
+/// with no borrow of the originating `DataConTable`.
 ///
-/// `just`/`nothing` are `Option<DataConId>` because `json_to_value` does not
+/// `left`/`right` are `Option<DataConId>` because `json_to_value` does not
 /// need them — only `decode_json_str` (the `JsonDecode` primop) does. This lets
 /// `tidepool-bridge`'s `ToCore for serde_json::Value` use `from_table` even when
-/// the program's `DataConTable` has no `Maybe` in scope.
+/// the program's `DataConTable` has no `Either` in scope.
 #[derive(Debug, Clone, Copy)]
 pub struct JsonConIds {
-    /// `Just` constructor (arity 1) — `None` when `Maybe` is not in scope.
-    pub just: Option<DataConId>,
-    /// `Nothing` constructor (arity 0) — `None` when `Maybe` is not in scope.
-    pub nothing: Option<DataConId>,
+    /// `Left` constructor (arity 1) — `None` when `Either` is not in scope.
+    pub left: Option<DataConId>,
+    /// `Right` constructor (arity 1) — `None` when `Either` is not in scope.
+    pub right: Option<DataConId>,
     pub object: DataConId,
     pub array: DataConId,
     pub string: DataConId,
@@ -59,8 +59,8 @@ pub struct JsonConIds {
 
 impl JsonConIds {
     /// Resolve constructor ids from a table. Returns `None` if any core `Value` /
-    /// `Data.Map` / `Text` constructor is absent. `just`/`nothing` are optional:
-    /// they are set to `Some` only when `Maybe` is in scope. Callers that need
+    /// `Data.Map` / `Text` constructor is absent. `left`/`right` are optional:
+    /// they are set to `Some` only when `Either` is in scope. Callers that need
     /// `decode_json_str` (the `JsonDecode` primop) must check that both are
     /// `Some`; callers that only need `json_to_value` (e.g. `tidepool-bridge`)
     /// can ignore them.
@@ -77,8 +77,8 @@ impl JsonConIds {
             .or_else(|| table.get_companion(bin, "Tip", 0))
             .or_else(|| table.get_by_name_arity("Tip", 0))?;
         Some(JsonConIds {
-            just: table.get_by_name_arity("Just", 1),
-            nothing: table.get_by_name_arity("Nothing", 0),
+            left: table.get_by_name_arity("Left", 1),
+            right: table.get_by_name_arity("Right", 1),
             object: table.get_by_name_arity("Object", 1)?,
             array: table.get_by_name_arity("Array", 1)?,
             string: table.get_by_name_arity("String", 1)?,
@@ -153,19 +153,21 @@ pub fn json_to_value(j: &serde_json::Value, ids: &JsonConIds) -> Value {
     }
 }
 
-/// Parse a JSON document and wrap the result: `Just v` on success, `Nothing` on
-/// any parse error. This is the semantics of `decodeJson :: Text -> Maybe Value`.
+/// Parse a JSON document and wrap the result: `Right v` on success, `Left <err>`
+/// (the serde_json error message as a `Text`) on any parse error. This is the
+/// semantics of the internal `eitherDecodeValue :: Text -> Either Text Value`
+/// primop that the public `eitherDecode` is derived from.
 ///
-/// Returns `None` (rather than panicking) when `ids.just` or `ids.nothing` are
+/// Returns `None` (rather than panicking) when `ids.left` or `ids.right` are
 /// absent, so callers can surface a clean error. In practice this only happens
-/// when the `DataConTable` lacks a `Maybe` closure — programs that call
-/// `decodeJson` always have it in scope.
+/// when the `DataConTable` lacks `Either` in scope — programs that reach the
+/// JSON-decode primop always have it in scope.
 pub fn decode_json_str(input: &str, ids: &JsonConIds) -> Option<Value> {
-    let just = ids.just?;
-    let nothing = ids.nothing?;
+    let left = ids.left?;
+    let right = ids.right?;
     match serde_json::from_str::<serde_json::Value>(input) {
-        Ok(j) => Some(Value::Con(just, vec![json_to_value(&j, ids)])),
-        Err(_) => Some(Value::Con(nothing, vec![])),
+        Ok(j) => Some(Value::Con(right, vec![json_to_value(&j, ids)])),
+        Err(e) => Some(Value::Con(left, vec![text_value(&e.to_string(), ids)])),
     }
 }
 

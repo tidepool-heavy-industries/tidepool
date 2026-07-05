@@ -596,7 +596,7 @@ pub fn emit_primop(
             Ok(SsaVal::Raw(result, LIT_TAG_ADDR))
         }
         PrimOpKind::JsonDecode => {
-            // decodeJson :: Text -> Maybe Value. Force the Text arg to a heap
+            // eitherDecodeValue :: Text -> Either Text Value. Force the Text arg to a heap
             // pointer (`Text ByteArray# Int# Int#` Con) and hand it + vmctx to
             // the host fn, which parses via serde_json and builds the aeson
             // `Maybe Value` on the nursery heap (same builder the tree-walker

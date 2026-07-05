@@ -33,7 +33,7 @@ fn run_pure_kata(body: &str, target: &str) -> serde_json::Value {
 }
 
 /// Kata (a) — Generic deriving: a record derives `(Generic, FromJSON)`, gets
-/// parsed from a JSON literal via the real `decodeJson`/`fromJSON` pipeline,
+/// parsed from a JSON literal via the real `eitherDecode`/`fromJSON` pipeline,
 /// and its fields are summed. This is the capability people flinch from:
 /// trusting `deriving` to synthesize the parser instead of hand-rolling one.
 #[test]
@@ -42,11 +42,11 @@ fn kata_a_generic_deriving() {
         r#"data Rec = Rec { rx :: Int, ry :: Int } deriving (Generic, FromJSON)
 
 result :: Int
-result = case decodeJson "{\"rx\":3,\"ry\":4}" of
-  Just v -> case (fromJSON v :: Result Rec) of
+result = case (eitherDecode "{\"rx\":3,\"ry\":4}" :: Either Text Value) of
+  Right v -> case (fromJSON v :: Result Rec) of
     Success r -> rx r + ry r
     Error _ -> -1
-  Nothing -> -2"#,
+  Left _ -> -2"#,
         "result",
     );
     eprintln!("kata_a result: {json}");

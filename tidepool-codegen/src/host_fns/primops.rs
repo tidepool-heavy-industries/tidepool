@@ -1,6 +1,6 @@
 //! Primop runtime implementations not inlined as Cranelift IR: byte-array and
 //! boxed-array (`ByteArray#`/`Array#`) ops, Double decode/show/libm math, text
-//! measurement helpers, and the pure `decodeJson` primop.
+//! measurement helpers, and the pure JSON-decode (`eitherDecodeValue`) primop.
 
 use crate::context::VMContext;
 use crate::machine_state::machine_state;
@@ -748,16 +748,16 @@ pub extern "C" fn runtime_double_power(bits_a: i64, bits_b: i64) -> i64 {
     a.powf(b).to_bits() as i64
 }
 
-/// `decodeJson :: Text -> Maybe Value` — the pure JSON-decode primop.
+/// `eitherDecodeValue :: Text -> Either Text Value` — the pure JSON-decode primop.
 ///
 /// Lifts the argument `Text` to a `Value` tree via `heap_bridge` (which owns
 /// the heap-byte layouts), slices its UTF-8 bytes via
 /// `tidepool_eval::shapes::text_bytes_clamped_with` (the same table-free
 /// Text decode the tree-walker's `JsonDecode` arm uses), parses with
-/// `serde_json`, and builds the aeson `Maybe Value` ADT on the nursery heap
-/// via `tidepool_eval::json` (the SAME builder the tree-walker uses, so JIT
+/// `serde_json`, and builds the aeson `Either Text Value` ADT on the nursery
+/// heap via `tidepool_eval::json` (the SAME builder the tree-walker uses, so JIT
 /// and eval agree by construction) + the stack-safe `value_to_heap`. Parse
-/// failure yields `Nothing`.
+/// failure yields `Left <serde error message>`.
 ///
 /// # Safety
 /// `vmctx` must be a valid live VMContext; `text_ptr` a valid heap pointer to a
@@ -767,7 +767,7 @@ pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *m
     let ids = match machine_state(vmctx).json_con_ids() {
         Some(ids) => ids,
         None => {
-            let msg = b"decodeJson: aeson Value/Maybe/Map constructors not in scope";
+            let msg = b"eitherDecode: aeson Value/Either/Map constructors not in scope";
             return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
         }
     };
@@ -776,13 +776,13 @@ pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *m
     // during traversal).
     let text = heap_force(vmctx, text_ptr);
     if text.is_null() {
-        let msg = b"decodeJson: null Text argument";
+        let msg = b"eitherDecode: null Text argument";
         return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
     }
     let text_val = match crate::heap_bridge::heap_to_value_forcing(text, vmctx) {
         Ok(v) => v,
         Err(e) => {
-            let msg = format!("decodeJson: Text argument read failed: {e}");
+            let msg = format!("eitherDecode: Text argument read failed: {e}");
             return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
         }
     };
@@ -799,7 +799,7 @@ pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *m
     let s = match bytes {
         Some(b) => String::from_utf8_lossy(&b).into_owned(),
         None => {
-            let msg = b"decodeJson: argument is not a Text (Con with 3 fields)";
+            let msg = b"eitherDecode: argument is not a Text (Con with 3 fields)";
             return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
         }
     };
@@ -810,7 +810,7 @@ pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *m
     let value = match tidepool_eval::json::decode_json_str(&s, &ids) {
         Some(v) => v,
         None => {
-            let msg = b"decodeJson: Maybe (Just/Nothing) constructors not in scope";
+            let msg = b"eitherDecode: Either (Left/Right) constructors not in scope";
             return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
         }
     };
@@ -824,7 +824,7 @@ pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *m
             }
         }
         Err(e) => {
-            let msg = format!("decodeJson: result materialization failed: {e}");
+            let msg = format!("eitherDecode: result materialization failed: {e}");
             runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64)
         }
     }

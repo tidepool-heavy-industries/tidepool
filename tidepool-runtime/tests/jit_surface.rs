@@ -158,6 +158,25 @@ fn works_from_json() {
     );
 }
 
+/// `eitherDecode` — the pure, aeson-flavored JSON decoder and the single decode
+/// entry point. Text→Value parse is the `JsonDecode` primop (serde_json
+/// Rust-side); `Value` has the identity `FromJSON` instance, so `eitherDecode
+/// @Value` is the raw parse. Malformed input is `Left <serde msg>`, never an
+/// abort and never a silently-discarded error.
+#[test]
+fn works_either_decode() {
+    // Right on valid input (a = Value via the identity FromJSON instance).
+    works(
+        r#"pure (case (eitherDecode "[1,2,3]" :: Either Text Value) of { Right v -> v; Left _ -> Null })"#,
+        serde_json::json!([1, 2, 3]),
+    );
+    // Left on malformed input, with the serde error message preserved (non-empty).
+    works(
+        r#"pure (case (eitherDecode "{oops" :: Either Text Value) of { Left e -> Bool (T.length e > 0); Right _ -> Bool False })"#,
+        serde_json::json!(true),
+    );
+}
+
 /// `nub` — works (O(n²) but correct), no longer a SIGILL fear.
 #[test]
 fn works_nub_dedup() {
