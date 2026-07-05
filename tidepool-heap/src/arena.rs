@@ -55,9 +55,12 @@ impl ArenaHeap {
 
     /// Allocate raw bytes in the arena.
     ///
-    /// # Safety
+    /// # Guarantees
     ///
-    /// The returned pointer is 8-byte aligned and valid for `size` bytes.
+    /// The returned pointer is 8-byte aligned and valid for `size` bytes — but
+    /// only until the next [`collect_garbage`](Self::collect_garbage), whose
+    /// `arena.reset()` invalidates every pointer handed out by this method. Do
+    /// not hold a raw pointer across a GC boundary.
     pub fn alloc_raw(&self, size: usize) -> Result<*mut u8, HeapError> {
         // Round up to 8-byte alignment, check for overflow.
         let aligned_size =
