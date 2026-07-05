@@ -75,12 +75,14 @@ if go == Just True then expensiveAnalysis data else pure "skipped"
 filtering gives a codebase overview in a single round-trip.
 
 **Editing — `update` is the common-case core verb** (always available in any repo;
-in `fs_decl` helpers, not project-lib): `update path old new :: M ()` is exact
-str-replace, exactly-once, and THROWS a precise error on not-found/ambiguous —
-the MCP Edit-tool shape. `updateAll`/`insertAfter` never throw: a missing file,
-absent pattern, or ambiguous anchor comes back as a typed `UpdateAllOutcome`/
-`InsertAfterOutcome` DATA value (`{ok,count}`/`{ok}` on success, `{ok:false,reason,...}`
-on rejection), so a batch over many files can't half-apply mid-loop; `planUpdate ::
+in `fs_decl` helpers, not project-lib): `update path old new :: M UpdateOneOutcome`
+is exact str-replace, exactly-once, the MCP Edit-tool shape. Like
+`updateAll`/`insertAfter`, it NEVER throws: an empty `old`, a missing file, an
+absent pattern, or an ambiguous anchor comes back as a typed `UpdateOneOutcome`
+DATA value (`UpdateOneApplied` on the single-match success, `UpdateOneRejected
+reason mCount` otherwise) — mirroring `UpdateAllOutcome`/`InsertAfterOutcome`
+(`{ok,count}`/`{ok}` on success, `{ok:false,reason,...}` on rejection), so a batch
+over many files can't half-apply mid-loop; `planUpdate ::
 M Value` is the dry-run that returns `{changed,diff}` as DATA (never throws — the
 branch-before-commit path); `updateJ` rides the input lane; `writeChecked` also lives here.
 The tiers below (`Edit` DSL, `[patch|]`/Diff, ast-grep) are power tools for

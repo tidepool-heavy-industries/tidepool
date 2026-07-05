@@ -68,8 +68,9 @@ locked decision on union tags).
   granularity: list cells materialize eagerly, but each cell's head is a
   thunk that converts its element to a `Value` only when forced (memoized).
   `take 3` converts 3 elements; `length` converts none. Use for a known-size
-  collection where callers commonly only need a prefix (search hits, LSP
-  nodes) — `SgReq`/`LspReq::Where` use this.
+  collection where callers commonly only need a prefix — the Fs `readGlob` verb
+  (`fs_read_glob`, `src/handlers/fs.rs`) is the live call site, exposing
+  `[FileRead]` at element granularity.
 
 ## Sandboxing
 
@@ -84,11 +85,13 @@ after canonicalization, not before.
 `FsReq::Write` has **mkdir-p semantics**: missing parent directories are
 created automatically (`std::fs::create_dir_all`) before writing. Parent
 creation is subject to the same sandbox check — the check validates the target
-path first, and any ancestor inside the sandbox root is safe by construction. **Lsp is NOT part of this
-canonicalize+`starts_with` check** — it forwards node/file addressing to the
-`tidepool-lsp-daemon` sidecar, which gates access through its own
-`registry::server_for` workspace-root binding instead (see `tidepool-lsp`'s
-`CLAUDE.md`).
+path first, and any ancestor inside the sandbox root is safe by construction.
+**Lsp applies the SAME canonicalize+`starts_with` containment** — the daemon's
+`resolve.rs::abs_of` canonicalizes the workspace root and the node/file path and
+rejects anything resolving outside the root (an untrusted absolute `file` like
+`/etc/x.rs` would otherwise replace the root via `Path::join`). That is separate
+from `registry::server_for`, which only gates by file extension (`.rs` →
+rust-analyzer), not by path. See `tidepool-lsp`'s `CLAUDE.md`.
 
 ## Lsp handler specifics
 

@@ -37,8 +37,27 @@ impl FileCache {
     }
 }
 
-fn abs_of(root: &Path, file: &str) -> PathBuf {
-    root.join(file)
+/// Resolve a node's `file` against the workspace `root`, enforcing containment.
+///
+/// `file` is untrusted (it arrives on the socket from the effect surface), and
+/// `Path::join` on an ABSOLUTE `file` silently replaces the root — so a bare
+/// `root.join(file)` let `/etc/x.rs` reach the filesystem. Mirror the Fs
+/// handler's sandbox (canonicalize both, then `starts_with`): any path resolving
+/// outside the workspace root — via an absolute `file` or `..` escape — is a
+/// loud error, not a silent read. Also errors if the path can't be canonicalized
+/// (e.g. it doesn't exist).
+fn abs_of(root: &Path, file: &str) -> Result<PathBuf, String> {
+    let canon_root = root
+        .canonicalize()
+        .map_err(|e| format!("workspace root {}: {}", root.display(), e))?;
+    let abs = canon_root.join(file);
+    let canon = abs
+        .canonicalize()
+        .map_err(|e| format!("resolve {}: {}", abs.display(), e))?;
+    if !canon.starts_with(&canon_root) {
+        return Err(format!("path {file:?} escapes the workspace root"));
+    }
+    Ok(canon)
 }
 
 fn rel_of(root: &Path, abs: &str) -> String {
@@ -113,7 +132,7 @@ fn node_position(client: &RaClient, n: &Value) -> Result<(String, u64, u64), Str
         .and_then(Value::as_u64)
         .ok_or("node pos missing 'line'")?;
     let char0 = pos.get("char").and_then(Value::as_u64).unwrap_or(0);
-    let abs = abs_of(client.root(), file);
+    let abs = abs_of(client.root(), file)?;
     Ok((path_to_uri(&abs), line1.saturating_sub(1), char0))
 }
 
@@ -508,7 +527,7 @@ pub fn rename(client: &RaClient, n: &Value, new_name: &str) -> Result<Option<Str
 /// Diagnostics for `file` (pull request, falling back to pushed cache).
 pub fn diagnostics(client: &RaClient, file: &str) -> Result<Vec<Value>, String> {
     let root = client.root().to_path_buf();
-    let abs = abs_of(&root, file);
+    let abs = abs_of(&root, file)?;
     client.ensure_open(&abs)?;
     let uri = path_to_uri(&abs);
 
