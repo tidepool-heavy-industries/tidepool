@@ -143,7 +143,7 @@ fn works_error_worker_folds() {
 /// `fromJSON` round-trips a `toJSON`-built `Value`. (The `ParseJson` *effect*
 /// half — serde_json text→Value — is exercised by live eval + the FromCore
 /// roundtrip; the `NullDispatcher` here returns `0` for all effects, so only the
-/// pure layer is probeable.) Feature shipped 2026-06-22.
+/// pure layer is probeable.)
 #[test]
 fn works_from_json() {
     // FromJSON [Int]: build an Array via toJSON, decode it back, sum it.
@@ -191,9 +191,8 @@ fn works_round_bankers() {
     );
 }
 
-/// SHOW precedence (ledger #30, FIXED): a NEGATIVE Double in constructor-arg
-/// position is parenthesized (`Just (-2.5)`) — the `showParen (p > 6)` that the
-/// JIT-safe `showSignedFloat` replacement used to drop, now restored via the
+/// SHOW precedence: a NEGATIVE Double in constructor-arg position is
+/// parenthesized (`Just (-2.5)`) — the `showParen (p > 6)` is decided by the
 /// `ShowSignedDoubleAddr` primop (parens decided in the Rust host, no Core
 /// compare; the precedence — `appPrec1`=11 nested, `minExpt`=0 top-level —
 /// resolves after unblocking `minExpt` in Resolve.hs). Top-level (prec 0) and
@@ -369,7 +368,7 @@ fn read_on_jit() {
 
 /// `read :: Double` also WORKS on the native-bignum toolchain. Root CLAUDE.md
 /// item 0 claimed BOTH `:: Int` AND `:: Double` die at compile time with
-/// "__gmpn_add_1". The `:: Int` case was already flipped (read_on_jit);
+/// "__gmpn_add_1". The `:: Int` case is covered by read_on_jit;
 /// this probe pins the `:: Double` variant. The Read lexer for Double goes through
 /// the same native-bignum integer path so the __gmpn_* wall is gone for both.
 #[test]
@@ -385,7 +384,7 @@ fn large_double_literal_on_jit() {
     works("pure (1.79e308 :: Double)", serde_json::json!(1.79e308));
 }
 
-/// `cycle` WORKS (fixed 2026-07-01): base's inlined body floats its
+/// `cycle` works: base's inlined body floats its
 /// corecursive knot (`xs' = xs ++ xs'`) to a top-level self-recursive simple
 /// binding, which the LetRec emit now knot-ties (promised captures → null
 /// placeholder slot → pending_capture_updates patch) instead of silently
@@ -399,12 +398,11 @@ fn works_cycle_value_knot() {
     );
 }
 
-/// BUG-8 dead (2026-07-02): integers survive the JSON path exactly. The
-/// vendored aeson `Number` is Double-backed, so `toJSON` on Int/Integer
-/// LOST precision past 2^53 at CONSTRUCTION (silent wrong DATA — found by
-/// the kata debt-ledger sweep). Ints now ride the exact `NumberI` carrier
-/// end-to-end (ToJSON instances, [j|] integral literals, serde bridge,
-/// render arm, optics `_Int`).
+/// Integers survive the JSON path exactly. The vendored aeson `Number` is
+/// Double-backed, so `toJSON` on Int/Integer would lose precision past 2^53 at
+/// construction; Ints instead ride the exact `NumberI` carrier end-to-end
+/// (ToJSON instances, [j|] integral literals, serde bridge, render arm, optics
+/// `_Int`).
 #[test]
 fn works_exact_int_json() {
     works(
@@ -413,7 +411,7 @@ fn works_exact_int_json() {
     );
 }
 
-/// Vendored `lines`/`words` (friction #10, 2026-07-02): guarded corecursion.
+/// Vendored `lines`/`words`: guarded corecursion.
 /// The external Data.Text bodies overflowed the JIT stack when the list was
 /// built without a fused consumer; semantics must stay Data.Text-exact
 /// (`lines "a\nb\n" == ["a","b"]` — no empty final segment).
@@ -429,8 +427,8 @@ fn works_lines_words_vendored() {
 /// yield error — never SIGSEGV. (500k non-tail frames here.) Contrast
 /// `works_tco_deep_tail_recursion`.
 ///
-/// Regression guard for the masked-StackOverflow bug (fixed 2026-06-21,
-/// effect_machine `parse_result`): when the top-level result is itself a thunk,
+/// Guards the masked-StackOverflow case in effect_machine `parse_result`:
+/// when the top-level result is itself a thunk,
 /// the deep recursion runs inside `force_ptr`, so the depth guard sets
 /// StackOverflow AFTER `parse_result`'s pre-force error check — the tag-0 poison
 /// closure was then mis-reported as "unexpected heap tag: 0". `parse_result` now
@@ -457,8 +455,8 @@ fn let_in_braced_do_fails_loudly() {
 /// style-guide #18 claims. The cause is a non-tail lens fold, not "complex
 /// traversal". Doc trued up in tidepool-style-guide.md.
 ///
-/// Regression guard for the same masked-StackOverflow bug as
-/// `nontail_recursion_fails_loudly` (fixed 2026-06-21 in `parse_result`).
+/// Guards the same masked-StackOverflow case as
+/// `nontail_recursion_fails_loudly` (in `parse_result`).
 #[test]
 fn large_value_lens_fold_fails_loudly() {
     fails_loudly(
@@ -706,9 +704,8 @@ target = (Foo "red").color ++ (Bar "blue").color
 }
 
 // =========================================================================
-// NEWLY ADDED (2026-07-01 gotcha-claims-sweep): claims from root CLAUDE.md
-// "Monomorphic Shadows (Prelude)" and haskell/CLAUDE.md "Known Limits" that
-// were testable but had no probe in this registry.
+// Claims from root CLAUDE.md "Monomorphic Shadows (Prelude)" and
+// haskell/CLAUDE.md "Known Limits", pinned as probes.
 // =========================================================================
 
 /// `showDouble` monomorphic shadow: `Translate.hs` intercepts `showDouble` /
@@ -732,9 +729,8 @@ fn works_show_double_monomorphic_shadow() {
     );
 }
 
-/// Empty `Text` operations work correctly on the JIT. The memory entry
-/// `empty-text-interp-string-space.md` notes these were verified 2026-06-22 —
-/// the `LitString([])` choke is oracle-only, not a JIT issue. Regression
+/// Empty `Text` operations work correctly on the JIT: the `LitString([])`
+/// choke is oracle-only, not a JIT issue. Regression
 /// guard: the `LetRec` sibling-capture fix (`emit_letrec_phases`) touched
 /// these paths and originally manifested as `T.split` on empty text returning
 /// `<closure>` instead of `[""]`.

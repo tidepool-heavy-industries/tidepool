@@ -202,8 +202,8 @@ async fn redefine_function_latest_wins() {
 /// and `c` (bound against `Lib.G1.Color`) is a different type. GHC surfaces this
 /// correctly as a type mismatch rather than a silent runtime corruption.
 ///
-/// Graceful failure = GHCi-correct. No aspirational coexistence test remains
-/// (it was deleted — see git log; it was NOT a bug that warranted fixing).
+/// Graceful failure = GHCi-correct: the old binding is orphaned by a clean type
+/// mismatch, which is the right behavior, not a bug to design coexistence around.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn redefine_type_old_binding_orphaned_gracefully() {
     if !extract_available() {

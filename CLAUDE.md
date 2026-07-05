@@ -92,9 +92,10 @@ description emitted by the server — not duplicated in these files (it drifts).
 ```bash
 nix develop                              # Enter dev shell (provides Rust + GHC 9.12)
 cargo check --workspace                  # Type check
-scripts/battery.sh                       # Run all tests (cargo-nextest; builds TIDEPOOL_EXTRACT if unset)
-cargo nextest run -p tidepool-codegen    # Run tests for one crate
-cargo nextest run -p tidepool-eval -E 'test(test_name)'  # Run a single test by name
+scripts/battery.sh                       # Run ALL tests incl. GHC-heavy crates (cargo-nextest; builds TIDEPOOL_EXTRACT if unset)
+cargo nextest run                        # Quick tier: pure-Rust crates only (GHC-extract crates skipped by default-filter)
+cargo nextest run -p tidepool-codegen    # Run tests for one pure-Rust crate
+cargo nextest run --ignore-default-filter -p tidepool-runtime -E 'test(test_name)'  # A GHC-heavy crate needs --ignore-default-filter
 cargo clippy --workspace                 # Lint
 cargo fmt --all -- --check               # Format check
 cargo install --path tidepool            # Install the MCP server binary (`tidepool`)

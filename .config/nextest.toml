@@ -56,6 +56,20 @@
 # are unaffected by a larger ceiling.
 slow-timeout = { period = "60s", terminate-after = 30 }
 
+# Default tier: bare `cargo nextest run` skips the GHC-extract-heavy crates.
+# Every test in tidepool-runtime/repl/mcp/handlers/testing forks a heavyweight
+# GHC `extract` compile (seconds each) — they are "run sometimes", not on every
+# quick inner-loop check. The pure-Rust crates (codegen/eval/repr/effect/bridge/
+# optimize/bignum) still run by default and stay fast.
+#
+# To run EVERYTHING (the full battery), add `--ignore-default-filter` — this is
+# what `scripts/battery.sh` does, so it keeps the slow-timeout + ghc-heavy cap
+# below rather than needing a second profile. To run a single heavy crate's
+# tests, likewise pass `--ignore-default-filter -p <crate>` (a bare `-p
+# tidepool-runtime` reports "0 running, N skipped" — the default-filter is
+# ANDed with `-p`, not overridden by it).
+default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | package(tidepool-testing))'
+
 # GHC-compile-heavy crates run capped, not at full core count. Every test in
 # tidepool-runtime/repl/mcp/handlers/testing forks a heavyweight GHC `extract`
 # compile through the EvalHarness pipeline; at full-core parallelism these

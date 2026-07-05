@@ -267,8 +267,8 @@ fn test_windows() {
 
 #[test]
 fn test_zip_with_index() {
-    // `Schemes.indexed` was removed (dup of the Prelude's `zipWithIndex`, and
-    // `indexed` now resolves to Control.Lens's via the wholesale re-export).
+    // `zipWithIndex` is the Prelude idiom for this; bare `indexed` resolves to
+    // Control.Lens's via the wholesale re-export.
     let r = run_expr(r#"zipWithIndex [10,20,30 :: Int]"#);
     assert_eq!(r, serde_json::json!([[0, 10], [1, 20], [2, 30]]));
 }

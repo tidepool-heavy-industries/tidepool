@@ -21,4 +21,8 @@ if [ -z "${TIDEPOOL_EXTRACT:-}" ]; then
 fi
 echo "TIDEPOOL_EXTRACT=${TIDEPOOL_EXTRACT}"
 
-exec cargo nextest run --workspace "$@"
+# --ignore-default-filter: the full battery runs EVERY crate, including the
+# GHC-extract-heavy ones that .config/nextest.toml's default-filter skips for
+# quick inner-loop `cargo nextest run`. Same profile, so slow-timeout + the
+# ghc-heavy thread cap still apply.
+exec cargo nextest run --workspace --ignore-default-filter "$@"
