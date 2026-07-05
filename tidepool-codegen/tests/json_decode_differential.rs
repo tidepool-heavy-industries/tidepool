@@ -101,6 +101,94 @@ fn aeson_table() -> DataConTable {
     t
 }
 
+/// [`aeson_table`] without `Left`/`Right`. A machine compiled against this
+/// resolves `JsonConIds` with `left`/`right = None` — a forced `JsonDecode`
+/// would fail "Either (Left/Right) constructors not in scope" until a later
+/// fragment supplies them.
+fn table_without_either() -> DataConTable {
+    let mut t = DataConTable::new();
+    t.insert(dc(
+        OBJECT,
+        "Object",
+        1,
+        1,
+        Some("Tidepool.Aeson.Value.Object"),
+    ));
+    t.insert(dc(ARRAY, "Array", 2, 1, Some("Tidepool.Aeson.Value.Array")));
+    t.insert(dc(
+        STRING,
+        "String",
+        3,
+        1,
+        Some("Tidepool.Aeson.Value.String"),
+    ));
+    t.insert(dc(
+        NUMBER,
+        "Number",
+        4,
+        1,
+        Some("Tidepool.Aeson.Value.Number"),
+    ));
+    t.insert(dc(
+        SCIENTIFIC,
+        "Scientific",
+        1,
+        2,
+        Some("Tidepool.Aeson.Scientific.Scientific"),
+    ));
+    t.insert(dc(IS, "IS", 1, 1, Some("GHC.Num.Integer.IS")));
+    t.insert(dc(IP, "IP", 2, 1, Some("GHC.Num.Integer.IP")));
+    t.insert(dc(IN, "IN", 3, 1, Some("GHC.Num.Integer.IN")));
+    t.insert(dc(BOOL, "Bool", 5, 1, Some("Tidepool.Aeson.Value.Bool")));
+    t.insert(dc(NULL, "Null", 6, 0, Some("Tidepool.Aeson.Value.Null")));
+    t.insert(dc(FALSE, "False", 1, 0, Some("GHC.Types.False")));
+    t.insert(dc(TRUE, "True", 2, 0, Some("GHC.Types.True")));
+    t.insert(dc(TIP, "Tip", 1, 0, Some("Data.Map.Tip")));
+    t.insert(dc(BIN, "Bin", 2, 5, Some("Data.Map.Bin")));
+    t.insert(dc(I_HASH, "I#", 1, 1, Some("GHC.Types.I#")));
+    t.insert(dc(TEXT, "Text", 1, 3, Some("Data.Text.Internal.Text")));
+    t.insert(dc(NIL, "[]", 1, 0, Some("GHC.Types.[]")));
+    t.insert(dc(CONS, ":", 2, 2, Some("GHC.Types.:")));
+    t
+}
+
+/// Resident-session regression: the machine's primop con-id bundle must
+/// ACCUMULATE across fragments. A session that first compiles against a table
+/// lacking `Either` (con-ids `left/right = None`), then adds a fragment compiled
+/// against the full aeson table, must upgrade the ids so a `JsonDecode` forced
+/// in that later fragment resolves — instead of reusing the stale first-compile
+/// ids and failing "Either constructors not in scope" (the pre-fix behaviour
+/// that also bit `ParseISO8601`).
+#[test]
+fn session_accumulates_primop_con_ids_across_fragments() {
+    use tidepool_codegen::emit::ExternalEnv;
+
+    let sparse = table_without_either();
+    let full = aeson_table();
+    let env = ExternalEnv::new();
+
+    // 1. compile_session on a trivial pure entry with the Either-less table.
+    let dummy = {
+        let mut b = TreeBuilder::new();
+        b.push(CoreFrame::Lit(Literal::LitInt(0)));
+        b.build()
+    };
+    let mut m = JitEffectMachine::compile_session(&dummy, &sparse, 256 * 1024)
+        .expect("compile_session with sparse table");
+
+    // 2. Add a decode fragment compiled against the FULL table (has Left/Right).
+    let fid = m
+        .add_function("decode", &build_decode("[1,2,3]"), &full, &env)
+        .expect("add_function decode fragment");
+
+    // 3. Force it: without accumulation the machine still holds left/right = None
+    //    and this yields the "Either not in scope" runtime error.
+    let raw = m
+        .run_fragment_pure(fid)
+        .expect("run_fragment_pure — con-ids must have accumulated from the fragment table");
+    assert_eq!(render_either(&raw, &full), "[1,2,3]");
+}
+
 /// `eitherDecodeValue <text>` where `<text>` is a literal `Text ByteArray# Int# Int#`.
 fn build_decode(input: &str) -> CoreExpr {
     let mut b = TreeBuilder::new();

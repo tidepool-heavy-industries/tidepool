@@ -842,6 +842,21 @@ impl JitEffectMachine {
         // fragment's table (see compile_inner). Runtime-inert — read only during
         // emission — so refreshing it does not perturb already-compiled code.
         self.pipeline.lit_wrappers = crate::emit::LitWrapperIds::from_table(table);
+        // ACCUMULATE the primop constructor-id bundles (JsonDecode / ParseISO8601)
+        // as fragments introduce constructors: upgrade None -> Some, never clobber
+        // a resolved bundle. Each turn's table is a SUBSET of the session, so a
+        // later turn that merely FORCES a primop-produced thunk — its own Core
+        // may not reference Either/Value/I#/Text at all — still sees the ids a
+        // turn that DID reference them resolved. (Without this, forcing a
+        // JsonDecode/ParseISO8601 result in a sparse turn failed with
+        // "constructors not in scope".) The machine reads these fields at every
+        // run entry via `install_registries`.
+        if let Some(ids) = tidepool_eval::json::JsonConIds::from_table(table) {
+            self.json_con_ids = Some(ids);
+        }
+        if let Some(ids) = tidepool_eval::time::TimeConIds::from_table(table) {
+            self.time_con_ids = Some(ids);
+        }
         let func_id =
             crate::emit::expr::compile_expr(&mut self.pipeline, &expr, name, external_env)
                 .map_err(JitError::Compilation)?;
