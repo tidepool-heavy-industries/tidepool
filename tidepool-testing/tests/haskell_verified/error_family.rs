@@ -12,37 +12,37 @@ fn gen_computed_list() -> impl Strategy<Value = (i64, i64, Vec<i64>)> {
 #[test]
 fn proptest_head() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
-        let src = format!("head (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
+        let src = format!("L.head (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
         (src, json!(xs[0]))
     });
-    run_template(25, strat);
+    run_template_with_imports(25, strat, &["import qualified Data.List as L"]);
 }
 
 #[test]
 fn proptest_tail() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
-        let src = format!("tail (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
+        let src = format!("L.tail (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
         (src, json!(&xs[1..]))
     });
-    run_template(25, strat);
+    run_template_with_imports(25, strat, &["import qualified Data.List as L"]);
 }
 
 #[test]
 fn proptest_last() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
-        let src = format!("last (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
+        let src = format!("L.last (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
         (src, json!(xs.last().unwrap()))
     });
-    run_template(25, strat);
+    run_template_with_imports(25, strat, &["import qualified Data.List as L"]);
 }
 
 #[test]
 fn proptest_init() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
-        let src = format!("init (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
+        let src = format!("L.init (filter (\\x -> x > {}) (enumFromTo 1 {}))", k, n);
         (src, json!(&xs[..xs.len() - 1]))
     });
-    run_template(25, strat);
+    run_template_with_imports(25, strat, &["import qualified Data.List as L"]);
 }
 
 #[test]
@@ -67,39 +67,39 @@ fn proptest_minimum() {
 fn proptest_foldr1_add() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
         let src = format!(
-            "foldr1 (+) (filter (\\x -> x > {}) (enumFromTo 1 {}))",
+            "L.foldr1 (+) (filter (\\x -> x > {}) (enumFromTo 1 {}))",
             k, n
         );
         let expected: i64 = xs.iter().sum();
         (src, json!(expected))
     });
-    run_template_with_imports(25, strat, &["import Data.List (foldr1)"]);
+    run_template_with_imports(25, strat, &["import qualified Data.List as L"]);
 }
 
 #[test]
 fn proptest_foldl1_add() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
         let src = format!(
-            "foldl1 (+) (filter (\\x -> x > {}) (enumFromTo 1 {}))",
+            "L.foldl1 (+) (filter (\\x -> x > {}) (enumFromTo 1 {}))",
             k, n
         );
         let expected: i64 = xs.iter().sum();
         (src, json!(expected))
     });
-    run_template_with_imports(25, strat, &["import Data.List (foldl1)"]);
+    run_template_with_imports(25, strat, &["import qualified Data.List as L"]);
 }
 
 #[test]
 fn proptest_foldl1_sub() {
     let strat = gen_computed_list().prop_map(|(k, n, xs)| {
         let src = format!(
-            "foldl1 (-) (filter (\\x -> x > {}) (enumFromTo 1 {}))",
+            "L.foldl1 (-) (filter (\\x -> x > {}) (enumFromTo 1 {}))",
             k, n
         );
         let expected = xs[1..].iter().fold(xs[0], |acc, x| acc - x);
         (src, json!(expected))
     });
-    run_template_with_imports(25, strat, &["import Data.List (foldl1)"]);
+    run_template_with_imports(25, strat, &["import qualified Data.List as L"]);
 }
 
 #[test]
