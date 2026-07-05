@@ -2087,8 +2087,8 @@ fn push_verbatim_binding(out: &mut String, name: &str, text: &str) {
 
 /// Emit a turn's statement VERBATIM inside an explicit `do { }` block. `let`
 /// statements need explicit decl braces there (a layout `let` swallows the
-/// following `;` — pinned by gotcha_registry's
-/// `loud_fail_let_in_braced_do_parse_error`): two boundary edits at known
+/// following `;` — pinned by jit_surface's
+/// `let_in_braced_do_fails_loudly`): two boundary edits at known
 /// positions, never interior transformation, so payloads and columns survive
 /// byte-exact (modulo +2 on the `let`'s own first line).
 fn push_braced_stmt(out: &mut String, turn_text: &str) {

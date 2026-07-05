@@ -1,19 +1,15 @@
-//! Executable gotcha registry — the documented footguns, Known-Limits, and
-//! Dangerous-Patterns turned into live eval probes that PIN current behavior.
+//! JIT surface coverage — executable probes that PIN the behavior of the
+//! Tidepool eval surface exactly as the MCP user sees it. Two classes:
 //!
-//! Purpose (three jobs):
-//!   1. REGRESSION GUARD — a "stale fear that now works" (sum/Floating/round/
-//!      even-odd/nub/Integer-defaulting/insertWith, and the once-forbidden
-//!      infinite-list idioms) must keep working. If one flips to an error, the
-//!      named test fails loud.
-//!   2. CLEAN-FAILURE GUARD — an unsupported thing (read/Integer-GMP, a
-//!      near-DBL_MAX Double literal, `cycle`, non-tail-recursion overflow,
-//!      `let`-in-braced-`do`, a giant lens fold) must fail with a CLEAN, named
-//!      error — never a silent SIGILL/SIGSEGV or silent-wrong output. Each
-//!      LOUD-FAIL probe asserts the error text carries the expected marker.
-//!   3. STALE-DOC FLAG — several probes prove the docs OVERSTATE danger. Those
-//!      are pinned here AND the doc lines are trued up (CLAUDE.md "Known
-//!      Limits", memory `tidepool-style-guide.md`). See the per-probe comments.
+//!   1. WORKS — a capability that must hold: its value is asserted verbatim
+//!      (sum/Floating/round/even-odd/nub/Integer-defaulting/insertWith, the
+//!      infinite-list idioms, the safe-head/wither/Category surface, …). A
+//!      failure here is a regression in a shipped capability.
+//!   2. FAILS-LOUDLY — an unsupported input (read/Integer-GMP, a near-DBL_MAX
+//!      Double literal, `cycle`, non-tail-recursion overflow, `let`-in-braced-
+//!      `do`, a giant lens fold) must fail with a CLEAN, named error — never a
+//!      silent SIGILL/SIGSEGV or wrong output. Each such probe asserts the
+//!      error text carries the expected marker.
 //!
 //! Harness mirrors `fmt_nonfinite.rs`: full MCP preamble (`build_preamble` +
 //! `template_haskell`) + `compile_and_run`, on a 64 MiB thread with signal
@@ -107,7 +103,7 @@ fn works(code: &str, expected: serde_json::Value) {
 /// "must fail cleanly" class — a success here means the footgun silently
 /// changed shape (re-pin it), and a missing marker means the error is no longer
 /// the clean, named one we promise (possible silent-crash bug-find).
-fn loud_fail(code: &str, marker: &str) {
+fn fails_loudly(code: &str, marker: &str) {
     match run_probe(code) {
         Ok(v) => panic!(
             "\nLOUD-FAIL probe unexpectedly SUCCEEDED:\n  code: {code}\n  got:  {v}\n  \
@@ -272,8 +268,8 @@ fn works_map_fromlistwith_default_resolves() {
 /// yield), never a silent SIGSEGV. Unsorted input takes the tail-safe
 /// `foldl' insert` path — covered by the WORKS probe below.
 #[test]
-fn loud_fail_map_fromlist_large_sorted_overflows() {
-    loud_fail(
+fn map_fromlist_large_sorted_fails_loudly() {
+    fails_loudly(
         "pure (Map.size (Map.fromList [(i, i) | i <- [1..12000 :: Int]]))",
         "stack overflow",
     );
@@ -302,7 +298,7 @@ fn works_lazy_safe_combinators() {
 }
 
 /// TCO: a deep TAIL-recursive loop (500k frames) returns cleanly — contrast
-/// with `loud_fail_nontail_recursion_overflow`. Pins "tail recursion is
+/// with `nontail_recursion_fails_loudly`. Pins "tail recursion is
 /// unbounded", retiring the long-dead "recursion depth ~20 max" rule.
 #[test]
 fn works_tco_deep_tail_recursion() {
@@ -336,7 +332,7 @@ fn works_moderate_double_literals() {
 /// consumption of an "infinite" producer now works. Style-guide table claims
 /// these SIGILL ("Eager Con fields, no thunks"); STALE.
 #[test]
-fn stale_doc_infinite_list_take_now_works() {
+fn infinite_list_take_on_jit() {
     works(
         "pure (object [\"enumFrom\" .= (take 3 [0..] :: [Int]), \
          \"repeat\" .= (take 3 (repeat (7::Int)) :: [Int]), \
@@ -350,7 +346,7 @@ fn stale_doc_infinite_list_take_now_works() {
 /// `zipWith f xs [0..]` "doesn't fuse, infinite list" → crash; STALE. Confirms
 /// jit-eager-argument-position's filter/nubBy lazy-safety claim.
 #[test]
-fn stale_doc_infinite_list_transform_now_works() {
+fn infinite_list_transform_on_jit() {
     works(
         "pure (object [\"zipWith\" .= zipWith (\\a b -> a + b) [10,20,30::Int] [0..], \
          \"filter\" .= take 3 (filter even [0..] :: [Int]), \
@@ -364,30 +360,28 @@ fn stale_doc_infinite_list_transform_now_works() {
 // error (never a silent SIGILL/SIGSEGV / wrong output). Assert Err + marker.
 // =========================================================================
 
-/// `read` now WORKS on the native-bignum toolchain — the `__gmpn_*` wall is gone
-/// (was a clean gmp COMPILE error). Flipped from loud_fail 2026-06-22; the
-/// deployed extract uses GHC's native ghc-bignum.
+/// `read :: Int` works on the JIT: the deployed extract uses GHC's native
+/// ghc-bignum, so the integer Read path carries no `__gmpn_*` dependency.
 #[test]
-fn stale_doc_read_now_works() {
+fn read_on_jit() {
     works("pure (P.read \"42\" :: Int)", serde_json::json!(42));
 }
 
 /// `read :: Double` also WORKS on the native-bignum toolchain. Root CLAUDE.md
 /// item 0 claimed BOTH `:: Int` AND `:: Double` die at compile time with
-/// "__gmpn_add_1". The `:: Int` case was already flipped (stale_doc_read_now_works);
+/// "__gmpn_add_1". The `:: Int` case was already flipped (read_on_jit);
 /// this probe pins the `:: Double` variant. The Read lexer for Double goes through
 /// the same native-bignum integer path so the __gmpn_* wall is gone for both.
 #[test]
-fn stale_doc_read_double_now_works() {
+fn read_double_on_jit() {
     works("pure (P.read \"42.5\" :: Double)", serde_json::json!(42.5));
 }
 
-/// A near-DBL_MAX Double LITERAL now WORKS on the native-bignum toolchain (was a
-/// clean gmp COMPILE error via the integerAdd/integerSub shims). Flipped from
-/// loud_fail 2026-06-22. Moderate literals were always fine (see
+/// A near-DBL_MAX Double LITERAL works on the JIT: the native-bignum
+/// integerAdd/integerSub shims handle it. Moderate literals are also fine (see
 /// `works_moderate_double_literals`).
 #[test]
-fn stale_doc_large_double_literal_now_works() {
+fn large_double_literal_on_jit() {
     works("pure (1.79e308 :: Double)", serde_json::json!(1.79e308));
 }
 
@@ -444,8 +438,8 @@ fn works_lines_words_vendored() {
 /// MCP server, which surfaced the still-pending error via a later teardown path;
 /// only the library/`compile_and_run` path exposed it.)
 #[test]
-fn loud_fail_nontail_recursion_overflow() {
-    loud_fail(
+fn nontail_recursion_fails_loudly() {
+    fails_loudly(
         "pure (go 500000 :: Int) where { go n = if n == 0 then 0 else 1 + go (n-1) }",
         "stack overflow",
     );
@@ -454,8 +448,8 @@ fn loud_fail_nontail_recursion_overflow() {
 /// `let` in braced `do` (`do { let x = e; stmt }`) is a GHC PARSE error
 /// (style-guide gotcha #10/#207). Clean compile-time failure.
 #[test]
-fn loud_fail_let_in_braced_do_parse_error() {
-    loud_fail("do { let x = 1 :: Int; pure x }", "parse error");
+fn let_in_braced_do_fails_loudly() {
+    fails_loudly("do { let x = 1 :: Int; pure x }", "parse error");
 }
 
 /// A large Value tree folded by a lens (`toJSON [1..20000] ^.. values`)
@@ -464,10 +458,10 @@ fn loud_fail_let_in_braced_do_parse_error() {
 /// traversal". Doc trued up in tidepool-style-guide.md.
 ///
 /// Regression guard for the same masked-StackOverflow bug as
-/// `loud_fail_nontail_recursion_overflow` (fixed 2026-06-21 in `parse_result`).
+/// `nontail_recursion_fails_loudly` (fixed 2026-06-21 in `parse_result`).
 #[test]
-fn loud_fail_large_value_lens_fold_overflow() {
-    loud_fail(
+fn large_value_lens_fold_fails_loudly() {
+    fails_loudly(
         "pure (len (toJSON [1..20000::Int] ^.. values) :: Int)",
         "stack overflow",
     );
@@ -760,7 +754,7 @@ fn works_empty_text_ops() {
 
 /// GHC -O2 loopifies a no-base-case non-tail recursion (`go n = n + go
 /// (n+1)`) into a tight spin — it runs until the eval *timeout*, NOT until
-/// "stack overflow". Contrast `loud_fail_nontail_recursion_overflow` where
+/// "stack overflow". Contrast `nontail_recursion_fails_loudly` where
 /// a base-case 500k-frame `1 + go(n-1)` does overflow.
 ///
 /// Doc claim: "a no-base-case non-tail recursion (`go n = n + go (n+1)`) is
@@ -809,11 +803,10 @@ fn claims_nobase_nontail_loopifies_not_overflows() {
 }
 
 // =========================================================================
-// NEWLY ADDED (2026-07-04 prelude-fallout-gotcha): canonical safe idioms that
-// replaced the un-exported partials head/tail/last/init/(!!)/foldr1/foldl1/
-// fromJust (commit f10f0461, "haskell-as-interface polish wave"). Each PIN
-// proves the new `Tidepool.Prelude` re-export JIT-runs end-to-end, per
-// haskell/CLAUDE.md: "extend gotcha_registry.rs when you add a function".
+// The safe-idiom surface: the total forms that stand in for the partials
+// (headMay/lastMay/initMay/tailMay/atMay, note/hush, wither/filterA/ordNub,
+// readMaybe, (>>>)/(<<<)). Each PIN proves the `Tidepool.Prelude` re-export
+// JIT-runs end-to-end. Add a `works_*` probe here when you add a Prelude fn.
 // =========================================================================
 
 /// `headMay`/`lastMay`/`initMay`/`tailMay` (safe package) — `Just` on a
@@ -859,7 +852,7 @@ fn works_safe_maximum_minimum_may() {
 
 /// `readMaybe` (Text.Read) — `Just` on a parseable literal, `Nothing` on
 /// garbage. Bare `read` (partial) is still exported/pinned separately
-/// (`stale_doc_read_now_works`); this is the total sibling.
+/// (`read_on_jit`); this is the total sibling.
 #[test]
 fn works_read_maybe() {
     works(

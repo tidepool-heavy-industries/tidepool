@@ -144,4 +144,4 @@ Same "cheap proof/preview to decide the next commit" family:
 5. Later: bounded-read effect for peek; `survey`/`shape`/`countOnly`/`spread`/`delta`.
 
 Verification for each: prototype live in a session first (dogfood-build-measure, as
-was done for glimpse: 506×), then promote to stdlib + a gotcha_registry probe.
+was done for glimpse: 506×), then promote to stdlib + a jit_surface probe.

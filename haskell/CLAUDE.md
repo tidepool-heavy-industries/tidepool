@@ -129,4 +129,4 @@ and GADT type-indexed dispatch all compile and execute — write the polymorphic
 version. A few functions carry monomorphic shadows in the Prelude only for
 genuine FFI gaps (`round`, `showDouble`); `Opt_FullLaziness` and `Opt_CprAnal`
 are disabled in `GhcPipeline.hs`. The JIT-safe surface is enforced end-to-end by
-`tidepool-runtime/tests/gotcha_registry.rs` — extend it when you add a function.
+`tidepool-runtime/tests/jit_surface.rs` — add a `works_*` probe when you add a function.
