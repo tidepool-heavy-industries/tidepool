@@ -25,8 +25,12 @@
 --
 -- Full JSON: objects @{"k": v, ...}@, arrays @[v, ...]@, strings (with the
 -- standard JSON escapes @\\\" \\\\ \\\/ \\n \\t \\r \\b \\f \\uXXXX@,
--- including surrogate pairs), numbers (integer/fraction/exponent, all stored
--- in 'Number'\'s 'Double' field), @true@/@false@/@null@, and JSON whitespace.
+-- including surrogate pairs), numbers (integer/fraction/exponent, carried by
+-- 'Number' as an exact 'Scientific' — @coefficient * 10 ^ base10Exponent@),
+-- @true@/@false@/@null@, and JSON whitespace. (Literal numbers in the
+-- quasiquote source still parse through 'Double' before being decomposed into
+-- Scientific digits, so a >2^53 literal in @[j| … |]@ text is lossy — see the
+-- @NNumber@ note below; the antiquote/builder path is exact.)
 --
 -- Antiquotes appear in /value position only/:
 --

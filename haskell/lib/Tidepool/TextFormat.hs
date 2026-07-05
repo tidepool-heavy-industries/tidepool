@@ -134,11 +134,10 @@ dedent t =
       nonEmpty = filter (not . T.null . T.stripStart) ls
       minIndent = case nonEmpty of
         []     -> 0
-        (x:xs) -> foldl' (\acc l -> min' acc (countLeading l)) (countLeading x) xs
+        (x:xs) -> foldl' (\acc l -> min acc (countLeading l)) (countLeading x) xs
   in  T.unlines (map (T.drop minIndent) ls)
   where
     countLeading = T.length . T.takeWhile (== ' ')
-    min' a b = if a <= b then a else b
 
 -- | Wrap text to a given line width at word boundaries.
 wrap :: Int -> Text -> Text

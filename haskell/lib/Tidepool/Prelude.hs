@@ -143,8 +143,6 @@ module Tidepool.Prelude
   , digitToInt, toLowerChar, toUpperChar
     -- * Indexed list operations (safe alternatives to [0..])
   , zipWithIndex, imap, enumFromTo
-    -- * Monomorphic numeric helpers
-  , abs', signum', min', max'
     -- * Kleisli profunctor squad (monadic Arrow-style plumbing)
   , (&&&), (***), (|||), firstK, secondK
     -- * Additional list combinators (P2)
@@ -670,6 +668,10 @@ fromJust = unsatisfiable
 -- so `round`/`truncate`/`floor`/`ceiling` work on any `RealFrac` — including
 -- `Scientific`, exactly (Integer math, no `Double` round-trip). The Double case
 -- still lowers to the round primop (as `QQ.Fmt.Runtime` already relies on).
+-- The same cleanup was finished for the last four `Int`-only shadows
+-- (`abs'`/`signum'`/`min'`/`max'`): removed in favour of the polymorphic base
+-- `abs`/`signum` (via `Num(..)`) and `max`/`min` (via `Ord(..)`), already
+-- re-exported above.
 
 -- | Zip three lists with a function.
 zipWith3 :: (a -> b -> c -> d) -> [a] -> [b] -> [c] -> [d]
@@ -721,9 +723,11 @@ parseIntM t = case T.uncons t of
     isDigitC :: Char -> Bool
     isDigitC c = c >= '0' && c <= '9'
 
--- | Parse an integer from Text, calling error on failure.
-parseInt :: Text -> Int
-parseInt t = fromMaybe (error ("parseInt: not a number: " <> T.unpack t)) (parseIntM t)
+-- | Partial shadow (see the head/fromJust shadows above): exported but any
+-- caller is a compile error naming the total form. Parsing can always fail, so
+-- the total-returning `parseIntM` is the only sanctioned surface.
+parseInt :: Unsatisfiable ('Text "parseInt is partial — use parseIntM :: Text -> Maybe Int." ':$$: 'Text "Then handle the Nothing (fromMaybe def, a case, or liftMaybe).") => Text -> Int
+parseInt = unsatisfiable
 
 -- | Parse a Double from Text, returning Nothing on failure.
 -- Handles optional sign, integer part, optional decimal part.
@@ -759,9 +763,9 @@ parseDoubleM t = case T.uncons t of
     isDigitC :: Char -> Bool
     isDigitC c = c >= '0' && c <= '9'
 
--- | Parse a Double from Text, calling error on failure.
-parseDouble :: Text -> Double
-parseDouble t = fromMaybe (error ("parseDouble: not a number: " <> T.unpack t)) (parseDoubleM t)
+-- | Partial shadow (see `parseInt`): use the total `parseDoubleM`.
+parseDouble :: Unsatisfiable ('Text "parseDouble is partial — use parseDoubleM :: Text -> Maybe Double." ':$$: 'Text "Then handle the Nothing (fromMaybe def, a case, or liftMaybe).") => Text -> Double
+parseDouble = unsatisfiable
 
 -- ---------------------------------------------------------------------------
 -- JSON Value helpers
@@ -874,33 +878,6 @@ toUpperChar c
   | c >= 'a' && c <= 'z' = chr (ord c - 32)
   | otherwise             = c
 {-# INLINE toUpperChar #-}
-
--- ---------------------------------------------------------------------------
--- Monomorphic numeric helpers (avoids Num/Ord dictionary issues)
--- ---------------------------------------------------------------------------
-
--- | Monomorphic absolute value for Int.
-abs' :: Int -> Int
-abs' n = if n < 0 then negate n else n
-{-# INLINE abs' #-}
-
--- | Monomorphic signum for Int.
-signum' :: Int -> Int
-signum' n
-  | n < 0     = -1
-  | n == 0    = 0
-  | otherwise = 1
-{-# INLINE signum' #-}
-
--- | Monomorphic min for Int.
-min' :: Int -> Int -> Int
-min' a b = if a <= b then a else b
-{-# INLINE min' #-}
-
--- | Monomorphic max for Int.
-max' :: Int -> Int -> Int
-max' a b = if a >= b then a else b
-{-# INLINE max' #-}
 
 -- ---------------------------------------------------------------------------
 -- Kleisli profunctor squad (probe-verified under the JIT 2026-06-11):
