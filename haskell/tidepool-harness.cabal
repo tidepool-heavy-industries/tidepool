@@ -52,7 +52,10 @@ executable tidepool-extract-bin
     text,
     cborg,
     mtl,
-    lens
+    lens,
+    errors,
+    witherable,
+    safe
   default-language: GHC2024
   default-extensions: OverloadedStrings
   ghc-options:      -Wall

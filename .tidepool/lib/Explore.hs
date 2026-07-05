@@ -12,7 +12,7 @@ import qualified Data.Map.Strict as Map
 extHisto :: [Text] -> [(Text, Int)]
 extHisto paths = sortBy (\a b -> compare (snd b) (snd a)) tally
   where
-    ext p = case splitOn "." p of { [_] -> "(none)"; ps -> last ps }
+    ext p = case splitOn "." p of { [_] -> "(none)"; ps -> fromMaybe "(none)" (lastMay ps) }
     tally = Map.toList (Map.fromListWith (+) [(ext p, 1) | p <- paths])
 
 -- | Top-N heaviest entries from (path, size) pairs.

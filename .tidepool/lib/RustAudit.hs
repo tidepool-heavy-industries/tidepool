@@ -112,7 +112,7 @@ opKey s =
   let line   = sText s
       marker = if isInfixOf ".expect" line then ".expect" else ".unwrap"
       prefix = fst (T.breakOn marker line)
-      seg    = case splitOn "." prefix of { [] -> ""; xs -> last xs }
+      seg    = case splitOn "." prefix of { [] -> ""; xs -> fromMaybe "" (lastMay xs) }
       ident  = T.takeWhile isIdentChar seg
   in if ident == "" then "<expr>" else ident
   where

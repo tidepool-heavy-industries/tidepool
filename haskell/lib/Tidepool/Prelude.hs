@@ -61,14 +61,11 @@ module Tidepool.Prelude
   , sum, product, minimum, maximum
   , concat, iterate, repeat, cycle
   , scanl, scanr, scanl1, scanr1
-  , foldr1, foldl1
-  , (!!)
     -- * Self-contained list operations
   , reverse
   , splitAt
   , span
   , break
-  , init
   , nub
   , nubBy
   , sort
@@ -109,7 +106,7 @@ module Tidepool.Prelude
   , scanl'
   , listIntercalate
     -- * Function combinators
-  , on
+  , on, (>>>), (<<<)
   , comparing
   , until
     -- * Monadic combinators
@@ -122,12 +119,17 @@ module Tidepool.Prelude
   , foldM, foldM_
   , filterM, replicateM, zipWithM
     -- * Maybe/Either utilities
-  , maybe, fromMaybe, fromJust, isJust, isNothing, catMaybes, mapMaybe, listToMaybe, maybeToList
+  , maybe, fromMaybe, isJust, isNothing, catMaybes, mapMaybe, listToMaybe, maybeToList
   , either
-    -- * Partial functions (use with care)
-  , head
-  , tail
-  , last
+    -- * Safe list heads (the partial head/tail/last/init/(!!)/foldr1/foldl1/
+    -- fromJust are deliberately NOT re-exported — these total forms replace
+    -- them; the qualified base originals live behind `P.` if truly needed).
+  , headMay, lastMay, initMay, tailMay, atMay, maximumMay, minimumMay
+  , readMaybe
+    -- * Railway-oriented error helpers (errors package)
+  , note, hush
+    -- * Effectful filter-map (witherable package)
+  , wither, filterA, ordNub
     -- * Numeric utilities
   , even, odd
     -- * Text-to-number parsing
@@ -311,6 +313,23 @@ import Control.Lens hiding (imap, (.=), (??), para, (<.>), rewrite)
 import Control.Applicative ((<|>))  -- Alternative (<|>) — Control.Lens omits it
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+-- Point-free composition (Control.Category). `(&)`/`bimap` already arrive via
+-- the wholesale Control.Lens re-export; these two do not.
+import Control.Category ((>>>), (<<<))
+-- Safe alternatives to the partial list heads (safe package). The unsafe
+-- `head`/`tail`/`last`/`init`/`(!!)`/`foldr1`/`foldl1`/`fromJust` are deliberately
+-- NOT re-exported — reach for these instead (each returns `Maybe`).
+import Safe (headMay, lastMay, initMay, tailMay, atMay, maximumMay, minimumMay)
+-- Railway-oriented error helpers (errors package): `note` tags a `Nothing` into
+-- a `Left e`; `hush` forgets a `Left` back to `Nothing`. Compose with the
+-- `Either`-returning verbs (#335) and `liftEither`/`partitionEithers`.
+import Control.Error.Util (note, hush)
+-- Filter-map fused inside an effect/Applicative (witherable package): `wither`
+-- is `mapMaybe` with effects, `filterA` is `filter` with effects; `ordNub` is
+-- the O(n log n) nub.
+import Witherable (wither, filterA, ordNub)
+-- Total parse (Text.Read). Text-first numeric parsing stays in parseInt/parseDouble.
+import Text.Read (readMaybe)
 
 -- Permanent binding-level interception in Translate.hs.
 -- GHC's floatToDigits/Integer pipeline is fundamentally incompatible with

@@ -17,13 +17,7 @@ import qualified Data.Map.Strict as Map
 import qualified Tidepool.Data.Text as T
 
 -- ===== small generic helpers =====
--- (`concatMapM` comes from Tidepool.Prelude)
-
--- | Safe index into a list; Nothing when the index is out of bounds.
-atMay :: [a] -> Int -> Maybe a
-atMay xs i
-  | i < 0     = Nothing
-  | otherwise = case drop i xs of { (x : _) -> Just x; _ -> Nothing }
+-- (`concatMapM` and `atMay` come from Tidepool.Prelude)
 
 -- | First path segment — a crate/dir name, for the cheap same-crate rule.
 crateOf :: LspNode -> Text
@@ -181,7 +175,8 @@ the name intent = do
         Left _ -> Nothing)
     pickHuman ns = do
       v <- ask (SObj [("index", SNum)]) ("Which " <> name <> "?\n" <> menu ns)
-      pure (maybe (head ns) id (v ^? key "index" . _Double >>= (atMay ns . round)))
+      pure (fromMaybe (error "pickHuman: empty candidate list")
+                      ((v ^? key "index" . _Double >>= (atMay ns . round)) <|> headMay ns))
 
 -- | Impact-assessed rename: classify each reference (in-crate=safe rule → local
 -- model judges cross-crate → human confirms), mutate only on approval, apply

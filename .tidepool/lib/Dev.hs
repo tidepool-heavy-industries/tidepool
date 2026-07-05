@@ -61,7 +61,7 @@ vocab = do
   where
     sigsOf m = do
       src <- readFile m >>= liftEither
-      let name = replace ".hs" "" (last (splitOn "/" m))
+      let name = replace ".hs" "" (fromMaybe m (lastMay (splitOn "/" m)))
       let topSig l = " :: " `isInfixOf` l && not (" " `isPrefixOf` l) && not ("--" `isPrefixOf` l)
       pure (map (\s -> name <> "." <> s) (filter topSig (lines src)))
 

@@ -136,6 +136,9 @@
           ghcEnv = hsPkgs.ghcWithPackages (ps: with ps; [
             freer-simple
             lens
+            errors
+            witherable
+            safe
           ]);
           harness = hsPkgs.callCabal2nix "tidepool-harness" ./haskell {};
         in pkgs.writeShellScriptBin "tidepool-extract" ''

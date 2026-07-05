@@ -180,7 +180,7 @@ fn test_compose_converge_with_scanl() {
     // Newton's sqrt(2) traced via scanl': iterate the step, collect intermediates
     // We can't use converge (it returns final), so use iterateWhile + scanl'
     let r = run_expr(
-        r#"let step x = (x + 200 `div` x) `div` 2 in last (iterateN 6 step (200 :: Int))"#,
+        r#"let step x = (x + 200 `div` x) `div` 2 in fromMaybe 0 (lastMay (iterateN 6 step (200 :: Int)))"#,
     );
     // Should converge toward 14 (isqrt 200 = 14)
     assert_eq!(r, serde_json::json!(14));
