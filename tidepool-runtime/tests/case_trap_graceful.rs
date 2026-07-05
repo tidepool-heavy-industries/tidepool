@@ -4,7 +4,7 @@
 //! gate" in `plans/ghci-session-persistence.md`). The world-age type story relies on
 //! cross-generation type access being a clean *error*, not a process crash: a
 //! `case` over a value whose `DataConId` matches no alternative must call the
-//! host fn `runtime_case_trap` (sets `RuntimeError::CaseTrap`, returns a poison
+//! host fn `runtime_shape_trap` (sets `RuntimeError::CaseTrap`, returns a poison
 //! pointer) and surface as a clean `Err` once `with_signal_protection` returns
 //! — NOT a bare Cranelift `trap user2` → `ud2` → SIGILL that takes down the
 //! process / MCP connection.
@@ -21,7 +21,7 @@
 //! by `repro_lit_double_case.rs`, `repro_ne_group.rs`, and the effectful tests
 //! in `value_case_match.rs`. Everything downstream of the effect boundary —
 //! effect-result materialization, the JIT-emitted Case dispatch comparison
-//! chain, `runtime_case_trap`, and error surfacing — is production codegen via
+//! chain, `runtime_shape_trap`, and error surfacing — is production codegen via
 //! the real `compile_and_run` entry point. Only the *source* of the mismatched
 //! value is a test handler, which is legitimate (it stands in for "a value from
 //! another generation").
@@ -102,7 +102,7 @@ fn drive(src: &str, target: &str, reply: Reply) -> Result<serde_json::Value, Str
 /// Source: classify an aeson `Value` over ALL SIX of its constructors with no
 /// wildcard, so GHC emits an exhaustive `case` with NO default alternative. A
 /// value whose `DataConId` matches none of the six therefore falls straight
-/// through to `runtime_case_trap`.
+/// through to `runtime_shape_trap`.
 const CLASSIFY_VALUE_SRC: &str = r#"
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables #-}
 module Expr where

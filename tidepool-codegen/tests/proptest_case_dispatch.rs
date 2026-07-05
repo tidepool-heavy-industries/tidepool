@@ -31,7 +31,7 @@
 //!
 //! TOTALITY DISCIPLINE for literal/data cases WITHOUT a `Default`: the scrutinee
 //! is a *constant chosen from the alt key set*, so it always matches some alt —
-//! the JIT `runtime_case_trap` / eval no-match-error path is never reached on a
+//! the JIT `runtime_shape_trap` / eval no-match-error path is never reached on a
 //! no-default program. Programs WITH a `Default` additionally sweep
 //! deliberately-out-of-range scrutinees to exercise the fall-through arm.
 //!
