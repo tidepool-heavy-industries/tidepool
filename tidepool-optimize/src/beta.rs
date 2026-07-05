@@ -1,17 +1,19 @@
 //! Beta reduction pass for Core expressions.
 
+use crate::occ::{get_occ, occ_analysis, Occ};
 use crate::{Changed, Pass};
 use tidepool_repr::{replace_subtree, CoreExpr, CoreFrame};
 
 /// Optimization pass: beta reduction.
 ///
 /// Replaces function applications `(\x -> body) arg` with the body where
-/// `x` is substituted for `arg`.
+/// `x` is substituted for `arg` — but only when that substitution cannot
+/// duplicate work (see [`try_beta_at`]).
 pub struct BetaReduce;
 
 impl Pass for BetaReduce {
     fn run(&self, expr: &mut CoreExpr) -> Changed {
-        crate::apply_rewrite(expr, try_beta_reduce)
+        crate::apply_rewrite(expr, |e| try_beta_reduce(e, &occ_analysis(e)))
     }
 
     fn name(&self) -> &str {
@@ -19,20 +21,35 @@ impl Pass for BetaReduce {
     }
 }
 
-fn try_beta_reduce(expr: &CoreExpr) -> Option<CoreExpr> {
-    crate::rewrite::find_redex(expr, try_beta_at)
+fn try_beta_reduce(expr: &CoreExpr, occ_map: &crate::occ::OccMap) -> Option<CoreExpr> {
+    crate::rewrite::find_redex(expr, |expr, idx| try_beta_at(expr, idx, occ_map))
 }
 
 /// Beta redex test for a single node: an `App` whose function is a manifest
 /// `Lam`. Non-redex nodes return `None`; the search driver handles descent.
-fn try_beta_at(expr: &CoreExpr, idx: usize) -> Option<CoreExpr> {
+///
+/// Substitution splices a full copy of the argument at every binder
+/// occurrence, so reducing `(\x -> x + x) e` would turn one shared evaluation
+/// of `e` into two independent ones. We therefore gate the same way [`Inline`]
+/// does: fire only when the binder is used at most once (`Occ::Dead`/`Once` can
+/// never duplicate) or the argument is trivial (a `Var`/`Lit`, free to copy).
+/// A multi-use binder with a non-trivial argument is left for the caller — the
+/// redex stays, but sharing is preserved. Beta stays sound either way; this is
+/// purely a work-preservation gate.
+///
+/// [`Inline`]: crate::inline::Inline
+fn try_beta_at(expr: &CoreExpr, idx: usize, occ_map: &crate::occ::OccMap) -> Option<CoreExpr> {
     let CoreFrame::App { fun, arg } = &expr.nodes[idx] else {
         return None;
     };
     let CoreFrame::Lam { binder, body } = &expr.nodes[*fun] else {
         return None;
     };
-    // Found a manifest beta redex!
+    let arg_trivial = matches!(&expr.nodes[*arg], CoreFrame::Var(_) | CoreFrame::Lit(_));
+    if get_occ(occ_map, *binder) == Occ::Many && !arg_trivial {
+        return None;
+    }
+    // Found a manifest, work-safe beta redex.
     let body_tree = expr.extract_subtree(*body);
     let arg_tree = expr.extract_subtree(*arg);
     let substituted = tidepool_repr::subst::subst(&body_tree, *binder, &arg_tree);
@@ -173,6 +190,38 @@ mod tests {
             panic!("Expected 42");
         };
         assert_eq!(n, 42);
+    }
+
+    #[test]
+    fn test_beta_preserves_sharing() {
+        // (λx. x + x) (1 + 2): binder occurs at two DISTINCT Var nodes, arg is a
+        // non-trivial PrimOp. Reducing would splice `1 + 2` at both occurrences,
+        // duplicating the work — so the redex must be left intact. (Two separate
+        // Var nodes, not a shared one: occurrence analysis counts nodes, and a
+        // shared Var node is genuinely spliced only once.)
+        let x = VarId(1);
+        let nodes = vec![
+            CoreFrame::Var(x), // 0: x
+            CoreFrame::Var(x), // 1: x (distinct occurrence)
+            CoreFrame::PrimOp {
+                op: tidepool_repr::PrimOpKind::IntAdd,
+                args: vec![0, 1],
+            }, // 2: x + x
+            CoreFrame::Lam { binder: x, body: 2 }, // 3: λx. x + x
+            CoreFrame::Lit(Literal::LitInt(1)), // 4: 1
+            CoreFrame::Lit(Literal::LitInt(2)), // 5: 2
+            CoreFrame::PrimOp {
+                op: tidepool_repr::PrimOpKind::IntAdd,
+                args: vec![4, 5],
+            }, // 6: 1 + 2 (non-trivial arg)
+            CoreFrame::App { fun: 3, arg: 6 }, // 7: (λx. x + x) (1 + 2)
+        ];
+        let mut expr = CoreExpr { nodes };
+        let changed = BetaReduce.run(&mut expr);
+        assert!(
+            !changed,
+            "multi-use binder + non-trivial arg must not reduce"
+        );
     }
 
     #[test]
