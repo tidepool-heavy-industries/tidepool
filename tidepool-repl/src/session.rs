@@ -1311,39 +1311,19 @@ impl Session {
     /// `run_session_reference` path) is bound to `it`, rebinding on every such
     /// turn. The expression's effects (if any) fire EXACTLY ONCE.
     ///
-    /// **The bind seam:** wraps `expr_text` as a MATERIALIZING bind, exactly
-    /// like a real `x <- e` (`run_bind`'s own mechanism): `it <- __user`
+    /// **Single compile, single run:** wraps `expr_text` as a MATERIALIZING
+    /// bind whose `result` yields the TUPLE `(it, toWire it)` — `it <- __user`
     /// tried first (monadic — `__user` hoisted to a module-level binding so a
     /// trailing `where` still attaches, mirroring `wrap_probe_source`); on a
     /// compile failure, `let it = __user` (pure fallback — `let` doesn't
     /// require the RHS to unify with the session's `Eff` stack, matching
-    /// `wrap_pure_ref_source`'s existing Eff-then-pure retry). Either way
-    /// `run_fragment_and_bind` runs the SAME single compiled fragment exactly
-    /// once, tenuring `it`'s slot.
-    ///
-    /// **The render seam:** the response `value` is produced by a SEPARATE,
-    /// same-turn compile that references `it` BY NAME after it is bound —
-    /// `toWire it` for the monadic form (matching `template_haskell_show_default`'s
-    /// existing Show-default rendering: a custom record renders as `show`
-    /// text, not a structured dump), or bare `it` for the pure fallback
-    /// (matching `wrap_pure_ref_source`'s existing no-toWire rendering). This
-    /// mirrors exactly how ANY later turn resolves a session binding
-    /// (`--inject-val` + import), and is PURE (`run_fragment_pure`) — no
-    /// second execution of `__user`'s effect, only a fresh projection of the
-    /// data the bind already computed. (Precedent: `defined_outcome` already
-    /// does a same-turn recompile referencing a just-defined decl to paint
-    /// its type — this is the same idiom for a value.)
-    ///
-    /// An earlier version tried to get both `it` and its `toWire`'d render
-    /// from ONE JIT run — `pure (it, toWire it)` projected via
-    /// `run_fragment_and_bind_projected` (`run_multi_bind`'s own primitive) —
-    /// to avoid a second compile. That breaks when `toWire` is the identity
-    /// (`Aeson.Value` itself, e.g. `pure input`): `it` and `toWire it` are
-    /// then the SAME heap object, and tenuring the tuple's two fields
-    /// independently tenures that shared object twice, corrupting the second
-    /// copy (`unexpected heap tag: 255` — a stale forwarding marker). The
-    /// by-name follow-up reference below has no such aliasing hazard, at the
-    /// cost of one extra (cheap, no-effect) compile per bare expression.
+    /// `wrap_pure_ref_source`'s existing Eff-then-pure retry). Either way,
+    /// `run_fragment_and_bind_render` runs the ONE compiled fragment exactly
+    /// once: field 0 (`it`) drives `__user`'s effect and gets tenured; field 1
+    /// (`toWire it`, pure) is bridged to an owned `Value` for the response —
+    /// see that method's doc for why bridging field 1 BEFORE tenuring field 0
+    /// makes this safe even when `toWire` is the identity and the two fields
+    /// alias the same heap object (`pure input`).
     fn run_bare_expr<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         expr_text: &str,
@@ -1355,7 +1335,18 @@ impl Session {
         let preamble = self.patched_preamble();
         let g = self.val_gen.next();
         let eval_input = self.eval_input.clone();
-        let it_names = vec!["it".to_string()];
+        // TWO names, matching the `(it, toWire it)` tuple `result` now
+        // yields: this rides the SAME multi-binder `splitTupleType` path
+        // `run_multi_bind`/`wrap_multi_bind_source` already use (purely
+        // type-driven — `--bind-name` need not correspond to a real bound
+        // identifier in the source), so `emitBindArtifacts` splits
+        // `result`'s captured `(T, Value)` type into `it :: T` +
+        // `__it_render :: Value` instead of (wrongly) taking the whole tuple
+        // type as `it`'s type — which is what a single `--bind-name it`
+        // would do. `__it_render`'s binder metadata is discarded below (only
+        // `turn.binders[0]`, i.e. `it`, is used); its harmless synthetic
+        // export just rides along in the same thin session iface.
+        let it_names = vec!["it".to_string(), "__it_render".to_string()];
 
         let monadic_src = wrap_bare_it_monadic(
             &preamble,
@@ -1378,10 +1369,8 @@ impl Session {
             )
         };
 
-        // `is_monadic` tags which wrap succeeded — the render step below
-        // branches on it (`toWire it` vs bare `it`).
-        let (turn, is_monadic) = match monadic_result {
-            Ok(t) => (t, true),
+        let turn = match monadic_result {
+            Ok(t) => t,
             Err(_monadic_err) => {
                 let pure_src = wrap_bare_it_pure(
                     &preamble,
@@ -1401,7 +1390,7 @@ impl Session {
                         gen: g.0,
                     }),
                 ) {
-                    Ok(t) => (t, false),
+                    Ok(t) => t,
                     Err(pure_err) => return TurnOutcome::Error(compile_fail(&pure_err, &pure_src)),
                 }
             }
@@ -1429,7 +1418,8 @@ impl Session {
         }
 
         // Bootstrap the resident machine on the first turn from THIS turn's
-        // table (an Eff module either way — both wraps end in `pure it`).
+        // table (an Eff module either way — both wraps end in
+        // `pure (it, toWire it)`).
         if self.machine.is_none() {
             match JitEffectMachine::compile_session(&turn.expr, &turn.table, self.cfg.nursery_size)
             {
@@ -1450,15 +1440,17 @@ impl Session {
         };
 
         // Run EXACTLY ONCE: the effectful step loop drives `__user` to
-        // completion here, whichever wrap compiled.
-        let it_slot = match machine.run_fragment_and_bind(
+        // completion here (field 0's bind), whichever wrap compiled. Field 1
+        // (`toWire it`, pure) rides along in the SAME run — no second
+        // compile, no second execution of `__user`'s effect.
+        let (it_slot, rendered_value) = match machine.run_fragment_and_bind_render(
             fid,
             &self.session_table,
             handlers,
             captured,
             matches!(it_binder.tier, ValueTier::Tier0Data),
         ) {
-            Ok(s) => s,
+            Ok(sv) => sv,
             Err(e) => return TurnOutcome::Error(run_fail("runtime error", e)),
         };
 
@@ -1473,49 +1465,6 @@ impl Session {
             defining_expr: Some(expr_text.to_string()),
         });
 
-        // Render the response `value`: a same-turn PURE reference to the
-        // just-bound `it` (never re-running `__user`'s effect). Recompute
-        // imports/inject so the freshly-written `it` module is on the
-        // include/import list, exactly like any later turn referencing it.
-        let render_expr: &str = if is_monadic { "toWire it" } else { "it" };
-        let render_imports = self.turn_imports(render_expr);
-        let render_inject = self.live_val_modules();
-        let render_src =
-            wrap_pure_ref_source(&preamble, &render_imports, render_expr, eval_input.as_ref());
-        let render_result = {
-            let include = self.turn_include();
-            compile_session_turn(
-                &render_src,
-                &include,
-                self.session_root(),
-                &render_inject,
-                None,
-            )
-        };
-        let render_turn = match render_result {
-            Ok(t) => t,
-            Err(e) => return TurnOutcome::Error(compile_fail(&e, &render_src)),
-        };
-        if let Err(e) = self.merge_table(&render_turn.table) {
-            return TurnOutcome::Error(tag_failure(FailureClass::Runtime, Phase::Run, e));
-        }
-
-        self.turn_counter += 1;
-        let render_frag = format!("repl_it_render_{}", self.turn_counter);
-        let machine = self.machine.as_mut().expect("machine bootstrapped above");
-        let render_fid = match machine.add_function(
-            &render_frag,
-            &render_turn.expr,
-            &self.session_table,
-            &self.bindings.seed_external_env(),
-        ) {
-            Ok(f) => f,
-            Err(e) => return TurnOutcome::Error(run_fail("JIT it-render add_function error", e)),
-        };
-        let rendered_value = match machine.run_fragment_pure(render_fid) {
-            Ok(v) => v,
-            Err(e) => return TurnOutcome::Error(run_fail("it-render runtime error", e)),
-        };
         let rendered = value_to_json(&rendered_value, &self.session_table, 0);
         self.value_outcome_bound_it(rendered, Some(it_binder.type_display))
     }
@@ -2428,20 +2377,15 @@ fn wrap_multi_bind_source(
 /// `Eff`-typed action, exactly like a real `x <- e` bind. `__user` is hoisted
 /// to a module-level binding (not inlined into the do-block) so a trailing
 /// `where` on the user's expression still attaches legally — mirrors
-/// `wrap_probe_source`/`wrap_pure_ref_source`. Run via `run_fragment_and_bind`
-/// (the same bind primitive `run_bind` uses) — ONE execution of `__user`.
+/// `wrap_probe_source`/`wrap_pure_ref_source`.
 ///
-/// The response `value` is rendered AFTERWARD, from a SEPARATE same-turn
-/// recompile that references the just-bound `it` (`toWire it`, run purely) —
-/// NOT by tupling a second `toWire` component into this do-block. An earlier
-/// version tried `pure (it, toWire it)` + `run_fragment_and_bind_projected`
-/// to get both from one JIT run; for a type where `toWire` is the identity
-/// (`Aeson.Value` itself — exactly `pure input`'s case), `it` and `toWire it`
-/// are the SAME heap object, and projecting/tenuring the tuple's two fields
-/// independently tenured that shared object twice, corrupting the second
-/// tenure (`unexpected heap tag: 255` — a stale forwarding marker). Referencing
-/// `it` by NAME in a follow-up compile (like any later turn would) sidesteps
-/// that aliasing hazard entirely — see `run_bare_expr`'s doc for the full seam.
+/// `result` yields `(it, toWire it)` — ONE compile, run via
+/// `run_fragment_and_bind_render` (`run_bare_expr`'s single-compile bind+render
+/// primitive): field 0 (`it`) is the ONE execution of `__user`'s effect; field
+/// 1 (`toWire it`, pure) rides along in the same run and is bridged to an
+/// owned `Value` BEFORE field 0 is tenured, so the two fields aliasing the
+/// same heap object (`toWire = id`, e.g. `pure input`) cannot corrupt — see
+/// `run_fragment_and_bind_render`'s doc for the read-before-tenure ordering.
 fn wrap_bare_it_monadic(
     preamble: &str,
     effect_stack: &str,
@@ -2453,7 +2397,7 @@ fn wrap_bare_it_monadic(
     push_verbatim_binding(&mut out, "__user", expr_text);
     out.push('\n');
     out.push_str(&format!("result :: Eff {effect_stack} _\n"));
-    out.push_str("result = do {\n it <- __user ; pure it\n }\n");
+    out.push_str("result = do {\n it <- __user ; pure (it, toWire it)\n }\n");
     out
 }
 
@@ -2461,7 +2405,8 @@ fn wrap_bare_it_monadic(
 /// wrap fails to compile (`__user`'s type doesn't unify with the session's
 /// `Eff` stack — a bare non-monadic expression like `x + 1` / `v ^? key …`).
 /// `let` doesn't require its RHS to unify with the do-block's monad, so this
-/// binds `it` materially without invoking any effect.
+/// binds `it` materially without invoking any effect. Same single-compile
+/// `(it, toWire it)` tuple as the monadic wrap.
 fn wrap_bare_it_pure(
     preamble: &str,
     effect_stack: &str,
@@ -2473,7 +2418,7 @@ fn wrap_bare_it_pure(
     push_verbatim_binding(&mut out, "__user", expr_text);
     out.push('\n');
     out.push_str(&format!("result :: Eff {effect_stack} _\n"));
-    out.push_str("result = do {\n let { it = __user } ; pure it\n }\n");
+    out.push_str("result = do {\n let { it = __user } ; pure (it, toWire it)\n }\n");
     out
 }
 

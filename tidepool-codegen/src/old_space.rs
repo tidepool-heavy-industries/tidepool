@@ -172,6 +172,22 @@ impl OldSpace {
 
         let mut root = ptr;
 
+        if needed == 0 && read_tag(ptr) == TAG_FORWARDED {
+            // `ptr` itself was already tenured earlier in this call (or a
+            // prior tenure of overlapping structure this generation) —
+            // `measure_closure_bytes` returns 0 for a forwarded object
+            // without inspecting where it points, so `root = ptr` would root
+            // the stale TAG_FORWARDED stub instead of the tenured copy.
+            // Follow the forwarding pointer (written by `raw::evacuate` at
+            // offset 8, mirroring its own forwarded-object short-circuit) so
+            // a second tenure of an already-tenured object is idempotent —
+            // this is what makes tenuring exactly one aliased field (the new
+            // `it`-tuple bind primitive) safe even when a caller ends up
+            // tenuring the same root twice (`run_multi_bind`'s
+            // `(a, b) <- pure (dup, dup)`).
+            root = *(ptr.add(8) as *const *mut u8);
+        }
+
         if needed > 0 {
             // Grow arena chain if the last arena lacks contiguous free bytes.
             let free = self
@@ -482,6 +498,60 @@ mod tests {
             assert_eq!(a_child, b_child, "shared child must be one old-space copy");
             assert_eq!(read_tag(a_child), TAG_LIT);
             assert_eq!(*(a_child.add(LIT_VALUE_OFFSET) as *const i64), 99);
+        }
+    }
+
+    /// Regression for the shipped `run_multi_bind` corruption: tenuring the
+    /// SAME top-level root pointer twice in one call (e.g.
+    /// `(a, b) <- pure (dup, dup)`, where both tuple fields are literally the
+    /// same heap object). Unlike `test_overlapping_tenures_preserve_sharing`
+    /// (where the shared node is a CHILD reached through a field —  already
+    /// handled by `cheney_copy`/`evacuate`'s own forwarding check), this is
+    /// the root of the SECOND `tenure()` call itself already being forwarded
+    /// by the first. Before the forward-skip fix, `measure_closure_bytes`
+    /// returns 0 for an already-forwarded root, so `tenure` rooted the raw
+    /// (now TAG_FORWARDED) pointer directly — the resulting slot read back
+    /// `heap tag: 255` instead of the tenured value.
+    #[test]
+    #[serial]
+    fn test_tenure_same_root_twice_follows_forward() {
+        unsafe {
+            let mut nursery = AlignedBuf([0u8; 4096]);
+            let n = &mut nursery.0;
+            write_lit(n, 0, 42);
+            let dup_ptr = n.as_mut_ptr();
+
+            let range = (n.as_ptr(), n.as_ptr().add(n.len()));
+            let mut old_space = OldSpace::new();
+
+            // First tenure of dup_ptr: fresh, copies normally and forwards
+            // the nursery original.
+            let slot_a = old_space.tenure(std::ptr::null_mut(), dup_ptr, range);
+            let used_after_first = old_space.bytes_used();
+            assert_eq!(used_after_first, LIT_SIZE);
+
+            // Second tenure of the SAME top-level pointer — dup_ptr's header
+            // is now TAG_FORWARDED from the first tenure.
+            let slot_b = old_space.tenure(std::ptr::null_mut(), dup_ptr, range);
+            assert_eq!(
+                old_space.bytes_used(),
+                used_after_first,
+                "shared root must not be recopied"
+            );
+
+            let a_copy = slot_a.current();
+            let b_copy = slot_b.current();
+            assert_eq!(
+                a_copy, b_copy,
+                "both tenures of the same root must resolve to one old-space copy"
+            );
+            assert_eq!(
+                read_tag(b_copy),
+                TAG_LIT,
+                "tenuring an already-forwarded root must follow the forward pointer, \
+                 not root the stale TAG_FORWARDED stub"
+            );
+            assert_eq!(*(b_copy.add(LIT_VALUE_OFFSET) as *const i64), 42);
         }
     }
 }
