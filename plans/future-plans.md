@@ -70,15 +70,6 @@ Pure bindings only (reject `Eff` types at compile, like IOTypeDetected).
 GC note: each call's allocations live in the handle's nursery; decide
 reset-per-call vs persistent (reset-per-call is simplest and safe for pure).
 
-## D. Heap verifier (fail-loud invariant mode) — GO, next hands-on item
-
-`TIDEPOOL_HEAP_VERIFY=1`, hooked after gc-compact: walk every object —
-valid tag; size ↔ arity consistency for Cons; field pointers in-heap and
-aligned; known lit tags (catches S3-C3 drift); valid thunk states; BLACKHOLE
-captures visible (catches S3-C6); byte-array capacity-word sanity. Tests run
-with it ON; production pays nothing. Turns the S3/W3 silent-corruption class
-into loud failures at the first GC after the corruption.
-
 ## E. Divergence debugger (minimal) — BACKLOG
 
 Trace flag → both machines (eval + JIT) keep a ring buffer of
@@ -115,5 +106,7 @@ consumption matrix. The eager kill-switch is the only reason the 100k node
 cap, the 2000-node probe/dismantle spine logic, and the one documented
 mode-divergence exist (it already cost W6 a harness flake). After a few more
 weeks of soak: delete eager → delete the cap → delete the probe → delete the
-divergence. Negative-line-count change; cite `plans/proptest-findings-lazy.md`
-as the safety evidence.
+divergence. Negative-line-count change; safety evidence is the lazy-consumption
+matrix, `tidepool-runtime/tests/proptest_lazy_consumption.rs` (the W4 33-cell
+soak, now a live test). Still present: `TIDEPOOL_LAZY_RESULTS=0` kill-switch +
+`MAX_EFFECT_RESPONSE_NODES` cap in `jit_machine.rs` — this cleanup is unstarted.
