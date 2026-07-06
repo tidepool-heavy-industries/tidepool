@@ -4,9 +4,9 @@ Queued cleanup work. Each plan is one worktree.
 
 | Plan | Focus |
 |------|-------|
-| [error-consolidation](error-consolidation.md) | `thiserror` derives + cut 72 `.expect()` calls — queued |
 | [future-plans](future-plans.md) | Idea backlog (effect-log resume, content-addressed Core, `compile_to_callable`, heap verifier, …) |
 | [llm-continuation-patterns](llm-continuation-patterns.md) | Design catalog: `ask`/`llm` continuation patterns (aperture, interview, escalator, tribunal, …) |
+| [haskell-interface-polish](haskell-interface-polish.md) | GHCi-parity surface checklist (`it` in progress; `generic-lens`/`validation`/echo-type open) |
 
 ## Done
 
