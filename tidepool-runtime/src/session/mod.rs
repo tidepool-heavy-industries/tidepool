@@ -217,18 +217,22 @@ impl SessionLib {
     /// session decl rather than the Prelude re-export (BUG-7).
     #[must_use]
     pub fn decl_value_names(&self) -> Vec<&str> {
-        self.log
-            .turns
-            .iter()
-            .flat_map(|t| t.items.iter())
-            .filter_map(|item| {
+        // Latest-wins with retraction: a name removed by a later retraction turn
+        // (its binding migrated to the value plane) is no longer a decl-plane
+        // value, so it drops out.
+        let mut live: Vec<&str> = Vec::new();
+        for turn in &self.log.turns {
+            for r in &turn.retracts {
+                live.retain(|n| *n != r.as_str());
+            }
+            for item in &turn.items {
                 if let ExportItem::Value { name } = item {
-                    Some(name.as_str())
-                } else {
-                    None
+                    live.retain(|n| *n != name.as_str());
+                    live.push(name.as_str());
                 }
-            })
-            .collect()
+            }
+        }
+        live
     }
 
     /// Names of every type/class introduced across declaration turns. Hidden
@@ -336,7 +340,11 @@ impl SessionLib {
         binder_include.extend(self.extra_include.iter().map(PathBuf::as_path));
         let items = binders::extract_binders(&combined, &binder_include)?;
 
-        self.log.push(DeclTurn { sources, items });
+        self.log.push(DeclTurn {
+            sources,
+            items,
+            retracts: Vec::new(),
+        });
         let gen = self.log.generation();
         let rendered = render::render_module(&self.log, gen, &self.env, shadow_wildcard_imports);
         self.write_module(&rendered)?;
@@ -351,6 +359,37 @@ impl SessionLib {
         }
 
         Ok(gen)
+    }
+
+    /// Retract `name` from the decl plane: after its binding migrates to the
+    /// value plane, the decl module must stop exporting it, or a later
+    /// `let`/`def` would compile against the stale decl (a value bound
+    /// `findings <- pure []` then rebound `findings <- pure (findings ++ xs)`
+    /// otherwise leaves `findings = []` defined forever). The dual of
+    /// `tidepool-repl`'s value-plane eviction — call it when a decl-plane name is
+    /// materialized.
+    ///
+    /// No-op when `name` is not a current decl head. Otherwise appends a
+    /// pure-retraction turn and re-renders the current module as a re-export
+    /// shell minus `name`. The shell introduces NO new source (only subtracts an
+    /// export), so it cannot fail to type-check — GHC validation is skipped,
+    /// making retraction cheap (no ~6s compile).
+    pub fn retract(&mut self, name: &str) -> Result<(), SessionError> {
+        if !self.log.current_heads().iter().any(|(h, _)| h == name) {
+            return Ok(());
+        }
+        self.log.push(DeclTurn {
+            sources: Vec::new(),
+            items: Vec::new(),
+            retracts: vec![name.to_string()],
+        });
+        let gen = self.log.generation();
+        let rendered = render::render_module(&self.log, gen, &self.env, true);
+        if let Err(e) = self.write_module(&rendered) {
+            self.log.turns.pop(); // keep the log consistent with disk
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Validate that the candidate gen module compiles and type-checks by running

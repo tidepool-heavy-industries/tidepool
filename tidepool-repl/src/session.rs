@@ -224,38 +224,14 @@ impl Session {
     /// (if any) plus the current `Val.G<g>` module of each live name (newest
     /// gen only — shadowed gens are injected but not imported).
     fn session_imports(&self) -> String {
+        // A name that migrates decl→value is RETRACTED from the decl plane by
+        // `bind_materialized` (via `SessionLib::retract`), so `current_module`
+        // no longer exports it and there is no decl/value collision to hide here
+        // — the value plane's `Val.G<g>` module is the sole provider. (One
+        // mechanism: retraction at the source, not per-consumer hiding.)
         let mut lines: Vec<String> = Vec::new();
         if let Some(m) = self.lib.current_module() {
-            // Cross-plane shadow: the value plane wins over the decl plane. A
-            // name that migrated decl→value (a self-referential `n <- pure (n+1)`
-            // that materialized, or `n <- pure 1` then `n <- someEffect`) is
-            // STILL exported by the decl module — the lib log can't retract it —
-            // so importing that module unqualified would clash with the name's
-            // `Val.G<g>` module (GHC-87543 ambiguous occurrence). Hide exactly the
-            // decl-exported value heads the value plane now owns; each then
-            // resolves unambiguously to its value module. (Same `hiding` idiom the
-            // preamble uses to let session decls shadow the Library re-exports.)
-            let val_names: std::collections::HashSet<&str> = self
-                .bindings
-                .iter_current()
-                .map(|(n, _)| n.0.as_str())
-                .collect();
-            let shadowed: Vec<String> = self
-                .lib
-                .decl_value_names()
-                .into_iter()
-                .filter(|h| val_names.contains(h))
-                .map(hiding_entry)
-                .collect();
-            if shadowed.is_empty() {
-                lines.push(m.module_name());
-            } else {
-                lines.push(format!(
-                    "{} hiding ({})",
-                    m.module_name(),
-                    shadowed.join(", ")
-                ));
-            }
+            lines.push(m.module_name());
         }
         lines.extend(self.current_val_modules());
         lines.join("\n")
@@ -295,6 +271,14 @@ impl Session {
     /// bind sites can't smear a name across both planes by forgetting the paired
     /// cross-plane removal.
     fn bind_materialized(&mut self, entry: BindingEntry) {
+        // Symmetric with `bind_pure`: a name moving to the value plane is
+        // retracted from the decl plane too, so `SessionLib` stops exporting a
+        // now-stale decl (`findings <- pure []` then `findings <- pure
+        // (findings ++ xs)` would otherwise leave `findings = []` defined, and a
+        // later `let`/`def` would compile against it). `retract` is a no-op when
+        // the name was never a decl head (a plain `p <- run …`). Best-effort: a
+        // rare module-write failure leaves the binding materialized correctly.
+        let _ = self.lib.retract(&entry.name.0);
         self.pure_binds.remove(&entry.name.0);
         self.bindings.bind(entry);
     }

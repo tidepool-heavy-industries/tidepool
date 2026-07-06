@@ -131,6 +131,16 @@ pub struct DeclTurn {
     pub sources: Vec<String>,
     /// The exportable binders this turn introduces (from GHC).
     pub items: Vec<ExportItem>,
+    /// Names this turn REMOVES from the decl plane (no replacement). A name is
+    /// retracted when its binding migrates to the value plane (e.g. a
+    /// self-referential `n <- pure (n+1)` that must materialize) — the decl
+    /// plane must then stop exporting it, or a later `let`/`def` would compile
+    /// against the stale decl. A pure-retraction turn carries empty
+    /// `sources`/`items` and one or more `retracts`. Honored by every scoping
+    /// fold (`cumulative_exports_before`, `current_heads`, `replayable_sources`,
+    /// `render_module`) so all decl-plane views stay consistent; a later
+    /// `define` of the same name naturally un-retracts it (latest-wins).
+    pub retracts: Vec<String>,
 }
 
 /// The ordered declaration log. `turns[i]` is generation `i + 1`
@@ -168,6 +178,9 @@ impl DeclLog {
         let mut map: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
         for (i, turn) in self.turns.iter().enumerate() {
             let gen = (i + 1) as u64;
+            for r in &turn.retracts {
+                map.remove(r);
+            }
             for item in &turn.items {
                 map.insert(item.head_name().to_string(), gen);
             }
@@ -207,11 +220,15 @@ impl DeclLog {
         let mut out: Vec<&str> = Vec::new();
         for (i, turn) in self.turns.iter().enumerate() {
             let heads: Vec<&str> = turn.items.iter().map(ExportItem::head_name).collect();
+            // A turn's source is dropped once every head it introduced is later
+            // redefined OR retracted — the migrated/superseded decl must not
+            // reappear in a flat `:program` replay.
             let fully_superseded = !heads.is_empty()
                 && heads.iter().all(|h| {
-                    self.turns[i + 1..]
-                        .iter()
-                        .any(|later| later.items.iter().any(|it| it.head_name() == *h))
+                    self.turns[i + 1..].iter().any(|later| {
+                        later.items.iter().any(|it| it.head_name() == *h)
+                            || later.retracts.iter().any(|r| r == h)
+                    })
                 });
             if !fully_superseded {
                 out.extend(turn.sources.iter().map(String::as_str));
@@ -412,7 +429,12 @@ fn cumulative_exports_before(log: &DeclLog, gen_one_based: usize) -> Vec<ExportI
     let mut acc: Vec<ExportItem> = Vec::new();
     for turn in log.turns.iter().take(gen_one_based.saturating_sub(1)) {
         let new_heads: Vec<&str> = turn.items.iter().map(ExportItem::head_name).collect();
-        acc.retain(|prior| !new_heads.contains(&prior.head_name()));
+        // A turn removes prior exports it either redefines OR retracts; then
+        // re-adds its own. (A retraction adds nothing.)
+        acc.retain(|prior| {
+            !new_heads.contains(&prior.head_name())
+                && !turn.retracts.iter().any(|r| r == prior.head_name())
+        });
         acc.extend(turn.items.iter().cloned());
     }
     acc
@@ -483,9 +505,16 @@ pub fn render_module(
     // Heads this turn (re)defines — drives the `hiding` clause on the prior-gen
     // import (head-name match only; see `cumulative_exports_before`).
     let new_heads: Vec<&str> = this.items.iter().map(ExportItem::head_name).collect();
+    // Hide from the prior-gen import every head this turn REDEFINES or RETRACTS.
+    // For a retraction the name is still in `prior` (retracts take effect for
+    // LATER gens via `cumulative_exports_before`); hiding it here drops it from
+    // this gen's `import Prev hiding (…)` and — since `module Prev` only
+    // re-exports in-scope names — from the re-export too, so the name is gone.
     let hidden_prior: Vec<&ExportItem> = prior
         .iter()
-        .filter(|p| new_heads.contains(&p.head_name()))
+        .filter(|p| {
+            new_heads.contains(&p.head_name()) || this.retracts.iter().any(|r| r == p.head_name())
+        })
         .collect();
 
     // Every head this session has ever (re)defined, prior gens + this turn —
@@ -612,6 +641,15 @@ mod tests {
         DeclTurn {
             sources: vec![src.into()],
             items,
+            retracts: Vec::new(),
+        }
+    }
+    /// A pure-retraction turn: removes `names` from the decl plane, no source.
+    fn retract_turn(names: &[&str]) -> DeclTurn {
+        DeclTurn {
+            sources: Vec::new(),
+            items: Vec::new(),
+            retracts: names.iter().map(|s| (*s).into()).collect(),
         }
     }
 
@@ -912,5 +950,84 @@ mod tests {
             .filter_map(ExportItem::from_json)
             .collect();
         assert_eq!(items, vec![val("slug"), ty("Foo", &["A", "B"])]);
+    }
+
+    // --- Retraction (a name leaving the decl plane on decl→value migration) ---
+
+    fn heads(log: &DeclLog) -> Vec<String> {
+        log.current_heads().into_iter().map(|(h, _)| h).collect()
+    }
+
+    #[test]
+    fn retraction_removes_name_from_every_scoping_view() {
+        let mut log = DeclLog::new();
+        log.push(turn("findings = []", vec![val("findings")]));
+        log.push(turn("keep t = t", vec![val("keep")]));
+        // Before retraction: both are live in every view.
+        assert_eq!(heads(&log), vec!["findings", "keep"]);
+        let before = cumulative_exports_before(&log, log.turns.len() + 1);
+        assert!(before.iter().any(|e| e.head_name() == "findings"));
+
+        // findings migrates to the value plane → retract it.
+        log.push(retract_turn(&["findings"]));
+
+        // current_heads, cumulative exports, and decl replay all drop it;
+        // `keep` is untouched.
+        assert_eq!(heads(&log), vec!["keep"]);
+        let after = cumulative_exports_before(&log, log.turns.len() + 1);
+        assert!(!after.iter().any(|e| e.head_name() == "findings"));
+        assert!(after.iter().any(|e| e.head_name() == "keep"));
+        // The migrated decl's source is dropped from a flat replay.
+        let replay = log.replayable_sources();
+        assert!(!replay.iter().any(|s| s.contains("findings = []")));
+        assert!(replay.iter().any(|s| s.contains("keep t = t")));
+    }
+
+    #[test]
+    fn retraction_turn_hides_name_from_rendered_module() {
+        let mut log = DeclLog::new();
+        log.push(turn("findings = []", vec![val("findings")]));
+        log.push(turn("keep t = t", vec![val("keep")]));
+        log.push(retract_turn(&["findings"]));
+        let r = render_module(&log, Generation(3), &ModuleEnv::standalone_default(), true);
+        // The retraction shell hides `findings` from the prior-gen import (so
+        // `module Prev` no longer re-exports it) and adds no new decl for it.
+        assert!(
+            r.source.contains("Session.Lib.G2 hiding (findings)"),
+            "retraction must hide the name from the prior import:\n{}",
+            r.source
+        );
+        assert!(
+            !r.source.contains("\n    findings"),
+            "retracted name must not appear in the export list:\n{}",
+            r.source
+        );
+    }
+
+    #[test]
+    fn define_after_retraction_unretracts_latest_wins() {
+        let mut log = DeclLog::new();
+        log.push(turn("findings = []", vec![val("findings")]));
+        log.push(retract_turn(&["findings"]));
+        assert!(!heads(&log).contains(&"findings".to_string()));
+        // Re-defining the name brings it back (a later value→decl rebind).
+        log.push(turn("findings = [1]", vec![val("findings")]));
+        assert!(heads(&log).contains(&"findings".to_string()));
+        let exports = cumulative_exports_before(&log, log.turns.len() + 1);
+        assert!(exports.iter().any(|e| e.head_name() == "findings"));
+        assert!(log
+            .replayable_sources()
+            .iter()
+            .any(|s| s.contains("findings = [1]")));
+    }
+
+    #[test]
+    fn retracting_absent_name_leaves_exports_unchanged() {
+        let mut log = DeclLog::new();
+        log.push(turn("keep t = t", vec![val("keep")]));
+        let before = cumulative_exports_before(&log, log.turns.len() + 1);
+        log.push(retract_turn(&["never_defined"]));
+        let after = cumulative_exports_before(&log, log.turns.len() + 1);
+        assert_eq!(before, after, "retracting an absent name is a no-op fold");
     }
 }

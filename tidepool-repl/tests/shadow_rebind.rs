@@ -316,3 +316,134 @@ async fn bindings_after_rebind_lists_once() {
         ":bindings should list `x` exactly once (newest), got {occurrences}: {out}"
     );
 }
+
+/// CASE 6 — decl→value MIGRATION + a later `let` reference (the honest-decl-plane
+/// regression). A pure bind lands on the decl plane, a self-referential rebind
+/// migrates it to the value plane; a subsequent `let` (a decl-plane item) that
+/// references it must see the LIVE value, not the stale decl.
+///
+/// WAS A BUG: `bind_materialized` evicted the value from the `pure_binds` map but
+/// left the decl (`x = []`) in `SessionLib` forever, so `let y = length x`
+/// compiled against the stale `x = []` → `y == 0`, while a bare `length x` read
+/// the value plane → correct. FIXED: `bind_materialized` now retracts `x` from
+/// the decl plane, so the `let` fails to resolve `x` there and materializes
+/// (seeing the value plane). Bare and `let` reads must AGREE.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migrated_name_read_from_later_let() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+
+    repl.eval("x <- pure ([] :: [Int])")
+        .await
+        .expect_ok("bind x=[] (decl plane)");
+    repl.eval("x <- pure (0 : x)")
+        .await
+        .expect_ok("migrate x to value plane (self-ref)");
+
+    // A `let` (decl-plane item) referencing the migrated name.
+    repl.eval("let y = length x")
+        .await
+        .expect_ok("let y = length x (must see the value plane, not stale decl)");
+    let out = repl.eval("y").await;
+    let out = out.expect_ok("read y");
+    assert!(
+        out.contains('1'),
+        "let over migrated name: expected 1 (length [0]), got: {out}"
+    );
+    // Bare expression and the `let` must agree.
+    let bare = repl.eval_ok("length x").await;
+    assert!(bare.contains('1'), "bare length x: expected 1, got: {bare}");
+}
+
+/// CASE 7 — accumulator, then a `let` fold. The pattern the repl exists for:
+/// build a list across turns with self-referential rebinds, then a `let` that
+/// folds it must see every element (not a stale empty decl).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accumulate_then_let_fold() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+
+    repl.eval("acc <- pure ([] :: [Int])")
+        .await
+        .expect_ok("acc=[]");
+    for v in ["1", "2", "3"] {
+        repl.eval(&format!("acc <- pure ({v} : acc)"))
+            .await
+            .expect_ok("accumulate");
+    }
+    repl.eval("let total = sum acc")
+        .await
+        .expect_ok("let total = sum acc (fold over migrated accumulator)");
+    let out = repl.eval_ok("total").await;
+    assert!(
+        out.contains('6'),
+        "accumulate then fold: expected 6 (1+2+3), got: {out}"
+    );
+}
+
+/// CASE 8 — a function `def` referencing a migrated name fails CLEANLY (not a
+/// silent stale read), and the session survives. The decl plane genuinely
+/// cannot reference a materialized heap value; after retraction that surfaces as
+/// an honest "not in scope" rather than compiling against a stale `x`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn def_referencing_migrated_name_errors_cleanly() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+
+    repl.eval("x <- pure (1 :: Int)")
+        .await
+        .expect_ok("bind x=1 (decl plane)");
+    repl.eval("x <- pure (x + 1)")
+        .await
+        .expect_ok("migrate x to value plane");
+
+    // A function def cannot close over a value-plane binding on the decl plane.
+    repl.eval("g y = y + x")
+        .await
+        .expect_err("def referencing a migrated value must fail cleanly, not read stale");
+    // Session survives; the value binding still resolves.
+    let out = repl.eval_ok("x").await;
+    assert!(
+        out.contains('2'),
+        "session survives def error; x==2, got: {out}"
+    );
+}
+
+/// CASE 9 — REGRESSION GUARD: a `let` referencing a decl-plane binding that was
+/// NEVER migrated must still resolve on the decl plane (retraction must not fire
+/// when there is no migration, and generalization is preserved).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn let_referencing_unmigrated_decl_still_works() {
+    if !extract_available() {
+        return;
+    }
+    let repl = Repl::new();
+
+    repl.eval("n <- pure (5 :: Int)")
+        .await
+        .expect_ok("bind n=5 (decl plane, not migrated)");
+    repl.eval("let m = n + 1")
+        .await
+        .expect_ok("let m = n + 1 (decl→decl reference)");
+    let out = repl.eval_ok("m").await;
+    assert!(
+        out.contains('6'),
+        "decl-plane let reference: expected 6, got: {out}"
+    );
+    // A fresh polymorphic pure bind still generalizes (retraction machinery
+    // didn't disturb the decl plane's generalization).
+    repl.eval("xs <- pure []")
+        .await
+        .expect_ok("xs=[] generalizes");
+    let len = repl.eval_ok("length xs").await;
+    assert!(
+        len.contains('0'),
+        "xs generalized + usable: expected 0, got: {len}"
+    );
+}
