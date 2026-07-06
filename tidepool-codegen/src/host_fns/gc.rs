@@ -276,10 +276,10 @@ unsafe fn verify_heap_post_gc(
     while off < live_bytes {
         let obj = to_start.add(off);
         let tag = *obj;
-        // Size is a u16 at byte offset 1 — intentionally unaligned in the
+        // Size is a u32 at byte offset 1 — intentionally unaligned in the
         // header layout; must be read_unaligned (debug builds abort on
         // misaligned derefs).
-        let size = std::ptr::read_unaligned(obj.add(1) as *const u16) as usize;
+        let size = std::ptr::read_unaligned(obj.add(1) as *const u32) as usize;
         if size < 8 || off + size > live_bytes {
             fail(
                 off,
@@ -583,13 +583,13 @@ mod tests {
         unsafe {
             // Lit at offset 0: tag=3, size=24, lit_tag=0 (Int), value=42.
             *base = layout::TAG_LIT;
-            std::ptr::write_unaligned(base.add(1) as *mut u16, 24);
+            std::ptr::write_unaligned(base.add(1) as *mut u32, 24);
             *base.add(layout::LIT_TAG_OFFSET as usize) = 0;
             *(base.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = 42;
             // Con at offset 24: tag=2, size=32, con_tag, num_fields=1, field -> Lit.
             let con = base.add(24);
             *con = layout::TAG_CON;
-            std::ptr::write_unaligned(con.add(1) as *mut u16, 32);
+            std::ptr::write_unaligned(con.add(1) as *mut u32, 32);
             *(con.add(layout::CON_TAG_OFFSET as usize) as *mut u64) = 7;
             *(con.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) = 1;
             *(con.add(layout::CON_FIELDS_OFFSET as usize) as *mut *mut u8) = base;

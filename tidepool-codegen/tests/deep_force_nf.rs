@@ -21,7 +21,7 @@ const FIELD_STRIDE: usize = 8;
 /// Write a boxed `Int` Lit at `buf[offset..]`; return the next 8-aligned offset.
 unsafe fn write_lit(buf: &mut [u8], offset: usize, value: i64) -> usize {
     let ptr = buf.as_mut_ptr().add(offset);
-    heap_layout::write_header(ptr, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u16);
+    heap_layout::write_header(ptr, layout::TAG_LIT, layout::LIT_TOTAL_SIZE as u32);
     *ptr.add(layout::LIT_TAG_OFFSET as usize) = layout::LIT_TAG_INT as u8;
     *(ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = value;
     offset + layout::LIT_TOTAL_SIZE as usize
@@ -30,7 +30,7 @@ unsafe fn write_lit(buf: &mut [u8], offset: usize, value: i64) -> usize {
 /// Write a Con(`con_tag`, `fields`) at `buf[offset..]`; return next 8-aligned offset.
 unsafe fn write_con(buf: &mut [u8], offset: usize, con_tag: u64, fields: &[*mut u8]) -> usize {
     let ptr = buf.as_mut_ptr().add(offset);
-    let size = (layout::CON_FIELDS_OFFSET as usize + fields.len() * FIELD_STRIDE) as u16;
+    let size = (layout::CON_FIELDS_OFFSET as usize + fields.len() * FIELD_STRIDE) as u32;
     let aligned = ((size as usize) + 7) & !7;
     heap_layout::write_header(ptr, layout::TAG_CON, size);
     *(ptr.add(layout::CON_TAG_OFFSET as usize) as *mut u64) = con_tag;
@@ -47,7 +47,7 @@ unsafe fn write_con(buf: &mut [u8], offset: usize, con_tag: u64, fields: &[*mut 
 unsafe fn write_closure(buf: &mut [u8], offset: usize) -> usize {
     let ptr = buf.as_mut_ptr().add(offset);
     // size: header + code ptr + num_captured (no captures)
-    let size = layout::CLOSURE_CAPTURED_OFFSET as u16;
+    let size = layout::CLOSURE_CAPTURED_OFFSET as u32;
     let aligned = ((size as usize) + 7) & !7;
     heap_layout::write_header(ptr, layout::TAG_CLOSURE, size);
     *(ptr.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *mut usize) = 0xDEAD_BEEF;

@@ -418,7 +418,7 @@ pub fn error_poison_ptr() -> *mut u8 {
         // describes only the logical 24-byte Closure layout — the tail
         // bytes are zero-initialized padding that the JIT may clobber
         // after a `runtime_oom` return.
-        let logical_size = 24u16;
+        let logical_size = 24u32;
         let layout = std::alloc::Layout::from_size_align(POISON_BUF_SIZE, 8)
             .unwrap_or_else(|_| std::process::abort());
         // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
@@ -487,7 +487,7 @@ pub fn error_poison_ptr_lazy(kind: u64) -> *mut u8 {
                 tidepool_heap::layout::write_header(
                     ptr,
                     tidepool_heap::layout::TAG_CLOSURE,
-                    size as u16,
+                    size as u32,
                 );
                 *(ptr.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *mut usize) =
                     poison_trampoline_lazy as *const () as usize;
@@ -764,7 +764,7 @@ pub fn error_poison_ptr_lazy_msg(kind: u64, msg: &[u8]) -> *mut u8 {
     // capture count, and 3 captures (kind, msg_ptr, msg_len) at known offsets.
     // msg_ptr is a leaked allocation that lives forever.
     unsafe {
-        tidepool_heap::layout::write_header(ptr, tidepool_heap::layout::TAG_CLOSURE, size as u16);
+        tidepool_heap::layout::write_header(ptr, tidepool_heap::layout::TAG_CLOSURE, size as u32);
         *(ptr.add(tidepool_heap::layout::CLOSURE_CODE_PTR_OFFSET) as *mut usize) =
             poison_trampoline_lazy_msg as *const () as usize;
         *(ptr.add(tidepool_heap::layout::CLOSURE_NUM_CAPTURED_OFFSET) as *mut u16) = 3;
@@ -1112,7 +1112,7 @@ mod tests {
 
             // Simulate the JIT's post-OOM write sequence exactly as
             // `emit_alloc_fast_path` + the Con emitter do: tag at 0, size
-            // halfword at 1, CON_TAG at 8, num_fields at 16, fields from 24.
+            // word at 1, CON_TAG at 8, num_fields at 16, fields from 24.
             let ptr = runtime_oom();
             assert!(!ptr.is_null());
 
@@ -1122,10 +1122,10 @@ mod tests {
             // JIT stores use `MemFlags::trusted()` which permits unaligned
             // access; mirror that with `write_unaligned` so the test also works
             // on targets where a naked deref would trap on misalignment (the
-            // size halfword lands at offset 1).
+            // size word lands at offset 1).
             unsafe {
                 ptr.write(layout::TAG_CON);
-                (ptr.add(1) as *mut u16).write_unaligned(worst_case_con as u16);
+                (ptr.add(1) as *mut u32).write_unaligned(worst_case_con as u32);
                 (ptr.add(layout::CON_TAG_OFFSET as usize) as *mut u64).write_unaligned(7);
                 (ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16)
                     .write_unaligned(MAX_FIELDS as u16);

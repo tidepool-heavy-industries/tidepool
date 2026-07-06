@@ -110,7 +110,7 @@ unsafe fn alloc_host_thunk2(
     if p.is_null() {
         return std::ptr::null_mut();
     }
-    tidepool_heap::layout::write_header(p, tidepool_heap::layout::TAG_THUNK, size as u16);
+    tidepool_heap::layout::write_header(p, tidepool_heap::layout::TAG_THUNK, size as u32);
     *p.add(tidepool_heap::layout::THUNK_STATE_OFFSET) = tidepool_heap::layout::THUNK_UNEVALUATED;
     *(p.add(tidepool_heap::layout::THUNK_CODE_PTR_OFFSET) as *mut usize) = code as usize;
     *(p.add(tidepool_heap::layout::THUNK_CAPTURED_OFFSET) as *mut u64) = cap0;
@@ -153,7 +153,7 @@ unsafe fn alloc_nullary_con(vmctx: *mut VMContext, con_tag: u64) -> *mut u8 {
     if p.is_null() {
         return std::ptr::null_mut();
     }
-    tidepool_heap::layout::write_header(p, tidepool_heap::layout::TAG_CON, size as u16);
+    tidepool_heap::layout::write_header(p, tidepool_heap::layout::TAG_CON, size as u32);
     *(p.add(tidepool_heap::layout::CON_TAG_OFFSET) as *mut u64) = con_tag;
     *(p.add(tidepool_heap::layout::CON_NUM_FIELDS_OFFSET) as *mut u16) = 0;
     p
@@ -205,7 +205,7 @@ unsafe fn build_cons_cells(
             truncate_rust_roots(vmctx, mark);
             return runtime_oom();
         }
-        tidepool_heap::layout::write_header(cell, tidepool_heap::layout::TAG_CON, size as u16);
+        tidepool_heap::layout::write_header(cell, tidepool_heap::layout::TAG_CON, size as u32);
         *(cell.add(tidepool_heap::layout::CON_TAG_OFFSET) as *mut u64) = cons_tag;
         *(cell.add(tidepool_heap::layout::CON_NUM_FIELDS_OFFSET) as *mut u16) = 2;
         *(cell.add(tidepool_heap::layout::CON_FIELDS_OFFSET) as *mut *mut u8) = elem;
@@ -429,7 +429,7 @@ unsafe fn build_cons_cells_thunked(
             truncate_rust_roots(vmctx, mark);
             return runtime_oom();
         }
-        tidepool_heap::layout::write_header(cell, tidepool_heap::layout::TAG_CON, size as u16);
+        tidepool_heap::layout::write_header(cell, tidepool_heap::layout::TAG_CON, size as u32);
         *(cell.add(tidepool_heap::layout::CON_TAG_OFFSET) as *mut u64) = cons_tag;
         *(cell.add(tidepool_heap::layout::CON_NUM_FIELDS_OFFSET) as *mut u16) = 2;
         *(cell.add(tidepool_heap::layout::CON_FIELDS_OFFSET) as *mut *mut u8) = elem;

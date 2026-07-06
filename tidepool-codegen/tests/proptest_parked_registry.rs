@@ -112,7 +112,7 @@ fn t_a1_memoization() {
         TRACK_A_COUNTER.with(|c| c.set(c.get() + 1));
         unsafe {
             let p = _thunk.add(1024);
-            layout::write_header(p, layout::TAG_LIT, layout::LIT_SIZE as u16);
+            layout::write_header(p, layout::TAG_LIT, layout::LIT_SIZE as u32);
             *(p.add(layout::LIT_TAG_OFFSET)) = layout::LitTag::Int as u8;
             *(p.add(layout::LIT_VALUE_OFFSET) as *mut i64) = 42;
             p
@@ -130,7 +130,7 @@ fn t_a1_memoization() {
         machine_state.set_gc_state(start, nursery.len());
 
         let thunk_ptr = start;
-        layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+        layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u32);
         *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_UNEVALUATED;
         *(thunk_ptr.add(layout::THUNK_CODE_PTR_OFFSET) as *mut usize) = entry as *const () as usize;
 
@@ -172,7 +172,7 @@ fn t_a2_poison_memoization() {
         let _ = host_fns::take_runtime_error();
 
         let thunk_ptr = start;
-        layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+        layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u32);
         *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_UNEVALUATED;
         *(thunk_ptr.add(layout::THUNK_CODE_PTR_OFFSET) as *mut usize) =
             entry_poison as *const () as usize;
@@ -216,7 +216,7 @@ fn t_a3_reentrant_blackhole() {
         let _ = host_fns::take_runtime_error();
 
         let thunk_ptr = start;
-        layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+        layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u32);
         *(thunk_ptr.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_UNEVALUATED;
         *(thunk_ptr.add(layout::THUNK_CODE_PTR_OFFSET) as *mut usize) =
             entry_reentrant as *const () as usize;
@@ -249,17 +249,17 @@ fn t_a4_indirection_chains() {
         machine_state.set_gc_state(start, nursery.len());
 
         let lit_ptr = start;
-        layout::write_header(lit_ptr, layout::TAG_LIT, layout::LIT_SIZE as u16);
+        layout::write_header(lit_ptr, layout::TAG_LIT, layout::LIT_SIZE as u32);
         *(lit_ptr.add(layout::LIT_TAG_OFFSET)) = layout::LitTag::Int as u8;
         *(lit_ptr.add(layout::LIT_VALUE_OFFSET) as *mut i64) = 100;
 
         let thunk_b = start.add(32);
-        layout::write_header(thunk_b, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+        layout::write_header(thunk_b, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u32);
         *(thunk_b.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_EVALUATED;
         *(thunk_b.add(layout::THUNK_INDIRECTION_OFFSET) as *mut *mut u8) = lit_ptr;
 
         let thunk_a = start.add(64);
-        layout::write_header(thunk_a, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+        layout::write_header(thunk_a, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u32);
         *(thunk_a.add(layout::THUNK_STATE_OFFSET)) = layout::THUNK_EVALUATED;
         *(thunk_a.add(layout::THUNK_INDIRECTION_OFFSET) as *mut *mut u8) = thunk_b;
 

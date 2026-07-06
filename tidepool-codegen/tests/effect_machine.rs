@@ -627,7 +627,7 @@ unsafe fn alloc_con_heap(
         return std::ptr::null_mut();
     }
 
-    layout::write_header(ptr, layout::TAG_CON, size as u16);
+    layout::write_header(ptr, layout::TAG_CON, size as u32);
 
     *(ptr.add(layout::CON_TAG_OFFSET) as *mut u64) = con_tag;
 
@@ -704,7 +704,7 @@ fn test_resume_leaf_identity() {
 
         let p = tidepool_codegen::heap_bridge::bump_alloc_from_vmctx(machine.vmctx_mut(), size);
 
-        layout::write_header(p, layout::TAG_LIT, size as u16);
+        layout::write_header(p, layout::TAG_LIT, size as u32);
 
         *p.add(layout::LIT_TAG_OFFSET) = 0; // Int
 
@@ -785,7 +785,7 @@ fn test_resume_node_identity() {
 
         let p = tidepool_codegen::heap_bridge::bump_alloc_from_vmctx(machine.vmctx_mut(), size);
 
-        layout::write_header(p, layout::TAG_LIT, size as u16);
+        layout::write_header(p, layout::TAG_LIT, size as u32);
 
         *p.add(layout::LIT_TAG_OFFSET) = 0; // Int
 
@@ -847,7 +847,7 @@ fn test_resume_unknown_tag() {
 
         let p = tidepool_codegen::heap_bridge::bump_alloc_from_vmctx(machine.vmctx_mut(), size);
 
-        layout::write_header(p, layout::TAG_LIT, size as u16);
+        layout::write_header(p, layout::TAG_LIT, size as u32);
 
         p
     };
@@ -984,7 +984,7 @@ fn test_resume_node_with_effect_result() {
 
         let p = tidepool_codegen::heap_bridge::bump_alloc_from_vmctx(machine.vmctx_mut(), size);
 
-        layout::write_header(p, layout::TAG_LIT, size as u16);
+        layout::write_header(p, layout::TAG_LIT, size as u32);
 
         *p.add(layout::LIT_TAG_OFFSET) = 0; // Int
 
@@ -1040,7 +1040,7 @@ fn test_force_ptr_invalid_tag() {
     let bad_ptr = unsafe {
         let size = 24;
         let p = tidepool_codegen::heap_bridge::bump_alloc_from_vmctx(machine.vmctx_mut(), size);
-        layout::write_header(p, 0xFE, size as u16); // Invalid tag 0xFE
+        layout::write_header(p, 0xFE, size as u32); // Invalid tag 0xFE
         p
     };
 
@@ -1070,7 +1070,7 @@ fn test_resume_unexpected_con_tag_harden() {
     let bad_con = unsafe {
         let size = 24;
         let p = tidepool_codegen::heap_bridge::bump_alloc_from_vmctx(machine.vmctx_mut(), size);
-        layout::write_header(p, layout::TAG_CON, size as u16);
+        layout::write_header(p, layout::TAG_CON, size as u32);
         *(p.add(layout::CON_TAG_OFFSET) as *mut u64) = 9999; // Invalid con_tag
         p
     };

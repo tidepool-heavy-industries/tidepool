@@ -266,9 +266,9 @@ mod tests {
         // 16 bytes -- sufficient for a HeapObject header. write_header/read_tag/read_size
         // operate within this allocation.
         unsafe {
-            write_header(ptr, TAG_CLOSURE, size as u16);
+            write_header(ptr, TAG_CLOSURE, size as u32);
             assert_eq!(read_tag(ptr), TAG_CLOSURE);
-            assert_eq!(read_size(ptr), size as u16);
+            assert_eq!(read_size(ptr), size as u32);
         }
     }
 

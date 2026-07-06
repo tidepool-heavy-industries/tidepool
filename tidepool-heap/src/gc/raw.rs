@@ -172,7 +172,7 @@ mod tests {
         // SAFETY: buf is a 1024-byte aligned buffer; offset is managed by the caller
         // to ensure non-overlapping object placement. LIT_SIZE (24) fits within remaining space.
         let ptr = buf.as_mut_ptr().add(offset);
-        write_header(ptr, TAG_LIT, LIT_SIZE as u16);
+        write_header(ptr, TAG_LIT, LIT_SIZE as u32);
         *ptr.add(LIT_TAG_OFFSET) = LitTag::Int as u8;
         *(ptr.add(LIT_VALUE_OFFSET) as *mut i64) = value;
         offset + LIT_SIZE
@@ -182,7 +182,7 @@ mod tests {
         // SAFETY: buf is a 1024-byte aligned buffer; offset ensures non-overlapping placement.
         // The computed size fits within the buffer for small field counts used in tests.
         let ptr = buf.as_mut_ptr().add(offset);
-        let size = (CON_FIELDS_OFFSET + fields.len() * FIELD_STRIDE) as u16;
+        let size = (CON_FIELDS_OFFSET + fields.len() * FIELD_STRIDE) as u32;
         let aligned = (size as usize)
             .checked_add(7)
             .expect("heap object size too large to align")
@@ -205,7 +205,7 @@ mod tests {
         // SAFETY: buf is a 1024-byte aligned buffer; offset ensures non-overlapping placement.
         // The computed size fits within the buffer for small capture counts used in tests.
         let ptr = buf.as_mut_ptr().add(offset);
-        let size = (CLOSURE_CAPTURED_OFFSET + captures.len() * FIELD_STRIDE) as u16;
+        let size = (CLOSURE_CAPTURED_OFFSET + captures.len() * FIELD_STRIDE) as u32;
         let aligned = (size as usize)
             .checked_add(7)
             .expect("heap object size too large to align")

@@ -360,14 +360,14 @@ mod tests {
             // 1. Allocate a Lit object for the result
             let mut lit_buf = [0u8; heap_layout::LIT_SIZE];
             let lit_ptr = lit_buf.as_mut_ptr();
-            heap_layout::write_header(lit_ptr, layout::TAG_LIT, heap_layout::LIT_SIZE as u16);
+            heap_layout::write_header(lit_ptr, layout::TAG_LIT, heap_layout::LIT_SIZE as u32);
             *(lit_ptr.add(layout::LIT_TAG_OFFSET as usize)) = 0; // Int#
             *(lit_ptr.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = 42;
 
             // 2. Allocate a thunk object
             let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
             let thunk_ptr = thunk_buf.as_mut_ptr();
-            heap_layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+            heap_layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u32);
             *(thunk_ptr.add(layout::THUNK_STATE_OFFSET as usize)) = layout::THUNK_UNEVALUATED;
 
             TEST_RESULT.with(|r| r.set(lit_ptr));
@@ -407,7 +407,7 @@ mod tests {
             // 2. Already evaluated thunk pointing to that Lit
             let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
             let thunk_ptr = thunk_buf.as_mut_ptr();
-            heap_layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+            heap_layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u32);
             *(thunk_ptr.add(layout::THUNK_STATE_OFFSET as usize)) = layout::THUNK_EVALUATED;
             *(thunk_ptr.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *mut *mut u8) = lit_ptr;
 
@@ -431,7 +431,7 @@ mod tests {
             // Blackholed thunk
             let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
             let thunk_ptr = thunk_buf.as_mut_ptr();
-            heap_layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+            heap_layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u32);
             *(thunk_ptr.add(layout::THUNK_STATE_OFFSET as usize)) = layout::THUNK_BLACKHOLE;
 
             let res = heap_force(&mut vmctx, thunk_ptr);
@@ -457,7 +457,7 @@ mod tests {
 
             let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
             let thunk_ptr = thunk_buf.as_mut_ptr();
-            heap_layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+            heap_layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u32);
             *(thunk_ptr.add(layout::THUNK_STATE_OFFSET as usize)) = layout::THUNK_UNEVALUATED;
             *(thunk_ptr.add(layout::THUNK_CODE_PTR_OFFSET as usize) as *mut usize) = 0;
 
@@ -482,7 +482,7 @@ mod tests {
 
             let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
             let thunk_ptr = thunk_buf.as_mut_ptr();
-            heap_layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u16);
+            heap_layout::write_header(thunk_ptr, layout::TAG_THUNK, layout::THUNK_MIN_SIZE as u32);
             *(thunk_ptr.add(layout::THUNK_STATE_OFFSET as usize)) = 255; // Invalid state
 
             let res = heap_force(&mut vmctx, thunk_ptr);

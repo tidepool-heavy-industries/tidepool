@@ -284,7 +284,7 @@ mod tests {
 
     unsafe fn write_lit(buf: &mut [u8], offset: usize, value: i64) -> usize {
         let ptr = buf.as_mut_ptr().add(offset);
-        write_header(ptr, TAG_LIT, LIT_SIZE as u16);
+        write_header(ptr, TAG_LIT, LIT_SIZE as u32);
         *ptr.add(LIT_TAG_OFFSET) = LitTag::Int as u8;
         *(ptr.add(LIT_VALUE_OFFSET) as *mut i64) = value;
         offset + LIT_SIZE
@@ -292,7 +292,7 @@ mod tests {
 
     unsafe fn write_con(buf: &mut [u8], offset: usize, con_tag: u64, fields: &[*mut u8]) -> usize {
         let ptr = buf.as_mut_ptr().add(offset);
-        let size = (CON_FIELDS_OFFSET + fields.len() * FIELD_STRIDE) as u16;
+        let size = (CON_FIELDS_OFFSET + fields.len() * FIELD_STRIDE) as u32;
         let aligned = ((size as usize) + 7) & !7;
         write_header(ptr, TAG_CON, size);
         *(ptr.add(CON_TAG_OFFSET) as *mut u64) = con_tag;
