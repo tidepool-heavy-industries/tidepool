@@ -29,6 +29,7 @@ use tidepool_repr::SessionId;
 use tidepool_runtime::session::ModuleEnv;
 use tokio::io::{stdin, stdout};
 use tokio::time::{timeout, Duration};
+use tokio_util::sync::CancellationToken;
 
 use crate::ask::{PauseGate, ResumeMsg, WorkerMessage};
 use crate::command::{BlockItem, DeclText, ExprText, MetaCommand, SessionCommand};
@@ -419,13 +420,28 @@ impl TidepoolReplServer {
 
     // -- tool handlers -----------------------------------------------------
 
-    /// The shared tool-dispatch entry point. `call_tool` (the MCP `ServerHandler`
-    /// method) delegates here; tests drive this directly to exercise the exact
-    /// production path without constructing a `RequestContext`.
+    /// The shared tool-dispatch entry point, with no client cancel signal — a
+    /// convenience over [`Self::dispatch_tool_ct`] passing a never-cancelled
+    /// token. Tests drive this directly to exercise the exact production path
+    /// without constructing a `RequestContext`.
     pub async fn dispatch_tool(
         &self,
         name: &str,
         args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<CallToolResult, McpError> {
+        self.dispatch_tool_ct(name, args, CancellationToken::new())
+            .await
+    }
+
+    /// The work-carrying tool-dispatch entry point. `call_tool` (the MCP
+    /// `ServerHandler` method) delegates here, forwarding the request's
+    /// `RequestContext.ct` so a client cancel (rmcp cancels this token; it does
+    /// NOT drop the handler future) aborts the in-flight turn at a safepoint.
+    pub async fn dispatch_tool_ct(
+        &self,
+        name: &str,
+        args: serde_json::Map<String, serde_json::Value>,
+        ct: CancellationToken,
     ) -> Result<CallToolResult, McpError> {
         let parse =
             |args: serde_json::Map<String, serde_json::Value>| serde_json::Value::Object(args);
@@ -458,13 +474,14 @@ impl TidepoolReplServer {
                             verbose,
                         },
                         input,
+                        ct,
                     )
                     .await)
             }
             "session_resume" => {
                 let req: SessionResumeRequest = serde_json::from_value(parse(args))
                     .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
-                self.session_resume(req).await
+                self.session_resume(req, ct).await
             }
             "session_reset" => Ok(self.session_reset().await),
             other => Err(McpError {
@@ -483,6 +500,7 @@ impl TidepoolReplServer {
         op: &str,
         cmd: SessionCommand,
         eval_input: Option<serde_json::Value>,
+        ct: CancellationToken,
     ) -> CallToolResult {
         let state = match self.ensure_session() {
             Ok(s) => s,
@@ -527,13 +545,14 @@ impl TidepoolReplServer {
             .manager
             .cancel_slot()
             .unwrap_or_else(empty_cancel_slot);
-        self.drive(
+        self.drive_detached(
             op,
             session_rx,
             response_tx,
             gate,
             captured,
             DriveCtl { state, cancel },
+            ct,
         )
         .await
     }
@@ -595,7 +614,11 @@ impl TidepoolReplServer {
         }
     }
 
-    async fn session_resume(&self, req: SessionResumeRequest) -> Result<CallToolResult, McpError> {
+    async fn session_resume(
+        &self,
+        req: SessionResumeRequest,
+        ct: CancellationToken,
+    ) -> Result<CallToolResult, McpError> {
         // Validate + canonicalize the reply against the suspension's schema
         // BEFORE consuming the continuation. This (a) makes `ask` return a
         // STRUCTURED, optic-extractable Value — a reply that arrived as a JSON
@@ -690,15 +713,87 @@ impl TidepoolReplServer {
             .cancel_slot()
             .unwrap_or_else(empty_cancel_slot);
         Ok(self
-            .drive(
+            .drive_detached(
                 "session_resume",
                 suspension.session_rx,
                 suspension.response_tx,
                 suspension.gate,
                 suspension.captured,
                 DriveCtl { state, cancel },
+                ct,
             )
             .await)
+    }
+
+    /// Resolve a turn's state on a DETACHED task, decoupled from this RPC
+    /// caller's future. [`Self::drive`] is the single writer of terminal state
+    /// (`Idle`/`Suspended`/`Wedged`); running it on its own `tokio::task` means a
+    /// cancelled or dropped RPC future can no longer strand the state at `Busy`
+    /// (the cancel-wedge). The turn always resolves its own state.
+    ///
+    /// The RPC side races the resolver against `ct` (rmcp cancels this token on a
+    /// client cancel; it does NOT drop the handler future over stdio). On a
+    /// cancel we fire the SAME cooperative-abort levers the timeout path uses
+    /// (`request_abort` + the machine's `CancelHandle`), then give a bounded
+    /// grace for a prompt stop — after which the detached resolver keeps owning
+    /// final state (self-heal `Idle` or `Wedged`) while the caller returns. No
+    /// arm/disarm latch is needed: a spurious `cancel()` is cleared by the next
+    /// turn's `Session::run_turn` → `reset_cancel` (`session.rs`).
+    #[allow(clippy::too_many_arguments)]
+    async fn drive_detached(
+        &self,
+        op: &str,
+        session_rx: tokio::sync::mpsc::UnboundedReceiver<WorkerMessage>,
+        response_tx: std::sync::mpsc::Sender<ResumeMsg>,
+        gate: Arc<PauseGate>,
+        captured: CapturedOutput,
+        ctl: DriveCtl,
+        ct: CancellationToken,
+    ) -> CallToolResult {
+        // Abort levers cloned out before the rest moves into the resolver task.
+        let gate_abort = Arc::clone(&gate);
+        let cancel_abort = ctl.cancel.clone();
+        let op_owned = op.to_string();
+        let this = self.clone();
+        let (result_tx, mut result_rx) = tokio::sync::oneshot::channel::<CallToolResult>();
+        tokio::spawn(async move {
+            let r = this
+                .drive(&op_owned, session_rx, response_tx, gate, captured, ctl)
+                .await;
+            // Err only if the RPC side already returned (grace expired / future
+            // dropped); state is resolved regardless, so the drop is harmless.
+            let _ = result_tx.send(r);
+        });
+
+        tokio::select! {
+            r = &mut result_rx => r.unwrap_or_else(|_| {
+                CallToolResult::error(vec![Content::text(format!(
+                    "{op}: turn resolver task ended without a result (internal error)"
+                ))])
+            }),
+            _ = ct.cancelled() => {
+                // Client asked to stop. Signal abort on both fronts — the same
+                // levers the timeout branch of `drive` uses — then let the
+                // resolver record the real terminal state.
+                gate_abort.request_abort(format!("{op} cancelled by client"));
+                if let Some(h) = cancel_abort.lock().as_ref().cloned() {
+                    h.cancel();
+                }
+                match timeout(Duration::from_secs(ABORT_GRACE_SECS), &mut result_rx).await {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(_)) => CallToolResult::error(vec![Content::text(format!(
+                        "{op}: turn resolver task ended without a result (internal error)"
+                    ))]),
+                    // Uninterruptible turn: don't block the caller on the full
+                    // turn budget. The detached resolver keeps owning final
+                    // state (it self-heals to Idle or goes Wedged).
+                    Err(_) => CallToolResult::error(vec![Content::text(format!(
+                        "{op} cancelled; the turn is stopping and the session will be ready \
+                         shortly (or wedged if uninterruptible — session_reset to force-recover)"
+                    ))]),
+                }
+            }
+        }
     }
 
     /// Await the next worker message for an in-flight turn, mapping it to an MCP
@@ -706,6 +801,8 @@ impl TidepoolReplServer {
     /// arrived `Busy` (set by the caller); this resolves it to `Idle` (turn
     /// finished), `Suspended` (parked an `ask` — the suspension payload, incl.
     /// `response_tx`, is stored IN the state), or `Wedged` (timeout / crash).
+    /// Runs on a detached task (see [`Self::drive_detached`]) so its terminal
+    /// writes survive a cancelled/dropped RPC future.
     async fn drive(
         &self,
         op: &str,
@@ -994,10 +1091,17 @@ impl ServerHandler for TidepoolReplServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        self.dispatch_tool(request.name.as_ref(), request.arguments.unwrap_or_default())
-            .await
+        // rmcp cancels `context.ct` on a client `CancelledNotification` (it does
+        // NOT drop this future over stdio) — forward it so an interrupted turn
+        // aborts at a safepoint instead of wedging the session.
+        self.dispatch_tool_ct(
+            request.name.as_ref(),
+            request.arguments.unwrap_or_default(),
+            context.ct,
+        )
+        .await
     }
 
     async fn list_tools(

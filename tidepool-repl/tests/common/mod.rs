@@ -308,6 +308,75 @@ impl Repl {
     pub async fn eval_ok(&self, code: &str) -> String {
         self.eval(code).await.expect_ok(code).to_string()
     }
+
+    /// Run a single `session_run` item under a caller-supplied cancel token —
+    /// the same token rmcp cancels on a client interrupt (`call_tool` forwards
+    /// `context.ct`). Lets a test cancel a turn mid-flight. Returns the RAW
+    /// dispatch `Turn` (a cancelled turn's text is a plain message, not a block
+    /// envelope, so no envelope-unwrapping here).
+    pub async fn eval_cancellable(
+        &self,
+        code: &str,
+        ct: tokio_util::sync::CancellationToken,
+    ) -> Turn {
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "items".to_string(),
+            serde_json::Value::Array(vec![serde_json::Value::String(code.to_string())]),
+        );
+        let r = self
+            .server
+            .dispatch_tool_ct("session_run", args, ct)
+            .await
+            .unwrap_or_else(|e| panic!("dispatch session_run transport error: {e:?}"));
+        Turn {
+            text: text_of(&r),
+            is_error: r.is_error == Some(true),
+        }
+    }
+
+    /// `session_resume` under a caller-supplied cancel token (covers the second
+    /// `drive_detached` call site).
+    pub async fn resume_cancellable(
+        &self,
+        continuation_id: &str,
+        response: serde_json::Value,
+        ct: tokio_util::sync::CancellationToken,
+    ) -> Turn {
+        let mut args = serde_json::Map::new();
+        args.insert("continuation_id".into(), serde_json::json!(continuation_id));
+        args.insert("response".into(), response);
+        match self
+            .server
+            .dispatch_tool_ct("session_resume", args, ct)
+            .await
+        {
+            Ok(r) => Turn {
+                text: text_of(&r),
+                is_error: r.is_error == Some(true),
+            },
+            Err(e) => Turn {
+                text: e.message.to_string(),
+                is_error: true,
+            },
+        }
+    }
+
+    /// Poll a fresh (never-cancelled) `session_run` until it succeeds — the
+    /// session's detached resolver may still be settling terminal state after a
+    /// cancelled turn (if the abort grace expired). Panics if it never recovers
+    /// within the bound. Used to assert a session is usable post-cancel without
+    /// racing the resolver.
+    pub async fn eval_until_ok(&self, code: &str) -> Turn {
+        for _ in 0..600 {
+            let t = self.eval(code).await;
+            if !t.is_error {
+                return t;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        panic!("session never returned to Idle for `{code}` within the poll bound");
+    }
 }
 
 impl Default for Repl {
