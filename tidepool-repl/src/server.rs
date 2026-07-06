@@ -1022,7 +1022,14 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          • KEEP IT OFF-CONTEXT: a big intermediate lives in the session heap, NOT your \
          context window. Fold it IN the session (count / group / sort / join) and return only \
          the conclusion — aggregate, don't dump. A value too large to render is auto-stubbed \
-         but stays a live binding you can keep computing on.\n\n\
+         but stays a live binding you can keep computing on.\n\
+         • DERIVE what static tools can't: the sharpest wins aren't a faster grep — they are \
+         signals no grep or call-graph can see, because you fold a whole substrate (a git \
+         history, a corpus, an API dump) into a derived metric. Method: substrate once → each \
+         turn one composable fold that adds a lens → NORMALIZE for surprise not volume (divide \
+         a raw count by a baseline so you rank the anomalous, not the merely busy) → CLASSIFY \
+         results into expected vs smell. Reach here when \"what moves/appears together\" matters \
+         and static analysis comes up empty.\n\n\
          PRIMARY TOOL: session_run\n\
          Pass a list of items run in sequence: top-level declarations (`data Foo = …`, \
          `f x = …`), bind statements (`x <- e` / `let x = e`), bare expressions, or \
@@ -1068,7 +1075,13 @@ fn build_tool_description(decls: &[EffectDecl]) -> String {
          read `p.stdout`, `p.exitCode`, `p.stderr` (`ok p` = zero exit); \
          `grepGlob`/`searchFiles` → `[Hit]` (`h.path`, `h.line`, `h.text`); \
          `readGlob` → `[FileRead]` (`r.path`, `r.contents :: Either FsError Text`). \
-         Bare selectors like `stdout p` are ambiguous — always use dot syntax.",
+         Bare selectors like `stdout p` are ambiguous — always use dot syntax.\n\n\
+         SURFACE NOTES — the OverloadedRecordDot extension is ON: `x.f` is field access, so \
+         write function composition WITH SPACES (`f . g`); `f.g` parses as projecting field \
+         `g` and will not typecheck. Common partial functions (`head`, `tail`, `!!`, \
+         `fromJust`) are deliberately unsupported — they compile-error naming the total form \
+         (`L.head`, `atMay`, or a pattern-match generator `(x:_) <- …`); reach for those \
+         directly rather than the partial.",
     )
 }
 
