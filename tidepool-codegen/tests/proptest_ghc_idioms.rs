@@ -65,12 +65,6 @@ static N_BACKREF: AtomicU64 = AtomicU64::new(0); // letrec Con field referencing
 static N_JOINCROSS: AtomicU64 = AtomicU64::new(0); // join with Jump under a value Lam
 static N_NESTED_CROSS: AtomicU64 = AtomicU64::new(0); // Jump from a doubly-nested Lam
 
-// Hits of the KNOWN, documented bug (#1: Jump-crosses-Lam). These are tolerated
-// by the live fuzzer (skipped, not counted in the reach denominator) so the
-// suite stays green; the bug itself is pinned by the `#[ignore]`d repro
-// `bug1_join_crosses_lambda` below. Any *other* divergence still fails loudly.
-static N_KNOWN_BUG1: AtomicU64 = AtomicU64::new(0);
-
 fn bump(c: &AtomicU64) {
     c.fetch_add(1, Ordering::Relaxed);
 }
@@ -154,28 +148,6 @@ fn run_in_fork(_expr: &CoreExpr, _nursery: usize) -> Result<(), i32> {
 // Shared oracle wrapper: runs all three oracles for one expression.
 // ---------------------------------------------------------------------------
 fn run_oracles(expr: CoreExpr) -> Result<(), TestCaseError> {
-    // KNOWN-BUG gate (#1: Jump-crosses-Lam). If eval succeeds but the JIT fails
-    // with the *specific* "Jump to unregistered join" compilation error, this is
-    // the documented bug pinned by `bug1_join_crosses_lambda`. Tolerate it so the
-    // live fuzzer stays green and keeps hunting for NEW divergences; do NOT count
-    // it toward the reach denominator. A value mismatch (both Ok) or any other
-    // JIT error does NOT match here and still flows into the strict oracle.
-    {
-        use tidepool_eval::{env_from_datacon_table, eval, VecHeap};
-        let table = tidepool_testing::proptest::build_table_for_expr(&expr);
-        let mut heap = VecHeap::new();
-        let env = env_from_datacon_table(&table);
-        let ev = eval(&expr, &env, &mut heap);
-        let jit =
-            JitEffectMachine::compile(&expr, &table, 64 * 1024).and_then(|mut m| m.run_pure());
-        if let (Ok(_), Err(e)) = (&ev, &jit) {
-            if format!("{:?}", e).contains("Jump to unregistered join") {
-                bump(&N_KNOWN_BUG1);
-                return Ok(());
-            }
-        }
-    }
-
     bump(&TOTAL);
 
     // Oracle 3 (B3): crash containment at both nursery sizes, BEFORE running
@@ -1204,15 +1176,10 @@ proptest! {
 // matching gate in `run_oracles`) once the underlying bug is fixed.
 // ===========================================================================
 
-/// BUG #1: Jump-crosses-Lam — JIT-only compilation error (B2).
+/// BUG #1 (FIXED): Jump-crosses-Lam — was a JIT-only compilation error (B2).
 ///
-/// observed:  JIT = Err(Compilation(NotYetImplemented("Jump to unregistered join JoinId(0)")))
-/// expected:  Ok(Lit(LitInt(0)))  (the tree-walking interpreter's result)
-/// class:     B2 (JIT errors while eval succeeds; outside the HeapOverflow /
-///            UnresolvedVar / HeapBridge whitelist)
-/// component: join-point compilation (`tidepool-codegen/src/emit/join.rs`)
-/// skeleton:  JoinCrossLambda, fully shrunk
-///            (n_lead=0, branchy=false, nested=false, all holes/args = 0)
+/// component: join-point compilation (`tidepool-codegen/src/emit/join.rs`,
+///            fixed by the pre-emit lowering pass in `tidepool-codegen/src/lower.rs`)
 /// seed:      tidepool-codegen/tests/proptest_ghc_idioms.proptest-regressions
 ///            cc b2d5850a54a189ebdbb5ba9ed858774516944b55d49badbfe1ce4ea478ce73a9
 ///
@@ -1222,16 +1189,15 @@ proptest! {
 ///
 /// The `Jump` to `k` lives inside the body of a value `Lam`. The JIT compiles
 /// each `Lam` as a separate Cranelift function and only registers a join label
-/// in the function that compiles the `Join`'s body — so the label is unknown in
-/// the lambda's function and codegen aborts. The production Haskell pipeline
+/// in the function that compiles the `Join`'s body — so the label was unknown in
+/// the lambda's function and codegen aborted. The production Haskell pipeline
 /// never reaches codegen with this shape because `Translate.hs`'s `jumpCrossesLam`
 /// rewrites such a `Join` into a `LetNonRec` + lambda wrapper first (memory
-/// gotchas #10/#17). Codegen therefore carries an *unchecked precondition* that
-/// no `Jump` crosses a `Lam` boundary; hand-built IR (or any future producer that
-/// skips that rewrite) violates it. The interpreter resolves the jump via the
-/// lexical join continuation and returns 0.
+/// gotchas #10/#17); `lower::lower_jump_crosses_lam` mirrors that rewrite in Rust
+/// as a pre-emit pass, so hand-built IR that skips it is restored to the same
+/// precondition codegen relies on. The interpreter resolves the jump via the
+/// lexical join continuation and returns 0; the JIT now agrees.
 #[test]
-#[ignore = "BUG #1: JIT 'Jump to unregistered join' when a Jump crosses a Lam boundary (codegen assumes Translate.hs jumpCrossesLam ran first)"]
 fn bug1_join_crosses_lambda() {
     use tidepool_eval::{env_from_datacon_table, eval, VecHeap};
 
@@ -1277,17 +1243,14 @@ fn bug1_join_crosses_lambda() {
 
     let jit = JitEffectMachine::compile(&tree, &table, 64 * 1024).and_then(|mut m| m.run_pure());
 
-    // The bug: JIT diverges from eval. When fixed, both are Lit(LitInt(0)).
     match jit {
         Ok(v) => assert!(
             values_equal(&ev, &v),
-            "BUG #1 appears FIXED — JIT now agrees with eval ({:?}); un-ignore this test and remove the run_oracles gate.",
+            "JIT and eval disagree: eval={:?} jit={:?}",
+            ev,
             v
         ),
-        Err(e) => panic!(
-            "BUG #1 reproduced: eval={:?} but JIT={:?}",
-            ev, e
-        ),
+        Err(e) => panic!("BUG #1 regressed: eval={:?} but JIT={:?}", ev, e),
     }
 }
 
@@ -1319,10 +1282,6 @@ fn zzz_reach_floor() {
         N_JOINCROSS.load(Ordering::Relaxed),
         N_NESTED_CROSS.load(Ordering::Relaxed),
         N_BACKREF.load(Ordering::Relaxed),
-    );
-    eprintln!(
-        "KNOWN-BUG HITS (#1 Jump-crosses-Lam, tolerated): {}",
-        N_KNOWN_BUG1.load(Ordering::Relaxed),
     );
     // Only enforce the floor if a meaningful number of cases ran (guards against
     // running this test in isolation).
