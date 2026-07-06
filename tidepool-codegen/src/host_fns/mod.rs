@@ -62,8 +62,8 @@ pub use cancel::runtime_cancel_check;
 pub(crate) use gc::GcState;
 pub use gc::{
     clear_rust_roots, gc_trigger, gc_trigger_call_count, gc_trigger_last_vmctx,
-    persistent_roots_count, register_persistent_root, register_rust_root, reset_test_counters,
-    rust_roots_mark, truncate_rust_roots,
+    heap_verify_run_count, persistent_roots_count, register_persistent_root, register_rust_root,
+    reset_test_counters, rust_roots_mark, set_heap_verify, truncate_rust_roots,
 };
 
 use errors::unresolved_var_trap;

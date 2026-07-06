@@ -22,7 +22,7 @@
 use crate::context::VMContext;
 use crate::gc::frame_walker;
 use crate::machine_state::{machine_state, machine_state_opt};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::cancel::check_cancel_and_set_error;
 
@@ -194,13 +194,37 @@ fn max_heap_bytes() -> usize {
     })
 }
 
-/// Kill-switched fail-loud mode: `TIDEPOOL_HEAP_VERIFY=1` walks the entire
-/// live set after every GC and panics on the first invariant violation.
-/// Tests opt in; production pays one cached env read.
+/// Process-global test override for `heap_verify_enabled`. `env::set_var` is
+/// racy against the `OnceLock`-cached env read below (it latches the FIRST
+/// read) and unsafe on edition 2024; this atomic gives tests a reliable,
+/// safe way to force the verifier on without touching the environment.
+static HEAP_VERIFY_FORCE: AtomicBool = AtomicBool::new(false);
+
+/// Test-only: force the post-GC heap verifier on (or back off), independent
+/// of `TIDEPOOL_HEAP_VERIFY`. Not part of the public API.
+#[doc(hidden)]
+pub fn set_heap_verify(on: bool) {
+    HEAP_VERIFY_FORCE.store(on, Ordering::Relaxed);
+}
+
+/// Kill-switched fail-loud mode: `TIDEPOOL_HEAP_VERIFY=1` (or `set_heap_verify`)
+/// walks the entire live set after every GC and panics on the first invariant
+/// violation. Tests opt in; production pays one cached env read.
 fn heap_verify_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("TIDEPOOL_HEAP_VERIFY").is_ok_and(|v| v == "1"))
+        || HEAP_VERIFY_FORCE.load(Ordering::Relaxed)
+}
+
+/// Count of completed `verify_heap_post_gc` runs, process-wide. Lets a test
+/// prove the verifier actually fired rather than silently no-op'ing.
+static HEAP_VERIFY_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+/// Test-only: how many times `verify_heap_post_gc` has run in this process.
+#[doc(hidden)]
+pub fn heap_verify_run_count() -> usize {
+    HEAP_VERIFY_RUNS.load(Ordering::Relaxed)
 }
 
 /// Post-GC heap invariant walk (see `heap_verify_enabled`).
@@ -230,6 +254,7 @@ unsafe fn verify_heap_post_gc(
     from_start: *const u8,
     from_end: *const u8,
 ) {
+    HEAP_VERIFY_RUNS.fetch_add(1, Ordering::Relaxed);
     use crate::layout as l;
     let to_end = to_start.add(live_bytes);
     let in_to = |p: *const u8| p >= to_start && p < to_end;
