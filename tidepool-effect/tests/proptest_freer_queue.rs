@@ -582,26 +582,14 @@ fn small_stack_depth_64_green() {
     });
 }
 
-/// BUG B3 (left spine): `EffectMachine::apply_cont` recurses into `k1` for
-/// every `Node` (machine.rs Node arm), so a left-biased tree consumes one
-/// host stack frame (~10KB in the dev profile) per node. Depth 1200 on an
-/// 8MB stack — four times the Rust spawned-thread default — overflows and
-/// ABORTS the process (stack overflow is not unwindable), which is why this
-/// repro must stay ignored rather than be a normal failing test. Measured
-/// thresholds (8MB, dev): depth 700 OK, depth 800 ABORTS; on a default 2MB
-/// thread the machine dies somewhere below ~190 nodes.
-///
-/// observed: process abort — "thread ... has overflowed its stack"
-/// expected: result == model (queue walk must be iterative)
-/// class: B3 stack overflow | component: tidepool-effect/src/machine.rs apply_cont
-/// seed: deterministic (no proptest seed — fixed-depth repro)
-// B3 PARTIALLY FIXED 2026-06-11: apply_cont's queue walk is now iterative
-// (explicit pending stack) — RUNTIME queue depth (e.g. mapM over a long
-// effect list, where the expression stays small) no longer consumes host
-// stack. This repro however builds a 1200-deep EXPRESSION, and post-fix
-// probing shows the abort here is dominated by eval_at's expression
-// recursion (gotcha #5: ~600 OK / 700 ABORT at 8MB dev) — a different
-// walker, planned as its own slice. Activate when the eval slice lands.
+/// Regression guard (B3, left spine): a 1200-deep left-biased effect tree runs
+/// flat and MATCHES the model. Both host walkers are iterative now —
+/// `EffectMachine::apply_cont`'s queue walk (explicit pending stack) and
+/// `eval_at` (explicit work-stack, b83cfb09) — so neither the runtime queue
+/// depth nor the expression depth grows the host stack. The original B3 walked
+/// both recursively and aborted here around depth 700-800 on an 8MB stack
+/// (stack overflow is not unwindable); a regression flips this green test to a
+/// process abort.
 #[test]
 fn bug_b3_left_biased_depth_1200_8mb_stack() {
     run_in_thread(8 * 1024 * 1024, || {
@@ -614,17 +602,11 @@ fn bug_b3_left_biased_depth_1200_8mb_stack() {
     });
 }
 
-/// BUG B3 (right spine): the `Val` continuation step `apply_cont(k2, y)` is
-/// a tail call in source but Rust guarantees no TCO; in the dev profile each
-/// right-spine step also burns a host frame, so right-biased trees abort at
-/// the same measured thresholds as left-biased ones (8MB: 700 OK / 800 ABORT).
-///
-/// observed: process abort — "thread ... has overflowed its stack"
-/// expected: result == model
-/// class: B3 stack overflow | component: tidepool-effect/src/machine.rs apply_cont
-/// seed: deterministic (fixed-depth repro)
-// Same status and caveat as the left-biased twin: queue walk iterative,
-// repro blocked on eval_at expression recursion.
+/// Regression guard (B3, right spine): the `Val` step `apply_cont(k2, y)` is a
+/// source tail call with no Rust TCO — under recursive walking each right-spine
+/// step burned a host frame and aborted at the same thresholds as the left twin
+/// (8MB: ~700 OK / 800 ABORT). With the iterative walkers it runs flat and
+/// matches the model.
 #[test]
 fn bug_b3_right_biased_depth_1200_8mb_stack() {
     run_in_thread(8 * 1024 * 1024, || {
