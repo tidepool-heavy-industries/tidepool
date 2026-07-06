@@ -834,8 +834,8 @@ proptest! {
 // Word64Shl ~1449). Fix = swap `-a`/`a >> b`/`a << b` for
 // `a.wrapping_neg()`/`a.wrapping_shr(b as u32)`/`a.wrapping_shl(b as u32)`.
 
-/// Confirm + run one (op, args) repro: returns (eval_panicked, jit_result_dbg).
-fn run_one(op: PrimOpKind, args: Vec<Literal>) -> (bool, String) {
+/// Confirm + run one (op, args) repro: returns (eval_result_dbg_or_panic, jit_result_dbg).
+fn run_one(op: PrimOpKind, args: Vec<Literal>) -> (String, String) {
     let mut b = TreeBuilder::new();
     let idxs: Vec<usize> = args
         .iter()
@@ -853,54 +853,43 @@ fn run_one(op: PrimOpKind, args: Vec<Literal>) -> (bool, String) {
     }));
     std::panic::set_hook(prev);
     let jit = JitEffectMachine::compile(&tree, &table, 64 * 1024).and_then(|mut m| m.run_pure());
-    (ev.is_err(), format!("{:?}", jit))
+    let eval_dbg = match ev {
+        Ok(res) => format!("{:?}", res),
+        Err(_) => "PANIC".to_string(),
+    };
+    (eval_dbg, format!("{:?}", jit))
 }
 
-/// CONFIRMED-BUG EVAL-1: `Int64Negate` on `INT_MIN`.
-/// eval = PANIC "attempt to negate with overflow"; JIT = Ok(LitInt(INT_MIN)).
+/// CONFIRMED-BUG EVAL-1 (fixed): `Int64Negate` on `INT_MIN` now wraps like the JIT.
 #[test]
-#[ignore = "CONFIRMED-BUG EVAL-1: tidepool-eval Int64Negate uses raw `-a` (panics on INT_MIN); JIT ineg wraps. Fix eval to wrapping_neg, then un-ignore."]
 fn evalbug1_int64_negate_int_min() {
-    let (eval_panicked, jit) = run_one(PrimOpKind::Int64Negate, vec![Literal::LitInt(i64::MIN)]);
-    assert!(
-        eval_panicked,
-        "EVAL-1 appears FIXED — eval no longer panics on Int64Negate(INT_MIN); un-ignore this repro."
-    );
+    let (eval, jit) = run_one(PrimOpKind::Int64Negate, vec![Literal::LitInt(i64::MIN)]);
     assert_eq!(jit, "Ok(Lit(LitInt(-9223372036854775808)))");
+    assert_eq!(eval, "Ok(Lit(LitInt(-9223372036854775808)))");
 }
 
-/// CONFIRMED-BUG EVAL-2: `Int64Shra` with shift >= 64 (here INT_MIN >> 64).
-/// eval = PANIC "attempt to shift right with overflow";
-/// JIT = Ok(LitInt(INT_MIN)) (Cranelift sshr reduces shift mod 64 → >>0).
+/// CONFIRMED-BUG EVAL-2 (fixed): `Int64Shra` with shift >= 64 (here INT_MIN >> 64)
+/// now masks mod 64 like the JIT's Cranelift `sshr`.
 #[test]
-#[ignore = "CONFIRMED-BUG EVAL-2: tidepool-eval Int64Shra uses raw `a >> b` (panics on shift>=64); JIT sshr masks mod 64. Fix eval to wrapping_shr, then un-ignore."]
 fn evalbug2_int64_shra_shift_64() {
-    let (eval_panicked, jit) = run_one(
+    let (eval, jit) = run_one(
         PrimOpKind::Int64Shra,
         vec![Literal::LitInt(i64::MIN), Literal::LitInt(64)],
     );
-    assert!(
-        eval_panicked,
-        "EVAL-2 appears FIXED — eval no longer panics on Int64Shra(_, 64); un-ignore this repro."
-    );
     assert_eq!(jit, "Ok(Lit(LitInt(-9223372036854775808)))");
+    assert_eq!(eval, "Ok(Lit(LitInt(-9223372036854775808)))");
 }
 
-/// CONFIRMED-BUG EVAL-3: `Word64Shl` with shift >= 64 (here 1 << 64).
-/// eval = PANIC "attempt to shift left with overflow";
-/// JIT = Ok(LitWord(1)) (Cranelift ishl reduces shift mod 64 → <<0).
+/// CONFIRMED-BUG EVAL-3 (fixed): `Word64Shl` with shift >= 64 (here 1 << 64)
+/// now masks mod 64 like the JIT's Cranelift `ishl`.
 #[test]
-#[ignore = "CONFIRMED-BUG EVAL-3: tidepool-eval Word64Shl uses raw `a << b` (panics on shift>=64); JIT ishl masks mod 64. Fix eval to wrapping_shl, then un-ignore."]
 fn evalbug3_word64_shl_shift_64() {
-    let (eval_panicked, jit) = run_one(
+    let (eval, jit) = run_one(
         PrimOpKind::Word64Shl,
         vec![Literal::LitWord(1), Literal::LitInt(64)],
     );
-    assert!(
-        eval_panicked,
-        "EVAL-3 appears FIXED — eval no longer panics on Word64Shl(1, 64); un-ignore this repro."
-    );
     assert_eq!(jit, "Ok(Lit(LitWord(1)))");
+    assert_eq!(eval, "Ok(Lit(LitWord(1)))");
 }
 
 // ===========================================================================
