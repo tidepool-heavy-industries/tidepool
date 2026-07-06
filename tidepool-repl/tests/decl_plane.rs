@@ -536,9 +536,10 @@ async fn mutual_recursion_across_items() {
         .await;
     out.expect_ok("mutual recursion across items");
     let val = repl.eval_ok("pure (isEven 10, isOdd 7)").await;
+    // (True, True) renders as a JSON tuple-array of native bools (ToWire Bool).
     assert!(
-        val.contains("True"),
-        "isEven 10 / isOdd 7 should be True: {val}"
+        val.contains("[true,true]"),
+        "isEven 10 / isOdd 7 should both be true: {val}"
     );
 }
 
@@ -627,7 +628,12 @@ async fn mutual_recursion_and_call_in_one_block() {
         ])
         .await;
     let text = out.expect_ok("mutual recursion and call in one block");
-    assert!(text.contains("True"), "isEvn 10 should be True: {text}");
+    // isEvn 10 == True renders as native JSON `true` (ToWire Bool); pin the
+    // value field so it doesn't false-match the items' `"ok":true`.
+    assert!(
+        text.contains("\"value\":true"),
+        "isEvn 10 should be true: {text}"
+    );
 }
 
 /// PURE-BIND-AS-DECL (M2): a numeric bind generalizes instead of freezing to
